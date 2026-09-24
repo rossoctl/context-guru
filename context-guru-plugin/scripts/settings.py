@@ -1971,14 +1971,32 @@ def _write_update_check(fields: dict[str, str]) -> str:
     return ""
 
 
+def installed_proxy_version() -> str:
+    """The version install.sh last confirmed on disk, or "" if it never has.
+
+    Read from a plain file, not from running the binary — the same reason start-proxy.sh reads
+    it this way (see install.sh's record_installed_version): a caller that is not the hook is
+    still better off not guessing at what invoking an arbitrary configured binary might do.
+    """
+    try:
+        with open(os.path.join(state_dir(), "proxy-version"), encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except OSError:
+        return ""
+
+
 def cmd_update_check(args) -> int:
     if args.op == "show":
         fields, reason = _read_update_check()
         if fields is None:
             emit(result="skipped", reason=reason)
             return 0
+        # `installed=` is its OWN fact, not something a reader should infer from `skipped=` (the
+        # tag a past notice was declined for) or `latest=` (what the last check found). A prior
+        # version of this surface omitted it entirely, and the gap was filled by a model
+        # conflating "skipped" with "installed" and reporting a version that was simply wrong.
         emit(result="ok", answer=fields["answer"], skipped=fields["skipped"],
-             latest=fields["latest"])
+             latest=fields["latest"], installed=installed_proxy_version() or "unknown")
         return 0
 
     if args.op == "stamp":

@@ -12,9 +12,11 @@ description: Check whether a newer context-guru-proxy BINARY has been released a
 
 !`"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" update-check show`
 
-**The block above is a pure file read** — installed-vs-latest, and whatever the user already
-answered. It fetches nothing from the network: `answer=`/`skipped=`/`latest=` are only ever as
-fresh as the last SessionStart check, so treat `latest=` as "as of then," not "right now."
+**The block above is a pure file read, and it is history, not news.** `answer=`/`skipped=`/
+`latest=`/`installed=` are only ever as fresh as the last SessionStart check — which could be from
+minutes ago, or from a session that ran long before this one. **The user invoking this skill is
+asking a direct question, and a cached answer is not a substitute for checking.** Always continue
+to step 1 and get a live answer; never report the block above as if it were current.
 
 This skill does not touch routing, does not start a proxy, and does not ask for the
 traffic-interception consent `/context-guru:install` asks for — it only replaces the binary on
@@ -22,26 +24,34 @@ traffic-interception consent `/context-guru:install` asks for — it only replac
 merely old), say so and point at `/context-guru:install` instead; this skill has nothing to install
 onto.
 
-## 1. If the record is stale or absent, don't guess
+## 1. Always get a live answer first
 
-`result=skipped`, or an empty `latest=`, means "unknown," not "current." There is no cheap
-check-only command today — `install.sh` only resolves the latest tag on the way to actually
-installing. If the user wants a real answer right now rather than waiting for the next
-SessionStart, the honest move is to proceed straight to step 3: `CONTEXT_GURU_UPGRADE=1 install.sh`
-either upgrades or reports `result=present` (already current) — either way you learn the truth, and
-a no-op run costs one redirect fetch.
+```
+"${CLAUDE_PLUGIN_ROOT}/scripts/install.sh" --check-latest
+```
+
+Read-only: no download, no install, no proxy restart — it only resolves the latest release tag and
+reports `installed_version=`/`latest_version=`/`update_available=true|false|unknown`. This is what
+makes "check for updates but don't install one" an actual choice you can honour, rather than the
+`CONTEXT_GURU_UPGRADE=1` path below, which installs whatever it finds.
+
+`update_available=unknown` means the check itself failed (offline, rate-limited) — say that
+plainly. It is not the same claim as "up to date," and reporting it that way is the single most
+misleading thing this skill can do.
 
 ## 2. Report honestly
 
-- Up to date: say so plainly. Do not claim it if the last check `result=` was `skipped` — that
-  means "unknown," not "current."
-- A newer release exists: name both versions and that the download is on the order of 30 MB.
-- `answer=auto`: say a matching upgrade is expected to happen automatically in the background and
-  take effect at the proxy's next start — this skill can still run it now on request.
+- `update_available=false`: up to date, name the version.
+- `update_available=true`: name both versions and that the download is on the order of 30 MB.
+- `update_available=unknown`: say the check failed and why (`reason=`), and that you don't know
+  either way — never fall back to the cached `latest=` from the block above as if it answered this.
+- `answer=auto` (from the cached block): mention a matching upgrade is expected to happen
+  automatically in the background and take effect at the proxy's next start — this skill can still
+  run it now on request.
 
-## 3. If the user wants to update now
+## 3. Only install on an explicit "yes"
 
-Run, verbatim:
+If — and only if — the user says to update now, run, verbatim:
 
 ```
 CONTEXT_GURU_UPGRADE=1 "${CLAUDE_PLUGIN_ROOT}/scripts/install.sh"
@@ -61,12 +71,24 @@ On success, restart the proxy so the new binary is live now rather than at the n
 version) against what should be running, and restarts it itself when they differ — you do not need
 to stop anything by hand.
 
-## 4. Record the answer, so the next session-start notice behaves
+**If the user asked you to check but explicitly said not to install, stop after step 2.** Checking
+is not a decision, and running this step without one turns "tell me what's out there" into an
+upgrade the user did not ask for.
 
-- Updated now, or the user says update automatically from now on:
+## 4. Record the answer — only when the user actually gave one
+
+Never run any of these unless the user said one of these three things out loud, in this
+conversation. Merely running step 1, or the user asking "did you check for updates," is **not** an
+answer — it is a question, and recording a `skip` for a question the user never answered is exactly
+the confusion this rule exists to prevent.
+
+- The user said update now, or update automatically from now on:
   `"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" update-check answer --answer always`
-- Not this release: `"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" update-check answer --answer skip --version '<the latest tag>'`
+- The user said not this release (or said nothing when directly asked whether to update):
+  `"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" update-check answer --answer skip --version '<the latest tag>'`
   — mutes only that tag; a later release still asks.
-- Never ask again, on this machine: `"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" update-check answer --answer never`
+- The user said never ask again, on this machine:
+  `"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" update-check answer --answer never`
 
-A silent or absent choice from the user is a **no** — record it as `skip`, never as `always`.
+A silent or absent answer to a question you actually asked is a **no** — record it as `skip`. A
+question you never asked has no answer to record at all.

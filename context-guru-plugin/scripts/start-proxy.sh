@@ -299,19 +299,24 @@ if [ "$UPDATE_CHECK" = 1 ] && [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; th
 
   if [ "$UC_ANSWER" != never ]; then
     if [ "$DUE" = 1 ] && [ -n "$HAVE" ]; then
-      # Detached, and bounded only on ITS OWN clock (--max-time 3), never on the hook's: this must
-      # add ZERO latency to the synchronous /healthz wait below. </dev/null plus both redirects
-      # matter as much as the trailing & — a child inheriting this hook's stdout could interleave
-      # into the session's context, or hold the pipe open, after the hook has already exited.
-      (
-        LATEST=$(curl -fsSLI --max-time 3 -o /dev/null -w '%{url_effective}' \
-                   "https://github.com/${UPDATE_REPO}/releases/latest" 2>/dev/null) || LATEST=""
-        LATEST="${LATEST##*/}"
-        case "$LATEST" in ''|releases|latest) LATEST="" ;; esac
-        CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" update-check stamp --latest "$LATEST" \
-          >/dev/null 2>&1
-      ) </dev/null >/dev/null 2>&1 &
-      disown 2>/dev/null || true
+      # SYNCHRONOUS, not detached — deliberately. A detached check cannot feed its own result back
+      # into the notice this same run is about to decide on, which is exactly the defect a real
+      # user hit: a release published between two sessions was only ever announced in the SECOND
+      # session after it shipped, never the one that actually discovered it — because the hook had
+      # already read the OLD `latest=` before the background job finished writing the new one.
+      #
+      # Bounded on ITS OWN clock (--max-time 3) so a slow or unreachable GitHub cannot turn into an
+      # unbounded hook. This cost is paid by whichever session happens to be due — at most once
+      # every 5 minutes across every session on the machine, not by every session.
+      LATEST=$(curl -fsSLI --max-time 3 -o /dev/null -w '%{url_effective}' \
+                 "https://github.com/${UPDATE_REPO}/releases/latest" 2>/dev/null) || LATEST=""
+      LATEST="${LATEST##*/}"
+      case "$LATEST" in ''|releases|latest) LATEST="" ;; esac
+      CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" update-check stamp --latest "$LATEST" \
+        >/dev/null 2>&1
+      # A resolved tag wins over whatever was cached; an unreachable/rate-limited GitHub (empty
+      # LATEST) falls back to the last known value rather than blanking the notice for no reason.
+      [ -n "$LATEST" ] && UC_LATEST="$LATEST"
     fi
 
     # `skipped=` only gates the ASK branch below — it must never block "auto", or a version the

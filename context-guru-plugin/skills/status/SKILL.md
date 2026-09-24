@@ -127,10 +127,16 @@ delivers by itself.
 ### Is a newer proxy release pending?
 
 `"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" update-check show` — **read-only, never fetches.** It
-reports what the last SessionStart check (at most one every 5 minutes) already found:
-`answer=`/`skipped=`/`latest=`. An empty `latest=` means no check has succeeded yet, not that the
-proxy is current. If `latest=` names something newer than the running `bin=` above and it is not
-the `skipped=` tag, point at `/context-guru:update` rather than re-explaining it here.
+reports what the last SessionStart check (at most once every 5 minutes, run synchronously by
+whichever session happens to be due — so a release CAN be announced in the very session that
+discovers it, not only the next one) already found: `answer=`/`skipped=`/`latest=`/`installed=`.
+
+Read `installed=` from THIS output, not from `skipped=` — `skipped=` is the tag a past notice was
+declined for, and is not the same fact as what is actually installed; conflating the two is a real
+defect this surface used to have. An empty or `unknown` `latest=` means no check has succeeded yet,
+not that the proxy is current. If `latest=` names something newer than `installed=` and it is not
+the `skipped=` tag, point at `/context-guru:update` — which does its own live check before
+reporting, rather than trusting this cached record — instead of re-explaining any of this here.
 
 - **Check the preset before explaining a zero pipeline saving at all.** The default preset is
   `off`, which runs no components, so `acted: 0` and `saved_tokens: 0` are the expected state, not
