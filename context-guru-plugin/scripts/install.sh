@@ -730,8 +730,12 @@ a routed one with no proxy is a broken one."
 route_install_statusline() {
   [ "$R_NOSTATUSLINE" = 1 ] && { emit "statusline=skipped"; return 0; }
   local sout scode=0
+  # --no-backup: the routing `add` a few lines up already backed up this file's pre-install
+  # state. Without this, this second call took its own backup a moment later — of "routed, no
+  # statusline yet", a state nobody would ever restore to — so one install left two backup files
+  # on disk. See settings.py's --no-backup for why this is the only caller that passes it.
   local sl=("$(route_here)/settings.py" add --file "$R_FILE" \
-    --statusline "python3 \"$(route_here)/statusline.py\"")
+    --statusline "python3 \"$(route_here)/statusline.py\"" --no-backup)
   [ "$R_SCOPE" = user ] && sl+=(--user-scope)
   sout=$("${sl[@]}" 2>&1) || scode=$?
   local sres; sres=$(kv "$sout" result)

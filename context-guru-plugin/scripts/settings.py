@@ -561,6 +561,46 @@ def _manifest_paths(state: str) -> tuple[str, str]:
             os.path.join(state, "reset-manifest.tsv"))
 
 
+def _created_by_us(real: str) -> bool:
+    """Did context-guru's own first edit CREATE `real`, per the reset manifest's
+    `existed_before`? Missing, unreadable or unrecorded all answer False — the side that never
+    deletes a file we are not certain we brought into existence.
+    """
+    jsonp, _ = _manifest_paths(state_dir())
+    try:
+        with open(jsonp, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(manifest, dict):
+        return False
+    for entry in manifest.get("files", []):
+        if isinstance(entry, dict) and entry.get("path") == real:
+            return entry.get("existed_before") is False
+    return False
+
+
+def maybe_delete_if_empty(path: str, data: dict) -> bool:
+    """If removing our keys left `data` with nothing else in it AND context-guru created `path`,
+    delete the file instead of leaving an empty `{}` shell behind — uninstalling from a project
+    that had no settings file at all must not end with one. Returns True if the file was deleted,
+    in which case the caller must not also call save().
+
+    Never deletes a file that held something before context-guru's first edit (per
+    `_created_by_us`): that content — a theme, a permission grant, another plugin's config — is
+    the user's, whatever is left in `data` right now, and removing it would take that with it.
+    """
+    if data:
+        return False
+    if not _created_by_us(os.path.realpath(path)):
+        return False
+    try:
+        os.remove(path)
+    except OSError:
+        return False
+    return True
+
+
 def _render_tsv(entries: list[dict]) -> bytes:
     """The record in the form the hatch actually reads: one line per file, tab-separated.
 
@@ -1007,10 +1047,19 @@ def cmd_add(args: argparse.Namespace) -> int:
             emit(result="unchanged", file=args.file,
                  note="statusline already installed, nothing to add")
             return 0
-        saved = backup(args.file) if existed else ""
+        # --no-backup: install.sh's own statusline follow-up call passes this. It runs seconds
+        # after the routing `add` in the SAME install, which already backed up the file's
+        # pre-install state — a second backup here would only capture "routed, no statusline yet",
+        # a state nobody would ever want to restore to, and it left two backup files on disk for
+        # one conceptual install. `/context-guru:statusline`'s own standalone calls never pass this,
+        # so they still get the backup a user-initiated change is entitled to.
+        saved = "" if args.no_backup else (backup(args.file) if existed else "")
         apply_statusline(data, sl_command)
         save(args.file, data)
-        emit(result="added", file=args.file, backup=saved or "(new file)", statusline=sl_command)
+        emit(result="added", file=args.file,
+             backup=saved or ("(covered by the routing install's backup)" if args.no_backup
+                               else "(new file)"),
+             statusline=sl_command)
         return 0
 
     current = env.get(KEY)
@@ -1144,8 +1193,11 @@ def cmd_off(args: argparse.Namespace) -> int:
         emit(result="unchanged", file=args.file, note="no context-guru statusline installed here")
         return 0
     saved = backup(args.file)
-    save(args.file, data)
-    emit(result="removed", file=args.file, backup=saved, statusline_restored=restored_sl)
+    deleted = maybe_delete_if_empty(args.file, data)
+    if not deleted:
+        save(args.file, data)
+    emit(result="removed", file=args.file, backup=saved, statusline_restored=restored_sl,
+         file_deleted=str(deleted).lower())
     return 0
 
 
@@ -1162,8 +1214,11 @@ def cmd_remove(args: argparse.Namespace) -> int:
         changed, restored_sl = remove_statusline_only(data)
         if changed:
             saved = backup(args.file)
-            save(args.file, data)
+            deleted = maybe_delete_if_empty(args.file, data)
+            if not deleted:
+                save(args.file, data)
             emit(result="removed", file=args.file, backup=saved, statusline_restored=restored_sl,
+                 file_deleted=str(deleted).lower(),
                  note="statusline-only removal; no routing was present to touch")
             return 0
         emit(result="unchanged", file=args.file, note=f"no env.{KEY} here")
@@ -1249,10 +1304,12 @@ def cmd_remove(args: argparse.Namespace) -> int:
         del data["env"]
     else:
         data["env"] = env
-    save(args.file, data)
+    deleted = maybe_delete_if_empty(args.file, data)
+    if not deleted:
+        save(args.file, data)
     emit(result="removed", file=args.file, was=current, backup=saved,
          restored=restored, env_block_left=str(bool(env)).lower(),
-         statusline_restored=restored_sl)
+         statusline_restored=restored_sl, file_deleted=str(deleted).lower())
     return 0
 
 
@@ -1994,6 +2051,10 @@ def main() -> int:
                             "\"command\", \"command\": <this value>}), refusing to replace one "
                             "that is not ours unless --force. on remove: taken back only if it "
                             "is exactly what a previous --statusline install recorded writing.")
+        p.add_argument("--no-backup", action="store_true",
+                       help="on a statusline-only add: skip taking a timestamped backup. For a "
+                            "follow-up call that runs seconds after another `add` already backed "
+                            "up this file in the same install — never for a standalone change.")
     off = sub.add_parser("off",
         help="turn the status line off without touching routing — the counterpart to `add "
              "--statusline`, for when both were installed together and only the statusline "
