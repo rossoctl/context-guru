@@ -62,7 +62,7 @@ against.
 
 A clean removal deletes every rolling backup it made for that file along the way — `backup=` then
 reports why rather than a path, since there is nothing left at the old one to point at. What
-survives is `.pre-install` in the recovery folder (see step 3), which is the one that matters.
+survives is `.pre-install.json` in the recovery folder (see step 3), which is the one that matters.
 
 The removal takes effect in a **new session**; this one keeps the environment it started with.
 Say so, or "I removed it and it is still routing" is the next message.
@@ -148,14 +148,15 @@ Ask before either of these; neither is implied by "stop routing my sessions":
 - **Delete the recovery folder(s)** — `<dir>/context-guru-settings-json/`, beside each settings
   file the install touched (so `.claude/context-guru-settings-json/` for a project install, or
   `~/.claude/context-guru-settings-json/` for `--global`). Step 1's removal already deleted the
-  rolling `.context-guru-backup-*` files in there on its own — nothing left to offer there. **Say
-  what's still in it before they agree to delete the rest:** a `README.md` explaining the folder,
-  and `<file>.pre-install` (the copy taken before this plugin's first edit — what step 1 restores
-  from if needed), plus `<file>.pre-reset-*` if the escape hatch has run here. (If context-guru
-  created the file from nothing, step 1 already removed the whole folder along with it — there is
-  nothing left to offer here at all.) Deleting the rest is what makes the routing removal
-  irreversible; it also can contain a credential, same as the settings file it copies, which is why
-  `/context-guru:install` adds a `.gitignore` entry for it automatically. Full explanation:
+  rolling `.context-guru-backup-*.json` files in there on its own — nothing left to offer there.
+  **Say what's still in it before they agree to delete the rest:** a `README.md` explaining the
+  folder, and `<name>.pre-install.json` (the copy taken before this plugin's first edit — what
+  step 1 restores from if needed), plus `<name>.pre-reset-*.json` if the escape hatch has run here.
+  (If context-guru created the file from nothing, step 1 already removed the whole folder along
+  with it — there is nothing left to offer here at all.) Deleting the rest is what makes the
+  routing removal irreversible; it also can contain a credential, same as the settings file it
+  copies, which is why `/context-guru:install` adds a `.gitignore` entry for it automatically. Full
+  explanation:
   [docs/how-to/plugin-recovery-files.md](../../../docs/how-to/plugin-recovery-files.md).
 
 ## 4. Confirm the end state

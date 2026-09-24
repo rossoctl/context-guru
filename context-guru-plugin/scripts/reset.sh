@@ -472,7 +472,7 @@ for path in "./.claude/settings.local.json" "./.claude/settings.json" "$CLAUDE_D
     else
       say "      (no context-guru keys — this one is fine)"
     fi
-    ls -1t "$path".context-guru-backup-* 2>/dev/null | sed 's/^/      backup: /' || true
+    ls -1t "${path%.json}".context-guru-backup-*.json 2>/dev/null | sed 's/^/      backup: /' || true
     continue
   fi
   # Does this file show ANY sign of being ours RIGHT NOW? A recovery folder existing only proves
@@ -493,8 +493,11 @@ for path in "./.claude/settings.local.json" "./.claude/settings.json" "$CLAUDE_D
     continue
   fi
   basename="$(basename "$path")"
-  created_marker="$recovery_dir/$basename.created-by-us"
-  original="$recovery_dir/$basename.pre-install"
+  # Content-bearing recovery files end in .json; the marker does not (it is not JSON content) —
+  # see the matching PRE_INSTALL_SUFFIX/recovery_stem() comment in settings.py, which this mirrors.
+  stem="${basename%.json}"
+  created_marker="$recovery_dir/$stem.created-by-us"
+  original="$recovery_dir/$stem.pre-install.json"
   if [ -e "$created_marker" ]; then
     say "  $path"
     say "      DELETE (context-guru created this file; it did not exist before)"
@@ -530,7 +533,7 @@ for path in "./.claude/settings.local.json" "./.claude/settings.json" "$CLAUDE_D
       say "      ! this reverts the WHOLE file, not just the routing. Anything you changed in it"
       say "        since installing goes back too — permission grants Claude Code appended as you"
       say "        approved tools, a model or theme you set. Your current version is copied to"
-      say "        $recovery_dir/ first (a *.pre-reset-* file there), so this is undoable."
+      say "        $recovery_dir/ first (a *.pre-reset-*.json file there), so this is undoable."
       # The diff is shown as EVIDENCE, with no claim about which side of it is the user's.
       #
       # The first version of this counted "lines that are not context-guru's" by grepping our key
@@ -567,7 +570,7 @@ for path in "./.claude/settings.local.json" "./.claude/settings.json" "$CLAUDE_D
     # since. Both read the same to a user: nothing here holds the original content.
     say "      ! no pre-edit copy was taken for this file — it already carried context-guru's"
     say "        keys when the record was created, so nothing here holds its original content."
-    newest="$(ls -1t "$recovery_dir/$(basename "$path").context-guru-backup-"* 2>/dev/null | head -1 || true)"
+    newest="$(ls -1t "$recovery_dir/$stem.context-guru-backup-"*.json 2>/dev/null | head -1 || true)"
     if [ -n "$newest" ]; then
       say "        a timestamped backup exists and is NOT restored automatically, because it"
       say "        may be a copy of a later state rather than of your original:"
@@ -613,7 +616,7 @@ if [ ! -s "$PLAN" ]; then
   say "  1. compare a timestamped backup and copy it back yourself — look in"
   say "     <dir>/context-guru-settings-json/ beside the file (the normal case), or beside the"
   say "     file itself if that folder could not be created:"
-  say "       cp <file>.context-guru-backup-<newest> <file>"
+  say "       cp <name>.context-guru-backup-<newest>.json <file>"
   say "  2. or open the file and delete the ANTHROPIC_BASE_URL / ANTHROPIC_UPSTREAM /"
   say "     CONTEXT_GURU_BIN keys from its \"env\" block, leaving everything else alone."
   say "     That is all the routing is; nothing else has to change."
@@ -669,13 +672,17 @@ while IFS='	' read -r action original path; do
   # it exactly as the `.pre-install` copy already does.
   recovery_dir="$(dirname "$path")/$RECOVERY_DIR_NAME"
   mkdir -p "$recovery_dir" 2>/dev/null && chmod 700 "$recovery_dir" 2>/dev/null
+  # Content-bearing recovery files end in .json — see the matching comment where $stem is first
+  # computed, in the plan-building loop above (out of scope here; this is a separate loop reading
+  # back from $PLAN, so it is recomputed).
+  stem="$(basename "$path")"; stem="${stem%.json}"
   if [ -d "$recovery_dir" ] && [ -w "$recovery_dir" ]; then
-    pre="$recovery_dir/$(basename "$path").pre-reset-$STAMP"
-    preglob="$recovery_dir/$(basename "$path").pre-reset-*"
+    pre="$recovery_dir/$stem.pre-reset-$STAMP.json"
+    preglob="$recovery_dir/$stem.pre-reset-*.json"
   else
     # An unwritable recovery folder must not turn a reversible restore into an irreversible one.
-    pre="$path.context-guru-prereset-$STAMP"
-    preglob="$path.context-guru-prereset-*"
+    pre="$path.context-guru-prereset-$STAMP.json"
+    preglob="$path.context-guru-prereset-*.json"
   fi
   if [ -e "$path" ] && [ ! -e "$pre" ]; then
     if cp -p "$path" "$pre" 2>/dev/null || cp "$path" "$pre"; then
@@ -692,6 +699,13 @@ while IFS='	' read -r action original path; do
       if rm -f "$path"; then
         say "  deleted:  $path"
         RESTORED=$((RESTORED + 1))
+        # Nothing left in the recovery folder is useful once the file itself is gone — no
+        # .pre-install (there never was one; see .created-by-us), so no reason to keep backups or
+        # the pre-reset copy just taken above either. Mirrors settings.py's
+        # maybe_delete_if_empty(), which removes the same folder the same way on a normal
+        # uninstall. Best-effort: a folder that cannot be removed is not this script's failure —
+        # the file itself is already gone, which is the property that matters.
+        rm -rf "$recovery_dir" 2>/dev/null || true
       else
         warn "  ! could not delete $path"; INCOMPLETE=1; FILES_UNFIXED=1
       fi ;;
@@ -707,6 +721,13 @@ while IFS='	' read -r action original path; do
       if cp "$original" "$path" && cmp -s "$original" "$path"; then
         say "  restored: $path"
         RESTORED=$((RESTORED + 1))
+        # Every rolling per-edit backup for this file answers a question nobody has anymore once
+        # the pre-install state is verified restored — mirrors settings.py's forget_backups().
+        # This is the gap that let one survive a real `context-guru-reset` run: settings.py's own
+        # `remove`/`off` commands learned this, but the hatch — a separate, plain-sh restore path —
+        # never did. `.pre-reset-*.json` is deliberately left alone; that is the hatch's OWN safety
+        # net for THIS run, a different concern from the generic per-edit backups.
+        rm -f "$recovery_dir/$stem.context-guru-backup-"*.json 2>/dev/null || true
       else
         warn "  ! restoring $path from $original did not produce an identical file; the copy of your"
         warn "    current version is at $pre and nothing was counted as restored"
