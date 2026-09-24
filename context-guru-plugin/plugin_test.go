@@ -4026,7 +4026,7 @@ func TestInstallLeavesAWayBackOutsideThePlugin(t *testing.T) {
 	if facts["recovery_dir"] != wantRecovery {
 		t.Errorf("recovery_dir=%q, want %q", facts["recovery_dir"], wantRecovery)
 	}
-	original := filepath.Join(wantRecovery, "settings.json.pre-install")
+	original := filepath.Join(wantRecovery, "settings.pre-install.json")
 	if facts["recovery_original"] != original {
 		t.Errorf("recovery_original=%q, want %q", facts["recovery_original"], original)
 	}
@@ -4205,7 +4205,7 @@ func TestTheOriginalCopyOutlivesTheRollingBackups(t *testing.T) {
 	// Beside the file now, not in a shared, hashed `originals/` directory under the state dir — see
 	// recovery_dir_for() in settings.py. copy_once's own O_EXCL/hardlink-once semantics are what
 	// keep it surviving every one of the twelve cycles above, unlike the rolling backups.
-	found := filepath.Join(proj, "context-guru-settings-json", "settings.json.pre-install")
+	found := filepath.Join(proj, "context-guru-settings-json", "settings.pre-install.json")
 	// A leading dot would make the copy invisible to `ls` and to every glob — including a user's
 	// own, in a directory that exists to be read by hand. Deterministic naming off the settings
 	// file's own basename makes this true by construction now, but the property is worth asserting
@@ -4283,11 +4283,11 @@ func TestHatchRestoresWithThePluginDeleted(t *testing.T) {
 	// complete copy of a file that can hold a credential belongs where /context-guru:install's
 	// gitignore-ensure step can protect it, not in a shared location nobody would think to check.
 	pre, err := filepath.Glob(filepath.Join(proj, ".claude", "context-guru-settings-json",
-		"settings.local.json.pre-reset-*"))
+		"settings.local.pre-reset-*.json"))
 	if err != nil || len(pre) == 0 {
 		t.Errorf("the hatch overwrote the routed file without keeping a copy of it")
 	}
-	stray, _ := filepath.Glob(path + ".context-guru-prereset-*")
+	stray, _ := filepath.Glob(path + ".context-guru-prereset-*.json")
 	if len(stray) != 0 {
 		t.Errorf("left a full copy of a settings file in the project tree: %v", stray)
 	}
@@ -4338,7 +4338,7 @@ func TestHatchSecondRunChangesNothing(t *testing.T) {
 		t.Fatal("first hatch run failed")
 	}
 	recovery := filepath.Join(proj, ".claude", "context-guru-settings-json")
-	before, _ := filepath.Glob(filepath.Join(recovery, "*.pre-reset-*"))
+	before, _ := filepath.Glob(filepath.Join(recovery, "*.pre-reset-*.json"))
 
 	out, code := runHatch(t, state, home, proj, "--yes")
 	if code != 0 {
@@ -4347,7 +4347,7 @@ func TestHatchSecondRunChangesNothing(t *testing.T) {
 	if !strings.Contains(out, "already matches") && !strings.Contains(out, "Nothing to restore") {
 		t.Errorf("the second run did not report itself as a no-op:\n%s", out)
 	}
-	after, _ := filepath.Glob(filepath.Join(recovery, "*.pre-reset-*"))
+	after, _ := filepath.Glob(filepath.Join(recovery, "*.pre-reset-*.json"))
 	if len(after) != len(before) {
 		t.Errorf("the second run wrote %d more backup(s) for no reason", len(after)-len(before))
 	}
@@ -4728,7 +4728,7 @@ func TestStatuslineRefusesMachineWideWithoutTheFlag(t *testing.T) {
 		t.Errorf("the machine-wide file was modified by a call that reported refusing:\n%s", after)
 	}
 	matches, err := filepath.Glob(filepath.Join(filepath.Dir(userScope), "context-guru-settings-json",
-		"settings.json.context-guru-backup-*"))
+		"settings.context-guru-backup-*.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4946,7 +4946,7 @@ func TestRemoveFirstNeverProducesAnOriginalHoldingRouting(t *testing.T) {
 			"should have been captured as its \"original\"", facts["recovery_original"])
 	}
 	recovery := filepath.Join(proj, ".claude", "context-guru-settings-json")
-	originals, _ := filepath.Glob(filepath.Join(recovery, "*.pre-install"))
+	originals, _ := filepath.Glob(filepath.Join(recovery, "*.pre-install.json"))
 	if len(originals) != 0 {
 		t.Errorf("took %d pre-edit copy/copies of a file that was already routed: %v",
 			len(originals), originals)
@@ -5130,7 +5130,7 @@ func TestAnUnusableStateDirectoryNeverFailsTheInstall(t *testing.T) {
 		t.Errorf("recovery_dir=%q, want %q — it must not depend on the (unusable) state directory",
 			facts["recovery_dir"], wantRecovery)
 	}
-	original := filepath.Join(wantRecovery, "settings.json.pre-install")
+	original := filepath.Join(wantRecovery, "settings.pre-install.json")
 	if facts["recovery_original"] != original {
 		t.Errorf("recovery_original=%q, want %q", facts["recovery_original"], original)
 	}
@@ -5231,7 +5231,7 @@ func TestNormalUninstallDoesNotClaimTheOriginalIsGone(t *testing.T) {
 	}
 	// And the copy really is there, really is clean. Beside the file now, not in a shared
 	// `originals/` directory under the state dir.
-	originals, _ := filepath.Glob(filepath.Join(proj, "context-guru-settings-json", "*.pre-install"))
+	originals, _ := filepath.Glob(filepath.Join(proj, "context-guru-settings-json", "*.pre-install.json"))
 	if len(originals) != 1 {
 		t.Fatalf("want exactly one pre-install copy, got %v", originals)
 	}
@@ -5319,7 +5319,7 @@ func TestLoopbackDetectionCoversTheShapesThatMatter(t *testing.T) {
 		if _, code := settingsIn(t, state, home, "remove", "--file", path, "--url", tc.url); code != 0 {
 			t.Fatalf("%s: remove failed", tc.url)
 		}
-		originals, _ := filepath.Glob(filepath.Join(proj, "context-guru-settings-json", "*.pre-install"))
+		originals, _ := filepath.Glob(filepath.Join(proj, "context-guru-settings-json", "*.pre-install.json"))
 		if tc.ourFile && len(originals) != 0 {
 			b, _ := os.ReadFile(originals[0])
 			t.Errorf("%s: took a pre-edit copy of an already-routed file:\n%s", tc.url, b)
@@ -6073,7 +6073,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 				gotHome["statusLine"])
 		}
 		matches, err := filepath.Glob(filepath.Join(filepath.Dir(homeSettings), "context-guru-settings-json",
-			"settings.json.context-guru-backup-*"))
+			"settings.context-guru-backup-*.json"))
 		if err != nil {
 			t.Fatal(err)
 		}

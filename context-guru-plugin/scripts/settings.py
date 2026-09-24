@@ -228,11 +228,11 @@ def backup(path: str) -> str:
         # recovery folder must not turn an ordinary settings write into a hard failure. Falls back
         # to where backups lived before this folder existed.
         backup_dir = os.path.dirname(real)
-    basename = os.path.basename(real)
+    stem = recovery_stem(real)
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     for attempt in range(100):
-        dest = os.path.join(backup_dir, f"{basename}.context-guru-backup-{stamp}"
-                             + (f".{attempt}" if attempt else ""))
+        dest = os.path.join(backup_dir, f"{stem}{BACKUP_SUFFIX}{stamp}"
+                             + (f".{attempt}" if attempt else "") + BACKUP_EXT)
         try:
             fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
@@ -272,15 +272,15 @@ def prune_backups(path: str, backup_dir: str | None = None) -> None:
     real = os.path.realpath(path)
     if backup_dir is None:
         backup_dir = recovery_dir_for(real)
-    basename = os.path.basename(real)
+    stem = recovery_stem(real)
     try:
-        # glob.escape on the WHOLE joined path, not just the basename: `backup_dir` is derived
+        # glob.escape on the WHOLE joined path, not just the stem: `backup_dir` is derived
         # from the settings file's own directory, which can itself contain `[`, `?` or `*` (a
-        # project at `~/projects/foo[1]/.claude/`, say) — escaping only the basename left the
+        # project at `~/projects/foo[1]/.claude/`, say) — escaping only the stem left the
         # directory half of the pattern live, so `proj[1]` was read as a character class and
         # matched nothing. Silent, because pruning is best-effort by design, and the backups it
         # exists to bound then accumulate without limit.
-        found = sorted(glob.glob(glob.escape(os.path.join(backup_dir, basename)) + ".context-guru-backup-*"),
+        found = sorted(glob.glob(glob.escape(os.path.join(backup_dir, stem)) + BACKUP_SUFFIX + "*" + BACKUP_EXT),
                        key=os.path.getmtime)
     except OSError:
         return
@@ -306,9 +306,9 @@ def forget_backups(path: str) -> None:
     import glob
 
     real = os.path.realpath(path)
-    basename = os.path.basename(real)
+    stem = recovery_stem(real)
     # Escape the WHOLE joined path — see the identical fix and comment in prune_backups().
-    pattern = glob.escape(os.path.join(recovery_dir_for(real), basename)) + ".context-guru-backup-*"
+    pattern = glob.escape(os.path.join(recovery_dir_for(real), stem)) + BACKUP_SUFFIX + "*" + BACKUP_EXT
     try:
         found = glob.glob(pattern)
     except OSError:
@@ -377,22 +377,39 @@ def post_uninstall_backup_note(deleted: bool) -> str:
 
 HATCH_NAME = "context-guru-reset"
 RECOVERY_DIR_NAME = "context-guru-settings-json"
-PRE_INSTALL_SUFFIX = ".pre-install"
+# Content-bearing recovery files end in .json (an editor, a syntax highlighter, `file`, all treat
+# them as what they are), so the SUFFIX carries it, not the settings file's own basename directly —
+# `settings.local.json.pre-install` doesn't end in .json at all; `settings.local.pre-install.json`
+# does. Every construction site below uses `recovery_stem()`, never the raw basename, to get there.
+# `.created-by-us` is the one exception: it is an empty marker, not JSON content, so it keeps the
+# plain name a marker file should have.
+PRE_INSTALL_SUFFIX = ".pre-install.json"
 CREATED_MARKER_SUFFIX = ".created-by-us"
+# reset.sh (plain POSIX sh, no shared constants with this file) builds `.pre-reset-*.json` the
+# same way independently — see its own PRE_RESET-equivalent naming there.
+BACKUP_SUFFIX = ".context-guru-backup-"
+BACKUP_EXT = ".json"
 RECOVERY_README = """\
 # context-guru recovery files
 
 This folder was created by the context-guru Claude Code plugin, next to the settings file it
 covers, so it is where you look for it — not buried in `~/.local/state`.
 
-- `<file>.pre-install` — a one-time copy of that settings file from *before* context-guru's very
-  first edit to it. This is what `/context-guru:uninstall` and the `context-guru-reset` escape
-  hatch restore from.
-- `<file>.created-by-us` — an empty marker. If present, context-guru created that file from
+- `<name>.pre-install.json` — a one-time copy of that settings file from *before* context-guru's
+  very first edit to it. This is what `/context-guru:uninstall` and the `context-guru-reset`
+  escape hatch restore from.
+- `<name>.created-by-us` — an empty marker. If present, context-guru created that file from
   nothing (it did not exist before), so undoing the install means deleting it, not restoring it.
-- `<file>.pre-reset-<timestamp>` — a safety copy `context-guru-reset` takes of the file's current
-  (routed) content right before it restores or deletes it, so running the hatch is itself
+- `<name>.pre-reset-<timestamp>.json` — a safety copy `context-guru-reset` takes of the file's
+  current (routed) content right before it restores or deletes it, so running the hatch is itself
   undoable. The newest 10 are kept per file.
+- `<name>.context-guru-backup-<timestamp>.json` — a copy taken before any other edit this plugin
+  makes to the file. A clean `/context-guru:uninstall` (or a successful `context-guru-reset` run)
+  deletes all of these for that file on its own; they answer a question nobody has once that has
+  happened.
+
+`<name>` is the settings file's own name with `.json` removed (`settings.local` for
+`settings.local.json`), so every file above still ends in `.json` except the empty marker.
 
 Full explanation: https://github.com/rossoctl/context-guru/blob/main/docs/how-to/plugin-recovery-files.md
 
@@ -412,6 +429,15 @@ def recovery_dir_for(real: str) -> str:
     hashed, append-only ledger under the state directory.
     """
     return os.path.join(os.path.dirname(real), RECOVERY_DIR_NAME)
+
+
+def recovery_stem(real: str) -> str:
+    """`real`'s basename with a trailing `.json` removed (`settings.local` for
+    `settings.local.json`) — every recovery filename is built from this, not the raw basename, so
+    that appending a suffix ending in `.json` produces a name that ends in `.json` ONCE, at the
+    end, rather than in the middle (`settings.local.json.pre-install`).
+    """
+    return os.path.splitext(os.path.basename(real))[0]
 
 
 def ensure_dir_0700(path: str, *, chmod_parent: bool = True) -> str:
@@ -787,7 +813,7 @@ def _created_by_us(real: str) -> bool:
     recovery folder? Missing, unreadable or unrecorded all answer False — the side that never
     deletes a file we are not certain we brought into existence.
     """
-    marker = os.path.join(recovery_dir_for(real), os.path.basename(real) + CREATED_MARKER_SUFFIX)
+    marker = os.path.join(recovery_dir_for(real), recovery_stem(real) + CREATED_MARKER_SUFFIX)
     return os.path.exists(marker)
 
 
@@ -924,9 +950,9 @@ def _record_touch(real: str, existed: bool) -> None:
         return
     write_recovery_readme(recovery)
 
-    basename = os.path.basename(real)
-    pre_install = os.path.join(recovery, basename + PRE_INSTALL_SUFFIX)
-    created_marker = os.path.join(recovery, basename + CREATED_MARKER_SUFFIX)
+    stem = recovery_stem(real)
+    pre_install = os.path.join(recovery, stem + PRE_INSTALL_SUFFIX)
+    created_marker = os.path.join(recovery, stem + CREATED_MARKER_SUFFIX)
 
     skipped_copy = False
     if not os.path.exists(pre_install) and not os.path.exists(created_marker):
