@@ -232,8 +232,10 @@ Ask before either of these; neither is implied by "stop routing my sessions":
   copy — fine once they are working again and have confirmed it, but say so before they agree.
 - **Delete the recovery folder(s)** — `<dir>/context-guru-settings-json/`, beside each settings
   file the install touched (so `.claude/context-guru-settings-json/` for a project install, or
-  `~/.claude/context-guru-settings-json/` for `--global`). Step 1's removal already deleted the
-  rolling `.context-guru-backup-*.json` files in there on its own — nothing left to offer there.
+  `~/.claude/context-guru-settings-json/` for `--global`). Step 1's writes already deleted the
+  rolling `.context-guru-backup-*.json` files in there on their own — both of them, `remove` and the
+  `port unset` beside it, which is the LAST write of the uninstall and so the one whose own backup
+  used to outlive it. Nothing left to offer there.
   **Say what's still in it before they agree to delete the rest:** a `README.md` explaining the
   folder, and `<name>.pre-install.json` (the copy taken before this plugin's first edit — what
   step 1 restores from if needed), plus `<name>.pre-reset-*.json` if the escape hatch has run here.

@@ -61,17 +61,17 @@ to act on, not a failure to report as one.
   Then `--on-existing-projects leave` (both stay, each on its own port and config) or `adopt` (their
   routing and port option are removed, each file backed up, so they fall back to the machine-wide
   route). `adopt` runs last, after the route is proven healthy, and reports `adopted_project=…
-  unrouted=… recovery_dir=…` per project — read those rather than assuming. `unrouted=removed` is
-  the success value; `unchanged` or `conflict` means that project kept its routing and must be
-  reported as still overriding. Relay two more per-project lines rather than folding them into
-  "adopted": `adopted_project_still_overriding=<dir> base_url=<url>` — that project's own
-  pre-context-guru URL was rightly restored, so it still overrides the machine-wide route the user
-  asked for. `adopted_proxy_left_running=<dir> port=<n>` — its old proxy still answers, so its state
-  was left alone; report the port. `adopted_proxy_stopped=` needs no comment.
-  `adopted_project_is_this_project=<dir>` — they ran this from a project that was itself adopted
-  (converting a project-local install); it was folded in like any other, so its old proxy is stopped
-  and the machine-wide one, on its own port, is what serves it now. `adopted_proxy_kept=<dir>
-  port=<n>` — that project's proxy was on the port this install serves (a pinned port), so it stays.
+  unrouted=… recovery_dir=…` per project — read those, do not assume; `file_deleted=true` with
+  `adopted_file_removed=` replaces `recovery_dir=` when we created that file and nothing was left
+  in it. `unrouted=removed` is the success value; `unchanged` or `conflict` means that project
+  kept its routing and must be reported as still overriding. Relay these per-project lines rather
+  than folding them into "adopted": `adopted_project_still_overriding=<dir> base_url=<url>` (its
+  own pre-context-guru URL was rightly restored, so it still overrides the route the user asked
+  for); `adopted_proxy_left_running=<dir> port=<n>` (its old proxy still answers and its state was
+  left alone — report the port); `adopted_project_is_this_project=<dir>` (they ran this from a
+  project that was itself adopted, so its old proxy is stopped and the machine-wide one, on its
+  own port, serves it now); `adopted_proxy_kept=<dir> port=<n>` (its proxy was on the port this
+  install serves — a pinned port — so it stays). `adopted_proxy_stopped=` needs no comment.
 - `result=needs_decision reason=port_owned_by_another_project` — `owner_project=` already has a proxy
   on that port, running its preset, and a proxy is never taken from its owner. Clear the `port` option
   so one is allocated, or ask for an unused one.

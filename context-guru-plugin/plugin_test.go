@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -9973,10 +9974,21 @@ func TestUserScopeAdoptFoldsInTheProjectItIsRunFromToo(t *testing.T) {
 	// And the half of adoption that was always right: the project-local file no longer overrides the
 	// machine-wide route it was adopted into — neither its URL nor the port option behind the hooks.
 	projFile := filepath.Join(proj, ".claude", "settings.local.json")
-	data := readJSON(t, projFile)
-	if fenv, _ := data["env"].(map[string]any); fenv["ANTHROPIC_BASE_URL"] != nil {
-		t.Errorf("the install's own project still routes itself, so the machine-wide route it just "+
-			"wrote is overridden in the very project it was run from: %v", data)
+	// The file may be GONE, and that is the stronger form of the same property: context-guru created
+	// it here, `adopt` took back both of the things it wrote into it, and a file we created that ends
+	// up holding nothing of anybody's is deleted rather than left as an empty husk (see
+	// maybe_delete_if_empty). Asserting it still exists would pin the husk.
+	if _, err := os.Stat(projFile); err == nil {
+		data := readJSON(t, projFile)
+		if fenv, _ := data["env"].(map[string]any); fenv["ANTHROPIC_BASE_URL"] != nil {
+			t.Errorf("the install's own project still routes itself, so the machine-wide route it "+
+				"just wrote is overridden in the very project it was run from: %v", data)
+		}
+		if data["pluginConfigs"] != nil {
+			t.Errorf("an empty pluginConfigs husk of ours survived the adoption: %v", data)
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
 	}
 	if got := projectPortOption(t, projFile); got != "" {
 		t.Errorf("the adopted project still pins port %q, which outranks the machine-wide option and "+
@@ -10868,5 +10880,167 @@ func TestUninstallSkillUnsetsThePortOptionItStops(t *testing.T) {
 	if !strings.Contains(body, "project-key --user-scope") {
 		t.Error("step 2 releases only this project's record. A machine-wide install has its own " +
 			"record (see user_scope_key()), and nothing else will ever release it.")
+	}
+}
+
+// backupsUnder returns the rolling `.context-guru-backup-*` checkpoints in a file's recovery folder.
+func backupsUnder(t *testing.T, file string) []string {
+	t.Helper()
+	stem := strings.TrimSuffix(filepath.Base(file), ".json")
+	got, err := filepath.Glob(filepath.Join(filepath.Dir(file), "context-guru-settings-json",
+		stem+".context-guru-backup-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// The uninstall's LAST write must clean up after itself, and `port unset` is that write.
+//
+// Reported from a real install: after /context-guru:uninstall the project's recovery folder still
+// held `settings.local.context-guru-backup-<ts>.json`, timestamped AFTER the uninstall, and
+// skills/uninstall/SKILL.md told the user there was nothing of that kind left to offer. Both halves
+// of step 1 were doing what they were written to do — `remove` deleted every backup (forget_backups)
+// and then `port unset` took a fresh one and never cleaned up, because it was written for the
+// `adopt` path where nobody was looking at the recovery folder. Whichever of the two runs last owns
+// the cleanup, so it cannot be only one of them.
+//
+// The leftover mattered beyond tidiness: its content differed from the reset file by exactly
+// `"port": 8788`, i.e. it was a copy of a settings file that still had context-guru in it, sitting
+// in a folder the skill offers to delete as originals-only.
+func TestTheUninstallsLastWriteLeavesNoBackupBehind(t *testing.T) {
+	sd, home := t.TempDir(), t.TempDir()
+	proj := t.TempDir()
+	claude := filepath.Join(proj, ".claude")
+	if err := os.MkdirAll(claude, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(claude, "settings.local.json")
+	// The user's own file as they had it.
+	writeJSON(t, file, map[string]any{
+		"enabledPlugins": map[string]any{"context-guru@context-guru": true},
+	})
+	before, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An install, in install.sh's own order: `port alloc --file` writes the pinned option and is the
+	// FIRST write of the whole install (so it is what the `.pre-install` copy is taken before), then
+	// `add` writes the routing. Both halves matter here: without the port option `port unset` answers
+	// `unchanged` and never reaches the code under test, and with the option written by hand BEFORE
+	// the install the `.pre-install` copy would carry a pin of the user's own that the reset is right
+	// to remove, so the file could not be expected to match it again.
+	if f, c := settingsInDir(t, sd, home, proj, "port", "alloc", "--file", file); c != 0 ||
+		f["result"] != "ok" {
+		t.Fatalf("port alloc exit %d %v", c, f)
+	}
+	port := projectPortOption(t, file)
+	if port == "" {
+		t.Fatalf("port alloc wrote no option, so there is nothing for `port unset` to remove")
+	}
+	url := "http://127.0.0.1:" + port + "/anthropic"
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", file, "--url", url); c != 0 ||
+		f["result"] != "added" {
+		t.Fatalf("add exit %d %v", c, f)
+	}
+	if got := backupsUnder(t, file); len(got) == 0 {
+		t.Fatalf("no backup was taken by the install, so this test cannot observe one surviving")
+	}
+
+	// Step 1 of skills/uninstall/SKILL.md, in its order: `remove`, then `port unset` in the same
+	// file, gated on `removed`.
+	rm, c := settingsInDir(t, sd, home, proj, "remove", "--file", file, "--url", url)
+	if c != 0 || rm["result"] != "removed" {
+		t.Fatalf("remove exit %d %v", c, rm)
+	}
+	un, c := settingsInDir(t, sd, home, proj, "port", "unset", "--file", file)
+	if c != 0 || un["result"] != "removed" {
+		t.Fatalf("port unset exit %d %v", c, un)
+	}
+
+	if got := backupsUnder(t, file); len(got) != 0 {
+		t.Errorf("%d rolling backup(s) survived the uninstall: %v — the recovery folder the skill "+
+			"offers to delete as originals-only holds a copy of a still-routed settings file",
+			len(got), got)
+	}
+	// The fact, too: reporting the path `backup()` returned would send the user looking for a file
+	// this command then deleted.
+	if !strings.HasPrefix(un["backup"], "(gone") {
+		t.Errorf("port unset reported backup=%q, want the post-uninstall note: the path it names no "+
+			"longer exists", un["backup"])
+	}
+	if un["file_deleted"] != "false" {
+		t.Errorf("file_deleted=%q, want false — the user had this file before the install",
+			un["file_deleted"])
+	}
+
+	// And the whole point of a reset: the file is the user's file again, with no husk of ours left
+	// in it. Measured on the real install: `pluginConfigs: {"context-guru@context-guru":
+	// {"options": {}}}` stayed behind, in a project that had no pluginConfigs of its own before.
+	after, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readJSON(t, file)["pluginConfigs"] != nil {
+		t.Errorf("an empty pluginConfigs husk of ours is still in the file:\n%s", after)
+	}
+	pre := filepath.Join(claude, "context-guru-settings-json", "settings.local.pre-install.json")
+	preB, err := os.ReadFile(pre)
+	if err != nil {
+		t.Fatalf("no .pre-install copy to compare against: %v", err)
+	}
+	var gotJSON, wantJSON, origJSON any
+	if err := json.Unmarshal(after, &gotJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(preB, &wantJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(before, &origJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotJSON, wantJSON) || !reflect.DeepEqual(gotJSON, origJSON) {
+		t.Errorf("the reset file is not what the user had:\ngot  %s\npre  %s\norig %s",
+			after, preB, before)
+	}
+}
+
+// ...and the same write must NOT clean up when something of ours is still in the file. install.sh's
+// step-0 rollback (`route_unwind_port`) calls `port unset` after a FAILED re-install over a WORKING
+// install, and that install's routing is deliberately left alone — its rolling checkpoints are a
+// live install's, so deleting them would turn a failed install into lost recovery state. Hence the
+// gate is on what the file still holds, not on who called.
+func TestARollbackOverAWorkingInstallKeepsItsBackups(t *testing.T) {
+	sd, home := t.TempDir(), t.TempDir()
+	proj := t.TempDir()
+	claude := filepath.Join(proj, ".claude")
+	if err := os.MkdirAll(claude, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(claude, "settings.local.json")
+	writeJSON(t, file, map[string]any{"env": map[string]any{"KEEP": "yes"}})
+	if f, c := settingsInDir(t, sd, home, proj, "port", "alloc", "--file", file); c != 0 ||
+		f["result"] != "ok" {
+		t.Fatalf("port alloc exit %d %v", c, f)
+	}
+	url := "http://127.0.0.1:" + projectPortOption(t, file) + "/anthropic"
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", file, "--url", url); c != 0 ||
+		f["result"] != "added" {
+		t.Fatalf("add exit %d %v", c, f)
+	}
+	un, c := settingsInDir(t, sd, home, proj, "port", "unset", "--file", file)
+	if c != 0 || un["result"] != "removed" {
+		t.Fatalf("port unset exit %d %v", c, un)
+	}
+	if got := backupsUnder(t, file); len(got) == 0 {
+		t.Errorf("the rollback deleted a still-routed install's backups: nothing left under %s",
+			filepath.Join(claude, "context-guru-settings-json"))
+	}
+	if strings.HasPrefix(un["backup"], "(gone") {
+		t.Errorf("backup=%q claims the checkpoints are gone while this file still routes through us",
+			un["backup"])
+	}
+	if got := readJSON(t, file)["env"]; got == nil {
+		t.Errorf("the rollback removed the working install's routing as well: %v", got)
 	}
 }
