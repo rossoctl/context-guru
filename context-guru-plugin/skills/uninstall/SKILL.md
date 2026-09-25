@@ -69,9 +69,15 @@ for f in .claude/settings.local.json .claude/settings.json ~/.claude/settings.js
   # matches, and both exit silently — so nothing starts the proxy and nothing reports why.
   # install.sh does the same `port unset` when it folds a project into a machine-wide install.
   #
-  # Only when the key really went: on `result=conflict` the file still routes somewhere (to the
-  # user's own gateway), and removing the port under it would break that instead.
-  case "$out" in *result=conflict*) ;; *)
+  # `removed` ONLY, which is the single value that means the key really went. `remove` also answers
+  # `conflict` (the file still routes somewhere — the user's own gateway — and taking the port
+  # from under it would break that) and `unchanged` (this file was not routing to that port, or is not
+  # there at all). Matching anything but `removed` strips the port out of files this loop never
+  # unrouted: a pin the user typed in `.claude/settings.json` while routing lives in
+  # `settings.local.json`, or — the third file here — the machine-wide install's own option, which
+  # a single project uninstall has no business touching. `remove` refuses that file on its own now
+  # (`reason=another_installs_routing`, below); this gate is the half that must not undo the refusal.
+  case "$out" in *result=removed*)
     "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port unset --file "$f" ;;
   esac
 done
@@ -81,6 +87,15 @@ The script removes the key only if it holds **our** base URL — the one passed 
 one it recorded at install time — and reports `result=conflict` instead of deleting a value the
 user has since pointed somewhere else. If you see a conflict, leave it alone and tell them what
 is there.
+
+`conflict reason=another_installs_routing` on the third file means something else, and it wants a
+question rather than a fix: this project routes through a file of its own
+(`this_project_routes_in=`), so `~/.claude/settings.json` is the **machine-wide** install's, and
+every other project on the machine is using it. Leaving it is what "reset this project" means —
+this project falls back to it, which is the documented upgrade path in reverse. Only if the user
+says they want the machine-wide install gone too, run that one file again with `--user-scope`, and
+then do steps 2 and 3 a second time for **its** port (`port show --key "$KEY"`, with `$KEY` from
+`project-key --user-scope` as in step 2).
 
 `--url` is worth passing (it also covers a port that changed since install), but it is **not**
 what makes this safe, and the earlier version of this line said it was. That put the property

@@ -10323,18 +10323,57 @@ func TestResettingAProjectFallsBackToTheMachineWideInstall(t *testing.T) {
 	}
 	waitForHealthz(t, port2)
 
-	// The reset, exactly as skills/uninstall/SKILL.md steps 1 and 2 spell it: remove the routing key,
-	// unset the port option in the SAME file, stop the proxy, release the record.
+	// The reset, as skills/uninstall/SKILL.md step 1 spells it: a LOOP over all three candidate files,
+	// `remove` in each, and `port unset` in the same file — but only where `remove` answered `removed`.
+	// Iterating all three is the point: the third is the machine-wide install's own file, and a step
+	// that unsets the port option in a file it did not unroute takes the machine-wide install down
+	// from inside a single project. A test that ran the two commands against the project's file alone
+	// would pin the sentence and miss the loop it lives in.
 	projFile := filepath.Join(proj, ".claude", "settings.local.json")
+	userFile := filepath.Join(home, ".claude", "settings.json")
 	url := "http://127.0.0.1:" + port1 + "/anthropic"
-	if f, c := settingsInDir(t, sd, home, proj, "remove", "--file", projFile, "--url", url); c != 0 ||
-		f["result"] != "removed" {
-		t.Fatalf("exit %d %v, want the project's routing key removed", c, f)
+	removedIn := ""
+	for _, f := range []string{
+		projFile,
+		filepath.Join(proj, ".claude", "settings.json"),
+		userFile,
+	} {
+		out, c := settingsInDir(t, sd, home, proj, "remove", "--file", f, "--url", url)
+		// The machine-wide file is refused, and refused for the machine-wide reason. `--url` naming
+		// this project's port does NOT produce that refusal on its own: it widens rather than
+		// narrows (it is the escape hatch for a URL we have no record of), so before the guard this
+		// call answered `removed` with `was=` naming the OTHER install's port — one project's reset
+		// unrouting every project on the machine, exit 0.
+		if f == userFile {
+			if c != 2 || out["result"] != "conflict" || out["reason"] != "another_installs_routing" {
+				t.Fatalf("remove on the machine-wide file answered exit %d %v; want a conflict "+
+					"naming another install's routing, or resetting this project takes every other "+
+					"project on this machine down with it", c, out)
+			}
+			continue
+		}
+		if c != 0 {
+			t.Fatalf("remove exit %d on %s: %v", c, f, out)
+		}
+		if out["result"] != "removed" {
+			continue
+		}
+		removedIn += f + " "
+		if o, c := settingsInDir(t, sd, home, proj, "port", "unset", "--file", f); c != 0 ||
+			o["result"] != "removed" {
+			t.Fatalf("exit %d %v: the uninstall left the port option behind in %s, which is what "+
+				"silences both hooks", c, o, f)
+		}
 	}
-	if f, c := settingsInDir(t, sd, home, proj, "port", "unset", "--file", projFile); c != 0 ||
-		f["result"] != "removed" {
-		t.Fatalf("exit %d %v: the uninstall left the project's port option behind, which is what "+
-			"silences both hooks", c, f)
+	if strings.TrimSpace(removedIn) != projFile {
+		t.Fatalf("the uninstall removed routing from %q; only the project's own file routes to port "+
+			"%s, so anything else here is the machine-wide install being taken down from inside one "+
+			"project", strings.TrimSpace(removedIn), port1)
+	}
+	if got := projectPortOption(t, userFile); got != port2 {
+		t.Errorf("the machine-wide install's own port option is %q, want %s: a project uninstall "+
+			"unset an option in a file it never unrouted, so every project on this machine now "+
+			"resolves the plugin.json default while the routing still names %s", got, port2, port2)
 	}
 	stopFakeProxy(t, state, port1)
 	if f, c := settingsInDir(t, sd, home, proj, "port", "release"); c != 0 ||
@@ -10418,6 +10457,154 @@ func TestResettingAProjectFallsBackToTheMachineWideInstall(t *testing.T) {
 	waitForHealthz(t, port2)
 }
 
+// TestUserScopeThenProjectKeepsTwoPorts is the same invariant as
+// TestProjectThenUserScopeKeepsTwoPorts in the other order, which is the order the README and the
+// how-to now recommend: machine-wide first, a project pulled out of it later.
+//
+// Allocation rule 2 reads `options.port` from `_option_file_candidates`, whose last entry IS the
+// machine-wide settings file. So a project install read the machine-wide install's own option and
+// returned `source=configured` — two records, one port, therefore one proxy, one store and one preset,
+// silently. And `configured` skips the option write, so the project never got a port option of its
+// own: its hooks resolved their port through a file it does not own, and the machine-wide uninstall
+// unsetting that option would drop the project to the plugin.json default while its URL still named
+// the old port. The next alloc in that project then refused with
+// `port_recorded_by_another_project other_project=<the user config dir>` — a project the user never
+// installed anything in, and whose suggested remedy uninstalls the machine-wide install.
+//
+// A user-level `port` with no machine-wide record is a pin the user typed and is still honoured; the
+// record is the distinction, which is why this test installs rather than writing an option by hand.
+func TestUserScopeThenProjectKeepsTwoPorts(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	env := routeEnv(t, home, state, fakeProxyDirAnyPort(t))
+
+	// Machine-wide first, from a directory that is not the project — nothing to leave or adopt.
+	facts, code := runRoute(t, t.TempDir(), env, "--scope", "user",
+		"--i-consent-to-traffic-interception", "--i-understand-machine-wide")
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the machine-wide install failed, so there is nothing to pull a project out of: "+
+			"exit %d %v", code, facts)
+	}
+	port1 := facts["port"]
+	t.Cleanup(func() { stopFakeProxy(t, state, port1) })
+	waitForHealthz(t, port1)
+
+	facts, code = runRoute(t, proj, env, consentOK()...)
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the project install failed: exit %d %v", code, facts)
+	}
+	port2 := facts["port"]
+	t.Cleanup(func() { stopFakeProxy(t, state, port2) })
+	if port2 == "" || port2 == port1 {
+		t.Fatalf("the project install took the machine-wide install's port %q (source=%s), so both "+
+			"are on one proxy, one store and one preset: %v", port2, facts["port_source"], facts)
+	}
+	if facts["port_source"] != "allocated" {
+		t.Errorf("port_source=%q: a port that came from the machine-wide install's file is reported "+
+			"as configured and writes no option into this project, so its hooks depend on a file it "+
+			"does not own: %v", facts["port_source"], facts)
+	}
+	waitForHealthz(t, port2)
+
+	// The project has an option of its own, and the machine-wide install's is untouched.
+	projFile := filepath.Join(proj, ".claude", "settings.local.json")
+	if got := projectPortOption(t, projFile); got != port2 {
+		t.Errorf("the project's own port option is %q, want %s", got, port2)
+	}
+	if got := projectPortOption(t, filepath.Join(home, ".claude", "settings.json")); got != port1 {
+		t.Errorf("the machine-wide port option is now %q, want %s", got, port1)
+	}
+
+	// Two records, and the second install does not walk into rule 1's clash refusal.
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userKey, err := filepath.EvalSymlinks(filepath.Join(home, ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _ := readJSON(t, filepath.Join(state, "context-guru",
+		"install-scope.json"))["projects"].(map[string]any)
+	for key, want := range map[string]string{projReal: port2, userKey: port1} {
+		rec, _ := projects[key].(map[string]any)
+		if rec == nil || fmt.Sprint(rec["port"]) != want {
+			t.Errorf("record for %s is %v, want port %s", key, rec, want)
+		}
+	}
+	if f, c := settingsInDir(t, filepath.Join(state, "context-guru"), home, proj, "port", "alloc",
+		"--dry-run"); c != 0 || f["port"] != port2 {
+		t.Errorf("a second alloc in the project answers exit %d %v, want port %s unchanged — a "+
+			"refusal here names the user config dir as the owning \"project\"", c, f, port2)
+	}
+}
+
+// TestRemoveRefusesAnotherInstallsRouting pins the guard itself, in all three directions, because
+// the scenario test above can only show one of them.
+//
+// `remove`'s existing safety is "is this URL ours" — which the MACHINE-WIDE install's own file
+// answers yes to exactly as loudly as the project's. `--url` does not narrow that: it WIDENS (it is
+// the escape hatch for a URL we have no record of writing, and it covers a port that changed since
+// install), so a project uninstall passing its own port removed the machine-wide `ANTHROPIC_BASE_URL`
+// and reported `removed` with `was=` naming a port it was never asked about. The record is the
+// distinction, and the three directions are: refuse from a project that routes itself; allow from a
+// project whose only routing IS the machine-wide one (`adopt` folded it in — removing that file is
+// the only uninstall that project has); allow from anywhere when asked for explicitly.
+func TestRemoveRefusesAnotherInstallsRouting(t *testing.T) {
+	home, state, proj, folded := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	sd := filepath.Join(state, "context-guru")
+	userFile := filepath.Join(home, ".claude", "settings.json")
+	projFile := filepath.Join(proj, ".claude", "settings.local.json")
+	userURL := "http://127.0.0.1:8971/anthropic"
+	projURL := "http://127.0.0.1:8972/anthropic"
+
+	addUser := func() {
+		t.Helper()
+		if f, c := settingsInDir(t, sd, home, folded, "add", "--file", userFile, "--url", userURL,
+			"--user-scope"); c != 0 {
+			t.Fatalf("machine-wide add exit %d %v", c, f)
+		}
+	}
+	addUser()
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", projFile, "--url",
+		projURL); c != 0 {
+		t.Fatalf("project add exit %d %v", c, f)
+	}
+
+	// 1. From the project that routes itself: refused, and the file is untouched.
+	f, c := settingsInDir(t, sd, home, proj, "remove", "--file", userFile, "--url", projURL)
+	if c != 2 || f["result"] != "conflict" || f["reason"] != "another_installs_routing" {
+		t.Fatalf("exit %d %v: a project uninstall removed the machine-wide install's routing, so "+
+			"resetting one project unroutes every project on this machine", c, f)
+	}
+	if f["this_project_routes_in"] == "" {
+		t.Errorf("the refusal does not say which file this project does route through, which is the "+
+			"one fact the skill needs to explain it: %v", f)
+	}
+	env, _ := readJSON(t, userFile)["env"].(map[string]any)
+	if env["ANTHROPIC_BASE_URL"] != userURL {
+		t.Fatalf("the machine-wide routing is %v, want %s left exactly as it was",
+			env["ANTHROPIC_BASE_URL"], userURL)
+	}
+
+	// 2. From a project with no routing of its own — what `adopt` leaves behind. The machine-wide
+	// file IS this project's routing, so removing it is the uninstall it has, and refusing here
+	// would leave a folded-in project with no way to uninstall at all.
+	if f, c := settingsInDir(t, sd, home, folded, "remove", "--file", userFile,
+		"--url", userURL); c != 0 || f["result"] != "removed" {
+		t.Fatalf("exit %d %v: a project folded into the machine-wide install cannot uninstall it, "+
+			"which is every project's only uninstall after `adopt`", c, f)
+	}
+
+	// 3. Asked for explicitly, from the project that routes itself: allowed. Same flag `add` needs
+	// to write this file in the first place, so there is one name for "yes, the whole machine".
+	addUser()
+	if f, c := settingsInDir(t, sd, home, proj, "remove", "--file", userFile, "--url", userURL,
+		"--user-scope"); c != 0 || f["result"] != "removed" {
+		t.Fatalf("exit %d %v: --user-scope does not get the machine-wide install uninstalled from "+
+			"inside a project, so the refusal in 1 has no way out", c, f)
+	}
+}
+
 // TestUninstallSkillUnsetsThePortOptionItStops. The step that closes the gap above lives in prose,
 // so this is the only thing that keeps it there — and its absence is invisible in every other test,
 // because nothing else reads that file after a removal.
@@ -10427,6 +10614,13 @@ func TestUninstallSkillUnsetsThePortOptionItStops(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(b)
+	// `removed` is the only answer that means the key really went. `unchanged` ("not routing here")
+	// reaching `port unset` is how the loop strips an option out of a file it never unrouted — the
+	// user's own pin, or the machine-wide install's port, from inside a single project's uninstall.
+	if !strings.Contains(body, "*result=removed*)") {
+		t.Error("the `port unset` gate does not match on `removed` alone, so `unchanged` passes " +
+			"through it and the loop unsets the port option in files it did not unroute.")
+	}
 	if !strings.Contains(body, `port unset --file "$f"`) {
 		t.Error("step 1 removes the routing key without unsetting the port option in the same file. " +
 			"A leftover project `port` outranks a machine-wide install's, so both hooks self-gate on " +

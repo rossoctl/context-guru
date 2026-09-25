@@ -22,7 +22,7 @@ re-reading the file or parsing prose.
 Usage:
   settings.py add           --file PATH --url URL [--force] [--upstream URL] [--bin PATH] [--statusline CMD]
   settings.py add           --file PATH --statusline CMD [--force]   # statusline only, no routing change
-  settings.py remove        --file PATH [--url URL]
+  settings.py remove        --file PATH [--url URL] [--user-scope]
   settings.py show          --file PATH
   settings.py resolve-scope                                          # where THIS project's routing lives
 """
@@ -1276,7 +1276,13 @@ def cmd_port(args: argparse.Namespace) -> int:
         # running install had just written for itself and left the row it was told to remove in
         # place: the exact inverse of the request, silently, reported as `released`.
         if getattr(args, "key", None):
-            if args.key in projects:
+            # The machine-wide row is named literally whether or not it is still there. Resolution is
+            # a fallback for a plain DIRECTORY, and user_scope_key() is a directory - so for anyone
+            # whose home is a git checkout (versioned dotfiles) project_key("~/.claude") answers the
+            # repo root, and the release names a row nothing files anything under. Today that can only
+            # fail to pop a row that is already gone, which is why it is one line and not a fix to a
+            # visible bug.
+            if args.key in projects or args.key == user_scope_key():
                 key = args.key
             elif os.path.isdir(args.key):
                 key = project_key(args.key)
@@ -1372,13 +1378,34 @@ def cmd_port(args: argparse.Namespace) -> int:
                       "exists to prevent")
             return 3
     else:
-        # A machine-wide install reads its own file only. Project-local options outrank user ones,
-        # so from inside a project that pins a port — including one this plugin pinned there itself,
-        # which an `allocated` install writes into that project's settings — rule 2 handed the
-        # machine-wide install THAT project's port. Same defect as rule 1's, one branch further down,
-        # and it survived the record-key fix because it never consults the record at all.
-        only = user_scope_files() if key == user_scope_key() else None
-        explicit_port, _explicit_file = _explicit_configured_port(args.plugin, only)
+        # Rule 2 must not hand either kind of install the OTHER kind's port. The invariant is
+        # symmetric — a machine-wide install and a project install on one port means one proxy, one
+        # store, one preset and a kill-and-restart at every session start — so both directions are
+        # excluded here, and the record is what tells them apart.
+        #
+        # Outwards: a machine-wide install reads its own file only. Project-local options outrank user
+        # ones, so from inside a project that pins a port — including one this plugin pinned there
+        # itself, which an `allocated` install writes into that project's settings — rule 2 handed
+        # the machine-wide install THAT project's port.
+        user_key = user_scope_key()
+        only = user_scope_files() if key == user_key else None
+        explicit_port, explicit_file = _explicit_configured_port(args.plugin, only)
+        # Inwards: `_option_file_candidates`' last entry IS the machine-wide file, so a PROJECT install
+        # read the machine-wide install's own `options.port` and called it `configured` — the same
+        # defect in the other direction, on the order the docs recommend (machine-wide first, then a
+        # project). Worse than a shared number, because `configured` skips the option write below: the
+        # project's hooks would resolve their port THROUGH a file it does not own, and the machine-wide
+        # uninstall unsetting that option (correctly) would drop every project that inherited it to the
+        # plugin.json default while its own URL still named the old port.
+        #
+        # A user-level `port` with NO machine-wide record is a different thing — a pin the user
+        # typed, which every project should honour. The record is the whole distinction, and it exists.
+        if (explicit_port is not None and key != user_key and is_user_scope(explicit_file)
+                and isinstance(projects.get(user_key), dict)):
+            # Falls through to the scan, which excludes the machine-wide port via `_recorded_ports`
+            # (its key is a real directory, so it is not an orphan) and writes the port it picks into
+            # this project's own file.
+            explicit_port = None
         if explicit_port is not None:
             port, source = explicit_port, "configured"
         else:
@@ -2271,6 +2298,37 @@ def cmd_remove(args: argparse.Namespace) -> int:
              expected=args.url,
              note="this base URL is not the one context-guru installed; left untouched")
         return 2
+    # ...and refuse to remove ANOTHER context-guru install's routing. The check above only asks
+    # "did we write this", which the MACHINE-WIDE install's own file answers yes to as loudly as
+    # the project's. `--url` does not narrow it either, by design: it WIDENS (see above — it is the
+    # escape hatch for a record we never wrote, and it covers a port that changed since install),
+    # so a project uninstall passing its own port still deletes the machine-wide `ANTHROPIC_BASE_URL`
+    # and reports `removed` with `was=` naming a port it was never asked about. Measured, on the two
+    # installs the README now documents: resetting ONE project unrouted EVERY project on the machine,
+    # exit 0. The uninstall skill then unsets the machine-wide `options.port` too, since its gate
+    # (correctly) trusts `removed`.
+    #
+    # The record is what distinguishes them: whatever file routes THIS project is this project's to
+    # remove, and the machine-wide file when it is not that file belongs to an install this caller
+    # was not asked to touch. `resolve_install_scope` answers that (and answers the machine-wide
+    # file itself for a project that has no routing of its own — a project folded in by `adopt` —
+    # where removing it IS the uninstall this project has).
+    #
+    # Fail open on anything unexpected: an uninstall that cannot read the record must still be able
+    # to uninstall. `--user-scope` is the deliberate override, the same flag `add` needs to write
+    # this file in the first place.
+    if is_user_scope(args.file) and not getattr(args, "user_scope", False):
+        try:
+            _own_scope, own_file, _own_src = resolve_install_scope()
+        except Exception:
+            own_file = None
+        if own_file and os.path.realpath(own_file) != os.path.realpath(args.file):
+            emit(result="conflict", reason="another_installs_routing", file=args.file,
+                 existing=current, this_project_routes_in=own_file,
+                 note="this is the MACHINE-WIDE install's own settings file and this project routes "
+                      "through a file of its own; a project uninstall leaves it alone. Uninstalling "
+                      "the machine-wide install is a separate, confirmed step: --user-scope")
+            return 2
     backup(args.file)
     del env[KEY]
     # Take our upstream key with it, but ONLY the value we recorded writing. An ANTHROPIC_UPSTREAM
@@ -3116,7 +3174,10 @@ def main() -> int:
         p.add_argument("--user-scope", action="store_true",
                        help="permit writing the machine-wide settings file "
                             "(~/.claude/settings.json), which routes EVERY project. Refused "
-                            "without this on `add`; never needed on `remove`.")
+                            "without this on `add`. On `remove` it is needed only from inside a "
+                            "project that routes through a file of its OWN: taking the "
+                            "machine-wide routing down from there unroutes every other project "
+                            "too, so it has to be asked for.")
         p.add_argument("--statusline", default="",
                        help="on add: also write the TOP-LEVEL statusLine key ({\"type\": "
                             "\"command\", \"command\": <this value>}), refusing to replace one "
