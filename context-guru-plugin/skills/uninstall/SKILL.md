@@ -42,17 +42,17 @@ whatever `source=` says.
 **The port is the exception, and 8787 is the wrong guess for it.** Ports are allocated per project —
 one project per port, because two projects sharing one proxy made every session start kill and
 restart it, wiping the in-memory store each time — so the port this project runs on is usually
-neither 8787 nor anything the user ever typed. It is recorded, so ask for it instead of defaulting
-it:
+neither 8787 nor anything the user ever typed. One command answers the whole question, in the same
+order the hooks and the status line use, so you never assemble the chain yourself:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port show
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port routed
 ```
 
-`result=ok port=<n>` is this project's port, and it wins over `option_port=` when the two disagree —
-that is the same order the allocator uses, and it is what the proxy was actually started on.
-`port=(none)` means there is no record: only then fall back to `option_port=`, and to 8787 after
-that. Then:
+`result=ok port=<n>` is the port this directory is actually routed to our proxy on, and `source=`
+says what established it — the routing URL, an install record, or a configured option.
+`result=unrouted` means nothing here routes through us: report that and its `why=`, and do **not**
+substitute 8787. Then:
 
 ```bash
 PORT="<port>"

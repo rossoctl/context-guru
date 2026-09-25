@@ -10870,3 +10870,248 @@ func TestUninstallSkillUnsetsThePortOptionItStops(t *testing.T) {
 			"record (see user_scope_key()), and nothing else will ever release it.")
 	}
 }
+
+// --- one port rule, shared by every consumer -----------------------------------------------
+//
+// The defect these pin: every port consumer used to start from CLAUDE_PLUGIN_OPTION_PORT with 8787
+// as a fallback and then check $ANTHROPIC_BASE_URL for that port as a safety gate. That order is
+// backwards. Claude Code sets CLAUDE_PLUGIN_OPTION_* in HOOK environments ONLY — a statusLine
+// command and a skill's Bash block never see it — and since ports became per-project, 8787 is not a
+// default but whichever project installed first. So the "fallback" was the answer, the gate then
+// failed to match, and the consumer went silent: a correct install with a permanently blank status
+// line, and insights.py once pricing an unrelated proxy's traffic as this account's spend.
+//
+// The cure is settings.resolve_routed_port: read the port off the URL that actually routes the
+// traffic, then confirm from a record or an option that WE put it there. These tests are written
+// against the OBSERVABLE behaviour of each consumer rather than against that function, because the
+// function being right was never the hard part — four separate copies of the rule was.
+
+// portRoutedProject builds a project that is genuinely routed to `port`, the way a real install
+// leaves one: the marker `is_ours` reads, the env block that routes the traffic, and the
+// install-scope.json row. Deliberately NO `port` option and NO CLAUDE_PLUGIN_OPTION_PORT — that
+// absence is the whole point, and `port` is never 8787.
+func portRoutedProject(t *testing.T, port string) (dir string, env []string) {
+	t.Helper()
+	dir = t.TempDir()
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude := filepath.Join(dir, ".claude")
+	if err := os.MkdirAll(claude, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := "http://127.0.0.1:" + port + "/anthropic"
+	local := filepath.Join(claude, "settings.local.json")
+	writeJSON(t, local, map[string]any{
+		"$context-guru": map[string]any{"installed_base_url": base},
+		"env":           map[string]any{"ANTHROPIC_BASE_URL": base},
+	})
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dir, "state")
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, filepath.Join(state, "install-scope.json"), map[string]any{
+		"version": 1,
+		"projects": map[string]any{real: map[string]any{
+			"scope": "project", "file": local, "port": n,
+			"recorded_at": "2026-01-01T00:00:00Z",
+		}},
+	})
+	// ANTHROPIC_BASE_URL is exported the way Claude Code exports a settings `env` block into a hook
+	// or statusLine process. CLAUDE_CONFIG_DIR points at an empty dir so the user-scope candidate
+	// exists and names nothing, which is the state of a machine with only a project install.
+	home := filepath.Join(dir, "home-claude")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env = append(sandboxEnv(t),
+		"CONTEXT_GURU_STATE="+state,
+		"CLAUDE_CONFIG_DIR="+home,
+		"ANTHROPIC_BASE_URL="+base,
+	)
+	return dir, env
+}
+
+// runIn runs a script in `dir` with `env`, returning combined output and exit code. Every consumer
+// here resolves the project from its CWD, so cmd.Dir is load-bearing and not incidental.
+func runIn(t *testing.T, dir string, env []string, stdin string, argv ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = dir
+	cmd.Env = append(env, "TMPDIR="+t.TempDir())
+	cmd.Stdin = strings.NewReader(stdin)
+	b, err := cmd.CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("running %v: %v (%s)", argv, err, b)
+	}
+	t.Logf("%v in %s -> exit %d, output %q", argv, dir, code, b)
+	return string(b), code
+}
+
+func TestThePortIsResolvedFromTheRoutingNotFromTheHookOnlyOptionEnv(t *testing.T) {
+	py := requireTool(t, "python3")
+	settingsPy := filepath.Join(scriptsDir(t), "settings.py")
+
+	t.Run("a routed project on a non-8787 port resolves with no option env at all", func(t *testing.T) {
+		dir, env := portRoutedProject(t, "8841")
+		out, code := runIn(t, dir, env, "", py, settingsPy, "port", "routed")
+		f := facts(mustZero(t, out, code))
+		if f["result"] != "ok" || f["port"] != "8841" {
+			t.Errorf("result=%q port=%q, want ok/8841. This is the reported defect: a correct "+
+				"install whose port is not 8787, read by a consumer that is not a hook and so "+
+				"never sees CLAUDE_PLUGIN_OPTION_PORT", f["result"], f["port"])
+		}
+		if f["source"] == "" {
+			t.Error("source= must say what established the port; a consumer reporting a port " +
+				"cannot tell the user where it came from otherwise")
+		}
+	})
+
+	t.Run("a foreign loopback proxy is never adopted", func(t *testing.T) {
+		// The property the old gate existed for, and the reason this cannot simply trust the URL:
+		// two local proxies are indistinguishable by URL, and another local API proxy on
+		// 127.0.0.1:4000/anthropic is a real shape. Adopting it would start ours underneath it, or
+		// price its traffic as the user's.
+		dir, env := portRoutedProject(t, "8841")
+		env = append(env, "ANTHROPIC_BASE_URL=http://127.0.0.1:4000/anthropic")
+		out, code := runIn(t, dir, env, "", py, settingsPy, "port", "routed")
+		f := facts(mustZero(t, out, code))
+		if f["result"] != "unrouted" {
+			t.Errorf("result=%q, want unrouted: nothing records 4000 as ours, and a loopback "+
+				"/anthropic URL is not evidence by itself. facts=%v", f["result"], f)
+		}
+		if f["port"] == "4000" {
+			t.Error("port=4000 hands a caller somebody else's proxy to probe, restart or bill")
+		}
+	})
+
+	t.Run("no install means no port, not 8787", func(t *testing.T) {
+		dir := t.TempDir()
+		env := sandboxEnv(t, "CONTEXT_GURU_STATE="+filepath.Join(dir, "state"))
+		out, code := runIn(t, dir, env, "", py, settingsPy, "port", "routed")
+		f := facts(mustZero(t, out, code))
+		if f["result"] != "unrouted" || f["port"] == "8787" {
+			t.Errorf("result=%q port=%q: falling back to 8787 from a directory with no install is "+
+				"how a report was once written against an unrelated project's proxy",
+				f["result"], f["port"])
+		}
+	})
+}
+
+// mustZero fails the test unless the command exited 0, and returns its output. `port routed` in
+// particular must exit 0 on the UNROUTED answer too: not being routed is the normal state of most
+// directories on a machine, and a non-zero exit would make every caller's `||` chain treat the
+// ordinary case as a failure.
+func mustZero(t *testing.T, out string, code int) string {
+	t.Helper()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0: %s", code, out)
+	}
+	return out
+}
+
+func TestTheStatusLineRendersOnAProjectWhosePortIsNot8787(t *testing.T) {
+	// The reported defect, end to end. Before the fix this printed NOTHING: _our_port read
+	// CLAUDE_PLUGIN_OPTION_PORT (absent — a statusLine command is not a hook), fell back to 8787,
+	// found ANTHROPIC_BASE_URL naming another port, and returned None. Blank output with a live
+	// proxy, a correct install and no error anywhere.
+	port := statsStub(t, `{"savings":{"tokens_saved":1234,"usd_saved":0.5}}`)
+	dir, env := portRoutedProject(t, port)
+	py := requireTool(t, "python3")
+	out, code := runIn(t, dir, env,
+		statuslinePayload("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 1.5, 1000, 100),
+		py, filepath.Join(scriptsDir(t), "statusline.py"))
+	if code != 0 {
+		t.Fatalf("exit %d: a status line must never fail a render: %s", code, out)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Fatal("no output. The project is routed to a live proxy and the install records it; a " +
+			"blank status line here is the defect, and it is invisible to the user as anything " +
+			"other than 'the plugin does nothing'")
+	}
+	// And the control, so this cannot pass for the wrong reason: a project that is NOT ours must
+	// still render nothing.
+	foreign := append(env, "ANTHROPIC_BASE_URL=http://127.0.0.1:4000/anthropic")
+	out2, _ := runIn(t, dir, foreign,
+		statuslinePayload("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 1.5, 1000, 100),
+		py, filepath.Join(scriptsDir(t), "statusline.py"))
+	if strings.TrimSpace(out2) != "" {
+		t.Errorf("output %q for a project routed to somebody else's proxy: the self-gate is what "+
+			"keeps this plugin out of every unrelated project on the machine", out2)
+	}
+}
+
+func TestTheHooksResolveThePortWithoutTheOptionEnv(t *testing.T) {
+	// start-proxy.sh's decline breadcrumb is the observable: it logs "declined" and exits 0 when it
+	// decides the project is not routed to its port. With the old rule, a project on 8841 and no
+	// CLAUDE_PLUGIN_OPTION_PORT made it compare against 8787, decline, and leave a routed project
+	// with no proxy and no auto-restart behind it — silently.
+	requireTool(t, "bash")
+	requireTool(t, "python3")
+	dir, env := portRoutedProject(t, "8841")
+	// CONTEXT_GURU_BIN names something that cannot start, so this exercises the PORT decision and
+	// then fails to launch, rather than binding a real port on a shared machine.
+	env = append(env, "CONTEXT_GURU_BIN="+filepath.Join(dir, "no-such-proxy-binary"))
+	out, code := runIn(t, dir, env, "", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	if code != 0 {
+		t.Errorf("exit %d: every exit from this hook is 0 by design", code)
+	}
+	log := filepath.Join(os.TempDir(), "context-guru-proxy-8841.log")
+	if b, err := os.ReadFile(log); err == nil && strings.Contains(string(b), "declined") {
+		t.Errorf("declined a project it is routed to: %s", b)
+	}
+	if strings.Contains(out, "8787") {
+		t.Errorf("output names 8787 for a project routed to 8841: %s", out)
+	}
+}
+
+func TestNoPortConsumerCarriesABlindDefault(t *testing.T) {
+	// A drift test, because this defect is re-introduced by writing the obvious thing. Every one of
+	// the four consumers had `${CLAUDE_PLUGIN_OPTION_PORT:-8787}` or its Python twin, each looked
+	// correct in isolation, and each was silently wrong off the hook path. The rule now lives in
+	// settings.resolve_routed_port alone; a consumer that defaults the port again is a consumer that
+	// has stopped asking.
+	for _, name := range []string{"statusline.py", "insights.py", "check-proxy.sh", "start-proxy.sh"} {
+		b, err := os.ReadFile(filepath.Join(scriptsDir(t), name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			code := line
+			if i := strings.Index(code, "#"); i >= 0 {
+				code = code[:i] // comments here EXPLAIN the old shape; they must not be matched
+			}
+			for _, bad := range []string{
+				"CLAUDE_PLUGIN_OPTION_PORT:-8787",
+				`CLAUDE_PLUGIN_OPTION_PORT") or DEFAULT_PORT`,
+				"DEFAULT_PORT",
+			} {
+				if strings.Contains(code, bad) {
+					t.Errorf("%s: %q — a blind port default. Ask "+
+						"settings.resolve_routed_port (or `settings.py port routed` from a "+
+						"shell) instead; see its docstring for why 8787 is not a default and "+
+						"why the option env is not available here.", name, strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+	// start-proxy.sh keeps ONE 8787, under --force, for the install-time path where routing does not
+	// exist yet by definition. That is the only one, and it is guarded by FORCE rather than reached
+	// by falling through.
+	b, err := os.ReadFile(filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), `PORT="8787"`); n != 1 {
+		t.Errorf(`%d occurrences of PORT="8787" in start-proxy.sh, want exactly 1 (the --force `+
+			`install-time path)`, n)
+	}
+}

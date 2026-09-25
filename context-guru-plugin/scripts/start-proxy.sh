@@ -27,19 +27,53 @@
 #    can brick every session on the machine, which is the biggest risk in this whole feature.
 set -uo pipefail
 
-PORT="${CLAUDE_PLUGIN_OPTION_PORT:-8787}"
+# Our own directory, so this hook can call settings.py. ${CLAUDE_PLUGIN_ROOT} is substituted into a
+# `!`-block command string but is NOT exported to a child process, so it cannot be relied on here.
+HERE="$(unset CDPATH; \cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || HERE=""
+
+# THE PORT COMES FROM WHAT ACTUALLY ROUTES THIS DIRECTORY. It used to be
+# `${CLAUDE_PLUGIN_OPTION_PORT:-8787}`, and that is backwards in two ways that compound.
+#
+# 8787 is not a default any more: ports are allocated per project from PORT_SCAN_START upwards, so
+# 8787 is whichever project installed first. And CLAUDE_PLUGIN_OPTION_PORT is set only when Claude
+# Code's hook runner invokes this file — a human pasting the recovery command, or any other path
+# from a terminal, has no such variable. On either of those paths the fallback was not a fallback,
+# it was the answer, and the gate below then compared the routing URL against a port belonging to a
+# different project, did not match, and exited silently. A routed project with a dead proxy and no
+# note: exactly the failure check-proxy.sh exists to replace with an explanation.
+#
+# `settings.py port routed` is the one implementation of this rule (see resolve_routed_port there):
+# it reads the port off ANTHROPIC_BASE_URL and confirms from a settings file or an install record
+# that we are the ones who wrote it, so another local proxy on 127.0.0.1:4000/anthropic is still not
+# adopted. Empty means nothing claims this directory, and an empty PORT declines below rather than
+# guessing — the option variable is still honoured when it IS set and the delegate cannot answer
+# (no python3, a broken install), because a hook that can name a port should use it.
+#
+# The lookup is behind a shape test on ANTHROPIC_BASE_URL so the common case stays free. This plugin
+# installs at user scope, so this hook runs at the start of EVERY session in EVERY project on the
+# machine, and most of those are not routed through us. A URL that names no loopback port cannot be
+# ours whatever the state files say, and that path used to exit after one `case` with no forks at
+# all; spending a python3 start-up there would be a cost this plugin imposes on projects that have
+# nothing to do with it. Shape is only ever used to skip — never to adopt, which is the delegate's
+# job and needs the provenance record.
+PORT=""
+case "${ANTHROPIC_BASE_URL:-}" in
+  *//127.0.0.1:* | *//localhost:* | *//\[::1\]:*)
+    if [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
+      PORT="$(python3 "$HERE/settings.py" port routed 2>/dev/null |
+                sed -n 's/^port=\([0-9][0-9]*\)$/\1/p')"
+    fi ;;
+esac
+[ -n "$PORT" ] || PORT="${CLAUDE_PLUGIN_OPTION_PORT:-}"
 # `off` is the default preset: the passthrough pipeline, no components. See DEFAULT_PRESET in
 # settings.py for why, and TestThePresetDefaultIsEncodedOnce for the test that keeps these agreeing.
 PRESET="${CLAUDE_PLUGIN_OPTION_PRESET:-off}"
 IDLE_EXIT="${CLAUDE_PLUGIN_OPTION_IDLE_EXIT:-24h}"
 BIN="${CONTEXT_GURU_BIN:-context-guru-proxy}"
-LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log"
+LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT:-unresolved}.log"
 # See --emit-facts below. Off by default: the hook path's output is read by a person.
 EMIT_FACTS=0
 HEALTH="http://127.0.0.1:${PORT}/healthz"
-# Our own directory, so this hook can call settings.py. ${CLAUDE_PLUGIN_ROOT} is substituted into a
-# `!`-block command string but is NOT exported to a child process, so it cannot be relied on here.
-HERE="$(unset CDPATH; \cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || HERE=""
 # The proxy BINARY's own release repo — must agree with install.sh's REPO. Duplicated rather than
 # read from there because install.sh does no work merely by being sourced, and this file forks
 # nothing extra to learn a constant. TestTheReleaseRepoIsEncodedOnce keeps the two agreeing.
@@ -209,6 +243,22 @@ case "$PORT_ARG" in
     HEALTH="http://127.0.0.1:${PORT}/healthz"
     ;;
 esac
+
+# No port from the routing, no configured option and no --port. Under --force this is the
+# install-time path, where routing does not exist yet by definition and 8787 is the plugin.json
+# default a bare invocation means; without --force there is nothing to serve and nothing to gate
+# against, so decline the same way an unrouted project does.
+if [ -z "$PORT" ]; then
+  if [ "$FORCE" = 1 ]; then
+    PORT="8787"
+    LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log"
+    HEALTH="http://127.0.0.1:${PORT}/healthz"
+  else
+    printf '%s declined: no install routes this directory and no port is configured\n' \
+      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$LOG" 2>/dev/null
+    exit 0
+  fi
+fi
 
 if [ "$FORCE" = 1 ]; then
   :

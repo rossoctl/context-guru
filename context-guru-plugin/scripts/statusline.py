@@ -25,11 +25,16 @@ follow from that, and both are enforced structurally rather than by discipline:
   any error this prints whatever partial line it already has, or nothing.
 
 Self-gating: exactly like the SessionStart/UserPromptSubmit hooks, this does nothing in a project
-that is not routed through OUR proxy. The gate reads CLAUDE_PLUGIN_OPTION_PORT the same way those
-two hooks do, but never TRUSTS it alone — it still checks $ANTHROPIC_BASE_URL for that exact port,
-because that env block is what actually routes the traffic and so cannot be wrong. Matching any
-loopback ".../anthropic" URL regardless of port would treat another local API proxy on its own
+that is not routed through OUR proxy. The gate is settings.resolve_routed_port, which every port
+consumer in this plugin now shares: it reads the port off $ANTHROPIC_BASE_URL — the env block that
+actually routes the traffic, so it cannot be wrong about the port — and then confirms from a
+settings file or an install record that WE wrote that URL. Provenance is required because matching
+any loopback ".../anthropic" URL regardless of port would treat another local API proxy on its own
 port (127.0.0.1:4000 is a common one) as ours whenever it happened to be a project's real routing.
+
+This script is NOT a hook, which is what the gate used to get wrong: CLAUDE_PLUGIN_OPTION_PORT
+reaches hook environments only, so reading the port from there with 8787 as a fallback meant 8787
+was the answer on every render, and every project allocated another port rendered nothing at all.
 """
 
 from __future__ import annotations
@@ -60,9 +65,9 @@ HTTP_TIMEOUT_SECONDS = 0.6
 # request-per-render storm against the proxy.
 STATS_CACHE_TTL_SECONDS = 2.0
 
-# The plugin's own default port, matching context-guru-plugin/.claude-plugin/plugin.json's
-# "port" option default — used only as a fallback when CLAUDE_PLUGIN_OPTION_PORT is absent.
-DEFAULT_PORT = "8787"
+# There is deliberately NO default port constant here any more. A statusLine command is not a hook,
+# so CLAUDE_PLUGIN_OPTION_PORT never reaches it, which made a "fallback" of 8787 the answer on every
+# render — see settings.resolve_routed_port, which this script now asks instead.
 
 # A session_id Claude Code did not itself generate. Guards the one place this script puts a
 # stdin-supplied string into a URL and a tempfile path: an id that does not look like the UUID
@@ -270,20 +275,29 @@ def _read_stdin_json() -> dict:
 def _our_port() -> str | None:
     """The port this project is routed to OUR proxy on, or None if it is not routed through us.
 
-    Reads CLAUDE_PLUGIN_OPTION_PORT the same way check-proxy.sh and start-proxy.sh do (default
-    8787), then checks the ACTUAL routing value: does $ANTHROPIC_BASE_URL name exactly that port.
-    Accepting ANY loopback ".../anthropic" URL here — instead of a SPECIFIC configured port —
-    would treat another local API proxy (127.0.0.1:4000/anthropic is a common one) as ours
-    whenever it happens to be a project's real routing, which is precisely the class of bug those
-    two hooks' own tests
-    (matching the port, not merely "localhost") exist to catch.
+    Delegates to settings.resolve_routed_port, which is the single implementation of this rule for
+    every consumer. It used to be answered here, from CLAUDE_PLUGIN_OPTION_PORT with 8787 as a
+    fallback, gated on $ANTHROPIC_BASE_URL naming exactly that port — and a statusLine command is
+    NOT a hook, so that option variable is never set for this process. The fallback was therefore
+    the answer on every render, and in any project whose allocated port is not 8787 the gate failed
+    to match and this returned None: a correct install with a permanently blank status line, and no
+    error anywhere to explain it.
+
+    The anti-false-positive property the old gate existed for is kept, and strengthened, in the
+    shared rule: a port is only ours when a settings file or an install record says we put it there,
+    never because the URL looks like a local proxy. Another local API proxy on
+    127.0.0.1:4000/anthropic is still not us.
+
+    Import is local and swallowed: this script's contract is that it never fails a render. A missing
+    or broken settings.py renders no context-guru segment, exactly as an unrouted project does.
     """
-    port = (os.environ.get("CLAUDE_PLUGIN_OPTION_PORT") or DEFAULT_PORT).strip() or DEFAULT_PORT
-    if not port.isdigit():
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import settings  # noqa: PLC0415 - see docstring
+        port, _source = settings.resolve_routed_port()
+    except Exception:  # noqa: BLE001 - a status line must never raise
         return None
-    base = os.environ.get("ANTHROPIC_BASE_URL", "")
-    pattern = rf"^https?://(?:127\.0\.0\.1|localhost|\[::1\]):{re.escape(port)}/anthropic/?$"
-    return port if re.match(pattern, base) else None
+    return port if port and port.isdigit() else None
 
 
 def _cache_stopper(payload: dict) -> str:

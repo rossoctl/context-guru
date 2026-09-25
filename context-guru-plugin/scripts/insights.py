@@ -62,14 +62,12 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import settings  # noqa: E402  - same directory, and the ONE place option files are resolved
 
-# The plugin's own default port, matching .claude-plugin/plugin.json's "port" default.
-#
-# Since per-project ports landed, this is NOT a safe answer for "no port configured": it is
-# PORT_SCAN_START, the first port the allocator hands out, so on a machine with any install at all
-# it belongs to whichever project installed first. It is used here for exactly one case — an
-# install recorded before ports were per-project, whose record therefore carries no port and which
-# really is on 8787. Every other unconfigured case refuses. See _resolve_port.
-DEFAULT_PORT = "8787"
+# There is deliberately no default-port constant in this file. Since per-project ports landed, 8787
+# is not a safe answer for "no port configured" — it is PORT_SCAN_START, the first port the
+# allocator hands out, so on a machine with any install at all it belongs to whichever project
+# installed first. The one case where it IS the answer (a record written before ports were per
+# project, which therefore carries no port) lives with the rest of the rule, in
+# settings.resolve_routed_port and settings.LEGACY_SINGLE_PROXY_PORT.
 
 # /api/tools, /api/components and /api/facets are the three reads core itself puts on a longer
 # timeout (dashHeavyTimeout) because the default is simply too short for them on a large database.
@@ -165,92 +163,32 @@ COMPONENTS: dict[str, dict[str, str]] = {
 # ---------------------------------------------------------------------------
 
 def _resolve_port() -> tuple[str | None, str]:
-    """(port, source) — the port this directory's install is on, read off disk, and what said so.
-    `None` when nothing on disk claims to route this directory, which is NOT the same as 8787.
+    """(port, source) — the port this directory's install is on, and what said so. `None` when
+    nothing claims to route this directory, which is NOT the same as 8787.
 
-    Never $CLAUDE_PLUGIN_OPTION_PORT: Claude Code puts those variables into HOOK environments
-    only, so a script invoked from a skill's Bash block always sees the default whatever the user
-    configured. That is not cosmetic here — every figure in this report would be read off the
-    wrong proxy, or off none, and reported as an empty account.
+    One line of code, because the rule belongs to exactly one function now:
+    `settings.resolve_routed_port`. This file used to carry its own copy in two parts
+    (`_resolve_port` walking the option files, `_recorded_port` walking install-scope.json), and
+    statusline.py and the two hooks each carried a third variant. They were not the same rule, and
+    the ways they differed were invisible from any one of them — which is how the status line went
+    permanently blank on a correct install while this report, reading the same machine, was right.
+    Everything those docstrings recorded lives in the shared one; the two properties worth
+    restating here, because THIS file is a money report:
 
-    Resolution is PER OPTION, which is the same rule every skill in this plugin states: the option
-    files hold only the keys the user actually set, so an account that configured a preset and
-    never touched the port has a real file and no `port` key. That one option is then unconfigured
-    — and what happens next is the whole point of this function.
+      * Never $CLAUDE_PLUGIN_OPTION_PORT. Claude Code puts those variables into HOOK environments
+        only, and this script runs from a skill's Bash block, so the "configured" value it used to
+        read was always the default whatever the user set.
+      * Never 8787 as a fallback. Ports are per project from PORT_SCAN_START upwards, so the
+        "default" is whichever project installed first. Measured before the fix: from a directory
+        with no install, this reported `proxy_up=true` off an UNRELATED proxy on 8787 and priced
+        that install's traffic as this account's spend, with `port_source=(default)` the only
+        signal and no finding raised. `None` here becomes a finding and `unavailable=port`.
 
-    FALLING BACK TO 8787 IS WRONG NOW, and wrong in the direction that does not look wrong. Ports
-    are allocated per project from PORT_SCAN_START=8787 upwards, so the "default" is whichever
-    project installed first. Measured: from a directory with no install, in a clean HOME and state
-    directory, this reported `proxy_up=true` off an UNRELATED proxy on 8787 and printed that
-    install's preset, upstream and pipeline as this account's configuration. Every priced figure
-    under that header would have been another project's spend. `port_source=(default)` was the only
-    signal, no finding was raised, and no skill names that field.
-
-    So the chain is: what the hooks actually read (the option files, per option), then the record
-    the plugin keeps of which install routes this directory, and then NOTHING — `None`, which
-    `collect_env` turns into a finding and an `unavailable` entry rather than a number.
-
-    Read-only throughout: `_read_install_scopes()` is a plain read, deliberately in place of
-    `resolve_install_scope()`, which self-heals legacy rows by WRITING as it answers. A cost report
-    must not edit the state it reports on, and `TestInsightsWritesNothingAndPingsNothing` says so.
+    Read-only, which `TestInsightsWritesNothingAndPingsNothing` asserts: the shared rule uses
+    `_read_install_scopes()` deliberately in place of `resolve_install_scope()`, which self-heals
+    legacy rows by WRITING as it answers. A cost report must not edit the state it reports on.
     """
-    for path in settings._option_file_candidates("context-guru@context-guru"):
-        if not os.path.exists(path):
-            continue
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            continue
-        opts = (((data.get("pluginConfigs") or {}).get("context-guru@context-guru") or {})
-                .get("options") or {})
-        if isinstance(opts, dict) and opts.get("port"):
-            return str(opts["port"]).strip(), path
-    return _recorded_port()
-
-
-def _recorded_port() -> tuple[str | None, str]:
-    """The port install-scope.json records for this directory, when no option file names one.
-
-    Three answers, and the third is the only place DEFAULT_PORT survives:
-
-      * this project's own row, with a port — the per-project record, used verbatim;
-      * a row (this project's, or the machine-wide one that routes a project with none of its own)
-        that carries NO port — the shape written before ports were per-project, when there was one
-        proxy on 8787. That install really is on 8787, so say 8787 AND say which record said so,
-        because a reader who sees "(default)" learns nothing about whose proxy it is;
-      * no row at all — no install claims this directory, so there is no port to report.
-
-    The machine-wide row is recognised by `scope`, plus a `file` that is the user-scope settings
-    file for a row written before `scope` was recorded. That is the same pair of tests
-    `settings.py` uses; when its `_is_machine_wide_row` helper is available this collapses onto it.
-    """
-    try:
-        projects = settings._read_install_scopes()
-        key = settings.project_key()
-    except Exception:  # noqa: BLE001 - state is never load-bearing for a report
-        return None, "(install-scope.json unreadable)"
-
-    def _port_of(rec: object, what: str) -> tuple[str | None, str] | None:
-        if not isinstance(rec, dict):
-            return None
-        port = rec.get("port")
-        if isinstance(port, int):
-            return str(port), f"install-scope.json ({what})"
-        return DEFAULT_PORT, f"(default; {what} predates per-project ports)"
-
-    own = _port_of(projects.get(key), "recorded for this project")
-    if own is not None:
-        return own
-    for rec in projects.values():
-        if not isinstance(rec, dict):
-            continue
-        file = rec.get("file") or ""
-        if rec.get("scope") == "user" or (file and settings.is_user_scope(file)):
-            found = _port_of(rec, "the machine-wide install")
-            if found is not None:
-                return found
-    return None, "(no install routes this directory)"
+    return settings.resolve_routed_port()
 
 
 def _configured_options() -> tuple[dict, dict]:

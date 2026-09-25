@@ -1047,10 +1047,171 @@ def resolve_install_scope(project_dir: str | None = None) -> tuple[str | None, s
 # else holds, rather than actually binding real ports in 8787..8850 on a shared machine. Never set
 # by a normal install; there is no user-facing reason to move the scan window.
 PORT_SCAN_START = int(os.environ.get("CONTEXT_GURU_PORT_BASE") or 8787)
+
+# The port the plugin had before ports were per-project, when there was one proxy per machine. It is
+# NOT PORT_SCAN_START: that one moves with CONTEXT_GURU_PORT_BASE so a test suite can scan a range
+# nobody else on a shared box holds, whereas this is a historical fact about installs already on
+# disk — a row carrying no `port` describes a proxy that really is on 8787, wherever the scan
+# window happens to be pointed today. The only surviving case where a default is the answer.
+LEGACY_SINGLE_PROXY_PORT = "8787"
 PORT_SCAN_END = PORT_SCAN_START + 63  # "8787..8850 is plenty" — 64 ports is far more than this
                        # machine will ever have projects for, and an unbounded scan is a way to
                        # hang on a machine whose firewall makes every bind attempt time out
                        # instead of refuse.
+
+
+def url_port(url: str) -> str | None:
+    """The port a loopback base URL names, or None if it names no loopback port.
+
+    Deliberately strict where `_is_loopback` is generous, and for the mirror-image reason: that one
+    answers "could this be us?" and a false negative there re-introduces a defect, while this one
+    hands a port to callers that will START a proxy on it or read numbers off it. A URL with no port
+    is not a port, and guessing 80 or 8787 for it is the whole class of bug this function exists to
+    end.
+    """
+    if not isinstance(url, str) or not _is_loopback(url):
+        return None
+    rest = url.split("://", 1)[1] if "://" in url else url
+    hostport = rest.split("/", 1)[0]
+    port = hostport.partition("]")[2][1:] if hostport.startswith("[") else hostport.partition(":")[2]
+    return port if port.isdigit() else None
+
+
+def _machine_wide_row(projects: dict) -> dict | None:
+    """The machine-wide install's row, recognised the way every other reader here recognises it:
+    by `scope`, plus a `file` that is the user-scope settings file for a row written before `scope`
+    was recorded.
+    """
+    for rec in projects.values():
+        if not isinstance(rec, dict):
+            continue
+        file = rec.get("file") or ""
+        if rec.get("scope") == "user" or (file and is_user_scope(file)):
+            return rec
+    return None
+
+
+def resolve_routed_port(env: dict | None = None,
+                        project_dir: str | None = None,
+                        plugin: str = "context-guru@context-guru") -> tuple[str | None, str]:
+    """(port, source) — THE port this directory is routed to our proxy on, or (None, why not).
+
+    One rule, one implementation, because the several copies of it were not the same rule and the
+    differences were invisible. This is the function every consumer must use: the statusLine
+    command, `insights.py`, and both hooks when their option environment is absent.
+
+    THE DISEASE THIS CURES. Every earlier copy started from a CONFIGURED port and fell back to
+    8787, then checked `$ANTHROPIC_BASE_URL` for that port as a safety gate. That order is backwards
+    now. Ports are allocated per project from PORT_SCAN_START upwards, so 8787 is not "the default"
+    — it is whichever project installed first. And `CLAUDE_PLUGIN_OPTION_PORT`, the thing the
+    configured value is normally read from, reaches HOOK environments only: a statusLine command or
+    a skill's Bash block never sees it, so the fallback was not a fallback, it was the answer. In a
+    project on any other port the safety gate then failed to match and the consumer went silent —
+    which is how a correct install had a permanently blank status line, and how `insights.py` once
+    priced another project's traffic off an unrelated proxy on 8787.
+
+    So this starts from what ACTUALLY routes the traffic and works back to provenance:
+
+      1. `$ANTHROPIC_BASE_URL` names a loopback port, and a settings file in scope records that
+         exact URL as ours (`$context-guru.installed_base_url`) — the strongest answer there is:
+         the value that routes the traffic, confirmed to be the value we wrote.
+      2. The same URL, with the `port` OPTION (in a settings file, or in
+         CLAUDE_PLUGIN_OPTION_PORT for the two hooks that are given it) naming that exact port, or
+         with an install record naming it for this project or for the machine-wide install. These
+         cover a routed project whose settings file predates the marker, and the instant during a
+         fresh install between `port alloc` writing the option and `add` writing the marker.
+      3. No usable routing in the environment: fall back to what is configured on disk — the `port`
+         option, per option file, then this project's recorded port, then the machine-wide one.
+         This is the path a Bash-tool consumer takes in a session started before the install.
+      4. Nothing claims this directory: `None`. NOT 8787.
+
+    Step 1 and 2 both require provenance, never the URL's shape alone: two local proxies are
+    indistinguishable by URL (`is_ours`' docstring has the detail), and a consumer that adopted any
+    loopback `/anthropic` URL would read another proxy's numbers, or start ours underneath it.
+
+    READ-ONLY. `_read_install_scopes()` rather than `resolve_install_scope()`, which self-heals
+    legacy rows by writing as it answers: a status line renders on every keystroke and a cost report
+    must not edit the state it reports on.
+    """
+    env = os.environ if env is None else env
+    base = (env.get("ANTHROPIC_BASE_URL") or "").strip()
+    port = url_port(base)
+
+    candidates = _option_file_candidates(plugin)
+
+    def _read(path: str) -> dict | None:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    try:
+        projects = _read_install_scopes()
+        key = project_key(project_dir)
+    except Exception:  # noqa: BLE001 - state is never load-bearing for a reader
+        projects, key = {}, ""
+
+    if port:
+        for path in candidates:
+            data = _read(path)
+            if data is not None and is_ours(data, base):
+                return port, f"routing ({path} recorded it)"
+        # Configuration is provenance too, and it is the only provenance a fresh install has for the
+        # instant between `port alloc` writing the option and `add` writing the marker. The user (or
+        # our own installer) put OUR plugin's `port` option on this exact port and the routing URL
+        # names it: that is the same pair of facts the pre-fix gate used, in the same direction —
+        # what is different is that a MISSING option is no longer silently read as 8787.
+        #
+        # CLAUDE_PLUGIN_OPTION_PORT is accepted here for the two callers that really do get it, the
+        # hooks, and is simply absent everywhere else rather than defaulted.
+        opt_env = (env.get("CLAUDE_PLUGIN_OPTION_PORT") or "").strip()
+        if opt_env == port:
+            return port, "routing (CLAUDE_PLUGIN_OPTION_PORT names it)"
+        for path in candidates:
+            data = _read(path)
+            if data is None:
+                continue
+            opts = (((data.get("pluginConfigs") or {}).get(plugin) or {}).get("options") or {})
+            if isinstance(opts, dict) and str(opts.get("port") or "").strip() == port:
+                return port, f"routing ({path} configures it)"
+        own = projects.get(key)
+        if isinstance(own, dict) and str(own.get("port") or "") == port:
+            return port, "routing (install-scope.json, this project)"
+        wide = _machine_wide_row(projects)
+        if isinstance(wide, dict) and str(wide.get("port") or "") == port:
+            return port, "routing (install-scope.json, the machine-wide install)"
+        return None, f"ANTHROPIC_BASE_URL names 127.0.0.1:{port}, which no install of ours claims"
+
+    for path in candidates:
+        data = _read(path)
+        if data is None:
+            continue
+        opts = (((data.get("pluginConfigs") or {}).get(plugin) or {}).get("options") or {})
+        if isinstance(opts, dict) and opts.get("port"):
+            return str(opts["port"]).strip(), path
+
+    def _port_of(rec: object, what: str) -> tuple[str, str] | None:
+        if not isinstance(rec, dict):
+            return None
+        recorded = str(rec.get("port") or "").strip()
+        if recorded.isdigit():
+            return recorded, f"install-scope.json ({what})"
+        # The shape written before ports were per-project, when there was one proxy on 8787. That
+        # install really is on 8787 — the only surviving case where the default is the answer, and
+        # the source says which record said so rather than "(default)".
+        return LEGACY_SINGLE_PROXY_PORT, f"(default; {what} predates per-project ports)"
+
+    found = _port_of(projects.get(key), "recorded for this project")
+    if found is not None:
+        return found
+    found = _port_of(_machine_wide_row(projects), "the machine-wide install")
+    if found is not None:
+        return found
+    if base:
+        return None, "ANTHROPIC_BASE_URL does not name a loopback port, and nothing on disk does"
+    return None, "no install routes this directory"
 
 
 def _port_bindable(port: int) -> bool:
@@ -1288,6 +1449,23 @@ def cmd_port(args: argparse.Namespace) -> int:
     # only because it also has to accept a plain directory from `adopt`.
     if getattr(args, "key", None) and args.op in ("alloc", "show"):
         key = args.key
+
+    if args.op == "routed":
+        # The one port question a NON-HOOK consumer can ask: "which port is this directory actually
+        # routed to, if any". `show` cannot answer it — it reports one record, by key, and says
+        # nothing about the environment or about the option files that outrank that record. The two
+        # hooks call this when CLAUDE_PLUGIN_OPTION_PORT is absent, which is every path reached from
+        # a terminal rather than from Claude Code's hook runner.
+        #
+        # `result=unrouted` rather than an error exit: not being routed is a normal, common answer
+        # (most projects on a machine with a project-scope install), and a non-zero exit would make
+        # every caller's `set -e` or `||` chain treat the ordinary case as a failure.
+        port, source = resolve_routed_port(plugin=args.plugin)
+        if port is None:
+            emit(result="unrouted", port="(none)", why=source)
+        else:
+            emit(result="ok", port=port, source=source)
+        return 0
 
     if args.op == "show":
         rec = _read_install_scopes().get(key)
@@ -3379,7 +3557,7 @@ def main() -> int:
     # rather than making `alloc` re-resolve it; omitted, it falls back to `resolve_install_scope()`
     # exactly as `preset set` does when nothing is configured or routed yet.
     pt = sub.add_parser("port")
-    pt.add_argument("op", choices=("alloc", "show", "release", "unset"))
+    pt.add_argument("op", choices=("alloc", "show", "release", "unset", "routed"))
     pt.add_argument("--plugin", default="context-guru@context-guru")
     pt.add_argument("--file", default="",
                     help="for `alloc`: the settings file to write pluginConfigs.options.port "
