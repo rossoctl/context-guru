@@ -868,7 +868,8 @@ def record_install_scope(file: str, project_dir: str | None = None, scope_dir: s
     were per-project. A reader then had only one way to answer it: the old single-proxy default,
     8787, which is precisely the blind default this work removes. The URL already names the port, so
     the producer can stop making the ambiguous shape. A non-loopback `--attach` URL names no port of
-    ours and correctly leaves the field absent.
+    ours, so the row is marked `attach` instead: portless by design rather than by age, which is the
+    one portless shape a reader must not answer with the legacy 8787.
 
     `drop_keys` names ADDITIONAL keys to remove in the same write — the losing candidates of a
     migration tiebreak, which are this project's records under sibling worktrees' pre-migration
@@ -939,6 +940,12 @@ def record_install_scope(file: str, project_dir: str | None = None, scope_dir: s
             from_url = url_port(url or "")
             if from_url:
                 entry["port"] = int(from_url)
+            elif url:
+                # The one portless row a reader must NOT read as legacy: an `--attach` install has
+                # no local proxy and no port of ours at all, so the 8787 fallback below would
+                # report a port nothing here ever served, sourced as "predates per-project ports"
+                # about a row stamped today. Saying so in the row is cheaper than inferring it.
+                entry["attach"] = True
         entry["scope"] = scope
         entry["file"] = os.path.realpath(file)
         entry["recorded_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
@@ -1235,7 +1242,16 @@ def _resolve_port(env: dict | None,
         wide = _machine_wide_row(projects)
         if isinstance(wide, dict) and str(wide.get("port") or "") == port:
             return port, "routing (install-scope.json, the machine-wide install)"
-        return None, f"ANTHROPIC_BASE_URL names 127.0.0.1:{port}, which no install of ours claims"
+        # THE GATE stops here: a loopback proxy we cannot claim is somebody else's, and "am I in the
+        # path" is answered no. The REPORT does not, and the difference is not a nicety — a project
+        # whose session happens to point at a foreign local proxy (litellm on 4000, a colleague's
+        # gateway) still HAS an install, a record, a proxy and a dashboard DB, and all three skills
+        # read `result=unrouted` as "nothing here is installed at all". Falling through to the disk
+        # block below reports that install and says, separately, that this session is not routed
+        # through it.
+        if not from_disk:
+            return None, (f"ANTHROPIC_BASE_URL names 127.0.0.1:{port}, "
+                          "which no install of ours claims")
 
     # NOT reached by the gate. Everything below answers from DISK, which cannot say anything about
     # where this session's traffic goes — and by here the environment has already said it does not
@@ -1259,6 +1275,9 @@ def _resolve_port(env: dict | None,
         recorded = str(rec.get("port") or "").strip()
         if recorded.isdigit():
             return recorded, f"install-scope.json ({what})"
+        # An attach install is portless by design, not by age — there is no local proxy to name.
+        if rec.get("attach"):
+            return None
         # A row with no `port` is the shape written before ports were per-project, when there was one
         # proxy per machine on 8787 — and that install really is on 8787, which is the one surviving
         # case where the default is an answer rather than a guess.

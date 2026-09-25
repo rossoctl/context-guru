@@ -1097,3 +1097,23 @@ func TestAPortlessMachineWideRowIsNotHandedToAnUnrelatedProject(t *testing.T) {
 		t.Errorf("port=%q, want (none)", f["port"])
 	}
 }
+
+// The same install, the same record, and a session pointing at a FOREIGN local proxy — litellm on
+// 4000, a colleague's gateway, anything on loopback we did not write. The gate must still say no:
+// that traffic does not reach us. The REPORT must not, and it used to, because the "no install of
+// ours claims this loopback port" answer sat above the gate/report split and returned for both. The
+// three skills read `result=unrouted` as "nothing here is installed at all", so status and uninstall
+// reported nothing installed for a project with a record, a proxy and a dashboard DB.
+func TestTheReportStillFindsTheInstallWhenTheSessionPointsAtAForeignLocalProxy(t *testing.T) {
+	dir := insightsProject(t, nil)
+	insightsScopeRecord(t, dir, insightsKey(t, dir), "project",
+		filepath.Join(dir, ".claude", "settings.json"), 8850)
+	env := map[string]string{"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000/anthropic"}
+
+	out, code := runInsights(t, dir, env, "env")
+	f := facts(mustZero(t, out, code))
+	if f["port"] != "8850" {
+		t.Errorf("port=%q, want 8850: a foreign proxy in the environment is not evidence that this "+
+			"project has no install", f["port"])
+	}
+}

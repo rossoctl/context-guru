@@ -11171,6 +11171,63 @@ func TestTheGateAndTheReportAreTwoQuestions(t *testing.T) {
 		}
 	})
 
+	t.Run("a foreign LOCAL proxy is the same two answers", func(t *testing.T) {
+		// The half of the split the first fix missed. `https://api.anthropic.com` reached the disk
+		// fallback, but a loopback port no install of ours claims was refused ABOVE the gate/report
+		// split, so the report answered `unrouted port=(none)` for a project with a record, a proxy
+		// and a dashboard DB — and all three skills read that as "nothing here is installed at all".
+		// litellm on 4000 is the everyday shape of it.
+		const foreign = "http://127.0.0.1:4000/anthropic"
+		dir, env := portRoutedProject(t, "8841")
+		env = append(env, "ANTHROPIC_BASE_URL="+foreign)
+
+		out, code := runIn(t, dir, env, "", py, settingsPy, "port", "routed")
+		if f := facts(mustZero(t, out, code)); f["result"] != "unrouted" {
+			t.Errorf("result=%q: traffic to somebody else's local proxy does not reach ours", f["result"])
+		}
+		out, code = runIn(t, dir, env, "", py, settingsPy, "port", "install")
+		f := facts(mustZero(t, out, code))
+		if f["result"] != "ok" || f["port"] != "8841" {
+			t.Errorf("result=%q port=%q, want ok/8841: the install is on disk either way",
+				f["result"], f["port"])
+		}
+		if f["routed"] != "false" || !strings.Contains(f["not_routed_why"], "4000") {
+			t.Errorf("routed=%q not_routed_why=%q must name the proxy that is actually in the path",
+				f["routed"], f["not_routed_why"])
+		}
+	})
+
+	t.Run("an attach row is portless by design, not by age", func(t *testing.T) {
+		// The one portless row the producer still writes deliberately: `--attach` has no local proxy,
+		// so the legacy reading ("no port means it predates per-project ports, so it is on 8787")
+		// reported a port nothing ever served here, sourced as history, about a row stamped today.
+		dir := t.TempDir()
+		claude := filepath.Join(dir, ".claude")
+		if err := os.MkdirAll(claude, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		state := filepath.Join(dir, "state")
+		if err := os.MkdirAll(state, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		home := filepath.Join(dir, "home-claude")
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		const gw = "https://gw.corp.example/anthropic"
+		env := append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "CLAUDE_CONFIG_DIR="+home,
+			"ANTHROPIC_BASE_URL="+gw)
+		out, code := runIn(t, dir, env, "", py, settingsPy, "add",
+			"--file", filepath.Join(claude, "settings.json"), "--url", gw)
+		mustZero(t, out, code)
+		out, code = runIn(t, dir, env, "", py, settingsPy, "port", "install")
+		f := facts(mustZero(t, out, code))
+		if f["port"] == "8787" || strings.Contains(f["source"], "predates per-project") {
+			t.Errorf("port=%q source=%q: an attach install is answered with the single-proxy "+
+				"default as if the row were old", f["port"], f["source"])
+		}
+	})
+
 	t.Run("and says routed=true when it is", func(t *testing.T) {
 		dir, env := portRoutedProject(t, "8841")
 		out, code := runIn(t, dir, env, "", py, settingsPy, "port", "install")
