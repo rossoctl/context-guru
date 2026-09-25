@@ -62,9 +62,13 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import settings  # noqa: E402  - same directory, and the ONE place option files are resolved
 
-# The plugin's own default port, matching .claude-plugin/plugin.json's "port" default. Used only
-# when nothing has configured one — see _resolve_port for why that is read from disk and not from
-# the environment.
+# The plugin's own default port, matching .claude-plugin/plugin.json's "port" default.
+#
+# Since per-project ports landed, this is NOT a safe answer for "no port configured": it is
+# PORT_SCAN_START, the first port the allocator hands out, so on a machine with any install at all
+# it belongs to whichever project installed first. It is used here for exactly one case — an
+# install recorded before ports were per-project, whose record therefore carries no port and which
+# really is on 8787. Every other unconfigured case refuses. See _resolve_port.
 DEFAULT_PORT = "8787"
 
 # /api/tools, /api/components and /api/facets are the three reads core itself puts on a longer
@@ -160,8 +164,9 @@ COMPONENTS: dict[str, dict[str, str]] = {
 # Plumbing: the port, the fetch, the formatting
 # ---------------------------------------------------------------------------
 
-def _resolve_port() -> tuple[str, str]:
-    """(port, source) — the CONFIGURED port, read off disk, and which file said so.
+def _resolve_port() -> tuple[str | None, str]:
+    """(port, source) — the port this directory's install is on, read off disk, and what said so.
+    `None` when nothing on disk claims to route this directory, which is NOT the same as 8787.
 
     Never $CLAUDE_PLUGIN_OPTION_PORT: Claude Code puts those variables into HOOK environments
     only, so a script invoked from a skill's Bash block always sees the default whatever the user
@@ -171,7 +176,23 @@ def _resolve_port() -> tuple[str, str]:
     Resolution is PER OPTION, which is the same rule every skill in this plugin states: the option
     files hold only the keys the user actually set, so an account that configured a preset and
     never touched the port has a real file and no `port` key. That one option is then unconfigured
-    and the plugin.json default applies to it alone.
+    — and what happens next is the whole point of this function.
+
+    FALLING BACK TO 8787 IS WRONG NOW, and wrong in the direction that does not look wrong. Ports
+    are allocated per project from PORT_SCAN_START=8787 upwards, so the "default" is whichever
+    project installed first. Measured: from a directory with no install, in a clean HOME and state
+    directory, this reported `proxy_up=true` off an UNRELATED proxy on 8787 and printed that
+    install's preset, upstream and pipeline as this account's configuration. Every priced figure
+    under that header would have been another project's spend. `port_source=(default)` was the only
+    signal, no finding was raised, and no skill names that field.
+
+    So the chain is: what the hooks actually read (the option files, per option), then the record
+    the plugin keeps of which install routes this directory, and then NOTHING — `None`, which
+    `collect_env` turns into a finding and an `unavailable` entry rather than a number.
+
+    Read-only throughout: `_read_install_scopes()` is a plain read, deliberately in place of
+    `resolve_install_scope()`, which self-heals legacy rows by WRITING as it answers. A cost report
+    must not edit the state it reports on, and `TestInsightsWritesNothingAndPingsNothing` says so.
     """
     for path in settings._option_file_candidates("context-guru@context-guru"):
         if not os.path.exists(path):
@@ -185,13 +206,72 @@ def _resolve_port() -> tuple[str, str]:
                 .get("options") or {})
         if isinstance(opts, dict) and opts.get("port"):
             return str(opts["port"]).strip(), path
-    return DEFAULT_PORT, "(default)"
+    return _recorded_port()
 
 
-def _configured_options() -> tuple[dict, str]:
-    """Every configured option, and the file they came from. Same per-option rule as above: a key
-    absent here is UNCONFIGURED, and the caller applies the plugin.json default for that key only.
+def _recorded_port() -> tuple[str | None, str]:
+    """The port install-scope.json records for this directory, when no option file names one.
+
+    Three answers, and the third is the only place DEFAULT_PORT survives:
+
+      * this project's own row, with a port — the per-project record, used verbatim;
+      * a row (this project's, or the machine-wide one that routes a project with none of its own)
+        that carries NO port — the shape written before ports were per-project, when there was one
+        proxy on 8787. That install really is on 8787, so say 8787 AND say which record said so,
+        because a reader who sees "(default)" learns nothing about whose proxy it is;
+      * no row at all — no install claims this directory, so there is no port to report.
+
+    The machine-wide row is recognised by `scope`, plus a `file` that is the user-scope settings
+    file for a row written before `scope` was recorded. That is the same pair of tests
+    `settings.py` uses; when its `_is_machine_wide_row` helper is available this collapses onto it.
     """
+    try:
+        projects = settings._read_install_scopes()
+        key = settings.project_key()
+    except Exception:  # noqa: BLE001 - state is never load-bearing for a report
+        return None, "(install-scope.json unreadable)"
+
+    def _port_of(rec: object, what: str) -> tuple[str | None, str] | None:
+        if not isinstance(rec, dict):
+            return None
+        port = rec.get("port")
+        if isinstance(port, int):
+            return str(port), f"install-scope.json ({what})"
+        return DEFAULT_PORT, f"(default; {what} predates per-project ports)"
+
+    own = _port_of(projects.get(key), "recorded for this project")
+    if own is not None:
+        return own
+    for rec in projects.values():
+        if not isinstance(rec, dict):
+            continue
+        file = rec.get("file") or ""
+        if rec.get("scope") == "user" or (file and settings.is_user_scope(file)):
+            found = _port_of(rec, "the machine-wide install")
+            if found is not None:
+                return found
+    return None, "(no install routes this directory)"
+
+
+def _configured_options() -> tuple[dict, dict]:
+    """Every configured option, and the file EACH one came from. A key absent from the result is
+    UNCONFIGURED, and the caller applies the plugin.json default for that key only.
+
+    Genuinely per option, which this claimed and did not do: it used to return the first file whose
+    options dict was non-empty, so a project file holding only `preset` hid a `port`, `upstream` or
+    `idle_exit` set in `~/.claude/settings.json`. With one install per machine that could not be
+    seen. With a project install and a machine-wide one it is the normal state — and #308's
+    uninstall path deliberately leaves the project's file in place with its `port` option removed,
+    which is exactly this shape. `port` resolved correctly through `_resolve_port` all along, which
+    made the mismatch harder to notice rather than easier: the report named the project's file and
+    then printed `upstream=(anthropic)` for a machine-wide install that has an upstream.
+
+    `cmd_config` in settings.py answers a different question (which single file holds the options
+    this project's install wrote, for an installer that must undo precisely what it wrote) and is
+    correct as it stands.
+    """
+    opts: dict = {}
+    sources: dict = {}
     for path in settings._option_file_candidates("context-guru@context-guru"):
         if not os.path.exists(path):
             continue
@@ -200,11 +280,17 @@ def _configured_options() -> tuple[dict, str]:
                 data = json.load(fh)
         except (OSError, ValueError):
             continue
-        opts = (((data.get("pluginConfigs") or {}).get("context-guru@context-guru") or {})
-                .get("options") or {})
-        if isinstance(opts, dict) and opts:
-            return opts, path
-    return {}, "(none)"
+        found = (((data.get("pluginConfigs") or {}).get("context-guru@context-guru") or {})
+                 .get("options") or {})
+        if not isinstance(found, dict):
+            continue
+        for key, value in found.items():
+            # Most specific first, so the first file to name a key wins it — the same precedence
+            # Claude Code itself applies, and the same order _resolve_port walks.
+            if key not in opts:
+                opts[key] = value
+                sources[key] = path
+    return opts, sources
 
 
 class Fetcher:
@@ -461,10 +547,15 @@ def collect_env(f: Fetcher, rep: Report, stats: object) -> None:
     that each problem carries its own one-line fix.
     """
     port, port_source = _resolve_port()
-    opts, opts_file = _configured_options()
-    rep.fact("port", port)
+    opts, opt_sources = _configured_options()
+    rep.fact("port", port or "(none)")
     rep.fact("port_source", port_source)
-    rep.fact("options_file", opts_file)
+    # The most specific file that contributed anything, plus the file behind each option. One
+    # `options_file` line could not describe two installs' files, and "which file set this" is the
+    # question a reader asks the moment a value surprises them.
+    rep.fact("options_file", next(iter(opt_sources.values()), "(none)"))
+    for key in sorted(opt_sources):
+        rep.fact(f"options_file.{key}", opt_sources[key])
 
     preset = str(opts.get("preset") or settings.DEFAULT_PRESET)
     strategy = str(opts.get("cache_strategy") or settings.DEFAULT_STRATEGY)
@@ -480,6 +571,22 @@ def collect_env(f: Fetcher, rep: Report, stats: object) -> None:
     # makes "up but blind" distinguishable from "down" — two states whose fixes are different, and
     # telling somebody to restart with --dashboard when nothing is running at all is a wrong answer
     # that looks like a right one.
+    if port is None:
+        # Nothing on disk routes this directory. Reading a port anyway is how this reported another
+        # project's proxy as this account's, so the report stops here and says which question it
+        # could not answer.
+        rep.unavailable.append("port")
+        rep.findings.append(Finding(
+            "no-install", "info",
+            "context-guru is not installed for this directory, so there is nothing to measure",
+            "No settings file in scope configures a port and install-scope.json has no record "
+            "that routes this directory. Reporting on the default port would read whichever "
+            "install owns it — ports are allocated per project from 8787 upwards — and price "
+            "another project's traffic as yours.",
+            "Run /context-guru:install here, or run this from a directory that is installed.",
+            "configuration, not a measurement"))
+        return
+
     up = f.reachable()
     rep.fact("proxy_up", up)
     state = settings.state_dir()
@@ -1326,13 +1433,17 @@ def main() -> int:
     args = parser.parse_args()
 
     port, _ = _resolve_port()
-    f = Fetcher(port)
+    # Fetcher is built even with no port, so collect_env stays one code path; nothing is requested
+    # in that case, because collect_env returns before the first read and `stats` is left None.
+    f = Fetcher(port or "")
     rep = Report()
     rep.fact("area", args.area)
 
     # /api/stats is read first and unconditionally: it carries the window every projection divides
-    # by, and its absence is the finding that gates every other one.
-    stats = f.get("/api/stats", heavy=True)
+    # by, and its absence is the finding that gates every other one. Not requested at all when no
+    # install routes this directory — a GET to a port nobody claimed is a question about somebody
+    # else's proxy.
+    stats = f.get("/api/stats", heavy=True) if port else None
     collect_env(f, rep, stats)
     if stats is None:
         rep.emit(args.json)

@@ -45,8 +45,16 @@ Two things it borrows from `/doctor` deliberately, because they are good: the pe
 
 ## Read the two gating facts first
 
-Neither is a cost finding and both make everything after them meaningless if wrong.
+None is a cost finding and each makes everything after it meaningless if wrong.
 
+- **`port=(none)`, with `unavailable=port` and the `no-install` finding** — nothing on disk routes
+  this directory: no settings file in scope names a port, and the plugin's own record has no entry
+  that covers it. There is no report to give, only the install command. Say that, and do not reach
+  for a port yourself: ports are allocated per project from 8787 upwards, so "the default" is
+  whichever project installed first, and every figure read off it would be that project's spend
+  under this user's name. `port_source` says where the port DID come from when there is one — a
+  settings file, or the install record — and is worth quoting whenever the user is surprised by a
+  number, because it distinguishes "your project's proxy" from "the machine-wide one".
 - **`proxy_up=false`** — nothing is running. History on disk is intact; the process is not. The
   `proxy-down` finding carries the command.
 - **`session_routed_through_us=false` with a `session_base_url`** — this session's traffic is going

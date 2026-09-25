@@ -41,12 +41,23 @@ import (
 // runInsights runs the script in `dir` with `env` layered over a minimal environment, and returns
 // (stdout, exit code). stderr is folded in: a traceback on stderr with a clean stdout is exactly the
 // failure this would otherwise miss.
+//
+// Through sandboxEnv, not os.Environ(), and that is load-bearing rather than tidiness. insights.py
+// resolves its port from settings files — `.claude/settings.local.json`, `.claude/settings.json`,
+// then `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json`. Inheriting the developer's HOME let the
+// third candidate be their own real install, so a test asserting the no-configuration behaviour
+// read a configured port and passed for the wrong reason on the one machine that runs it most. HOME
+// and CLAUDE_CONFIG_DIR are therefore pinned under `dir`, and a test that wants a user-scope file
+// writes it into `dir/home/.claude` (see insightsProject) instead of hoping there is not one.
 func runInsights(t *testing.T, dir string, env map[string]string, args ...string) (string, int) {
 	t.Helper()
 	requireTool(t, "python3")
 	cmd := exec.Command("python3", append([]string{filepath.Join(scriptsDir(t), "insights.py")}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "CONTEXT_GURU_STATE="+filepath.Join(dir, "state"))
+	cmd.Env = sandboxEnv(t,
+		"CONTEXT_GURU_STATE="+filepath.Join(dir, "state"),
+		"HOME="+filepath.Join(dir, "home"),
+		"CLAUDE_CONFIG_DIR="+filepath.Join(dir, "home", ".claude"))
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -88,22 +99,71 @@ func findingIDs(out string) []string {
 // insightsProject writes an options file naming `port` plus whatever else `options` carries, and
 // returns the directory to run in. The file is the real shape Claude Code writes:
 // pluginConfigs["<plugin>@<marketplace>"].options.
+//
+// Passing a nil map writes NO file at all — the "nothing is configured here" case, which is not the
+// same as an empty options object and must not be spelled as one. `dir/home/.claude` is created
+// either way, because that is the sandbox's user scope: it exists and holds nothing unless a test
+// puts something there with insightsOptions.
 func insightsProject(t *testing.T, options map[string]any) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, sub := range []string{".claude", filepath.Join("home", ".claude")} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
+	if options != nil {
+		insightsOptions(t, filepath.Join(dir, ".claude", "settings.json"), options)
+	}
+	return dir
+}
+
+// insightsOptions writes one options file at `path`, for tests that need a SECOND one — a
+// user-scope file beside a project file. Since per-project ports, two option files is the normal
+// state of a machine with a project install and a machine-wide one, so resolution across them is
+// behaviour to pin and not an exotic case.
+func insightsOptions(t *testing.T, path string, options map[string]any) {
+	t.Helper()
 	doc := map[string]any{"pluginConfigs": map[string]any{
 		"context-guru@context-guru": map[string]any{"options": options}}}
 	b, err := json.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".claude", "settings.json"), b, 0o644); err != nil {
+	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return dir
+}
+
+// insightsScopeRecord writes install-scope.json into the sandbox state directory with one row for
+// `key` — the record that answers "which install routes this directory" once no option file names a
+// port. `port` of 0 writes a row with NO port key, the shape written before ports were per-project.
+func insightsScopeRecord(t *testing.T, dir, key, scope, file string, port int) {
+	t.Helper()
+	row := map[string]any{"scope": scope, "file": file, "recorded_at": "2026-01-01T00:00:00Z"}
+	if port != 0 {
+		row["port"] = port
+	}
+	state := filepath.Join(dir, "state")
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, filepath.Join(state, "install-scope.json"), map[string]any{
+		"version":  1,
+		"projects": map[string]any{key: row},
+	})
+}
+
+// insightsKey is the identity install-scope.json files `dir` under: realpath, since a temp dir on
+// macOS is reached through a symlinked /var and a record keyed by the unresolved path would never
+// be found by the script.
+func insightsKey(t *testing.T, dir string) string {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return real
 }
 
 // apiStub serves the dashboard routes insights.py reads, from a path->body map, and counts every
@@ -608,21 +668,86 @@ func TestInsightsWritesNothingAndPingsNothing(t *testing.T) {
 func TestInsightsResolvesThePortPerOptionAndNotFromTheEnvironment(t *testing.T) {
 	stub := newAPIStub(t, map[string]string{"/api/stats": window(30)})
 
-	t.Run("a partial options file falls back for the missing option only", func(t *testing.T) {
+	t.Run("an unconfigured port refuses rather than falling back to 8787", func(t *testing.T) {
 		dir := insightsProject(t, map[string]any{"preset": "house"})
 		out, _ := runInsights(t, dir, nil, "env")
 		f := facts(out)
-		if f["port"] != "8787" {
-			t.Errorf("port=%q, want the plugin.json default 8787: the file exists and has no "+
-				"`port` key, so that ONE option is unconfigured", f["port"])
+		// 8787 is PORT_SCAN_START, the first port the allocator hands out — so on any machine with
+		// an install it is somebody's proxy, and a report that reads it prices another project's
+		// traffic under this heading. Measured before the fix: `proxy_up=true` and a full set of
+		// preset/upstream/pipeline facts, from a sandbox containing no install whatsoever.
+		if f["port"] == "8787" {
+			t.Errorf("port=8787 with nothing configured and nothing recorded. That is the bottom "+
+				"of the allocation scan, not a default this directory is entitled to:\n%s", out)
 		}
-		if f["port_source"] != "(default)" {
-			t.Errorf("port_source=%q; it must say the value came from the default and not "+
-				"name a file that never carried it", f["port_source"])
+		if f["port"] != "(none)" {
+			t.Errorf("port=%q, want (none): no option file names a port and no record routes "+
+				"this directory", f["port"])
+		}
+		if !strings.Contains(out, "unavailable=port") {
+			t.Errorf("the port is not listed as unavailable, so a reader sees a report with no "+
+				"port and no statement that the port is the part that could not be resolved:\n%s", out)
+		}
+		if ids := findingIDs(out); len(ids) != 1 || ids[0] != "no-install" {
+			t.Errorf("findings=%v, want exactly [no-install]. Silence here reads as a healthy "+
+				"account with nothing to improve", ids)
+		}
+		if f["proxy_up"] != "" {
+			t.Errorf("proxy_up=%q: with no port resolved there is no proxy this report may speak "+
+				"about, and whatever answered is not ours", f["proxy_up"])
 		}
 		if f["preset"] != "house" || f["preset_configured"] != "true" {
 			t.Errorf("preset=%q configured=%q; the option that IS present must still be read "+
 				"from the file", f["preset"], f["preset_configured"])
+		}
+	})
+
+	t.Run("the recorded port is used when no option file names one", func(t *testing.T) {
+		// The post-#307 shape of a project whose install wrote its port into a settings file that
+		// has since been cleaned up (uninstall removes the option and leaves the file), or whose
+		// options live in a scope this directory cannot see. install-scope.json is the record of
+		// which install routes this directory and is what the rest of the plugin consults.
+		dir := insightsProject(t, map[string]any{"preset": "house"})
+		insightsScopeRecord(t, dir, insightsKey(t, dir), "project",
+			filepath.Join(dir, ".claude", "settings.json"), 8850)
+		f := facts(mustRunInsights(t, dir, "env"))
+		if f["port"] != "8850" {
+			t.Errorf("port=%q, want 8850 from install-scope.json", f["port"])
+		}
+		if !strings.Contains(f["port_source"], "install-scope.json") {
+			t.Errorf("port_source=%q must name the record, so a reader can tell a recorded port "+
+				"from a configured one", f["port_source"])
+		}
+	})
+
+	t.Run("a record predating per-project ports still means 8787", func(t *testing.T) {
+		// Rows written before #307 carry no `port`, because there was one proxy per machine and it
+		// was on 8787. Those installs really are there, so this is the one surviving use of the
+		// default — and the source has to say WHY, not "(default)".
+		dir := insightsProject(t, nil)
+		insightsScopeRecord(t, dir, insightsKey(t, dir), "project",
+			filepath.Join(dir, ".claude", "settings.json"), 0)
+		f := facts(mustRunInsights(t, dir, "env"))
+		if f["port"] != "8787" {
+			t.Errorf("port=%q, want 8787: a row with no port is a pre-per-project install, which "+
+				"is on 8787", f["port"])
+		}
+		if !strings.Contains(f["port_source"], "per-project") {
+			t.Errorf("port_source=%q; a bare \"(default)\" leaves the reader unable to tell this "+
+				"from a guess", f["port_source"])
+		}
+	})
+
+	t.Run("a machine-wide install answers for a directory with no record of its own", func(t *testing.T) {
+		// Install at user level, then run this from a project that was never installed: the
+		// machine-wide install genuinely routes that directory, and its port is the right answer.
+		dir := insightsProject(t, nil)
+		user := filepath.Join(dir, "home", ".claude", "settings.json")
+		insightsScopeRecord(t, dir, filepath.Join(dir, "home", ".claude"), "user", user, 8851)
+		f := facts(mustRunInsights(t, dir, "env"))
+		if f["port"] != "8851" {
+			t.Errorf("port=%q, want 8851 from the machine-wide row: it routes every project "+
+				"without one of its own, which is what this directory is", f["port"])
 		}
 	})
 
@@ -636,6 +761,74 @@ func TestInsightsResolvesThePortPerOptionAndNotFromTheEnvironment(t *testing.T) 
 				"result as measured", got, stub.port)
 		}
 	})
+}
+
+// mustRunInsights is runInsights with the exit code asserted, for the tests whose subject is the
+// content of a successful report rather than how it fails.
+func mustRunInsights(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, code := runInsights(t, dir, nil, args...)
+	if code != 0 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	return out
+}
+
+// TestInsightsResolvesEveryOptionPerFileAndNotJustThePort.
+//
+// The port was resolved per option; everything else took the first file with a non-empty options
+// object, against its own docstring. With one install per machine those agree. With a project
+// install and a machine-wide one — the normal state since #307, and precisely what #308's uninstall
+// leaves behind — they do not: a project file holding `preset` hid the `upstream` and `idle_exit`
+// configured in ~/.claude/settings.json, and the report printed the defaults for them as facts
+// under a header naming the project's file.
+func TestInsightsResolvesEveryOptionPerFileAndNotJustThePort(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{"/api/stats": window(30)})
+	dir := insightsProject(t, map[string]any{"preset": "house"})
+	insightsOptions(t, filepath.Join(dir, "home", ".claude", "settings.json"), map[string]any{
+		"port":     stub.port,
+		"upstream": "https://gateway.example.com",
+	})
+	out := mustRunInsights(t, dir, "env")
+	f := facts(out)
+	if f["port"] != stub.port {
+		t.Errorf("port=%q, want %q from the user-scope file", f["port"], stub.port)
+	}
+	if f["preset"] != "house" {
+		t.Errorf("preset=%q, want house from the project file: the more specific file wins a key "+
+			"it names", f["preset"])
+	}
+	if !strings.Contains(out, "gateway.example.com") {
+		t.Errorf("the upstream configured in the user-scope file is absent, so the report states "+
+			"a default for an option that IS configured:\n%s", out)
+	}
+	// Which file each option came from, because "where is this value set" is the next question a
+	// surprising value raises, and with two installs one options_file line cannot answer it.
+	if got := f["options_file.preset"]; !strings.HasSuffix(got, filepath.Join(".claude", "settings.json")) ||
+		strings.Contains(got, filepath.Join("home", ".claude")) {
+		t.Errorf("options_file.preset=%q, want the project file", got)
+	}
+	if got := f["options_file.upstream"]; !strings.Contains(got, filepath.Join("home", ".claude")) {
+		t.Errorf("options_file.upstream=%q, want the user-scope file", got)
+	}
+}
+
+// TestInsightsAndStartProxyAgreeOnTheFingerprintPath: insights.py reads the fingerprint file
+// start-proxy.sh writes, by rebuilding its path from the port. Two spellings of one path in two
+// languages with no shared constant is the drift the preset table nearly shipped — and the failure
+// is silent, because a fingerprint that cannot be found reads exactly like a proxy that never
+// wrote one.
+func TestInsightsAndStartProxyAgreeOnTheFingerprintPath(t *testing.T) {
+	py := readFileString(t, filepath.Join(scriptsDir(t), "insights.py"))
+	sh := readFileString(t, filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	if !strings.Contains(py, `f"proxy-{port}.fingerprint"`) {
+		t.Error("insights.py no longer builds proxy-<port>.fingerprint; if the name moved, move " +
+			"this test with it, and check start-proxy.sh moved too")
+	}
+	if !strings.Contains(sh, `proxy-${PORT}.fingerprint`) {
+		t.Error("start-proxy.sh no longer writes proxy-<port>.fingerprint, so insights.py is " +
+			"reading a path nothing writes and will report every proxy as having declared nothing")
+	}
 }
 
 // TestJSONModeIsTheSameDocument: --json exists so a human can take the raw thing, and it must carry
@@ -720,6 +913,21 @@ func TestEveryInsightSkillRunsTheScriptAndClaimsOnlyWhatItCan(t *testing.T) {
 					"at all — insights.py does it, from disk")
 			}
 		})
+	}
+}
+
+// TestTheUmbrellaSkillNamesTheNoInstallRefusal: the script can now answer "there is no port to
+// report", and that answer is only useful if the skill reading it knows not to substitute one. The
+// original defect was not that the script lacked the information — `port_source=(default)` was
+// printed all along — but that no finding was raised and no skill named the field, so a model
+// narrated a report about somebody else's proxy in the user's own voice.
+func TestTheUmbrellaSkillNamesTheNoInstallRefusal(t *testing.T) {
+	body := readFileString(t, filepath.Join("skills", "insights", "SKILL.md"))
+	for _, want := range []string{"no-install", "port_source", "unavailable=port"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("skills/insights/SKILL.md never mentions %q, so the one state where this "+
+				"command must refuse outright has no instructions attached to it", want)
+		}
 	}
 }
 
