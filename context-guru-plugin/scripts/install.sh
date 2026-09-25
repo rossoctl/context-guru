@@ -955,7 +955,12 @@ back - see port_unwound."
   # here, and a routed project with no proxy is the one state strictly worse than not installing —
   # too important to depend on a model choosing to offer it.
   if ! route_health_ok; then
-    "$(route_here)/settings.py" remove --file "$R_FILE" --url "$(route_url)" >/dev/null 2>&1 || true
+    # `--user-scope` because this is the rollback of a write THIS RUN just made to THIS file: for a
+    # machine-wide install $R_FILE is ~/.claude/settings.json, and `remove` now refuses that file
+    # without the flag (removing it uninstalls every project, so it has to be asked for). Refused
+    # here it would leave the one state worse than not installing - routed, with nothing answering.
+    "$(route_here)/settings.py" remove --file "$R_FILE" --url "$(route_url)" --user-scope \
+      >/dev/null 2>&1 || true
     route_unwind_port
     emit "result=error"; emit "reason=health_check_failed_after_write"
     emit "rolled_back=true"

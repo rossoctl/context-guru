@@ -4659,10 +4659,19 @@ func TestAddRefusesTheMachineWideFileWithoutBeingTold(t *testing.T) {
 	}
 }
 
-// TestRemoveIsNeverGatedByScope: uninstall loops over all three scopes, and it is the recovery path.
-// Gating removal the way `add` is gated would make a machine-wide install unremovable by the tool
-// that installed it — erring on exactly the wrong side.
-func TestRemoveIsNeverGatedByScope(t *testing.T) {
+// TestRemoveFromTheMachineWideFileIsGatedByAFlagNotByScope replaces TestRemoveIsNeverGatedByScope,
+// whose reasoning was "gating removal the way `add` is gated would make a machine-wide install
+// unremovable by the tool that installed it". The premise was wrong in one word: `--user-scope`
+// makes it gated, not unremovable, and an uninstall can pass it in the same breath as asking. What
+// the ungated version actually bought was that an uninstall run to reset ONE project — a project
+// `adopt` folded in, or any project on a machine-wide-only machine, which is to say almost every
+// project — removed routing for the whole machine at exit 0, with no question and no flag.
+//
+// So the property worth keeping is the rest of the original: the machine-wide file must still be
+// removable BY THIS TOOL, and the removal must not damage anything else in it. Both are asserted
+// below, either side of the refusal. (The path for a user who cannot get a session to talk at all
+// was never this command: it is `context-guru-reset`, which restores whole files.)
+func TestRemoveFromTheMachineWideFileIsGatedByAFlagNotByScope(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	userScope := filepath.Join(home, ".claude", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(userScope), 0o755); err != nil {
@@ -4675,8 +4684,18 @@ func TestRemoveIsNeverGatedByScope(t *testing.T) {
 	}
 
 	facts, code := settingsIn(t, state, home, "remove", "--file", userScope, "--url", ourURL)
+	if code != 2 || facts["result"] != "conflict" {
+		t.Fatalf("remove from the machine-wide file answered exit %d %v with no flag; it unroutes "+
+			"every project on the machine, so it has to be asked for", code, facts)
+	}
+	if env, _ := readJSON(t, userScope)["env"].(map[string]any); env["ANTHROPIC_BASE_URL"] != ourURL {
+		t.Fatalf("the refused removal changed the file anyway: %v", env)
+	}
+	facts, code = settingsIn(t, state, home, "remove", "--file", userScope, "--url", ourURL,
+		"--user-scope")
 	if code != 0 {
-		t.Fatalf("remove from user scope: exit %d %v", code, facts)
+		t.Fatalf("remove from user scope WITH --user-scope: exit %d %v — the machine-wide install "+
+			"must stay removable by the tool that installed it", code, facts)
 	}
 	env, _ := readJSON(t, userScope)["env"].(map[string]any)
 	if _, still := env["ANTHROPIC_BASE_URL"]; still {
@@ -10538,6 +10557,66 @@ func TestUserScopeThenProjectKeepsTwoPorts(t *testing.T) {
 	}
 }
 
+// TestProjectInstallIgnoresALegacyMachineWideRow is the pre-#308 machine-wide install: its row is
+// filed under the project the user happened to run it from, carrying `scope=user` and
+// ~/.claude/settings.json, because `user_scope_key()` did not exist yet.
+//
+// Every check this PR added asked `projects.get(user_scope_key())` — i.e. it fired only for installs
+// this version created, which on an existing machine is never. Two ways the legacy row then still
+// put both installs on one port, both reproduced:
+//
+//   - rule 2 read the machine-wide `options.port` and answered `configured`, writing no option into
+//     the project (the round-1 defect, unfixed on every machine that matters);
+//   - rule 1 found the legacy row UNDER THIS PROJECT'S OWN KEY and handed back the machine-wide port
+//     as "this project's recorded port", after which `record_install_scope` rewrote the row as
+//     `scope=project` carrying it — laundering the shared port into a row that looks legitimate, by
+//     doing the exact thing the docs offer as the cleanup for a legacy row.
+//
+// `scope` is the discriminator, in whatever row carries it, which is what install.sh already uses.
+func TestProjectInstallIgnoresALegacyMachineWideRow(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	sd := filepath.Join(state, "context-guru")
+	userFile := filepath.Join(home, ".claude", "settings.json")
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A machine-wide install as an older version recorded it: routing and the port option in the
+	// machine-wide file, and the row filed under the project it was run from — this one.
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", userFile,
+		"--url", "http://127.0.0.1:8788/anthropic", "--user-scope"); c != 0 {
+		t.Fatalf("fixture add: exit %d %v", c, f)
+	}
+	data := readJSON(t, userFile)
+	data["pluginConfigs"] = map[string]any{
+		"context-guru@context-guru": map[string]any{"options": map[string]any{"port": 8788}},
+	}
+	writeJSON(t, userFile, data)
+	scopeFile := filepath.Join(sd, "install-scope.json")
+	writeJSON(t, scopeFile, map[string]any{"version": 1, "projects": map[string]any{
+		projReal: map[string]any{
+			"scope": "user", "file": userFile, "port": 8788,
+			"recorded_at": "2026-01-01T00:00:00+00:00",
+		},
+	}})
+
+	f, c := settingsInDir(t, sd, home, proj, "port", "alloc", "--dry-run")
+	if c != 0 {
+		t.Fatalf("alloc exit %d %v", c, f)
+	}
+	if f["port"] == "8788" {
+		t.Fatalf("a project install in the directory an older machine-wide install was run from "+
+			"gets port 8788 (source=%s) — the machine-wide port, from a row that describes the "+
+			"machine-wide install and not this project: %v", f["source"], f)
+	}
+	if f["source"] != "allocated" {
+		t.Errorf("source=%q, want allocated: anything else means the port came from the "+
+			"machine-wide install's own file or row, and `configured` writes no option into this "+
+			"project at all: %v", f["source"], f)
+	}
+}
+
 // TestRemoveRefusesAnotherInstallsRouting pins the guard itself, in all three directions, because
 // the scenario test above can only show one of them.
 //
@@ -10586,18 +10665,31 @@ func TestRemoveRefusesAnotherInstallsRouting(t *testing.T) {
 			env["ANTHROPIC_BASE_URL"], userURL)
 	}
 
-	// 2. From a project with no routing of its own — what `adopt` leaves behind. The machine-wide
-	// file IS this project's routing, so removing it is the uninstall it has, and refusing here
-	// would leave a folded-in project with no way to uninstall at all.
-	if f, c := settingsInDir(t, sd, home, folded, "remove", "--file", userFile,
-		"--url", userURL); c != 0 || f["result"] != "removed" {
-		t.Fatalf("exit %d %v: a project folded into the machine-wide install cannot uninstall it, "+
-			"which is every project's only uninstall after `adopt`", c, f)
+	// 2. From a project with no routing of its own — what `adopt` leaves behind, and what every
+	// project on a machine-wide-only machine looks like. Refused too, with the reason that says so.
+	// The first version of this guard EXEMPTED this case, on the reasoning that the machine-wide
+	// file is then the only routing this project has. That exemption covered the common case rather
+	// than an edge one: `/context-guru:uninstall` in such a project unrouted the whole machine at
+	// exit 0, no flag and no question, and the skill's gate then unset the machine-wide port option
+	// too. The record cannot tell "reset this project" from "remove context-guru" here — a folded-in
+	// project and a machine-wide-only machine are identical in it — so the only correct move is to
+	// ask, and direction 3 shows the asking costs one flag rather than a lockout.
+	f, c = settingsInDir(t, sd, home, folded, "remove", "--file", userFile, "--url", userURL)
+	if c != 2 || f["result"] != "conflict" || f["reason"] != "machine_wide_routing" {
+		t.Fatalf("exit %d %v: an uninstall in a project that is routed BY the machine-wide install "+
+			"removed it for every project on the machine without being asked", c, f)
+	}
+	// What this project routes through IS the machine-wide file (`resolve_install_scope` infers it
+	// for a project with no record, which is what makes `other` false and picks this reason). So the
+	// field must name that same file or nothing — naming a DIFFERENT file would mean the two reasons
+	// had been chosen the wrong way round, and the skill would ask the wrong question.
+	if r := f["this_project_routes_in"]; r != "(none)" && r != userFile {
+		t.Errorf("the refusal reports this_project_routes_in=%q, which is neither %s nor (none): %v",
+			r, userFile, f)
 	}
 
 	// 3. Asked for explicitly, from the project that routes itself: allowed. Same flag `add` needs
 	// to write this file in the first place, so there is one name for "yes, the whole machine".
-	addUser()
 	if f, c := settingsInDir(t, sd, home, proj, "remove", "--file", userFile, "--url", userURL,
 		"--user-scope"); c != 0 || f["result"] != "removed" {
 		t.Fatalf("exit %d %v: --user-scope does not get the machine-wide install uninstalled from "+

@@ -231,10 +231,10 @@ If you kept both and later want that project to use the machine-wide install ins
 
 Run it in that project. It removes that project's routing *and* its port option, stops its proxy and
 releases its port — so the next session there resolves the machine-wide route. The machine-wide
-install is untouched, and cannot be taken down by accident from here: it has its own record and its
-own port, and an uninstall in a project that routes itself refuses to touch the file that routes
-every *other* project. If you want the machine-wide install gone as well, say so — the uninstall asks
-before it does anything to it.
+install is untouched: it has its own record and its own port, and removing the settings file that
+routes *every* project is refused unless you say that is what you mean. So "reset this project"
+cannot turn into "uninstall context-guru everywhere" by accident, in this project or any other — and
+when you do want the whole thing gone, say so and the uninstall will do it.
 
 The change lands in your **next** session, in that project as everywhere else.
 

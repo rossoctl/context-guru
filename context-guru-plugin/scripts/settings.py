@@ -1093,6 +1093,29 @@ def _explicit_configured_port(plugin: str, only: list[str] | None = None) -> tup
     return None, ""
 
 
+def _machine_wide_record(projects: dict) -> tuple[str, dict] | None:
+    """The row describing a MACHINE-WIDE install, under whatever key it happens to be filed.
+
+    NOT `projects.get(user_scope_key())`. That key is new: every machine-wide install made before it
+    existed is filed under the project the user happened to run it from, carrying `scope=user` and
+    the machine-wide file. Keying this question on the key made every check built on it fire only
+    for installs this version created — so on an existing machine the checks were all no-ops, which
+    is the same as not having written them. `scope` is the discriminator `install.sh` already uses
+    for the same question, and it is in the row regardless of what the row is called.
+
+    First match wins: there is one machine-wide install by definition (one file, one option, one
+    port), and a file holding two such rows is a legacy row plus its migrated self, which name the
+    same install.
+    """
+    for key, rec in projects.items():
+        if not isinstance(rec, dict):
+            continue
+        file = rec.get("file") or ""
+        if rec.get("scope") == "user" or (file and is_user_scope(file)):
+            return key, rec
+    return None
+
+
 def _recorded_ports(exclude_key: str) -> set[int]:
     """Every port some OTHER project already has recorded, so the scan in `cmd_port`'s `alloc`
     never hands out one of them. `exclude_key` is this project's own key — its own recorded port
@@ -1345,7 +1368,21 @@ def cmd_port(args: argparse.Namespace) -> int:
 
     # op == alloc
     projects = _read_install_scopes()
+    user_key = user_scope_key()
+    mw_key, mw_rec = _machine_wide_record(projects) or (None, None)
     rec = projects.get(key)
+    # A row describing the MACHINE-WIDE install is not this project's record, whatever key it is
+    # filed under — and on every machine that installed before `user_scope_key()` existed, it is
+    # filed under a project's. Rule 1 below ("this project already has a recorded port -> return it
+    # unchanged") then handed a PROJECT install in that directory the machine-wide port, and
+    # `record_install_scope` rewrote the row as `scope=project` carrying that port: one shared port
+    # laundered into a row that looks perfectly legitimate, and the documented cleanup for a
+    # legacy row ("re-install or uninstall in that project") was the thing that did it.
+    #
+    # `key == user_key` is the one caller the row does belong to — that is the machine-wide install
+    # asking for its own port, which is exactly what rule 1 is for.
+    if rec is not None and rec is mw_rec and key != user_key:
+        rec = None
 
     drop_orphans: list[str] = []
     if isinstance(rec, dict) and isinstance(rec.get("port"), int):
@@ -1387,7 +1424,6 @@ def cmd_port(args: argparse.Namespace) -> int:
         # ones, so from inside a project that pins a port — including one this plugin pinned there
         # itself, which an `allocated` install writes into that project's settings — rule 2 handed
         # the machine-wide install THAT project's port.
-        user_key = user_scope_key()
         only = user_scope_files() if key == user_key else None
         explicit_port, explicit_file = _explicit_configured_port(args.plugin, only)
         # Inwards: `_option_file_candidates`' last entry IS the machine-wide file, so a PROJECT install
@@ -1399,9 +1435,12 @@ def cmd_port(args: argparse.Namespace) -> int:
         # plugin.json default while its own URL still named the old port.
         #
         # A user-level `port` with NO machine-wide record is a different thing — a pin the user
-        # typed, which every project should honour. The record is the whole distinction, and it exists.
+        # typed, which every project should honour. The record is the whole distinction, and it
+        # exists — under whatever key, which is why this asks `_machine_wide_record` and not the
+        # key. Asking the key made this fire only for installs this version created, i.e. never on
+        # an existing machine.
         if (explicit_port is not None and key != user_key and is_user_scope(explicit_file)
-                and isinstance(projects.get(user_key), dict)):
+                and mw_rec is not None):
             # Falls through to the scan, which excludes the machine-wide port via `_recorded_ports`
             # (its key is a real directory, so it is not an orphan) and writes the port it picks into
             # this project's own file.
@@ -1410,6 +1449,12 @@ def cmd_port(args: argparse.Namespace) -> int:
             port, source = explicit_port, "configured"
         else:
             used, orphans = _recorded_ports(key)
+            # The machine-wide port is never a candidate, even when its row is filed under THIS key
+            # (the legacy shape above, which `_recorded_ports` skips as "this project's own") and
+            # even when its directory is gone (an orphan row cannot make a routing file stop naming
+            # the port it names).
+            if isinstance((mw_rec or {}).get("port"), int):
+                used.add(mw_rec["port"])
             port = None
             for candidate in range(PORT_SCAN_START, PORT_SCAN_END + 1):
                 if candidate in used or not _port_bindable(candidate):
@@ -2322,13 +2367,34 @@ def cmd_remove(args: argparse.Namespace) -> int:
             _own_scope, own_file, _own_src = resolve_install_scope()
         except Exception:
             own_file = None
-        if own_file and os.path.realpath(own_file) != os.path.realpath(args.file):
-            emit(result="conflict", reason="another_installs_routing", file=args.file,
-                 existing=current, this_project_routes_in=own_file,
-                 note="this is the MACHINE-WIDE install's own settings file and this project routes "
-                      "through a file of its own; a project uninstall leaves it alone. Uninstalling "
-                      "the machine-wide install is a separate, confirmed step: --user-scope")
-            return 2
+        other = bool(own_file) and os.path.realpath(own_file) != os.path.realpath(args.file)
+        # EVERY caller, not only one that routes itself. The first version of this guard exempted a
+        # project with no routing of its own, on the reasoning that the machine-wide file is then
+        # this project's only routing and refusing would leave it unable to uninstall at all. Both
+        # halves were wrong. That describes every project except the ones that installed
+        # themselves — including every project `adopt` folded in, and every project on a
+        # machine-wide-only machine — so the exemption covered the common case rather than an edge
+        # one, and there `/context-guru:uninstall` unrouted the whole machine at exit 0 with no
+        # flag and no question. And nothing is unable to uninstall: `--user-scope` works from
+        # anywhere, so the cost of the refusal is one confirmed re-run, not a lockout. (The path for
+        # a user who cannot get a session to talk at all was never this command either — it is
+        # `context-guru-reset`, which restores whole files and needs no Claude.)
+        #
+        # The record cannot tell "reset this project" from "remove context-guru" here: a folded-in
+        # project and a machine-wide-only machine look identical in it, and only the user knows
+        # which they meant. So this asks, and `--user-scope` is the answer — the same flag `add`
+        # needs to write this file in the first place, so there is one name for "yes, the whole
+        # machine". The two reasons differ only in how sharp the case is, and both refuse.
+        emit(result="conflict",
+             reason="another_installs_routing" if other else "machine_wide_routing",
+             file=args.file, existing=current, this_project_routes_in=own_file or "(none)",
+             note=("this is the MACHINE-WIDE install's own settings file and this project routes "
+                   "through a file of its own; a project uninstall leaves it alone. "
+                   if other else
+                   "this file routes EVERY project on this machine, and removing it uninstalls "
+                   "context-guru everywhere rather than resetting one project. ") +
+                  "Doing it anyway is a separate, confirmed step: --user-scope")
+        return 2
     backup(args.file)
     del env[KEY]
     # Take our upstream key with it, but ONLY the value we recorded writing. An ANTHROPIC_UPSTREAM
