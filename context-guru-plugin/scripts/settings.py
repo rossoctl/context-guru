@@ -899,8 +899,29 @@ def record_install_scope(file: str, project_dir: str | None = None, scope_dir: s
         # rather than silently reset, so a routing rewrite never looks like a port release. The
         # entry already at `new_key` wins over a stale `old_key` legacy entry if both have one,
         # which in turn wins over a dropped sibling's — weakest source first, last write wins.
+        #
+        # A row describing the MACHINE-WIDE install is not one of those candidates, whatever key it
+        # is filed under — and before `user_scope_key()` existed it was filed under the project it
+        # was run from, so it turns up here as `old_entry`/`existing_new_entry` for a PROJECT install
+        # in that directory. Carrying its `port` forward filed the machine-wide port as this
+        # project's own with `scope=project`, while this very call was recording routing on a
+        # different port: `cmd_port`'s rule-1 laundering again, by the other door. (Narrow in
+        # practice — `install.sh` allocs at step 0, which now moves the row before this runs — but
+        # `add --url` by hand reaches it.) So it is skipped as a port source, and MOVED to the key
+        # the user branch above would have used rather than overwritten by this write.
+        candidates: list = [*dropped, old_entry, existing_new_entry]
+        if not user_scoped:
+            user_key = user_scope_key()
+            project_candidates = []
+            for candidate in candidates:
+                if _is_machine_wide_row(candidate):
+                    if user_key not in projects:
+                        projects[user_key] = dict(candidate)
+                    continue
+                project_candidates.append(candidate)
+            candidates = project_candidates
         entry: dict = {}
-        for candidate in (*dropped, old_entry, existing_new_entry):
+        for candidate in candidates:
             if isinstance(candidate, dict) and "port" in candidate:
                 entry["port"] = candidate["port"]
         entry["scope"] = scope
@@ -1093,6 +1114,16 @@ def _explicit_configured_port(plugin: str, only: list[str] | None = None) -> tup
     return None, ""
 
 
+def _is_machine_wide_row(rec: object) -> bool:
+    """Does this row describe the MACHINE-WIDE install? `scope` is the discriminator `install.sh`
+    already uses; the `file` check catches a row written before `scope` was recorded.
+    """
+    if not isinstance(rec, dict):
+        return False
+    file = rec.get("file") or ""
+    return rec.get("scope") == "user" or bool(file and is_user_scope(file))
+
+
 def _machine_wide_record(projects: dict) -> tuple[str, dict] | None:
     """The row describing a MACHINE-WIDE install, under whatever key it happens to be filed.
 
@@ -1109,10 +1140,7 @@ def _machine_wide_record(projects: dict) -> tuple[str, dict] | None:
     instead, which does not have to pick.
     """
     for key, rec in projects.items():
-        if not isinstance(rec, dict):
-            continue
-        file = rec.get("file") or ""
-        if rec.get("scope") == "user" or (file and is_user_scope(file)):
+        if _is_machine_wide_row(rec):
             return key, rec
     return None
 
@@ -1124,11 +1152,7 @@ def _machine_wide_ports(projects: dict) -> set[int]:
     """
     ports = set()
     for _key, rec in projects.items():
-        if not isinstance(rec, dict):
-            continue
-        file = rec.get("file") or ""
-        if (rec.get("scope") == "user" or (file and is_user_scope(file))) \
-                and isinstance(rec.get("port"), int):
+        if _is_machine_wide_row(rec) and isinstance(rec.get("port"), int):
             ports.add(rec["port"])
     return ports
 

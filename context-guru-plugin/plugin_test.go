@@ -10658,6 +10658,59 @@ func TestProjectInstallIgnoresALegacyMachineWideRow(t *testing.T) {
 	}
 }
 
+// TestAddWithoutAllocDoesNotAdoptTheMachineWidePort is the other door into the same laundering, one
+// layer down: `record_install_scope`'s carry-forward. `port` is the one field that call carries over
+// from an existing row rather than resetting, because an entirely separate command allocates it — and
+// a legacy machine-wide row IS an existing row under this project's key, so a project `add` lifted
+// 8788 out of it and filed it as `scope=project` while the routing it was recording named another
+// port. Narrow (install.sh allocs at step 0, which moves the row first), but `add --url` by hand
+// reaches it, and the fix is the same move rather than a note saying alloc protects it.
+func TestAddWithoutAllocDoesNotAdoptTheMachineWidePort(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	sd := filepath.Join(state, "context-guru")
+	userFile := filepath.Join(home, ".claude", "settings.json")
+	projFile := filepath.Join(proj, ".claude", "settings.local.json")
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", userFile,
+		"--url", "http://127.0.0.1:8788/anthropic", "--user-scope"); c != 0 {
+		t.Fatalf("fixture add: exit %d %v", c, f)
+	}
+	scopeFile := filepath.Join(sd, "install-scope.json")
+	writeJSON(t, scopeFile, map[string]any{"version": 1, "projects": map[string]any{
+		projReal: map[string]any{
+			"scope": "user", "file": userFile, "port": 8788,
+			"recorded_at": "2026-01-01T00:00:00+00:00",
+		},
+	}})
+
+	// No `port alloc` — straight to routing this project on a port of its own.
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", projFile,
+		"--url", "http://127.0.0.1:8791/anthropic"); c != 0 {
+		t.Fatalf("project add: exit %d %v", c, f)
+	}
+	projects, _ := readJSON(t, scopeFile)["projects"].(map[string]any)
+	rec, _ := projects[projReal].(map[string]any)
+	if rec == nil {
+		t.Fatalf("this project has no record after routing: %v", projects)
+	}
+	if fmt.Sprint(rec["port"]) == "8788" {
+		t.Errorf("this project's row carries the machine-wide port 8788 while its routing names "+
+			"8791: the carry-forward lifted it out of the legacy row: %v", rec)
+	}
+	userKey, err := filepath.EvalSymlinks(filepath.Join(home, ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mw, _ := projects[userKey].(map[string]any)
+	if mw == nil || fmt.Sprint(mw["port"]) != "8788" || mw["scope"] != "user" {
+		t.Fatalf("the machine-wide install's row did not survive this project's routing write "+
+			"(looked under %s): %v", userKey, projects)
+	}
+}
+
 // TestRemoveRefusesAnotherInstallsRouting pins the guard itself, in all three directions, because
 // the scenario test above can only show one of them.
 //
