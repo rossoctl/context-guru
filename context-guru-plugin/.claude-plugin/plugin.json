@@ -2,7 +2,7 @@
   "name": "context-guru",
   "displayName": "context-guru",
   "description": "Installs a local context-guru proxy, routes this project's Claude Code sessions through it, and reports what it saved. Reversible: /context-guru:uninstall removes the one settings key it adds and stops the proxy.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "rossoctl",
     "url": "https://github.com/rossoctl/context-guru"
