@@ -28,8 +28,8 @@ Self-gating: exactly like the SessionStart/UserPromptSubmit hooks, this does not
 that is not routed through OUR proxy. The gate reads CLAUDE_PLUGIN_OPTION_PORT the same way those
 two hooks do, but never TRUSTS it alone — it still checks $ANTHROPIC_BASE_URL for that exact port,
 because that env block is what actually routes the traffic and so cannot be wrong. Matching any
-loopback ".../anthropic" URL regardless of port would treat another local proxy on its own port
-(litellm defaults to 127.0.0.1:4000) as ours whenever it happened to be a project's real routing.
+loopback ".../anthropic" URL regardless of port would treat another local API proxy on its own
+port (127.0.0.1:4000 is a common one) as ours whenever it happened to be a project's real routing.
 """
 
 from __future__ import annotations
@@ -273,8 +273,9 @@ def _our_port() -> str | None:
     Reads CLAUDE_PLUGIN_OPTION_PORT the same way check-proxy.sh and start-proxy.sh do (default
     8787), then checks the ACTUAL routing value: does $ANTHROPIC_BASE_URL name exactly that port.
     Accepting ANY loopback ".../anthropic" URL here — instead of a SPECIFIC configured port —
-    would treat litellm's own default (127.0.0.1:4000/anthropic) as ours whenever it happens to
-    be a project's real routing, which is precisely the class of bug those two hooks' own tests
+    would treat another local API proxy (127.0.0.1:4000/anthropic is a common one) as ours
+    whenever it happens to be a project's real routing, which is precisely the class of bug those
+    two hooks' own tests
     (matching the port, not merely "localhost") exist to catch.
     """
     port = (os.environ.get("CLAUDE_PLUGIN_OPTION_PORT") or DEFAULT_PORT).strip() or DEFAULT_PORT

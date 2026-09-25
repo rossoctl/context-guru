@@ -55,8 +55,9 @@ Use `.claude/settings.local.json` instead if you do not want to commit it: a bas
 
 That is the shape the plugin writes, except that it does not use a fixed port: it allocates a free
 one per project and records it, so two projects with different configurations never end up sharing a
-proxy and restarting it out from under each other. The scan starts at **8787** rather than 4000 —
-litellm's default is 4000, and a collision there is silent and confusing.
+proxy and restarting it out from under each other. The scan starts at **8787** and skips ports
+already in use: landing on one another local API proxy had already taken is a silent, confusing
+failure, because two proxies on loopback are indistinguishable from each other by URL alone.
 
 ## Keep the API key out of Claude Code
 

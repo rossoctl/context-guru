@@ -62,7 +62,7 @@ form has no explanation of what each choice does; use those for the two rows tha
 
 | Option | Default | Change it when |
 |---|---|---|
-| **Proxy port** | *(allocated)* | almost never — leave it empty and the install picks a free port for **this project** and records it. Set it only to pin a specific one. One project per port is deliberate: two projects sharing a proxy meant each project's session start killed and restarted it, losing the other's warm cache every time. The scan starts at 8787 (not 4000 — that collides with litellm) |
+| **Proxy port** | *(allocated)* | almost never — leave it empty and the install picks a free port for **this project** and records it. Set it only to pin a specific one. One project per port is deliberate: two projects sharing a proxy meant each project's session start killed and restarted it, losing the other's warm cache every time. The scan starts at 8787 and skips anything already listening |
 | **Preset** | `off` | you want context editing at all. `off` is passthrough: nothing dropped, no model called. `/context-guru:preset-picker` explains each one |
 | **Cache strategy** | `5-min-ping` | you don't want keep-alive pings that spend a little of your own quota to keep the cache warm. `none` turns it off. `/context-guru:cache-strategy-picker` explains whether it's paying for itself on `keepalive_net_usd` |
 | **Idle exit** | `24h` | rarely — floor is `max(2 × store.ttl_seconds, 1h)` |
@@ -181,8 +181,8 @@ from `.claude/settings.local.json` to get working immediately.
 `PATH`.
 
 **The port is taken.** You should not see this: the install allocates a free port. It is reachable
-only if you pinned one in `/plugin configure` — clear it to get one allocated, or pick another, and
-avoid 4000, which litellm defaults to.
+only if you pinned one in `/plugin configure` — clear it to get one allocated, or pick a port nothing
+else on the machine listens on.
 
 **`port_owned_by_another_project`.** The port this project would use is already serving a different
 project, named in the message. A proxy is never taken from the project that owns it, so the install
