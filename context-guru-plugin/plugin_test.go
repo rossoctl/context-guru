@@ -6207,6 +6207,59 @@ func TestLoopbackDetectionCoversTheShapesThatMatter(t *testing.T) {
 	}
 }
 
+// TestTheDocsDoNotPromiseTheHatchStopsAnything pins the one claim in "Removing it: uninstall, or
+// reset" that a later change could quietly falsify. The docs tell the user that `context-guru-reset`
+// un-routes every settings file but stops no proxy and releases no port record — which is why they
+// are told to follow it with an uninstall per project. If the hatch ever grows a kill or a
+// `port release`, that paragraph becomes advice to do something twice, and the section explaining
+// why the two commands differ starts describing a difference that is no longer there.
+//
+// Read off reset.sh rather than run: the point is what the hatch is ALLOWED to do, and a run only
+// shows what it did to one fixture.
+func TestTheDocsDoNotPromiseTheHatchStopsAnything(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("scripts", "reset.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		code, _, _ := strings.Cut(line, "#") // comments explain the absence; they are the point
+		for _, bad := range []string{"kill ", "kill -", "pkill", "port release", "port unset"} {
+			if strings.Contains(code, bad) {
+				t.Errorf("reset.sh now does %q, but install-plugin.md tells the user it stops no "+
+					"proxy and releases no port: %s", bad, strings.TrimSpace(line))
+			}
+		}
+	}
+
+	d, err := os.ReadFile(filepath.Join("..", "docs", "how-to", "install-plugin.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, after, ok := strings.Cut(string(d), "## Removing it: uninstall, or reset")
+	if !ok {
+		t.Fatal("install-plugin.md no longer distinguishes the uninstall from the hatch, so the " +
+			"README link to it is dead and the question it answers is unanswered again")
+	}
+	section, _, _ := strings.Cut(after, "\n## ")
+	// The distinction is the whole section: one install vs. every settings file, and that the hatch
+	// needs no session. Any of these going missing is the section losing its reason to exist.
+	for _, want := range []string{"context-guru-reset", "/context-guru:uninstall", "one install",
+		"~/.claude/settings.json"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("the uninstall-vs-reset section does not mention %q", want)
+		}
+	}
+
+	r, err := os.ReadFile(filepath.Join("..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(r), "#removing-it-uninstall-or-reset") {
+		t.Error("the README does not link the section, so the only place the two commands are told " +
+			"apart is a page the user has no reason to open")
+	}
+}
+
 // TestTroubleshootingLeadsWithTheCommand. Discoverability is part of the feature, not documentation
 // polish: a user who needs the hatch is searching the docs with a Claude that cannot answer
 // questions. Troubleshooting is the section they open, and it did not name the hatch at all.
