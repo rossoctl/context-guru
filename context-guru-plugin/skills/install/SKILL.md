@@ -53,6 +53,37 @@ to act on, not a failure to report as one.
 - `result=needs_decision reason=user_scope_needs_flag` — they passed `--global`. Confirm once, naming the
   blast radius: **every** Claude Code session on the machine, including projects that have nothing
   to do with context-guru, which is also every session they could use to fix it.
+- `result=needs_decision reason=project_installs_exist` — user scope, and the `existing_project=`
+  lines name projects that route themselves. The machine-wide route will **not** reach them: their own
+  settings file is more specific, so it keeps winning — the opposite of what "everywhere" means to the
+  person asking. Name them and ask, then pass `--on-existing-projects leave` (they keep their own port
+  and config; safe, and right if that was deliberate) or `adopt` (their routing and port option are
+  removed, each file backed up, so they fall back to the machine-wide route). `adopt` runs last, after
+  the route is proven healthy, and reports `adopted_project=… unrouted=… recovery_dir=…` per project —
+  read those rather than assuming. `unrouted=removed` is the success value; `unchanged` or `conflict`
+  means that project kept its routing and must be reported as still overriding.
+  Relay two more per-project lines rather than folding them into "adopted":
+  `adopted_project_still_overriding=<dir> base_url=<url>` — that project's own pre-context-guru URL was
+  rightly restored, so it still overrides the machine-wide route; the user asked for everywhere and
+  this project is not in it. `adopted_proxy_left_running=<dir> port=<n>` — its old proxy still answers,
+  so its state was left alone; report the port. `adopted_proxy_stopped=` needs no comment.
+  `adopted_project_is_this_project=<dir>` plus `adopted_proxy_kept=<dir> port=<n>` — the install's own
+  project was in the adopt list (converting a project-local install from that project); its routing was
+  removed, its port record and proxy are this install's and were kept. Not a skipped step.
+- `result=needs_decision reason=port_owned_by_another_project` — `owner_project=` already has a proxy
+  on that port, running its preset, and a proxy is never taken from its owner. Only reachable for a
+  pinned or previously recorded port. Clear the `port` option so one is allocated, or ask for an
+  unused one.
+- `result=refused reason=port_changed_since_plan` — the port they agreed to is no longer the one this
+  project gets. **Nothing was written.** Re-run `--route --plan` and ask again on the new port.
+- `result=refused reason=port_recorded_by_another_project` — this project and `owner_project=` both
+  have `port=` recorded; both are equally real, and picking one would put two projects with different
+  presets on one proxy. **Nothing was written.** Report both and ask which keeps the port; the other
+  needs its `port` option cleared (or an uninstall) so a fresh one is allocated.
+- `port_unwound=` on a failure — `true` (with `port_unwound_parts=option,record`) means step 0's own
+  bookkeeping was taken back, so "nothing was written" is literal. `nothing_to_undo` means a re-install
+  failed and the working install's record and pinned `options.port` are **deliberately** still there —
+  do not offer to clear them. Absent: they may still be there; say so, do not guess.
 - `result=error reason=binary_install_failed` — read `detail=`. `no_release_found` wants the source
   build offer (`make build-static`, Go 1.26, no C toolchain). Anything naming a checksum
   (`checksum_mismatch`, `checksum_unavailable`, `checksum_absent`) is a **hard stop**: it is the only
@@ -167,7 +198,10 @@ not reword the command to look like less than it is, and never write routing whi
 - Name the **cache strategy** from the result, and what it costs.
 - Dashboard: `http://127.0.0.1:<port>/dashboard/` — the four billed token tiers are where the cache
   effect shows.
-- If `port` is not 8787, say so; a non-default port is the kind of thing people forget they set.
+- **Name the port**, and that it is this project's own: `port_source=scanned` means allocated just
+  now, `recorded` a re-run, `configured` their own pinning. One project per port is deliberate, so a
+  number they did not pick is correct. `port_warning=` means it works but was not recorded — mention
+  it, since a later install could hand the same port to another project.
 - `/context-guru:status` for numbers, `/context-guru:cache-strategy-picker` to change the strategy,
   `/context-guru:uninstall` to undo.
 - **`reset_hatch=` verbatim, on its own line, as your last line.** This is the only moment the user

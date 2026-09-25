@@ -248,6 +248,57 @@ PIDFILE="${STATE}/proxy-${PORT}.pid"
 # What the proxy holding this port was STARTED with. There is no way to ask it: /healthz answers the
 # literal string "ok" (proxy/proxy.go), and nothing else is unauthenticated. So the starter records it.
 FINGERPRINT="${STATE}/proxy-${PORT}.fingerprint"
+# WHICH PROJECT the proxy holding this port belongs to. Deliberately a SEPARATE file and NOT a
+# field in the fingerprint: the fingerprint is compared as an opaque string, so adding a field would
+# make every fingerprint already on disk incomparable and restart every running proxy once, for
+# nothing. This file answers a different question anyway - the fingerprint says "what configuration",
+# this says "whose" - and only the second one may veto a restart.
+OWNER="${STATE}/proxy-${PORT}.owner"
+
+# WHOSE this session's proxy is, as a token to write into (and compare against) that file. NOT the
+# project key: see settings.py's owner_token(). Under a machine-wide (`--scope user`) install there
+# is one settings file, therefore one port, therefore one proxy SHARED by every project on the
+# machine - so every project must resolve to the same token, or all but one of them would read the
+# owner file as a stranger's and defer to a proxy that is in fact theirs to restart.
+#
+# Resolved ONCE and only when something actually needs it (a healthy port to adjudicate, or a proxy
+# of our own to record), because it forks python and git. Fails open to the cwd: settings.py's
+# project_key() does the same, and a token we cannot resolve must never be the thing that stops a
+# session getting a proxy.
+OWNER_TOKEN=""
+OWNER_TOKEN_RESOLVED=0
+owner_token_now() {
+  if [ "$OWNER_TOKEN_RESOLVED" = 0 ]; then
+    OWNER_TOKEN_RESOLVED=1
+    if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; then
+      OWNER_TOKEN=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" owner-token 2>/dev/null \
+                      | sed -n 's/^owner=//p' | head -1)
+    fi
+    [ -n "$OWNER_TOKEN" ] || OWNER_TOKEN=$(pwd -P 2>/dev/null) || OWNER_TOKEN=""
+  fi
+  printf '%s\n' "$OWNER_TOKEN"
+}
+
+# ours | theirs. Asked of settings.py rather than compared here, because the comparison is not a
+# string equality: an owner file written before this token existed holds a bare project key, and
+# that names a stranger only if the project it names still routes ITSELF. Anything else is a stale
+# claim from the old scheme, and treating it as a stranger would veto this session's proxy forever
+# on state nobody can clear.
+#
+# If that answer cannot be obtained, the fallback is the PLAIN STRING COMPARISON - i.e. exactly the
+# behaviour before this token existed, which answers `theirs` for anything that does not match. Not
+# "fails open to ours": a `theirs` verdict is what vetoes a restart, so the unobtainable-verdict
+# case is the conservative one (leave the proxy alone and say so) rather than the permissive one.
+# Stated explicitly because an earlier version of this comment claimed the opposite, and a reader
+# who trusts it would mis-reason about the one branch where the fix does not apply.
+owner_verdict() {
+  if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; then
+    ov_=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" owner-token --observed "$1" 2>/dev/null \
+          | sed -n 's/^verdict=//p' | head -1)
+    [ -n "$ov_" ] && { printf '%s\n' "$ov_"; return 0; }
+  fi
+  [ "$1" = "$(owner_token_now)" ] && printf 'ours\n' || printf 'theirs\n'
+}
 
 # The argument wins: it is the only one of these three the install skill can actually rely on, since
 # a Bash tool call sees neither the plugin option nor, necessarily, the session's own env. Moved up
@@ -471,7 +522,25 @@ if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
   # Leave it alone unless we can prove a change is needed. Three of these four cases are deliberate
   # no-ops, because the cost of a wrong restart (interrupting somebody else's session) is higher than
   # the cost of a stale preset (reported, and fixed by the next cold start).
-  if [ -z "$fp_have" ]; then
+  owner_have=$(cat "$OWNER" 2>/dev/null)
+  if [ -n "$owner_have" ] && [ "$(owner_verdict "$owner_have")" = "theirs" ]; then
+    # ANOTHER PROJECT's proxy, whatever the fingerprint says. This is the regression the per-project
+    # port exists to remove: two projects sharing port 8787 with different presets took turns killing
+    # each other's proxy on every session start, and each kill wiped the in-memory store. A restart
+    # here can only ever be right for the project that owns the port, so the veto comes FIRST - a
+    # fingerprint mismatch against a foreign proxy is expected, not evidence of anything.
+    #
+    # "theirs" is a SCOPE question, not a project one - owner_verdict/owner_token_now above. Under a
+    # machine-wide install this branch is never taken, which is the point: one shared proxy that
+    # every project is entitled to restart, so a preset change made from any of them takes effect
+    # at the next session start, exactly as it did before there were per-project ports.
+    #
+    # An ABSENT owner file means a proxy started before this file existed, and is treated as ours,
+    # i.e. exactly today's behaviour: refusing to touch it would strand every running install.
+    note "port ${PORT} is serving another project (${owner_have}); leaving it alone."
+    note "this project should have its own port - run /context-guru:status if it does not."
+    exit 0
+  elif [ -z "$fp_have" ]; then
     # A proxy from before fingerprints existed, or one somebody else started. Not ours to replace.
     :
   elif [ -z "$SYNC_STRATEGY" ]; then
@@ -764,10 +833,14 @@ liveness check on pid %s, which cannot tell a proxy that bound from one that is 
       # Best-effort write: a state directory we cannot write is survivable everywhere else in this
       # script, and the only cost is that the next session cannot tell a configuration change happened.
       fingerprint_want >"$FINGERPRINT" 2>/dev/null || true
+      owner_token_now >"$OWNER" 2>/dev/null || true
     else
       # Deliberately REMOVED rather than left stale: a fingerprint describing the configuration we
-      # failed to start would make the next session believe it is already running.
+      # failed to start would make the next session believe it is already running. The owner file
+      # goes with it - claiming a port held by something we did not start is the worse error of the
+      # two, because it would make every OTHER project defer to a claim that is not true.
       rm -f "$FINGERPRINT" 2>/dev/null || true
+      rm -f "$OWNER" 2>/dev/null || true
       note "port ${PORT} is answering, but the proxy this hook started is not running - so something"
       note "else holds the port and this session's requests go there, not through the configuration"
       note "you asked for. Nothing was recorded. Log: ${LOG}"

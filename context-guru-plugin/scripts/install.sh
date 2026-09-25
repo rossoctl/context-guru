@@ -65,9 +65,59 @@ route_here() { CDPATH= cd -- "$(dirname -- "$0")" && pwd -P; }
 R_MODE=local R_SCOPE=project R_ONCONFLICT= R_BASEURL= R_HEALTHURL= R_NOHEALTH=0
 R_STRATEGY= R_UPSTREAM= R_USERSCOPE=0 R_PLAN=0 R_CONFIRM=0 R_NOSTATUSLINE=0 R_NOGITIGNORE=0
 R_PORT= R_PRESET= R_IDLE= R_BIN= R_ONPATH= R_FILE= R_EXISTING= R_CHAINED=false
+# Set by step 0 once the port record is actually written, and read only by route_unwind_port.
+R_PORT_COMMITTED=0
 R_ALREADY=false R_CONSENT=0 R_OURS= R_FROMENV=0 R_SPENDS= R_PIDFILE= R_PROXYLOG=
+R_ONEXISTING= R_PORTSOURCE= R_EXISTINGPROJECTS=
+# What step 0 FOUND, read before it writes, so route_unwind_port can undo what this install made
+# and nothing else. `unknown` is the safe default: it is not `absent`, so nothing is released on the
+# strength of a reading we never got.
+R_PORT_RECORD_PRE=unknown R_PORT_OPTION_PRE="(unknown)" R_PORT_ALLOC_SRC=unknown
 
-route_die() { emit "result=error"; emit "reason=$1"; [ -n "${2:-}" ] && emit "detail=$2"; exit 3; }
+# Take step 0's write back, for the failure paths that report nothing was written. Best-effort in
+# both halves and deliberately so: this runs while something else has already gone wrong, and a
+# bookkeeping cleanup that failed must not replace the real reason for the failure. It removes the
+# `port` option only from the file step 0 wrote it into, never from a file it did not touch.
+# Undo what step 0 MADE, never what it found. The first version of this ran `port unset` and
+# `port release` unconditionally on any `result=ok`, and `result=ok` also covers source=recorded and
+# source=configured — the two cases where step 0 wrote nothing new. So a failed RE-install of a
+# working install deleted that project's whole record (scope, file and port) and the user's pinned
+# `options.port`, while `env.ANTHROPIC_BASE_URL` in the same file still named the old port: the next
+# start-proxy.sh computed 8787 and the session was routed at a port nothing listens on. The finding
+# this function exists to close was a contract violation with no user-visible damage; that was
+# user-visible damage, which makes it the worse of the two.
+#
+# So each half is gated on the state read BEFORE the write, and the case where step 0 created
+# nothing is reported as such rather than silently skipped: a caller has to be able to tell
+# "your pre-existing record and port are deliberately still there" from "nothing was cleaned up".
+route_unwind_port() {
+  [ "$R_PORT_COMMITTED" = 1 ] || return 0
+  R_PORT_COMMITTED=0
+  local parts=
+  # `source=configured` writes NO option (the user's own option is already in whichever file they
+  # put it in, possibly not this one), so there is nothing of ours to remove and reporting `option`
+  # would name an undo that never happened. Both conditions, because either alone is wrong: absent
+  # before and written by us is the only case that is ours to take back.
+  if [ "$R_PORT_OPTION_PRE" = "(none)" ] && [ "$R_PORT_ALLOC_SRC" != configured ]; then
+    "$(route_here)/settings.py" port unset --file "$R_FILE" >/dev/null 2>&1 || true
+    parts="option"
+  fi
+  if [ "$R_PORT_RECORD_PRE" = absent ]; then
+    "$(route_here)/settings.py" port release >/dev/null 2>&1 || true
+    parts="${parts:+${parts},}record"
+  fi
+  if [ -z "$parts" ]; then
+    emit "port_unwound=nothing_to_undo"
+    return 0
+  fi
+  # Reported, not silent. The point of unwinding is that the failure notes can be believed, and a
+  # caller that is told nothing cannot tell an install that undid its bookkeeping from one that
+  # never got that far.
+  emit "port_unwound=true"
+  emit "port_unwound_parts=$parts"
+}
+
+route_die() { route_unwind_port; emit "result=error"; emit "reason=$1"; [ -n "${2:-}" ] && emit "detail=$2"; exit 3; }
 
 # route_refuse is for the WRITING path: exit 2, a refusal a caller can distinguish from a failure.
 #
@@ -121,7 +171,27 @@ route_resolve_options() {
   # Per-option fallback, never "source= was set so everything is set". `settings.py config` prints
   # a line only for keys the user actually configured, so a partial config — port set, preset
   # never touched — reports a real source= and simply omits option_preset=.
-  R_PORT=$(kv "$cfg" option_port);            : "${R_PORT:=8787}"
+  # The port is no longer a per-machine default. It used to be 8787 for EVERY project, so two
+  # projects with different presets shared one proxy and start-proxy.sh took turns killing it,
+  # wiping the in-memory store on every session start. `settings.py port alloc` is now the single
+  # encoding of which port this project gets, in this order: a port already recorded for it (a
+  # reinstall must never move a port whose URL is already written into a settings file), then one
+  # explicitly configured in pluginConfigs, then a free one. Asked as `--dry-run` because this runs
+  # on the PLAN path too, and a plan must not commit this project to a port — or take it out of
+  # every other project's pool — before consent has been asked. The real allocation happens after
+  # the consent gate, pinned to the port this reported.
+  #
+  # Fails open to the old behaviour: with settings.py unavailable, the configured option and then
+  # 8787, exactly as before. A port we cannot allocate is not a reason to refuse an install.
+  local pout
+  pout=$("$(route_here)/settings.py" port alloc --dry-run 2>/dev/null) || pout=""
+  R_PORT=$(kv "$pout" port)
+  R_PORTSOURCE=$(kv "$pout" source)
+  case "$R_PORT" in
+    ''|*[!0-9]*) R_PORT=$(kv "$cfg" option_port); R_PORTSOURCE=fallback ;;
+  esac
+  : "${R_PORT:=8787}"
+  : "${R_PORTSOURCE:=fallback}"
   R_PRESET=$(kv "$cfg" option_preset);        : "${R_PRESET:=off}"
   R_IDLE=$(kv "$cfg" option_idle_exit);       : "${R_IDLE:=24h}"
   [ -z "$R_STRATEGY" ] && R_STRATEGY=$(kv "$cfg" option_cache_strategy)
@@ -267,6 +337,7 @@ route_confirm_command() {
   [ "$R_NOHEALTH" = 1 ] && c="$c --no-health-check"
   [ "$R_NOGITIGNORE" = 1 ] && c="$c --no-gitignore-check"
   [ "$R_USERSCOPE" = 1 ] && c="$c --i-understand-machine-wide"
+  [ -n "$R_ONEXISTING" ] && c="$c --on-existing-projects $(shq "$R_ONEXISTING")"
   printf '%s --i-consent-to-traffic-interception\n' "$c"
 }
 
@@ -340,6 +411,52 @@ until Usage says otherwise)" ;;
 # start-proxy.sh prints under --emit-facts. Copying one writer's expression to find another writer's
 # file is what drifted, and predicting that the symptom would be "a missing line rather than a wrong
 # path" was correct and no comfort at all - the missing line was the whole function.
+# Stop the proxy an adopted project was using, and only then drop the state describing it. Same
+# ownership discipline as the uninstall skill, for the same reason: the PID comes from a file that
+# can be stale, and a recycled PID satisfies `kill -0` perfectly well — so the `ps` check GATES the
+# signal in one branch rather than sitting below it as prose. Kills by PID, never by pattern: this
+# machine may also be running a production instance or a benchmark arm.
+#
+# Every step is best-effort and reported, never fatal: the machine-wide route is already written and
+# health-checked by the time this runs, so a proxy that will not stop is a leftover to report, not a
+# reason to fail an install that succeeded.
+route_stop_adopted_proxy() {
+  local aproj aport apidfile apid astate
+  aproj="$1"; aport="$2"
+  case "$aport" in ''|*[!0-9]*) return 0 ;; esac
+  # NEVER the port this install is routing to. The process on $R_PORT was started and health-checked
+  # by THIS install seconds ago, and no caller of this function may signal it.
+  #
+  # DO NOT DELETE THIS AS UNREACHABLE - an earlier version of this comment said the self-skip in the
+  # adopt loop above always gets there first, and that is wrong. The self-skip compares the adopted
+  # KEY against `project-key`, so it does not fire for a record keyed by a WORKTREE path (a
+  # pre-migration install from a worktree), whose key is not the main checkout this install is keyed
+  # under - while its recorded port is the very port this install is now serving. In that case the
+  # loop does not skip, this function IS reached, and this refusal is the only thing between an
+  # adopt and a dead proxy on its own port. Same reason it kills by PID and never by pattern.
+  if [ "$aport" = "$R_PORT" ]; then
+    emit "adopted_proxy_kept=$aproj port=$aport reason=this_installs_own_port"
+    return 0
+  fi
+  astate="$(route_state_dir)"
+  apidfile="${astate}/proxy-${aport}.pid"
+  apid=$(cat "$apidfile" 2>/dev/null) || apid=""
+  case "$apid" in ''|*[!0-9]*) apid="" ;; esac
+  if [ -n "$apid" ] && ps -p "$apid" -o command= 2>/dev/null | grep -q context-guru-proxy; then
+    kill "$apid" 2>/dev/null || true
+    sleep 1
+  fi
+  if curl -fsS --max-time 2 "http://127.0.0.1:${aport}/healthz" >/dev/null 2>&1; then
+    # Still answering. Leave ALL of the state alone: it describes something that is running, and a
+    # removed owner file plus a live proxy is how a later install gets silently pointed at it.
+    emit "adopted_proxy_left_running=$aproj port=$aport"
+    return 0
+  fi
+  rm -f "$apidfile" "${astate}/proxy-${aport}.owner" "${astate}/proxy-${aport}.fingerprint" \
+    2>/dev/null || true
+  emit "adopted_proxy_stopped=$aproj port=$aport"
+}
+
 route_state_dir() {
   printf '%s\n' "${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}"
 }
@@ -388,6 +505,7 @@ route_report() {
   emit "scope=$R_SCOPE"
   emit "file=$R_FILE"
   emit "port=$R_PORT"
+  emit "port_source=$R_PORTSOURCE"
   emit "preset=$R_PRESET"
   emit "idle_exit=$R_IDLE"
   emit "cache_strategy=$R_STRATEGY"
@@ -491,6 +609,71 @@ thing that cannot be derived, so it is the one thing checked first."
     "--scope user routes EVERY project on this machine, including every project that has nothing to \
 do with context-guru. Confirm with the user, then add --i-understand-machine-wide"
 
+  # A user-scope install meets the projects that already installed themselves. The machine-wide
+  # route this is about to write will NOT reach them: a project's own settings file is more
+  # specific, so it simply keeps winning, and the user who just asked for "everywhere" gets
+  # everywhere-except-these with nothing said about it. Only they can say whether that is what they
+  # meant, so it is a gate and not a note — and, like every other decision in this script, the
+  # answer arrives as a flag rather than as prose a model interprets.
+  # The list is read whenever the scope is user, NOT only when the question still needs asking:
+  # `adopt` is performed at the very end of this script from exactly this variable, and reading it
+  # only on the asking path left the confirming re-run — the one that carries the answer — with an
+  # empty list and an `adopt` that silently adopted nothing while reporting success.
+  if [ "$R_SCOPE" = user ]; then
+    R_EXISTINGPROJECTS=$("$(route_here)/settings.py" scopes 2>/dev/null \
+                           | sed -n '/^existing_project=/p' | grep -v ' scope=user ') || true
+  fi
+  if [ "$R_SCOPE" = user ] && [ -z "$R_ONEXISTING" ] && [ -n "$R_EXISTINGPROJECTS" ]; then
+    # Emitted through the same two shapes as every other gate: needs_decision under --plan (the
+    # caller has a question to ask, not an error to propagate), a refusal otherwise. route_report is
+    # NOT called here, unlike the base-url gate further down: this runs before route_inspect, so
+    # file=, existing_base_url= and already_routed= have no values yet and reporting them empty
+    # would state something false about the install rather than nothing.
+    if [ "$R_PLAN" = 1 ]; then
+      emit "result=needs_decision"; emit "reason=project_installs_exist"
+    else
+      emit "result=refused"; emit "reason=project_installs_exist"
+    fi
+    printf '%s\n' "$R_EXISTINGPROJECTS" | while IFS= read -r l; do emit "$l"; done
+    emit "port=$R_PORT"
+    emit "note=these projects route themselves and will keep OVERRIDING the machine-wide route this \
+install writes. Ask the user, then re-run with --on-existing-projects leave (they keep their own \
+port and config, which is the safe answer) or adopt (their own routing and port are removed so they \
+fall back to the machine-wide one; every file is backed up first). Nothing was installed, started \
+or written."
+    emit "permission_rule=$(route_permission_rule)"
+    emit "confirm_command_leave=$(R_ONEXISTING=leave route_confirm_command)"
+    emit "confirm_command_adopt=$(R_ONEXISTING=adopt route_confirm_command)"
+    [ "$R_PLAN" = 1 ] && exit 0
+    exit 2
+  fi
+
+  # A port this project is about to route to, held by a proxy another project owns. Only reachable
+  # for a port that was explicitly configured or recorded — the scan skips every port another
+  # project recorded — which is exactly the case that must not be resolved silently: allocation
+  # cannot move a port the user chose, and start-proxy.sh (correctly) will not kill a proxy it does
+  # not own, so an install that proceeded here would route this project at a proxy running somebody
+  # else's configuration and report success.
+  local owner_file owner_key
+  owner_file="$(route_state_dir)/proxy-${R_PORT}.owner"
+  owner_key=$(cat "$owner_file" 2>/dev/null) || owner_key=""
+  # `owner-token --observed`, not a comparison against project-key: ownership is a question about
+  # the ROUTING SCOPE, not about this project. A machine-wide install shares ONE port across every
+  # project on the machine by design, so under `--scope user` the owner of that port is this same
+  # install and the gate must not fire; and an owner file written before that token existed holds a
+  # bare project key, which names a stranger only if that project still routes itself. settings.py
+  # answers both, so this gate and start-proxy.sh's veto cannot drift apart.
+  local owner_verdict
+  owner_verdict=$("$(route_here)/settings.py" owner-token --observed "$owner_key" 2>/dev/null \
+                    | sed -n 's/^verdict=//p' | head -1)
+  if [ -n "$owner_key" ] && [ "$owner_verdict" = theirs ]; then
+    emit "owner_project=$owner_key"
+    route_needs "port_owned_by_another_project" \
+      "port $R_PORT is serving another project ($owner_key), and a proxy is never taken from the \
+project that owns it. Clear the port= option for this project so one is allocated for it, or pick \
+an unused port explicitly. Nothing was installed, started or written."
+  fi
+
   route_inspect
 
   # THE ONE DECISION THAT CANNOT BE DEFAULTED. A base URL already set may be their company gateway,
@@ -574,6 +757,56 @@ they say yes. A silent or absent answer is a NO. Never pass it on your own judge
     exit 2
   fi
 
+  # ---- step 0: commit the port -----------------------------------------------------------
+  # The plan's port was a preview. THIS is the write, and it is pinned to the port the plan showed
+  # (`--promised-port`): if that port stopped being the one a real allocation would pick — another
+  # project took it in the gap, or the configured value changed — the allocator refuses rather than
+  # writing a URL nobody agreed to, and the caller has to re-plan. plugin.json says the port must be
+  # fixed rather than negotiated; writing a different one here would negotiate it silently.
+  #
+  # Fail-open on anything else: an unrecorded port still works for this session (the URL, the proxy
+  # and the settings write all use $R_PORT regardless), so a bookkeeping failure is reported as a
+  # warning, not a refusal. The one exception is the promise mismatch above, which is not a
+  # bookkeeping failure — it means the port is wrong.
+  local paout pares pshow
+  # BEFORE the write: what is already here. route_unwind_port undoes only the halves this call
+  # creates, and it can only know which those are from a reading taken first. Fail-open: an
+  # unreadable answer leaves both fields at their `unknown` defaults, which unwinds nothing.
+  pshow=$("$(route_here)/settings.py" port show --file "$R_FILE" 2>/dev/null) || pshow=""
+  R_PORT_RECORD_PRE=$(kv "$pshow" record);      [ -n "$R_PORT_RECORD_PRE" ] || R_PORT_RECORD_PRE=unknown
+  R_PORT_OPTION_PRE=$(kv "$pshow" option_port); [ -n "$R_PORT_OPTION_PRE" ] || R_PORT_OPTION_PRE="(unknown)"
+  paout=$("$(route_here)/settings.py" port alloc --file "$R_FILE" --promised-port "$R_PORT" 2>&1) || true
+  R_PORT_ALLOC_SRC=$(kv "$paout" source); [ -n "$R_PORT_ALLOC_SRC" ] || R_PORT_ALLOC_SRC=unknown
+  pares=$(kv "$paout" result)
+  # What this call actually wrote, so a later failure can take it back — see route_unwind_port.
+  # `port alloc` is the FIRST write of the whole install (it has to be: the settings write needs the
+  # port), and every failure path after it says "nothing was installed, started or written". That
+  # was false: the record, an `options.port`, and in a project with no settings file yet the file
+  # and its recovery folder, all survived. A record with a port and no scope/file is also exactly
+  # the shape `scopes` used to report as a project that routes itself, which got the next
+  # `--scope user` install refused over a project that had never been installed.
+  [ "$pares" = ok ] && R_PORT_COMMITTED=1
+  if [ "$(kv "$paout" reason)" = port_recorded_by_another_project ]; then
+    # Two live projects recorded on one port. No allocation can resolve that — both records are
+    # equally real — and proceeding would route this project at the other one's proxy.
+    emit "result=refused"; emit "reason=port_recorded_by_another_project"
+    emit "port=$(kv "$paout" port)"; emit "owner_project=$(kv "$paout" other_project)"
+    emit "note=$(kv "$paout" note). Nothing was installed, started or written."
+    exit 2
+  fi
+  if [ "$(kv "$paout" reason)" = port_changed_since_plan ]; then
+    route_unwind_port
+    emit "result=refused"; emit "reason=port_changed_since_plan"
+    emit "promised=$R_PORT"; emit "port=$(kv "$paout" port)"
+    emit "note=nothing was installed, started or written. Re-run --route --plan and ask the user \
+again: the port they agreed to is no longer free for this project."
+    exit 2
+  fi
+  case "$pares" in
+    ok) : ;;
+    *) emit "port_warning=$(kv "$paout" reason)" ;;
+  esac
+
   # ---- step 1: the binary (local only) --------------------------------------------------
   # Re-invokes THIS script with no arguments rather than refactoring its linear body: the installer
   # already speaks key=value and already exits early on `result=present`, and $0 is the same
@@ -583,9 +816,14 @@ they say yes. A silent or absent answer is a NO. Never pass it on your own judge
     iout=$("$0" 2>&1); ires=$(kv "$iout" result)
     case "$ires" in
       present|installed) : ;;
-      *) emit "result=error"; emit "reason=binary_install_failed"
+      *) route_unwind_port
+         emit "result=error"; emit "reason=binary_install_failed"
          emit "detail=$(kv "$iout" reason)"
-         emit "note=nothing else was touched. A checksum failure must never be worked around."
+         # This is the MOST COMMON early failure (no release asset, checksum mismatch) and step 0
+         # has already run, so "nothing else was touched" was false here more often than anywhere
+         # else. What it can honestly say is what port_unwound= reports.
+         emit "note=no routing was written, and whatever port bookkeeping step 0 created was taken \
+back - see port_unwound. A checksum failure must never be worked around."
          exit 3 ;;
     esac
     R_ONPATH=$(kv "$iout" on_path)
@@ -631,10 +869,16 @@ they say yes. A silent or absent answer is a NO. Never pass it on your own judge
 
   # ---- step 6: prove something answers, BEFORE routing to it ----------------------------
   if ! route_health_ok; then
+    route_unwind_port
     emit "result=error"; emit "reason=health_check_failed"
     emit "health_url=$(route_health_url)"
-    emit "note=SETTINGS WERE NOT TOUCHED. An unrouted project with no proxy is a working project; \
-a routed one with no proxy is a broken one."
+    # "THE ROUTING KEY", not "SETTINGS", since step 0 above writes an `options.port` into this same
+    # file before this check is reached. route_unwind_port takes that back, and says so — but the
+    # file itself survives if step 0 had to create it, so the old wording ("SETTINGS WERE NOT
+    # TOUCHED") would still have been a claim this path cannot make.
+    emit "note=THE ROUTING KEY WAS NOT WRITTEN, and the port bookkeeping step 0 wrote was taken \
+back (port_unwound). An unrouted project with no proxy is a working project; a routed one with no \
+proxy is a broken one."
     # ...but "settings were not touched" is not "nothing happened", and the caller will read it as
     # the latter. Step 5 may have started a proxy and left a pidfile and a strategy config behind.
     # That matters most when a health check fails TRANSIENTLY (a slow start, a busy laptop): the user
@@ -667,9 +911,14 @@ a routed one with no proxy is a broken one."
   local ares; ares=$(kv "$aout" result)
   case "$ares" in
     added|completed|unchanged|repointed) : ;;
-    *) emit "result=error"; emit "reason=settings_write_failed"
+    *) route_unwind_port
+       emit "result=error"; emit "reason=settings_write_failed"
        emit "detail=$(kv "$aout" reason)"; emit "exit=$acode"
-       emit "note=no routing was written."
+       # True about the ROUTING, and it always was. What it left out is that step 0 had already put
+       # a port option into this same file and a record in the state dir, so "no routing was
+       # written" read as "nothing is here" about a file that had just been created and written to.
+       emit "note=no routing was written, and whatever port bookkeeping step 0 created was taken \
+back - see port_unwound."
        route_report_side_effects        # "may be running" is knowable; say which.
        exit 3 ;;
   esac
@@ -680,6 +929,7 @@ a routed one with no proxy is a broken one."
   # too important to depend on a model choosing to offer it.
   if ! route_health_ok; then
     "$(route_here)/settings.py" remove --file "$R_FILE" --url "$(route_url)" >/dev/null 2>&1 || true
+    route_unwind_port
     emit "result=error"; emit "reason=health_check_failed_after_write"
     emit "rolled_back=true"
     emit "note=the routing key was REMOVED again, so the project is unrouted rather than broken."
@@ -687,6 +937,78 @@ a routed one with no proxy is a broken one."
     # `rolled_back=true` be read as "everything was undone".
     route_report_side_effects
     exit 3
+  fi
+
+  # ---- step 9: adopt the projects that route themselves, if that is what was asked -------
+  # LAST, and deliberately so. Adopting unroutes OTHER projects, and it is only safe to take their
+  # own routing away once the machine-wide route they are about to fall back on is written AND
+  # health-checked — step 8 above is what proves that. Unrouting them first and then failing here
+  # would leave every one of them with no route at all.
+  if [ "$R_ONEXISTING" = adopt ] && [ -n "$R_EXISTINGPROJECTS" ]; then
+    local ap af aport aout2 arest arestored rkey
+    # THIS project's key. A project-local install converted to machine-wide from that same project
+    # is in R_EXISTINGPROJECTS too (its record says scope=project-local, which is exactly what the
+    # gate lists), and two of the three things done to an adopted project below must not be done to
+    # the project the install belongs to: releasing its record would delete the record step 0 just
+    # wrote for THIS install, and stopping its proxy would kill the proxy step 8 just verified.
+    # Un-routing its own project-local file is still right - that file is more specific than the
+    # machine-wide route and would keep overriding it, which is the whole point of adopting.
+    rkey=$("$(route_here)/settings.py" project-key 2>/dev/null | sed -n 's/^key=//p' | head -1) || rkey=""
+    printf '%s\n' "$R_EXISTINGPROJECTS" | while IFS= read -r l; do
+      # Anchored on the two fields that CANNOT contain a space (scope= and port=) rather than on
+      # "up to the first space". `existing_project=` and `file=` are both PATHS, and a project at
+      # `~/My Projects/thing` truncated at the space: `[ -n "$ap" ]` still passed, the `cd` failed
+      # into `|| true`, the record release silently did not happen, and the truncated path was
+      # reported as if it had worked. Space-bearing paths are ordinary on macOS.
+      ap=$(printf '%s\n' "$l" | sed -n 's/^existing_project=\(.*\) scope=[^ ]* port=[^ ]* file=.*$/\1/p')
+      af=$(printf '%s\n' "$l" | sed -n 's/^existing_project=.* scope=[^ ]* port=[^ ]* file=\(.*\)$/\1/p')
+      aport=$(printf '%s\n' "$l" | sed -n 's/^existing_project=.* scope=[^ ]* port=\([^ ]*\) file=.*$/\1/p')
+      [ -n "$ap" ] || continue
+      arestored=
+      # `remove` is the same surface uninstall uses, and it is the safe one: it only removes routing
+      # it can prove is ours (is_ours), it takes a backup, and it puts back whatever base URL was
+      # there before us. No --url, so that check decides alone.
+      if [ -n "$af" ] && [ "$af" != "(none)" ]; then
+        aout2=$("$(route_here)/settings.py" remove --file "$af" 2>&1) || true
+        arestored=$(kv "$aout2" restored)
+        # `remove`'s own backup= is NOT relayed. It stopped being a path: a clean removal deletes
+        # every rolling backup it just took (forget_backups), so the field now carries a fixed
+        # sentence saying so — the same sentence for every project, containing spaces and an em
+        # dash, inside a line callers parse on spaces. The recoverable artifact is the recovery
+        # FOLDER beside each file, which the note on the gate above already points at.
+        emit "adopted_project=$ap unrouted=$(kv "$aout2" result) recovery_dir=$(dirname "$af")/context-guru-settings-json"
+        # RESTORED, not adopted. `remove` puts back whatever ANTHROPIC_BASE_URL was in that file
+        # before us — correctly; deleting a URL we did not set would be the overreach that branch
+        # exists to avoid — and that restored URL is more specific than the machine-wide route, so
+        # it keeps overriding it. Which is the same silent override this whole gate exists to
+        # surface, so it is reported in the same words rather than folded into `unrouted=removed`.
+        if [ -n "$arestored" ] && [ "$arestored" != "(none)" ]; then
+          emit "adopted_project_still_overriding=$ap base_url=$arestored"
+        fi
+        # The per-project port option goes too: with no route of its own, a leftover port would aim
+        # that project's hooks at a port nothing serves — configured-looking and broken, which is
+        # worse than the state before.
+        "$(route_here)/settings.py" port unset --file "$af" >/dev/null 2>&1 || true
+      fi
+      # THIS project keeps its record and its proxy: both now belong to the machine-wide install
+      # that step 0 and step 8 just made. Its own project-local routing was removed above, which is
+      # the part of adoption that actually applies to it.
+      if [ -n "$rkey" ] && [ "$ap" = "$rkey" ]; then
+        emit "adopted_project_is_this_project=$ap note=its own routing was removed; its port record \
+and proxy are this install's and were kept."
+        continue
+      fi
+      # And the record, so nothing reports the project as still having its own routing. `--key`
+      # names the project directly: the `cd` this used to do was a second place for a path to get
+      # mangled on the way there, and it silently did nothing when it failed.
+      "$(route_here)/settings.py" port release --key "$ap" >/dev/null 2>&1 || true
+      # The proxy itself, and the owner file that outlives it. Uninstall does both halves — a
+      # released record beside a live proxy is the one state nothing else in the plugin expects —
+      # and adopt was doing neither, so every adopted project left a proxy serving its old
+      # configuration until --idle-exit reaped it, plus a `proxy-<port>.owner` that would get a
+      # later install on that port refused over a project that has not routed itself since.
+      route_stop_adopted_proxy "$ap" "$aport"
+    done
   fi
 
   emit "result=routed"
@@ -784,6 +1106,18 @@ if [ "${1:-}" = --route ]; then
       --mode)     route_need_value --mode "${2:-}";     R_MODE="$2"; shift ;;
       --scope)    route_need_value --scope "${2:-}";    R_SCOPE="$2"; shift ;;
       --on-conflict) route_need_value --on-conflict "${2:-}"; R_ONCONFLICT="$2"; shift ;;
+      --on-existing-projects) route_need_value --on-existing-projects "${2:-}"
+        case "$2" in
+          leave|adopt) R_ONEXISTING="$2" ;;
+          # Validated HERE rather than where it is used, for the same reason --scope is: an
+          # unrecognised value that reaches the gate would read as "no answer given" and re-ask a
+          # question the caller already answered, with a typo as the invisible cause.
+          *) emit "result=error"; emit "reason=unknown_on_existing_projects"
+             emit "value=$2"
+             emit "note=--on-existing-projects must be leave or adopt. Nothing was done."
+             exit 3 ;;
+        esac
+        shift ;;
       --cache-strategy) route_need_value --cache-strategy "${2:-}"; R_STRATEGY="$2"; shift ;;
       --base-url) route_need_value --base-url "${2:-}"; R_BASEURL="$2"; shift ;;
       --health-url) route_need_value --health-url "${2:-}"; R_HEALTHURL="$2"; shift ;;

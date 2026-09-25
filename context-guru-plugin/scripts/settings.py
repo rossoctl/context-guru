@@ -35,6 +35,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -597,26 +598,196 @@ def is_user_scope(path: str) -> bool:
     return os.path.realpath(path) in user_scope_files()
 
 
-def scope_name_for(path: str) -> str:
-    """Which of the three scopes `path` is, purely from the path itself — no state read. Mirrors
-    install.sh's `route_scope_file()` mapping (project/team/user), named to match
-    `_option_file_candidates()`'s own ordering (project-local, project, user). "custom" covers a
-    hand-supplied path outside all three (e.g. `--attach` to something the user pointed at
-    directly) — still worth recording, just not one of the three named scopes.
+def scope_name_for(path: str, project_dir: str | None = None) -> str:
+    """Which of the three scopes `path` is FOR `project_dir` (default cwd) — not purely from the
+    path itself: "project-local" and "project" are relative to a project, and the project meant is
+    `project_dir`, which is not always the caller's cwd. Mirrors install.sh's `route_scope_file()`
+    mapping (project/team/user), named to match `_option_file_candidates()`'s own ordering
+    (project-local, project, user). "custom" covers a hand-supplied path outside all three (e.g.
+    `--attach` to something the user pointed at directly) — still worth recording, just not one of
+    the three named scopes.
+
+    `project_dir` matters as soon as a caller can pass a file that belongs to a DIFFERENT project
+    than its own cwd — which `record_install_scope`'s migration/tiebreak paths can: the winning
+    record after a sibling-worktree tiebreak may be a file under a worktree this call did not
+    start in. Comparing that file against `os.getcwd()` would misreport it as "custom" (a real
+    project-local file, just not THIS process's), which is exactly the bug this parameter exists
+    to avoid. Every call site that predates this parameter passed no argument and got `os.getcwd()`
+    — unchanged behavior for all of them.
     """
+    base = project_dir or os.getcwd()
     real = os.path.realpath(path)
-    if real == os.path.realpath(os.path.join(os.getcwd(), ".claude", "settings.local.json")):
+    if real == os.path.realpath(os.path.join(base, ".claude", "settings.local.json")):
         return "project-local"
-    if real == os.path.realpath(os.path.join(os.getcwd(), ".claude", "settings.json")):
+    if real == os.path.realpath(os.path.join(base, ".claude", "settings.json")):
         return "project"
     if is_user_scope(path):
         return "user"
     return "custom"
 
 
+# ---------------------------------------------------------------------------
+# Project identity — the key a per-project record (install-scope.json's port field, and anything
+# else genuinely per-project) is filed under.
+#
+# The defect this exists to fix: the plugin's state directory was keyed by PORT, and the port
+# defaulted to 8787 for every project regardless of what each project's own options said. Options
+# ARE correctly read per-project (see `_option_file_candidates`) — but two projects with
+# different presets were still sharing one proxy process, and start-proxy.sh's fingerprint check
+# resolved the disagreement by killing whichever proxy did not match the session that just
+# started. Every kill wiped the in-memory cache/store — the exact regression the idle-exit floor
+# in store/store_test.go already refuses to permit for cost reasons, arriving here for free every
+# time two projects disagreed. `port_alloc()` (below) is the other half of the actual fix; this
+# function only answers "which project is this", which is what a per-project port has to be keyed
+# on to mean anything.
+#
+# realpath(dir) alone is NOT the right identity, because a git worktree's directory is not the
+# project — a worktree of a repo IS that repo, sharing its options (`.claude/settings*.json`
+# candidates are read relative to cwd, and a worktree's own `.claude/` is typically the checked-out
+# tree, not a separate configuration) and, per the decision recorded in the plan this implements,
+# meant to share its port too. So the key is the MAIN checkout's directory, derived from git's own
+# notion of "the common dir every worktree of this repo shares" — and only realpath(dir) itself for
+# anything that is not a git worktree (a bare repo, no git at all, or an unusual layout this does
+# not recognise).
+_PROJECT_KEY_CACHE: dict[str, str] = {}
+
+
+def project_key(path: str | None = None) -> str:
+    """The identity a per-project record is filed under: the MAIN checkout's directory for a git
+    worktree, or realpath(dir) otherwise.
+
+    Fails open, always, and never raises: any missing git, non-zero exit, unrecognised output, or
+    timeout falls back to realpath(dir). This is reached from hook-time code paths (every
+    SessionStart, by way of `resolve_install_scope`), where nothing may block a session over a
+    project-identity lookup — a wrong-but-harmless identity (two projects that could have shared a
+    port do not) is a fine outcome; a hang or a traceback is not.
+
+    Memoised per process, keyed on realpath(dir): this is called from places that do not thread a
+    single resolved directory through (config reads, hook starts), and re-forking git on every one
+    of those calls in the same process would be the literal cost this identity was introduced to
+    avoid duplicating.
+    """
+    real_dir = os.path.realpath(path or os.getcwd())
+    cached = _PROJECT_KEY_CACHE.get(real_dir)
+    if cached is not None:
+        return cached
+    key = _resolve_project_key(real_dir)
+    _PROJECT_KEY_CACHE[real_dir] = key
+    return key
+
+
+def _resolve_project_key(real_dir: str) -> str:
+    common_dir = _git_common_dir(real_dir)
+    if common_dir and os.path.basename(common_dir.rstrip(os.sep)) == ".git":
+        # The ordinary case, and the worktree case: a plain checkout's common-dir IS its own
+        # `.git`, and every worktree of one repo shares that SAME common-dir (worktrees keep their
+        # own `.git` FILE, pointing at `<main>/.git/worktrees/<name>`, but `--git-common-dir`
+        # resolves past that to the one directory they all share) — so this branch returns the
+        # same key for the main checkout and for every worktree branched from it, which is exactly
+        # the "one repo, one record, one port" decision this function exists to implement.
+        return os.path.realpath(os.path.dirname(common_dir))
+    # A bare repo, or git succeeding with something this does not recognise. Guessing at an
+    # identity for that case risks being confidently wrong; realpath(dir) is still correct, only
+    # not worktree-aware, which is the safe direction to be wrong in.
+    return real_dir
+
+
+def _git_common_dir(real_dir: str) -> str:
+    """The absolute `--git-common-dir` git reports for `real_dir`, or "" on anything short of a
+    clean answer (missing git, a timeout, not a repo, non-zero exit). ~2s timeout, because this is
+    reached from hook-time code paths and a hanging git must not hang a session start.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", real_dir, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode == 0:
+        out = result.stdout.strip()
+        return os.path.realpath(out) if out else ""
+    # `--path-format` needs git >= 2.31 ("unknown option" on anything older) — retry the bare form
+    # and resolve its answer, which may be RELATIVE, against `real_dir` ourselves.
+    try:
+        result = subprocess.run(
+            ["git", "-C", real_dir, "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    out = result.stdout.strip()
+    if not out:
+        return ""
+    return os.path.realpath(out if os.path.isabs(out) else os.path.join(real_dir, out))
+
+
 def install_scope_path() -> str:
     """One file, machine-wide, keyed by project — there is one state directory, not one per repo."""
     return os.path.join(state_dir(), "install-scope.json")
+
+
+def _record_still_routes(record: dict) -> bool:
+    """Is `record["file"]` still the file actually routing us — i.e. does it still exist and
+    still carry our env var? Fail-open: any read trouble (missing file, unreadable, corrupt JSON)
+    reports False rather than raising, the same as a project that was never routed at all. Used
+    only to break a tie between two migration-candidate records that both claim the same project;
+    a wrong-but-harmless answer here just falls through to the `recorded_at` tiebreak below it.
+    """
+    file = record.get("file")
+    if not file or not os.path.exists(file):
+        return False
+    try:
+        data, _existed = load(file)
+    except OSError:
+        return False
+    current = (data.get("env") or {}).get(KEY)
+    return bool(current) and is_ours(data, current)
+
+
+def _pick_still_routing_record(a: dict, b: dict) -> dict:
+    """Tiebreak between two `install-scope.json` records that both migrate onto the same
+    `project_key()` — see the MIGRATION TIEBREAK note on `resolve_install_scope`. Prefer whichever
+    one's file is still actually routing; when that does not distinguish them (both or neither
+    still route), prefer the more recently `recorded_at` one. `recorded_at` is an ISO-8601 UTC
+    timestamp, so a plain string comparison orders it correctly; a record missing the field (it
+    always has one, but this must never raise) sorts as older than any that has one.
+    """
+    a_routes, b_routes = _record_still_routes(a), _record_still_routes(b)
+    if a_routes != b_routes:
+        return a if a_routes else b
+    return a if (a.get("recorded_at") or "") >= (b.get("recorded_at") or "") else b
+
+
+def _valid_scope_record(record: object) -> bool:
+    return isinstance(record, dict) and bool(record.get("scope")) and bool(record.get("file"))
+
+
+def _sibling_legacy_records(new_key: str, old_key: str, projects: dict) -> list[tuple[str, dict]]:
+    """Every pre-migration record in `projects`, OTHER than whatever is already filed under
+    `new_key`, that belongs to the SAME project identity — this call's own `old_key` record (if
+    it has one), plus, opportunistically, any OTHER worktree's still-unmigrated legacy record.
+
+    This call's own `old_key` is trusted without re-deriving its `project_key()` — the caller
+    already knows it resolves to `new_key`, by construction. Any OTHER key in the file is only
+    probed (a fresh `project_key(key)` call, which forks `git`) when its directory still exists:
+    a worktree that has since been deleted cannot be asked its own git-common-dir any more, and
+    guessing at its identity from a stale path risks being confidently wrong. Left unprobed, it
+    just sits in the file as an orphan record. Nothing routes through a deleted directory
+    regardless of what its record says, so it misleads no reader — but it is not entirely free
+    either: it names a port, and `_recorded_ports` skips exactly these records for that reason, so
+    that an abandoned checkout does not hold a port out of every other project's pool forever.
+    """
+    out: list[tuple[str, dict]] = []
+    own = projects.get(old_key)
+    if _valid_scope_record(own):
+        out.append((old_key, own))
+    for key, record in projects.items():
+        if key in (new_key, old_key) or not _valid_scope_record(record):
+            continue
+        if os.path.isdir(key) and project_key(key) == new_key:
+            out.append((key, record))
+    return out
 
 
 def _read_install_scopes() -> dict:
@@ -634,19 +805,72 @@ def _read_install_scopes() -> dict:
     return projects if isinstance(projects, dict) else {}
 
 
-def record_install_scope(file: str) -> None:
-    """Record which scope `file` is, for THIS project (cwd), so a later command — the statusline
-    skill, `preset`, anything else that writes a Claude settings file — can read back the choice
-    the user already made instead of guessing at one of its own. Called from every routing-success
-    branch of `cmd_add`. Fail-open: a write here must never fail the routing install it rides on.
+def record_install_scope(file: str, project_dir: str | None = None, scope_dir: str | None = None,
+                         drop_keys: list[str] | None = None) -> None:
+    """Record which scope `file` is, for THIS project (`project_dir`, default cwd), so a later
+    command — the statusline skill, `preset`, anything else that writes a Claude settings file —
+    can read back the choice the user already made instead of guessing at one of its own. Called
+    from every routing-success branch of `cmd_add`. Fail-open: a write here must never fail the
+    routing install it rides on.
+
+    `project_dir` is accepted explicitly, rather than always reading `os.getcwd()`, so
+    `resolve_install_scope`'s migration and self-heal branches — which may already have resolved
+    an identity for a directory that is not necessarily the caller's cwd at the moment this runs —
+    can record under the SAME key they just computed, instead of this function re-deriving it (and
+    running `git` a second time) from whatever the cwd happens to be.
+
+    `scope_dir` overrides ONLY what `scope_name_for(file, ...)` compares `file` against; it defaults
+    to `project_dir`. They differ when a migration tiebreak's WINNER is a sibling worktree's file
+    rather than this call's own: `scope_name_for` needs the directory that `file` actually lives
+    under (the sibling's), not `project_dir` (this call's own, which is what `file` would need to
+    live under to read as anything but "custom"). Getting this wrong only mislabels the `scope`
+    field, never the `file` itself, so it is worth getting right but not worth blocking a write
+    over.
+
+    MIGRATION: `project_key()` postdates this file's original key, `realpath(cwd)`. A record still
+    filed under that old key for this project is dropped here rather than left beside the new one
+    — otherwise a project that predates `project_key()` would fork into two entries (one per
+    identity) instead of having its one entry rewritten, and a later read keyed on the OLD identity
+    (say, from a worktree whose cwd differs from its main checkout) would find stale data instead
+    of nothing.
+
+    `drop_keys` names ADDITIONAL keys to remove in the same write — the losing candidates of a
+    migration tiebreak, which are this project's records under sibling worktrees' pre-migration
+    keys. Only the caller that ran the tiebreak knows which keys those were, so they have to be
+    passed in: without this, a loser sat in the file forever, and because `resolve_install_scope`
+    re-probes every surviving sibling key on every call, each leftover cost a `git` fork on every
+    SessionStart and had its `port` counted as another project's, burning a port for nothing.
     """
     try:
         projects = _read_install_scopes()
-        projects[os.path.realpath(os.getcwd())] = {
-            "scope": scope_name_for(file),
-            "file": os.path.realpath(file),
-            "recorded_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        }
+        new_key = project_key(project_dir)
+        old_key = os.path.realpath(project_dir or os.getcwd())
+        old_entry = projects.pop(old_key, None) if old_key != new_key else None
+        # Losers are dropped, but their `port` is still this project's port if nothing else in the
+        # file carries one — see the carry-forward note below. `new_key` is never dropped.
+        dropped = [projects.pop(key) for key in (drop_keys or [])
+                   if key != new_key and key in projects]
+        existing_new_entry = projects.get(new_key)
+
+        # This call IS authoritative about scope/file/recorded_at — it is running because routing
+        # (or a migration/tiebreak that just decided the same thing) knows THIS is where the
+        # project routes now. Carrying those three fields over from a stale entry would leave a
+        # stale `file` in place after e.g. a scope change — exactly the kind of stale-pointer bug
+        # Phase 3 exists to fix for proxies, and not one to reintroduce here.
+        #
+        # `port`, however, is allocated by an entirely separate command (`port alloc`, added in a
+        # later phase) that this call knows nothing about; it is the one field to carry FORWARD
+        # rather than silently reset, so a routing rewrite never looks like a port release. The
+        # entry already at `new_key` wins over a stale `old_key` legacy entry if both have one,
+        # which in turn wins over a dropped sibling's — weakest source first, last write wins.
+        entry: dict = {}
+        for candidate in (*dropped, old_entry, existing_new_entry):
+            if isinstance(candidate, dict) and "port" in candidate:
+                entry["port"] = candidate["port"]
+        entry["scope"] = scope_name_for(file, scope_dir or project_dir)
+        entry["file"] = os.path.realpath(file)
+        entry["recorded_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        projects[new_key] = entry
         ensure_state_dir(state_dir())
         _write_atomic(install_scope_path(),
                        (json.dumps({"version": 1, "projects": projects}, indent=2) + "\n")
@@ -659,15 +883,69 @@ def resolve_install_scope(project_dir: str | None = None) -> tuple[str | None, s
     """(scope, file, source) for `project_dir` (default cwd) — the one place every settings-writer
     other than `add`'s own routing write should ask "which file", instead of hardcoding one.
 
-    `source` is "recorded" (install already ran and told us), "inferred" (no record, but one of
-    the three candidate files is routing THIS project — a project that predates this feature, or
-    was routed by hand; the answer is self-healed into the record so the probe below runs at most
-    once per project), or None (nothing anywhere — the caller's answer is "ask").
+    `source` is "recorded" (install already ran and told us, filed under the current key),
+    "inferred" (no record under either key, but one of the three candidate files is routing THIS
+    project — a project that predates this feature, or was routed by hand; the answer is
+    self-healed into the record so the probe below runs at most once per project), or None
+    (nothing anywhere — the caller's answer is "ask").
+
+    MIGRATION, which must not be skipped: `install-scope.json` records written before
+    `project_key()` existed are keyed on the OLD identity, `realpath(cwd)`. Every read here tries
+    the current key first and, only on a miss, the old one — and a hit under the old key is
+    rewritten under the new one and dropped from the old, the same self-healing shape the
+    "inferred" branch below already uses for a project with no record at all. Skipping this would
+    leave every pre-existing install invisible to `project_key()`-keyed lookups: `resolve-scope`
+    would report "(ask)" for a project that is, in fact, already routed.
+
+    MIGRATION TIEBREAK: `project_key()` collapses every worktree of one repo onto the SAME
+    `new_key`, but each worktree kept its OWN pre-migration record (one per `realpath(worktree)`).
+    Those records migrate lazily, one `project_dir` at a time — so the FIRST call for ANY worktree
+    of a repo can land here with no entry at `new_key` yet, only its own `old_key` legacy record,
+    while a SIBLING worktree's legacy record (under a different, not-yet-migrated `old_key`) sits
+    unexamined elsewhere in the same file. Migrating blindly onto whichever call happens to run
+    first would let an abandoned worktree's stale record win permanently over the one that is
+    actually live, just because it was resolved first. So every call gathers every candidate that
+    could be THIS project's record — the current `new_key` entry if any, this call's own `old_key`
+    legacy entry if any, and any OTHER not-yet-migrated key whose directory still exists and whose
+    own `project_key()` also comes out to `new_key` — and picks among ALL of them: whichever
+    record's `file` is still ACTUALLY routing (still has our env var pointed at it) wins, and only
+    when that does not distinguish them (all or none still route) does the more recently
+    `recorded_at` one win. A sibling worktree that was later deleted cannot be probed any more (its
+    directory is gone) and is left as a harmless orphan record rather than guessed at.
     """
-    project = os.path.realpath(project_dir or os.getcwd())
-    recorded = _read_install_scopes().get(project)
+    projects = _read_install_scopes()
+    new_key = project_key(project_dir)
+    old_key = os.path.realpath(project_dir or os.getcwd())
+
+    recorded = projects.get(new_key)
+    candidates: list[tuple[str, dict]] = []
     if isinstance(recorded, dict) and recorded.get("scope") and recorded.get("file"):
-        return recorded["scope"], recorded["file"], "recorded"
+        candidates.append((new_key, recorded))
+    if old_key != new_key:
+        candidates.extend(_sibling_legacy_records(new_key, old_key, projects))
+
+    winner_key, winner = None, None
+    for key, record in candidates:
+        if winner is None:
+            winner_key, winner = key, record
+        elif _pick_still_routing_record(winner, record) is record:
+            winner_key, winner = key, record
+
+    if winner is not None:
+        # A single candidate that is ALREADY the current `new_key` entry needs no write — the
+        # common case, and the one the fast path used to take before any sibling ever existed.
+        # Anything else (a legacy record to migrate, or more than one candidate to collapse into
+        # the winner and clean the losers out of the file) is worth the write.
+        if not (len(candidates) == 1 and candidates[0][0] == new_key):
+            # `winner_key` is the directory `winner["file"]` actually lives under — this call's
+            # own `old_key`, or a sibling worktree's key from `_sibling_legacy_records` — UNLESS
+            # the winner is the entry already at `new_key`, whose own originating directory this
+            # call was never told; `scope_dir=None` there falls back to `project_dir` (see
+            # `record_install_scope`'s docstring for what that can still get wrong).
+            scope_dir = winner_key if winner_key != new_key else None
+            record_install_scope(winner["file"], project_dir, scope_dir=scope_dir,
+                                 drop_keys=[key for key, _ in candidates if key != new_key])
+        return winner["scope"], winner["file"], "recorded"
 
     prev_cwd = os.getcwd()
     try:
@@ -679,11 +957,469 @@ def resolve_install_scope(project_dir: str | None = None) -> tuple[str | None, s
             data, _existed = load(path)
             current = (data.get("env") or {}).get(KEY)
             if current and is_ours(data, current):
-                record_install_scope(path)
+                record_install_scope(path, project_dir)
                 return scope_name_for(path), os.path.realpath(path), "inferred"
     finally:
         os.chdir(prev_cwd)
     return None, None, None
+
+
+# ---------------------------------------------------------------------------
+# Port allocation — one port per project, always.
+#
+# The defect this half of the fix removes: the port defaulted to 8787 for EVERY project, so two
+# projects with different presets shared one proxy process, and start-proxy.sh's fingerprint
+# check resolved the disagreement by killing whichever proxy did not match — wiping the in-memory
+# cache/store on every flip between them. `project_key()` (above) answers "which project is
+# this"; this section answers "which port is THIS project's, and does it collide with anyone
+# else's" — the two questions a per-project port has to answer to mean anything.
+#
+# Allocation order, cheapest and least surprising first:
+#   1. this project already has a recorded port -> return it UNCHANGED. Reinstall, update and
+#      repair must never move a project's port: the URL is already written into a settings file,
+#      and moving it here would silently break every session still pointed at the old one.
+#   2. an EXPLICITLY configured port (the key is PRESENT in pluginConfigs[plugin].options, not
+#      merely equal to the default) -> honour it and record it, never reallocated later even if
+#      the option is subsequently removed from the file.
+#   3. otherwise scan upward from the default, skipping every port another project has already
+#      recorded and every port that refuses to bind right now.
+# The default is 8787 (plugin.json's `port.default`, asserted equal to this by a drift test —
+# see the note on `_explicit_configured_port` about presence vs. value). `CONTEXT_GURU_PORT_BASE`
+# overrides where the SCAN starts, without touching that default: it exists only so a test suite
+# running on a box another engineer's real services also use can point the scan at a range nobody
+# else holds, rather than actually binding real ports in 8787..8850 on a shared machine. Never set
+# by a normal install; there is no user-facing reason to move the scan window.
+PORT_SCAN_START = int(os.environ.get("CONTEXT_GURU_PORT_BASE") or 8787)
+PORT_SCAN_END = PORT_SCAN_START + 63  # "8787..8850 is plenty" — 64 ports is far more than this
+                       # machine will ever have projects for, and an unbounded scan is a way to
+                       # hang on a machine whose firewall makes every bind attempt time out
+                       # instead of refuse.
+
+
+def _port_bindable(port: int) -> bool:
+    """Best-effort: can 127.0.0.1:<port> be bound right now? Bound and closed immediately,
+    deliberately WITHOUT SO_REUSEADDR, so a port something else is actively listening on is
+    reported as taken.
+
+    This is TOCTOU by nature — nothing stops a second `install` running between this probe and
+    the proxy actually binding. That is accepted deliberately rather than added locking, because
+    Phase 3 makes start-proxy.sh REPORT a foreign occupant instead of killing it: the failure mode
+    of a lost race is a clear conflict message, never silent co-tenancy or a killed proxy.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _explicit_configured_port(plugin: str) -> tuple[int | None, str]:
+    """(port, file) from the first candidate file (most specific first) where `options.port` is
+    literally PRESENT, or (None, "") if none has it.
+
+    Presence, not value, is what "explicit" means here — deliberately. Comparing the configured
+    value against the plugin.json default (8787) cannot tell "the user typed 8787 on purpose"
+    apart from "nothing is configured and 8787 is simply what applies", and the two have to be
+    treated differently: the first must never be reallocated even though it happens to equal what
+    an unconfigured project would have gotten anyway.
+    """
+    for path in _option_file_candidates(plugin):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        opts = (((data.get("pluginConfigs") or {}).get(plugin) or {}).get("options") or {})
+        if not isinstance(opts, dict) or "port" not in opts:
+            continue
+        value = opts["port"]
+        # bool is an int subclass in Python — exclude it explicitly, since `"port": true` is not a
+        # port and treating it as one (True == 1) would silently "honour" a typo as port 1.
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value, path
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value), path
+        # Present but not a usable number — a hand-edited file, most likely. Not trustworthy
+        # enough to honour OR to record; fall through to the scan rather than write back
+        # something nobody actually configured.
+        continue
+    return None, ""
+
+
+def _recorded_ports(exclude_key: str) -> set[int]:
+    """Every port some OTHER project already has recorded, so the scan in `cmd_port`'s `alloc`
+    never hands out one of them. `exclude_key` is this project's own key — its own recorded port
+    (if any) is not a collision with itself, and rule 1 already returns it unchanged before this
+    is ever consulted.
+
+    A record whose project directory no longer exists is SKIPPED. Without that, every deleted
+    checkout held its port out of the pool permanently: the scan range is 64 ports wide, uninstall
+    is the only thing that releases a record, and deleting a project directory is a far more
+    ordinary way for one to end than running uninstall first. The pool would shrink by one for
+    every clone a user ever threw away, and the eventual failure is `no_port_available` on a
+    machine where nothing is listening on any of them.
+
+    Skipping is safe because it is not the last line of defence: the caller only accepts a
+    candidate that `_port_bindable` also confirms nothing is listening on, so re-issuing a port
+    whose record is an orphan can never steal one from a live proxy. It can only reuse a number
+    whose owner is genuinely gone. (`proxy-<port>.owner` is the other half — it is what refuses an
+    install onto a port a LIVE proxy owns, and uninstall removes it alongside the record.)
+
+    Returns (used, orphans), where `orphans` maps a port to the absent-directory records holding
+    it. Skipping alone was not enough and the second half is not optional: the orphan record STAYS
+    in the file, and rule 1 of `alloc` hands a recorded port straight back, so a directory that
+    came back — a re-clone at a path used before, an unmounted volume returning — ended up with a
+    record naming a port that had since been reissued to someone else. Two projects on one port is
+    the exact defect this whole change exists to remove, so the caller drops the orphan record in
+    the same write that reissues its port.
+    """
+    used: set[int] = set()
+    orphans: dict[int, list[str]] = {}
+    for key, rec in _read_install_scopes().items():
+        if key == exclude_key:
+            continue
+        if not isinstance(rec, dict) or not isinstance(rec.get("port"), int):
+            continue
+        # os.path.isdir, not any attempt to re-derive the project's identity: a deleted directory
+        # cannot be asked anything, and the only question here is whether it is still there.
+        if os.path.isdir(key):
+            used.add(rec["port"])
+        else:
+            orphans.setdefault(rec["port"], []).append(key)
+    return used, orphans
+
+
+def owner_token() -> tuple[str, str]:
+    """Who owns the proxy on this project's port, as `start-proxy.sh` must compare it.
+
+    Returns (token, scope).
+
+    The owner file exists so that one project never kills a proxy another project is being served
+    by. `project_key()` was the wrong token for that, because it answers a different question:
+    "who am I", not "who is this port shared with". Under `--scope user` there is ONE settings
+    file, therefore one `port` option, therefore ONE port shared by every project on the machine —
+    that being exactly what machine-wide means — while every project still has its own
+    `project_key()`. Keying the owner on the project made every project but the first a stranger to
+    the proxy it is supposed to be using: the veto fires before the fingerprint comparison, so a
+    preset change made from any non-owning project never restarted the proxy and never took
+    effect, and every one of those sessions was told "this project should have its own port", which
+    is the precise opposite of the install the user asked for.
+
+    So the token is keyed on the ROUTING SCOPE, which is the thing that actually decides whether
+    the port is shared: a machine-wide route yields one token for every project that shares it; a
+    project-scoped route yields this project's key, because only that project routes to it.
+    """
+    scope, file, _source = resolve_install_scope()
+    if scope == "user":
+        # The user settings file, not the bare word: two HOMEs on one machine (a test harness, a
+        # second account) are two machine-wide installs, and they must not claim each other's
+        # proxy just because both call themselves `user`.
+        return "user:" + (os.path.realpath(file) if file else user_scope_files()[0]), scope
+    return project_key(), scope
+
+
+def cmd_owner_token(args: argparse.Namespace) -> int:
+    token, scope = owner_token()
+    scope = scope or "(none)"   # nothing routed yet; a literal "None" in the output would be noise
+    if not args.observed:
+        emit(result="ok", owner=token, scope=scope)
+        return 0
+
+    observed = args.observed.strip()
+    if observed == token:
+        emit(result="ok", owner=token, scope=scope, verdict="ours", reason="exact")
+        return 0
+
+    if scope == "user" and not observed.startswith("user:"):
+        # A bare path under a MACHINE-WIDE route. Two ways to get here, and they need opposite
+        # answers, so the file alone cannot decide — the install records can:
+        #
+        #  - a proxy started before this token existed, by whichever project happened to go first.
+        #    Ours: the port is shared by every project this route covers, and deferring to a claim
+        #    from a scheme we no longer use would veto the restart forever, on state nobody can
+        #    clear. That is the regression finding 2 of the review is about — a preset change made
+        #    from any non-owning project never took effect.
+        #  - a project that installed ITSELF on this port and is genuinely being served by that
+        #    proxy. Theirs, machine-wide route or not: it is not covered by this route (its own
+        #    settings file is more specific and keeps winning), so stopping its proxy would take
+        #    away the one it is actually using.
+        #
+        # The discriminator is whether that path still routes itself, which is precisely what the
+        # `--on-existing-projects` gate asks about. Note `adopt` makes the answer "no" for the
+        # projects it folds in, which is right: they are covered by this route afterwards.
+        rec = _read_install_scopes().get(observed)
+        if not (isinstance(rec, dict)
+                and rec.get("scope") in ("project", "project-local", "custom")
+                and bool(rec.get("file")) and os.path.isdir(observed)):
+            emit(result="ok", owner=token, scope=scope, verdict="ours", reason="legacy_unscoped",
+                 observed=observed)
+            return 0
+
+    # Any other difference is a stranger, unchanged from the plain string comparison this replaced:
+    # under a PROJECT-scoped route the port belongs to one project, so a different owner — recorded
+    # or not, existing or not — is somebody else's and is left alone. Deliberately not self-healed
+    # here: a project-scoped session has its own port to go to, so the cost of being wrong is a
+    # session without a proxy, against killing a proxy another project is using.
+    emit(result="ok", owner=token, scope=scope, verdict="theirs", observed=observed)
+    return 0
+
+
+def cmd_port(args: argparse.Namespace) -> int:
+    key = project_key()
+
+    if args.op == "show":
+        rec = _read_install_scopes().get(key)
+        port = rec.get("port") if isinstance(rec, dict) else None
+        # `record=` and `option_port=` exist so a caller can undo PRECISELY. install.sh's step 0
+        # commits the port before anything else can fail, and its unwind could not tell "the record I
+        # just made" from "the record that was already here": `result=ok` also covers
+        # source=recorded and source=configured, so a failed RE-install of a working install deleted
+        # that project's record and the user's pinned `options.port` while `ANTHROPIC_BASE_URL` still
+        # named the old port — routed at a port the next session would not even compute. Read the
+        # prior state, undo only what you made.
+        state = "present" if isinstance(port, int) else "absent"
+        opt: object = "(none)"
+        if args.file:
+            try:
+                with open(args.file, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                opts = (((data.get("pluginConfigs") or {}).get(args.plugin) or {})
+                        .get("options") or {})
+                if isinstance(opts, dict) and "port" in opts:
+                    opt = opts["port"]
+            except FileNotFoundError:
+                pass
+            except (OSError, json.JSONDecodeError):
+                # Unreadable is NOT absent. A caller that treats it as absent would "undo" an option
+                # it never saw, which is the same overreach in a quieter form.
+                opt = "(unreadable)"
+        if isinstance(port, int):
+            emit(result="ok", port=port, record=state, option_port=opt)
+        else:
+            emit(result="ok", port="(none)", record=state, option_port=opt,
+                 note="no port recorded for this project")
+        return 0
+
+    if args.op == "release":
+        # Uninstall's call. Removes the WHOLE project record, not just the port field — a project
+        # that has stopped routing has nothing left for `resolve_install_scope` to answer either,
+        # and leaving a scope/file/port shell behind would misreport it as still configured.
+        # Fail-open: this must never be load-bearing for uninstall completing, per the plan.
+        projects = _read_install_scopes()
+        # --key names the project directly, for a caller acting on a project it is not running in
+        # (install.sh's `adopt`). Without it the only way to name a project was to `cd` into it,
+        # which is a second way for a path to get mangled on the way there.
+        #
+        # The LITERAL key first, and only then the resolved one. `project_key()` of a git worktree is
+        # the MAIN CHECKOUT, so resolving unconditionally meant that for a record keyed by a worktree
+        # path — which is what every install from a worktree before the migration left behind, since
+        # the migration lives in `record_install_scope` and the `scopes` gate never reaches a write
+        # path — this popped the main checkout's row instead. `adopt` then deleted the record the
+        # running install had just written for itself and left the row it was told to remove in
+        # place: the exact inverse of the request, silently, reported as `released`.
+        if getattr(args, "key", None):
+            if args.key in projects:
+                key = args.key
+            elif os.path.isdir(args.key):
+                key = project_key(args.key)
+            else:
+                key = args.key
+            # And never this project, whatever the key resolved to. A caller that names ANOTHER
+            # project can only be wrong if it ends up here, and the record this process is running
+            # under is the one nothing else can reconstruct — `ANTHROPIC_BASE_URL` in the settings
+            # file survives it and names a port nobody can compute again. The own-project release is
+            # uninstall's, and uninstall passes no --key.
+            #
+            # Fail-open like the rest of `release`: exit 0, because this must never be the thing that
+            # blocks an uninstall, and a refusal that is reported is not a failure.
+            if key == project_key():
+                emit(result="refused", reason="key_is_this_project", key=args.key, resolved=key,
+                     note="--key names the project this process is running in; releasing it here "
+                          "would delete the caller's own record. Run `release` without --key to "
+                          "release this project deliberately.")
+                return 0
+        removed = projects.pop(key, None)
+        if removed is None:
+            emit(result="unchanged", note="no record for this project")
+            return 0
+        try:
+            ensure_state_dir(state_dir())
+            _write_atomic(install_scope_path(),
+                           (json.dumps({"version": 1, "projects": projects}, indent=2) + "\n")
+                           .encode("utf-8"), mode=0o600)
+        except OSError as exc:
+            emit(result="skipped", reason="unwritable", detail=f"{exc}",
+                 note="the record could not be removed, but this must never block uninstall")
+            return 0
+        released_port = removed.get("port", "(none)") if isinstance(removed, dict) else "(none)"
+        emit(result="released", port=released_port)
+        return 0
+
+    if args.op == "unset":
+        # Remove the `port` OPTION from one settings file, leaving everything else in it alone.
+        # Needed by install.sh's `--on-existing-projects adopt`: a project being folded into a
+        # user-scope install stops having its own route, and a leftover per-project `port` would
+        # then point its hooks at a port nothing serves — worse than the state before, because the
+        # project looks configured. Deliberately does NOT touch install-scope.json; `release` owns
+        # that, and the caller runs both.
+        if not args.file:
+            emit(result="error", reason="unset_needs_a_file")
+            return 3
+        data, existed = load(args.file)
+        if not existed:
+            emit(result="unchanged", file=args.file, note="no such file")
+            return 0
+        options = (((data.get("pluginConfigs") or {}).get(args.plugin) or {}).get("options"))
+        if not isinstance(options, dict) or "port" not in options:
+            emit(result="unchanged", file=args.file, note="no port option here")
+            return 0
+        saved = backup(args.file)
+        del options["port"]
+        save(args.file, data)
+        emit(result="removed", file=args.file, backup=saved)
+        return 0
+
+    # op == alloc
+    projects = _read_install_scopes()
+    rec = projects.get(key)
+
+    drop_orphans: list[str] = []
+    if isinstance(rec, dict) and isinstance(rec.get("port"), int):
+        port, source = rec["port"], "recorded"
+        # VERIFY, do not assume. Returning a recorded port unchanged is right — the URL naming it
+        # is already written into a settings file, and moving it would strand that file — but it
+        # must not paper over a port two live projects both have recorded. Reachable from a
+        # hand-edited install-scope.json, a restored backup, or (before the orphan drop above) a
+        # directory that came back after its port was reissued. No allocation can resolve this:
+        # both records are equally real, and picking one silently is how the projects end up
+        # sharing a proxy with different presets. `port=` is still emitted, deliberately, so a
+        # caller that fails open does so onto THIS project's own recorded port rather than onto
+        # the plugin.json default, which would be a different project's proxy again.
+        # SHARING ONE FILE IS NOT A CLASH. A machine-wide (`--scope user`) install is one settings
+        # file, therefore one `port` option, therefore one port for every project it routes — by
+        # design, that being what machine-wide means. So the question is not "does another project
+        # have this port" but "does another project ROUTE ITSELF to it": same file, no clash;
+        # different file (or no file yet, which cannot be shown to be the same one), a clash.
+        my_file = rec.get("file") if isinstance(rec, dict) else None
+        clash = sorted(k for k, r in projects.items()
+                       if k != key and isinstance(r, dict) and r.get("port") == port
+                       and os.path.isdir(k)
+                       and not (my_file and r.get("file") == my_file))
+        if clash:
+            emit(result="error", reason="port_recorded_by_another_project", port=port,
+                 source=source, other_project=clash[0], others=len(clash),
+                 note=f"port {port} is recorded for this project AND for {clash[0]}; nothing was "
+                      "written. Clear the port option in one of them (or uninstall there) so a "
+                      "fresh port is allocated — two projects on one port is what this allocation "
+                      "exists to prevent")
+            return 3
+    else:
+        explicit_port, _explicit_file = _explicit_configured_port(args.plugin)
+        if explicit_port is not None:
+            port, source = explicit_port, "configured"
+        else:
+            used, orphans = _recorded_ports(key)
+            port = None
+            for candidate in range(PORT_SCAN_START, PORT_SCAN_END + 1):
+                if candidate in used or not _port_bindable(candidate):
+                    continue
+                port = candidate
+                break
+            # Whatever absent-directory records were holding the port we just took go with it — see
+            # _recorded_ports. Nothing is lost by dropping them: if such a project comes back, its
+            # own settings file still carries the `port` option this command wrote, so rule 2
+            # (`configured`) hands it the same port back without the record.
+            drop_orphans = list(orphans.get(port, [])) if port is not None else []
+            if port is None:
+                emit(result="error", reason="no_port_available",
+                     note=f"every port from {PORT_SCAN_START} to {PORT_SCAN_END} is either "
+                          "recorded by another project or refused to bind; nothing was written")
+                return 3
+            source = "allocated"
+
+    if args.dry_run:
+        # A preview only — no write to install-scope.json, no write to any settings file, no
+        # reservation. Used by install.sh's `--plan`, which must not write anything at all: an
+        # allocation made during a plan a user never confirms would commit this project to a port
+        # (and take it out of the pool for every other project) before consent was even asked.
+        emit(result="ok", port=port, source=source,
+             note="dry run: nothing was recorded or written")
+        return 0
+
+    if args.promised_port is not None and port != args.promised_port:
+        # The port a `--dry-run` reported (and this project's user consented to, in whatever URL
+        # install.sh's --plan showed) is no longer the port a REAL alloc would pick — someone else
+        # took it, or an explicit config changed, in the gap between the plan and this call.
+        # plugin.json says the port "must be FIXED rather than negotiated": writing a URL nobody
+        # actually agreed to would negotiate it anyway, silently. Refuse instead of writing
+        # anything, distinctly from "no port available" — the caller must re-plan and get fresh
+        # consent for whatever port is real now, not just retry.
+        emit(result="error", reason="port_changed_since_plan", promised=args.promised_port,
+             port=port, note="the port promised at plan time is no longer the one a real "
+                  "allocation would pick; nothing was written — re-run --plan for fresh consent")
+        return 3
+
+    try:
+        entry = dict(rec) if isinstance(rec, dict) else {}
+        entry["port"] = port
+        projects[key] = entry
+        for orphan_key in drop_orphans:
+            projects.pop(orphan_key, None)
+        ensure_state_dir(state_dir())
+        _write_atomic(install_scope_path(),
+                       (json.dumps({"version": 1, "projects": projects}, indent=2) + "\n")
+                       .encode("utf-8"), mode=0o600)
+    except OSError as exc:
+        emit(result="error", reason="unwritable_install_scope", detail=f"{exc}",
+             note="the port was chosen but could not be recorded; a later call may pick a "
+                  "different one")
+        return 3
+
+    # Also write it into the plugin's OWN options, at the scope routing already uses — not a
+    # second scope decision, the SAME one `resolve_install_scope` already answers for the
+    # statusline and for `preset`'s fallback (see cmd_preset's own `target is None` branch, which
+    # takes the identical fallback below when nothing is configured or routed yet). This is what
+    # makes every hook see the right port with no new lookup: CLAUDE_PLUGIN_OPTION_PORT already
+    # resolves per-scope once this key exists in the file the scope points at.
+    #
+    # Skipped when the port came from rule 2 (`configured`): it is already present in whichever
+    # file the user (or a previous install) put it in, and writing it again into a DIFFERENT file
+    # — `target` here need not be the same file `_explicit_configured_port` found it in — would
+    # create a redundant second copy rather than honour the one that already exists.
+    target = args.file
+    if source != "configured":
+        if not target:
+            _scope, resolved_file, _source = resolve_install_scope()
+            target = resolved_file or os.path.join(".claude", "settings.local.json")
+        data, existed = load(target)
+        plugins = data.setdefault("pluginConfigs", {})
+        if not isinstance(plugins, dict):
+            emit(result="error", reason="pluginConfigs_not_an_object", file=target)
+            return 3
+        plugin_entry = plugins.setdefault(args.plugin, {})
+        if not isinstance(plugin_entry, dict):
+            emit(result="error", reason="plugin_entry_not_an_object", file=target)
+            return 3
+        options = plugin_entry.setdefault("options", {})
+        if not isinstance(options, dict):
+            emit(result="error", reason="options_not_an_object", file=target)
+            return 3
+        if options.get("port") != port:
+            # A JSON int, never a string — plugin.json types `port` as `"number"`, and a stray
+            # quoted value here would make `CLAUDE_PLUGIN_OPTION_PORT` carry the string "8787"
+            # rather than the number every reader of it expects.
+            if existed:
+                backup(target)
+            options["port"] = port
+            save(target, data)
+
+    emit(result="ok", port=port, source=source, file=target or "(unchanged; already configured)")
+    return 0
 
 
 def _write_atomic(path: str, data: bytes, mode: int = 0o600) -> None:
@@ -1090,6 +1826,48 @@ def cmd_resolve_scope(_args: argparse.Namespace) -> int:
                   "the same choice /context-guru:install would ask")
         return 0
     emit(result="ok", scope=scope, file=file, source=source)
+    return 0
+
+
+def cmd_project_key(_args: argparse.Namespace) -> int:
+    """Read-only: the identity this project's per-project state is filed under. Nothing but a
+    lookup — `project_key` itself already fails open to `realpath(cwd)`, so this cannot fail in a
+    way a caller has to handle, which is what lets start-proxy.sh use it on a hook path.
+    """
+    emit(result="ok", key=project_key())
+    return 0
+
+
+def cmd_scopes(_args: argparse.Namespace) -> int:
+    """Read-only: every per-project routing record there is, one line each.
+
+    Exists for install.sh's `--scope user` gate. A user-scope install routes EVERY project on the
+    machine, so a project that already has its OWN routing is about to start overriding the
+    machine-wide one it just asked for — silently, because the more specific settings file simply
+    wins. The install cannot answer whether that is what the user wanted, so it has to be able to
+    LIST them and ask; that is all this does.
+
+    One line per record, each carrying the whole record, rather than numbered keys: the consumer is
+    bash, and a `project_1=`/`scope_1=`/`port_1=` shape makes it assemble records out of parallel
+    arrays, which is how a report ends up pairing one project's path with another's port.
+    """
+    projects = _read_install_scopes()
+    emit(result="ok", count=len(projects))
+    for key in sorted(projects):
+        record = projects[key]
+        if not isinstance(record, dict):
+            continue
+        # A record with a port but no scope/file is NOT a project that routes itself. `port alloc`
+        # writes the port before the routing write, so a plan that stopped at a later gate, or an
+        # install that failed after step 0, leaves exactly that shape behind. Reported on its own
+        # line: the `--scope user` gate reads `existing_project=` to decide whose routing would
+        # override the machine-wide one, and a project with no routing overrides nothing — listing
+        # it there refused an install over a project that was never installed.
+        line = "existing_project" if (record.get("scope") and record.get("file")) \
+            else "port_only_record"
+        print("{}={} scope={} port={} file={}".format(
+            line, key, record.get("scope") or "(unknown)", record.get("port") or "(none)",
+            record.get("file") or "(none)"))
     return 0
 
 
@@ -2295,6 +3073,14 @@ def main() -> int:
     # cwd every routing `add` call already keys its own record on (see record_install_scope).
     sub.add_parser("resolve-scope")
 
+    # project-key exists for start-proxy.sh, which has to write the OWNER of a proxy it starts and
+    # must not re-implement project_key()'s git-worktree rule in bash — two encodings of one
+    # identity rule is how a proxy ends up owned by a key nothing else ever looks up.
+    sub.add_parser("project-key")
+
+    # scopes exists for install.sh's --scope user gate; read-only, no arguments — see cmd_scopes.
+    sub.add_parser("scopes")
+
     # `strategy` is the named-cache-strategy surface: the one place that decides what a name means,
     # so the skills that use it carry a NAME rather than four tuning numbers in a heredoc.
     # check-url exists so a caller can validate a supplied base URL BEFORE acting on it. Without
@@ -2331,6 +3117,43 @@ def main() -> int:
                          "one. Ignored if the plugin's options already live somewhere — that "
                          "file is updated in place regardless of this flag.")
 
+    # Per-project port allocation. `--file` lets a caller that already knows the scope (install.sh,
+    # which derives it from --scope) name the settings file directly, the same way `add` does,
+    # rather than making `alloc` re-resolve it; omitted, it falls back to `resolve_install_scope()`
+    # exactly as `preset set` does when nothing is configured or routed yet.
+    pt = sub.add_parser("port")
+    pt.add_argument("op", choices=("alloc", "show", "release", "unset"))
+    pt.add_argument("--plugin", default="context-guru@context-guru")
+    pt.add_argument("--file", default="",
+                    help="for `alloc`: the settings file to write pluginConfigs.options.port "
+                         "into, or for `unset`: the settings file to remove it FROM, where "
+                         "it is required. For `show`: the file whose existing option value to "
+                         "report as option_port=, for a caller that has to know what was there "
+                         "BEFORE it wrote. Optional for `alloc`; defaults to "
+                         "resolve_install_scope()'s answer.")
+    pt.add_argument("--dry-run", action="store_true",
+                    help="for `alloc`: report the port that would be used without recording or "
+                         "writing anything. For install.sh's --plan, which must write nothing.")
+    pt.add_argument("--promised-port", type=int, default=None,
+                    help="for the REAL `alloc` that follows a `--dry-run`: the port that dry run "
+                         "reported (and the user consented to, in whatever URL a plan showed). "
+                         "If the real allocation would now pick a DIFFERENT port, refuse instead "
+                         "of silently writing a URL nobody agreed to.")
+    pt.add_argument("--key", default="",
+                    help="for `release`: the project to release, for a caller acting on a project "
+                         "it is not running IN (install.sh's `adopt`). A directory is resolved "
+                         "through project_key(); anything else is taken as a key already. "
+                         "Omitted, this project is released.")
+
+    # Who owns the proxy on this port — see owner_token(). Its own command rather than a field of
+    # `port show`, because start-proxy.sh asks it on every session start, before it has decided
+    # whether it is allowed to touch anything at all.
+    ot = sub.add_parser("owner-token")
+    ot.add_argument("--observed", default="",
+                    help="the contents of proxy-<port>.owner as read from disk. Given, the answer "
+                         "carries verdict=ours|theirs; omitted, it is just this project's token, "
+                         "for writing that file.")
+
     # The proxy-binary release-notice surface: separate from `strategy`/`preset` because it is
     # machine-wide (one binary on PATH) rather than per-port or per-project.
     uc = sub.add_parser("update-check")
@@ -2354,7 +3177,9 @@ def main() -> int:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
     rc = {"add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
-          "strategy": cmd_strategy, "preset": cmd_preset,
+          "project-key": cmd_project_key, "scopes": cmd_scopes,
+          "strategy": cmd_strategy, "preset": cmd_preset, "port": cmd_port,
+          "owner-token": cmd_owner_token,
           "check-url": cmd_check_url, "update-check": cmd_update_check,
           "gitignore-ensure": cmd_gitignore_ensure}[args.cmd](args)
 
