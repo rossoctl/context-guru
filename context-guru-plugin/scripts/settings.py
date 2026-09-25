@@ -1105,7 +1105,8 @@ def _machine_wide_record(projects: dict) -> tuple[str, dict] | None:
 
     First match wins: there is one machine-wide install by definition (one file, one option, one
     port), and a file holding two such rows is a legacy row plus its migrated self, which name the
-    same install.
+    same install. Callers that must not hand out a machine-wide port use `_machine_wide_ports`
+    instead, which does not have to pick.
     """
     for key, rec in projects.items():
         if not isinstance(rec, dict):
@@ -1114,6 +1115,22 @@ def _machine_wide_record(projects: dict) -> tuple[str, dict] | None:
         if rec.get("scope") == "user" or (file and is_user_scope(file)):
             return key, rec
     return None
+
+
+def _machine_wide_ports(projects: dict) -> set[int]:
+    """Every port any machine-wide row records — for the scan, which must not hand out a port some
+    install is serving on. `_machine_wide_record` picks one row because the guards need one answer;
+    a port must not be reissued just because its row lost that tie-break.
+    """
+    ports = set()
+    for _key, rec in projects.items():
+        if not isinstance(rec, dict):
+            continue
+        file = rec.get("file") or ""
+        if (rec.get("scope") == "user" or (file and is_user_scope(file))) \
+                and isinstance(rec.get("port"), int):
+            ports.add(rec["port"])
+    return ports
 
 
 def _recorded_ports(exclude_key: str) -> set[int]:
@@ -1381,8 +1398,22 @@ def cmd_port(args: argparse.Namespace) -> int:
     #
     # `key == user_key` is the one caller the row does belong to — that is the machine-wide install
     # asking for its own port, which is exactly what rule 1 is for.
+    migrate_mw_row = False
     if rec is not None and rec is mw_rec and key != user_key:
         rec = None
+        # Disowning the row is not enough: the write at the end of this function is
+        # `projects[key] = dict(rec or {}) | {"port": port}`, so a disowned row under THIS key is
+        # OVERWRITTEN by a bare `{"port": <this project's new port>}`. Measured: this project got its
+        # own port correctly, and then the machine-wide install had no record at all — so the very
+        # next project on the machine read the machine-wide `options.port` and answered
+        # `configured`, because every protection here asks `_machine_wide_record` and the row it asks
+        # about was gone. The guard erased the evidence the guard depends on.
+        #
+        # So MOVE it, in the same write, to the key `record_install_scope`'s user branch would have
+        # used. This is the one rewrite of a legacy row that is safe: the key is derived, not
+        # guessed, and `scope`/`file`/`port` are carried verbatim — it renames a row that already
+        # describes the machine-wide install, rather than inferring anything about it.
+        migrate_mw_row = True
 
     drop_orphans: list[str] = []
     if isinstance(rec, dict) and isinstance(rec.get("port"), int):
@@ -1449,12 +1480,11 @@ def cmd_port(args: argparse.Namespace) -> int:
             port, source = explicit_port, "configured"
         else:
             used, orphans = _recorded_ports(key)
-            # The machine-wide port is never a candidate, even when its row is filed under THIS key
+            # A machine-wide port is never a candidate, even when its row is filed under THIS key
             # (the legacy shape above, which `_recorded_ports` skips as "this project's own") and
             # even when its directory is gone (an orphan row cannot make a routing file stop naming
-            # the port it names).
-            if isinstance((mw_rec or {}).get("port"), int):
-                used.add(mw_rec["port"])
+            # the port it names). Every such row, not just the one `_machine_wide_record` picks.
+            used |= _machine_wide_ports(projects)
             port = None
             for candidate in range(PORT_SCAN_START, PORT_SCAN_END + 1):
                 if candidate in used or not _port_bindable(candidate):
@@ -1498,6 +1528,11 @@ def cmd_port(args: argparse.Namespace) -> int:
     try:
         entry = dict(rec) if isinstance(rec, dict) else {}
         entry["port"] = port
+        if migrate_mw_row and user_key not in projects:
+            # Before `projects[key]` is reassigned, and only when the destination is free: two rows
+            # naming the machine-wide install is the legacy row plus its migrated self, and the one
+            # already under `user_key` is the newer of the two.
+            projects[user_key] = dict(mw_rec)
         projects[key] = entry
         for orphan_key in drop_orphans:
             projects.pop(orphan_key, None)
@@ -2355,9 +2390,10 @@ def cmd_remove(args: argparse.Namespace) -> int:
     #
     # The record is what distinguishes them: whatever file routes THIS project is this project's to
     # remove, and the machine-wide file when it is not that file belongs to an install this caller
-    # was not asked to touch. `resolve_install_scope` answers that (and answers the machine-wide
-    # file itself for a project that has no routing of its own — a project folded in by `adopt` —
-    # where removing it IS the uninstall this project has).
+    # was not asked to touch. `resolve_install_scope` answers which file that is; for a project with
+    # no routing of its own it INFERS the machine-wide file, which is why the two reasons below split
+    # on `other` rather than on the removal being allowed. Neither is allowed without the flag — see
+    # the note on the exemption below, which this used to describe.
     #
     # Fail open on anything unexpected: an uninstall that cannot read the record must still be able
     # to uninstall. `--user-scope` is the deliberate override, the same flag `add` needs to write

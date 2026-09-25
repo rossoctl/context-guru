@@ -10615,6 +10615,47 @@ func TestProjectInstallIgnoresALegacyMachineWideRow(t *testing.T) {
 			"machine-wide install's own file or row, and `configured` writes no option into this "+
 			"project at all: %v", f["source"], f)
 	}
+
+	// The alloc above is a dry run, and the port it reports was never the whole story. A REAL alloc
+	// writes `projects[key]`, and this key is the legacy row's — so disowning the row for rule 1 left
+	// it to be overwritten by a bare `{"port": <this project's port>}`. This project got the right
+	// port and the machine-wide install lost its only record, which is worse than the bug this test
+	// was written for: every protection here asks `_machine_wide_record`, so with the row gone the
+	// NEXT project on the machine reads the machine-wide `options.port` and answers `configured`.
+	// The row must be MOVED to the key the user branch would have used, in that same write.
+	if f, c := settingsInDir(t, sd, home, proj, "port", "alloc"); c != 0 {
+		t.Fatalf("real alloc exit %d %v", c, f)
+	}
+	userKey, err := filepath.EvalSymlinks(filepath.Join(home, ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _ := readJSON(t, scopeFile)["projects"].(map[string]any)
+	mw, _ := projects[userKey].(map[string]any)
+	if mw == nil || fmt.Sprint(mw["port"]) != "8788" || mw["scope"] != "user" {
+		t.Fatalf("after a project install in that directory, no row describes the machine-wide "+
+			"install on port 8788 any more (looked under %s): %v", userKey, projects)
+	}
+	if fmt.Sprint(mw["file"]) != userFile {
+		t.Errorf("the migrated row names %q rather than the machine-wide file %s; the move must "+
+			"carry scope/file/port verbatim and only change the key: %v", mw["file"], userFile, mw)
+	}
+	if rec, _ := projects[projReal].(map[string]any); rec == nil || rec["scope"] == "user" {
+		t.Errorf("this project's own row is missing or still says scope=user: %v", projects)
+	}
+
+	// And the symptom that makes losing the row worse than sharing a port: a SECOND project, which
+	// has no legacy row of its own and only ever sees the machine-wide `options.port`.
+	other := t.TempDir()
+	f2, c2 := settingsInDir(t, sd, home, other, "port", "alloc", "--dry-run")
+	if c2 != 0 {
+		t.Fatalf("second project alloc exit %d %v", c2, f2)
+	}
+	if f2["port"] == "8788" || f2["source"] != "allocated" {
+		t.Fatalf("the next project on the machine gets port=%v source=%v — round 1's defect back "+
+			"verbatim, because the record that told the guards a machine-wide install exists was "+
+			"overwritten by the previous install in this test: %v", f2["port"], f2["source"], f2)
+	}
 }
 
 // TestRemoveRefusesAnotherInstallsRouting pins the guard itself, in all three directions, because
@@ -10625,9 +10666,9 @@ func TestProjectInstallIgnoresALegacyMachineWideRow(t *testing.T) {
 // the escape hatch for a URL we have no record of writing, and it covers a port that changed since
 // install), so a project uninstall passing its own port removed the machine-wide `ANTHROPIC_BASE_URL`
 // and reported `removed` with `was=` naming a port it was never asked about. The record is the
-// distinction, and the three directions are: refuse from a project that routes itself; allow from a
-// project whose only routing IS the machine-wide one (`adopt` folded it in — removing that file is
-// the only uninstall that project has); allow from anywhere when asked for explicitly.
+// distinction, and the three directions are: refuse from a project that routes itself; refuse from a
+// project whose only routing IS the machine-wide one (`adopt` folded it in, or the machine never had
+// any other install) with the reason that says so; allow from anywhere when asked for explicitly.
 func TestRemoveRefusesAnotherInstallsRouting(t *testing.T) {
 	home, state, proj, folded := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	sd := filepath.Join(state, "context-guru")
