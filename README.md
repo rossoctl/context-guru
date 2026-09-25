@@ -103,6 +103,29 @@ Prefer it over `/context-guru:uninstall` or `/plugin uninstall context-guru@cont
 session is actually stuck: a dead proxy fails every request, including the ones an uninstall
 command would need. More: [docs/how-to/install-plugin.md#troubleshooting](docs/how-to/install-plugin.md#troubleshooting).
 
+**The two are not the same, though.** `/context-guru:uninstall` undoes **one** install — the one
+routing the project you run it in — and leaves any other alone; the recovery script un-routes
+**every** settings file the plugin edited, machine-wide one included.
+
+```
+/context-guru:uninstall
+```
+
+More:
+[docs/how-to/install-plugin.md](docs/how-to/install-plugin.md#removing-it-uninstall-or-reset).
+
+## Upgrading from project level to user level
+
+Installed in one project and now want it everywhere? Install again with `--global` and keep both —
+each gets its own port, and a project you later reset falls back to the machine-wide one.
+
+```
+/context-guru:install --global
+```
+
+More:
+[docs/how-to/install-plugin.md](docs/how-to/install-plugin.md#upgrading-from-project-level-to-user-level).
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE). A [Rossoctl](https://github.com/rossoctl) platform component.

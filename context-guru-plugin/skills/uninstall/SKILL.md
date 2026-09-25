@@ -57,8 +57,29 @@ that. Then:
 ```bash
 PORT="<port>"
 for f in .claude/settings.local.json .claude/settings.json ~/.claude/settings.json; do
-  [ -f "$f" ] && "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" remove \
-      --file "$f" --url "http://127.0.0.1:${PORT}/anthropic"
+  [ -f "$f" ] || continue
+  out=$("${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" remove \
+      --file "$f" --url "http://127.0.0.1:${PORT}/anthropic")
+  printf '%s\n' "$out"
+  # The port OPTION goes with the routing key, in the same file, or the next session in this project
+  # is worse off than before the uninstall. Claude Code resolves options project-local > project >
+  # user, so a leftover project `port` outranks a machine-wide install's: `ANTHROPIC_BASE_URL`
+  # resolves to the machine-wide port while the port option the hooks are handed resolves to the dead
+  # one this uninstall just stopped. Both hooks self-gate on "does that URL name MY port", neither
+  # matches, and both exit silently — so nothing starts the proxy and nothing reports why.
+  # install.sh does the same `port unset` when it folds a project into a machine-wide install.
+  #
+  # `removed` ONLY, which is the single value that means the key really went. `remove` also answers
+  # `conflict` (the file still routes somewhere — the user's own gateway — and taking the port
+  # from under it would break that) and `unchanged` (this file was not routing to that port, or is not
+  # there at all). Matching anything but `removed` strips the port out of files this loop never
+  # unrouted: a pin the user typed in `.claude/settings.json` while routing lives in
+  # `settings.local.json`, or — the third file here — the machine-wide install's own option, which
+  # a single project uninstall has no business touching. `remove` refuses that file on its own now
+  # (see the table below); this gate is the half that must not undo the refusal.
+  case "$out" in *result=removed*)
+    "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port unset --file "$f" ;;
+  esac
 done
 ```
 
@@ -66,6 +87,21 @@ The script removes the key only if it holds **our** base URL — the one passed 
 one it recorded at install time — and reports `result=conflict` instead of deleting a value the
 user has since pointed somewhere else. If you see a conflict, leave it alone and tell them what
 is there.
+
+**The third file, `~/.claude/settings.json`, is refused on purpose, and it is a question rather than
+a problem.** Removing it uninstalls context-guru from *every* project on the machine, and nothing in
+the state can tell "reset this project" from "remove context-guru" — so `remove` refuses it and says
+which case it is — go by `reason=`:
+
+| `reason=` | What it means | What to do |
+|---|---|---|
+| `machine_wide_routing` | this project has no routing of its own: it is routed *by* the machine-wide install, either because that is the only install or because `adopt` folded it in | Say plainly that this is the whole install, not this project, and ask. Nothing about this project alone is left to remove. |
+| `another_installs_routing` | this project routes through a file of its **own** (the refusal names it as `this_project_routes_in=`), so this file is the machine-wide install's and every *other* project is using it | Leaving it is what "reset this project" means — this project falls back to the machine-wide install, the upgrade path in reverse. Do not ask unless they raise it. |
+
+Only if the user says they want the machine-wide install gone, run that one file again with
+`--user-scope` added, and then do steps 2 and 3 a second time for **its** port (`port show --key
+"$KEY"`, with `$KEY` from `project-key --user-scope` as in step 2). The flag is the whole
+confirmation, so do not add it before they answer — and never to make the loop above quieter.
 
 `--url` is worth passing (it also covers a port that changed since install), but it is **not**
 what makes this safe, and the earlier version of this line said it was. That put the property
@@ -151,7 +187,17 @@ Once it is confirmed stopped, release the port — and only then:
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/context-guru"
 rm -f "${STATE}/proxy-${PORT}.owner" "${STATE}/proxy-${PORT}.fingerprint"
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port release
+
+# A MACHINE-WIDE install is not filed under any project — it has its own record, so that a project
+# install and a machine-wide one made from inside it can hold two ports. `port release` with no
+# --key releases THIS PROJECT's record and would leave that one behind. Only when the routing you
+# just removed was in `~/.claude/settings.json`:
+KEY=$("${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" project-key --user-scope | sed -n 's/^key=//p')
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port release --key "$KEY"
 ```
+
+Ask `project-key --user-scope` for that key rather than deriving it — one encoding of where that
+record lives, so a release cannot name a row nothing looks up.
 
 Both halves matter, for different reasons. `port release` drops this project's record, and that
 record is what keeps the port out of every other project's allocation pool — skip it and the pool

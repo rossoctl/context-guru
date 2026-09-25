@@ -181,8 +181,8 @@ from `.claude/settings.local.json` to get working immediately.
 `PATH`.
 
 **The port is taken.** You should not see this: the install allocates a free port. It is reachable
-only if you pinned one in `/plugin configure` — clear it to get one allocated, or pick another, and
-avoid 4000, which litellm defaults to.
+only if you pinned one in `/plugin configure` — clear it to get one allocated, or pick a port nothing
+else on the machine listens on.
 
 **`port_owned_by_another_project`.** The port this project would use is already serving a different
 project, named in the message. A proxy is never taken from the project that owns it, so the install
@@ -201,6 +201,72 @@ session. Check `/context-guru:status` for the same numbers to confirm it's not s
 **`--idle-exit` is refused at startup.** A threshold below roughly 5h34m (2× the store's default
 entry lifetime) is rejected, because exiting clears in-memory cache state. Raise the threshold, or
 raise `store.ttl_seconds` if the short lifetime is deliberate.
+
+## Upgrading from project level to user level
+
+You installed in one project, and now you want context-guru on every project on the machine. Run the
+install again, from anywhere — including from inside that project:
+
+```
+/context-guru:install --global
+```
+
+It will notice the project install and ask the one question that matters: **keep this project on its
+own settings and port, or fold it into the machine-wide one?**
+
+| Answer | Result |
+|---|---|
+| Keep both (`--on-existing-projects leave`) | two installs, two ports, two proxies. The project keeps its own settings file, port and preset; every *other* project gets the machine-wide one. The project's own settings are more specific, so they keep winning there — that is what "keep" means. |
+| Fold it in (`--on-existing-projects adopt`) | the project's routing and port option are removed (each file backed up first) and its proxy is stopped, so it falls back to the machine-wide route like everywhere else. |
+
+You do not have to be in a particular directory, and you never have to edit a settings file by hand.
+
+### Resetting a project afterwards
+
+If you kept both and later want that project to use the machine-wide install instead:
+
+```
+/context-guru:uninstall
+```
+
+Run it in that project. It removes that project's routing *and* its port option, stops its proxy and
+releases its port — so the next session there resolves the machine-wide route. The machine-wide
+install is untouched: it has its own record and its own port, and removing the settings file that
+routes *every* project is refused unless you say that is what you mean. So "reset this project"
+cannot turn into "uninstall context-guru everywhere" by accident, in this project or any other — and
+when you do want the whole thing gone, say so and the uninstall will do it.
+
+The change lands in your **next** session, in that project as everywhere else.
+
+## Removing it: uninstall, or reset
+
+There are two ways to stop context-guru routing your sessions, and they are **not** the same thing.
+Pick by how much you want gone.
+
+```
+/context-guru:uninstall                        # one install
+~/.local/state/context-guru/context-guru-reset # every install, no session needed
+```
+
+| | `/context-guru:uninstall` | `context-guru-reset` |
+|---|---|---|
+| Scope | **one install** — the one that routes the directory you run it in | **every settings file** the plugin ever edited, including `~/.claude/settings.json` |
+| Needs a working session | yes (it is a skill) | no — plain `sh`, no Claude, no network, no proxy |
+| Stops the proxy | yes, that install's proxy | no, it stops nothing |
+| Releases the port record | yes | no |
+| Other installs | left alone; removing the machine-wide route from a project's uninstall is refused unless you ask for it | also un-routed, whether you meant that or not |
+| Offers to remove the binary, plugin, state dir | yes, asking first | no |
+
+So: **uninstall is the undo for one install; reset is the recovery hatch for the machine.** Running
+the reset from inside project A does not leave the machine-wide install routed — it restores that
+file too. If both are installed and you only want project A back on the machine-wide route, use
+`/context-guru:uninstall` in A (see [Resetting a project
+afterwards](#resetting-a-project-afterwards)); the reset would take both down.
+
+Because the reset stops no proxy and releases no port record, the proxies keep running and their
+ports stay reserved after it. That is deliberate — it is the tool for a session that cannot talk, so
+it does the one thing that unblocks you and nothing that could fail. Once you are working again, run
+`/context-guru:uninstall` in the projects concerned to stop the proxies and free the ports.
 
 ## Upgrading
 

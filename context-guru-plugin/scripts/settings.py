@@ -22,7 +22,7 @@ re-reading the file or parsing prose.
 Usage:
   settings.py add           --file PATH --url URL [--force] [--upstream URL] [--bin PATH] [--statusline CMD]
   settings.py add           --file PATH --statusline CMD [--force]   # statusline only, no routing change
-  settings.py remove        --file PATH [--url URL]
+  settings.py remove        --file PATH [--url URL] [--user-scope]
   settings.py show          --file PATH
   settings.py resolve-scope                                          # where THIS project's routing lives
 """
@@ -598,6 +598,33 @@ def is_user_scope(path: str) -> bool:
     return os.path.realpath(path) in user_scope_files()
 
 
+def user_scope_key() -> str:
+    """The `install-scope.json` key a MACHINE-WIDE (`--scope user`) install files ITSELF under.
+
+    A machine-wide install is not a project, and filing it as one was a real defect rather than a
+    cosmetic one. Its record used to be keyed by `project_key(cwd)` — the project the user happened
+    to be standing in when they ran the install — with two consequences, both silent:
+
+      * allocation rule 1 ("this project already has a recorded port -> return it unchanged") handed
+        the machine-wide install THAT PROJECT's port, so a project install and a machine-wide install
+        made from inside it shared one proxy, one store and one preset. The whole reason ports are
+        per-project is that sharing one made every session start kill and restart the proxy.
+      * `record_install_scope` then overwrote that project's own row with scope=user and the
+        user-scope file, so the project's install became invisible and a later uninstall THERE
+        released the record describing the MACHINE-WIDE install.
+
+    The user's own answer to "what about the projects that already route themselves" is `leave`,
+    i.e. keep both. That answer could not be honoured from inside such a project: the two installs
+    could not hold two ports because they could not hold two records.
+
+    A real, existing directory rather than a sentinel like "(user)": `_recorded_ports` treats a
+    record whose directory is gone as an orphan and reissues its port, so a sentinel key would have
+    the machine-wide install's port quietly handed to the next project that asked. The user config
+    dir is exactly as present as the settings file inside it that the install writes.
+    """
+    return os.path.dirname(user_scope_files()[0])
+
+
 def scope_name_for(path: str, project_dir: str | None = None) -> str:
     """Which of the three scopes `path` is FOR `project_dir` (default cwd) — not purely from the
     path itself: "project-local" and "project" are relative to a project, and the project meant is
@@ -843,13 +870,22 @@ def record_install_scope(file: str, project_dir: str | None = None, scope_dir: s
     """
     try:
         projects = _read_install_scopes()
-        new_key = project_key(project_dir)
+        scope = scope_name_for(file, scope_dir or project_dir)
+        # A machine-wide install is filed under the machine, not under the project the user happened
+        # to run it from — see user_scope_key(). Everything below about legacy keys and migration is
+        # about PROJECT identity (`project_key()` postdating `realpath(cwd)`, worktrees collapsing
+        # onto one key) and none of it applies here: the cwd's row belongs to the cwd's project,
+        # which may be routing itself on its own port, and popping it is precisely the damage this
+        # keying exists to stop. So the user-scope branch migrates nothing and drops nothing.
+        user_scoped = scope == "user"
+        new_key = user_scope_key() if user_scoped else project_key(project_dir)
         old_key = os.path.realpath(project_dir or os.getcwd())
-        old_entry = projects.pop(old_key, None) if old_key != new_key else None
+        old_entry = (None if user_scoped else
+                     projects.pop(old_key, None) if old_key != new_key else None)
         # Losers are dropped, but their `port` is still this project's port if nothing else in the
         # file carries one — see the carry-forward note below. `new_key` is never dropped.
-        dropped = [projects.pop(key) for key in (drop_keys or [])
-                   if key != new_key and key in projects]
+        dropped = [] if user_scoped else [projects.pop(key) for key in (drop_keys or [])
+                                          if key != new_key and key in projects]
         existing_new_entry = projects.get(new_key)
 
         # This call IS authoritative about scope/file/recorded_at — it is running because routing
@@ -863,11 +899,32 @@ def record_install_scope(file: str, project_dir: str | None = None, scope_dir: s
         # rather than silently reset, so a routing rewrite never looks like a port release. The
         # entry already at `new_key` wins over a stale `old_key` legacy entry if both have one,
         # which in turn wins over a dropped sibling's — weakest source first, last write wins.
+        #
+        # A row describing the MACHINE-WIDE install is not one of those candidates, whatever key it
+        # is filed under — and before `user_scope_key()` existed it was filed under the project it
+        # was run from, so it turns up here as `old_entry`/`existing_new_entry` for a PROJECT install
+        # in that directory. Carrying its `port` forward filed the machine-wide port as this
+        # project's own with `scope=project`, while this very call was recording routing on a
+        # different port: `cmd_port`'s rule-1 laundering again, by the other door. (Narrow in
+        # practice — `install.sh` allocs at step 0, which now moves the row before this runs — but
+        # `add --url` by hand reaches it.) So it is skipped as a port source, and MOVED to the key
+        # the user branch above would have used rather than overwritten by this write.
+        candidates: list = [*dropped, old_entry, existing_new_entry]
+        if not user_scoped:
+            user_key = user_scope_key()
+            project_candidates = []
+            for candidate in candidates:
+                if _is_machine_wide_row(candidate):
+                    if user_key not in projects:
+                        projects[user_key] = dict(candidate)
+                    continue
+                project_candidates.append(candidate)
+            candidates = project_candidates
         entry: dict = {}
-        for candidate in (*dropped, old_entry, existing_new_entry):
+        for candidate in candidates:
             if isinstance(candidate, dict) and "port" in candidate:
                 entry["port"] = candidate["port"]
-        entry["scope"] = scope_name_for(file, scope_dir or project_dir)
+        entry["scope"] = scope
         entry["file"] = os.path.realpath(file)
         entry["recorded_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
         projects[new_key] = entry
@@ -1016,7 +1073,7 @@ def _port_bindable(port: int) -> bool:
         sock.close()
 
 
-def _explicit_configured_port(plugin: str) -> tuple[int | None, str]:
+def _explicit_configured_port(plugin: str, only: list[str] | None = None) -> tuple[int | None, str]:
     """(port, file) from the first candidate file (most specific first) where `options.port` is
     literally PRESENT, or (None, "") if none has it.
 
@@ -1025,8 +1082,14 @@ def _explicit_configured_port(plugin: str) -> tuple[int | None, str]:
     apart from "nothing is configured and 8787 is simply what applies", and the two have to be
     treated differently: the first must never be reallocated even though it happens to equal what
     an unconfigured project would have gotten anyway.
+
+    `only` narrows the candidates, for a caller asking on behalf of something that is not the cwd
+    project. The default list is Claude Code's own precedence, project-local first, which is the
+    right answer for every question asked ABOUT this project and the wrong one for a MACHINE-WIDE
+    install: standing in a project that pins its own port, "is a port configured for the
+    machine-wide install" would answer with that project's. See cmd_port's alloc.
     """
-    for path in _option_file_candidates(plugin):
+    for path in (only if only is not None else _option_file_candidates(plugin)):
         if not os.path.exists(path):
             continue
         try:
@@ -1049,6 +1112,49 @@ def _explicit_configured_port(plugin: str) -> tuple[int | None, str]:
         # something nobody actually configured.
         continue
     return None, ""
+
+
+def _is_machine_wide_row(rec: object) -> bool:
+    """Does this row describe the MACHINE-WIDE install? `scope` is the discriminator `install.sh`
+    already uses; the `file` check catches a row written before `scope` was recorded.
+    """
+    if not isinstance(rec, dict):
+        return False
+    file = rec.get("file") or ""
+    return rec.get("scope") == "user" or bool(file and is_user_scope(file))
+
+
+def _machine_wide_record(projects: dict) -> tuple[str, dict] | None:
+    """The row describing a MACHINE-WIDE install, under whatever key it happens to be filed.
+
+    NOT `projects.get(user_scope_key())`. That key is new: every machine-wide install made before it
+    existed is filed under the project the user happened to run it from, carrying `scope=user` and
+    the machine-wide file. Keying this question on the key made every check built on it fire only
+    for installs this version created — so on an existing machine the checks were all no-ops, which
+    is the same as not having written them. `scope` is the discriminator `install.sh` already uses
+    for the same question, and it is in the row regardless of what the row is called.
+
+    First match wins: there is one machine-wide install by definition (one file, one option, one
+    port), and a file holding two such rows is a legacy row plus its migrated self, which name the
+    same install. Callers that must not hand out a machine-wide port use `_machine_wide_ports`
+    instead, which does not have to pick.
+    """
+    for key, rec in projects.items():
+        if _is_machine_wide_row(rec):
+            return key, rec
+    return None
+
+
+def _machine_wide_ports(projects: dict) -> set[int]:
+    """Every port any machine-wide row records — for the scan, which must not hand out a port some
+    install is serving on. `_machine_wide_record` picks one row because the guards need one answer;
+    a port must not be reissued just because its row lost that tie-break.
+    """
+    ports = set()
+    for _key, rec in projects.items():
+        if _is_machine_wide_row(rec) and isinstance(rec.get("port"), int):
+            ports.add(rec["port"])
+    return ports
 
 
 def _recorded_ports(exclude_key: str) -> set[int]:
@@ -1171,6 +1277,17 @@ def cmd_owner_token(args: argparse.Namespace) -> int:
 
 def cmd_port(args: argparse.Namespace) -> int:
     key = project_key()
+    # `alloc` and `show` act on the record NAMED, when one is named. This is how a machine-wide
+    # install reaches its own record (user_scope_key()) instead of the record of whichever project
+    # the user is standing in: without it, rule 1 below hands a `--scope user` install that
+    # project's port, and the two installs cannot hold two ports.
+    #
+    # LITERALLY, with no project_key() resolution, unlike `release`'s own --key handling further
+    # down: an allocation writes the key it was given, so a key that resolved to something else
+    # would record the port under a row the caller never named. `release` resolves as a FALLBACK
+    # only because it also has to accept a plain directory from `adopt`.
+    if getattr(args, "key", None) and args.op in ("alloc", "show"):
+        key = args.key
 
     if args.op == "show":
         rec = _read_install_scopes().get(key)
@@ -1223,7 +1340,13 @@ def cmd_port(args: argparse.Namespace) -> int:
         # running install had just written for itself and left the row it was told to remove in
         # place: the exact inverse of the request, silently, reported as `released`.
         if getattr(args, "key", None):
-            if args.key in projects:
+            # The machine-wide row is named literally whether or not it is still there. Resolution is
+            # a fallback for a plain DIRECTORY, and user_scope_key() is a directory - so for anyone
+            # whose home is a git checkout (versioned dotfiles) project_key("~/.claude") answers the
+            # repo root, and the release names a row nothing files anything under. Today that can only
+            # fail to pop a row that is already gone, which is why it is one line and not a fix to a
+            # visible bug.
+            if args.key in projects or args.key == user_scope_key():
                 key = args.key
             elif os.path.isdir(args.key):
                 key = project_key(args.key)
@@ -1286,7 +1409,35 @@ def cmd_port(args: argparse.Namespace) -> int:
 
     # op == alloc
     projects = _read_install_scopes()
+    user_key = user_scope_key()
+    mw_key, mw_rec = _machine_wide_record(projects) or (None, None)
     rec = projects.get(key)
+    # A row describing the MACHINE-WIDE install is not this project's record, whatever key it is
+    # filed under — and on every machine that installed before `user_scope_key()` existed, it is
+    # filed under a project's. Rule 1 below ("this project already has a recorded port -> return it
+    # unchanged") then handed a PROJECT install in that directory the machine-wide port, and
+    # `record_install_scope` rewrote the row as `scope=project` carrying that port: one shared port
+    # laundered into a row that looks perfectly legitimate, and the documented cleanup for a
+    # legacy row ("re-install or uninstall in that project") was the thing that did it.
+    #
+    # `key == user_key` is the one caller the row does belong to — that is the machine-wide install
+    # asking for its own port, which is exactly what rule 1 is for.
+    migrate_mw_row = False
+    if rec is not None and rec is mw_rec and key != user_key:
+        rec = None
+        # Disowning the row is not enough: the write at the end of this function is
+        # `projects[key] = dict(rec or {}) | {"port": port}`, so a disowned row under THIS key is
+        # OVERWRITTEN by a bare `{"port": <this project's new port>}`. Measured: this project got its
+        # own port correctly, and then the machine-wide install had no record at all — so the very
+        # next project on the machine read the machine-wide `options.port` and answered
+        # `configured`, because every protection here asks `_machine_wide_record` and the row it asks
+        # about was gone. The guard erased the evidence the guard depends on.
+        #
+        # So MOVE it, in the same write, to the key `record_install_scope`'s user branch would have
+        # used. This is the one rewrite of a legacy row that is safe: the key is derived, not
+        # guessed, and `scope`/`file`/`port` are carried verbatim — it renames a row that already
+        # describes the machine-wide install, rather than inferring anything about it.
+        migrate_mw_row = True
 
     drop_orphans: list[str] = []
     if isinstance(rec, dict) and isinstance(rec.get("port"), int):
@@ -1319,11 +1470,45 @@ def cmd_port(args: argparse.Namespace) -> int:
                       "exists to prevent")
             return 3
     else:
-        explicit_port, _explicit_file = _explicit_configured_port(args.plugin)
+        # Rule 2 must not hand either kind of install the OTHER kind's port. The invariant is
+        # symmetric — a machine-wide install and a project install on one port means one proxy, one
+        # store, one preset and a kill-and-restart at every session start — so both directions are
+        # excluded here, and the record is what tells them apart.
+        #
+        # Outwards: a machine-wide install reads its own file only. Project-local options outrank user
+        # ones, so from inside a project that pins a port — including one this plugin pinned there
+        # itself, which an `allocated` install writes into that project's settings — rule 2 handed
+        # the machine-wide install THAT project's port.
+        only = user_scope_files() if key == user_key else None
+        explicit_port, explicit_file = _explicit_configured_port(args.plugin, only)
+        # Inwards: `_option_file_candidates`' last entry IS the machine-wide file, so a PROJECT install
+        # read the machine-wide install's own `options.port` and called it `configured` — the same
+        # defect in the other direction, on the order the docs recommend (machine-wide first, then a
+        # project). Worse than a shared number, because `configured` skips the option write below: the
+        # project's hooks would resolve their port THROUGH a file it does not own, and the machine-wide
+        # uninstall unsetting that option (correctly) would drop every project that inherited it to the
+        # plugin.json default while its own URL still named the old port.
+        #
+        # A user-level `port` with NO machine-wide record is a different thing — a pin the user
+        # typed, which every project should honour. The record is the whole distinction, and it
+        # exists — under whatever key, which is why this asks `_machine_wide_record` and not the
+        # key. Asking the key made this fire only for installs this version created, i.e. never on
+        # an existing machine.
+        if (explicit_port is not None and key != user_key and is_user_scope(explicit_file)
+                and mw_rec is not None):
+            # Falls through to the scan, which excludes the machine-wide port via `_recorded_ports`
+            # (its key is a real directory, so it is not an orphan) and writes the port it picks into
+            # this project's own file.
+            explicit_port = None
         if explicit_port is not None:
             port, source = explicit_port, "configured"
         else:
             used, orphans = _recorded_ports(key)
+            # A machine-wide port is never a candidate, even when its row is filed under THIS key
+            # (the legacy shape above, which `_recorded_ports` skips as "this project's own") and
+            # even when its directory is gone (an orphan row cannot make a routing file stop naming
+            # the port it names). Every such row, not just the one `_machine_wide_record` picks.
+            used |= _machine_wide_ports(projects)
             port = None
             for candidate in range(PORT_SCAN_START, PORT_SCAN_END + 1):
                 if candidate in used or not _port_bindable(candidate):
@@ -1367,6 +1552,11 @@ def cmd_port(args: argparse.Namespace) -> int:
     try:
         entry = dict(rec) if isinstance(rec, dict) else {}
         entry["port"] = port
+        if migrate_mw_row and user_key not in projects:
+            # Before `projects[key]` is reassigned, and only when the destination is free: two rows
+            # naming the machine-wide install is the legacy row plus its migrated self, and the one
+            # already under `user_key` is the newer of the two.
+            projects[user_key] = dict(mw_rec)
         projects[key] = entry
         for orphan_key in drop_orphans:
             projects.pop(orphan_key, None)
@@ -1829,11 +2019,18 @@ def cmd_resolve_scope(_args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_project_key(_args: argparse.Namespace) -> int:
+def cmd_project_key(args: argparse.Namespace) -> int:
     """Read-only: the identity this project's per-project state is filed under. Nothing but a
     lookup — `project_key` itself already fails open to `realpath(cwd)`, so this cannot fail in a
     way a caller has to handle, which is what lets start-proxy.sh use it on a hook path.
+
+    `--user-scope` answers the other identity: the one a MACHINE-WIDE install files itself under.
+    It is here rather than computed in install.sh so that where that record lives has ONE encoding —
+    two (one in Python, one in bash) is how a record ends up written under a key nothing looks up.
     """
+    if getattr(args, "user_scope", False):
+        emit(result="ok", key=user_scope_key(), scope="user")
+        return 0
     emit(result="ok", key=project_key())
     return 0
 
@@ -2204,6 +2401,59 @@ def cmd_remove(args: argparse.Namespace) -> int:
         emit(result="conflict", reason="not_the_url_we_installed", file=args.file, existing=current,
              expected=args.url,
              note="this base URL is not the one context-guru installed; left untouched")
+        return 2
+    # ...and refuse to remove ANOTHER context-guru install's routing. The check above only asks
+    # "did we write this", which the MACHINE-WIDE install's own file answers yes to as loudly as
+    # the project's. `--url` does not narrow it either, by design: it WIDENS (see above — it is the
+    # escape hatch for a record we never wrote, and it covers a port that changed since install),
+    # so a project uninstall passing its own port still deletes the machine-wide `ANTHROPIC_BASE_URL`
+    # and reports `removed` with `was=` naming a port it was never asked about. Measured, on the two
+    # installs the README now documents: resetting ONE project unrouted EVERY project on the machine,
+    # exit 0. The uninstall skill then unsets the machine-wide `options.port` too, since its gate
+    # (correctly) trusts `removed`.
+    #
+    # The record is what distinguishes them: whatever file routes THIS project is this project's to
+    # remove, and the machine-wide file when it is not that file belongs to an install this caller
+    # was not asked to touch. `resolve_install_scope` answers which file that is; for a project with
+    # no routing of its own it INFERS the machine-wide file, which is why the two reasons below split
+    # on `other` rather than on the removal being allowed. Neither is allowed without the flag — see
+    # the note on the exemption below, which this used to describe.
+    #
+    # Fail open on anything unexpected: an uninstall that cannot read the record must still be able
+    # to uninstall. `--user-scope` is the deliberate override, the same flag `add` needs to write
+    # this file in the first place.
+    if is_user_scope(args.file) and not getattr(args, "user_scope", False):
+        try:
+            _own_scope, own_file, _own_src = resolve_install_scope()
+        except Exception:
+            own_file = None
+        other = bool(own_file) and os.path.realpath(own_file) != os.path.realpath(args.file)
+        # EVERY caller, not only one that routes itself. The first version of this guard exempted a
+        # project with no routing of its own, on the reasoning that the machine-wide file is then
+        # this project's only routing and refusing would leave it unable to uninstall at all. Both
+        # halves were wrong. That describes every project except the ones that installed
+        # themselves — including every project `adopt` folded in, and every project on a
+        # machine-wide-only machine — so the exemption covered the common case rather than an edge
+        # one, and there `/context-guru:uninstall` unrouted the whole machine at exit 0 with no
+        # flag and no question. And nothing is unable to uninstall: `--user-scope` works from
+        # anywhere, so the cost of the refusal is one confirmed re-run, not a lockout. (The path for
+        # a user who cannot get a session to talk at all was never this command either — it is
+        # `context-guru-reset`, which restores whole files and needs no Claude.)
+        #
+        # The record cannot tell "reset this project" from "remove context-guru" here: a folded-in
+        # project and a machine-wide-only machine look identical in it, and only the user knows
+        # which they meant. So this asks, and `--user-scope` is the answer — the same flag `add`
+        # needs to write this file in the first place, so there is one name for "yes, the whole
+        # machine". The two reasons differ only in how sharp the case is, and both refuse.
+        emit(result="conflict",
+             reason="another_installs_routing" if other else "machine_wide_routing",
+             file=args.file, existing=current, this_project_routes_in=own_file or "(none)",
+             note=("this is the MACHINE-WIDE install's own settings file and this project routes "
+                   "through a file of its own; a project uninstall leaves it alone. "
+                   if other else
+                   "this file routes EVERY project on this machine, and removing it uninstalls "
+                   "context-guru everywhere rather than resetting one project. ") +
+                  "Doing it anyway is a separate, confirmed step: --user-scope")
         return 2
     backup(args.file)
     del env[KEY]
@@ -3050,7 +3300,10 @@ def main() -> int:
         p.add_argument("--user-scope", action="store_true",
                        help="permit writing the machine-wide settings file "
                             "(~/.claude/settings.json), which routes EVERY project. Refused "
-                            "without this on `add`; never needed on `remove`.")
+                            "without this on `add`. On `remove` it is needed only from inside a "
+                            "project that routes through a file of its OWN: taking the "
+                            "machine-wide routing down from there unroutes every other project "
+                            "too, so it has to be asked for.")
         p.add_argument("--statusline", default="",
                        help="on add: also write the TOP-LEVEL statusLine key ({\"type\": "
                             "\"command\", \"command\": <this value>}), refusing to replace one "
@@ -3076,7 +3329,11 @@ def main() -> int:
     # project-key exists for start-proxy.sh, which has to write the OWNER of a proxy it starts and
     # must not re-implement project_key()'s git-worktree rule in bash — two encodings of one
     # identity rule is how a proxy ends up owned by a key nothing else ever looks up.
-    sub.add_parser("project-key")
+    pk = sub.add_parser("project-key")
+    pk.add_argument("--user-scope", action="store_true",
+                    help="print the key a MACHINE-WIDE install files itself under, instead of this "
+                         "project's. For install.sh and the uninstall skill, which must not "
+                         "re-derive it.")
 
     # scopes exists for install.sh's --scope user gate; read-only, no arguments — see cmd_scopes.
     sub.add_parser("scopes")
@@ -3140,10 +3397,14 @@ def main() -> int:
                          "If the real allocation would now pick a DIFFERENT port, refuse instead "
                          "of silently writing a URL nobody agreed to.")
     pt.add_argument("--key", default="",
-                    help="for `release`: the project to release, for a caller acting on a project "
-                         "it is not running IN (install.sh's `adopt`). A directory is resolved "
-                         "through project_key(); anything else is taken as a key already. "
-                         "Omitted, this project is released.")
+                    help="the install-scope record to act on, when it is not this project's. For "
+                         "`release`: the project to release, for a caller acting on a project it "
+                         "is not running IN (install.sh's `adopt`) - a directory is resolved "
+                         "through project_key(), anything else is taken as a key already. For "
+                         "`alloc` and `show`: the record to allocate/report, taken literally - "
+                         "how a machine-wide install reaches its own record "
+                         "(`project-key --user-scope`) rather than the cwd project's. Omitted, "
+                         "this project's record is used.")
 
     # Who owns the proxy on this port — see owner_token(). Its own command rather than a field of
     # `port show`, because start-proxy.sh asks it on every session start, before it has decided
