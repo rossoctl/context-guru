@@ -73,6 +73,24 @@ R_ONEXISTING= R_PORTSOURCE= R_EXISTINGPROJECTS=
 # and nothing else. `unknown` is the safe default: it is not `absent`, so nothing is released on the
 # strength of a reading we never got.
 R_PORT_RECORD_PRE=unknown R_PORT_OPTION_PRE="(unknown)" R_PORT_ALLOC_SRC=unknown
+# Which install-scope record this install's port belongs to. Empty means "this project's", which is
+# every project-scope install. A MACHINE-WIDE install is not a project and has its own key - see
+# user_scope_key() in settings.py - and passing it here is what lets a `--scope user` install made
+# FROM an already-installed project get its own port instead of that project's: rule 1 of the
+# allocator returns a recorded port unchanged, so under the project's key it returned the project's
+# port, the two installs shared one proxy, and the project's own row was overwritten.
+R_PORTKEY=
+
+# `port alloc`/`show`/`release` against THAT record. A wrapper rather than a string spliced into each
+# call site, because the key is a path and can contain spaces.
+route_port() {
+  local op="$1"; shift
+  if [ -n "$R_PORTKEY" ]; then
+    "$(route_here)/settings.py" port "$op" --key "$R_PORTKEY" "$@"
+  else
+    "$(route_here)/settings.py" port "$op" "$@"
+  fi
+}
 
 # Take step 0's write back, for the failure paths that report nothing was written. Best-effort in
 # both halves and deliberately so: this runs while something else has already gone wrong, and a
@@ -103,7 +121,9 @@ route_unwind_port() {
     parts="option"
   fi
   if [ "$R_PORT_RECORD_PRE" = absent ]; then
-    "$(route_here)/settings.py" port release >/dev/null 2>&1 || true
+    # The record THIS install made, which for a machine-wide install is not the cwd project's -
+    # releasing that one would delete a working project install's row on the way out of a failure.
+    route_port release >/dev/null 2>&1 || true
     parts="${parts:+${parts},}record"
   fi
   if [ -z "$parts" ]; then
@@ -183,8 +203,15 @@ route_resolve_options() {
   #
   # Fails open to the old behaviour: with settings.py unavailable, the configured option and then
   # 8787, exactly as before. A port we cannot allocate is not a reason to refuse an install.
+  # Before the dry run, not after: the plan has to show the port the real allocation will pick, and
+  # under the wrong record it showed the cwd project's. Step 0 passes that number back as
+  # `--promised-port`, so a mismatch would make the real alloc refuse an install this script itself
+  # mis-planned.
+  if [ "$R_SCOPE" = user ]; then
+    R_PORTKEY=$(kv "$("$(route_here)/settings.py" project-key --user-scope 2>/dev/null)" key)
+  fi
   local pout
-  pout=$("$(route_here)/settings.py" port alloc --dry-run 2>/dev/null) || pout=""
+  pout=$(route_port alloc --dry-run 2>/dev/null) || pout=""
   R_PORT=$(kv "$pout" port)
   R_PORTSOURCE=$(kv "$pout" source)
   case "$R_PORT" in
@@ -772,10 +799,10 @@ they say yes. A silent or absent answer is a NO. Never pass it on your own judge
   # BEFORE the write: what is already here. route_unwind_port undoes only the halves this call
   # creates, and it can only know which those are from a reading taken first. Fail-open: an
   # unreadable answer leaves both fields at their `unknown` defaults, which unwinds nothing.
-  pshow=$("$(route_here)/settings.py" port show --file "$R_FILE" 2>/dev/null) || pshow=""
+  pshow=$(route_port show --file "$R_FILE" 2>/dev/null) || pshow=""
   R_PORT_RECORD_PRE=$(kv "$pshow" record);      [ -n "$R_PORT_RECORD_PRE" ] || R_PORT_RECORD_PRE=unknown
   R_PORT_OPTION_PRE=$(kv "$pshow" option_port); [ -n "$R_PORT_OPTION_PRE" ] || R_PORT_OPTION_PRE="(unknown)"
-  paout=$("$(route_here)/settings.py" port alloc --file "$R_FILE" --promised-port "$R_PORT" 2>&1) || true
+  paout=$(route_port alloc --file "$R_FILE" --promised-port "$R_PORT" 2>&1) || true
   R_PORT_ALLOC_SRC=$(kv "$paout" source); [ -n "$R_PORT_ALLOC_SRC" ] || R_PORT_ALLOC_SRC=unknown
   pares=$(kv "$paout" result)
   # What this call actually wrote, so a later failure can take it back — see route_unwind_port.
@@ -945,14 +972,21 @@ back - see port_unwound."
   # health-checked — step 8 above is what proves that. Unrouting them first and then failing here
   # would leave every one of them with no route at all.
   if [ "$R_ONEXISTING" = adopt ] && [ -n "$R_EXISTINGPROJECTS" ]; then
-    local ap af aport aout2 arest arestored rkey
-    # THIS project's key. A project-local install converted to machine-wide from that same project
-    # is in R_EXISTINGPROJECTS too (its record says scope=project-local, which is exactly what the
-    # gate lists), and two of the three things done to an adopted project below must not be done to
-    # the project the install belongs to: releasing its record would delete the record step 0 just
-    # wrote for THIS install, and stopping its proxy would kill the proxy step 8 just verified.
-    # Un-routing its own project-local file is still right - that file is more specific than the
-    # machine-wide route and would keep overriding it, which is the whole point of adopting.
+    local ap af aport aout2 arest arestored rkey akey
+    # THIS project's key, reported rather than acted on. A project-local install converted to
+    # machine-wide from that same project is in R_EXISTINGPROJECTS too (its record says
+    # scope=project-local, which is exactly what the gate lists), and it used to be SKIPPED here:
+    # releasing its record would have deleted the record step 0 wrote for this install, and stopping
+    # its proxy would have killed the proxy step 8 verified, because the machine-wide install shared
+    # both with it - one record key and therefore one port for two installs.
+    # It no longer does: a machine-wide install has its own record (user_scope_key() in settings.py)
+    # and its own port, so the project the install was run from is an ordinary adopted project and
+    # gets the same three things done to it as any other. Skipping it now would leave it holding a
+    # released-looking row and a live proxy nothing routes to - "configured-looking and broken",
+    # which is the state the port unset above exists to prevent.
+    # The one case where its proxy must still be spared is a PINNED port, where the two installs
+    # legitimately share one; that is route_stop_adopted_proxy's own $R_PORT guard, asserted at the
+    # point of the dangerous action rather than here.
     rkey=$("$(route_here)/settings.py" project-key 2>/dev/null | sed -n 's/^key=//p' | head -1) || rkey=""
     printf '%s\n' "$R_EXISTINGPROJECTS" | while IFS= read -r l; do
       # Anchored on the two fields that CANNOT contain a space (scope= and port=) rather than on
@@ -990,18 +1024,37 @@ back - see port_unwound."
         # worse than the state before.
         "$(route_here)/settings.py" port unset --file "$af" >/dev/null 2>&1 || true
       fi
-      # THIS project keeps its record and its proxy: both now belong to the machine-wide install
-      # that step 0 and step 8 just made. Its own project-local routing was removed above, which is
-      # the part of adoption that actually applies to it.
-      if [ -n "$rkey" ] && [ "$ap" = "$rkey" ]; then
-        emit "adopted_project_is_this_project=$ap note=its own routing was removed; its port record \
-and proxy are this install's and were kept."
-        continue
+      # And the record, so nothing reports the project as still having its own routing.
+      #
+      # Under the key the row lives at NOW, which is not always the key the gate listed it under: a
+      # record written before project_key() existed is keyed on the worktree it was installed from,
+      # and the first read of it in this very run migrates it onto the main checkout. Releasing the
+      # listed key then names a row that is already gone and leaves the migrated one behind - a
+      # project-local claim on the port this machine-wide install is serving, which refuses the next
+      # install in that checkout with port_recorded_by_another_project for no visible reason.
+      akey=$( (cd "$ap" 2>/dev/null && "$(route_here)/settings.py" project-key 2>/dev/null) \
+        | sed -n 's/^key=//p' | head -1) || akey=""
+      [ -n "$akey" ] || akey=$ap
+      if [ -n "$rkey" ] && [ "$akey" = "$rkey" ]; then
+        # The project this install was RUN FROM - see the note on rkey above. Said out loud, and
+        # released WITHOUT --key: settings.py refuses a `release --key` that names the caller's own
+        # project, because a caller passing --key is acting on a project it is not standing in and a
+        # key landing on itself can only be a mistake there. Here it is the ordinary path, and the
+        # no-key form is the same one an uninstall in this project would use.
+        emit "adopted_project_is_this_project=$ap note=the install was run from here; adopted like \
+any other project, since the machine-wide install has its own record and port."
+        "$(route_here)/settings.py" port release >/dev/null 2>&1 || true
+      else
+        # `--key` names the project directly: the `cd` this used to do for the RELEASE was a second
+        # place for a path to get mangled on the way there, and it silently did nothing when it
+        # failed. (The `cd` above is only a lookup, and falls back to the listed key.)
+        "$(route_here)/settings.py" port release --key "$akey" >/dev/null 2>&1 || true
       fi
-      # And the record, so nothing reports the project as still having its own routing. `--key`
-      # names the project directly: the `cd` this used to do was a second place for a path to get
-      # mangled on the way there, and it silently did nothing when it failed.
-      "$(route_here)/settings.py" port release --key "$ap" >/dev/null 2>&1 || true
+      # The pre-migration key too, when they differ: if nothing in this run happened to read that
+      # project's record, it is still sitting under the old key.
+      if [ "$akey" != "$ap" ]; then
+        "$(route_here)/settings.py" port release --key "$ap" >/dev/null 2>&1 || true
+      fi
       # The proxy itself, and the owner file that outlives it. Uninstall does both halves — a
       # released record beside a live proxy is the one state nothing else in the plugin expects —
       # and adopt was doing neither, so every adopted project left a proxy serving its old

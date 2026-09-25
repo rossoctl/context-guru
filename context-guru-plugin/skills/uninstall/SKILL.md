@@ -57,8 +57,23 @@ that. Then:
 ```bash
 PORT="<port>"
 for f in .claude/settings.local.json .claude/settings.json ~/.claude/settings.json; do
-  [ -f "$f" ] && "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" remove \
-      --file "$f" --url "http://127.0.0.1:${PORT}/anthropic"
+  [ -f "$f" ] || continue
+  out=$("${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" remove \
+      --file "$f" --url "http://127.0.0.1:${PORT}/anthropic")
+  printf '%s\n' "$out"
+  # The port OPTION goes with the routing key, in the same file, or the next session in this project
+  # is worse off than before the uninstall. Claude Code resolves options project-local > project >
+  # user, so a leftover project `port` outranks a machine-wide install's: `ANTHROPIC_BASE_URL`
+  # resolves to the machine-wide port while the port option the hooks are handed resolves to the dead
+  # one this uninstall just stopped. Both hooks self-gate on "does that URL name MY port", neither
+  # matches, and both exit silently — so nothing starts the proxy and nothing reports why.
+  # install.sh does the same `port unset` when it folds a project into a machine-wide install.
+  #
+  # Only when the key really went: on `result=conflict` the file still routes somewhere (to the
+  # user's own gateway), and removing the port under it would break that instead.
+  case "$out" in *result=conflict*) ;; *)
+    "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port unset --file "$f" ;;
+  esac
 done
 ```
 
@@ -151,7 +166,17 @@ Once it is confirmed stopped, release the port — and only then:
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/context-guru"
 rm -f "${STATE}/proxy-${PORT}.owner" "${STATE}/proxy-${PORT}.fingerprint"
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port release
+
+# A MACHINE-WIDE install is not filed under any project — it has its own record, so that a project
+# install and a machine-wide one made from inside it can hold two ports. `port release` with no
+# --key releases THIS PROJECT's record and would leave that one behind. Only when the routing you
+# just removed was in `~/.claude/settings.json`:
+KEY=$("${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" project-key --user-scope | sed -n 's/^key=//p')
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port release --key "$KEY"
 ```
+
+Ask `project-key --user-scope` for that key rather than deriving it — one encoding of where that
+record lives, so a release cannot name a row nothing looks up.
 
 Both halves matter, for different reasons. `port release` drops this project's record, and that
 record is what keeps the port out of every other project's allocation pool — skip it and the pool
