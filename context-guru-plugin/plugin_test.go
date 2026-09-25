@@ -11115,3 +11115,162 @@ func TestNoPortConsumerCarriesABlindDefault(t *testing.T) {
 			`install-time path)`, n)
 	}
 }
+
+// --- the gate and the report are two questions -------------------------------
+
+// TestTheGateAndTheReportAreTwoQuestions.
+//
+// The first version of this work answered both with one function under the gate's name, and the
+// disk fallback was reached whenever ANTHROPIC_BASE_URL named no port of ours — INCLUDING when it
+// named the real API. So in a project with an install recorded, `ANTHROPIC_BASE_URL=
+// https://api.anthropic.com` resolved to the recorded port and every consumer that gates on "am I
+// in the path" lost its gate: measured, `result=ok port=8792` for traffic that never touched the
+// proxy. The fix is two entry points, and this test is the difference between them.
+func TestTheGateAndTheReportAreTwoQuestions(t *testing.T) {
+	py := requireTool(t, "python3")
+	settingsPy := filepath.Join(scriptsDir(t), "settings.py")
+	// The real API: a URL that is not loopback at all, which is the state of a project whose
+	// routing was removed, or one the user pointed elsewhere by hand while the install is still on
+	// disk. A corporate gateway behaves identically and is the same case.
+	const elsewhere = "https://api.anthropic.com"
+
+	t.Run("the gate says unrouted when the environment routes to the real API", func(t *testing.T) {
+		dir, env := portRoutedProject(t, "8841")
+		env = append(env, "ANTHROPIC_BASE_URL="+elsewhere)
+		out, code := runIn(t, dir, env, "", py, settingsPy, "port", "routed")
+		f := facts(mustZero(t, out, code))
+		if f["result"] != "unrouted" || f["port"] == "8841" {
+			t.Errorf("result=%q port=%q: the record says 8841 but the environment routes to %s, so "+
+				"nothing here goes through our proxy. A caller that gates on this answer — both "+
+				"hooks and the status line — is in the path of traffic it never sees",
+				f["result"], f["port"], elsewhere)
+		}
+		if !strings.Contains(f["why"], elsewhere) {
+			t.Errorf("why=%q must name the endpoint that is actually routing, so the reason is "+
+				"reportable rather than just a refusal", f["why"])
+		}
+	})
+
+	t.Run("the report still names the install, and says it is not routed", func(t *testing.T) {
+		// The mirror-image loss, and why the gate cannot simply be tightened everywhere: a cost
+		// report is about an INSTALL. `insights.py` reading the same machine must still find the
+		// dashboard DB that holds the history, and say plainly that this session is not going
+		// through it rather than refusing to report at all.
+		dir, env := portRoutedProject(t, "8841")
+		env = append(env, "ANTHROPIC_BASE_URL="+elsewhere)
+		out, code := runIn(t, dir, env, "", py, settingsPy, "port", "install")
+		f := facts(mustZero(t, out, code))
+		if f["result"] != "ok" || f["port"] != "8841" {
+			t.Errorf("result=%q port=%q, want ok/8841 from the record: the install is there and its "+
+				"numbers are readable whatever this session's environment says", f["result"], f["port"])
+		}
+		if f["routed"] != "false" || f["not_routed_why"] == "" {
+			t.Errorf("routed=%q not_routed_why=%q: the port and the routing are two facts, and a "+
+				"skill told only the port reports it as \"what this directory is routed to\", "+
+				"which is untrue here", f["routed"], f["not_routed_why"])
+		}
+	})
+
+	t.Run("and says routed=true when it is", func(t *testing.T) {
+		dir, env := portRoutedProject(t, "8841")
+		out, code := runIn(t, dir, env, "", py, settingsPy, "port", "install")
+		f := facts(mustZero(t, out, code))
+		if f["result"] != "ok" || f["port"] != "8841" || f["routed"] != "true" {
+			t.Errorf("result=%q port=%q routed=%q, want ok/8841/true", f["result"], f["port"], f["routed"])
+		}
+	})
+}
+
+// TestTheStatusLineIsSilentInAProjectRoutedToTheRealAPI is the consequence of the above, at the one
+// consumer that cannot recover from it: statusline.py takes the delegate's answer as its whole
+// self-gate (both hooks re-check the URL against the port afterwards). With the gate collapsed it
+// rendered a permanent `cg!` — a down-proxy warning — in a project whose traffic was going to the
+// real API perfectly well. TestStatuslineIsSilentWhereRoutingIsNotConfigured does NOT cover this:
+// its cases reach the "nothing recorded" answer because sandboxEnv leaves no install in scope, so
+// they pass whether the gate works or not.
+func TestTheStatusLineIsSilentInAProjectRoutedToTheRealAPI(t *testing.T) {
+	py := requireTool(t, "python3")
+	// A live stub on the recorded port, so a broken gate has something to render and this test
+	// fails loudly rather than by coincidence.
+	port := statsStub(t, `{"savings":{"tokens_saved":1234,"usd_saved":0.5}}`)
+	dir, env := portRoutedProject(t, port)
+	env = append(env, "ANTHROPIC_BASE_URL=https://api.anthropic.com")
+	out, code := runIn(t, dir, env,
+		statuslinePayload("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 1.5, 1000, 100),
+		py, filepath.Join(scriptsDir(t), "statusline.py"))
+	if code != 0 {
+		t.Fatalf("exit %d: a status line must never fail a render: %s", code, out)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("printed %q in a project whose traffic goes to api.anthropic.com. The install is "+
+			"recorded, but the proxy is not in the path, so every number here would be about "+
+			"traffic this session did not send", strings.TrimSpace(out))
+	}
+}
+
+// TestAddRecordsThePortItRoutedTo pins the producer half of the blind-8787 removal. A row with no
+// `port` is read as "written before ports were per-project, so it is on 8787" — the one surviving
+// use of that default. `add --url` produced exactly that row, stamped today, and the two shapes are
+// indistinguishable to any reader. The URL already names the port, so the ambiguous row stops being
+// made.
+func TestAddRecordsThePortItRoutedTo(t *testing.T) {
+	state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(dir, ".claude", "settings.local.json")
+	f, code := settingsInDir(t, state, home, dir, "add", "--file", path,
+		"--url", "http://127.0.0.1:8899/anthropic")
+	if code != 0 || f["result"] != "added" {
+		t.Fatalf("add: exit %d result=%q", code, f["result"])
+	}
+	b, err := os.ReadFile(filepath.Join(state, "install-scope.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"port": 8899`) {
+		t.Errorf("install-scope.json carries no port for a row routing 127.0.0.1:8899:\n%s\n"+
+			"A portless row is read as a pre-per-project install on 8787, which is somebody "+
+			"else's proxy on any machine that has one", b)
+	}
+}
+
+// TestTheHooksSkipTheDelegateWhenTheOptionPortAlreadyAgrees.
+//
+// Both hooks run on EVERY prompt and EVERY session start in EVERY project on the machine, because
+// the plugin installs at user scope. Delegating the port resolution to python3 cost a measured
+// 40ms -> 166ms per run (python start-up plus the `git` fork behind project_key) — and on the hook
+// path the answer is usually already in hand: Claude Code sets CLAUDE_PLUGIN_OPTION_PORT, and when
+// the routing URL names that same port the two agree, which IS the delegate's step 2. The stub
+// below makes the fork observable: if it is reached, python3 leaves a file behind.
+func TestTheHooksSkipTheDelegateWhenTheOptionPortAlreadyAgrees(t *testing.T) {
+	requireTool(t, "bash")
+	for _, script := range []string{"check-proxy.sh", "start-proxy.sh"} {
+		t.Run(script, func(t *testing.T) {
+			dir, env := portRoutedProject(t, "8841")
+			bin := t.TempDir()
+			// Records every argv rather than merely that python3 ran: start-proxy.sh legitimately
+			// calls settings.py for other things (owner-token, update-check, strategy sync), so
+			// "no fork at all" is not the property — "no PORT RESOLUTION fork" is.
+			log := filepath.Join(dir, "python3-argv.log")
+			if err := os.WriteFile(filepath.Join(bin, "python3"),
+				[]byte("#!/bin/sh\necho \"$@\" >> "+log+"\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			env = append(env,
+				"PATH="+bin+":"+os.Getenv("PATH"),
+				"CLAUDE_PLUGIN_OPTION_PORT=8841",
+				"CONTEXT_GURU_BIN="+filepath.Join(dir, "no-such-proxy-binary"))
+			_, code := runIn(t, dir, env, "", filepath.Join(scriptsDir(t), script))
+			if code != 0 {
+				t.Errorf("exit %d: every exit from these hooks is 0 by design", code)
+			}
+			b, err := os.ReadFile(log)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(b), "port routed") {
+				t.Errorf("delegated the port resolution although CLAUDE_PLUGIN_OPTION_PORT and the "+
+					"routing URL already name the same port. That is ~126ms added to every prompt "+
+					"in every project on the machine, for an answer the hook already had:\n%s", b)
+			}
+		})
+	}
+}

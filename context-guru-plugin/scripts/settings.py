@@ -833,7 +833,7 @@ def _read_install_scopes() -> dict:
 
 
 def record_install_scope(file: str, project_dir: str | None = None, scope_dir: str | None = None,
-                         drop_keys: list[str] | None = None) -> None:
+                         drop_keys: list[str] | None = None, url: str | None = None) -> None:
     """Record which scope `file` is, for THIS project (`project_dir`, default cwd), so a later
     command — the statusline skill, `preset`, anything else that writes a Claude settings file —
     can read back the choice the user already made instead of guessing at one of its own. Called
@@ -860,6 +860,15 @@ def record_install_scope(file: str, project_dir: str | None = None, scope_dir: s
     identity) instead of having its one entry rewritten, and a later read keyed on the OLD identity
     (say, from a worktree whose cwd differs from its main checkout) would find stale data instead
     of nothing.
+
+    `url` is the base URL this row is being recorded FOR, and exists so the row can carry its own
+    `port` when nothing else supplies one. `port alloc` is what normally writes that field, and
+    `install.sh` always runs it — but `add --url http://127.0.0.1:<n>/anthropic` by hand does not,
+    and produced a portless row, stamped today, indistinguishable from a row written before ports
+    were per-project. A reader then had only one way to answer it: the old single-proxy default,
+    8787, which is precisely the blind default this work removes. The URL already names the port, so
+    the producer can stop making the ambiguous shape. A non-loopback `--attach` URL names no port of
+    ours and correctly leaves the field absent.
 
     `drop_keys` names ADDITIONAL keys to remove in the same write — the losing candidates of a
     migration tiebreak, which are this project's records under sibling worktrees' pre-migration
@@ -924,6 +933,12 @@ def record_install_scope(file: str, project_dir: str | None = None, scope_dir: s
         for candidate in candidates:
             if isinstance(candidate, dict) and "port" in candidate:
                 entry["port"] = candidate["port"]
+        # Nothing upstream had a port to carry: take it from the URL being recorded, so the row
+        # says which proxy it is about rather than leaving a reader to assume one. See `url`.
+        if "port" not in entry:
+            from_url = url_port(url or "")
+            if from_url:
+                entry["port"] = int(from_url)
         entry["scope"] = scope
         entry["file"] = os.path.realpath(file)
         entry["recorded_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
@@ -1094,7 +1109,45 @@ def _machine_wide_row(projects: dict) -> dict | None:
 def resolve_routed_port(env: dict | None = None,
                         project_dir: str | None = None,
                         plugin: str = "context-guru@context-guru") -> tuple[str | None, str]:
-    """(port, source) — THE port this directory is routed to our proxy on, or (None, why not).
+    """(port, source) — the port this directory is ROUTED to our proxy on, or (None, why not).
+
+    THE GATE. It answers one question: is the traffic leaving this directory going through a proxy
+    of ours, and on which port. An environment that routes somewhere else — the real API, a company
+    gateway, another local proxy — is `None`, whatever is recorded on disk.
+
+    That distinction was collapsed in the first version of this and it cost the status line its
+    self-gate: with `ANTHROPIC_BASE_URL=https://api.anthropic.com` in a project that had an install
+    recorded, the disk fallback answered with the recorded port and the status line rendered a
+    permanent `cg!` for a proxy that was not in the path. The blank-status-line defect this work
+    fixes, inverted — numbers presented for traffic the proxy never saw.
+
+    `resolve_reportable_port()` is the other question, and the only caller that may ask it is a
+    report about an install rather than about this session's traffic.
+    """
+    return _resolve_port(env, project_dir, plugin, from_disk=False)
+
+
+def resolve_reportable_port(env: dict | None = None,
+                            project_dir: str | None = None,
+                            plugin: str = "context-guru@context-guru") -> tuple[str | None, str]:
+    """(port, source) — the port whose dashboard DB holds the numbers for this directory's install.
+
+    `resolve_routed_port()` first, so a routed session is answered by what actually routes it. Then,
+    and only then, what is configured on disk: a cost report is about an install, not about this
+    process's environment, and it has to keep working for a Bash-tool consumer in a session that
+    started before the install, or one whose environment points at somebody else's proxy while our
+    own dashboard still holds real history.
+
+    Never for a consumer that gates on "am I in the path" — that is `resolve_routed_port()`.
+    """
+    return _resolve_port(env, project_dir, plugin, from_disk=True)
+
+
+def _resolve_port(env: dict | None,
+                  project_dir: str | None,
+                  plugin: str,
+                  from_disk: bool) -> tuple[str | None, str]:
+    """The two questions above, sharing their provenance rules. See both docstrings.
 
     One rule, one implementation, because the several copies of it were not the same rule and the
     differences were invisible. This is the function every consumer must use: the statusLine
@@ -1184,6 +1237,14 @@ def resolve_routed_port(env: dict | None = None,
             return port, "routing (install-scope.json, the machine-wide install)"
         return None, f"ANTHROPIC_BASE_URL names 127.0.0.1:{port}, which no install of ours claims"
 
+    # NOT reached by the gate. Everything below answers from DISK, which cannot say anything about
+    # where this session's traffic goes — and by here the environment has already said it does not
+    # go to a proxy of ours.
+    if not from_disk:
+        if base:
+            return None, f"ANTHROPIC_BASE_URL is {base}, which is not a proxy of ours"
+        return None, "ANTHROPIC_BASE_URL is unset, so nothing routes this directory through us"
+
     for path in candidates:
         data = _read(path)
         if data is None:
@@ -1192,18 +1253,28 @@ def resolve_routed_port(env: dict | None = None,
         if isinstance(opts, dict) and opts.get("port"):
             return str(opts["port"]).strip(), path
 
-    def _port_of(rec: object, what: str) -> tuple[str, str] | None:
+    def _port_of(rec: object, what: str, legacy_ok: bool = False) -> tuple[str, str] | None:
         if not isinstance(rec, dict):
             return None
         recorded = str(rec.get("port") or "").strip()
         if recorded.isdigit():
             return recorded, f"install-scope.json ({what})"
-        # The shape written before ports were per-project, when there was one proxy on 8787. That
-        # install really is on 8787 — the only surviving case where the default is the answer, and
-        # the source says which record said so rather than "(default)".
+        # A row with no `port` is the shape written before ports were per-project, when there was one
+        # proxy per machine on 8787 — and that install really is on 8787, which is the one surviving
+        # case where the default is an answer rather than a guess.
+        #
+        # `legacy_ok` is why it is not the answer everywhere. A portless row is also what a bare
+        # `settings.py add --url` produces on current code, stamped today, so the two are
+        # indistinguishable — and read off the MACHINE-WIDE row it handed 8787 to any project on the
+        # machine, including one that never installed anything. That is the blind 8787 this work
+        # removes, surviving inside the rule meant to replace it. So it is allowed only for THIS
+        # project's own row, where the claim is at least about the directory being asked about, and
+        # `record_install_scope` now derives `port` from the URL so the shape stops being produced.
+        if not legacy_ok:
+            return None
         return LEGACY_SINGLE_PROXY_PORT, f"(default; {what} predates per-project ports)"
 
-    found = _port_of(projects.get(key), "recorded for this project")
+    found = _port_of(projects.get(key), "recorded for this project", legacy_ok=True)
     if found is not None:
         return found
     found = _port_of(_machine_wide_row(projects), "the machine-wide install")
@@ -1451,11 +1522,13 @@ def cmd_port(args: argparse.Namespace) -> int:
         key = args.key
 
     if args.op == "routed":
-        # The one port question a NON-HOOK consumer can ask: "which port is this directory actually
-        # routed to, if any". `show` cannot answer it — it reports one record, by key, and says
-        # nothing about the environment or about the option files that outrank that record. The two
-        # hooks call this when CLAUDE_PLUGIN_OPTION_PORT is absent, which is every path reached from
-        # a terminal rather than from Claude Code's hook runner.
+        # THE GATE, for a caller whose next act depends on being in the path: "is this directory's
+        # traffic going through a proxy of ours, and on which port". `show` cannot answer it — it
+        # reports one record, by key, and says nothing about the environment or about the option
+        # files that outrank that record. The two hooks call this when CLAUDE_PLUGIN_OPTION_PORT is
+        # absent, which is every path reached from a terminal rather than from Claude Code's hook
+        # runner. An environment pointing anywhere else is `unrouted`, whatever is on disk — see
+        # resolve_routed_port. A report wants `port install` instead.
         #
         # `result=unrouted` rather than an error exit: not being routed is a normal, common answer
         # (most projects on a machine with a project-scope install), and a non-zero exit would make
@@ -1465,6 +1538,23 @@ def cmd_port(args: argparse.Namespace) -> int:
             emit(result="unrouted", port="(none)", why=source)
         else:
             emit(result="ok", port=port, source=source)
+        return 0
+
+    if args.op == "install":
+        # The REPORT question: "whose dashboard holds this directory's numbers". Both facts in one
+        # command, because a skill needs both and asking twice is how the two drift: `port=` is the
+        # install, `routed=` is whether this session's traffic is actually going through it. A report
+        # that says `port=8792` is "what this directory is routed to" while the environment points at
+        # api.anthropic.com states something untrue, so `routed=false` carries `not_routed_why=` and
+        # the skill says which it is.
+        port, source = resolve_reportable_port(plugin=args.plugin)
+        routed, why = resolve_routed_port(plugin=args.plugin)
+        if port is None:
+            emit(result="unrouted", port="(none)", why=source)
+        elif routed:
+            emit(result="ok", port=port, source=source, routed="true")
+        else:
+            emit(result="ok", port=port, source=source, routed="false", not_routed_why=why)
         return 0
 
     if args.op == "show":
@@ -2388,7 +2478,7 @@ def cmd_add(args: argparse.Namespace) -> int:
 
     current = env.get(KEY)
     if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged:
-        record_install_scope(args.file)
+        record_install_scope(args.file, url=args.url)
         emit(result="unchanged", file=args.file, base_url=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
              note="already routed to this proxy, with nothing left to add")
@@ -2410,7 +2500,7 @@ def cmd_add(args: argparse.Namespace) -> int:
             meta["installed_bin"] = args.bin
         apply_statusline(data, sl_command)
         save(args.file, data)
-        record_install_scope(args.file)
+        record_install_scope(args.file, url=args.url)
         emit(result="completed", file=args.file, base_url=args.url, added_keys=",".join(changed),
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""), backup=saved,
              note="already routed; filled in the keys that were missing")
@@ -2430,7 +2520,7 @@ def cmd_add(args: argparse.Namespace) -> int:
             meta["installed_bin"] = args.bin
         apply_statusline(data, sl_command)
         save(args.file, data)
-        record_install_scope(args.file)
+        record_install_scope(args.file, url=args.url)
         emit(result="repointed", file=args.file, base_url=args.url, previous=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
              backup=saved, note="this was our own URL on another port; moved")
@@ -2496,7 +2586,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         meta["previous_base_url"] = current
     apply_statusline(data, sl_command)
     save(args.file, data)
-    record_install_scope(args.file)
+    record_install_scope(args.file, url=args.url)
     emit(result="added", file=args.file, base_url=args.url,
          replaced=current if current else "", backup=saved or "(new file)",
          other_env_keys=len([k for k in env if k not in OURS]))
@@ -3557,7 +3647,7 @@ def main() -> int:
     # rather than making `alloc` re-resolve it; omitted, it falls back to `resolve_install_scope()`
     # exactly as `preset set` does when nothing is configured or routed yet.
     pt = sub.add_parser("port")
-    pt.add_argument("op", choices=("alloc", "show", "release", "unset", "routed"))
+    pt.add_argument("op", choices=("alloc", "show", "release", "unset", "routed", "install"))
     pt.add_argument("--plugin", default="context-guru@context-guru")
     pt.add_argument("--file", default="",
                     help="for `alloc`: the settings file to write pluginConfigs.options.port "

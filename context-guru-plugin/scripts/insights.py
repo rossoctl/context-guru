@@ -166,8 +166,11 @@ def _resolve_port() -> tuple[str | None, str]:
     """(port, source) — the port this directory's install is on, and what said so. `None` when
     nothing claims to route this directory, which is NOT the same as 8787.
 
-    One line of code, because the rule belongs to exactly one function now:
-    `settings.resolve_routed_port`. This file used to carry its own copy in two parts
+    One line of code, because the rule belongs to exactly one function now, and it is
+    `settings.resolve_reportable_port`: the REPORT question, not the gate. A cost report is
+    about an install and has to keep answering in a session whose environment points elsewhere,
+    where `resolve_routed_port()` correctly says nothing routes here.
+    This file used to carry its own copy in two parts
     (`_resolve_port` walking the option files, `_recorded_port` walking install-scope.json), and
     statusline.py and the two hooks each carried a third variant. They were not the same rule, and
     the ways they differed were invisible from any one of them — which is how the status line went
@@ -188,7 +191,7 @@ def _resolve_port() -> tuple[str | None, str]:
     `_read_install_scopes()` deliberately in place of `resolve_install_scope()`, which self-heals
     legacy rows by WRITING as it answers. A cost report must not edit the state it reports on.
     """
-    return settings.resolve_routed_port()
+    return settings.resolve_reportable_port()
 
 
 def _configured_options() -> tuple[dict, dict]:

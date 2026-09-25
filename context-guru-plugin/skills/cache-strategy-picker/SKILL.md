@@ -39,12 +39,14 @@ reported as success — happens just the same. Ask the one command that resolves
 hooks and the status line use:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port routed
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port install
 ```
 
-`result=ok port=<n>` is the port this directory is routed to our proxy on. `result=unrouted` means
-nothing here routes through us — stop and say so rather than falling back to 8787, because there is
-no proxy for a strategy to be armed on.
+`result=ok port=<n>` is the port this directory's install is on, and a strategy is armed on that
+install whether or not this session happens to be routed through it (`routed=false` with
+`not_routed_why=` is worth one line, not a refusal). `result=unrouted` means nothing here is
+installed — stop and say so rather than falling back to 8787, because there is no proxy for a
+strategy to be armed on.
 
 ## 2. Report what is in effect
 

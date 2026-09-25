@@ -283,6 +283,12 @@ def _our_port() -> str | None:
     to match and this returned None: a correct install with a permanently blank status line, and no
     error anywhere to explain it.
 
+    THE GATE, deliberately, and not settings.resolve_reportable_port: this is the one consumer with
+    no second check of its own (both hooks re-compare the URL against the port after the delegate
+    answers), so whatever this returns is rendered. Asked the report question instead, it printed a
+    permanent `cg!` — a down-proxy warning — in a project whose ANTHROPIC_BASE_URL pointed at the
+    real API and whose only sin was having an install recorded on disk.
+
     The anti-false-positive property the old gate existed for is kept, and strengthened, in the
     shared rule: a port is only ours when a settings file or an install record says we put it there,
     never because the URL looks like a local proxy. Another local API proxy on

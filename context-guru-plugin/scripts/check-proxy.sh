@@ -31,9 +31,24 @@ HERE="$(unset CDPATH; \cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || HER
 # the state files say. Shape only ever skips; adopting a port needs the provenance record, which is
 # the delegate's job — another local proxy on 127.0.0.1:4000/anthropic is not us.
 PORT=""
+# FAST PATH, and the same rule the delegate applies, not a looser one: when the hook runner set
+# CLAUDE_PLUGIN_OPTION_PORT and the routing URL names THAT port, the two agree, which is provenance
+# step 2 in resolve_routed_port — the option is configuration we wrote, and it matches what the
+# environment routes. Nothing python3 could add would change the answer, so it is not asked.
+#
+# This is a hook: it runs on every prompt in every project on the machine. Measured, the delegate
+# fork (python3 plus the `git` fork behind project_key) cost 40ms -> 166ms per run on a routed
+# project, paid for an answer already in hand. The slow path stays for every case where the two do
+# NOT agree, which is the whole of what the port-resolution fix is about.
+if [ -n "${CLAUDE_PLUGIN_OPTION_PORT:-}" ]; then
+  case "${ANTHROPIC_BASE_URL:-}" in
+    *"127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT}/"* | *"localhost:${CLAUDE_PLUGIN_OPTION_PORT}/"* \
+      | *"[::1]:${CLAUDE_PLUGIN_OPTION_PORT}/"*) PORT="${CLAUDE_PLUGIN_OPTION_PORT}" ;;
+  esac
+fi
 case "${ANTHROPIC_BASE_URL:-}" in
   *//127.0.0.1:* | *//localhost:* | *//\[::1\]:*)
-    if [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
+    if [ -z "$PORT" ] && [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
       PORT="$(python3 "$HERE/settings.py" port routed 2>/dev/null |
                 sed -n 's/^port=\([0-9][0-9]*\)$/\1/p')"
     fi ;;

@@ -46,12 +46,15 @@ neither 8787 nor anything the user ever typed. One command answers the whole que
 order the hooks and the status line use, so you never assemble the chain yourself:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port routed
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port install
 ```
 
-`result=ok port=<n>` is the port this directory is actually routed to our proxy on, and `source=`
-says what established it — the routing URL, an install record, or a configured option.
-`result=unrouted` means nothing here routes through us: report that and its `why=`, and do **not**
+`result=ok port=<n>` is the port this directory's install is on, and `source=` says what established
+it — the routing URL, an install record, or a configured option. **`routed=` is a separate fact and
+must not be folded into the port**: `true` means this session's traffic really is going through that
+proxy; `false` means the install is there but the environment points elsewhere (`not_routed_why=`
+says where), so report the numbers as that install's, never as "what this project is routed to".
+`result=unrouted` means nothing here is installed at all: report that and its `why=`, and do **not**
 substitute 8787. Then:
 
 ```bash
