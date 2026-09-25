@@ -54,17 +54,17 @@ not a failure to report.
   handling auth and model routing. Replacing it outright usually breaks that agent's authentication.
 - `result=needs_decision reason=user_scope_needs_flag` **or** `project_installs_exist` — the
   machine-wide question, and it is **one** question however it is labelled. The `reason=` says what
-  is missing from argv; the `note=` and the `confirm_command_*` lines carry the whole thing. Two
-  halves: the blast radius (**every** Claude Code session on the machine, including projects with
-  nothing to do with context-guru, which is also every session they could use to fix it), and, when
-  `existing_project=` lines are present, what becomes of the projects that route themselves — the
-  machine-wide route will **not** reach them, because their own settings file is more specific and
-  keeps winning, which is not what "everywhere" means to the asker. Ask both **here**: this works
-  from inside one of those projects, so never answer it by sending them elsewhere. *Keep this
-  project on its own settings and port, or fold it into the machine-wide one?* Then run
-  `confirm_command_leave=` (both stay, each on its own port and config) or `confirm_command_adopt=`
-  verbatim — `--i-understand-machine-wide` is already in both, so **you add nothing**, and do not
-  re-plan to "collect" a flag you were told not to add.
+  is missing from argv. When `existing_project=` lines are present the plan prints that question
+  **paired** with its two answers, because what becomes of those projects is part of what is being
+  agreed to: `consent_question_leave=`/`confirm_command_leave=` (both installs stay, each on its own
+  port, config and store, and those projects keep overriding the machine-wide route) and
+  `consent_question_adopt=`/`confirm_command_adopt=` (they stop routing themselves and follow it).
+  Ask with the two `consent_question_*` sentences as the two options — each already carries the
+  blast radius and what happens to each project, so write neither yourself — then run the
+  `confirm_command_*` beside their answer verbatim. `--i-understand-machine-wide` is in both, so
+  **you add nothing**, and do not re-plan to "collect" a flag you were told not to add. Ask **here**:
+  this works from inside one of those projects, so never answer it by sending them elsewhere. With
+  no `existing_project=` lines it is one `consent_question=`/`confirm_command=` pair instead.
   `pending_decision=base_url_already_set` means a second question is owed about `existing_base_url=`,
   so there is deliberately **no** `consent_question=` yet: ask this one, run the matching
   `plan_command_leave=`/`plan_command_adopt=` line, ask the conflict question from the plan that comes

@@ -304,11 +304,28 @@ route_loopback_port() {
   printf '%s\n' "$rest"
 }
 
-# Is that port one of the project installs R_EXISTINGPROJECTS lists? Provenance from the install
-# record, never from the URL's shape — the distinction valid_base_url()'s docstring insists on.
+# Is that port one of the project installs R_EXISTINGPROJECTS lists? Provenance from what we
+# recorded, never from the URL's shape — the distinction valid_base_url()'s docstring insists on.
+#
+# TWO sources, because the first one is optional. `port=` is authoritative when present, but a row
+# written before per-project ports — and, on this head, a row written by a bare `settings.py add` —
+# carries `port=(none)`, and keying on that field alone made this whole fix a no-op for exactly
+# those projects: same project, same environment URL, only the `port` field differing, and the run
+# fell back into `base_url_already_set` and proposed chaining the machine-wide proxy behind the
+# project's own. So `file=` is asked too — it is always in the row, it is the file that PUT that URL
+# in the environment, and `show --file` reports both the URL and whether we wrote it (`ours=true`),
+# which is provenance from the record by another field rather than a guess about a URL's shape.
+# Read-only, like everything else route_inspect calls.
 route_project_holds_port() {
   printf '%s\n' "$R_EXISTINGPROJECTS" | while IFS= read -r l; do
     case "$l" in *" port=$1"|*" port=$1 "*) exit 7 ;; esac
+    local f o b
+    case "$l" in *" file="*) f=${l##* file=}; f=${f%%" "*} ;; *) continue ;; esac
+    [ -n "$f" ] || continue
+    o=$("$(route_here)/settings.py" show --file "$f" 2>/dev/null) || continue
+    case "$o" in *"ours=true"*) ;; *) continue ;; esac
+    b=$(printf '%s\n' "$o" | sed -n 's/^base_url=//p')
+    [ "$(route_loopback_port "$b")" = "$1" ] && exit 7
   done
   [ "$?" = 7 ]
 }
@@ -451,6 +468,22 @@ route_consent_question() {
   elif [ -z "$up" ]; then
     q="$q, forwarding straight to api.anthropic.com"
   fi
+  # The projects that route themselves, when there are any and the answer is in hand. Without this
+  # the gate printed ONE sentence and TWO commands: `consent_question=` never mentioned
+  # R_ONEXISTING, so leave and adopt were word-for-word identical, and the difference between them
+  # lived only in `note=` prose and in a sentence SKILL.md wrote by hand — which is the drift a
+  # generated question exists to prevent, reappearing as the one fact the two commands differ by.
+  if [ "$R_SCOPE" = user ] && [ -n "$R_EXISTINGPROJECTS" ]; then
+    local n; n=$(printf '%s\n' "$R_EXISTINGPROJECTS" | grep -c '^existing_project=')
+    case "$R_ONEXISTING" in
+      leave) q="$q, and LEAVE the $n project(s) that route themselves as they are (each keeps its \
+own port, config and store, and keeps overriding this machine-wide route — so \"every project\" \
+means every project except those)" ;;
+      adopt) q="$q, and REMOVE the routing of the $n project(s) that route themselves so they \
+follow this machine-wide route instead (their own proxies are stopped; whatever they routed to \
+before context-guru is put back and would still override, reported per project)" ;;
+    esac
+  fi
   if [ "$R_MODE" = attach ]; then
     q="$q (attach mode: nothing is started, the URL is assumed to be already serving)"
   fi
@@ -588,6 +621,11 @@ route_report() {
   emit "base_url=$(route_url)"
   emit "health_url=$(route_health_url)"
   emit "existing_base_url=$R_EXISTING"
+  # Why existing_base_url= is empty although ANTHROPIC_BASE_URL names a proxy: it is one of the
+  # existing_project= installs, seen because this ran from inside that project. Otherwise the fix is
+  # invisible — assertable only as the ABSENCE of a conflict, which is also what a broken plan looks
+  # like.
+  [ -n "$R_OWNPROJECTROUTE" ] && emit "own_project_route=$R_OWNPROJECTROUTE"
   emit "already_routed=$R_ALREADY"
   emit "chained=$R_CHAINED"
   emit "upstream=$R_UPSTREAM"
@@ -723,6 +761,8 @@ thing that cannot be derived, so it is the one thing checked first."
     emit "port=$R_PORT"
     emit "port_source=$R_PORTSOURCE"
     emit "file=$R_FILE"
+    # Same fact as on the plan path above, and for the same reason.
+    [ -n "$R_OWNPROJECTROUTE" ] && emit "own_project_route=$R_OWNPROJECTROUTE"
     [ -n "$R_EXISTINGPROJECTS" ] \
       && printf '%s\n' "$R_EXISTINGPROJECTS" | while IFS= read -r l; do emit "$l"; done
     note="--scope user routes EVERY project on this machine, including every project that has \
@@ -754,14 +794,20 @@ get the conflict question with its own paired commands. Do not compose --on-conf
       else
         emit "plan_command=$(R_USERSCOPE=1 route_plan_command)"
       fi
+    elif [ -n "$R_EXISTINGPROJECTS" ]; then
+      # PAIRED, the same shape the base_url_already_set gate uses further down, and for the same
+      # reason: the answer is part of what is being agreed to, so one sentence cannot authorise two
+      # commands. Each question says what becomes of those projects; the skill asks with these two
+      # as the two options and runs the command beside the one they pick. No bare
+      # `consent_question=`/`confirm_command=` here — either would be the question with its answer
+      # missing, which is what shipped and read as consent to whichever command was then run.
+      emit "consent_question_leave=$(R_USERSCOPE=1 R_ONEXISTING=leave route_consent_question)"
+      emit "confirm_command_leave=$(R_USERSCOPE=1 R_ONEXISTING=leave route_confirm_command)"
+      emit "consent_question_adopt=$(R_USERSCOPE=1 R_ONEXISTING=adopt route_consent_question)"
+      emit "confirm_command_adopt=$(R_USERSCOPE=1 R_ONEXISTING=adopt route_confirm_command)"
     else
       emit "consent_question=$(R_USERSCOPE=1 route_consent_question)"
-      if [ -n "$R_EXISTINGPROJECTS" ]; then
-        emit "confirm_command_leave=$(R_USERSCOPE=1 R_ONEXISTING=leave route_confirm_command)"
-        emit "confirm_command_adopt=$(R_USERSCOPE=1 R_ONEXISTING=adopt route_confirm_command)"
-      else
-        emit "confirm_command=$(R_USERSCOPE=1 route_confirm_command)"
-      fi
+      emit "confirm_command=$(R_USERSCOPE=1 route_confirm_command)"
     fi
     [ "$R_PLAN" = 1 ] && exit 0
     exit 2

@@ -10910,7 +10910,10 @@ func TestAGlobalPlanFromInsideAnInstalledProjectAsksOneAnswerableQuestion(t *tes
 		"reason=user_scope_needs_flag",
 		// The blast radius AND the existing projects, in one place, because they are one question.
 		"existing_project=",
-		"consent_question=route THIS MACHINE's model traffic",
+		// Paired: the answer about those projects is part of what is being agreed to, so each
+		// answer gets its own sentence beside its own command.
+		"consent_question_leave=route THIS MACHINE's model traffic",
+		"consent_question_adopt=route THIS MACHINE's model traffic",
 		// Runnable without the caller composing a flag it was told not to add.
 		"confirm_command_leave=",
 		"confirm_command_adopt=",
@@ -11023,5 +11026,119 @@ func TestAnUndecidedConflictOnTheMachineWideGatePrintsAPlanCommandNotAConsent(t 
 		if strings.Contains(out, unwanted) {
 			t.Errorf("%q is printed while the conflict is undecided:\n%s", unwanted, out)
 		}
+	}
+}
+
+// The portless row is the shape the `port=` field cannot answer for. A record written before
+// per-project ports — and, until this fix's producer half, one written by a bare `settings.py add` —
+// carries no port, and keying provenance on that field alone made the fix above a no-op for exactly
+// those projects: same project, same environment URL, only the field missing, and the run fell back
+// to `base_url_already_set` and proposed chaining the machine-wide proxy behind the project's own.
+func TestAProjectsOwnProxyIsNotAConflictEvenWhenItsRecordHasNoPort(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	file := seedProjectRecord(t, state, proj, port)
+	dropPortFromRecord(t, state, proj)
+	env := append(routeEnv(t, home, state, ""), "ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic")
+
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
+		"--i-understand-machine-wide", "--on-existing-projects", "leave")
+	if code != 0 || facts["result"] != "planned" {
+		t.Fatalf("a row with no recorded port must still be recognised as ours, got exit %d: %v",
+			code, facts)
+	}
+	if facts["existing_base_url"] != "" {
+		t.Errorf("the project's own proxy is a conflict because its row has no port=: %v", facts)
+	}
+	if facts["own_project_route"] != port {
+		t.Errorf("own_project_route= does not report the route that was recognised, so the absence "+
+			"of a conflict is indistinguishable from a broken plan: %v", facts)
+	}
+
+	// NEGATIVE CONTROL. Provenance is the record, not the URL's shape: the same portless row must not
+	// vouch for a loopback port its own file does not name.
+	fenv := append(routeEnv(t, t.TempDir(), state, ""),
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+freePort(t)+"/anthropic")
+	f, code := runRoute(t, proj, fenv, "--plan", "--scope", "user",
+		"--i-understand-machine-wide", "--on-existing-projects", "leave")
+	if code != 0 || f["reason"] != "base_url_already_set" {
+		t.Errorf("a foreign loopback proxy stopped being a conflict, so the portless row vouches "+
+			"for any port: exit %d: %v", code, f)
+	}
+	// And the file really is the one the record points at, which is what `show --file` is asked.
+	if b, err := os.ReadFile(file); err != nil || !strings.Contains(string(b), port) {
+		t.Fatalf("test fixture: %v %s", err, b)
+	}
+}
+
+// Drop the `port` field from the project's install-scope row, leaving everything else — the shape a
+// record written before per-project ports has.
+func dropPortFromRecord(t *testing.T, state, proj string) {
+	t.Helper()
+	f := filepath.Join(state, "context-guru", "install-scope.json")
+	b, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, ok := doc["projects"].(map[string]any)[projReal].(map[string]any)
+	if !ok {
+		t.Fatalf("no row for %s in %s", projReal, b)
+	}
+	delete(row, "port")
+	writeJSON(t, f, doc)
+}
+
+// One sentence cannot authorise two commands. The gate used to print ONE `consent_question=` beside
+// `confirm_command_leave=` and `confirm_command_adopt=`, and the sentence never mentioned which
+// answer it was for — so whichever command ran, the consent that was given was the other one's too.
+func TestTheTwoMachineWideAnswersGetTwoDifferentConsentQuestions(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	seedProjectRecord(t, state, t.TempDir(), freePort(t))
+	env := routeEnv(t, home, state, "")
+
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user")
+	if code != 0 || facts["result"] != "needs_decision" {
+		t.Fatalf("exit %d: %v", code, facts)
+	}
+	leave, adopt := facts["consent_question_leave"], facts["consent_question_adopt"]
+	if leave == "" || adopt == "" {
+		t.Fatalf("the two answers are not both asked about, so the skill has no sentence for one of "+
+			"the options it offers: %v", facts)
+	}
+	if leave == adopt {
+		t.Errorf("the two questions are word-for-word identical, which is the defect: %q", leave)
+	}
+	if !strings.Contains(leave, "LEAVE") || strings.Contains(leave, "REMOVE the routing") {
+		t.Errorf("the leave question does not say those projects are left alone: %q", leave)
+	}
+	if !strings.Contains(adopt, "REMOVE the routing") {
+		t.Errorf("the adopt question does not say those projects stop routing themselves: %q", adopt)
+	}
+	// Both still carry the blast radius and the spend clause: adding the answer must not cost the
+	// facts the sentence already had.
+	for name, q := range map[string]string{"leave": leave, "adopt": adopt} {
+		for _, want := range []string{"THIS MACHINE's model traffic", spendClauseMarker} {
+			if !strings.Contains(q, want) {
+				t.Errorf("consent_question_%s dropped %q: %q", name, want, q)
+			}
+		}
+	}
+	// No bare pair on this path: either line would be the question with its answer missing.
+	for _, unwanted := range []string{"consent_question", "confirm_command"} {
+		if facts[unwanted] != "" {
+			t.Errorf("%s= is printed although the answer is part of what is agreed to: %q",
+				unwanted, facts[unwanted])
+		}
+	}
+	if facts["confirm_command_leave"] == "" || facts["confirm_command_adopt"] == "" {
+		t.Errorf("a question without the command it authorises: %v", facts)
 	}
 }
