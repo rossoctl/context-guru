@@ -291,7 +291,7 @@ func TestSettingsRemoveTakesOnlyOurKey(t *testing.T) {
 
 	// (c) a base URL that is NOT ours must survive an uninstall untouched.
 	path = filepath.Join(dir, "c.json")
-	theirs := "http://127.0.0.1:4000/anthropic" // e.g. litellm
+	theirs := "http://127.0.0.1:4000/anthropic" // e.g. some other local API proxy
 	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": theirs}})
 	facts, code = settings(t, "remove", "--file", path, "--url", ourURL)
 	if code != 2 || facts["result"] != "conflict" {
@@ -375,7 +375,7 @@ func TestHookIsSilentAndInertWhereRoutingIsNotConfigured(t *testing.T) {
 		routed        bool
 	}{
 		{name: "unset"},
-		{name: "another local proxy on a different port (e.g. litellm)", baseURL: "http://localhost:4000/anthropic"},
+		{name: "another local proxy on a different port", baseURL: "http://localhost:4000/anthropic"},
 		{name: "a remote gateway", baseURL: "https://gateway.corp.example/anthropic"},
 		{name: "our port number appearing in a REMOTE host", baseURL: "https://8787.example.com/anthropic"},
 		// The gate matched on the port as a PREFIX, so 8787 also matched 87871 — and this hook
@@ -708,11 +708,11 @@ func TestSettingsRecognisesItsOwnURLOnAnotherPort(t *testing.T) {
 		t.Errorf("not repointed: %v", env)
 	}
 	// Anything we did NOT record stays a conflict — including another LOCAL proxy, which is the
-	// case a URL-shape rule got wrong: litellm's default is http://127.0.0.1:4000/anthropic, and
+	// case a URL-shape rule got wrong: another local API proxy answers on http://127.0.0.1:4000/anthropic, and
 	// treating that as ours would have let uninstall delete somebody else's routing.
 	for _, theirs := range []string{
 		"https://8787.example.com/anthropic", // remote host that merely contains our port
-		"http://127.0.0.1:4000/anthropic",    // another local proxy (litellm's default)
+		"http://127.0.0.1:4000/anthropic",    // another local API proxy on a common port
 	} {
 		p2 := filepath.Join(dir, "conflict.json")
 		writeJSON(t, p2, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": theirs}})
@@ -1063,7 +1063,7 @@ func TestCheckHookIsSilentWhereRoutingIsNotConfigured(t *testing.T) {
 		routed        bool
 	}{
 		{name: "unset"},
-		{name: "another local proxy on a different port (e.g. litellm)", baseURL: "http://localhost:4000/anthropic"},
+		{name: "another local proxy on a different port", baseURL: "http://localhost:4000/anthropic"},
 		{name: "a remote gateway", baseURL: "https://gateway.corp.example/anthropic"},
 		// The gate was a PREFIX match, so port 8787 also matched 87871 — and this hook would then
 		// probe and start our proxy underneath a user routed elsewhere on that port.
@@ -2163,7 +2163,7 @@ func TestStatuslineIsSilentWhereRoutingIsNotConfigured(t *testing.T) {
 		name, baseURL string
 	}{
 		{"unset", ""},
-		{"another local proxy on a different port (e.g. litellm)", "http://localhost:4000/anthropic"},
+		{"another local proxy on a different port", "http://localhost:4000/anthropic"},
 		{"a remote gateway", "https://gateway.corp.example/anthropic"},
 		{"our port number appearing in a REMOTE host", "https://8787.example.com/anthropic"},
 	} {
@@ -7748,7 +7748,7 @@ func TestRouteDecidesProvenanceFromTheRecordNotTheURLShape(t *testing.T) {
 			t.Fatalf("plan: exit %d %v", code, facts)
 		}
 		if facts["already_routed"] == "true" {
-			t.Errorf("claimed somebody else's endpoint as ours. With port 4000 this is litellm's own "+
+			t.Errorf("claimed somebody else's endpoint as ours. On a port another local API proxy holds "+
 				"default, so this is how an install would silently take over a working gateway: %v", facts)
 		}
 		if facts["existing_base_url"] == "" {

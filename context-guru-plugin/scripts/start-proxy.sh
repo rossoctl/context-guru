@@ -54,7 +54,7 @@ note() { printf 'context-guru: %s\n' "$*"; }
 
 # --- (1) the gate ------------------------------------------------------------------------
 # Match the port, not merely the word "localhost": a user routing to a DIFFERENT local proxy
-# (litellm, their own gateway) must not have ours started underneath them.
+# (another local API proxy, their own gateway) must not have ours started underneath them.
 # The trailing "/" is load-bearing: without it this is a PREFIX match, so PORT=8787 also matches
 # a URL on 87871 -- and this hook would start our proxy on 8787 underneath a user routed to a
 # different local proxy on that port, which is the exact case this gate exists to prevent. Every

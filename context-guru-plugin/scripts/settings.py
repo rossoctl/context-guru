@@ -71,7 +71,7 @@ def is_ours(data: dict, url: str) -> bool:
     """Did WE write this base URL? Answered from a record, never from the URL's shape.
 
     The tempting version of this is a regex over loopback `/anthropic` URLs, and it is wrong in a
-    way a test caught: litellm's default is `http://127.0.0.1:4000/anthropic`, so "any local
+    way a test caught: another local API proxy answers on `http://127.0.0.1:4000/anthropic`, so "any local
     /anthropic URL is ours" would make uninstall delete somebody else's routing. Two local proxies
     are indistinguishable by URL — so instead `add` records the URL it wrote, and this reads it.
 
@@ -1813,7 +1813,7 @@ def _looks_routed_by_us(real: str) -> bool:
     timestamped backups. A false negative re-applies the routing they ran the hatch to escape.
 
     A base URL that is NOT ours is deliberately not a signal — a user's own loopback gateway
-    (litellm's default is 127.0.0.1:4000) is precisely the value most worth having a copy of. Hence
+    (another local API proxy, say) is precisely the value most worth having a copy of. Hence
     the record and our own keys below, plus the narrow loopback test, rather than "any base URL".
     """
     try:
@@ -2377,7 +2377,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         return 0
     current = env[KEY]
     # Ours is the URL passed in, or the one we recorded at install time — which covers the case
-    # where the configured port changed since. It is NOT "any loopback /anthropic URL": litellm's
+    # where the configured port changed since. It is NOT "any loopback /anthropic URL": another
     # default is one of those, and uninstall must not delete somebody else's routing.
     #
     # This check is UNCONDITIONAL, and that is the fix for the worst defect this script has had.
@@ -2730,7 +2730,7 @@ def valid_base_url(url: str) -> str:
     Three things it deliberately is NOT:
 
     * NOT `is_ours()`. That answers "did we write this?" from the recorded
-      `$context-guru.installed_base_url`, never from the URL's shape — because litellm's default is
+      `$context-guru.installed_base_url`, never from the URL's shape — because another local proxy's is
       `http://127.0.0.1:4000/anthropic` and two local proxies are indistinguishable by URL.
       Provenance and validity are different questions.
     * NOT `_is_loopback()`, which is deliberately generous: every shape it missed was a false

@@ -253,8 +253,9 @@ route_inspect() {
   # docstring forbids twenty lines away in the sibling this calls: two local proxies are
   # indistinguishable by URL. So somebody else's proxy on our port was reported as ours, with
   # `existing_base_url=` emptied — the one question this design says can never be defaulted was never
-  # asked, and the skill narrated it as "a re-run or a repair". Port 4000 would have claimed litellm's
-  # own endpoint, the exact collision the docstring names.
+  # asked, and the skill narrated it as "a re-run or a repair". On a port another local API proxy
+  # happened to hold, it would have claimed that proxy's endpoint — the exact collision the docstring
+  # names.
   #
   # `show` now reports `ours=`, answered from the recorded installed_base_url. Prefer it whenever the
   # value came from the FILE, which is the case the shape test got wrong.
