@@ -4659,10 +4659,19 @@ func TestAddRefusesTheMachineWideFileWithoutBeingTold(t *testing.T) {
 	}
 }
 
-// TestRemoveIsNeverGatedByScope: uninstall loops over all three scopes, and it is the recovery path.
-// Gating removal the way `add` is gated would make a machine-wide install unremovable by the tool
-// that installed it — erring on exactly the wrong side.
-func TestRemoveIsNeverGatedByScope(t *testing.T) {
+// TestRemoveFromTheMachineWideFileIsGatedByAFlagNotByScope replaces TestRemoveIsNeverGatedByScope,
+// whose reasoning was "gating removal the way `add` is gated would make a machine-wide install
+// unremovable by the tool that installed it". The premise was wrong in one word: `--user-scope`
+// makes it gated, not unremovable, and an uninstall can pass it in the same breath as asking. What
+// the ungated version actually bought was that an uninstall run to reset ONE project — a project
+// `adopt` folded in, or any project on a machine-wide-only machine, which is to say almost every
+// project — removed routing for the whole machine at exit 0, with no question and no flag.
+//
+// So the property worth keeping is the rest of the original: the machine-wide file must still be
+// removable BY THIS TOOL, and the removal must not damage anything else in it. Both are asserted
+// below, either side of the refusal. (The path for a user who cannot get a session to talk at all
+// was never this command: it is `context-guru-reset`, which restores whole files.)
+func TestRemoveFromTheMachineWideFileIsGatedByAFlagNotByScope(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	userScope := filepath.Join(home, ".claude", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(userScope), 0o755); err != nil {
@@ -4675,8 +4684,18 @@ func TestRemoveIsNeverGatedByScope(t *testing.T) {
 	}
 
 	facts, code := settingsIn(t, state, home, "remove", "--file", userScope, "--url", ourURL)
+	if code != 2 || facts["result"] != "conflict" {
+		t.Fatalf("remove from the machine-wide file answered exit %d %v with no flag; it unroutes "+
+			"every project on the machine, so it has to be asked for", code, facts)
+	}
+	if env, _ := readJSON(t, userScope)["env"].(map[string]any); env["ANTHROPIC_BASE_URL"] != ourURL {
+		t.Fatalf("the refused removal changed the file anyway: %v", env)
+	}
+	facts, code = settingsIn(t, state, home, "remove", "--file", userScope, "--url", ourURL,
+		"--user-scope")
 	if code != 0 {
-		t.Fatalf("remove from user scope: exit %d %v", code, facts)
+		t.Fatalf("remove from user scope WITH --user-scope: exit %d %v — the machine-wide install "+
+			"must stay removable by the tool that installed it", code, facts)
 	}
 	env, _ := readJSON(t, userScope)["env"].(map[string]any)
 	if _, still := env["ANTHROPIC_BASE_URL"]; still {
@@ -9626,7 +9645,10 @@ func fakeProxyDirAnyPort(t *testing.T) string {
 		"addr=\"\"\n" +
 		"while [ $# -gt 0 ]; do case \"$1\" in --listen) addr=$2; shift 2;; *) shift;; esac; done\n" +
 		"port=${addr##*:}\n" +
-		"exec " + py + " -c '\n" +
+		// `exec -a`, so the process this leaves behind still has context-guru-proxy in its command
+		// line. Everything that signals a proxy in this plugin checks that first and kills by PID -
+		// never by pattern - so a fake that execs away its own name is a fake nothing will ever stop.
+		"exec -a context-guru-proxy " + py + " -c '\n" +
 		"import http.server, sys\n" +
 		"class H(http.server.BaseHTTPRequestHandler):\n" +
 		"    def do_GET(self):\n" +
@@ -9790,81 +9812,122 @@ func projectPortOption(t *testing.T, file string) string {
 	return fmt.Sprint(opts["port"])
 }
 
-// TestUserScopeAdoptKeepsTheProxyAndRecordOfTheProjectItIsRunFrom.
-//
-// `adopt` un-routes every project that routes itself, releases its port record and stops the proxy it
-// was using. That is right for a STRANGER project. But the likeliest way anyone reaches adopt at all
-// is by converting their own project-local install to machine-wide, FROM that project — and then the
-// converting project is in the adopt list too: its record still says scope=project-local, which is
-// exactly what the gate lists.
-//
-// So adopt ran on the install's own project and, with nothing excluding it, killed the proxy step 8
-// had just started and health-checked, deleted its pid/owner/fingerprint and released the record step
-// 0 had just written — while the install still reported `result=routed`. The user is told they are
-// now routed machine-wide; the port they are routed at has nothing on it.
-//
-// What still applies to that project is removing its project-local routing: that file is more
-// specific than the machine-wide route and would keep overriding it, which is the point of adopting.
-func TestUserScopeAdoptKeepsTheProxyAndRecordOfTheProjectItIsRunFrom(t *testing.T) {
-	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	port := freePort(t)
-	// This project's own project-local install, at `port`, routing itself — the state a user has
-	// immediately before they decide they want context-guru everywhere.
-	projFile := seedProjectRecord(t, state, proj, port)
+// waitPortClosed is the negative of waitForHealthz: nothing accepts a connection there any more.
+func waitPortClosed(t *testing.T, port string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 200*time.Millisecond)
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("something is still listening on port %s", port)
+}
 
-	env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
-	t.Cleanup(func() { stopFakeProxy(t, state, port) })
-	facts, code := runRoute(t, proj, env, "--scope", "user", "--i-consent-to-traffic-interception",
+// TestUserScopeAdoptFoldsInTheProjectItIsRunFromToo.
+//
+// `adopt` un-routes every project that routes itself, unsets its port option, releases its port
+// record and stops the proxy it was using. The likeliest way anyone reaches adopt at all is by
+// converting their own project-local install to machine-wide FROM that project, so the converting
+// project is in the adopt list too: its record still says scope=project-local, which is exactly what
+// the gate lists. "Fold this project in" is what the user asked for, and it has to mean the same thing
+// there as anywhere else.
+//
+// It used to mean something else. The machine-wide install was recorded under `project_key(cwd)` and
+// therefore INHERITED the converting project's port and row, so adopting that project would have
+// killed the proxy step 8 had just health-checked and released the record step 0 had just written —
+// while still reporting `result=routed`. The adopt loop had to skip its own project to avoid that, and
+// the skip left the project holding a live proxy nothing routed to. Now the machine-wide install has
+// its own record (user_scope_key()) and its own port, so there is nothing to protect and the skip is
+// gone; what is left of it is the report, because "the project you ran this from was adopted too" is
+// worth saying.
+//
+// Both ports are REAL allocations, so they differ — the pinned case, where the two installs
+// legitimately share one port and the proxy-stop guard fires instead, is
+// TestUserScopeAdoptFromAWorktreeKeepsItsOwnRecordAndProxy.
+func TestUserScopeAdoptFoldsInTheProjectItIsRunFromToo(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	env := routeEnv(t, home, state, fakeProxyDirAnyPort(t))
+	sd := filepath.Join(state, "context-guru")
+
+	// This project's own project-local install, routing itself — the state a user is in immediately
+	// before they decide they want context-guru everywhere.
+	facts, code := runRoute(t, proj, env, consentOK()...)
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the project install failed, so there is nothing to convert: exit %d %v", code, facts)
+	}
+	port1 := facts["port"]
+	t.Cleanup(func() { stopFakeProxy(t, state, port1) })
+	waitForHealthz(t, port1)
+
+	facts, code = runRoute(t, proj, env, "--scope", "user", "--i-consent-to-traffic-interception",
 		"--i-understand-machine-wide", "--on-existing-projects", "adopt")
 	if code != 0 || facts["result"] != "routed" {
 		t.Fatalf("the conversion itself failed, so adoption proves nothing: exit %d %v", code, facts)
 	}
-	// This is only the case under test if the machine-wide install really did reuse this project's
-	// recorded port; if it picked a different one, everything below passes for the wrong reason.
-	if facts["port"] != port || facts["port_source"] != "recorded" {
-		t.Fatalf("the install is not on the project's recorded port %s (port=%s source=%s), so the "+
-			"case this test exists for was never reached: %v", port, facts["port"],
-			facts["port_source"], facts)
+	port2 := facts["port"]
+	t.Cleanup(func() { stopFakeProxy(t, state, port2) })
+	if port2 == "" || port2 == port1 {
+		t.Fatalf("the machine-wide install took %q and the project it converted holds %q; with one "+
+			"port for both installs this test is the pinned case, not this one: %v", port2, port1, facts)
 	}
-	// The self-skip in the adopt loop is what stops the damage: it has to skip the record release too,
-	// so it returns before the proxy-stop step is reached at all. (`route_stop_adopted_proxy`'s own
-	// $R_PORT guard is the same invariant restated at the point of the dangerous action, and on this
-	// path it is deliberately unreachable — so `adopted_proxy_kept=` is NOT what this asserts on.)
 	if facts["adopted_project_is_this_project"] == "" {
-		t.Errorf("adopt says nothing about having skipped the install's own project, so a reader "+
-			"cannot tell a deliberate skip from a release that silently failed: %v", facts)
+		t.Errorf("adopt says nothing about the project it was run from being in the adopt list, so a "+
+			"reader cannot tell that its proxy was stopped on purpose: %v", facts)
 	}
 
-	// Ground truth, not wording: something still answers on that port.
-	waitForHealthz(t, port)
-	sd := filepath.Join(state, "context-guru")
-	for _, f := range []string{"proxy-" + port + ".pid", "proxy-" + port + ".owner"} {
+	// Ground truth. The machine-wide proxy answers; the project's own no longer exists.
+	waitForHealthz(t, port2)
+	waitPortClosed(t, port1)
+	for _, f := range []string{"proxy-" + port1 + ".pid", "proxy-" + port1 + ".owner"} {
+		if _, err := os.Stat(filepath.Join(sd, f)); err == nil {
+			t.Errorf("%s survives for a proxy that is gone, so the next install there will find a "+
+				"stale owner", f)
+		}
+	}
+	for _, f := range []string{"proxy-" + port2 + ".pid", "proxy-" + port2 + ".owner"} {
 		if _, err := os.Stat(filepath.Join(sd, f)); err != nil {
 			t.Errorf("adopt removed %s for the proxy this install is using: %v", f, err)
 		}
 	}
+
 	projReal, err := filepath.EvalSymlinks(proj)
 	if err != nil {
 		t.Fatal(err)
 	}
+	userKey, err := filepath.EvalSymlinks(filepath.Join(home, ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	projects, _ := readJSON(t, filepath.Join(sd, "install-scope.json"))["projects"].(map[string]any)
-	rec, _ := projects[projReal].(map[string]any)
+	if rec, still := projects[projReal]; still {
+		t.Errorf("the adopted project keeps a record after being folded in, which will refuse the "+
+			"next install there with port_recorded_by_another_project: %v", rec)
+	}
+	rec, _ := projects[userKey].(map[string]any)
 	if rec == nil {
-		t.Fatalf("adopt released the record step 0 wrote for this install: %v", projects)
+		t.Fatalf("adopt released the record step 0 wrote for this install (keyed at %s): %v", userKey,
+			projects)
 	}
-	if fmt.Sprint(rec["port"]) != port {
-		t.Errorf("the surviving record no longer names the port being served (want %s): %v", port, rec)
+	if fmt.Sprint(rec["port"]) != port2 || rec["scope"] != "user" {
+		t.Errorf("the surviving record does not describe this install (want port %s, scope user): %v",
+			port2, rec)
 	}
-	if rec["scope"] != "user" {
-		t.Errorf("the record still calls this a %v install after converting to machine-wide: %v",
-			rec["scope"], rec)
-	}
-	// And the half of adoption that DOES apply: the project-local file no longer overrides the
-	// machine-wide route it was adopted into.
+
+	// And the half of adoption that was always right: the project-local file no longer overrides the
+	// machine-wide route it was adopted into — neither its URL nor the port option behind the hooks.
+	projFile := filepath.Join(proj, ".claude", "settings.local.json")
 	data := readJSON(t, projFile)
 	if fenv, _ := data["env"].(map[string]any); fenv["ANTHROPIC_BASE_URL"] != nil {
 		t.Errorf("the install's own project still routes itself, so the machine-wide route it just "+
 			"wrote is overridden in the very project it was run from: %v", data)
+	}
+	if got := projectPortOption(t, projFile); got != "" {
+		t.Errorf("the adopted project still pins port %q, which outranks the machine-wide option and "+
+			"self-gates both hooks on a port nothing serves", got)
 	}
 }
 
@@ -10081,11 +10144,12 @@ func TestPortReleaseTakesTheRowItWasNamed(t *testing.T) {
 // there: a pre-migration project-local install recorded under a WORKTREE path, converted to
 // machine-wide from that worktree.
 //
-// The adopt loop's self-skip cannot catch this — it compares the adopted key (the worktree) against
-// `project-key` (the main checkout), so it does not fire. The release therefore runs on a real,
-// different row, and everything downstream of it has to be right on its own: the row named is the row
-// removed, this install's own record survives, and `route_stop_adopted_proxy` refuses the port it is
-// serving. That last refusal is REACHED here, which is why it is not dead code.
+// Two installs legitimately share one port here, because the port is PINNED, and that is what makes
+// `route_stop_adopted_proxy`'s refusal to stop the port it is serving reachable — the one thing the
+// adopt loop's own self-skip used to stand in for. With the skip gone that guard is the only thing
+// standing between "fold this project in" and "kill the proxy you just health-checked", so it is
+// asserted here on a row that is genuinely another project's: the worktree's key is not this
+// install's, and the release really does run.
 func TestUserScopeAdoptFromAWorktreeKeepsItsOwnRecordAndProxy(t *testing.T) {
 	mainRepo, worktree := gitWorktreePair(t)
 	home, state := t.TempDir(), t.TempDir()
@@ -10105,9 +10169,9 @@ func TestUserScopeAdoptFromAWorktreeKeepsItsOwnRecordAndProxy(t *testing.T) {
 		t.Fatalf("the conversion itself failed, so nothing below proves anything: exit %d %v", code,
 			facts)
 	}
-	if facts["adopted_project_is_this_project"] != "" {
-		t.Fatalf("the self-skip fired, so the release never ran and this test proves nothing — the "+
-			"worktree row must NOT look like this install's own key: %v", facts)
+	if facts["adopted_project_is_this_project"] == "" {
+		t.Errorf("the worktree was not reported as the project this install was run from, although "+
+			"`project-key` resolves it to the same checkout: %v", facts)
 	}
 	// The guard at the point of the dangerous action, reached because the self-skip did not fire.
 	if kept := facts["adopted_proxy_kept"]; !strings.Contains(kept, "port="+port) {
@@ -10121,10 +10185,22 @@ func TestUserScopeAdoptFromAWorktreeKeepsItsOwnRecordAndProxy(t *testing.T) {
 	if _, still := projects[worktree]; still {
 		t.Errorf("the adopted worktree row was not removed: %v", projects)
 	}
-	rec, _ := projects[mainRepo].(map[string]any)
+	// And nothing was filed under the main checkout either: that key is what `project-key` resolves
+	// the worktree TO, and a row left there would be a stale project-local claim on the machine-wide
+	// port — refusing the next install in that checkout for a reason nobody can explain.
+	if rec, stale := projects[mainRepo]; stale {
+		t.Errorf("a row survives under the main checkout %s: %v", mainRepo, rec)
+	}
+	// Keyed at the user config dir, not at the checkout: a machine-wide install is not a property of
+	// whatever directory it was run from. See user_scope_key().
+	userKey, err := filepath.EvalSymlinks(filepath.Join(home, ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := projects[userKey].(map[string]any)
 	if rec == nil {
-		t.Fatalf("adopt released the record this install wrote for itself (keyed at the main "+
-			"checkout, %s): %v", mainRepo, projects)
+		t.Fatalf("adopt released the record this install wrote for itself (keyed at %s): %v", userKey,
+			projects)
 	}
 	if fmt.Sprint(rec["port"]) != port || rec["scope"] != "user" {
 		t.Errorf("the surviving record does not describe this install (want port %s, scope user): %v",
@@ -10135,5 +10211,609 @@ func TestUserScopeAdoptFromAWorktreeKeepsItsOwnRecordAndProxy(t *testing.T) {
 	data := readJSON(t, projFile)
 	if fenv, _ := data["env"].(map[string]any); fenv["ANTHROPIC_BASE_URL"] != nil {
 		t.Errorf("the adopted worktree still routes itself: %v", data)
+	}
+}
+
+// --- installing at user level from inside an installed project, and resetting that project -----
+//
+// The scenario the repo owner described and expected to work through the two commands alone:
+// install in one project; later install at user level and keep both, on different ports; then reset
+// the project and have it fall back to the machine-wide install. None of the three steps worked, and
+// all three failed silently.
+//
+// The cause of the first two is one thing: `install-scope.json` filed a MACHINE-WIDE install under
+// `project_key(cwd)` — the project the user happened to be standing in. See user_scope_key() in
+// settings.py.
+
+// TestProjectThenUserScopeKeepsTwoPorts is "keep both", from inside the project that is kept.
+//
+// Allocation rule 1 is "this project already has a recorded port -> return it unchanged". With the
+// machine-wide install keyed as the cwd project, that rule handed it THAT PROJECT's port: one proxy
+// served both installs (losing the per-project store and preset that per-project ports exist for),
+// and `record_install_scope` then overwrote the project's own row with scope=user, so the project's
+// install became invisible and a later uninstall there released the record describing the
+// machine-wide one. `leave` means "keep both" and could not deliver it, because two installs cannot
+// hold two ports if they cannot hold two records.
+//
+// Both ports are REAL allocations (fakeProxyDirAnyPort, no pinned `port` option) — a pinned port
+// takes rule 2 for both installs and they would legitimately share it, which would make this test
+// pass while proving nothing.
+func TestProjectThenUserScopeKeepsTwoPorts(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	env := routeEnv(t, home, state, fakeProxyDirAnyPort(t))
+
+	facts, code := runRoute(t, proj, env, consentOK()...)
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the project install failed, so there is nothing to upgrade FROM: exit %d %v", code,
+			facts)
+	}
+	port1 := facts["port"]
+	if port1 == "" {
+		t.Fatalf("the project install did not say which port it took: %v", facts)
+	}
+	t.Cleanup(func() { stopFakeProxy(t, state, port1) })
+
+	// From INSIDE that project, which is the whole point: the user must not have to go somewhere
+	// else to install at user level.
+	facts, code = runRoute(t, proj, env, "--scope", "user", "--i-consent-to-traffic-interception",
+		"--i-understand-machine-wide", "--on-existing-projects", "leave")
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the machine-wide install failed: exit %d %v", code, facts)
+	}
+	port2 := facts["port"]
+	t.Cleanup(func() { stopFakeProxy(t, state, port2) })
+	if port2 == "" || port2 == port1 {
+		t.Fatalf("the machine-wide install took port %q and the project's is %q — `leave` kept both "+
+			"installs on ONE proxy, so they share a store and a preset: %v", port2, port1, facts)
+	}
+	waitForHealthz(t, port1)
+	waitForHealthz(t, port2)
+
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userKey, err := filepath.EvalSymlinks(filepath.Join(home, ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _ := readJSON(t, filepath.Join(state, "context-guru",
+		"install-scope.json"))["projects"].(map[string]any)
+	projRec, _ := projects[projReal].(map[string]any)
+	if projRec == nil {
+		t.Fatalf("the machine-wide install removed the project's own row although it was told to "+
+			"LEAVE it: %v", projects)
+	}
+	if fmt.Sprint(projRec["port"]) != port1 || projRec["scope"] != "project-local" {
+		t.Errorf("the project's row now describes the machine-wide install (want port %s, scope "+
+			"project-local): %v", port1, projRec)
+	}
+	userRec, _ := projects[userKey].(map[string]any)
+	if userRec == nil {
+		t.Fatalf("the machine-wide install filed no record of its own under %s: %v", userKey, projects)
+	}
+	if fmt.Sprint(userRec["port"]) != port2 || userRec["scope"] != "user" {
+		t.Errorf("the machine-wide record is wrong (want port %s, scope user): %v", port2, userRec)
+	}
+	// And the project still routes itself to its own port, which is what "keep" means to the user.
+	projFile := filepath.Join(proj, ".claude", "settings.local.json")
+	fenv, _ := readJSON(t, projFile)["env"].(map[string]any)
+	if got := fmt.Sprint(fenv["ANTHROPIC_BASE_URL"]); !strings.Contains(got, ":"+port1+"/") {
+		t.Errorf("the project's own routing is %q, want its own port %s", got, port1)
+	}
+	if got := projectPortOption(t, projFile); got != port1 {
+		t.Errorf("the project's port option is %q, want its own port %s", got, port1)
+	}
+}
+
+// TestResettingAProjectFallsBackToTheMachineWideInstall is the third step, and the one whose failure
+// is worst: after it the project is not "unrouted", it is routed at a port nothing will ever start.
+//
+// `settings.py remove` deletes the routing key but not `pluginConfigs[…].options.port`, and Claude
+// Code resolves options project-local > project > user. So in the reset project
+// `ANTHROPIC_BASE_URL` resolves to the machine-wide port while `CLAUDE_PLUGIN_OPTION_PORT` resolves
+// to the dead one the uninstall just stopped; both hooks self-gate on "does that URL name MY port",
+// neither matches, and both exit 0 in silence. The uninstall skill now runs `port unset` on the same
+// file, the way install.sh's `adopt` already did.
+//
+// Asserted as the HOOK's own verdict, not only as file contents: the failure mode is silence, and a
+// test that reads JSON cannot tell "the hook will act on this" from "the hook will decline it".
+func TestResettingAProjectFallsBackToTheMachineWideInstall(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	fake := fakeProxyDirAnyPort(t)
+	env := routeEnv(t, home, state, fake)
+	sd := filepath.Join(state, "context-guru")
+
+	facts, code := runRoute(t, proj, env, consentOK()...)
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the project install failed: exit %d %v", code, facts)
+	}
+	port1 := facts["port"]
+	t.Cleanup(func() { stopFakeProxy(t, state, port1) })
+	facts, code = runRoute(t, proj, env, "--scope", "user", "--i-consent-to-traffic-interception",
+		"--i-understand-machine-wide", "--on-existing-projects", "leave")
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the machine-wide install failed: exit %d %v", code, facts)
+	}
+	port2 := facts["port"]
+	t.Cleanup(func() { stopFakeProxy(t, state, port2) })
+	if port2 == port1 {
+		t.Fatalf("both installs took port %s, so there is no fall-back to observe", port1)
+	}
+	waitForHealthz(t, port2)
+
+	// The reset, as skills/uninstall/SKILL.md step 1 spells it: a LOOP over all three candidate files,
+	// `remove` in each, and `port unset` in the same file — but only where `remove` answered `removed`.
+	// Iterating all three is the point: the third is the machine-wide install's own file, and a step
+	// that unsets the port option in a file it did not unroute takes the machine-wide install down
+	// from inside a single project. A test that ran the two commands against the project's file alone
+	// would pin the sentence and miss the loop it lives in.
+	projFile := filepath.Join(proj, ".claude", "settings.local.json")
+	userFile := filepath.Join(home, ".claude", "settings.json")
+	url := "http://127.0.0.1:" + port1 + "/anthropic"
+	removedIn := ""
+	for _, f := range []string{
+		projFile,
+		filepath.Join(proj, ".claude", "settings.json"),
+		userFile,
+	} {
+		out, c := settingsInDir(t, sd, home, proj, "remove", "--file", f, "--url", url)
+		// The machine-wide file is refused, and refused for the machine-wide reason. `--url` naming
+		// this project's port does NOT produce that refusal on its own: it widens rather than
+		// narrows (it is the escape hatch for a URL we have no record of), so before the guard this
+		// call answered `removed` with `was=` naming the OTHER install's port — one project's reset
+		// unrouting every project on the machine, exit 0.
+		if f == userFile {
+			if c != 2 || out["result"] != "conflict" || out["reason"] != "another_installs_routing" {
+				t.Fatalf("remove on the machine-wide file answered exit %d %v; want a conflict "+
+					"naming another install's routing, or resetting this project takes every other "+
+					"project on this machine down with it", c, out)
+			}
+			continue
+		}
+		if c != 0 {
+			t.Fatalf("remove exit %d on %s: %v", c, f, out)
+		}
+		if out["result"] != "removed" {
+			continue
+		}
+		removedIn += f + " "
+		if o, c := settingsInDir(t, sd, home, proj, "port", "unset", "--file", f); c != 0 ||
+			o["result"] != "removed" {
+			t.Fatalf("exit %d %v: the uninstall left the port option behind in %s, which is what "+
+				"silences both hooks", c, o, f)
+		}
+	}
+	if strings.TrimSpace(removedIn) != projFile {
+		t.Fatalf("the uninstall removed routing from %q; only the project's own file routes to port "+
+			"%s, so anything else here is the machine-wide install being taken down from inside one "+
+			"project", strings.TrimSpace(removedIn), port1)
+	}
+	if got := projectPortOption(t, userFile); got != port2 {
+		t.Errorf("the machine-wide install's own port option is %q, want %s: a project uninstall "+
+			"unset an option in a file it never unrouted, so every project on this machine now "+
+			"resolves the plugin.json default while the routing still names %s", got, port2, port2)
+	}
+	stopFakeProxy(t, state, port1)
+	if f, c := settingsInDir(t, sd, home, proj, "port", "release"); c != 0 ||
+		f["result"] != "released" {
+		t.Fatalf("exit %d %v, want the project's record released", c, f)
+	}
+
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userKey, err := filepath.EvalSymlinks(filepath.Join(home, ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _ := readJSON(t, filepath.Join(sd, "install-scope.json"))["projects"].(map[string]any)
+	if _, still := projects[projReal]; still {
+		t.Errorf("the reset project still has a record: %v", projects)
+	}
+	rec, _ := projects[userKey].(map[string]any)
+	if rec == nil || fmt.Sprint(rec["port"]) != port2 {
+		t.Fatalf("uninstalling IN the project took the machine-wide record with it (want %s on port "+
+			"%s): %v", userKey, port2, projects)
+	}
+	if got := projectPortOption(t, projFile); got != "" {
+		t.Errorf("the project still pins port %q; with the machine-wide URL resolving to %s both "+
+			"hooks self-gate and exit silently", got, port2)
+	}
+
+	// What a fresh session in that project actually resolves — from the files, through the same
+	// command the skills read it with, not from the test's own arithmetic.
+	cfg, code := settingsInDir(t, sd, home, proj, "config")
+	if code != 0 {
+		t.Fatalf("settings.py config exit %d: %v", code, cfg)
+	}
+	if cfg["option_port"] != port2 {
+		t.Fatalf("a session in the reset project resolves option_port=%q, want the machine-wide %s",
+			cfg["option_port"], port2)
+	}
+
+	// The hook's own verdict, and the property that actually matters: a session in the reset project
+	// can BRING THE MACHINE-WIDE PROXY BACK. Asserted by taking it down first — with it already up,
+	// "declined silently" and "already healthy, nothing to do" are the same observation, and the
+	// first version of this test could not tell them apart.
+	stopFakeProxy(t, state, port2)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := net.DialTimeout("tcp", "127.0.0.1:"+port2, 200*time.Millisecond); err != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	logs := t.TempDir()
+	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	cmd.Dir = proj
+	cmd.Env = append(routeEnv(t, home, state, fake),
+		"TMPDIR="+logs,
+		// What Claude Code would put in a hook's environment for a session in this project, resolved
+		// above from the files by the same command the skills use — not by this test's arithmetic.
+		"CLAUDE_PLUGIN_OPTION_PORT="+cfg["option_port"],
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port2+"/anthropic",
+	)
+	out, err := cmd.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); ok {
+		t.Fatalf("start-proxy.sh exit %d in the reset project: %s", ee.ExitCode(), out)
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("start-proxy.sh in the reset project:\n%s", out)
+	t.Cleanup(func() { stopFakeProxy(t, state, port2) })
+	// The breadcrumb the self-gate leaves, named because silence is this defect's whole signature:
+	// the gate exits 0 with no stdout and only this line in the log.
+	if ents, _ := os.ReadDir(logs); len(ents) > 0 {
+		for _, e := range ents {
+			b, _ := os.ReadFile(filepath.Join(logs, e.Name()))
+			if strings.Contains(string(b), "declined:") {
+				t.Errorf("the hook declined in the reset project: %s\n%s", e.Name(), b)
+			}
+		}
+	}
+	waitForHealthz(t, port2)
+}
+
+// TestUserScopeThenProjectKeepsTwoPorts is the same invariant as
+// TestProjectThenUserScopeKeepsTwoPorts in the other order, which is the order the README and the
+// how-to now recommend: machine-wide first, a project pulled out of it later.
+//
+// Allocation rule 2 reads `options.port` from `_option_file_candidates`, whose last entry IS the
+// machine-wide settings file. So a project install read the machine-wide install's own option and
+// returned `source=configured` — two records, one port, therefore one proxy, one store and one preset,
+// silently. And `configured` skips the option write, so the project never got a port option of its
+// own: its hooks resolved their port through a file it does not own, and the machine-wide uninstall
+// unsetting that option would drop the project to the plugin.json default while its URL still named
+// the old port. The next alloc in that project then refused with
+// `port_recorded_by_another_project other_project=<the user config dir>` — a project the user never
+// installed anything in, and whose suggested remedy uninstalls the machine-wide install.
+//
+// A user-level `port` with no machine-wide record is a pin the user typed and is still honoured; the
+// record is the distinction, which is why this test installs rather than writing an option by hand.
+func TestUserScopeThenProjectKeepsTwoPorts(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	env := routeEnv(t, home, state, fakeProxyDirAnyPort(t))
+
+	// Machine-wide first, from a directory that is not the project — nothing to leave or adopt.
+	facts, code := runRoute(t, t.TempDir(), env, "--scope", "user",
+		"--i-consent-to-traffic-interception", "--i-understand-machine-wide")
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the machine-wide install failed, so there is nothing to pull a project out of: "+
+			"exit %d %v", code, facts)
+	}
+	port1 := facts["port"]
+	t.Cleanup(func() { stopFakeProxy(t, state, port1) })
+	waitForHealthz(t, port1)
+
+	facts, code = runRoute(t, proj, env, consentOK()...)
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the project install failed: exit %d %v", code, facts)
+	}
+	port2 := facts["port"]
+	t.Cleanup(func() { stopFakeProxy(t, state, port2) })
+	if port2 == "" || port2 == port1 {
+		t.Fatalf("the project install took the machine-wide install's port %q (source=%s), so both "+
+			"are on one proxy, one store and one preset: %v", port2, facts["port_source"], facts)
+	}
+	if facts["port_source"] != "allocated" {
+		t.Errorf("port_source=%q: a port that came from the machine-wide install's file is reported "+
+			"as configured and writes no option into this project, so its hooks depend on a file it "+
+			"does not own: %v", facts["port_source"], facts)
+	}
+	waitForHealthz(t, port2)
+
+	// The project has an option of its own, and the machine-wide install's is untouched.
+	projFile := filepath.Join(proj, ".claude", "settings.local.json")
+	if got := projectPortOption(t, projFile); got != port2 {
+		t.Errorf("the project's own port option is %q, want %s", got, port2)
+	}
+	if got := projectPortOption(t, filepath.Join(home, ".claude", "settings.json")); got != port1 {
+		t.Errorf("the machine-wide port option is now %q, want %s", got, port1)
+	}
+
+	// Two records, and the second install does not walk into rule 1's clash refusal.
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userKey, err := filepath.EvalSymlinks(filepath.Join(home, ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _ := readJSON(t, filepath.Join(state, "context-guru",
+		"install-scope.json"))["projects"].(map[string]any)
+	for key, want := range map[string]string{projReal: port2, userKey: port1} {
+		rec, _ := projects[key].(map[string]any)
+		if rec == nil || fmt.Sprint(rec["port"]) != want {
+			t.Errorf("record for %s is %v, want port %s", key, rec, want)
+		}
+	}
+	if f, c := settingsInDir(t, filepath.Join(state, "context-guru"), home, proj, "port", "alloc",
+		"--dry-run"); c != 0 || f["port"] != port2 {
+		t.Errorf("a second alloc in the project answers exit %d %v, want port %s unchanged — a "+
+			"refusal here names the user config dir as the owning \"project\"", c, f, port2)
+	}
+}
+
+// TestProjectInstallIgnoresALegacyMachineWideRow is the pre-#308 machine-wide install: its row is
+// filed under the project the user happened to run it from, carrying `scope=user` and
+// ~/.claude/settings.json, because `user_scope_key()` did not exist yet.
+//
+// Every check this PR added asked `projects.get(user_scope_key())` — i.e. it fired only for installs
+// this version created, which on an existing machine is never. Two ways the legacy row then still
+// put both installs on one port, both reproduced:
+//
+//   - rule 2 read the machine-wide `options.port` and answered `configured`, writing no option into
+//     the project (the round-1 defect, unfixed on every machine that matters);
+//   - rule 1 found the legacy row UNDER THIS PROJECT'S OWN KEY and handed back the machine-wide port
+//     as "this project's recorded port", after which `record_install_scope` rewrote the row as
+//     `scope=project` carrying it — laundering the shared port into a row that looks legitimate, by
+//     doing the exact thing the docs offer as the cleanup for a legacy row.
+//
+// `scope` is the discriminator, in whatever row carries it, which is what install.sh already uses.
+func TestProjectInstallIgnoresALegacyMachineWideRow(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	sd := filepath.Join(state, "context-guru")
+	userFile := filepath.Join(home, ".claude", "settings.json")
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A machine-wide install as an older version recorded it: routing and the port option in the
+	// machine-wide file, and the row filed under the project it was run from — this one.
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", userFile,
+		"--url", "http://127.0.0.1:8788/anthropic", "--user-scope"); c != 0 {
+		t.Fatalf("fixture add: exit %d %v", c, f)
+	}
+	data := readJSON(t, userFile)
+	data["pluginConfigs"] = map[string]any{
+		"context-guru@context-guru": map[string]any{"options": map[string]any{"port": 8788}},
+	}
+	writeJSON(t, userFile, data)
+	scopeFile := filepath.Join(sd, "install-scope.json")
+	writeJSON(t, scopeFile, map[string]any{"version": 1, "projects": map[string]any{
+		projReal: map[string]any{
+			"scope": "user", "file": userFile, "port": 8788,
+			"recorded_at": "2026-01-01T00:00:00+00:00",
+		},
+	}})
+
+	f, c := settingsInDir(t, sd, home, proj, "port", "alloc", "--dry-run")
+	if c != 0 {
+		t.Fatalf("alloc exit %d %v", c, f)
+	}
+	if f["port"] == "8788" {
+		t.Fatalf("a project install in the directory an older machine-wide install was run from "+
+			"gets port 8788 (source=%s) — the machine-wide port, from a row that describes the "+
+			"machine-wide install and not this project: %v", f["source"], f)
+	}
+	if f["source"] != "allocated" {
+		t.Errorf("source=%q, want allocated: anything else means the port came from the "+
+			"machine-wide install's own file or row, and `configured` writes no option into this "+
+			"project at all: %v", f["source"], f)
+	}
+
+	// The alloc above is a dry run, and the port it reports was never the whole story. A REAL alloc
+	// writes `projects[key]`, and this key is the legacy row's — so disowning the row for rule 1 left
+	// it to be overwritten by a bare `{"port": <this project's port>}`. This project got the right
+	// port and the machine-wide install lost its only record, which is worse than the bug this test
+	// was written for: every protection here asks `_machine_wide_record`, so with the row gone the
+	// NEXT project on the machine reads the machine-wide `options.port` and answers `configured`.
+	// The row must be MOVED to the key the user branch would have used, in that same write.
+	if f, c := settingsInDir(t, sd, home, proj, "port", "alloc"); c != 0 {
+		t.Fatalf("real alloc exit %d %v", c, f)
+	}
+	userKey, err := filepath.EvalSymlinks(filepath.Join(home, ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _ := readJSON(t, scopeFile)["projects"].(map[string]any)
+	mw, _ := projects[userKey].(map[string]any)
+	if mw == nil || fmt.Sprint(mw["port"]) != "8788" || mw["scope"] != "user" {
+		t.Fatalf("after a project install in that directory, no row describes the machine-wide "+
+			"install on port 8788 any more (looked under %s): %v", userKey, projects)
+	}
+	if fmt.Sprint(mw["file"]) != userFile {
+		t.Errorf("the migrated row names %q rather than the machine-wide file %s; the move must "+
+			"carry scope/file/port verbatim and only change the key: %v", mw["file"], userFile, mw)
+	}
+	if rec, _ := projects[projReal].(map[string]any); rec == nil || rec["scope"] == "user" {
+		t.Errorf("this project's own row is missing or still says scope=user: %v", projects)
+	}
+
+	// And the symptom that makes losing the row worse than sharing a port: a SECOND project, which
+	// has no legacy row of its own and only ever sees the machine-wide `options.port`.
+	other := t.TempDir()
+	f2, c2 := settingsInDir(t, sd, home, other, "port", "alloc", "--dry-run")
+	if c2 != 0 {
+		t.Fatalf("second project alloc exit %d %v", c2, f2)
+	}
+	if f2["port"] == "8788" || f2["source"] != "allocated" {
+		t.Fatalf("the next project on the machine gets port=%v source=%v — round 1's defect back "+
+			"verbatim, because the record that told the guards a machine-wide install exists was "+
+			"overwritten by the previous install in this test: %v", f2["port"], f2["source"], f2)
+	}
+}
+
+// TestAddWithoutAllocDoesNotAdoptTheMachineWidePort is the other door into the same laundering, one
+// layer down: `record_install_scope`'s carry-forward. `port` is the one field that call carries over
+// from an existing row rather than resetting, because an entirely separate command allocates it — and
+// a legacy machine-wide row IS an existing row under this project's key, so a project `add` lifted
+// 8788 out of it and filed it as `scope=project` while the routing it was recording named another
+// port. Narrow (install.sh allocs at step 0, which moves the row first), but `add --url` by hand
+// reaches it, and the fix is the same move rather than a note saying alloc protects it.
+func TestAddWithoutAllocDoesNotAdoptTheMachineWidePort(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	sd := filepath.Join(state, "context-guru")
+	userFile := filepath.Join(home, ".claude", "settings.json")
+	projFile := filepath.Join(proj, ".claude", "settings.local.json")
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", userFile,
+		"--url", "http://127.0.0.1:8788/anthropic", "--user-scope"); c != 0 {
+		t.Fatalf("fixture add: exit %d %v", c, f)
+	}
+	scopeFile := filepath.Join(sd, "install-scope.json")
+	writeJSON(t, scopeFile, map[string]any{"version": 1, "projects": map[string]any{
+		projReal: map[string]any{
+			"scope": "user", "file": userFile, "port": 8788,
+			"recorded_at": "2026-01-01T00:00:00+00:00",
+		},
+	}})
+
+	// No `port alloc` — straight to routing this project on a port of its own.
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", projFile,
+		"--url", "http://127.0.0.1:8791/anthropic"); c != 0 {
+		t.Fatalf("project add: exit %d %v", c, f)
+	}
+	projects, _ := readJSON(t, scopeFile)["projects"].(map[string]any)
+	rec, _ := projects[projReal].(map[string]any)
+	if rec == nil {
+		t.Fatalf("this project has no record after routing: %v", projects)
+	}
+	if fmt.Sprint(rec["port"]) == "8788" {
+		t.Errorf("this project's row carries the machine-wide port 8788 while its routing names "+
+			"8791: the carry-forward lifted it out of the legacy row: %v", rec)
+	}
+	userKey, err := filepath.EvalSymlinks(filepath.Join(home, ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mw, _ := projects[userKey].(map[string]any)
+	if mw == nil || fmt.Sprint(mw["port"]) != "8788" || mw["scope"] != "user" {
+		t.Fatalf("the machine-wide install's row did not survive this project's routing write "+
+			"(looked under %s): %v", userKey, projects)
+	}
+}
+
+// TestRemoveRefusesAnotherInstallsRouting pins the guard itself, in all three directions, because
+// the scenario test above can only show one of them.
+//
+// `remove`'s existing safety is "is this URL ours" — which the MACHINE-WIDE install's own file
+// answers yes to exactly as loudly as the project's. `--url` does not narrow that: it WIDENS (it is
+// the escape hatch for a URL we have no record of writing, and it covers a port that changed since
+// install), so a project uninstall passing its own port removed the machine-wide `ANTHROPIC_BASE_URL`
+// and reported `removed` with `was=` naming a port it was never asked about. The record is the
+// distinction, and the three directions are: refuse from a project that routes itself; refuse from a
+// project whose only routing IS the machine-wide one (`adopt` folded it in, or the machine never had
+// any other install) with the reason that says so; allow from anywhere when asked for explicitly.
+func TestRemoveRefusesAnotherInstallsRouting(t *testing.T) {
+	home, state, proj, folded := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	sd := filepath.Join(state, "context-guru")
+	userFile := filepath.Join(home, ".claude", "settings.json")
+	projFile := filepath.Join(proj, ".claude", "settings.local.json")
+	userURL := "http://127.0.0.1:8971/anthropic"
+	projURL := "http://127.0.0.1:8972/anthropic"
+
+	addUser := func() {
+		t.Helper()
+		if f, c := settingsInDir(t, sd, home, folded, "add", "--file", userFile, "--url", userURL,
+			"--user-scope"); c != 0 {
+			t.Fatalf("machine-wide add exit %d %v", c, f)
+		}
+	}
+	addUser()
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", projFile, "--url",
+		projURL); c != 0 {
+		t.Fatalf("project add exit %d %v", c, f)
+	}
+
+	// 1. From the project that routes itself: refused, and the file is untouched.
+	f, c := settingsInDir(t, sd, home, proj, "remove", "--file", userFile, "--url", projURL)
+	if c != 2 || f["result"] != "conflict" || f["reason"] != "another_installs_routing" {
+		t.Fatalf("exit %d %v: a project uninstall removed the machine-wide install's routing, so "+
+			"resetting one project unroutes every project on this machine", c, f)
+	}
+	if f["this_project_routes_in"] == "" {
+		t.Errorf("the refusal does not say which file this project does route through, which is the "+
+			"one fact the skill needs to explain it: %v", f)
+	}
+	env, _ := readJSON(t, userFile)["env"].(map[string]any)
+	if env["ANTHROPIC_BASE_URL"] != userURL {
+		t.Fatalf("the machine-wide routing is %v, want %s left exactly as it was",
+			env["ANTHROPIC_BASE_URL"], userURL)
+	}
+
+	// 2. From a project with no routing of its own — what `adopt` leaves behind, and what every
+	// project on a machine-wide-only machine looks like. Refused too, with the reason that says so.
+	// The first version of this guard EXEMPTED this case, on the reasoning that the machine-wide
+	// file is then the only routing this project has. That exemption covered the common case rather
+	// than an edge one: `/context-guru:uninstall` in such a project unrouted the whole machine at
+	// exit 0, no flag and no question, and the skill's gate then unset the machine-wide port option
+	// too. The record cannot tell "reset this project" from "remove context-guru" here — a folded-in
+	// project and a machine-wide-only machine are identical in it — so the only correct move is to
+	// ask, and direction 3 shows the asking costs one flag rather than a lockout.
+	f, c = settingsInDir(t, sd, home, folded, "remove", "--file", userFile, "--url", userURL)
+	if c != 2 || f["result"] != "conflict" || f["reason"] != "machine_wide_routing" {
+		t.Fatalf("exit %d %v: an uninstall in a project that is routed BY the machine-wide install "+
+			"removed it for every project on the machine without being asked", c, f)
+	}
+	// What this project routes through IS the machine-wide file (`resolve_install_scope` infers it
+	// for a project with no record, which is what makes `other` false and picks this reason). So the
+	// field must name that same file or nothing — naming a DIFFERENT file would mean the two reasons
+	// had been chosen the wrong way round, and the skill would ask the wrong question.
+	if r := f["this_project_routes_in"]; r != "(none)" && r != userFile {
+		t.Errorf("the refusal reports this_project_routes_in=%q, which is neither %s nor (none): %v",
+			r, userFile, f)
+	}
+
+	// 3. Asked for explicitly, from the project that routes itself: allowed. Same flag `add` needs
+	// to write this file in the first place, so there is one name for "yes, the whole machine".
+	if f, c := settingsInDir(t, sd, home, proj, "remove", "--file", userFile, "--url", userURL,
+		"--user-scope"); c != 0 || f["result"] != "removed" {
+		t.Fatalf("exit %d %v: --user-scope does not get the machine-wide install uninstalled from "+
+			"inside a project, so the refusal in 1 has no way out", c, f)
+	}
+}
+
+// TestUninstallSkillUnsetsThePortOptionItStops. The step that closes the gap above lives in prose,
+// so this is the only thing that keeps it there — and its absence is invisible in every other test,
+// because nothing else reads that file after a removal.
+func TestUninstallSkillUnsetsThePortOptionItStops(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("skills", "uninstall", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	// `removed` is the only answer that means the key really went. `unchanged` ("not routing here")
+	// reaching `port unset` is how the loop strips an option out of a file it never unrouted — the
+	// user's own pin, or the machine-wide install's port, from inside a single project's uninstall.
+	if !strings.Contains(body, "*result=removed*)") {
+		t.Error("the `port unset` gate does not match on `removed` alone, so `unchanged` passes " +
+			"through it and the loop unsets the port option in files it did not unroute.")
+	}
+	if !strings.Contains(body, `port unset --file "$f"`) {
+		t.Error("step 1 removes the routing key without unsetting the port option in the same file. " +
+			"A leftover project `port` outranks a machine-wide install's, so both hooks self-gate on " +
+			"a URL that is not theirs and exit silently.")
+	}
+	if !strings.Contains(body, "project-key --user-scope") {
+		t.Error("step 2 releases only this project's record. A machine-wide install has its own " +
+			"record (see user_scope_key()), and nothing else will ever release it.")
 	}
 }

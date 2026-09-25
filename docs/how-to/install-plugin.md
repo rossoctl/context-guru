@@ -202,6 +202,42 @@ session. Check `/context-guru:status` for the same numbers to confirm it's not s
 entry lifetime) is rejected, because exiting clears in-memory cache state. Raise the threshold, or
 raise `store.ttl_seconds` if the short lifetime is deliberate.
 
+## Upgrading from project level to user level
+
+You installed in one project, and now you want context-guru on every project on the machine. Run the
+install again, from anywhere — including from inside that project:
+
+```
+/context-guru:install --global
+```
+
+It will notice the project install and ask the one question that matters: **keep this project on its
+own settings and port, or fold it into the machine-wide one?**
+
+| Answer | Result |
+|---|---|
+| Keep both (`--on-existing-projects leave`) | two installs, two ports, two proxies. The project keeps its own settings file, port and preset; every *other* project gets the machine-wide one. The project's own settings are more specific, so they keep winning there — that is what "keep" means. |
+| Fold it in (`--on-existing-projects adopt`) | the project's routing and port option are removed (each file backed up first) and its proxy is stopped, so it falls back to the machine-wide route like everywhere else. |
+
+You do not have to be in a particular directory, and you never have to edit a settings file by hand.
+
+### Resetting a project afterwards
+
+If you kept both and later want that project to use the machine-wide install instead:
+
+```
+/context-guru:uninstall
+```
+
+Run it in that project. It removes that project's routing *and* its port option, stops its proxy and
+releases its port — so the next session there resolves the machine-wide route. The machine-wide
+install is untouched: it has its own record and its own port, and removing the settings file that
+routes *every* project is refused unless you say that is what you mean. So "reset this project"
+cannot turn into "uninstall context-guru everywhere" by accident, in this project or any other — and
+when you do want the whole thing gone, say so and the uninstall will do it.
+
+The change lands in your **next** session, in that project as everywhere else.
+
 ## Upgrading
 
 **The plugin** (skills, hooks, scripts) updates the way any Claude Code marketplace plugin does —
