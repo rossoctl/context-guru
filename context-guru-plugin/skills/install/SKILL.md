@@ -5,12 +5,10 @@ description: Install a local context-guru proxy and route this project's Claude 
 
 # Install context-guru for Claude Code
 
-<!-- Deliberately NO `allowed-tools:` here. The `!` block below pre-executes at render and needs no
-     tool permission, so the only thing an allowed-tools line would grant is the ONE command that
-     starts a traffic-intercepting proxy and repoints ANTHROPIC_BASE_URL. Measured in a real
-     sandboxed session: with `Bash(.../install.sh)` declared, that command ran with no prompt at all.
-     A plugin granting itself the permission the classifier exists to ask about is the plugin
-     answering a question that belongs to its user. -->
+<!-- Deliberately NO `allowed-tools:` here. The `!` block needs no tool permission, so the only thing
+     such a line would grant is the ONE command that intercepts traffic — measured: with
+     `Bash(.../install.sh)` declared it ran with no prompt. A plugin granting itself the permission
+     the classifier exists to ask about answers a question that belongs to its user. -->
 
 !`"${CLAUDE_PLUGIN_ROOT}/scripts/install.sh" --route --plan`
 
@@ -18,10 +16,14 @@ description: Install a local context-guru proxy and route this project's Claude 
 during rendering, so you did not choose to run it and cannot have mistyped it — read it rather than
 re-deriving any of it. It wrote nothing and started nothing.
 
+**It ran with no flags, so it describes a project-scope install of the directory you are in.** If they
+passed `--global` (or `--cache-strategy`, `--attach`, `--mode`), it is about a different install from
+the one they asked for — wrong `port=`, wrong `file=`. Re-run it once with their flags (`--global` is
+`--scope user`) and read THAT plan. Never translate this one into a machine-wide question.
+
 Your job is the part a script does badly: putting one question to a human, and reporting honestly.
-Everything else — resolving the port, ordering the proxy before the routing key, deriving the URL,
-health-checking, recording the undo — is in `install.sh --route`, where it is line order rather than
-a numbered paragraph somebody can read differently.
+Everything else — the port, the proxy-before-routing order, the URL, the health check, the undo — is
+in `install.sh --route`, as line order rather than a paragraph somebody can read differently.
 
 ## 1. Say what you are about to do, in three lines
 
@@ -41,8 +43,8 @@ Fuller detail is in `docs/how-to/install-plugin.md`. Point at it; do not recite 
 
 ## 2. Ask ONCE, then run one command
 
-**Read `result=` in the plan first.** A plan always exits 0 — `needs_decision` is something for you
-to act on, not a failure to report as one.
+**Read `result=` in the plan first.** A plan always exits 0 — `needs_decision` is for you to act on,
+not a failure to report.
 
 - `result=planned` — the plan is clean. If `already_routed=true`, say so: this is a re-run or a
   repair, not a fresh install.
@@ -50,41 +52,46 @@ to act on, not a failure to report as one.
   may be their company gateway, a benchmark endpoint or another proxy. **This is the one question**,
   and on a hosted agent the answer is nearly always chain: our proxy sits in front and theirs keeps
   handling auth and model routing. Replacing it outright usually breaks that agent's authentication.
-- `result=needs_decision reason=user_scope_needs_flag` — they passed `--global`. Confirm once, naming the
-  blast radius: **every** Claude Code session on the machine, including projects that have nothing
-  to do with context-guru, which is also every session they could use to fix it.
-- `result=needs_decision reason=project_installs_exist` — user scope, and the `existing_project=`
-  lines name projects that route themselves. The machine-wide route will **not** reach them: their
-  own settings file is more specific and keeps winning — not what "everywhere" means to the asker.
-  Ask **here**: this works from inside one of those projects, so never answer it by sending them
-  elsewhere. *Keep this project on its own settings and port, or fold it into the machine-wide one?*
-  Then `--on-existing-projects leave` (both stay, each on its own port and config) or `adopt` (their
-  routing and port option are removed, each file backed up, so they fall back to the machine-wide
-  route). `adopt` runs last, after the route is proven healthy, and reports `adopted_project=…
+- `result=needs_decision reason=user_scope_needs_flag` **or** `project_installs_exist` — the
+  machine-wide question, and it is **one** question however it is labelled. The `reason=` says what
+  is missing from argv; the `note=` and the `confirm_command_*` lines carry the whole thing. Two
+  halves: the blast radius (**every** Claude Code session on the machine, including projects with
+  nothing to do with context-guru, which is also every session they could use to fix it), and, when
+  `existing_project=` lines are present, what becomes of the projects that route themselves — the
+  machine-wide route will **not** reach them, because their own settings file is more specific and
+  keeps winning, which is not what "everywhere" means to the asker. Ask both **here**: this works
+  from inside one of those projects, so never answer it by sending them elsewhere. *Keep this
+  project on its own settings and port, or fold it into the machine-wide one?* Then run
+  `confirm_command_leave=` (both stay, each on its own port and config) or `confirm_command_adopt=`
+  verbatim — `--i-understand-machine-wide` is already in both, so **you add nothing**, and do not
+  re-plan to "collect" a flag you were told not to add.
+  `pending_decision=base_url_already_set` means a second question is owed about `existing_base_url=`,
+  so there is deliberately **no** `consent_question=` yet: ask this one, run the matching
+  `plan_command_leave=`/`plan_command_adopt=` line, ask the conflict question from the plan that comes
+  back. `adopt` reports `adopted_project=…
   unrouted=… recovery_dir=…` per project — read those rather than assuming. `unrouted=removed` is
   the success value; `unchanged` or `conflict` means that project kept its routing and must be
-  reported as still overriding. Relay two more per-project lines rather than folding them into
-  "adopted": `adopted_project_still_overriding=<dir> base_url=<url>` — that project's own
-  pre-context-guru URL was rightly restored, so it still overrides the machine-wide route the user
-  asked for. `adopted_proxy_left_running=<dir> port=<n>` — its old proxy still answers, so its state
-  was left alone; report the port. `adopted_proxy_stopped=` needs no comment.
-  `adopted_project_is_this_project=<dir>` — they ran this from a project that was itself adopted
-  (converting a project-local install); it was folded in like any other, so its old proxy is stopped
-  and the machine-wide one, on its own port, is what serves it now. `adopted_proxy_kept=<dir>
-  port=<n>` — that project's proxy was on the port this install serves (a pinned port), so it stays.
+  reported as still overriding. Relay these per-project lines rather than folding them into
+  "adopted": `adopted_project_still_overriding=<dir> base_url=<url>` (its own pre-context-guru URL
+  was rightly restored, so it still overrides the route the user asked for);
+  `adopted_proxy_left_running=<dir> port=<n>` (its old proxy still answers and its state was left
+  alone — report the port); `adopted_project_is_this_project=<dir>` (they ran this from a project
+  that was itself adopted, so its old proxy is stopped and the machine-wide one now serves it);
+  `adopted_proxy_kept=<dir> port=<n>` (its proxy was on the port this install serves — a pinned
+  port — so it stays). `adopted_proxy_stopped=` needs no comment.
 - `result=needs_decision reason=port_owned_by_another_project` — `owner_project=` already has a proxy
   on that port, running its preset, and a proxy is never taken from its owner. Clear the `port` option
   so one is allocated, or ask for an unused one.
 - `result=refused reason=port_changed_since_plan` — the port they agreed to is no longer the one this
   project gets. **Nothing was written.** Re-run `--route --plan` and ask again on the new port.
 - `result=refused reason=port_recorded_by_another_project` — this project and `owner_project=` both
-  have `port=` recorded; both are equally real, and picking one would put two projects with different
-  presets on one proxy. **Nothing was written.** Report both and ask which keeps the port; the other
-  needs its `port` option cleared (or an uninstall) so a fresh one is allocated.
-- `port_unwound=` on a failure — `true` (with `port_unwound_parts=option,record`) means step 0's own
-  bookkeeping was taken back, so "nothing was written" is literal. `nothing_to_undo` means a re-install
-  failed and the working install's record and pinned `options.port` are **deliberately** still there —
-  do not offer to clear them. Absent: they may still be there; say so, do not guess.
+  have `port=` recorded, and picking one would put two projects with different presets on one proxy.
+  **Nothing was written.** Report both and ask which keeps it; the other needs its `port` option
+  cleared (or an uninstall) so a fresh one is allocated.
+- `port_unwound=` on a failure — `true` (`port_unwound_parts=option,record`) means step 0's own
+  bookkeeping was taken back, so "nothing was written" is literal. `nothing_to_undo` means a
+  re-install failed and the working install's record and pinned `options.port` are **deliberately**
+  still there — do not offer to clear them. Absent: they may be; say so, do not guess.
 - `result=error reason=binary_install_failed` — read `detail=`. `no_release_found` wants the source
   build offer (`make build-static`, Go 1.26, no C toolchain). Anything naming a checksum
   (`checksum_mismatch`, `checksum_unavailable`, `checksum_absent`) is a **hard stop**: it is the only
@@ -92,17 +99,16 @@ to act on, not a failure to report as one.
   `CONTEXT_GURU_INSECURE=1` on their behalf.
 
 **One question, covering everything that needs their agreement — and you do not write it.** The
-script generates it from the resolved facts and prints it (`consent_question*=`, below). A worked
-example used to sit here, and it was the hazard this design removes: a hand-written sentence beside a
-generated one is two sources for one question, and the hand-written one drifts.
+script generates it from the resolved facts and prints it (`consent_question*=`, below). No worked
+example: a hand-written sentence beside a generated one is two sources for one question, and the
+hand-written one drifts.
 
 ### Get an explicit yes, as a choice they pick
 
-**`--route` refuses to do anything without `--i-consent-to-traffic-interception`.** That is
-deliberate and it is not a formality: everything the command does either intercepts their model
-traffic or points it somewhere new, and the approval prompt cannot be relied on to ask about that —
-it is probabilistic, a skill can declare it away, and in an unattended session there is no prompt
-because there is no human. So the script fails closed and the consent has to come from a person.
+**`--route` refuses to do anything without `--i-consent-to-traffic-interception`.** Not a formality:
+everything the command does intercepts their model traffic or points it somewhere new, and the
+approval prompt cannot be relied on to ask — it is probabilistic, a skill can declare it away, and an
+unattended session has no human to prompt. The script fails closed; the consent comes from a person.
 
 **Ask it as a two-option choice, not as prose they can skim.** Use `AskUserQuestion` if you have it,
 so it renders as something they pick rather than something they might answer sideways:
@@ -110,11 +116,13 @@ so it renders as something they pick rather than something they might answer sid
 - **question**: what the `consent_question*=` line says, generated from the same resolved facts as the
   command it authorises. Say all of it — phrase it naturally, but every fact has to survive, and do not
   drop the money: a question narrower than the command it authorises is not consent to that command.
-- **option 1 — "Yes, route this project"**: what they get, and that `/context-guru:uninstall` reverses it.
+- **option 1 — "Yes, route this project"**, or **"Yes, route every project on this machine"** when
+  the plan says `scope=user`: what they get, and that `/context-guru:uninstall` reverses it. A label
+  naming a narrower blast radius than the command is the consent going missing in the one word they
+  actually read.
 - **option 2 — "No, don't change anything"**: nothing is installed, started or written.
 
 Without `AskUserQuestion`, ask in plain text with exactly two numbered options and stop for an answer.
-
 **A silent or absent answer is a NO.** If nothing comes back — a non-interactive run, a session with
 no human — report what the plan found and stop. Do not infer consent from the fact that they typed
 `/context-guru:install`, and do not pass it because a refusal is inconvenient. **Never pass it on your
@@ -130,34 +138,29 @@ lines as the two options — they name the endpoint the user already has and say
 which is the whole of what they are deciding — then run the `confirm_command_*` line matching their
 answer, verbatim. For *abort*, run nothing.
 
-There is deliberately **no** `consent_question=` or `confirm_command=` on that path: the answer is the
-thing being asked for, so neither could be complete, and both those keys mean something exact
-everywhere else. Do not add `--on-conflict` to any other line yourself; if the paired lines are
-missing, re-run `--plan` rather than composing a command.
+There is deliberately **no** `consent_question=` or `confirm_command=` on that path: the answer is
+the thing being asked for, so neither could be complete. Never add `--on-conflict` yourself; if the
+paired lines are missing, re-run `--plan`.
 
 **Otherwise, run the `confirm_command=` line from the plan, verbatim.** Copy it; do not retype it, do not
 reorder it, and do not add or drop a flag. It is printed with every decision already resolved — scope,
 mode, base URL, conflict, cache strategy, machine-wide acknowledgement — and it ends with
 `--i-consent-to-traffic-interception`, so **the only thing you add is nothing.**
 
-There is deliberately no example command here. There used to be, and it was the defect this section
-exists to prevent: it hardcoded `--on-conflict chain`, which is wrong whenever the plan came back with
-nothing already set, and it spelled the path `"${CLAUDE_PLUGIN_ROOT}/scripts/install.sh"` — a variable
-that is substituted into a `` !`` ``-block's command string but is **not** exported to a Bash tool call,
-so on the one gated command it could expand to `/scripts/install.sh`, and a model that hit "no such
-file" would improvise a path. `confirm_command=` carries the absolute path the script resolved from
-`$0`, which is why it is the only spelling to use.
+No example command here, deliberately: the one that used to be hardcoded `--on-conflict chain`
+(wrong whenever nothing is already set) and spelled the path `"${CLAUDE_PLUGIN_ROOT}/…"`, which is
+substituted in a `` !`` ``-block but **not** exported to a Bash tool call — so it could expand to
+`/scripts/install.sh` and a model hitting "no such file" would improvise one. `confirm_command=`
+carries the absolute path the script resolved from `$0`.
+If a decision in it looks wrong, change the input to the plan and re-read the line it prints. Editing
+the line by hand is how a decision the user made gets silently dropped.
 
-If a decision in it looks wrong, go back to `## 2` and change the input to the plan, then re-read the
-line it prints. Editing the line by hand is how a decision the user made gets silently dropped.
-
-**Expect this one command to be gated, and do not try to get around it.** It starts a
-traffic-intercepting proxy and repoints `ANTHROPIC_BASE_URL`; auto mode is right to ask, because
-installing a plugin by name is not the same as consenting to have your model traffic intercepted.
-The command names its own scope and upstream, so approving it **is** the consent rather than a second
-copy of the question. If it is denied, hand them three options and no fourth: approve the prompt, run
-that exact command themselves with `!`, or add the rule the plan printed as `permission_rule=`. Do
-not reword the command to look like less than it is, and never write routing while no proxy answers.
+**Expect this one command to be gated, and do not try to get around it.** Installing a plugin by
+name is not consenting to have your model traffic intercepted, so auto mode is right to ask; the
+command names its own scope and upstream, so approving it **is** the consent. If denied, hand them
+three options and no fourth: approve the prompt, run that exact command themselves with `!`, or add
+the plan's `permission_rule=`. Never reword the command to look like less than it is, and never
+write routing while no proxy answers.
 
 ## 3. Read the result
 
@@ -165,15 +168,13 @@ not reword the command to look like less than it is, and never write routing whi
   `completed` (a repair of an earlier partial attempt — report it as success, not "nothing to do"),
   or `repointed` (moved to a new port).
 - `result=error reason=health_check_failed` — **no routing was written**, so the project is unrouted,
-  which is a working project. Say what the log shows rather than guessing. Do **not** say "nothing
-  happened": check `proxy_started=`. If it is `true`, a proxy IS still listening on that port and was
-  not stopped — say so, and pass on `stop_command=` or point at `/context-guru:uninstall`. A health
-  check often fails transiently (a slow start, a busy laptop), and a user told "nothing happened" will
-  retry into their own stale pidfile and an occupied port.
+  which is a working project. Say what the log shows rather than guessing, and do **not** say
+  "nothing happened": check `proxy_started=`, and if `true` a proxy IS still listening — say so and
+  pass on `stop_command=` or `/context-guru:uninstall`. Health checks fail transiently, and a user
+  told "nothing happened" retries into their own stale pidfile and an occupied port.
 - `result=error reason=health_check_failed_after_write` with `rolled_back=true` — the **routing key**
-  was removed again automatically, so they are unrouted rather than broken. The rollback undoes the
-  routing key and nothing else: `proxy_started=`, `pidfile=` and `strategy_file=` say what is still
-  there. Report those too rather than implying a full undo.
+  was removed automatically, so they are unrouted rather than broken. It undoes that key and nothing
+  else: report `proxy_started=`, `pidfile=` and `strategy_file=` rather than implying a full undo.
 - `result=error reason=settings_write_failed detail=unparseable_json` — their settings file was
   already broken. Do not rewrite it; tell them where it is.
 - `result=error reason=settings_write_failed detail=base_url_already_set` — a **refusal**, not a broken
@@ -183,26 +184,25 @@ not reword the command to look like less than it is, and never write routing whi
   starts before this step, so one may be running.
 - `result=refused reason=consent_required` — you ran it without the flag, or without asking. Nothing
   was installed, started or written. Go back and ask; do not simply re-run it with the flag appended.
-- `result=refused reason=unknown_strategy` — the `--cache-strategy` name does not exist (a typo, e.g.
-  `5-minute-ping` for `5-min-ping`). Nothing was installed, started or written; the `note=` lists the
-  real names. Ask which they meant — do not pick one for them, because the names differ in whether
-  they spend the user's quota.
+- `result=refused reason=unknown_strategy` — the `--cache-strategy` name does not exist (e.g.
+  `5-minute-ping` for `5-min-ping`). Nothing was written; `note=` lists the real names. Ask which they
+  meant — do not pick, because the names differ in whether they spend the user's quota.
 - `strategy_warning=` — the strategy could not be written even though the name was valid (usually a
   config at that path we did not write). The proxy is fine; mention it and move on.
 - `statusline=on` — also installed; mention it once, same as `recovery_dir=` (a `.gitignore`'d folder beside the routed file). `skipped` is not an install failure.
 
 ## 4. Then tell them
 
-- **Do not say it only takes effect next session.** Claude Code picks the `env` change up live —
-  that is why the proxy is started first. What is true: this session began before the proxy existed,
-  so `/context-guru:status` may have nothing to show yet, and a new session is the clean way to look.
+- **Do not say it only takes effect next session.** Claude Code picks the `env` change up live, which
+  is why the proxy starts first. What is true: this session began before the proxy existed, so
+  `/context-guru:status` may have nothing to show yet; a new session is the clean way to look.
 - Name the **cache strategy** from the result, and what it costs.
 - Dashboard: `http://127.0.0.1:<port>/dashboard/` — the four billed token tiers are where the cache
   effect shows.
-- **Name the port**, and that it is this project's own: `port_source=scanned` means allocated just
-  now, `recorded` a re-run, `configured` their own pinning. One project per port is deliberate, so a
-  number they did not pick is correct. `port_warning=` means it works but was not recorded — mention
-  it, since a later install could hand the same port to another project.
+- **Name the port**, and whose it is: `port_source=scanned` means allocated just now, `recorded` a
+  re-run, `configured` their own pinning. One project per port is deliberate, so a number they did
+  not pick is correct. `port_warning=` means it works but was not recorded — mention it, since a
+  later install could hand the same port to another project.
 - `/context-guru:status` for numbers, `/context-guru:cache-strategy-picker` to change the strategy,
   `/context-guru:uninstall` to undo.
 - **`reset_hatch=` verbatim, on its own line, as your last line.** This is the only moment the user
@@ -219,10 +219,10 @@ not reword the command to look like less than it is, and never write routing whi
 ## Do not
 
 - **Do not investigate their machine.** No `env | grep` over credentials, not `ANTHROPIC_API_KEY`,
-  not `AWS_*`; no `ps aux`, `lsof` or port scanning. An unbounded version of this was denied as
-  `[Credential Exploration]` on a real install. This plugin does not read credentials and must not
-  appear to — a proxy plugin sweeping for API keys is indistinguishable from the thing people are
-  right to fear. The plan already tells you every environment fact you need.
+  not `AWS_*`; no `ps aux`, `lsof` or port scanning — an unbounded version was denied as
+  `[Credential Exploration]` on a real install. A proxy plugin sweeping for API keys is
+  indistinguishable from the thing people are right to fear. The plan already tells you every
+  environment fact you need.
 - **Do not re-run the individual scripts** (`settings.py add`, `start-proxy.sh`) to do this by hand.
   The ordering between them is load-bearing and getting it wrong once killed the installing session.
 - Do not add any other key. Not `ANTHROPIC_API_KEY`, not `ANTHROPIC_AUTH_TOKEN` — a credential
