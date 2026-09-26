@@ -320,7 +320,13 @@ route_project_holds_port() {
   printf '%s\n' "$R_EXISTINGPROJECTS" | while IFS= read -r l; do
     case "$l" in *" port=$1"|*" port=$1 "*) exit 7 ;; esac
     local f o b
-    case "$l" in *" file="*) f=${l##* file=}; f=${f%%" "*} ;; *) continue ;; esac
+    # NOT truncated at the first space. `file=` is the LAST field of the row the producer prints
+    # (`existing_project=<path> scope=<s> port=<p> file=<path>`), so everything after it is the
+    # path — and it is a PATH: `~/My Projects/thing/.claude/settings.json` cut at the space made
+    # `show --file` fail, the row was skipped, and a machine-wide install from inside that project
+    # was back to reporting the project's own proxy as a conflict and proposing to chain behind it.
+    # The adopt loop at the end of this script records the same class of defect for the same reason.
+    case "$l" in *" file="*) f=${l##* file=} ;; *) continue ;; esac
     [ -n "$f" ] || continue
     o=$("$(route_here)/settings.py" show --file "$f" 2>/dev/null) || continue
     case "$o" in *"ours=true"*) ;; *) continue ;; esac

@@ -11029,6 +11029,49 @@ func TestAnUndecidedConflictOnTheMachineWideGatePrintsAPlanCommandNotAConsent(t 
 	}
 }
 
+// TestAProjectsOwnProxyIsRecognisedWhenItsPathHasASpace: the row's `file=` is a PATH, and it was read
+// as "everything up to the first space". For a project under `~/My Projects/`, `show --file` was then
+// handed a truncated path, failed, and the row was skipped — so a machine-wide install run from inside
+// that project went back to reporting the project's own proxy as a foreign conflict and proposing to
+// chain every project on the machine behind it. Space-bearing paths are ordinary on macOS.
+//
+// Portless on purpose: `port=` is the source that would otherwise cover for the truncation, and the
+// rows `file=` exists for are exactly the ones that lack it.
+func TestAProjectsOwnProxyIsRecognisedWhenItsPathHasASpace(t *testing.T) {
+	home, state := t.TempDir(), t.TempDir()
+	proj := filepath.Join(t.TempDir(), "My Projects", "thing")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// FIRST, so this test cannot pass on a resolved path that lost the space it is about.
+	real, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(real, " ") {
+		t.Fatalf("this test needs a path containing a space to mean anything: %q", real)
+	}
+
+	port := freePort(t)
+	seedProjectRecord(t, state, proj, port)
+	dropPortFromRecord(t, state, proj)
+	env := append(routeEnv(t, home, state, ""), "ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic")
+
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
+		"--i-understand-machine-wide", "--on-existing-projects", "leave")
+	if code != 0 || facts["result"] != "planned" {
+		t.Fatalf("exit %d, want a plan: %v", code, facts)
+	}
+	if facts["existing_base_url"] != "" {
+		t.Errorf("the project's own proxy is reported as a conflict because its settings file path "+
+			"contains a space: %v", facts)
+	}
+	if facts["own_project_route"] != port {
+		t.Errorf("own_project_route=%q, want %q — the row was skipped, so the absence of a conflict "+
+			"would be indistinguishable from a broken plan: %v", facts["own_project_route"], port, facts)
+	}
+}
+
 // The portless row is the shape the `port=` field cannot answer for. A record written before
 // per-project ports — and, until this fix's producer half, one written by a bare `settings.py add` —
 // carries no port, and keying provenance on that field alone made the fix above a no-op for exactly
