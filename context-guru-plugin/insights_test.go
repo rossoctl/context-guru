@@ -1054,3 +1054,66 @@ func indexOf(haystack []string, needle string) int {
 	}
 	return -1
 }
+
+// TestInsightsReportsTheInstallEvenWhenThisSessionIsRoutedElsewhere.
+//
+// The report question, distinguished from the gate — see TestTheGateAndTheReportAreTwoQuestions in
+// plugin_test.go for the other half. This file's consumer must NOT use the gate: a cost report is
+// about an install, and it is read from a Bash tool call in sessions that started before the
+// install, in projects whose environment points at somebody else's endpoint, and after routing was
+// removed while the dashboard DB still holds real history. Refusing there would be the same defect
+// as the blind 8787, inverted: no numbers at all where honest ones exist.
+func TestInsightsReportsTheInstallEvenWhenThisSessionIsRoutedElsewhere(t *testing.T) {
+	dir := insightsProject(t, nil)
+	insightsScopeRecord(t, dir, insightsKey(t, dir), "project",
+		filepath.Join(dir, ".claude", "settings.json"), 8850)
+	out, code := runInsights(t, dir, map[string]string{
+		"ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+	}, "env")
+	f := facts(mustZero(t, out, code))
+	if f["port"] != "8850" {
+		t.Errorf("port=%q, want 8850: the environment routes to the real API, but the install and "+
+			"its dashboard DB are still on 8850 and are what this report is about", f["port"])
+	}
+}
+
+// TestAPortlessMachineWideRowIsNotHandedToAnUnrelatedProject: the blind 8787 surviving inside the
+// rule meant to replace it. A row with no `port` is read as a pre-per-project install on 8787 —
+// true of THAT install, and the reason the default still exists — but read off the MACHINE-WIDE row
+// it answered for any directory on the machine, including one that never installed anything. So the
+// legacy reading is allowed only for the row describing the directory being asked about.
+func TestAPortlessMachineWideRowIsNotHandedToAnUnrelatedProject(t *testing.T) {
+	dir := insightsProject(t, nil)
+	insightsScopeRecord(t, dir, "(user)", "user",
+		filepath.Join(dir, "home", ".claude", "settings.json"), 0)
+	out, code := runInsights(t, dir, nil, "env")
+	f := facts(mustZero(t, out, code))
+	if f["port"] == "8787" {
+		t.Errorf("port=8787 for a project with no install of its own, from a machine-wide row " +
+			"that names no port. That is the bottom of the allocation scan and, on any machine " +
+			"with an install, somebody's live proxy — priced as this account's spend")
+	}
+	if f["port"] != "(none)" {
+		t.Errorf("port=%q, want (none)", f["port"])
+	}
+}
+
+// The same install, the same record, and a session pointing at a FOREIGN local proxy — litellm on
+// 4000, a colleague's gateway, anything on loopback we did not write. The gate must still say no:
+// that traffic does not reach us. The REPORT must not, and it used to, because the "no install of
+// ours claims this loopback port" answer sat above the gate/report split and returned for both. The
+// three skills read `result=unrouted` as "nothing here is installed at all", so status and uninstall
+// reported nothing installed for a project with a record, a proxy and a dashboard DB.
+func TestTheReportStillFindsTheInstallWhenTheSessionPointsAtAForeignLocalProxy(t *testing.T) {
+	dir := insightsProject(t, nil)
+	insightsScopeRecord(t, dir, insightsKey(t, dir), "project",
+		filepath.Join(dir, ".claude", "settings.json"), 8850)
+	env := map[string]string{"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000/anthropic"}
+
+	out, code := runInsights(t, dir, env, "env")
+	f := facts(mustZero(t, out, code))
+	if f["port"] != "8850" {
+		t.Errorf("port=%q, want 8850: a foreign proxy in the environment is not evidence that this "+
+			"project has no install", f["port"])
+	}
+}

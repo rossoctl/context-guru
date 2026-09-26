@@ -16,12 +16,53 @@
 # failure than the one it reports.
 set -uo pipefail
 
-PORT="${CLAUDE_PLUGIN_OPTION_PORT:-8787}"
+HERE="$(unset CDPATH; \cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || HERE=""
 
-# Same gate as the starter, for the same reason: this plugin is installed at user scope, so this
-# hook runs in every project the user has. Unrouted projects must never hear from it.
-# The trailing "/" makes this an exact port match rather than a prefix one -- see the same gate
-# in start-proxy.sh. PORT=8787 must not match a URL on 87871.
+# THE PORT COMES FROM WHAT ACTUALLY ROUTES THIS DIRECTORY, resolved by `settings.py port routed` —
+# the one implementation of that rule, shared with start-proxy.sh, the status line and insights.py.
+# See resolve_routed_port in settings.py for the whole story; the part that matters here is that the
+# old `${CLAUDE_PLUGIN_OPTION_PORT:-8787}` made this hook go silent on a correct install. 8787 is not
+# a default any more (ports are per project, from PORT_SCAN_START upwards, so 8787 is whichever
+# project installed first), so in any project on another port the gate below did not match and this
+# hook exited without a word — leaving the user with the hang it exists to explain.
+#
+# Shape-tested first so the common case costs nothing: this plugin installs at user scope, so this
+# runs on EVERY prompt in EVERY project, and a URL naming no loopback port cannot be ours whatever
+# the state files say. Shape only ever skips; adopting a port needs the provenance record, which is
+# the delegate's job — another local proxy on 127.0.0.1:4000/anthropic is not us.
+PORT=""
+# FAST PATH, and the same rule the delegate applies, not a looser one: when the hook runner set
+# CLAUDE_PLUGIN_OPTION_PORT and the routing URL names THAT port, the two agree, which is provenance
+# step 2 in resolve_routed_port — the option is configuration we wrote, and it matches what the
+# environment routes. Nothing python3 could add would change the answer, so it is not asked.
+#
+# This is a hook: it runs on every prompt in every project on the machine. Measured, the delegate
+# fork (python3 plus the `git` fork behind project_key) cost 40ms -> 166ms per run on a routed
+# project, paid for an answer already in hand. The slow path stays for every case where the two do
+# NOT agree, which is the whole of what the port-resolution fix is about.
+if [ -n "${CLAUDE_PLUGIN_OPTION_PORT:-}" ]; then
+  case "${ANTHROPIC_BASE_URL:-}" in
+    *"127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT}/"* | *"localhost:${CLAUDE_PLUGIN_OPTION_PORT}/"* \
+      | *"[::1]:${CLAUDE_PLUGIN_OPTION_PORT}/"*) PORT="${CLAUDE_PLUGIN_OPTION_PORT}" ;;
+  esac
+fi
+case "${ANTHROPIC_BASE_URL:-}" in
+  *//127.0.0.1:* | *//localhost:* | *//\[::1\]:*)
+    if [ -z "$PORT" ] && [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
+      PORT="$(python3 "$HERE/settings.py" port routed 2>/dev/null |
+                sed -n 's/^port=\([0-9][0-9]*\)$/\1/p')"
+    fi ;;
+  *) exit 0 ;;
+esac
+# Honoured when the delegate could not answer (no python3, a broken install) but the hook runner did
+# set the option: a hook that can name a port should use it rather than say nothing.
+[ -n "$PORT" ] || PORT="${CLAUDE_PLUGIN_OPTION_PORT:-}"
+[ -n "$PORT" ] || exit 0
+
+# The gate the delegate's answer already satisfies, kept because the option-variable fallback above
+# does not: an unrouted project must never hear from this hook. The trailing "/" makes this an exact
+# port match rather than a prefix one -- see the same gate in start-proxy.sh. PORT=8787 must not
+# match a URL on 87871.
 case "${ANTHROPIC_BASE_URL:-}" in
   *"127.0.0.1:${PORT}/"* | *"localhost:${PORT}/"* | *"[::1]:${PORT}/"*) ;;
   *) exit 0 ;;
