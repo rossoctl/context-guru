@@ -68,7 +68,7 @@ R_PORT= R_PRESET= R_IDLE= R_BIN= R_ONPATH= R_FILE= R_EXISTING= R_CHAINED=false
 # Set by step 0 once the port record is actually written, and read only by route_unwind_port.
 R_PORT_COMMITTED=0
 R_ALREADY=false R_CONSENT=0 R_OURS= R_FROMENV=0 R_SPENDS= R_PIDFILE= R_PROXYLOG=
-R_ONEXISTING= R_PORTSOURCE= R_EXISTINGPROJECTS=
+R_ONEXISTING= R_PORTSOURCE= R_EXISTINGPROJECTS= R_OWNPROJECTROUTE=
 # What step 0 FOUND, read before it writes, so route_unwind_port can undo what this install made
 # and nothing else. `unknown` is the safe default: it is not `absent`, so nothing is released on the
 # strength of a reading we never got.
@@ -270,8 +270,70 @@ route_inspect() {
       *"//127.0.0.1:${R_PORT}/"*|*"//localhost:${R_PORT}/"*) R_EXISTING=; R_ALREADY=true ;;
     esac
   fi
+  # A user-scope install run from INSIDE a project that context-guru already installed sees THAT
+  # PROJECT's proxy in the environment, because the project's own settings file put it there. It is
+  # not a conflict for the user file: it is the project install that --on-existing-projects is the
+  # question about, and `leave` exists to keep it. Reported as a conflict, the plan recommended
+  # `chain` ("usually right") — which would have put every project on the machine behind one
+  # project's proxy and pipeline, and told the user their own proxy "handles auth". The project file
+  # keeps overriding the user file whatever is decided here, so there is nothing to displace.
+  if [ -n "$R_EXISTING" ] && [ "$R_SCOPE" = user ] && [ -n "$R_EXISTINGPROJECTS" ]; then
+    local eport
+    eport=$(route_loopback_port "$R_EXISTING")
+    if [ -n "$eport" ] && route_project_holds_port "$eport"; then
+      R_EXISTING=; R_OWNPROJECTROUTE="$eport"
+    fi
+  fi
   # A value in the FILE that is not ours stays exactly where it is: a conflict, reported, and
   # answerable only by a human. That is the case the shape match silently swallowed.
+}
+
+# The port in a loopback URL, or nothing. Anchored on `//host:port/` for the reason route_inspect
+# records: an unanchored match let 8787 claim an endpoint on 87870.
+# No sed: BSD sed has no `\|` alternation, so the first version of this matched nothing at all on
+# macOS and silently reported "no port" for every URL — a fix that looked applied and was not.
+route_loopback_port() {
+  local rest
+  case "$1" in
+    http://127.0.0.1:*|https://127.0.0.1:*|http://localhost:*|https://localhost:*|\
+    http://\[::1\]:*|https://\[::1\]:*) ;;
+    *) return 0 ;;
+  esac
+  rest=${1##*:}; rest=${rest%%/*}
+  case "$rest" in ''|*[!0-9]*) return 0 ;; esac
+  printf '%s\n' "$rest"
+}
+
+# Is that port one of the project installs R_EXISTINGPROJECTS lists? Provenance from what we
+# recorded, never from the URL's shape — the distinction valid_base_url()'s docstring insists on.
+#
+# TWO sources, because the first one is optional. `port=` is authoritative when present, but a row
+# written before per-project ports — and, on this head, a row written by a bare `settings.py add` —
+# carries `port=(none)`, and keying on that field alone made this whole fix a no-op for exactly
+# those projects: same project, same environment URL, only the `port` field differing, and the run
+# fell back into `base_url_already_set` and proposed chaining the machine-wide proxy behind the
+# project's own. So `file=` is asked too — it is always in the row, it is the file that PUT that URL
+# in the environment, and `show --file` reports both the URL and whether we wrote it (`ours=true`),
+# which is provenance from the record by another field rather than a guess about a URL's shape.
+# Read-only, like everything else route_inspect calls.
+route_project_holds_port() {
+  printf '%s\n' "$R_EXISTINGPROJECTS" | while IFS= read -r l; do
+    case "$l" in *" port=$1"|*" port=$1 "*) exit 7 ;; esac
+    local f o b
+    # NOT truncated at the first space. `file=` is the LAST field of the row the producer prints
+    # (`existing_project=<path> scope=<s> port=<p> file=<path>`), so everything after it is the
+    # path — and it is a PATH: `~/My Projects/thing/.claude/settings.json` cut at the space made
+    # `show --file` fail, the row was skipped, and a machine-wide install from inside that project
+    # was back to reporting the project's own proxy as a conflict and proposing to chain behind it.
+    # The adopt loop at the end of this script records the same class of defect for the same reason.
+    case "$l" in *" file="*) f=${l##* file=} ;; *) continue ;; esac
+    [ -n "$f" ] || continue
+    o=$("$(route_here)/settings.py" show --file "$f" 2>/dev/null) || continue
+    case "$o" in *"ours=true"*) ;; *) continue ;; esac
+    b=$(printf '%s\n' "$o" | sed -n 's/^base_url=//p')
+    [ "$(route_loopback_port "$b")" = "$1" ] && exit 7
+  done
+  [ "$?" = 7 ]
 }
 
 # The URL is DERIVED in local mode and never accepted as an argument, which is what makes the
@@ -412,6 +474,22 @@ route_consent_question() {
   elif [ -z "$up" ]; then
     q="$q, forwarding straight to api.anthropic.com"
   fi
+  # The projects that route themselves, when there are any and the answer is in hand. Without this
+  # the gate printed ONE sentence and TWO commands: `consent_question=` never mentioned
+  # R_ONEXISTING, so leave and adopt were word-for-word identical, and the difference between them
+  # lived only in `note=` prose and in a sentence SKILL.md wrote by hand — which is the drift a
+  # generated question exists to prevent, reappearing as the one fact the two commands differ by.
+  if [ "$R_SCOPE" = user ] && [ -n "$R_EXISTINGPROJECTS" ]; then
+    local n; n=$(printf '%s\n' "$R_EXISTINGPROJECTS" | grep -c '^existing_project=')
+    case "$R_ONEXISTING" in
+      leave) q="$q, and LEAVE the $n project(s) that route themselves as they are (each keeps its \
+own port, config and store, and keeps overriding this machine-wide route — so \"every project\" \
+means every project except those)" ;;
+      adopt) q="$q, and REMOVE the routing of the $n project(s) that route themselves so they \
+follow this machine-wide route instead (their own proxies are stopped; whatever they routed to \
+before context-guru is put back and would still override, reported per project)" ;;
+    esac
+  fi
   if [ "$R_MODE" = attach ]; then
     q="$q (attach mode: nothing is started, the URL is assumed to be already serving)"
   fi
@@ -424,8 +502,9 @@ route_consent_question() {
   # An unknown spend status reads as SPENDING, not as free: the sentence a user consents to is the
   # wrong place to resolve an uncertainty in their favour.
   case "$R_SPENDS" in
-    true)  q="$q, with cache strategy $R_STRATEGY, which SPENDS THE USER'S OWN QUOTA on idle \
-turns to hold the cache warm" ;;
+    true)  q="$q, and spend a little of YOUR OWN Claude quota between turns (cache strategy \
+$R_STRATEGY sends a tiny keep-alive request while you are not typing, so the cache stays warm; \
+/context-guru:cache-strategy-picker turns it off)" ;;
     false) q="$q, with cache strategy $R_STRATEGY (no spend)" ;;
     *)     q="$q, with cache strategy $R_STRATEGY (SPEND STATUS UNKNOWN - treat it as spending \
 until Usage says otherwise)" ;;
@@ -528,6 +607,14 @@ stale pidfile on port ${R_PORT}."
   return 0
 }
 
+# The same line as route_confirm_command, but a --plan rather than a consent: what to run when a
+# decision has been made and ANOTHER question is still owed, so the next question is asked from a
+# plan that carries this answer instead of being composed by hand. The consent flag is the fixed
+# last word of that line, which is what makes the swap exact.
+route_plan_command() {
+  route_confirm_command | sed 's/ --i-consent-to-traffic-interception$/ --plan/'
+}
+
 route_report() {
   emit "mode=$R_MODE"
   emit "scope=$R_SCOPE"
@@ -540,6 +627,11 @@ route_report() {
   emit "base_url=$(route_url)"
   emit "health_url=$(route_health_url)"
   emit "existing_base_url=$R_EXISTING"
+  # Why existing_base_url= is empty although ANTHROPIC_BASE_URL names a proxy: it is one of the
+  # existing_project= installs, seen because this ran from inside that project. Otherwise the fix is
+  # invisible — assertable only as the ABSENCE of a conflict, which is also what a broken plan looks
+  # like.
+  [ -n "$R_OWNPROJECTROUTE" ] && emit "own_project_route=$R_OWNPROJECTROUTE"
   emit "already_routed=$R_ALREADY"
   emit "chained=$R_CHAINED"
   emit "upstream=$R_UPSTREAM"
@@ -633,10 +725,6 @@ thing that cannot be derived, so it is the one thing checked first."
     [ -z "$R_BASEURL" ] || route_needs "base_url_is_local_mode_nonsense" \
       "--base-url is for --mode attach; in local mode the URL is derived from the resolved port"
   fi
-  [ "$R_SCOPE" = user ] && [ "$R_USERSCOPE" != 1 ] && route_needs "user_scope_needs_flag" \
-    "--scope user routes EVERY project on this machine, including every project that has nothing to \
-do with context-guru. Confirm with the user, then add --i-understand-machine-wide"
-
   # A user-scope install meets the projects that already installed themselves. The machine-wide
   # route this is about to write will NOT reach them: a project's own settings file is more
   # specific, so it simply keeps winning, and the user who just asked for "everywhere" gets
@@ -651,27 +739,82 @@ do with context-guru. Confirm with the user, then add --i-understand-machine-wid
     R_EXISTINGPROJECTS=$("$(route_here)/settings.py" scopes 2>/dev/null \
                            | sed -n '/^existing_project=/p' | grep -v ' scope=user ') || true
   fi
-  if [ "$R_SCOPE" = user ] && [ -z "$R_ONEXISTING" ] && [ -n "$R_EXISTINGPROJECTS" ]; then
-    # Emitted through the same two shapes as every other gate: needs_decision under --plan (the
-    # caller has a question to ask, not an error to propagate), a refusal otherwise. route_report is
-    # NOT called here, unlike the base-url gate further down: this runs before route_inspect, so
-    # file=, existing_base_url= and already_routed= have no values yet and reporting them empty
-    # would state something false about the install rather than nothing.
-    if [ "$R_PLAN" = 1 ]; then
-      emit "result=needs_decision"; emit "reason=project_installs_exist"
-    else
-      emit "result=refused"; emit "reason=project_installs_exist"
-    fi
-    printf '%s\n' "$R_EXISTINGPROJECTS" | while IFS= read -r l; do emit "$l"; done
+
+  route_inspect
+
+  # ONE GATE for everything a machine-wide install needs agreed, because it is ONE question to a
+  # human: it routes every project on the machine, and the projects that already route themselves
+  # either keep doing so or get folded in.
+  #
+  # These were two gates, answered one flag at a time, and that is the defect. `--global` from
+  # inside an installed project had to cross THREE plans to reach the keep-both-or-fold-in question
+  # — --scope user, then --i-understand-machine-wide, then --on-existing-projects — and the skill
+  # instructed none of them, so the question a user reported expecting was unreachable: they were
+  # shown the plain project-scope consent question instead, about the project they were standing in.
+  # A gate that names a flag and prints no command gets the flag composed for it or skipped; one
+  # plan, one question, one runnable line is the shape the rest of this script already uses.
+  if [ "$R_SCOPE" = user ] \
+     && { [ "$R_USERSCOPE" != 1 ] || { [ -z "$R_ONEXISTING" ] && [ -n "$R_EXISTINGPROJECTS" ]; }; }
+  then
+    local why note
+    # Both reasons survive, and which one is reported still answers "what is missing from argv" —
+    # the flag, or the answer about the existing projects. What changed is that either now carries
+    # the whole question and a line that runs it.
+    if [ "$R_USERSCOPE" != 1 ]; then why=user_scope_needs_flag; else why=project_installs_exist; fi
+    if [ "$R_PLAN" = 1 ]; then emit "result=needs_decision"; else emit "result=refused"; fi
+    emit "reason=$why"
+    emit "scope=user"
     emit "port=$R_PORT"
-    emit "note=these projects route themselves and will keep OVERRIDING the machine-wide route this \
-install writes. Ask the user, then re-run with --on-existing-projects leave (they keep their own \
-port and config, which is the safe answer) or adopt (their own routing and port are removed so they \
-fall back to the machine-wide one; every file is backed up first). Nothing was installed, started \
-or written."
+    emit "port_source=$R_PORTSOURCE"
+    emit "file=$R_FILE"
+    # Same fact as on the plan path above, and for the same reason.
+    [ -n "$R_OWNPROJECTROUTE" ] && emit "own_project_route=$R_OWNPROJECTROUTE"
+    [ -n "$R_EXISTINGPROJECTS" ] \
+      && printf '%s\n' "$R_EXISTINGPROJECTS" | while IFS= read -r l; do emit "$l"; done
+    note="--scope user routes EVERY project on this machine, including every project that has \
+nothing to do with context-guru, which is also every project they could use to fix it. It needs a \
+person's yes; --i-understand-machine-wide is already in the command below, so do not add it."
+    if [ -n "$R_EXISTINGPROJECTS" ]; then
+      note="$note The existing_project= lines route themselves and will keep OVERRIDING the \
+machine-wide route, so they belong in the SAME question: leave (both stay — each project keeps its \
+own port, config and store, and this install gets port $R_PORT of its own; the safe answer) or \
+adopt (their routing and port option are removed, every file backed up first, so they fall back to \
+the machine-wide route). This works from inside one of those projects; never answer it by sending \
+them somewhere else to run something."
+    fi
+    emit "note=$note Nothing was installed, started or written."
     emit "permission_rule=$(route_permission_rule)"
-    emit "confirm_command_leave=$(R_ONEXISTING=leave route_confirm_command)"
-    emit "confirm_command_adopt=$(R_ONEXISTING=adopt route_confirm_command)"
+    # An undecided conflict in the file this install writes is a SECOND question, and it cannot be
+    # folded into this one: the consent sentence would have to say what becomes of that endpoint
+    # before anybody has decided. So print the plan that carries this answer rather than a consent
+    # line that overstates what was agreed — and no consent_question= here, because the honest one
+    # does not exist yet.
+    if [ -n "$R_EXISTING" ] && [ -z "$R_ONCONFLICT" ]; then
+      emit "pending_decision=base_url_already_set"
+      emit "existing_base_url=$R_EXISTING"
+      emit "pending_note=ask this question, then run the plan_command_* line matching the answer to \
+get the conflict question with its own paired commands. Do not compose --on-conflict yourself."
+      if [ -n "$R_EXISTINGPROJECTS" ]; then
+        emit "plan_command_leave=$(R_USERSCOPE=1 R_ONEXISTING=leave route_plan_command)"
+        emit "plan_command_adopt=$(R_USERSCOPE=1 R_ONEXISTING=adopt route_plan_command)"
+      else
+        emit "plan_command=$(R_USERSCOPE=1 route_plan_command)"
+      fi
+    elif [ -n "$R_EXISTINGPROJECTS" ]; then
+      # PAIRED, the same shape the base_url_already_set gate uses further down, and for the same
+      # reason: the answer is part of what is being agreed to, so one sentence cannot authorise two
+      # commands. Each question says what becomes of those projects; the skill asks with these two
+      # as the two options and runs the command beside the one they pick. No bare
+      # `consent_question=`/`confirm_command=` here — either would be the question with its answer
+      # missing, which is what shipped and read as consent to whichever command was then run.
+      emit "consent_question_leave=$(R_USERSCOPE=1 R_ONEXISTING=leave route_consent_question)"
+      emit "confirm_command_leave=$(R_USERSCOPE=1 R_ONEXISTING=leave route_confirm_command)"
+      emit "consent_question_adopt=$(R_USERSCOPE=1 R_ONEXISTING=adopt route_consent_question)"
+      emit "confirm_command_adopt=$(R_USERSCOPE=1 R_ONEXISTING=adopt route_confirm_command)"
+    else
+      emit "consent_question=$(R_USERSCOPE=1 route_consent_question)"
+      emit "confirm_command=$(R_USERSCOPE=1 route_confirm_command)"
+    fi
     [ "$R_PLAN" = 1 ] && exit 0
     exit 2
   fi
@@ -701,8 +844,6 @@ or written."
 project that owns it. Clear the port= option for this project so one is allocated for it, or pick \
 an unused port explicitly. Nothing was installed, started or written."
   fi
-
-  route_inspect
 
   # THE ONE DECISION THAT CANNOT BE DEFAULTED. A base URL already set may be their company gateway,
   # a benchmark endpoint or another proxy; replacing it silently breaks their setup while looking
