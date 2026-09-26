@@ -35,14 +35,18 @@ that one alone (preset `cache`, cache strategy `5-min-ping`).
 
 **Not for the port.** It is allocated per project rather than defaulted, so 8787 is a guess at
 another project's proxy and the whole failure above — a `keepalive-<port>.yaml` nothing reads,
-reported as success — happens just the same. Ask:
+reported as success — happens just the same. Ask the one command that resolves it, the same one the
+hooks and the status line use:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port show
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port install
 ```
 
-`port=<n>` is this project's; it wins over `option_port=` when they disagree. Only `port=(none)`
-sends you back to `option_port=`, and then to 8787.
+`result=ok port=<n>` is the port this directory's install is on, and a strategy is armed on that
+install whether or not this session happens to be routed through it (`routed=false` with
+`not_routed_why=` is worth one line, not a refusal). `result=unrouted` means nothing here is
+installed — stop and say so rather than falling back to 8787, because there is no proxy for a
+strategy to be armed on.
 
 ## 2. Report what is in effect
 
