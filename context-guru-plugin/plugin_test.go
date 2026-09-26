@@ -11044,3 +11044,145 @@ func TestARollbackOverAWorkingInstallKeepsItsBackups(t *testing.T) {
 		t.Errorf("the rollback removed the working install's routing as well: %v", got)
 	}
 }
+
+// TestTheUninstallCleansUpForSomeoneWhoPickedAPreset is the negative control the first version of this
+// gate failed. `still_holds_our_state` used to answer yes on our `pluginConfigs` entry being non-empty
+// — and `port` is one of five options, with `preset` written into THIS file by `skills/preset-picker`
+// as a matter of course. So for every user who had ever picked a preset, `port unset` removed the port,
+// found the entry still non-empty, and skipped the cleanup entirely: bug 3 verbatim, on the commit that
+// was meant to fix it, while skills/uninstall/SKILL.md now tells them both writes cleaned up.
+//
+// An option is a choice the USER made, which this uninstall never offered to remove. It is not an
+// install of ours still standing, and the checkpoints beside it are still a copy of a file that was
+// routed a moment ago.
+func TestTheUninstallCleansUpForSomeoneWhoPickedAPreset(t *testing.T) {
+	sd, home := t.TempDir(), t.TempDir()
+	proj := t.TempDir()
+	claude := filepath.Join(proj, ".claude")
+	if err := os.MkdirAll(claude, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(claude, "settings.local.json")
+	writeJSON(t, file, map[string]any{
+		"enabledPlugins": map[string]any{"context-guru@context-guru": true},
+	})
+	if f, c := settingsInDir(t, sd, home, proj, "port", "alloc", "--file", file); c != 0 ||
+		f["result"] != "ok" {
+		t.Fatalf("port alloc exit %d %v", c, f)
+	}
+	url := "http://127.0.0.1:" + projectPortOption(t, file) + "/anthropic"
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", file, "--url", url); c != 0 ||
+		f["result"] != "added" {
+		t.Fatalf("add exit %d %v", c, f)
+	}
+	// Exactly as the picker runs it: no --file, so it lands in whichever file already holds our
+	// options — which is the file this uninstall is about to reset.
+	if f, c := settingsInDir(t, sd, home, proj, "preset", "set", "--name", "house"); c != 0 ||
+		f["result"] != "set" {
+		t.Fatalf("preset set exit %d %v", c, f)
+	}
+
+	rm, c := settingsInDir(t, sd, home, proj, "remove", "--file", file, "--url", url)
+	if c != 0 || rm["result"] != "removed" {
+		t.Fatalf("remove exit %d %v", c, rm)
+	}
+	un, c := settingsInDir(t, sd, home, proj, "port", "unset", "--file", file)
+	if c != 0 || un["result"] != "removed" {
+		t.Fatalf("port unset exit %d %v", c, un)
+	}
+
+	if got := backupsUnder(t, file); len(got) != 0 {
+		t.Errorf("%d rolling backup(s) survived the uninstall of an install with a preset "+
+			"configured: %v — a configured option is not an install of ours still standing",
+			len(got), got)
+	}
+	if !strings.HasPrefix(un["backup"], "(gone") {
+		t.Errorf("port unset reported backup=%q, want the post-uninstall note", un["backup"])
+	}
+	// The user's own choice is NOT collateral: this uninstall never offered to remove their preset,
+	// and the reason the backups go is not "the file is empty of us" but "no install of ours is left".
+	data := readJSON(t, file)
+	opts, _ := (((data["pluginConfigs"].(map[string]any))["context-guru@context-guru"]).(map[string]any))["options"].(map[string]any)
+	if opts["preset"] != "house" {
+		t.Errorf("the uninstall took the user's configured preset with it: %v", data)
+	}
+	if opts["port"] != nil {
+		t.Errorf("the port option survived the reset: %v", data)
+	}
+}
+
+// TestTheMachineWideUninstallUnpinsItsPortToo: the husk `port unset` exists to prune is worst in
+// ~/.claude/settings.json, and that is the one file step 1's loop never reaches — it is refused there
+// on purpose, so the machine-wide removal is a separate, confirmed `remove --user-scope`. Without the
+// paired `port unset`, a confirmed "remove context-guru from this machine" leaves a `port` option in
+// the file that governs EVERY project, and the option is not inert: the next install anywhere reads it
+// as a configured pin the user never typed, which is exactly what stops per-project allocation.
+func TestTheMachineWideUninstallUnpinsItsPortToo(t *testing.T) {
+	sd, home := t.TempDir(), t.TempDir()
+	uc := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(uc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(uc, "settings.json")
+	writeJSON(t, file, map[string]any{"theme": "dark"})
+	proj := t.TempDir()
+	if f, c := settingsInDir(t, sd, home, proj, "port", "alloc", "--file", file); c != 0 ||
+		f["result"] != "ok" {
+		t.Fatalf("port alloc exit %d %v", c, f)
+	}
+	port := projectPortOption(t, file)
+	url := "http://127.0.0.1:" + port + "/anthropic"
+	if f, c := settingsInDir(t, sd, home, proj, "add", "--file", file, "--url", url,
+		"--user-scope"); c != 0 || f["result"] != "added" {
+		t.Fatalf("add exit %d %v", c, f)
+	}
+
+	// The machine-wide removal as the skill describes it, both writes.
+	rm, c := settingsInDir(t, sd, home, proj, "remove", "--file", file, "--url", url, "--user-scope")
+	if c != 0 || rm["result"] != "removed" {
+		t.Fatalf("remove --user-scope exit %d %v", c, rm)
+	}
+	un, c := settingsInDir(t, sd, home, proj, "port", "unset", "--file", file)
+	if c != 0 || un["result"] != "removed" {
+		t.Fatalf("port unset exit %d %v", c, un)
+	}
+	data := readJSON(t, file)
+	if data["pluginConfigs"] != nil {
+		t.Errorf("the machine-wide uninstall left a pluginConfigs husk in the file that governs every "+
+			"project: %v", data)
+	}
+	if data["theme"] != "dark" {
+		t.Errorf("the user's own settings did not survive: %v", data)
+	}
+	if got := backupsUnder(t, file); len(got) != 0 {
+		t.Errorf("%d rolling backup(s) survived the machine-wide uninstall: %v", len(got), got)
+	}
+	// What the husk actually costs, measured rather than argued: a fresh project's install must
+	// ALLOCATE a port, not inherit a user-scope pin nobody typed.
+	fresh := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(fresh, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, c := settingsInDir(t, sd, home, fresh, "port", "alloc")
+	if c != 0 || f["result"] != "ok" {
+		t.Fatalf("port alloc in a fresh project exit %d %v", c, f)
+	}
+	if f["source"] == "configured" {
+		t.Errorf("the next install after a machine-wide uninstall read a port pin nobody typed: %v", f)
+	}
+
+	// And the skill has to name the write, since that path has no code of ours to enforce it.
+	md, err := os.ReadFile(filepath.Join(scriptsDir(t), "..", "skills", "uninstall", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	para := string(md)
+	i := strings.Index(para, "`--user-scope` added")
+	if i < 0 {
+		t.Fatalf("the machine-wide paragraph is not where this test looks for it")
+	}
+	if !strings.Contains(para[i:i+700], "port unset") {
+		t.Errorf("the machine-wide removal paragraph does not name `port unset`, so the husk survives "+
+			"the one path no code of ours guards:\n%s", para[i:i+700])
+	}
+}

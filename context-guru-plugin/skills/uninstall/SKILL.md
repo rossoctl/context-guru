@@ -99,9 +99,17 @@ which case it is — go by `reason=`:
 | `another_installs_routing` | this project routes through a file of its **own** (the refusal names it as `this_project_routes_in=`), so this file is the machine-wide install's and every *other* project is using it | Leaving it is what "reset this project" means — this project falls back to the machine-wide install, the upgrade path in reverse. Do not ask unless they raise it. |
 
 Only if the user says they want the machine-wide install gone, run that one file again with
-`--user-scope` added, and then do steps 2 and 3 a second time for **its** port (`port show --key
-"$KEY"`, with `$KEY` from `project-key --user-scope` as in step 2). The flag is the whole
-confirmation, so do not add it before they answer — and never to make the loop above quieter.
+`--user-scope` added — **and `port unset --file ~/.claude/settings.json` after it, on `removed`,
+exactly as the loop above pairs the two** — and then do steps 2 and 3 a second time for **its** port
+(`port show --key "$KEY"`, with `$KEY` from `project-key --user-scope` as in step 2). The flag is the
+whole confirmation, so do not add it before they answer — and never to make the loop above quieter.
+
+The `port unset` is not housekeeping on this path, it is the difference between an uninstall and a
+booby trap. The loop above never reaches this file (it is refused there, which is the point), so
+without it a confirmed machine-wide removal leaves `pluginConfigs` naming a `port` in the one file
+that governs **every** project: measured, the next install anywhere then reads `port=<that>
+source=configured` — a user-scope pin nobody typed, which is precisely what stops per-project
+allocation and puts two projects back on one proxy.
 
 `--url` is worth passing (it also covers a port that changed since install), but it is **not**
 what makes this safe, and the earlier version of this line said it was. That put the property
@@ -235,7 +243,9 @@ Ask before either of these; neither is implied by "stop routing my sessions":
   `~/.claude/context-guru-settings-json/` for `--global`). Step 1's writes already deleted the
   rolling `.context-guru-backup-*.json` files in there on their own — both of them, `remove` and the
   `port unset` beside it, which is the LAST write of the uninstall and so the one whose own backup
-  used to outlive it. Nothing left to offer there.
+  used to outlive it (this holds for `~/.claude/context-guru-settings-json/` only if the
+  machine-wide removal ran its `port unset` too, which is why step 1 pairs them there as well).
+  Nothing left to offer there.
   **Say what's still in it before they agree to delete the rest:** a `README.md` explaining the
   folder, and `<name>.pre-install.json` (the copy taken before this plugin's first edit — what
   step 1 restores from if needed), plus `<name>.pre-reset-*.json` if the escape hatch has run here.
