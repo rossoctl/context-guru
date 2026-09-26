@@ -1157,7 +1157,17 @@ back - see port_unwound."
         # sentence saying so — the same sentence for every project, containing spaces and an em
         # dash, inside a line callers parse on spaces. The recoverable artifact is the recovery
         # FOLDER beside each file, which the note on the gate above already points at.
-        emit "adopted_project=$ap unrouted=$(kv "$aout2" result) recovery_dir=$(dirname "$af")/context-guru-settings-json"
+        # AFTER the port unset below, not before it: that is the last write, and it can DELETE the
+        # file (and with it the recovery folder) when context-guru created that settings file and
+        # taking our two keys out left nothing of anybody's in it. Reported before it, this line
+        # named a folder that no longer existed by the time the user read it.
+        aout3=$("$(route_here)/settings.py" port unset --file "$af" 2>&1) || true
+        if [ "$(kv "$aout3" file_deleted)" = "true" ]; then
+          emit "adopted_project=$ap unrouted=$(kv "$aout2" result) file_deleted=true"
+          emit "adopted_file_removed=$af"
+        else
+          emit "adopted_project=$ap unrouted=$(kv "$aout2" result) recovery_dir=$(dirname "$af")/context-guru-settings-json"
+        fi
         # RESTORED, not adopted. `remove` puts back whatever ANTHROPIC_BASE_URL was in that file
         # before us — correctly; deleting a URL we did not set would be the overreach that branch
         # exists to avoid — and that restored URL is more specific than the machine-wide route, so
@@ -1166,10 +1176,9 @@ back - see port_unwound."
         if [ -n "$arestored" ] && [ "$arestored" != "(none)" ]; then
           emit "adopted_project_still_overriding=$ap base_url=$arestored"
         fi
-        # The per-project port option goes too: with no route of its own, a leftover port would aim
-        # that project's hooks at a port nothing serves — configured-looking and broken, which is
-        # worse than the state before.
-        "$(route_here)/settings.py" port unset --file "$af" >/dev/null 2>&1 || true
+        # (The per-project port option went with it, in the `port unset` above: with no route of its
+        # own, a leftover port would aim that project's hooks at a port nothing serves —
+        # configured-looking and broken, which is worse than the state before.)
       fi
       # And the record, so nothing reports the project as still having its own routing.
       #

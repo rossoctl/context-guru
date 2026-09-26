@@ -321,6 +321,53 @@ def forget_backups(path: str) -> None:
             pass
 
 
+def still_holds_our_state(data: dict) -> bool:
+    """Is there anything of OURS left in this file's contents? Asked after an uninstall-type write,
+    to decide whether the rolling `.context-guru-backup-*` checkpoints beside it still belong to a
+    live install.
+
+    Answered from the two things only an INSTALL of ours writes: the metadata block, and the two
+    env keys nobody else writes. Nothing else qualifies, and the two exclusions are the whole
+    content of this function.
+
+    NOT `env.ANTHROPIC_BASE_URL`, for the same reason `is_ours()` does not: a base URL is not
+    evidence of whose it is. A user whose own loopback gateway was just handed back by `remove`
+    (`previous_base_url`) has a file with no install of ours in it, and their recovery folder must
+    end up as clean as anybody else's. `_looks_routed_by_us` answers a different question — "would
+    a copy of this file be a useful original" — and errs toward yes on purpose, which is the wrong
+    direction here.
+
+    NOT our own `pluginConfigs` block either, which this function did consult and which made the
+    cleanup a no-op on any machine that had ever used the feature the plugin advertises. `port` is
+    one of five options; `preset` is written by `skills/preset-picker` into THIS file by
+    construction, and `/plugin configure` writes any of them. So after `port unset` removed `port`,
+    the entry was still non-empty for those users, the rolling checkpoints stayed — one of them a
+    copy of a still-routed file, differing from the reset file by exactly the port — and the
+    uninstall skill now claims both of its writes cleaned up. An option is a CHOICE THE USER MADE,
+    which this uninstall never offered to remove; it is not an install of ours still standing, and
+    reading it as one reproduced the very bug this gate exists to fix (measured, `preset set` then
+    step 1). The rollback case the gate is for does not need it: a live install has its metadata
+    block and its env keys, and both are still there after `port unset` takes only the option.
+
+    The cost of being contents-only is bounded and accepted: a file that IS routed through a live
+    install of ours but carries no metadata block — hand-edited, or an install predating that block
+    — loses its rolling checkpoints here. What it does not lose is the original: `.pre-install.json`
+    and `context-guru-reset` are untouched by `forget_backups`, so the recovery path that matters
+    survives. The alternative reading — keep the checkpoints whenever anything of ours is in the
+    file — is what left litter behind every real uninstall, and provenance from the install record
+    cannot separate the two cases either: the row still names this file during the uninstall (the
+    skill releases it in step 2, after this write), so it says "live install" for exactly the run
+    that must clean up.
+    """
+    meta = data.get(META)
+    if isinstance(meta, dict) and meta:
+        return True
+    env = data.get("env")
+    if isinstance(env, dict) and (UPSTREAM_KEY in env or BIN_KEY in env):
+        return True
+    return False
+
+
 def post_uninstall_backup_note(deleted: bool) -> str:
     """What to report for `backup=` once an uninstall-type write has cleaned up after itself. The
     path `backup()` returned a moment earlier no longer exists by the time this prints — either
@@ -1690,8 +1737,44 @@ def cmd_port(args: argparse.Namespace) -> int:
             return 0
         saved = backup(args.file)
         del options["port"]
-        save(args.file, data)
-        emit(result="removed", file=args.file, backup=saved)
+        # Leave no litter, the same rule cmd_remove follows: an `options: {}` we created goes with
+        # the option, and so does the plugin entry and the `pluginConfigs` block once they hold
+        # nothing else. Otherwise a reset ends with a husk of ours in the user's file, which is what
+        # a project that had NO pluginConfigs before the install was left carrying.
+        cfgs = data.get("pluginConfigs")
+        if isinstance(cfgs, dict):
+            entry = cfgs.get(args.plugin)
+            if isinstance(entry, dict):
+                if not options:
+                    entry.pop("options", None)
+                if not entry:
+                    cfgs.pop(args.plugin, None)
+            if not cfgs:
+                data.pop("pluginConfigs", None)
+        # Every caller of `port unset` is the TAIL of an undo — the uninstall skill's step 2, adopt
+        # folding a project into a machine-wide install, and install.sh's own step-0 rollback — so
+        # this write is the one that finishes the job, and it used to leave behind the very backup it
+        # had just taken. `remove` ran `forget_backups` in step 1 and skills/uninstall/SKILL.md told
+        # the user so ("nothing left to offer there"); step 2 then put a fresh
+        # `.context-guru-backup-*.json` back in the recovery folder, timestamped after the uninstall,
+        # and nothing ever removed it. Measured on a real install after /context-guru:uninstall.
+        #
+        # Gated on what the file holds AFTER the write rather than on who called: if an INSTALL of
+        # ours is still in there — install.sh's step-0 rollback undoes a FAILED re-install and
+        # leaves a working install's routing in place — the rolling checkpoints are that install's
+        # and stay. An option of ours is not an install (see still_holds_our_state): every user who
+        # has picked a preset has one in this very file, and reading it as "still installed" made
+        # this whole cleanup a no-op for them.
+        deleted = maybe_delete_if_empty(args.file, data)
+        if not deleted:
+            save(args.file, data)
+            if not still_holds_our_state(data):
+                forget_backups(args.file)
+                saved = post_uninstall_backup_note(False)
+        else:
+            saved = post_uninstall_backup_note(True)
+        emit(result="removed", file=args.file, backup=saved,
+             file_deleted=str(deleted).lower())
         return 0
 
     # op == alloc

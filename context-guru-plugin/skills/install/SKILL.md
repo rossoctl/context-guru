@@ -68,9 +68,9 @@ not a failure to report.
   `pending_decision=base_url_already_set` means a second question is owed about `existing_base_url=`,
   so there is deliberately **no** `consent_question=` yet: ask this one, run the matching
   `plan_command_leave=`/`plan_command_adopt=` line, ask the conflict question from the plan that comes
-  back. `adopt` reports `adopted_project=…
-  unrouted=… recovery_dir=…` per project — read those rather than assuming. `unrouted=removed` is
-  the success value; `unchanged` or `conflict` means that project kept its routing and must be
+  back. `adopt` reports `adopted_project=… unrouted=… recovery_dir=…` per project — read those, do
+  not assume; `file_deleted=true` with `adopted_file_removed=` replaces `recovery_dir=` when we
+  created that file and nothing was left in it. `unrouted=removed` is the success value; `unchanged` or `conflict` means that project kept its routing and must be
   reported as still overriding. Relay these per-project lines rather than folding them into
   "adopted": `adopted_project_still_overriding=<dir> base_url=<url>` (its own pre-context-guru URL
   was rightly restored, so it still overrides the route the user asked for);
