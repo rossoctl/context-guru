@@ -7874,6 +7874,15 @@ func TestRouteReportsAProxyItLeftRunning(t *testing.T) {
 // strategy — and the default one spends their own quota while nobody is at the keyboard. A question
 // narrower than the command it authorises is not consent to that command, so the question is generated
 // from the same resolved facts as the command rather than from the skill's example paragraph.
+// The consent question must say that the default cache strategy spends the user's OWN quota. That
+// fact is recognised HERE and nowhere else. Five tests each matched the literal token "SPENDS", and
+// when the clause was rewritten into English an ordinary user can answer, all five failed at once
+// while the fact they exist for was still in the sentence — five copies of one rule, and a rewording
+// that had to touch every one of them to stay honest.
+const spendClauseMarker = "YOUR OWN Claude quota"
+
+func questionWarnsAboutSpend(q string) bool { return strings.Contains(q, spendClauseMarker) }
+
 func TestRoutePlanCarriesTheConsentQuestionIncludingTheSpend(t *testing.T) {
 	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
 	writePluginOptions(t, home, map[string]any{"port": freePort(t)})
@@ -7888,7 +7897,7 @@ func TestRoutePlanCarriesTheConsentQuestionIncludingTheSpend(t *testing.T) {
 		t.Fatal("the plan prints no consent_question=, so the question a model asks is composed from " +
 			"prose and can drift from the command it authorises")
 	}
-	if !strings.Contains(q, "SPENDS") {
+	if !questionWarnsAboutSpend(q) {
 		t.Errorf("the default strategy spends the user's own quota and the question does not say so. "+
 			"That is the half of the proposition a user would most want to have been asked: %q", q)
 	}
@@ -7898,7 +7907,7 @@ func TestRoutePlanCarriesTheConsentQuestionIncludingTheSpend(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("plan: exit %d %v", code, facts)
 	}
-	if strings.Contains(facts["consent_question"], "SPENDS") {
+	if questionWarnsAboutSpend(facts["consent_question"]) {
 		t.Errorf("`none` spends nothing, so warning about spending is a false statement in the one "+
 			"sentence the user is asked to agree to: %q", facts["consent_question"])
 	}
@@ -8294,7 +8303,7 @@ func TestConsentQuestionReadsWhetherAStrategySpendsFromTheStrategyList(t *testin
 				t.Fatalf("plan: exit %d %v", code, facts)
 			}
 			q := facts["consent_question"]
-			warns := strings.Contains(q, "SPENDS")
+			warns := questionWarnsAboutSpend(q)
 			if warns != (spends == "true") {
 				t.Errorf("strategy list says spends=%s for %q, and the consent question %s warn about "+
 					"spending. The sentence a user agrees to has to agree with STRATEGIES:\n  %s",
@@ -8590,7 +8599,7 @@ func TestConflictPlanAsksAboutTheEndpointItWouldDisplace(t *testing.T) {
 		}
 		// The money clause from round 2 has to survive into both, or the paired questions reintroduce
 		// the very gap they were split to close.
-		if !strings.Contains(q, "SPENDS") {
+		if !questionWarnsAboutSpend(q) {
 			t.Errorf("consent_question_%s lost the spend warning: %q", name, q)
 		}
 	}
@@ -8723,7 +8732,7 @@ func TestConsentQuestionAgreesWithTheUpstreamThatGetsWritten(t *testing.T) {
 		}
 		// Splitting one question into two is an easy way to lose what round 2 added.
 		for name, q := range map[string]string{"chain": chain, "replace": replace} {
-			if !strings.Contains(q, "SPENDS") {
+			if !questionWarnsAboutSpend(q) {
 				t.Errorf("consent_question_%s lost the spend warning: %q", name, q)
 			}
 		}
@@ -11184,6 +11193,312 @@ func TestTheMachineWideUninstallUnpinsItsPortToo(t *testing.T) {
 	if !strings.Contains(para[i:i+700], "port unset") {
 		t.Errorf("the machine-wide removal paragraph does not name `port unset`, so the husk survives "+
 			"the one path no code of ours guards:\n%s", para[i:i+700])
+	}
+}
+
+// --- one machine-wide question, asked where the user is standing ---
+//
+// `/context-guru:install --global` from inside a project context-guru had already installed asked
+// about routing THAT PROJECT through THAT PROJECT's port, with the cache-strategy spend clause in
+// capitals, and never asked the question the user expected: keep both, or fold this project into the
+// machine-wide install. Three faults compounded. The plan pre-rendered by skills/install/SKILL.md
+// runs with no flags, so `--global` never reached it. The two user-scope gates answered one flag at a
+// time, so the keep-both question sat three sequential re-plans away and the skill instructed none of
+// them. And the project's own proxy, seen in the environment, was reported as a foreign endpoint to
+// chain through — the machine-wide install pointed at one project's pipeline, recommended as "usually
+// right".
+
+// The gate a `--global` plan lands on must carry the WHOLE question and a line that runs it. Asserted
+// on `--scope user` alone, with no --i-understand-machine-wide and no --on-existing-projects: that is
+// what the skill has after one re-plan, and it used to yield a flag name and nothing else.
+func TestAGlobalPlanFromInsideAnInstalledProjectAsksOneAnswerableQuestion(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	other := t.TempDir()
+	seedProjectRecord(t, state, other, freePort(t))
+	env := routeEnv(t, home, state, "")
+
+	out, code := runRouteRaw(t, proj, env, "--plan", "--scope", "user")
+	if code != 0 {
+		t.Fatalf("a PLAN must report rather than fail: exit %d\n%s", code, out)
+	}
+	for _, want := range []string{
+		"result=needs_decision",
+		"reason=user_scope_needs_flag",
+		// The blast radius AND the existing projects, in one place, because they are one question.
+		"existing_project=",
+		// Paired: the answer about those projects is part of what is being agreed to, so each
+		// answer gets its own sentence beside its own command.
+		"consent_question_leave=route THIS MACHINE's model traffic",
+		"consent_question_adopt=route THIS MACHINE's model traffic",
+		// Runnable without the caller composing a flag it was told not to add.
+		"confirm_command_leave=",
+		"confirm_command_adopt=",
+		"--i-understand-machine-wide",
+		"--i-consent-to-traffic-interception",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("one re-plan does not yield %q, so the question is still unreachable:\n%s", want, out)
+		}
+	}
+	// The question must be about the MACHINE, never about the directory the user happens to be in.
+	// This is the exact sentence the user was shown instead.
+	if strings.Contains(out, "route this project's model traffic") {
+		t.Errorf("a --scope user plan asks about this project:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude")); err == nil {
+		t.Error("the plan created a settings directory")
+	}
+}
+
+// The spend clause is the half of the sentence an ordinary user has to be able to answer. It says
+// what it costs in plain words; the fact survives, the jargon does not.
+func TestTheSpendClauseIsAnswerableByAPersonWhoDoesNotKnowWhatACacheStrategyIs(t *testing.T) {
+	home, state := t.TempDir(), t.TempDir()
+	facts, code := runRoute(t, t.TempDir(), routeEnv(t, home, state, ""), "--plan")
+	if code != 0 || facts["result"] != "planned" {
+		t.Fatalf("exit %d: %v", code, facts)
+	}
+	q := facts["consent_question"]
+	for _, want := range []string{spendClauseMarker, "5-min-ping", "keep-alive"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("the question drops %q, so what it costs is no longer in it: %q", want, q)
+		}
+	}
+	// The old wording. It named a "cache strategy" that "SPENDS THE USER'S OWN QUOTA" — a sentence
+	// about a third party, in jargon, as the one thing a person is asked to agree to.
+	if strings.Contains(q, "SPENDS THE USER'S OWN QUOTA") {
+		t.Errorf("the question still speaks about the user in the third person: %q", q)
+	}
+}
+
+// Our own project proxy, seen in the environment because that project's settings file put it there,
+// is not an endpoint for a machine-wide install to chain through or replace. Provenance comes from
+// the install record, never from the URL's shape.
+func TestAProjectsOwnProxyIsNotAConflictForAMachineWideInstall(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	seedProjectRecord(t, state, proj, port)
+	// routeEnv's third argument is a PATH prefix, not a URL — the base URL is appended here.
+	env := append(routeEnv(t, home, state, ""), "ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic")
+
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
+		"--i-understand-machine-wide", "--on-existing-projects", "leave")
+	if code != 0 || facts["result"] != "planned" {
+		t.Fatalf("keeping both must plan cleanly, got exit %d: %v", code, facts)
+	}
+	if facts["existing_base_url"] != "" {
+		t.Errorf("this project's own proxy is reported as a conflict: %v", facts)
+	}
+	// The machine-wide install gets a port of its OWN. Chaining would have handed it the project's.
+	if facts["port"] == port {
+		t.Errorf("the machine-wide install took the project's port %s: %v", port, facts)
+	}
+	if strings.Contains(facts["consent_question"], "as the upstream") {
+		t.Errorf("the question proposes forwarding through the project's proxy: %v", facts)
+	}
+
+	// NEGATIVE CONTROL, twice: a foreign loopback proxy on a port no install of ours claims, and a
+	// remote gateway. Both are still the one decision that cannot be defaulted, and neither may get
+	// a consent question — the honest one does not exist until the conflict is answered.
+	for _, foreign := range []string{"http://127.0.0.1:" + freePort(t) + "/anthropic",
+		"https://gw.corp.example/v1"} {
+		fenv := append(routeEnv(t, t.TempDir(), state, ""), "ANTHROPIC_BASE_URL="+foreign)
+		f, code := runRoute(t, proj, fenv,
+			"--plan", "--scope", "user", "--i-understand-machine-wide",
+			"--on-existing-projects", "leave")
+		if code != 0 || f["reason"] != "base_url_already_set" {
+			t.Errorf("%s must still be a conflict, got exit %d: %v", foreign, code, f)
+		}
+		if f["consent_question"] != "" {
+			t.Errorf("%s got a consent question before the conflict was answered: %v", foreign, f)
+		}
+	}
+}
+
+// A second question owed is said so, with a PLAN command to reach it — not a consent line that
+// overstates what was agreed, and not a flag for the caller to compose.
+func TestAnUndecidedConflictOnTheMachineWideGatePrintsAPlanCommandNotAConsent(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	seedProjectRecord(t, state, t.TempDir(), freePort(t))
+	env := append(routeEnv(t, home, state, ""), "ANTHROPIC_BASE_URL=https://gw.corp.example/v1")
+
+	out, code := runRouteRaw(t, proj, env, "--plan", "--scope", "user")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	for _, want := range []string{
+		"reason=user_scope_needs_flag",
+		"pending_decision=base_url_already_set",
+		"existing_base_url=https://gw.corp.example/v1",
+		"plan_command_leave=",
+		"plan_command_adopt=",
+		"--plan",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the gate omits %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"consent_question=", "confirm_command_leave="} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("%q is printed while the conflict is undecided:\n%s", unwanted, out)
+		}
+	}
+}
+
+// TestAProjectsOwnProxyIsRecognisedWhenItsPathHasASpace: the row's `file=` is a PATH, and it was read
+// as "everything up to the first space". For a project under `~/My Projects/`, `show --file` was then
+// handed a truncated path, failed, and the row was skipped — so a machine-wide install run from inside
+// that project went back to reporting the project's own proxy as a foreign conflict and proposing to
+// chain every project on the machine behind it. Space-bearing paths are ordinary on macOS.
+//
+// Portless on purpose: `port=` is the source that would otherwise cover for the truncation, and the
+// rows `file=` exists for are exactly the ones that lack it.
+func TestAProjectsOwnProxyIsRecognisedWhenItsPathHasASpace(t *testing.T) {
+	home, state := t.TempDir(), t.TempDir()
+	proj := filepath.Join(t.TempDir(), "My Projects", "thing")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// FIRST, so this test cannot pass on a resolved path that lost the space it is about.
+	real, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(real, " ") {
+		t.Fatalf("this test needs a path containing a space to mean anything: %q", real)
+	}
+
+	port := freePort(t)
+	seedProjectRecord(t, state, proj, port)
+	dropPortFromRecord(t, state, proj)
+	env := append(routeEnv(t, home, state, ""), "ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic")
+
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
+		"--i-understand-machine-wide", "--on-existing-projects", "leave")
+	if code != 0 || facts["result"] != "planned" {
+		t.Fatalf("exit %d, want a plan: %v", code, facts)
+	}
+	if facts["existing_base_url"] != "" {
+		t.Errorf("the project's own proxy is reported as a conflict because its settings file path "+
+			"contains a space: %v", facts)
+	}
+	if facts["own_project_route"] != port {
+		t.Errorf("own_project_route=%q, want %q — the row was skipped, so the absence of a conflict "+
+			"would be indistinguishable from a broken plan: %v", facts["own_project_route"], port, facts)
+	}
+}
+
+// The portless row is the shape the `port=` field cannot answer for. A record written before
+// per-project ports — and, until this fix's producer half, one written by a bare `settings.py add` —
+// carries no port, and keying provenance on that field alone made the fix above a no-op for exactly
+// those projects: same project, same environment URL, only the field missing, and the run fell back
+// to `base_url_already_set` and proposed chaining the machine-wide proxy behind the project's own.
+func TestAProjectsOwnProxyIsNotAConflictEvenWhenItsRecordHasNoPort(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	file := seedProjectRecord(t, state, proj, port)
+	dropPortFromRecord(t, state, proj)
+	env := append(routeEnv(t, home, state, ""), "ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic")
+
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
+		"--i-understand-machine-wide", "--on-existing-projects", "leave")
+	if code != 0 || facts["result"] != "planned" {
+		t.Fatalf("a row with no recorded port must still be recognised as ours, got exit %d: %v",
+			code, facts)
+	}
+	if facts["existing_base_url"] != "" {
+		t.Errorf("the project's own proxy is a conflict because its row has no port=: %v", facts)
+	}
+	if facts["own_project_route"] != port {
+		t.Errorf("own_project_route= does not report the route that was recognised, so the absence "+
+			"of a conflict is indistinguishable from a broken plan: %v", facts)
+	}
+
+	// NEGATIVE CONTROL. Provenance is the record, not the URL's shape: the same portless row must not
+	// vouch for a loopback port its own file does not name.
+	fenv := append(routeEnv(t, t.TempDir(), state, ""),
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+freePort(t)+"/anthropic")
+	f, code := runRoute(t, proj, fenv, "--plan", "--scope", "user",
+		"--i-understand-machine-wide", "--on-existing-projects", "leave")
+	if code != 0 || f["reason"] != "base_url_already_set" {
+		t.Errorf("a foreign loopback proxy stopped being a conflict, so the portless row vouches "+
+			"for any port: exit %d: %v", code, f)
+	}
+	// And the file really is the one the record points at, which is what `show --file` is asked.
+	if b, err := os.ReadFile(file); err != nil || !strings.Contains(string(b), port) {
+		t.Fatalf("test fixture: %v %s", err, b)
+	}
+}
+
+// Drop the `port` field from the project's install-scope row, leaving everything else — the shape a
+// record written before per-project ports has.
+func dropPortFromRecord(t *testing.T, state, proj string) {
+	t.Helper()
+	f := filepath.Join(state, "context-guru", "install-scope.json")
+	b, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, ok := doc["projects"].(map[string]any)[projReal].(map[string]any)
+	if !ok {
+		t.Fatalf("no row for %s in %s", projReal, b)
+	}
+	delete(row, "port")
+	writeJSON(t, f, doc)
+}
+
+// One sentence cannot authorise two commands. The gate used to print ONE `consent_question=` beside
+// `confirm_command_leave=` and `confirm_command_adopt=`, and the sentence never mentioned which
+// answer it was for — so whichever command ran, the consent that was given was the other one's too.
+func TestTheTwoMachineWideAnswersGetTwoDifferentConsentQuestions(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	seedProjectRecord(t, state, t.TempDir(), freePort(t))
+	env := routeEnv(t, home, state, "")
+
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user")
+	if code != 0 || facts["result"] != "needs_decision" {
+		t.Fatalf("exit %d: %v", code, facts)
+	}
+	leave, adopt := facts["consent_question_leave"], facts["consent_question_adopt"]
+	if leave == "" || adopt == "" {
+		t.Fatalf("the two answers are not both asked about, so the skill has no sentence for one of "+
+			"the options it offers: %v", facts)
+	}
+	if leave == adopt {
+		t.Errorf("the two questions are word-for-word identical, which is the defect: %q", leave)
+	}
+	if !strings.Contains(leave, "LEAVE") || strings.Contains(leave, "REMOVE the routing") {
+		t.Errorf("the leave question does not say those projects are left alone: %q", leave)
+	}
+	if !strings.Contains(adopt, "REMOVE the routing") {
+		t.Errorf("the adopt question does not say those projects stop routing themselves: %q", adopt)
+	}
+	// Both still carry the blast radius and the spend clause: adding the answer must not cost the
+	// facts the sentence already had.
+	for name, q := range map[string]string{"leave": leave, "adopt": adopt} {
+		for _, want := range []string{"THIS MACHINE's model traffic", spendClauseMarker} {
+			if !strings.Contains(q, want) {
+				t.Errorf("consent_question_%s dropped %q: %q", name, want, q)
+			}
+		}
+	}
+	// No bare pair on this path: either line would be the question with its answer missing.
+	for _, unwanted := range []string{"consent_question", "confirm_command"} {
+		if facts[unwanted] != "" {
+			t.Errorf("%s= is printed although the answer is part of what is agreed to: %q",
+				unwanted, facts[unwanted])
+		}
+	}
+	if facts["confirm_command_leave"] == "" || facts["confirm_command_adopt"] == "" {
+		t.Errorf("a question without the command it authorises: %v", facts)
 	}
 }
 
