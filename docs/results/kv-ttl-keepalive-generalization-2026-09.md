@@ -12,11 +12,22 @@ relabelling (see "A labelling lesson" below).
 
 ## The short version
 
+**The headline, for a reader who stops here: a two-parameter non-learned policy beats every
+predictor we built, including a well-calibrated one built specifically to try to beat it.** That
+number is **modelled** (a replay against one 41.4-day snapshot, not a live measurement), and the
+one piece of work that would move it from modelled to measured — a live randomized holdout — is
+the single largest thing this page does not contain. Everything below is detail in support of
+that sentence, not a build-up to it.
+
 - **A per-tenant-tuned `max_pings` cap with an off-switch (no model at all) beats every
   predictor in this whole line of work.** Better than the shipped `stop-reason-gated` rule,
   better than the prior page's `logreg-v1`, better than a calibrated hybrid model built
   specifically for this page. It also **harms zero tenants**, where every flat setting
-  (including today's) harms several.
+  (including today's) harms several. **It is also more ROBUST than a learned or uncapped
+  alternative, independent of its net-dollar edge**: a hard cap bounds any one span's ping
+  spend regardless of the true gap length, so it is structurally insulated from data defects
+  a predictor or an uncapped policy is exposed to in full — see "A robustness argument" below,
+  found only after this study was already largely finished, which is itself worth knowing.
 - **A single fleet-wide `max_pings=2` is the right fallback if per-tenant config isn't built
   yet — `max_pings=6` is not.** An earlier back-of-envelope estimate favoured 6; once a real,
   per-conversation, per-model-priced replay is run (this page's method, not aggregate
@@ -168,6 +179,23 @@ eliminates all six of today's real, existing per-tenant harms. **A single fleet-
 raised from 2 to 6 buys $56 and harms one MORE tenant** — the opposite of an improvement once
 harm is counted as a first-class outcome rather than folded into a pooled average.
 
+### A robustness argument for the cap, found only after this study was largely finished
+
+The per-tenant cap's case is not only that it scores best on this snapshot — it is **structurally
+more robust to a data defect nobody knew about when this comparison was designed.** A different
+reviewer, checking the same corpus independently, found that client-supplied `session_id`s are
+sometimes reused across genuinely disjoint conversations (reproduced on this page's own data:
+205 of 246,484 decision points, 0.083%, show a gap over 24 hours, up to 501.8 hours — plainly not
+real idle time). **Any policy that pings unconditionally in proportion to gap length, or any
+predictor that scores such a span as "still worth pinging," is exposed to this defect in full**:
+an uncapped policy would pay for hundreds of pings across a fake multi-day "gap." **A
+`max_pings`-capped policy is not** — the cap bounds the spend on any one span regardless of how
+long the true or artifactual gap is, so the worst this defect can do to a capped arm is waste at
+most `max_pings` pings on 205 events (a few dollars, not a material fraction of any figure on
+this page). This is a property of the RECOMMENDATION, not just a number in a threats-to-validity
+list: a policy that is robust to a defect discovered after the fact is a stronger recommendation
+than one that merely scored better on the data as first understood.
+
 **Realized-vs-modelled gap**: real, measured keep-alive net is $200.86. The raw model (before
 any coverage/gate correction) says $395–433 at N=1 — a **1.94–1.97x gap**, converged across two
 independent engines. Replaying the REAL control-plane config instead (30 active strategies, all
@@ -205,6 +233,20 @@ direction. Individually each was a plausible bug, caught properly. Collectively 
 systematic optimism that no amount of self-review from inside one modelling frame caught alone —
 the strongest argument this study can offer for why the still-open live randomized holdout
 (below) is worth more than further modelling.
+
+**A third lesson, about methodology rather than about this study's numbers**: this page's own
+cost engine was never exposed to either of two bugs that hit the two from-scratch
+reimplementations built for the cross-check above. `kv_ttl_cost_model.Request.key` has keyed on
+`(tenant, session, model)` — not `(tenant, session)` alone — since before this study started,
+because a cache entry cannot transfer between models. Both the independent model above AND a
+third, separately-built reimplementation initially keyed on session alone and had to discover
+and fix the same bug (588 of 14,343 sessions switch models mid-session, 71% of the corpus by
+request count is inside such a session). **The analysis built on production's own tested
+machinery inherited a correctness property that both from-scratch reimplementations had to
+rediscover the hard way.** That generalises past this one bug: reusing an already-tested engine
+is not just less work, it is a real reduction in the surface area for this exact class of error,
+and it is the concrete reason this page's `evaluate()`-based numbers needed none of the four
+downward corrections the independently-built model went through.
 
 ## Feature availability, condensed (full table: KA-predictor's own report, cited below)
 
