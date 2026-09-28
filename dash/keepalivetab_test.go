@@ -486,11 +486,11 @@ func TestCalculatorGoldenAgainstTheProductionBands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Rows) != 4 {
-		t.Fatalf("the ladder has %d rungs, want K=1..4", len(out.Rows))
+	if len(out.Rows) != kaCalcMaxK {
+		t.Fatalf("the ladder has %d rungs, want K=1..%d", len(out.Rows), kaCalcMaxK)
 	}
 	want := []int64{2, 4, 6, 8}
-	for i, row := range out.Rows {
+	for i, row := range out.Rows[:4] {
 		if row.MaxPings != i+1 {
 			t.Fatalf("row %d is K=%d", i, row.MaxPings)
 		}
@@ -502,6 +502,14 @@ func TestCalculatorGoldenAgainstTheProductionBands(t *testing.T) {
 			t.Errorf("K=%d reports no share of addressable dollars", row.MaxPings)
 		}
 	}
+	// Every gap in this fixture sits below the K=4 coverage, so K=5..24 convert nothing more —
+	// the ladder is flat past the fixture's own data, not fabricating reach it never measured.
+	for _, row := range out.Rows[4:] {
+		if row.Convertible != want[3] {
+			t.Errorf("K=%d converts %d, want it to stay at K=4's %d — this fixture has no gap "+
+				"wide enough to need a 5th ping", row.MaxPings, row.Convertible, want[3])
+		}
+	}
 	// Reach must be monotonic and its GAIN must shrink — the flattening is the finding.
 	g1 := out.Rows[1].Convertible - out.Rows[0].Convertible
 	g3 := out.Rows[3].Convertible - out.Rows[2].Convertible
@@ -511,6 +519,60 @@ func TestCalculatorGoldenAgainstTheProductionBands(t *testing.T) {
 	// And the current row is marked, which is what the panel emphasises.
 	if !out.Rows[1].Current {
 		t.Error("K=2 was not marked as the current policy")
+	}
+}
+
+// Exactly one rung is marked Optimal, and it is the one with the highest NetUSD — the panel
+// trusts this flag rather than re-deriving an argmax over 24 rows itself.
+//
+// This fixture's spans are all session-final (open), so pings grow linearly with K forever while
+// reach saturates once every gap's coverage is met — net must turn down eventually, and the
+// optimum must land short of the ladder's top rung, which is the shape the panel exists to show.
+func TestCalculatorMarksTheOptimalRung(t *testing.T) {
+	var evs []*Event
+	ts := int64(10_000_000)
+	for i, gap := range []float64{400, 700, 1000, 1300} {
+		evs = append(evs, kaExpiry(ts+int64(i)*3_600_000, "s"+string(rune('a'+i)), gap, 1.0, 300_000)...)
+	}
+	fx := newKAFixture(t, evs...)
+	price := func(string) (modelinfo.Price, bool) { return ibmSonnet, true }
+	out, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 300_000, "aws/claude-sonnet-5", price, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	optimal, best := -1, math.Inf(-1)
+	count := 0
+	for i, row := range out.Rows {
+		if row.Optimal {
+			count++
+			optimal = i
+		}
+		if row.NetUSD > best {
+			best = row.NetUSD
+		}
+	}
+	if count != 1 {
+		t.Fatalf("%d rungs marked optimal, want exactly 1", count)
+	}
+	if out.Rows[optimal].NetUSD != best {
+		t.Errorf("the optimal rung (K=%d, net $%.4f) is not the highest net on the ladder ($%.4f)",
+			out.Rows[optimal].MaxPings, out.Rows[optimal].NetUSD, best)
+	}
+	if optimal == len(out.Rows)-1 {
+		t.Error("the optimum landed on the ladder's top rung — this fixture's linear ping cost " +
+			"should turn net down before then, which is the shape this test exists to catch")
+	}
+
+	// Unpriced: no dollar figure exists to maximise, so nothing is marked.
+	un, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 300_000, "nobody-prices-me",
+		func(string) (modelinfo.Price, bool) { return modelinfo.Price{}, false }, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range un.Rows {
+		if row.Optimal {
+			t.Error("an unpriced ladder marked a rung optimal")
+		}
 	}
 }
 
