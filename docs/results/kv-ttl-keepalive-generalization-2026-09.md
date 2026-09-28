@@ -259,6 +259,19 @@ Both new scripts read the store `mode=ro` only and take no dependency beyond wha
 `kv_ttl_predictor_arms.py`/`kv_ttl_cost_model.py` already require (numpy, pandas,
 scikit-learn). Neither writes to `cg.db`, `cg-control.db`, or any live path.
 
+## A corpus bootstrap-period caveat
+
+Found independently by two other agents from two directions: 2026-08-17→08-19, this snapshot's
+first ~60 hours, carries its own distinct billing behavior (a `claude-sonnet-5` implied rate of
+2.11849 that week vs. exactly 2.28000 every week since) that coincides with an unrelated
+`saved_usd`-attribution defect whose entire 1,696-row population also falls in that same window.
+347 of 46,028 rows (0.754%), moving the aggregate implied rate by ~0.054% — immaterial to every
+figure on this page, which reports full-window aggregates rather than a per-week/time-series
+trend that this window's step-change could manufacture spuriously. Flagged because this page's
+full-window replays (the coverage/gate decomposition, the per-tenant reconciliation) DO include
+those three days; a future time-series extension of this work should exclude or dual-report that
+window rather than inherit the caveat silently.
+
 ## Not reached
 
 - `ReuseModelV1` + `stop_cluster` (issue #326).
