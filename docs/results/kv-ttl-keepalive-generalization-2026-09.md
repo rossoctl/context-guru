@@ -157,7 +157,7 @@ coincidence was not investigated) to 0.877 (`claude-opus-5`).
 **Materially safer than the shipped `stop-reason-gated` rule**, which loses −1.99% on one tenant
 and −0.13% on another on this same corpus (prior page's own finding).
 
-## The per-tenant cap + off-switch: a RANKING claim, not a magnitude — the dollar figure is unresolved across four models
+## The per-tenant cap + off-switch: a RANKING claim, not a magnitude — the dollar figure is unresolved across five rows, and there are TWO separate, differently-explained gaps
 
 **Second correction, this time from the orchestrating session itself, on top of REV's** (kept
 visible rather than smoothed into a clean final version, per this whole line of work's own
@@ -167,27 +167,31 @@ was not a stable number on its own terms — after REV's review, the orchestrato
 further errors in their own withdrawn model (omitting session-final ping cost, the "how a
 calculator flatters its own feature" trap `dash/keepalive.go:1316` documents by name; and
 over-crediting the avoided write at the full 1.25x rather than the marginal write-minus-read
-1.15x), moving their own estimate to ≈$373 — which still does not reconcile with a FOURTH
-model: KA-dash found and fixed a real partition-key bug in the shipped `dash.KeepAliveCalc`
-itself (the same `(tenant,session)`-missing-`model` defect this study's own engine has never had
-— see "Why this engine needed none of the other model's corrections" below), which flipped
-that engine's own whole-deployment optimum from +$262.86 at K=2 to a first, now **SUPERSEDED**
-figure of ≈−$0.86 at K=1. **That −$0.86 figure has since moved twice more and should not be
-quoted**: it used a per-tenant MEDIAN representative prefix+model applied to every ping/miss;
-pricing each event from its own actual prefix+model instead (the granularity fix, not a pricing
-bug — checked against #324's price-table defect specifically, which explains ~0% of the swing)
-flips the sign entirely — fleet-wide flat K=1 goes from −$127.54 (median) to **+$274.66**
-(event-level), K=2 from −$408.53 to **+$328.35**, with 9 of 16 tenants individually crossing
-zero between the two methods. **This is itself a transplantable lesson**: collapsing a tenant's
-whole traffic to one representative prefix+model on a bimodal cost distribution (this corpus's
-own p50 $0.0004 vs p99 $0.2275 per event) can flip the sign of a policy's net value, not just
-its magnitude — the same family of error as pricing a skewed subpopulation at a uniform rate
-(`PHASE2.md` P2-8b), one level more granular. **The current shipped-engine figure, per KA-dash,
-event-level, fleet-wide, all 18 real tenants, K=1..24**: flat K=1 ≈+$274.66, flat K=2 ≈+$328.35,
-per-tenant-best+off ≈**+$566.60**. **Flagged with extra caution, per KA-dash's own request**:
-this is a one-off script, not yet independently re-derived the way the partition-key fix and
-the #324-is-not-the-cause check both were — treat it as the current best estimate from the
-shipped engine, not as a fifth settled number to add to a permanent table without that caveat.
+1.15x), moving their own estimate to ≈$373 (4 confirmed errors in total).
+
+**A separate model, the shipped `dash.KeepAliveCalc`, entered the picture via KA-dash's real
+partition-key fix** (the same `(tenant,session)`-missing-`model` defect this study's own engine
+has never had — see "Why this engine needed none of the other model's corrections" below),
+which moved that engine's own whole-deployment optimum from +$262.86 at K=2 (pre-fix, wrong
+partition) to −$0.86 at K=1 (post-fix). **This −$0.86 figure is superseded as THE ANSWER but is
+NOT dropped as a DATA POINT — it is the single most heavily-verified figure in this whole
+comparison.** REV rebuilt both branches into separate binaries, ran each against its own
+scratch copy of the read-only snapshot, and hit the real HTTP API end to end: 2,721 misses,
+$4,123.20, K=1 net −$0.86 — reproduced to the cent. It remains correct **as the output of the
+MEDIAN-prefix method**: one representative prefix+model per tenant, applied to every
+ping/miss. **A second, distinct method — pricing each event from its own actual prefix+model
+instead of a tenant-wide median — gives a different, not-yet-independently-verified number**:
+fleet-wide flat K=1 goes from −$127.54 (median) to +$274.66 (event-level), K=2 from −$408.53 to
++$328.35, per-tenant-best+off to ≈+$566.60, with 9 of 16 tenants individually crossing zero
+between the two methods. Checked and refuted as the cause: #324's pricing defect (a 2×2 of
+median/event-level × unpatched/patched price table) explains ~0% of this swing. **These are two
+methods, not one correcting the other — presented as two separate rows below, because
+collapsing them into one "current best" number would hide the finding itself**, which is that
+collapsing a tenant's whole traffic to one representative prefix+model on a bimodal per-event
+cost distribution (this corpus's own p50 $0.0004 vs. p99 $0.2275) can flip the sign of a
+policy's net value, not just its magnitude — the same family of error as pricing a skewed
+subpopulation at a uniform rate (`PHASE2.md` P2-8b), one level more granular, and a genuinely
+transplantable lesson for anyone pricing a policy over a skewed population.
 
 **So the honest headline is a RANKING, not a magnitude**: a per-tenant `max_pings ∈ {off, 1, 2, 6}`
 policy, tuned per tenant with an off-switch where every setting loses money, **beats every
@@ -197,32 +201,45 @@ ranking and on per-tenant harm.** That ranking claim is what REV independently r
 and confirmed from this page's own committed engine, and it does not depend on any of the
 disputed dollar figures below.
 
-**The absolute dollar value of a per-tenant cap+off-switch policy is UNRESOLVED, across (at
-least) four independently-built models, and this page says so rather than picking one:**
+**The absolute dollar value of a per-tenant cap+off-switch policy is UNRESOLVED, across five
+rows from four models/methods, and this page says so rather than picking one:**
 
-| model | scope | per-tenant cap+off value | status |
+| model / method | scope | per-tenant cap+off value | verification |
 |---|---|---:|---|
-| orchestrator's ad-hoc SQL | ungated, full window | ≈$373 (was $515–768) | **WITHDRAWN by its own author** — two confirmed errors |
-| this page's `kv_ttl_cost_model.evaluate()` | ungated, test-window split | +$641.95 | reproducible (`kv_ttl_per_tenant_cap.py`), but ungated like the withdrawn one |
-| this page's engine, full-window scope | ungated, full window | +$1,669.44 | reproducible, same caveat |
-| `dash.KeepAliveCalc`, event-level, post both fixes | **real gates, the SHIPPED engine, current best estimate** | **≈+$566.60 (per-tenant best+off)** | production code, but this specific figure is a one-off script not yet independently re-derived — see caveat above |
+| orchestrator's ad-hoc SQL | ungated, full window | ≈$373 (was $515–768) | **WITHDRAWN by its own author** — 4 confirmed errors |
+| `kv_ttl_cost_model` (this page) | ungated, test window | +$641.95 | reproduced by REV (`kv_ttl_per_tenant_cap.py`) |
+| `kv_ttl_cost_model` (this page) | ungated, full window | +$1,669.44 | reproduced by REV |
+| `dash.KeepAliveCalc`, **median-prefix** | gated, the shipped engine | **−$0.86** (flat K=2: −$408.53) | **REV-verified end-to-end, to the cent** |
+| `dash.KeepAliveCalc`, **event-level** | gated, the shipped engine | ≈+$566.60 (flat K=2: +$328.35) | **NOT yet independently re-derived** |
 
-*(Two now-superseded shipped-engine figures, kept visible per this section's own convention:
-+$262.86 at K=2 pre-partition-fix, then ≈−$0.86 at K=1 post-partition-fix but still on a
-per-tenant-median pricing granularity that itself turned out to flip signs once corrected to
-event-level pricing.)*
+**No number in this table should be quoted as THE value of this policy.** The ranking claim
+above is what survives; the dollar figure does not, yet.
 
-**The shipped engine is the only one of the four with a documented anti-flattery discipline**
-(`dash/keepalive.go:1316`'s own comment names the session-final-ping trap explicitly), and its
-current best estimate (+$566.60) is now closer in ORDER OF MAGNITUDE to this page's own
-test-window figure (+$641.95) than either was to the other's earlier, now-superseded numbers —
-stated as an observation, not as convergence; the two are still measuring different scopes
-(fleet-wide-K=1..24 vs. this page's per-tenant-best-of-{1,2,6}) and neither has been reconciled
-against the other. This page's own engine was independently checked against that
-exact trap while writing this correction (see the methods note below) and does not have it —
-but "does not have one known flattery bug" is not the same claim as "matches the shipped engine,"
-and it does not. **No number in this table should be quoted as THE value of this policy.** The
-ranking claim above is what survives; the dollar figure does not, yet.
+### There are TWO independent, differently-explained gaps here, not one
+
+**Gap 1 — median-prefix vs. event-level, inside the shipped engine: EXPLAINED, pure
+granularity.** The rows above disagree by design, not by defect — collapsing a tenant's traffic
+to one representative prefix+model on a bimodal cost distribution changes the answer, #324 is
+refuted as the driver, and the gap IS the finding, not a mystery to solve further.
+
+**Gap 2 — this page's engine vs. the shipped engine (either method): UNEXPLAINED, and it is not
+either engine's known bugs.** This page's own engine was checked, not assumed, against both bug
+classes the withdrawn ad-hoc model had (the session-final-ping omission and the over-credited
+avoided-write formula — see the methods note below) and has neither. So even after removing
+every defect found anywhere in this comparison and fully explaining Gap 1, an order-of-magnitude
+divergence remains between two engines with **no known defect in either one**. The likely locus,
+not yet resolved: what counts as an "addressable" span at all — this page's engine and
+`dash.KeepAliveCalc`'s `addressable`/`addressableCTE` may define the ELIGIBLE population
+differently (which spans even enter the comparison), independent of how either one then prices
+what it counts. Flagged, not chased to ground this round — the honest, most useful thing this
+page can say about its own headline number's absolute value is that it survives a real
+adversarial audit qualitatively and does NOT yet reconcile quantitatively, on two different axes
+that must not be conflated with each other.
+
+This two-gap structure — one explained, one not, and neither one a simple "my number vs. yours"
+disagreement — is a stronger and more precise result than a single table alone, and it only
+became visible because this page's engine was audited against the SPECIFIC bugs found elsewhere
+rather than assumed clean by default.
 
 ### The "roughly a third of tenants harmed" claim — reverted to unresolved, no exact count
 
