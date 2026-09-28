@@ -246,6 +246,18 @@ type Request struct {
 	Hit        bool   `json:"hit"`
 	MissReason string `json:"miss_reason"`
 
+	// Reverts and Expands mirror dash.Event's own columns of the same name (see
+	// dash/schema.go's `reverts`/`expands`), added here so kvcache/predictor's feature
+	// registry has a typed field to read. UNLIKE StopReason and MissReason, these are NOT
+	// safe to read at THIS row's own decision point: their AVAILABLE-AT timestamp trails the
+	// request they describe (dash's async analysis pipeline finishes them after the request
+	// has already been billed), so a feature reading them must lag by one row — see
+	// kvcache/predictor's doc comment for the trap this avoids. Zero until whatever builds
+	// the dataset (dash/kvcache.go's row scan) is wired to populate them; that wiring is
+	// intentionally not part of this change.
+	Reverts int `json:"reverts"`
+	Expands int `json:"expands"`
+
 	// StopReason is this request's own terminal stop reason
 	// (end_turn|tool_use|stop_sequence|max_tokens|...), the strongest single feature found
 	// for predicting whether the NEXT request in this conversation lands in the 5m-1h
