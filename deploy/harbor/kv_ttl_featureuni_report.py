@@ -196,50 +196,88 @@ def build(ev: dict, plots_rel: str) -> str:
             b.append(f"| {cat} | {mr['n']:,} | {mr['rate']*100:.2f}% | "
                     f"{cr['n']:,} | {crate} |" if cr else
                     f"| {cat} | {mr['n']:,} | {mr['rate']*100:.2f}% | 0 | n/a |")
-        b.append("\n**What this actually shows, measured rather than assumed: the ranking "
-                "survives (tool_use > stop_sequence > end_turn, both marginally and "
-                "conditionally), and the absolute point-spread among the three big "
-                "clusters is not smaller conditionally (87.2/81.9/77.5%, a ~9.7-point "
-                "spread) than marginally (99.9/99.3/96.7%, a ~3.2-point spread) -- if "
-                "anything it's wider. So stop_reason's own discriminative signal does "
-                "NOT simply evaporate once you condition on the trigger, which is a "
-                "more precise finding than 'redundant with the trigger.'**\n\n"
-                "**The actual mechanism behind outcome (c)'s HARMS AS A GATE verdict "
-                "(measured above: gating on end_turn alone costs $249 vs. ping-everyone) "
-                "is under-coverage, not a lack of signal: every cluster's CONDITIONAL "
-                "return-within-1h rate is still high (57-92% once a decision point has "
-                "already gone idle 280s+), so excluding any cluster from the ping policy "
-                "forgoes real, still-substantial rescue value on it. stop_reason ranks "
-                "the clusters correctly; it just doesn't identify any cluster worth "
-                "excluding once you're already past the trigger.**\n")
+        big3 = ["tool_use", "stop_sequence", "end_turn"]
+        m_big = [m[k]["rate"] * 100 for k in big3 if k in m]
+        c_big = [c[k]["rate"] * 100 for k in big3 if k in c and c[k]["n"]]
+        m_spread = max(m_big) - min(m_big) if len(m_big) == 3 else None
+        c_spread = max(c_big) - min(c_big) if len(c_big) == 3 else None
+        m_str = "/".join(f"{m[k]['rate']*100:.1f}" for k in big3 if k in m)
+        c_str = "/".join(f"{c[k]['rate']*100:.1f}" for k in big3 if k in c and c[k]["n"])
+        stop_m = m.get("stop", {}).get("rate")
+        stop_c = c.get("stop", {}).get("rate")
+        b.append(f"\n**What this actually shows, measured with proper censoring (a "
+                f"trigger-reaching span that never got a successor counts as a non-return, "
+                f"not an exclusion -- the first cut of this table dropped 15,409 of 23,800 "
+                f"true trigger-reaching decision points, all of them exactly the never-"
+                f"returned failures the conditional rate needs, which inflated it): the "
+                f"ranking among the three big clusters survives (tool_use > stop_sequence "
+                f"> end_turn, both marginally and conditionally), and the point-spread "
+                f"among them is NOT smaller conditionally ({c_str}%, a "
+                f"~{c_spread:.1f}-point spread) than marginally ({m_str}%, a "
+                f"~{m_spread:.1f}-point spread) -- if anything it is roughly "
+                f"{c_spread/m_spread:.1f}x wider. So stop_reason's own discriminative "
+                f"signal does NOT evaporate once conditioned on the trigger, which is a "
+                f"more precise finding than 'redundant with the trigger.'**\n\n"
+                f"**A new finding this correction surfaced: the 'stop' category "
+                f"(stop_cluster='looks_done_isnt') is a near-total dead end** -- "
+                f"{100*stop_m:.2f}% marginal, and once conditioned on the trigger, "
+                f"**{100*stop_c:.3f}%** (essentially zero; {c.get('stop',{}).get('n',0):,} "
+                f"trigger-reaching decision points, {c.get('stop',{}).get('k',0)} rescued). "
+                f"Unlike tool_use/stop_sequence/end_turn, excluding 'stop' from a ping "
+                f"policy costs almost nothing -- this is the one cluster stop_reason "
+                f"correctly flags as safe to gate away.\n\n"
+                f"**The actual mechanism behind outcome (c)'s HARMS AS A GATE verdict "
+                f"is under-coverage of the OTHER clusters, not a lack of signal: the "
+                f"shipped/studied stop-reason-gated policy pings only 'end_turn' "
+                f"(actually_done), whose conditional rescue rate ({c.get('end_turn',{}).get('rate',0)*100:.1f}%) "
+                f"is actually the LOWEST of the three substantial clusters -- it excludes "
+                f"tool_use ({c.get('tool_use',{}).get('rate',0)*100:.1f}%) and "
+                f"stop_sequence ({c.get('stop_sequence',{}).get('rate',0)*100:.1f}%), both "
+                f"higher-value, from the ping policy entirely. stop_reason ranks the "
+                f"clusters correctly (including correctly flagging 'stop' as worthless); "
+                f"the harm comes from which clusters the SHIPPED single-category gate "
+                f"chooses to include and exclude, not from a lack of signal. Whether a "
+                f"smarter rule (e.g. 'ping everyone except stop') would beat ping-everyone "
+                f"was NOT tested in this sweep -- this script's outcome-(c) grid only "
+                f"tries single-category 'ping only on X' rules, matching the established "
+                f"literature's own gate definition, not exclusion rules -- and is flagged "
+                f"here as a concrete, promising follow-up rather than claimed as tested.**\n")
 
     ti = ev.get("tenant_identity")
     if ti:
         b.append("\n## Tenant identity (confound context, not a catalogue row)\n")
-        rows_t = ti.get("per_tenant_band_rate", [])
-        rates = [r["band_rate_pct"] for r in rows_t]
-        spread = (max(rates) / min([r for r in rates if r > 0], default=1)) if rates else None
-        b.append(f"Measured directly (full window, tenants with n>=1,000, pseudonyms only): "
-                f"rescue-band rate ranges from {min(rates):.2f}% to {max(rates):.2f}% "
-                f"across {len(rows_t)} tenants"
-                f"{f' (a {spread:.0f}x spread)' if spread else ''}. Break-even for an "
-                f"unconditional ping is **{ti['break_even_pct']:.2f}%** (r/(w-r), the "
-                f"marginal cost of a write over a read). "
-                f"**{'A tenant clears it' if ti['any_tenant_clears_break_even'] else 'No tenant clears it'}** "
-                f"-- the best is {ti['max_tenant_band_rate_pct']:.2f}%. Verdict: "
-                f"**{ti['verdict']}** -- {ti['verdict_reason']}\n")
-        b.append("\n| Tenant | N (eligible, full window) | Rescue-band rate |\n|---|---|---|")
+        if ti.get("correction_note"):
+            b.append(f"\n> **Correction applied:** {ti['correction_note']}\n")
+        rows_t = ti.get("per_tenant_trigger_conditional_rescue_rate", [])
+        rates = [r["rescue_rate_pct"] for r in rows_t if r["rescue_rate_pct"] is not None]
+        n_clear = ti.get("n_tenants_clearing_break_even_trigger_conditional")
+        b.append(f"**Trigger-conditional rescue rate** (population: decision points that "
+                f"reached the 280s ping trigger -- gap "
+                f"observed >=280s, OR censored with elapsed-to-window-end >=280s -- scored "
+                f"against whether a successor arrived within {ti.get('rescue_horizon_ms', 880000)/1000:.0f}s, "
+                f"proper censoring: a trigger-reaching span that never got a successor "
+                f"counts as a non-rescue, not an exclusion): ranges from "
+                f"{min(rates):.1f}% to {max(rates):.1f}% across {len(rows_t)} tenants "
+                f"(n>=30). Break-even is **{ti['break_even_pct']:.2f}%** (r/(w-r)). "
+                f"**{n_clear} of {len(rates)} tenants clear it**"
+                f"{', comfortably (several by 4-5x)' if n_clear and n_clear >= len(rates)-1 else ''}. "
+                f"Verdict (from the full cost-model replay below, which is the decisive "
+                f"one): **{ti['verdict']}** -- {ti['verdict_reason']}\n")
+        b.append("\n| Tenant | N (trigger-reaching, full window) | Rescue rate (within "
+                f"{ti.get('rescue_horizon_ms', 880000)/1000:.0f}s of trigger) |\n|---|---|---|")
         for r in rows_t:
-            b.append(f"| {r['tenant']} | {r['n']:,} | {r['band_rate_pct']:.2f}% |")
+            rr = r["rescue_rate_pct"]
+            b.append(f"| {r['tenant']} | {r['n']:,} | "
+                    f"{f'{rr:.1f}%' if rr is not None else 'n/a'} |")
 
-        b.append("\n**Direct test, not inherited from the myopic break-even formula:** "
-                "the band-rate-vs-8.70% comparison above is the simple r/(w-r) heuristic. "
-                "Whether 'ping whenever tenant==X' actually loses money is a full "
-                "cost-model question (PingSchedule only pays for a ping when idle time "
-                "actually crosses its interval, which is why the ping-everyone reference "
-                "elsewhere in this report beats fixed-5m despite a 2.6% base rate well "
-                "under the myopic bar) -- so it was run through the same replay as every "
-                "other outcome-(c) test here, per tenant, on the held-out test window:\n")
+        b.append("\n**Full cost-model replay, the decisive comparison:** the "
+                "trigger-conditional rate above answers 'is this tenant's rescue rate "
+                "above the myopic break-even', which is a necessary check but not "
+                "sufficient on its own (it says nothing about whether restricting the "
+                "*policy* to just this tenant beats the alternatives). Whether 'ping "
+                "whenever tenant==X' actually makes or loses money is therefore also run "
+                "through the same full replay as every other outcome-(c) test here, per "
+                "tenant, on the held-out test window:\n")
         b.append("\n| Tenant | N (test) | vs fixed-5m, 95% CI | vs ping-everyone, 95% CI |\n"
                 "|---|---|---|---|")
         for d in ti.get("per_tenant_ping_dollar_value", []):

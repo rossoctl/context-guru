@@ -62,6 +62,12 @@ HORIZON_1H_MS = 3_600_000
 # r/(w-r): the marginal cost of a write over a read is the true break-even a gate has to
 # clear, not r/w -- matches kvcache/keepalive.go's own constant and the site's 8.70% figure.
 BREAK_EVEN_PCT = 100 * DEFAULT_CACHE_READ_MULTIPLE / (DEFAULT_WRITE_5M_MULTIPLE - DEFAULT_CACHE_READ_MULTIPLE)
+# The break-even is P(a ping pays | a ping is SENT), i.e. trigger-conditional -- comparing
+# it against an unconditional rescue-band rate (as this file's first cut of the tenant card
+# did) is an invalid denominator mismatch, confirmed independently after team-lead's own
+# retraction of the same mistake. RESCUE_HORIZON_MS matches team-lead's own break-even
+# check exactly, so the two analyses are comparable.
+RESCUE_HORIZON_MS = 880_000
 
 # The 2026-08-17 -> 08-19 bootstrap window carries a price step and an unrelated attribution
 # defect (per COORDINATION.md); excluded from any per-week/time-of-collection figure. This
@@ -918,7 +924,8 @@ def analyze_feature(entry: dict, df, train_rows, test_rows, *, prices, semantics
     out["confounding"] = confound
 
     if fid == "stop_reason":
-        out["confounding_idle_ge_280s"] = stop_reason_idle_trigger_check(df)
+        out["confounding_idle_ge_280s"] = stop_reason_idle_trigger_check(
+            train_rows + test_rows, hi_ms)
 
     plot_feature(entry, df, outcomes, out["distribution"], plot_dir)
     return out
@@ -1014,23 +1021,88 @@ def caption_for(entry: dict, outcomes: dict, dist: dict) -> str:
            f"report for whether this feature survives the stop_reason confounding check.")
 
 
-def stop_reason_idle_trigger_check(df) -> dict:
-    """The brief's central trap, demonstrated directly: stop_reason's relationship to
-    return timing, marginal vs. restricted to decision points that already survived to the
-    production ping trigger's own 280s idle delay (PingSchedule.idle_5m_ms)."""
-    marginal = categorical_rates(df, "stop_reason", "in_1h_or_earlier")
-    cond = categorical_rates(df[df["idle_ge_280s"] == True], "stop_reason", "in_1h_or_earlier")  # noqa: E712
+def _resolved_1h_outcome(r, hi_ms: int, horizon_ms: int = HORIZON_1H_MS):
+    """Proper censoring, not complete-case: a row resolves the 'did it return within
+    horizon_ms' question either because a successor was observed (any gap), or because it
+    is censored AND the snapshot ran on long enough past ts to prove a return could not
+    have happened within horizon_ms either way. A censored row whose remaining window is
+    SHORTER than horizon_ms is genuinely unresolved and excluded -- this is the distinction
+    the brief's 'never score censored as did not return' warns about, applied correctly:
+    only a row whose full horizon has actually been observed gets scored, censored or not.
+    Returns (resolved: bool, returned_within_horizon: bool | None)."""
+    if r.idle_ms is not None:
+        return True, (r.idle_ms <= horizon_ms)
+    if (hi_ms - r.ts_ms) >= horizon_ms:
+        return True, False
+    return False, None
+
+
+def _reached_trigger(r, hi_ms: int, trigger_ms: int = IDLE_5M_MS) -> bool:
+    if r.idle_ms is not None:
+        return r.idle_ms >= trigger_ms
+    return (hi_ms - r.ts_ms) >= trigger_ms
+
+
+def _censoring_aware_categorical_rates(rows, cat_of, in_population, outcome_of, *,
+                                       min_n: int = 30, max_categories: int = 30) -> list[dict]:
+    """categorical_rates' own Wilson-CI shape, but built from raw rows with an explicit
+    resolved/unresolved split instead of a pre-built dataframe column -- needed because
+    build_frame's in_1h_or_earlier already discards every censored row regardless of how
+    much of the horizon was actually observed, which is complete-case, not censoring-aware,
+    and was the source of a confirmed bias in the first cut of this check (verified: it
+    dropped 15,409 of 23,800 true trigger-reaching decision points, all of them exactly the
+    never-returned failures the numerator needs)."""
+    from collections import defaultdict
+    counts: dict = defaultdict(lambda: [0, 0])  # cat -> [n, k]
+    for r in rows:
+        if not in_population(r):
+            continue
+        resolved, ret = outcome_of(r)
+        if not resolved:
+            continue
+        cat = cat_of(r)
+        counts[cat][0] += 1
+        counts[cat][1] += int(ret)
+    ranked = sorted(counts.items(), key=lambda kv: -kv[1][0])[:max_categories]
+    out = []
+    for cat, (n, k) in ranked:
+        lo, hi = wilson_ci(k, n) if n >= min_n else (float("nan"), float("nan"))
+        out.append({"category": str(cat), "n": n, "k": k, "rate": k / n if n else None,
+                    "ci95": [lo, hi], "meets_min_n": n >= min_n})
+    return out
+
+
+def stop_reason_idle_trigger_check(rows, hi_ms: int) -> dict:
+    """The brief's central trap, demonstrated directly, with proper censoring: stop_reason's
+    relationship to return timing, marginal vs. restricted to decision points that already
+    survived to the production ping trigger's own 280s idle delay (PingSchedule.idle_5m_ms).
+    A row that went idle past the trigger and NEVER got a successor is a real failure of the
+    rescue question and must count in the conditional denominator, not be dropped -- dropping
+    it (this function's first cut did) inflates the conditional rate by keeping only the
+    subset that happened to return at all."""
+    cat_of = lambda r: r.stop_reason or "(none)"
+    marginal = _censoring_aware_categorical_rates(
+        rows, cat_of, lambda r: True, lambda r: _resolved_1h_outcome(r, hi_ms))
+    cond = _censoring_aware_categorical_rates(
+        rows, cat_of, lambda r: _reached_trigger(r, hi_ms), lambda r: _resolved_1h_outcome(r, hi_ms))
     return {
         "idle_trigger_ms": IDLE_5M_MS,
+        "horizon_ms": HORIZON_1H_MS,
         "marginal_rates": marginal,
         "conditional_on_idle_ge_280s_rates": cond,
-        "note": "marginal = every decision point; conditional = restricted to points whose "
-                "observed forward gap already reached the 280s ping-trigger delay (a "
-                "population definition using the row's OWN already-elapsed idle time at "
-                "the trigger's firing instant, not a feature used to predict anything -- "
-                "landmark analysis, not leakage). If stop_reason's spread collapses in the "
-                "conditional table relative to the marginal one, the marginal signal was "
-                "largely explained by the trigger's own conditioning.",
+        "note": "Both tables use PROPER censoring, not complete-case: a censored row "
+                "(no successor observed anywhere in the 41.4-day snapshot) counts as a "
+                "resolved non-return once the elapsed time since it already exceeds the "
+                "1h horizon being asked about, and is excluded only while that horizon "
+                "genuinely hasn't been observed yet. marginal = every decision point that "
+                "resolves the 1h question. conditional = further restricted to points "
+                "whose own idle time reached the 280s trigger (successor observed with "
+                "gap>=280s, OR censored with elapsed-to-window-end>=280s) -- a population "
+                "definition using the row's own already-elapsed idle time, not a feature "
+                "used to predict anything (landmark analysis, not leakage). If "
+                "stop_reason's spread collapses in the conditional table relative to the "
+                "marginal one, the marginal signal was largely explained by the trigger's "
+                "own conditioning.",
     }
 
 
@@ -1133,17 +1205,38 @@ def run(args) -> dict:
                                  reps=args.bootstrap_reps, seed=args.seed, plot_dir=plot_dir,
                                  local_test=local_test, base_conv_test=base_conv_test,
                                  pingall_conv_test=pingall_conv_test)
-    per_tenant_band = (df[df["idle_ms"].notna()].groupby("tenant")
-                      .agg(n=("band", "size"),
-                           band_rate_pct=("band", lambda s: 100 * (s == "in_1h").mean()))
-                      .query("n >= 1000").sort_values("n", ascending=False))
+    # Trigger-conditional rescue rate, NOT the unconditional band rate: the 8.70% break-even
+    # is P(a ping pays | a ping is SENT), i.e. conditioned on having already reached the
+    # 280s trigger. Comparing it against an unconditional band rate (this file's first cut
+    # did exactly that) is an invalid denominator mismatch -- confirmed independently after
+    # team-lead's own retraction of the identical mistake in their own analysis. Proper
+    # censoring throughout: a censored row that had already gone idle past the horizon by
+    # window end counts as a real non-rescue, not an exclusion (see _resolved_1h_outcome).
+    all_rows = train_rows + test_rows
+    per_tenant_trigger: dict[str, list[int]] = {}  # tenant -> [n_trigger, k_rescued]
+    for r in all_rows:
+        if not _reached_trigger(r, hi_ms):
+            continue
+        resolved, rescued_flag = _resolved_1h_outcome(r, hi_ms, horizon_ms=RESCUE_HORIZON_MS)
+        if not resolved:
+            continue
+        t = tenant_pseudo[r.user]
+        cell = per_tenant_trigger.setdefault(t, [0, 0])
+        cell[0] += 1
+        cell[1] += int(rescued_flag)
+    per_tenant_trigger_rows = [
+        {"tenant": t, "n": n, "rescue_rate_pct": 100 * k / n if n else None}
+        for t, (n, k) in per_tenant_trigger.items() if n >= 30]
+    per_tenant_trigger_rows.sort(key=lambda d: -d["n"])
     tenant_out["break_even_pct"] = BREAK_EVEN_PCT
-    tenant_out["max_tenant_band_rate_pct"] = float(per_tenant_band["band_rate_pct"].max())
-    tenant_out["any_tenant_clears_break_even"] = bool(
-        (per_tenant_band["band_rate_pct"] > BREAK_EVEN_PCT).any())
-    tenant_out["per_tenant_band_rate"] = [
-        {"tenant": t, "n": int(row["n"]), "band_rate_pct": float(row["band_rate_pct"])}
-        for t, row in per_tenant_band.iterrows()]
+    tenant_out["rescue_horizon_ms"] = RESCUE_HORIZON_MS
+    tenant_out["per_tenant_trigger_conditional_rescue_rate"] = per_tenant_trigger_rows
+    rates = [d["rescue_rate_pct"] for d in per_tenant_trigger_rows if d["rescue_rate_pct"] is not None]
+    tenant_out["max_tenant_rescue_rate_pct"] = float(max(rates)) if rates else None
+    tenant_out["any_tenant_clears_break_even_trigger_conditional"] = bool(
+        rates and max(rates) > BREAK_EVEN_PCT)
+    tenant_out["n_tenants_clearing_break_even_trigger_conditional"] = sum(
+        1 for r in rates if r > BREAK_EVEN_PCT)
 
     # Direct test of "ping whenever tenant==X loses money for every X" via the SAME full
     # cost-model simulation the rest of this sweep uses, rather than inheriting the myopic
