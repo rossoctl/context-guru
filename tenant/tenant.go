@@ -1378,6 +1378,24 @@ var migrations = []string{
 	// alone would only duplicate it: measured (EXPLAIN QUERY PLAN against the real
 	// query), the planner never chooses such an index over the PK's own, so it would
 	// add write/storage cost on every insert for zero query benefit.
+
+	// v12: the Strategies page's own gates — see tenant/keepalivestrategy.go's Strategy
+	// struct doc comments for each. All four additive with defaults chosen so every
+	// EXISTING strategy keeps behaving identically after this migration:
+	//
+	//   - mode defaults to 'enforce', not 'shadow' — a strategy already live before this
+	//     shipped was already enforcing, and this migration must not silently shadow it.
+	//     'shadow' is opt-in, and CreateStrategy (Go, not this column default) is the one
+	//     place a blank Mode on a NEW strategy becomes 'shadow' instead.
+	//   - tenant_caps_json '{}' is "no tenant has an override", identical to today.
+	//   - max_usd_per_tenant 0 is "no budget declared" — advisory only, read by dash's
+	//     strategy preview, never by the live ping path (see keepalivestrategy.go's own
+	//     comment on why: it would need a stateful running counter that does not exist).
+	//   - models_json '[]' is "every model", identical to today's un-gated behaviour.
+	`ALTER TABLE keepalive_strategies ADD COLUMN mode               TEXT NOT NULL DEFAULT 'enforce';
+	 ALTER TABLE keepalive_strategies ADD COLUMN tenant_caps_json   TEXT NOT NULL DEFAULT '{}';
+	 ALTER TABLE keepalive_strategies ADD COLUMN max_usd_per_tenant REAL NOT NULL DEFAULT 0;
+	 ALTER TABLE keepalive_strategies ADD COLUMN models_json        TEXT NOT NULL DEFAULT '[]';`,
 }
 
 func migrate(db *sql.DB) error {

@@ -82,6 +82,17 @@ func (k *keeper) bestStrategyFor(tenantID string, now time.Time) *tenant.Strateg
 		if !s.Matches(now, tenantID) {
 			continue
 		}
+		// A shadow-mode strategy matches (it is fully visible on the list route and in the
+		// max-pings economics summary) but never wins live resolution — see tenant.ModeShadow.
+		if !s.Enforcing() {
+			continue
+		}
+		// A tenant this strategy has explicitly turned OFF is excluded from matching it at
+		// all, even under an all-target strategy — the per-tenant off-switch the study found
+		// beats every flat cap (see tenant.TenantCap).
+		if c, ok := s.TenantCapFor(tenantID); ok && c.Off {
+			continue
+		}
 		if best == nil || betterStrategy(s, best) {
 			best = s
 		}
@@ -105,6 +116,12 @@ func (k *keeper) applyStrategy(tenantID string, pol CachePolicy, now time.Time) 
 	pol.KeepAlive = true
 	pol.Idle = time.Duration(best.IdleSeconds) * time.Second
 	pol.MaxPings = best.MaxPings
+	// This tenant's own override, if the strategy has one — the cap-with-off-switch
+	// (bestStrategyFor already excluded an Off tenant outright; this is the narrower
+	// "same strategy, lower ceiling for this one tenant" half of the same mechanism).
+	if c, ok := best.TenantCapFor(tenantID); ok && c.MaxPings != nil {
+		pol.MaxPings = *c.MaxPings
+	}
 	pol.MinPrefixTokens = best.MinPrefixTokens
 	pol.MaxUSDPerPing = best.MaxUSDPerPing
 	pol.PredictorID = best.PredictorID
@@ -229,6 +246,32 @@ func validStrategyBounds(idle time.Duration, pings, minPrefix int, maxUSDPerPing
 	return nil
 }
 
+// validMode checks Mode against the only two values Strategy.Enforcing() knows how to read.
+// "" is refused here even though Enforcing() would read it as enforcing — every write path
+// (create defaults a blank Mode to ModeShadow before this runs; patch leaves an unset Mode
+// alone rather than sending "") should always have a real value by the time this checks it,
+// so a caller that reaches this with "" has a bug worth surfacing rather than a row worth
+// defaulting silently a second time.
+func validMode(m string) error {
+	if m != tenant.ModeShadow && m != tenant.ModeEnforce {
+		return fmt.Errorf("mode must be %q or %q, got %q", tenant.ModeShadow, tenant.ModeEnforce, m)
+	}
+	return nil
+}
+
+// validTenantCaps checks only the shape: a negative override is never meaningful (zero
+// already means "no pings", matching CachePolicy.MaxPings's own "zero disables"). It does
+// not check that a tenant id NAMED here actually exists — a strategy may be prepared for an
+// account that signs up later, the same latitude Target.TenantIDs already has.
+func validTenantCaps(caps map[string]tenant.TenantCap) error {
+	for id, c := range caps {
+		if c.MaxPings != nil && *c.MaxPings < 0 {
+			return fmt.Errorf("tenant %q's max_pings override cannot be negative", id)
+		}
+	}
+	return nil
+}
+
 // knownPredictorIDs is the set of predictor names a strategy is allowed to reference —
 // kept in lockstep with predictorFor's switch by TestKnownPredictorIDsMatchPredictorFor,
 // so accepting a strategy at creation time can never promise a gate that pingable() does
@@ -241,7 +284,10 @@ func validStrategyBounds(idle time.Duration, pings, minPrefix int, maxUSDPerPing
 // from a trained logistic regression on the same window — which is why it is a rule
 // rather than a model: predictorFor never runs anything heavier than kvcache.ClusterOf in
 // the hot path.
-var knownPredictorIDs = map[string]bool{"stop-reason-gated": true}
+var knownPredictorIDs = map[string]bool{
+	"stop-reason-gated":                    true,
+	"stop-reason-gated-proceed-on-no-data": true,
+}
 
 // predictorFor resolves a predictor id to a probability function over the entry's own
 // stop_reason, and reports whether the id is known. This is the whole production-safe
@@ -252,6 +298,26 @@ func predictorFor(id string) (func(stopReason string) float64, bool) {
 	switch id {
 	case "stop-reason-gated":
 		return func(stopReason string) float64 {
+			if kvcache.ClusterOf(stopReason) == kvcache.ClusterActuallyDone {
+				return 1.0
+			}
+			return 0.0
+		}, true
+	// stop-reason-gated-proceed-on-no-data is the same gate, with one explicit difference:
+	// an EMPTY stop_reason (no signal at all, never recorded — not "recorded and
+	// ambiguous") proceeds on the strategy's own idle/max-pings schedule rather than
+	// silently refusing forever. Without this a deployment, or a provider, that never
+	// populates stop_reason would have a stop-reason-gated strategy that LOOKS active
+	// (in_window: true, pings scheduled) and pings zero times ever — the same silent
+	// no-op trap head_ttl_1h already has on a gateway that honours no 1h requests at all.
+	// This is a distinct, opt-in catalog entry rather than a second field on Strategy: the
+	// live gate only ever sees CachePolicy.PredictorID, a single string, so the fallback IS
+	// the predictor choice.
+	case "stop-reason-gated-proceed-on-no-data":
+		return func(stopReason string) float64 {
+			if stopReason == "" {
+				return 1.0
+			}
 			if kvcache.ClusterOf(stopReason) == kvcache.ClusterActuallyDone {
 				return 1.0
 			}
@@ -313,6 +379,9 @@ func (h *Handler) keepAliveStrategyCtlRoutes() []ctlRoute {
 		// The per-tenant max_pings economics summary — see keepalivetenanteconomics.go.
 		{"GET /api/keepalive/strategies/max-pings-by-tenant", ctlManager,
 			h.ctlKeepAliveMaxPingsByTenant},
+		// The predictor catalog the Strategies form's dropdown reads instead of hardcoding
+		// its own mirror of knownPredictorIDs — see ctlListKeepAlivePredictors.
+		{"GET /api/keepalive/predictors", ctlManager, h.ctlListKeepAlivePredictors},
 	}
 }
 
@@ -333,11 +402,20 @@ type strategyView struct {
 	PredictorThreshold float64         `json:"predictor_threshold"`
 	HeadTTL1h          bool            `json:"head_ttl_1h"`
 	HeadTTLMinTokens   int             `json:"head_ttl_min_tokens"`
-	CreatedBy          string          `json:"created_by"`
-	CreatedAt          int64           `json:"created_at"`
-	UpdatedBy          string          `json:"updated_by"`
-	UpdatedAt          int64           `json:"updated_at"`
-	InWindow           bool            `json:"in_window"`
+	// Mode, TenantCaps, MaxUSDPerTenant and Models are the Strategies page's own composed
+	// gates — see tenant.Strategy's doc comments. Enforcing is the live-resolved
+	// counterpart to InWindow: whether this strategy is even eligible to change traffic
+	// right now, so the list can show "shadow" state without the reader computing it.
+	Mode            string                      `json:"mode"`
+	TenantCaps      map[string]tenant.TenantCap `json:"tenant_caps,omitempty"`
+	MaxUSDPerTenant float64                     `json:"max_usd_per_tenant,omitempty"`
+	Models          []string                    `json:"models,omitempty"`
+	Enforcing       bool                        `json:"enforcing"`
+	CreatedBy       string                      `json:"created_by"`
+	CreatedAt       int64                       `json:"created_at"`
+	UpdatedBy       string                      `json:"updated_by"`
+	UpdatedAt       int64                       `json:"updated_at"`
+	InWindow        bool                        `json:"in_window"`
 }
 
 func viewStrategy(s tenant.Strategy, now time.Time) strategyView {
@@ -347,6 +425,8 @@ func viewStrategy(s tenant.Strategy, now time.Time) strategyView {
 		Windows: s.Windows, Target: s.Target, Active: s.Active,
 		PredictorID: s.PredictorID, PredictorThreshold: s.PredictorThreshold,
 		HeadTTL1h: s.HeadTTL1h, HeadTTLMinTokens: s.HeadTTLMinTokens,
+		Mode: s.Mode, TenantCaps: s.TenantCaps, MaxUSDPerTenant: s.MaxUSDPerTenant,
+		Models: s.Models, Enforcing: s.Enforcing(),
 		CreatedBy: s.CreatedBy, CreatedAt: msOrZero(s.CreatedAt),
 		UpdatedBy: s.UpdatedBy, UpdatedAt: msOrZero(s.UpdatedAt),
 		InWindow: s.InWindow(now),
@@ -392,6 +472,12 @@ type strategyIn struct {
 	PredictorThreshold float64         `json:"predictor_threshold"`
 	HeadTTL1h          bool            `json:"head_ttl_1h"`
 	HeadTTLMinTokens   int             `json:"head_ttl_min_tokens"`
+	// Mode "" is filled in as tenant.ModeShadow below, before validation — the opt-in
+	// default for anything new. Send tenant.ModeEnforce explicitly to skip shadow.
+	Mode            string                      `json:"mode"`
+	TenantCaps      map[string]tenant.TenantCap `json:"tenant_caps"`
+	MaxUSDPerTenant float64                     `json:"max_usd_per_tenant"`
+	Models          []string                    `json:"models"`
 }
 
 // ctlCreateKeepAliveStrategy creates a strategy: validated at least as strictly as an
@@ -413,6 +499,12 @@ func (h *Handler) ctlCreateKeepAliveStrategy(w http.ResponseWriter, r *http.Requ
 		readErr(w, err)
 		return
 	}
+	// The opt-in default for anything new: a caller that does not name a mode gets
+	// shadow, never enforce. Filled in before validMode runs, so a bad explicit value is
+	// still refused rather than silently corrected.
+	if in.Mode == "" {
+		in.Mode = tenant.ModeShadow
+	}
 	idle := time.Duration(in.IdleSeconds) * time.Second
 	if err := validStrategyBounds(idle, in.MaxPings, in.MinPrefixTokens, in.MaxUSDPerPing,
 		in.HeadTTL1h, in.HeadTTLMinTokens); err != nil {
@@ -431,12 +523,26 @@ func (h *Handler) ctlCreateKeepAliveStrategy(w http.ResponseWriter, r *http.Requ
 		ctlErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := validMode(in.Mode); err != nil {
+		ctlErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validTenantCaps(in.TenantCaps); err != nil {
+		ctlErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if in.MaxUSDPerTenant < 0 {
+		ctlErr(w, http.StatusBadRequest, "the per-tenant budget cannot be negative")
+		return
+	}
 	s, err := h.registry().CreateStrategy(actor.ID, tenant.Strategy{
 		Name: in.Name, IdleSeconds: in.IdleSeconds, MaxPings: in.MaxPings,
 		MinPrefixTokens: in.MinPrefixTokens, MaxUSDPerPing: in.MaxUSDPerPing,
 		Windows: in.Windows, Target: in.Target, Active: in.Active,
 		PredictorID: in.PredictorID, PredictorThreshold: in.PredictorThreshold,
 		HeadTTL1h: in.HeadTTL1h, HeadTTLMinTokens: in.HeadTTLMinTokens,
+		Mode: in.Mode, TenantCaps: in.TenantCaps, MaxUSDPerTenant: in.MaxUSDPerTenant,
+		Models: in.Models,
 	})
 	if err != nil {
 		ctlErr(w, http.StatusBadRequest, err.Error())
@@ -460,18 +566,22 @@ func (h *Handler) ctlCreateKeepAliveStrategy(w http.ResponseWriter, r *http.Requ
 // strategyPatchIn is an update request's body: pointers, so "not sent" and "set to
 // zero/empty" are different things, matching tenant.Patch's own convention.
 type strategyPatchIn struct {
-	Name               *string          `json:"name"`
-	IdleSeconds        *int             `json:"idle_seconds"`
-	MaxPings           *int             `json:"max_pings"`
-	MinPrefixTokens    *int             `json:"min_prefix_tokens"`
-	MaxUSDPerPing      *float64         `json:"max_usd_per_ping"`
-	Windows            *[]tenant.Window `json:"windows"`
-	Target             *tenant.Target   `json:"target"`
-	Active             *bool            `json:"active"`
-	PredictorID        *string          `json:"predictor_id"`
-	PredictorThreshold *float64         `json:"predictor_threshold"`
-	HeadTTL1h          *bool            `json:"head_ttl_1h"`
-	HeadTTLMinTokens   *int             `json:"head_ttl_min_tokens"`
+	Name               *string                      `json:"name"`
+	IdleSeconds        *int                         `json:"idle_seconds"`
+	MaxPings           *int                         `json:"max_pings"`
+	MinPrefixTokens    *int                         `json:"min_prefix_tokens"`
+	MaxUSDPerPing      *float64                     `json:"max_usd_per_ping"`
+	Windows            *[]tenant.Window             `json:"windows"`
+	Target             *tenant.Target               `json:"target"`
+	Active             *bool                        `json:"active"`
+	PredictorID        *string                      `json:"predictor_id"`
+	PredictorThreshold *float64                     `json:"predictor_threshold"`
+	HeadTTL1h          *bool                        `json:"head_ttl_1h"`
+	HeadTTLMinTokens   *int                         `json:"head_ttl_min_tokens"`
+	Mode               *string                      `json:"mode"`
+	TenantCaps         *map[string]tenant.TenantCap `json:"tenant_caps"`
+	MaxUSDPerTenant    *float64                     `json:"max_usd_per_tenant"`
+	Models             *[]string                    `json:"models"`
 }
 
 // ctlPatchKeepAliveStrategy updates any field; takes effect on the next request that
@@ -538,6 +648,18 @@ func (h *Handler) ctlPatchKeepAliveStrategy(w http.ResponseWriter, r *http.Reque
 	if in.HeadTTLMinTokens != nil {
 		next.HeadTTLMinTokens = *in.HeadTTLMinTokens
 	}
+	if in.Mode != nil {
+		next.Mode = *in.Mode
+	}
+	if in.TenantCaps != nil {
+		next.TenantCaps = *in.TenantCaps
+	}
+	if in.MaxUSDPerTenant != nil {
+		next.MaxUSDPerTenant = *in.MaxUSDPerTenant
+	}
+	if in.Models != nil {
+		next.Models = *in.Models
+	}
 	idle := time.Duration(next.IdleSeconds) * time.Second
 	if err := validStrategyBounds(idle, next.MaxPings, next.MinPrefixTokens, next.MaxUSDPerPing,
 		next.HeadTTL1h, next.HeadTTLMinTokens); err != nil {
@@ -556,12 +678,26 @@ func (h *Handler) ctlPatchKeepAliveStrategy(w http.ResponseWriter, r *http.Reque
 		ctlErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := validMode(next.Mode); err != nil {
+		ctlErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validTenantCaps(next.TenantCaps); err != nil {
+		ctlErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if next.MaxUSDPerTenant < 0 {
+		ctlErr(w, http.StatusBadRequest, "the per-tenant budget cannot be negative")
+		return
+	}
 	s, err := h.registry().UpdateStrategy(actor.ID, id, tenant.StrategyPatch{
 		Name: in.Name, IdleSeconds: in.IdleSeconds, MaxPings: in.MaxPings,
 		MinPrefixTokens: in.MinPrefixTokens, MaxUSDPerPing: in.MaxUSDPerPing,
 		Windows: in.Windows, Target: in.Target, Active: in.Active,
 		PredictorID: in.PredictorID, PredictorThreshold: in.PredictorThreshold,
 		HeadTTL1h: in.HeadTTL1h, HeadTTLMinTokens: in.HeadTTLMinTokens,
+		Mode: in.Mode, TenantCaps: in.TenantCaps, MaxUSDPerTenant: in.MaxUSDPerTenant,
+		Models: in.Models,
 	})
 	if err != nil {
 		ctlErr(w, http.StatusBadRequest, err.Error())
@@ -577,6 +713,8 @@ func (h *Handler) ctlPatchKeepAliveStrategy(w http.ResponseWriter, r *http.Reque
 			Windows: &cur.Windows, Target: &cur.Target, Active: &cur.Active,
 			PredictorID: &cur.PredictorID, PredictorThreshold: &cur.PredictorThreshold,
 			HeadTTL1h: &cur.HeadTTL1h, HeadTTLMinTokens: &cur.HeadTTLMinTokens,
+			Mode: &cur.Mode, TenantCaps: &cur.TenantCaps, MaxUSDPerTenant: &cur.MaxUSDPerTenant,
+			Models: &cur.Models,
 		})
 		ctlErr(w, http.StatusInternalServerError,
 			"could not record this in the audit log, so the update was not applied")
@@ -622,4 +760,71 @@ func (h *Handler) ctlDeleteKeepAliveStrategy(w http.ResponseWriter, r *http.Requ
 	}
 	h.keeper.loadStrategies()
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "deleted": true})
+}
+
+// predictorCatalogEntry is one entry the Strategies form's predictor dropdown can show —
+// see ctlListKeepAlivePredictors.
+type predictorCatalogEntry struct {
+	ID          string `json:"id"`
+	Kind        string `json:"kind"` // "baseline" | "rule" | "trained"
+	Description string `json:"description"`
+	// Validated is whatever check this deployment can run for that kind: a rule is
+	// validated by construction (it is reviewed source, not a fit), a trained artifact by
+	// its own Validate(). Selectable is the code-enforced half of "visible for comparison,
+	// ineligible for live enforcement" — validPredictorRef refuses any id this is false
+	// for, regardless of what a client sends, so this field is a courtesy for the UI, not
+	// the actual gate.
+	Validated  bool   `json:"validated"`
+	Selectable bool   `json:"selectable_for_enforcement"`
+	Version    string `json:"version,omitempty"`
+	TrainedOn  string `json:"trained_on,omitempty"`
+}
+
+// ctlListKeepAlivePredictors lists every predictor a strategy's PredictorID could name,
+// naive baseline first, then the validated rules knownPredictorIDs actually knows how to
+// evaluate, then — for comparison only — kvcache's own trained reuse model. That last entry
+// is NEVER added to knownPredictorIDs: predictorFor does not know how to turn a
+// stop_reason-shaped signature into the richer feature vector ReuseModel needs, so it stays
+// unselectable (see predictorCatalogEntry.Selectable) until someone builds that wiring and
+// proves it safe — an unvalidated arm visible for comparison, refused for enforcement in
+// validPredictorRef itself, not only by this field.
+func (h *Handler) ctlListKeepAlivePredictors(w http.ResponseWriter, r *http.Request) {
+	actor, err := h.webPrincipal(r)
+	if err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	if !actor.IsManager() {
+		ctlErr(w, http.StatusForbidden, "manager only")
+		return
+	}
+	out := []predictorCatalogEntry{
+		{ID: "", Kind: "baseline", Validated: true, Selectable: true,
+			Description: "No predictor gate — every ping the schedule (windows, idle, max_pings) allows fires."},
+		{ID: "stop-reason-gated", Kind: "rule", Validated: true, Selectable: true,
+			Description: "Ping only when the request just served ended with a stop_reason that " +
+				"clusters as actually-done. Measured +1.54% vs fixed-5m (CI95 [0.60%, 2.79%]); " +
+				"if this deployment or provider never records stop_reason, this gate silently " +
+				"pings zero times — see the next entry."},
+		{ID: "stop-reason-gated-proceed-on-no-data", Kind: "rule", Validated: true, Selectable: true,
+			Description: "The same gate, except an entirely absent stop_reason proceeds on the " +
+				"schedule instead of refusing — the explicit no-data fallback for a deployment " +
+				"where that signal is missing rather than merely ambiguous."},
+	}
+	if rm := kvcache.ReuseModelV1; rm != nil {
+		out = append(out, predictorCatalogEntry{
+			ID:   "reuse-model-" + rm.Version,
+			Kind: "trained", Version: rm.Version, TrainedOn: rm.TrainedOn,
+			Validated:  rm.Validate() == nil,
+			Selectable: false,
+			Description: "A frozen survival fit over this deployment's own keep-alive sweeps " +
+				"(kvcache.ReuseModel), used today by the KV-cache page's own keepalive-budget " +
+				"arm. Shown for comparison only: it reads a feature vector (prefix size, prior " +
+				"gap, turn, hour, day-of-week, per-account stats) this strategy's live gate has " +
+				"no path to supply — only a stop_reason. Not in knownPredictorIDs, so " +
+				"validPredictorRef refuses it as a Strategy.PredictorID regardless of this flag.",
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"predictors": out})
 }

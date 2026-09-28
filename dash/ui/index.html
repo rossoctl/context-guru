@@ -1173,5 +1173,7 @@
      tools.js/kvcache.js it is manager-only with no local-ok exemption, so it is not
      tagged here at all. app.js's maybeLoadManagerScript fetches it the one time a hosted
      manager signs in, so a plain account's browser never requests this file. -->
+<!-- The Strategies view (tpl-view-strategies below) is filled by strategies.js the same
+     way — also manager-only, also fetched by maybeLoadManagerScript, also not tagged here. -->
 </body>
 </html>

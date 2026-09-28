@@ -546,6 +546,9 @@ func (a *API) routes() []route {
 	// The manager-controlled keep-alive strategy ledger, declared beside its handler in
 	// keepalivestrategy.go and appended here for the same reason.
 	rs = append(rs, a.keepAliveStrategyRoutes()...)
+	// The Strategies page's preview-before-enabling route, declared beside its handler in
+	// strategypreview.go and appended here for the same reason.
+	rs = append(rs, a.strategyPreviewRoutes()...)
 	// The KV-cache TTL analysis and strategy simulator, declared beside its handlers in
 	// kvcacheapi.go and appended here for the same reason.
 	rs = append(rs, a.kvCacheRoutes()...)

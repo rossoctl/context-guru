@@ -55,6 +55,34 @@ const (
 	TargetList = "list"
 )
 
+// TenantCap is one tenant's override of a strategy's own MaxPings — the mechanism the
+// 2026-08-25 keep-alive predictor study ranked above every flat cap and every predictor,
+// including a well-calibrated one: a per-tenant cap with an explicit off-switch, because a
+// flat setting applied fleet-wide helps some tenants and loses money for others regardless
+// of where it is set (see PHASE2.md P2-4/P2-5 and proxy/keepalivetenanteconomics.go's own
+// per-tenant curve). Off is independent of MaxPings so a manager may express "no pings for
+// this tenant, but keep the row so a later re-enable does not need to be re-typed" without
+// relying on MaxPings==0 to mean the same thing — both work, since CachePolicy.MaxPings
+// already documents zero as "disabled".
+type TenantCap struct {
+	MaxPings *int `json:"max_pings,omitempty"`
+	Off      bool `json:"off,omitempty"`
+}
+
+// Mode gates whether a matching strategy actually changes live traffic.
+//
+// ModeShadow (the default for anything newly created — see CreateStrategy) matches,
+// resolves, and is fully visible everywhere a strategy already is, but a shadow strategy is
+// excluded from keeper.bestStrategyFor, so it can never turn KeepAlive on, change a ping
+// schedule, or promote the head-TTL tier — the study's other finding this encodes is that a
+// dollar estimate for a not-yet-proven config disagreed by ~18x across five honest ways of
+// computing it, so nothing new should spend real money before it has been watched.
+// ModeEnforce opts a strategy into actually doing that.
+const (
+	ModeShadow  = "shadow"
+	ModeEnforce = "enforce"
+)
+
 // Strategy is a manager-authored keep-alive rule — see the design doc's "Model".
 type Strategy struct {
 	ID              string
@@ -85,10 +113,28 @@ type Strategy struct {
 	HeadTTL1h bool
 	// HeadTTLMinTokens gates HeadTTL1h on request size. Ignored while HeadTTL1h is false.
 	HeadTTLMinTokens int
-	CreatedBy        string
-	CreatedAt        time.Time
-	UpdatedBy        string
-	UpdatedAt        time.Time
+	// Mode is ModeShadow or ModeEnforce — see the constants' own doc comment. "" reads as
+	// ModeEnforce (bestStrategyFor.enforcing()), which is what every strategy created before
+	// this field existed already was; CreateStrategy is the only place "" becomes ModeShadow,
+	// so the default only applies going forward, not retroactively to what is already live.
+	Mode string
+	// TenantCaps overrides MaxPings per tenant, keyed by tenant id — see TenantCap. A tenant
+	// absent from this map gets the strategy's own MaxPings, unchanged.
+	TenantCaps map[string]TenantCap
+	// MaxUSDPerTenant is an advisory per-tenant spend budget, checked by dash's strategy
+	// preview against this deployment's own history — see dash/strategypreview.go. NOT
+	// live-enforced: a running per-tenant total would need a stateful counter in the ping
+	// hot path, which does not exist yet. 0 means no budget is declared.
+	MaxUSDPerTenant float64
+	// Models is a declarative compatibility list (substring-matched against the request's
+	// own model field) — empty means every model. Also advisory/preview-only, for the same
+	// reason MaxUSDPerTenant is: enforcing it live would need the request's model threaded
+	// into the ping resolution chain, which today only ever sees a tenant id.
+	Models    []string
+	CreatedBy string
+	CreatedAt time.Time
+	UpdatedBy string
+	UpdatedAt time.Time
 }
 
 // StrategyPatch is a sparse update, matching Patch's own pointer convention: a nil
@@ -106,6 +152,10 @@ type StrategyPatch struct {
 	PredictorThreshold *float64
 	HeadTTL1h          *bool
 	HeadTTLMinTokens   *int
+	Mode               *string
+	TenantCaps         *map[string]TenantCap
+	MaxUSDPerTenant    *float64
+	Models             *[]string
 }
 
 // ErrNoStrategy names no keep-alive strategy.
@@ -308,6 +358,20 @@ func (s Strategy) Matches(now time.Time, tenantID string) bool {
 	return s.InWindow(now)
 }
 
+// Enforcing reports whether this strategy is allowed to change live traffic at all — see
+// ModeShadow/ModeEnforce. Only the literal ModeShadow value suppresses it, so a strategy
+// created before Mode existed (""), and every strategy already live before this feature
+// shipped, keeps enforcing exactly as it always did.
+func (s Strategy) Enforcing() bool { return s.Mode != ModeShadow }
+
+// TenantCapFor is this tenant's own MaxPings override and off-switch, if any is set. ok is
+// false when tenantID has no entry at all, in which case the strategy's own MaxPings applies
+// unchanged.
+func (s Strategy) TenantCapFor(tenantID string) (c TenantCap, ok bool) {
+	c, ok = s.TenantCaps[tenantID]
+	return c, ok
+}
+
 // CreateStrategy inserts a new strategy, stamping its id and both timestamps. The
 // caller (proxy's control route) validates the numeric bounds — the keep-alive's own
 // spend-authorization limits, which this package does not know about — and every
@@ -316,11 +380,26 @@ func (r *Registry) CreateStrategy(actorID string, s Strategy) (Strategy, error) 
 	if strings.TrimSpace(s.Name) == "" {
 		return Strategy{}, fmt.Errorf("tenant: a strategy needs a name")
 	}
+	// The one place "" becomes ModeShadow: opt-in enforcement for anything NEW, per the
+	// study's finding that an unwatched config's dollar estimate is not to be trusted yet.
+	// A caller that already validated an explicit Mode (proxy's ctlCreateKeepAliveStrategy)
+	// passes it straight through unchanged.
+	if s.Mode == "" {
+		s.Mode = ModeShadow
+	}
 	windowsJSON, err := json.Marshal(s.Windows)
 	if err != nil {
 		return Strategy{}, err
 	}
 	targetJSON, err := json.Marshal(s.Target)
+	if err != nil {
+		return Strategy{}, err
+	}
+	tenantCapsJSON, err := json.Marshal(s.TenantCaps)
+	if err != nil {
+		return Strategy{}, err
+	}
+	modelsJSON, err := json.Marshal(s.Models)
 	if err != nil {
 		return Strategy{}, err
 	}
@@ -331,12 +410,14 @@ func (r *Registry) CreateStrategy(actorID string, s Strategy) (Strategy, error) 
 	if _, err := r.db.Exec(`INSERT INTO keepalive_strategies
 	  (id,name,idle_seconds,max_pings,min_prefix_tokens,max_usd_per_ping,windows_json,
 	   target_json,active,predictor_id,predictor_threshold,head_ttl_1h,head_ttl_min_tokens,
+	   mode,tenant_caps_json,max_usd_per_tenant,models_json,
 	   created_by,created_at,updated_by,updated_at)
-	  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		s.ID, s.Name, s.IdleSeconds, s.MaxPings, s.MinPrefixTokens, s.MaxUSDPerPing,
 		string(windowsJSON), string(targetJSON), boolInt(s.Active), s.PredictorID,
-		s.PredictorThreshold, boolInt(s.HeadTTL1h), s.HeadTTLMinTokens, s.CreatedBy,
-		s.CreatedAt.UnixMilli(), s.UpdatedBy, s.UpdatedAt.UnixMilli()); err != nil {
+		s.PredictorThreshold, boolInt(s.HeadTTL1h), s.HeadTTLMinTokens,
+		s.Mode, string(tenantCapsJSON), s.MaxUSDPerTenant, string(modelsJSON),
+		s.CreatedBy, s.CreatedAt.UnixMilli(), s.UpdatedBy, s.UpdatedAt.UnixMilli()); err != nil {
 		return Strategy{}, err
 	}
 	return s, nil
@@ -387,6 +468,18 @@ func (r *Registry) UpdateStrategy(actorID, id string, p StrategyPatch) (Strategy
 	if p.HeadTTLMinTokens != nil {
 		s.HeadTTLMinTokens = *p.HeadTTLMinTokens
 	}
+	if p.Mode != nil {
+		s.Mode = *p.Mode
+	}
+	if p.TenantCaps != nil {
+		s.TenantCaps = *p.TenantCaps
+	}
+	if p.MaxUSDPerTenant != nil {
+		s.MaxUSDPerTenant = *p.MaxUSDPerTenant
+	}
+	if p.Models != nil {
+		s.Models = *p.Models
+	}
 	s.UpdatedBy, s.UpdatedAt = actorID, time.Now()
 	windowsJSON, err := json.Marshal(s.Windows)
 	if err != nil {
@@ -396,14 +489,24 @@ func (r *Registry) UpdateStrategy(actorID, id string, p StrategyPatch) (Strategy
 	if err != nil {
 		return Strategy{}, err
 	}
+	tenantCapsJSON, err := json.Marshal(s.TenantCaps)
+	if err != nil {
+		return Strategy{}, err
+	}
+	modelsJSON, err := json.Marshal(s.Models)
+	if err != nil {
+		return Strategy{}, err
+	}
 	if _, err := r.db.Exec(`UPDATE keepalive_strategies SET
 	  name=?, idle_seconds=?, max_pings=?, min_prefix_tokens=?, max_usd_per_ping=?,
 	  windows_json=?, target_json=?, active=?, predictor_id=?, predictor_threshold=?,
-	  head_ttl_1h=?, head_ttl_min_tokens=?, updated_by=?, updated_at=? WHERE id=?`,
+	  head_ttl_1h=?, head_ttl_min_tokens=?, mode=?, tenant_caps_json=?, max_usd_per_tenant=?,
+	  models_json=?, updated_by=?, updated_at=? WHERE id=?`,
 		s.Name, s.IdleSeconds, s.MaxPings, s.MinPrefixTokens, s.MaxUSDPerPing,
 		string(windowsJSON), string(targetJSON), boolInt(s.Active), s.PredictorID,
-		s.PredictorThreshold, boolInt(s.HeadTTL1h), s.HeadTTLMinTokens, s.UpdatedBy,
-		s.UpdatedAt.UnixMilli(), s.ID); err != nil {
+		s.PredictorThreshold, boolInt(s.HeadTTL1h), s.HeadTTLMinTokens,
+		s.Mode, string(tenantCapsJSON), s.MaxUSDPerTenant, string(modelsJSON),
+		s.UpdatedBy, s.UpdatedAt.UnixMilli(), s.ID); err != nil {
 		return Strategy{}, err
 	}
 	return s, nil
@@ -453,16 +556,18 @@ func (r *Registry) ListStrategies() ([]Strategy, error) {
 
 const strategyCols = `id,name,idle_seconds,max_pings,min_prefix_tokens,max_usd_per_ping,
 	windows_json,target_json,active,predictor_id,predictor_threshold,head_ttl_1h,
-	head_ttl_min_tokens,created_by,created_at,updated_by,updated_at`
+	head_ttl_min_tokens,mode,tenant_caps_json,max_usd_per_tenant,models_json,
+	created_by,created_at,updated_by,updated_at`
 
 func scanStrategy(sc scanner) (Strategy, error) {
 	var out Strategy
-	var windowsJSON, targetJSON string
+	var windowsJSON, targetJSON, tenantCapsJSON, modelsJSON string
 	var active, headTTL1h int
 	var createdAt, updatedAt int64
 	if err := sc.Scan(&out.ID, &out.Name, &out.IdleSeconds, &out.MaxPings, &out.MinPrefixTokens,
 		&out.MaxUSDPerPing, &windowsJSON, &targetJSON, &active, &out.PredictorID,
-		&out.PredictorThreshold, &headTTL1h, &out.HeadTTLMinTokens, &out.CreatedBy, &createdAt,
+		&out.PredictorThreshold, &headTTL1h, &out.HeadTTLMinTokens, &out.Mode, &tenantCapsJSON,
+		&out.MaxUSDPerTenant, &modelsJSON, &out.CreatedBy, &createdAt,
 		&out.UpdatedBy, &updatedAt); err != nil {
 		return Strategy{}, err
 	}
@@ -474,6 +579,16 @@ func scanStrategy(sc scanner) (Strategy, error) {
 	}
 	if targetJSON != "" {
 		if err := json.Unmarshal([]byte(targetJSON), &out.Target); err != nil {
+			return Strategy{}, err
+		}
+	}
+	if tenantCapsJSON != "" && tenantCapsJSON != "null" {
+		if err := json.Unmarshal([]byte(tenantCapsJSON), &out.TenantCaps); err != nil {
+			return Strategy{}, err
+		}
+	}
+	if modelsJSON != "" && modelsJSON != "null" {
+		if err := json.Unmarshal([]byte(modelsJSON), &out.Models); err != nil {
 			return Strategy{}, err
 		}
 	}

@@ -267,7 +267,7 @@ func TestNoUIScriptShadowsAWindowMethod(t *testing.T) {
 	// property "in any load order", so a file left out of the loop is a file that can
 	// introduce one freely. campaigns.js is the pointed case — it calls bare confirm() and
 	// alert(), both on the list below.
-	for _, f := range []string{"ui/app.js", "ui/tools.js", "ui/kvcache.js", "ui/campaigns.js"} {
+	for _, f := range []string{"ui/app.js", "ui/tools.js", "ui/kvcache.js", "ui/campaigns.js", "ui/strategies.js"} {
 		src := stripJSComments(readUI(t, f))
 		for _, m := range decl.FindAllStringSubmatch(src, -1) {
 			for _, bad := range shadowable {
