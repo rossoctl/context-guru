@@ -130,11 +130,27 @@ func mayCarryPathPrefix(s string) bool {
 	return false
 }
 
-// FoldSearchOutput returns the smallest of the candidate folds whose inverse
-// reproduces s exactly, or s itself when none of them wins. Exported so a measurement
-// harness can run the transform over captured output without a request around it.
+// FoldSearchOutput returns the smallest (by TOKENS, not bytes — see below) of the
+// candidate folds whose inverse reproduces s exactly, or s itself when none of them
+// wins. Exported so a measurement harness can run the transform over captured output
+// without a request around it.
+//
+// Ranking by tokens rather than bytes is the same fix #336 made to adopt() itself, one
+// call frame up (#339): more than one candidate can survive adopt() for the same input
+// (several hits in one file admits both foldHitPath's and foldHitDir's shape gates), and
+// nothing upstream guarantees the byte-smallest of the survivors is also the
+// token-smallest. Not found in this production corpus, but IS constructible with an
+// ordinary-looking layout: three hits under a short directory next to one hit each under
+// a long, hash-like directory name separates the two winners (foldHitDir wins bytes by
+// factoring the long name out once; foldHitPath wins tokens) — see
+// TestFoldSearchOutputPicksTokenOverByteWinner. It cannot make a worse pick than before:
+// every candidate reaching this comparison already passed adopt() against s, which since
+// #336 already guarantees it is byte- AND token-shorter than s individually, so ranking
+// the survivors by tokens instead of bytes only ever chooses AMONG already-valid
+// candidates — it can't resurrect one adopt() rejected, and it can't produce anything
+// adopt() would reject if run on it, since adopt() already ran on it and accepted it.
 func FoldSearchOutput(s string) string {
-	best := s
+	best, bestTok := s, schema.TextTokens(s)
 	for _, c := range []struct {
 		fold    func(string) string
 		inverse func(string) string
@@ -143,8 +159,15 @@ func FoldSearchOutput(s string) string {
 		{foldHitDir, unfoldPrefixDir},   // one hit per file: factor the parent dir
 		{foldPathList, unfoldPrefixDir}, // find/ls -1/rg -l: bare paths
 	} {
-		if out, ok := adopt(s, c.fold, c.inverse); ok && len(out) < len(best) {
-			best = out
+		out, ok := adopt(s, c.fold, c.inverse)
+		if !ok {
+			continue
+		}
+		// schema.TextTokens is memoized by content hash (internal/tokens.Count), and
+		// adopt() just computed this exact count for this exact string to pass its own
+		// check — this is a cache hit, not a second encode.
+		if t := schema.TextTokens(out); t < bestTok {
+			best, bestTok = out, t
 		}
 	}
 	return best
