@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -1196,5 +1197,106 @@ func TestLedgerRefusesCreditFromAPingThatRefreshedNothing(t *testing.T) {
 		if led.SavedUSD != 0 {
 			t.Errorf("%s: SavedUSD = %v, want 0 — that ping refreshed nothing", name, led.SavedUSD)
 		}
+	}
+}
+
+// The mirror of dash/kvcache.go's TestTheSQLPartitionIsExactlyTheConversationKey, for
+// addressableCTE. That file found the defect first and documented it at length
+// (dash/kvcache.go:255-267): a cached prefix is keyed on (tenant, session, MODEL), so a request
+// on a different model cannot read the entry a same-session request on another model left behind
+// — and without the model in the partition, LAG links the two anyway, reassigning the true
+// predecessor's real gap to whatever landed on the other model in between. keepalive.go's own
+// addressableCTE and pingSpans had the identical defect: partitioned by (tenant, session) alone.
+func TestAddressablePartitionsByModelAndTenant(t *testing.T) {
+	// STRUCTURAL: same shape as kvcache's own check — this fails on an edit that drops the
+	// column, naming what changed, rather than leaving it to be found from a wrong number.
+	for _, col := range []string{"r.tenant_id", "r.session_id, r.model"} {
+		if !strings.Contains(addressableCTE, col) {
+			t.Errorf("addressableCTE does not partition by %s", col)
+		}
+	}
+	if !strings.Contains(addressableCTE, "ORDER BY r.ts, r.id") {
+		t.Error("addressableCTE's LAG has no r.id tiebreak — r.ts alone is not a unique order, " +
+			"the same non-determinism dash/kvcache.go:262 documents on the identical query shape")
+	}
+
+	// BEHAVIOURAL: one session, three requests. The opus request 30s in is NOT the addressable
+	// miss's real predecessor — it is a different conversation that happens to share a session
+	// id, and the true predecessor (also opus) is 830s back.
+	const t0 = int64(1_700_000_000_000)
+	opus1 := mkEvent(t0, "s1", "aws/claude-opus-5", 0, 0)
+	opus1.CacheRead, opus1.CacheWrite = 40_000, 0
+	sonnet := mkEvent(t0+30_000, "s1", "aws/claude-sonnet-5", 0, 0)
+	sonnet.CacheRead, sonnet.CacheWrite = 1_000, 0
+	opusMiss := mkEvent(t0+830_000, "s1", "aws/claude-opus-5", 0, 0)
+	opusMiss.CacheRead, opusMiss.CacheWrite, opusMiss.CostUSD = 0, 40_000, 1.00
+	opusMiss.CacheMissReason = "ttl_expiry"
+
+	fx := newKAFixture(t, opus1, sonnet, opusMiss)
+	prefix, model, err := fx.db.AccountMedianPrefix(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One addressable row in this fixture, so its own prev_prefix IS the "median" returned.
+	if prefix != 40_000 {
+		t.Errorf("prev_prefix = %d, want 40,000 (the earlier OPUS request). 1,000 would mean "+
+			"the miss was linked to the sonnet request 30s away, whose entry it could never "+
+			"have matched", prefix)
+	}
+	if model != "aws/claude-opus-5" {
+		t.Errorf("model = %q, want aws/claude-opus-5", model)
+	}
+}
+
+// The mirror of TestAddressablePartitionsByModelAndTenant, for pingSpans — the same defect, one
+// function over. turn (which decides whether the shipped gate's "past the session's first
+// request" applies) and gap_s (which decides how many pings a span attracts) were both computed
+// across the same model boundary a live ping could never cross.
+func TestPingSpansPartitionsByModelAndTenant(t *testing.T) {
+	src, err := os.ReadFile("keepalive.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn := string(src)
+	if i := strings.Index(fn, "func (d *DB) pingSpans("); i >= 0 {
+		fn = fn[i:]
+	} else {
+		t.Fatal("pingSpans is gone; this check needs rewriting")
+	}
+	for _, col := range []string{"r.tenant_id, r.session_id, r.model"} {
+		if strings.Count(fn, col) < 2 { // ROW_NUMBER's partition AND LEAD's partition
+			t.Errorf("pingSpans does not partition both window functions by %s", col)
+		}
+	}
+
+	// BEHAVIOURAL: opus0 exists purely so opus1 is turn>=1 within the OPUS sub-conversation (a
+	// span belongs to the request the gate would actually evaluate, and a conversation's own
+	// first turn is never pingable). opus1 must open a span whose gap is measured to the LATER
+	// opus request 830s away, not to the sonnet request wedged in 30s later — and turn must be
+	// counted within the opus sub-conversation, not across both models.
+	const t0 = int64(1_700_100_000_000)
+	opus0 := mkEvent(t0, "s2", "aws/claude-opus-5", 0, 0)
+	opus0.CacheRead, opus0.CacheWrite = 40_000, 0
+	opus1 := mkEvent(t0+100_000, "s2", "aws/claude-opus-5", 0, 0)
+	opus1.CacheRead, opus1.CacheWrite = 40_000, 0
+	sonnet := mkEvent(t0+130_000, "s2", "aws/claude-sonnet-5", 0, 0)
+	sonnet.CacheRead, sonnet.CacheWrite = 40_000, 0
+	opus2 := mkEvent(t0+930_000, "s2", "aws/claude-opus-5", 0, 0)
+	opus2.CacheRead, opus2.CacheWrite = 40_000, 0
+
+	fx := newKAFixture(t, opus0, opus1, sonnet, opus2)
+	spans, err := fx.db.pingSpans(Filter{TenantAll: true}, 20_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []float64
+	for _, sp := range spans {
+		if !sp.open {
+			got = append(got, sp.gap)
+		}
+	}
+	if len(got) != 1 || got[0] != 830 {
+		t.Errorf("closed-span gaps = %v, want exactly one at 830s (opus1 -> opus2). A 30s gap "+
+			"would mean opus1's span was linked to the sonnet request instead", got)
 	}
 }

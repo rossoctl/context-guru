@@ -57,11 +57,26 @@ const ttlTTL = 300 * time.Second
 // prev_prefix is the PREVIOUS request's billed prefix (`cache_read + cache_write`), which is
 // the size of the entry that lapsed. Not `tokens_before`, which is message text only and runs
 // a median 3.38x low.
+//
+// The partition is (tenant, session, MODEL), with an r.id tiebreak — not (tenant, session) alone.
+// dash/kvcache.go:262 found this exact defect and documented it at length first: a cached prefix
+// is keyed on the model too, so a request on model B cannot read model A's entry, and LAGging
+// across the boundary links the two as predecessor/successor anyway — crediting model B's
+// request with a "prior prefix" it could never have matched, and (worse, on this query
+// specifically) reassigning the TRUE predecessor's real gap to whatever landed between them on
+// the other model. The bias is one-directional the same way: it makes an addressable miss look
+// closer to its predecessor than it was, which is the exact direction that makes a keep-alive
+// policy look more effective than it can be. And r.ts alone is not a unique order — two rows
+// landing in the same millisecond make the successor planner-dependent without an r.id tiebreak,
+// the same non-determinism kvcache.go's own comment documents on the identical query shape.
+// TestAddressablePartitionsByModelAndTenant is the mirror of kvcache.go's own
+// TestTheSQLPartitionIsExactlyTheConversationKey, so this cannot drift from that one again.
 const addressableCTE = `WITH s AS (
 	SELECT r.tenant_id, r.session_id, r.ts, r.cost_usd, r.model, r.cache_miss_reason, r.cache_write,
-	       LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_ts,
+	       LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id, r.model ORDER BY r.ts, r.id)
+	         AS prev_ts,
 	       LAG(r.cache_read + r.cache_write) OVER
-	         (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_prefix
+	         (PARTITION BY r.tenant_id, r.session_id, r.model ORDER BY r.ts, r.id) AS prev_prefix
 	FROM requests r WHERE %s
 ), addressable AS (
 	SELECT *, (ts - prev_ts) / 1000.0 AS gap_s FROM s
@@ -1203,13 +1218,20 @@ func (d *DB) pingSpans(f Filter, minPrefix int64) ([]pingSpan, error) {
 	cond, args := f.where()
 	// LEAD, not LAG: a span belongs to the request that OPENS it, which is the request the gate
 	// is evaluated on, and LEAD is NULL exactly on the session-final row.
+	//
+	// Partitioned by (tenant, session, MODEL), same fix and same rationale as addressableCTE
+	// (dash/kvcache.go:262): a request on a different model within the same session did not open
+	// a span on THIS model's cache entry, and without the model in the partition both `turn`
+	// (which decides whether the gate's "past the session's first request" even applies) and
+	// `gap_s` (which decides how many pings the span attracts) would be computed across a model
+	// boundary a live policy could never ping across.
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH s AS (
 		SELECT r.session_id AS session_id,
-		       ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id
+		       ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id, r.model
 		                          ORDER BY r.ts, r.id) - 1 AS turn,
 		       r.cache_read + r.cache_write AS prefix,
-		       (LEAD(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts, r.id)
-		         - r.ts) / 1000.0 AS gap_s
+		       (LEAD(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id, r.model
+		                         ORDER BY r.ts, r.id) - r.ts) / 1000.0 AS gap_s
 		FROM requests r WHERE `+cond+`)
 		SELECT session_id, gap_s FROM s
 		WHERE turn >= 1 AND prefix >= ? AND (gap_s IS NULL OR gap_s > 0)`,
