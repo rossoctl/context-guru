@@ -1,0 +1,48 @@
+substrates/blis_plan.py:294:def estimate_seconds(plan, case=None) -> float:
+substrates/blis_plan.py:311:    return blis.estimate_seconds(
+=== blis_plan estimate_seconds ===
+294:def estimate_seconds(plan, case=None) -> float:
+295-    """Upper-bound wall clock for this plan, weighted by what each run actually costs.
+296-
+297-    The generic layer cannot compute this, which is why the hook exists here. Two of the
+298-    three inputs are invisible to `valid8/run.py`: `duration_s` is frequently absent from
+299-    `base` and then defaults to a *case* constant (30 s for routing, 180 s for admission — a
+300-    6x cost difference), and when the axis is `aggregate_rate` the `base` rate is not the
+301-    swept rate at all, since the axis replaces it per point.
+302-    """
+303-    if case is None:
+304-        case = load_case(str(plan.base.get("case") or plan.case or "admission-orig"))
+305-
+306-    a = plan.axis
+307-    duration = plan.base.get("duration_s")
+308-    if duration is None:
+309-        duration = getattr(case, "DURATION_S", blis.DEFAULT_DURATION_S)
+310-
+311-    return blis.estimate_seconds(
+312-        axis_name=str(a.get("name", "")),
+313-        lo=float(a.get("lo", 0.0)),
+314-        hi=float(a.get("hi", 0.0)),
+315-        rate=float(plan.base.get("rate", 90.0)),
+316-        duration_s=float(duration),
+317-        # Budget is per sweep and every variation pays it — the same upper bound the
+318-        # generic estimate uses, so only the per-run cost differs.
+319-        runs=int(plan.budget) * max(plan.n_variations, 1),
+320-    )
+321-
+322-
+323-def prepare(plan, variation, case=None) -> Prepared:
+324-    """The substrate hook `valid8.run.execute` calls, once per variation.
+=== prepare signature ===
+323:def prepare(plan, variation, case=None) -> Prepared:
+324-    """The substrate hook `valid8.run.execute` calls, once per variation.
+325-
+326-    `case` is the use-case module. It defaults to the one the plan names, so
+327-    `plan.json`'s `"case": "admission-orig"` is all a round needs to say.
+328-    """
+329-    if case is None:
+330-        case = load_case(str(plan.base.get("case") or plan.case or "admission-orig"))
+331-
+332-    a = plan.axis
+333-    name = str(a["name"])
+334-    if name not in AXES:
+335-        raise ValueError(

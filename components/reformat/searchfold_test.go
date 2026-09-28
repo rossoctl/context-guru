@@ -69,6 +69,35 @@ func TestAdoptDeclinesUnsoundFold(t *testing.T) {
 	}
 }
 
+// TestAdoptDeclinesTokenLosingFold reproduces every one of searchfold's 384 pipeline-level
+// reverts one level down. token_regression_capture.txt is a real production tool-result
+// message (a `grep -A`-style capture with a single hit under its directory): factoring out
+// its "substrates/" parent directory as a heading is a genuine byte win (2281 -> 2273
+// bytes) that adopt() used to accept on bytes alone, but it tokenizes to MORE tokens
+// (615 -> 616 on the real o200k_base encoder) because the new heading/tab boundary breaks
+// a BPE merge the inline "substrates/blis_plan.py:" text had. The pipeline's never-worse
+// guard (components/pipeline.go) counts tokens, not bytes, so on a request where this was
+// the only candidate fold, the byte-only adopt() handed the guard a token-losing rewrite
+// and the guard reverted the whole component run — visible in the corpus as `err=""`
+// reverts (no panic, no error: the never-worse guard, the only path left for a Reformat).
+func TestAdoptDeclinesTokenLosingFold(t *testing.T) {
+	in, err := os.ReadFile("testdata/token_regression_capture.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := string(in)
+	beforeTok := schema.TextTokens(before)
+	if out, ok := adopt(before, foldHitDir, unfoldPrefixDir); ok {
+		t.Fatalf("adopted a token-losing fold: %d -> %d tokens (out=%q)", beforeTok, schema.TextTokens(out), trunc(out))
+	}
+	// FoldSearchOutput must likewise leave the message untouched: no candidate here is a
+	// real win once tokens are the yardstick, so the message should reach the pipeline
+	// exactly as it arrived instead of tripping the never-worse guard downstream.
+	if out := FoldSearchOutput(before); out != before {
+		t.Fatalf("FoldSearchOutput changed a token-losing capture: %d -> %d tokens", beforeTok, schema.TextTokens(out))
+	}
+}
+
 func TestFoldShapes(t *testing.T) {
 	tests := []struct {
 		name, in, want string
