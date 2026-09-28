@@ -93,6 +93,21 @@ type StatsContext struct {
 	// ClusteredHistory's doc comment for why cluster is never dropped the way user/model/
 	// bucket are.
 	Clustered *ClusteredHistory
+	// Tenant is the running per-tenant activity accumulator — see TenantStats's own doc
+	// comment. Replay builds and feeds this one itself, the same footing as Hist/Clustered.
+	Tenant *TenantStats
+	// WindowStart is the first request's own timestamp in the dataset Replay was given —
+	// present-tense the instant the walk begins (it is the FIRST row's own ts, never a
+	// later one), set once and never advanced. Zero where a caller has none.
+	WindowStart int64
+	// TenantCreatedAt is an OPTIONAL, static lookup of each tenant's account-creation
+	// instant (epoch ms) — the source is cg-control.db's tenants.created_at, a different
+	// database than the one this package's other statistics are accumulated from. Replay
+	// does not populate this map (it has no access to that database and this package stays
+	// SQL-free by design — see this package's own doc comment); it is nil unless a caller
+	// builds a StatsContext by hand and calls Features.Extract directly, which is exactly
+	// what TestTenantAgeFeature does to prove FeatureTenantAgeDays is not a stub.
+	TenantCreatedAt map[string]int64
 }
 
 // Extractor computes one feature's value at a decision point from exactly the two things
@@ -214,6 +229,14 @@ func (f *Features) Extract(group []*kvcache.Request, i int, stats StatsContext) 
 		User: row.User, Conversation: row.ConversationID, Model: row.Model, RequestID: row.ID,
 		Now: row.TS, HourUTC: row.HourUTC, Bucket: row.Bucket,
 		CachedTokens: row.CachedContext, TTL: row.TTL, Turn: i + 1, StopReason: row.StopReason,
+		Agent: row.Agent, Preset: row.Preset, Mode: row.Mode,
+		MaxTokens: row.MaxTokens, Stream: row.Stream, ToolChoice: row.ToolChoice,
+		Temperature: row.Temperature, TopP: row.TopP, ReasoningEffort: row.ReasoningEffort,
+		ThinkingMode: row.ThinkingMode, ThinkingBudget: row.ThinkingBudget,
+		ToolsDeclared: row.ToolsDeclared, SystemBlocks: row.SystemBlocks,
+		CacheBPSystem: row.CacheBPSystem, CacheBPTools: row.CacheBPTools,
+		CacheBPMessages: row.CacheBPMessages, CacheBPBlocks: row.CacheBPBlocks,
+		CacheRead: row.CacheRead, CacheWrite: row.CacheWrite, CacheWrite1h: row.CacheWrite1h,
 		Stats: stats.Hist,
 	}
 	if i > 0 && group[i-1].Key() == row.Key() {

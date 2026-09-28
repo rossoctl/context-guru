@@ -26,11 +26,33 @@ func TestNoRegisteredFeatureReadsTheFuture(t *testing.T) {
 			int64(700_000+k), // CachedContext — unique per row
 			"tool_use", fmt.Sprintf("poison-reason-%d", k),
 			900_000+k, 800_000+k) // Reverts, Expands — unique per row
+		// Every OTHER field a feature added since #345 reads must be poisoned too, so a
+		// leak through any of THEM is caught the same way — see this test's own doc
+		// comment: a newly added feature is covered automatically only if the field it
+		// reads is on this list.
+		r := rows[k]
+		r.Preset = fmt.Sprintf("poison-preset-%d", k)
+		r.Mode = fmt.Sprintf("poison-mode-%d", k)
+		r.MaxTokens = int64(600_000 + k)
+		r.ThinkingBudget = int64(500_000 + k)
+		r.ToolsDeclared = 400_000 + k
+		r.SystemBlocks = 300_000 + k
+		r.CacheBPSystem, r.CacheBPTools = 200_000+k, 100_000+k
+		r.CacheBPMessages, r.CacheBPBlocks = 90_000+k, 80_000+k
+		r.CacheRead, r.CacheWrite, r.CacheWrite1h = int64(70_000+k), int64(60_000+k), int64(50_000+k)
+		r.ToolChoice = fmt.Sprintf("poison-choice-%d", k)
+		r.ReasoningEffort = fmt.Sprintf("poison-effort-%d", k)
+		r.ThinkingMode = fmt.Sprintf("poison-thinking-%d", k)
+		temp := float64(40_000 + k)
+		r.Temperature = &temp
 	}
 	rows = derive(rows)
 
 	freg := DefaultFeatures()
-	stats := StatsContext{Hist: kvcache.NewHistory(), Clustered: NewClusteredHistory()}
+	stats := StatsContext{
+		Hist: kvcache.NewHistory(), Clustered: NewClusteredHistory(), Tenant: NewTenantStats(),
+		WindowStart: rows[0].TS,
+	}
 
 	for i := 0; i < n; i++ {
 		// Close the gap exactly as Replay does, so stats-backed features have something
@@ -50,6 +72,25 @@ func TestNoRegisteredFeatureReadsTheFuture(t *testing.T) {
 			futureNum[float64(later.Expands)] = fmt.Sprintf("row %d's own Expands (future)", later.ID)
 			futureNum[float64(later.TS)] = fmt.Sprintf("row %d's own timestamp (future)", later.ID)
 			futureStr[later.MissReason] = fmt.Sprintf("row %d's own MissReason (future)", later.ID)
+			futureNum[float64(later.MaxTokens)] = fmt.Sprintf("row %d's own MaxTokens (future)", later.ID)
+			futureNum[float64(later.ThinkingBudget)] = fmt.Sprintf("row %d's own ThinkingBudget (future)", later.ID)
+			futureNum[float64(later.ToolsDeclared)] = fmt.Sprintf("row %d's own ToolsDeclared (future)", later.ID)
+			futureNum[float64(later.SystemBlocks)] = fmt.Sprintf("row %d's own SystemBlocks (future)", later.ID)
+			futureNum[float64(later.CacheBPSystem)] = fmt.Sprintf("row %d's own CacheBPSystem (future)", later.ID)
+			futureNum[float64(later.CacheBPTools)] = fmt.Sprintf("row %d's own CacheBPTools (future)", later.ID)
+			futureNum[float64(later.CacheBPMessages)] = fmt.Sprintf("row %d's own CacheBPMessages (future)", later.ID)
+			futureNum[float64(later.CacheBPBlocks)] = fmt.Sprintf("row %d's own CacheBPBlocks (future)", later.ID)
+			futureNum[float64(later.CacheRead)] = fmt.Sprintf("row %d's own CacheRead (future)", later.ID)
+			futureNum[float64(later.CacheWrite)] = fmt.Sprintf("row %d's own CacheWrite (future)", later.ID)
+			futureNum[float64(later.CacheWrite1h)] = fmt.Sprintf("row %d's own CacheWrite1h (future)", later.ID)
+			if later.Temperature != nil {
+				futureNum[*later.Temperature] = fmt.Sprintf("row %d's own Temperature (future)", later.ID)
+			}
+			futureStr[later.Preset] = fmt.Sprintf("row %d's own Preset (future)", later.ID)
+			futureStr[later.Mode] = fmt.Sprintf("row %d's own Mode (future)", later.ID)
+			futureStr[later.ToolChoice] = fmt.Sprintf("row %d's own ToolChoice (future)", later.ID)
+			futureStr[later.ReasoningEffort] = fmt.Sprintf("row %d's own ReasoningEffort (future)", later.ID)
+			futureStr[later.ThinkingMode] = fmt.Sprintf("row %d's own ThinkingMode (future)", later.ID)
 		}
 
 		_, feats := freg.Extract(rows, i, stats)

@@ -84,7 +84,10 @@ func Replay(reqs []*kvcache.Request, freg *Features, preds *Predictors) ([]Decis
 		return order[i].ID < order[j].ID
 	})
 
-	stats := StatsContext{Hist: kvcache.NewHistory(), Clustered: NewClusteredHistory()}
+	stats := StatsContext{
+		Hist: kvcache.NewHistory(), Clustered: NewClusteredHistory(), Tenant: NewTenantStats(),
+		WindowStart: order[0].TS,
+	}
 	convRows := map[kvcache.Conversation][]*kvcache.Request{}
 
 	registered := []Registered(nil)
@@ -113,6 +116,12 @@ func Replay(reqs []*kvcache.Request, freg *Features, preds *Predictors) ([]Decis
 
 		group = append(group, r)
 		convRows[key] = group
+
+		// TenantStats sees every request, not just ones whose gap has closed — it is a fact
+		// about arrivals, not about idle spans — and it is recorded BEFORE Extract for the
+		// same reason Hist/Clustered are advanced before it: a read inside Extract must see
+		// this request already counted, never one that has not happened yet.
+		stats.Tenant.Observe(r.User, r.ConversationID, r.Model, r.ID, r.TS)
 
 		o, feats := freg.Extract(group, i, stats)
 
