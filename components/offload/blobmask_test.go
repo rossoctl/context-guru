@@ -96,22 +96,28 @@ func TestBlobMaskLeavesASmallIncidentalPayloadAlone(t *testing.T) {
 	}
 }
 
-// TestBlobMaskDoesNotMistakeLongHexForABinaryPayload is the adversarial-exactness case the
-// bare-run regex arm needs: hex digests are a SUBSET of the base64 alphabet, and a long
-// enough chain of them (an SRI integrity block, a sha256 listing, a lockfile) is exactly
-// 200+ base64-alphabet characters without being a binary payload at all — masking it would
-// throw away a hash the agent may need to compare, not an unreadable blob. Table mirrors the
-// cases found in review.
-func TestBlobMaskDoesNotMistakeLongHexForABinaryPayload(t *testing.T) {
+// TestBlobMaskOnlyTrustsAnExplicitDataURI is the adversarial-exactness table: two classes of
+// long base64-alphabet run that are NOT a binary payload and must not be masked, both found
+// in review. A long hex digest chain (an SRI integrity block, a `sha256sum` listing) is a
+// SUBSET of the base64 alphabet and would be masked by shape alone — throwing away a hash the
+// agent may need to compare. Worse, a pagination/continuation token or a Relay-style cursor —
+// standard base64, no dots, routinely 200+ chars — is a value the agent needs VERBATIM on its
+// very next tool call; masking it is not just a lossy compaction, it breaks the agent's next
+// step until it thinks to expand. Neither is a data URI, so `embeddedBlob`'s single arm
+// correctly declines both; the real base64 image payload is the control that confirms the
+// component still does its job.
+func TestBlobMaskOnlyTrustsAnExplicitDataURI(t *testing.T) {
 	b := blobMaskFor(t, "")
 	cases := []struct {
 		name       string
 		body       string
 		wantMasked bool
 	}{
-		{"256-char hex digest chain", jsonBody(strings.Repeat("a1b2c3d4e5f60789", 16)), false},
+		{"256-char hex digest chain", jsonBody("sha256", strings.Repeat("a1b2c3d4e5f60789", 16)), false},
 		{"10 concatenated sha256-shaped hex digests",
-			jsonBody(strings.Repeat("deadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcd", 4)), false},
+			jsonBody("sha256", strings.Repeat("deadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcd", 4)), false},
+		{"pagination/continuation token (clean base64, no dots)",
+			jsonBody("nextPageToken", strings.Repeat("QUJDREVGR0hJSkxNTk9QUVJTVFVWV1hZWjAxMjM0NTY3ODk", 45)), false},
 		{"real base64 image payload (control)", bigDataURI(), true},
 	}
 	for _, tc := range cases {
@@ -130,11 +136,12 @@ func TestBlobMaskDoesNotMistakeLongHexForABinaryPayload(t *testing.T) {
 	}
 }
 
-// jsonBody wraps a value in a minimal JSON envelope — the digest chain dominates the
-// message (well past MinBlobFrac's 0.6 default), matching a real lockfile integrity block
-// or a `sha256sum` listing, where the hashes ARE most of the output.
-func jsonBody(value string) string {
-	return `{"note":"integrity check ok","sha256":"` + value + `"}`
+// jsonBody wraps a value in a minimal JSON envelope under the given field name — the value
+// dominates the message (well past MinBlobFrac's 0.6 default), matching how these values
+// actually arrive: a lockfile integrity block, a `sha256sum` listing, or a pagination
+// response is mostly the value itself, not surrounding prose.
+func jsonBody(field, value string) string {
+	return `{"note":"ok","` + field + `":"` + value + `"}`
 }
 
 func TestBlobMaskRespectsTheCachedPrefix(t *testing.T) {

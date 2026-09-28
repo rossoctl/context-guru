@@ -11,27 +11,27 @@ import (
 
 func init() { components.Register("blobmask", newBlobMask) }
 
-// embeddedBlob matches an inline base64/data-URI payload sitting inside otherwise-normal
-// tool-result text: a `data:<mime>;base64,<payload>` URI (screenshots, browser-automation
-// snapshots, file-read results that embed an image) or a bare long base64 run inside a JSON
-// string value (`"data": "iVBOR…"`, `"screenshotDataUrl": "…"`). 200+ base64 chars is ~150
-// bytes of real payload — well past anything a hand-written id/hash/token would ever be.
+// embeddedBlob matches an inline base64 data URI sitting inside otherwise-normal tool-result
+// text: `data:<mime>;base64,<payload>` (screenshots, browser-automation snapshots, file-read
+// results that embed an image). Anchored on the SHAPE the bytes take, not on a field name: a
+// tool's JSON envelope varies by integration, but a data URI's `;base64,` marker does not.
 //
-// Anchored on the SHAPE the bytes take, not on a field name: a tool's JSON envelope varies by
-// integration, but a data URI's `;base64,` marker and a long base64 run do not.
-//
-// The bare-run arm requires at least one character OUTSIDE the hex alphabet
-// ([G-Zg-z+/]) among the 200+: hex is a subset of the base64 alphabet, and a 256-char
-// SRI digest chain or a concatenated sha256 listing (git cat-file, a lockfile integrity
-// block) is exactly hex-shaped and exactly this long, but is not a binary payload — masking
-// it would throw away a hash the agent may need to compare, not an unreadable blob. Real
-// base64 of binary data essentially always has a byte outside the hex alphabet somewhere
-// in 200+ characters; requiring one costs nothing on the true positives (verified below)
-// and drops the hex false positives to zero. No lookahead: Go's RE2 doesn't support it, so
-// this is phrased as "200+ hex-or-base64 chars, THEN one non-hex char, then the rest" rather
-// than "200+ chars that happen to contain one" — equivalent for this purpose, since the
-// minimum-200 requirement only needs the mandatory prefix to be long enough to guarantee it.
-var embeddedBlob = regexp.MustCompile(`data:[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]{200,}|"[A-Za-z0-9+/]{199,}[G-Zg-z+/][A-Za-z0-9+/]*={0,2}"`)
+// Deliberately does NOT also match a bare long base64-alphabet run with no `data:` prefix.
+// An earlier version did (any 200+-char run of [A-Za-z0-9+/], optionally hex-guarded), and
+// review found two real false-positive classes it cannot be told apart from by shape alone: a
+// long hex digest chain (an SRI integrity block, a concatenated sha256 listing — hex is a
+// subset of the base64 alphabet) and, worse, an opaque API value the agent needs VERBATIM for
+// a follow-up call — a pagination/continuation token or a Relay-style cursor, which is
+// standard base64, no dots, and routinely exceeds 200 characters. A `data:mime;base64,` URI is
+// an unambiguous declaration of intent ("this is encoded binary media"); a bare long run is
+// not, and nothing in the bytes distinguishes "an image the agent will never need back" from
+// "a token the agent needs on its very next tool call" — both are high-entropy opaque blobs.
+// Measured against the deployed snapshot (306,785 `request_content` rows): every one of the
+// 1,667 real matches carries an explicit `data:` URI; the bare-run arm matched zero of them on
+// its own. So dropping it costs nothing measured here and removes both false-positive classes
+// at once, rather than trying to patch them with a field-name denylist that would inevitably
+// miss some API's naming convention.
+var embeddedBlob = regexp.MustCompile(`data:[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]{200,}`)
 
 // BlobMask collapses a tool output whose bulk is an embedded base64/binary payload — a
 // screenshot, a rendered image, an encoded attachment — that the model cannot usefully read
