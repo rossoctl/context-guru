@@ -669,8 +669,22 @@ func TestCtlGetCampaignAggregatesPredictedAndRealPerTenant(t *testing.T) {
 	if total, _ := out["total_predicted_usd"].(float64); total < 1.49 || total > 1.51 {
 		t.Errorf("total_predicted_usd = %v, want ~1.50", out["total_predicted_usd"])
 	}
-	if out["caveat"] == "" || out["caveat"] == nil {
+	caveat, _ := out["caveat"].(string)
+	if caveat == "" {
 		t.Error("the attribution caveat was not carried onto the response")
+	}
+	// PredictedUSD sits right beside RealSavedUSD on this exact response (both asserted
+	// above) — the pairing PHASE2.md's P2-3 finding says invites treating the in-sample
+	// figure as a forecast. The caveat must say so, in the same sentence that already
+	// travels with every predicted number, not in a tooltip nobody has to open.
+	if !strings.Contains(caveat, "IN-SAMPLE") {
+		t.Error("the caveat no longer calls predicted_usd in-sample — without that sentence " +
+			"this response pairs a fitted number with a measured one and says nothing about " +
+			"the difference")
+	}
+	if !strings.Contains(caveat, "Holdout") {
+		t.Error("the caveat no longer points to the KV-cache tab's Holdout panel, the one " +
+			"place this deployment's own overfitting estimate for predicted_usd lives")
 	}
 }
 
