@@ -521,7 +521,22 @@ func TestBuiltinClassification(t *testing.T) {
 		// Not a real tool name — the thing people write when they mean Agent.
 		{KindTool, "Task", false, "client_tool"},
 		// Some other agent's own tool: removable, and must not be warned about as a built-in.
-		{KindTool, "DesignSync", false, "client_tool"},
+		{KindTool, "AcmeWidgetTool", false, "client_tool"},
+		// Artifact's own siblings: absent from the allowlist until this test was added, so a
+		// non-manager account could exclude one via the dashboard switch with no warning at
+		// all. See dash/toolremoval.go for how this was verified.
+		{KindTool, "ArtifactComments", true, "builtin"},
+		{KindTool, "ArtifactData", true, "builtin"},
+		{KindTool, "ArtifactCheck", true, "builtin"},
+		{KindTool, "SendFeedback", true, "builtin"},
+		// The generic MCP-resource tools the SDK injects, not something an account added.
+		{KindTool, "ReadMcpResourceTool", true, "builtin"},
+		{KindTool, "ReadMcpResourceDirTool", true, "builtin"},
+		{KindTool, "ListMcpResourcesTool", true, "builtin"},
+		// DesignSync WAS this table's example of an obviously-fake name (see git history) —
+		// real, verified against a live captured request body, and reclassified. See
+		// dash/toolremoval.go's comment for how.
+		{KindTool, "DesignSync", true, "builtin"},
 		{KindMCPTool, "mcp__srv__thing", false, "mcp_tool"},
 		{KindSkill, "dataviz", false, "skill"},
 		{KindSkill, "someplugin:someskill", false, "plugin_skill"},

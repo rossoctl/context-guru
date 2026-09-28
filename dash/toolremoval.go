@@ -78,6 +78,32 @@ var builtinTools = map[string]bool{
 	"SendMessage": true, "Skill": true, "SlashCommand": true, "TaskCreate": true,
 	"TaskGet": true, "TaskList": true, "TaskOutput": true, "TaskStop": true,
 	"TaskUpdate": true, "TodoWrite": true, "WebFetch": true, "WebSearch": true, "Write": true,
+	// The Artifact tool's own siblings, split out for some agent configurations rather than
+	// folded into "Artifact": seen naming a distinct tool in this harness's own subagent
+	// tool-restriction lists, so a bare "Artifact" entry above does not cover them.
+	"ArtifactComments": true, "ArtifactData": true, "ArtifactCheck": true,
+	// SendFeedback: Claude Code's own feedback-drafting tool.
+	"SendFeedback": true,
+	// The generic tools the Agent SDK / Claude Code injects whenever a configured MCP server
+	// exposes resources rather than (or alongside) tools — not something any account added
+	// itself, so removing one breaks MCP resource access rather than trimming a user's own
+	// server. Both names are listed because captured traffic and current docs disagree on the
+	// directory-listing tool's name (ReadMcpResourceDirTool vs ListMcpResourcesTool); the cost
+	// of listing an extra name nobody ever sends is nothing, the cost of missing the real one
+	// is a silent break, so both stay.
+	"ReadMcpResourceTool": true, "ReadMcpResourceDirTool": true, "ListMcpResourcesTool": true,
+	// DesignSync: Claude Code's own claude.ai/design bridge, used only via the /design-sync
+	// skill the user runs themselves. Confirmed real by reading its actual declared schema
+	// off a live captured session (GET /api/prompt): its description names the skill and the
+	// claude.ai login flow that grants it, which is not something a third-party MCP tool
+	// could fabricate. It was previously believed to be a good example of an obviously-fake
+	// name for test coverage (see TestBuiltinClassification's history) — that belief predates
+	// this tool's existence, or the coincidence of a real one later shipping under the same
+	// name; either way it is real now, and was the single largest misclassified item in this
+	// deployment's own traffic ($208 of $560 projected across a snapshot where it is declared,
+	// unused, by 1,592 of 1,959 tool-bearing sessions across every one of 18 tenants — exactly
+	// the shape of something the CLIENT always sends, not something one account added).
+	"DesignSync": true,
 }
 
 // IsBuiltinTool reports whether a KindTool declaration is one of Claude Code's own.
