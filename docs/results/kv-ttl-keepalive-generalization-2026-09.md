@@ -157,27 +157,65 @@ coincidence was not investigated) to 0.877 (`claude-opus-5`).
 **Materially safer than the shipped `stop-reason-gated` rule**, which loses −1.99% on one tenant
 and −0.13% on another on this same corpus (prior page's own finding).
 
-## The per-tenant cap + off-switch: the actual headline, and how it converged
+## The per-tenant cap + off-switch: the actual headline — CORRECTED, this page's own numbers
+
+**Correction, found by REV's review of this PR, and thanks to REV for catching it**: an earlier
+version of this section presented a table as "converged... including this page's own
+`kv_ttl_cost_model.evaluate()`" that this page's engine does **not** actually reproduce. The
+table was the orchestrating session's and a third agent's own separately-built, hand-rolled
+per-tenant model, cited here by copy rather than independently reproduced — and describing it as
+jointly verified by this page's engine was a real error, not a rounding difference. Fixed below:
+every number in this section is now reproduced from this page's own committed script, on the
+same test-window split as every other table on this page (`--split 0.6`, `--min-prefix 20000`,
+`kv_ttl_cost_model.py`'s own `by_user` breakdown, unmodified), with exact reproduction commands.
 
 A per-tenant `max_pings ∈ {off, 1, 2, 6}` policy, tuned per tenant with an off-switch where every
-setting loses money, dominates every flat policy AND every learned model above on both money and
-harm. Final, converged figures (two independently-built cost engines agreeing to within 2% —
-this page's `kv_ttl_cost_model.evaluate()`, drift-tested against the shipped Go simulator, and
-a from-schema reimplementation built without reading this page's code):
+setting loses money, beats every flat policy on this page:
 
-| policy | ≈ $ (41.4 d) | tenants harmed |
+| policy | Δ vs. fixed-5m (test window) | tenants harmed |
 |---|---:|---:|
-| flat N=1 | $395 | 7 |
-| flat N=2 (≈ today) | $515 | 6 |
-| flat N=6 (an earlier back-of-envelope favourite) | $571 | 7 |
-| per-tenant best N | $753 | 4 |
-| **per-tenant best N, OFF where every N loses** | **$768** | **0** |
-| oracle (hindsight, unreachable) | $1,855 | — |
+| flat N=1 | +$541.55 | 1 |
+| flat N=2 (≈ today) | +$619.50 | 3 |
+| flat N=6 | +$519.43 | 5 |
+| **per-tenant best N, OFF where every N loses** | **+$641.95** | **0** (2 of 15 tenants have no profitable setting and are switched off) |
 
-Per-tenant + off-switch reaches 41% of the oracle with no model, gains $253 over today, and
-eliminates all six of today's real, existing per-tenant harms. **A single fleet-wide value
-raised from 2 to 6 buys $56 and harms one MORE tenant** — the opposite of an improvement once
-harm is counted as a first-class outcome rather than folded into a pooled average.
+**This flat N=2 figure ($619.42) is the SAME number as "Baselines and oracle" above** — restated
+here deliberately, because the earlier, incorrect version of this table quoted $515 for the same
+policy on the same page, which was internally inconsistent as well as unreproducible. Per-tenant
+tuning beats flat N=2 by $22.44 (0.21% of the $10,724 test-window baseline) on this page's own
+engine — real, and in the same direction as every other model built in this whole line of work,
+but a much smaller edge than the $253/41% orchestrator's-model figure this section previously
+borrowed. **`flat-cap-6` still does not beat `flat-cap-2` on this page's own engine** (the
+finding from earlier in this page, reconfirmed here at a different min-prefix/window
+combination) — consistent, not contradicted, by the correction.
+
+**A separate, NOT-reconciled model, from a different engine, given here as a citation rather
+than a joint result**: the orchestrating session's own hand-rolled per-tenant model (uniform
+$/M-fresh-equivalent pricing, its own action-cost formula, a 24-hour gap cutoff this page's
+engine does not apply) converged with a third agent's independent reimplementation to within 2%
+on one specific figure (the RAW, pre-coverage-correction N=1 estimate: $395 vs $389 against
+`kv_ttl_cost_model`'s $541.50) and reports, on the full 41.4-day window: flat N=1 $395/7 harmed,
+N=2 $515/6 harmed, N=6 $571/7 harmed, per-tenant-best $753/4 harmed, per-tenant+off-switch
+$768/0 harmed, oracle $1,855 (`PHASE2.md` P2-9). **The two models agree qualitatively**
+(per-tenant tuning with an off-switch beats every flat cap and eliminates harm) **and disagree
+on magnitude by roughly 2-2.6x** for the per-tenant+off-switch total specifically, even after
+accounting for this page's test-window-only scope (a full-window run of this page's own engine,
+using a different per-tenant selection method, gives ≈$1,669 — see "A labelling lesson" below —
+which is closer to but still not the same as the $768 the other model reports). **This magnitude
+gap is a genuinely new, unresolved finding, distinct from the tenant-identity labelling
+collision resolved elsewhere on this page.** Named, not chased down further this round: it could
+be the 24h-gap cutoff (absent from this page's engine), the uniform-vs-real-per-model pricing
+convention, a difference in how each model prices the avoided re-write, or some combination —
+this page does not have enough remaining budget to trace it to ground, and says so rather than
+picking a story that fits. **This page's own recommendation is stated ONLY from this page's own
+reproduced numbers above** ($619.50→$641.95, a $22.45 edge to per-tenant tuning) — not from the
+larger, unreconciled $253/41%-of-oracle figure the earlier version of this page borrowed.
+
+Per-tenant + off-switch, on this page's own engine, eliminates the harm that flat N=2 causes
+on 3 tenants at this test-window scope, for a modest but real dollar gain. **A single fleet-wide
+value raised from 2 to 6 does not help on this page's own engine either** ($519.18 < $619.42,
+and harms more tenants, 5 vs 3) — the direction of that specific finding is unaffected by the
+correction above.
 
 ### A robustness argument for the cap, found only after this study was largely finished
 
@@ -284,6 +322,10 @@ verified tenant-residency fact).
 ## Reproduction
 
 ```
+# kv_ttl_per_tenant_cap.py -- the per-tenant best-of-{off,N} table above, reproducibly, from
+# kv_ttl_cost_model.py's own by_user breakdown (no hand-combined JSON, per REV's review)
+deploy/harbor/kv_ttl_per_tenant_cap.py --db <cg.db> --prices <prices.yaml>
+
 # kv_ttl_ka_arms.py -- new arms, calibration, LOTO/LOMO, tenant-level bootstrap
 deploy/harbor/kv_ttl_ka_arms.py --db <cg.db> --prices <prices.yaml> \
   --train-frac 0.6 --folds 3 --bootstrap 400 --seed 0 --out result.json
