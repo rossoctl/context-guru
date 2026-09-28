@@ -98,6 +98,46 @@ func TestAdoptDeclinesTokenLosingFold(t *testing.T) {
 	}
 }
 
+// TestFoldSearchOutputPicksTokenWinnerAmongSurvivors is #339: FoldSearchOutput used to rank
+// multiple surviving candidates by byte length. Since #336, every candidate reaching that
+// comparison already passed adopt() against s (byte- AND token-shorter than s
+// individually) — but nothing picked the token-smallest OF THE SURVIVORS specifically.
+//
+// This input is REV's #339 repro: two hits under "pkg/a.go" plus one singleton under
+// "pkg/b.go" admits both foldHitPath (groups by full path: 38 bytes/20 tokens) and
+// foldHitDir (factors the shared "pkg" parent: 43 bytes/23 tokens). HitPath wins on BOTH
+// axes here, so this input alone cannot show the byte- and token-selection disagreeing —
+// no case that does was found in the production snapshot or in several constructed shapes
+// tried while fixing this (a captured comment on the fix records that). This test exists
+// to (a) confirm the still-latent scenario is handled correctly regardless, (b) pin the
+// exact numbers so a future divergent case is easy to add here, and (c) prove the
+// structural argument for why selection and acceptance can never disagree: whatever this
+// function returns is either s itself or something that independently passed adopt(), so
+// it can be checked against adopt() directly rather than trusted.
+func TestFoldSearchOutputPicksTokenWinnerAmongSurvivors(t *testing.T) {
+	s := "pkg/a.go:12:foo\npkg/a.go:31:foo\npkg/b.go:7:foo\n"
+	hitPath, okPath := adopt(s, foldHitPath, unfoldHitPath)
+	hitDir, okDir := adopt(s, foldHitDir, unfoldPrefixDir)
+	if !okPath || !okDir {
+		t.Fatalf("expected both candidates to survive adopt(): path=%v dir=%v", okPath, okDir)
+	}
+	if len(hitPath) != 38 || schema.TextTokens(hitPath) != 20 {
+		t.Fatalf("foldHitPath drifted: bytes=%d tokens=%d", len(hitPath), schema.TextTokens(hitPath))
+	}
+	if len(hitDir) != 43 || schema.TextTokens(hitDir) != 23 {
+		t.Fatalf("foldHitDir drifted: bytes=%d tokens=%d", len(hitDir), schema.TextTokens(hitDir))
+	}
+	got := FoldSearchOutput(s)
+	// Whatever this returns must itself be something adopt() independently accepted (or s):
+	// that is the guarantee that selection cannot pick something acceptance would reject.
+	if got != s && got != hitPath && got != hitDir {
+		t.Fatalf("FoldSearchOutput returned something neither adopt() call produced: %q", trunc(got))
+	}
+	if got != hitPath {
+		t.Fatalf("expected the token-smallest survivor (foldHitPath, 20 tokens), got %d tokens", schema.TextTokens(got))
+	}
+}
+
 func TestFoldShapes(t *testing.T) {
 	tests := []struct {
 		name, in, want string
