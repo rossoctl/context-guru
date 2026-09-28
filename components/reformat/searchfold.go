@@ -139,16 +139,16 @@ func mayCarryPathPrefix(s string) bool {
 // call frame up (#339): more than one candidate can survive adopt() for the same input
 // (several hits in one file admits both foldHitPath's and foldHitDir's shape gates), and
 // nothing upstream guarantees the byte-smallest of the survivors is also the
-// token-smallest. No production or constructed case has actually SHOWN two survivors
-// diverging — every real search-output shape tried folds the two candidates roughly
-// proportionally in bytes and tokens — but there is no argument that they must agree,
-// only that they happen to here, so this closes the gap for free rather than leaving it
-// latent. It cannot make a worse pick than before: every candidate reaching this
-// comparison already passed adopt() against s, which since #336 already guarantees it is
-// byte- AND token-shorter than s individually, so ranking the survivors by tokens instead
-// of bytes only ever chooses AMONG already-valid candidates — it can't resurrect one
-// adopt() rejected, and it can't produce anything adopt() would reject if run on it,
-// since adopt() already ran on it and accepted it.
+// token-smallest. Not found in this production corpus, but IS constructible with an
+// ordinary-looking layout: three hits under a short directory next to one hit each under
+// a long, hash-like directory name separates the two winners (foldHitDir wins bytes by
+// factoring the long name out once; foldHitPath wins tokens) — see
+// TestFoldSearchOutputPicksTokenOverByteWinner. It cannot make a worse pick than before:
+// every candidate reaching this comparison already passed adopt() against s, which since
+// #336 already guarantees it is byte- AND token-shorter than s individually, so ranking
+// the survivors by tokens instead of bytes only ever chooses AMONG already-valid
+// candidates — it can't resurrect one adopt() rejected, and it can't produce anything
+// adopt() would reject if run on it, since adopt() already ran on it and accepted it.
 func FoldSearchOutput(s string) string {
 	best, bestTok := s, schema.TextTokens(s)
 	for _, c := range []struct {

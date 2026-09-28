@@ -103,17 +103,17 @@ func TestAdoptDeclinesTokenLosingFold(t *testing.T) {
 // comparison already passed adopt() against s (byte- AND token-shorter than s
 // individually) — but nothing picked the token-smallest OF THE SURVIVORS specifically.
 //
-// This input is REV's #339 repro: two hits under "pkg/a.go" plus one singleton under
-// "pkg/b.go" admits both foldHitPath (groups by full path: 38 bytes/20 tokens) and
-// foldHitDir (factors the shared "pkg" parent: 43 bytes/23 tokens). HitPath wins on BOTH
-// axes here, so this input alone cannot show the byte- and token-selection disagreeing —
-// no case that does was found in the production snapshot or in several constructed shapes
-// tried while fixing this (a captured comment on the fix records that). This test exists
-// to (a) confirm the still-latent scenario is handled correctly regardless, (b) pin the
-// exact numbers so a future divergent case is easy to add here, and (c) prove the
-// structural argument for why selection and acceptance can never disagree: whatever this
-// function returns is either s itself or something that independently passed adopt(), so
-// it can be checked against adopt() directly rather than trusted.
+// This input is REV's original #339 repro: two hits under "pkg/a.go" plus one singleton
+// under "pkg/b.go" admits both foldHitPath (groups by full path: 38 bytes/20 tokens) and
+// foldHitDir (factors the shared "pkg" parent: 43 bytes/23 tokens). HitPath happens to win
+// on BOTH axes here, so THIS INPUT ALONE cannot discriminate byte-ranking from
+// token-ranking — see TestFoldSearchOutputPicksTokenOverByteWinner below for the input
+// that does (REV found one on a second pass: a short repeated dir next to a long one).
+// This test still earns its place: it pins these exact numbers as a regression anchor,
+// and it proves the structural argument for why selection and acceptance can never
+// disagree, on the case that first motivated the fix: whatever this function returns is
+// either s itself or something that independently passed adopt(), so it can be checked
+// against adopt() directly rather than trusted.
 func TestFoldSearchOutputPicksTokenWinnerAmongSurvivors(t *testing.T) {
 	s := "pkg/a.go:12:foo\npkg/a.go:31:foo\npkg/b.go:7:foo\n"
 	hitPath, okPath := adopt(s, foldHitPath, unfoldHitPath)
@@ -135,6 +135,49 @@ func TestFoldSearchOutputPicksTokenWinnerAmongSurvivors(t *testing.T) {
 	}
 	if got != hitPath {
 		t.Fatalf("expected the token-smallest survivor (foldHitPath, 20 tokens), got %d tokens", schema.TextTokens(got))
+	}
+}
+
+// TestFoldSearchOutputPicksTokenOverByteWinner is the discriminating case
+// TestFoldSearchOutputPicksTokenWinnerAmongSurvivors could not be: REV found it on a
+// second pass after noting the first repro's byte- and token-winner were the same
+// candidate, so that test would pass identically whether FoldSearchOutput ranked
+// survivors by bytes or by tokens.
+//
+// Three hits under a SHORT directory ("d") plus one hit each under a LONG,
+// digit-heavy directory name makes foldHitDir's shared-parent heading pay off in bytes
+// (it factors the long name out once) while foldHitPath's per-file grouping still wins
+// in tokens (repeating the long directory name twice tokenizes more cheaply than the
+// heading-plus-tab structure foldHitDir introduces for it) — foldHitPath: 81
+// bytes/39 tokens; foldHitDir: 76 bytes/40 tokens. The byte-winner (foldHitDir, 76 < 81)
+// and the token-winner (foldHitPath, 39 < 40) are DIFFERENT candidates, so this input
+// fails on the pre-#340 byte-ranked selection (which returns foldHitDir, the worse
+// token count) and passes only with token-ranked selection. Constructible with an
+// ordinary-looking layout (a short local directory next to a long hash-like one, e.g. a
+// dependency lockfile hash or a build-cache path) rather than a purely theoretical
+// input, per REV's review — "latent" describes this corpus, not every corpus.
+func TestFoldSearchOutputPicksTokenOverByteWinner(t *testing.T) {
+	s := "d/a.go:1:x\nd/a.go:2:x\nd/a.go:3:x\n" +
+		"d1234567890abcdefghij/b.go:1:x\nd1234567890abcdefghij/c.go:1:x\n"
+	hitPath, okPath := adopt(s, foldHitPath, unfoldHitPath)
+	hitDir, okDir := adopt(s, foldHitDir, unfoldPrefixDir)
+	if !okPath || !okDir {
+		t.Fatalf("expected both candidates to survive adopt(): path=%v dir=%v", okPath, okDir)
+	}
+	if len(hitPath) != 81 || schema.TextTokens(hitPath) != 39 {
+		t.Fatalf("foldHitPath drifted: bytes=%d tokens=%d", len(hitPath), schema.TextTokens(hitPath))
+	}
+	if len(hitDir) != 76 || schema.TextTokens(hitDir) != 40 {
+		t.Fatalf("foldHitDir drifted: bytes=%d tokens=%d", len(hitDir), schema.TextTokens(hitDir))
+	}
+	if len(hitDir) >= len(hitPath) {
+		t.Fatalf("this input no longer separates the byte- and token-winner (need hitDir bytes < hitPath bytes)")
+	}
+	got := FoldSearchOutput(s)
+	if got != hitPath {
+		t.Fatalf("expected the token-smallest survivor (foldHitPath, 39 tokens); got %d bytes / %d tokens — "+
+			"ranking by bytes would pick foldHitDir (76 bytes) here, the worse token count",
+			len(got), schema.TextTokens(got))
 	}
 }
 
