@@ -96,6 +96,47 @@ func TestBlobMaskLeavesASmallIncidentalPayloadAlone(t *testing.T) {
 	}
 }
 
+// TestBlobMaskDoesNotMistakeLongHexForABinaryPayload is the adversarial-exactness case the
+// bare-run regex arm needs: hex digests are a SUBSET of the base64 alphabet, and a long
+// enough chain of them (an SRI integrity block, a sha256 listing, a lockfile) is exactly
+// 200+ base64-alphabet characters without being a binary payload at all — masking it would
+// throw away a hash the agent may need to compare, not an unreadable blob. Table mirrors the
+// cases found in review.
+func TestBlobMaskDoesNotMistakeLongHexForABinaryPayload(t *testing.T) {
+	b := blobMaskFor(t, "")
+	cases := []struct {
+		name       string
+		body       string
+		wantMasked bool
+	}{
+		{"256-char hex digest chain", jsonBody(strings.Repeat("a1b2c3d4e5f60789", 16)), false},
+		{"10 concatenated sha256-shaped hex digests",
+			jsonBody(strings.Repeat("deadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcd", 4)), false},
+		{"real base64 image payload (control)", bigDataURI(), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := tailReq(tc.body)
+			var rep components.Report
+			if _, err := b.Offload(req, &rep, coldGateCtx(store.NewMemory(store.Options{}), false)); err != nil {
+				t.Fatal(err)
+			}
+			got := schema.MessageText(req.Input[1])
+			masked := got != tc.body
+			if masked != tc.wantMasked {
+				t.Fatalf("wantMasked=%v got masked=%v (gates=%v)", tc.wantMasked, masked, rep.Gates)
+			}
+		})
+	}
+}
+
+// jsonBody wraps a value in a minimal JSON envelope — the digest chain dominates the
+// message (well past MinBlobFrac's 0.6 default), matching a real lockfile integrity block
+// or a `sha256sum` listing, where the hashes ARE most of the output.
+func jsonBody(value string) string {
+	return `{"note":"integrity check ok","sha256":"` + value + `"}`
+}
+
 func TestBlobMaskRespectsTheCachedPrefix(t *testing.T) {
 	b := blobMaskFor(t, "cold_cache: false\n")
 	original := bigDataURI()
