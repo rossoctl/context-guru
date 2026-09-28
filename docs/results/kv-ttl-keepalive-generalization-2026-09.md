@@ -167,7 +167,7 @@ was not a stable number on its own terms — after REV's review, the orchestrato
 further errors in their own withdrawn model (omitting session-final ping cost, the "how a
 calculator flatters its own feature" trap `dash/keepalive.go:1316` documents by name; and
 over-crediting the avoided write at the full 1.25x rather than the marginal write-minus-read
-1.15x), moving their own estimate to ≈$373 (4 confirmed errors in total).
+1.15x), moving their own estimate to ≈$373 — 5 confirmed bugs in total, out of 7 candidate mechanisms tested for that model's own gap from reality (the other 2: REV's own addressableCTE-width hypothesis, tested and refuted; one further mechanism sized at ~5%, immaterial).
 
 **A separate model, the shipped `dash.KeepAliveCalc`, entered the picture via KA-dash's real
 partition-key fix** (the same `(tenant,session)`-missing-`model` defect this study's own engine
@@ -206,10 +206,10 @@ rows from four models/methods, and this page says so rather than picking one:**
 
 | model / method | scope | per-tenant cap+off value | verification |
 |---|---|---:|---|
-| orchestrator's ad-hoc SQL | ungated, full window | ≈$373 (was $515–768) | **WITHDRAWN by its own author** — 4 confirmed errors |
+| orchestrator's ad-hoc SQL | ungated, full window | ≈$373 (was $515–768) | **WITHDRAWN by its own author** — 5 confirmed bugs, 7 mechanisms tested |
 | `kv_ttl_cost_model` (this page) | ungated, test window | +$641.95 | reproduced by REV (`kv_ttl_per_tenant_cap.py`) |
 | `kv_ttl_cost_model` (this page) | ungated, full window | +$1,669.44 | reproduced by REV |
-| `dash.KeepAliveCalc`, **median-prefix** | gated, the shipped engine | **−$0.86** (flat K=2: −$408.53) | **REV-verified end-to-end, to the cent** |
+| `dash.KeepAliveCalc`, **median-prefix** | gated, the shipped engine | **−$0.86** (flat K=2: −$408.53) | **REV-verified end-to-end, to the cent, then extended to all 18 real tenants** |
 | `dash.KeepAliveCalc`, **event-level** | gated, the shipped engine | ≈+$566.60 (flat K=2: +$328.35) | **NOT yet independently re-derived** |
 
 **No number in this table should be quoted as THE value of this policy.** The ranking claim
@@ -227,11 +227,18 @@ either engine's known bugs.** This page's own engine was checked, not assumed, a
 classes the withdrawn ad-hoc model had (the session-final-ping omission and the over-credited
 avoided-write formula — see the methods note below) and has neither. So even after removing
 every defect found anywhere in this comparison and fully explaining Gap 1, an order-of-magnitude
-divergence remains between two engines with **no known defect in either one**. The likely locus,
-not yet resolved: what counts as an "addressable" span at all — this page's engine and
-`dash.KeepAliveCalc`'s `addressable`/`addressableCTE` may define the ELIGIBLE population
-differently (which spans even enter the comparison), independent of how either one then prices
-what it counts. Flagged, not chased to ground this round — the honest, most useful thing this
+divergence remains between two engines with **no known defect in either one**. **One candidate
+explanation is now WEAKER than it looked**: an earlier draft of this section pointed at
+`addressable`/`addressableCTE`'s population definition as the likely locus. REV has since checked
+the analogous question in the orchestrator's own model (the released reviewer's final task
+before standing down) and found the opposite of a narrowness defect — **29.4% addressable is
+correct, deliberate scoping**, not an under-coverage bug. That specific finding was about the
+withdrawn model's own gap, not a direct test of this page's engine against `dash.KeepAliveCalc`
+— but it removes the one concrete hypothesis this page had for Gap 2, rather than confirming it.
+**Gap 2 remains genuinely open, with no candidate mechanism currently identified**, not "likely
+explained by X." REV has been released from further re-derivation work on this thread (with 7
+mechanisms enumerated for the withdrawn model's own gap, an eighth was judged not worth
+chasing) — nothing further is expected from that direction. The honest, most useful thing this
 page can say about its own headline number's absolute value is that it survives a real
 adversarial audit qualitatively and does NOT yet reconcile quantitatively, on two different axes
 that must not be conflated with each other.
