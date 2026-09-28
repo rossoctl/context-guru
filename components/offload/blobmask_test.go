@@ -144,6 +144,45 @@ func jsonBody(field, value string) string {
 	return `{"note":"ok","` + field + `":"` + value + `"}`
 }
 
+// TestBlobMaskNeverMatchesAPlainTokenFieldUnderRealDefaults pins the resolution of a
+// back-and-forth in review: does a large pagination/continuation token clear min_tokens and
+// min_blob_frac before the regex even matters? Answer, with the ACTUAL shipped defaults
+// (newBlobMask([]byte{}), not the test helper's lowered min_tokens:5) and a realistic
+// 2,160-char token that easily clears both (min_tokens=500, min_blob_frac=0.6): yes, it
+// clears both — and it is STILL not masked, because `embeddedBlob` requires an explicit
+// `data:<mime>;base64,` declaration and a bare JSON string value never carries one. This is a
+// structural exclusion, not a lucky gate ordering: the gate log below is `no_embedded_blob`,
+// not `below_min_tokens` or `blob_not_dominant`.
+func TestBlobMaskNeverMatchesAPlainTokenFieldUnderRealDefaults(t *testing.T) {
+	comp, err := newBlobMask([]byte("")) // real shipped defaults: min_tokens=500, min_blob_frac=0.6
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := comp.(*BlobMask)
+
+	token := strings.Repeat("QUJDREVGR0hJSkxNTk9QUVJTVFVWV1hZWjAxMjM0NTY3ODk", 45) // 2,160 clean base64 chars
+	body := jsonBody("nextPageToken", token)
+	if got := schema.TextTokens(body); got < 500 {
+		t.Fatalf("fixture must clear the real min_tokens default on its own; got %d tokens", got)
+	}
+	if frac := float64(len(token)) / float64(len(body)); frac < 0.6 {
+		t.Fatalf("fixture must clear the real min_blob_frac default on its own; got %.3f", frac)
+	}
+
+	req := tailReq(body)
+	var rep components.Report
+	if _, err := b.Offload(req, &rep, coldGateCtx(store.NewMemory(store.Options{}), false)); err != nil {
+		t.Fatal(err)
+	}
+	got := schema.MessageText(req.Input[1])
+	if got != body {
+		t.Fatalf("a bare token field must never be masked, regardless of size, got %q", got)
+	}
+	if rep.Gates["no_embedded_blob"] == 0 {
+		t.Fatalf("expected the structural no_embedded_blob gate specifically, got %v", rep.Gates)
+	}
+}
+
 func TestBlobMaskRespectsTheCachedPrefix(t *testing.T) {
 	b := blobMaskFor(t, "cold_cache: false\n")
 	original := bigDataURI()
