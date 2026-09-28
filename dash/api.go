@@ -549,6 +549,9 @@ func (a *API) routes() []route {
 	// The KV-cache TTL analysis and strategy simulator, declared beside its handlers in
 	// kvcacheapi.go and appended here for the same reason.
 	rs = append(rs, a.kvCacheRoutes()...)
+	// The keep-alive PAGE's per-session drill-down, declared beside its handlers in
+	// keepalivepageapi.go and appended here for the same reason.
+	rs = append(rs, a.keepAlivePageRoutes()...)
 	// The Components tab's compaction-episode measurement, declared beside its handler in
 	// compactepisode.go and appended here for the same reason as the rest: this table is what
 	// the scoping tests walk.
