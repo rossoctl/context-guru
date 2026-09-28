@@ -555,7 +555,10 @@ func (a *API) routes() []route {
 	// The Components tab's compaction-episode measurement, declared beside its handler in
 	// compactepisode.go and appended here for the same reason as the rest: this table is what
 	// the scoping tests walk.
-	return append(rs, a.compactEpisodeRoutes()...)
+	rs = append(rs, a.compactEpisodeRoutes()...)
+	// The feature/predictor inspection panel, declared beside its handler in
+	// featurepanelapi.go and appended here for the same reason.
+	return append(rs, a.featurePanelRoutes()...)
 }
 
 // Mount registers every dashboard route on a mux under the given prefix

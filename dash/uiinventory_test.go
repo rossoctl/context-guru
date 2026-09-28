@@ -214,7 +214,7 @@ func TestNoFunctionIsDefinedTwiceInTheDashboardSource(t *testing.T) {
 	// app.js — so a name either of them redefined would win or lose by load order with
 	// nothing to catch it, which is the exact failure mode the comment above describes.
 	for _, name := range []string{"ui/tools.js", "ui/app.js", "ui/kvcache.js", "ui/campaigns.js",
-		"ui/keepalivepage.js"} {
+		"ui/keepalivepage.js", "ui/featurepanel.js"} {
 		seen := map[string]int{}
 		for _, m := range def.FindAllStringSubmatch(readUI(t, name), -1) {
 			seen[m[1]]++
