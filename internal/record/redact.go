@@ -82,10 +82,21 @@ var extraSecrets = []*regexp.Regexp{
 	// post to the channel -- so unlike a userinfo URL there is nothing worth preserving.
 	regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Za-z0-9_]+/B[A-Za-z0-9_]+/[A-Za-z0-9_]+`),
 
-	// PGP private key block. internal/redact covers `-----BEGIN ... PRIVATE KEY-----` but
-	// the PGP header is `PGP PRIVATE KEY BLOCK`, whose `[A-Z ]*` prefix class cannot match
-	// the trailing " BLOCK".
-	regexp.MustCompile(`-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----`),
+	// PGP private key block. internal/redact covers the `-----BEGIN ... PRIVATE KEY-----`
+	// family, but the PGP header ends in " BLOCK", which its `[A-Z ]*` prefix class cannot
+	// match -- so this shape needs its own pattern.
+	//
+	// The HashiCorpIgnore marker below is required and is NOT a way of quietening a real
+	// finding. The line has to contain the armour header verbatim in order to match it, which
+	// makes the pattern that FINDS PGP keys look like a PGP key to a credential scanner: IBM
+	// Vault Radar blocked the first commit of this file on exactly that, medium severity in
+	// non-test code. The marker is the sanctioned inline exclusion for a single reviewed
+	// false-positive line, which is narrower than a path exclusion (whole files, and
+	// accountability for anything later hidden in them) and narrower than secret_types, which
+	// would switch PGP detection off for this entire repository -- not ours to do. There is no
+	// key material here; deleting the pattern would stop PGP private keys being redacted from
+	// recorded traces, which is the opposite of the intent.
+	regexp.MustCompile(`-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----`), // HashiCorpIgnore.
 }
 
 // b64Candidate finds base64-looking runs long enough to hide a credential. 64 is the
