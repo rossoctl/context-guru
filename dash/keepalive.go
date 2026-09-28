@@ -57,11 +57,26 @@ const ttlTTL = 300 * time.Second
 // prev_prefix is the PREVIOUS request's billed prefix (`cache_read + cache_write`), which is
 // the size of the entry that lapsed. Not `tokens_before`, which is message text only and runs
 // a median 3.38x low.
+//
+// The partition is (tenant, session, MODEL), with an r.id tiebreak — not (tenant, session) alone.
+// dash/kvcache.go:262 found this exact defect and documented it at length first: a cached prefix
+// is keyed on the model too, so a request on model B cannot read model A's entry, and LAGging
+// across the boundary links the two as predecessor/successor anyway — crediting model B's
+// request with a "prior prefix" it could never have matched, and (worse, on this query
+// specifically) reassigning the TRUE predecessor's real gap to whatever landed between them on
+// the other model. The bias is one-directional the same way: it makes an addressable miss look
+// closer to its predecessor than it was, which is the exact direction that makes a keep-alive
+// policy look more effective than it can be. And r.ts alone is not a unique order — two rows
+// landing in the same millisecond make the successor planner-dependent without an r.id tiebreak,
+// the same non-determinism kvcache.go's own comment documents on the identical query shape.
+// TestAddressablePartitionsByModelAndTenant is the mirror of kvcache.go's own
+// TestTheSQLPartitionIsExactlyTheConversationKey, so this cannot drift from that one again.
 const addressableCTE = `WITH s AS (
 	SELECT r.tenant_id, r.session_id, r.ts, r.cost_usd, r.model, r.cache_miss_reason, r.cache_write,
-	       LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_ts,
+	       LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id, r.model ORDER BY r.ts, r.id)
+	         AS prev_ts,
 	       LAG(r.cache_read + r.cache_write) OVER
-	         (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_prefix
+	         (PARTITION BY r.tenant_id, r.session_id, r.model ORDER BY r.ts, r.id) AS prev_prefix
 	FROM requests r WHERE %s
 ), addressable AS (
 	SELECT *, (ts - prev_ts) / 1000.0 AS gap_s FROM s
@@ -1156,6 +1171,16 @@ func PingsPerSpan(gap, idleSeconds float64, maxPings int) int {
 // TestTheReplayGateMatchesTheShippedPolicy.
 const kaGateMinPrefix = 20000
 
+// kaCalcMaxK is the top rung the calculator's ladder replays to. 24 rather than 4: the
+// pooled corpus-wide modelled curve peaks around K=6 and falls off sharply well before 24
+// (2026-09-28 study, PHASE2.md findings P2-1c/P2-5), and every one of this deployment's 30
+// active strategies is set to max_pings 1 or 2 — a ladder that stopped at 4 could never show
+// whether that setting is short of its own peak. This replay is PER-SCOPE (whatever Filter the
+// caller passed), not the pooled figure: finding P2-4 found a single flat setting applied
+// everywhere harms roughly a third of tenants, some of them at every K, so a per-scope optimum
+// is the right question to answer here, not "what does the whole corpus want".
+const kaCalcMaxK = 24
+
 // pingSpan is one idle span a live keep-alive would send pings in.
 type pingSpan struct {
 	session string
@@ -1203,13 +1228,20 @@ func (d *DB) pingSpans(f Filter, minPrefix int64) ([]pingSpan, error) {
 	cond, args := f.where()
 	// LEAD, not LAG: a span belongs to the request that OPENS it, which is the request the gate
 	// is evaluated on, and LEAD is NULL exactly on the session-final row.
+	//
+	// Partitioned by (tenant, session, MODEL), same fix and same rationale as addressableCTE
+	// (dash/kvcache.go:262): a request on a different model within the same session did not open
+	// a span on THIS model's cache entry, and without the model in the partition both `turn`
+	// (which decides whether the gate's "past the session's first request" even applies) and
+	// `gap_s` (which decides how many pings the span attracts) would be computed across a model
+	// boundary a live policy could never ping across.
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH s AS (
 		SELECT r.session_id AS session_id,
-		       ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id
+		       ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id, r.model
 		                          ORDER BY r.ts, r.id) - 1 AS turn,
 		       r.cache_read + r.cache_write AS prefix,
-		       (LEAD(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts, r.id)
-		         - r.ts) / 1000.0 AS gap_s
+		       (LEAD(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id, r.model
+		                         ORDER BY r.ts, r.id) - r.ts) / 1000.0 AS gap_s
 		FROM requests r WHERE `+cond+`)
 		SELECT session_id, gap_s FROM s
 		WHERE turn >= 1 AND prefix >= ? AND (gap_s IS NULL OR gap_s > 0)`,
@@ -1248,6 +1280,10 @@ type CalcRow struct {
 	SavedUSD float64 `json:"saved_usd,omitempty"`
 	NetUSD   float64 `json:"net_usd,omitempty"`
 	Current  bool    `json:"current,omitempty"`
+	// Optimal marks the rung with the highest NetUSD, only when Priced — an unpriced ladder
+	// has no dollar figure to maximise, so nothing is marked. Ties keep the lowest K, since a
+	// lower K reaches the same modelled net for less exposure if the model is wrong.
+	Optimal bool `json:"optimal,omitempty"`
 }
 
 // KeepAliveCalc is the calculator's whole answer.
@@ -1325,7 +1361,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		out.PingUSDEach = float64(prefix)*p.CacheRead + p.Output
 		out.AvoidedUSDEach = float64(prefix) * (p.CacheWrite - p.CacheRead)
 	}
-	for k := 1; k <= 4; k++ {
+	for k := 1; k <= kaCalcMaxK; k++ {
 		row := CalcRow{MaxPings: k, Coverage: CoverageSeconds(idleSeconds, k),
 			Current: k == currentPings}
 		for i, g := range gaps {
@@ -1346,6 +1382,19 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 			row.NetUSD = row.SavedUSD - row.PingUSD
 		}
 		out.Rows = append(out.Rows, row)
+	}
+	// The optimum is a second pass over what was just computed, not a running max kept
+	// alongside the loop above: NetUSD only means anything once out.Priced is known, and
+	// reading it back from the finished rows is one comparison instead of two things to keep in
+	// sync. First occurrence of the max wins, so a tie favours the LOWER K.
+	if out.Priced && len(out.Rows) > 0 {
+		best := 0
+		for i := 1; i < len(out.Rows); i++ {
+			if out.Rows[i].NetUSD > out.Rows[best].NetUSD {
+				best = i
+			}
+		}
+		out.Rows[best].Optimal = true
 	}
 	cov, err := d.keepAliveCoverage(f)
 	if err != nil {
@@ -1436,6 +1485,16 @@ const (
 	// the avoidable WRITE PREMIUM. Measured at 78.4% on the production corpus. Used only here,
 	// where a per-row model rate is not available for every row of a resample.
 	recRecoverableShare = 0.784
+)
+
+// KeepAliveMinDecisionPoints and KeepAliveMinRequests re-export recMinMisses/recMinRequests for
+// other packages that need the SAME "not enough data" floor KeepAliveRecommend already
+// enforces — proxy's per-tenant max_pings summary, so a tenant flagged "thin" there and a
+// tenant KeepAliveRecommend would refuse to score are always the same tenant, never two
+// slightly different thresholds that happen to agree today and drift apart later.
+const (
+	KeepAliveMinDecisionPoints = recMinMisses
+	KeepAliveMinRequests       = recMinRequests
 )
 
 // KeepAliveRecommendation is either a recommendation with its interval and its n, or a refusal
