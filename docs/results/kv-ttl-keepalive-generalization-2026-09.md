@@ -170,9 +170,24 @@ over-crediting the avoided write at the full 1.25x rather than the marginal writ
 1.15x), moving their own estimate to ≈$373 — which still does not reconcile with a FOURTH
 model: KA-dash found and fixed a real partition-key bug in the shipped `dash.KeepAliveCalc`
 itself (the same `(tenant,session)`-missing-`model` defect this study's own engine has never had
-— see "Why this engine needed none of the other model's corrections" below), which flips
-that engine's own whole-deployment optimum from **+$262.86 at K=2** to **−$0.86 at K=1** —
-i.e. the shipped, production engine, POST-FIX, reports the flat policy as **roughly break-even**.
+— see "Why this engine needed none of the other model's corrections" below), which flipped
+that engine's own whole-deployment optimum from +$262.86 at K=2 to a first, now **SUPERSEDED**
+figure of ≈−$0.86 at K=1. **That −$0.86 figure has since moved twice more and should not be
+quoted**: it used a per-tenant MEDIAN representative prefix+model applied to every ping/miss;
+pricing each event from its own actual prefix+model instead (the granularity fix, not a pricing
+bug — checked against #324's price-table defect specifically, which explains ~0% of the swing)
+flips the sign entirely — fleet-wide flat K=1 goes from −$127.54 (median) to **+$274.66**
+(event-level), K=2 from −$408.53 to **+$328.35**, with 9 of 16 tenants individually crossing
+zero between the two methods. **This is itself a transplantable lesson**: collapsing a tenant's
+whole traffic to one representative prefix+model on a bimodal cost distribution (this corpus's
+own p50 $0.0004 vs p99 $0.2275 per event) can flip the sign of a policy's net value, not just
+its magnitude — the same family of error as pricing a skewed subpopulation at a uniform rate
+(`PHASE2.md` P2-8b), one level more granular. **The current shipped-engine figure, per KA-dash,
+event-level, fleet-wide, all 18 real tenants, K=1..24**: flat K=1 ≈+$274.66, flat K=2 ≈+$328.35,
+per-tenant-best+off ≈**+$566.60**. **Flagged with extra caution, per KA-dash's own request**:
+this is a one-off script, not yet independently re-derived the way the partition-key fix and
+the #324-is-not-the-cause check both were — treat it as the current best estimate from the
+shipped engine, not as a fifth settled number to add to a permanent table without that caveat.
 
 **So the honest headline is a RANKING, not a magnitude**: a per-tenant `max_pings ∈ {off, 1, 2, 6}`
 policy, tuned per tenant with an off-switch where every setting loses money, **beats every
@@ -190,11 +205,20 @@ least) four independently-built models, and this page says so rather than pickin
 | orchestrator's ad-hoc SQL | ungated, full window | ≈$373 (was $515–768) | **WITHDRAWN by its own author** — two confirmed errors |
 | this page's `kv_ttl_cost_model.evaluate()` | ungated, test-window split | +$641.95 | reproducible (`kv_ttl_per_tenant_cap.py`), but ungated like the withdrawn one |
 | this page's engine, full-window scope | ungated, full window | +$1,669.44 | reproducible, same caveat |
-| `dash.KeepAliveCalc`, POST partition-key fix | **real gates, the SHIPPED engine** | **≈−$0.86 at its own optimum** | production code, roughly break-even |
+| `dash.KeepAliveCalc`, event-level, post both fixes | **real gates, the SHIPPED engine, current best estimate** | **≈+$566.60 (per-tenant best+off)** | production code, but this specific figure is a one-off script not yet independently re-derived — see caveat above |
+
+*(Two now-superseded shipped-engine figures, kept visible per this section's own convention:
++$262.86 at K=2 pre-partition-fix, then ≈−$0.86 at K=1 post-partition-fix but still on a
+per-tenant-median pricing granularity that itself turned out to flip signs once corrected to
+event-level pricing.)*
 
 **The shipped engine is the only one of the four with a documented anti-flattery discipline**
-(`dash/keepalive.go:1316`'s own comment names the session-final-ping trap explicitly) **and it
-reports approximately zero.** This page's own engine was independently checked against that
+(`dash/keepalive.go:1316`'s own comment names the session-final-ping trap explicitly), and its
+current best estimate (+$566.60) is now closer in ORDER OF MAGNITUDE to this page's own
+test-window figure (+$641.95) than either was to the other's earlier, now-superseded numbers —
+stated as an observation, not as convergence; the two are still measuring different scopes
+(fleet-wide-K=1..24 vs. this page's per-tenant-best-of-{1,2,6}) and neither has been reconciled
+against the other. This page's own engine was independently checked against that
 exact trap while writing this correction (see the methods note below) and does not have it —
 but "does not have one known flattery bug" is not the same claim as "matches the shipped engine,"
 and it does not. **No number in this table should be quoted as THE value of this policy.** The
