@@ -2227,7 +2227,12 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 //
 // It also returns the instant the client got its first byte (zero if the body was
 // empty), which is the SSE TTFB accounting in serve.
-func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
+// streamRec is stream with an optional full-body tee for --record. Callers that are
+// not inference turns (the catch-all passthrough, /count_tokens) keep calling stream and
+// therefore record nothing: the recorder must not see a route that has no turn.
+//
+// tee is nil when recording is off, which is the only state the shipped default has.
+func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -2242,6 +2247,7 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (firstByte 
 			}
 			w.Write(buf[:n])
 			sn.write(buf[:n])
+			tee.write(buf[:n]) // nil-safe; no-op when --record is off
 			if flush != nil {
 				flush.Flush()
 			}
@@ -2256,6 +2262,11 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (firstByte 
 	// block that was present but rejected stays a dialect finding, whatever the window did.
 	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), sn.bytes(), sn.spliced())
 	return firstByte, u, why, ok
+}
+
+// stream is the no-recording path: every existing caller keeps its exact behaviour.
+func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (time.Time, Usage, usageMiss, bool) {
+	return h.streamRec(w, resp, nil)
 }
 
 // msSince returns milliseconds from start to at (falling back to now if the
