@@ -169,6 +169,13 @@ func gateCases() []gateCase {
 			}
 			return c.(components.Offload), toolMsgs(wideOutput("m1"), wideOutput("m2")), ctxFor(st)
 		}},
+		{"blobmask", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
+			c, err := newBlobMask([]byte("min_tokens: 20\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return c.(components.Offload), toolMsgs(bigDataURI()), ctxFor(st)
+		}},
 		{"linecap", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
 			c, err := newLinecap([]byte("max_line_chars: 40\nmin_size: 10\n"))
 			if err != nil {
