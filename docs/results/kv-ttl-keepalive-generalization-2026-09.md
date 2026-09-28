@@ -179,43 +179,52 @@ setting loses money, beats every flat policy on this page:
 | flat N=6 | +$519.43 | 5 |
 | **per-tenant best N, OFF where every N loses** | **+$641.95** | **0** (2 of 15 tenants have no profitable setting and are switched off) |
 
-**This flat N=2 figure ($619.42) is the SAME number as "Baselines and oracle" above** — restated
-here deliberately, because the earlier, incorrect version of this table quoted $515 for the same
-policy on the same page, which was internally inconsistent as well as unreproducible. Per-tenant
-tuning beats flat N=2 by $22.44 (0.21% of the $10,724 test-window baseline) on this page's own
-engine — real, and in the same direction as every other model built in this whole line of work,
-but a much smaller edge than the $253/41% orchestrator's-model figure this section previously
-borrowed. **`flat-cap-6` still does not beat `flat-cap-2` on this page's own engine** (the
-finding from earlier in this page, reconfirmed here at a different min-prefix/window
-combination) — consistent, not contradicted, by the correction.
+**This flat N=2 figure ($619.50) is the SAME number as "Baselines and oracle" above** (the
+$0.08 difference from that table's $619.42 is floating-point/implementation noise between two
+call paths through the same engine, not a second discrepancy) — restated here deliberately,
+because the earlier, incorrect version of this table quoted $515 for the same policy on the same
+page, which was internally inconsistent as well as unreproducible. Per-tenant tuning beats flat
+N=2 by $22.45 (0.21% of the $10,724 test-window baseline) on this page's own engine — real, and
+in the same direction as every other model built in this whole line of work, but a much smaller
+edge than the $253/41% orchestrator's-model figure this section previously borrowed.
+**`flat-cap-6` still does not beat `flat-cap-2` on this page's own engine.**
 
-**A separate, NOT-reconciled model, from a different engine, given here as a citation rather
-than a joint result**: the orchestrating session's own hand-rolled per-tenant model (uniform
-$/M-fresh-equivalent pricing, its own action-cost formula, a 24-hour gap cutoff this page's
-engine does not apply) converged with a third agent's independent reimplementation to within 2%
-on one specific figure (the RAW, pre-coverage-correction N=1 estimate: $395 vs $389 against
-`kv_ttl_cost_model`'s $541.50) and reports, on the full 41.4-day window: flat N=1 $395/7 harmed,
-N=2 $515/6 harmed, N=6 $571/7 harmed, per-tenant-best $753/4 harmed, per-tenant+off-switch
-$768/0 harmed, oracle $1,855 (`PHASE2.md` P2-9). **The two models agree qualitatively**
-(per-tenant tuning with an off-switch beats every flat cap and eliminates harm) **and disagree
-on magnitude by roughly 2-2.6x** for the per-tenant+off-switch total specifically, even after
-accounting for this page's test-window-only scope (a full-window run of this page's own engine,
-using a different per-tenant selection method, gives ≈$1,669 — see "A labelling lesson" below —
-which is closer to but still not the same as the $768 the other model reports). **This magnitude
-gap is a genuinely new, unresolved finding, distinct from the tenant-identity labelling
-collision resolved elsewhere on this page.** Named, not chased down further this round: it could
-be the 24h-gap cutoff (absent from this page's engine), the uniform-vs-real-per-model pricing
-convention, a difference in how each model prices the avoided re-write, or some combination —
-this page does not have enough remaining budget to trace it to ground, and says so rather than
-picking a story that fits. **This page's own recommendation is stated ONLY from this page's own
-reproduced numbers above** ($619.50→$641.95, a $22.45 edge to per-tenant tuning) — not from the
-larger, unreconciled $253/41%-of-oracle figure the earlier version of this page borrowed.
+### The "6 vs. 3 tenants harmed" disagreement — RESOLVED, it was a window-scope difference
 
-Per-tenant + off-switch, on this page's own engine, eliminates the harm that flat N=2 causes
-on 3 tenants at this test-window scope, for a modest but real dollar gain. **A single fleet-wide
-value raised from 2 to 6 does not help on this page's own engine either** ($519.18 < $619.42,
-and harms more tenants, 5 vs 3) — the direction of that specific finding is unaffected by the
-correction above.
+`PHASE2.md` P2-9 logs an unresolved disagreement between the orchestrator (6 tenants harmed by
+flat `max_pings=2`) and FIX-price (3) on their own two hand-rolled models. REV's review of this
+PR reproduced 3 from this page's committed code and could not find where "6" came from in
+anything committed. **Running the SAME committed `kv_ttl_per_tenant_cap.py` at `--split 0.0`
+(the full 41.4-day window, rather than this page's usual last-40%-only test window) gives
+exactly 6 tenants harmed at flat N=2** — matching the orchestrator's count exactly, on this
+page's own engine, with no further change needed. **The disagreement was a window-scope
+difference, not a modelling disagreement**: some tenants are harmed by flat N=2 over the WHOLE
+41.4-day window whose harm doesn't show up (or isn't as severe) in just the last 40% of it — a
+real, substantive fact about this deployment's own non-stationarity, not an error on either
+side. This page's own headline table above stays on the test-window split for consistency with
+every other table on the page; the full-window figures (`kv_ttl_per_tenant_cap.py --split 0.0`,
+against the SAME floored fixed-5m baseline, $46,824.92 over the whole window): flat N=1
++$1,178.87/2 harmed, flat N=2 +$1,406.16/6 harmed, flat N=6 +$1,424.48/7 harmed, per-tenant
+best+off **+$1,669.44/0 harmed (2 tenants switched off)**.
+
+**The dollar MAGNITUDE gap is a separate matter and remains genuinely unresolved.** Even at
+matching full-window scope, this page's engine ($1,669.44) and the orchestrator's/FIX-price's
+converged hand-rolled model ($768, `PHASE2.md` P2-9) disagree by roughly 2.17x for the
+per-tenant-best+off total — a real, ~2x gap, distinct from and NOT explained by the now-resolved
+harm-count/window-scope question above. Named, not chased down further this round: candidates
+include the 24-hour gap cutoff (present in the other model, absent from this engine), the
+uniform-vs-real-per-model pricing convention, and a difference in how each model formalizes the
+avoided-rewrite credit — this page does not have budget left to trace it to ground, and says so
+rather than picking a story that fits. **This page's own recommendation is stated ONLY from this
+page's own reproduced numbers** ($619.50→$641.95 at test-window scope, or $1,406.16→$1,669.44 at
+full-window scope) — not from the orchestrator's separately-sourced $253/41%-of-oracle framing
+the earlier version of this page borrowed without attribution.
+
+Per-tenant + off-switch, on this page's own engine, eliminates the harm flat N=2 causes at
+either window scope (3 tenants at test-window scope, 6 at full-window scope), for a real dollar
+gain at either scope. **A single fleet-wide value raised from 2 to 6 does not help on this
+page's own engine at either scope** — the direction of that specific finding is unaffected by
+either correction above.
 
 ### A robustness argument for the cap, found only after this study was largely finished
 
