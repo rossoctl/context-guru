@@ -87,10 +87,12 @@ var builtinTools = map[string]bool{
 	// The generic tools the Agent SDK / Claude Code injects whenever a configured MCP server
 	// exposes resources rather than (or alongside) tools — not something any account added
 	// itself, so removing one breaks MCP resource access rather than trimming a user's own
-	// server. Both names are listed because captured traffic and current docs disagree on the
-	// directory-listing tool's name (ReadMcpResourceDirTool vs ListMcpResourcesTool); the cost
-	// of listing an extra name nobody ever sends is nothing, the cost of missing the real one
-	// is a silent break, so both stay.
+	// server. Three distinct operations, not two names for one (per the Agent SDK docs):
+	// ListMcpResourcesTool lists resources across servers, ReadMcpResourceTool reads one
+	// resource by URI, and ReadMcpResourceDirTool lists the children of one directory
+	// resource (`resources/directory/read`) — captured on the wire in this deployment's own
+	// traffic. All three stay for the same reason: the cost of listing one nobody ever sends
+	// is nothing, the cost of missing a real one is a silent break.
 	"ReadMcpResourceTool": true, "ReadMcpResourceDirTool": true, "ListMcpResourcesTool": true,
 	// DesignSync: Claude Code's own claude.ai/design bridge, used only via the /design-sync
 	// skill the user runs themselves. Confirmed real by reading its actual declared schema
