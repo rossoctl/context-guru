@@ -157,74 +157,81 @@ coincidence was not investigated) to 0.877 (`claude-opus-5`).
 **Materially safer than the shipped `stop-reason-gated` rule**, which loses −1.99% on one tenant
 and −0.13% on another on this same corpus (prior page's own finding).
 
-## The per-tenant cap + off-switch: the actual headline — CORRECTED, this page's own numbers
+## The per-tenant cap + off-switch: a RANKING claim, not a magnitude — the dollar figure is unresolved across four models
 
-**Correction, found by REV's review of this PR, and thanks to REV for catching it**: an earlier
-version of this section presented a table as "converged... including this page's own
-`kv_ttl_cost_model.evaluate()`" that this page's engine does **not** actually reproduce. The
-table was the orchestrating session's and a third agent's own separately-built, hand-rolled
-per-tenant model, cited here by copy rather than independently reproduced — and describing it as
-jointly verified by this page's engine was a real error, not a rounding difference. Fixed below:
-every number in this section is now reproduced from this page's own committed script, on the
-same test-window split as every other table on this page (`--split 0.6`, `--min-prefix 20000`,
-`kv_ttl_cost_model.py`'s own `by_user` breakdown, unmodified), with exact reproduction commands.
+**Second correction, this time from the orchestrating session itself, on top of REV's** (kept
+visible rather than smoothed into a clean final version, per this whole line of work's own
+convention): the orchestrating session has WITHDRAWN the $395/$515/$571/$753/$768 table
+entirely. It was never this page's own number (REV's finding, above) and it turns out it also
+was not a stable number on its own terms — after REV's review, the orchestrator found two
+further errors in their own withdrawn model (omitting session-final ping cost, the "how a
+calculator flatters its own feature" trap `dash/keepalive.go:1316` documents by name; and
+over-crediting the avoided write at the full 1.25x rather than the marginal write-minus-read
+1.15x), moving their own estimate to ≈$373 — which still does not reconcile with a FOURTH
+model: KA-dash found and fixed a real partition-key bug in the shipped `dash.KeepAliveCalc`
+itself (the same `(tenant,session)`-missing-`model` defect this study's own engine has never had
+— see "Why this engine needed none of the other model's corrections" below), which flips
+that engine's own whole-deployment optimum from **+$262.86 at K=2** to **−$0.86 at K=1** —
+i.e. the shipped, production engine, POST-FIX, reports the flat policy as **roughly break-even**.
 
-A per-tenant `max_pings ∈ {off, 1, 2, 6}` policy, tuned per tenant with an off-switch where every
-setting loses money, beats every flat policy on this page:
+**So the honest headline is a RANKING, not a magnitude**: a per-tenant `max_pings ∈ {off, 1, 2, 6}`
+policy, tuned per tenant with an off-switch where every setting loses money, **beats every
+predictor built in this whole line of work — the shipped `stop-reason-gated` rule, the prior
+round's `logreg-v1`, and a calibrated hybrid built for this study (ECE 0.0035) — on policy
+ranking and on per-tenant harm.** That ranking claim is what REV independently reconstructed
+and confirmed from this page's own committed engine, and it does not depend on any of the
+disputed dollar figures below.
 
-| policy | Δ vs. fixed-5m (test window) | tenants harmed |
-|---|---:|---:|
-| flat N=1 | +$541.55 | 1 |
-| flat N=2 (≈ today) | +$619.50 | 3 |
-| flat N=6 | +$519.43 | 5 |
-| **per-tenant best N, OFF where every N loses** | **+$641.95** | **0** (2 of 15 tenants have no profitable setting and are switched off) |
+**The absolute dollar value of a per-tenant cap+off-switch policy is UNRESOLVED, across (at
+least) four independently-built models, and this page says so rather than picking one:**
 
-**This flat N=2 figure ($619.50) is the SAME number as "Baselines and oracle" above** (the
-$0.08 difference from that table's $619.42 is floating-point/implementation noise between two
-call paths through the same engine, not a second discrepancy) — restated here deliberately,
-because the earlier, incorrect version of this table quoted $515 for the same policy on the same
-page, which was internally inconsistent as well as unreproducible. Per-tenant tuning beats flat
-N=2 by $22.45 (0.21% of the $10,724 test-window baseline) on this page's own engine — real, and
-in the same direction as every other model built in this whole line of work, but a much smaller
-edge than the $253/41% orchestrator's-model figure this section previously borrowed.
-**`flat-cap-6` still does not beat `flat-cap-2` on this page's own engine.**
+| model | scope | per-tenant cap+off value | status |
+|---|---|---:|---|
+| orchestrator's ad-hoc SQL | ungated, full window | ≈$373 (was $515–768) | **WITHDRAWN by its own author** — two confirmed errors |
+| this page's `kv_ttl_cost_model.evaluate()` | ungated, test-window split | +$641.95 | reproducible (`kv_ttl_per_tenant_cap.py`), but ungated like the withdrawn one |
+| this page's engine, full-window scope | ungated, full window | +$1,669.44 | reproducible, same caveat |
+| `dash.KeepAliveCalc`, POST partition-key fix | **real gates, the SHIPPED engine** | **≈−$0.86 at its own optimum** | production code, roughly break-even |
 
-### The "6 vs. 3 tenants harmed" disagreement — RESOLVED, it was a window-scope difference
+**The shipped engine is the only one of the four with a documented anti-flattery discipline**
+(`dash/keepalive.go:1316`'s own comment names the session-final-ping trap explicitly) **and it
+reports approximately zero.** This page's own engine was independently checked against that
+exact trap while writing this correction (see the methods note below) and does not have it —
+but "does not have one known flattery bug" is not the same claim as "matches the shipped engine,"
+and it does not. **No number in this table should be quoted as THE value of this policy.** The
+ranking claim above is what survives; the dollar figure does not, yet.
 
-`PHASE2.md` P2-9 logs an unresolved disagreement between the orchestrator (6 tenants harmed by
-flat `max_pings=2`) and FIX-price (3) on their own two hand-rolled models. REV's review of this
-PR reproduced 3 from this page's committed code and could not find where "6" came from in
-anything committed. **Running the SAME committed `kv_ttl_per_tenant_cap.py` at `--split 0.0`
-(the full 41.4-day window, rather than this page's usual last-40%-only test window) gives
-exactly 6 tenants harmed at flat N=2** — matching the orchestrator's count exactly, on this
-page's own engine, with no further change needed. **The disagreement was a window-scope
-difference, not a modelling disagreement**: some tenants are harmed by flat N=2 over the WHOLE
-41.4-day window whose harm doesn't show up (or isn't as severe) in just the last 40% of it — a
-real, substantive fact about this deployment's own non-stationarity, not an error on either
-side. This page's own headline table above stays on the test-window split for consistency with
-every other table on the page; the full-window figures (`kv_ttl_per_tenant_cap.py --split 0.0`,
-against the SAME floored fixed-5m baseline, $46,824.92 over the whole window): flat N=1
-+$1,178.87/2 harmed, flat N=2 +$1,406.16/6 harmed, flat N=6 +$1,424.48/7 harmed, per-tenant
-best+off **+$1,669.44/0 harmed (2 tenants switched off)**.
+### The "roughly a third of tenants harmed" claim — reverted to unresolved, no exact count
 
-**The dollar MAGNITUDE gap is a separate matter and remains genuinely unresolved.** Even at
-matching full-window scope, this page's engine ($1,669.44) and the orchestrator's/FIX-price's
-converged hand-rolled model ($768, `PHASE2.md` P2-9) disagree by roughly 2.17x for the
-per-tenant-best+off total — a real, ~2x gap, distinct from and NOT explained by the now-resolved
-harm-count/window-scope question above. Named, not chased down further this round: candidates
-include the 24-hour gap cutoff (present in the other model, absent from this engine), the
-uniform-vs-real-per-model pricing convention, and a difference in how each model formalizes the
-avoided-rewrite credit — this page does not have budget left to trace it to ground, and says so
-rather than picking a story that fits. **This page's own recommendation is stated ONLY from this
-page's own reproduced numbers** ($619.50→$641.95 at test-window scope, or $1,406.16→$1,669.44 at
-full-window scope) — not from the orchestrator's separately-sourced $253/41%-of-oracle framing
-the earlier version of this page borrowed without attribution.
+An earlier version of this page (and `PHASE2.md` P2-10/P2-11) claimed the "6 vs. 3 tenants
+harmed" disagreement between the orchestrator and FIX-price was "settled in favour of 6." That
+claim was reached by taking a message at face value rather than running committed code, and it
+does not survive the further corrections above. **The safe claim, under all the models above:
+roughly a third of tenants are harmed by today's flat setting.** No exact count is asserted.
+This page's own reproducible script gives 3 (test-window scope) or 6 (full-window scope, an
+honest window-SENSITIVITY finding in its own right — some tenants are only harmed over the whole
+window, not the last 40% of it) — both real numbers from committed code, at two different
+scopes, neither claimed as THE count.
 
-Per-tenant + off-switch, on this page's own engine, eliminates the harm flat N=2 causes at
-either window scope (3 tenants at test-window scope, 6 at full-window scope), for a real dollar
-gain at either scope. **A single fleet-wide value raised from 2 to 6 does not help on this
-page's own engine at either scope** — the direction of that specific finding is unaffected by
-either correction above.
+### A methods note: the anti-flattery discipline, and why this page's engine was checked against it
+
+`dash/keepalive.go:1316`'s own comment names the exact trap the orchestrator's withdrawn model
+fell into: a calculator that only counts the spans where a ping paid off, and omits the spans
+where a ping fired and the session simply ended (pure cost, zero possible benefit — 15,064 such
+spans on this deployment, ≈$135 at K=2, per the orchestrator's own follow-up measurement),
+flatters itself. **Checked, not assumed, whether this page's own `kv_ttl_cost_model.evaluate()`
+has the same defect**: it does not. `evaluate()` explicitly bills "the OPEN spans, priced at the
+last request's own model and counted apart" for every trajectory whose last action still pings
+when the observation window ends (`pings_on_open_spans`, a field reported separately in every
+`Cost` this page cites) — the exact case the shipped engine's comment warns about, already
+priced with no possible credited benefit, because there IS no next request in the window to
+turn into a cheap read. This page's engine also never uses a "credit" formula at all (the 1.25x-
+vs-1.15x error class) — every ping and every real request is priced individually as the read or
+write it actually is, so there is no separate avoided-cost approximation to get wrong. **The
+general lesson for anyone modelling this mechanism**: enumerate the cost cases where the benefit
+is structurally zero — a session-final ping being the canonical one — before trusting any net
+figure a model produces, and prefer per-event pricing (what actually happened, billed at what it
+actually cost) over a net-credit formula (what you believe should have been avoided) wherever the
+underlying engine already supports it.
 
 ### A robustness argument for the cap, found only after this study was largely finished
 
@@ -243,9 +250,14 @@ this page). This is a property of the RECOMMENDATION, not just a number in a thr
 list: a policy that is robust to a defect discovered after the fact is a stronger recommendation
 than one that merely scored better on the data as first understood.
 
-**Realized-vs-modelled gap**: real, measured keep-alive net is $200.86. The raw model (before
-any coverage/gate correction) says $395–433 at N=1 — a **1.94–1.97x gap**, converged across two
-independent engines. Replaying the REAL control-plane config instead (30 active strategies, all
+**Realized-vs-modelled gap**: real, measured keep-alive net is $200.86. An UNGATED model (no
+tenant targeting, no real windows, no real prefix gate — every model in the disputed table
+above is ungated in this sense) puts the raw N=1 figure well above the real number, by a factor
+that has moved with each successive correction to the models producing it (most recently ≈$373
+from the orchestrator's own, now-withdrawn model; this page's own ungated engine gives $541.55
+at the SAME test-window scope) — **stated as "well above," not as a specific multiple, given the
+absolute value itself is unresolved per the table above.** Replaying the REAL control-plane
+config instead (30 active strategies, all
 single-tenant campaigns, narrow weekday/hour windows in each strategy's own timezone — empty
 `Window.TZ` resolves to `Asia/Jerusalem`, `tenant/keepalivestrategy.go:44-45` — plus the real
 `min_prefix_tokens=20000` gate) closes most of the remaining gap: **1.4–1.8x**. Of decision
@@ -265,21 +277,28 @@ model showed up as clearly profitable here, and vice versa. Both engines were re
 line; neither had a bug. **The two scripts had assigned pseudonymized tenant ids by different
 rules** — one by decision-point volume descending, this page's by sorted raw tenant id — so
 "T09" in one meant a different real tenant than "t09" in the other. Once relabelled, every
-disagreement dissolved exactly, and both engines agree on 6 tenants harmed by today's flat
-setting. **Recorded here as a general, cheap, memorable lesson**: two independently-correct
+flagged tenant-IDENTITY disagreement dissolved exactly (the SEPARATE question of how many
+tenants are harmed and by how much is not settled by this relabelling alone — see "reverted to
+unresolved" above, added after two further corrections to the model being compared against).
+**Recorded here as a general, cheap, memorable lesson**: two independently-correct
 analyses can appear to contradict each other purely through labelling, and it can take as little
 as one query to dissolve what looked like a real disagreement. This page adopts sorted-raw-id as
 the one pseudonymization rule (stable under any filter, unlike a volume rank that silently
 relabels every tenant when the window changes) and recommends it as the project's convention
 going forward.
 
-**A related, sharper lesson**: the independent model above was corrected downward four
-successive times over one working session (an early flat-N=6 estimate moved $1,252 → $898 → $768
-→ $571), each correction caught by a different independent check, every one in the same
-direction. Individually each was a plausible bug, caught properly. Collectively it is a
-systematic optimism that no amount of self-review from inside one modelling frame caught alone —
-the strongest argument this study can offer for why the still-open live randomized holdout
-(below) is worth more than further modelling.
+**A related, sharper lesson**: the independent model above was corrected downward SIX
+successive times over one working session (an early flat-N=6 estimate moved $1,252 → $898 →
+$768 → $571, then two further errors — omitted session-final ping cost, an over-credited
+avoided-write formula — moved its per-tenant-cap+off figure to ≈$373, at which point its own
+author withdrew the table entirely rather than issue a seventh correction), each correction
+caught by a different independent check, every one in the same direction. Individually each was
+a plausible bug, caught properly. Collectively it is a systematic optimism that no amount of
+self-review from inside one modelling frame caught alone — the strongest argument this study can
+offer for why the still-open live randomized holdout (below) is worth more than further
+modelling. **The model was eventually withdrawn by its own author rather than corrected a
+seventh time — itself worth stating as the honest endpoint of that pattern**, and a healthier
+outcome than a seventh number nobody fully trusted.
 
 **A third lesson, about methodology rather than about this study's numbers**: this page's own
 cost engine was never exposed to either of two bugs that hit the two from-scratch
@@ -292,8 +311,8 @@ request count is inside such a session). **The analysis built on production's ow
 machinery inherited a correctness property that both from-scratch reimplementations had to
 rediscover the hard way.** That generalises past this one bug: reusing an already-tested engine
 is not just less work, it is a real reduction in the surface area for this exact class of error,
-and it is the concrete reason this page's `evaluate()`-based numbers needed none of the four
-downward corrections the independently-built model went through.
+and it is the concrete reason this page's `evaluate()`-based numbers needed none of the six
+downward corrections (nor the eventual withdrawal) the independently-built model went through.
 
 ## Feature availability, condensed (full table: KA-predictor's own report, cited below)
 
