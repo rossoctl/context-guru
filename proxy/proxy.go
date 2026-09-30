@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -38,6 +39,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/internal/record"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
@@ -122,6 +124,15 @@ type Options struct {
 	// request is captured off the hot path into a durable store and the dashboard UI
 	// + API are mounted. nil = the proxy behaves exactly as before.
 	Dashboard *dash.Recorder
+	// Record, when non-nil, writes claude-record-shaped *.otel.json trace files -- one per
+	// Claude Code session -- into its output directory. nil = no recording, and every
+	// touchpoint is nil-guarded, so the default path costs one nil check per request.
+	//
+	// This writes MORE than Dashboard content capture does: the whole pristine request body
+	// and every tool result, redacted on a best-effort denylist. That is the right trade for
+	// a research corpus and the wrong one for an unattended deployment; --record says so in
+	// its help text and at startup.
+	Record *sessionRecorder
 
 	// PipelineFor builds a pipeline for a per-request override on /compact
 	// (?preset=… or x-context-guru-pipeline: a,b,c). nil = overrides ignored, the
@@ -246,7 +257,10 @@ type Handler struct {
 	// rec is the dashboard's capture pipeline (nil when the dashboard is off). Every
 	// use is nil-guarded, so the disabled path costs one nil check per request.
 	rec *dash.Recorder
-	api *dash.API
+	// recorder writes trace files for --record (nil when off). Distinct from rec: that one
+	// feeds the dashboard's own store, this one writes the claude-record-shaped corpus.
+	recorder *sessionRecorder
+	api      *dash.API
 	// static is the single-tenant Tenancy: the handler's own pipeline, store and
 	// mode presented through the same type the hosted path uses. Built once so the
 	// request path has exactly ONE way to reach a pipeline, rather than a branch at
@@ -359,7 +373,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 		c = &http.Client{Transport: upstreamTransport(opts.UpstreamHeaderTimeout)}
 	}
 	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
-		tracker: modes.NewTracker(0), rec: opts.Dashboard,
+		tracker: modes.NewTracker(0), rec: opts.Dashboard, recorder: opts.Record,
 		sent: newSentStash()}
 	if h.mode() == components.ModeObserve {
 		h.pool = modes.NewPool(opts.Observe.MaxQueue, opts.Observe.Workers)
@@ -1418,7 +1432,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		if threadID != thread.Primary {
 			slg = slg.With("thread", threadID)
 		}
-		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, anchor, slg)
+		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, anchor, slg,
+			h.newRecCtx(r, provider, orig, tn))
 	}
 }
 
@@ -1607,7 +1622,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, anchor *expand.Anchor, lg *slog.Logger) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, anchor *expand.Anchor, lg *slog.Logger, rc recCtx) {
 	wire := string(provider)
 	if up.path == "/v1/responses" {
 		wire = "responses"
@@ -1666,6 +1681,19 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// that carries no terminator of its own leaves the earlier round's message_stop as the
 	// only one the client will ever get.
 	var withheld, prevWithheld []byte
+	// --record state. tee is nil when recording is off (newRecTee returns nil for a
+	// non-positive cap), and recTee.write is nil-safe, so the default path is untouched.
+	//
+	// recBody/recIsSSE hold what the RECORDER will translate, which is not always what the
+	// client got: on the two stream-through paths the bytes exist only in the tee, and on the
+	// two buffered paths respBody is already in memory and the tee is never attached.
+	var tee *recTee
+	var recBody []byte
+	var recIsSSE bool
+	var recIncomplete string
+	if h.recorder != nil {
+		tee = newRecTee(h.recorder.teeCap)
+	}
 	defer func() {
 		// Hand the finished request to the keep-alive. Last, so `body` is the bytes that
 		// actually went upstream on the final round (an expand round rewrites it) and the
@@ -1743,6 +1771,64 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			"fresh_input", usage.FreshInput, "cache_read", usage.CacheRead,
 			"cache_write", usage.CacheWrite, "output", usage.Output, "usage_reported", usageOK,
 			"usage_miss", usageWhy.String())
+		// --record, LAST in this defer and wrapped in its own recover.
+		//
+		// Last, so a recording bug cannot cost the request its dashboard row or its one
+		// lifecycle log line -- both are already written by the time this runs. Recovered
+		// separately for the same reason the request path recovers around the rewrite: a
+		// panic here must revert recording only, per CLAUDE.md's fail-open boundary. And in a
+		// defer rather than at each terminal point because serve has ten returns, two of them
+		// before the usage block, so there is no single reachable statement to put it on.
+		//
+		// Everything expensive happens on the writer goroutine. This is field copies and one
+		// non-blocking channel send: ~175 ns against the ~53 ms redaction would cost here,
+		// which on a keep-alive connection is paid by the NEXT request.
+		if h.recorder != nil && rc.traceID != "" {
+			func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						lg.Warn("cg.record: recovered from a panic while collecting a turn; "+
+							"the request itself was unaffected", "panic", rec)
+					}
+				}()
+				inc := recIncomplete
+				if rounds > 1 && len(recBody) > 0 && !recIsSSE {
+					// A multi-round continuation OVERWRITES respBody each round, so what
+					// survived is the last round, not the whole answer. Rounds records the
+					// count; this records that the body is therefore partial.
+					inc = joinIncomplete(inc, record.IncompleteTruncated)
+				}
+				errMsg := ""
+				if status >= 400 || status == 0 {
+					// A FIXED string, never err.Error(): the upstream error is a *url.Error
+					// carrying the upstream URL and possibly its userinfo, and this goes into
+					// a corpus that gets shared.
+					errMsg = fmt.Sprintf("upstream status %d", status)
+				}
+				h.recorder.Record(&recEvent{
+					traceID:   rc.traceID,
+					provider:  provider,
+					reqBody:   rc.pristine,
+					respBody:  recBody,
+					respIsSSE: recIsSSE,
+					respSize:  len(recBody),
+					start:     reqStart,
+					end:       time.Now(),
+					// The upstream's own latency, as the lifecycle line reports it.
+					upstreamMS: int64(math.Round(msSince(reqStart, time.Time{}))),
+					// Only when a first byte was actually OBSERVED. sseFirstByte is left zero
+					// on every buffered path on purpose, and msSince falls back to now for a
+					// zero time -- right for the dashboard's SSE average, and in a trace it
+					// would file the whole request duration as the time to first byte.
+					firstByteMS: firstByteOrZero(reqStart, sseFirstByte),
+					rounds:      rounds,
+					usage:       usage,
+					usageOK:     usageOK,
+					incomplete:  inc,
+					errMsg:      errMsg,
+				})
+			}()
+		}
 	}()
 	for round := 0; ; round++ {
 		rounds = round + 1
@@ -1816,9 +1902,17 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			sse = sse || isSSE
 			// Stream straight through, sniffing usage from a bounded head+tail window as
 			// the bytes go by (no buffering of the whole response, no added latency).
-			first, u, why, ok := h.stream(w, resp)
+			// streamRec, not stream: on this path the response body exists NOWHERE else --
+			// the comment above says so ("no buffering of the whole response") -- so the tee
+			// is the only route to a recorded response, not an optimisation. Claude Code
+			// advertises neither expand nor adjudicate, so every turn of the session this
+			// feature exists to record arrives here.
+			first, u, why, ok := h.streamRec(w, resp, tee)
 			if !sseBuffered {
 				sseFirstByte = first
+			}
+			if tee != nil {
+				recBody, recIsSSE = teeBody(tee, isSSE, &recIncomplete)
 			}
 			// noteUsageMiss, not a bare assignment: usageOK is sticky-true across expand rounds
 			// while this was last-write-wins, so a request whose round 1 parsed usage and whose
@@ -1865,6 +1959,16 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			}
 			lg.Debug("cg.sse_splice", "round", round, "expand_call", found,
 				"blocks_sent", sp.blocks, "bytes", len(respBody))
+			if h.recorder != nil {
+				// sp.pass already reconstructed a JSON message object, so this needs no
+				// aggregation -- recIsSSE stays false. A nil body means the 16 MB retain
+				// bound was blown and the body never materialised at all, which is a
+				// different fact from "empty" and is marked as such.
+				recBody, recIsSSE = respBody, false
+				if respBody == nil {
+					recIncomplete = record.IncompleteRetainCap
+				}
+			}
 		case isSSE && wire == "responses" && expand.HasMarkersInMessages(body):
 			// Responses' terminal event includes the complete output array. Buffer
 			// only when a model-visible marker exists: advertising stays stable
@@ -1872,6 +1976,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			sse, sseBuffered = true, true
 			respBody, _ = io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if h.recorder != nil {
+				// Raw Responses-API events. The recorder translates only the Anthropic stream, so
+				// this turn is kept and marked incomplete rather than written with an empty
+				// response -- the same outcome as the other non-Anthropic stream path below.
+				recBody, recIsSSE = respBody, true
+			}
 		case isSSE:
 			// Non-Anthropic dialects are not inspected at all: AggregateSSE only reconstructs
 			// the Anthropic event stream, so there is nothing the loop could read even if we
@@ -1879,9 +1989,17 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// A raw expand call on this path is repaired on the REQUEST side instead
 			// (expand.RepairToolResults).
 			sse = true
-			first, u, why, ok := h.stream(w, resp)
+			// The tee goes on here too, even though AggregateSSE cannot read this dialect.
+			// Wiring only path A would leave a non-Anthropic --record user with turns that
+			// carry an empty response and NO reason why, which is the one thing
+			// Turn.Incomplete exists to prevent. Recording it and marking it no_body_on_path
+			// is the honest outcome; see fillResponse.
+			first, u, why, ok := h.streamRec(w, resp, tee)
 			if !sseBuffered {
 				sseFirstByte = first
+			}
+			if tee != nil {
+				recBody, recIsSSE = teeBody(tee, isSSE, &recIncomplete)
 			}
 			usageWhy = noteUsageMiss(usageWhy, why, usageOK || ok) // see the other stream path
 			if ok {
@@ -1893,6 +2011,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		default:
 			respBody, _ = io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if h.recorder != nil {
+				recBody, recIsSSE = respBody, false
+			}
 			// A JSON round after a stream was opened is an upstream anomaly (the request
 			// said stream: true), and there is no way to splice a JSON body into an event
 			// stream. withheld deliberately still holds the previous round's events, so
@@ -2199,7 +2320,10 @@ func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *rec
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	flush, _ := w.(http.Flusher)
-	sn := newSniffer(h.rec != nil || h.agg != nil)
+	// h.recorder belongs in this gate: agg is always non-nil in the shipped binary, so a
+	// missing clause here is latent there -- but a --record-only Handler (which every unit
+	// test builds) would get an off sniffer, zero usage, and a silently usage-free corpus.
+	sn := newSniffer(h.rec != nil || h.agg != nil || h.recorder != nil)
 	buf := make([]byte, 16*1024)
 	for {
 		n, rerr := resp.Body.Read(buf)
