@@ -239,3 +239,18 @@ func (t *Turn) markIncomplete(reason string) {
 		t.Incomplete += "," + reason
 	}
 }
+
+// MarkIncomplete is markIncomplete for the proxy, which fills a Turn from another package.
+//
+// It exists because Turn.Incomplete is not a plain assignment: a turn can be incomplete for
+// several reasons at once (a retain bound AND a multi-round continuation), the FIRST reason
+// is the most specific and must survive, and later distinct reasons append comma-separated
+// so an analysis can search for any one of them. A caller setting the field directly would
+// have to reimplement that rule, and would eventually get it wrong in a way no test here
+// would catch.
+func (t *Turn) MarkIncomplete(reason string) {
+	if reason == IncompleteNone {
+		return
+	}
+	t.markIncomplete(reason)
+}
