@@ -134,6 +134,11 @@ const (
 	IncompleteRetainCap = "retain_bound"     // CG's 16 MB retain bound; body never materialised
 	IncompleteTruncated = "rounds_truncated" // continuation exit, both rounds truncated
 	IncompleteNoBody    = "no_body_on_path"  // a terminal path that never buffers a body
+	// IncompleteNoUsage: the response's usage block was absent or unparseable, so the
+	// cg.usage.* values on this span are zeros that were never measured. Needed because
+	// ToSpan emits those keys unconditionally -- deliberately, since a genuine zero is data --
+	// which leaves "no cache activity" and "unknown" indistinguishable without this marker.
+	IncompleteNoUsage = "no_usage_on_response"
 )
 
 // Attribute keys. Every one the existing corpus uses is spelled here exactly as the corpus

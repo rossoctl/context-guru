@@ -131,6 +131,25 @@ func main() {
 			"capture channel depth; a full channel DROPS events (counted, and shown in the UI) rather than delaying a request")
 		dashCIDRs = flag.String("dashboard-trusted-cidrs", envOr("DASHBOARD_TRUSTED_CIDRS", ""),
 			"comma-separated CIDRs allowed to view per-request CONTENT and the effective config (loopback always is; aggregates are open)")
+		// --record: write claude-record-shaped trace files, one per Claude Code session.
+		//
+		// It is the OUTPUT DIRECTORY, not a bool, so "--record set but no directory given"
+		// is not a state that exists. Empty means off.
+		//
+		// The help text says "every request and response body" in as many words on purpose.
+		// This writes MORE than --dashboard-content does -- the whole pristine request body
+		// and every tool result, not a capped before/after blob -- and redaction is a pattern
+		// denylist, which is always one unseen credential shape behind reality (the same
+		// caveat --dashboard-content carries, and for the same reason). An operator must not
+		// be able to turn this on without being told that.
+		recordDir = flag.String("record", envOr("CG_RECORD_DIR", ""),
+			"directory for *.otel.json trace files (empty = off); writes every request and response body to disk, redacted on a best-effort pattern denylist, so it is for corpus collection on your own traffic")
+		recordBodyCap = flag.Int("record-body-cap", envInt("CG_RECORD_BODY_CAP", 1<<20),
+			"maximum bytes PER BODY written to a trace file, after redaction")
+		recordTeeCap = flag.Int("record-tee-cap", envInt("CG_RECORD_TEE_CAP", 8<<20),
+			"maximum bytes RETAINED PER IN-FLIGHT RESPONSE while streaming; the memory ceiling is roughly this times the number of concurrent requests")
+		recordQueue = flag.Int("record-queue", envInt("CG_RECORD_QUEUE", 256),
+			"turn channel depth; a full channel DROPS turns (counted, warned once) rather than delaying a request")
 		// Hosted (multi-tenant) mode. Off by default: without --upstreams this binary
 		// behaves exactly as it always has, which keeps every existing deployment and
 		// every benchmark harness working unchanged.
@@ -390,6 +409,29 @@ func main() {
 			"content_capture", *dashContent)
 	}
 
+	// --record. nil unless a directory was given, and the proxy nil-checks it per request.
+	//
+	// The Close is a plain defer, NOT RegisterOnShutdown: those hooks fire as shutdown
+	// BEGINS, before in-flight requests drain, so a flush there would miss the last turns of
+	// every live session. This defer runs after the server has returned -- the same reason
+	// the dashboard recorder's Close is deferred here rather than registered.
+	traceRec, err := proxy.NewSessionRecorder(*recordDir, *recordBodyCap, *recordTeeCap,
+		*recordQueue, slog.Default())
+	if err != nil {
+		// Fatal, not a warning. Somebody who passed --record believes their session is being
+		// recorded; discovering afterwards that nothing was written wastes the session, which
+		// is the whole cost this feature exists to avoid.
+		log.Fatalf("record: %v", err)
+	}
+	if traceRec != nil {
+		defer traceRec.Close()
+		// Unmissable, and it says what reaches disk. An operator must never be unsure whether
+		// this is on, and must not learn what it captures by reading the source.
+		slog.Warn("RECORDING ENABLED: writing every request and response body to disk",
+			"dir", traceRec.Dir(), "body_cap", *recordBodyCap, "tee_cap", *recordTeeCap,
+			"note", "bodies are redacted on a best-effort pattern denylist, which is not a guarantee")
+	}
+
 	// Hosted mode. Everything below is nil/empty unless --upstreams was given, and the
 	// proxy checks exactly one field (Options.Tenants) to decide which world it is in.
 	var tenants *proxy.TenantSource
@@ -575,8 +617,9 @@ func main() {
 		Windows:   windows,                // dynamic context-window resolver (fraction triggers)
 		Prices:    priceResolver(windows), // per-token rates, so each captured request is priced at write time
 		Preset:    cfg.Preset,
-		Dashboard: rec,  // nil unless --dashboard
-		Mode:      mode, // sync (default) | observe — explicit, never inferred
+		Dashboard: rec,      // nil unless --dashboard
+		Record:    traceRec, // nil unless --record
+		Mode:      mode,     // sync (default) | observe — explicit, never inferred
 		Observe: proxy.ObserveOptions{
 			MaxQueue: cfg.Observe.MaxQueue,
 			Workers:  cfg.Observe.Workers,
