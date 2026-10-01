@@ -27,44 +27,133 @@ Full docs: **[rossoctl.github.io/context-guru](https://rossoctl.github.io/contex
 <img src="docs/img/context_guru_stats_sqaure.png" alt="context-guru saves 5–15% of your API cost in four ways" width="720" />
 </p>
 
-## Install (Claude Code plugin)
+## Install
 
-```
+Choose where context-guru runs, then choose your agent. Only the instructions you expand are shown.
+
+<details open>
+<summary><strong>Personal use</strong> — run context-guru locally for your own sessions</summary>
+
+<details>
+<summary><strong>Claude Code</strong></summary>
+
+In Claude Code:
+
+```text
 /plugin marketplace add rossoctl/context-guru
 /plugin install context-guru@context-guru
-/reload-plugins     # REQUIRED — next lines else answer "Unknown command"
-/permissions        # add a new rule → paste the line below → Project settings (local)
+/reload-plugins
+/permissions
+```
+
+Add this local project permission, replacing `{you}` with your username:
+
+```text
 Bash(/Users/{you}/.claude/plugins/cache/context-guru/**)
+```
+
+Then install and verify:
+
+```text
 /context-guru:install
-```
-
-<!-- If you want to install it for your entire org instead of one machine, follow the proxy
-     installation guide: docs/setup.md -->
-
-Check what it's saving:
-
-```
 /context-guru:status
 ```
 
-It reports the preset and cache strategy running, and the dollars saved so far — keep-alive
-savings, any content-trimming savings, and the net. Want the raw numbers instead of the reading of
-them? `/context-guru:status --stats` prints the `/stats` endpoint verbatim.
+The status line is enabled by default. Toggle it with `/context-guru:statusline off` or
+`/context-guru:statusline on`.
 
-If you want to also carry less, not just pay less, opt into content trimming:
+[Detailed Claude Code installation and troubleshooting](docs/how-to/install-plugin.md)
 
-```
-/context-guru:preset-picker   # → conservative, the safe first step into trimming
+</details>
+
+<details>
+<summary><strong>Codex</strong></summary>
+
+In a terminal:
+
+```sh
+git clone --depth 1 https://github.com/rossoctl/context-guru.git
+make -C context-guru build
+codex plugin marketplace add ./context-guru/codex-marketplace
+codex plugin add context-guru@context-guru
 ```
 
-### Status line
+Start Codex, ask it to **set up context-guru**, and approve routing through the local proxy. Then
+start routed sessions with:
 
-A terminal status line is installed **on by default** alongside the plugin. Run this command to turn it off/on:
+```sh
+codex -p context-guru
 ```
-/context-guru:statusline off/on
+
+The plugin uses a separate profile and leaves your main Codex configuration unchanged. Its
+standalone escape hatch is `~/.local/state/context-guru-codex/context-guru-reset`.
+
+Codex Responses traffic is currently observable passthrough; native Responses context trimming is
+not yet enabled.
+
+[Codex plugin details](codex-marketplace/plugins/context-guru/README.md)
+
+</details>
+
+</details>
+
+<details>
+<summary><strong>Enterprise use</strong> — connect to an organization-hosted context-guru</summary>
+
+Ask your operator for the service URL, your `cg_live_...` token, and the organization CA if the
+service uses private TLS. Your provider API key stays in its existing variable; the context-guru
+token is a separate header.
+
+<details>
+<summary><strong>Claude Code</strong></summary>
+
+```sh
+export ANTHROPIC_BASE_URL=https://cg.example.com/anthropic
+export ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: cg_live_xxxxxxxx"
+claude
 ```
-More: [docs/how-to/install-plugin.md](docs/how-to/install-plugin.md), or ask
-`/context-guru:statusline` to enable an extra segment or turn it back on.
+
+Confirm that your dashboard request count increases. A value in Claude Code's `settings.json` can
+silently override the exported base URL.
+
+[Enterprise Claude Code connection and verification](docs/hosted.md#user-setup)
+
+</details>
+
+<details>
+<summary><strong>Codex</strong></summary>
+
+Keep the context-guru token out of `config.toml` by exporting it:
+
+```sh
+export CONTEXT_GURU_TOKEN=cg_live_xxxxxxxx
+```
+
+Add a dedicated provider to `~/.codex/config.toml`:
+
+```toml
+[model_providers.context-guru-enterprise]
+name = "context-guru enterprise"
+base_url = "https://cg.example.com/openai/v1"
+wire_api = "responses"
+requires_openai_auth = true
+env_http_headers = { "x-context-guru-token" = "CONTEXT_GURU_TOKEN" }
+```
+
+Then run `codex -c model_provider=context-guru-enterprise`. Confirm that your dashboard request
+count increases.
+
+[Enterprise deployment and connection guide](docs/hosted.md#user-setup)
+
+</details>
+
+Operators: [deploy and administer the hosted service](docs/hosted.md).
+
+</details>
+
+For Claude Code, `/context-guru:status` reports the active preset, cache strategy, and measured
+savings. `/context-guru:status --stats` prints the raw `/stats` response. To opt into content
+trimming, run `/context-guru:preset-picker` and start with `conservative`.
 
 ## Presets
 
