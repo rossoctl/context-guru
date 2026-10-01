@@ -24,13 +24,16 @@ package proxy
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -367,7 +370,7 @@ func (r *sessionRecorder) flush(s *recSession) {
 	if s == nil || s.dirty == 0 || len(s.spans) == 0 {
 		return
 	}
-	b, err := record.NewFile(s.traceID, s.spans, time.Now()).Marshal()
+	b, err := record.NewFile(s.traceID, r.spansWithDerivedTurns(s), time.Now()).Marshal()
 	if err != nil {
 		r.errors.Add(1)
 		r.log.Warn("cg.record: could not marshal a trace file", "err", err, "trace_id", s.traceID)
@@ -388,6 +391,78 @@ func (r *sessionRecorder) flush(s *recSession) {
 		return
 	}
 	s.dirty = 0
+}
+
+// spansWithDerivedTurns returns the session's observed spans followed by one derived-turn span
+// per reconstructed human turn.
+//
+// WHY THIS IS COMPOSED AT WRITE TIME AND NOT STORED. ReconstructTurns needs EVERY call in the
+// session at once: it groups calls by advertised tool set, drops roots below RootShare, and
+// de-duplicates turns that later calls replay. None of that is decidable per-turn, so there is
+// nothing correct to append as turns arrive. Recomputing from s.spans on each flush also makes
+// the periodic flush idempotent by construction -- derived spans are never stored, so they can
+// never be duplicated or left stale by a later flush.
+//
+// Span ids are DERIVED FROM THE SEQUENCE NUMBER, not random. A flush every 10 s with random ids
+// would give the same turn a different id on every write, so a consumer diffing two reads of a
+// live file would see churn where nothing changed.
+//
+// Fails open, like everything else here: on any trouble the observed spans are returned
+// unchanged. A trace file missing its derived turns is a degraded file; a missing file is a
+// lost session.
+func (r *sessionRecorder) spansWithDerivedTurns(s *recSession) []record.Span {
+	defer func() {
+		if v := recover(); v != nil {
+			r.errors.Add(1)
+			r.log.Warn("cg.record: turn reconstruction panicked; wrote observed spans only",
+				"panic", v, "trace_id", s.traceID)
+		}
+	}()
+	if len(s.spans) == 0 {
+		return s.spans
+	}
+	calls := make([]record.Call, 0, len(s.spans))
+	for _, sp := range s.spans {
+		if sp.Attributes == nil {
+			continue
+		}
+		raw, _ := sp.Attributes[record.AttrInputMsgs].(string)
+		if raw == "" {
+			continue
+		}
+		var msgs []record.Message
+		if err := json.Unmarshal([]byte(raw), &msgs); err != nil {
+			continue
+		}
+		defs, _ := sp.Attributes[record.AttrToolDefs].(string)
+		// Order must sort chronologically: the span's own start time does, and it is also the
+		// closest thing to a timestamp a reconstructed turn can honestly carry.
+		calls = append(calls, record.Call{Order: sp.StartTime, Messages: msgs, ToolDefs: defs})
+	}
+	turns := record.ReconstructTurns(calls)
+	if len(turns) == 0 {
+		return s.spans
+	}
+	out := make([]record.Span, 0, len(s.spans)+len(turns))
+	out = append(out, s.spans...)
+	for _, t := range turns {
+		start, err := time.Parse(time.RFC3339Nano, t.FirstSeen)
+		if err != nil {
+			// FirstSeen is a span start time this function wrote, so a parse failure means the
+			// format changed underneath us. Skip the turn rather than invent a timestamp.
+			continue
+		}
+		out = append(out, record.DerivedTurnSpan(
+			s.traceID, derivedSpanID(s.traceID, t.Sequence, t.Root), "", t, start))
+	}
+	return out
+}
+
+// derivedSpanID is a stable 8-byte id for one reconstructed turn. Deterministic in the session,
+// the root and the sequence number, so a turn keeps its id across flushes.
+func derivedSpanID(traceID string, seq int, root string) string {
+	sum := sha256.Sum256([]byte(traceID + "\x00" + root + "\x00" + strconv.Itoa(seq)))
+	return hex.EncodeToString(sum[:8])
 }
 
 func (r *sessionRecorder) flushAll(final bool) {
