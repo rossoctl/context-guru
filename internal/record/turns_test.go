@@ -423,9 +423,13 @@ func TestCorpusReconstructionScore(t *testing.T) {
 			"turns whose bodies are present", recallPct)
 	}
 	// The headline claim: reconstruction beats claude-record's own surviving turn spans.
-	if recon <= kept {
-		t.Errorf("reconstructed %d <= claude-record's kept %d; the comparison's central claim "+
-			"no longer holds on this corpus", recon, kept)
+	// A TIE IS THE CEILING, NOT A FAILURE, when claude-record lost nothing: if every turn that
+	// happened is present as an interaction span, no reconstruction can exceed it. The claim this
+	// guards is about a corpus with eviction in it, so it only applies when kept < happened.
+	// Measured 2026-10-01 on a lossless 3-turn dual-recorded session: recon == kept == happened.
+	if kept < happened && recon <= kept {
+		t.Errorf("reconstructed %d <= claude-record's kept %d (of %d that happened); the "+
+			"comparison's central claim no longer holds on this corpus", recon, kept, happened)
 	}
 }
 
