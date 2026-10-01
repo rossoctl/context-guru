@@ -89,6 +89,32 @@ func ccBody(prompt string) []byte {
 	return b
 }
 
+// ccBodyTurns builds a Claude Code body replaying several human turns, the way every real
+// call does: the whole conversation so far, alternating user and assistant.
+func ccBodyTurns(prompts ...string) []byte {
+	msgs := make([]any, 0, len(prompts)*2-1)
+	for i, p := range prompts {
+		if i > 0 {
+			msgs = append(msgs, map[string]any{"role": "assistant", "content": "On it."})
+		}
+		msgs = append(msgs, map[string]any{"role": "user", "content": p})
+	}
+	var m map[string]any
+	_ = json.Unmarshal(ccBody(prompts[0]), &m)
+	m["messages"] = msgs
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// ccBodyNoTools is a call advertising no tools: a helper call, with no conversation anchor.
+func ccBodyNoTools(prompt string) []byte {
+	var m map[string]any
+	_ = json.Unmarshal(ccBody(prompt), &m)
+	delete(m, "tools")
+	b, _ := json.Marshal(m)
+	return b
+}
+
 func traceFiles(t *testing.T, dir string) []string {
 	t.Helper()
 	f, err := filepath.Glob(filepath.Join(dir, "*.otel.json"))
@@ -97,6 +123,33 @@ func traceFiles(t *testing.T, dir string) []string {
 	}
 	sort.Strings(f)
 	return f
+}
+
+// chatSpans returns only the OBSERVED model-call spans, dropping the derived-turn spans the
+// recorder also writes. Tests about one request's translation mean "the chat span", not "every
+// span in the file" -- so they filter, rather than counting a total that turn reconstruction is
+// entitled to add to.
+func chatSpans(t *testing.T, spans []map[string]any) []map[string]any {
+	t.Helper()
+	out := make([]map[string]any, 0, len(spans))
+	for _, sp := range spans {
+		if n, _ := sp["name"].(string); n != record.SpanDerivedTurn {
+			out = append(out, sp)
+		}
+	}
+	return out
+}
+
+// derivedTurnSpans returns only the reconstructed-turn spans.
+func derivedTurnSpans(t *testing.T, spans []map[string]any) []map[string]any {
+	t.Helper()
+	out := make([]map[string]any, 0, len(spans))
+	for _, sp := range spans {
+		if n, _ := sp["name"].(string); n == record.SpanDerivedTurn {
+			out = append(out, sp)
+		}
+	}
+	return out
 }
 
 func readTrace(t *testing.T, path string) (map[string]any, []map[string]any) {
@@ -322,9 +375,9 @@ func TestRecordSSEResponseIsAggregatedBeforeTranslation(t *testing.T) {
 	r, dir := newTestRecorder(t)
 	recordAndClose(t, r, baseEvent(testSessionUUID, []byte(testSSE), true))
 
-	spans := readOneTrace(t, dir)
+	spans := chatSpans(t, readOneTrace(t, dir))
 	if len(spans) != 1 {
-		t.Fatalf("want 1 span, got %d", len(spans))
+		t.Fatalf("want 1 chat span, got %d", len(spans))
 	}
 	a := spanAttrs(t, spans[0])
 	out, _ := a["gen_ai.output.messages"].(string)
@@ -387,9 +440,10 @@ func TestRecorderWritesOneFilePerSession(t *testing.T) {
 	}
 
 	// The two-turn session must thread its spans: turn 2's parent is turn 1.
-	f, spans := readTrace(t, filepath.Join(dir, testSessionUUID+".otel.json"))
+	f, allSpans := readTrace(t, filepath.Join(dir, testSessionUUID+".otel.json"))
+	spans := chatSpans(t, allSpans)
 	if len(spans) != 2 {
-		t.Fatalf("want 2 spans for the 2-turn session, got %d", len(spans))
+		t.Fatalf("want 2 chat spans for the 2-turn session, got %d", len(spans))
 	}
 	first, _ := spans[0]["span_id"].(string)
 	parent, _ := spans[1]["parent_span_id"].(string)
@@ -474,9 +528,9 @@ func TestRecordMarksIncompleteOnEachPath(t *testing.T) {
 			c.mutate(e)
 			recordAndClose(t, r, e)
 
-			spans := readOneTrace(t, dir)
+			spans := chatSpans(t, readOneTrace(t, dir))
 			if len(spans) != 1 {
-				t.Fatalf("want 1 span, got %d", len(spans))
+				t.Fatalf("want 1 chat span, got %d", len(spans))
 			}
 			inc, _ := spanAttrs(t, spans[0])[record.AttrIncomplete].(string)
 			if inc == "" {
@@ -639,5 +693,186 @@ func TestFirstByteOrZeroDistinguishesUnobservedFromInstant(t *testing.T) {
 	// Sub-millisecond must round to 1, not truncate to 0: 0 means "not observed".
 	if got := firstByteOrZero(start, start.Add(600*time.Microsecond)); got == 0 {
 		t.Error("a sub-millisecond first byte truncated to 0, which reads as 'not observed'")
+	}
+}
+
+// --- 8. Derived turn spans -------------------------------------------------------------
+//
+// The recorder writes one cg.turn.derived span per reconstructed human turn, so a consumer --
+// a downstream analyzer, for one -- reads turns straight off the file instead of re-running
+// our Go reconstruction. These spans are DERIVED and say so; nothing here is written as
+// claude_code.interaction, which would make a derived sequence number indistinguishable from
+// a measured one.
+
+func TestRecorderEmitsDerivedTurnSpans(t *testing.T) {
+	r, dir := newTestRecorder(t)
+	e1 := baseEvent(testSessionUUID, []byte(testSSE), true)
+	e2 := baseEvent(testSessionUUID, []byte(testSSE), true)
+	// Turn 2 REPLAYS turn 1, which is the property the whole reconstruction rests on: the
+	// proxy never saw turn 1 announced, it saw it inside turn 2's message list.
+	e2.reqBody = ccBodyTurns("fix the failing test", "now add a regression test")
+	recordAndClose(t, r, e1, e2)
+
+	spans := readOneTrace(t, dir)
+	chats, turns := chatSpans(t, spans), derivedTurnSpans(t, spans)
+	if len(chats) != 2 {
+		t.Fatalf("want 2 chat spans, got %d", len(chats))
+	}
+	// Two calls replaying one shared turn must yield TWO turns, not three: de-duplication
+	// within a conversation root is what keeps a 3-turn session from reading as 21.
+	if len(turns) != 2 {
+		t.Fatalf("want 2 derived turn spans, got %d (%d spans in the file)", len(turns), len(spans))
+	}
+	want := []string{"fix the failing test", "now add a regression test"}
+	for i, sp := range turns {
+		a := spanAttrs(t, sp)
+		if a[record.AttrTurnDerived] != true {
+			t.Errorf("turn %d is not marked derived: %v", i, a[record.AttrTurnDerived])
+		}
+		if a[record.AttrTurnMethod] != record.TurnMethodBodyRecon {
+			t.Errorf("turn %d has no provenance: %v", i, a[record.AttrTurnMethod])
+		}
+		if got, _ := a[record.AttrTurnPrompt].(string); got != want[i] {
+			t.Errorf("turn %d prompt = %q, want %q", i, got, want[i])
+		}
+		if seq, _ := a[record.AttrTurnSequence].(float64); int(seq) != i+1 {
+			t.Errorf("turn %d sequence = %v, want %d", i, a[record.AttrTurnSequence], i+1)
+		}
+		// A reconstruction knows one instant and must not invent a duration: the gap between
+		// two calls mixes the human thinking with the agent working locally, and this side
+		// cannot separate them. DerivedTurnSpan enforces this by writing one timestamp to
+		// both fields, so this assertion guards that library invariant, not our call into it.
+		if sp["start_time"] != sp["end_time"] {
+			t.Errorf("turn %d carries a duration (%v..%v); interaction.duration_ms is "+
+				"structurally out of reach from a proxy and must not be guessed",
+				i, sp["start_time"], sp["end_time"])
+		}
+		if id, _ := sp["span_id"].(string); id == "" {
+			t.Errorf("turn %d has no span id", i)
+		}
+	}
+}
+
+// A periodic flush rewrites the whole file every 10 s, so spansWithDerivedTurns is called
+// again and again over a growing span list. Derived spans must be REPLACED, not accumulated,
+// and each turn must keep its id -- otherwise a session flushed for an hour carries 360
+// copies of turn 1, each under a new id, and a consumer diffing two reads sees churn where
+// nothing changed. This is why the derived spans are composed at write time and never stored.
+func TestDerivedTurnSpansAreIdempotentAcrossFlushes(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	defer r.Close()
+
+	// Spare capacity, as a real session's append-grown span list has. Noted because it was
+	// checked: aliasing the stored slice (out := s.spans) is a latent hazard -- it scribbles
+	// into the backing array past len -- but it does NOT duplicate, because the stored header's
+	// length never moves, so the next flush recomposes from the same spans. No behavioural
+	// test can catch it, and this one does not claim to.
+	s := &recSession{traceID: testSessionUUID, spans: make([]record.Span, 0, 16)}
+	for _, body := range [][]byte{
+		ccBody("fix the failing test"),
+		ccBodyTurns("fix the failing test", "now add a regression test"),
+	} {
+		e := baseEvent(testSessionUUID, []byte(testSSE), true)
+		e.reqBody = body
+		turn, err := r.buildTurn(e, "")
+		if err != nil {
+			t.Fatalf("buildTurn: %v", err)
+		}
+		s.spans = append(s.spans, turn.ToSpan())
+	}
+
+	// Flush 1, then flush 2 with nothing new observed in between. The second must produce
+	// exactly the first -- same count, same ids, same order. Anything else means a session
+	// flushed every 10 s for an hour accumulates 360 copies of turn 1, or re-ids it so a
+	// consumer diffing two reads sees churn where nothing changed.
+	first := append([]record.Span(nil), r.spansWithDerivedTurns(s)...)
+	second := r.spansWithDerivedTurns(s)
+
+	if len(first) != 4 {
+		t.Fatalf("want 2 observed + 2 derived = 4 spans, got %d", len(first))
+	}
+	if len(first) != len(second) {
+		t.Fatalf("the second flush produced a different span count: %d then %d; derived spans "+
+			"are being accumulated instead of recomposed", len(first), len(second))
+	}
+	for i := range first {
+		if first[i].SpanID != second[i].SpanID || first[i].Name != second[i].Name {
+			t.Errorf("span %d differs between flushes: %q/%q then %q/%q",
+				i, first[i].Name, first[i].SpanID, second[i].Name, second[i].SpanID)
+		}
+	}
+	if n := len(derivedSpansOf(first)); n != 2 {
+		t.Errorf("want 2 derived spans in a flush, got %d", n)
+	}
+
+	// Now the case the periodic flush really is: a THIRD call arrives and the session is
+	// flushed again. The derived set must be 3 -- recomposed -- not 2+3=5 accumulated, and
+	// the two turns already written must keep the ids they had.
+	e := baseEvent(testSessionUUID, []byte(testSSE), true)
+	e.reqBody = ccBodyTurns("fix the failing test", "now add a regression test", "and ship it")
+	turn, err := r.buildTurn(e, "")
+	if err != nil {
+		t.Fatalf("buildTurn: %v", err)
+	}
+	s.spans = append(s.spans, turn.ToSpan())
+
+	third := r.spansWithDerivedTurns(s)
+	gotD := derivedSpansOf(third)
+	if len(gotD) != 3 {
+		t.Fatalf("after a 3rd call the flush has %d derived spans, want 3 (accumulated rather "+
+			"than recomposed?)", len(gotD))
+	}
+	if len(third) != 6 {
+		t.Errorf("want 3 observed + 3 derived = 6 spans, got %d", len(third))
+	}
+	wasD := derivedSpansOf(first)
+	for i := range wasD {
+		if wasD[i].SpanID != gotD[i].SpanID {
+			t.Errorf("turn %d was re-identified when a later turn arrived: %q then %q; a "+
+				"consumer diffing two reads would see churn where nothing changed",
+				i+1, wasD[i].SpanID, gotD[i].SpanID)
+		}
+	}
+	// Distinct ids, or two turns collapse into one row downstream.
+	ids := map[string]bool{}
+	for _, sp := range first {
+		if sp.SpanID == "" {
+			t.Fatal("a span has no id")
+		}
+		if ids[sp.SpanID] {
+			t.Errorf("duplicate span id %q", sp.SpanID)
+		}
+		ids[sp.SpanID] = true
+	}
+}
+
+// derivedSpansOf filters record.Span values (the in-memory form), as opposed to
+// derivedTurnSpans which filters the decoded JSON a test read back off disk.
+func derivedSpansOf(spans []record.Span) []record.Span {
+	var out []record.Span
+	for _, sp := range spans {
+		if sp.Name == record.SpanDerivedTurn {
+			out = append(out, sp)
+		}
+	}
+	return out
+}
+
+// Fail open: a session whose calls advertise no tools has no conversation anchor, so
+// reconstruction yields nothing. The observed spans must still be written unchanged -- a file
+// missing its derived turns is degraded, a missing file is a lost session.
+func TestDerivedTurnsFailOpenWithoutAnAnchor(t *testing.T) {
+	r, dir := newTestRecorder(t)
+	e := baseEvent(testSessionUUID, []byte(testSSE), true)
+	e.reqBody = ccBodyNoTools("a prompt on a call advertising no tools")
+	recordAndClose(t, r, e)
+
+	spans := readOneTrace(t, dir)
+	if got := len(chatSpans(t, spans)); got != 1 {
+		t.Fatalf("want the observed chat span written regardless, got %d", got)
+	}
+	if got := len(derivedTurnSpans(t, spans)); got != 0 {
+		t.Errorf("want no derived turns without an anchor, got %d; an unanchored call is a "+
+			"helper call (a title generator, a WebFetch-fed thread), not a human turn", got)
 	}
 }
