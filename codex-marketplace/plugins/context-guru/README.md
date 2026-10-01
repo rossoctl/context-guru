@@ -3,15 +3,17 @@
 This is the Codex plugin bundle for context-guru. It installs a dedicated Codex profile, starts a
 loopback proxy, exposes health and statistics skills, and can remove only the state it owns.
 
-For local development, register and install the containing marketplace:
+Clone, build the proxy, then register and install the marketplace:
 
 ```sh
-codex plugin marketplace add ./codex-marketplace
+git clone --depth 1 https://github.com/rossoctl/context-guru.git
+make -C context-guru build
+codex plugin marketplace add ./context-guru/codex-marketplace
 codex plugin add context-guru@context-guru
 ```
 
-The setup skill deliberately does not edit `~/.codex/config.toml`. After setup, start a routed
-session with:
+Start Codex and ask it to **set up context-guru**. The setup skill deliberately does not edit
+`~/.codex/config.toml`. After setup, start a routed session with:
 
 ```sh
 codex -p context-guru
@@ -20,8 +22,9 @@ codex -p context-guru
 Codex uses OpenAI's Responses API. The proxy currently forwards that envelope byte-for-byte; the
 existing context-reduction pipeline still applies only to Chat Completions and Anthropic Messages
 requests. This compatibility mode makes routing safe and observable without pretending that a
-Responses request was optimized. Responses-native rewriting is tracked as the next integration
-step.
+Responses request was optimized. The plugin therefore does not save Codex context or tokens yet;
+native Responses rewriting is tracked in
+[#373](https://github.com/rossoctl/context-guru/issues/373).
 
 The plugin requires `context-guru-proxy` on `PATH`, or a binary built at
 `bin/context-guru-proxy` in this checkout.

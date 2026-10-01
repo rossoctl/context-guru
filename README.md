@@ -29,131 +29,15 @@ Full docs: **[rossoctl.github.io/context-guru](https://rossoctl.github.io/contex
 
 ## Install
 
-Choose where context-guru runs, then choose your agent. Only the instructions you expand are shown.
+Choose your setup. Each button opens only the instructions for that path.
 
-<details open>
-<summary><strong>Personal use</strong> — run context-guru locally for your own sessions</summary>
+| | **Personal use** | **Enterprise use** |
+|---|:---:|:---:|
+| **Claude Code** | [![Install locally](https://img.shields.io/badge/install-locally-009688?style=for-the-badge&logo=anthropic&logoColor=white)](docs/how-to/install-plugin.md) | [![Connect to your organization](https://img.shields.io/badge/connect-organization-455A64?style=for-the-badge&logo=anthropic&logoColor=white)](docs/hosted.md#user-setup) |
+| **Codex** | [![Install locally](https://img.shields.io/badge/install-locally-009688?style=for-the-badge&logo=openai&logoColor=white)](codex-marketplace/plugins/context-guru/README.md) | [![Connect to your organization](https://img.shields.io/badge/connect-organization-455A64?style=for-the-badge&logo=openai&logoColor=white)](docs/hosted.md#user-setup) |
 
-<details>
-<summary><strong>Claude Code</strong></summary>
-
-In Claude Code:
-
-```text
-/plugin marketplace add rossoctl/context-guru
-/plugin install context-guru@context-guru
-/reload-plugins
-/permissions
-```
-
-Add this local project permission, replacing `{you}` with your username:
-
-```text
-Bash(/Users/{you}/.claude/plugins/cache/context-guru/**)
-```
-
-Then install and verify:
-
-```text
-/context-guru:install
-/context-guru:status
-```
-
-The status line is enabled by default. Toggle it with `/context-guru:statusline off` or
-`/context-guru:statusline on`.
-
-[Detailed Claude Code installation and troubleshooting](docs/how-to/install-plugin.md)
-
-</details>
-
-<details>
-<summary><strong>Codex</strong></summary>
-
-In a terminal:
-
-```sh
-git clone --depth 1 https://github.com/rossoctl/context-guru.git
-make -C context-guru build
-codex plugin marketplace add ./context-guru/codex-marketplace
-codex plugin add context-guru@context-guru
-```
-
-Start Codex, ask it to **set up context-guru**, and approve routing through the local proxy. Then
-start routed sessions with:
-
-```sh
-codex -p context-guru
-```
-
-The plugin uses a separate profile and leaves your main Codex configuration unchanged. Its
-standalone escape hatch is `~/.local/state/context-guru-codex/context-guru-reset`.
-
-Codex Responses traffic is currently observable passthrough; native Responses context trimming is
-not yet enabled.
-
-[Codex plugin details](codex-marketplace/plugins/context-guru/README.md)
-
-</details>
-
-</details>
-
-<details>
-<summary><strong>Enterprise use</strong> — connect to an organization-hosted context-guru</summary>
-
-Ask your operator for the service URL, your `cg_live_...` token, and the organization CA if the
-service uses private TLS. Your provider API key stays in its existing variable; the context-guru
-token is a separate header.
-
-<details>
-<summary><strong>Claude Code</strong></summary>
-
-```sh
-export ANTHROPIC_BASE_URL=https://cg.example.com/anthropic
-export ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: cg_live_xxxxxxxx"
-claude
-```
-
-Confirm that your dashboard request count increases. A value in Claude Code's `settings.json` can
-silently override the exported base URL.
-
-[Enterprise Claude Code connection and verification](docs/hosted.md#user-setup)
-
-</details>
-
-<details>
-<summary><strong>Codex</strong></summary>
-
-Keep the context-guru token out of `config.toml` by exporting it:
-
-```sh
-export CONTEXT_GURU_TOKEN=cg_live_xxxxxxxx
-```
-
-Add a dedicated provider to `~/.codex/config.toml`:
-
-```toml
-[model_providers.context-guru-enterprise]
-name = "context-guru enterprise"
-base_url = "https://cg.example.com/openai/v1"
-wire_api = "responses"
-requires_openai_auth = true
-env_http_headers = { "x-context-guru-token" = "CONTEXT_GURU_TOKEN" }
-```
-
-Then run `codex -c model_provider=context-guru-enterprise`. Confirm that your dashboard request
-count increases.
-
-[Enterprise deployment and connection guide](docs/hosted.md#user-setup)
-
-</details>
-
-Operators: [deploy and administer the hosted service](docs/hosted.md).
-
-</details>
-
-For Claude Code, `/context-guru:status` reports the active preset, cache strategy, and measured
-savings. `/context-guru:status --stats` prints the raw `/stats` response. To opt into content
-trimming, run `/context-guru:preset-picker` and start with `conservative`.
+Codex routing and observability work today, but Responses traffic is not yet context-reduced. That
+work is tracked in [#373](https://github.com/rossoctl/context-guru/issues/373).
 
 ## Presets
 
