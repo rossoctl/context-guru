@@ -1,0 +1,26 @@
+{
+  "name": "context-guru",
+  "version": "0.1.0",
+  "description": "Run context-guru in front of Codex and inspect measured context cost.",
+  "author": {"name": "rossoctl", "url": "https://github.com/rossoctl"},
+  "homepage": "https://rossoctl.github.io/context-guru/",
+  "repository": "https://github.com/rossoctl/context-guru",
+  "license": "Apache-2.0",
+  "keywords": ["codex", "context", "tokens", "prompt-caching", "cost"],
+  "skills": "./skills/",
+  "hooks": "./hooks.json",
+  "interface": {
+    "displayName": "context-guru",
+    "shortDescription": "Route and inspect Codex context cost",
+    "longDescription": "Install and operate a local context-guru proxy for Codex, then inspect context and prompt-cache measurements from your own traffic.",
+    "developerName": "rossoctl",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "websiteURL": "https://rossoctl.github.io/context-guru/",
+    "privacyPolicyURL": "https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement",
+    "termsOfServiceURL": "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service",
+    "defaultPrompt": ["Set up context-guru for Codex", "Show my context-guru status", "Analyze my context costs"],
+    "brandColor": "#009688",
+    "screenshots": []
+  }
+}

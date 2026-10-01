@@ -9,6 +9,7 @@ The proxy serves both provider dialects on one port (default `:4000`).
 | Route | Purpose |
 |---|---|
 | `POST /openai/v1/chat/completions` | OpenAI chat dialect — runs the pipeline, forwards to the OpenAI upstream. |
+| `POST /openai/v1/responses` | OpenAI Responses API (used by Codex) — compatibility passthrough. Routing and observability work, but the pipeline does not reduce this envelope yet, so native Responses support ([#373](https://github.com/rossoctl/context-guru/issues/373)) is required before the Codex plugin can save context or tokens. |
 | `POST /anthropic/v1/messages` | Anthropic Messages dialect — runs the pipeline, forwards to the Anthropic upstream. |
 | `POST /anthropic/v1/messages/count_tokens` | Token counting, forwarded **verbatim** — the pipeline does not run. Absent this route a client falls back to counting context with *inference* requests, which a proxy sold on reducing spend must not cause. See the note below on what it costs. |
 | `POST /compact` | Stateless compaction: run the pipeline and return the rewritten body, no upstream call. `?provider=anthropic` switches dialect; `?preset=` / `x-context-guru-pipeline` override the pipeline; `?cache=on\|off\|auto` overrides cache-awareness. |

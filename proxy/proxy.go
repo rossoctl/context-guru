@@ -368,6 +368,16 @@ func (h *Handler) Mux() *http.ServeMux {
 		path:   "/v1/chat/completions",
 		setKey: bearerKey(h.opts.OpenAIKey),
 	}, pickOpenAI))
+	// Codex uses the Responses API exclusively. BodyOpts currently understands the
+	// Chat Completions message envelope, so a Responses request passes through byte
+	// for byte; routing it here still gives Codex one supported local endpoint while
+	// the shared response-envelope adapter is developed. Never translate it to Chat
+	// Completions: Responses streaming events and tool-call state are not equivalent.
+	m.HandleFunc("POST /openai/v1/responses", h.chat(bschemas.OpenAI, upstream{
+		base:   h.opts.OpenAIUpstream,
+		path:   "/v1/responses",
+		setKey: bearerKey(h.opts.OpenAIKey),
+	}, pickOpenAI))
 	m.HandleFunc("POST /anthropic/v1/messages", h.chat(bschemas.Anthropic, upstream{
 		base:   h.opts.AnthropicUpstream,
 		path:   "/v1/messages",

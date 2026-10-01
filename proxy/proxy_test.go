@@ -205,6 +205,38 @@ func TestProxyReducesThenForwards(t *testing.T) {
 	}
 }
 
+func TestResponsesRouteForwardsCodexEnvelopeByteIdentically(t *testing.T) {
+	var up upstreamCapture
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up.record(r)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"resp_test","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	h, _ := buildHandler(t, "pipeline: []\n", upstream.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	body := []byte(`{"model":"gpt-test","instructions":"keep this","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	resp, err := http.Post(srv.URL+"/openai/v1/responses", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotResponse, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, gotResponse)
+	}
+	got := up.last()
+	if got.path != "/v1/responses" {
+		t.Fatalf("upstream path = %q, want /v1/responses", got.path)
+	}
+	if !bytes.Equal(got.body, body) {
+		t.Fatalf("Responses request changed in compatibility mode:\n got %s\nwant %s", got.body, body)
+	}
+}
+
 // TestAnthropicRouteReducesToolResult drives the real /anthropic/v1/messages
 // gateway route with a Claude-Code-shaped body (tool outputs as tool_result
 // blocks in user messages) and asserts the offloader fires end-to-end.
