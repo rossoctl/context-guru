@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -118,6 +119,205 @@ func TestApplyStrategyRequiresActiveTargetAndWindow(t *testing.T) {
 	k.setStrategies([]tenant.Strategy{outsideWindow})
 	if _, applied := k.applyStrategy("t1", CachePolicy{}, now); applied != "" {
 		t.Errorf("a strategy outside its window matched: %q", applied)
+	}
+}
+
+// A shadow-mode strategy matches (nothing about Matches changes) but never enforces: it
+// must never turn KeepAlive on or touch any field of the policy.
+func TestApplyStrategyShadowModeNeverEnforces(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	now := clock.now()
+	shadow := tenant.Strategy{
+		ID: "s", Active: true, IdleSeconds: 100, MaxPings: 5, Mode: tenant.ModeShadow,
+		Windows: []tenant.Window{{Start: "00:00", End: "24:00"}},
+		Target:  tenant.Target{Mode: tenant.TargetAll}, UpdatedAt: now,
+	}
+	k.setStrategies([]tenant.Strategy{shadow})
+	account := CachePolicy{KeepAlive: false, Idle: 7 * time.Second, MaxPings: 1}
+	got, applied := k.applyStrategy("t1", account, now)
+	if applied != "" {
+		t.Errorf("a shadow strategy applied: %q", applied)
+	}
+	if got != account {
+		t.Errorf("a shadow strategy changed the policy: %+v", got)
+	}
+	// An enforce-mode strategy matching the SAME tenant/window must win instead, proving
+	// this is a mode check and not an accidental "never resolves at all" regression.
+	enforce := shadow
+	enforce.ID, enforce.Mode = "e", tenant.ModeEnforce
+	k.setStrategies([]tenant.Strategy{shadow, enforce})
+	if _, applied := k.applyStrategy("t1", account, now); applied != "e" {
+		t.Errorf("applied = %q, want the enforce-mode sibling", applied)
+	}
+}
+
+// A blank Mode (every strategy stored before this field existed, and every one built
+// directly like the tests above) reads as enforcing — the DB column default and
+// Strategy.Enforcing() must agree that "" means "enforce", never "shadow".
+func TestApplyStrategyBlankModeStillEnforces(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	now := clock.now()
+	s := tenant.Strategy{
+		ID: "s", Active: true, IdleSeconds: 100, MaxPings: 5,
+		Windows: []tenant.Window{{Start: "00:00", End: "24:00"}},
+		Target:  tenant.Target{Mode: tenant.TargetAll}, UpdatedAt: now,
+	}
+	k.setStrategies([]tenant.Strategy{s})
+	if _, applied := k.applyStrategy("t1", CachePolicy{}, now); applied != "s" {
+		t.Errorf("applied = %q, want %q (a blank Mode must enforce)", applied, "s")
+	}
+}
+
+// The per-tenant off-switch: a tenant named in TenantCaps with Off excludes that ONE
+// tenant from an otherwise-matching all-target strategy, without touching any other
+// tenant it still covers.
+func TestApplyStrategyPerTenantOffSwitch(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	now := clock.now()
+	s := tenant.Strategy{
+		ID: "s", Active: true, IdleSeconds: 100, MaxPings: 5, Mode: tenant.ModeEnforce,
+		Windows: []tenant.Window{{Start: "00:00", End: "24:00"}},
+		Target:  tenant.Target{Mode: tenant.TargetAll}, UpdatedAt: now,
+		TenantCaps: map[string]tenant.TenantCap{"loser": {Off: true}},
+	}
+	k.setStrategies([]tenant.Strategy{s})
+	if _, applied := k.applyStrategy("loser", CachePolicy{}, now); applied != "" {
+		t.Errorf("applyStrategy for the off-switched tenant = %q, want \"\"", applied)
+	}
+	if _, applied := k.applyStrategy("winner", CachePolicy{}, now); applied != "s" {
+		t.Errorf("applyStrategy for an unmentioned tenant = %q, want %q — the off-switch must "+
+			"not leak onto a tenant it does not name", applied, "s")
+	}
+}
+
+// The per-tenant MaxPings override: a lower (or higher) ceiling for one tenant than the
+// strategy's own MaxPings, without an Off entry.
+func TestApplyStrategyPerTenantMaxPingsOverride(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	now := clock.now()
+	one := 1
+	s := tenant.Strategy{
+		ID: "s", Active: true, IdleSeconds: 100, MaxPings: 5, Mode: tenant.ModeEnforce,
+		Windows: []tenant.Window{{Start: "00:00", End: "24:00"}},
+		Target:  tenant.Target{Mode: tenant.TargetAll}, UpdatedAt: now,
+		TenantCaps: map[string]tenant.TenantCap{"capped": {MaxPings: &one}},
+	}
+	k.setStrategies([]tenant.Strategy{s})
+	got, applied := k.applyStrategy("capped", CachePolicy{}, now)
+	if applied != "s" || got.MaxPings != 1 {
+		t.Errorf("applyStrategy(capped) = %+v, %q; want MaxPings=1, %q", got, applied, "s")
+	}
+	got, applied = k.applyStrategy("uncapped", CachePolicy{}, now)
+	if applied != "s" || got.MaxPings != 5 {
+		t.Errorf("applyStrategy(uncapped) = %+v, %q; want the strategy's own MaxPings=5 unchanged", got, applied)
+	}
+}
+
+// tenant.Strategy.MaxUSDPerTenant and .Models are ADVISORY — checked by dash's strategy
+// preview against history, never by the live ping path (see both fields' own doc
+// comments): enforcing either here would need the request's own model, or a running
+// per-tenant dollar counter, threaded into proxy/keepalive.go's CachePolicy/kaEntry, which
+// this file does not own.
+//
+// dash/spend_test.go's TestPerTenantRowQuotaIsEnforced exists because this exact failure
+// mode already shipped once, on a different field: "a per-tenant quota ... was
+// audit-logged, rendered in the UI, and read by nothing". This test is the same guard
+// pointed the other way — it pins TODAY'S advisory status so a future half-wiring (someone
+// starts reading one of these fields in one place but not proving it binds) goes red here
+// and gets a decision, rather than shipping as a silent surprise.
+func TestMaxUSDPerTenantAndModelsAreAdvisoryNotEnforced(t *testing.T) {
+	// Structural: CachePolicy is the ONLY thing applyStrategy hands back to the ping path.
+	// If it grows a field by either name, this fails immediately and by name — the
+	// opposite of the silent drift a label in a JS string cannot prevent.
+	cpType := reflect.TypeOf(CachePolicy{})
+	for _, bad := range []string{"MaxUSDPerTenant", "Models"} {
+		if _, ok := cpType.FieldByName(bad); ok {
+			t.Errorf("CachePolicy now has a %q field. MaxUSDPerTenant/Models are advisory-only "+
+				"by design (see tenant.Strategy's doc comments) — if this is intentional new "+
+				"wiring, add a companion test proving it actually binds (the same way "+
+				"dash/spend_test.go's TestPerTenantRowQuotaIsEnforced does) and update this test "+
+				"and every doc comment/UI label that still calls the field advisory", bad)
+		}
+	}
+
+	// Behavioural: two otherwise-identical strategies, one with a budget/model list that
+	// would refuse a live tenant outright if either were actually consulted, resolve
+	// IDENTICALLY through applyStrategy.
+	k, _, clock := testKeeper(t, Limits{})
+	now := clock.now()
+	window := []tenant.Window{{Start: "00:00", End: "24:00"}}
+	permissive := tenant.Strategy{
+		ID: "permissive", Active: true, Windows: window, Target: tenant.Target{Mode: tenant.TargetAll},
+		IdleSeconds: 100, MaxPings: 3, Mode: tenant.ModeEnforce, UpdatedAt: now,
+	}
+	restrictive := permissive
+	restrictive.ID = "restrictive"
+	// A budget far below what any real ping could cost, and a model this tenant could
+	// never be on: if either were live-enforced, this strategy could not resolve the same
+	// way permissive does.
+	restrictive.MaxUSDPerTenant = 0.0000001
+	restrictive.Models = []string{"some/model-this-tenant-never-uses"}
+
+	for _, s := range []tenant.Strategy{permissive, restrictive} {
+		k.setStrategies([]tenant.Strategy{s})
+		got, applied := k.applyStrategy("t1", CachePolicy{}, now)
+		if applied != s.ID {
+			t.Fatalf("%s: applied = %q, want %q — MaxUSDPerTenant/Models must not affect "+
+				"whether a strategy matches", s.ID, applied, s.ID)
+		}
+		if !got.KeepAlive || got.MaxPings != 3 {
+			t.Errorf("%s: policy = %+v — a restrictive MaxUSDPerTenant/Models value changed the "+
+				"resolved policy; if intentional, these fields are no longer advisory and every "+
+				"doc comment and UI label calling them so needs updating alongside this test",
+				s.ID, got)
+		}
+	}
+}
+
+func TestValidMode(t *testing.T) {
+	if err := validMode(tenant.ModeShadow); err != nil {
+		t.Errorf("ModeShadow refused: %v", err)
+	}
+	if err := validMode(tenant.ModeEnforce); err != nil {
+		t.Errorf("ModeEnforce refused: %v", err)
+	}
+	for _, bad := range []string{"", "off", "ENFORCE"} {
+		if err := validMode(bad); err == nil {
+			t.Errorf("validMode(%q) = nil, want an error", bad)
+		}
+	}
+}
+
+func TestValidTenantCaps(t *testing.T) {
+	if err := validTenantCaps(nil); err != nil {
+		t.Errorf("a nil map was refused: %v", err)
+	}
+	zero := 0
+	if err := validTenantCaps(map[string]tenant.TenantCap{"t1": {MaxPings: &zero}}); err != nil {
+		t.Errorf("MaxPings=0 (meaning off) was refused: %v", err)
+	}
+	neg := -1
+	if err := validTenantCaps(map[string]tenant.TenantCap{"t1": {MaxPings: &neg}}); err == nil {
+		t.Error("a negative override was accepted")
+	}
+}
+
+// The no-data-fallback predictor variant: an empty stop_reason proceeds (unlike the plain
+// stop-reason-gated entry, which refuses it), and a real, unfavourable stop_reason still
+// refuses exactly as the plain entry does.
+func TestPredictorForProceedOnNoData(t *testing.T) {
+	p, ok := predictorFor("stop-reason-gated-proceed-on-no-data")
+	if !ok {
+		t.Fatal("stop-reason-gated-proceed-on-no-data is not a known predictor")
+	}
+	if got := p(""); got != 1.0 {
+		t.Errorf("p(\"\") = %v, want 1.0 (proceed on no data)", got)
+	}
+	if got := p("end_turn"); got != 1.0 {
+		t.Errorf("p(%q) = %v, want 1.0", "end_turn", got)
+	}
+	if got := p("tool_use"); got != 0.0 {
+		t.Errorf("p(%q) = %v, want 0.0 (a real, unfavourable stop_reason still refuses)", "tool_use", got)
 	}
 }
 
@@ -366,8 +566,12 @@ func TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart(t *testing.T) {
 	userJar, userID := f.signUpJar(t, "user@ibm.com")
 
 	// A plain user may not create one.
+	//
+	// mode:"enforce" is explicit here: a strategy created with no mode at all now defaults
+	// to shadow (opt-in enforcement, see tenant.ModeShadow), and this test is about the
+	// live resolution chain, not about that default.
 	body := `{"name":"biz hours","idle_seconds":280,"max_pings":2,"min_prefix_tokens":20000,
-		"max_usd_per_ping":0.25,"active":true,
+		"max_usd_per_ping":0.25,"active":true,"mode":"enforce",
 		"windows":[{"start":"00:00","end":"23:59"}],"target":{"mode":"all"}}`
 	w, _ := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, userJar)
 	if w.Code != http.StatusForbidden {
@@ -475,6 +679,74 @@ func TestKeepAliveStrategyCreateValidatesAtTheRoute(t *testing.T) {
 	}
 	if len(list) != 0 {
 		t.Errorf("a refused create nonetheless persisted %d strategies", len(list))
+	}
+}
+
+// A create request that names no mode at all comes back shadow — opt-in enforcement for
+// anything new — and does NOT resolve live, unlike
+// TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart's explicit mode:"enforce".
+func TestKeepAliveStrategyCreateDefaultsToShadow(t *testing.T) {
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	_, userID := f.signUpJar(t, "user@ibm.com")
+
+	body := `{"name":"biz hours","idle_seconds":280,"max_pings":2,
+		"windows":[{"start":"00:00","end":"23:59"}],"target":{"mode":"all"}}`
+	w, out := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, mgrJar)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201: %s", w.Code, w.Body)
+	}
+	if mode, _ := out["mode"].(string); mode != tenant.ModeShadow {
+		t.Errorf("mode in the create response = %q, want %q", mode, tenant.ModeShadow)
+	}
+	if enforcing, _ := out["enforcing"].(bool); enforcing {
+		t.Error("a strategy created with no mode reports enforcing:true")
+	}
+	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, time.Now()); applied != "" {
+		t.Errorf("a shadow-by-default strategy applied live: %q", applied)
+	}
+}
+
+// The predictor catalog lists the baseline and both validated rules as selectable, and (when
+// kvcache ships a compiled-in reuse model) the trained one as visible but not selectable.
+func TestCtlListKeepAlivePredictors(t *testing.T) {
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	userJar, _ := f.signUpJar(t, "user@ibm.com")
+
+	if w, _ := f.do(t, http.MethodGet, "/api/keepalive/predictors", "", userJar); w.Code != http.StatusForbidden {
+		t.Fatalf("a plain user's list = %d, want 403", w.Code)
+	}
+
+	w, out := f.do(t, http.MethodGet, "/api/keepalive/predictors", "", mgrJar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list = %d, want 200: %s", w.Code, w.Body)
+	}
+	entries, _ := out["predictors"].([]any)
+	byID := map[string]map[string]any{}
+	for _, e := range entries {
+		m, _ := e.(map[string]any)
+		id, _ := m["id"].(string)
+		byID[id] = m
+	}
+	for _, id := range []string{"", "stop-reason-gated", "stop-reason-gated-proceed-on-no-data"} {
+		e, ok := byID[id]
+		if !ok {
+			t.Fatalf("no catalog entry for %q: %v", id, entries)
+		}
+		if sel, _ := e["selectable_for_enforcement"].(bool); !sel {
+			t.Errorf("%q is not selectable_for_enforcement: %v", id, e)
+		}
+		if val, _ := e["validated"].(bool); !val {
+			t.Errorf("%q is not validated: %v", id, e)
+		}
+	}
+	for _, e := range entries {
+		if kind, _ := e.(map[string]any)["kind"].(string); kind == "trained" {
+			if sel, _ := e.(map[string]any)["selectable_for_enforcement"].(bool); sel {
+				t.Errorf("a trained/research entry is selectable_for_enforcement: %v", e)
+			}
+		}
 	}
 }
 

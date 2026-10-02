@@ -1045,12 +1045,24 @@ func (h *Handler) ctlGetCampaignTenant(w http.ResponseWriter, r *http.Request) {
 // because a credit whose ping matched no strategy belongs to no campaign. That is the same
 // sentence renderStrategiesList already shows for a single strategy's ledger, deliberately
 // worded the same way so the two tabs read as one product.
+// A second sentence lives on this same caveat, not a separate one, because every response
+// that carries it shows Predicted right beside Real (see campaignCellView.PredictedUSD /
+// campaignTenantSummary.PredictedUSD) — the exact pairing dash/kvcacheholdout.go's own doc
+// comment warns is "exactly the comparison the frozen [in-sample] number is least able to
+// support" (2026-09-28 study, PHASE2.md finding P2-3). Predicted is chosen and scored on the
+// SAME rows — the KV-cache page's own Holdout panel is where this deployment's own
+// overfitting estimate for that number lives; this only points there, it does not recompute
+// one inline, since a campaign's cells were frozen from a suggest run whose exact train
+// window this response does not carry.
 const campaignRealSavingsCaveat = "Real saved-$ figures are EXACT and additive across " +
 	"campaigns: each credited request is attributed once, to whichever strategy's pings " +
 	"actually rescued it. They will not sum to the Overview or Keep-Alive tab's total, " +
 	"though — a credit whose ping matched no strategy (plain account config or a session " +
 	"override) belongs to no campaign, and neither does traffic from before this campaign " +
-	"was activated."
+	"was activated. Predicted saving is IN-SAMPLE: the arm was chosen to maximise this exact " +
+	"number on these exact rows, which biases it upward, more so on a thin cell — it is a fit, " +
+	"not a forecast. See the KV-cache tab's Holdout panel for this deployment's own estimate " +
+	"of how much of that bias survives on rows the arm was not chosen on."
 
 // campaignRealSavings computes real savings for every strategy this campaign created,
 // bounded to since tenantID is only used to filter which cells to bother computing —

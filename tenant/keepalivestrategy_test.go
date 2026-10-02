@@ -149,6 +149,139 @@ func TestStrategyMatchesRequiresActiveTargetAndWindow(t *testing.T) {
 	}
 }
 
+func TestStrategyEnforcing(t *testing.T) {
+	if !(Strategy{}).Enforcing() {
+		t.Error("a blank Mode does not enforce; every strategy stored before this field " +
+			"existed must keep behaving as it always did")
+	}
+	if !(Strategy{Mode: ModeEnforce}).Enforcing() {
+		t.Error("ModeEnforce does not enforce")
+	}
+	if (Strategy{Mode: ModeShadow}).Enforcing() {
+		t.Error("ModeShadow enforces")
+	}
+}
+
+func TestStrategyTenantCapFor(t *testing.T) {
+	one := 1
+	s := Strategy{TenantCaps: map[string]TenantCap{
+		"capped": {MaxPings: &one},
+		"off":    {Off: true},
+	}}
+	if c, ok := s.TenantCapFor("capped"); !ok || c.MaxPings == nil || *c.MaxPings != 1 {
+		t.Errorf("TenantCapFor(capped) = %+v, %v", c, ok)
+	}
+	if c, ok := s.TenantCapFor("off"); !ok || !c.Off {
+		t.Errorf("TenantCapFor(off) = %+v, %v", c, ok)
+	}
+	if _, ok := s.TenantCapFor("neither"); ok {
+		t.Error("TenantCapFor named a tenant with no entry")
+	}
+}
+
+// The new fields round-trip through Create, a sparse Patch, and a reload — the same three
+// checks TestStrategyHeadTTLFieldsPersistAndPatch already runs for its own migration.
+func TestStrategyGatesPersistAndPatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tenant.db")
+	r1, err := Open(path, Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	one := 1
+	created, err := r1.CreateStrategy("mgr-1", Strategy{
+		Name: "gated", IdleSeconds: 280, MaxPings: 2,
+		Windows: []Window{{Start: "09:00", End: "18:00"}},
+		Target:  Target{Mode: TargetAll},
+		Mode:    ModeEnforce, MaxUSDPerTenant: 5.5, Models: []string{"claude-sonnet-5"},
+		TenantCaps: map[string]TenantCap{"t1": {MaxPings: &one}},
+	})
+	if err != nil {
+		t.Fatalf("CreateStrategy: %v", err)
+	}
+	if created.Mode != ModeEnforce || created.MaxUSDPerTenant != 5.5 ||
+		len(created.Models) != 1 || created.Models[0] != "claude-sonnet-5" {
+		t.Errorf("create did not round-trip the new scalar fields: %+v", created)
+	}
+	if c, ok := created.TenantCapFor("t1"); !ok || c.MaxPings == nil || *c.MaxPings != 1 {
+		t.Errorf("create did not round-trip TenantCaps: %+v", created.TenantCaps)
+	}
+
+	shadow := ModeShadow
+	updated, err := r1.UpdateStrategy("mgr-2", created.ID, StrategyPatch{Mode: &shadow})
+	if err != nil {
+		t.Fatalf("UpdateStrategy: %v", err)
+	}
+	if updated.Mode != ModeShadow {
+		t.Error("patch did not change Mode")
+	}
+	if updated.MaxUSDPerTenant != 5.5 {
+		t.Errorf("patch touched a field it was not given: MaxUSDPerTenant = %v", updated.MaxUSDPerTenant)
+	}
+
+	newCaps := map[string]TenantCap{"t2": {Off: true}}
+	updated, err = r1.UpdateStrategy("mgr-2", created.ID, StrategyPatch{TenantCaps: &newCaps})
+	if err != nil {
+		t.Fatalf("UpdateStrategy: %v", err)
+	}
+	if c, ok := updated.TenantCapFor("t2"); !ok || !c.Off {
+		t.Errorf("patch did not replace TenantCaps: %+v", updated.TenantCaps)
+	}
+	if _, ok := updated.TenantCapFor("t1"); ok {
+		t.Error("a TenantCaps patch is a replace, not a merge, but t1's old entry is still here")
+	}
+	if err := r1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r2, err := Open(path, Options{})
+	if err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	defer r2.Close()
+	reloaded, err := r2.StrategyByID(created.ID)
+	if err != nil {
+		t.Fatalf("StrategyByID after reload: %v", err)
+	}
+	if reloaded.Mode != ModeShadow || reloaded.MaxUSDPerTenant != 5.5 ||
+		len(reloaded.Models) != 1 || reloaded.Models[0] != "claude-sonnet-5" {
+		t.Errorf("reload lost the patched fields: %+v", reloaded)
+	}
+	if c, ok := reloaded.TenantCapFor("t2"); !ok || !c.Off {
+		t.Errorf("reload lost TenantCaps: %+v", reloaded.TenantCaps)
+	}
+}
+
+// A brand-new strategy defaults to ModeShadow when the caller sends no Mode at all — the
+// opt-in-enforcement rule CreateStrategy is the one place that applies (see Enforcing's
+// own doc comment on why a blank Mode elsewhere still reads as enforcing).
+func TestCreateStrategyDefaultsToShadow(t *testing.T) {
+	r := open(t, Options{})
+	s, err := r.CreateStrategy("mgr-1", Strategy{
+		Name: "new", IdleSeconds: 280, MaxPings: 1,
+		Windows: []Window{{Start: "09:00", End: "18:00"}},
+		Target:  Target{Mode: TargetAll},
+	})
+	if err != nil {
+		t.Fatalf("CreateStrategy: %v", err)
+	}
+	if s.Mode != ModeShadow {
+		t.Errorf("Mode = %q, want %q", s.Mode, ModeShadow)
+	}
+	// An explicit ModeEnforce is passed through unchanged, not overridden by the default.
+	s2, err := r.CreateStrategy("mgr-1", Strategy{
+		Name: "new-2", IdleSeconds: 280, MaxPings: 1,
+		Windows: []Window{{Start: "09:00", End: "18:00"}},
+		Target:  Target{Mode: TargetAll}, Mode: ModeEnforce,
+	})
+	if err != nil {
+		t.Fatalf("CreateStrategy: %v", err)
+	}
+	if s2.Mode != ModeEnforce {
+		t.Errorf("an explicit ModeEnforce was overridden: got %q", s2.Mode)
+	}
+}
+
 // Persistence across a simulated restart: strategies survive a Close and a fresh Open of
 // the same file, unlike a per-session override (which is deliberately memory-only).
 func TestStrategyPersistsAcrossReload(t *testing.T) {
