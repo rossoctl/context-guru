@@ -310,6 +310,9 @@ func (h *Handler) keepAliveStrategyCtlRoutes() []ctlRoute {
 		{"POST /api/keepalive/strategies", ctlManager, h.ctlCreateKeepAliveStrategy},
 		{"PATCH /api/keepalive/strategies/{id}", ctlManager, h.ctlPatchKeepAliveStrategy},
 		{"DELETE /api/keepalive/strategies/{id}", ctlManager, h.ctlDeleteKeepAliveStrategy},
+		// The per-tenant max_pings economics summary — see keepalivetenanteconomics.go.
+		{"GET /api/keepalive/strategies/max-pings-by-tenant", ctlManager,
+			h.ctlKeepAliveMaxPingsByTenant},
 	}
 }
 
