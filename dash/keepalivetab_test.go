@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -485,11 +486,11 @@ func TestCalculatorGoldenAgainstTheProductionBands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Rows) != 4 {
-		t.Fatalf("the ladder has %d rungs, want K=1..4", len(out.Rows))
+	if len(out.Rows) != kaCalcMaxK {
+		t.Fatalf("the ladder has %d rungs, want K=1..%d", len(out.Rows), kaCalcMaxK)
 	}
 	want := []int64{2, 4, 6, 8}
-	for i, row := range out.Rows {
+	for i, row := range out.Rows[:4] {
 		if row.MaxPings != i+1 {
 			t.Fatalf("row %d is K=%d", i, row.MaxPings)
 		}
@@ -501,6 +502,14 @@ func TestCalculatorGoldenAgainstTheProductionBands(t *testing.T) {
 			t.Errorf("K=%d reports no share of addressable dollars", row.MaxPings)
 		}
 	}
+	// Every gap in this fixture sits below the K=4 coverage, so K=5..24 convert nothing more —
+	// the ladder is flat past the fixture's own data, not fabricating reach it never measured.
+	for _, row := range out.Rows[4:] {
+		if row.Convertible != want[3] {
+			t.Errorf("K=%d converts %d, want it to stay at K=4's %d — this fixture has no gap "+
+				"wide enough to need a 5th ping", row.MaxPings, row.Convertible, want[3])
+		}
+	}
 	// Reach must be monotonic and its GAIN must shrink — the flattening is the finding.
 	g1 := out.Rows[1].Convertible - out.Rows[0].Convertible
 	g3 := out.Rows[3].Convertible - out.Rows[2].Convertible
@@ -510,6 +519,60 @@ func TestCalculatorGoldenAgainstTheProductionBands(t *testing.T) {
 	// And the current row is marked, which is what the panel emphasises.
 	if !out.Rows[1].Current {
 		t.Error("K=2 was not marked as the current policy")
+	}
+}
+
+// Exactly one rung is marked Optimal, and it is the one with the highest NetUSD — the panel
+// trusts this flag rather than re-deriving an argmax over 24 rows itself.
+//
+// This fixture's spans are all session-final (open), so pings grow linearly with K forever while
+// reach saturates once every gap's coverage is met — net must turn down eventually, and the
+// optimum must land short of the ladder's top rung, which is the shape the panel exists to show.
+func TestCalculatorMarksTheOptimalRung(t *testing.T) {
+	var evs []*Event
+	ts := int64(10_000_000)
+	for i, gap := range []float64{400, 700, 1000, 1300} {
+		evs = append(evs, kaExpiry(ts+int64(i)*3_600_000, "s"+string(rune('a'+i)), gap, 1.0, 300_000)...)
+	}
+	fx := newKAFixture(t, evs...)
+	price := func(string) (modelinfo.Price, bool) { return ibmSonnet, true }
+	out, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 300_000, "aws/claude-sonnet-5", price, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	optimal, best := -1, math.Inf(-1)
+	count := 0
+	for i, row := range out.Rows {
+		if row.Optimal {
+			count++
+			optimal = i
+		}
+		if row.NetUSD > best {
+			best = row.NetUSD
+		}
+	}
+	if count != 1 {
+		t.Fatalf("%d rungs marked optimal, want exactly 1", count)
+	}
+	if out.Rows[optimal].NetUSD != best {
+		t.Errorf("the optimal rung (K=%d, net $%.4f) is not the highest net on the ladder ($%.4f)",
+			out.Rows[optimal].MaxPings, out.Rows[optimal].NetUSD, best)
+	}
+	if optimal == len(out.Rows)-1 {
+		t.Error("the optimum landed on the ladder's top rung — this fixture's linear ping cost " +
+			"should turn net down before then, which is the shape this test exists to catch")
+	}
+
+	// Unpriced: no dollar figure exists to maximise, so nothing is marked.
+	un, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 300_000, "nobody-prices-me",
+		func(string) (modelinfo.Price, bool) { return modelinfo.Price{}, false }, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range un.Rows {
+		if row.Optimal {
+			t.Error("an unpriced ladder marked a rung optimal")
+		}
 	}
 }
 
@@ -1196,5 +1259,106 @@ func TestLedgerRefusesCreditFromAPingThatRefreshedNothing(t *testing.T) {
 		if led.SavedUSD != 0 {
 			t.Errorf("%s: SavedUSD = %v, want 0 — that ping refreshed nothing", name, led.SavedUSD)
 		}
+	}
+}
+
+// The mirror of dash/kvcache.go's TestTheSQLPartitionIsExactlyTheConversationKey, for
+// addressableCTE. That file found the defect first and documented it at length
+// (dash/kvcache.go:255-267): a cached prefix is keyed on (tenant, session, MODEL), so a request
+// on a different model cannot read the entry a same-session request on another model left behind
+// — and without the model in the partition, LAG links the two anyway, reassigning the true
+// predecessor's real gap to whatever landed on the other model in between. keepalive.go's own
+// addressableCTE and pingSpans had the identical defect: partitioned by (tenant, session) alone.
+func TestAddressablePartitionsByModelAndTenant(t *testing.T) {
+	// STRUCTURAL: same shape as kvcache's own check — this fails on an edit that drops the
+	// column, naming what changed, rather than leaving it to be found from a wrong number.
+	for _, col := range []string{"r.tenant_id", "r.session_id, r.model"} {
+		if !strings.Contains(addressableCTE, col) {
+			t.Errorf("addressableCTE does not partition by %s", col)
+		}
+	}
+	if !strings.Contains(addressableCTE, "ORDER BY r.ts, r.id") {
+		t.Error("addressableCTE's LAG has no r.id tiebreak — r.ts alone is not a unique order, " +
+			"the same non-determinism dash/kvcache.go:262 documents on the identical query shape")
+	}
+
+	// BEHAVIOURAL: one session, three requests. The opus request 30s in is NOT the addressable
+	// miss's real predecessor — it is a different conversation that happens to share a session
+	// id, and the true predecessor (also opus) is 830s back.
+	const t0 = int64(1_700_000_000_000)
+	opus1 := mkEvent(t0, "s1", "aws/claude-opus-5", 0, 0)
+	opus1.CacheRead, opus1.CacheWrite = 40_000, 0
+	sonnet := mkEvent(t0+30_000, "s1", "aws/claude-sonnet-5", 0, 0)
+	sonnet.CacheRead, sonnet.CacheWrite = 1_000, 0
+	opusMiss := mkEvent(t0+830_000, "s1", "aws/claude-opus-5", 0, 0)
+	opusMiss.CacheRead, opusMiss.CacheWrite, opusMiss.CostUSD = 0, 40_000, 1.00
+	opusMiss.CacheMissReason = "ttl_expiry"
+
+	fx := newKAFixture(t, opus1, sonnet, opusMiss)
+	prefix, model, err := fx.db.AccountMedianPrefix(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One addressable row in this fixture, so its own prev_prefix IS the "median" returned.
+	if prefix != 40_000 {
+		t.Errorf("prev_prefix = %d, want 40,000 (the earlier OPUS request). 1,000 would mean "+
+			"the miss was linked to the sonnet request 30s away, whose entry it could never "+
+			"have matched", prefix)
+	}
+	if model != "aws/claude-opus-5" {
+		t.Errorf("model = %q, want aws/claude-opus-5", model)
+	}
+}
+
+// The mirror of TestAddressablePartitionsByModelAndTenant, for pingSpans — the same defect, one
+// function over. turn (which decides whether the shipped gate's "past the session's first
+// request" applies) and gap_s (which decides how many pings a span attracts) were both computed
+// across the same model boundary a live ping could never cross.
+func TestPingSpansPartitionsByModelAndTenant(t *testing.T) {
+	src, err := os.ReadFile("keepalive.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn := string(src)
+	if i := strings.Index(fn, "func (d *DB) pingSpans("); i >= 0 {
+		fn = fn[i:]
+	} else {
+		t.Fatal("pingSpans is gone; this check needs rewriting")
+	}
+	for _, col := range []string{"r.tenant_id, r.session_id, r.model"} {
+		if strings.Count(fn, col) < 2 { // ROW_NUMBER's partition AND LEAD's partition
+			t.Errorf("pingSpans does not partition both window functions by %s", col)
+		}
+	}
+
+	// BEHAVIOURAL: opus0 exists purely so opus1 is turn>=1 within the OPUS sub-conversation (a
+	// span belongs to the request the gate would actually evaluate, and a conversation's own
+	// first turn is never pingable). opus1 must open a span whose gap is measured to the LATER
+	// opus request 830s away, not to the sonnet request wedged in 30s later — and turn must be
+	// counted within the opus sub-conversation, not across both models.
+	const t0 = int64(1_700_100_000_000)
+	opus0 := mkEvent(t0, "s2", "aws/claude-opus-5", 0, 0)
+	opus0.CacheRead, opus0.CacheWrite = 40_000, 0
+	opus1 := mkEvent(t0+100_000, "s2", "aws/claude-opus-5", 0, 0)
+	opus1.CacheRead, opus1.CacheWrite = 40_000, 0
+	sonnet := mkEvent(t0+130_000, "s2", "aws/claude-sonnet-5", 0, 0)
+	sonnet.CacheRead, sonnet.CacheWrite = 40_000, 0
+	opus2 := mkEvent(t0+930_000, "s2", "aws/claude-opus-5", 0, 0)
+	opus2.CacheRead, opus2.CacheWrite = 40_000, 0
+
+	fx := newKAFixture(t, opus0, opus1, sonnet, opus2)
+	spans, err := fx.db.pingSpans(Filter{TenantAll: true}, 20_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []float64
+	for _, sp := range spans {
+		if !sp.open {
+			got = append(got, sp.gap)
+		}
+	}
+	if len(got) != 1 || got[0] != 830 {
+		t.Errorf("closed-span gaps = %v, want exactly one at 830s (opus1 -> opus2). A 30s gap "+
+			"would mean opus1's span was linked to the sonnet request instead", got)
 	}
 }

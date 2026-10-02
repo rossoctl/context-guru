@@ -841,7 +841,12 @@
     <p class="note">A replay of <em>your own past gaps</em>, not a forecast. Each rung keeps
       the cache alive for <strong>K &times; X + 300 s</strong> — the last ping is itself a
       cache read, and a read refreshes the lifetime for free, which is why the trailing
-      five minutes belong in the arithmetic.</p>
+      five minutes belong in the arithmetic. <strong>MODELLED:</strong> it assumes every ping
+      refreshes the cache successfully, and realized keep-alive net has historically run well
+      below a comparable modelled estimate on this deployment — trust the <em>shape</em> of this
+      ladder (which K is best, or whether none of them turn a profit) far more than its absolute
+      dollars. The rung marked <strong>optimal</strong> is shown for reference; nothing here
+      changes your policy for you.</p>
     <div class="ka-calc-controls" id="ka-calc-controls"></div>
     <div id="ka-calc" data-testid="ka-calc"></div>
   </div>
@@ -1073,6 +1078,22 @@
      a plain hosted account's browser never builds this panel at all, not just hides it. -->
 <template id="tpl-view-strategies">
 <section class="view" id="view-strategies" role="tabpanel" aria-labelledby="tab-strategies" hidden>
+  <!-- Per-tenant, never pooled: PHASE2.md's 2026-09-28 keep-alive study found a single flat
+       max_pings applied fleet-wide helps some tenants and harms others, some of them at EVERY
+       setting — for those, no cap fixes it, keep-alive itself does not pay off on their own
+       traffic. A pooled curve would show one line that is wrong for a third of the fleet, so
+       there isn't one; every row here is one tenant's own replay of their own history. -->
+  <div class="panel">
+    <h2>Max_pings economics, by tenant</h2>
+    <p class="note"><strong>MODELLED</strong> — a replay of each tenant's own past idle gaps,
+      assuming every ping refreshes the cache successfully. Realized keep-alive net has
+      historically run well below a comparable modelled estimate on this deployment, so trust
+      the <em>shape</em> and the <em>sign</em> here (raise the cap, leave it, or turn it off)
+      far more than the absolute dollars. Nothing on this panel changes a strategy for you —
+      it only shows what each tenant's own history says, worst first.</p>
+    <div id="ka-tenant-econ" data-testid="ka-tenant-econ"></div>
+  </div>
+
   <div class="panel">
     <h2 id="strategy-form-title">New strategy</h2>
     <p class="note">A durable rule: "only during Israel business hours", or a service-wide
@@ -1148,6 +1169,10 @@
 <script defer src="tools.js"></script>
 <!-- The KV-cache TTL view mounts itself the same way, from kvcache.js. -->
 <script defer src="kvcache.js"></script>
+<!-- The Keep-alive session drill-down mounts itself the same way, from keepalivepage.js. -->
+<script defer src="keepalivepage.js"></script>
+<!-- The feature/predictor inspection panel mounts itself the same way, from featurepanel.js. -->
+<script defer src="featurepanel.js"></script>
 <!-- Strategy campaigns mounts itself the same way, from campaigns.js — but unlike
      tools.js/kvcache.js it is manager-only with no local-ok exemption, so it is not
      tagged here at all. app.js's maybeLoadManagerScript fetches it the one time a hosted

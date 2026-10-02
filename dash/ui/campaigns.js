@@ -776,7 +776,7 @@ async function renderCampaignOverview(body, campaignID) {
   if (gen !== camp.drawerGen) return;
   clear(body);
   body.appendChild(tileGroup(null, null, [
-    tile('camp-predicted', 'Predicted saving', usd(detail.total_predicted_usd)),
+    tile('camp-predicted', 'Predicted saving (in-sample)', usd(detail.total_predicted_usd)),
     // The exact ceiling on the SAME cells Predicted sums: what a policy with perfect
     // foreknowledge of every next request would have saved, frozen at campaign-creation
     // time right alongside Predicted (see dash.KVCacheSuggestion.OptimalSavingUSD) — how
@@ -809,7 +809,7 @@ async function renderCampaignOverview(body, campaignID) {
     clear(tenantHost);
     const tbl = el('table', { class: 'grid', 'data-testid': 'camp-tenants-table' },
       el('thead', {}, el('tr', {},
-        el('th', {}, 'Tenant'), el('th', { class: 'num' }, 'Predicted'),
+        el('th', {}, 'Tenant'), el('th', { class: 'num' }, 'Predicted (in-sample)'),
         el('th', { class: 'num' }, 'Oracle ceiling'),
         el('th', { class: 'num' }, 'Real ping cost'), el('th', { class: 'num' }, 'Real saved'),
         el('th', { class: 'num' }, 'Real net'))));
@@ -883,7 +883,7 @@ async function renderCampaignTenantDrilldown(body, campaignID, tenantID) {
   const tbl = el('table', { class: 'grid compact', 'data-testid': 'camp-drilldown-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Hour'), el('th', {}, 'Best strategy'), el('th', {}, 'State'),
-      el('th', { class: 'num' }, 'Historical/predicted'), el('th', { class: 'num' }, 'Real saved'),
+      el('th', { class: 'num' }, 'Historical/predicted (in-sample)'), el('th', { class: 'num' }, 'Real saved'),
       el('th', { class: 'num' }, 'Real net'), el('th', { class: 'num' }, '$/1k requests'),
       el('th', { class: 'num' }, '$/active day'))));
   const tbody = el('tbody');

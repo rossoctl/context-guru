@@ -549,10 +549,16 @@ func (a *API) routes() []route {
 	// The KV-cache TTL analysis and strategy simulator, declared beside its handlers in
 	// kvcacheapi.go and appended here for the same reason.
 	rs = append(rs, a.kvCacheRoutes()...)
+	// The keep-alive PAGE's per-session drill-down, declared beside its handlers in
+	// keepalivepageapi.go and appended here for the same reason.
+	rs = append(rs, a.keepAlivePageRoutes()...)
 	// The Components tab's compaction-episode measurement, declared beside its handler in
 	// compactepisode.go and appended here for the same reason as the rest: this table is what
 	// the scoping tests walk.
-	return append(rs, a.compactEpisodeRoutes()...)
+	rs = append(rs, a.compactEpisodeRoutes()...)
+	// The feature/predictor inspection panel, declared beside its handler in
+	// featurepanelapi.go and appended here for the same reason.
+	return append(rs, a.featurePanelRoutes()...)
 }
 
 // Mount registers every dashboard route on a mux under the given prefix
