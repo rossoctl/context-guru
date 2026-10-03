@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/kvcache"
 )
@@ -159,7 +160,9 @@ func kaSaved(alias string) string {
 			WHERE kp.keepalive = 1 AND kp.cache_read > 0
 			  AND kp.tenant_id = ` + alias + `tenant_id AND kp.session_id = ` + alias + `session_id
 			  AND kp.ts <= ` + alias + `ts
-			  AND kp.ts + ` + strconv.FormatInt(providerCacheTTLMs, 10) + ` >= ` + alias + `ts)
+			  AND kp.ts + (CASE WHEN kp.provider = 'openai' THEN ` +
+		strconv.FormatInt(apply.OpenAIMinimumCacheTTL.Milliseconds(), 10) + ` ELSE ` +
+		strconv.FormatInt(providerCacheTTLMs, 10) + ` END) >= ` + alias + `ts)
 		THEN ` + col + ` ELSE 0 END)`
 }
 

@@ -425,16 +425,19 @@ type Ctx struct {
 	// previous turn's SENT body as the prefix, so the provider reads its prompt cache instead of
 	// being re-sent the transcript. See PrefixAsker for why that body and not the incoming one.
 	PrefixAsk PrefixAsker
-	// CacheTTLMs is how long this request's prompt cache is assumed to live, in milliseconds, as
-	// DERIVED from the request rather than assumed: for the Anthropic family the body declares it
-	// (a bare `ephemeral` mark is 5 minutes, an explicit `ttl: "1h"` is an hour), widened to the
-	// longest lifetime this prefix has ever asked for. 0 when unknown.
+	// CacheTTLMs is a known cache lifetime in milliseconds: Anthropic's explicit
+	// expiry tier or GPT-5.6+'s documented 30-minute minimum. The latter has
+	// CacheTTLMinimum set, because OpenAI may retain the entry longer. 0 means unknown.
 	//
 	// Carried alongside IdleMs and ColdCache so a component can reason about where in the cache's
 	// LIFETIME this turn falls, not merely whether the entry is already gone. extract_llm_sweep
 	// needs exactly that: a prefix ask must read a cache that still EXISTS, while rewriting deep
 	// history wants one that is nearly worthless — which is a window before expiry, not after it.
 	CacheTTLMs int64
+	// CacheTTLMinimum means CacheTTLMs is a guaranteed minimum, not a known
+	// expiry. GPT-5.6+ entries may outlive their default 30-minute guarantee;
+	// after that point their phase is Unknown, never Cold by arithmetic alone.
+	CacheTTLMinimum bool
 	// FilterStats receives cmdfilter's per-filter ledger (which command families pay
 	// off, and which output shapes matched nothing). nil = not recording.
 	//

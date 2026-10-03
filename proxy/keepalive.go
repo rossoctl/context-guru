@@ -28,9 +28,11 @@ import (
 //
 // # What it is for
 //
-// A provider prompt-cache entry has a five-minute default lifetime, and a session idle
+// An Anthropic prompt-cache entry has a five-minute default lifetime, and a session idle
 // longer than that loses its entire cached prefix. The next turn then re-bills every token
-// of it at the cache-CREATION rate. Measured on this service over 19,805 requests and
+// of it at the cache-CREATION rate. GPT-5.6+ OpenAI Responses entries instead have a
+// documented 30-minute minimum after the latest write or reuse and use a separate
+// 28-minute schedule. Measured Anthropic traffic on this service over 19,805 requests and
 // $3,139.97 of spend: 742 requests (3.7% of traffic) missed for that reason and cost
 // $741.07 — 23.6% of everything — at $0.9987 each against $0.1178 for a request that hit.
 // Against each row's own counterfactual the penalty is 11.35x, of which 91.2% is pure
@@ -147,6 +149,10 @@ type CachePolicy struct {
 	// Idle is X: how long a session must be idle before the first ping, measured from the
 	// previous request's START per the provider's documented lifetime rule. Zero disables.
 	Idle time.Duration
+	// OpenAIIdle is the Responses interval for GPT-5.6+ implicit caches. Zero
+	// uses the 28-minute default; it is separate from Anthropic's five-minute
+	// schedule so enabling OpenAI does not send wasteful four-minute pings.
+	OpenAIIdle time.Duration
 	// MaxPings is K: the most pings one idle span may send. Zero disables.
 	MaxPings int
 	// MaxUSDPerPing refuses a ping whose projected cost exceeds this. PER PING, because ping
@@ -612,6 +618,13 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 	// not widen the per-ping cost guard, and it cannot reach around the kill switch or the
 	// no-audit-sink refusal above.
 	pol = k.overrideFor(tn.ID, session, pol)
+	model := gjson.GetBytes(body, "model").String()
+	if provider == bschemas.OpenAI {
+		pol.Idle = pol.OpenAIIdle
+		if pol.Idle <= 0 {
+			pol.Idle = defaultOpenAIKeepAliveIdle
+		}
+	}
 	if !pol.on() {
 		k.retire(key)
 		return
@@ -624,7 +637,7 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 	// Nothing to keep alive unless the provider honours explicit breakpoints and this
 	// request actually established or read an entry. A request that wrote and read nothing
 	// has no prefix worth a ping.
-	if !cacheAwareProvider(provider) {
+	if !keepAliveEligible(provider, model, route) {
 		k.retire(key)
 		return
 	}
@@ -647,7 +660,6 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 		k.skipped.Add(1)
 		return
 	}
-	model := gjson.GetBytes(body, "model").String()
 	// A keeper-OWNED copy, not the slice serve just used. It costs one allocation per tracked
 	// session — and tracked sessions are gated down to a handful — in exchange for being able to
 	// overwrite the bytes on release without corrupting anything else that might still read
@@ -664,7 +676,7 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 		tenant: tn.ID, session: session, startedAt: startedAt, body: owned, up: up, st: tn.Store,
 		provider: provider, model: model, route: route, preset: tn.Preset,
 		agent: r.UserAgent(), pol: pol, prefix: prefix, stopReason: u.StopReason,
-		pingUSD: k.projectedPingUSD(model, prefix),
+		pingUSD: k.projectedPingUSD(model, prefix, route),
 		hdr:     hdr, auth: auth, appliedStrategy: applied,
 	}
 	k.mu.Lock()
@@ -700,13 +712,13 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 }
 
 // projectedPingUSD is what one ping on this prefix will cost: the prefix at the model's own
-// cache-read rate, plus the single output token. Computed at record time so the guard can
+// cache-read rate, plus the route's output budget. Computed at record time so the guard can
 // refuse an expensive ping BEFORE sending it rather than reporting it afterwards.
 //
 // Zero when the model is not priced, which lets the ping through — refusing to protect a cache
 // because a price list is incomplete would be the wrong failure, and the spend still lands on
 // its own dashboard row either way.
-func (k *keeper) projectedPingUSD(model string, prefix int64) float64 {
+func (k *keeper) projectedPingUSD(model string, prefix int64, route string) float64 {
 	p := k.h.opts.Prices
 	if p == nil || model == "" || prefix <= 0 {
 		return 0
@@ -715,7 +727,7 @@ func (k *keeper) projectedPingUSD(model string, prefix int64) float64 {
 	if !ok || price.Zero() {
 		return 0
 	}
-	return float64(prefix)*price.CacheRead + price.Output
+	return float64(prefix)*price.CacheRead + float64(pingOutputBudget(route))*price.Output
 }
 
 // retire releases one session's held material now: zeroized, deadline cancelled, entry gone.
@@ -897,7 +909,7 @@ func (k *keeper) fire(j pingJob) {
 	}
 	defer release()
 
-	body, ok := pingBody(j.raw)
+	body, ok := pingBody(j.raw, j.up.path)
 	if !ok {
 		k.markStopped(j.e)
 		k.skipped.Add(1)
@@ -989,7 +1001,7 @@ func (k *keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// What the ping actually asked for, so the row says it rather than reading as a request
 	// with no output budget. The audit trail is the reason these rows exist; a column that is
 	// blank because nobody filled it in is the same defect at a smaller scale.
-	ev.MaxTokens = 1
+	ev.MaxTokens = pingOutputBudget(route)
 	// A ping is not agent traffic, so it gets no cache-miss attribution and never touches
 	// the session-recency map: doing so would re-date the session and make the NEXT real
 	// request's gap read as four minutes instead of the twenty it actually was, hiding the
@@ -1041,10 +1053,11 @@ func (k *keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	return cost
 }
 
-// pingBody turns the last real request into the cheapest possible cache READ of the same
-// prefix.
+// pingBody turns the last real request into the cheapest accepted cache READ of the
+// same prefix. Responses uses max_output_tokens:16 because the IBM LiteLLM
+// Azure route rejects smaller values; Anthropic Messages uses max_tokens:1.
 //
-// Only two fields change, and NEITHER is inside the hashed prefix. The provider hashes
+// Only two fields change, and NEITHER is inside the hashed prefix. Anthropic hashes
 // `tools` → `system` → `messages` cumulatively up to the breakpoint; `max_tokens` and
 // `stream` are request-level knobs outside that sequence, so the prefix stays byte-identical
 // and the ping matches the entry the real request wrote. Everything a change to WOULD
@@ -1073,8 +1086,20 @@ func (k *keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 //
 // stream is false so the response is one small JSON body with its usage block in it, rather
 // than an SSE stream this would have to read to the end to price.
-func pingBody(body []byte) ([]byte, bool) {
-	out, err := sjson.SetBytes(body, "max_tokens", 1)
+func pingOutputBudget(route string) int {
+	if route == "/v1/responses" {
+		// The IBM LiteLLM Azure route rejects max_output_tokens below 16.
+		return 16
+	}
+	return 1
+}
+
+func pingBody(body []byte, route string) ([]byte, bool) {
+	field := "max_tokens"
+	if route == "/v1/responses" {
+		field = "max_output_tokens"
+	}
+	out, err := sjson.SetBytes(body, field, pingOutputBudget(route))
 	if err != nil {
 		return nil, false
 	}
@@ -1096,7 +1121,7 @@ func pingBody(body []byte) ([]byte, bool) {
 func pingHeaders(r *http.Request, up upstream) (http.Header, []maskedHeader) {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
-	for _, name := range []string{"Anthropic-Version", "Anthropic-Beta"} {
+	for _, name := range []string{"Anthropic-Version", "Anthropic-Beta", "OpenAI-Organization", "OpenAI-Project"} {
 		if v := r.Header.Get(name); v != "" {
 			h.Set(name, v)
 		}
@@ -1170,6 +1195,10 @@ func (k *keeper) sendPing(j pingJob, body []byte) (Usage, int, error) {
 // takes and far short of the request path's own header timeout.
 const keepAlivePingTimeout = 60 * time.Second
 
+// Two minutes before GPT-5.6+'s documented 30-minute minimum lifetime.
+// A 60-second ping timeout and the two-second sweep tick fit inside the margin.
+const defaultOpenAIKeepAliveIdle = 28 * time.Minute
+
 // keepAliveReserveFrac is the share of a tenant's rate and concurrency budget a ping may
 // never touch. A quarter, so a tenant at three quarters of its limit stops being pinged
 // while its agent keeps working — the requirement is that a ping never crowds out a real
@@ -1177,12 +1206,15 @@ const keepAlivePingTimeout = 60 * time.Second
 // the edge of it.
 const keepAliveReserveFrac = 0.25
 
-// cacheAwareProvider reports whether this provider honours explicit cache_control
-// breakpoints, which is the precondition for there being an entry a ping could refresh.
-func cacheAwareProvider(p bschemas.ModelProvider) bool {
+// keepAliveEligible only admits cache rules whose lifetime and ping wire shape
+// we know. OpenAI Responses uses implicit caching on GPT-5.6+; earlier models
+// have model/retention-dependent lifetimes and are not safe to schedule here.
+func keepAliveEligible(p bschemas.ModelProvider, model, route string) bool {
 	switch p {
 	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
 		return true
+	case bschemas.OpenAI:
+		return route == "/v1/responses" && modelinfo.GPT56OrLater(model)
 	}
 	return false
 }

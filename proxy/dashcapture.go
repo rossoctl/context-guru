@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
@@ -381,9 +382,10 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// figure and not only to a label — see Event.cachesplitSavedUSD.
 	seenSession, seenModel, sinceMs, tailChanged := c.rec.ObserveSplit(
 		e.TenantID, e.SessionID, e.Model, e.TS, e.SplitTailHash)
-	// Anthropic's prompt cache has a 5-minute TTL; a gap wider than that explains a
-	// miss without blaming a prefix change (TTL wins ties).
-	e.AttributeCache(seenSession, seenModel, sinceMs, 5*60*1000, e.CacheWrite > 0)
+	// Only a known expiry can establish ttl_expiry. OpenAI's 30m is a
+	// minimum guarantee, so a later miss cannot be attributed to expiry alone.
+	e.AttributeCache(seenSession, seenModel, sinceMs,
+		cacheAttributionTTLMs(e.Provider, e.Model), e.CacheWrite > 0)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
 	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
@@ -451,4 +453,12 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
 	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent)
 	c.rec.Record(e)
+}
+
+func cacheAttributionTTLMs(provider, model string) int64 {
+	ttl, kind := apply.CacheLifetime(bschemas.ModelProvider(provider), model, nil)
+	if kind != apply.CacheLifetimeExact {
+		return 0
+	}
+	return ttl.Milliseconds()
 }

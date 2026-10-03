@@ -6,7 +6,7 @@ provider, and session id, and how they run the expand loop.
 
 | Option | Host code | Body source | Expand loop | Status |
 |---|---|---|---|---|
-| Proxy / gateway | `proxy/` + `cmd/context-guru-proxy/` | HTTP request body | server-side, wraps the chat route | shipped; the eval-containers gateway |
+| Proxy / gateway | `proxy/` + `cmd/context-guru-proxy/` | HTTP request body | server-side for chat; native input rewriting for Responses | shipped; the eval-containers gateway |
 | External sidecar plugin | a separate repo (imports this module) | `pctx.Body` | response path (`OnResponse`) | plugin lives externally |
 | bifrost `LLMPlugin` | `adapters/bifrost/` | `req.ChatRequest` | transport wrapper | adapter shipped |
 
@@ -22,7 +22,7 @@ sequenceDiagram
   participant Proxy as proxy.Handler
   participant Apply as apply.Body
   participant Up as Upstream
-  Agent->>Proxy: POST /anthropic/v1/messages (or /openai/v1/chat/completions)
+  Agent->>Proxy: POST /anthropic/v1/messages, /openai/v1/chat/completions, or /openai/v1/responses
   Proxy->>Proxy: FORCE_MODEL? overwrite "model"
   Proxy->>Apply: body, provider, x-context-guru-session, bypass?
   Apply-->>Proxy: rewritten body (fail open → original)
@@ -35,7 +35,7 @@ sequenceDiagram
 ```
 
 Key behaviors (`proxy/proxy.go`):
-- **Routes** — `POST /openai/v1/chat/completions`, `POST /anthropic/v1/messages`, `GET /healthz`,
+- **Routes** — `POST /openai/v1/chat/completions`, `POST /openai/v1/responses`, `POST /anthropic/v1/messages`, `GET /healthz`,
   `GET /stats`, `GET /expand?id=`.
 - **Gateway credential model** — when `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` are set, the client's
   auth is dropped and the real key injected on forward (the agent holds only a placeholder).

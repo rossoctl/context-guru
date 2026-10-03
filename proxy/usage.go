@@ -213,11 +213,23 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 	}
 	var out Usage
 	switch {
-	case u.Get("input_tokens").Exists(): // Anthropic
-		out.FreshInput = u.Get("input_tokens").Int()
+	case u.Get("input_tokens").Exists(): // Anthropic or OpenAI Responses
+		input := u.Get("input_tokens").Int()
 		out.Output = u.Get("output_tokens").Int()
-		out.CacheRead = u.Get("cache_read_input_tokens").Int()
-		out.CacheWrite = u.Get("cache_creation_input_tokens").Int()
+		if u.Get("input_tokens_details.cached_tokens").Exists() || u.Get("input_tokens_details.cache_write_tokens").Exists() {
+			// Responses includes both cache tiers in input_tokens.
+			out.CacheRead = u.Get("input_tokens_details.cached_tokens").Int()
+			out.CacheWrite = u.Get("input_tokens_details.cache_write_tokens").Int()
+			out.FreshInput = input - out.CacheRead - out.CacheWrite
+			if out.FreshInput < 0 {
+				out.FreshInput = 0
+			}
+		} else {
+			// Anthropic reports fresh and cache-read input as separate tiers.
+			out.CacheRead = u.Get("cache_read_input_tokens").Int()
+			out.FreshInput = input
+			out.CacheWrite = u.Get("cache_creation_input_tokens").Int()
+		}
 		// The per-TTL split, when the provider reports one. `cache_creation_input_tokens`
 		// is the total across both tiers, so this is a SUBSET of CacheWrite and never an
 		// addition to it.
@@ -307,7 +319,7 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss, string) {
 			continue
 		}
 		// Anthropic nests the first usage under message.usage; OpenAI puts it at the top.
-		for _, path := range []string{"usage", "message.usage"} {
+		for _, path := range []string{"usage", "message.usage", "response.usage"} {
 			u := gjson.Get(payload, path)
 			// usagePresent, not Exists: `"usage": null` on every chunk is what OpenAI-dialect
 			// streaming sends absent stream_options.include_usage, and it is not a block.

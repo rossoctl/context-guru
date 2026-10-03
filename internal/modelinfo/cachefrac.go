@@ -6,12 +6,8 @@ import "strings"
 // for a model whose price feed does not state one.
 //
 // It exists because a single fabricated multiple was applied to every model on earth.
-// `1.25x input` is the Anthropic family's published 5-minute cache-write premium, and it
-// is right for Claude — including Claude on Bedrock, which is what this deployment runs.
-// It is WRONG for OpenAI and Gemini: neither charges a premium to CREATE a cache entry
-// (they discount cached reads and, for Gemini's explicit caching, bill storage per hour —
-// neither is a per-token write surcharge). So every OpenAI/Gemini row was getting a
-// write rate 25% above anything that could be billed.
+// `1.25x input` applies to Anthropic and GPT-5.6 or later. Earlier OpenAI models and
+// Gemini do not charge a per-token cache-write premium.
 //
 // Why that mattered even though those providers never report cache_write: Event.Price uses
 // CacheWrite for cost_usd, where a zero cache_write count makes the rate irrelevant, AND
@@ -20,8 +16,7 @@ import "strings"
 // savings figure on traffic that could never have paid it.
 //
 // Unknown families get 1.0 rather than 1.25: for a SAVINGS number the direction that does
-// not invent value is the safe one, and no provider outside the Anthropic family is known
-// to charge a creation premium. A feed that states a real rate never reaches this function.
+// not invent value is the safe one. A feed that states a real rate never reaches this function.
 func CacheWriteFracFor(model string) float64 {
 	if chargesCacheWritePremium(model) {
 		return anthropicCacheWriteFrac
@@ -36,11 +31,40 @@ const (
 	anthropicCacheReadFrac  = 0.1
 )
 
-// chargesCacheWritePremium reports whether this model's provider bills a per-token
-// surcharge to create a prompt-cache entry. True for the Anthropic family only.
+// chargesCacheWritePremium reports whether this model bills a per-token surcharge
+// to create a prompt-cache entry.
 func chargesCacheWritePremium(model string) bool {
 	m := strings.ToLower(model)
 	// Bedrock and Vertex ids carry a vendor prefix ("aws/claude-opus-5",
 	// "anthropic.claude-3-5-sonnet"), so match on the substring, not a prefix.
-	return strings.Contains(m, "claude") || strings.Contains(m, "anthropic")
+	return strings.Contains(m, "claude") || strings.Contains(m, "anthropic") || GPT56OrLater(m)
+}
+
+// GPT56OrLater reports whether an OpenAI GPT model uses the GPT-5.6+ cache rules.
+// Routed model IDs (for example, azure/gpt-5.6-luna) are supported.
+func GPT56OrLater(model string) bool {
+	model = strings.ToLower(model)
+	i := strings.Index(model, "gpt-")
+	if i < 0 {
+		return false
+	}
+	v := model[i+4:]
+	major, n := 0, 0
+	for n < len(v) && v[n] >= '0' && v[n] <= '9' {
+		major = major*10 + int(v[n]-'0')
+		n++
+	}
+	if n == 0 || major != 5 {
+		return major > 5
+	}
+	if n == len(v) || v[n] != '.' {
+		return false
+	}
+	v = v[n+1:]
+	minor, digits := 0, 0
+	for digits < len(v) && v[digits] >= '0' && v[digits] <= '9' {
+		minor = minor*10 + int(v[digits]-'0')
+		digits++
+	}
+	return digits > 0 && minor >= 6
 }

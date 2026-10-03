@@ -357,6 +357,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			res = Result{Body: body}
 		}
 	}()
+	if o.API == "responses" {
+		return bodyResponsesOpts(ctx, pipe, st, o)
+	}
 	mode := o.Mode
 	if mode == "" {
 		mode = components.ModeSync
@@ -472,10 +475,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// -1, not 0: unknown and "zero idle" are different facts, and the compaction gate PERMITS the
 	// first while it must refuse the second. See components.Ctx.IdleMs.
 	idleMs := int64(-1)
-	// ttlMs is the cache lifetime the cold decision below derives, carried onto the Ctx so a
-	// component can act BEFORE expiry rather than only after it. 0 when the cache-aware path did not
-	// run, which reads as "unknown" to every consumer.
+	// ttlMs is either a known expiry or a documented minimum guarantee. The
+	// provenance flag prevents a minimum from becoming a false cold verdict.
+	// Zero means the lifetime is unknown.
 	ttlMs := int64(0)
+	ttlMinimum := false
 	maxCachedIdx := -1
 	if cacheAware && !bypass {
 		// Messages present on the previous turn of this session are already committed
@@ -541,11 +545,15 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// the agent compacts its own context (metaSessionKeys survives that, the derived
 			// sha256(system+firstUser) does not — see explicitSession). Passing the already
 			// widened ttl into the second call converges the two records as a side effect.
-			ttl := sessionTTL(st, sessionID, cacheTTL(provider, body))
-			if a := sessionTTL(st, alias, ttl); a > ttl {
-				ttl = a
+			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
+			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
+			if lifetimeKind == CacheLifetimeExact {
+				ttl = sessionTTL(st, sessionID, ttl)
+				if a := sessionTTL(st, alias, ttl); a > ttl {
+					ttl = a
+				}
+				coldCache = cacheIsCold(prevAt, nowMs, ttl)
 			}
-			coldCache = cacheIsCold(prevAt, nowMs, ttl)
 			// The SAME ttl the cold decision used, carried onto the Ctx. A component that wants to
 			// act BEFORE expiry rather than after needs the lifetime, not just the verdict, and
 			// re-deriving it there would be a second read of one fact — which is how the cold
@@ -631,6 +639,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		Mode:                mode,
 		PrefixAsk:           o.PrefixAsk,
 		CacheTTLMs:          ttlMs,
+		CacheTTLMinimum:     ttlMinimum,
 		// Set BEFORE the run, so cachesplit's own report is right at the source and every
 		// consumer of it agrees. Amending the report afterwards fixed the dashboard and
 		// left /stats and the Prometheus component counters still saying "skipped",
@@ -866,51 +875,10 @@ func resolveCacheAware(mode string, provider bschemas.ModelProvider, body []byte
 		return true
 	default: // "auto" / ""
 		switch provider {
-		case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+		case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex, bschemas.OpenAI:
 			return true
 		}
 		return hasCacheBreakpoint(body)
-	}
-}
-
-// Prompt-cache lifetimes, per provider, for deciding whether a session that has been idle
-// still has a cached prefix at all.
-//
-// THE SAFE DIRECTION IS TO OVER-ESTIMATE. Believing a cache is cold when it is still warm
-// is the expensive mistake: a component that then rewrites deep history invalidates a live
-// prefix and forces a cache-WRITE of the whole suffix at 1.25x the fresh rate — precisely
-// the churn the tail gate exists to prevent. Believing it is warm when it has actually
-// expired only forgoes an opportunity. So every number here is an UPPER bound.
-const (
-	// anthropicDefaultTTL is the implicit lifetime of a bare {"type":"ephemeral"} mark.
-	// Every real captured Claude Code breakpoint is exactly that shape — no ttl field in
-	// any of ~5,000 captured requests — so this is the common case, not the fallback.
-	anthropicDefaultTTL = 5 * time.Minute
-	// extendedTTL is the lifetime an explicit ttl:"1h" asks for, and also the outer bound
-	// used where a provider caches automatically and declares no lifetime at all
-	// (OpenAI-shaped backends: documented as clearing after minutes of inactivity and
-	// always within the hour).
-	extendedTTL = time.Hour
-	// coldMargin is added to the TTL before calling a prefix cold, covering clock skew
-	// between this box and the provider and the gap between when a request was recorded
-	// here and when the provider last touched the entry.
-	coldMargin = time.Minute
-)
-
-// cacheTTL returns how long this request's prompt cache should be assumed to live.
-//
-// For the Anthropic family the request itself declares it, so this is exact rather than a
-// guess: the LONGEST ttl among the breakpoints wins, because any one of them being 1h means
-// part of the prefix may still be warm.
-func cacheTTL(provider bschemas.ModelProvider, body []byte) time.Duration {
-	switch provider {
-	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
-		if bodyAsksExtendedTTL(body) {
-			return extendedTTL
-		}
-		return anthropicDefaultTTL
-	default:
-		return extendedTTL
 	}
 }
 
@@ -921,10 +889,8 @@ const (
 	TTLEphemeral1h = "ephemeral_1h"
 )
 
-// ttlTier names the cache lifetime this request asked for, or "" when it asked for no
-// caching at all. It is cacheTTL's answer as a LABEL: the duration is what the cold-cache
-// decision needs, and the label is what the dashboard needs, and deriving both from the same
-// structural scan is what keeps them from disagreeing.
+// ttlTier names an explicit cache_control tier, or "" when none was present.
+// OpenAI's implicit GPT-5.6+ cache has no Anthropic-style tier label.
 //
 // The empty answer matters and is not folded into 5m: a request with no cache_control anywhere
 // is not a 5-minute-TTL request, it is an uncached one, and a breakpoint histogram that
@@ -1071,10 +1037,15 @@ func RecordCacheTouch(st store.Store, tenant string, body []byte, provider bsche
 		return
 	}
 	msgsRaw := messagesArray(body)
-	if !msgsRaw.Exists() {
-		return
+	var norm []bschemas.ChatMessage
+	if msgsRaw.Exists() {
+		norm, _ = normalize(provider, msgsRaw.Array())
+	} else if provider == bschemas.OpenAI {
+		// A Responses keep-alive reads the same implicit prefix but has no
+		// Chat Completions messages array. Use the same normalized session head
+		// that bodyResponsesOpts uses for its content-derived alias.
+		norm, _ = normalizeResponses(body)
 	}
-	norm, _ := normalize(provider, msgsRaw.Array())
 	if len(norm) == 0 {
 		return
 	}

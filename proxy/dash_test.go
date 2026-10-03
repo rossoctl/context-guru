@@ -22,6 +22,22 @@ import (
 	"github.com/rossoctl/context-guru/store"
 )
 
+func TestCacheAttributionOnlyUsesKnownExpiry(t *testing.T) {
+	for _, tc := range []struct {
+		provider, model string
+		want            int64
+	}{
+		{"anthropic", "claude-sonnet-5", (5 * time.Minute).Milliseconds()},
+		{"openai", "azure/gpt-5.6-luna", 0},
+		{"openai", "gpt-5.5", 0},
+		{"gemini", "gemini-3-pro", 0},
+	} {
+		if got := cacheAttributionTTLMs(tc.provider, tc.model); got != tc.want {
+			t.Errorf("%s/%s: TTL = %d, want %d", tc.provider, tc.model, got, tc.want)
+		}
+	}
+}
+
 // bigToolOutput is a tool result large and repetitive enough that the pipeline's
 // offloaders actually fire, so the end-to-end test exercises a real compaction
 // rather than a no-op.

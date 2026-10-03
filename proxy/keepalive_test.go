@@ -141,7 +141,7 @@ func recordTurn(t *testing.T, k *keeper, pol CachePolicy, body string, at time.T
 // prefix is byte-identical, so the ping may differ from the recorded request in `max_tokens`
 // and `stream` and in NOTHING that the provider hashes.
 func TestPingBodyLeavesTheHashedPrefixByteIdentical(t *testing.T) {
-	out, ok := pingBody([]byte(kaBody))
+	out, ok := pingBody([]byte(kaBody), "/v1/messages")
 	if !ok {
 		t.Fatal("pingBody refused a well-formed body")
 	}
@@ -709,7 +709,7 @@ func TestSendPingHitsTheUpstream(t *testing.T) {
 
 	h := &Handler{opts: Options{}, limiter: NewLimiter(Limits{}), client: srv.Client()}
 	k := newKeeper(h)
-	body, _ := pingBody([]byte(kaBody))
+	body, _ := pingBody([]byte(kaBody), "/v1/messages")
 	u, status, err := k.sendPing(pingJob{
 		up:  upstream{base: srv.URL, path: "/v1/messages"},
 		hdr: http.Header{"Authorization": {"Bearer sk-caller"}, "Content-Type": {"application/json"}},
@@ -946,7 +946,7 @@ func TestRetainedBodyIsMaskedAtRest(t *testing.T) {
 	// BYTE-IDENTICAL, not merely marker-bearing: a single corrupted byte anywhere else in the
 	// prefix still contains the marker, and that byte is a 1.25x write instead of a 0.1x
 	// refresh. This is the assertion that actually guards the mask round trip.
-	want, ok := pingBody([]byte(body))
+	want, ok := pingBody([]byte(body), "/v1/messages")
 	if !ok {
 		t.Fatal("pingBody refused the fixture")
 	}

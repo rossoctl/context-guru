@@ -1,6 +1,6 @@
 # Keep an idle prompt cache warm
 
-The provider's prompt cache has a five-minute lifetime. A session idle longer than that
+Anthropic's prompt cache has a five-minute lifetime. A session idle longer than that
 loses its whole cached prefix, and the next turn re-bills every token of it at the
 cache-creation rate.
 
@@ -29,7 +29,7 @@ Two sentences from the provider's documentation make this fixable:
 
 So a cache *read* refreshes the lifetime, and a read costs `0.1x` base input where
 re-creating the prefix costs `1.25x`. After a session has been idle for `X` seconds, the
-proxy re-sends that session's last request with `max_tokens: 1` — a pure cache read, which
+proxy re-sends that session's last Anthropic request with `max_tokens: 1` — a pure cache read, which
 refreshes the entry. **One ping buys back about 11.5 of itself.**
 
 Nothing else about the request changes. The prefix hash is cumulative over
@@ -37,6 +37,16 @@ Nothing else about the request changes. The prefix hash is cumulative over
 at `1.25x` instead of refreshing one at `0.1x` — the one way this mechanism costs money
 instead of saving it. Only `max_tokens` and `stream` are touched, and neither is inside the
 hashed prefix.
+
+For GPT-5.6+ **OpenAI Responses**, the documented default is a **30-minute
+minimum** after the latest write or reuse, not a five-minute tier or an exact
+expiry. The proxy schedules a separate ping at 28 minutes, leaving two minutes
+for dispatch and upstream latency. It replays the same input with
+`max_output_tokens: 16` (the minimum accepted by the tested IBM LiteLLM Azure
+route) and `stream: false`. It never adds `prompt_cache_options.ttl`. A ping is
+credited only when usage confirms a cache read; a cache write stops further
+pings for that session. Earlier OpenAI models and OpenAI Chat Completions are
+not enabled until their retention and ping shapes are separately validated.
 
 ## Turning it on
 
@@ -48,12 +58,15 @@ configuration document:
 cache:
   keepalive: true
   keepalive_idle_seconds: 280          # X — must be under 300
+  keepalive_openai_idle_seconds: 1680  # GPT-5.6+ Responses; must be under 1730
   keepalive_max_pings: 2               # K
   keepalive_min_prefix_tokens: 20000   # the gate
   keepalive_max_usd_per_ping: 0.25
 ```
 
-These are the measured optimum, not defaults picked by feel. Replayed through the shipped
+The 280-second Anthropic interval is the measured optimum; the 1680-second
+OpenAI interval is a safety margin below the documented minimum, not an
+optimized value from a production replay. Replayed through the shipped
 decision function over the production window, the gated policy (X=280, K=2) nets **+$125.08**
 against $90.76 of ping cost — within 1.7% of an ungated blanket policy while sending **9.8x
 fewer pings** (912 vs 8,915). What the gate drops is the near-free pings on tiny prefixes —

@@ -367,12 +367,17 @@ func (h *Handler) Mux() *http.ServeMux {
 		base:   h.opts.OpenAIUpstream,
 		path:   "/v1/chat/completions",
 		setKey: bearerKey(h.opts.OpenAIKey),
-	}, pickOpenAI))
+	}, pickOpenAI, ""))
+	m.HandleFunc("POST /openai/v1/responses", h.chat(bschemas.OpenAI, upstream{
+		base:   h.opts.OpenAIUpstream,
+		path:   "/v1/responses",
+		setKey: bearerKey(h.opts.OpenAIKey),
+	}, pickOpenAI, "responses"))
 	m.HandleFunc("POST /anthropic/v1/messages", h.chat(bschemas.Anthropic, upstream{
 		base:   h.opts.AnthropicUpstream,
 		path:   "/v1/messages",
 		setKey: headerKey("x-api-key", h.opts.AnthropicKey),
-	}, pickAnthropic))
+	}, pickAnthropic, ""))
 	// Token counting, forwarded verbatim with no pipeline. Absent this route, a client that
 	// asks how big its context is gets a 404 and falls back to working it out with inference
 	// requests — billed calls, added by a proxy sold on reducing them. See counttokens.go.
@@ -419,7 +424,7 @@ func (h *Handler) Mux() *http.ServeMux {
 			// setKey nil in single-tenant mode: pass Bob's own auth (BOBSHELL key)
 			// straight through. In hosted mode upstreamFor always injects, because the
 			// client's header holds OUR token, which must not leave the box.
-		}, pickBob))
+		}, pickBob, ""))
 		m.HandleFunc("/", h.passthrough(h.opts.BobUpstream))
 	}
 	return m
@@ -982,7 +987,7 @@ func failAuthAs(w http.ResponseWriter, err error, reason refusalReason, tenantID
 	fmt.Fprintf(w, "{\"error\":%q}\n", msg)
 }
 
-func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick func(*Tenancy) string) http.HandlerFunc {
+func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick func(*Tenancy) string, api string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Authenticate FIRST, before reading a body or doing any work. In hosted mode
 		// an unauthenticated caller must not be able to make the proxy buffer 32 MiB.
@@ -1137,6 +1142,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// is charged to this request's row, and to no other tenant's.
 				ctx:         cp.llmCtx(r.Context()),
 				provider:    provider,
+				api:         api,
 				body:        body,
 				session:     r.Header.Get("x-context-guru-session"),
 				bypassed:    bypassed,
@@ -1194,7 +1200,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// capture against bypassed=1 rows. Injecting into a bypassed request instead is not
 			// the answer: bypass promises a byte-identical forward, and breaking that to save a
 			// prefix trades a documented guarantee for an unmeasured gain.
-			if tn.Mode != components.ModeObserve && !bypassed {
+			if api != "responses" && tn.Mode != components.ModeObserve && !bypassed {
 				im := h.opts.InjectExpand
 				if im == "" {
 					im = expand.InjectAuto

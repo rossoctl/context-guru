@@ -63,7 +63,7 @@ func TestPingWireBytesEndToEndThroughRealSend(t *testing.T) {
 	k.dispatch = k.fire // inline, so the assertions below run after the ping completes
 
 	orig := []byte(strings.Replace(kaBody, `"text":"hi"`, `"text":"`+marker+`"`, 1))
-	want, ok := pingBody(orig)
+	want, ok := pingBody(orig, "/v1/messages")
 	if !ok {
 		t.Fatal("pingBody refused the fixture")
 	}

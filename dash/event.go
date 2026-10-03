@@ -2,7 +2,9 @@ package dash
 
 import (
 	"strings"
+	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -843,7 +845,7 @@ func (e *Event) keepaliveSavedUSD(p modelinfo.Price) float64 {
 	if e.KeepAlive || e.KeepAlivePings <= 0 || e.CacheRead <= 0 {
 		return 0 // a ping never credits itself
 	}
-	if e.SinceLastMs <= providerCacheTTLMs {
+	if e.SinceLastMs <= keepaliveCreditFloorMs(e.Provider, e.Model) {
 		return 0
 	}
 	if e.CacheWrite >= e.CacheRead {
@@ -864,10 +866,19 @@ func (e *Event) keepaliveSavedUSD(p modelinfo.Price) float64 {
 	return float64(n) * delta
 }
 
-// providerCacheTTLMs is the default ephemeral lifetime, and the same 5 minutes
-// dashcapture.go hands AttributeCache. One constant rather than two literals: the miss
-// classifier and the keep-alive credit have to agree about when an entry is gone, or a row
-// can read "hit" for a gap the credit calls short.
+func keepaliveCreditFloorMs(provider, model string) int64 {
+	if provider == string(bschemas.OpenAI) {
+		if !modelinfo.GPT56OrLater(model) {
+			return 1<<63 - 1 // no known lifetime means no defensible credit
+		}
+		return apply.OpenAIMinimumCacheTTL.Milliseconds()
+	}
+	return providerCacheTTLMs
+}
+
+// providerCacheTTLMs is the Anthropic default used by the Anthropic-only
+// keep-alive. It comes from apply's lifetime source; OpenAI's minimum must not
+// be used as proof that an entry has expired.
 //
 // IT IS NOT THE ONLY TIER, and keepaliveSavedUSD's use of it above is wrong for the other one.
 // A row that wrote at the ONE-HOUR tier (requests.cache_write_1h) keeps its entry for an hour, so
@@ -884,7 +895,7 @@ func (e *Event) keepaliveSavedUSD(p modelinfo.Price) float64 {
 // sign saying the floor is missing, not a fix.
 //
 // dash.kaSaved corrects a different defect in the same credit and does not touch this one.
-const providerCacheTTLMs int64 = 5 * 60 * 1000
+const providerCacheTTLMs int64 = int64(apply.AnthropicDefaultCacheTTL / time.Millisecond)
 
 // baselineDeltaUSD is what the removed content would have cost had it been sent:
 // the unique part as new input (cache-write rate), the re-sent remainder as a

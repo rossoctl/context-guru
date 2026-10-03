@@ -264,3 +264,22 @@ func TestConcurrentTurnsAreWarmNotUnknown(t *testing.T) {
 		t.Error("cache_state pre_expiry permitted compaction on a prefix cached 0 ms ago")
 	}
 }
+
+func TestMinimumLifetimeNeverClaimsTheCacheExpired(t *testing.T) {
+	const ttl = int64(30 * time.Minute / time.Millisecond)
+	c := &Ctx{CacheAware: true, MaxCachedIdx: 2, CacheTTLMs: ttl, CacheTTLMinimum: true}
+	for _, tc := range []struct {
+		idle time.Duration
+		want CachePhase
+	}{
+		{time.Minute, CachePhaseWarm},
+		{29*time.Minute + 30*time.Second, CachePhaseWarm},
+		{30 * time.Minute, CachePhaseUnknown},
+		{45 * time.Minute, CachePhaseUnknown},
+	} {
+		c.IdleMs = tc.idle.Milliseconds()
+		if got := c.CachePhase(time.Minute); got != tc.want {
+			t.Errorf("idle %s: phase = %s, want %s", tc.idle, got, tc.want)
+		}
+	}
+}

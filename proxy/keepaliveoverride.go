@@ -188,6 +188,7 @@ func (k *keeper) overrideFor(tenantID, session string, pol CachePolicy) CachePol
 	// sessionOverride.pol — and so do the head-TTL fields, which are a different mechanism.
 	pol.KeepAlive = true
 	pol.Idle, pol.MaxPings = o.pol.Idle, o.pol.MaxPings
+	pol.OpenAIIdle = o.pol.Idle
 	pol.MinPrefixTokens = o.pol.MinPrefixTokens
 	return pol
 }

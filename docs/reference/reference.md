@@ -9,6 +9,7 @@ The proxy serves both provider dialects on one port (default `:4000`).
 | Route | Purpose |
 |---|---|
 | `POST /openai/v1/chat/completions` | OpenAI chat dialect — runs the pipeline, forwards to the OpenAI upstream. |
+| `POST /openai/v1/responses` | OpenAI Responses dialect — natively rewrites compatible `instructions` and `input` text/tool-output items while preserving opaque state items and response events. |
 | `POST /anthropic/v1/messages` | Anthropic Messages dialect — runs the pipeline, forwards to the Anthropic upstream. |
 | `POST /anthropic/v1/messages/count_tokens` | Token counting, forwarded **verbatim** — the pipeline does not run. Absent this route a client falls back to counting context with *inference* requests, which a proxy sold on reducing spend must not cause. See the note below on what it costs. |
 | `POST /compact` | Stateless compaction: run the pipeline and return the rewritten body, no upstream call. `?provider=anthropic` switches dialect; `?preset=` / `x-context-guru-pipeline` override the pipeline; `?cache=on\|off\|auto` overrides cache-awareness. |
@@ -20,7 +21,7 @@ The proxy serves both provider dialects on one port (default `:4000`).
 
 #### Request-size ceiling — 32 MiB by default, 128 MiB for compaction
 
-`/openai/v1/chat/completions` and `/anthropic/v1/messages` refuse a request body over 32 MiB
+`/openai/v1/chat/completions`, `/openai/v1/responses`, and `/anthropic/v1/messages` refuse a request body over 32 MiB
 with `413 Request Entity Too Large` — buffering more than that would risk exhausting proxy
 memory on a single request. Two exceptions, both because the whole point of the request is
 carrying a transcript that is, by definition, already this large:

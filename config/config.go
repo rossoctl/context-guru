@@ -70,6 +70,11 @@ type CacheConfig struct {
 	// 111 pings on gaps that would have hit anyway, X=280 wastes 53, and the net moves from
 	// +$94.85 to +$125.08.
 	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
+	// KeepAliveOpenAIIdleSeconds is the separate Responses ping interval for
+	// GPT-5.6+ implicit caches. Their guaranteed lifetime is 30 minutes after
+	// the latest write or reuse; the default leaves two minutes of margin.
+	// Zero selects that default. It may be shortened for a controlled test.
+	KeepAliveOpenAIIdleSeconds int `yaml:"keepalive_openai_idle_seconds"`
 	// KeepAliveMaxPings is K: the most pings one idle span may send. 0 =
 	// DefaultKeepAliveMaxPings (2).
 	//
@@ -156,6 +161,7 @@ type CacheConfig struct {
 // becomes 240.
 const (
 	DefaultKeepAliveIdle          = 280
+	DefaultKeepAliveOpenAIIdle    = 28 * 60
 	DefaultKeepAliveMaxPings      = 2
 	DefaultKeepAliveMaxUSDPerPing = 0.25
 	DefaultKeepAliveMinPrefix     = 20000
@@ -168,6 +174,9 @@ const (
 func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveIdleSeconds <= 0 {
 		c.KeepAliveIdleSeconds = DefaultKeepAliveIdle
+	}
+	if c.KeepAliveOpenAIIdleSeconds <= 0 {
+		c.KeepAliveOpenAIIdleSeconds = DefaultKeepAliveOpenAIIdle
 	}
 	if c.KeepAliveMaxPings <= 0 {
 		c.KeepAliveMaxPings = DefaultKeepAliveMaxPings
@@ -190,7 +199,8 @@ func (c CacheConfig) Resolved() CacheConfig {
 // here that turns a saving into a pure cost, because the ping then WRITES at 1.25x instead
 // of reading at 0.1x.
 func (c CacheConfig) validate() error {
-	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 ||
+	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
+		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 ||
 		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
 	}
@@ -199,6 +209,10 @@ func (c CacheConfig) validate() error {
 			"(the provider's 5-minute lifetime runs from the previous request's START, "+
 			"so a later ping re-creates the entry at 1.25x instead of refreshing it at 0.1x); got %d",
 			c.KeepAliveIdleSeconds)
+	}
+	if c.KeepAliveOpenAIIdleSeconds >= 1730 {
+		return fmt.Errorf("config: cache: keepalive_openai_idle_seconds must be under 1730 " +
+			"(leave at least 70 seconds for the ping before the GPT-5.6+ 30-minute minimum ends)")
 	}
 	return nil
 }

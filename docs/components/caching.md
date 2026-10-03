@@ -4,6 +4,25 @@ Two components touch the provider's prompt cache: **cachesplit** (in every cachi
 **cacheinject** (in none). Both are Reformat components whose real work happens body-level in
 `apply`, not in the pipeline's per-message rewrite.
 
+## OpenAI's implicit cache
+
+OpenAI requests are cache-aware in `cache_mode: auto` even without `cache_control`:
+the provider caches eligible prefixes implicitly. Context-guru protects the
+previous turn's prefix while rewriting a new tail. It does not add
+`prompt_cache_options.ttl` to requests. For GPT-5.6 and later, OpenAI's
+documented default is `30m` after the latest write or reuse; that is a
+**minimum**, not proof that the entry expires at 30 minutes. The
+entry is classified **warm** throughout that guarantee: its actual expiry
+cannot be inferred, so `pre_expiry` is not claimed. Past 30 minutes the cache
+phase is **unknown**, not cold. Earlier
+OpenAI models have different retention rules, so their phase remains unknown
+unless a reliable lifetime can be established. GPT-5.6+ Responses sessions
+can opt into a separate 28-minute keep-alive schedule; earlier OpenAI models
+are not pinged.
+
+See the [OpenAI prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+for the model-specific retention rules.
+
 ## Split is measured, placement isn't
 
 Claude Code appends a live environment snapshot to the **end** of its main system block:

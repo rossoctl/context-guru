@@ -15,7 +15,12 @@ func TestCacheWritePremiumIsPerFamily(t *testing.T) {
 		{"claude-haiku-4-5", 1.25},
 		{"aws/claude-sonnet-5", 1.25},         // Bedrock prefix
 		{"anthropic.claude-3-5-sonnet", 1.25}, // Bedrock native id
-		{"azure/gpt-5.5", 1.0},                // no creation premium
+		{"azure/gpt-5.5", 1.0},
+		{"Azure/gpt-5.6-luna", 1.25},
+		{"azure/gpt-5.10-sol", 1.25},
+		{"azure/gpt-6-astra", 1.25},
+		{"gpt-6.1-sol", 1.25},
+		{"gpt-5-mini", 1.0},
 		{"gpt-4o", 1.0},
 		{"gcp/gemini-2.5-pro", 1.0},
 		{"gemini-3-flash-preview", 1.0},

@@ -60,6 +60,23 @@ func TestKeepAliveCreditGates(t *testing.T) {
 	}
 }
 
+func TestOpenAIKeepAliveCreditWaitsForTheThirtyMinuteGuarantee(t *testing.T) {
+	for _, tc := range []struct {
+		gap  int64
+		want bool
+	}{
+		{29 * 60 * 1000, false},
+		{31 * 60 * 1000, true},
+	} {
+		e := keepaliveEvent(tc.gap, 1, 8000, 8000, 0)
+		e.Provider, e.Model = "openai", "azure/gpt-5.6-luna"
+		e.Price(ibmSonnet, true)
+		if got := e.KeepAliveSavedUSD > 0; got != tc.want {
+			t.Errorf("gap %d ms: credited=%v, want %v", tc.gap, got, tc.want)
+		}
+	}
+}
+
 // The credit is capped by what the ping actually refreshed. The ping's own response says how
 // many tokens were in the entry it touched, and claiming more than that would claim tokens our
 // ping never kept alive — for instance a prefix that grew between the ping and the next turn.

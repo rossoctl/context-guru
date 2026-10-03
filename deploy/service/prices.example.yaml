@@ -13,10 +13,10 @@
 #
 # Rates here are LIST PRICES, not credentials. Nothing in this file is a secret.
 #
-# `in`/`out` are required. `cache_read`/`cache_write` are optional and default to
-# 0.1x and 1.25x of `in` (the Anthropic-family multiples) — ete-litellm does not
-# publish separate cache rates, and those multiples are what its Bedrock backend
-# bills. State them explicitly for any model where that stops being true.
+# `in`/`out` are required. `cache_read` defaults to 0.1x of `in`.
+# `cache_write` defaults to 1.25x for Claude and GPT-5.6+, and 1x for older
+# OpenAI and Gemini models. State either rate explicitly when this gateway bills
+# differently.
 #
 # A trailing `*` matches a family. The longest match wins, so a specific id always
 # beats the family it belongs to regardless of order in this file.

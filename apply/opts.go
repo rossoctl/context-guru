@@ -16,6 +16,9 @@ import (
 type Opts struct {
 	Provider bschemas.ModelProvider
 	Body     []byte
+	// API identifies the wire envelope. Empty means Chat Completions / Messages;
+	// "responses" selects OpenAI's native Responses instructions+input shape.
+	API string
 	// Session is the host-supplied session id ("" => content hash).
 	Session string
 	// Tenant namespaces the session id in a hosted, multi-tenant deployment. Empty

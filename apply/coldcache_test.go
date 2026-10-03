@@ -45,8 +45,7 @@ func TestCacheIsCold(t *testing.T) {
 	}
 }
 
-// The TTL comes from the request where the request declares it, and from a documented outer
-// bound where it does not.
+// A minimum guarantee must not be mistaken for a known expiry.
 func TestCacheTTLPerProvider(t *testing.T) {
 	bare := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi",
 		"cache_control":{"type":"ephemeral"}}]}]}`)
@@ -58,21 +57,41 @@ func TestCacheTTLPerProvider(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		provider bschemas.ModelProvider
+		model    string
 		body     []byte
 		want     time.Duration
+		kind     CacheLifetimeKind
 	}{
-		{"anthropic, bare ephemeral is the 5m tier", bschemas.Anthropic, bare, anthropicDefaultTTL},
-		{"anthropic, explicit 1h", bschemas.Anthropic, hour, extendedTTL},
-		{"anthropic, 1h on a system block", bschemas.Anthropic, sysHour, extendedTTL},
-		{"bedrock follows the anthropic shape", bschemas.Bedrock, bare, anthropicDefaultTTL},
-		{"vertex follows the anthropic shape", bschemas.Vertex, bare, anthropicDefaultTTL},
-		{"openai declares no lifetime, so the outer bound applies", bschemas.OpenAI, bare, extendedTTL},
+		{"anthropic, bare ephemeral is the 5m tier", bschemas.Anthropic, "claude-sonnet-5", bare, anthropicDefaultTTL, CacheLifetimeExact},
+		{"anthropic, explicit 1h", bschemas.Anthropic, "claude-sonnet-5", hour, extendedTTL, CacheLifetimeExact},
+		{"anthropic, 1h on a system block", bschemas.Anthropic, "claude-sonnet-5", sysHour, extendedTTL, CacheLifetimeExact},
+		{"bedrock follows the anthropic shape", bschemas.Bedrock, "aws/claude-sonnet-5", bare, anthropicDefaultTTL, CacheLifetimeExact},
+		{"vertex follows the anthropic shape", bschemas.Vertex, "claude-sonnet-5", bare, anthropicDefaultTTL, CacheLifetimeExact},
+		{"gpt-5.6 default is a minimum", bschemas.OpenAI, "azure/gpt-5.6-luna", bare, OpenAIMinimumCacheTTL, CacheLifetimeMinimum},
+		{"older OpenAI retention is unknown", bschemas.OpenAI, "gpt-5.5", bare, 0, CacheLifetimeUnknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := cacheTTL(tc.provider, tc.body); got != tc.want {
-				t.Fatalf("cacheTTL = %v, want %v", got, tc.want)
+			if got, kind := CacheLifetime(tc.provider, tc.model, tc.body); got != tc.want || kind != tc.kind {
+				t.Fatalf("CacheLifetime = (%v, %v), want (%v, %v)", got, kind, tc.want, tc.kind)
 			}
 		})
+	}
+}
+
+func TestOpenAIAutomaticCacheIsProtectedWithoutExplicitBreakpoints(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}`)
+	for _, tc := range []struct {
+		mode string
+		want bool
+	}{
+		{"", true},
+		{"auto", true},
+		{"on", true},
+		{"off", false},
+	} {
+		if got := resolveCacheAware(tc.mode, bschemas.OpenAI, body); got != tc.want {
+			t.Errorf("mode %q: cache aware = %v, want %v", tc.mode, got, tc.want)
+		}
 	}
 }
 
@@ -86,8 +105,8 @@ func TestExtendedTTLDetectionIsStructural(t *testing.T) {
 	if bodyAsksExtendedTTL(body) {
 		t.Fatal("text inside a tool output was read as a cache_control ttl")
 	}
-	if got := cacheTTL(bschemas.Anthropic, body); got != anthropicDefaultTTL {
-		t.Fatalf("cacheTTL = %v, want the 5m tier", got)
+	if got, _ := CacheLifetime(bschemas.Anthropic, "claude-sonnet-5", body); got != anthropicDefaultTTL {
+		t.Fatalf("CacheLifetime = %v, want the 5m tier", got)
 	}
 }
 
