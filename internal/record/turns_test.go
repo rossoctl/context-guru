@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -176,6 +177,117 @@ func TestReconstructTurnsDropsSubagentRoots(t *testing.T) {
 	}
 }
 
+func TestReconstructTurnsDropsDispatchedSubagentPrompts(t *testing.T) {
+	dispatch := Message{Role: "assistant", Parts: []Part{{Type: PartToolCall, ID: "toolu_1",
+		Name: "Agent", Arguments: `{"description":"review","prompt":"You are doing a code review. Angle A."}`}}}
+	var calls []Call
+	// Main thread: the human's turn, then the assistant dispatching a subagent, replayed after.
+	calls = append(calls, Call{Order: "a0", ToolDefs: mainToolDefs, Messages: []Message{
+		{Role: "user", Parts: []Part{{Type: PartText, Content: "review this PR please"}}}}})
+	for i := 1; i < 4; i++ {
+		calls = append(calls, Call{Order: "a" + string(rune('0'+i)), ToolDefs: mainToolDefs,
+			Messages: []Message{
+				{Role: "user", Parts: []Part{{Type: PartText, Content: "review this PR please"}}},
+				dispatch,
+			}})
+	}
+	// The subagent: MORE calls than the main thread, so its root clears RootShare -- the
+	// measured failure -- and one call sharing the main tool set, so it shares the anchor too.
+	for i := 0; i < 8; i++ {
+		calls = append(calls, Call{Order: "b" + string(rune('0'+i)), ToolDefs: subToolDefs(0),
+			Messages: []Message{{Role: "user", Parts: []Part{{Type: PartText,
+				Content: "You are doing a code review.\nAngle A.\n<system-reminder>x</system-reminder>"}}}}})
+	}
+	calls = append(calls, Call{Order: "c0", ToolDefs: mainToolDefs, Messages: []Message{
+		{Role: "user", Parts: []Part{{Type: PartText, Content: "You are doing a code review. Angle A."}}}}})
+
+	got := ReconstructTurns(calls)
+	if len(got) != 1 || got[0].Text != "review this PR please" {
+		t.Fatalf("want only the human's turn, got %d: %+v", len(got), texts(got))
+	}
+}
+
+func TestReconstructTurnsMarksResumedHistoryPrior(t *testing.T) {
+	user := func(tx string) Message {
+		return Message{Role: "user", Parts: []Part{{Type: PartText, Content: tx}}}
+	}
+	reply := Message{Role: "assistant", Parts: []Part{{Type: PartText, Content: "done"}}}
+
+	// A resumed session: its FIRST request already replays two turns and their answers.
+	resumed := []Call{
+		{Order: "01", ToolDefs: mainToolDefs, Messages: []Message{
+			user("old turn one"), reply, user("old turn two"), reply, user("new turn")}},
+		{Order: "02", ToolDefs: mainToolDefs, Messages: []Message{
+			user("old turn one"), reply, user("old turn two"), reply, user("new turn"), reply,
+			user("second new turn")}},
+	}
+	got := ReconstructTurns(resumed)
+	want := []struct {
+		text  string
+		prior bool
+	}{{"old turn one", true}, {"old turn two", true}, {"new turn", false}, {"second new turn", false}}
+	if len(got) != len(want) {
+		t.Fatalf("want %d turns, got %d: %v", len(want), len(got), texts(got))
+	}
+	for i, w := range want {
+		if got[i].Text != w.text || got[i].Prior != w.prior {
+			t.Errorf("turn %d: got %q prior=%v, want %q prior=%v",
+				i, got[i].Text, got[i].Prior, w.text, w.prior)
+		}
+	}
+
+	// A fresh session's first request has no assistant message: nothing is history.
+	fresh := []Call{
+		{Order: "01", ToolDefs: mainToolDefs, Messages: []Message{user("first turn")}},
+		{Order: "02", ToolDefs: mainToolDefs, Messages: []Message{
+			user("first turn"), reply, user("second turn")}},
+	}
+	for _, tr := range ReconstructTurns(fresh) {
+		if tr.Prior {
+			t.Errorf("fresh session marked %q prior", tr.Text)
+		}
+	}
+}
+
+func TestReconstructTurnsNewRootDoesNotRecountHistory(t *testing.T) {
+	user := func(tx string) Message {
+		return Message{Role: "user", Parts: []Part{{Type: PartText, Content: tx}}}
+	}
+	reply := Message{Role: "assistant", Parts: []Part{{Type: PartText, Content: "done"}}}
+	var calls []Call
+	calls = append(calls, Call{Order: "a0", ToolDefs: mainToolDefs,
+		Messages: []Message{user("turn one")}})
+	for i := 1; i < 5; i++ {
+		calls = append(calls, Call{Order: "a" + string(rune('0'+i)), ToolDefs: mainToolDefs,
+			Messages: []Message{user("turn one"), reply, user("turn two")}})
+	}
+	// The tool set changes mid-session: a new anchor, whose first call replays everything.
+	for i := 0; i < 5; i++ {
+		calls = append(calls, Call{Order: "b" + string(rune('0'+i)), ToolDefs: subToolDefs(0),
+			Messages: []Message{user("turn one"), reply, user("turn two"), reply, user("turn three")}})
+	}
+	got := ReconstructTurns(calls)
+	if len(got) != 3 {
+		t.Fatalf("want 3 turns, history not recounted under the new root; got %d: %v", len(got), texts(got))
+	}
+	for _, tr := range got {
+		if tr.Prior {
+			t.Errorf("%q marked prior, but the session observed it under the first root", tr.Text)
+		}
+	}
+}
+
+func TestHumanTextDropsHarnessNotices(t *testing.T) {
+	for _, in := range []string{
+		"[SYSTEM NOTIFICATION - NOT USER INPUT] This is an automated message.",
+		"Continue from where you left off.",
+	} {
+		if h := HumanText(in); h != "" {
+			t.Errorf("HumanText(%q) = %q, want it recognised as injected", in, h)
+		}
+	}
+}
+
 func TestReconstructTurnsMergesAcrossClear(t *testing.T) {
 	// KNOWN AND ACCEPTED COST of anchoring on tool definitions: a /clear starts a second
 	// conversation but does not change the advertised tool set, so both halves share an anchor
@@ -328,6 +440,62 @@ type corpusFile struct {
 	} `json:"spans"`
 }
 
+type seqAt struct {
+	start string
+	seq   int
+}
+
+// turnsHappened is how many human turns a session's surviving interaction spans attest to.
+//
+// Not simply max(interaction.sequence): Claude Code RESTARTS the sequence when a session is
+// resumed under the same id (seen on a real session: 8..16, then 2..6, then 1), so the max
+// undercounts every resumed session. In start-time order, a sequence that goes DOWN opens a new
+// segment, and each segment contributes its own max. A segment evicted whole is still invisible.
+func turnsHappened(seqs []seqAt) int {
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i].start < seqs[j].start })
+	total, segMax, prev := 0, 0, 0
+	for _, s := range seqs {
+		if s.seq < prev {
+			total += segMax
+			segMax = 0
+		}
+		if s.seq > segMax {
+			segMax = s.seq
+		}
+		prev = s.seq
+	}
+	return total + segMax
+}
+
+func TestTurnsHappenedCountsResumedSegments(t *testing.T) {
+	// The shape measured on a real resumed session, minus the content.
+	seqs := []seqAt{{"t10", 2}, {"t11", 3}, {"t01", 8}, {"t02", 9}, {"t03", 16}, {"t20", 1}}
+	if got := turnsHappened(seqs); got != 16+3+1 {
+		t.Fatalf("turnsHappened = %d, want 20 (segments 8..16, 2..3, 1)", got)
+	}
+	if got := turnsHappened([]seqAt{{"a", 1}, {"b", 2}, {"c", 5}}); got != 5 {
+		t.Fatalf("unresumed session: got %d, want max sequence 5", got)
+	}
+}
+
+// promptInBodies reports whether a prompt's text appears in any role:user text part, i.e.
+// whether a reconstruction had anything to recover it from.
+func promptInBodies(calls []Call, prompt string) bool {
+	for _, c := range calls {
+		for _, m := range c.Messages {
+			if m.Role != "user" {
+				continue
+			}
+			for _, p := range m.Parts {
+				if p.Type == PartText && strings.Contains(normalizeSpace(p.Content), prompt) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func TestCorpusReconstructionScore(t *testing.T) {
 	dir := os.Getenv("CG_RECORD_CORPUS")
 	if dir == "" {
@@ -340,7 +508,8 @@ func TestCorpusReconstructionScore(t *testing.T) {
 
 	// Two denominators, because they answer different questions and only reporting one misleads:
 	//
-	//   happened = max(interaction.sequence) -- how many turns the human actually took.
+	//   happened = turnsHappened(...) -- how many turns the human actually took: max sequence per
+	//              resumed segment, summed (see turnsHappened).
 	//   kept     = how many interaction spans survived in the file. claude-record loses turns to
 	//              Jaeger eviction (issue #21): measured, 528 of 764 survive, and the missing ones
 	//              are always a contiguous block from sequence 1.
@@ -348,7 +517,12 @@ func TestCorpusReconstructionScore(t *testing.T) {
 	// Scoring only against `happened` charges the reconstruction for turns whose bodies were
 	// evicted too, and there is nothing left in the file to recover them from. Scoring only
 	// against `kept` flatters it by ignoring those turns entirely. Both are reported.
-	var happened, kept, recon, recovered, sessions int
+	var happened, kept, recon, recovered, sessions, notices int
+	// withBody counts kept turns whose prompt text survives in at least one request body. A kept
+	// turn with no body left is claude-record's capture loss, not the filter's: on a second developer's corpus
+	// 54 of 59 misses were that, so recall over all kept turns measured the capture, not the code.
+	var withBody int
+	var prior int
 	for _, fp := range files {
 		raw, err := os.ReadFile(fp)
 		if err != nil {
@@ -360,16 +534,21 @@ func TestCorpusReconstructionScore(t *testing.T) {
 		}
 		var calls []Call
 		var gt []string
-		maxSeq := 0
+		var seqs []seqAt
 		for _, sp := range cf.Spans {
 			if sp.Name == "claude_code.interaction" {
-				if v, ok := sp.Attributes["interaction.sequence"]; ok {
-					if f, ok := v.(float64); ok && int(f) > maxSeq {
-						maxSeq = int(f)
-					}
+				if f, ok := sp.Attributes["interaction.sequence"].(float64); ok {
+					seqs = append(seqs, seqAt{sp.StartTime, int(f)})
 				}
 				if up, ok := sp.Attributes["user_prompt"].(string); ok {
-					gt = append(gt, normalizeSpace(up))
+					// claude-record labels a <task-notification> as a human turn; it is a
+					// background task reporting back, explicitly "NOT USER INPUT". Scoring the
+					// filter against it rewards matching the wrapper notice that carries it.
+					if strings.HasPrefix(normalizeSpace(up), "<task-notification>") {
+						notices++
+					} else {
+						gt = append(gt, normalizeSpace(up))
+					}
 				}
 				continue
 			}
@@ -384,22 +563,36 @@ func TestCorpusReconstructionScore(t *testing.T) {
 			defs, _ := sp.Attributes["gen_ai.tool.definitions"].(string)
 			calls = append(calls, Call{Order: sp.StartTime, Messages: msgs, ToolDefs: defs})
 		}
+		maxSeq := turnsHappened(seqs)
 		if maxSeq == 0 {
 			continue
 		}
 		sessions++
 		got := ReconstructTurns(calls)
 		for _, g := range gt {
+			hit := false
 			for _, r := range got {
 				if r.Text == g || strings.Contains(r.Text, g) || strings.Contains(g, r.Text) {
-					recovered++
+					hit = true
 					break
 				}
+			}
+			switch {
+			case hit:
+				recovered++
+				withBody++
+			case promptInBodies(calls, g):
+				withBody++
 			}
 		}
 		happened += maxSeq
 		kept += len(gt)
 		recon += len(got)
+		for _, r := range got {
+			if r.Prior {
+				prior++
+			}
+		}
 	}
 	if sessions == 0 {
 		t.Skip("corpus had no sessions with interaction spans")
@@ -410,7 +603,11 @@ func TestCorpusReconstructionScore(t *testing.T) {
 	t.Logf("sessions=%d turns_happened=%d", sessions, happened)
 	t.Logf("  claude-record kept   : %d (%.1f%% of happened)", kept, crPct)
 	t.Logf("  cg reconstructed     : %d (%.1f%% of happened)", recon, covPct)
+	t.Logf("    of which prior to the first observed call: %d", prior)
 	t.Logf("  recall of kept turns : %d/%d (%.1f%%)", recovered, kept, recallPct)
+	bodyRecallPct := 100.0 * float64(recovered) / float64(withBody)
+	t.Logf("  ...of those with a body left: %d/%d (%.1f%%)", recovered, withBody, bodyRecallPct)
+	t.Logf("  task-notifications claude-record labelled as turns, not scored: %d", notices)
 
 	// Guard both claims the comparison makes. Bounds sit below the measured 85.2% / 97.0% so
 	// corpus drift does not fail the build, but a filter regression (which shifts these by tens
@@ -418,9 +615,9 @@ func TestCorpusReconstructionScore(t *testing.T) {
 	if covPct < 75 || covPct > 115 {
 		t.Errorf("coverage %.1f%% of turns that happened; filter likely regressed", covPct)
 	}
-	if recallPct < 90 {
-		t.Errorf("recall of claude-record's kept turns is %.1f%%; the reconstruction is losing "+
-			"turns whose bodies are present", recallPct)
+	if bodyRecallPct < 90 {
+		t.Errorf("recall of claude-record's kept turns is %.1f%% where a body survives; the "+
+			"reconstruction is losing turns whose bodies are present", bodyRecallPct)
 	}
 	// The headline claim: reconstruction beats claude-record's own surviving turn spans.
 	// A TIE IS THE CEILING, NOT A FAILURE, when claude-record lost nothing: if every turn that
