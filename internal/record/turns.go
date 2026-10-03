@@ -43,6 +43,7 @@ package record
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"sort"
 	"strings"
 	"unicode"
@@ -66,6 +67,16 @@ type ReconTurn struct {
 	// Root is the conversation this turn belongs to (see ConversationRoot). Turns from
 	// different roots are different conversations and must not be merged into one sequence.
 	Root string
+
+	// Prior marks a turn that was already HISTORY in the first call observed for its root:
+	// it sits before that call's last assistant message, so it was typed before the proxy saw
+	// the conversation. Live, that is a resumed session -- Claude Code gives a resume a new
+	// session id, and its first request replays the old conversation, so without this mark
+	// every resume re-counts the earlier session's turns (a second developer's corpus: one prompt chain
+	// replayed across three session files). It is also what a session started before
+	// recording began looks like, and, offline, a session whose early calls were lost.
+	// The proxy cannot tell those apart, so the turn is MARKED, not dropped.
+	Prior bool
 }
 
 // injectedPrefixes are whole-message markers: text starting with one of these is framework
@@ -95,6 +106,12 @@ var injectedPrefixes = []string{
 	"The coordinator sent a message while you were working",
 	"Another Claude session sent a message while you were working",
 	"A teammate sent a message while you were working",
+
+	// Harness notices that arrive as bare role:user text. Neither ever appears as a
+	// claude_code.interaction user_prompt in either corpus (73 sessions from one developer, 33 from another),
+	// i.e. Claude Code itself does not count them as human turns.
+	"[SYSTEM NOTIFICATION - NOT USER INPUT]",
+	"Continue from where you left off.",
 }
 
 // wrapperTags enclose injected content. They are STRIPPED rather than used to drop the whole
@@ -282,6 +299,45 @@ const RootShare = 0.05
 // every subagent.
 const MinRootCalls = 3
 
+// subagentTools are the tools whose `prompt` argument becomes a subagent's first role:user
+// message. Task is the older name of Agent.
+var subagentTools = map[string]bool{"Agent": true, "Task": true}
+
+// dispatchedPrompts collects, normalised as HumanText would leave them, every prompt the
+// session handed to a subagent.
+//
+// A subagent's opening message is text the AGENT wrote, not the human, yet it arrives as an
+// ordinary role:user part. The tool-set anchor separates most subagents, but not all of them:
+// a code-review fan-out made more calls than the main thread on two of a second developer's sessions (68 vs
+// 17 on one), so its root cleared RootShare, and a general-purpose subagent shares the main
+// thread's tool set and so its anchor. Matching the dispatch itself catches both, because the
+// main thread replays the assistant's Agent tool_call, prompt included, on every later call.
+func dispatchedPrompts(calls []Call) map[string]bool {
+	out := make(map[string]bool)
+	for _, c := range calls {
+		for _, m := range c.Messages {
+			if m.Role != "assistant" {
+				continue
+			}
+			for _, p := range m.Parts {
+				if p.Type != PartToolCall || !subagentTools[p.Name] {
+					continue
+				}
+				var args struct {
+					Prompt string `json:"prompt"`
+				}
+				if json.Unmarshal([]byte(p.Arguments), &args) != nil {
+					continue
+				}
+				if h := HumanText(args.Prompt); h != "" {
+					out[h] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
 // ReconstructTurns recovers the human turns from a session's model calls.
 //
 // Calls need not be sorted; they are ordered by Call.Order here. Turns are de-duplicated by
@@ -331,7 +387,11 @@ func ReconstructTurns(calls []Call) []ReconTurn {
 		}
 	}
 
+	dispatched := dispatchedPrompts(ordered)
+
 	// Pass 2: collect turns in call order, de-duplicated per root.
+	firstCall := make(map[string]bool)
+	emitted := make(map[string]bool) // turn text, across all roots
 	seen := make(map[string]bool)
 	perRoot := make(map[string]int)
 	var out []ReconTurn
@@ -340,7 +400,18 @@ func ReconstructTurns(calls []Call) []ReconTurn {
 		if r == "" || !keep[r] {
 			continue
 		}
-		for _, m := range c.Messages {
+		// In the root's first observed call, everything before the last assistant message is
+		// history. A fresh conversation's first call has no assistant message, so nothing is.
+		historyEnd := -1
+		if !firstCall[r] {
+			firstCall[r] = true
+			for j, m := range c.Messages {
+				if m.Role == "assistant" {
+					historyEnd = j
+				}
+			}
+		}
+		for j, m := range c.Messages {
 			if m.Role != "user" {
 				continue
 			}
@@ -349,7 +420,7 @@ func ReconstructTurns(calls []Call) []ReconTurn {
 					continue
 				}
 				h := HumanText(p.Content)
-				if h == "" {
+				if h == "" || dispatched[h] {
 					continue
 				}
 				key := r + "\x00" + h
@@ -357,12 +428,23 @@ func ReconstructTurns(calls []Call) []ReconTurn {
 					continue
 				}
 				seen[key] = true
+				// History that another root already produced is the SAME conversation seen
+				// again, not a new turn: a mid-session tool-set change starts a new anchor, a
+				// forked subagent carries its parent's history, and either one's first call
+				// replays everything so far. Measured on 3 of 73 sessions, where those turns
+				// were counted twice.
+				prior := j < historyEnd
+				if prior && emitted[h] {
+					continue
+				}
+				emitted[h] = true
 				perRoot[r]++
 				out = append(out, ReconTurn{
 					Sequence:  perRoot[r],
 					Text:      h,
 					FirstSeen: c.Order,
 					Root:      r,
+					Prior:     prior,
 				})
 			}
 		}
