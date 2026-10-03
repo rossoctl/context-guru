@@ -39,6 +39,11 @@ const (
 	AttrTurnRoot      = "cg.turn.conversation_root"
 	AttrTurnMethod    = "cg.turn.method" // how it was recovered, for auditability
 
+	// AttrTurnPrior is true on a turn that was already history in the first call observed for
+	// its conversation: a resumed session's earlier turns, or turns from before recording began.
+	// Count a session's own turns as those where this is false. See ReconTurn.Prior.
+	AttrTurnPrior = "cg.turn.prior_to_observation"
+
 	// TurnMethodBodyRecon names the only method there is today. Spelled out in the data so a
 	// consumer can tell a reconstruction from an observation without reading this file.
 	TurnMethodBodyRecon = "request_body_reconstruction"
@@ -64,6 +69,7 @@ func DerivedTurnSpan(sessionID, spanID, parentID string, t ReconTurn, start time
 		AttrTurnPrompt:    t.Text,
 		AttrTurnPromptLen: len(t.Text),
 		AttrTurnMethod:    TurnMethodBodyRecon,
+		AttrTurnPrior:     t.Prior,
 		AttrRecordedBy:    CollectorVersion,
 	}
 	if t.Root != "" {
