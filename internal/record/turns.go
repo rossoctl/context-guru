@@ -126,7 +126,9 @@ var wrapperTags = []string{
 	"command-message",
 	"command-args",
 	"fork-boilerplate",
-	"pasted_content",
+	// NOT pasted_content: it encloses text the HUMAN pasted, and claude-record keeps it in
+	// user_prompt. Stripping it dropped paste-only turns and broke matching on mixed ones
+	// (4 of 51 turns with bodies on a third developer's corpus).
 	"agent-message",         // a peer session's message, delivered as role:user text
 	"cross-session-message", // same, under its other spelling
 }
