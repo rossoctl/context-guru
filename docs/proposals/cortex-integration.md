@@ -328,6 +328,18 @@ in the loop, and what they're reviewing is a working adapter, not a design: the 
 this whole plan is §7's documentation confirmation, which can land independently of and before the
 adapter PR.
 
+Phase 4 is unrelated to keep-alive, response visibility, or storage — it's a separate, pre-existing
+gap worth closing in the same PR series since we're already touching this file. Cortex's
+`core/plugins/contextguru` plugin pins `github.com/rossoctl/context-guru` at `v0.3.1` and defaults
+its `paths` config to `/v1/chat/completions`, `/v1/completions`, `/v1/messages` — a list that
+predates this repo's `#375` (native OpenAI Responses-API context reduction, merged well after
+`v0.3.1`). So today, any Responses-API traffic (`/v1/responses`) proxied through Cortex skips
+compaction entirely: not because the engine can't handle it — it can, as of `#375` — but because
+Cortex's embedded copy is both too old to contain that code and configured to never route that
+path to the plugin even if it were current. Phase 4 is two small, independent changes: bump the
+pinned module version past `#375`, and add `/v1/responses` to the default `paths` list — bringing
+the embedded plugin to parity with what `cmd/context-guru-proxy` has already supported for months.
+
 ## Appendix A — the credential retention discipline, portable as-is
 
 Unlike the previous draft of this plan, this isn't Cortex's design to hand down — it's existing,
