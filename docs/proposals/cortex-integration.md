@@ -24,8 +24,10 @@ directly on `*proxy.Handler`:
 
 The governing constraint, settled in discussion: **all context-guru decision logic stays in
 context-guru.** Cortex is piping — transport and credential custody, nothing else. This document
-is the plan for making that split real, independent of whether Cortex ever adopts it (see §5,
-which we'd do regardless).
+is the plan for making that split real, independent of whether Cortex ever adopts it. The first
+piece — decoupling the keep-alive audit sink from `dash` so the keeper no longer has a concrete
+dependency on it — already shipped in [#383](https://github.com/rossoctl/context-guru/pull/383)
+and needed no Cortex decision at all; see Phase 0 in §6.
 
 ## 2. Current state
 
@@ -58,9 +60,9 @@ logic it is today in `proxy/keepalive.go`, just not templated on `*Handler` anym
 ```mermaid
 graph TB
     subgraph ContextGuru["context-guru (unchanged ownership)"]
-        KA["keepalive.Keeper<br/>(exported — ticker, gating, masking,<br/>cost ceiling, write-vs-read guard,<br/>hard deadline, eviction)"]
+        KA["keepalive.Keeper<br/>(not yet exported — ticker, gating,<br/>masking, cost ceiling, write-vs-read<br/>guard, hard deadline, eviction)"]
         ST["store.Store<br/>(already host-agnostic interface)"]
-        EM["components.Emitter<br/>+ optional KeepAliveEmitter"]
+        EM["components.Emitter<br/>+ optional KeepAliveEmitter ✅ shipped (#383)"]
         KA --> ST
         KA --> EM
     end
@@ -192,61 +194,7 @@ stateDiagram-v2
     Released --> [*]: Dispatcher.Release(tenant, session) called
 ```
 
-## 5. Do this regardless of Cortex: decouple the audit sink from the keeper
-
-Today `record1` calls `k.h.rec.Record(dash.Event{...})` directly — the keeper has a hard
-dependency on `dash`'s SQLite-backed event store. That's the same shape of problem the Cortex
-integration has for credentials: a piece of host-specific machinery wired directly into the
-keeper instead of behind an interface. **This is worth fixing independent of Cortex** — it's
-exactly the kind of decoupling that makes the keeper embeddable anywhere, and it costs nothing for
-the standalone proxy.
-
-Fold it into the existing `components.Emitter` pattern rather than inventing a new one. `Emitter`
-(`components.Component(Report)`, `components.Run(RunReport)`) already exists precisely so "the
-pipeline has no dependency on any concrete telemetry backend." Add an **optional** interface
-rather than a new method on `Emitter` itself — adding a required method would break every existing
-implementer (including Cortex's own `logEmitter{}`) on the next version bump:
-
-```go
-// KeepAliveReport is the per-ping result — the same fields record1 puts on
-// a dash.Event today, independent of any particular sink.
-type KeepAliveReport struct {
-    Tenant, Session, Model, Provider, Route string
-    Pings                                    int
-    CacheRead, CacheWrite, Output            int64
-    CostUSD                                  float64
-    Status                                   int
-    DurationMs                               float64
-}
-
-// KeepAliveEmitter is optional — Emitter implementations that don't care
-// about keep-alive specifically (most) don't need to implement it. The
-// keeper type-asserts and no-ops if absent, the same pattern Stasher and
-// StreamingResponder already use elsewhere in this codebase.
-type KeepAliveEmitter interface {
-    KeepAlivePing(KeepAliveReport)
-}
-```
-
-- `cmd/context-guru-proxy` gets a `dashEmitter` that implements `KeepAliveEmitter` by writing the
-  same `dash.Event` it writes today — **zero behavior change**, verified by the existing
-  `TestKeepAliveOnProductionSnapshot` replay.
-- Any embedding host (Cortex or otherwise) that doesn't want the `dash`/SQLite dependency pulled
-  into its process just doesn't implement `KeepAliveEmitter` — it logs through its own `slog`
-  emitter, same as `Component`/`Run` already do in `core/plugins/contextguru/plugin.go` today.
-
-```mermaid
-graph LR
-    K["keepalive.Keeper"] -->|"Component(Report)<br/>Run(RunReport)<br/>KeepAlivePing(KeepAliveReport)?"| EM["components.Emitter<br/>+ optional KeepAliveEmitter"]
-    EM -.implements.-> DE["dash.Event sink<br/>(cmd/context-guru-proxy)"]
-    EM -.implements.-> LE["slog sink<br/>(any embedding host)"]
-```
-
-This phase ships entirely inside context-guru, has no Cortex dependency, and is a prerequisite for
-everything else — the keeper can't be exported cleanly while it still reaches into `dash` by
-concrete type.
-
-## 6. Response visibility and storage — smaller lifts
+## 5. Response visibility and storage — smaller lifts
 
 - **Response visibility (requirement #2):** Cortex's pipeline already calls every plugin's
   `OnResponse(ctx, pctx)` on the real response, in reverse declaration order, with the full body
@@ -263,24 +211,28 @@ concrete type.
   what their shared store's consistency/TTL semantics are, and whether `store.Store`'s TTL
   expectations (used for offload reversibility, not just caching) map cleanly onto it.
 
-## 7. Phased plan
+## 6. Phased plan
 
 ```mermaid
 graph LR
-    P0["Phase 0<br/>Decouple Emitter from dash<br/>(§5, ships regardless of Cortex)"] --> P1
+    P0["Phase 0 ✅ DONE<br/>Decouple Emitter from dash<br/>(#382, #383)"] --> P1
     P1["Phase 1<br/>Export keepalive.Keeper,<br/>Dispatcher/Release interfaces,<br/>default httpDispatcher for<br/>cmd/context-guru-proxy<br/>(no behavior change)"] --> P2
     P2["Phase 2<br/>Wire real OnResponse /<br/>OnResponseFrame into the<br/>Cortex plugin"] --> P3
     P3["Phase 3<br/>Cortex implements Dispatcher<br/>+ shared Store adapter<br/>(their build, Appendix A<br/>is reference only)"] --> P4
     P4["Phase 4<br/>Add /v1/responses to the<br/>plugin's default paths<br/>(PR375 parity)"]
 ```
 
-Phase 0 and Phase 1 are entirely ours, ship independent of any Cortex decision, and are verified
-against the existing keep-alive test suite (`keepalive_test.go`,
-`TestKeepAliveOnProductionSnapshot`, `keepalive_openai_test.go`) with no behavioral delta expected.
-Phase 2 is also entirely ours, inside the Cortex plugin file, once Phase 1 ships an exported
-package to call. Phase 3 is the one phase that's actually the Cortex maintainers' decision —
-we hand them the two-method `Dispatcher` interface and the lifecycle diagram above, not an
-implementation.
+Phase 0 shipped in
+[#383](https://github.com/rossoctl/context-guru/pull/383) (tracked by
+[#382](https://github.com/rossoctl/context-guru/issues/382)) — the keeper's `record1` now
+reports through `components.Emitter`'s optional `KeepAliveEmitter` instead of calling `dash`
+directly, with the standalone proxy's dashboard output unchanged, verified against the existing
+keep-alive test suite (`keepalive_test.go`, `TestKeepAliveOnProductionSnapshot`,
+`keepalive_openai_test.go`). Phase 1 is next, entirely ours, ships independent of any Cortex
+decision, and gets verified against the same suite with no behavioral delta expected. Phase 2 is
+also entirely ours, inside the Cortex plugin file, once Phase 1 ships an exported package to call.
+Phase 3 is the one phase that's actually the Cortex maintainers' decision — we hand them the
+two-method `Dispatcher` interface and the lifecycle diagram above, not an implementation.
 
 ## Appendix A — reference retention discipline (non-binding)
 
