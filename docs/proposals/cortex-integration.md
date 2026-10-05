@@ -24,10 +24,7 @@ directly on `*proxy.Handler`:
 
 The governing constraint, settled in discussion: **all context-guru decision logic stays in
 context-guru.** Cortex is piping — transport and credential custody, nothing else. This document
-is the plan for making that split real, independent of whether Cortex ever adopts it. The first
-piece — decoupling the keep-alive audit sink from `dash` so the keeper no longer has a concrete
-dependency on it — already shipped in [#383](https://github.com/rossoctl/context-guru/pull/383)
-and needed no Cortex decision at all; see Phase 0 in §6.
+is the plan for making that split real, independent of whether Cortex ever adopts it.
 
 ## 2. Current state
 
@@ -60,9 +57,9 @@ logic it is today in `proxy/keepalive.go`, just not templated on `*Handler` anym
 ```mermaid
 graph TB
     subgraph ContextGuru["context-guru (unchanged ownership)"]
-        KA["keepalive.Keeper<br/>(not yet exported — ticker, gating,<br/>masking, cost ceiling, write-vs-read<br/>guard, hard deadline, eviction)"]
+        KA["keepalive.Keeper<br/>(exported — ticker, gating, masking,<br/>cost ceiling, write-vs-read guard,<br/>hard deadline, eviction)"]
         ST["store.Store<br/>(already host-agnostic interface)"]
-        EM["components.Emitter<br/>+ optional KeepAliveEmitter ✅ shipped (#383)"]
+        EM["components.Emitter<br/>+ optional KeepAliveEmitter"]
         KA --> ST
         KA --> EM
     end
@@ -215,24 +212,18 @@ stateDiagram-v2
 
 ```mermaid
 graph LR
-    P0["Phase 0 ✅ DONE<br/>Decouple Emitter from dash<br/>(#382, #383)"] --> P1
     P1["Phase 1<br/>Export keepalive.Keeper,<br/>Dispatcher/Release interfaces,<br/>default httpDispatcher for<br/>cmd/context-guru-proxy<br/>(no behavior change)"] --> P2
     P2["Phase 2<br/>Wire real OnResponse /<br/>OnResponseFrame into the<br/>Cortex plugin"] --> P3
     P3["Phase 3<br/>Cortex implements Dispatcher<br/>+ shared Store adapter<br/>(their build, Appendix A<br/>is reference only)"] --> P4
     P4["Phase 4<br/>Add /v1/responses to the<br/>plugin's default paths<br/>(PR375 parity)"]
 ```
 
-Phase 0 shipped in
-[#383](https://github.com/rossoctl/context-guru/pull/383) (tracked by
-[#382](https://github.com/rossoctl/context-guru/issues/382)) — the keeper's `record1` now
-reports through `components.Emitter`'s optional `KeepAliveEmitter` instead of calling `dash`
-directly, with the standalone proxy's dashboard output unchanged, verified against the existing
-keep-alive test suite (`keepalive_test.go`, `TestKeepAliveOnProductionSnapshot`,
-`keepalive_openai_test.go`). Phase 1 is next, entirely ours, ships independent of any Cortex
-decision, and gets verified against the same suite with no behavioral delta expected. Phase 2 is
-also entirely ours, inside the Cortex plugin file, once Phase 1 ships an exported package to call.
-Phase 3 is the one phase that's actually the Cortex maintainers' decision — we hand them the
-two-method `Dispatcher` interface and the lifecycle diagram above, not an implementation.
+Phase 1 is entirely ours, ships independent of any Cortex decision, and is verified against the
+existing keep-alive test suite (`keepalive_test.go`, `TestKeepAliveOnProductionSnapshot`,
+`keepalive_openai_test.go`) with no behavioral delta expected. Phase 2 is also entirely ours,
+inside the Cortex plugin file, once Phase 1 ships an exported package to call. Phase 3 is the one
+phase that's actually the Cortex maintainers' decision — we hand them the two-method `Dispatcher`
+interface and the lifecycle diagram above, not an implementation.
 
 ## Appendix A — reference retention discipline (non-binding)
 
