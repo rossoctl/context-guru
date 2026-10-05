@@ -191,25 +191,32 @@ even that. This is an adapter-side locking detail, not something that needs a Co
 
 ### 5.1 One session's idle gap, end to end
 
-`Adapter` below is the Cortex-side plugin code (`OnRequest`/`OnResponse`); `Dispatcher` is the
-`keepalive.Dispatcher` implementation it provides to the `Keeper`.
+Three roles, carried as the visible label on each box: **context-guru** (the `Keeper` — unchanged
+decision logic, host-agnostic), **cortex-plugin** (the new adapter in `core/plugins/contextguru` —
+`Plugin` implements the two hooks, `Dispatcher` implements the one interface the `Keeper` calls
+out through), and **cortex** (AuthBridge's own pipeline/listener — unmodified, just the thing that
+invokes plugin hooks and carries traffic to and from `Agent`/`Upstream`).
 
 ```mermaid
 sequenceDiagram
     participant Agent
-    participant Adapter
-    participant Keeper
-    participant Dispatcher
+    participant Cortex
+    participant Plugin as cortex-plugin - Plugin
+    participant Keeper as context-guru - Keeper
+    participant Dispatcher as cortex-plugin - Dispatcher
     participant Upstream
 
-    Agent->>Adapter: real request, session S
-    Adapter->>Keeper: Arrive(tenant, S)
+    Agent->>Cortex: real request, session S
+    Cortex->>Plugin: OnRequest(pctx)
+    Plugin->>Keeper: Arrive(tenant, S)
     Note over Keeper: clears any stale tracked entry for S
-    Adapter->>Upstream: forward compacted body
-    Upstream-->>Adapter: response and usage
-    Adapter->>Keeper: Record(tenant, S, startedAt, body, usage, status)
+    Plugin-->>Cortex: SetBody, compacted
+    Cortex->>Upstream: forward compacted body
+    Upstream-->>Cortex: response and usage
+    Cortex->>Plugin: OnResponse(pctx)
+    Plugin->>Keeper: Record(tenant, S, startedAt, body, usage, status)
     Note over Keeper: gates - turn at least 1, prefix floor, cost ceiling,<br/>thinking-enabled refusal - track or discard
-    Adapter-->>Agent: response
+    Cortex-->>Agent: response
 
     Note over Keeper: session goes idle
     loop every keepAliveTick, 2s
@@ -222,8 +229,9 @@ sequenceDiagram
     Note over Keeper: write-vs-read guard - CacheWrite over CacheRead<br/>stops pinging this session
     Keeper->>Keeper: record1 - cost, RecordCacheTouch,<br/>emit KeepAlivePing report
 
-    Agent->>Adapter: next real request, session S
-    Adapter->>Keeper: Arrive(tenant, S)
+    Agent->>Cortex: next real request, session S
+    Cortex->>Plugin: OnRequest(pctx)
+    Plugin->>Keeper: Arrive(tenant, S)
     Keeper-->>Dispatcher: Release(tenant, S)
     Note over Dispatcher: zero the retained credential
 ```
