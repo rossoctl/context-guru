@@ -268,9 +268,12 @@ func kvCacheScope(f Filter) Filter {
 // TestTheSQLPartitionIsExactlyTheConversationKey is the assertion that they agree.
 const kvCacheCTE = `WITH s AS (SELECT r.id, r.ts, r.tenant_id, r.session_id, r.model,
 		r.provider, r.agent, r.preset, r.mode, r.token_accounting, r.reasoning_effort,
-		r.thinking_mode, r.stop_reason, r.uncompressed_reason, r.cache_ttl, r.keepalive,
-		r.fresh_input, r.output_tokens, r.cache_read, r.cache_write, r.cache_write_1h,
-		r.cache_miss_reason, r.cost_usd, r.upstream_ms,
+		r.thinking_mode, r.thinking_budget, r.stop_reason, r.uncompressed_reason, r.cache_ttl,
+		r.keepalive, r.fresh_input, r.output_tokens, r.cache_read, r.cache_write,
+		r.cache_write_1h, r.cache_miss_reason, r.cost_usd, r.upstream_ms, r.reverts,
+		r.expands, r.max_tokens, r.stream, r.tool_choice, r.temperature, r.top_p, r.tools,
+		r.system_blocks, r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages,
+		r.cache_bp_blocks,
 		LEAD(r.ts) OVER w AS next_ts, LEAD(r.id) OVER w AS next_id
 	FROM requests r WHERE %s
 	WINDOW w AS (PARTITION BY r.tenant_id, r.session_id, r.model ORDER BY r.ts, r.id))`
@@ -339,7 +342,10 @@ func bucketHours(b kvcache.Bucket) (lo, hi int, ok bool) {
 const kvCacheCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r.agent,
 	r.cache_ttl, r.fresh_input, r.output_tokens, r.cache_read, r.cache_write, r.cache_write_1h,
 	r.cache_miss_reason, r.token_accounting, r.cost_usd, r.upstream_ms, r.keepalive,
-	r.stop_reason, r.next_ts, r.next_id`
+	r.stop_reason, r.next_ts, r.next_id, r.preset, r.mode, r.reverts, r.expands,
+	r.max_tokens, r.stream, r.tool_choice, r.temperature, r.top_p, r.reasoning_effort,
+	r.thinking_mode, r.thinking_budget, r.tools, r.system_blocks, r.cache_bp_system,
+	r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks`
 
 // scanKVCacheRequest reads one row and fills everything derived from it.
 //
@@ -352,14 +358,25 @@ func scanKVCacheRequest(rows interface{ Scan(...any) error }) (*kvcache.Request,
 	var r kvcache.Request
 	var cacheTTL, missReason, accounting string
 	var nextTS, nextID sql.NullInt64
-	var keepAlive int
+	var keepAlive, reverts, expands, stream int
+	var temperature, topP sql.NullFloat64
 	if err := rows.Scan(&r.ID, &r.TS, &r.User, &r.ConversationID, &r.Model, &r.Provider,
 		&r.Agent, &cacheTTL, &r.InputTokens, &r.OutputTokens, &r.CacheRead, &r.CacheWrite,
 		&r.CacheWrite1h, &missReason, &accounting, &r.CostUSD, &r.UpstreamMs, &keepAlive,
-		&r.StopReason, &nextTS, &nextID); err != nil {
+		&r.StopReason, &nextTS, &nextID, &r.Preset, &r.Mode, &reverts, &expands,
+		&r.MaxTokens, &stream, &r.ToolChoice, &temperature, &topP, &r.ReasoningEffort,
+		&r.ThinkingMode, &r.ThinkingBudget, &r.ToolsDeclared, &r.SystemBlocks,
+		&r.CacheBPSystem, &r.CacheBPTools, &r.CacheBPMessages, &r.CacheBPBlocks); err != nil {
 		return nil, err
 	}
 	r.KeepAlive = keepAlive != 0
+	r.Reverts, r.Expands, r.Stream = reverts, expands, stream != 0
+	if temperature.Valid {
+		r.Temperature = &temperature.Float64
+	}
+	if topP.Valid {
+		r.TopP = &topP.Float64
+	}
 	r.MissReason = missReason
 	r.Hit = missReason == CacheHit
 	r.CachedContext = r.CacheRead + r.CacheWrite
