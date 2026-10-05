@@ -191,36 +191,39 @@ even that. This is an adapter-side locking detail, not something that needs a Co
 
 ### 5.1 One session's idle gap, end to end
 
+`Adapter` below is the Cortex-side plugin code (`OnRequest`/`OnResponse`); `Dispatcher` is the
+`keepalive.Dispatcher` implementation it provides to the `Keeper`.
+
 ```mermaid
 sequenceDiagram
     participant Agent
-    participant Host as Adapter (plugin OnRequest/OnResponse)
-    participant Keeper as keepalive.Keeper
-    participant Dispatcher as Adapter.Dispatcher
+    participant Adapter
+    participant Keeper
+    participant Dispatcher
     participant Upstream
 
-    Agent->>Host: real request (session S)
-    Host->>Keeper: Arrive(tenant, S)
+    Agent->>Adapter: real request, session S
+    Adapter->>Keeper: Arrive(tenant, S)
     Note over Keeper: clears any stale tracked entry for S
-    Host->>Upstream: forward (compacted) body
-    Upstream-->>Host: response + usage
-    Host->>Keeper: Record(tenant, S, startedAt, body, usage, status)
-    Note over Keeper: gates: turn>=1, prefix floor, cost ceiling,<br/>thinking-enabled refusal → track or discard
-    Host-->>Agent: response
+    Adapter->>Upstream: forward compacted body
+    Upstream-->>Adapter: response and usage
+    Adapter->>Keeper: Record(tenant, S, startedAt, body, usage, status)
+    Note over Keeper: gates - turn at least 1, prefix floor, cost ceiling,<br/>thinking-enabled refusal - track or discard
+    Adapter-->>Agent: response
 
-    Note over Keeper: session goes idle...
-    loop every keepAliveTick (2s)
-        Keeper->>Keeper: sweep(now) — is this entry due()?
+    Note over Keeper: session goes idle
+    loop every keepAliveTick, 2s
+        Keeper->>Keeper: sweep(now) - is this entry due
     end
-    Keeper->>Dispatcher: Dispatch(req) [idle elapsed]
-    Dispatcher->>Upstream: ping (standalone http.Client,<br/>credential captured from pctx.Headers<br/>at Arrive/Record time)
+    Keeper->>Dispatcher: Dispatch(req), idle elapsed
+    Dispatcher->>Upstream: ping via standalone http.Client,<br/>credential captured from pctx.Headers<br/>at Arrive and Record time
     Upstream-->>Dispatcher: usage
     Dispatcher-->>Keeper: Usage, status
-    Note over Keeper: write-vs-read guard: CacheWrite>CacheRead?<br/>→ stop pinging this session
-    Keeper->>Keeper: record1() — cost, store.RecordCacheTouch,<br/>emit KeepAlivePing report
+    Note over Keeper: write-vs-read guard - CacheWrite over CacheRead<br/>stops pinging this session
+    Keeper->>Keeper: record1 - cost, RecordCacheTouch,<br/>emit KeepAlivePing report
 
-    Agent->>Host: next real request (session S)
-    Host->>Keeper: Arrive(tenant, S)
+    Agent->>Adapter: next real request, session S
+    Adapter->>Keeper: Arrive(tenant, S)
     Keeper-->>Dispatcher: Release(tenant, S)
     Note over Dispatcher: zero the retained credential
 ```
@@ -230,19 +233,19 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> Untracked
-    Untracked --> Tracked: Record() passes every gate<br/>(turn≥1, prefix floor, cost ≤ ceiling,<br/>not thinking-enabled, usage present)
-    Untracked --> Untracked: Record() fails a gate → discarded,<br/>nothing retained
+    Untracked --> Tracked: Record passes every gate -<br/>turn at least 1, prefix floor,<br/>cost under ceiling, not thinking-enabled,<br/>usage present
+    Untracked --> Untracked: Record fails a gate,<br/>discarded, nothing retained
 
-    Tracked --> Tracked: sweep() tick, not yet due()
-    Tracked --> Dispatching: due() — idle elapsed, pings < MaxPings
-    Dispatching --> Tracked: Dispatch ok, CacheRead≥CacheWrite<br/>(pings++, startedAt reset)
-    Dispatching --> Stopped: CacheWrite>CacheRead (wrote instead of read)<br/>or upstream 4xx (won't repeat)
-    Dispatching --> Tracked: Dispatch error/5xx (transient, will retry)
+    Tracked --> Tracked: sweep tick, not yet due
+    Tracked --> Dispatching: due - idle elapsed, pings under MaxPings
+    Dispatching --> Tracked: Dispatch ok, CacheRead at least CacheWrite,<br/>pings plus one, startedAt reset
+    Dispatching --> Stopped: CacheWrite over CacheRead, wrote instead of read,<br/>or upstream 4xx, wont repeat
+    Dispatching --> Tracked: Dispatch error or 5xx, transient, will retry
 
-    Tracked --> Released: Arrive() for the same session<br/>(a real request supersedes the hold)
-    Tracked --> Released: hard deadline (K+1)×Idle fires<br/>(time.AfterFunc, independent of sweep)
-    Tracked --> Released: evictLocked() — session/byte bound hit
-    Stopped --> Released: next sweep or Arrive()
+    Tracked --> Released: Arrive for the same session,<br/>a real request supersedes the hold
+    Tracked --> Released: hard deadline, K plus 1 times Idle, fires<br/>via time.AfterFunc, independent of sweep
+    Tracked --> Released: evictLocked - session or byte bound hit
+    Stopped --> Released: next sweep or Arrive
 
     Released --> [*]: Dispatcher.Release(tenant, session) called
 ```
