@@ -83,6 +83,22 @@ func TestCampaignHoldoutPanelNamesTheInSampleFigureForWhatItIs(t *testing.T) {
 	}
 }
 
+// TestCampaignOverviewLabelsPredictedAsInSample guards the specific pairing PHASE2.md's
+// P2-3 finding names: the campaign drawer shows PredictedUSD right beside a REAL, live
+// measurement, which is exactly the comparison an in-sample number cannot support. The
+// server's own caveat string (proxy/campaign.go's campaignRealSavingsCaveat) says so in
+// words, but a reader scanning the tiles and table headers first sees only their labels —
+// so the labels themselves must say "in-sample" too, not just the paragraph beneath them.
+func TestCampaignOverviewLabelsPredictedAsInSample(t *testing.T) {
+	src := readUI(t, "ui/campaigns.js")
+	overview := sliceFunc(t, src, "async function renderCampaignOverview(")
+	if !strings.Contains(overview, "in-sample") {
+		t.Error("renderCampaignOverview's Predicted tile/table headers no longer say " +
+			"in-sample — a reader would see a fitted number sitting beside a measured one " +
+			"with nothing on the page distinguishing them")
+	}
+}
+
 // sliceFunc returns the source of one function: from its declaration to the next top-level
 // declaration. Crude, and enough — every function in these files starts at column zero.
 func sliceFunc(t *testing.T, src, decl string) string {

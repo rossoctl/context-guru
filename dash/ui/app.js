@@ -8561,6 +8561,11 @@ const strategyForm = {
   editingID: '', // '' = creating a new one
   windows: [],   // the windows accumulated for the form currently open
   tenants: [],   // the roster, for the account picker; loaded once
+  // forecastGen guards refreshStrategyForecast's own async fetch the same way campaigns.js's
+  // *Gen counters do: bumped at the start of every debounced call, checked again once the fetch
+  // resolves, so a slow response to an earlier edit can never overwrite what a later edit is
+  // now showing.
+  forecastGen: 0,
 };
 
 const STRATEGY_DAYS = [
@@ -8575,6 +8580,12 @@ const STRATEGY_PREDICTORS = [
     + '(measured +1.54% vs fixed-5m, see the KV-cache page)' },
 ];
 
+// KA_CALC_MAX_K mirrors dash/keepalive.go's kaCalcMaxK — the top rung GET /api/keepalive/calc
+// replays to. Kept here only so the strategy-form forecast (below) can recognise a max_pings
+// typed past the edge of what it can preview, not as a second source of truth for the ladder
+// itself: the server owns every row and every dollar.
+const KA_CALC_MAX_K = 24;
+
 function dayLabel(days) {
   if (!days || !days.length) return 'every day';
   return [...days].sort((a, b) => a - b).map((d) => STRATEGY_DAYS[d][1]).join(',');
@@ -8583,7 +8594,72 @@ function windowLabel(w) {
   return `${dayLabel(w.days)} ${w.start}–${w.end} ${w.tz || 'Asia/Jerusalem'}`;
 }
 
+/**
+ * loadKeepAliveMaxPingsByTenant renders the per-tenant max_pings economics table — see
+ * PHASE2.md's finding P2-4: a single pooled curve harms roughly a third of tenants, some of
+ * them at every setting, so this is per-tenant by construction, never averaged into one line.
+ * The server already sorts worst-first (off-recommended, then lowest optimal net); nothing
+ * here re-sorts or computes a dollar figure of its own.
+ */
+async function loadKeepAliveMaxPingsByTenant() {
+  const host = clear($('#ka-tenant-econ'));
+  loadingState(host, 3);
+  let out;
+  try {
+    out = await ctl('/api/keepalive/strategies/max-pings-by-tenant');
+  } catch (e) {
+    clear(host);
+    errorState(host, 'Could not compute the per-tenant max_pings economics', e);
+    return;
+  }
+  clear(host);
+  const rows = out.tenants || [];
+  if (out.note) host.appendChild(el('p', { class: 'note' }, out.note));
+  if (!rows.length) {
+    emptyState(host, 'No tenant has keep-alive-relevant history in this deployment yet', '');
+    return;
+  }
+  const tbl = el('table', { class: 'grid', 'data-testid': 'ka-tenant-econ-table' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Tenant'), el('th', { class: 'num' }, 'Decision points'),
+      el('th', {}, 'Current'), el('th', {}, 'Modelled state'),
+      el('th', { class: 'num' }, 'Optimal max_pings'), el('th', { class: 'num' }, 'Optimal net'))));
+  const body = el('tbody');
+  for (const t of rows) {
+    const current = t.current_max_pings
+      ? `${t.current_max_pings} (${t.current_strategy_id})` : 'none (account default)';
+    let state, stateClass = '';
+    if (!t.priced) {
+      state = 'not priced';
+    } else if (t.off_recommended) {
+      state = 'keep-alive does not pay for this tenant at any setting — consider OFF';
+      stateClass = 'bad-text';
+    } else if (t.current_max_pings && t.current_max_pings === t.optimal_max_pings) {
+      state = 'already at its own modelled optimum';
+      stateClass = 'good-text';
+    } else if (t.current_max_pings) {
+      state = t.optimal_max_pings > t.current_max_pings
+        ? 'this tenant’s own history says raise the cap' : 'this tenant’s own history '
+          + 'says lower the cap';
+    } else {
+      state = 'no strategy currently matches this tenant';
+    }
+    body.appendChild(el('tr', { 'data-testid': 'ka-tenant-econ-' + t.tenant_id },
+      el('td', {}, el('code', { class: 'clip' }, t.tenant_id)),
+      el('td', { class: 'num' },
+        num(t.decision_points) + (t.thin_data ? ' (thin — too little to trust)' : '')),
+      el('td', {}, current),
+      el('td', { class: stateClass }, state),
+      el('td', { class: 'num' }, t.priced ? num(t.optimal_max_pings) : '—'),
+      el('td', { class: 'num ' + (t.priced && t.optimal_net_usd < 0 ? 'bad-text' : '') },
+        t.priced ? usd(t.optimal_net_usd) : '—')));
+  }
+  tbl.appendChild(body);
+  host.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
+}
+
 async function loadStrategies() {
+  loadKeepAliveMaxPingsByTenant(); // independent read; its own try/catch, awaited separately
   const form = $('#strategy-form');
   if (!form.dataset.built) {
     try {
@@ -8641,6 +8717,94 @@ function buildStrategyForm(form) {
   const syncTargetDisabled = () => { targetIDs.disabled = !targetList.checked; };
   targetAll.addEventListener('change', syncTargetDisabled);
   targetList.addEventListener('change', syncTargetDisabled);
+
+  // refreshStrategyForecast: a MODELLED preview of this strategy's own economics, reusing the
+  // Keep-alive tab's own calculator route (GET /api/keepalive/calc) rather than a second
+  // simulator — see PHASE2.md's P2-1c/P2-1d finding that every active strategy today is set to
+  // max_pings 1 or 2, well short of the modelled optimum, with no visible way to see that while
+  // editing one. Informational only: it never writes anything and the optimum it names is never
+  // applied for the caller — a human reads it and decides.
+  let sfForecastDeb = null;
+  const refreshStrategyForecast = () => {
+    clearTimeout(sfForecastDeb);
+    sfForecastDeb = setTimeout(async () => {
+      const gen = ++strategyForm.forecastGen;
+      const x = Math.max(1, Number(idle.value) || 280);
+      const k = Math.max(1, Number(pings.value) || 1);
+      let tenantQ = '', tenantNote = '';
+      if (targetList.checked) {
+        const picked = Array.from(targetIDs.selectedOptions).map((o) => o.value);
+        if (picked.length === 0) {
+          clear(forecast).appendChild(el('span', {}, 'Pick at least one account (or switch to '
+            + '"Every account") to preview this setting’s modelled net.'));
+          return;
+        }
+        tenantQ = '&tenant=' + encodeURIComponent(picked[0]);
+        if (picked.length > 1) {
+          tenantNote = ` Previewing on ${picked[0]} only — the first of ${picked.length} `
+            + 'picked accounts; a combined preview across several accounts is not built yet.';
+        }
+      }
+      if (k > KA_CALC_MAX_K) {
+        clear(forecast).appendChild(el('span', {},
+          `This preview only replays max_pings up to ${KA_CALC_MAX_K} — net falls off `
+          + 'sharply well before then (see the Keep-alive tab’s own ladder), so a setting '
+          + 'this high is not worth previewing.'));
+        return;
+      }
+      clear(forecast).appendChild(el('span', { class: 'muted' }, 'Computing…'));
+      let out;
+      try {
+        out = await ctl(`/api/keepalive/calc?x=${x}&k=${k}${tenantQ}`);
+      } catch (e) {
+        if (gen !== strategyForm.forecastGen) return;
+        errorState(clear(forecast), 'Could not compute the modelled net', e);
+        return;
+      }
+      if (gen !== strategyForm.forecastGen) return; // a newer edit already asked again
+      clear(forecast);
+      if (!out.priced || !out.rows || !out.rows.length) {
+        forecast.appendChild(el('span', {},
+          'No priced model on this scope’s own history to preview a modelled net against.'));
+        return;
+      }
+      const current = out.rows.find((r) => r.max_pings === k);
+      const optimal = out.rows.find((r) => r.optimal);
+      const p = el('p', {}, el('strong', {
+        class: current && current.net_usd < 0 ? 'bad-text' : '',
+      }, `Modelled net at max_pings=${k}: `
+        + (current ? usd(current.net_usd) : 'not enough history to price')));
+      if (optimal && current && optimal.max_pings !== k) {
+        p.appendChild(el('span', {}, ` · this scope’s modelled optimum is `
+          + `max_pings=${optimal.max_pings} (${usd(optimal.net_usd)}) — shown for `
+          + 'reference, not applied for you.'));
+      }
+      forecast.appendChild(p);
+      // The specific case PHASE2.md's P2-4/P2-5 findings exist to warn about: a flat cap
+      // applied everywhere harms roughly a third of tenants, some of them AT EVERY max_pings —
+      // for those, no rung on this ladder is the fix, because none of them turns a profit. The
+      // "optimal" row is still just the least-bad one when that happens, and saying only
+      // "optimal" there would read as good news that is not there.
+      if (optimal && optimal.net_usd <= 0) {
+        forecast.appendChild(el('p', { class: 'hint bad-text' },
+          `This scope’s own history has no max_pings setting that modelled net-positive — `
+          + `even ${optimal.max_pings} (its least-bad rung) is ${usd(optimal.net_usd)}. `
+          + 'Consider leaving keep-alive off for this scope rather than tuning it further.'));
+      }
+      forecast.appendChild(el('p', { class: 'hint' },
+        'MODELLED: a replay of this scope’s own past idle gaps, assuming every ping refreshes '
+        + 'the cache successfully — a per-scope replay, not this deployment’s pooled estimate, '
+        + 'so the optimum here can differ from a service-wide figure quoted elsewhere. Realized '
+        + 'keep-alive net has historically run well below a comparable modelled estimate on '
+        + 'this deployment, so trust the SHAPE (which max_pings is better, or whether none is) '
+        + 'far more than the absolute dollars.' + tenantNote));
+    }, 300);
+  };
+  idle.addEventListener('input', refreshStrategyForecast);
+  pings.addEventListener('input', refreshStrategyForecast);
+  targetAll.addEventListener('change', refreshStrategyForecast);
+  targetList.addEventListener('change', refreshStrategyForecast);
+  targetIDs.addEventListener('change', refreshStrategyForecast);
 
   const dayBoxes = STRATEGY_DAYS.map(([v, label]) => el('label', { class: 'comp' },
     el('input', { type: 'checkbox', value: String(v), 'data-testid': 'sf-day-' + v }), ' ' + label));
@@ -8702,6 +8866,8 @@ function buildStrategyForm(form) {
   form.appendChild(el('div', { class: 'field' }, el('label', { for: 'sf-name' }, 'Name'), name));
   form.appendChild(el('div', { class: 'field' }, el('label', { for: 'sf-idle' }, 'Idle seconds'), idle));
   form.appendChild(el('div', { class: 'field' }, el('label', { for: 'sf-pings' }, 'Max pings'), pings));
+  const forecast = el('div', { id: 'sf-forecast', class: 'note', 'data-testid': 'sf-forecast' });
+  form.appendChild(forecast);
   form.appendChild(el('div', { class: 'field' },
     el('label', { for: 'sf-prefix' }, 'Min prefix tokens'), prefix));
   form.appendChild(el('div', { class: 'field' },
@@ -8718,6 +8884,7 @@ function buildStrategyForm(form) {
     el('label', {}, 'Accounts (used only with "Pick accounts")', targetIDs)));
   form.appendChild(windowsField);
   form.appendChild(el('div', { class: 'actions' }, submit, cancel, status));
+  refreshStrategyForecast(); // paint a preview for the defaults, not just after the first edit
 
   // editStrategy calls this fresh build and then overwrites the fields — simpler than a
   // second code path that patches an existing DOM tree field by field.
@@ -8742,6 +8909,7 @@ function buildStrategyForm(form) {
     }
     syncTargetDisabled();
     paintWindows();
+    refreshStrategyForecast(); // the preview must match the strategy actually loaded, not the defaults
     submit.textContent = 'Save changes';
     cancel.hidden = false;
   };
@@ -10192,12 +10360,12 @@ function renderKACalcControls() {
   const host = clear($('#ka-calc-controls'));
   const x = el('input', { type: 'number', id: 'ka-x', min: '60', max: '290', step: '10',
     value: String(kaState.x), 'data-testid': 'ka-x' });
-  const k = el('input', { type: 'number', id: 'ka-k', min: '1', max: '4', step: '1',
+  const k = el('input', { type: 'number', id: 'ka-k', min: '1', max: String(KA_CALC_MAX_K), step: '1',
     value: String(kaState.k), 'data-testid': 'ka-k' });
   const apply = el('button', { class: 'ghost', 'data-testid': 'ka-calc-apply',
     onclick: () => {
       kaState.x = Math.max(60, Math.min(290, parseInt(x.value, 10) || 280));
-      kaState.k = Math.max(1, Math.min(4, parseInt(k.value, 10) || 2));
+      kaState.k = Math.max(1, Math.min(KA_CALC_MAX_K, parseInt(k.value, 10) || 2));
       loadKACalc();
       loadKABehaviour(); // the coverage rule on the gap bands moves with the policy
       loadKALive();      // and so do the live panel's own reach figures
@@ -10254,9 +10422,10 @@ async function loadKACalc() {
   const tb = el('tbody');
   for (const r of c.rows) {
     // Emphasis by weight, not by a new hue: the current row is the accent, the rest recede.
+    const tag = (r.current ? ' (current)' : '') + (r.optimal ? ' (optimal, modelled)' : '');
     tb.appendChild(el('tr', { class: r.current ? 'is-current' : 'muted-row',
       'data-testid': 'ka-ladder-k' + r.max_pings },
-      el('td', {}, String(r.max_pings) + (r.current ? ' (current)' : '')),
+      el('td', {}, String(r.max_pings) + tag),
       el('td', {}, r.coverage_seconds.toFixed(0) + 's = ' + r.max_pings + '×' + kaState.x + ' + 300'),
       el('td', { class: 'num' }, num(r.convertible_misses)),
       el('td', { class: 'num' }, usd(r.convertible_usd)),
@@ -10279,7 +10448,7 @@ async function loadKACalc() {
   const share = el('div');
   host.appendChild(share);
   barRows(share, c.rows.map((r) => ({
-    label: 'K=' + r.max_pings + (r.current ? ' (current)' : ''),
+    label: 'K=' + r.max_pings + (r.current ? ' (current)' : '') + (r.optimal ? ' (optimal)' : ''),
     value: r.share_of_addressable_pct, max: 100,
     display: pct(r.share_of_addressable_pct, 1) + ' · ' + num(r.pings) + ' pings',
     color: r.current ? 'var(--accent)' : KA_MUTED,
