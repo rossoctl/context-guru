@@ -395,9 +395,8 @@ func TestRecordSSEResponseIsAggregatedBeforeTranslation(t *testing.T) {
 	}
 	// Usage must come from the proxy's own parse. An aggregated body has NO usage key at all
 	// (expand/sse.go never emits one), so a recorder reading it back would report zeros here.
-	// Note the two namespaces are not a slip: semconv has no field for the cache split, so
-	// the totals are gen_ai.usage.* and the split is cg.usage.* -- which is the whole mooncake
-	// unblock, since mooncake needs the split.
+	// The split is what mooncake needs. Read and write are semconv names (shared with
+	// claude-record 0.1.5); only the fresh remainder is cg.usage.*, as semconv has no name for it.
 	for _, c := range []struct {
 		key  string
 		want float64
