@@ -135,7 +135,7 @@ const (
 	IncompleteTruncated = "rounds_truncated" // continuation exit, both rounds truncated
 	IncompleteNoBody    = "no_body_on_path"  // a terminal path that never buffers a body
 	// IncompleteNoUsage: the response's usage block was absent or unparseable, so the
-	// cg.usage.* values on this span are zeros that were never measured. Needed because
+	// cache-split values on this span are zeros that were never measured. Needed because
 	// ToSpan emits those keys unconditionally -- deliberately, since a genuine zero is data --
 	// which leaves "no cache activity" and "unknown" indistinguishable without this marker.
 	IncompleteNoUsage = "no_usage_on_response"
@@ -159,9 +159,12 @@ const (
 	AttrInputTokens  = "gen_ai.usage.input_tokens"
 	AttrOutputTokens = "gen_ai.usage.output_tokens"
 
-	// CG-only. The cache split is the mooncake unblock.
-	AttrCacheRead    = "cg.usage.cache_read_tokens"
-	AttrCacheWrite   = "cg.usage.cache_write_tokens"
+	// The cache split, under the GenAI semconv names claude-record also writes since 0.1.5
+	// (collector #34). Both are already counted in AttrInputTokens, as the semconv says.
+	AttrCacheRead  = "gen_ai.usage.cache_read.input_tokens"
+	AttrCacheWrite = "gen_ai.usage.cache_creation.input_tokens"
+
+	// CG-only. Semconv has no name for the uncached remainder.
 	AttrFreshInput   = "cg.usage.fresh_input_tokens"
 	AttrStopReason   = "cg.response.stop_reason"
 	AttrUpstreamMS   = "cg.upstream_ms"
@@ -207,11 +210,9 @@ func SpanName(model string) string {
 // than the one previously recorded here. Issue #17 is about a different layer: Claude Code's
 // OTel metrics export, not this conversion.
 //
-// What CG adds is not a better total but the SPLIT: claude-record reads the three components
-// from Jaeger span tags and keeps only their sum in the OTel file, so cache_read and
-// cache_write are not recoverable from a corpus file afterwards. CG has them at the source and
-// emits them in cg.usage.*, which is the mooncake unblock -- mooncake needs the split, not the
-// total.
+// The SPLIT is what mooncake needs, not the total. claude-record before 0.1.5 kept only the
+// sum in the OTel file, so the split is not recoverable from those corpus files; since 0.1.5
+// both recorders write it under the same semconv names. CG has it at the source, on every turn.
 func (t Turn) InputTokens() int { return t.FreshInput + t.CacheRead + t.CacheWrite }
 
 // ToSpan renders the turn. Bodies must already be redacted; see Redact.

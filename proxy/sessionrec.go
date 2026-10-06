@@ -323,7 +323,7 @@ func (r *sessionRecorder) buildTurn(e *recEvent, parent string) (record.Turn, er
 	}
 	r.fillResponse(&turn, e)
 	// Zero tokens and unknown tokens are DIFFERENT FACTS, and ToSpan cannot tell them apart:
-	// it writes cg.usage.* unconditionally, because "this turn did no cache reads" is real
+	// it writes the cache split unconditionally, because "this turn did no cache reads" is real
 	// data worth recording. So an unparsed usage block has to be marked here, or the corpus
 	// silently reports a measured zero for a turn nobody measured.
 	if !e.usageOK {
