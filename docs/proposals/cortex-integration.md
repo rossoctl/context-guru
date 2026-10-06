@@ -438,7 +438,7 @@ graph LR
     P1["Phase 1<br/>Export keepalive.Keeper + Keeper.Shutdown,<br/>Dispatcher/Release interfaces,<br/>extract Appendix A's masking helper,<br/>a Dispatcher contract test,<br/>default httpDispatcher for<br/>cmd/context-guru-proxy<br/>(no behavior change)"] --> P2
     P2["Phase 2<br/>Build the core/plugins/contextguru<br/>adapter: cortexDispatcher over<br/>pctx.Headers, Store over whichever<br/>tier §4 resolves to, real<br/>OnResponse/OnResponseFrame,<br/>proactive Shutdown-triggered Release"] --> P3
     P3["Phase 3<br/>PR to rossoctl/cortex for review —<br/>no new core/pipeline interface requested,<br/>the adapter from Phase 2 plus<br/>whatever §4/§8 resolved to"] --> P4
-    P4["Phase 4<br/>Bump the pinned version past #375,<br/>add /v1/responses to the plugin's<br/>default paths, land a compat-test<br/>gate so the next bump isn't silent"]
+    P4["Phase 4<br/>Add /v1/responses to the plugin's<br/>default paths; a human manually bumps<br/>the pinned version past #375 only<br/>once the Phase 1 contract test passes<br/>against the candidate version"]
 ```
 
 Phase 1 is entirely ours, ships independent of any Cortex decision, and is verified against the
@@ -455,13 +455,22 @@ whichever way §4/§8 resolves. Phase 3 is the first point Cortex's maintainers 
 loop, and what they're reviewing is a working adapter plus two real decisions (§8), not an abstract
 design.
 
-Phase 4 bundles the pre-existing version-skew problem (§2) with the specific `/v1/responses` gap
-named earlier: bump the pinned module past `#375`, add the path to the plugin's defaults, and —
-given the `v0.3.1`→`v0.3.2` bump already failed to land once with no stated reason — land a compat
-test (e.g., running `TestKeepAliveOnProductionSnapshot`-equivalent coverage, or the Phase 1
-contract test, against the pinned version in Cortex's own CI) as part of the same change, so the
-*next* bump has a mechanism catching a `Keeper` regression close to when it happens rather than
-whenever someone next notices the pin is six releases stale.
+**The version bump stays a deliberate, manual act — this is not proposing automatic dependency
+updates.** A human decides to open a bump PR, exactly as `cortex#1207` was a human-opened PR; what
+changes is what that PR has to pass before another human merges it. Phase 4 adds `/v1/responses`
+to the plugin's defaults, and separately — given the `v0.3.1`→`v0.3.2` bump already failed to land
+once with no stated reason recorded anywhere — establishes a **gate**: whenever someone next
+proposes bumping the pin (to close `#375`'s gap or for any later reason), that PR must run the
+Phase 1 `Dispatcher`/`Keeper` contract test against the candidate version before it's eligible to
+merge. The gate's job is narrower than "catch regressions" in the abstract — it's answering one of
+two questions concretely for whichever version someone is considering: **did context-guru change
+`Keeper`'s behavior in a way that breaks the contract this adapter depends on, or does adopting
+this version require additional work in the adapter that wasn't needed before** (a new field on
+`DispatchRequest`, a changed `Record` signature, a new required method)? A compile failure
+localizes the latter; a contract-test assertion failure localizes the former. Either way, the
+human doing the bump gets a concrete answer instead of a manual diff review of everything that
+changed across however many releases — which is the discipline that was missing when
+`cortex#1207` was abandoned with no comment.
 
 ## Appendix A — the credential retention discipline, portable as-is
 
