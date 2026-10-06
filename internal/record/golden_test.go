@@ -38,6 +38,14 @@ type corpusSchema struct {
 	TimestampsSeen []string                  `json:"timestamp_samples"`
 }
 
+// postCorpusKeys are standard (non-cg.) attributes claude-record started writing after the
+// 67-file corpus was recorded, so the fixture cannot contain them: the cache split, added in
+// collector 0.1.5 (#34). Regenerate the fixture from 0.1.5 recordings and empty this.
+var postCorpusKeys = map[string]bool{
+	AttrCacheRead:  true,
+	AttrCacheWrite: true,
+}
+
 func loadCorpusSchema(t *testing.T) corpusSchema {
 	t.Helper()
 	b, err := os.ReadFile("testdata/corpus_schema.json")
@@ -211,7 +219,7 @@ func TestCGAttributesAreNamespaced(t *testing.T) {
 
 	for key := range at {
 		_, inCorpus := cs.AttributeKeys[key]
-		if inCorpus {
+		if inCorpus || postCorpusKeys[key] {
 			continue
 		}
 		if !strings.HasPrefix(key, "cg.") {
@@ -236,7 +244,7 @@ func TestStrictParityViewIsExactlyTheCorpusSchema(t *testing.T) {
 
 	strict := map[string]any{}
 	for k, v := range at {
-		if !strings.HasPrefix(k, "cg.") {
+		if !strings.HasPrefix(k, "cg.") && !postCorpusKeys[k] {
 			strict[k] = v
 		}
 	}
