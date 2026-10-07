@@ -100,7 +100,7 @@ Only where a finding argues for it, and name what the change actually adds:
 | `conservative` | deterministic trimming, `extract`, and `toolfilter` | no |
 | `medium` | `conservative` plus `extract_llm`, a cheap-model relevance pass | yes, a little |
 | `high` | `medium` plus `summarize`, compacting older turns once the context is nearly full | yes |
-| `xhigh` | `high` plus `extract_llm_sweep`, a cold-cache deep-adjudication pass — the deepest cut | yes, the most |
+| `xhigh` | `high` plus `extract_llm_sweep` (a cold-cache deep-adjudication pass), with `summarize` swapped for `cache_aware_summarizer` (the same compaction, reusing the cached prefix instead of paying full price for it) — the deepest cut | yes, the most |
 
 `/context-guru:preset-picker` explains the trade in each and is the better thing to hand somebody who
 is undecided. **Say it out loud when a recommended preset spends** — every tier from `medium` up

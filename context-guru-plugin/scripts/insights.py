@@ -115,8 +115,9 @@ PRESET_PIPELINES: dict[str, tuple[str, ...]] = {
                "extract", "cachesplit", "toolfilter"),
     "high": ("summarize", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean",
               "extract_llm", "extract", "cachesplit", "toolfilter"),
-    "xhigh": ("summarize", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean",
-              "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"),
+    "xhigh": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold",
+              "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit",
+              "toolfilter"),
 }
 
 # What each component this plugin can turn on actually does, in one line a developer can act on,
@@ -159,6 +160,9 @@ COMPONENTS: dict[str, dict[str, str]] = {
     "extract_llm_sweep": {"what": "a periodic second pass of extract_llm over older turns",
                           "counterfactual": "related"},
     "summarize":  {"what": "a compaction model rewrites the transcript", "counterfactual": "related"},
+    "cache_aware_summarizer": {"what": "a compaction model rewrites the transcript, reusing the "
+                                      "cached prefix instead of paying full price for it",
+                               "counterfactual": "related"},
     "smartcrush": {"what": "structure-aware compression of large outputs", "counterfactual": "none"},
     "agentdiet":  {"what": "the published AgentDiet baseline, for A/B only", "counterfactual": "none"},
     "cachesplit": {"what": "moves the cache breakpoint off the volatile tail so the prefix stays "
