@@ -40,7 +40,9 @@ package record
 // alone, and it leaves the credential vocabulary in the one place CG already maintains.
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"regexp"
 	"strings"
 
@@ -122,6 +124,152 @@ func Content(s string) string {
 	return redactEncoded(s)
 }
 
+// ContentJSON scrubs a JSON document by scrubbing the STRINGS INSIDE IT, never its encoded
+// text, and splices back only the strings that changed.
+//
+// WHY, measured on the first full day of recordings (2026-10-07): Content run over encoded
+// JSON corrupted 63 of 314 bodies. The assignment rule's value class `[^\s"',;}]` admits a
+// backslash, so in `?token=XYZ\"` the match took the `\` of the escaped quote with it and
+// left a bare `"` behind -- invalid JSON. Turn reconstruction parses these bodies, so the
+// first broken string silently ended turn derivation for the rest of the session (2 of 7
+// turns found). Decoded text has no escapes for a pattern to eat, and a re-encoded string
+// is always a valid literal, so the document stays valid whatever the patterns do.
+//
+// What the encoded pass caught ACROSS literals is kept: an object member is also checked
+// as `"key": value`, the exact shape internal/redact's JSON-assignment rule exists for, and
+// its value is replaced whole when that pair would have been scrubbed. Bytes outside a
+// changed literal -- key order, whitespace, `<`-style escapes -- are untouched, so a
+// body with nothing to redact comes back identical.
+//
+// Text that is not valid JSON falls back to Content: a capped or otherwise partial body is
+// still scrubbed, just without the structure guarantee.
+func ContentJSON(s string) string {
+	if s == "" || !json.Valid([]byte(s)) {
+		return Content(s)
+	}
+	var b strings.Builder
+	last := 0
+	for i := 0; i < len(s); {
+		if s[i] != '"' {
+			i++
+			continue
+		}
+		end := stringEnd(s, i)
+		vs := skipSpace(s, end)
+		if vs >= len(s) || s[vs] != ':' {
+			// A string that is not a key: an array element or the whole document.
+			if out, ok := scrubLiteral(s[i:end]); ok {
+				b.WriteString(s[last:i])
+				b.WriteString(out)
+				last = end
+			}
+			i = end
+			continue
+		}
+		// An object key. Keys are scrubbed like any string; then the member is checked as
+		// a pair when its value is a string or a scalar.
+		if out, ok := scrubLiteral(s[i:end]); ok {
+			b.WriteString(s[last:i])
+			b.WriteString(out)
+			last = end
+		}
+		key := decodeLiteral(s[i:end])
+		vs = skipSpace(s, vs+1)
+		var vend int
+		switch {
+		case s[vs] == '"':
+			vend = stringEnd(s, vs)
+		case s[vs] == '{' || s[vs] == '[':
+			i = vs // a container: its contents are walked by the main loop
+			continue
+		default:
+			vend = scalarEnd(s, vs)
+		}
+		raw := s[vs:vend]
+		var out string
+		var changed bool
+		if pair := `"` + key + `": ` + pairValue(raw); redact.Content(pair, 0) != pair {
+			out, changed = encodeLiteral(Placeholder), true
+		} else if raw[0] == '"' {
+			out, changed = scrubLiteral(raw)
+		}
+		if changed {
+			b.WriteString(s[last:vs])
+			b.WriteString(out)
+			last = vend
+		}
+		i = vend
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// pairValue renders a member's value the way the assignment rule saw it in a flat
+// document: a string as its decoded text in quotes, a scalar as its raw token.
+func pairValue(raw string) string {
+	if raw[0] == '"' {
+		return `"` + decodeLiteral(raw) + `"`
+	}
+	return raw
+}
+
+// scrubLiteral runs Content over one decoded string literal and reports whether that
+// changed it; the replacement is re-encoded, so it is always a valid literal.
+func scrubLiteral(lit string) (string, bool) {
+	v := decodeLiteral(lit)
+	if c := Content(v); c != v {
+		return encodeLiteral(c), true
+	}
+	return lit, false
+}
+
+func decodeLiteral(lit string) string {
+	if !strings.ContainsRune(lit, '\\') {
+		return lit[1 : len(lit)-1]
+	}
+	var v string
+	_ = json.Unmarshal([]byte(lit), &v) // lit came from a document json.Valid accepted
+	return v
+}
+
+func encodeLiteral(v string) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // keep `<` and `&` as the client sent them
+	_ = enc.Encode(v)
+	return strings.TrimSuffix(buf.String(), "\n")
+}
+
+// stringEnd returns the index just past the literal that opens at s[i].
+func stringEnd(s string, i int) int {
+	for j := i + 1; j < len(s); j++ {
+		switch s[j] {
+		case '\\':
+			j++
+		case '"':
+			return j + 1
+		}
+	}
+	return len(s)
+}
+
+func scalarEnd(s string, i int) int {
+	for i < len(s) && !strings.ContainsRune(",}] \t\r\n", rune(s[i])) {
+		i++
+	}
+	return i
+}
+
+func skipSpace(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n') {
+		i++
+	}
+	return i
+}
+
 // redactEncoded decodes base64-looking runs and replaces the whole run if what comes out
 // contains a credential.
 //
@@ -201,13 +349,15 @@ func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
 // ~53 ms, about 25% of a request, paid by the next request on a keep-alive connection.
 // The ordering against the write is what guarantees no unscrubbed byte ever reaches disk.
 func (t *Turn) Redact(bodyCap int) {
-	t.RequestBody = Content(t.RequestBody)
-	t.ResponseBody = Content(t.ResponseBody)
-	t.OutputSchema = Content(t.OutputSchema)
+	// The four body fields hold translated JSON, so they go through ContentJSON: scrubbing
+	// the encoded text instead is what broke 63 bodies on the 2026-10-07 recordings.
+	t.RequestBody = ContentJSON(t.RequestBody)
+	t.ResponseBody = ContentJSON(t.ResponseBody)
+	t.OutputSchema = ContentJSON(t.OutputSchema)
 	// Tool definitions are author-written descriptions and JSON schemas. They routinely
 	// carry example values, and an example is exactly where a real endpoint or token gets
 	// pasted, so they are scrubbed like any other free text.
-	t.ToolDefs = Content(t.ToolDefs)
+	t.ToolDefs = ContentJSON(t.ToolDefs)
 	// Err can carry an upstream error body verbatim, and a gateway that echoes the
 	// presented credential in a 401 would otherwise put it on disk. Never capped: it is a
 	// short diagnostic.

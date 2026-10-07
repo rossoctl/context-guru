@@ -2,6 +2,7 @@ package record
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -269,5 +270,60 @@ func TestCapContentIsRuneSafe(t *testing.T) {
 	}
 	if len(got) != 50 {
 		t.Errorf("expected backup to rune start (50 bytes), got %d", len(got))
+	}
+}
+
+// TestContentJSONKeepsBodiesValid pins the 2026-10-07 corruption, using the two shapes that
+// actually broke real bodies: a query-string token inside a JSON-encoded API response, and
+// a Python assignment whose value starts with an escaped quote. Scrubbing the ENCODED text
+// let the assignment rule eat the `\` of `\"` and left invalid JSON behind.
+func TestContentJSONKeepsBodiesValid(t *testing.T) {
+	cases := map[string]string{
+		"query token in a nested API response": `[{"role":"tool","parts":[{"type":"tool_call_response","response":` +
+			`"{\"download_url\":\"https://raw.example.com/a.yaml?token=` + canary + `\",\"type\":\"file\"}"}]}]`,
+		"assignment before an escaped quote": `[{"role":"tool","parts":[{"type":"tool_call_response","response":` +
+			`"5\tTOKEN = os.environ[\"MONDAY_TOKEN\"]\n6\tBOARD = 1"}]}]`,
+		"JSON-shaped member, prefix-less value": `[{"role":"assistant","parts":[{"type":"tool_call","arguments":` +
+			`{"api_key":"` + canary + `","n":1}}]}]`,
+		"scalar credential member": `{"password":12345678901234,"keep":"me"}`,
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			if !json.Valid([]byte(in)) {
+				t.Fatalf("test input is not valid JSON: %s", in)
+			}
+			got := ContentJSON(in)
+			if !json.Valid([]byte(got)) {
+				t.Fatalf("redaction produced invalid JSON:\n%s", got)
+			}
+			if strings.Contains(got, canary) || strings.Contains(got, "12345678901234") {
+				t.Errorf("credential survived: %s", got)
+			}
+			if ContentJSON(got) != got {
+				t.Errorf("not idempotent: %s -> %s", got, ContentJSON(got))
+			}
+		})
+	}
+	// Proves the case above exercises the bug: the encoded-text pass breaks it.
+	broken := Content(cases["query token in a nested API response"])
+	if json.Valid([]byte(broken)) {
+		t.Fatalf("Content on encoded text no longer breaks this input; the test above proves nothing")
+	}
+}
+
+// TestContentJSONLeavesCleanBodiesByteIdentical: nothing to redact means nothing re-encoded,
+// so key order, spacing and the client's own escapes survive exactly.
+func TestContentJSONLeavesCleanBodiesByteIdentical(t *testing.T) {
+	in := `{"z":1, "a":[ "x<y", "café", true, null ],"max_tokens":32000}`
+	if got := ContentJSON(in); got != in {
+		t.Errorf("clean body changed:\n in: %s\ngot: %s", in, got)
+	}
+}
+
+// TestContentJSONFallsBackOnNonJSON: a capped or partial body still gets scrubbed.
+func TestContentJSONFallsBackOnNonJSON(t *testing.T) {
+	in := `{"truncated": "my key is sk-ant-api03-` + canary
+	if got := ContentJSON(in); strings.Contains(got, canary) {
+		t.Errorf("non-JSON input not scrubbed: %s", got)
 	}
 }
