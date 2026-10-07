@@ -488,6 +488,22 @@ type CostRecorder interface {
 }
 ```
 
+**This is entirely Cortex's own, self-contained work — context-guru's side needs no changes at
+all.** `Dispatcher.Dispatch` already receives the real `Usage` numbers back directly, the moment a
+ping's response arrives, before it even returns anything to the `Keeper` (§6.2's signature:
+`Dispatch(...) (Usage, status int, err error)`). So Cortex's own `Dispatch` implementation, in that
+same function, after getting the response:
+
+1. Already has the usage numbers.
+2. Prices them with Cortex's own `core/cost/pricing.Resolver` (see below).
+3. Calls `CostRecorder.RecordCost` with the result.
+4. Returns `Usage` to the `Keeper` exactly as it already does.
+
+The `Keeper` never finds out a ledger exists. It just gets a `Usage` back, same as always. All
+three pieces — getting the usage, pricing it, and recording it — happen inside Cortex's own
+`Dispatch`, using capabilities that are already Cortex's own code (`pricing.Resolver`,
+`CostRecorder`). Nothing crosses back into context-guru's side to make this work.
+
 Reusing `event.Event`'s existing wire shape means every consumer that already reads the `"cost"`
 session-event key — `agentop`, dashboards, whatever's downstream — keeps working with no changes;
 they'd just see an extra event for a session, distinguishable by whatever `Source` we tag it with
@@ -498,9 +514,10 @@ would be a small addition there too).
 "so the two agree" rather than context-guru's own. We think that's right, and for a reason beyond
 convenience — a prior review on this same plan already caught a bug of exactly this shape (two
 independently-computed cost figures for the same event quietly disagreeing; fixed in `#383`). So
-the keep-alive adapter's `Dispatcher` implementation should price a ping using Cortex's
-`core/cost/pricing.Resolver`, the same resolver `inferenceparser` already uses for real requests,
-rather than carrying its own copy of a rate table.
+`Dispatch`'s own implementation should price a ping using `core/cost/pricing.Resolver`, the same
+resolver `inferenceparser` already uses for real requests, rather than carrying its own copy of a
+rate table — one more thing that lives entirely on the Dispatcher route, not something context-guru
+computes and hands over.
 
 Not asking Cortex to build this unilaterally — this is the "let's work out a small API together"
 item from Hai's own review, written up concretely enough to start from rather than left as an
@@ -553,15 +570,16 @@ replaces it:
 |---|---|---|
 | `k.h.client` | performs the actual ping | `Dispatcher.Dispatch` (already designed, §6.2) |
 | `k.h.limiter.AcquireSpare` | refuses a ping when the tenant's rate/concurrency budget is tight | the adapter's own `Dispatch` implementation checks Cortex's existing rate limiter before firing; `Dispatch` returning an error is already how the `Keeper` treats any refusal, so no new interface needed |
-| `k.h.opts.Prices` | prices a ping before firing (the cost ceiling) and after (the actual charge) | Cortex's own `core/cost/pricing.Resolver` — see §9.3, same reasoning as the cost-ledger proposal |
-| `k.h.rec == nil` check | refuses to even hold a credential if nothing will account for what it's used for | the Cortex-side equivalent: refuse retention if the `CostRecorder` from §9.3 isn't wired up either, for the same reason |
+| `k.h.opts.Prices` | prices a ping *twice*: a rough estimate before firing, inside the `Keeper` (the cost ceiling check), and the actual figure after, for the dashboard | The pre-flight estimate stays context-guru's own `internal/modelinfo` table — it's a safety ceiling, not a billing record, and keeping it there avoids adding a third method to `Dispatcher`. The figure Cortex's ledger actually cares about is computed separately, entirely inside `Dispatch`, using Cortex's own `pricing.Resolver` (§9.3). The two don't need to agree — they serve different consumers, unlike the bug `#383` fixed, which was one field computed twice for the *same* record |
+| `k.h.rec == nil` check | refuses to even hold a credential at all if nothing will account for what it's used for | This check lives inside the `Keeper` today, which — per §9.3 — never finds out whether Cortex's `CostRecorder` exists. So under Cortex it can't be the same per-call check; it becomes a one-time decision the *adapter* makes at startup: don't enable keep-alive at all if nothing is configured to record what it spends |
 | `tn.Cache` (`CachePolicy`) plus manager-controlled strategies and session overrides | per-tenant policy: is keep-alive even on, `Idle`/`MaxPings`/`MaxUSDPerPing`, who can override it and how | Cortex has no multi-tenant control plane to match this against, and we don't think it needs one for this: one static policy from the plugin's own config block, no strategies, no per-session dashboard overrides. Simpler than the standalone proxy by design, not a gap |
 | `tn.Preset` | a label on the dashboard row | cosmetic; the adapter supplies a fixed string or omits it |
 
-Pricing (`k.h.opts.Prices`) and the audit-sink gate (`k.h.rec`) both point at the same place: §9.3's
-`CostRecorder` proposal. If that lands, both resolve together — the adapter can refuse to retain a
-credential exactly when it has nowhere to publish the eventual cost, which is the same accountability
-rule the standalone proxy already enforces, just phrased in Cortex's terms instead of `dash`'s.
+The ledger-facing half of pricing (`k.h.opts.Prices`'s second use) and the audit-sink gate
+(`k.h.rec`) both point at the same place: §9.3's `CostRecorder` proposal. If that lands, the
+adapter can refuse to even start keep-alive when nothing is configured to record what it spends —
+the same accountability rule the standalone proxy already enforces per-request, just checked once
+at startup instead, and phrased in Cortex's terms instead of `dash`'s.
 
 **Phase 2** is also entirely ours, and doesn't need Cortex to build or decide anything beyond
 whatever §5/§9 settles.
