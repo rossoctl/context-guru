@@ -29,8 +29,8 @@ anything.
 Here's how the rest of this document answers that:
 
 - **§3** — what Cortex already gives us for free, and where that stops being true.
-- **§4** — a capability Cortex doesn't have today that this plan actually needs: letting a
-  plugin hold a streamed response back before deciding what, if anything, to send onward.
+- **§4** — a small, confirmed gap in letting a plugin rewrite a streamed response. Tracked, but
+  not needed for anything in this plan.
 - **§5** — where keep-alive's state lives. Settled: plain in-process memory, the same way the
   standalone proxy already does it.
 - **§6** — the part that's entirely ours to build: a new adapter inside
@@ -82,7 +82,7 @@ the stronger thing `marker_mode: full` needs — see §4.
 | Read the caller's credential, without Cortex having to manage it specially for us | The live request's headers are exposed directly on the per-request object — no API, just a field | Plugins already read and write this field directly; it's how every other plugin touches headers |
 | Somewhere to keep state across requests | Plain memory inside the plugin itself — the same way `proxy/keepalive.go` already does it. Settled; see §5 | Confirmed directly by Cortex (see §9): restarts and config reloads are rare enough that losing one keep-alive window when they happen is an acceptable cost, so no new storage guarantee is needed |
 
-## 4. Streaming interception — a capability Cortex needs to build, not defer
+## 4. Streaming — a small gap, tracked but not needed for v1
 
 context-guru can replace a large tool result with a short placeholder, and let the model ask for
 the real thing back later through a tool call it names `expand`. There are three settings for
@@ -98,72 +98,40 @@ normal answer a moment later. That trick is already fully built, in context-guru
 (`expand.Resolve`, `expand.Continuation`, `expand.ResponseCalls`). Deciding what to do here isn't
 missing anything.
 
-What's missing is the one thing that trick depends on: **holding a piece of the response back
-before any of it reaches the real caller**, so the spliced-in answer can take its place. The
-standalone proxy can do this because it's the thing physically writing bytes onto the agent's
-connection — it can simply choose not to write a chunk yet. A Cortex plugin isn't that thing.
-Cortex's own listener writes the bytes, and — confirmed directly in Cortex's own code comments —
-it does that *before* a plugin's streaming hook even runs: "the listeners forward+flush before
-invoking the hook — for observability only." The hook is a tap, not a gate.
+**Correction from an earlier draft of this section:** we originally thought a Cortex plugin
+couldn't even see a streamed chunk before it reached the client, based on a doc comment in
+`core/pipeline/pipeline.go` ("the listeners forward+flush before invoking the hook — for
+observability only"). Checked against the actual listener code (`core/listener/reverseproxy`),
+and that comment is stale: `RunResponseFrame` runs on every frame *before* it's written to the
+client, in both the forward and reverse proxy listeners. So the hook already runs at the right
+time.
 
-So this isn't something context-guru is missing. It's a capability Cortex's plugin model doesn't
-give *any* plugin today: the ability to sit in front of the outbound stream, hold chunks back, and
-decide — possibly after making its own extra network call — what, if anything, actually gets sent
-onward. Without it, `marker_mode: full` simply does not work for a streamed response, which is
-nearly all real traffic. This isn't something to defer: shipping `marker_mode: full` through
-Cortex requires it.
+**The real, much smaller gap:** today, a streaming hook can only say "let this frame through
+unchanged" or "reject the whole stream." It has no way to say "forward something different
+instead" — there's no path for a plugin's return value to become the bytes that actually go out.
+That's the one thing expand's loop needs and doesn't have: a way to swap in a different frame (or
+several, built from a hidden extra call to the real LLM) in place of the one that arrived.
 
-### 4.1 What this capability needs to do
+Not needed for v1: the adapter forces `marker_mode` away from `full` regardless of config (see
+§4.1), so nothing in this plan is blocked on it. Tracking it here because it's a real, small,
+well-scoped gap that `marker_mode: full` will need eventually, and because it's useful to anyone
+later working on a plugin that needs to rewrite a stream, not just us.
 
-- Run **before** any byte of a chunk reaches the client — a real gate, not a tap.
-- Let a plugin say "not yet" and hold one or more chunks without forwarding anything, while it
-  decides what to do.
-- Let a plugin eventually release: the original bytes untouched, something different instead, or
-  nothing at all.
-- Tolerate a plugin taking real time between receiving a chunk and deciding what to forward —
-  because deciding might mean making a brand-new request to the real LLM first. The caller's own
-  connection has to survive that pause (the same kind of keep-alive trick SSE already uses for any
-  long gap in a stream).
-- Fail open: if a plugin errors, panics, or takes too long, the safe default is to release
-  whatever's being held, unchanged — never hang the connection, never silently drop it. This
-  matches context-guru's own rule that nothing it does is allowed to break the underlying
-  request.
-- Only change behavior for plugins that actually ask for it. Every other plugin keeps today's
-  cheap, no-interception default.
-
-### 4.2 A sketch, not a demand
-
-One shape this could take — ours to propose, Cortex's to accept, change, or replace entirely:
-
-```go
-// StreamInterceptor is for a plugin that needs to see a chunk BEFORE it is
-// forwarded, not after. The listener calls this instead of forwarding
-// automatically, and only sends whatever this method returns.
-type StreamInterceptor interface {
-    OnStreamChunk(ctx context.Context, pctx *Context, chunk []byte, last bool) (toForward [][]byte, err error)
-}
-```
-
-The split stays exactly where it's been everywhere else in this plan: holding or releasing bytes
-is Cortex's to build, because only Cortex's listener controls the wire. Deciding what counts as an
-`expand` call, what to fetch, and what to splice in stays entirely context-guru's existing code,
-unchanged.
-
-### 4.3 What's actually blocked without this, and what isn't
+### 4.1 What's blocked without it, and what isn't
 
 Only `marker_mode: full` needs this. Nothing else in this plan does:
 
 - Compaction (already shipping today) never produces a placeholder or an `expand` call.
 - Keep-alive (§7) only reads usage numbers out of a response, never its content.
 - `marker_mode: summary`/`off` don't need an expand loop at all — they just drop content for
-  good, which needs no interception.
+  good.
 
-Until this capability exists, the adapter shouldn't just *refuse a request* to turn `marker_mode`
-to `full` — it should actively force it back to `summary` (or `off`), regardless of what preset
-or config asks for. `full` is already context-guru's own default the moment any size-reducing
-component capable of dropping content is turned on, so leaving the default alone and only
-blocking an explicit `marker_mode: full` setting would still let a stronger preset turn this on by
-accident.
+Until a frame-replacement capability exists, the adapter shouldn't just *refuse a request* to
+turn `marker_mode` to `full` — it should actively force it back to `summary` (or `off`),
+regardless of what preset or config asks for. `full` is already context-guru's own default the
+moment any size-reducing component capable of dropping content is turned on, so leaving the
+default alone and only blocking an explicit `marker_mode: full` setting would still let a
+stronger preset turn this on by accident.
 
 ## 5. Where keep-alive's state lives
 
@@ -452,13 +420,29 @@ Cortex (Hai) answered these directly:
   all.
 - **The version bump (§2, §10 Phase 4):** confirmed — bumping to `v0.4.2` already builds and
   passes the plugin's existing tests with no code changes needed.
+- **Pricing: nothing new needed.** `plugins.Deps` already injects Cortex's own pricing registry
+  into any plugin implementing `pricing.ResolverConsumer` (`SetPricingResolver(Resolver)`),
+  kept current across reloads — the same mechanism SPIFFE identity already uses. The adapter
+  implements that interface and backs the `Keeper`'s `Prices` dependency with the injected
+  resolver, so the pre-flight cost ceiling and the ledger figure (§9.3) read the *same* number —
+  corrects the Phase 1 table below, which previously assumed these could stay two independent
+  figures. One sharp edge inherited either way, not introduced by this plan: a model missing
+  from the price table prices a ping at $0, which leaves the `$0.25` ceiling unenforced for that
+  model, since zero never exceeds a ceiling. Worth knowing about, not something this plan fixes.
+- **Rate limiting: dropped for v1.** Cortex has no rate limiter, so there's nothing for the
+  `Keeper`'s spare-capacity check to plug into. The adapter's `Dispatch` simply doesn't have an
+  equivalent gate — corrects the Phase 1 table below, which previously assumed one existed to
+  check against.
 
-### 9.2 Streaming interception (§4) — a real build, not a confirmation
+### 9.2 Streaming frame replacement (§4) — tracked, not blocking v1
 
-`marker_mode: full` cannot work through Cortex without it — for any plugin, not just ours. §4.2
-sketches one possible shape for it; the actual design is Cortex's call.
+Not an ask for this plan — nothing here needs it, since the adapter forces `marker_mode` away
+from `full`. Flagging it as a real, confirmed gap worth Cortex's own backlog: `OnResponseFrame`
+already runs before a frame reaches the client, but can't supply replacement bytes, only
+Continue/Reject. `marker_mode: full` needs that eventually; so would any other plugin that ever
+needs to rewrite a stream in flight.
 
-### 9.3 A proposal: let a plugin's own spend reach Cortex's cost ledger
+### 9.3 A proposal: let any plugin's own spend reach Cortex's cost ledger
 
 Hai raised a real gap: a keep-alive ping spends real money, but because it goes out through this
 plugin's own standalone `http.Client` instead of through Cortex's normal request pipeline, it
@@ -469,59 +453,57 @@ published, and every function underneath it — `settle.Settle`, `settle.Publish
 takes a `*pipeline.Context` as its first argument. A keep-alive ping has no `pipeline.Context`; it
 isn't a request Cortex ever saw.
 
-What we did find, one layer down, is a function that *isn't* shaped around a live request:
-`core/session.Store.Append(sessionID string, event pipeline.SessionEvent)`. This is the actual
-low-level call that ends up persisting a cost record for a real request too — a plugin publishing
-a cost event onto a live `pctx` is really just a longer path to the same `Append`. It's just not
-exposed to a plugin directly today; `pctx.Session` only hands out a read-only snapshot
-(`SessionView`), never a handle to the writable store behind it.
+Hai agreed this is worth building, as a general capability any plugin making its own upstream
+calls could use — not something scoped to keep-alive — with three corrections to how we first
+sketched it:
 
-**Proposed shape** — small, and intentionally mirroring how `pctx.Shared` is already handed out:
+- **Inject it like pricing, not like `pctx.Shared`.** Add it to `plugins.Deps`, delivered through
+  a consumer interface the same way `pricing.ResolverConsumer` already is (§9.1) — not something
+  captured off a live `pctx`, since the whole point is this gets called with no live request.
+- **Don't build it on `core/session.Store.Append`.** That call makes a session *active* and
+  refreshes it — exactly the session-recency signal a background ping must not produce (it isn't
+  real agent activity, and letting it look like some would distort idle-gap tracking, which is
+  the opposite of what §6 is trying to measure in the first place). Cortex's own `AppendTrailing`
+  already does the right thing — reaches the ledger without touching session state — so the new
+  capability should be built on that shape, not plain `Append`.
+- **Carry client and host, not just a session ID.** So the resulting cost lands attributed to the
+  right agent and endpoint, the same way a real request's cost would be.
+
+**Proposed shape**, corrected:
 
 ```go
-// CostRecorder lets a plugin publish a cost event for a session when the
-// spend didn't come from a request Cortex's own pipeline ever saw — e.g. a
-// keep-alive ping fired from a background goroutine. Captured from pctx once,
-// the same way pctx.Shared already is.
+// CostRecorder lets a plugin publish a cost event when the spend didn't come
+// from a request Cortex's own pipeline ever saw — e.g. a keep-alive ping fired
+// from a background goroutine. Injected via plugins.Deps, the same way
+// pricing.ResolverConsumer already is.
 type CostRecorder interface {
-    RecordCost(sessionID string, ev event.Event)
+    RecordCost(sessionID, client, host string, ev event.Event)
 }
 ```
 
-**This is entirely Cortex's own, self-contained work — context-guru's side needs no changes at
+**Still entirely Cortex's own, self-contained work — context-guru's side needs no changes at
 all.** `Dispatcher.Dispatch` already receives the real `Usage` numbers back directly, the moment a
 ping's response arrives, before it even returns anything to the `Keeper` (§6.2's signature:
 `Dispatch(...) (Usage, status int, err error)`). So Cortex's own `Dispatch` implementation, in that
 same function, after getting the response:
 
 1. Already has the usage numbers.
-2. Prices them with Cortex's own `core/cost/pricing.Resolver` (see below).
-3. Calls `CostRecorder.RecordCost` with the result.
+2. Prices them with the pricing resolver already injected per §9.1 — the same number the cost
+   ceiling check used, not a second one.
+3. Calls `CostRecorder.RecordCost`, carrying the session, client, and host.
 4. Returns `Usage` to the `Keeper` exactly as it already does.
 
-The `Keeper` never finds out a ledger exists. It just gets a `Usage` back, same as always. All
-three pieces — getting the usage, pricing it, and recording it — happen inside Cortex's own
-`Dispatch`, using capabilities that are already Cortex's own code (`pricing.Resolver`,
-`CostRecorder`). Nothing crosses back into context-guru's side to make this work.
+The `Keeper` never finds out a ledger exists. It just gets a `Usage` back, same as always.
 
 Reusing `event.Event`'s existing wire shape means every consumer that already reads the `"cost"`
 session-event key — `agentop`, dashboards, whatever's downstream — keeps working with no changes;
-they'd just see an extra event for a session, distinguishable by whatever `Source` we tag it with
-(`event.Source` already has an enum for this; a new value for "a plugin's own background spend"
-would be a small addition there too).
+they'd just see an extra event, distinguishable by whatever `Source` we tag it with (`event.Source`
+already has an enum for this; a new value for "a plugin's own background spend" would be a small
+addition there too).
 
-**The pricing side of the same point:** Hai separately suggested using Cortex's own pricing table
-"so the two agree" rather than context-guru's own. We think that's right, and for a reason beyond
-convenience — a prior review on this same plan already caught a bug of exactly this shape (two
-independently-computed cost figures for the same event quietly disagreeing; fixed in `#383`). So
-`Dispatch`'s own implementation should price a ping using `core/cost/pricing.Resolver`, the same
-resolver `inferenceparser` already uses for real requests, rather than carrying its own copy of a
-rate table — one more thing that lives entirely on the Dispatcher route, not something context-guru
-computes and hands over.
-
-Not asking Cortex to build this unilaterally — this is the "let's work out a small API together"
-item from Hai's own review, written up concretely enough to start from rather than left as an
-open-ended ask.
+Not asking Cortex to build this unilaterally — this is the "let's work out a small API together,
+usable by any plugin" item from Hai's own review, written up concretely enough to start from
+rather than left as an open-ended ask.
 
 ### 9.4 Two things we're deliberately not asking for
 
@@ -546,11 +528,10 @@ graph LR
 ```
 
 One deliberate thing missing from the phases above: `marker_mode: full` support isn't in them.
-It's blocked on §4's streaming-interception capability landing in Cortex first, and until then the
-adapter actively forces `marker_mode` away from `full` regardless of config (§4.3). Once §4 exists
-on Cortex's side, adding `full` support is its own later phase — and a small one, since the
-decision logic already lives in context-guru today; the adapter would just wire it to whatever
-gate Cortex builds.
+It's not needed for v1 (§4) — the adapter actively forces `marker_mode` away from `full`
+regardless of config (§4.1). Once Cortex's streaming hook can supply replacement frames (§4,
+§9.2), adding `full` support is its own later phase — and a small one, since the decision logic
+already lives in context-guru today; the adapter would just wire it to whatever Cortex builds.
 
 **Phase 1** is entirely ours and ships whether or not Cortex adopts anything else here. It's
 verified against context-guru's existing keep-alive tests, with no change in behavior expected
@@ -569,8 +550,8 @@ replaces it:
 | What `keeper` reaches for today | What it's for | What replaces it under Cortex |
 |---|---|---|
 | `k.h.client` | performs the actual ping | `Dispatcher.Dispatch` (already designed, §6.2) |
-| `k.h.limiter.AcquireSpare` | refuses a ping when the tenant's rate/concurrency budget is tight | the adapter's own `Dispatch` implementation checks Cortex's existing rate limiter before firing; `Dispatch` returning an error is already how the `Keeper` treats any refusal, so no new interface needed |
-| `k.h.opts.Prices` | prices a ping *twice*: a rough estimate before firing, inside the `Keeper` (the cost ceiling check), and the actual figure after, for the dashboard | The pre-flight estimate stays context-guru's own `internal/modelinfo` table — it's a safety ceiling, not a billing record, and keeping it there avoids adding a third method to `Dispatcher`. The figure Cortex's ledger actually cares about is computed separately, entirely inside `Dispatch`, using Cortex's own `pricing.Resolver` (§9.3). The two don't need to agree — they serve different consumers, unlike the bug `#383` fixed, which was one field computed twice for the *same* record |
+| `k.h.limiter.AcquireSpare` | refuses a ping when the tenant's rate/concurrency budget is tight | **Dropped for v1** — Cortex has no rate limiter to check against (confirmed by Cortex, §9.1). The adapter's `Dispatch` has no equivalent gate |
+| `k.h.opts.Prices` | prices a ping twice: a rough estimate before firing, inside the `Keeper` (the cost ceiling check), and the actual figure after, for the dashboard/ledger | **One source, not two.** The adapter implements `pricing.ResolverConsumer`; Cortex injects its own pricing registry automatically (§9.1), kept current across reloads. The adapter backs the `Keeper`'s `Prices` dependency with that same injected resolver, so the pre-flight ceiling check and the ledger figure (§9.3) read the same number — no separate table, no risk of the two disagreeing the way `#383`'s bug did |
 | `k.h.rec == nil` check | refuses to even hold a credential at all if nothing will account for what it's used for | This check lives inside the `Keeper` today, which — per §9.3 — never finds out whether Cortex's `CostRecorder` exists. So under Cortex it can't be the same per-call check; it becomes a one-time decision the *adapter* makes at startup: don't enable keep-alive at all if nothing is configured to record what it spends |
 | `tn.Cache` (`CachePolicy`) plus manager-controlled strategies and session overrides | per-tenant policy: is keep-alive even on, `Idle`/`MaxPings`/`MaxUSDPerPing`, who can override it and how | Cortex has no multi-tenant control plane to match this against, and we don't think it needs one for this: one static policy from the plugin's own config block, no strategies, no per-session dashboard overrides. Simpler than the standalone proxy by design, not a gap |
 | `tn.Preset` | a label on the dashboard row | cosmetic; the adapter supplies a fixed string or omits it |
