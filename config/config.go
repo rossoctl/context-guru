@@ -513,16 +513,24 @@ var presets = map[string][]string{
 	//   high         = medium + summarize, at its own default trigger (min_request_frac 0.9,
 	//                  cache_state any — see the note beside its presetConfigs entry below for
 	//                  why cache_state is NOT overridden to pre_expiry despite the name "high").
-	//   xhigh        = high + extract_llm_sweep back in — i.e. housellm + that same summarizer.
-	// Unmeasured: nobody has benchmarked summarize ahead of the housellm offloaders (or in
-	// combination with them at all) for savings, only for wire-shape correctness
-	// (apply/shape_validate_test.go). It is placed first on that test's precedent, not on
-	// evidence that the order matters — keep_last (default 3) leaves the tail summarize would
-	// interact with untouched regardless of order.
+	//   xhigh        = high's summarizer swapped for cache_aware_summarizer (#413), plus
+	//                  extract_llm_sweep back in — i.e. housellm + the cache-reusing summarizer.
+	// `high` keeps `summarize` unchanged — that swap is `xhigh`-only. `cache_aware_summarizer`
+	// needs #402's trigger defaults, cold-turn ordering and keep-alive substitution, and #406's
+	// prefix-ask fix, to do anything at all on Anthropic incoming-model traffic; on the OpenAI
+	// path it needed none of those, which is why `high` was left on `summarize` rather than
+	// moved at the same time — one component changing under two presets at once from two
+	// different causes would be two changes wearing one commit.
+	// Unmeasured: nobody has benchmarked either summarizer ahead of the housellm offloaders (or
+	// in combination with them at all) for savings, only for wire-shape correctness
+	// (apply/shape_validate_test.go, which tests `summarize`). Both are placed first on that
+	// test's precedent, not on evidence that the order matters — keep_last_turns (default 10 for
+	// cache_aware_summarizer, matching summarize's own keep_last tuning) leaves the tail either
+	// component would interact with untouched regardless of order.
 	"conservative": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"medium":       {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 	"high":         {"summarize", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
-	"xhigh":        {"summarize", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	"xhigh":        {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
@@ -776,9 +784,17 @@ components:
     strategy: code
     trigger:
       min_request_tokens: 3000`,
-	"xhigh": `pipeline: [summarize, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+	// xhigh's summarizer is cache_aware_summarizer, not summarize — the one tier that uses it.
+	// model.source: incoming is the only setting carried over; trigger is left at the
+	// component's own defaults (min_request_frac 0.9, cache_state any — see
+	// applyCacheAwareTriggerDefaults) rather than pinned here, the same choice `high` makes for
+	// `summarize` and for the same reason (see the comment above `high`'s entry). On Anthropic
+	// incoming-model traffic this needs #402 (the trigger/cold-turn/keep-alive work and the
+	// PrefixAsk fallback), #406 (the prefix-ask max_tokens fix) and #413 (the prefix-ask
+	// insertion-point fix) to do anything at all — see the presets map comment above.
+	"xhigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
 components:
-  summarize:
+  cache_aware_summarizer:
     model:
       source: incoming
   extract:
