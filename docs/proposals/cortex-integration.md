@@ -31,10 +31,10 @@ Here's how the rest of this document answers that:
 - **§3** — what Cortex already gives us for free, and where that stops being true.
 - **§4** — a capability Cortex doesn't have today that this plan actually needs: letting a
   plugin hold a streamed response back before deciding what, if anything, to send onward.
-- **§5** — the one piece that's genuinely unresolved: where keep-alive's state should live.
-  Written as requirements and two options, not a decision we've made on Cortex's behalf.
+- **§5** — where keep-alive's state lives. Settled: plain in-process memory, the same way the
+  standalone proxy already does it.
 - **§6** — the part that's entirely ours to build: a new adapter inside
-  `core/plugins/contextguru`. Buildable and testable without Cortex deciding anything except §5.
+  `core/plugins/contextguru`.
 - **§9** — the actual, short list of things we're asking Cortex to decide, build, or confirm.
 
 ## 2. Current state
@@ -71,26 +71,16 @@ fix.
 ## 3. What Cortex already gives us — no infra change needed
 
 We checked how much of this Cortex can already do, instead of assuming we'd need something new.
-Two of four requirements are already covered, fully, by existing generic mechanisms. A third
-(seeing the response) is covered for *reading*, but not for the stronger thing one of our features
-needs — see §4. The fourth (durable storage) is covered by *an* existing mechanism, but whether
-it's the *right* one is a real open question — see §5.
+Three of four requirements are already covered, fully, by existing generic mechanisms. The fourth
+(seeing the response) is covered for *reading* a finished response (confirmed below), but not for
+the stronger thing `marker_mode: full` needs — see §4.
 
 | Requirement | Existing Cortex primitive | Where it's already proven |
 |---|---|---|
 | Fire a request with nothing inbound triggering it | A plugin can run a background goroutine for its whole lifetime (`Init`/`Shutdown`), and make its own HTTP calls that skip the normal request pipeline entirely | `core/plugins/ibac` does exactly this for its own LLM-judge call — "uses a standalone http.Client that bypasses the listener" — with a sentinel header so it never loops back on itself. context-guru's own plugin already uses the identical trick for its extract-model calls |
-| See the real response | Every plugin's `OnResponse` hook already runs on the real response, with the full body, if the plugin asks for it. Same for streamed (SSE) responses, via a separate hook — but only to *observe* it after the fact. Not enough for everything we need; §4 covers the gap | Already wired into Cortex's pipeline today, for observation. `contextguru`'s `OnResponse` is empty by *choice*, not because the hook is missing |
+| Read the final, settled usage numbers for a request | Not `OnResponse` — Cortex's `inference-parser` runs *after* this plugin on the response pass, so usage isn't final yet when `OnResponse` fires. The reliable point is `OnFinish`, called once everything else is done, where `pctx.Extensions.Inference` already carries cache-read/cache-write/output tokens and `pctx.Body` still holds the compacted bytes | Confirmed directly by Cortex (see §9) — this plan originally assumed `OnResponse` was enough; it isn't, and the fix needs no new Cortex capability, just the right hook |
 | Read the caller's credential, without Cortex having to manage it specially for us | The live request's headers are exposed directly on the per-request object — no API, just a field | Plugins already read and write this field directly; it's how every other plugin touches headers |
-| Somewhere to keep state across requests | `pctx.Shared` — an in-memory, per-process key-value store with expiry, handed to every plugin. One candidate; see §5 for why it might not be the right one | `core/plugins/sessionbudget` had a near-identical need (per-session state, read later by a background process) and chose Redis instead — for reasons §5 covers |
-
-One thing worth getting precisely right, because it decides whether anything we store in
-`pctx.Shared` survives a config reload at all (separately from whether `pctx.Shared` is even the
-right place — §5): Cortex builds this store exactly once per process, at startup, and hands it to
-the parts of the system that stay running. Reloading the config rebuilds the plugins, but not that
-store — so state we put there survives a reload; state we keep inside the plugin itself does not.
-That's true today because of how the code happens to be written, not because any test or doc
-comment promises it'll stay true. §9 asks Cortex to make it a real, tested guarantee if this ends
-up being the storage tier we use.
+| Somewhere to keep state across requests | Plain memory inside the plugin itself — the same way `proxy/keepalive.go` already does it. Settled; see §5 | Confirmed directly by Cortex (see §9): restarts and config reloads are rare enough that losing one keep-alive window when they happen is an acceptable cost, so no new storage guarantee is needed |
 
 ## 4. Streaming interception — a capability Cortex needs to build, not defer
 
@@ -175,11 +165,11 @@ component capable of dropping content is turned on, so leaving the default alone
 blocking an explicit `marker_mode: full` setting would still let a stronger preset turn this on by
 accident.
 
-## 5. Storage requirements for keep-alive state, and two candidates
+## 5. Where keep-alive's state lives
 
 Keep-alive needs somewhere to hold its state between requests. Rather than pick a place and ask
-Cortex to approve it, here's what that state actually needs (§5.1), two real options (§5.2,
-§5.3), and why the choice belongs to Cortex, not us (§5.4).
+Cortex to approve it, we wrote down what that state actually needs (§5.1) and asked. Cortex's
+answer (§5.2, confirmed in §9) is simpler than either option we proposed.
 
 ### 5.1 What the state actually needs
 
@@ -202,38 +192,30 @@ Cortex to approve it, here's what that state actually needs (§5.1), two real op
   supposed to be stopped at. Losing keep-alive's state just means one session, briefly, behaves
   like keep-alive was never turned on.
 
-### 5.2 Candidate A — the in-memory store Cortex already hands every plugin (`pctx.Shared`)
+### 5.2 Decided: plain memory inside the plugin, same as the standalone proxy
 
-**Pros:** no new dependency, works today, and its failure mode (lose an entry, no harm done)
-matches §5.1 exactly. **Cons:** it only exists on one process — invisible to any other replica,
-and gone on restart. It also has no size limit of its own, so we'd need to add our own cap rather
-than rely on it to protect memory. And, per §3, nothing currently guarantees it survives a config
-reload — it just happens to, today.
+Cortex's call (§9): hold this state in ordinary memory inside the plugin itself — the same shape
+`proxy/keepalive.go`'s own `keeper` struct already uses. Not even `pctx.Shared`; just a map the
+plugin owns. Reasoning: restarts and config reloads are rare, and losing one keep-alive window
+when they happen is an acceptable cost — exactly the failure-mode tolerance §5.1 above already
+argued for. That settles it: no Redis, no new guarantee needed from `pctx.Shared`, and no new
+size-bound design — the adapter ships with the exact same constants `proxy/keepalive.go` already
+has (`maxKeepAliveSessions`, `maxKeepAliveBytes`, `maxKeepAliveBodyBytes`), unchanged.
 
-### 5.3 Candidate B — Redis, the same way `sessionbudget` already uses it
-
-**Pros:** survives restarts, visible across replicas — the stronger choice, and already proven
-for a similar problem elsewhere in Cortex. `sessionbudget` also already solved "what if Redis is
-down" (fail open, same answer §5.1 wants here). **Cons:** turns keep-alive into a feature that
-needs Redis configured and reachable everywhere it's used. It also means a masked credential now
-leaves this process's memory for Redis — not necessarily worse, but a different threat model than
-the one our masking approach (Appendix A) was built for, and worth a security look specifically
-because of that.
-
-### 5.4 This is Cortex's decision, not ours
-
-Both options already exist in Cortex today — we're not proposing a new storage layer either way.
-What's open is whether either one, as-is, actually meets §5.1's needs, whether one needs a small
-upgrade first (a documented guarantee for the in-memory store; a dedicated namespace and security
-review for Redis), or whether Cortex would rather do neither. We're not picking for them — §9
-turns this into the actual question.
+One consequence worth being explicit about, since an earlier draft of this plan assumed shared
+storage and designed around it: during a config reload, the old and new plugin instances now have
+*completely separate* memory, with nothing shared between them. The new instance starts with zero
+tracked sessions — it has nothing to race the old instance over. So the double-ping risk an
+earlier draft needed a compare-and-swap to prevent can't actually happen; that fix is gone from
+§6.3 below. The one reload-time risk that's still real is the *old* instance's own credential
+during its own shutdown, which §6.3 still covers.
 
 ## 6. The context-guru-side adapter
 
 Everything in this section lives in `core/plugins/contextguru` (or a new package next to it) in
 Cortex's own repo — a pull request we write and hand them to review, built only from what's in §3
-plus whichever storage option §5 settles on. No new Cortex-wide interface, no change to Cortex's
-core packages.
+plus the plain in-process storage §5 settled on. No new Cortex-wide interface, no change to
+Cortex's core packages.
 
 The plan: pull the keep-alive logic out of `proxy/keepalive.go` into its own exported package.
 Whoever hosts it — the standalone proxy, or this new Cortex adapter — only has to supply two
@@ -260,7 +242,7 @@ graph TB
     subgraph Host2["core/plugins/contextguru adapter (new, lives in Cortex's repo)"]
         D2["cortexDispatcher<br/>captures pctx.Headers on OnRequest,<br/>fires its own standalone http.Client<br/>(ibac/token-broker pattern) — the<br/>credential never leaves this adapter"]
         E2["slog Emitter<br/>(existing logEmitter pattern)"]
-        S2["Store adapter over whichever tier<br/>§5 resolves to (pctx.Shared or Redis),<br/>with context-guru's OWN size/count<br/>bounds layered on top either way"]
+        S2["Plain in-process map,<br/>same size/count bounds<br/>as proxy/keepalive.go today"]
     end
 
     D1 -. implements .-> KA
@@ -292,7 +274,13 @@ func (k *Keeper) Record(tenant, session string, startedAt time.Time, body []byte
 
 Under Cortex, `tenant` and `session` come straight from the session ID Cortex already attaches to
 every request — nothing new to invent there. `body` is the same compacted bytes the plugin
-already produced for the existing compaction feature.
+already produced for the existing compaction feature. `Arrive` fires from `OnRequest`, same as the
+standalone proxy. `Record` fires from `OnFinish`, not `OnResponse` — Cortex's `inference-parser`
+runs *after* this plugin on the response pass, so the real, settled usage numbers (cache read,
+cache write, output tokens) aren't ready yet when `OnResponse` runs. By `OnFinish`, they're
+sitting in `pctx.Extensions.Inference`, already parsed, and `pctx.Body` still holds the compacted
+bytes — so the adapter doesn't need any response-parsing logic of its own, just reads what's
+already there.
 
 ### 6.2 The one call the engine makes back out — `Dispatcher`
 
@@ -334,27 +322,23 @@ making a plain HTTP call, masking a credential while it's held — is something 
 already does elsewhere (§3). There's nothing here that needs Cortex's maintainers to design
 anything; there's a pull request for them to review.
 
-### 6.3 Two problems a config reload can cause, and how each is closed
+### 6.3 One problem a config reload can cause, and how it's closed
 
 Reloading Cortex's config rebuilds every plugin, including this one. The old copy and the new copy
 briefly exist at the same time (new one starts up first, old one gets 30 seconds to finish up
-before being shut down). Two things can go wrong in that window:
+before being shut down). Because keep-alive's state is plain memory inside each plugin instance
+(§5.2), not something shared between them, the new copy starts out knowing nothing about any
+session the old copy was tracking — there's no risk of both copies pinging the same session, since
+only the old copy ever knew about it in the first place.
 
-**A session could get pinged twice.** Both the old and new copy's background timer could notice
-the same idle session and both decide to ping it. Each ping still goes through the same real
-upstream call and the same checks afterward, so the worst outcome is wasting the cost of one extra
-ping — not corrupted state. **Fix:** before pinging, the adapter marks the entry as "claimed" in
-shared storage first, so only one copy ever actually sends the ping.
-
-**A credential held by the *old* copy might never get released.** This one needed an actual fix,
-not just a note. If the old copy is in the middle of shutting down while it's still holding a
-session's credential — and hasn't gotten around to pinging it yet — nothing today forces that
-credential to be released before the old copy disappears. **Fix:** when the adapter shuts down, it
-now calls a new method, `Keeper.Shutdown()`, which stops the timer and immediately releases every
-session it's still holding, before shutdown finishes — instead of hoping the timer gets to it in
-time. And as a backstop, even if that somehow gets interrupted (a crash mid-shutdown), the masking
-approach in Appendix A still guarantees the credential self-destructs on a fixed schedule either
-way.
+What *is* still a real risk: **a credential held by the old copy might never get released.** If
+the old copy is in the middle of shutting down while it's still holding a session's credential —
+and hasn't gotten around to pinging it yet — nothing today forces that credential to be released
+before the old copy disappears. **Fix:** when the adapter shuts down, it now calls a new method,
+`Keeper.Shutdown()`, which stops the timer and immediately releases every session it's still
+holding, before shutdown finishes — instead of hoping the timer gets to it in time. And as a
+backstop, even if that somehow gets interrupted (a crash mid-shutdown), the masking approach in
+Appendix A still guarantees the credential self-destructs on a fixed schedule either way.
 
 ### 6.4 One thing that's fine as-is
 
@@ -390,11 +374,12 @@ sequenceDiagram
     Note over Keeper: clears any stale tracked entry for S
     Plugin-->>Cortex: SetBody, compacted
     Cortex->>Upstream: forward compacted body
-    Upstream-->>Cortex: response and usage
-    Cortex->>Plugin: OnResponse(pctx)
+    Upstream-->>Cortex: response
+    Cortex->>Cortex: inference-parser settles usage<br/>into pctx.Extensions.Inference
+    Cortex-->>Agent: response
+    Cortex->>Plugin: OnFinish(pctx)
     Plugin->>Keeper: Record(tenant, S, startedAt, body, usage, status)
     Note over Keeper: gates - turn at least 1, prefix floor, cost ceiling,<br/>thinking-enabled refusal - track or discard
-    Cortex-->>Agent: response
 
     Note over Keeper: session goes idle
     loop every keepAliveTick, 2s
@@ -439,62 +424,106 @@ stateDiagram-v2
 
 ## 8. Response visibility and storage, concretely
 
-- **Seeing the response:** Cortex already calls every plugin's `OnResponse` hook with the real
-  response. `contextguru`'s version of that hook is just empty today, by choice. Fixing it means:
-  on `OnResponse`, read the usage numbers and the body, hand them to `Keeper.Record`, and feed the
-  same cache-touch/summarize bookkeeping the standalone proxy already does. For streamed
-  responses, use the streaming version of the hook instead, so the usage numbers (which only show
-  up at the very end of a stream) actually get seen. None of this needs §4's streaming
-  interception — reading usage numbers after the fact is exactly what today's hooks already
-  support; only `marker_mode: full`'s expand loop needs the stronger capability.
+- **Seeing the response:** not `OnResponse` — `OnFinish`. Cortex's `inference-parser` settles
+  usage numbers *after* this plugin's response-pass hook would run, so `OnResponse` would see
+  cache/output tokens that aren't final yet. `OnFinish` runs once everything else is done, and by
+  then `pctx.Extensions.Inference` already has the settled numbers and `pctx.Body` still has the
+  compacted bytes — so the adapter reads both and calls `Keeper.Record`, with no response-parsing
+  logic of its own to write. This is true whether the response was streamed or not, so there's no
+  separate streaming-hook path to build here. None of this needs §4's streaming interception —
+  reading settled numbers after the fact is exactly what `OnFinish` already gives us; only
+  `marker_mode: full`'s expand loop needs the stronger capability.
 - **Storage:** context-guru's own storage interface (`store.Store`) is already small and
-  host-agnostic — the adapter just needs one implementation of it, wrapping whichever option §5
-  settles on. Neither option (the in-memory store or Redis) enforces a size limit on its own, so
-  the adapter still needs to enforce its own limits on top — the exact same discipline
-  `proxy/keepalive.go` already applies today, just pointed at a different backing store.
+  host-agnostic — the adapter's implementation of it is just a plain in-process map, per §5,
+  enforcing the same size/count limits `proxy/keepalive.go` already does today.
 
 ## 9. What we're asking Cortex to decide, build, or confirm
 
-**Streaming interception (§4) is a real build, not a confirmation.** `marker_mode: full` cannot
-work through Cortex without it — for any plugin, not just ours. §4.2 sketches one possible shape
-for it; the actual design is Cortex's call.
+### 9.1 Already settled, in review on this plan
 
-**The storage-tier decision (§5) is a real decision, not a rubber stamp.** Two concrete
-questions:
+Cortex (Hai) answered these directly:
 
-1. If the in-memory store (§5.2) is the one used: is Cortex willing to make its reload-survival
-   and lack of a size limit an actual, tested guarantee — not just something that happens to be
-   true about how the code is written today?
-2. Given `sessionbudget` already exists and picked Redis for a similar-looking problem: should
-   this adapter do the same, accepting a hard dependency on Redis in exchange for durability that
-   §5.1 says isn't strictly required here? Or is the difference in §5.1 (losing this state is
-   harmless, losing `sessionbudget`'s isn't) a real reason to make a different call? We don't
-   think we should answer this one ourselves.
+- **Storage (§5):** plain memory inside the plugin, no `pctx.Shared`, no Redis. Losing a window
+  on a rare restart or reload is an acceptable cost.
+- **Plugin ordering (§6.4):** a line in the deployment docs is enough; no enforcement mechanism
+  needed.
+- **Packaging:** once the adapter lands, it should ship in the laptop build as opt-in — that's
+  where the real Claude Code traffic is. Today no shipped Cortex artifact includes the plugin at
+  all.
+- **The version bump (§2, §10 Phase 4):** confirmed — bumping to `v0.4.2` already builds and
+  passes the plugin's existing tests with no code changes needed.
 
-Two things we're deliberately **not** asking for, named so it's clear we considered them:
+### 9.2 Streaming interception (§4) — a real build, not a confirmation
 
-- **A guarantee that a credential-injecting plugin always runs before this one.** Right now that
-  ordering is just a matter of how a deployment is configured, with nothing enforcing it. §6.4
-  covers why getting it wrong fails harmlessly (keep-alive silently doesn't happen for that
-  session) rather than dangerously. We're calling this out as a deployment requirement, not asking
-  Cortex to build an enforcement mechanism for it.
+`marker_mode: full` cannot work through Cortex without it — for any plugin, not just ours. §4.2
+sketches one possible shape for it; the actual design is Cortex's call.
+
+### 9.3 A proposal: let a plugin's own spend reach Cortex's cost ledger
+
+Hai raised a real gap: a keep-alive ping spends real money, but because it goes out through this
+plugin's own standalone `http.Client` instead of through Cortex's normal request pipeline, it
+never reaches Cortex's own cost reporting. Cortex already prices and records cost for every real
+request it handles — but that whole path, as it exists today, is built entirely around a live
+request. Tracing it: `inferenceparser.settleCost` is the one place a cost gets priced and
+published, and every function underneath it — `settle.Settle`, `settle.Publish`, `settle.Store` —
+takes a `*pipeline.Context` as its first argument. A keep-alive ping has no `pipeline.Context`; it
+isn't a request Cortex ever saw.
+
+What we did find, one layer down, is a function that *isn't* shaped around a live request:
+`core/session.Store.Append(sessionID string, event pipeline.SessionEvent)`. This is the actual
+low-level call that ends up persisting a cost record for a real request too — a plugin publishing
+a cost event onto a live `pctx` is really just a longer path to the same `Append`. It's just not
+exposed to a plugin directly today; `pctx.Session` only hands out a read-only snapshot
+(`SessionView`), never a handle to the writable store behind it.
+
+**Proposed shape** — small, and intentionally mirroring how `pctx.Shared` is already handed out:
+
+```go
+// CostRecorder lets a plugin publish a cost event for a session when the
+// spend didn't come from a request Cortex's own pipeline ever saw — e.g. a
+// keep-alive ping fired from a background goroutine. Captured from pctx once,
+// the same way pctx.Shared already is.
+type CostRecorder interface {
+    RecordCost(sessionID string, ev event.Event)
+}
+```
+
+Reusing `event.Event`'s existing wire shape means every consumer that already reads the `"cost"`
+session-event key — `agentop`, dashboards, whatever's downstream — keeps working with no changes;
+they'd just see an extra event for a session, distinguishable by whatever `Source` we tag it with
+(`event.Source` already has an enum for this; a new value for "a plugin's own background spend"
+would be a small addition there too).
+
+**The pricing side of the same point:** Hai separately suggested using Cortex's own pricing table
+"so the two agree" rather than context-guru's own. We think that's right, and for a reason beyond
+convenience — a prior review on this same plan already caught a bug of exactly this shape (two
+independently-computed cost figures for the same event quietly disagreeing; fixed in `#383`). So
+the keep-alive adapter's `Dispatcher` implementation should price a ping using Cortex's
+`core/cost/pricing.Resolver`, the same resolver `inferenceparser` already uses for real requests,
+rather than carrying its own copy of a rate table.
+
+Not asking Cortex to build this unilaterally — this is the "let's work out a small API together"
+item from Hai's own review, written up concretely enough to start from rather than left as an
+open-ended ask.
+
+### 9.4 Two things we're deliberately not asking for
+
+Named so it's clear we considered them:
+
+- **A guarantee that a credential-injecting plugin always runs before this one.** Already settled
+  — §9.1.
 - **A way for this plugin's own ping to flow back through Cortex's normal traffic pipeline**, so
   Cortex's other observability/security plugins would see it too, instead of going out through a
   plain, separate HTTP call. `ibac` already made the same choice for its own calls, so we're
-  following existing precedent rather than introducing a new kind of gap.
-
-One more thing worth naming, for whoever eventually reviews the actual pull request rather than
-this document: today's plugin does nothing in the background and shows up nowhere in Cortex's own
-metrics or session-event views. Once it owns a background timer, that changes, and whether that
-also changes how the plugin should be packaged (it's currently excluded from Cortex's default
-build) is a call for that reviewer to make — not something this document resolves.
+  following existing precedent rather than introducing a new kind of gap. (§9.3's `CostRecorder`
+  closes the one concrete cost consequence of that choice without needing to reverse it.)
 
 ## 10. Phased plan
 
 ```mermaid
 graph LR
     P1["Phase 1<br/>Export keepalive.Keeper + Keeper.Shutdown,<br/>Dispatcher/Release interfaces,<br/>extract Appendix A's masking helper,<br/>a Dispatcher contract test,<br/>default httpDispatcher for<br/>cmd/context-guru-proxy<br/>(no behavior change)"] --> P2
-    P2["Phase 2<br/>Build the core/plugins/contextguru<br/>adapter: cortexDispatcher over<br/>pctx.Headers, Store over whichever<br/>tier §5 resolves to, real<br/>OnResponse/OnResponseFrame,<br/>proactive Shutdown-triggered Release"] --> P3
+    P2["Phase 2<br/>Build the core/plugins/contextguru<br/>adapter: cortexDispatcher over<br/>pctx.Headers, plain in-process Store,<br/>Record wired to OnFinish,<br/>proactive Shutdown-triggered Release,<br/>price pings via Cortex's own<br/>pricing.Resolver"] --> P3
     P3["Phase 3<br/>PR to rossoctl/cortex for review —<br/>no new core/pipeline interface requested,<br/>the adapter from Phase 2 plus<br/>whatever §5/§9 resolved to"] --> P4
     P4["Phase 4<br/>Add /v1/responses to the plugin's<br/>default paths; a human manually bumps<br/>the pinned version past #375 only<br/>once the Phase 1 contract test passes<br/>against the candidate version"]
 ```
@@ -514,6 +543,25 @@ of leaving it as a someday-task, and a new automated test that exercises the `Di
 interface using fake inputs. That test does two jobs: it gives Phase 3's Cortex pull request
 something concrete to check the adapter against, and it means a future context-guru change that
 breaks this contract gets caught in *our own* tests before it ever reaches Cortex.
+
+Hai's review flagged something worth being explicit about here rather than discovering it during
+Phase 2: `proxy/keepalive.go`'s `keeper` reaches into `*Handler`/`*Tenancy` for more than just the
+HTTP call `Dispatch` already covers. Exporting the `Keeper` means deciding, for each one, what
+replaces it:
+
+| What `keeper` reaches for today | What it's for | What replaces it under Cortex |
+|---|---|---|
+| `k.h.client` | performs the actual ping | `Dispatcher.Dispatch` (already designed, §6.2) |
+| `k.h.limiter.AcquireSpare` | refuses a ping when the tenant's rate/concurrency budget is tight | the adapter's own `Dispatch` implementation checks Cortex's existing rate limiter before firing; `Dispatch` returning an error is already how the `Keeper` treats any refusal, so no new interface needed |
+| `k.h.opts.Prices` | prices a ping before firing (the cost ceiling) and after (the actual charge) | Cortex's own `core/cost/pricing.Resolver` — see §9.3, same reasoning as the cost-ledger proposal |
+| `k.h.rec == nil` check | refuses to even hold a credential if nothing will account for what it's used for | the Cortex-side equivalent: refuse retention if the `CostRecorder` from §9.3 isn't wired up either, for the same reason |
+| `tn.Cache` (`CachePolicy`) plus manager-controlled strategies and session overrides | per-tenant policy: is keep-alive even on, `Idle`/`MaxPings`/`MaxUSDPerPing`, who can override it and how | Cortex has no multi-tenant control plane to match this against, and we don't think it needs one for this: one static policy from the plugin's own config block, no strategies, no per-session dashboard overrides. Simpler than the standalone proxy by design, not a gap |
+| `tn.Preset` | a label on the dashboard row | cosmetic; the adapter supplies a fixed string or omits it |
+
+Pricing (`k.h.opts.Prices`) and the audit-sink gate (`k.h.rec`) both point at the same place: §9.3's
+`CostRecorder` proposal. If that lands, both resolve together — the adapter can refuse to retain a
+credential exactly when it has nowhere to publish the eventual cost, which is the same accountability
+rule the standalone proxy already enforces, just phrased in Cortex's terms instead of `dash`'s.
 
 **Phase 2** is also entirely ours, and doesn't need Cortex to build or decide anything beyond
 whatever §5/§9 settles.
@@ -550,7 +598,4 @@ credential has nothing proxy-specific about it:
   explicit safety net for the adapter's own shutdown path too, not just the standalone proxy's.
 
 Plan: pull this into one small shared package that both `proxy/keepalive.go` and the new Cortex
-adapter import, instead of having the same security-sensitive code copy-pasted in two places. If
-Cortex ends up choosing Redis (§5.3) for storage, this masking code needs a security look *before*
-that lands — once the credential leaves process memory for Redis, it's a different thing being
-protected against.
+adapter import, instead of having the same security-sensitive code copy-pasted in two places.
