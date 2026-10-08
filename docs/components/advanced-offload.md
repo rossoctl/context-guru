@@ -790,7 +790,138 @@ Run it **alone**: it changes the message count, and `apply`'s count-change rebui
 retained message's original raw bytes by matching them exactly, so a message another component
 edited in place fails to match and is re-marshalled instead.
 
-### Why the call shape matters
+### Two ways to use `cache_state`
+
+`trigger.cache_state` has two values: `any` and `pre_expiry`. Pick one.
+
+**`any` — summarize now, use it now.** As soon as a turn crosses the size threshold, the
+component writes a summary and uses it on the very next request. This is the simple choice: use
+it to shrink an oversized conversation as soon as possible.
+
+**`pre_expiry` — prepare a summary, but hold it until the cache goes cold.** Writing a summary
+into a request the provider still has cached forces a full re-write of everything after it — the
+same cost as if the cache were cold already, paid early for no reason. `pre_expiry` avoids this:
+it writes the summary in the background, near the end of the cache's life, and holds it in
+**reserve**. Nothing changes about the request sent upstream until the cache actually goes cold.
+Only then does the reserve get used.
+
+**The summarizer never changes how long the cache stays warm.** That is set by the cache
+strategy (`keepalive_max_pings`). A summary call takes the place of one ping, counts the same way
+a ping does, and never adds an extra one.
+
+#### What happens, turn by turn
+
+| | `any` | `pre_expiry` |
+|---|---|---|
+| **The summary call happens** | On the turn that crosses the size threshold | On a turn landing in the last minute before the cache would expire — or, since real turns rarely land in so narrow a window, at a keep-alive ping inside that same window |
+| **The summary is used** | On the very next request | Only once a request actually arrives with the cache cold |
+| **A normal keep-alive ping** | Not affected | Replaced by the summary call once there is a threshold-crossing summary to write |
+| **Later keep-alive pings, before the cache goes cold** | Not affected | Stay plain pings, UNLESS the reserve has enough new material to be worth refreshing (see below) |
+| **A request before the cache goes cold** | Sends the summary, like any other request | Sends the full conversation, unchanged |
+| **A request once the cache goes cold** | Sends the summary, like any other request | Sends the summary for the first time |
+
+#### Refreshing the reserve costs money, so it has to earn it back
+
+A `pre_expiry` reserve can go stale: the conversation keeps growing while the reserve still only
+covers the point it was written at. A later keep-alive ping can refresh it — write a new summary
+covering the larger conversation — instead of sending a plain ping.
+
+**That refresh is not free, so it only happens when it pays for itself.** The rule: refresh only
+when the money a cold return will save is at least as much as the refresh itself costs.
+
+- The refresh's own cost is a cache **read** of the whole conversation plus a short reply.
+- The money it saves is the new material it folds in, priced at what writing it on a cold return
+  would have cost (the cache **write** rate).
+
+An earlier version of this used a fixed size instead — refresh once 6,000 new tokens had piled up.
+That number was borrowed from a different decision (`resummarize_tokens`, which still controls
+when a TURN re-derives its summary) and was far too small for a refresh: at Sonnet 5's prices,
+6,000 new tokens are worth about $0.015 on the eventual cold return, but the refresh itself costs
+about $0.20. Refreshing at 6,000 tokens meant paying $0.20 to save $0.015 — repeatedly, on an idle
+session, forever. The money rule fixes this: on Sonnet 5's prices it takes roughly **80,000** new
+tokens before a refresh earns itself back, and the number adjusts automatically for other models'
+prices.
+
+#### What it costs, at 900,000 tokens on Sonnet 5
+
+Sonnet 5 prices: $2 per million input tokens, $0.20 per million cache-read tokens, $2.50 per
+million cache-write tokens, $10 per million output tokens.
+
+| | Full history (900k) | Summary (80k) |
+|---|---|---|
+| **A warm turn** (cache read) | $0.18 | $0.016 |
+| **A cold return** (cache write) | $2.25 | $0.20 |
+
+So on a cold return, sending the summary instead of the full history saves about **$2.05**. On a
+warm turn it saves about **$0.16**. One summary call itself costs about **$0.20** (it reads the
+whole 900k conversation to write the new summary).
+
+#### Which to choose
+
+- **Use `any`** for a session that is being actively worked on. It saves money starting on the
+  very next turn — about $0.16 per turn at 900k tokens — and never pays the cold-return rewrite
+  twice.
+- **Use `pre_expiry`** when you want the agent to see the FULL conversation for as long as
+  possible, and sessions often sit idle past the cache's lifetime (a user steps away, keep-alive
+  pings run out, the proxy restarts). It keeps full detail in every warm turn and only pays the
+  summary's cost where a full rewrite was going to happen anyway.
+
+#### Why there is no "summarize on every turn, but only ever use it when cold"
+
+`cache_state` used to have two more values — `cold` and `pre_expiry_or_cold` — that waited for
+the cache to be free to invalidate before firing at all. Both were removed, for three reasons
+found on a real corpus:
+
+- **The downside they were avoiding was small.** Firing on a warm cache and getting it wrong
+  (summarizing something that should not have been summarized yet) cost about **$0.84 across the
+  whole corpus** — not nothing, but not the large risk the wait was priced to avoid.
+- **Firing on a warm cache and getting it right pays back fast.** 2-3 turns.
+- **Waiting does not even avoid the thing it was waiting for.** Committing a summary always
+  takes two turns — one turn writes it, the next turn uses it. By the time a cold-gated version
+  can use its summary, it has already paid the first full rewrite anyway.
+
+There is no config value left that fires on every turn but only ever applies when the cache goes
+cold — it was tried, and it cost more than it saved.
+
+#### Limits
+
+- **A proxy restart loses everything in progress.** Checkpoints and reserves are held in memory
+  only, so a restart clears every session's. On Anthropic traffic, the previous request this
+  component reuses is also held in memory only: the first request after a restart has nothing to
+  build on (`cache_aware_summarizer_no_prefix`) and goes through unchanged. That same request
+  becomes the new starting point, so the component can summarize again from the next turn — one
+  turn lost, not more.
+- **While keep-alive pings keep a session's cache warm, the cache never goes cold.** A
+  `pre_expiry` reserve is only used once the cache actually goes cold, so as long as pings keep
+  running, the reserve just sits there (refreshed only when it is worth it — see above). It gets
+  used only after pinging stops: the session's ping budget runs out, keep-alive is off, or the
+  session sits idle longer than keep-alive covers.
+- **On some models, an earlier thinking block costs the whole cache read.** `claude-haiku-4-5`
+  is the one measured, but the same documented behavior covers Claude 3.7 Sonnet, bare Opus 4
+  and Opus 4.1, and bare Sonnet 4 and Sonnet 4.5 (every one of them keeps only the LAST turn's
+  thinking block), and appending this component's own instruction strips every earlier one at
+  once, which also shrinks the cache the backend actually reads. On those models this component
+  declines rather than pay for a smaller read than expected.
+
+#### When to use `summarize` instead
+
+- **A much cheaper model should write the summary.** This component's whole saving depends on
+  reusing the SAME model's cache, so pointing it at a separate, cheaper model defeats the point.
+  `summarize` has no such restriction.
+- **There is no previous request to build on** — right after a restart, or on a session's very
+  first turn.
+- **Your gateway does not accept resending the previous request's exact bytes plus one more
+  message.**
+- **A very large thinking budget is in use.** The reply allowance this component's call gets can
+  shrink to almost nothing when a large thinking budget pushes past the model's own hidden output
+  limit.
+- **Tool output should be left out of the summary.** This component always sends the whole
+  conversation, tool output included. `summarize` can leave tool output out
+  (`include_tool_calls: false`).
+
+### Technical notes
+
+#### Why the call shape matters
 
 `summarize` builds a fresh prompt — a preamble plus the rendered transcript as one user message.
 That prompt shares no prefix with the conversation it describes, so the call is a cache miss on
@@ -800,7 +931,7 @@ This component sends **`[the conversation, verbatim and in order] + [one appende
 The rendered prefix is the one the agent's own request produced, so a prefix-caching backend can
 charge prefill only on the appended suffix.
 
-### How far the reuse actually goes
+#### How far the reuse actually goes
 
 The prefix that gets hit is one the **backend** has seen, and the backend only ever receives what
 this proxy forwards. The agent keeps sending its full uncompacted history, but from the first
@@ -816,7 +947,7 @@ Two consequences, both worth measuring rather than assuming:
 Judge this component on the backend's own telemetry — `vllm:prefix_cache_hits_total`, or
 `usage.cache_read_input_tokens`, which the OpenAI client records — never on a savings percentage.
 
-### Where the instruction goes, and why it is per model
+#### Where the instruction goes, and why it is per model
 
 The appended instruction is an **operator** instruction, so `role: system` is the correct channel
 where it exists: it is non-spoofable, and a trailing user turn on a long trajectory reads to the
@@ -856,7 +987,7 @@ To promote a model, verify the **path** — probe through the same endpoint and 
 uses and confirm the instruction arrives last — then add its match string to `system_models`, or ship
 a `profiles_path` override so the promotion needs no rebuild.
 
-### The call is detached, so compaction takes two turns
+#### The call is detached, so compaction takes two turns
 
 A summary here covers most of the transcript, so the call is large by construction and its budget is
 300 s. Running that inline would stall the triggering turn by minutes, billed against the agent's own
@@ -872,7 +1003,7 @@ waiting for.
 Read the `async_started` / `async_committed` **pair**: started without committed is a summary that was
 paid for and lost, which no other counter would reveal.
 
-### Two gates, two different quantities
+#### Two gates, two different quantities
 
 `min_tokens` asks *is the span worth a call*. `max_request_tokens` asks *can we afford the call* — and
 they differ because the request carries the **whole conversation**, not the span.
@@ -882,7 +1013,7 @@ available: the appended-suffix shape is the entire mechanism, and a truncated co
 different prefix that matches nothing. An over-large session declines and says so
 (`cache_aware_summarizer_too_large`).
 
-### Reversibility and reuse
+#### Reversibility and reuse
 
 `marker_mode: full` (default) stashes the replaced span through `commitMark`, so a store that
 **refuses** the payload causes the compaction to be skipped rather than leaving a `<<cg:HASH>>`
@@ -900,7 +1031,7 @@ spellings), the summary sentinel and a premature `</summary>` before the text is
 trustworthy earlier context. The whole trajectory reaches the summarizer, so planted text in any
 tool output gets a long run at it.
 
-### Counters at `/stats`
+#### Counters at `/stats`
 
 | field | means |
 |---|---|
@@ -913,8 +1044,14 @@ tool output gets a long run at it.
 | `cache_aware_summarizer_too_large` | declined because the outbound request would exceed `max_request_tokens` |
 | `cache_aware_summarizer_async_started` / `_committed` | the **pair** is the signal — started without committed is a summary paid for and lost |
 | `cache_aware_summarizer_timeouts` / `_errors` | fail-open paths; a timeout means the budget is too small for this load, an error means the route is wrong |
+| `cache_aware_summarizer_no_prefix` | the Anthropic (`PrefixAsk`) path's first-turn case — nothing stashed yet to build on. Counted apart from `_errors`: this is routine, not a failure |
+| `cache_aware_summarizer_prefix_ask_used` | the call went through `PrefixAsk` rather than a `MessagesModel` — whether this component is actually reaching Anthropic traffic |
+| `cache_aware_summarizer_cache_read_tokens` / `_cache_write_tokens` | the summary call's own usage — the direct answer to "is the call actually reading warm", this component's whole argument |
+| `cache_aware_summarizer_truncated` | a reply cut off before its closing tag was rejected rather than spliced in as a looks-complete fragment |
 
-### Not yet measured
+Two more counters, on the keep-alive side (`proxy`'s `/stats`, not this component's own): `keepalive_summary_substitute_refresh_paid` and `_refresh_not_worth_it` are the `pre_expiry` refresh money gate's own decision, one per keep-alive ping that had a stale reserve to weigh.
+
+#### Not yet measured
 
 The prefix-cache-hit improvement this design predicts is **unverified** — there is no live run
 behind it yet. The counters and the backend telemetry above are how to establish it.

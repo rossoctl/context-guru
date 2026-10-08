@@ -19,6 +19,9 @@ package components
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -124,8 +127,14 @@ type Budgeter interface {
 type PrefixUsage struct {
 	CacheRead  int
 	CacheWrite int
-	Fresh      int
-	Output     int
+	// CacheWrite1h is the SUBSET of CacheWrite the provider billed at the one-hour write
+	// premium rather than the default five-minute rate — never an addition to CacheWrite. Kept
+	// in the same position as cheapmodel.PrefixUsage's own field of the same name: proxy/
+	// prefixask.go converts directly between the two types, which Go only permits when every
+	// field name, type and order matches.
+	CacheWrite1h int
+	Fresh        int
+	Output       int
 	// ViaTool records that the answer arrived as a tool_use for the proxy's own structured-answer
 	// tool rather than as reply TEXT. Reported for the same reason CacheRead is: a caller that
 	// declares a verdict tool in order to get a schema-shaped answer cannot otherwise tell whether it
@@ -159,6 +168,39 @@ type PrefixAsker interface {
 	Ask(ctx context.Context, session, ask string) (reply string, usage PrefixUsage, err error)
 }
 
+// SpanHash is a stable content hash of a normalized message span, shared by every caller that
+// needs to tell whether two slices of a transcript are byte-for-byte the same conversation.
+// Exported so a PrefixCoverage implementation living outside this package (the host's own
+// stash) can compute the identical hash a components/offload caller computes over its own
+// span, without either package importing the other.
+func SpanHash(msgs []schemas.ChatMessage) string {
+	h := sha256.New()
+	for i := range msgs {
+		b, _ := json.Marshal(msgs[i])
+		h.Write(b)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:24]
+}
+
+// PrefixCoverage, when a PrefixAsker also implements it, answers whether the body it would
+// append `ask` to actually covers a given prefix of the conversation: the first `count`
+// normalized messages, content-hashed with SpanHash to `hash`. A PrefixAsker that does not
+// implement this interface is assumed to always cover — a caller MAY skip the check rather
+// than refuse an asker it cannot verify, since that is what every caller did before this
+// interface existed.
+//
+// WHY THIS EXISTS: the host's stash holds the LAST body forwarded for a session, which Ask
+// appends to on the theory that it is the current transcript. That theory breaks when the
+// stash declines to hold a body (too large, see proxy/prefixask.go's maxSentBody) and keeps an
+// OLDER one instead — Ask then silently answers from a transcript that does not include
+// everything the caller is about to claim its checkpoint covers. CoversSpan lets the caller
+// catch that BEFORE paying for the call, by checking the stash's actual coverage against the
+// span it is about to commission a summary for.
+type PrefixCoverage interface {
+	CoversSpan(session string, count int, hash string) bool
+}
+
 // ErrNoPrefix is what Ask returns on the FIRST turn of a session: nothing has been forwarded yet, so
 // there is no cached prefix to append to.
 //
@@ -171,6 +213,20 @@ var ErrNoPrefix = errNoPrefix{}
 type errNoPrefix struct{}
 
 func (errNoPrefix) Error() string { return "no stashed prefix for this session" }
+
+// ErrStalePrefix is what a caller should treat an attempted PrefixAsk as having returned when it
+// checks PrefixCoverage.CoversSpan itself and finds the stash does not (or no longer) cover the
+// span it is about to claim as summarized — see cache_aware_summarizer's own call closure for the
+// PrefixAsk path, which checks CoversSpan immediately before calling Ask and substitutes this for
+// the call entirely rather than paying for an answer it would then have to discard. Declared
+// alongside ErrNoPrefix and distinct from it for the same reason the two have different counters:
+// one means "nothing stashed yet" (every session's first turn, routine), the other means
+// "something IS stashed and it is not enough of the right thing" (caught before paying for it).
+var ErrStalePrefix = errStalePrefix{}
+
+type errStalePrefix struct{}
+
+func (errStalePrefix) Error() string { return "stashed prefix does not cover the span to summarize" }
 
 // MessagesModel is an OPTIONAL capability on a Model: a client that can send a full
 // message ARRAY rather than one flattened prompt string. Components detect it by type

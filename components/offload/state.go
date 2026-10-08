@@ -1,8 +1,6 @@
 package offload
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"sync/atomic"
@@ -496,6 +494,15 @@ type sumCheckpoint struct {
 	CoveredCount int    `json:"c"`
 	CoveredHash  string `json:"h"`
 	Key          string `json:"k"`
+	// Reserved marks a cache_aware_summarizer checkpoint commissioned under cache_state:
+	// pre_expiry that has not yet been spliced into any forwarded body. It is cache_aware_
+	// summarizer's own field, in a struct this file shares with summarize (same store key
+	// namespace, store.SumPrefix+session) — summarize never sets it, and cache_aware_summarizer
+	// never sets it for its own cache_state: any, so a zero value here always means "apply
+	// immediately", exactly as both components behaved before this field existed. See
+	// cache_aware_summarizer.go's own package comment on the two cache-state modes, and
+	// cacheAwareApplyPhase for how a Reserved checkpoint graduates.
+	Reserved bool `json:"reserved,omitempty"`
 }
 
 func sumKey(session string) string { return store.SumPrefix + session }
@@ -520,12 +527,11 @@ func saveCheckpoint(c *components.Ctx, cp sumCheckpoint) {
 
 // spanHash is a stable content hash of a message span, used to confirm the
 // covered prefix is unchanged on a later turn before reusing the summary.
+//
+// A thin wrapper around components.SpanHash, which is exported so proxy's sentStash can compute
+// the identical hash when answering components.PrefixCoverage.CoversSpan — see that interface's
+// own doc comment. Kept as a package-private name here rather than switched to the exported one
+// at every call site, so this package's many callers do not all have to change at once.
 func spanHash(span []bschemas.ChatMessage) string {
-	h := sha256.New()
-	for i := range span {
-		b, _ := json.Marshal(span[i])
-		h.Write(b)
-		h.Write([]byte{0})
-	}
-	return hex.EncodeToString(h.Sum(nil))[:24]
+	return components.SpanHash(span)
 }

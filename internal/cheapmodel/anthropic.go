@@ -192,8 +192,13 @@ const errBodyCap = 512
 type PrefixUsage struct {
 	CacheRead  int
 	CacheWrite int
-	Fresh      int
-	Output     int
+	// CacheWrite1h is the SUBSET of CacheWrite billed at the one-hour write premium rather than
+	// the default five-minute rate — never an addition to CacheWrite. See
+	// components.PrefixUsage.CacheWrite1h, which this converts to directly (components/
+	// prefixask.go), so the two types must keep identical field names, types and order.
+	CacheWrite1h int
+	Fresh        int
+	Output       int
 	// ViaTool: the answer came back as a tool_use for adjudicate.ToolName, not as reply text. See
 	// components.PrefixUsage.ViaTool -- the field exists so the caller can COUNT which shape it got,
 	// because the text parser accepts both and therefore hides the difference.
@@ -328,15 +333,23 @@ func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask 
 			OutputTokens     int `json:"output_tokens"`
 			CacheCreationTok int `json:"cache_creation_input_tokens"`
 			CacheReadTok     int `json:"cache_read_input_tokens"`
+			// CacheCreation's own ephemeral_1h_input_tokens is the SUBSET of CacheCreationTok
+			// billed at the one-hour premium — same field proxy/usage.go's own usage parser reads
+			// off the agent's response (cache_creation.ephemeral_1h_input_tokens), read here off
+			// this component's OWN call so its cost can be priced at the same per-tier rate.
+			CacheCreation struct {
+				Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
+			} `json:"cache_creation"`
 		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return "", u, err
 	}
 	u = PrefixUsage{CacheRead: out.Usage.CacheReadTok, CacheWrite: out.Usage.CacheCreationTok,
-		Fresh: out.Usage.InputTokens, Output: out.Usage.OutputTokens}
-	recordUsageCache(ctx, a.Model, out.Usage.InputTokens, out.Usage.OutputTokens,
-		out.Usage.CacheCreationTok, out.Usage.CacheReadTok)
+		CacheWrite1h: out.Usage.CacheCreation.Ephemeral1h,
+		Fresh:        out.Usage.InputTokens, Output: out.Usage.OutputTokens}
+	recordUsageCacheWithTTL(ctx, a.Model, out.Usage.InputTokens, out.Usage.OutputTokens,
+		out.Usage.CacheCreationTok, out.Usage.CacheReadTok, out.Usage.CacheCreation.Ephemeral1h)
 	// A cut-off reply (stop_reason: "max_tokens") is returned as text, not as an error. The sweep
 	// detects it and declines at no cost (sweep_reply_truncated); an error here would start a
 	// full-price fallback.

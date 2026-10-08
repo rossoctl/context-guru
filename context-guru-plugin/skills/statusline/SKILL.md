@@ -12,7 +12,7 @@ manage this one additional top-level key (never a second settings editor, never 
 **What it shows by default, once enabled and this project is routed:**
 
 ```
-████····  100/200.0k 50% | $0.03/12k saved of $0.41/187k | proxy: 3ms · upstream: 340ms | ◇ github 1% remove
+████····  100/200.0k 50% | $0.03 of $0.41 (-12k) | proxy: 3ms · upstream: 340ms | ◇ github 1% remove
 ```
 
 Five segments, each independently optional — a segment whose numbers are not available just does
@@ -30,11 +30,13 @@ not print:
   under 50%, yellow under 70%, red above. Read straight off Claude Code's own statusLine payload
   (`context_window.total_input_tokens` / `.context_window_size` / `.used_percentage`); no extra
   network call.
-- **What THIS session saved, against what it has spent so far** — `$0.03/12k saved of
-  $0.41/187k`. The first pair is this session's own savings (`total_saved_usd` / `saved_unique`,
-  scoped to this one session_id — see the script's own `_fetch_stats`); the second is this
-  session's own running cost and tokens, read straight off Claude Code's own statusLine payload
-  (`cost.total_cost_usd`, `context_window`). Omitted, not shown as zeroes, before this session has
+- **What THIS session saved, against what it has spent so far** — `$0.03 of $0.41 (-12k)`.
+  The first figure is this session's own saving (`total_saved_usd`, scoped to this one
+  session_id — see the script's own `_fetch_stats`); the second is this session's own running
+  cost, read straight off Claude Code's own statusLine payload (`cost.total_cost_usd`). The
+  bracket is the tokens context-guru removed over the session (`saved_unique`, each distinct
+  item counted once). It has no "of": the context bar already shows the current window size,
+  and that is a snapshot, not a running total to compare a running sum against. Omitted, not shown as zeroes, before this session has
   spent anything at all — a real $0 saved once there IS a total to compare it to still prints.
 - **The proxy/upstream latency split** — `proxy: 3ms · upstream: 340ms`, ContextGuru's own added
   latency next to what the upstream provider took, each labelled. Both are `/api/stats`' own

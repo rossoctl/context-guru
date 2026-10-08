@@ -297,10 +297,12 @@ func (s *Summarize) startAsyncSummary(c *components.Ctx, model components.Model,
 		// the next turn, charging one call twice. Measured at exactly 2x. Detaching makes the
 		// attribution single-valued; process totals are counted by the model wrapper regardless.
 		ctx, callSink := cheapmodel.WithDetachedSink(ctx)
+		callStart := time.Now()
 		summary, err := s.summarize(ctx, model, spanCopy, goal)
+		callMs := float64(time.Since(callStart).Milliseconds())
 		// Deferred BEFORE the error check: a call that timed out or failed may still have been
 		// billed for its input, and a cost we incurred is a cost we report.
-		deferUsage(st, session, callSink)
+		deferUsage(st, session, "summarize", "", "turn", callMs, callSink)
 		if err != nil {
 			// Classified here rather than swallowed: with nothing on the hot path waiting for
 			// this call, these two counters are the ONLY place a degraded summarizer shows up.
@@ -394,20 +396,58 @@ func AsyncSummaryStats() (started, committed, waitedMs, waitTimeouts, refused, u
 		atomic.LoadInt64(&summarizeAsyncPanics)
 }
 
-// deferredUsage is what a detached summarizer call used, waiting for a turn to attribute it to.
+// deferredUsage is what detached calls used since this session's last turn, waiting for a turn
+// to attribute it to. In/Out/CacheWrite/CacheRead are the FULL SUM across every call that landed
+// in the gap (two can: a commission and a roll-forward) — that total is the ledger truth
+// (cheapmodel.ReplayUsage reads it) and is never truncated. Calls is a bounded PER-CALL detail
+// list used only to build dashboard rows at replay time; truncating IT never loses money
+// accounting, only per-call detail on an unusually busy session.
 type deferredUsage struct {
+	Model      string         `json:"model"`
+	In         int            `json:"in"`
+	Out        int            `json:"out"`
+	CacheWrite int            `json:"cache_write"`
+	CacheRead  int            `json:"cache_read"`
+	Calls      []deferredCall `json:"calls,omitempty"`
+}
+
+// deferredCall is one detached call's own record, for one components.ModelCall dashboard row —
+// the summary call's own usage was otherwise invisible: it never appears on the triggering
+// turn's Report (it hasn't happened yet) nor the splicing turn's (it ran on a different
+// goroutine, with no Report of its own).
+type deferredCall struct {
 	Model      string `json:"model"`
 	In         int    `json:"in"`
 	Out        int    `json:"out"`
 	CacheWrite int    `json:"cache_write"`
 	CacheRead  int    `json:"cache_read"`
+	Component  string `json:"component"`
+	// Path is "messages" (components.MessagesModel) or "prefix_ask" (components.PrefixAsker) —
+	// cache_aware_summarizer's only, "" for summarize's always-flat-prompt call.
+	Path string `json:"path,omitempty"`
+	// Trigger is "turn" (commissioned directly from an eligible turn), "cold_deferred"
+	// (cache_aware_summarizer's cold-turn deferral — see cache_aware_cold.go), or
+	// "keepalive_substitute" (proxy/keepalive.go's substitute ping) — "" for summarize, which has
+	// only the one shape.
+	Trigger   string  `json:"trigger,omitempty"`
+	LatencyMs float64 `json:"latency_ms"`
 }
+
+// maxDeferredCallDetails bounds the per-call detail list — see deferredUsage's own comment on
+// why truncating it is safe. 4 covers every normal session (one commission between two turns is
+// the overwhelmingly common case) with room for the rare double.
+const maxDeferredCallDetails = 4
 
 // deferUsage records what a detached call used, for this session's next turn to attribute.
 //
 // Additive rather than replacing: two calls can complete between one turn and the next (a
 // commission and a roll-forward), and the second must not erase the first's cost. The whole point
 // of this record is that a cost we incurred is a cost we report.
+//
+// component/path/trigger/latencyMs describe THIS call for the dashboard row takeDeferredUsage
+// will build from it — see deferredCall. component is required ("summarize" or
+// "cache_aware_summarizer"); path/trigger are "" for summarize, which has only one shape of each.
+//
 // deferredUsageMu serializes the read-modify-write on a session's deferred-usage record.
 //
 // deferUsage does Get -> add -> Put on a background goroutine while takeDeferredUsage does
@@ -417,7 +457,7 @@ type deferredUsage struct {
 // from the other side. store.Store offers no atomic read-and-clear, so the mutex is the mechanism.
 var deferredUsageMu sync.Mutex
 
-func deferUsage(st store.Store, session string, sink *cheapmodel.Sink) {
+func deferUsage(st store.Store, session, component, path, trigger string, latencyMs float64, sink *cheapmodel.Sink) {
 	if st == nil || session == "" || sink == nil {
 		return
 	}
@@ -430,6 +470,8 @@ func deferUsage(st store.Store, session string, sink *cheapmodel.Sink) {
 	}
 	u := deferredUsage{Model: sink.Model(), In: int(in), Out: int(out),
 		CacheWrite: int(cw), CacheRead: int(cr)}
+	detail := deferredCall{Model: u.Model, In: u.In, Out: u.Out, CacheWrite: u.CacheWrite, CacheRead: u.CacheRead,
+		Component: component, Path: path, Trigger: trigger, LatencyMs: latencyMs}
 	if b, ok := st.Get(store.UsagePrefix + session); ok && len(b) > 0 {
 		var prev deferredUsage
 		if json.Unmarshal(b, &prev) == nil {
@@ -440,18 +482,41 @@ func deferUsage(st store.Store, session string, sink *cheapmodel.Sink) {
 			if u.Model == "" {
 				u.Model = prev.Model
 			}
+			u.Calls = prev.Calls
 		}
+	}
+	if len(u.Calls) < maxDeferredCallDetails {
+		u.Calls = append(u.Calls, detail)
 	}
 	if b, err := json.Marshal(u); err == nil {
 		st.Put(store.UsagePrefix+session, b)
 	}
 }
 
+// deferredCallRates resolves the rate card for one deferred call's model — c.RatesFor first
+// (resolves ANY model id, not just the incoming one; needed because cache_aware_summarizer may
+// be configured with model.source: config, a DIFFERENT model than the request's own), falling
+// back to c.SelfRates when the model matches (or RatesFor is unavailable). Zero means no usable
+// rate — reported as $0 rather than guessed, the same convention this codebase uses elsewhere
+// for "the price list is incomplete".
+func deferredCallRates(c *components.Ctx, model string) components.TokenRates {
+	if c.RatesFor != nil {
+		if r := c.RatesFor(model); !r.Zero() {
+			return r
+		}
+	}
+	return c.SelfRates
+}
+
 // takeDeferredUsage attributes any pending detached-call usage to THIS request, and clears it.
 //
 // Read-then-delete-then-replay, in that order: replaying without deleting would charge the same
 // call to every later turn, which is a worse error than the missing cost it fixes.
-func takeDeferredUsage(c *components.Ctx) {
+//
+// rep receives one components.ModelCall per detail entry (nil-safe: Report.Gate-style methods
+// all nil-check, but Calls is a plain slice append, so this checks rep itself). This is the ONLY
+// place a detached summarizer call's own usage becomes visible on a dashboard — see deferredCall.
+func takeDeferredUsage(c *components.Ctx, rep *components.Report) {
 	if c == nil || c.Store == nil || c.Session == "" {
 		return
 	}
@@ -480,4 +545,21 @@ func takeDeferredUsage(c *components.Ctx) {
 		return
 	}
 	cheapmodel.ReplayUsage(c.Ctx, u.Model, u.In, u.Out, u.CacheWrite, u.CacheRead)
+	if rep == nil {
+		return
+	}
+	for _, dc := range u.Calls {
+		rates := deferredCallRates(c, dc.Model)
+		rep.Calls = append(rep.Calls, components.ModelCall{
+			Component: dc.Component, Model: dc.Model,
+			Strategy:         strings.TrimSuffix(dc.Path+"/"+dc.Trigger, "/"),
+			PromptTokens:     int64(dc.In),
+			CompletionTokens: int64(dc.Out),
+			CacheRead:        int64(dc.CacheRead),
+			CacheWrite:       int64(dc.CacheWrite),
+			CostUSD:          rates.Cost(int64(dc.In), int64(dc.Out), int64(dc.CacheWrite), int64(dc.CacheRead)),
+			LatencyMs:        dc.LatencyMs,
+			Accepted:         true,
+		})
+	}
 }

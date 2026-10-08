@@ -507,9 +507,9 @@ def _session_totals(payload: dict) -> tuple[float | None, float | None]:
     total_duration_ms:...}` — that `...!1` spreads the literal `false`, a no-op), so it is never
     actually present to read. `context_window`'s pair is instead the size of the latest turn's
     own usage (fresh input, plus whatever cache tiers it hit, plus the reply) — the same number
-    behind Claude Code's own `/context` view, and, for a conversation that only grows, in
-    practice the running total a status line means by "what this session has used" even though
-    it is not a strict per-turn sum. Returns (None, None) where the payload cannot support
+    behind Claude Code's own `/context` view. It is a snapshot, NOT a running total: a long
+    session with subagents or a compaction processes far more than it. So it only gates the
+    fresh-session check in _default_segment and is never printed next to a running sum. Returns (None, None) where the payload cannot support
     either — a malformed stdin, or a real one before the first response has anything to report.
     """
     usd = None
@@ -537,8 +537,8 @@ def _default_segment(payload: dict, stats: dict | None) -> str | None:
     a broken feature: a malformed/absent stdin payload, and a genuinely brand-new session (its
     own total is 0 and 0 before the first response has usage to track — dividing "saved" by a
     total of nothing is nonsensical, not merely undramatic, so this returns before that division
-    is ever written). A real, nonzero total with zero saved DOES still print (`$0.00/0 saved of
-    ...`), same reasoning as the old segment's negative-net case: a real $0 saved this session is
+    is ever written). A real, nonzero total with zero saved DOES still print (`$0.00 of ...
+    (-0)`), same reasoning as the old segment's negative-net case: a real $0 saved this session is
     not the same fact as no session having happened yet.
     """
     total_usd, total_tokens = _session_totals(payload)
@@ -548,8 +548,10 @@ def _default_segment(payload: dict, stats: dict | None) -> str | None:
         return None
     saved_usd = stats.get("total_saved_usd", 0) or 0
     saved_tokens = stats.get("saved_unique", 0) or 0
-    return (f"${saved_usd:.2f}/{_human(saved_tokens)} saved of "
-            f"${total_usd:.2f}/{_human(total_tokens)}")
+    # No token total after the cost: context_window's pair is the CURRENT window size (the
+    # context bar already shows it), while saved_unique is a running sum over every request of
+    # the session — printing one "of" the other read as 750k removed out of 447k.
+    return f"${saved_usd:.2f} of ${total_usd:.2f} (-{_human(saved_tokens)})"
 
 
 def _update_check_state_dir() -> str:

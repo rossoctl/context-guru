@@ -1160,6 +1160,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				}
 			}
 			var added time.Duration
+			// Captured BEFORE the pipeline runs — see ClearStaleKeepAliveCandidate's own comment
+			// on why this request's "did I register fresh keep-alive material" test has to be a
+			// timestamp comparison rather than clearing by call order: tr.Session (the key a
+			// clear-by-session-id would need) is not resolved until the pipeline inside applyMode
+			// runs, so an unconditional clear placed after it deletes the very candidate this
+			// request's own run just wrote.
+			pipelineStartedAt := time.Now()
 			body, added, tr = h.applyMode(&reqInfo{
 				// cp.llmCtx: context-guru's OWN compaction-model spend under this context
 				// is charged to this request's row, and to no other tenant's.
@@ -1198,6 +1205,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			cp.noteThread(th)
 			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
 			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
+			// Drop any cache_aware_summarizer keep-alive substitute registered off an EARLIER
+			// turn's conversation — but never the one this request's own pipeline run (above)
+			// may just have written: an unconditional clear here used to delete that candidate
+			// in the same call it was created, which is why keep-alive substitution could never
+			// actually fire. See ClearStaleKeepAliveCandidate's own comment.
+			// Per thread (#423): see keeper.noteCandidate.
+			h.keeper.noteCandidate(tn.ID, tr.Session, threadID, pipelineStartedAt)
 			h.setLastSession(tr.Session)
 			if h.agg != nil && !bypassed {
 				h.agg.RecordAddedLatency(addedMs)
@@ -1536,6 +1550,13 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// prefix a ping would replay is the one the provider just hashed. Costs nothing when
 		// no tenant has opted in.
 		h.keeper.record(tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
+		// Release any cache_aware_summarizer side call this turn deferred because its own cache
+		// was COLD: this request has now either rewritten that prefix or failed trying to, and
+		// either way the deferral must resolve rather than wait indefinitely for a signal that
+		// may never come (see offload.ResolveDeferredCacheAwareSummary's own comment on why a
+		// failed forward still resolves it). Harmless, and nearly free, on the overwhelming
+		// majority of sessions that never deferred anything.
+		offload.ResolveDeferredCacheAwareSummary(session)
 		if sse {
 			// The same two facts to both sinks. The aggregator keeps the process-lifetime
 			// average; the dashboard row keeps the per-request pair, so "which model, which
@@ -1609,7 +1630,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// KEYED BY THE SCOPED SESSION ID, which is what serve receives (tr.Session) and what a
 			// component reads as Ctx.Session. Keying it by the raw header instead would make every
 			// Ask miss while the mechanism looked switched on.
-			h.sent.put(session, body)
+			h.sent.put(session, provider, body)
 		}
 		if err != nil {
 			// LOG it, and record it on the captured row. An upstream failure used to be
@@ -2166,6 +2187,12 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.CacheAwareSummarizerProfileFallbacks = offload.CacheAwareSummarizerProfileFallbacks()
 	caStarted, caCommitted, _, _ := offload.CacheAwareAsyncStats()
 	snap.CacheAwareSummarizerAsyncStarted, snap.CacheAwareSummarizerAsyncCommitted = caStarted, caCommitted
+	snap.CacheAwareSummarizerNoPrefix = offload.CacheAwareSummarizerNoPrefix()
+	snap.CacheAwareSummarizerStalePrefix = offload.CacheAwareSummarizerStalePrefix()
+	snap.CacheAwareSummarizerPrefixAskUsed = offload.CacheAwareSummarizerPrefixAskUsed()
+	snap.CacheAwareSummarizerCacheReadTokens, snap.CacheAwareSummarizerCacheWriteTokens =
+		offload.CacheAwareSummarizerCacheTokens()
+	snap.CacheAwareSummarizerTruncated = offload.CacheAwareSummarizerTruncated()
 
 	// Freeze-replay health, same layering: the counters live with the code that owns
 	// them (offload for the replay path, the store for dropped/repaired decisions).

@@ -1194,6 +1194,15 @@ func normalizeSessionMessages(provider bschemas.ModelProvider, body []byte) []bs
 	return nil
 }
 
+// NormalizeMessages is normalizeSessionMessages, exported for a caller outside this package
+// that needs the SAME normalization BodyOpts itself uses on a raw wire body — proxy's sentStash
+// is the first one, which has to derive a cheap identity for a previously-forwarded body in
+// order to answer components.PrefixCoverage.CoversSpan with the same message boundaries a
+// components/offload caller computed over its own, freshly-normalized request.
+func NormalizeMessages(provider bschemas.ModelProvider, body []byte) []bschemas.ChatMessage {
+	return normalizeSessionMessages(provider, body)
+}
+
 // sessionIDFrom is the ONE derivation of a request's session id, given its normalized messages.
 //
 // Every checkpoint, cold-cache decision and billed-input figure is keyed by this string, so two

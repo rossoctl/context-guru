@@ -26,6 +26,10 @@ var (
 	llmOutputTokens atomic.Int64
 	llmCacheWrite   atomic.Int64
 	llmCacheRead    atomic.Int64
+	// llmCacheWrite1h is the SUBSET of llmCacheWrite billed at the one-hour TTL premium rather
+	// than the default five-minute rate — see Sink.cacheWrite1h for why this has to be tracked
+	// apart from the combined figure at all.
+	llmCacheWrite1h atomic.Int64
 )
 
 // Sink accumulates the cheap-model usage of ONE scope — in the proxy, one request. The
@@ -53,6 +57,13 @@ type Sink struct {
 	in, out    atomic.Int64
 	cacheWrite atomic.Int64
 	cacheRead  atomic.Int64
+	// cacheWrite1h is the part of cacheWrite the provider billed at the one-hour write premium —
+	// a SUBSET of cacheWrite, never an addition to it, mirroring proxy.Usage.CacheWrite1h's own
+	// relationship to CacheWrite. Needed so a caller pricing a cheap-model call with
+	// modelinfo.Price.CostWithCacheWrite1h (cache_aware_summarizer's keep-alive substitute is the
+	// first one to) can price the 1h tier at its own premium instead of silently folding it into
+	// the 5-minute rate — see KeepAliveSummaryResult.CacheWrite1h.
+	cacheWrite1h atomic.Int64
 	// parent is the sink this one nests inside, so a narrower scope can be measured without
 	// hiding the call from the wider one. The proxy installs a per-REQUEST sink; a component
 	// that wants per-CALL numbers installs a child for the duration of one call, and the
@@ -93,6 +104,16 @@ func (s *Sink) CacheTotals() (cacheWrite, cacheRead int64) {
 	return s.cacheWrite.Load(), s.cacheRead.Load()
 }
 
+// CacheWrite1h returns the SUBSET of CacheTotals' cacheWrite this scope billed at the one-hour
+// write premium, never an addition to it. 0 on every backend but Anthropic, and 0 there too
+// unless the call actually requested a 1h TTL breakpoint.
+func (s *Sink) CacheWrite1h() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.cacheWrite1h.Load()
+}
+
 type sinkKey struct{}
 
 // WithSink scopes cheap-model accounting for everything done under ctx to s. A call made
@@ -115,7 +136,7 @@ func WithCallSink(ctx context.Context) (context.Context, *Sink) {
 }
 
 // add records one call's usage on this sink and every sink it nests inside.
-func (s *Sink) add(model string, inTok, outTok, cacheWrite, cacheRead int) {
+func (s *Sink) add(model string, inTok, outTok, cacheWrite, cacheRead, cacheWrite1h int) {
 	// Nil receiver is the common case: a call made with no sink installed counts toward the
 	// process totals only, which is correct — it is simply not attributable to one request.
 	for cur := s; cur != nil; cur = cur.parent {
@@ -131,6 +152,7 @@ func (s *Sink) add(model string, inTok, outTok, cacheWrite, cacheRead int) {
 		cur.out.Add(int64(outTok))
 		cur.cacheWrite.Add(int64(cacheWrite))
 		cur.cacheRead.Add(int64(cacheRead))
+		cur.cacheWrite1h.Add(int64(cacheWrite1h))
 	}
 }
 
@@ -147,12 +169,20 @@ func SinkFrom(ctx context.Context) *Sink {
 // scope's sink, split by cache tier. inTok is FRESH (uncached) input on both backends —
 // see openai.go for why that needs normalizing there.
 func recordUsageCache(ctx context.Context, model string, inTok, outTok, cacheWrite, cacheRead int) {
+	recordUsageCacheWithTTL(ctx, model, inTok, outTok, cacheWrite, cacheRead, 0)
+}
+
+// recordUsageCacheWithTTL is recordUsageCache plus the one-hour SUBSET of cacheWrite, for the
+// one caller (Anthropic's prefixed completion, so far) that can tell the two tiers apart in the
+// response it reads. Every other caller goes through recordUsageCache, which is this with 0.
+func recordUsageCacheWithTTL(ctx context.Context, model string, inTok, outTok, cacheWrite, cacheRead, cacheWrite1h int) {
 	llmCalls.Add(1)
 	llmInputTokens.Add(int64(inTok))
 	llmOutputTokens.Add(int64(outTok))
 	llmCacheWrite.Add(int64(cacheWrite))
 	llmCacheRead.Add(int64(cacheRead))
-	SinkFrom(ctx).add(model, inTok, outTok, cacheWrite, cacheRead)
+	llmCacheWrite1h.Add(int64(cacheWrite1h))
+	SinkFrom(ctx).add(model, inTok, outTok, cacheWrite, cacheRead, cacheWrite1h)
 }
 
 // Usage returns the cumulative cheap-model usage (calls, input tokens, output
@@ -274,7 +304,7 @@ func AvgCallCost(p Pricing) (float64, bool) {
 // Replaying twice would double-count, so the caller must delete its record before replaying — see
 // summarize's takeDeferredUsage.
 func ReplayUsage(ctx context.Context, model string, inTok, outTok, cacheWrite, cacheRead int) {
-	SinkFrom(ctx).add(model, inTok, outTok, cacheWrite, cacheRead)
+	SinkFrom(ctx).add(model, inTok, outTok, cacheWrite, cacheRead, 0)
 }
 
 // WithDetachedSink installs a sink that does NOT chain to whatever sink already scopes ctx,

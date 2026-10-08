@@ -804,6 +804,31 @@ type Snapshot struct {
 	CacheAwareSummarizerAsyncStarted int64 `json:"cache_aware_summarizer_async_started"`
 	// detached summaries that reached a checkpoint. The PAIR is the signal: started without committed is a summary paid for and lost
 	CacheAwareSummarizerAsyncCommitted int64 `json:"cache_aware_summarizer_async_committed"`
+	// a session's FIRST turn through components.PrefixAsker (components.ErrNoPrefix) — not a
+	// failure, counted apart from CacheAwareSummarizerErrors for the same reason extract_llm_sweep
+	// separates sweep_no_prefix from sweep_ask_failed
+	CacheAwareSummarizerNoPrefix int64 `json:"cache_aware_summarizer_no_prefix"`
+	// a decline because the PrefixAsk path's stashed body does not cover the span this turn was
+	// about to commission a summary for — the stale-prefix guard, distinct from NoPrefix ("the
+	// session has sent nothing" vs. "something is stashed and it is the wrong something")
+	CacheAwareSummarizerStalePrefix int64 `json:"cache_aware_summarizer_stale_prefix"`
+	// commission calls that reached the model through components.PrefixAsker rather than a
+	// components.MessagesModel — i.e. the Anthropic incoming-model path (#275). Zero here on a
+	// deployment running Anthropic-only traffic means this component is still measuring `off`,
+	// whatever CacheAwareSummarizerDeclined says
+	CacheAwareSummarizerPrefixAskUsed int64 `json:"cache_aware_summarizer_prefix_ask_used"`
+	// ⭐ THE DIRECT ANSWER to "is the call actually reading warm" — this component's whole
+	// argument. CacheAwareSummarizerCacheReadTokens staying at 0 across many calls is the same
+	// "never infer a cache win from placement" signal cheapmodel.CacheUsage's own docstring states
+	// for the cheap-model path, applied to this component's own commission calls (any trigger, any
+	// path) rather than the agent's traffic
+	CacheAwareSummarizerCacheReadTokens  int64 `json:"cache_aware_summarizer_cache_read_tokens"`
+	CacheAwareSummarizerCacheWriteTokens int64 `json:"cache_aware_summarizer_cache_write_tokens"`
+	// a PAID-FOR call whose raw reply was missing the closing </summary> tag the prompt asks for
+	// — the signature of a reply cut off mid-generation by the model's own token/thinking budget.
+	// Refused rather than committed, so a non-zero figure here is lost compaction, never a wrong
+	// checkpoint
+	CacheAwareSummarizerTruncated int64 `json:"cache_aware_summarizer_truncated"`
 
 	// Extract is extract_llm's own economics (#28 part F), including NET savings after
 	// its LLM cost — the honest headline for the one component that spends to save.

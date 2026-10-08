@@ -2269,7 +2269,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 
 	// Priming call: the stub is still answering, so this both renders the live figure and
 	// writes it to this script's own on-disk /api/stats cache.
-	if got := run(); !strings.Contains(got, "$0.03/12.0k saved") {
+	if got := run(); !strings.Contains(got, "$0.03 of $0.41 (-12.0k)") {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
@@ -2285,7 +2285,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 
 	stall() // same port, same cache key — now it accepts and never answers
 	got := run()
-	if !strings.Contains(got, "$0.03/12.0k saved") {
+	if !strings.Contains(got, "$0.03 of $0.41 (-12.0k)") {
 		t.Errorf("got %q; want the cached savings figure still rendered from the earlier fetch", got)
 	}
 	if !strings.Contains(got, "⏳") {
@@ -2325,7 +2325,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 		return strings.TrimSpace(string(out))
 	}
 
-	if got := run(); !strings.Contains(got, "$0.03/12.0k saved") {
+	if got := run(); !strings.Contains(got, "$0.03 of $0.41 (-12.0k)") {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
@@ -2452,7 +2452,7 @@ func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 	if !strings.HasPrefix(strings.TrimSpace(out), "cache 1:") {
 		t.Errorf("got %q; the cache stopper must still render off a malformed /api/stats body", out)
 	}
-	if strings.Contains(out, "saved") {
+	if strings.Contains(out, " of $") {
 		t.Errorf("a savings segment appeared from an unparseable stats body: %q", out)
 	}
 }
@@ -2586,8 +2586,8 @@ func TestStatuslineOmitsZeroSavings(t *testing.T) {
 // TestStatuslineDefaultSegmentZeroTotal is the "a brand-new session divides by nothing" case
 // called out by name: cost.total_cost_usd and context_window's token pair are all explicitly 0,
 // exactly like Claude Code's own real payload before the first response has anything to track
-// (confirmed by a live capture — see report-pr217.md). Must render nothing, never "$0.00/0 saved
-// of $0.00/0", a crash, or a NaN/Inf from a division this must never even attempt.
+// (confirmed by a live capture — see report-pr217.md). Must render nothing, never "$0.00 of $0.00
+// (-0)", a crash, or a NaN/Inf from a division this must never even attempt.
 func TestStatuslineDefaultSegmentZeroTotal(t *testing.T) {
 	port := statsStub(t, `{"total_saved_usd": 0, "saved_unique": 0}`)
 	stdin := `{"session_id":"sess-zero","cost":{"total_cost_usd":0},` +
@@ -2618,7 +2618,7 @@ func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 	got := strings.TrimSpace(out)
-	if got != "$0.03/12.0k saved of $0.41/187.0k" {
+	if got != "$0.03 of $0.41 (-12.0k)" {
 		t.Errorf("got %q, want the savings-vs-session-total segment exactly", got)
 	}
 	if strings.Contains(got, "cache") || strings.Contains(got, "ka ") {
@@ -2670,7 +2670,7 @@ func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 	if !strings.Contains(out, "ka ≤4miss $0.07") {
 		t.Errorf("got %q, want %q with --keepalive passed", out, "ka ≤4miss $0.07")
 	}
-	if !strings.Contains(out, "$0.03/12.0k saved of $0.41/187.0k") {
+	if !strings.Contains(out, "$0.03 of $0.41 (-12.0k)") {
 		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
 	}
 }
@@ -2687,7 +2687,7 @@ func TestStatuslineShowsANegativeNetHonestly(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "$-0.05/0 saved of $1.00/41.0k") {
+	if !strings.Contains(out, "$-0.05 of $1.00 (-0)") {
 		t.Errorf("got %q, want a segment showing the negative net, not an omission", out)
 	}
 }
@@ -2823,11 +2823,11 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 	}
 	a := run("sess-a")
 	b := run("sess-b")
-	if !strings.Contains(a, "$0.01/100 saved") {
-		t.Errorf("session a: got %q, want its own $0.01/100 saved", a)
+	if !strings.Contains(a, "$0.01 of $1.00 (-100)") {
+		t.Errorf("session a: got %q, want its own $0.01 of $1.00 (-100)", a)
 	}
-	if !strings.Contains(b, "$9.99/9.0k saved") {
-		t.Errorf("session b: got %q, want its own $9.99/9.0k saved — not session a's cached figure", b)
+	if !strings.Contains(b, "$9.99 of $1.00 (-9.0k)") {
+		t.Errorf("session b: got %q, want its own $9.99 of $1.00 (-9.0k) — not session a's cached figure", b)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
 )
@@ -58,18 +59,51 @@ const (
 	maxSentBytes    = 96_000_000
 )
 
+// sentEntry is one session's stashed body, plus what it takes to answer
+// components.PrefixCoverage.CoversSpan for it later without re-parsing on every put: the
+// provider the body was forwarded under (normalizeMessages needs it to parse the right wire
+// shape) is kept so a later CoversSpan call can re-derive the same message boundaries a
+// components/offload caller computed over its own, freshly-normalized request. The body is
+// re-normalized lazily, on the (rare, off the hot forwarding path) call to CoversSpan, rather
+// than eagerly on every put — put runs on every single forwarded request, CoversSpan only when
+// a component is actually about to commission a summary through this stash.
+type sentEntry struct {
+	body     []byte
+	provider bschemas.ModelProvider
+}
+
 // sentStash holds the last body forwarded upstream per session.
 type sentStash struct {
 	mu    sync.Mutex
-	m     map[string][]byte
+	m     map[string]sentEntry
 	bytes int
 }
 
-func newSentStash() *sentStash { return &sentStash{m: map[string][]byte{}} }
+func newSentStash() *sentStash { return &sentStash{m: map[string]sentEntry{}} }
 
 // put records this session's forwarded body, replacing any previous one.
-func (s *sentStash) put(session string, body []byte) {
-	if s == nil || session == "" || len(body) == 0 || len(body) > maxSentBody {
+//
+// A body over maxSentBody is NOT stashed, and this now DELETES whatever was stashed for the
+// session before — see the package comment's "what happens when a bound is hit". Keeping the
+// OLD body used to be the behavior, on the theory that a forgone opportunity now beats one
+// later; it is not, for PrefixAsker: Ask would still find something and answer from a
+// transcript that is missing everything since, with no signal to the caller that happened,
+// unless the caller checks CoversSpan first. A stale body is worse than none — none makes Ask
+// return ErrNoPrefix, which every caller already handles; a stale one makes Ask succeed with an
+// answer about the wrong conversation. CoversSpan is the primary fix (a caller that checks it
+// never gets fooled by a stale body either way), but deleting here means a caller that does NOT
+// check also gets the safer failure mode.
+func (s *sentStash) put(session string, provider bschemas.ModelProvider, body []byte) {
+	if s == nil || session == "" || len(body) == 0 {
+		return
+	}
+	if len(body) > maxSentBody {
+		s.mu.Lock()
+		if old, ok := s.m[session]; ok {
+			s.bytes -= len(old.body)
+			delete(s.m, session)
+		}
+		s.mu.Unlock()
 		return
 	}
 	cp := make([]byte, len(body))
@@ -77,13 +111,13 @@ func (s *sentStash) put(session string, body []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if old, ok := s.m[session]; ok {
-		s.bytes -= len(old)
+		s.bytes -= len(old.body)
 	}
 	if len(s.m) >= maxSentSessions || s.bytes+len(cp) > maxSentBytes {
-		s.m = map[string][]byte{}
+		s.m = map[string]sentEntry{}
 		s.bytes = 0
 	}
-	s.m[session] = cp
+	s.m[session] = sentEntry{body: cp, provider: provider}
 	s.bytes += len(cp)
 }
 
@@ -93,7 +127,39 @@ func (s *sentStash) get(session string) []byte {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.m[session]
+	return s.m[session].body
+}
+
+// CoversSpan implements components.PrefixCoverage: it reports whether the stashed body for
+// session, re-normalized the same way the forwarding path itself normalizes a wire body
+// (apply.NormalizeMessages), has AT LEAST `count` messages and those first `count` messages
+// hash (components.SpanHash) to exactly `hash`.
+//
+// A MISSING session reports true — covered — rather than false. That looks backwards until
+// you read what Ask already does with it: with nothing stashed, Ask returns components.
+// ErrNoPrefix, which every existing caller already treats as the ordinary, once-per-session
+// "nothing to read yet" case (cacheAwareNoPrefix), not a failure. This method exists to catch a
+// DIFFERENT, newer failure: a stash that HOLDS something, but not enough of it, or not the right
+// bytes — put's own oversized-body path now deletes a session's entry rather than leaving a
+// stale one behind (see put's comment), specifically so that case also degrades to "missing",
+// not "wrong". So false here is reserved for the one case that is actually dangerous: a PRESENT
+// stash whose coverage falls short — see cache_aware_summarizer's own stale-prefix guard, which
+// is the only caller.
+func (s *sentStash) CoversSpan(session string, count int, hash string) bool {
+	if s == nil || session == "" || count < 0 {
+		return true
+	}
+	s.mu.Lock()
+	e, ok := s.m[session]
+	s.mu.Unlock()
+	if !ok {
+		return true
+	}
+	norm := apply.NormalizeMessages(e.provider, e.body)
+	if count > len(norm) {
+		return false
+	}
+	return components.SpanHash(norm[:count]) == hash
 }
 
 // prefixAsker is the components.PrefixAsker the pipeline receives. Created per request and holds no
@@ -117,6 +183,14 @@ func (p responsesPrefixAsker) Ask(ctx context.Context, session, ask string) (str
 	return reply, components.PrefixUsage(u), err
 }
 
+// CoversSpan implements components.PrefixCoverage by delegating to the stash this asker reads
+// through Ask — the asker value itself is what a caller type-asserts
+// (c.PrefixAsk.(components.PrefixCoverage)), so the method has to live here, not only on
+// *sentStash, or the assertion always fails and the stale-prefix guard never actually runs.
+func (p responsesPrefixAsker) CoversSpan(session string, count int, hash string) bool {
+	return p.stash.CoversSpan(session, count, hash)
+}
+
 // Ask appends the question to this session's last forwarded body and returns the model's text plus
 // what it actually cost. A missing stash is an ERROR rather than a silent empty answer, so the caller
 // can tell "there was no prefix to read" from "the model declined to act" — the distinction the
@@ -128,6 +202,13 @@ func (p prefixAsker) Ask(ctx context.Context, session, ask string) (string, comp
 	}
 	reply, u, err := p.cli.CompletePrefixed(ctx, body, ask)
 	return reply, components.PrefixUsage(u), err
+}
+
+// CoversSpan implements components.PrefixCoverage by delegating to the stash this asker reads
+// through Ask — see responsesPrefixAsker.CoversSpan's own comment for why this cannot live only
+// on *sentStash.
+func (p prefixAsker) CoversSpan(session string, count int, hash string) bool {
+	return p.stash.CoversSpan(session, count, hash)
 }
 
 // prefixAskerFor builds the asker for one request, or nil when a precondition is missing.

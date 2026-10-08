@@ -224,13 +224,14 @@ func newSummarize(raw []byte) (components.Component, error) {
 // raw window. Those are what made "0.9" denote anything. The gate on top of them did not.
 //
 // `pre_expiry` IS STILL THE RIGHT ANSWER FOR A DIFFERENT QUESTION, which is why the value survives —
-// but NOTHING ASKS THAT QUESTION YET, and the docstring should not imply otherwise. A summarizer
-// whose model call reuses the conversation's own prefix needs that prefix LIVE, the opposite concern
-// to this one and genuinely phase-dependent. THIS component is not one: it flattens its prompt into a
-// single string and shares no prefix with anything, so `pre_expiry` here is honoured and buys nothing
-// but a lower firing rate. cache_aware_summarizer IS the prefix-reusing one and consults neither
-// CacheAllows nor CachePhase, so the key is silently inert there — the same defect as #247. Kept
-// because no surviving value can express "is there a live prefix to hit", not because it pays today.
+// and NOW SOMETHING ASKS IT. A summarizer whose model call reuses the conversation's own prefix
+// needs that prefix LIVE, the opposite concern to this one and genuinely phase-dependent. THIS
+// component is not one: it flattens its prompt into a single string and shares no prefix with
+// anything, so `pre_expiry` here is honoured and buys nothing but a lower firing rate.
+// cache_aware_summarizer IS the prefix-reusing one, and as of the fix for #400 it consults both
+// CacheAllows and CachePhase — see its own Offload for the gate and cache_aware_cold.go for why a
+// turn that fires on `any` while the cache is COLD still never pays the double-rewrite this
+// paragraph's reasoning would otherwise predict.
 //
 // WHAT STOPS A SESSION THAT NEVER ENTERS THE WINDOW: nothing here, deliberately. The ceiling is
 // the CLIENT's — Claude Code runs its own compaction as it approaches C, and Fires now measures
@@ -272,30 +273,41 @@ const (
 	EventAwaitedCheckpoint = "awaited_checkpoint"
 )
 
-// applySummarizeTriggerDefaults installs summarize's trigger defaults for keys the operator did
-// not write, and validates cache_state.
+// triggerKeysPresent reports which keys the raw YAML document's `trigger:` block actually sets —
+// shared by every component that installs a size-threshold default onto an embedded
+// components.Trigger, because MinRequestFrac is a float64 whose zero value ("no constraint") is
+// indistinguishable from an absent key once decoded. `min_request_frac: 0` is how an operator
+// writes "fire at any size" (e.g. in the pre-expiry window), so defaulting off the zero value
+// would make that configuration unwritable — the probe is what lets an explicit zero win over the
+// default. Originally private to applySummarizeTriggerDefaults; cache_aware_summarizer needed the
+// identical probe for its own trigger defaults, and a second copy is exactly the kind of thing
+// that drifts (see Trigger.Validate's own history of drifting between components).
 //
-// IT PROBES THE RAW YAML RATHER THAN TESTING FOR THE ZERO VALUE, and it has to. MinRequestFrac is
-// a float64 whose zero means "no constraint", so `min_request_frac: 0` — the way an operator says
-// "compact in the pre-expiry window at ANY size" — is indistinguishable from an absent key once
-// decoded. Defaulting off the zero value would make that configuration unwritable. The probe is
-// the same shape newExtractSweep uses to catch its banned keys before Decode's KnownFields check.
-//
-// The probe is deliberately loose: an unparseable document has already been rejected by
+// It is the same shape newExtractSweep uses to catch its banned keys before Decode's KnownFields
+// check, and it is deliberately loose: an unparseable document has already been rejected by
 // components.Decode in the caller, so a failure here means only that the presence question cannot
-// be answered, and the default is then the safer answer.
-func applySummarizeTriggerDefaults(raw []byte, t *components.Trigger) error {
+// be answered, and treating every key as absent is then the safer reading.
+func triggerKeysPresent(raw []byte) map[string]bool {
 	present := map[string]bool{}
-	if len(raw) > 0 {
-		var probe struct {
-			Trigger map[string]yaml.Node `yaml:"trigger"`
-		}
-		if err := yaml.Unmarshal(raw, &probe); err == nil {
-			for k := range probe.Trigger {
-				present[k] = true
-			}
+	if len(raw) == 0 {
+		return present
+	}
+	var probe struct {
+		Trigger map[string]yaml.Node `yaml:"trigger"`
+	}
+	if err := yaml.Unmarshal(raw, &probe); err == nil {
+		for k := range probe.Trigger {
+			present[k] = true
 		}
 	}
+	return present
+}
+
+// applySummarizeTriggerDefaults installs summarize's trigger defaults for keys the operator did
+// not write, and validates cache_state. See triggerKeysPresent for why the defaulting has to probe
+// the raw document rather than test MinRequestFrac's zero value.
+func applySummarizeTriggerDefaults(raw []byte, t *components.Trigger) error {
+	present := triggerKeysPresent(raw)
 	if !present["min_request_frac"] {
 		t.MinRequestFrac = summarizeDefaultRequestFrac
 	}
@@ -357,7 +369,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// Attribute any model spend a DETACHED summarizer call incurred since this session's last
 	// turn. First thing, and unconditionally: the money was spent whatever this turn decides, and
 	// the compaction-episode panel charges it as a debit. See takeDeferredUsage.
-	takeDeferredUsage(c)
+	takeDeferredUsage(c, rep)
 	if end > start && c.AllowSummarySpan != nil && !c.AllowSummarySpan(start, end) {
 		rep.Gate("wire_span_unsafe")
 		rep.Skipped = true

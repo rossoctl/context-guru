@@ -17,6 +17,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/store"
@@ -337,6 +338,47 @@ func (e *kaEntry) due(now time.Time) bool {
 		!now.Before(e.startedAt.Add(e.pol.Idle))
 }
 
+// cachePhaseAt classifies the cache phase of an entry last touched at prevStartedAt, for a
+// `cache_state: pre_expiry` keep-alive-substitute candidate to check against (see
+// fireSummarySubstitute) — the keeper's own "due for a ping" timing is a DIFFERENT question from
+// "is this candidate's configured pre-expiry window live right now", and the two can diverge (a
+// manager strategy's K>1 schedule, or a component configured with a narrower pre_expiry_seconds
+// than the keeper's own Idle).
+//
+// prevStartedAt, NOT e.startedAt: by the time fire() runs, sweep has already overwritten
+// e.startedAt with this ping's own (not yet sent) start — reading it here would answer "how long
+// until THIS ping's refresh expires" (always nearly the full TTL) instead of "how close was the
+// ENTRY to expiring before this ping". See pingJob.prevStartedAt.
+//
+// Deliberately NOT Ctx.CachePhase itself: that function also handles CacheTTLMinimum and an
+// unknown idle time, neither of which arises here — a live kaEntry always knows its own idle
+// time exactly (now - prevStartedAt, never "unknown"), and the keeper derives the TTL tier from
+// the one policy field that controls it (pol.HeadTTL1h) rather than reading it off a request. A
+// narrower function is simpler and cannot drift from a case this call site never reaches.
+func cachePhaseAt(prevStartedAt, now time.Time, headTTL1h bool, preExpiry time.Duration) components.CachePhase {
+	ttl := 5 * time.Minute
+	if headTTL1h {
+		ttl = time.Hour
+	}
+	remaining := ttl - now.Sub(prevStartedAt)
+	if remaining <= 0 {
+		return components.CachePhaseCold
+	}
+	if remaining <= preExpiry {
+		return components.CachePhasePreExpiry
+	}
+	return components.CachePhaseWarm
+}
+
+// preExpiryFor resolves a candidate's configured pre_expiry_seconds (0 = the component's own
+// default), mirroring components.Trigger.PreExpiry without needing a Trigger value here.
+func preExpiryFor(seconds int) time.Duration {
+	if seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return components.DefaultPreExpiry
+}
+
 // pingable reports whether this session is worth holding state for at all. Every condition is
 // known when the request finishes, which is why it is checked there.
 //
@@ -436,6 +478,13 @@ type keeper struct {
 	// session id and is cleared wholesale at the bound; give it an LRU only if session churn
 	// is ever shown to cost real pings.
 	turns map[string]int
+	// candThread names the thread whose request registered the session's cache_aware_summarizer
+	// keep-alive candidate, keyed by kaKey(tenant, session). offload keys its candidate registry by
+	// session, but the keep-alive is per thread (#423) and a candidate's span is ONE thread's
+	// conversation: substituting it for another thread's ping would refresh the wrong prefix, and
+	// another thread's request or retirement must not clear it. A session missing from the map
+	// keeps the pre-#423 behaviour (any thread owns the candidate). See noteCandidate.
+	candThread map[string]string
 	// overrides is the per-session manual keep-alive, keyed like live. In memory only and
 	// deliberately so — an authorization to spend that silently survives a restart is worse
 	// than one that does not. See keepaliveoverride.go.
@@ -465,6 +514,46 @@ type keeper struct {
 	failed   atomic.Int64
 	wrote    atomic.Int64  // pings that CREATED instead of refreshing — a bug, not a cost
 	spentUSD atomic.Uint64 // float64 bits; only ever read as a whole
+	// summarySubstituted counts pings replaced by cache_aware_summarizer's own cache-reading
+	// call (see fireSummarySubstitute) — accounted toward `pings` as well, since it IS the ping
+	// for that idle span, never a second one.
+	summarySubstituted atomic.Int64
+	// summarySubstituteFailed counts a substitute attempt that fell back to an ordinary ping
+	// because the call itself declined, timed out, errored, or came back empty.
+	summarySubstituteFailed atomic.Int64
+	// summarySubstituteOverBudget counts a substitute attempt refused BEFORE being dispatched
+	// because its projected cost exceeded the keep-alive per-ping $ cap.
+	summarySubstituteOverBudget atomic.Int64
+	// summarySubstitutePhaseMismatch counts a `cache_state: pre_expiry` candidate declined
+	// because THIS ping is not actually in the component's own pre-expiry window — routine
+	// (every strategy-driven K>1 schedule and every narrower pre_expiry_seconds than the
+	// keeper's own Idle produces some of these), not a failure.
+	summarySubstitutePhaseMismatch atomic.Int64
+	// summarySubstituteNoCandidate counts a due ping for which no keep-alive candidate was
+	// registered at all — the ordinary case for the vast majority of sessions (the component
+	// not in the pipeline, or no turn has reached registration yet). Was previously folded into
+	// one silent `return false` indistinguishable from the three counters below it.
+	summarySubstituteNoCandidate atomic.Int64
+	// summarySubstituteCheckpointExists counts a due ping for a session that HAD a registered
+	// candidate but already has a checkpoint — the next real turn splices it for free, so
+	// substituting here would summarize a span nobody needs.
+	summarySubstituteCheckpointExists atomic.Int64
+	// summarySubstituteInFlight/ConcurrencyFull count a Dispatch that was itself refused before
+	// any model call was made — a candidate existed and passed every check above, but collided
+	// with another commission already running for the session, or with the global concurrency
+	// bound. Distinct from summarySubstituteFailed's other causes (a call that ran and did not
+	// commit), which have their own counters already (CacheAwareSummarizerErrors/Timeouts/Empty).
+	summarySubstituteInFlight        atomic.Int64
+	summarySubstituteConcurrencyFull atomic.Int64
+	// summarySubstituteRefreshPaid/RefreshNotWorthIt count the money gate's own decision (#415)
+	// for a `cache_state: pre_expiry` reserve that already exists and has new material: Paid when
+	// the expected saving on the eventual cold return (the new tail's own tokens at the model's
+	// cache-write rate) covers the refresh's own projected cost, NotWorthIt when it does not and
+	// the ping stays an ordinary one instead. Only incremented for a REFRESH (an existing reserve
+	// growing a larger one) — creating a session's first reserve has no such test and is not
+	// counted by either.
+	summarySubstituteRefreshPaid       atomic.Int64
+	summarySubstituteRefreshNotWorthIt atomic.Int64
 }
 
 // keepAliveDisabled is the operator's kill switch, read once at construction. A single
@@ -477,7 +566,7 @@ func keepAliveDisabled() bool {
 
 func newKeeper(h *Handler) *keeper {
 	k := &keeper{h: h, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, candThread: map[string]string{},
 		overrides: map[string]sessionOverride{}, now: time.Now}
 	k.send = k.sendPing
 	k.dispatch = func(j pingJob) { go k.fire(j) }
@@ -530,6 +619,7 @@ func (k *keeper) Stop() {
 	for key, e := range k.live {
 		e.clear()
 		delete(k.live, key)
+		k.clearCandidateLocked(e)
 	}
 	k.bytes = 0
 	k.turns = map[string]int{}
@@ -781,6 +871,55 @@ func (k *keeper) projectedPingUSD(model string, prefix int64, route string) floa
 	return float64(prefix)*price.CacheRead + float64(pingOutputBudget(route))*price.Output
 }
 
+// summaryOutputBudgetGuess is the assumed output size of a keep-alive-substituted summary call,
+// used ONLY to project its cost against the keep-alive $ cap before dispatching it — never a cap
+// on the real call, which runs under cache_aware_summarizer's own full timeout and token budget.
+//
+// Unmeasured, like pingUSD's own disclaimer two paragraphs up: a real summary's length depends on
+// the transcript and the component's configured prompt, and this is new as of #400 so there is no
+// telemetry on this specific call's own output size yet. 2000 tokens is a round, conservative
+// guess sized to make the error fail in the cheap direction — overestimating a verbose model's
+// true output merely sends an ordinary ping instead of substituting one, never the reverse.
+const summaryOutputBudgetGuess = 2000
+
+// projectedSummaryUSD mirrors projectedPingUSD for the keep-alive substitute call: the prefix at
+// the model's own cache-read rate, plus an assumed output budget rather than the ping's 1-token
+// one, since this call generates a full summary.
+func (k *keeper) projectedSummaryUSD(model string, prefix int64) float64 {
+	p := k.h.opts.Prices
+	if p == nil || model == "" || prefix <= 0 {
+		return 0
+	}
+	price, ok := p.Price(context.Background(), model)
+	if !ok || price.Zero() {
+		return 0
+	}
+	return float64(prefix)*price.CacheRead + float64(summaryOutputBudgetGuess)*price.Output
+}
+
+// expectedRefreshSavingUSD is the dollar value a refresh folding tailTokens of new material into
+// a `cache_state: pre_expiry` reserve is expected to earn back: those tokens would otherwise be
+// written, at the model's cache-WRITE rate, on the cold return the reserve exists to cheapen.
+// Issue #415's own "safe lower bound": it deliberately omits any saving from later turns reading
+// the larger reserve instead of the smaller one, since how many turns follow a cold return is not
+// knowable at ping time.
+//
+// Zero when the model is not priced, for the same reason projectedPingUSD/projectedSummaryUSD are
+// — an incomplete price list must not block a feature it cannot afford to evaluate, and
+// fireSummarySubstitute's own comparison (saving < cost) already fails toward "ping normally"
+// whenever cost cannot be shown to be zero too.
+func (k *keeper) expectedRefreshSavingUSD(model string, tailTokens int) float64 {
+	p := k.h.opts.Prices
+	if p == nil || model == "" || tailTokens <= 0 {
+		return 0
+	}
+	price, ok := p.Price(context.Background(), model)
+	if !ok || price.Zero() {
+		return 0
+	}
+	return float64(tailTokens) * price.CacheWrite
+}
+
 // retire releases one session's held material now: zeroized, deadline cancelled, entry gone.
 // Idempotent and safe on a session that was never tracked, which is what lets every refusal path
 // call it unconditionally.
@@ -794,6 +933,62 @@ func (k *keeper) retire(key string) {
 	k.bytes -= int64(len(e.body))
 	e.clear()
 	delete(k.live, key)
+	// The keep-alive substitute registry (cache_aware_summarizer.go's own, session-keyed map)
+	// is not part of this struct and nothing else ever cleared it on this exit — a session that
+	// retired here could still hold a candidate forever, which is how that registry used to fill
+	// permanently after 2,048 sessions ever passed through. Every exit from k.live must drop it
+	// too; see offload.ClearKeepAliveCandidate's own doc comment.
+	k.clearCandidateLocked(e)
+}
+
+// maxCandThreads bounds candThread. At the bound the map is emptied, which falls back to the
+// pre-#423 rule (any thread owns a candidate) rather than growing without limit.
+const maxCandThreads = 4096
+
+// noteCandidate runs after a real request's pipeline, in place of a bare
+// offload.ClearStaleKeepAliveCandidate. If THIS request registered a candidate, it records the
+// request's thread as the owner. Otherwise it drops a stale candidate only when the candidate
+// belongs to this thread: a subagent's request says nothing about the main thread's candidate.
+func (k *keeper) noteCandidate(tenantID, session, threadID string, pipelineStartedAt time.Time) {
+	if k == nil {
+		offload.ClearStaleKeepAliveCandidate(session, pipelineStartedAt)
+		return
+	}
+	if session == "" {
+		return
+	}
+	key := kaKey(tenantID, session)
+	registered := offload.KeepAliveCandidateRegisteredSince(session, pipelineStartedAt)
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if registered {
+		if len(k.candThread) >= maxCandThreads {
+			k.candThread = map[string]string{}
+		}
+		k.candThread[key] = threadID
+		return
+	}
+	if owner, known := k.candThread[key]; known && owner != threadID {
+		return
+	}
+	offload.ClearStaleKeepAliveCandidate(session, pipelineStartedAt)
+}
+
+// candidateOwnedLocked reports whether e's thread owns its session's candidate. Caller holds k.mu.
+func (k *keeper) candidateOwnedLocked(e *kaEntry) bool {
+	owner, known := k.candThread[kaKey(e.tenant, e.session)]
+	return !known || owner == e.thread
+}
+
+// clearCandidateLocked drops the session's candidate when e's thread owns it. Every exit from
+// k.live calls this (see offload.ClearKeepAliveCandidate); retiring a subagent's entry must not
+// drop the main thread's candidate. Caller holds k.mu.
+func (k *keeper) clearCandidateLocked(e *kaEntry) {
+	if !k.candidateOwnedLocked(e) {
+		return
+	}
+	offload.ClearKeepAliveCandidate(e.session)
+	delete(k.candThread, kaKey(e.tenant, e.session))
 }
 
 // retireSession releases every thread of one session: the primary thread's key and every key
@@ -810,6 +1005,7 @@ func (k *keeper) retireSession(tenantID, session string) {
 		k.bytes -= int64(len(e.body))
 		e.clear()
 		delete(k.live, key)
+		k.clearCandidateLocked(e)
 	}
 }
 
@@ -841,6 +1037,7 @@ func (k *keeper) forget(tenantID string) {
 		e.clear()
 		delete(k.live, key)
 		delete(k.turns, key)
+		k.clearCandidateLocked(e)
 	}
 	// Per-session overrides go too. This is the path a Settings save takes, so unticking the
 	// account-wide box must not leave armed sessions pinging on the strength of an
@@ -866,6 +1063,7 @@ func (k *keeper) evictLocked() {
 		k.bytes -= int64(len(e.body))
 		e.clear()
 		delete(k.live, worstKey)
+		k.clearCandidateLocked(e)
 		k.skipped.Add(1)
 	}
 }
@@ -912,6 +1110,7 @@ func (k *keeper) sweep(now time.Time) int {
 		// lifetime runs from request start, so the next deadline is this instant plus X. It
 		// also makes the entry not-due for the rest of this sweep, so a slow ping cannot be
 		// started twice.
+		prevStartedAt := e.startedAt
 		e.startedAt = now
 		e.pings++
 		auth := make([]maskedHeader, len(e.auth))
@@ -924,7 +1123,7 @@ func (k *keeper) sweep(now time.Time) int {
 		xorMask(raw)
 		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), auth: auth, up: e.up,
 			tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
-			ping: e.pings})
+			ping: e.pings, prevStartedAt: prevStartedAt})
 	}
 	k.mu.Unlock()
 
@@ -957,6 +1156,13 @@ type pingJob struct {
 	// job runs on its own goroutine and must hold a copy rather than reach back into the entry.
 	emitter components.Emitter
 	ping    int
+	// prevStartedAt is e.startedAt as it stood BEFORE this sweep tick overwrote it with `now` —
+	// i.e. when the cache entry this ping is about to refresh was last written or read. Needed
+	// for fireSummarySubstitute's own cache-phase check: by the time fire() runs, e.startedAt is
+	// already this ping's own (not-yet-sent) start, so reading it there would compute "how long
+	// until this ping expires" instead of "how close was this ENTRY to expiring" — answering a
+	// different, always-nearly-full-TTL question.
+	prevStartedAt time.Time
 }
 
 // fire sends one ping and accounts for it. Always fails open and quietly: the agent is not
@@ -976,6 +1182,32 @@ func (k *keeper) fire(j pingJob) {
 	// agent IS waiting on. AcquireSpare reserves headroom so a ping cannot consume the last
 	// slot or the last request of the minute.
 	release, err := k.h.limiter.AcquireSpare(j.tenant, keepAliveReserveFrac)
+	if err != nil {
+		k.skipped.Add(1)
+		return
+	}
+
+	// Let cache_aware_summarizer stand in for this ping when it has material registered for the
+	// session: same cache-read refresh, plus a compaction instead of one output token. Never
+	// double-pinged — on success this returns, and the ordinary ping below never runs for this
+	// due cycle; on any kind of "no" it falls through to the ordinary ping, fail open.
+	//
+	// RELEASED BEFORE THE CALL, not deferred to the end of fire(): the substitute's own call can
+	// run for up to cacheAwareTimeout (300 s), against an ordinary ping's single round trip of a
+	// second or two. AcquireSpare's job is only to confirm the tenant currently has slack to
+	// spare one more concurrent request; holding the slot for the whole substitute call would
+	// starve the tenant's real traffic of that headroom for minutes instead of a moment, on every
+	// due cycle this fires for. The substitute call needs no slot of its own to stay bounded — it
+	// already shares cache_aware_summarizer's own, separate concurrency gate (summarySlots in
+	// cache_aware_async.go), sized for exactly this kind of call.
+	release()
+	if k.fireSummarySubstitute(j) {
+		return
+	}
+
+	// Falling through to an ordinary ping needs its own slot — the one above was already
+	// released and only ever covered the eligibility check, not this request.
+	release, err = k.h.limiter.AcquireSpare(j.tenant, keepAliveReserveFrac)
 	if err != nil {
 		k.skipped.Add(1)
 		return
@@ -1023,6 +1255,186 @@ func (k *keeper) fire(j pingJob) {
 		"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "ping", j.ping,
 		"cache_read", u.CacheRead, "cache_write", u.CacheWrite, "output", u.Output,
 		"cost_usd", cost, "ms", ms)
+}
+
+// fireSummarySubstitute tries to replace this due ping with cache_aware_summarizer's own
+// cache-reading call. Returns true when it did — the caller must then not also send an ordinary
+// ping. False covers every reason not to, and the caller's existing ping flow is the fallback for
+// all of them without needing to know which: no material is registered for this session (the
+// component is not in this tenant's pipeline, or no turn has reached the registration point —
+// see offload.KeepAliveSubstitute), the registry's own "a checkpoint already exists" refusal, a
+// projected cost over the keep-alive $ cap, or the call itself declining, timing out, erroring,
+// or coming back empty.
+//
+// Fail open throughout, by construction: nothing here can leave this ping unset for the idle
+// span it was due for, because every "no" falls through to the code fire() already runs.
+func (k *keeper) fireSummarySubstitute(j pingJob) bool {
+	// The candidate's span is one thread's conversation (#423): only that thread's ping may use
+	// it. Another thread's ping is an ordinary ping, counted as "no candidate" for that thread.
+	k.mu.Lock()
+	owned := k.candidateOwnedLocked(j.e)
+	k.mu.Unlock()
+	if !owned {
+		k.summarySubstituteNoCandidate.Add(1)
+		slog.Debug("context-guru: cache_aware_summarizer keep-alive substitute not offered",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
+			"reason", "other_thread")
+		return false
+	}
+	dispatch, info, reason, ok := offload.KeepAliveSubstitute(j.session)
+	if !ok {
+		// WAS silent — "no candidate" (the ordinary case for most sessions) and "a candidate
+		// existed but a checkpoint already covers it" (routine, but a DIFFERENT fact) used to be
+		// one indistinguishable false. Counted separately so a session that SHOULD have a
+		// candidate and does not (cache_aware_summarizer is in the pipeline, turns are declining
+		// with a cache_state gate that implies registration — see Offload's own comment on
+		// registering unconditionally) is diagnosable instead of looking identical to a session
+		// the component never touched at all.
+		switch reason {
+		case offload.KeepAliveReasonCheckpointExists:
+			k.summarySubstituteCheckpointExists.Add(1)
+		default:
+			k.summarySubstituteNoCandidate.Add(1)
+		}
+		slog.Debug("context-guru: cache_aware_summarizer keep-alive substitute not offered",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "reason", string(reason))
+		return false
+	}
+	e := j.e
+	k.mu.Lock()
+	model, prefix, ceiling, headTTL1h := e.model, e.prefix, e.pol.Ceiling(), e.pol.HeadTTL1h
+	k.mu.Unlock()
+	phase := cachePhaseAt(j.prevStartedAt, k.now(), headTTL1h, preExpiryFor(info.PreExpirySeconds))
+	// A `pre_expiry` candidate asked to spend only when ITS OWN notion of the pre-expiry window
+	// is live, not merely whenever the keeper happens to be sending a ping — the two can diverge
+	// (a manager strategy's K>1 schedule, or a component configured with a narrower
+	// pre_expiry_seconds than the keeper's own Idle). `any` has no such condition. Checked against
+	// the SAME phase arithmetic Ctx.CachePhase itself uses (cachePhaseLocked), computed from this
+	// entry's own startedAt/pol rather than approximated from timing alone.
+	if info.CacheState == components.CacheStatePreExpiry && phase != components.CachePhasePreExpiry {
+		k.summarySubstitutePhaseMismatch.Add(1)
+		return false
+	}
+	// Respect the keep-alive $ cap on a PROJECTION, before spending anything.
+	cost := k.projectedSummaryUSD(model, prefix)
+	if cost > ceiling {
+		k.summarySubstituteOverBudget.Add(1)
+		slog.Debug("context-guru: cache_aware_summarizer keep-alive substitute would exceed the "+
+			"per-ping cost cap; pinging normally instead",
+			"tenant", tenantLabel(j.tenant), "session", j.session,
+			"estimate_usd", cost, "ceiling_usd", ceiling)
+		return false
+	}
+	// REFRESHING an existing reserve (as opposed to creating a session's first one) only earns
+	// back its own cost when the material it folds in is worth more than the call itself — see
+	// issue #415. Creating the first reserve has no such test: it is compared against "no reserve
+	// at all" (the full-rewrite cold return this whole mechanism exists to avoid), not against a
+	// slightly smaller one, so info.IsRefresh gates this block to the refresh case alone.
+	if info.IsRefresh {
+		saving := k.expectedRefreshSavingUSD(model, info.RefreshTailTokens)
+		if saving < cost {
+			k.summarySubstituteRefreshNotWorthIt.Add(1)
+			slog.Debug("context-guru: cache_aware_summarizer refresh would cost more than it saves; "+
+				"pinging normally instead",
+				"tenant", tenantLabel(j.tenant), "session", j.session,
+				"tail_tokens", info.RefreshTailTokens, "expected_saving_usd", saving, "projected_cost_usd", cost)
+			return false
+		}
+		k.summarySubstituteRefreshPaid.Add(1)
+		slog.Debug("context-guru: cache_aware_summarizer refresh pays for itself; refreshing the reserve",
+			"tenant", tenantLabel(j.tenant), "session", j.session,
+			"tail_tokens", info.RefreshTailTokens, "expected_saving_usd", saving, "projected_cost_usd", cost)
+	}
+	start := k.now()
+	res := dispatch(offload.CacheAwareSummarizerCallTimeout())
+	ms := float64(k.now().Sub(start).Microseconds()) / 1000.0
+	if !res.Committed {
+		k.summarySubstituteFailed.Add(1)
+		switch res.Reason {
+		case offload.KeepAliveReasonInFlight:
+			k.summarySubstituteInFlight.Add(1)
+		case offload.KeepAliveReasonConcurrencyFull:
+			k.summarySubstituteConcurrencyFull.Add(1)
+		}
+		slog.Debug("context-guru: cache_aware_summarizer keep-alive substitute produced no "+
+			"summary; pinging normally instead",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "reason", string(res.Reason))
+		return false
+	}
+	spent := k.recordSummarySubstitute(j, res, ms, start)
+	slog.Debug("context-guru: cache keep-alive ping (via cache_aware_summarizer)",
+		"tenant", tenantLabel(j.tenant), "session", j.session, "ping", j.ping,
+		"cache_read", res.CacheRead, "cache_write", res.CacheWrite, "output", res.Output,
+		"cost_usd", spent, "ms", ms)
+	return true
+}
+
+// recordSummarySubstitute books a substituted ping exactly like record1 books an ordinary one —
+// the session's running spend, the process counter, the cache-liveness clock, and the host's
+// KeepAliveReport — plus the one difference that justifies a separate function: `pings` is
+// incremented here as PINGS.Add(1) the same as record1, so a substituted ping is counted once
+// toward the process-wide ping figure (never twice: the ordinary ping path that would have
+// counted it never runs, because fireSummarySubstitute returned true). The summarizer's OWN
+// spend is a separate figure, already booked onto the regular LLM-cost ledger by commissionSync's
+// call to deferUsage — this function books only the ping-ledger side of the same event.
+func (k *keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummaryResult, ms float64, startedAt time.Time) float64 {
+	e := j.e
+	k.mu.Lock()
+	provider, route, preset, agent := e.provider, e.route, e.preset, e.agent
+	appliedStrategy := e.appliedStrategy
+	k.mu.Unlock()
+	model := res.Model
+	if model == "" {
+		model = e.model
+	}
+	var price modelinfo.Price
+	priced := false
+	if p := k.h.opts.Prices; p != nil && model != "" {
+		price, priced = p.Price(context.Background(), model)
+	}
+	u := Usage{FreshInput: int64(res.FreshInput), CacheRead: int64(res.CacheRead),
+		CacheWrite: int64(res.CacheWrite), Output: int64(res.Output),
+		CacheWrite1h: int64(res.CacheWrite1h)}
+	// Same clock, same gate, same reason as record1: a substitute call reads the SAME cached
+	// prefix a ping would (it is built from the byte-identical forwarded body — see
+	// offload.registerKeepAliveCandidate), so it refreshes the SAME liveness clock
+	// cache_state: pre_expiry reads, and only when it actually read something.
+	if u.CacheRead > 0 {
+		apply.RecordCacheTouch(j.st, j.tenant, j.raw, provider, startedAt.UnixMilli())
+	}
+	var cost float64
+	if priced && !price.Zero() && (u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0) {
+		// u.CacheWrite1h, not 0: see record1's own call to CostWithCacheWrite1h for why the
+		// 1h-tier subset has to be passed through rather than folded into the 5-minute rate.
+		cost = price.CostWithCacheWrite1h(u.FreshInput, u.CacheRead, u.CacheWrite, u.Output, u.CacheWrite1h)
+	}
+	k.mu.Lock()
+	e.spent += cost
+	e.refreshed = u.CacheRead
+	k.mu.Unlock()
+	for {
+		old := k.spentUSD.Load()
+		if k.spentUSD.CompareAndSwap(old, math.Float64bits(math.Float64frombits(old)+cost)) {
+			break
+		}
+	}
+	k.pings.Add(1)
+	k.summarySubstituted.Add(1)
+	if ka, ok := j.emitter.(components.KeepAliveEmitter); ok {
+		ka.KeepAlivePing(components.KeepAliveReport{
+			Tenant: j.tenant, Session: j.session, Model: model, Provider: string(provider),
+			Route: route, Pings: j.ping, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite,
+			Output: u.Output, CostUSD: cost, Status: 200, DurationMs: ms,
+			TS: k.now().UnixMilli(), Agent: agent, Preset: preset,
+			Strategy:   appliedStrategy,
+			FreshInput: u.FreshInput,
+			// 0, not pingOutputBudget(route): this ping asked for a full summary, not the
+			// 1-token read an ordinary ping would have, so reporting the ping's own budget here
+			// would misdescribe what was actually requested. See KeepAliveSummaryResult.
+			MaxTokens: 0,
+		})
+	}
+	return cost
 }
 
 // markStopped stops pinging one session, if it is still tracked.
@@ -1307,6 +1719,33 @@ type KeepAliveStats struct {
 	Failed   int64   `json:"failed"`
 	Wrote    int64   `json:"wrote_instead_of_read"`
 	SpentUSD float64 `json:"spend_usd"`
+	// SummarySubstituted, SummarySubstituteFailed and SummarySubstituteOverBudget are
+	// cache_aware_summarizer's share of Pings — see fireSummarySubstitute. A deployment running
+	// that component should see SummarySubstituted climb instead of a flat Pings/Wrote pair; a
+	// SummarySubstituteFailed or SummarySubstituteOverBudget that climbs just as fast says the
+	// substitution is being attempted and declining, not that it is dead.
+	SummarySubstituted          int64 `json:"keepalive_summary_substituted"`
+	SummarySubstituteFailed     int64 `json:"keepalive_summary_substitute_failed"`
+	SummarySubstituteOverBudget int64 `json:"keepalive_summary_substitute_over_budget"`
+	// SummarySubstitutePhaseMismatch counts a routine `pre_expiry` candidate declined because
+	// this particular ping did not land inside the component's own pre-expiry window.
+	SummarySubstitutePhaseMismatch int64 `json:"keepalive_summary_substitute_phase_mismatch"`
+	// SummarySubstituteNoCandidate/CheckpointExists/InFlight/ConcurrencyFull split what used to
+	// be one silent "no substitute" outcome — see fireSummarySubstitute. NoCandidate is the
+	// ordinary case for most sessions; the other three, climbing on a session that SHOULD have a
+	// registered candidate, are what makes a registration gap diagnosable instead of looking
+	// identical to the component simply not being in that tenant's pipeline.
+	SummarySubstituteNoCandidate      int64 `json:"keepalive_summary_substitute_no_candidate"`
+	SummarySubstituteCheckpointExists int64 `json:"keepalive_summary_substitute_checkpoint_exists"`
+	SummarySubstituteInFlight         int64 `json:"keepalive_summary_substitute_in_flight"`
+	SummarySubstituteConcurrencyFull  int64 `json:"keepalive_summary_substitute_concurrency_full"`
+	// SummarySubstituteRefreshPaid/RefreshNotWorthIt are the money gate's own ledger (#415) for a
+	// `pre_expiry` reserve that already exists: Paid when a refresh's expected saving on the
+	// eventual cold return covered its own projected cost, NotWorthIt when it did not. Climbing
+	// NotWorthIt on a deployment with a lot of idle time between turns is expected and healthy —
+	// it is the gate doing its job, not a failure.
+	SummarySubstituteRefreshPaid       int64 `json:"keepalive_summary_substitute_refresh_paid"`
+	SummarySubstituteRefreshNotWorthIt int64 `json:"keepalive_summary_substitute_refresh_not_worth_it"`
 }
 
 // PendingPings reports how many tracked sessions still have a ping scheduled ahead of them.
@@ -1365,7 +1804,18 @@ func (k *keeper) Stats() KeepAliveStats {
 	k.mu.Unlock()
 	return KeepAliveStats{Live: live, Pings: k.pings.Load(), Skipped: k.skipped.Load(),
 		Failed: k.failed.Load(), Wrote: k.wrote.Load(),
-		SpentUSD: math.Float64frombits(k.spentUSD.Load())}
+		SpentUSD:                           math.Float64frombits(k.spentUSD.Load()),
+		SummarySubstituted:                 k.summarySubstituted.Load(),
+		SummarySubstituteFailed:            k.summarySubstituteFailed.Load(),
+		SummarySubstituteOverBudget:        k.summarySubstituteOverBudget.Load(),
+		SummarySubstitutePhaseMismatch:     k.summarySubstitutePhaseMismatch.Load(),
+		SummarySubstituteNoCandidate:       k.summarySubstituteNoCandidate.Load(),
+		SummarySubstituteCheckpointExists:  k.summarySubstituteCheckpointExists.Load(),
+		SummarySubstituteInFlight:          k.summarySubstituteInFlight.Load(),
+		SummarySubstituteConcurrencyFull:   k.summarySubstituteConcurrencyFull.Load(),
+		SummarySubstituteRefreshPaid:       k.summarySubstituteRefreshPaid.Load(),
+		SummarySubstituteRefreshNotWorthIt: k.summarySubstituteRefreshNotWorthIt.Load(),
+	}
 }
 
 // LiveSessionKeys returns the session ids the keeper currently considers live — a copy,
