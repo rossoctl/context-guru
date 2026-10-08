@@ -1099,6 +1099,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			wire = "responses"
 		}
 		var tr apply.Trace // hoisted: the lifecycle log line below reads it
+		// preBody is what the pipeline's own components are about to receive as req.Input, BEFORE
+		// any of them — cache_aware_summarizer included — runs. Captured here, read by h.serve
+		// below, and stashed alongside the body actually forwarded: see the STALE-PREFIX GUARD
+		// comment on sentEntry in prefixask.go for why the two can diverge (PR #414's review of
+		// this follow-up) and why a caller checking coverage must compare against THIS, never
+		// against what a later component in the pipeline went on to rewrite.
+		var preBody []byte
 		// Where an expand answered in band on this turn is restored from the next turn on, when
 		// the config asks for fixed restore (#407). Read off the transcript apply is about to see,
 		// in the same coordinates the anchor is checked against on every later turn.
@@ -1157,6 +1164,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// runs, so an unconditional clear placed after it deletes the very candidate this
 			// request's own run just wrote.
 			pipelineStartedAt := time.Now()
+			// Snapshot the exact bytes the pipeline is about to normalize into req.Input for
+			// EVERY component, cache_aware_summarizer included — this is "as the pipeline
+			// received them", not "as the client originally sent them" (repairExpandErrors,
+			// AnswerStrayCalls and the force-model rewrite above may already have touched body),
+			// which is what makes it the right thing for a later component's own hash to agree
+			// with.
+			preBody = body
 			body, added, tr = h.applyMode(&reqInfo{
 				// cp.llmCtx: context-guru's OWN compaction-model spend under this context
 				// is charged to this request's row, and to no other tenant's.
@@ -1284,7 +1298,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// emits it in a defer once the response is finished, so a request produces exactly
 		// one lifecycle line whichever way it ends — and the attrs are built here, once,
 		// rather than on the response path.
-		h.serve(w, r, provider, up, body, bypassed, cp, tn, tr.Session, anchor, lifecycleLogger(lg, tr, bypassed))
+		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, anchor, lifecycleLogger(lg, tr, bypassed))
 	}
 }
 
@@ -1462,7 +1476,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy, session string, anchor *expand.Anchor, lg *slog.Logger) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session string, anchor *expand.Anchor, lg *slog.Logger) {
 	wire := string(provider)
 	if up.path == "/v1/responses" {
 		wire = "responses"
@@ -1607,7 +1621,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// KEYED BY THE SCOPED SESSION ID, which is what serve receives (tr.Session) and what a
 			// component reads as Ctx.Session. Keying it by the raw header instead would make every
 			// Ask miss while the mechanism looked switched on.
-			h.sent.put(session, provider, body)
+			h.sent.put(session, provider, preBody, body)
 		}
 		if err != nil {
 			// LOG it, and record it on the captured row. An upstream failure used to be
