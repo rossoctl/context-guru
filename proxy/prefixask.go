@@ -60,24 +60,43 @@ const (
 	maxSentBytes    = 96_000_000
 )
 
-// sentEntry is one session's stashed body, plus what it takes to answer
-// components.PrefixCoverage.CoversSpan for it later without re-parsing on every put: the
-// provider the body was forwarded under (normalizeMessages needs it to parse the right wire
-// shape) is kept so a later CoversSpan call can re-derive the same message boundaries a
-// components/offload caller computed over its own, freshly-normalized request. The body is
-// re-normalized lazily, on the (rare, off the hot forwarding path) call to CoversSpan, rather
-// than eagerly on every put — put runs on every single forwarded request, CoversSpan only when
-// a component is actually about to commission a summary through this stash.
+// sentEntry is one session's stashed state, plus what it takes to answer
+// components.PrefixCoverage.CoversSpan for it later without re-parsing on every put.
+//
+// TWO BODIES, NOT ONE, and this is PR #414's review finding on this follow-up (which otherwise
+// only fixed #402's own re-review note). `forwarded` is what actually went upstream — the bytes
+// Ask appends its question to, because that is what the provider's prompt cache was populated
+// from. `preBody` is what the PIPELINE ITSELF received as req.Input, before cache_aware_summarizer
+// or any later component (textclean, format, dedup, …) touched it.
+//
+// Those two are NOT the same body whenever a component that runs AFTER cache_aware_summarizer in
+// the pipeline rewrites a message before forwarding — xhigh runs textclean, format, dedup, toon,
+// cmdfilter, searchfold and extract_llm after it. cache_aware_summarizer computes its own
+// requiredHash from msgs[:end], where msgs is req.Input AS THE PIPELINE RECEIVED IT this turn —
+// i.e. the same basis as preBody, never as forwarded. Checking coverage against `forwarded`
+// therefore compared the summarizer's span against a transcript a DIFFERENT component had already
+// edited, and disagreed on every turn one of them actually acted — live xhigh measured 5 of 5
+// commissions declining as stale_prefix for exactly this reason, with 0 ever committed. CoversSpan
+// below must use preBody; `forwarded` exists only for Ask, which has to append to the bytes the
+// provider's cache actually holds.
+//
+// The provider is kept so a later CoversSpan call can re-derive the same message boundaries a
+// components/offload caller computed over its own, freshly-normalized request. Both bodies are
+// re-normalized lazily, on the (rare, off the hot forwarding path) call to CoversSpan, rather than
+// eagerly on every put — put runs on every single forwarded request, CoversSpan only when a
+// component is actually about to commission a summary through this stash.
 type sentEntry struct {
-	body     []byte
-	provider bschemas.ModelProvider
+	forwarded []byte
+	preBody   []byte
+	provider  bschemas.ModelProvider
 	// seq orders entries by the time they were put, for oldest-first eviction.
 	seq uint64
 }
 
 // sentStash holds the last body forwarded upstream per THREAD, keyed by thread.Key(session, thread)
-// (#423). Per session, a subagent's request replaced the main thread's body, so a prefix ask on the
-// main thread failed its coverage check (ErrStalePrefix) or answered from the wrong conversation.
+// (#423), plus the pre-pipeline body that produced it (#414/#431). Per session, a subagent's
+// request replaced the main thread's body, so a prefix ask on the main thread failed its coverage
+// check (ErrStalePrefix) or answered from the wrong conversation.
 type sentStash struct {
 	mu    sync.Mutex
 	m     map[string]sentEntry
@@ -87,52 +106,63 @@ type sentStash struct {
 
 func newSentStash() *sentStash { return &sentStash{m: map[string]sentEntry{}} }
 
-// put records this session's forwarded body, replacing any previous one.
+// put records this session's forwarded body AND the pre-pipeline body it was built from,
+// replacing any previous entry.
 //
-// A body over maxSentBody is NOT stashed, and this now DELETES whatever was stashed for the
-// session before — see the package comment's "what happens when a bound is hit". Keeping the
-// OLD body used to be the behavior, on the theory that a forgone opportunity now beats one
-// later; it is not, for PrefixAsker: Ask would still find something and answer from a
-// transcript that is missing everything since, with no signal to the caller that happened,
-// unless the caller checks CoversSpan first. A stale body is worse than none — none makes Ask
-// return ErrNoPrefix, which every caller already handles; a stale one makes Ask succeed with an
-// answer about the wrong conversation. CoversSpan is the primary fix (a caller that checks it
-// never gets fooled by a stale body either way), but deleting here means a caller that does NOT
-// check also gets the safer failure mode.
-func (s *sentStash) put(session string, provider bschemas.ModelProvider, body []byte) {
-	if s == nil || session == "" || len(body) == 0 {
+// Either body over maxSentBody is NOT stashed, and this DELETES whatever was stashed for the
+// session before — see the package comment's "what happens when a bound is hit". Keeping the OLD
+// bodies used to be the behavior (before #402), on the theory that a forgone opportunity now
+// beats one later; it is not, for PrefixAsker: Ask would still find something and answer from a
+// transcript that is missing everything since, with no signal to the caller that happened, unless
+// the caller checks CoversSpan first. A stale body is worse than none — none makes Ask return
+// ErrNoPrefix, which every caller already handles; a stale one makes Ask succeed with an answer
+// about the wrong conversation. CoversSpan is the primary fix (a caller that checks it never gets
+// fooled by a stale body either way), but deleting here means a caller that does NOT check also
+// gets the safer failure mode. Checked on BOTH bodies, so an oversized preBody cannot leave a
+// forwarded body stashed with no coverage check possible against it (CoversSpan would then have
+// nothing to compare and would report "covered" by its own missing-session convention — exactly
+// the silent-wrong-answer shape #402 fixed).
+//
+// Past maxSentSessions or maxSentBytes the OLDEST entries (by seq, #423) are evicted until the new
+// one fits — never a wholesale drop, which would regularly throw away an active main thread's body
+// in favor of a short-lived subagent thread's. Both bodies' bytes are charged and released together,
+// since neither is useful without the other.
+func (s *sentStash) put(session string, provider bschemas.ModelProvider, preBody, forwarded []byte) {
+	if s == nil || session == "" || len(forwarded) == 0 {
 		return
 	}
-	if len(body) > maxSentBody {
+	if len(forwarded) > maxSentBody || len(preBody) > maxSentBody {
 		s.mu.Lock()
 		if old, ok := s.m[session]; ok {
-			s.bytes -= len(old.body)
+			s.bytes -= len(old.forwarded) + len(old.preBody)
 			delete(s.m, session)
 		}
 		s.mu.Unlock()
 		return
 	}
-	cp := make([]byte, len(body))
-	copy(cp, body)
+	cpF := make([]byte, len(forwarded))
+	copy(cpF, forwarded)
+	cpP := make([]byte, len(preBody))
+	copy(cpP, preBody)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if old, ok := s.m[session]; ok {
-		s.bytes -= len(old.body)
+		s.bytes -= len(old.forwarded) + len(old.preBody)
 		delete(s.m, session)
 	}
-	for len(s.m) > 0 && (len(s.m) >= maxSentSessions || s.bytes+len(cp) > maxSentBytes) {
+	for len(s.m) > 0 && (len(s.m) >= maxSentSessions || s.bytes+len(cpF)+len(cpP) > maxSentBytes) {
 		oldestKey, oldest := "", uint64(0)
 		for k, e := range s.m {
 			if oldestKey == "" || e.seq < oldest {
 				oldestKey, oldest = k, e.seq
 			}
 		}
-		s.bytes -= len(s.m[oldestKey].body)
+		s.bytes -= len(s.m[oldestKey].forwarded) + len(s.m[oldestKey].preBody)
 		delete(s.m, oldestKey)
 	}
 	s.seq++
-	s.m[session] = sentEntry{body: cp, provider: provider, seq: s.seq}
-	s.bytes += len(cp)
+	s.m[session] = sentEntry{forwarded: cpF, preBody: cpP, provider: provider, seq: s.seq}
+	s.bytes += len(cpF) + len(cpP)
 }
 
 func (s *sentStash) get(session string) []byte {
@@ -141,13 +171,14 @@ func (s *sentStash) get(session string) []byte {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.m[session].body
+	return s.m[session].forwarded
 }
 
-// CoversSpan implements components.PrefixCoverage: it reports whether the stashed body for
-// session, re-normalized the same way the forwarding path itself normalizes a wire body
-// (apply.NormalizeMessages), has AT LEAST `count` messages and those first `count` messages
-// hash (components.SpanHash) to exactly `hash`.
+// CoversSpan implements components.PrefixCoverage: it reports whether the stashed PRE-PIPELINE
+// body for session (see sentEntry's own comment on why this is preBody, never forwarded),
+// re-normalized the same way the forwarding path itself normalizes a wire body
+// (apply.NormalizeMessages), has AT LEAST `count` messages and those first `count` messages hash
+// (components.SpanHash) to exactly `hash`.
 //
 // A MISSING session reports true — covered — rather than false. That looks backwards until
 // you read what Ask already does with it: with nothing stashed, Ask returns components.
@@ -169,7 +200,7 @@ func (s *sentStash) CoversSpan(session string, count int, hash string) bool {
 	if !ok {
 		return true
 	}
-	norm := apply.NormalizeMessages(e.provider, e.body)
+	norm := apply.NormalizeMessages(e.provider, e.preBody)
 	if count > len(norm) {
 		return false
 	}

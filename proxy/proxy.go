@@ -1109,6 +1109,14 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		}
 		var tr apply.Trace  // hoisted: the lifecycle log line below reads it
 		var threadID string // hoisted with it: serve hands it to the keeper
+		// preBody is what the pipeline's own components are about to receive as req.Input, BEFORE
+		// any of them — cache_aware_summarizer and extract_llm_sweep included — runs. Captured here,
+		// read by h.serve below, and stashed alongside the body actually forwarded: see the
+		// STALE-PREFIX GUARD comment on sentEntry in prefixask.go for why the two can diverge (PR
+		// #414's review of this follow-up, and PR #431's round 1) and why a caller checking coverage
+		// must compare against THIS, never against what a later component in the pipeline went on to
+		// rewrite.
+		var preBody []byte
 		// Where an expand answered in band on this turn is restored from the next turn on, when
 		// the config asks for fixed restore (#407). Read off the transcript apply is about to see,
 		// in the same coordinates the anchor is checked against on every later turn.
@@ -1173,6 +1181,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			threadOf := func(sess string) thread.Result {
 				return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
 			}
+			// Snapshot the exact bytes the pipeline is about to normalize into req.Input for
+			// EVERY component, cache_aware_summarizer and extract_llm_sweep included — this is "as
+			// the pipeline received them", not "as the client originally sent them"
+			// (repairExpandErrors, AnswerStrayCalls and the force-model rewrite above may already
+			// have touched body), which is what makes it the right thing for a later component's
+			// own hash to agree with.
+			preBody = body
 			body, added, tr = h.applyMode(&reqInfo{
 				// cp.llmCtx: context-guru's OWN compaction-model spend under this context
 				// is charged to this request's row, and to no other tenant's.
@@ -1320,7 +1335,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		if threadID != thread.Primary {
 			slg = slg.With("thread", threadID)
 		}
-		h.serve(w, r, provider, up, body, bypassed, cp, tn, tr.Session, threadID, anchor, slg)
+		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, anchor, slg)
 	}
 }
 
@@ -1498,7 +1513,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, anchor *expand.Anchor, lg *slog.Logger) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, anchor *expand.Anchor, lg *slog.Logger) {
 	wire := string(provider)
 	if up.path == "/v1/responses" {
 		wire = "responses"
@@ -1644,7 +1659,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// component reads as Ctx.Session. Keying it by the raw header instead would make every
 			// Ask miss while the mechanism looked switched on.
 			// Per THREAD (#423): a prefix ask reads the last body of ITS thread's conversation.
-			h.sent.put(thread.Key(session, threadID), provider, body)
+			// Both bodies (#414/#431): preBody for CoversSpan, body for Ask's own append.
+			h.sent.put(thread.Key(session, threadID), provider, preBody, body)
 		}
 		if err != nil {
 			// LOG it, and record it on the captured row. An upstream failure used to be
