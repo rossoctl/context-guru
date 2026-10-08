@@ -190,8 +190,13 @@ func (p CachePolicy) on() bool {
 // Keeper bounds. Both are memory bounds and both are needed: a few enormous sessions and a
 // great many small ones are different ways to exhaust the same 8 GiB.
 const (
-	// maxKeepAliveSessions bounds the tracked sessions. Same order as modes.Tracker's own
-	// bound, and reached only by a deployment with that many opted-in sessions idle at once.
+	// maxKeepAliveSessions bounds the tracked ENTRIES, which since #423 are threads, not sessions:
+	// one session holds one entry per thread that passed the gates (main agent, each subagent).
+	// The name is kept so the bound stays greppable from its history. 512 still holds: an entry
+	// exists only for a thread past its first request with a prefix over the floor, a finished
+	// thread's entry ends at the hard deadline ((K+1) x Idle, about 14 min at the defaults), and
+	// the body bound below binds first. evictLocked has no per-session fairness on purpose: it
+	// drops the entry whose ping is least imminent, whichever session it belongs to.
 	maxKeepAliveSessions = 512
 	// maxKeepAliveBytes bounds the total request bodies held for replay.
 	//
@@ -201,7 +206,7 @@ const (
 	// peak of 11 live sessions, but it drives ~350-byte synthetic bodies, so it exercises the
 	// count bound and says nothing about this one.
 	maxKeepAliveBytes = 128 << 20
-	// maxKeepAliveTurnKeys bounds the per-session turn counter. Larger than the session bound
+	// maxKeepAliveTurnKeys bounds the per-thread turn counter (per session before #423). Larger than the session bound
 	// because it holds one int rather than a body, and it has to outlive the entry.
 	maxKeepAliveTurnKeys = 20000
 	// maxKeepAliveBodyBytes refuses to hold a single body larger than this. A body this big
@@ -356,6 +361,12 @@ func (e *kaEntry) due(now time.Time) bool {
 // that predates this field) means this whole block is skipped and behaviour is byte-for-
 // byte what it always was.
 func (e *kaEntry) pingable() bool {
+	//
+	// A FINISHED subagent (an "a:" thread whose last turn ended end_turn) is pinged like any other
+	// thread, on purpose (#426 review). Nothing tells the proxy it will never resume, and on the
+	// fix-summarizer session (76 such Sonnet threads with a prefix over 20k) about 8 resumed inside
+	// the ping window — agent-team teammates do — worth ~$8.8 of avoided misses, against ~$5.8 of
+	// pings on the 45 that never came back. A blanket gate would lose more than it saves there.
 	if e.turn < 1 || e.prefix < int64(e.pol.MinPrefixTokens) || e.pingUSD > e.pol.Ceiling() {
 		return false
 	}
@@ -414,7 +425,7 @@ type keeper struct {
 	mu    sync.Mutex
 	live  map[string]*kaEntry
 	bytes int64
-	// turns counts requests seen per session, so the first-request gate survives the entry's
+	// turns counts requests seen per THREAD (keyed like live), so the first-request gate survives the entry's
 	// own lifecycle: an entry is dropped the moment the next request arrives, and retired by
 	// policy a few minutes later, while "has this session sent a request before?" has to
 	// outlive both.

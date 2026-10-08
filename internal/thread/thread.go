@@ -15,9 +15,17 @@
 //  3. The session itself (thread id ""), when neither gives an answer. That is the behaviour
 //     before this package existed, so a wrong guess can never be worse than no guess.
 //
-// The first thread of a session without a header also gets the id "". A single-thread session — every Codex or
-// Bob Shell session, and every Claude Code session that never starts a subagent — therefore keys
-// exactly as it did before.
+// The first thread of a session without a header also gets the id "". A single-thread session —
+// every Codex or Bob Shell session, and every Claude Code session that never starts a subagent —
+// therefore keys exactly as it did before.
+//
+// "" means "the session's first header-less thread", NOT "the main agent". The two are the same
+// when the main agent speaks first, which Claude Code and Codex do at the start of a session. They
+// differ when an auxiliary request (a title, a classifier) comes first, or when the proxy restarts
+// mid-session and another thread speaks first: then the main agent gets a "p:" id. Every thread
+// keeps its own keep-alive entry and its own recency either way; only a reader that takes "" to be
+// the main agent is misled. Choosing "" by turn count instead would mean re-keying a thread in
+// the middle of its life, which resets its keep-alive turn count and its recency.
 package thread
 
 import (
@@ -222,11 +230,18 @@ func (s *sessionState) newID(sums []uint64) string {
 	if !s.hasPrefixThread() {
 		return Primary
 	}
+	// The MOST RECENT compacting thread: the agent sends the post-compaction request right after
+	// its compaction request, so if two threads are compacting at once, the later one is the one
+	// whose summary this is. Slice order would be arbitrary.
+	var succ *threadState
 	for _, th := range s.threads {
-		if th.compacting {
-			th.compacting = false
-			return th.id
+		if th.compacting && (succ == nil || th.last.After(succ.last)) {
+			succ = th
 		}
+	}
+	if succ != nil {
+		succ.compacting = false
+		return succ.id
 	}
 	// The same fingerprint as a thread that has since moved on is a resent request from that
 	// thread's past; the caller then joins it, which is right, since the prefix is the same.

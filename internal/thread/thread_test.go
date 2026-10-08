@@ -366,3 +366,20 @@ func TestACodexResumeStaysOnItsThread(t *testing.T) {
 		t.Fatalf("resumed Codex request got %+v, want the primary thread by prefix", r)
 	}
 }
+
+// With two threads compacting at once, the post-compaction request inherits the MOST RECENT one:
+// the agent sends it right after its own compaction request. Slice order would pick the older.
+func TestTwoCompactingThreadsTheLaterOneIsTheSuccessor(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", conv("first conversation", "a", "u"), false)
+	second := tr.Resolve("t\x00s", "", conv("second conversation", "a", "u"), false).ID
+	if second == Primary {
+		t.Fatal("precondition: the second conversation took the primary id")
+	}
+	// The primary (first in the slice) compacts first; the second thread compacts later.
+	tr.Resolve("t\x00s", "", conv("first conversation", "a", "u", "summarize"), true)
+	tr.Resolve("t\x00s", "", conv("second conversation", "a", "u", "summarize"), true)
+	if id := tr.Resolve("t\x00s", "", conv("summary of the second", "go on"), false).ID; id != second {
+		t.Fatalf("post-compaction request got %q, want %q, the thread that compacted last", id, second)
+	}
+}
