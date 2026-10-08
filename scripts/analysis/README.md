@@ -170,23 +170,59 @@ split entry than its usage, so a naive "first entry only" read misses it.
 
 Tracked per thread (`ThreadWaitState`), scanning entries in file order, from
 the actual shapes found in both local projects' transcripts (grep for them
-before trusting any regex here — formats can and do change):
+before trusting any regex here — formats do vary more than they look):
 
 | | Start | Finish |
 |---|---|---|
-| Background Bash (`run_in_background`) | tool_result text: `running in background with ID: X.` | `<task-notification><task-id>X</task-id>` |
-| `Monitor` | tool_result text: `Monitor started (task X, expires in <dur>...)` — the duration is parsed and tracked as an absolute expiry | `<task-notification><task-id>X</task-id>`, OR the stated expiry elapsing (checked against the gap-start call's own timestamp) |
-| Async agent (`Agent` tool, `run_in_background: true`) | tool_result text: `Async agent launched successfully... agentId: X` | **`<agent-message from="X">`** (a subagent hand-back notice) — **not** a `<task-notification>`; this is the one place a background task's finish signal differs by how it started, found by checking real transcript text rather than assuming all three use the same finish shape |
+| Background Bash (`run_in_background`) | tool_result text: `running in background with ID: X.` | A `<task-notification>` naming `X`, EXCEPT a `Monitor`'s own mid-watch event notices (see below) |
+| `Monitor` | tool_result text: `Monitor started (task X, <detail>)`, where `<detail>` is one of 3 real shapes — `expires in <dur> unless the source ends first; ...` (a timed watch), `timeout <N>ms` (also timed, in milliseconds), or `persistent — runs until TaskStop or session end` (no expiry at all) | The stated expiry elapsing (checked against the gap-start call's own timestamp), OR a `<task-notification>` whose `<event>` text says `[Monitor expired after ...]` specifically — **not just any `<task-notification>` naming X**: a Monitor fires one of these on every matching event while it keeps running (49 of 70 in both local projects were mid-watch, not final), and treating each one as a finish closed the task on its FIRST event, not its last |
+| Async agent (`Agent` tool, `run_in_background: true`) | tool_result text: `Async agent launched successfully... agentId: X` | **`<agent-message from="X">`** (a subagent hand-back notice) — **not** a `<task-notification>`; this is one of two places a background task's finish signal differs by how it started |
+| A background Skill (`Skill` tool, forked execution) | tool_result text: `... launched (forked execution, running in the background)` — but the id itself is NOT in this text at all; it is the entry's own structured `toolUseResult.agentId` field | A `<task-notification>` or an `<agent-message from="X">`, same as an async agent |
 | Any of the above | — | A `TaskStop(task_id=X)` tool call, matched structurally on the tool name and its JSON `task_id` field, not by regex |
 | A teammate wait (`SendMessage` tool_use) | matched structurally on the tool name and its JSON `to` field (not by regex) | `<teammate-message teammate_id="X">` or `<cross-session-message from-name="X">`, matched by regex since these only ever appear as plain text |
 
-A background task with no stated expiry (a backgrounded Bash command, or an
-async agent) stays open until an explicit finish signal; one with a stated
-expiry (a `Monitor`) is also treated as closed once that expiry has passed,
-even with no notification yet — the tool's own description says a Monitor
-may expire silently in rare cases, and treating "open forever" as the
-default for an expiring task is exactly the bug issue #424 flagged in its
-own rough detector (see Validation).
+A background task with no stated expiry (a backgrounded Bash command, an
+async agent, or a background Skill) stays open until an explicit finish
+signal; one with a stated expiry (a `Monitor`) is also treated as closed
+once that expiry has passed, even with no notification yet — the tool's
+own description says a Monitor may expire silently in rare cases, and
+treating "open forever" as the default for an expiring task is exactly the
+bug issue #424 flagged in its own rough detector (see Validation).
+
+**`waiting_for` is computed the moment the call that starts the wait
+finishes, not when the gap is finally built.** The first version of this
+script computed it lazily — only when the NEXT call was flushed — by which
+point every "in-between" entry (the very teammate reply or task
+notification that is about to END the gap) had already had its side
+effects applied to the tracked state. That reliably made a genuinely open
+background task or teammate wait look closed before it was ever checked.
+Fixed by snapshotting `waiting_for` immediately after each call is
+finalized, before any later entry can mutate the tracker; see the review's
+3 real examples (one per leak) in `wait_causes.py`'s self-test and in
+`iter_calls_and_gaps`'s own comments.
+
+**A SendMessage's own answer, and AskUserQuestion/ExitPlanMode's, both
+travel back as a bare `tool_result` block** — that is how the Messages API
+returns a tool's result, regardless of who (a human, for Ask/ExitPlan)
+produced it. `wake_cause`'s `tool_result` is right for every OTHER tool,
+but wrong for these two: `classify_wake_cause` now applies the same
+exception `waiting_for` already has, so AskUserQuestion/ExitPlanMode's
+human answer is `wake_cause=human`, never `tool_result`.
+
+**A teammate wait that never gets a reply stays open for the rest of the
+thread's visible transcript** — there is no analogous expiry rule to a
+Monitor's. On both local projects combined: of 1,474 teammate waits, 129
+(9%) never saw a reply within the thread's own transcript (context-guru:
+91 of 276, 33%; forever: 38 of 1198, 3%); of the ones that DID close, the
+median close time is a few minutes, but the tail is long (p90 in the tens
+of minutes to a few hours, a handful in the thousands of minutes — almost
+certainly sessions that resumed days later rather than a single
+continuous wait). Reported per project as `teammate_wait_durations`, split
+into closed and never-closed (the latter is a lower bound, measured only
+to the thread's last call, not a real close). This is reported as a
+finding, not fixed: whether an un-replied teammate wait should itself have
+an assumed timeout is an open question for issue #424, not something a
+transcript alone can answer.
 
 ## Learning a ping budget per tool (issue #424 section 4)
 
@@ -434,3 +470,24 @@ DB-undercoverage case is not hypothetical: before the fix, `forever`'s
 "unused tools" list included `SendMessage` and `AskUserQuestion` — tools
 the transcripts show hundreds of calls to — because the local dashboard
 DBs happen to cover only a handful of `forever`'s sessions.
+
+**Cross-tab leak investigation.** A review of the context-guru main-thread
+`waiting_for` x `wake_cause` cross-tab found 3 leaks (cells that should be
+rare but weren't); each was traced to a specific real session, timestamp,
+and transcript entry before fixing (see the comments at each fix site in
+`wait_causes.py`, and the dedicated regression session in `--self-test`):
+
+| Leak | Before | After | Root cause |
+|---|---|---|---|
+| `waiting_for=human` woken by `tool_result` | 15 | 0 | `AskUserQuestion`/`ExitPlanMode`'s human answer travels back as a bare `tool_result` — `wake_cause` needs the same exception `waiting_for` already has. |
+| `waiting_for=human` woken by `background` | 29 | 0 | Mostly the ordering bug below; the residual cases were a Monitor's `persistent`/`timeout <ms>` detail forms (unhandled regex), a Monitor's own mid-watch event wrongly treated as a finish, and a background Skill launch's id (`toolUseResult.agentId`, not in the text at all). |
+| `waiting_for=human` woken by `teammate` | 45 | 11 | Mostly the ordering bug below. All 11 residual cases were checked by hand against every `SendMessage` sent earlier in that session: none had an outstanding, unanswered send at the time the reply arrived — each is a teammate (or another Claude session, several literally named after other work this script's own PR went through) volunteering a follow-up with no corresponding ask, which a transcript cannot predict. |
+
+The dominant root cause (most of the drop in all 3 rows): `waiting_for`
+was computed lazily — only when the NEXT call was flushed — by which point
+every entry between the two calls, including the very teammate reply or
+task notification about to END the gap, had already been applied to the
+tracked open-tasks/open-teammates state. That reliably made a background
+task or teammate wait that was genuinely open at the START of the gap look
+already closed. Fixed by snapshotting `waiting_for` the moment each call
+finishes, before anything later can mutate the tracker.

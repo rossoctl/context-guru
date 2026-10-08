@@ -193,11 +193,45 @@ TASK_NOTIF_RE = re.compile(r"<task-notification>")
 #                                                   |   signal differs by start kind)
 #
 # A TaskStop(task_id=X) tool call also finishes X, whichever way it started.
-TASK_NOTIF_ID_RE = re.compile(r"<task-notification>.*?<task-id>([^<]+)</task-id>", re.DOTALL)
+# PR #425 review leak 2 follow-up: a <task-notification> is NOT always a
+# finish signal. A Monitor fires ONE of these on every matching event while
+# it keeps running — found by checking real data: 49 of 70 Monitor-event
+# notifications in both local projects are mid-watch events, not the final
+# one, and treating every one as a finish closed the task on its FIRST
+# event instead of its last. Only the terminal notice says so, in a fixed
+# bracketed form: "[Monitor expired after <dur> ...]". A task-notification
+# with no "Monitor event:" summary at all (a one-shot Bash/Agent/Skill
+# background task) always finishes, as before.
+TASK_NOTIFICATION_BLOCK_RE = re.compile(r"<task-notification>(.*?)</task-notification>", re.DOTALL)
+TASK_ID_IN_BLOCK_RE = re.compile(r"<task-id>([^<]+)</task-id>")
+MONITOR_EVENT_SUMMARY_RE = re.compile(r"<summary>Monitor event:")
+MONITOR_EXPIRED_RE = re.compile(r"Monitor expired")
+
+
+def task_notification_finishes(block: str) -> bool:
+    if MONITOR_EVENT_SUMMARY_RE.search(block):
+        return bool(MONITOR_EXPIRED_RE.search(block))
+    return True
 AGENT_MESSAGE_FINISH_RE = re.compile(r'<agent-message\s+from="([^"]+)"')
 BG_BASH_START_RE = re.compile(r"running in background with ID:\s*(\S+?)\.")
-MONITOR_START_RE = re.compile(r"Monitor started \(task\s+(\S+?),\s*expires in\s+([^;]+?);")
+# PR #425 review leak 2/3 follow-up: "Monitor started (task X, ...)" has (at
+# least) 3 real detail clauses, found by grepping every instance in both
+# local projects rather than assuming one shape:
+#   "expires in 1m 30s unless the source ends first; ..."  (a timed watch)
+#   "timeout 1800000ms"                                    (also timed, in ms)
+#   "persistent — runs until TaskStop or session end"      (no expiry at all)
+# The old regex matched only the first, so a Monitor opened with either of
+# the other two never registered as open at all.
+MONITOR_START_RE = re.compile(r"Monitor started \(task\s+(\S+?),\s*([^)]*)\)")
+MONITOR_EXPIRES_IN_RE = re.compile(r"expires in\s+([^;]+?);")
+MONITOR_TIMEOUT_MS_RE = re.compile(r"timeout\s+(\d+)ms")
 ASYNC_AGENT_START_RE = re.compile(r"Async agent launched successfully.*?agentId:\s*(\S+)", re.DOTALL)
+# A Skill run in the background (forked execution) — e.g. "/code-review" as
+# a background task. Its id is NOT in this text at all; it is a structured
+# field, toolUseResult.agentId, on the SAME transcript entry (see
+# ThreadWaitState.apply_user_entry) — found by inspecting a real instance's
+# raw JSON, since the text alone gives no id to capture.
+BACKGROUND_SKILL_START_RE = re.compile(r"launched \(forked execution, running in the background\)")
 
 # Open teammate waits: a SendMessage tool_use (matched structurally, on the
 # tool name and its JSON `to` field — not by regex) with no later reply.
@@ -216,6 +250,20 @@ def parse_duration_seconds(text: str) -> float:
         return 0.0
     h, mi, s = (int(g) if g else 0 for g in m.groups())
     return float(h * 3600 + mi * 60 + s)
+
+
+def parse_monitor_expiry_seconds(detail: str) -> float | None:
+    """From a Monitor's detail clause (the text between the task id and the
+    closing paren), the seconds until it expires on its own — or None for a
+    "persistent" Monitor, which only closes via TaskStop or a finish signal.
+    """
+    m = MONITOR_EXPIRES_IN_RE.search(detail)
+    if m:
+        return parse_duration_seconds(m.group(1))
+    m = MONITOR_TIMEOUT_MS_RE.search(detail)
+    if m:
+        return int(m.group(1)) / 1000.0
+    return None  # "persistent", or an unrecognized detail — fail open, stay open
 
 
 def entry_tool_result_texts(entry: dict) -> list[str]:
@@ -249,39 +297,59 @@ class ThreadWaitState:
 
     def __init__(self) -> None:
         self.open_tasks: dict[str, float | None] = {}  # task_id -> expiry epoch secs, or None
-        self.open_teammates: set[str] = set()
+        self.open_teammates: dict[str, float] = {}  # name -> ts the SendMessage opened it
+        # (name, open_ts, close_ts) for every teammate wait that CLOSED (a
+        # reply arrived) — see "report how long open teammate waits stay
+        # open" (PR #425 review). A wait still open when the thread's own
+        # transcript ends is read from `open_teammates` by the caller, which
+        # knows the thread's last call ts and this class does not.
+        self.teammate_wait_closed: list[tuple[str, float, float]] = []
 
-    def apply_tool_use(self, name: str, tool_input: dict) -> None:
+    def apply_tool_use(self, name: str, tool_input: dict, ts: float | None) -> None:
         if name == "SendMessage":
             to = str(tool_input.get("to", "")).split(" [")[0].strip()
-            if to:
-                self.open_teammates.add(to)
+            if to and ts is not None:
+                self.open_teammates[to] = ts
         elif name == "TaskStop":
             task_id = tool_input.get("task_id") or tool_input.get("shell_id")
             if task_id:
                 self.open_tasks.pop(task_id, None)
 
+    def _close_teammate(self, name: str, ts: float | None) -> None:
+        opened_ts = self.open_teammates.pop(name, None)
+        if opened_ts is not None and ts is not None:
+            self.teammate_wait_closed.append((name, opened_ts, ts))
+
     def apply_user_entry(self, entry: dict) -> None:
         text, _ = entry_user_text(entry)
-        for m in TASK_NOTIF_ID_RE.finditer(text):
-            self.open_tasks.pop(m.group(1), None)
+        ts = iso_to_epoch(entry.get("timestamp", ""))
+        for block_m in TASK_NOTIFICATION_BLOCK_RE.finditer(text):
+            block = block_m.group(1)
+            id_m = TASK_ID_IN_BLOCK_RE.search(block)
+            if id_m and task_notification_finishes(block):
+                self.open_tasks.pop(id_m.group(1), None)
         for m in AGENT_MESSAGE_FINISH_RE.finditer(text):
             self.open_tasks.pop(m.group(1), None)
         for m in TEAMMATE_ID_FINISH_RE.finditer(text):
-            self.open_teammates.discard(m.group(1))
+            self._close_teammate(m.group(1), ts)
         for m in CROSS_SESSION_NAME_FINISH_RE.finditer(text):
-            self.open_teammates.discard(m.group(1))
+            self._close_teammate(m.group(1), ts)
 
-        ts = iso_to_epoch(entry.get("timestamp", ""))
         for result_text in entry_tool_result_texts(entry):
             for m in ASYNC_AGENT_START_RE.finditer(result_text):
                 self.open_tasks[m.group(1)] = None
             for m in BG_BASH_START_RE.finditer(result_text):
                 self.open_tasks[m.group(1)] = None
             for m in MONITOR_START_RE.finditer(result_text):
-                task_id, dur_text = m.group(1), m.group(2)
-                expiry = (ts + parse_duration_seconds(dur_text)) if ts is not None else None
-                self.open_tasks[task_id] = expiry
+                task_id, detail = m.group(1), m.group(2)
+                seconds = parse_monitor_expiry_seconds(detail)
+                self.open_tasks[task_id] = (ts + seconds) if (ts is not None and seconds is not None) else None
+            if BACKGROUND_SKILL_START_RE.search(result_text):
+                # The id lives on the entry's own toolUseResult.agentId, not
+                # in this text — see BACKGROUND_SKILL_START_RE's docstring.
+                agent_id = (entry.get("toolUseResult") or {}).get("agentId")
+                if agent_id:
+                    self.open_tasks[agent_id] = None
 
     def prune_expired(self, now_ts: float) -> None:
         expired = [k for k, v in self.open_tasks.items() if v is not None and v <= now_ts]
@@ -384,6 +452,26 @@ class ToolWait:
     start: Call
     end: Call
     fallback_group: str  # "human" or "own_tool"
+
+
+@dataclass
+class TeammateWait:
+    """How long one open-teammate wait (a SendMessage to `name`) stayed open.
+    PR #425 review: "check that the open-teammate rule does not keep a wait
+    open forever ... report how long open teammate waits stay open."
+
+    `closed` is False when no reply ever arrived within this thread's own
+    visible transcript — `duration_min` is then measured only up to the
+    thread's LAST call, not to any real close, so it is a LOWER bound on how
+    long that wait was actually open, not its true duration.
+    """
+
+    project: str
+    thread_id: str
+    name: str
+    open_ts: float
+    duration_min: float
+    closed: bool
 
 
 def iso_to_epoch(ts: str) -> float | None:
@@ -495,7 +583,7 @@ class _CallBuffer:
                     # transcript order — not deferred to when this Call is
                     # finalized, so a later entry's finish signal in the same
                     # scan sees accurate state.
-                    wait_state.apply_tool_use(name, block.get("input") or {})
+                    wait_state.apply_tool_use(name, block.get("input") or {}, self.ts)
 
     def finalize(self) -> Call | None:
         if self.ts is None:
@@ -521,25 +609,39 @@ class _CallBuffer:
 
 def iter_calls_and_gaps(
     path: str, thread_id: str, thread_kind: str, project: str
-) -> tuple[list[Call], list[Gap], list[ToolWait]]:
+) -> tuple[list[Call], list[Gap], list[ToolWait], list[TeammateWait]]:
     """Parse one thread's JSONL file into its calls, its gaps > threshold,
-    and its per-tool waits (every consecutive call pair, no threshold)."""
+    its per-tool waits (every consecutive call pair, no threshold), and its
+    teammate-wait durations (every SendMessage, open to close or to the
+    thread's last call if no reply ever arrived)."""
     calls: list[Call] = []
     pending_between: list[dict] = []
     gaps: list[Gap] = []
     tool_waits: list[ToolWait] = []
     prev_call: Call | None = None
+    prev_call_waiting_for: str = ""
     wait_state = ThreadWaitState()
     buffer: _CallBuffer | None = None
 
     def flush_buffer() -> None:
-        nonlocal buffer, prev_call, pending_between
+        nonlocal buffer, prev_call, prev_call_waiting_for, pending_between
         if buffer is None:
             return
         call = buffer.finalize()
         buffer = None
         if call is None:
             return
+        # Snapshot THIS call's waiting_for right now, before any LATER entry
+        # (a teammate reply, a task-notification — exactly the things that
+        # END the next gap) gets a chance to mutate wait_state. waiting_for
+        # must reflect what was open the moment the wait STARTS; computing it
+        # lazily at the next flush (the previous shape of this function) read
+        # it only after every in-between entry's side effects had already
+        # landed, so a background task or teammate wait that was genuinely
+        # open — and whose closing is what ends the gap — looked closed
+        # before it was ever checked. See PR #425 review for 3 real examples
+        # of exactly this leak.
+        call_waiting_for = wait_state.classify_waiting_for(call)
         calls.append(call)
 
         if prev_call is not None:
@@ -561,7 +663,16 @@ def iter_calls_and_gaps(
                 )
             if gap_min >= GAP_THRESHOLD_MIN:
                 cause = "retry" if prev_call.is_error else classify_wake_cause(pending_between)
-                waiting_for = wait_state.classify_waiting_for(prev_call)
+                # PR #425 review leak 1: AskUserQuestion/ExitPlanMode's own
+                # answer MUST travel back as a tool_result block — that is
+                # how the Messages API returns a tool's result, regardless
+                # of who (a human) produced it. classify_wake_cause sees a
+                # bare tool_result and says "tool_result" (the agent's own
+                # next tool call, no new external input), which is right for
+                # every OTHER tool but wrong here: a human answered. Prefer
+                # the exception the SAME way waiting_for does.
+                if cause == "tool_result" and any(n in ASK_HUMAN_TOOLS for n in prev_call.tool_use_names):
+                    cause = "human"
                 gaps.append(
                     Gap(
                         thread_id=thread_id,
@@ -571,7 +682,7 @@ def iter_calls_and_gaps(
                         end=call,
                         gap_min=gap_min,
                         cause=cause,
-                        waiting_for=waiting_for,
+                        waiting_for=prev_call_waiting_for,
                     )
                 )
         else:
@@ -592,11 +703,12 @@ def iter_calls_and_gaps(
 
         pending_between = []
         prev_call = call
+        prev_call_waiting_for = call_waiting_for
 
     try:
         fh = open(path, "r", encoding="utf-8", errors="replace")
     except OSError:
-        return [], [], []
+        return [], [], [], []
 
     with fh:
         for line in fh:
@@ -629,7 +741,18 @@ def iter_calls_and_gaps(
 
         flush_buffer()
 
-    return calls, gaps, tool_waits
+    teammate_waits: list[TeammateWait] = [
+        TeammateWait(project=project, thread_id=thread_id, name=name, open_ts=open_ts, duration_min=(close_ts - open_ts) / 60.0, closed=True)
+        for name, open_ts, close_ts in wait_state.teammate_wait_closed
+    ]
+    last_ts = calls[-1].ts if calls else None
+    if last_ts is not None:
+        for name, open_ts in wait_state.open_teammates.items():
+            teammate_waits.append(
+                TeammateWait(project=project, thread_id=thread_id, name=name, open_ts=open_ts, duration_min=(last_ts - open_ts) / 60.0, closed=False)
+            )
+
+    return calls, gaps, tool_waits, teammate_waits
 
 
 WORKTREE_SUFFIX_RE = re.compile(r"--claude-worktrees-.*$")
@@ -1143,6 +1266,28 @@ def read_tool_tables(db_path: str, session_ids: set[str]) -> tuple[set[str], set
     return declared, called
 
 
+def summarize_teammate_wait_durations(teammate_waits: list[TeammateWait]) -> dict:
+    """How long open-teammate waits stay open — PR #425 review: "check that
+    the open-teammate rule does not keep a wait open forever after a
+    SendMessage that never gets a reply."
+
+    `never_closed` waits are a LOWER bound (duration_min is measured only to
+    the thread's last call, not a real close — see TeammateWait), so they
+    are reported separately from closed ones rather than pooled with them.
+    """
+    closed = [tw.duration_min for tw in teammate_waits if tw.closed]
+    never_closed = [tw.duration_min for tw in teammate_waits if not tw.closed]
+    return {
+        "closed_count": len(closed),
+        "closed_median_min": round(median(closed), 2) if closed else 0.0,
+        "closed_p90_min": round(pct(closed, 0.90), 2) if closed else 0.0,
+        "closed_max_min": round(max(closed), 2) if closed else 0.0,
+        "never_closed_count": len(never_closed),
+        "never_closed_median_min_lower_bound": round(median(never_closed), 2) if never_closed else 0.0,
+        "never_closed_max_min_lower_bound": round(max(never_closed), 2) if never_closed else 0.0,
+    }
+
+
 def unused_tools_report(session_ids: set[str], db_paths: list[str], called_from_transcripts: set[str]) -> dict:
     """Declared-but-never-called built-in tools for a project's sessions.
 
@@ -1377,12 +1522,14 @@ def run_transcript_mode(projects_dirs: list[str], db_paths: list[str]) -> dict:
     per_project_gaps: dict[str, list[Gap]] = defaultdict(list)
     per_project_calls: dict[str, dict[str, list[Call]]] = defaultdict(lambda: defaultdict(list))
     per_project_tool_waits: dict[str, list[ToolWait]] = defaultdict(list)
+    per_project_teammate_waits: dict[str, list[TeammateWait]] = defaultdict(list)
 
     for project, thread_id, thread_kind, path in threads:
-        calls, gaps, tool_waits = iter_calls_and_gaps(path, thread_id, thread_kind, project)
+        calls, gaps, tool_waits, teammate_waits = iter_calls_and_gaps(path, thread_id, thread_kind, project)
         per_project_gaps[project].extend(gaps)
         per_project_calls[project][thread_id] = calls
         per_project_tool_waits[project].extend(tool_waits)
+        per_project_teammate_waits[project].extend(teammate_waits)
         all_gaps_global.extend(gaps)
 
     db_index = DBIndex(db_rows) if db_rows else None
@@ -1430,6 +1577,9 @@ def run_transcript_mode(projects_dirs: list[str], db_paths: list[str]) -> dict:
         called_from_transcripts = {name for calls in project_calls.values() for c in calls for name in c.tool_use_names}
         all_session_ids = train_sessions | test_sessions
         report["projects"][project]["unused_tools"] = unused_tools_report(all_session_ids, db_paths, called_from_transcripts)
+        report["projects"][project]["teammate_wait_durations"] = summarize_teammate_wait_durations(
+            per_project_teammate_waits.get(project, [])
+        )
 
     if db_rows:
         report["mislabel_check"] = mislabel_check(all_gaps_global, db_rows)
@@ -1569,6 +1719,16 @@ def human_summary(report: dict) -> str:
                 lines.append(f"\n  Unused tools: {ut['note']}")
                 lines.append(f"    called: " + ", ".join(ut.get("called", [])))
 
+        tw = data.get("teammate_wait_durations")
+        if tw:
+            lines.append(
+                f"\n  Teammate wait durations: {tw['closed_count']} closed "
+                f"(median {tw['closed_median_min']}min, p90 {tw['closed_p90_min']}min, max {tw['closed_max_min']}min); "
+                f"{tw['never_closed_count']} never closed within the visible transcript "
+                f"(median {tw['never_closed_median_min_lower_bound']}min, max {tw['never_closed_max_min_lower_bound']}min, "
+                f"lower bound — measured only to the thread's last call)"
+            )
+
     if report.get("mislabel_check"):
         mc = report["mislabel_check"]
         lines.append(
@@ -1622,15 +1782,19 @@ def _write_call_line(
     fh.write(json.dumps(entry) + "\n")
 
 
-def _write_tool_result_line(fh, ts_iso: str, text: str) -> None:
+def _write_tool_result_line(fh, ts_iso: str, text: str, tool_use_result: dict | None = None) -> None:
     """A 'user' entry carrying one tool_result whose own text is `text` — this
     is where background-task START markers live (Monitor started, async agent
-    launched, running in background with ID)."""
+    launched, running in background with ID). `tool_use_result`, when given,
+    is the entry's top-level `toolUseResult` field — a background Skill
+    launch's own id lives there, not in the text (see BACKGROUND_SKILL_START_RE)."""
     entry = {
         "type": "user",
         "timestamp": ts_iso,
         "message": {"content": [{"type": "tool_result", "content": [{"type": "text", "text": text}]}]},
     }
+    if tool_use_result is not None:
+        entry["toolUseResult"] = tool_use_result
     fh.write(json.dumps(entry) + "\n")
 
 
@@ -1737,7 +1901,7 @@ def run_self_test() -> bool:
 
         all_gaps = []
         for project, thread_id, thread_kind, path in threads:
-            _, gaps, _ = iter_calls_and_gaps(path, thread_id, thread_kind, project)
+            _, gaps, _, _ = iter_calls_and_gaps(path, thread_id, thread_kind, project)
             all_gaps.extend(gaps)
 
         main_gaps = [g for g in all_gaps if g.thread_kind == "main"]
@@ -1821,7 +1985,7 @@ def run_self_test() -> bool:
             # W1->W2 is classified by W1 (own_tool, above); the gap W2->W3 is
             # classified by W2 (own_tool too, Monitor is a tool).
             _write_call_line(fh, iso(300), "w2", "claude-opus-5-5", cache_read=400, cache_creation=50, tool_uses=[("Monitor", {"command": "tail -f x"})])
-            _write_tool_result_line(fh, iso(301), 'Monitor started (task wftask1, expires in 15m unless the source ends first); you will be notified on each event.')
+            _write_tool_result_line(fh, iso(301), 'Monitor started (task wftask1, expires in 15m unless the source ends first; you get one notice at expiry). You will be notified on each event.')
             # W3: no tool_use (end_turn). wftask1 is still open (under its 15-min
             # expiry) -> the gap W3->W4 is classified by W3 -> background.
             _write_call_line(fh, iso(600), "w3", "claude-opus-5-5", cache_read=400, cache_creation=50)
@@ -1844,7 +2008,7 @@ def run_self_test() -> bool:
         wf_threads = find_threads([tmp])
         wf_path_found = [p for proj, tid, kind, p in wf_threads if tid == wf_session_id]
         check("waiting-for-session found as its own thread", len(wf_path_found), 1)
-        wf_calls, wf_gaps, wf_tool_waits = iter_calls_and_gaps(wf_path, wf_session_id, "main", "wf-project")
+        wf_calls, wf_gaps, wf_tool_waits, wf_teammate_waits = iter_calls_and_gaps(wf_path, wf_session_id, "main", "wf-project")
         wf_gaps = [g for g in wf_gaps if not g.is_cold_start]
         # There is one gap per consecutive call pair (6 calls -> 5 gaps + 1 cold
         # start taken separately below); index them by which call starts them.
@@ -1864,6 +2028,112 @@ def run_self_test() -> bool:
         cross = waiting_for_x_wake_cause(wf_gaps)
         check("cross-tab has a background row", "background" in cross, True)
         check("cross-tab has a teammate row", "teammate" in cross, True)
+
+        # --- PR #425 review: 3 real leaks found in the context-guru main
+        # cross-tab, each confirmed against a real session/timestamp/entry
+        # before fixing, now regression-tested here. ---
+        reg_session_id = "regression-session"
+        reg_path = os.path.join(tmp, f"{reg_session_id}.jsonl")
+        with open(reg_path, "w") as fh:
+            # Leak 1: AskUserQuestion/ExitPlanMode's answer travels back as a
+            # bare tool_result (the API's own protocol for returning a
+            # tool's result) -- classify_wake_cause must not call that
+            # "tool_result" (own next tool call, no human involved); it must
+            # defer to the SAME exception waiting_for already applies.
+            _write_call_line(fh, iso(0), "r1", "claude-opus-5-5", cache_read=0, cache_creation=500, tool_uses=[("AskUserQuestion", {"questions": []})])
+            # Gap r1->r2: 5 min, ending in a BARE tool_result (the human's
+            # answer, delivered the only way the API allows).
+            _write_user_tool_result_line(fh, iso(1))
+            _write_call_line(fh, iso(300), "r2", "claude-opus-5-5", cache_read=400, cache_creation=50)
+
+            # Leak 2a: ordering. r2 ends with NO tool_use while task
+            # "ordertest1" (opened earlier, "persistent") is open. The FINISH
+            # signal for "ordertest1" arrives DURING the gap r2->r3 (i.e.
+            # it is one of the "in-between" entries for THIS gap) -- before
+            # the fix, applying it before classifying r2 made the task look
+            # already closed, so r2's wait looked like "nothing open".
+            _write_call_line(fh, iso(301), "r2b", "claude-opus-5-5", cache_read=400, cache_creation=50, tool_uses=[("Monitor", {"command": "watch"})])
+            _write_tool_result_line(fh, iso(302), 'Monitor started (task ordertest1, persistent — runs until TaskStop or session end). You will be notified on each event.')
+            _write_call_line(fh, iso(303), "r2c", "claude-opus-5-5", cache_read=400, cache_creation=50)
+            # Gap r2c->r3: 5 min, classified by r2c (no tool_use, ordertest1
+            # open) -> must be "background", not "human".
+            fh.write(json.dumps({"type": "user", "timestamp": iso(600), "message": {"content": "<task-notification>\n<task-id>ordertest1</task-id>\n<summary>completed</summary>\n</task-notification>"}}) + "\n")
+            _write_call_line(fh, iso(603), "r3", "claude-opus-5-5", cache_read=400, cache_creation=50)
+
+            # Leak 2b: a Monitor's INTERMEDIATE event notification must NOT
+            # close it -- only its own "[Monitor expired ...]" terminal
+            # notice does. Open "ordertest2" with the "timeout <ms>" detail
+            # format (the 2nd missing Monitor-start variant found).
+            _write_call_line(fh, iso(604), "r3b", "claude-opus-5-5", cache_read=400, cache_creation=50, tool_uses=[("Monitor", {"command": "watch2"})])
+            _write_tool_result_line(fh, iso(605), 'Monitor started (task ordertest2, timeout 1800000ms). You will be notified on each event.')
+            _write_call_line(fh, iso(606), "r3c", "claude-opus-5-5", cache_read=400, cache_creation=50)
+            # An ONGOING event (not the terminal notice) -- must not close it.
+            fh.write(json.dumps({"type": "user", "timestamp": iso(607), "message": {"content": '<task-notification>\n<task-id>ordertest2</task-id>\n<summary>Monitor event: "watch2"</summary>\n<event>checkpoint 1/10</event>\n</task-notification>'}}) + "\n")
+            _write_call_line(fh, iso(608), "r3d", "claude-opus-5-5", cache_read=400, cache_creation=50)
+            # Gap r3d->r4: 5 min, classified by r3d -> "background" (ordertest2
+            # is still open; only its intermediate event arrived, not its
+            # terminal notice).
+            _write_call_line(fh, iso(908), "r4", "claude-opus-5-5", cache_read=400, cache_creation=50)
+
+            # Leak 2c: a background Skill launch (forked execution). Its id
+            # is NOT in the text -- it is the entry's own toolUseResult.agentId.
+            _write_call_line(fh, iso(909), "r4b", "claude-opus-5-5", cache_read=400, cache_creation=50, tool_uses=[("Skill", {"name": "code-review"})])
+            _write_tool_result_line(
+                fh, iso(910),
+                'Skill "code-review" launched (forked execution, running in the background).\n\nRunning in the background as @code-review',
+                tool_use_result={"agentId": "askill1", "background": True, "commandName": "code-review", "status": "forked", "success": True},
+            )
+            _write_call_line(fh, iso(911), "r4c", "claude-opus-5-5", cache_read=400, cache_creation=50)
+            # Gap r4c->r5: 5 min, classified by r4c -> "background" (askill1
+            # open, no finish signal yet).
+            _write_call_line(fh, iso(1211), "r5", "claude-opus-5-5", cache_read=400, cache_creation=50)
+
+            # A teammate wait that DOES close, 7 minutes (420s) after it
+            # opened — for summarize_teammate_wait_durations' "closed" path.
+            _write_call_line(fh, iso(1212), "r5b", "claude-opus-5-5", cache_read=400, cache_creation=50, tool_uses=[("SendMessage", {"to": "carol", "message": "status?"})])
+            _write_user_text_line(fh, iso(1632), 'Another Claude session sent a message:\n<teammate-message teammate_id="carol">all good</teammate-message>')
+            _write_call_line(fh, iso(1633), "r6", "claude-opus-5-5", cache_read=400, cache_creation=50)
+
+        reg_calls, reg_gaps, _, reg_teammate_waits = iter_calls_and_gaps(reg_path, reg_session_id, "main", "regression-project")
+        reg_gaps = [g for g in reg_gaps if not g.is_cold_start]
+        reg_by_start_mid = {g.start.message_id: g for g in reg_gaps}
+
+        check(
+            "leak 1 fixed: AskUserQuestion's bare-tool_result answer is wake_cause=human, not tool_result",
+            reg_by_start_mid["r1"].cause,
+            "human",
+        )
+        check(
+            "leak 2a fixed: a background task open at r2c, closed only DURING the gap, still classifies r2c as background",
+            reg_by_start_mid["r2c"].waiting_for,
+            "background",
+        )
+        check(
+            "leak 2b fixed: an intermediate Monitor event does not close the task -- r3d still sees it open",
+            reg_by_start_mid["r3d"].waiting_for,
+            "background",
+        )
+        check(
+            "leak 2c fixed: a background Skill launch (toolUseResult.agentId) registers as an open task",
+            reg_by_start_mid["r4c"].waiting_for,
+            "background",
+        )
+
+        # --- "report how long open teammate waits stay open" (PR #425
+        # review): one closed wait (carol, 420s = 7 min) in reg_teammate_waits,
+        # one never-closed wait (bob, from the waiting-for-session fixture:
+        # opened at W5=iso(1200), the thread's last call is W7=iso(1800), so
+        # its lower-bound duration is (1800-1200)/60 = 10 min). ---
+        check("carol's teammate wait is recorded as closed", [tw.closed for tw in reg_teammate_waits if tw.name == "carol"], [True])
+        check("carol's teammate wait duration is 7 min", [tw.duration_min for tw in reg_teammate_waits if tw.name == "carol"], [7.0])
+        check("bob's teammate wait (never answered) is recorded as not closed", [tw.closed for tw in wf_teammate_waits if tw.name == "bob"], [False])
+        check("bob's never-closed duration is a 10-min lower bound (to the thread's last call)", [tw.duration_min for tw in wf_teammate_waits if tw.name == "bob"], [10.0])
+
+        tw_summary = summarize_teammate_wait_durations(reg_teammate_waits + wf_teammate_waits)
+        check("teammate wait summary: 1 closed", tw_summary["closed_count"], 1)
+        check("teammate wait summary: closed median is carol's 7 min", tw_summary["closed_median_min"], 7.0)
+        check("teammate wait summary: 1 never closed", tw_summary["never_closed_count"], 1)
+        check("teammate wait summary: never-closed median is bob's 10-min lower bound", tw_summary["never_closed_median_min_lower_bound"], 10.0)
 
         # --- Issue #424 section 4: per-tool stats on the waiting-for-session
         # fixture (W1=Bash, W2=Monitor, W4=AskUserQuestion, W5=SendMessage,
