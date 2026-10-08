@@ -131,6 +131,65 @@ With `--db`, also:
   status code), and how many cache misses follow a run of consecutive
   failures on the same session.
 
+In transcript mode, also, per thread kind:
+
+- **`waiting_for` x `wake_cause` cross-tab**: `wake_cause` (above) is known
+  only once a wait ENDS; `waiting_for` is known the moment it STARTS, from
+  the response that ends the turn before the gap (see "waiting_for" below).
+  This is the table that says how well `waiting_for` predicts `wake_cause`
+  — which is the question that matters, because **the keep-alive's ping
+  budget can only ever be set from `waiting_for`** (it has to decide before
+  the wait ends).
+- **Cost by `waiting_for`**: the same OBSERVED / SIMULATED columns `wake_cause`
+  gets, grouped by `waiting_for` instead — this is the table a ping-budget
+  policy is actually built from.
+- **`own_tool` breakdown**: how many `own_tool` gaps started with each tool
+  name (`Bash`, `Monitor`, `SendMessage`, ...). A response can call more
+  than one tool, so this can sum to more than the `own_tool` gap count — it
+  counts tool CALLS, not gaps.
+
+## `waiting_for`
+
+Read from the response that ends the turn **before** the gap (the gap's
+`start` call), merging content across every transcript entry that shares
+its `message_id` — a response's tool_use block can land in a different
+split entry than its usage, so a naive "first entry only" read misses it.
+
+- **A failed call (`isApiErrorMessage`) means `retry`** — same rule as
+  `wake_cause`'s `retry`, since both read `Call.is_error` on the same call.
+- **A `tool_use` in that response means `own_tool`**, with the tool name
+  kept (see the breakdown). The exception: `AskUserQuestion` and
+  `ExitPlanMode` are themselves a `tool_use`, but they wait on the human —
+  so a response with either of these means `human`, not `own_tool`, even if
+  it also carries other tool calls.
+- **A response with no `tool_use` (`end_turn`)** means `background` if a
+  background task is open, `teammate` if a teammate wait is open
+  (`background` wins if somehow both are), and `human` otherwise.
+
+### Open background tasks and open teammate waits (`waiting_on`)
+
+Tracked per thread (`ThreadWaitState`), scanning entries in file order, from
+the actual shapes found in both local projects' transcripts (grep for them
+before trusting any regex here — formats can and do change):
+
+| | Start | Finish |
+|---|---|---|
+| Background Bash (`run_in_background`) | tool_result text: `running in background with ID: X.` | `<task-notification><task-id>X</task-id>` |
+| `Monitor` | tool_result text: `Monitor started (task X, expires in <dur>...)` — the duration is parsed and tracked as an absolute expiry | `<task-notification><task-id>X</task-id>`, OR the stated expiry elapsing (checked against the gap-start call's own timestamp) |
+| Async agent (`Agent` tool, `run_in_background: true`) | tool_result text: `Async agent launched successfully... agentId: X` | **`<agent-message from="X">`** (a subagent hand-back notice) — **not** a `<task-notification>`; this is the one place a background task's finish signal differs by how it started, found by checking real transcript text rather than assuming all three use the same finish shape |
+| Any of the above | — | A `TaskStop(task_id=X)` tool call, matched structurally on the tool name and its JSON `task_id` field, not by regex |
+| A teammate wait (`SendMessage` tool_use) | matched structurally on the tool name and its JSON `to` field (not by regex) | `<teammate-message teammate_id="X">` or `<cross-session-message from-name="X">`, matched by regex since these only ever appear as plain text |
+
+A background task with no stated expiry (a backgrounded Bash command, or an
+async agent) stays open until an explicit finish signal; one with a stated
+expiry (a `Monitor`) is also treated as closed once that expiry has passed,
+even with no notification yet — the tool's own description says a Monitor
+may expire silently in rare cases, and treating "open forever" as the
+default for an expiring task is exactly the bug issue #424 flagged in its
+own rough detector (see Validation).
+
+## Prices
+
 ## Prices
 
 `MODEL_BASE_INPUT_PRICE_PER_TOKEN` is a **fallback only**, used when no
@@ -236,14 +295,55 @@ $2.00/MTok, `claude-opus-5` $5.00/MTok, `claude-haiku-4-5` $1.00/MTok.
 **Self-test** (`--self-test`): synthetic transcripts for a `main` thread
 (cold start, a `human` miss, a `tool_result` hit, an upstream error
 followed by a `retry` miss), a plain `subagent` thread (a `background`
-hit), and a `team_thread` (a `teammate` wake via `<teammate-message>`, a
+hit), a `team_thread` (a `teammate` wake via `<teammate-message>`, a
 second via `<cross-session-message>`, and a `system` wake via an
-unmarked `isMeta` entry) — plus a tiny synthetic sqlite DB exercising the
-price fit, the response-time match (`DBIndex`, `mislabel_check`), and
+unmarked `isMeta` entry), and a dedicated `waiting_for` session covering
+all five values (`own_tool` via a plain tool, `human` via the
+`AskUserQuestion` exception, `background` via a `Monitor`-opened task
+still inside its stated expiry, `teammate` via an unanswered
+`SendMessage`, and `retry` reusing the main thread's upstream-error case)
+— plus a tiny synthetic sqlite DB exercising the price fit, the
+response-time match (`DBIndex`, `mislabel_check`), and
 `db_only_report`'s hit rule and real-ping lookup against deliberately
 mislabeled `cache_miss_reason` rows. Asserts exact numbers throughout. Run
-it after touching anything in the cost, hit/miss, pricing, matching, or
-wake-cause logic.
+it after touching anything in the cost, hit/miss, pricing, matching,
+wake-cause, or waiting_for logic.
+
+**`waiting_for` x `wake_cause`**, on main threads across both local
+projects (gaps over 4.67 min; the same slice issue #424's own rough
+cross-tab uses, as a sanity check — not a target to force a match
+against, since the issue's own text calls that cross-tab "rough" and
+flags its background-task detector as unreliable):
+
+| waiting_for | Predicted cause's share | Total | Median gap | Issue's rough pass |
+|---|---|---|---|---|
+| `own_tool` | `tool_result`: 110/113 (97%) | 113 | 6.1 min | 91/95 (96%) |
+| Turn ended, nothing open (`human`) | `human`: 194/324 (60%) | 324 | 13.9 min | 112/137 (82%) |
+| Turn ended, teammate open (`teammate`) | `teammate`: 19/96 (20%) | 96 | 23.4 min | 31/61 (51%) |
+| Turn ended, background open (`background`) | `background`: 19/184 (10%) | 184 | 12.0 min | 44/274 (16%) |
+| Previous call failed (`retry`) | `retry`: 11/11 (100%) | 11 | 29.4 min | n/a |
+
+`own_tool` matches the issue's rough pass closely — a `tool_use` really is
+almost always answered by its own `tool_result`. The other three rows are
+real signal in the same direction (each predicts its own cause more often
+than chance) but weaker here than the issue's rough numbers, in both
+directions on different axes: this script's `background` detector is
+*stricter* than the issue's own rough one (it actually closes a task on
+`TaskStop`/expiry/`<agent-message>`, which the issue says its rough
+detector did not do), so a smaller fraction of gaps show "background
+open" at all here (184 vs. 274) — and of those, a smaller fraction
+resolve by a background wake (10% vs. 16%), which is plausible on a
+*correctly* strict detector: a human message or teammate reply arriving
+while a background task happens to still be open does not become less
+likely just because the task is open. The `teammate` row shows the same
+pattern (96 vs. 61 total, 20% vs. 51% precision). This is reported as-is
+rather than tuned to match, per the open question in issue #424 itself
+("is it enough to know a wait is pending, or do we also need to know who
+it waits on"): a thread that sent one `SendMessage` and is also mid-way
+through other independent work may have several real things it could
+still be "waiting on" at once, and `waiting_for` as specified here can
+only report the first-checked one (background beats teammate beats
+human), not the full set.
 
 **Full-session comparison**, against the known session
 `6c456ae0-469f-44a1-92c1-f6ea03192715` (`fix-summarizer`, context-guru

@@ -50,6 +50,14 @@ PING_BUDGETS = list(range(0, 13))  # N = 0..12, as the issue asks for
 
 WAKE_CAUSES = ("tool_result", "background", "teammate", "human", "system", "retry", "unknown")
 
+# waiting_for: known the moment the gap STARTS (the response that ends the
+# turn before it), unlike wake_cause (known only once the gap ends). "own_tool"
+# carries a tool name separately (Call.tool_use_names / the own_tool breakdown);
+# AskUserQuestion and ExitPlanMode are the one exception — they are a tool_use
+# that waits on the human, so they classify as "human", not "own_tool".
+WAITING_FOR_VALUES = ("own_tool", "background", "teammate", "human", "retry")
+ASK_HUMAN_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
+
 # Hardcoded base INPUT price per token, in USD, by model family — used ONLY as a
 # fallback when no --db is given, or the DB has no priced rows for a model. This
 # is the "x" unit the issue's cost tables use. Cache write (5m) is priced at
@@ -168,10 +176,143 @@ def sim_cost_x(gap_min: float, n_pings: int) -> float:
 TEAMMATE_RE = re.compile(r"<teammate-message|<cross-session-message")
 TASK_NOTIF_RE = re.compile(r"<task-notification>")
 
+# --- waiting_for / waiting_on: open background tasks and open teammate waits.
+#
+# Found by reading real tool_result and user-entry text in both local
+# projects (see README's "Open background tasks" section) rather than
+# guessing at the shapes:
+#
+#   start                                          | finish
+#   ------------------------------------------------|---------------------------------------
+#   "running in background with ID: X."            | <task-notification><task-id>X</task-id>
+#   "Monitor started (task X, expires in <dur>"    | <task-notification><task-id>X</task-id>,
+#                                                   |   OR the stated expiry elapsing
+#   "Async agent launched successfully... agentId: X" | <agent-message from="X"> (NOT a
+#                                                   |   task-notification — this is the one
+#                                                   |   place a background task's finish
+#                                                   |   signal differs by start kind)
+#
+# A TaskStop(task_id=X) tool call also finishes X, whichever way it started.
+TASK_NOTIF_ID_RE = re.compile(r"<task-notification>.*?<task-id>([^<]+)</task-id>", re.DOTALL)
+AGENT_MESSAGE_FINISH_RE = re.compile(r'<agent-message\s+from="([^"]+)"')
+BG_BASH_START_RE = re.compile(r"running in background with ID:\s*(\S+?)\.")
+MONITOR_START_RE = re.compile(r"Monitor started \(task\s+(\S+?),\s*expires in\s+([^;]+?);")
+ASYNC_AGENT_START_RE = re.compile(r"Async agent launched successfully.*?agentId:\s*(\S+)", re.DOTALL)
+
+# Open teammate waits: a SendMessage tool_use (matched structurally, on the
+# tool name and its JSON `to` field — not by regex) with no later reply.
+TEAMMATE_ID_FINISH_RE = re.compile(r'<teammate-message\b[^>]*\bteammate_id="([^"]+)"')
+CROSS_SESSION_NAME_FINISH_RE = re.compile(r'<cross-session-message\b[^>]*\bfrom-name="([^"]+)"')
+
+_DURATION_RE = re.compile(r"(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?")
+
+
+def parse_duration_seconds(text: str) -> float:
+    """Parse "1m 30s", "5m", "15s", "1h" (as seen in real Monitor-started
+    text) into seconds. Unparseable text yields 0 (no expiry benefit, fails
+    open rather than crashing)."""
+    m = _DURATION_RE.match(text.strip())
+    if not m:
+        return 0.0
+    h, mi, s = (int(g) if g else 0 for g in m.groups())
+    return float(h * 3600 + mi * 60 + s)
+
+
+def entry_tool_result_texts(entry: dict) -> list[str]:
+    """Every tool_result block's own text in a 'user' entry. This is where
+    background-task START markers live (the START ones above) — unlike the
+    FINISH markers, which arrive as plain user/isMeta text, not a tool result.
+    """
+    message = entry.get("message") or {}
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    out = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        inner = block.get("content")
+        if isinstance(inner, str):
+            out.append(inner)
+        elif isinstance(inner, list):
+            for b in inner:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    out.append(b.get("text", ""))
+    return out
+
+
+class ThreadWaitState:
+    """Tracks, as a thread's entries are scanned in order, which background
+    tasks and teammate waits are currently open. Queried at the moment a gap
+    STARTS, to classify `waiting_for`.
+    """
+
+    def __init__(self) -> None:
+        self.open_tasks: dict[str, float | None] = {}  # task_id -> expiry epoch secs, or None
+        self.open_teammates: set[str] = set()
+
+    def apply_tool_use(self, name: str, tool_input: dict) -> None:
+        if name == "SendMessage":
+            to = str(tool_input.get("to", "")).split(" [")[0].strip()
+            if to:
+                self.open_teammates.add(to)
+        elif name == "TaskStop":
+            task_id = tool_input.get("task_id") or tool_input.get("shell_id")
+            if task_id:
+                self.open_tasks.pop(task_id, None)
+
+    def apply_user_entry(self, entry: dict) -> None:
+        text, _ = entry_user_text(entry)
+        for m in TASK_NOTIF_ID_RE.finditer(text):
+            self.open_tasks.pop(m.group(1), None)
+        for m in AGENT_MESSAGE_FINISH_RE.finditer(text):
+            self.open_tasks.pop(m.group(1), None)
+        for m in TEAMMATE_ID_FINISH_RE.finditer(text):
+            self.open_teammates.discard(m.group(1))
+        for m in CROSS_SESSION_NAME_FINISH_RE.finditer(text):
+            self.open_teammates.discard(m.group(1))
+
+        ts = iso_to_epoch(entry.get("timestamp", ""))
+        for result_text in entry_tool_result_texts(entry):
+            for m in ASYNC_AGENT_START_RE.finditer(result_text):
+                self.open_tasks[m.group(1)] = None
+            for m in BG_BASH_START_RE.finditer(result_text):
+                self.open_tasks[m.group(1)] = None
+            for m in MONITOR_START_RE.finditer(result_text):
+                task_id, dur_text = m.group(1), m.group(2)
+                expiry = (ts + parse_duration_seconds(dur_text)) if ts is not None else None
+                self.open_tasks[task_id] = expiry
+
+    def prune_expired(self, now_ts: float) -> None:
+        expired = [k for k, v in self.open_tasks.items() if v is not None and v <= now_ts]
+        for k in expired:
+            del self.open_tasks[k]
+
+    def classify_waiting_for(self, call: "Call") -> str:
+        if call.is_error:
+            return "retry"
+        if call.tool_use_names:
+            if any(n in ASK_HUMAN_TOOLS for n in call.tool_use_names):
+                return "human"
+            return "own_tool"
+        self.prune_expired(call.ts)
+        if self.open_tasks:
+            return "background"
+        if self.open_teammates:
+            return "teammate"
+        return "human"
+
 
 @dataclass
 class Call:
-    """One API call on a thread, as recorded in the transcript."""
+    """One API call on a thread, as recorded in the transcript.
+
+    An API response can be split across several transcript entries sharing
+    the same message_id (a thinking block in one entry, a tool_use block in
+    the next). `tool_use_names` and `stop_reason` are merged across all of
+    them — this matters for `waiting_for` (see classify_waiting_for), which
+    needs to know whether the response that STARTS a gap called a tool.
+    """
 
     ts: float  # epoch seconds (response-arrival time; see README caveat)
     message_id: str
@@ -181,6 +322,8 @@ class Call:
     cache_read: int = 0
     cache_creation: int = 0
     output_tokens: int = 0
+    stop_reason: str = ""
+    tool_use_names: tuple[str, ...] = ()
 
     @property
     def is_cache_hit(self) -> bool:
@@ -212,8 +355,9 @@ class Gap:
     start: Call
     end: Call
     gap_min: float
-    cause: str  # one of WAKE_CAUSES
+    cause: str  # wake_cause: one of WAKE_CAUSES, known once the gap ENDS
     is_cold_start: bool = False  # end.start is the thread's first call
+    waiting_for: str = ""  # one of WAITING_FOR_VALUES, known once the gap STARTS
 
 
 def iso_to_epoch(ts: str) -> float | None:
@@ -284,15 +428,127 @@ def classify_wake_cause(between_entries: list[dict]) -> str:
     return last_cause or "unknown"
 
 
+class _CallBuffer:
+    """Accumulates the transcript entries that share one message_id (an API
+    response's content can be split across several entries — a thinking
+    block in one, a tool_use block in the next) into one merged Call.
+    """
+
+    def __init__(self, mid: str) -> None:
+        self.mid = mid
+        self.ts: float | None = None
+        self.model = ""
+        self.is_error = False
+        self.usage: dict | None = None
+        self.stop_reason = ""
+        self.tool_use_names: list[str] = []
+
+    def add(self, entry: dict, wait_state: "ThreadWaitState") -> None:
+        message = entry.get("message") or {}
+        if self.ts is None:
+            self.ts = iso_to_epoch(entry.get("timestamp", ""))
+        if entry.get("isApiErrorMessage"):
+            self.is_error = True
+        model = message.get("model")
+        if model and not self.model:
+            self.model = model
+        stop_reason = message.get("stop_reason")
+        if stop_reason:
+            self.stop_reason = stop_reason
+        usage = message.get("usage")
+        if usage is not None and self.usage is None:
+            self.usage = usage
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    name = block.get("name", "")
+                    self.tool_use_names.append(name)
+                    # Side effects (open a teammate wait / close a background
+                    # task) happen the moment the tool is CALLED, same as the
+                    # transcript order — not deferred to when this Call is
+                    # finalized, so a later entry's finish signal in the same
+                    # scan sees accurate state.
+                    wait_state.apply_tool_use(name, block.get("input") or {})
+
+    def finalize(self) -> Call | None:
+        if self.ts is None:
+            return None
+        if not self.is_error and self.usage is None:
+            # A content-block-only response (tool_use, thinking) with no
+            # usage field ever seen: not a call boundary by itself.
+            return None
+        usage = self.usage or {}
+        return Call(
+            ts=self.ts,
+            message_id=self.mid,
+            model=self.model,
+            is_error=self.is_error,
+            input_tokens=int(usage.get("input_tokens", 0) or 0),
+            cache_read=int(usage.get("cache_read_input_tokens", 0) or 0),
+            cache_creation=int(usage.get("cache_creation_input_tokens", 0) or 0),
+            output_tokens=int(usage.get("output_tokens", 0) or 0),
+            stop_reason=self.stop_reason,
+            tool_use_names=tuple(self.tool_use_names),
+        )
+
+
 def iter_calls_and_gaps(
     path: str, thread_id: str, thread_kind: str, project: str
 ) -> tuple[list[Call], list[Gap]]:
     """Parse one thread's JSONL file into its calls and its gaps > threshold."""
     calls: list[Call] = []
-    seen_message_ids: set[str] = set()
     pending_between: list[dict] = []
     gaps: list[Gap] = []
     prev_call: Call | None = None
+    wait_state = ThreadWaitState()
+    buffer: _CallBuffer | None = None
+
+    def flush_buffer() -> None:
+        nonlocal buffer, prev_call, pending_between
+        if buffer is None:
+            return
+        call = buffer.finalize()
+        buffer = None
+        if call is None:
+            return
+        calls.append(call)
+
+        if prev_call is not None:
+            gap_min = (call.ts - prev_call.ts) / 60.0
+            if gap_min >= GAP_THRESHOLD_MIN:
+                cause = "retry" if prev_call.is_error else classify_wake_cause(pending_between)
+                waiting_for = wait_state.classify_waiting_for(prev_call)
+                gaps.append(
+                    Gap(
+                        thread_id=thread_id,
+                        thread_kind=thread_kind,
+                        project=project,
+                        start=prev_call,
+                        end=call,
+                        gap_min=gap_min,
+                        cause=cause,
+                        waiting_for=waiting_for,
+                    )
+                )
+        else:
+            # First call of the thread: cold start, not a gap, but note it
+            # on the Gap list with a zero-length marker for aggregation.
+            gaps.append(
+                Gap(
+                    thread_id=thread_id,
+                    thread_kind=thread_kind,
+                    project=project,
+                    start=call,
+                    end=call,
+                    gap_min=0.0,
+                    cause="cold_start",
+                    is_cold_start=True,
+                )
+            )
+
+        pending_between = []
+        prev_call = call
 
     try:
         fh = open(path, "r", encoding="utf-8", errors="replace")
@@ -312,71 +568,23 @@ def iter_calls_and_gaps(
             etype = entry.get("type")
             if etype == "assistant":
                 message = entry.get("message") or {}
-                usage = message.get("usage")
-                is_error = bool(entry.get("isApiErrorMessage"))
                 mid = message.get("id") or entry.get("uuid")
-                if not is_error and usage is None:
-                    # A content-block-only assistant entry (tool_use, thinking) with
-                    # no usage field: not a call boundary by itself.
-                    continue
-                if mid in seen_message_ids:
-                    # Split content blocks of the SAME API response repeat usage.
-                    continue
-                ts = iso_to_epoch(entry.get("timestamp", ""))
-                if ts is None:
-                    continue
-                seen_message_ids.add(mid)
-                call = Call(
-                    ts=ts,
-                    message_id=mid or "",
-                    model=message.get("model", "") or "",
-                    is_error=is_error,
-                    input_tokens=int((usage or {}).get("input_tokens", 0) or 0),
-                    cache_read=int((usage or {}).get("cache_read_input_tokens", 0) or 0),
-                    cache_creation=int((usage or {}).get("cache_creation_input_tokens", 0) or 0),
-                    output_tokens=int((usage or {}).get("output_tokens", 0) or 0),
-                )
-                calls.append(call)
-
-                if prev_call is not None:
-                    gap_min = (call.ts - prev_call.ts) / 60.0
-                    if gap_min >= GAP_THRESHOLD_MIN:
-                        if prev_call.is_error:
-                            cause = "retry"
-                        else:
-                            cause = classify_wake_cause(pending_between)
-                        gaps.append(
-                            Gap(
-                                thread_id=thread_id,
-                                thread_kind=thread_kind,
-                                project=project,
-                                start=prev_call,
-                                end=call,
-                                gap_min=gap_min,
-                                cause=cause,
-                            )
-                        )
-                else:
-                    # First call of the thread: cold start, not a gap, but note it
-                    # on the Gap list with a zero-length marker for aggregation.
-                    gaps.append(
-                        Gap(
-                            thread_id=thread_id,
-                            thread_kind=thread_kind,
-                            project=project,
-                            start=call,
-                            end=call,
-                            gap_min=0.0,
-                            cause="cold_start",
-                            is_cold_start=True,
-                        )
-                    )
-
-                pending_between = []
-                prev_call = call
+                if buffer is not None and buffer.mid != mid:
+                    flush_buffer()
+                if buffer is None:
+                    buffer = _CallBuffer(mid or "")
+                buffer.add(entry, wait_state)
             elif etype == "user":
+                flush_buffer()  # the assistant's turn is over once a user entry arrives
+                wait_state.apply_user_entry(entry)
                 pending_between.append(entry)
-            # attachment / other entry types carry no wake-cause signal; ignored.
+            else:
+                # attachment / queue-operation / other entry types carry no
+                # wake-cause or waiting_for signal, but still end any pending
+                # assistant turn (defensive — none seen in practice to need it).
+                flush_buffer()
+
+        flush_buffer()
 
     return calls, gaps
 
@@ -606,13 +814,23 @@ def observed_cost_x_usd(gap: Gap, pings: int, prices: PriceTable) -> tuple[float
     return x, usd
 
 
-def summarize_gaps_by_cause(gaps: list[Gap], db_index: "DBIndex | None" = None, prices: PriceTable | None = None) -> dict:
+def summarize_gaps_by_cause(
+    gaps: list[Gap],
+    db_index: "DBIndex | None" = None,
+    prices: PriceTable | None = None,
+    key_fn=lambda g: g.cause,
+) -> dict:
+    """Group gaps by `key_fn` (wake_cause by default; pass `lambda g: g.waiting_for`
+    for the waiting_for cost table the keep-alive's budget needs — the keep-alive
+    only ever knows `waiting_for`, since that's set when the wait STARTS, not
+    `wake_cause`, which is only known once it ends).
+    """
     prices = prices or PriceTable()
     by_cause: dict[str, list[Gap]] = defaultdict(list)
     for g in gaps:
         if g.is_cold_start:
             continue
-        by_cause[g.cause].append(g)
+        by_cause[key_fn(g)].append(g)
 
     out = {}
     for cause, gs in sorted(by_cause.items()):
@@ -672,6 +890,45 @@ def summarize_cold_starts(gaps: list[Gap], prices: PriceTable | None = None) -> 
     misses = sum(1 for g in cold if g.end.is_cache_miss)
     usd = sum(miss_premium_usd(g.end, prices) for g in cold if g.end.is_cache_miss)
     return {"threads": len(cold), "cache_misses": misses, "miss_cost_usd_total": round(usd, 4)}
+
+
+def waiting_for_x_wake_cause(gaps: list[Gap]) -> dict:
+    """Cross-tab: rows = waiting_for (known at the START of the wait), columns
+    = wake_cause (known at the END) — this is how well waiting_for predicts
+    wake_cause, per issue #424's own table. {waiting_for: {wake_cause: count}},
+    plus {waiting_for: {"total":, "median_gap_min":}}.
+    """
+    real = [g for g in gaps if not g.is_cold_start]
+    table: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    gap_minutes_by_wf: dict[str, list[float]] = defaultdict(list)
+    for g in real:
+        table[g.waiting_for][g.cause] += 1
+        gap_minutes_by_wf[g.waiting_for].append(g.gap_min)
+
+    out = {}
+    for wf in sorted(table):
+        row = dict(table[wf])
+        out[wf] = {
+            "by_wake_cause": row,
+            "total": sum(row.values()),
+            "median_gap_min": round(median(gap_minutes_by_wf[wf]), 2) if gap_minutes_by_wf[wf] else 0.0,
+        }
+    return out
+
+
+def own_tool_breakdown(gaps: list[Gap]) -> dict[str, int]:
+    """How many own_tool gaps started with each tool name. A response can
+    carry more than one tool_use block (parallel tool calls), so this can sum
+    to more than the own_tool gap count — it is a breakdown of TOOL CALLS, not
+    of gaps.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for g in gaps:
+        if g.is_cold_start or g.waiting_for != "own_tool":
+            continue
+        for name in g.start.tool_use_names:
+            counts[name] += 1
+    return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
 
 
 # ---------------------------------------------------------------------------
@@ -882,6 +1139,9 @@ def run_transcript_mode(projects_dirs: list[str], db_paths: list[str]) -> dict:
             report["projects"][project][kind] = {
                 "cold_starts": summarize_cold_starts(kind_gaps, prices),
                 "by_cause": summarize_gaps_by_cause(kind_gaps, db_index, prices),
+                "by_waiting_for": summarize_gaps_by_cause(kind_gaps, db_index, prices, key_fn=lambda g: g.waiting_for),
+                "waiting_for_x_wake_cause": waiting_for_x_wake_cause(kind_gaps),
+                "own_tool_breakdown": own_tool_breakdown(kind_gaps),
             }
 
     if db_rows:
@@ -959,6 +1219,32 @@ def human_summary(report: dict) -> str:
                     f"      simulated: N=0 -> {stats['sim_cost_x_per_gap_by_n'][0]}x/gap, "
                     f"best N={stats['best_n']} -> {stats['best_n_cost_x_per_gap']}x/gap"
                 )
+
+            cross = kd.get("waiting_for_x_wake_cause") or {}
+            if cross:
+                lines.append(f"\n  {label}: waiting_for x wake_cause (what the keep-alive would know vs. what actually ended it)")
+                wake_cols = sorted({wc for row in cross.values() for wc in row["by_wake_cause"]})
+                lines.append("    waiting_for".ljust(22) + "".join(c.ljust(14) for c in wake_cols) + "total   median_gap")
+                for wf, row in cross.items():
+                    counts = "".join(str(row["by_wake_cause"].get(c, 0)).ljust(14) for c in wake_cols)
+                    lines.append(f"    {wf}".ljust(22) + counts + f"{row['total']}".ljust(8) + f"{row['median_gap_min']}min")
+
+            wf_stats = kd.get("by_waiting_for") or {}
+            if wf_stats:
+                lines.append(f"\n  {label}: cost by waiting_for (this is what the keep-alive's ping budget would be set from)")
+                for wf, stats in wf_stats.items():
+                    dist = stats["gap_distribution"]
+                    lines.append(
+                        f"    {wf}: {dist['count']} gaps (hits={stats['hits']} misses={stats['misses']} "
+                        f"errors={stats['errors']}), median {dist['median_min']}min | "
+                        f"observed {stats['observed_cost_x_per_gap']}x/gap (${stats['observed_cost_usd_total']}) | "
+                        f"best N={stats['best_n']} -> {stats['best_n_cost_x_per_gap']}x/gap"
+                    )
+
+            tool_breakdown = kd.get("own_tool_breakdown") or {}
+            if tool_breakdown:
+                lines.append(f"  {label}: own_tool by tool name: " + ", ".join(f"{name}={n}" for name, n in tool_breakdown.items()))
+
     if report.get("mislabel_check"):
         mc = report["mislabel_check"]
         lines.append(
@@ -982,23 +1268,45 @@ def human_summary(report: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _write_call_line(fh, ts_iso: str, message_id: str, model: str, cache_read: int, cache_creation: int, is_error: bool = False) -> None:
-    entry = {
-        "type": "assistant",
-        "timestamp": ts_iso,
-        "message": {
-            "id": message_id,
-            "model": model,
-            "usage": {
-                "input_tokens": 10,
-                "cache_read_input_tokens": cache_read,
-                "cache_creation_input_tokens": cache_creation,
-                "output_tokens": 50,
-            },
+def _write_call_line(
+    fh,
+    ts_iso: str,
+    message_id: str,
+    model: str,
+    cache_read: int,
+    cache_creation: int,
+    is_error: bool = False,
+    tool_uses: list[tuple[str, dict]] | None = None,
+) -> None:
+    content = [{"type": "tool_use", "name": name, "input": inp, "id": f"toolu_{message_id}_{i}"} for i, (name, inp) in enumerate(tool_uses or [])]
+    message: dict = {
+        "id": message_id,
+        "model": model,
+        "stop_reason": "tool_use" if tool_uses else "end_turn",
+        "usage": {
+            "input_tokens": 10,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation,
+            "output_tokens": 50,
         },
     }
+    if content:
+        message["content"] = content
+    entry = {"type": "assistant", "timestamp": ts_iso, "message": message}
     if is_error:
         entry["isApiErrorMessage"] = True
+    fh.write(json.dumps(entry) + "\n")
+
+
+def _write_tool_result_line(fh, ts_iso: str, text: str) -> None:
+    """A 'user' entry carrying one tool_result whose own text is `text` — this
+    is where background-task START markers live (Monitor started, async agent
+    launched, running in background with ID)."""
+    entry = {
+        "type": "user",
+        "timestamp": ts_iso,
+        "message": {"content": [{"type": "tool_result", "content": [{"type": "text", "text": text}]}]},
+    }
     fh.write(json.dumps(entry) + "\n")
 
 
@@ -1171,6 +1479,67 @@ def run_self_test() -> bool:
         check("team_thread causes", set(team_by_cause), {"teammate", "system"})
         check("team_thread teammate gap count (both formats)", team_by_cause["teammate"]["gap_distribution"]["count"], 2)
         check("team_thread system gap count", team_by_cause["system"]["gap_distribution"]["count"], 1)
+
+        # --- waiting_for: one gap per value (own_tool, background, teammate,
+        # human-via-AskUserQuestion), in a dedicated session. retry is already
+        # covered above (main_gaps' "retry" gap doubles as a waiting_for=retry
+        # case, since a failed call means retry for both fields identically).
+        wf_session_id = "waiting-for-session"
+        wf_path = os.path.join(tmp, f"{wf_session_id}.jsonl")
+        with open(wf_path, "w") as fh:
+            # W1: tool_use=Bash. The gap W1->W2 is classified by W1 -> own_tool.
+            _write_call_line(fh, iso(0), "w1", "claude-opus-5-5", cache_read=0, cache_creation=500, tool_uses=[("Bash", {"command": "ls"})])
+            _write_tool_result_line(fh, iso(1), "total 0")
+            # W2: tool_use=Monitor. Its tool_result OPENS task "wftask1", expiring
+            # 15 min after it opens (absolute expiry ~= iso(301) + 900 = iso(1201)):
+            # open for W3's check below (iso(600)) but expired well before W6's
+            # (iso(1500)), so it does not mask the teammate check at W6. The gap
+            # W1->W2 is classified by W1 (own_tool, above); the gap W2->W3 is
+            # classified by W2 (own_tool too, Monitor is a tool).
+            _write_call_line(fh, iso(300), "w2", "claude-opus-5-5", cache_read=400, cache_creation=50, tool_uses=[("Monitor", {"command": "tail -f x"})])
+            _write_tool_result_line(fh, iso(301), 'Monitor started (task wftask1, expires in 15m unless the source ends first); you will be notified on each event.')
+            # W3: no tool_use (end_turn). wftask1 is still open (under its 15-min
+            # expiry) -> the gap W3->W4 is classified by W3 -> background.
+            _write_call_line(fh, iso(600), "w3", "claude-opus-5-5", cache_read=400, cache_creation=50)
+            # W4: tool_use=AskUserQuestion -> the exception: waits on the human,
+            # not "own_tool". The gap W4->W5 is classified by W4 -> human.
+            _write_call_line(fh, iso(900), "w4", "claude-opus-5-5", cache_read=400, cache_creation=50, tool_uses=[("AskUserQuestion", {"questions": []})])
+            _write_tool_result_line(fh, iso(901), "answer: yes")
+            # W5: tool_use=SendMessage to "bob". OPENS a teammate wait for "bob"
+            # (no reply ever arrives in this fixture). The gap W4->W5 is
+            # classified by W4 (human, above); the gap W5->W6 is classified by
+            # W5 (own_tool, SendMessage is a tool).
+            _write_call_line(fh, iso(1200), "w5", "claude-opus-5-5", cache_read=400, cache_creation=50, tool_uses=[("SendMessage", {"to": "bob", "message": "hi"})])
+            _write_tool_result_line(fh, iso(1201), "Message sent to bob's inbox")
+            # W6: no tool_use (end_turn). "bob" is still an open teammate wait
+            # (no <teammate-message teammate_id="bob"> ever arrived) -> the gap
+            # W6->W7 is classified by W6 -> teammate.
+            _write_call_line(fh, iso(1500), "w6", "claude-opus-5-5", cache_read=400, cache_creation=50)
+            _write_call_line(fh, iso(1800), "w7", "claude-opus-5-5", cache_read=400, cache_creation=50)
+
+        wf_threads = find_threads([tmp])
+        wf_path_found = [p for proj, tid, kind, p in wf_threads if tid == wf_session_id]
+        check("waiting-for-session found as its own thread", len(wf_path_found), 1)
+        _, wf_gaps = iter_calls_and_gaps(wf_path, wf_session_id, "main", "wf-project")
+        wf_gaps = [g for g in wf_gaps if not g.is_cold_start]
+        # There is one gap per consecutive call pair (6 calls -> 5 gaps + 1 cold
+        # start taken separately below); index them by which call starts them.
+        gaps_by_start_mid = {g.start.message_id: g for g in wf_gaps}
+        check("waiting-for-session gap count", len(wf_gaps), 6)
+        check("W1 (tool_use=Bash) -> own_tool", gaps_by_start_mid["w1"].waiting_for, "own_tool")
+        check("W3 (end_turn, Monitor task open) -> background", gaps_by_start_mid["w3"].waiting_for, "background")
+        check("W4 (tool_use=AskUserQuestion) -> human (the exception)", gaps_by_start_mid["w4"].waiting_for, "human")
+        check("W6 (end_turn, SendMessage reply never arrived) -> teammate", gaps_by_start_mid["w6"].waiting_for, "teammate")
+
+        wf_breakdown = own_tool_breakdown(wf_gaps)
+        check("own_tool breakdown counts Bash", wf_breakdown.get("Bash"), 1)
+        check("own_tool breakdown counts Monitor", wf_breakdown.get("Monitor"), 1)
+        check("own_tool breakdown counts SendMessage", wf_breakdown.get("SendMessage"), 1)
+        check("own_tool breakdown excludes AskUserQuestion (it's a human wait, not own_tool)", "AskUserQuestion" in wf_breakdown, False)
+
+        cross = waiting_for_x_wake_cause(wf_gaps)
+        check("cross-tab has a background row", "background" in cross, True)
+        check("cross-tab has a teammate row", "teammate" in cross, True)
 
         # --- Finding 1 & 5: a tiny synthetic DB, DB-fitted prices, and the
         # response-time-approximate match (ts + upstream_ms). ---
