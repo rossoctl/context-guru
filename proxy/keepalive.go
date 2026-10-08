@@ -18,6 +18,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 	"github.com/tidwall/gjson"
@@ -213,10 +214,18 @@ const (
 	keepAliveTick = 2 * time.Second
 )
 
-// kaEntry is one live session's replay material. It exists between the end of a request and
-// the start of the next one, which is exactly the interval the mechanism acts in.
+// kaEntry is one live THREAD's replay material. It exists between the end of a request and
+// the start of the next one on the same thread, which is exactly the interval the mechanism
+// acts in.
+//
+// Per thread, not per session (#423). Each thread of a session — the main agent, each subagent,
+// each fork — has its own provider cache entry. Keyed on the session, every request replaced the
+// one entry, so while subagents ran the keeper pinged the newest subagent's prompt and let the
+// main thread's cache expire.
 type kaEntry struct {
 	tenant, session string
+	// thread is the session thread this entry keeps warm; "" is the primary thread.
+	thread string
 	// startedAt is when the last upstream request on this session STARTED — a real request
 	// or a ping, whichever was later.
 	//
@@ -541,6 +550,12 @@ func (e *kaEntry) clear() {
 
 func kaKey(tenant, session string) string { return tenant + "\x00" + session }
 
+// kaThreadKey is the live-map key of one thread. The primary thread keys exactly as kaKey, so a
+// single-thread session is tracked as it was before threads existed.
+func kaThreadKey(tenant, session, threadID string) string {
+	return kaKey(tenant, thread.Key(session, threadID))
+}
+
 // arrive tells the keeper a real request just started on this session, and reports what the
 // keep-alive did during the span that request just ended.
 //
@@ -553,11 +568,14 @@ func kaKey(tenant, session string) string { return tenant + "\x00" + session }
 // span's policy, "" when none did. It is in scope right here and nowhere else once the entry
 // is cleared, so this is the one place a real request's credit can be attributed to the
 // strategy that earned it, rather than only the tenant's whole lifetime credit.
-func (k *keeper) arrive(tenant, session string) (pings int, refreshed int64, strategyID string) {
+//
+// Only THIS thread's entry is cleared: a subagent's request says nothing about whether the main
+// thread is still idle.
+func (k *keeper) arrive(tenant, session, threadID string) (pings int, refreshed int64, strategyID string) {
 	if k == nil || session == "" {
 		return 0, 0, ""
 	}
-	key := kaKey(tenant, session)
+	key := kaThreadKey(tenant, session, threadID)
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	e, ok := k.live[key]
@@ -571,12 +589,13 @@ func (k *keeper) arrive(tenant, session string) (pings int, refreshed int64, str
 	return pings, refreshed, strategyID
 }
 
-// record hands the keeper what it needs to ping this session, once the request that
+// record hands the keeper what it needs to ping this thread, once the request that
 // established the cache entry has finished.
 //
 // startedAt is the instant the upstream request STARTED, per the provider's lifetime rule.
-// The body is the exact bytes that went upstream.
-func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body []byte,
+// The body is the exact bytes that went upstream. The entry, the deadline and the turn count
+// are per thread; a session override still applies to every thread of its session.
+func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool) {
 	if k == nil || tn == nil || session == "" || len(body) == 0 || startedAt.IsZero() {
@@ -588,7 +607,7 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 	if status < 200 || status >= 300 {
 		return
 	}
-	key := kaKey(tn.ID, session)
+	key := kaThreadKey(tn.ID, session, threadID)
 	// The kill switch stops RETENTION, not merely pinging. A switch that left bodies and
 	// credentials accumulating while refusing to use them would be the worst of both.
 	if keepAliveDisabled() {
@@ -690,7 +709,8 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 	prefix := u.CacheRead + u.CacheWrite
 	hdr, auth := pingHeaders(r, up)
 	e := &kaEntry{
-		tenant: tn.ID, session: session, startedAt: startedAt, body: owned, up: up, st: tn.Store,
+		tenant: tn.ID, session: session, thread: threadID, startedAt: startedAt, body: owned, up: up,
+		st:       tn.Store,
 		emitter:  tn.Pipe.Emitter(),
 		provider: provider, model: model, route: route, preset: tn.Preset,
 		agent: r.UserAgent(), pol: pol, prefix: prefix, stopReason: u.StopReason,
@@ -761,6 +781,23 @@ func (k *keeper) retire(key string) {
 	k.bytes -= int64(len(e.body))
 	e.clear()
 	delete(k.live, key)
+}
+
+// retireSession releases every thread of one session: the primary thread's key and every key
+// under it. The separator is NUL, which no session id contains, so a prefix can never reach
+// into another session.
+func (k *keeper) retireSession(tenantID, session string) {
+	base := kaKey(tenantID, session)
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for key, e := range k.live {
+		if key != base && !strings.HasPrefix(key, base+"\x00") {
+			continue
+		}
+		k.bytes -= int64(len(e.body))
+		e.clear()
+		delete(k.live, key)
+	}
 }
 
 // forget releases everything held for one tenant, for the paths that end an account's authority
@@ -873,7 +910,8 @@ func (k *keeper) sweep(now time.Time) int {
 		raw := append([]byte(nil), e.body...)
 		xorMask(raw)
 		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), auth: auth, up: e.up,
-			tenant: e.tenant, session: e.session, st: e.st, emitter: e.emitter, ping: e.pings})
+			tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
+			ping: e.pings})
 	}
 	k.mu.Unlock()
 
@@ -898,6 +936,7 @@ type pingJob struct {
 	auth            []maskedHeader
 	up              upstream
 	tenant, session string
+	thread          string
 	// st is the tenant's store, copied here for the same reason everything else is: the job runs
 	// on its own goroutine and must hold a copy rather than a pointer into keeper state.
 	st store.Store
@@ -943,7 +982,7 @@ func (k *keeper) fire(j pingJob) {
 	if err != nil {
 		k.failed.Add(1)
 		slog.Debug("context-guru: cache keep-alive ping failed",
-			"tenant", tenantLabel(j.tenant), "session", j.session, "err", err)
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "err", err)
 		return
 	}
 	// A 4xx will repeat identically, so stop rather than spend the rest of K learning the
@@ -951,7 +990,7 @@ func (k *keeper) fire(j pingJob) {
 	if status >= 400 && status < 500 {
 		k.markStopped(j.e)
 		slog.Debug("context-guru: cache keep-alive ping refused; not pinging this session again",
-			"tenant", tenantLabel(j.tenant), "session", j.session, "status", status)
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
 		return
 	}
 	// THE guard. A ping is supposed to be a pure cache READ; if the provider says it wrote
@@ -963,12 +1002,12 @@ func (k *keeper) fire(j pingJob) {
 		k.markStopped(j.e)
 		slog.Error("context-guru: cache keep-alive ping CREATED a cache entry instead of "+
 			"refreshing one; not pinging this session again",
-			"tenant", tenantLabel(j.tenant), "session", j.session,
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
 			"cache_write", u.CacheWrite, "cache_read", u.CacheRead)
 	}
 	cost := k.record1(j, u, status, ms, start)
 	slog.Debug("context-guru: cache keep-alive ping",
-		"tenant", tenantLabel(j.tenant), "session", j.session, "ping", j.ping,
+		"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "ping", j.ping,
 		"cache_read", u.CacheRead, "cache_write", u.CacheWrite, "output", u.Output,
 		"cost_usd", cost, "ms", ms)
 }
@@ -1064,7 +1103,7 @@ func (k *keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	}
 	if ka, ok := j.emitter.(components.KeepAliveEmitter); ok {
 		ka.KeepAlivePing(components.KeepAliveReport{
-			Tenant: j.tenant, Session: j.session, Model: model, Provider: string(provider),
+			Tenant: j.tenant, Session: j.session, Thread: j.thread, Model: model, Provider: string(provider),
 			Route: route, Pings: j.ping, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite,
 			Output: u.Output, CostUSD: cost, Status: status, DurationMs: ms,
 			TS: k.now().UnixMilli(), Agent: agent, Preset: preset, StopReason: u.StopReason,
@@ -1317,9 +1356,9 @@ func (k *keeper) Stats() KeepAliveStats {
 }
 
 // LiveSessionKeys returns the session ids the keeper currently considers live — a copy,
-// so mutating the result never touches k.live. k.live is keyed by tenant:session, but
+// so mutating the result never touches k.live. k.live is keyed by tenant:session:thread, but
 // each entry carries its own raw session id (kaEntry.session), which is what
-// dash.Filter.Session expects.
+// dash.Filter.Session expects. Each session appears once, however many of its threads are live.
 func (k *keeper) LiveSessionKeys() []string {
 	if k == nil {
 		return nil
@@ -1327,8 +1366,12 @@ func (k *keeper) LiveSessionKeys() []string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	keys := make([]string, 0, len(k.live))
+	seen := make(map[string]bool, len(k.live))
 	for _, e := range k.live {
-		keys = append(keys, e.session)
+		if !seen[e.session] {
+			seen[e.session] = true
+			keys = append(keys, e.session)
+		}
 	}
 	return keys
 }

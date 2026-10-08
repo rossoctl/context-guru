@@ -869,11 +869,14 @@ func (NopEmitter) Run(RunReport)    {}
 // §5 implies, that doc is the one to correct, not this.
 type KeepAliveReport struct {
 	Tenant, Session, Model, Provider, Route string
-	Pings                                   int
-	CacheRead, CacheWrite, Output           int64
-	CostUSD                                 float64
-	Status                                  int
-	DurationMs                              float64
+	// Thread is the session thread the ping kept warm ("" = the primary thread), so a ping row
+	// says WHICH cache entry it protected. See internal/thread.
+	Thread                        string
+	Pings                         int
+	CacheRead, CacheWrite, Output int64
+	CostUSD                       float64
+	Status                        int
+	DurationMs                    float64
 	// TS is when this ping was recorded (the keeper's own clock, which production reads from
 	// time.Now but a replay/test may inject), in epoch milliseconds — not derivable from
 	// anything else here, and a sink that timestamps its own row from wall-clock-at-receipt

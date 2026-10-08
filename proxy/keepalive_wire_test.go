@@ -72,7 +72,7 @@ func TestPingWireBytesEndToEndThroughRealSend(t *testing.T) {
 	r.Header.Set("Authorization", cred)
 	up := upstream{base: srv.URL, path: "/v1/messages"}
 	for i := 0; i < 2; i++ { // two turns: the gate needs turn >= 1
-		k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), orig, up, r,
+		k.record(tn, "s", "", clock.now().Add(time.Duration(i)*time.Second), orig, up, r,
 			bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 	}
 	if k.Stats().Live != 1 {

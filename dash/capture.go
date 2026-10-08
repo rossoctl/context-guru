@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/thread"
 )
 
 // Options configures the dashboard. The zero value is usable: an in-memory
@@ -177,8 +179,8 @@ type Recorder struct {
 	// Cache-attribution state: the last time we saw each session and whether we
 	// have seen each model, so a cold start is never reported as a bust.
 	mu        sync.Mutex
-	lastSeen  map[string]int64  // session -> epoch ms of previous request
-	lastTail  map[string]uint64 // session -> previous request's volatile-tail hash
+	lastSeen  map[string]int64  // thread.Key(session, thread) -> epoch ms of previous request
+	lastTail  map[string]uint64 // thread.Key(session, thread) -> previous request's volatile-tail hash
 	seenModel map[string]bool
 	// perComp accumulates unique-savings dedup keys so a per-request unique figure
 	// exists at capture time. Bounded; see markUnique.
@@ -478,13 +480,24 @@ func (r *Recorder) Observe(tenant, session, model string, now int64) (seenSessio
 //
 // tailHash 0 means nothing split, and then tailChanged is false: there is no split to credit.
 func (r *Recorder) ObserveSplit(tenant, session, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
+	return r.ObserveThread(tenant, session, thread.Primary, model, now, tailHash)
+}
+
+// ObserveThread is ObserveSplit for one THREAD of the session (#423). Recency, the cold-start
+// test and the tail comparison are all per thread, because each thread has its own provider
+// cache entry: a subagent's request must not reset the main thread's idle gap, or the main
+// thread's expiry reads as a prefix change; and a subagent's first request is a cold start,
+// not a prefix change. seenSession is therefore "seen this thread". The primary thread keys on
+// the session alone, exactly as before threads existed.
+func (r *Recorder) ObserveThread(tenant, session, threadID, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
 	if r == nil {
 		return true, true, 0, false
 	}
+	key := thread.Key(session, threadID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	mk := tenant + "\x00" + model
-	prev, seenSession := r.lastSeen[session]
+	prev, seenSession := r.lastSeen[key]
 	if seenSession {
 		sinceLastMs = now - prev
 	}
@@ -507,7 +520,7 @@ func (r *Recorder) ObserveSplit(tenant, session, model string, now int64, tailHa
 		r.seenModel = map[string]bool{}
 	}
 	if tailHash != 0 {
-		prevTail, had := r.lastTail[session]
+		prevTail, had := r.lastTail[key]
 		switch {
 		case had:
 			tailChanged = prevTail != tailHash
@@ -525,9 +538,9 @@ func (r *Recorder) ObserveSplit(tenant, session, model string, now int64, tailHa
 			// them moved. Refusing the credit is the only safe direction.
 			tailChanged = false
 		}
-		r.lastTail[session] = tailHash
+		r.lastTail[key] = tailHash
 	}
-	r.lastSeen[session] = now
+	r.lastSeen[key] = now
 	r.seenModel[mk] = true
 	return seenSession, seenModel, sinceLastMs, tailChanged
 }
@@ -577,9 +590,12 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	// request's gap read as four minutes instead of the twenty it actually was, which is the
 	// one thing proxy/keepalive.go promises a ping never does. It would corrupt exactly the
 	// ttl_expiry attribution the keep-alive is judged on.
-	rows, err := r.db.sql.Query(`SELECT r.session_id, r.ts, r.split_tail_hash FROM requests r
+	//
+	// Per THREAD (#423), the key ObserveThread reads: the latest row of each thread, not of each
+	// session, or a restart would re-date the main thread with a subagent's last request.
+	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.ts, r.split_tail_hash FROM requests r
 		WHERE r.ts >= ? AND r.keepalive = 0 AND r.id = (SELECT r2.id FROM requests r2
-			WHERE r2.session_id = r.session_id AND r2.keepalive = 0
+			WHERE r2.session_id = r.session_id AND r2.thread_id = r.thread_id AND r2.keepalive = 0
 			ORDER BY r2.ts DESC, r2.id DESC LIMIT 1)`,
 		now-staleSession)
 	if err != nil {
@@ -589,16 +605,17 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	seeded := map[string]int64{}
 	tails := map[string]uint64{}
 	for rows.Next() {
-		var id string
+		var sid, tid string
 		var ts, tail int64
 		// int64, not uint64: SQLite's INTEGER is signed, so a hash whose top bit is set
 		// comes back negative and scanning it straight into a uint64 fails the whole
 		// query — which it did on every start, silently costing the seeding this function
 		// exists for ("could not recover session recency" in the log). The bits are the
 		// same; only the Go type of the container differs.
-		if err := rows.Scan(&id, &ts, &tail); err != nil {
+		if err := rows.Scan(&sid, &tid, &ts, &tail); err != nil {
 			return 0, err
 		}
+		id := thread.Key(sid, tid)
 		seeded[id] = ts
 		if tail != 0 {
 			tails[id] = uint64(tail)

@@ -501,7 +501,8 @@ type SafetyCost struct {
 
 // splitMoved is the ONE definition of "the volatile tail moved", in SQL. It matches
 // Recorder.ObserveSplit's in-process test: differs from the last non-zero tail hash recorded
-// for this session, and a session with no earlier non-zero hash counts as moved. Written once
+// for this session's THREAD (#423: another thread's tail is another cache entry's), and a thread
+// with no earlier non-zero hash counts as moved. Written once
 // and referenced twice so the count and its reconciliation cannot drift apart.
 // withKeepAlive returns f with ping rows included. A named helper rather than an inline field
 // set, so the two places that legitimately see pings are greppable.
@@ -513,12 +514,14 @@ func withKeepAlive(f Filter) Filter {
 const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
 	AND r.split_tail_hash <> COALESCE((
 		SELECT p.split_tail_hash FROM requests p
-		WHERE p.session_id = r.session_id AND p.split_tail_hash <> 0
+		WHERE p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.split_tail_hash <> 0
 		  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 		ORDER BY p.ts DESC, p.id DESC LIMIT 1), r.split_tail_hash + 1)`
 
 // afterOurMutation is the ONE definition of "the session's previous turn mutated something",
 // in SQL, shared by the prefix-change cost and its request count so the two cannot drift.
+// "Previous turn" is the previous turn of the same THREAD (#423): a subagent's mutation cannot
+// change the main thread's prefix.
 //
 // `p.keepalive = 0` is load-bearing. A keep-alive ping is a row in `requests` like any other,
 // so without the predicate a ping becomes "the previous turn"; a ping has no
@@ -530,7 +533,7 @@ const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
 const afterOurMutation = `EXISTS (
 			SELECT 1 FROM request_components c WHERE c.mutated = 1 AND c.request_id = (
 				SELECT p.id FROM requests p
-				WHERE p.session_id = r.session_id AND p.keepalive = 0
+				WHERE p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.keepalive = 0
 				  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 				ORDER BY p.ts DESC, p.id DESC LIMIT 1)
 		)`

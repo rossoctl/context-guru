@@ -36,6 +36,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
@@ -255,6 +256,10 @@ type Handler struct {
 	// BETWEEN requests, when no request is in flight and no component can run. Always
 	// present; it does nothing at all until a tenant opts in. See keepalive.go.
 	keeper *keeper
+	// threads tells the threads of one session apart (main agent, subagents, forks), so the
+	// keeper and the dashboard's miss attribution can key on session + thread. See
+	// internal/thread and threadFor.
+	threads *thread.Tracker
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
 	promCache promCache
@@ -324,6 +329,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	h.limiter = NewLimiter(opts.Limits)
 	h.keeper = newKeeper(h)
 	h.keeper.start()
+	h.threads = thread.New()
 	h.regLim = newAnonLimiter(Limits{RequestsPerMinute: registrationsPerMinute})
 	h.authLim = newAnonLimiter(Limits{RequestsPerMinute: authFailuresPerMinute})
 	h.pwLim = newAnonLimiter(Limits{RequestsPerMinute: passwordAttemptsPerMinute})
@@ -1068,7 +1074,10 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// (see isAgentCompaction). Counted as a gate on a `bypass` pseudo-component so
 		// /stats shows components.bypass.gates.agent_compaction — a silent bypass is
 		// indistinguishable from a broken pipeline.
-		if !bypassed && isAgentCompaction(body) {
+		// Kept for thread identification too: the agent's own compaction request ends one
+		// prefix of a thread and the next request starts another (see thread.Tracker).
+		agentCompaction := isAgentCompaction(body)
+		if !bypassed && agentCompaction {
 			bypassed = true
 			if h.agg != nil {
 				rep := components.Report{Component: "bypass", Skipped: true, Mode: tn.Mode}
@@ -1098,7 +1107,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		if api == "responses" {
 			wire = "responses"
 		}
-		var tr apply.Trace // hoisted: the lifecycle log line below reads it
+		var tr apply.Trace  // hoisted: the lifecycle log line below reads it
+		var threadID string // hoisted with it: serve hands it to the keeper
 		// Where an expand answered in band on this turn is restored from the next turn on, when
 		// the config asks for fixed restore (#407). Read off the transcript apply is about to see,
 		// in the same coordinates the anchor is checked against on every later turn.
@@ -1178,7 +1188,14 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// the pings during the idle span it just ended actually did. Both facts are
 			// needed BEFORE the row is priced — the ping count and the tokens the last ping
 			// refreshed are inputs to a dollar figure, not just a label.
-			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session)
+			//
+			// Per THREAD of the session (#423): the main agent, each subagent and each fork
+			// have their own cache entry, and only this request's thread was refreshed. Read
+			// off `orig`, the request as the agent sent it — the pipeline's own rewrite would
+			// break the prefix the fallback matches on.
+			threadID = h.threadFor(r, tn.ID, tr.Session, orig, agentCompaction, lg)
+			cp.noteThread(threadID)
+			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
 			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
 			h.setLastSession(tr.Session)
 			if h.agg != nil && !bypassed {
@@ -1271,7 +1288,11 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// emits it in a defer once the response is finished, so a request produces exactly
 		// one lifecycle line whichever way it ends — and the attrs are built here, once,
 		// rather than on the response path.
-		h.serve(w, r, provider, up, body, bypassed, cp, tn, tr.Session, anchor, lifecycleLogger(lg, tr, bypassed))
+		slg := lifecycleLogger(lg, tr, bypassed)
+		if threadID != thread.Primary {
+			slg = slg.With("thread", threadID)
+		}
+		h.serve(w, r, provider, up, body, bypassed, cp, tn, tr.Session, threadID, anchor, slg)
 	}
 }
 
@@ -1449,7 +1470,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy, session string, anchor *expand.Anchor, lg *slog.Logger) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, anchor *expand.Anchor, lg *slog.Logger) {
 	wire := string(provider)
 	if up.path == "/v1/responses" {
 		wire = "responses"
@@ -1513,7 +1534,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// actually went upstream on the final round (an expand round rewrites it) and the
 		// prefix a ping would replay is the one the provider just hashed. Costs nothing when
 		// no tenant has opted in.
-		h.keeper.record(tn, session, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
+		h.keeper.record(tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
 		if sse {
 			// The same two facts to both sinks. The aggregator keeps the process-lifetime
 			// average; the dashboard row keeps the per-request pair, so "which model, which

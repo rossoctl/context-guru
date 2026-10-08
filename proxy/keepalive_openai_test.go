@@ -67,7 +67,7 @@ func TestOpenAIKeepAliveUsesItsOwnLifetimeAndOnlyKnownModels(t *testing.T) {
 			req.Header.Set("Authorization", "Bearer test-key")
 			up := upstream{base: "http://up", path: "/v1/responses"}
 			for _, at := range []time.Time{clock.now().Add(-time.Second), clock.now()} {
-				k.record(&Tenancy{ID: "t1", Cache: pol}, "openai-session", at, body, up, req,
+				k.record(&Tenancy{ID: "t1", Cache: pol}, "openai-session", "", at, body, up, req,
 					bschemas.OpenAI, up.path, http.StatusOK,
 					Usage{CacheRead: 4000, CacheWrite: 100}, true)
 			}
@@ -99,9 +99,9 @@ func TestOpenAIKeepAliveIgnoresAnthropicIntervalControls(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
 	up := upstream{base: "http://up", path: "/v1/responses"}
-	k.record(&Tenancy{ID: "t1", Cache: pol}, "openai-session", now, body, up, req,
+	k.record(&Tenancy{ID: "t1", Cache: pol}, "openai-session", "", now, body, up, req,
 		bschemas.OpenAI, up.path, http.StatusOK, Usage{CacheRead: 4000}, true)
-	k.record(&Tenancy{ID: "t1", Cache: pol}, "openai-session", now.Add(time.Second), body, up, req,
+	k.record(&Tenancy{ID: "t1", Cache: pol}, "openai-session", "", now.Add(time.Second), body, up, req,
 		bschemas.OpenAI, up.path, http.StatusOK, Usage{CacheRead: 4000}, true)
 	k.mu.Lock()
 	e := k.live[kaKey("t1", "openai-session")]
@@ -118,7 +118,7 @@ func TestOpenAIKeepAliveIgnoresAnthropicIntervalControls(t *testing.T) {
 		t.Fatalf("OpenAI override retained credentials for %s, beyond %s", hold, maxOverrideHold)
 	}
 	k.disarm("t1", "openai-session")
-	k.record(&Tenancy{ID: "t1", Cache: pol}, "openai-session", now.Add(2*time.Second), body, up, req,
+	k.record(&Tenancy{ID: "t1", Cache: pol}, "openai-session", "", now.Add(2*time.Second), body, up, req,
 		bschemas.OpenAI, up.path, http.StatusOK, Usage{CacheRead: 4000}, true)
 	k.mu.Lock()
 	e = k.live[kaKey("t1", "openai-session")]

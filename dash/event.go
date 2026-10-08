@@ -85,7 +85,13 @@ type Event struct {
 	// TenantID owns this row; "" in single-tenant deployments.
 	TenantID  string `json:"tenant_id"`
 	SessionID string `json:"session_id"`
-	Model     string `json:"model"`
+	// ThreadID names the thread of the session this request belongs to: "" for the session's
+	// primary (main) thread, "a:<agent id>" for a subagent that named itself in a header, and
+	// "p:<fingerprint>" for a thread told apart by prefix continuity. Each thread has its own
+	// provider cache entry, so recency and miss attribution are per thread; reporting stays per
+	// session. See internal/thread and issue #423.
+	ThreadID string `json:"thread_id"`
+	Model    string `json:"model"`
 	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
 	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
 	// tokens.BilledDeltaFactor(Model), resolved once in Price.
