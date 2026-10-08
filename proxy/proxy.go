@@ -1193,8 +1193,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// have their own cache entry, and only this request's thread was refreshed. Read
 			// off `orig`, the request as the agent sent it — the pipeline's own rewrite would
 			// break the prefix the fallback matches on.
-			threadID = h.threadFor(r, tn.ID, tr.Session, orig, agentCompaction, lg)
-			cp.noteThread(threadID)
+			th := h.threadFor(r, tn.ID, tr.Session, orig, agentCompaction, lg)
+			threadID = th.ID
+			cp.noteThread(th)
 			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
 			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
 			h.setLastSession(tr.Session)

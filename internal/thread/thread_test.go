@@ -3,6 +3,7 @@ package thread
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -308,5 +309,37 @@ func TestThreadsPerSessionAreBounded(t *testing.T) {
 	}
 	if n := len(tr.sessions["t\x00s"].threads); n > maxThreadsPerSession {
 		t.Fatalf("%d threads held, bound is %d", n, maxThreadsPerSession)
+	}
+}
+
+// A new thread that is mostly an old conversation (a rewind, an edited turn) inherits that
+// conversation, so its miss is not called a cold start. A genuinely new conversation (a
+// subagent's task) does not, and neither does one that shares only a small leading part.
+func TestANewThreadInheritsByContentMass(t *testing.T) {
+	big := strings.Repeat("tool output line\n", 500)
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", conv("task", big, "u2 "+big, "a2", "u3"), false)
+
+	// Rewind: the user edits the latest turn. Everything before it is shared, and that is most
+	// of the bytes.
+	r := tr.Resolve("t\x00s", "", conv("task", big, "u2 "+big, "a2 EDITED"), false)
+	if r.ID == Primary {
+		t.Fatal("precondition: the rewind matched the primary thread by prefix, so the mass rule is not reached")
+	}
+	if from, ok := r.InheritsFrom(); !ok || from != Primary {
+		t.Errorf("rewind: inherits (%q, %v), want the primary thread", from, ok)
+	}
+	// A subagent's first request shares nothing.
+	if _, ok := tr.Resolve("t\x00s", "agentS", conv("investigate x"), false).InheritsFrom(); ok {
+		t.Error("a subagent's first request inherited a thread")
+	}
+	// An edit right after the first message shares only that small first message.
+	if r := tr.Resolve("t\x00s", "", conv("task", "different "+big, "u2"), false); r.Inherits != "" || r.inherits {
+		t.Errorf("a request sharing a small prefix inherited %q", r.Inherits)
+	}
+	// Only a thread's FIRST request carries the mark: later turns are the thread's own.
+	again := tr.Resolve("t\x00s", "", conv("task", big, "u2 "+big, "a2 EDITED", "next"), false)
+	if _, ok := again.InheritsFrom(); ok {
+		t.Error("the inherited thread's second request still carries the mark")
 	}
 }

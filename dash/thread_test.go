@@ -117,3 +117,33 @@ func TestARestartRecoversRecencyPerThread(t *testing.T) {
 		t.Errorf("thread ids read back: %v", threads)
 	}
 }
+
+// The dash half of the mass rule: a new thread that inherits a known thread is observed as that
+// thread's next turn. Its miss is a prefix change, or a TTL expiry after a long gap — and,
+// without the inheritance, the cold start the control asserts.
+func TestAnInheritingThreadIsNotAColdStart(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	label := func(gap int64, inherit bool) string {
+		r := &Recorder{lastSeen: map[string]int64{}, lastTail: map[string]uint64{}, seenModel: map[string]bool{}}
+		attribute(r, "s1", "", t0)
+		var seen, seenModel bool
+		var since int64
+		if inherit {
+			seen, seenModel, since, _ = r.ObserveThreadFrom("t1", "s1", "p:rewind", "", "m", t0+gap, 0)
+		} else {
+			seen, seenModel, since, _ = r.ObserveThread("t1", "s1", "p:rewind", "m", t0+gap, 0)
+		}
+		e := &Event{CacheWrite: 400_000}
+		e.AttributeCache(seen, seenModel, since, fiveMin, true)
+		return e.CacheMissReason
+	}
+	if got := label(30_000, true); got != CachePrefixChange {
+		t.Errorf("inherited, 30 s later: %q, want %q", got, CachePrefixChange)
+	}
+	if got := label(8*60_000, true); got != CacheTTLExpiry {
+		t.Errorf("inherited, 8 min later: %q, want %q", got, CacheTTLExpiry)
+	}
+	if got := label(30_000, false); got != CacheColdStart {
+		t.Fatalf("control: not inherited: %q, want %q", got, CacheColdStart)
+	}
+}

@@ -176,29 +176,29 @@ func TestThreadForFallsBackOnAnUnusableHeader(t *testing.T) {
 		}
 		return r
 	}
-	if id := h.threadFor(req("\x01unset"), "t1", "s", threadBody("main"), false, lg); id != thread.Primary {
+	if id := h.threadFor(req("\x01unset"), "t1", "s", threadBody("main"), false, lg).ID; id != thread.Primary {
 		t.Fatalf("main thread = %q", id)
 	}
-	if id := h.threadFor(req("a9b99ca1f8284c823"), "t1", "s", threadBody("sub"), false, lg); id != "a:a9b99ca1f8284c823" {
+	if id := h.threadFor(req("a9b99ca1f8284c823"), "t1", "s", threadBody("sub"), false, lg).ID; id != "a:a9b99ca1f8284c823" {
 		t.Fatalf("valid header thread = %q", id)
 	}
 	for _, bad := range []string{"", "   ", "has space", strings.Repeat("x", 500)} {
 		// A continuation of the main thread with a bad header stays on the main thread...
-		if id := h.threadFor(req(bad), "t1", "s", threadBody("main", "a", "u"), false, lg); id != thread.Primary {
+		if id := h.threadFor(req(bad), "t1", "s", threadBody("main", "a", "u"), false, lg).ID; id != thread.Primary {
 			t.Errorf("header %.20q on a main-thread continuation gave %q", bad, id)
 		}
 		// ...and a new conversation with a bad header gets a prefix thread, not the bad value.
-		id := h.threadFor(req(bad), "t1", "s", threadBody("other "+bad), false, lg)
+		id := h.threadFor(req(bad), "t1", "s", threadBody("other "+bad), false, lg).ID
 		if id == thread.Primary || strings.HasPrefix(id, "a:") {
 			t.Errorf("header %.20q on a new conversation gave %q", bad, id)
 		}
 	}
 	// No session: the session itself, whatever the header says.
-	if id := h.threadFor(req("x"), "t1", "", threadBody("a"), false, lg); id != thread.Primary {
+	if id := h.threadFor(req("x"), "t1", "", threadBody("a"), false, lg).ID; id != thread.Primary {
 		t.Errorf("no session gave %q", id)
 	}
 	// A nil tracker fails open to the session.
-	if id := (&Handler{}).threadFor(req("x"), "t1", "s", threadBody("a"), false, lg); id != thread.Primary {
+	if id := (&Handler{}).threadFor(req("x"), "t1", "s", threadBody("a"), false, lg).ID; id != thread.Primary {
 		t.Errorf("nil tracker gave %q", id)
 	}
 }

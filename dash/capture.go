@@ -490,6 +490,19 @@ func (r *Recorder) ObserveSplit(tenant, session, model string, now int64, tailHa
 // not a prefix change. seenSession is therefore "seen this thread". The primary thread keys on
 // the session alone, exactly as before threads existed.
 func (r *Recorder) ObserveThread(tenant, session, threadID, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
+	return r.observe(tenant, session, threadID, "", false, model, now, tailHash)
+}
+
+// ObserveThreadFrom is ObserveThread for the first request of a thread whose content is mostly
+// thread fromThread's (thread.Result.Inherits): a rewind, an edited earlier turn, a fork. Such
+// a request is that conversation's next turn with a changed prefix, not a cold start, so it is
+// observed as seen, with its gap measured from fromThread's last request. A miss on it then
+// reads prefix_change or ttl_expiry. Once the new thread has been seen, this is ObserveThread.
+func (r *Recorder) ObserveThreadFrom(tenant, session, threadID, fromThread, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
+	return r.observe(tenant, session, threadID, fromThread, true, model, now, tailHash)
+}
+
+func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom bool, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
 	if r == nil {
 		return true, true, 0, false
 	}
@@ -498,6 +511,11 @@ func (r *Recorder) ObserveThread(tenant, session, threadID, model string, now in
 	defer r.mu.Unlock()
 	mk := tenant + "\x00" + model
 	prev, seenSession := r.lastSeen[key]
+	if !seenSession && hasFrom {
+		// The tail stays unknown for the new key, so the switch below refuses the split credit
+		// (the "seen but no tail" branch) — the safe direction.
+		prev, seenSession = r.lastSeen[thread.Key(session, fromThread)]
+	}
 	if seenSession {
 		sinceLastMs = now - prev
 	}

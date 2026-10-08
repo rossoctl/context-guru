@@ -62,7 +62,18 @@ type Result struct {
 	// a different one. The header wins; the caller logs this so a drift between the two paths is
 	// visible rather than silent.
 	Disagree bool
+	// Inherits is set on the FIRST request of a new thread whose message content is mostly an
+	// existing thread's: it names that thread. Such a request is not a cold start. It is the
+	// existing conversation with a changed prefix — a user rewind, an edited earlier message, a
+	// fork. Attribution then treats it as that thread's next turn, so its miss reads
+	// prefix_change (or ttl_expiry), never cold_start. See inheritMass. "" otherwise.
+	Inherits string
+	// inherits is set when Inherits names the primary thread, whose id is "".
+	inherits bool
 }
+
+// InheritsFrom reports the existing thread a new thread continues by content, if any.
+func (r Result) InheritsFrom() (string, bool) { return r.Inherits, r.inherits }
 
 const (
 	// maxThreadsPerSession bounds one session's thread list. A Claude Code session makes many
@@ -76,6 +87,12 @@ const (
 	staleAfter  = 2 * time.Hour
 	// maxHeaderID refuses a header value too long to be an agent id.
 	maxHeaderID = 128
+	// inheritMass is the share of a new thread's message bytes that must be a known thread's
+	// leading messages for the new thread to count as that conversation with a changed prefix,
+	// rather than a new conversation. A subagent's first request shares nothing with the main
+	// thread (its first message is its own task); a rewind or an edited earlier turn shares
+	// everything before the edit, which on a long conversation is most of it.
+	inheritMass = 0.5
 )
 
 type threadState struct {
@@ -83,8 +100,11 @@ type threadState struct {
 	// n and sum describe the thread's LAST request: its message count and the cumulative
 	// fingerprint after its last message. A new request continues the thread when its own
 	// fingerprint after message n equals sum.
-	n    int
-	sum  uint64
+	n   int
+	sum uint64
+	// sums is the cumulative fingerprint of every message of the last request, kept to measure
+	// how much a NEW thread's content shares with this one (see Result.Inherits).
+	sums []uint64
 	last time.Time
 	// compacting marks a thread whose last request was the agent's own compaction request. The
 	// agent's next request starts from a summary, so it matches no thread by prefix; it is still
@@ -141,7 +161,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	if t == nil || scope == "" {
 		return Result{ID: Primary, Source: SourceSession}
 	}
-	sums, ok := Fingerprint(body)
+	sums, mass, ok := fingerprint(body)
 	now := t.now()
 
 	t.mu.Lock()
@@ -183,10 +203,13 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	}
 	th := s.find(res.ID)
 	if th == nil {
+		if from := s.mostShared(sums, mass); from != nil {
+			res.Inherits, res.inherits = from.id, true
+		}
 		th = &threadState{id: res.ID}
 		s.add(th)
 	}
-	th.n, th.sum, th.last = len(sums), sums[len(sums)-1], now
+	th.n, th.sum, th.sums, th.last = len(sums), sums[len(sums)-1], sums, now
 	th.compacting = agentCompaction && res.Source == SourcePrefix
 	return res
 }
@@ -210,6 +233,33 @@ func (s *sessionState) newID(sums []uint64) string {
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], sums[len(sums)-1])
 	return "p:" + hex.EncodeToString(b[:6])
+}
+
+// mostShared returns the thread whose messages make up at least inheritMass of this request's
+// message bytes as a common leading run, the largest such share winning. nil when none does.
+func (s *sessionState) mostShared(sums []uint64, mass []int) *threadState {
+	total := mass[len(mass)-1]
+	if total <= 0 {
+		return nil
+	}
+	var best *threadState
+	bestShared := 0
+	for _, th := range s.threads {
+		lcp := 0
+		for lcp < len(th.sums) && lcp < len(sums) && th.sums[lcp] == sums[lcp] {
+			lcp++
+		}
+		if lcp == 0 {
+			continue
+		}
+		if shared := mass[lcp-1]; shared > bestShared {
+			best, bestShared = th, shared
+		}
+	}
+	if best == nil || float64(bestShared) < inheritMass*float64(total) {
+		return nil
+	}
+	return best
 }
 
 // hasPrefixThread reports whether the session has a thread not named by a header. Header threads
@@ -292,9 +342,17 @@ func (t *Tracker) pruneLocked(now time.Time) {
 // The system prompt and the tools are left out on purpose. A thread whose system prompt changes
 // is still the same thread — that change is a prefix change, and it must be labelled as one.
 func Fingerprint(body []byte) ([]uint64, bool) {
+	sums, _, ok := fingerprint(body)
+	return sums, ok
+}
+
+// fingerprint is Fingerprint plus each prefix's MASS: mass[i] is the raw byte length of
+// messages[0..i]. Raw, not canonical, because the question it answers — how much of this
+// request is an old conversation — is about content, and a tool result's content is most of it.
+func fingerprint(body []byte) ([]uint64, []int, bool) {
 	root := gjson.ParseBytes(body)
 	if !root.IsObject() || root.Get("previous_response_id").String() != "" {
-		return nil, false
+		return nil, nil, false
 	}
 	items := root.Get("messages")
 	if !items.IsArray() {
@@ -305,18 +363,22 @@ func Fingerprint(body []byte) ([]uint64, bool) {
 	case items.Type == gjson.String:
 		// Responses accepts a bare string as the whole input: one user message.
 		canon(h, items)
-		return []uint64{h.Sum64()}, true
+		return []uint64{h.Sum64()}, []int{len(items.Raw)}, true
 	case !items.IsArray():
-		return nil, false
+		return nil, nil, false
 	}
 	var sums []uint64
+	var mass []int
+	total := 0
 	items.ForEach(func(_, m gjson.Result) bool {
 		h.Write([]byte{0x1e}) // record separator, so [ab][c] and [a][bc] differ
 		canon(h, m)
 		sums = append(sums, h.Sum64())
+		total += len(m.Raw)
+		mass = append(mass, total)
 		return true
 	})
-	return sums, len(sums) > 0
+	return sums, mass, len(sums) > 0
 }
 
 // canon writes v's thread-identifying shape to h. See Fingerprint for what it leaves out.
