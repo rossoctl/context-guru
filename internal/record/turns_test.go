@@ -286,9 +286,20 @@ func TestHumanTextDropsHarnessNotices(t *testing.T) {
 	for _, in := range []string{
 		"[SYSTEM NOTIFICATION - NOT USER INPUT] This is an automated message.",
 		"Continue from where you left off.",
+		"Skill /fetch is already loaded above; instructions unchanged.",
+		"Skill /plugin:my-skill is already loaded above; instructions unchanged",
 	} {
 		if h := HumanText(in); h != "" {
 			t.Errorf("HumanText(%q) = %q, want it recognised as injected", in, h)
+		}
+	}
+	// Whole-message match only: a human prompt that merely starts the same way survives.
+	for _, in := range []string{
+		"Skill /fetch failed yesterday, can you rerun it?",
+		"Skill /fetch is already loaded above; instructions unchanged. But please rerun it",
+	} {
+		if h := HumanText(in); h == "" {
+			t.Errorf("HumanText(%q) dropped a human prompt", in)
 		}
 	}
 }

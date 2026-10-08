@@ -236,7 +236,25 @@ func HumanText(content string) string {
 			return ""
 		}
 	}
+	if isSkillReloadNotice(n) {
+		return ""
+	}
 	return n
+}
+
+// isSkillReloadNotice matches the role:user line Claude Code appends after a Skill tool call
+// for a skill already in context: "Skill /fetch is already loaded above; instructions
+// unchanged." Matched as the WHOLE message, not by prefix, because "Skill /" alone could
+// begin a real prompt. Seen 2026-10-07, where it made one /fetch count as two turns; it never
+// appears as a claude_code.interaction user_prompt.
+func isSkillReloadNotice(n string) bool {
+	const head, tail = "Skill /", " is already loaded above; instructions unchanged"
+	rest, ok := strings.CutPrefix(n, head)
+	if !ok {
+		return false
+	}
+	name, ok := strings.CutSuffix(strings.TrimSuffix(rest, "."), tail)
+	return ok && name != "" && !strings.ContainsAny(name, " \t")
 }
 
 // ConversationRoot identifies which conversation a model call belongs to, from the set of tools
