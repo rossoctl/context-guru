@@ -48,38 +48,90 @@ MISS_PREMIUM_X = 1.15  # a cache miss costs 1.15x more than a hit
 GAP_THRESHOLD_MIN = 4.67  # a gap below this is not "waiting", just normal turn time
 PING_BUDGETS = list(range(0, 13))  # N = 0..12, as the issue asks for
 
-WAKE_CAUSES = ("tool_result", "background", "teammate", "human", "retry", "unknown")
+WAKE_CAUSES = ("tool_result", "background", "teammate", "human", "system", "retry", "unknown")
 
-# Hardcoded base INPUT price per token, in USD, by model family. This is the "x"
-# unit the issue's cost tables use. Cache write (5m) is priced at 1.25x this,
-# cache write (1h) at 2x, cache read at 0.1x — which is exactly where PING_COST_X
-# and MISS_PREMIUM_X below come from (1.25 - 0.1 = 1.15).
+# Hardcoded base INPUT price per token, in USD, by model family — used ONLY as a
+# fallback when no --db is given, or the DB has no priced rows for a model. This
+# is the "x" unit the issue's cost tables use. Cache write (5m) is priced at
+# 1.25x this, cache write (1h) at 2x, cache read at 0.1x — which is exactly
+# where PING_COST_X and MISS_PREMIUM_X below come from (1.25 - 0.1 = 1.15).
 #
-# These are list prices per Anthropic's published pricing as of Oct 2026, not
-# pulled from a live source. Where the local dashboard DB is available we could
-# derive a more exact per-model rate from its cost_usd/cache_write columns, but
-# for a first pass a small hardcoded table is enough to get a USD figure in the
-# right ballpark. Say so in the report.
+# PR #425 review finding 1: the first version of this table used Anthropic's
+# published LIST prices, which overstated the actual billed rate by up to 3.8x
+# (opus-5-5: $15/MTok listed vs $3.91/MTok actually billed on this gateway).
+# These corrected numbers are fit_model_prices() run on both local dashboard
+# DBs — the same fit a --db run does fresh, kept here as the best available
+# fallback for a model neither local DB has billed. See PriceTable below: when
+# --db is given, its DB-fitted price always wins over this table.
 MODEL_BASE_INPUT_PRICE_PER_TOKEN = {
-    "claude-opus-5-5": 15e-6,
-    "claude-opus-4-5": 15e-6,
-    "claude-opus-4-1": 15e-6,
-    "claude-sonnet-5-5": 3e-6,
-    "claude-sonnet-4-5": 3e-6,
-    "claude-haiku-5-5": 1e-6,
-    "claude-haiku-4-5": 1e-6,
+    "claude-opus-5-5": 3.91e-6,
+    "claude-opus-5": 5.00e-6,
+    "claude-sonnet-5-5": 2.00e-6,  # no local data for this exact id; same tier as sonnet-5
+    "claude-sonnet-5": 2.00e-6,
+    "claude-haiku-5-5": 1.00e-6,  # no local data for this exact id; same tier as haiku-4-5
+    "claude-haiku-4-5": 1.00e-6,
 }
-DEFAULT_BASE_INPUT_PRICE = 3e-6  # fall back to Sonnet-ish pricing for an unknown model
+DEFAULT_BASE_INPUT_PRICE = 2e-6  # fall back to sonnet-5-ish pricing for a wholly unknown model
 
 
-def base_price_for_model(model: str) -> float:
-    if not model:
-        return DEFAULT_BASE_INPUT_PRICE
-    # Bedrock/vertex model ids carry region/provider prefixes; match on substring.
-    for key, price in MODEL_BASE_INPUT_PRICE_PER_TOKEN.items():
-        if key in model:
-            return price
-    return DEFAULT_BASE_INPUT_PRICE
+def fit_model_prices(db_rows: "list[DBRow]") -> dict[str, float]:
+    """Fit a per-model base input price (USD/token) from what the DB actually billed.
+
+    cost_usd = b * (fresh_input + 0.1*cache_read + 1.25*cache_write + 5*output),
+    solved per model by least squares through the origin: b = sum(x*y)/sum(x*x).
+    This tracks the gateway's real billed rate, unlike a list price — see PR
+    #425 review finding 1 (list price overstated opus-5-5 by 3.8x).
+    """
+    sums: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
+    for r in db_rows:
+        if r.cost_usd <= 0:
+            continue
+        x = r.fresh_input + 0.1 * r.cache_read + 1.25 * r.cache_write + 5 * r.output_tokens
+        if x <= 0:
+            continue
+        s = sums[r.model]
+        s[0] += x * r.cost_usd
+        s[1] += x * x
+    return {model: sxy / sxx for model, (sxy, sxx) in sums.items() if sxx > 0}
+
+
+class PriceTable:
+    """Per-model base input price: DB-fitted where available, else hardcoded.
+
+    Matching is by substring, since a transcript model id can be a full
+    Bedrock ARN like "anthropic.claude-haiku-4-5-20251001-v1:0" rather than
+    the DB's short id. Keys are checked longest-first so "claude-opus-5-5" is
+    never mistaken for a substring match on the shorter "claude-opus-5".
+    """
+
+    def __init__(self, fitted: dict[str, float] | None = None):
+        self.fitted = fitted or {}
+
+    def price_and_source(self, model: str) -> tuple[float, str]:
+        if not model:
+            return DEFAULT_BASE_INPUT_PRICE, "default_fallback"
+        for key in sorted(self.fitted, key=len, reverse=True):
+            if key in model:
+                return self.fitted[key], "db_fit"
+        for key in sorted(MODEL_BASE_INPUT_PRICE_PER_TOKEN, key=len, reverse=True):
+            if key in model:
+                return MODEL_BASE_INPUT_PRICE_PER_TOKEN[key], "hardcoded_fallback"
+        return DEFAULT_BASE_INPUT_PRICE, "default_fallback"
+
+    def price(self, model: str) -> float:
+        return self.price_and_source(model)[0]
+
+    def sources_used(self, models: Iterable[str]) -> dict[str, dict]:
+        """{model: {"price_per_mtok":, "source":}} for every distinct model
+        string seen, for the report — so a reader can see which number priced
+        which traffic, per review finding 1's "print the price source"."""
+        out = {}
+        for m in sorted(set(models)):
+            if not m:
+                continue
+            price, source = self.price_and_source(m)
+            out[m] = {"price_per_mtok": round(price * 1e6, 4), "source": source}
+        return out
 
 
 def ping_window_minutes(n_pings: int) -> float:
@@ -93,10 +145,16 @@ def sim_cost_x(gap_min: float, n_pings: int) -> float:
     Per issue #424's technical notes: a gap g costs 0.1*floor(g/4.67) when it
     ends inside the N-ping warm window, and 0.1*N + 1.15 otherwise (N pings
     spent, then still a miss).
+
+    PR #425 review finding 3: that first term must never exceed the pings the
+    budget actually sends. At N=0, floor(g/4.67) can be 1 for a gap just past
+    one ping interval (e.g. 4.8 min), which charged 0.1x for a ping N=0 never
+    fires. Capped at min(n_pings, floor(g/4.67)).
     """
     window = ping_window_minutes(n_pings)
     if gap_min <= window:
-        return PING_COST_X * (gap_min // PING_INTERVAL_MIN)
+        pings_fired = min(n_pings, gap_min // PING_INTERVAL_MIN)
+        return PING_COST_X * pings_fired
     return PING_COST_X * n_pings + MISS_PREMIUM_X
 
 
@@ -104,7 +162,10 @@ def sim_cost_x(gap_min: float, n_pings: int) -> float:
 # Transcript parsing
 # ---------------------------------------------------------------------------
 
-TEAMMATE_RE = re.compile(r"<teammate-message")
+# PR #425 review finding 2: a message from another Claude session also arrives
+# as <cross-session-message ...>, not only <teammate-message ...>; both are a
+# "teammate" wake. #424 needs this same marker list for its own wake_cause field.
+TEAMMATE_RE = re.compile(r"<teammate-message|<cross-session-message")
 TASK_NOTIF_RE = re.compile(r"<task-notification>")
 
 
@@ -198,16 +259,24 @@ def classify_wake_cause(between_entries: list[dict]) -> str:
     beats plain human text beats a bare tool result (the agent's own next tool
     call, no new external input). We scan in order and take the LAST 'user' type
     entry's signal, since that is the one that immediately preceded the next call.
+
+    PR #425 review finding 2: an `isMeta` entry (a skill load, a system nudge,
+    a subagent hand-back notice) must never be classified as `human` — it was
+    not typed by a person. If it carries no recognized marker of its own, it
+    gets its own `system` cause rather than falling through to `human`.
     """
     last_cause = None
     for entry in between_entries:
         if entry.get("type") != "user":
             continue
         text, only_tool_result = entry_user_text(entry)
+        is_meta = bool(entry.get("isMeta"))
         if TEAMMATE_RE.search(text):
             last_cause = "teammate"
         elif TASK_NOTIF_RE.search(text):
             last_cause = "background"
+        elif is_meta:
+            last_cause = "system"
         elif text.strip():
             last_cause = "human"
         elif only_tool_result:
@@ -434,23 +503,35 @@ def read_db_rows(db_path: str) -> list[DBRow]:
     return rows
 
 
-MATCH_WINDOW_SEC = 60.0  # DB ts is request-START; transcript ts is response-ARRIVAL.
+MATCH_WINDOW_SEC = 15.0  # see approx_response_ts() for why this can be tight.
+
+
+def approx_response_ts(row: "DBRow") -> float:
+    """A DB row's `ts` is the request's START. The transcript only has the
+    response's ARRIVAL time. Approximate the row's arrival as ts + upstream_ms.
+
+    PR #425 review finding 5: matching on raw `ts` alone (request start) needs
+    a loose +-60s window and still misses ~4% of calls on the validation
+    session. Adding upstream_ms tightens the match to +-15s and raises the
+    match rate from 96.2% to 99.8% on the same data.
+    """
+    return row.ts_ms / 1000.0 + (row.upstream_ms or 0.0) / 1000.0
 
 
 class DBIndex:
     """Matches a transcript Gap's ending call to the DB row it produced.
 
     The DB has no thread id (issue #423), so matching is by session_id +
-    exact cache_read token count + nearest timestamp within MATCH_WINDOW_SEC.
-    Used to pull the REAL keepalive_pings already spent on a gap, for the
-    OBSERVED cost column, and by mislabel_check. Best-effort, not exact —
-    see README.
+    exact cache_read token count + nearest approximate response time (see
+    approx_response_ts) within MATCH_WINDOW_SEC. Used to pull the REAL
+    keepalive_pings already spent on a gap, for the OBSERVED cost column, and
+    by mislabel_check. Best-effort, not exact — see README.
     """
 
     def __init__(self, db_rows: list[DBRow]):
         self._by_key: dict[tuple[str, int], list[tuple[float, DBRow]]] = defaultdict(list)
         for r in db_rows:
-            self._by_key[(r.session_id, r.cache_read)].append((r.ts_ms / 1000.0, r))
+            self._by_key[(r.session_id, r.cache_read)].append((approx_response_ts(r), r))
         for v in self._by_key.values():
             v.sort(key=lambda pair: pair[0])
 
@@ -499,13 +580,12 @@ def gap_dist(gaps_min: list[float]) -> dict:
     }
 
 
-def miss_premium_usd(call: Call) -> float:
+def miss_premium_usd(call: Call, prices: PriceTable) -> float:
     """What this call's cache_creation cost over what a hit would have, in USD."""
-    price = base_price_for_model(call.model)
-    return call.cache_creation * price * MISS_PREMIUM_X
+    return call.cache_creation * prices.price(call.model) * MISS_PREMIUM_X
 
 
-def observed_cost_x_usd(gap: Gap, pings: int) -> tuple[float, float]:
+def observed_cost_x_usd(gap: Gap, pings: int, prices: PriceTable) -> tuple[float, float]:
     """What this gap ACTUALLY cost: `pings` real keep-alive pings (0 if unknown —
     the DB does not cover every session) plus a miss premium if it was still a
     miss. This is the "OBSERVED" column: real traffic, real (partial) mitigation,
@@ -513,16 +593,21 @@ def observed_cost_x_usd(gap: Gap, pings: int) -> tuple[float, float]:
     NOT the same thing as the N=0 simulation, which assumes zero real pinging
     ever happened; where the DB shows pings already in flight, observed can come
     in below the N=0 simulated cost for the same gap.
+
+    PR #425 review finding 4: an errored call (is_error) is neither a hit nor a
+    miss — Call.is_cache_miss already excludes it, so it gets no miss premium
+    here, only whatever real ping cost preceded it (usually 0).
     """
     is_miss = gap.end.is_cache_miss
     x = PING_COST_X * pings + (MISS_PREMIUM_X if is_miss else 0.0)
-    price = base_price_for_model(gap.end.model)
+    price = prices.price(gap.end.model)
     ping_usd = pings * PING_COST_X * price * gap.end.prompt_tokens_total
-    usd = ping_usd + (miss_premium_usd(gap.end) if is_miss else 0.0)
+    usd = ping_usd + (miss_premium_usd(gap.end, prices) if is_miss else 0.0)
     return x, usd
 
 
-def summarize_gaps_by_cause(gaps: list[Gap], db_index: "DBIndex | None" = None) -> dict:
+def summarize_gaps_by_cause(gaps: list[Gap], db_index: "DBIndex | None" = None, prices: PriceTable | None = None) -> dict:
+    prices = prices or PriceTable()
     by_cause: dict[str, list[Gap]] = defaultdict(list)
     for g in gaps:
         if g.is_cold_start:
@@ -534,8 +619,13 @@ def summarize_gaps_by_cause(gaps: list[Gap], db_index: "DBIndex | None" = None) 
         gap_minutes = [g.gap_min for g in gs]
         dist = gap_dist(gap_minutes)
 
+        # PR #425 review finding 4: hits + misses + errors must equal len(gs).
+        # An errored call is neither a hit nor a miss (both properties exclude
+        # is_error) — count it separately instead of folding it into "misses"
+        # via len(gs) - hits, which charged it a miss it never paid.
         hits = sum(1 for g in gs if g.end.is_cache_hit)
-        misses = len(gs) - hits
+        errors = sum(1 for g in gs if g.end.is_error)
+        misses = sum(1 for g in gs if g.end.is_cache_miss)
 
         # OBSERVED: what really happened on this traffic, including real pings
         # already sent (from the DB, where it covers the session) before this
@@ -543,7 +633,7 @@ def summarize_gaps_by_cause(gaps: list[Gap], db_index: "DBIndex | None" = None) 
         x_costs, usd_costs, pings_used = [], [], []
         for g in gs:
             pings = db_index.pings_for(g) if db_index else 0
-            x, usd = observed_cost_x_usd(g, pings)
+            x, usd = observed_cost_x_usd(g, pings, prices)
             x_costs.append(x)
             usd_costs.append(usd)
             pings_used.append(pings)
@@ -565,6 +655,7 @@ def summarize_gaps_by_cause(gaps: list[Gap], db_index: "DBIndex | None" = None) 
             "gap_distribution": dist,
             "hits": hits,
             "misses": misses,
+            "errors": errors,
             "observed_cost_x_per_gap": round(avg_observed_x, 3),
             "observed_cost_usd_total": round(total_observed_usd, 4),
             "observed_pings_total": sum(pings_used),
@@ -575,10 +666,11 @@ def summarize_gaps_by_cause(gaps: list[Gap], db_index: "DBIndex | None" = None) 
     return out
 
 
-def summarize_cold_starts(gaps: list[Gap]) -> dict:
+def summarize_cold_starts(gaps: list[Gap], prices: PriceTable | None = None) -> dict:
+    prices = prices or PriceTable()
     cold = [g for g in gaps if g.is_cold_start]
     misses = sum(1 for g in cold if g.end.is_cache_miss)
-    usd = sum(miss_premium_usd(g.end) for g in cold if g.end.is_cache_miss)
+    usd = sum(miss_premium_usd(g.end, prices) for g in cold if g.end.is_cache_miss)
     return {"threads": len(cold), "cache_misses": misses, "miss_cost_usd_total": round(usd, 4)}
 
 
@@ -587,20 +679,14 @@ def summarize_cold_starts(gaps: list[Gap]) -> dict:
 # ---------------------------------------------------------------------------
 
 
-MISLABEL_MATCH_WINDOW_SEC = 60.0
-
-
 def mislabel_check(all_gaps: list[Gap], db_rows: list[DBRow]) -> dict:
     """Count DB prefix_change rows that are really per-thread TTL expiry / cold start.
 
     The DB has no thread id (that is #423's job), so a row is matched to a
     transcript gap/cold-start event by: same session_id, same cache_read token
     count (both sides of a genuine miss agree on this), and the nearest
-    timestamp within MISLABEL_MATCH_WINDOW_SEC. The DB's ts is the request's
-    START; the transcript only gives the response's ARRIVAL time, so some
-    skew is expected — on the validation session (fix-summarizer) matched
-    deltas cluster under 65s and then jump to 74s+, which is where the window
-    is cut. This is a best-effort match, not an exact one; see README.
+    approximate response time (see approx_response_ts) within MATCH_WINDOW_SEC.
+    This is a best-effort match, not an exact one; see README.
     """
     session_events: dict[str, list[tuple[float, str, int]]] = defaultdict(list)
     for g in all_gaps:
@@ -614,7 +700,7 @@ def mislabel_check(all_gaps: list[Gap], db_rows: list[DBRow]) -> dict:
         session_events[session_id].append((g.end.ts, label, g.end.cache_read))
 
     mislabeled_count = 0
-    mislabeled_usd = 0.0
+    mislabeled_full_cost_usd = 0.0
     checked = 0
     for row in db_rows:
         if row.cache_miss_reason != "prefix_change":
@@ -623,8 +709,8 @@ def mislabel_check(all_gaps: list[Gap], db_rows: list[DBRow]) -> dict:
         if not events:
             continue
         checked += 1
-        row_ts = row.ts_ms / 1000.0
-        best_label, best_dt = None, MISLABEL_MATCH_WINDOW_SEC
+        row_ts = approx_response_ts(row)
+        best_label, best_dt = None, MATCH_WINDOW_SEC
         for ts, label, cache_read in events:
             if cache_read != row.cache_read:
                 continue
@@ -633,11 +719,14 @@ def mislabel_check(all_gaps: list[Gap], db_rows: list[DBRow]) -> dict:
                 best_dt, best_label = dt, label
         if best_label in ("ttl_expiry", "cold_start"):
             mislabeled_count += 1
-            mislabeled_usd += row.cost_usd
+            mislabeled_full_cost_usd += row.cost_usd
     return {
         "db_prefix_change_rows_checked": checked,
         "mislabeled_count": mislabeled_count,
-        "mislabeled_usd": round(mislabeled_usd, 4),
+        # PR #425 review finding 7: this is the mislabeled rows' FULL recorded
+        # cost_usd (what the dashboard calls prefix_change_cost_usd), not just
+        # their miss premium over a hit — name it that way, not "mislabeled_usd".
+        "mislabeled_full_cost_usd": round(mislabeled_full_cost_usd, 4),
     }
 
 
@@ -693,13 +782,16 @@ def failure_stats(db_rows: list[DBRow]) -> dict:
 
 def db_only_report(db_rows: list[DBRow]) -> dict:
     """Approximate, thread-less report: group by (session, model) as a thread proxy."""
+    prices = PriceTable(fit_model_prices(db_rows))
     by_key: dict[tuple[str, str], list[DBRow]] = defaultdict(list)
     for r in db_rows:
         by_key[(r.session_id, r.model)].append(r)
 
     gaps_min: list[float] = []
-    miss_x_total = 0.0
-    miss_usd_total = 0.0
+    hits = misses = 0
+    observed_x_total = 0.0
+    observed_usd_total = 0.0
+    observed_pings_total = 0
     sim_totals = {n: [] for n in PING_BUDGETS}
 
     for key, rows in by_key.items():
@@ -710,11 +802,23 @@ def db_only_report(db_rows: list[DBRow]) -> dict:
             if gap_min < GAP_THRESHOLD_MIN:
                 continue
             gaps_min.append(gap_min)
-            price = base_price_for_model(cur.model)
-            is_miss = cur.cache_miss_reason not in ("", "hit")
+            price = prices.price(cur.model)
+            # PR #425 review finding 6: use the SAME hit rule as transcript mode
+            # (cache_read / cache_write), not cache_miss_reason — that label
+            # depends on the ttl_expiry/prefix_change distinction issue #423 is
+            # still fixing, so a production number built on it inherits that bug.
+            is_hit = cur.cache_read > 0 and cur.cache_write < 0.5 * cur.cache_read
+            is_miss = not is_hit
+            hits += 1 if is_hit else 0
+            misses += 1 if is_miss else 0
+            # PR #425 review finding 6: also use the row's own real keepalive_pings
+            # (the production DB has this column) instead of assuming 0.
+            pings = cur.keepalive_pings or 0
+            observed_pings_total += pings
+            observed_x_total += PING_COST_X * pings + (MISS_PREMIUM_X if is_miss else 0.0)
+            observed_usd_total += pings * PING_COST_X * price * (cur.fresh_input + cur.cache_read + cur.cache_write)
             if is_miss:
-                miss_x_total += MISS_PREMIUM_X
-                miss_usd_total += cur.cache_write * price * MISS_PREMIUM_X
+                observed_usd_total += cur.cache_write * price * MISS_PREMIUM_X
             for n in PING_BUDGETS:
                 sim_totals[n].append(sim_cost_x(gap_min, n))
 
@@ -728,10 +832,14 @@ def db_only_report(db_rows: list[DBRow]) -> dict:
             "proxy. Wake cause is unknown everywhere until issue #424's wake_cause "
             "field ships; the gap counts and ping simulation below do not depend on it."
         ),
+        "price_sources": prices.sources_used(r.model for r in db_rows),
         "gap_distribution": gap_dist(gaps_min),
-        "miss_cost_no_pings_x_per_gap": round(miss_x_total / len(gaps_min), 3) if gaps_min else 0.0,
-        "miss_cost_no_pings_usd_total": round(miss_usd_total, 4),
-        "ping_sim_x_per_gap_by_n": sim,
+        "hits": hits,
+        "misses": misses,
+        "observed_cost_x_per_gap": round(observed_x_total / len(gaps_min), 3) if gaps_min else 0.0,
+        "observed_cost_usd_total": round(observed_usd_total, 4),
+        "observed_pings_total": observed_pings_total,
+        "sim_cost_x_per_gap_by_n": sim,
         "best_n": best_n,
         "failures": failure_stats(db_rows),
     }
@@ -764,14 +872,16 @@ def run_transcript_mode(projects_dirs: list[str], db_paths: list[str]) -> dict:
         all_gaps_global.extend(gaps)
 
     db_index = DBIndex(db_rows) if db_rows else None
+    prices = PriceTable(fit_model_prices(db_rows) if db_rows else None)
+    report["price_sources"] = prices.sources_used(g.end.model for g in all_gaps_global)
 
     for project, gaps in sorted(per_project_gaps.items()):
         report["projects"][project] = {"threads": len(per_project_calls[project])}
         for kind in ("main", "subagent", "team_thread"):
             kind_gaps = [g for g in gaps if g.thread_kind == kind]
             report["projects"][project][kind] = {
-                "cold_starts": summarize_cold_starts(kind_gaps),
-                "by_cause": summarize_gaps_by_cause(kind_gaps, db_index),
+                "cold_starts": summarize_cold_starts(kind_gaps, prices),
+                "by_cause": summarize_gaps_by_cause(kind_gaps, db_index, prices),
             }
 
     if db_rows:
@@ -784,29 +894,42 @@ def run_transcript_mode(projects_dirs: list[str], db_paths: list[str]) -> dict:
     return report
 
 
+def _price_sources_lines(price_sources: dict) -> list[str]:
+    if not price_sources:
+        return []
+    lines = ["Prices used (USD/MTok, source):"]
+    for model, info in price_sources.items():
+        lines.append(f"  {model}: ${info['price_per_mtok']}/MTok ({info['source']})")
+    return lines
+
+
 def human_summary(report: dict) -> str:
     lines = []
     if report["mode"] == "db_only_approximate":
         lines.append("DB-only mode (no transcripts) — approximate, no wake causes.")
         lines.append(report["note"])
+        lines.extend(_price_sources_lines(report.get("price_sources")))
         d = report["gap_distribution"]
         lines.append(
             f"Gaps >= {GAP_THRESHOLD_MIN} min: {d['count']}, median {d['median_min']} min, "
-            f"p90 {d['p90_min']} min, max {d['max_min']} min"
+            f"p90 {d['p90_min']} min, max {d['max_min']} min "
+            f"(hits={report['hits']} misses={report['misses']})"
         )
         lines.append(
-            f"Observed miss cost (no transcripts, so pings unknown -> treated as 0): "
-            f"{report['miss_cost_no_pings_x_per_gap']}x/gap (${report['miss_cost_no_pings_usd_total']} total)"
+            f"Observed: {report['observed_cost_x_per_gap']}x/gap "
+            f"(${report['observed_cost_usd_total']} total, {report['observed_pings_total']} real pings seen)"
         )
-        lines.append(f"Simulated best N (0-12): {report['best_n']}, cost {report['ping_sim_x_per_gap_by_n'][report['best_n']]}x/gap")
+        lines.append(f"Simulated best N (0-12): {report['best_n']}, cost {report['sim_cost_x_per_gap_by_n'][report['best_n']]}x/gap")
         for n in (0, 2, 4, 6, 10):
-            lines.append(f"  simulated N={n}: {report['ping_sim_x_per_gap_by_n'].get(n)}x/gap")
+            lines.append(f"  simulated N={n}: {report['sim_cost_x_per_gap_by_n'].get(n)}x/gap")
         f = report["failures"]
         lines.append(
             f"Failures: {f['failure_count']}, hang median {f['hang_ms_median']}ms, "
             f"misses following a failure: {f['cache_misses_following_a_failure_run']}"
         )
         return "\n".join(lines)
+
+    lines.extend(_price_sources_lines(report.get("price_sources")))
 
     for project, data in report["projects"].items():
         lines.append(f"\n== {project} ({data['threads']} threads) ==")
@@ -825,8 +948,8 @@ def human_summary(report: dict) -> str:
             for cause, stats in kd["by_cause"].items():
                 dist = stats["gap_distribution"]
                 lines.append(
-                    f"    {cause}: {dist['count']} gaps (hits={stats['hits']} misses={stats['misses']}), "
-                    f"median {dist['median_min']}min, p90 {dist['p90_min']}min"
+                    f"    {cause}: {dist['count']} gaps (hits={stats['hits']} misses={stats['misses']} "
+                    f"errors={stats['errors']}), median {dist['median_min']}min, p90 {dist['p90_min']}min"
                 )
                 lines.append(
                     f"      observed: {stats['observed_cost_x_per_gap']}x/gap "
@@ -840,7 +963,8 @@ def human_summary(report: dict) -> str:
         mc = report["mislabel_check"]
         lines.append(
             f"\nMislabel check: {mc['mislabeled_count']} / {mc['db_prefix_change_rows_checked']} "
-            f"DB prefix_change rows are really TTL expiry/cold start (${mc['mislabeled_usd']})"
+            f"DB prefix_change rows are really TTL expiry/cold start "
+            f"(full recorded cost ${mc['mislabeled_full_cost_usd']})"
         )
     if report.get("failures"):
         f = report["failures"]
@@ -888,12 +1012,27 @@ def _write_user_tool_result_line(fh, ts_iso: str) -> None:
     fh.write(json.dumps(entry) + "\n")
 
 
+def _write_user_meta_line(fh, ts_iso: str, text: str) -> None:
+    """An isMeta entry with no recognized marker — e.g. a skill load notice.
+    Per PR #425 review finding 2, this must classify as "system", not "human".
+    """
+    entry = {"type": "user", "timestamp": ts_iso, "isMeta": True, "message": {"content": [{"type": "text", "text": text}]}}
+    fh.write(json.dumps(entry) + "\n")
+
+
+# PRICE used by this self-test's assertions: the hardcoded fallback for
+# claude-opus-5-5 (no --db in these scenarios, so PriceTable() falls back to
+# MODEL_BASE_INPUT_PRICE_PER_TOKEN). Keep this in sync with that table.
+_SELF_TEST_PRICE = MODEL_BASE_INPUT_PRICE_PER_TOKEN["claude-opus-5-5"]
+
+
 def run_self_test() -> bool:
-    """Build a tiny synthetic transcript (one main thread, one plain subagent
-    thread) with known gaps, known hits/misses, and known causes; assert the
-    exact observed and simulated numbers. Exits non-zero on failure.
+    """Build tiny synthetic transcripts and a tiny synthetic DB with known
+    gaps, hits/misses, causes, and DB rows; assert the exact observed and
+    simulated numbers. Exits non-zero on failure.
     """
     import math
+    import sqlite3
     import tempfile
     from datetime import datetime, timedelta, timezone
 
@@ -925,6 +1064,12 @@ def run_self_test() -> bool:
             # Gap 2: 400s (6.667 min), cause=tool_result, cache_read=50000
             # cache_creation=1000 (< half of cache_read) -> hit.
             _write_call_line(fh, iso(1000), "m3", "claude-opus-5-5", cache_read=50000, cache_creation=1000)
+            # Call 4: an upstream failure (isApiErrorMessage). Neither hit nor miss.
+            _write_call_line(fh, iso(1010), "m4", "<synthetic>", cache_read=0, cache_creation=0, is_error=True)
+            # Gap 3: 400s (6.667 min) after a failed call -> cause=retry, regardless
+            # of what's in between (there is nothing here), cache_read=0
+            # cache_creation=3000 -> miss.
+            _write_call_line(fh, iso(1410), "m5", "claude-opus-5-5", cache_read=0, cache_creation=3000)
 
         subdir = os.path.join(tmp, session_id, "subagents")
         os.makedirs(subdir)
@@ -936,9 +1081,27 @@ def run_self_test() -> bool:
             # Gap: 300s (5.0 min), cause=background, cache_read=800 cache_creation=100 -> hit.
             _write_call_line(fh, iso(300), "s2", "claude-opus-5-5", cache_read=800, cache_creation=100)
 
+        # A team_thread (in-process agent-team teammate): one gap per teammate
+        # wake format, plus an isMeta entry with no marker (-> "system").
+        team_name = "agent-team-reviewer"
+        team_path = os.path.join(subdir, f"{team_name}.jsonl")
+        with open(team_path, "w") as fh:
+            _write_call_line(fh, iso(0), "t1", "claude-opus-5-5", cache_read=0, cache_creation=500)
+            _write_user_text_line(fh, iso(1), 'Another Claude session sent a message:\n<teammate-message teammate_id="x">hi</teammate-message>')
+            # Gap: 5 min, cause=teammate (via <teammate-message).
+            _write_call_line(fh, iso(300), "t2", "claude-opus-5-5", cache_read=400, cache_creation=50)
+            _write_user_text_line(fh, iso(301), 'Another Claude session sent a message:\n<cross-session-message from="x">hi</cross-session-message>')
+            # Gap: 5 min, cause=teammate (via <cross-session-message).
+            _write_call_line(fh, iso(600), "t3", "claude-opus-5-5", cache_read=400, cache_creation=50)
+            _write_user_meta_line(fh, iso(601), "Base directory for this skill: /tmp/x")
+            # Gap: 5 min, cause=system (isMeta, no recognized marker).
+            _write_call_line(fh, iso(900), "t4", "claude-opus-5-5", cache_read=400, cache_creation=50)
+        with open(os.path.join(subdir, f"{team_name}.meta.json"), "w") as fh:
+            json.dump({"taskKind": "in_process_teammate"}, fh)
+
         threads = find_threads([tmp])
         kinds = {t[2] for t in threads}
-        check("thread kinds found", kinds, {"main", "subagent"})
+        check("thread kinds found", kinds, {"main", "subagent", "team_thread"})
 
         all_gaps = []
         for project, thread_id, thread_kind, path in threads:
@@ -947,22 +1110,24 @@ def run_self_test() -> bool:
 
         main_gaps = [g for g in all_gaps if g.thread_kind == "main"]
         sub_gaps = [g for g in all_gaps if g.thread_kind == "subagent"]
+        team_gaps = [g for g in all_gaps if g.thread_kind == "team_thread"]
 
         main_cold = summarize_cold_starts(main_gaps)
         check("main cold starts", main_cold["threads"], 1)
         check("main cold start misses", main_cold["cache_misses"], 1)
-        check("main cold start USD", main_cold["miss_cost_usd_total"], round(2000 * 15e-6 * 1.15, 4))
+        check("main cold start USD", main_cold["miss_cost_usd_total"], round(2000 * _SELF_TEST_PRICE * 1.15, 4))
 
         main_by_cause = summarize_gaps_by_cause(main_gaps, db_index=None)
-        check("main causes", set(main_by_cause), {"human", "tool_result"})
+        check("main causes", set(main_by_cause), {"human", "tool_result", "retry"})
 
         human = main_by_cause["human"]
         check("human gap count", human["gap_distribution"]["count"], 1)
         check("human gap minutes", human["gap_distribution"]["median_min"], round(600 / 60, 2))
         check("human hits", human["hits"], 0)
         check("human misses", human["misses"], 1)
+        check("human errors", human["errors"], 0)
         check("human observed x/gap (no DB -> 0 pings known)", human["observed_cost_x_per_gap"], 1.15)
-        check("human observed USD", human["observed_cost_usd_total"], round(5000 * 15e-6 * 1.15, 4))
+        check("human observed USD", human["observed_cost_usd_total"], round(5000 * _SELF_TEST_PRICE * 1.15, 4))
         check("human sim N=0", human["sim_cost_x_per_gap_by_n"][0], 1.15)
         # window(12) = 4.67*12+5 = 61.04 min >> 10 min, so it resolves inside the
         # window: cost = 0.1 * floor(10 / 4.67) = 0.1 * 2 = 0.2.
@@ -976,6 +1141,18 @@ def run_self_test() -> bool:
         check("tool_result observed USD", tool_result["observed_cost_usd_total"], 0.0)
         check("tool_result sim N=0 (forced miss baseline)", tool_result["sim_cost_x_per_gap_by_n"][0], 1.15)
 
+        # Finding 4: a gap ENDING on an error (m3 -> m4, 10s) is below threshold
+        # so it never becomes a Gap at all. The gap that matters here is
+        # m4(error) -> m5, which must be "retry" and must NOT count m5 as an
+        # error (m5 itself succeeded) and must NOT give m5 a miss premium of
+        # zero just because the PRECEDING call errored.
+        retry = main_by_cause["retry"]
+        check("retry gap count", retry["gap_distribution"]["count"], 1)
+        check("retry hits", retry["hits"], 0)
+        check("retry misses", retry["misses"], 1)
+        check("retry errors", retry["errors"], 0)
+        check("retry observed USD (m5's own miss premium)", retry["observed_cost_usd_total"], round(3000 * _SELF_TEST_PRICE * 1.15, 4))
+
         sub_cold = summarize_cold_starts(sub_gaps)
         check("subagent cold starts", sub_cold["threads"], 1)
         check("subagent cold start misses", sub_cold["cache_misses"], 1)
@@ -987,6 +1164,105 @@ def run_self_test() -> bool:
         check("background hits", background["hits"], 1)
         check("background misses", background["misses"], 0)
         check("background observed x/gap", background["observed_cost_x_per_gap"], 0.0)
+
+        # Finding 2: both teammate-message formats land in the SAME "teammate"
+        # cause, and the isMeta/no-marker entry lands in "system", not "human".
+        team_by_cause = summarize_gaps_by_cause(team_gaps, db_index=None)
+        check("team_thread causes", set(team_by_cause), {"teammate", "system"})
+        check("team_thread teammate gap count (both formats)", team_by_cause["teammate"]["gap_distribution"]["count"], 2)
+        check("team_thread system gap count", team_by_cause["system"]["gap_distribution"]["count"], 1)
+
+        # --- Finding 1 & 5: a tiny synthetic DB, DB-fitted prices, and the
+        # response-time-approximate match (ts + upstream_ms). ---
+        db_path = os.path.join(tmp, "self-test.db")
+        con = sqlite3.connect(db_path)
+        con.execute(
+            """
+            create table requests (
+                id integer primary key, ts integer, session_id text, model text,
+                status integer, cache_read integer, cache_write integer,
+                fresh_input integer, output_tokens integer, cost_usd real,
+                cache_miss_reason text, upstream_ms real, keepalive integer,
+                keepalive_pings integer, saved_unique integer, stop_reason text
+            )
+            """
+        )
+        # Row for m2 (the human-cause miss): request started 2.5s before the
+        # transcript's response-arrival timestamp, upstream took 2.0s -- so
+        # ts + upstream_ms lands 0.5s from the transcript's ts, well inside
+        # MATCH_WINDOW_SEC, while raw ts alone is 2.5s off (still inside the
+        # old 60s window, so this alone doesn't distinguish the two -- the
+        # mislabel/ping-match assertions below just need SOME match to land).
+        m2_ts_ms = int((iso_to_epoch(iso(600)) - 2.5) * 1000)
+        # cost_usd fit to a known price: cost = price * (fresh + 0.1*cr + 1.25*cw + 5*out)
+        # fresh=10 (Call's hardcoded input_tokens), cache_read=0, cache_write=5000, output=50
+        fit_price = 2.5e-6
+        m2_cost = fit_price * (10 + 0.1 * 0 + 1.25 * 5000 + 5 * 50)
+        con.execute(
+            "insert into requests (ts, session_id, model, status, cache_read, cache_write, fresh_input, "
+            "output_tokens, cost_usd, cache_miss_reason, upstream_ms, keepalive, keepalive_pings, "
+            "saved_unique, stop_reason) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (m2_ts_ms, session_id, "claude-opus-5-5", 200, 0, 5000, 10, 50, m2_cost, "prefix_change", 2000.0, 0, 2, 0, "end_turn"),
+        )
+        con.commit()
+        con.close()
+
+        db_rows = read_db_rows(db_path)
+        check("db rows read", len(db_rows), 1)
+
+        fitted = fit_model_prices(db_rows)
+        check("fitted price for claude-opus-5-5", fitted.get("claude-opus-5-5", 0.0), fit_price)
+
+        prices = PriceTable(fitted)
+        check("PriceTable uses the DB fit, not the hardcoded fallback", prices.price_and_source("claude-opus-5-5")[1], "db_fit")
+
+        db_index = DBIndex(db_rows)
+        human_db = summarize_gaps_by_cause(main_gaps, db_index, prices)["human"]
+        check("human observed_pings_total pulls the DB's real 2 pings", human_db["observed_pings_total"], 2)
+        # Finding 1: USD now uses the fitted price, not the hardcoded fallback.
+        check(
+            "human observed USD uses the DB-fitted price",
+            human_db["observed_cost_usd_total"],
+            round(2 * PING_COST_X * fit_price * (10 + 0 + 5000) + 5000 * fit_price * MISS_PREMIUM_X, 4),
+        )
+
+        mc = mislabel_check(main_gaps, db_rows)
+        check("mislabel_check finds the DB's prefix_change row", mc["db_prefix_change_rows_checked"], 1)
+        check("mislabel_check flags it as a TTL expiry (it's a 10-min main-thread gap)", mc["mislabeled_count"], 1)
+        check("mislabel_check reports the row's FULL cost, not just its premium", mc["mislabeled_full_cost_usd"], round(m2_cost, 4))
+
+        # --- Finding 6: DB-only mode uses the real hit rule and real pings. ---
+        # Pings/hit-or-miss are attributed to whichever row ENDS a gap (same as
+        # DBIndex.pings_for in transcript mode) — row 1 is only the gap's start.
+        db_only_rows = [
+            DBRow(
+                id=1, ts_ms=0, session_id="s", model="claude-opus-5-5", status=200,
+                cache_read=0, cache_write=1000, fresh_input=10, output_tokens=50,
+                cost_usd=0.01, cache_miss_reason="unknown", upstream_ms=100.0,
+                keepalive=0, keepalive_pings=0, saved_unique=0, stop_reason="end_turn",
+            ),
+            DBRow(
+                id=2, ts_ms=10 * 60 * 1000, session_id="s", model="claude-opus-5-5", status=200,
+                cache_read=9000, cache_write=100, fresh_input=10, output_tokens=50,
+                # A hit: cache_write (100) < half of cache_read (9000);
+                # cache_miss_reason deliberately mislabeled "prefix_change" (the
+                # #423 bug) to prove db_only_report ignores that column now.
+                cost_usd=0.001, cache_miss_reason="prefix_change", upstream_ms=100.0,
+                keepalive=0, keepalive_pings=0, saved_unique=0, stop_reason="end_turn",
+            ),
+            DBRow(
+                id=3, ts_ms=20 * 60 * 1000, session_id="s", model="claude-opus-5-5", status=200,
+                cache_read=0, cache_write=5000, fresh_input=10, output_tokens=50,
+                # A miss, mislabeled the other way ("hit") to prove the same thing,
+                # with 1 real keepalive ping already spent on this gap.
+                cost_usd=0.02, cache_miss_reason="hit", upstream_ms=100.0,
+                keepalive=0, keepalive_pings=1, saved_unique=0, stop_reason="end_turn",
+            ),
+        ]
+        db_only = db_only_report(db_only_rows)
+        check("db_only hits (ignores the wrong cache_miss_reason label)", db_only["hits"], 1)
+        check("db_only misses (ignores the wrong cache_miss_reason label)", db_only["misses"], 1)
+        check("db_only observed_pings_total (real keepalive_pings)", db_only["observed_pings_total"], 1)
 
     return ok
 

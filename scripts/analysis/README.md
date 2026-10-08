@@ -25,20 +25,24 @@ in three kinds:
   by a `<teammate-message>`; a `main` thread very often has this cause too).
 
 This gives exact per-thread gaps and the exact signal that ended each one
-(teammate message, background task, human text, the agent's own tool
-result, or a retry after a failed call).
+(teammate message, cross-session message, background task, human text, a
+skill load or other system notice, the agent's own tool result, or a retry
+after a failed call).
 
 **DB-only mode** (`--db` only, no `--projects-dir`): this is how the script
 must run against the production proxy, which has no transcripts. There is
 no thread id and no wake cause here. The script says so and groups rows by
 `(session_id, model)` as an approximate thread proxy, then reports gap
-distributions, miss cost, the ping simulation (cause = unknown), and
-failure stats.
+distributions, hit/miss counts and observed/simulated cost (using the DB's
+own `keepalive_pings` and the real `cache_read`/`cache_write` hit rule, not
+the `cache_miss_reason` label — see Known approximations), and failure
+stats.
 
 ## Usage
 
 ```bash
-# One project, with its dashboard DB for the mislabel/failure cross-check:
+# One project, with its dashboard DB for prices, the mislabel check, the
+# real-ping lookup, and the failure cross-check:
 python3 -I scripts/analysis/wait_causes.py \
   --projects-dir ~/.claude/projects/-Users-you-git-your-repo \
   --db ~/.local/state/context-guru/dashboard-8789.db
@@ -57,8 +61,9 @@ python3 -I scripts/analysis/wait_causes.py \
 # Production proxy: DB only, no transcripts.
 python3 -I scripts/analysis/wait_causes.py --db /path/to/dashboard.db
 
-# Built-in self-check on a tiny synthetic transcript (known gaps, known
-# hits/misses) — run this after touching the cost or hit/miss logic.
+# Built-in self-check on tiny synthetic transcripts and a tiny synthetic DB
+# (known gaps, known hits/misses/errors, known causes, known DB matches) —
+# run this after touching the cost, hit/miss, pricing, or matching logic.
 python3 -I scripts/analysis/wait_causes.py --self-test
 ```
 
@@ -67,33 +72,46 @@ machine-readable report instead.
 
 ## What it reports
 
+With `--db`, the report opens with **which price priced which model**
+(`price_sources`): for each model string actually seen, its USD/MTok base
+input price and whether that came from `db_fit` (fitted on that DB's own
+billed `cost_usd`) or `hardcoded_fallback` (no DB, or the DB never billed
+that model). See "Prices" below for how the fit works.
+
 Per project, per thread kind (`main` / `subagent` / `team_thread`), per wake
 cause:
 
 - **Gap distribution**: count, median, p75, p90, max, in minutes, for gaps
   of at least 4.67 minutes (the keep-alive ping interval from issue #424 —
   below that, nothing would have needed a ping anyway).
-- **Hits vs misses**: how many of those gaps resolved as a cache hit versus
-  a miss, using `Call.is_cache_hit` (`cache_read > 0` AND `cache_creation`
-  under half of `cache_read` — NOT simply `cache_read == 0`; a prompt that
-  comes back with some `cache_read` but a `cache_creation` that dwarfs it
-  is still a miss in every way that matters for cost). Report this count so
-  a reader can see whether "gap over the threshold means a miss" actually
+- **Hits vs misses vs errors**: how many of those gaps resolved as a cache
+  hit, a cache miss, or an upstream error, using `Call.is_cache_hit`
+  (`cache_read > 0` AND `cache_creation` under half of `cache_read` — NOT
+  simply `cache_read == 0`; a prompt that comes back with some `cache_read`
+  but a `cache_creation` that dwarfs it is still a miss in every way that
+  matters for cost) and `Call.is_error` (an `isApiErrorMessage` response,
+  which is neither a hit nor a miss — it bought nothing and cost nothing in
+  cache terms, so counting it as a miss, as an earlier version of this
+  script did via `len(gs) - hits`, overstated the miss count). `hits +
+  misses + errors` always equals the gap count. Report this breakdown so a
+  reader can see whether "gap over the threshold means a miss" actually
   holds on that traffic — it is usually true but not universal.
 - **OBSERVED cost**: what this traffic actually cost, in units of `x` (the
-  gap-ending call's own base input price) and in USD, using a small
-  hardcoded per-model price table (see `MODEL_BASE_INPUT_PRICE_PER_TOKEN` in
-  the script — not pulled from a live pricing source, said plainly in the
-  code). This is real pings already sent (pulled from the DB's
-  `keepalive_pings`, where the DB covers the session — `observed_pings_total`
-  reports how many) plus a miss premium if the call was still a miss. **This
-  is a measurement of what happened, not a simulation** — it can be well
-  below the simulated N=0 cost on a gap where real pinging already helped.
+  gap-ending call's own base input price, from `price_sources`) and in USD.
+  This is real pings already sent (pulled from the DB's `keepalive_pings`,
+  where the DB covers the session — `observed_pings_total` reports how
+  many) plus a miss premium if the call was still a miss (zero for an
+  error). **This is a measurement of what happened, not a simulation** — it
+  can be well below the simulated N=0 cost on a gap where real pinging
+  already helped.
 - **SIMULATED ping-budget**: average cost per gap, in `x` units, for a
   hypothetical, uniform budget of N = 0 to 12 pings, using the formula from
   the issue's technical notes (a ping every 4.67 min; N pings keep the cache
   warm for `4.67N + 5` minutes; a gap that ends inside that window costs
-  `0.1 * floor(gap / 4.67)`, otherwise `0.1*N + 1.15`). **N=0 is 1.15x for
+  `0.1 * min(N, floor(gap / 4.67))`, otherwise `0.1*N + 1.15`). The `min(N,
+  ...)` matters at the window's edge: without it, N=0 could be charged for a
+  ping it never sends (a 4.8-minute gap resolving inside the 5-minute
+  no-ping window still has `floor(4.8/4.67) == 1`). **N=0 is 1.15x for
   every gap over 5 minutes, by construction** — it is the "no mitigation at
   all" baseline every other N is measured against, not a restatement of the
   OBSERVED column above. Reports the best N and its cost.
@@ -104,13 +122,58 @@ With `--db`, also:
 
 - **Mislabel check**: how many DB `prefix_change` rows are really a
   per-thread TTL expiry or cold start, matched to a transcript event by
-  session id, matching `cache_read` token count, and nearest timestamp
-  within 60 seconds (the DB's `ts` is the request's *start*; the transcript
-  only has the response's *arrival* time, so some skew is expected — see
-  `MISLABEL_MATCH_WINDOW_SEC` in the script).
+  session id, matching `cache_read` token count, and nearest approximate
+  response time within `MATCH_WINDOW_SEC` (15s — see "Matching a DB row to
+  a transcript call" below). Reports `mislabeled_full_cost_usd`: the
+  mislabeled rows' full recorded `cost_usd` (what the dashboard calls
+  `prefix_change_cost_usd`), not just their miss premium over a hit.
 - **Failures**: non-200 upstream rows, their hang time (median/max, and by
   status code), and how many cache misses follow a run of consecutive
   failures on the same session.
+
+## Prices
+
+`MODEL_BASE_INPUT_PRICE_PER_TOKEN` is a **fallback only**, used when no
+`--db` is given or the DB has no billed rows for a model. When a DB is
+given, `fit_model_prices()` fits a fresh per-model price straight from what
+that DB actually billed:
+
+```
+cost_usd = price * (fresh_input + 0.1*cache_read + 1.25*cache_write + 5*output_tokens)
+```
+
+solved per model by least squares through the origin
+(`price = sum(x*y) / sum(x*x)`). This is a correction from the script's
+first version, which used Anthropic's published **list** prices — those
+overstated the actual billed rate on this gateway by up to 3.8x
+(`claude-opus-5-5`: $15/MTok listed vs **$3.91/MTok** actually billed). The
+hardcoded fallback table now holds that fit's numbers (from both local
+DBs), not list prices, with a note on any model it has no direct data for.
+`PriceTable.price_and_source()` always prefers a DB fit over the fallback
+table when one exists for that model, and matches a transcript's full model
+id (which can be a Bedrock ARN, e.g.
+`anthropic.claude-haiku-4-5-20251001-v1:0`) by substring, checking longer
+table keys first so `claude-opus-5-5` is never mistaken for a match on the
+shorter `claude-opus-5`.
+
+## Matching a DB row to a transcript call
+
+The DB has no thread id (that is issue #423's job), so three things —
+the mislabel check, the OBSERVED column's real-ping lookup (`DBIndex`), and
+nothing else — all match a transcript call to a DB row the same way: same
+`session_id`, same `cache_read` token count, and the nearest **approximate
+response time** within `MATCH_WINDOW_SEC` (15 seconds).
+
+The DB's `ts` is the request's **start**; the transcript only has the
+response's **arrival** time. `approx_response_ts()` closes most of that gap
+by adding the DB row's own `upstream_ms`: on the validation session
+(`fix-summarizer`), matching on raw `ts` alone needs a loose 60-second
+window and still misses about 4% of calls (2817/2824, counting every
+thread); adding `upstream_ms` tightens the window to 15 seconds and raises
+the match rate to 99.75% (2817/2824 within 15s too, with a median residual
+delta of 0.13 seconds) — the handful of unmatched calls are almost
+certainly ones a DB row's own hang or retry still displaces by more than a
+few seconds.
 
 ## Known approximations (read before trusting a number)
 
@@ -119,16 +182,17 @@ With `--db`, also:
   differs by seconds; for a call that hung for minutes before failing (the
   502s), the *following* gap's start point is a few minutes later than the
   true idle start. This is why failed calls get their own `retry` cause
-  instead of being folded into the gap they distort.
-- **The mislabel check, the failure stats, and the OBSERVED column's real
-  pings all run over the whole DB**, not filtered to one thread, because
-  the DB has no thread id (that is issue #423's job). A DB row is
-  attributed to whichever transcript event matches closest on session id +
-  `cache_read` + nearest timestamp (`DBIndex`, used by both); two different
-  threads' events landing within the same 60-second window on the same
-  session could in principle be confused. In practice the matched deltas on
-  the validation session cluster tightly under 65 seconds and then jump, so
-  the window is a clean cutoff there.
+  instead of being folded into the gap they distort, and why the ending
+  call of such a gap is counted as an error, never a miss (see "Hits vs
+  misses vs errors" above).
+- **The mislabel check and the OBSERVED column's real-ping lookup both run
+  over the whole DB**, not filtered to one thread, because the DB has no
+  thread id. A DB row is attributed to whichever transcript event matches
+  closest (see "Matching a DB row to a transcript call"); two different
+  threads' events landing within the same 15-second window on the same
+  session, with the same `cache_read`, could in principle be confused —
+  unlikely given how tightly the matched deltas cluster, but not provably
+  impossible.
 - **"Misses following a failure" counts once per run of consecutive
   failing rows** on a session (several 5xx rows in a row are usually one
   underlying hang, retried fast), checked against whichever thread's row
@@ -138,10 +202,16 @@ With `--db`, also:
 - **DB-only mode's `(session_id, model)` grouping is not a thread.** Two
   different subagents on the same model look like one thread; a main
   thread that changes model mid-session looks like several. Treat its gap
-  counts as directional, not exact.
-- **Model prices are hardcoded**, not derived from the DB's own
-  `cost_usd`/`cache_write` columns. A future pass could derive them live
-  where the DB covers the model.
+  counts as directional, not exact. It does, however, use the same hit
+  rule and the same real `keepalive_pings` as transcript mode now (not the
+  `cache_miss_reason` label, which depends on the ttl_expiry/prefix_change
+  distinction issue #423 is still fixing — a production number built on
+  that label would silently inherit whatever #423 has not yet corrected).
+- **The `system` wake cause is a catch-all** for an `isMeta` entry that
+  carries no recognized marker (a skill load, a one-line nudge like "your
+  previous response had no visible output", etc.) — it is deliberately
+  broad rather than enumerating every meta-entry shape, since the one thing
+  that matters here is that none of them is a `human`.
 
 ## Validation
 
@@ -156,11 +226,24 @@ local projects — exact match:
 | context-guru | main | 346 | 75 |
 | context-guru | subagent + team_thread | 154 | 5 |
 
-**Self-test** (`--self-test`): a tiny synthetic transcript (one `main`
-thread, one `subagent` thread) with known gaps, known hits/misses, and
-known causes. Asserts exact numbers for gap counts, hit/miss counts, the
-OBSERVED x/gap and USD, and the SIMULATED N=0 and N=12 costs. Run it after
-touching anything in the cost or hit/miss logic.
+**Price fit**, cross-checked against an independent fit of the same formula
+on the same DB — exact match: `claude-opus-5-5` $3.91/MTok, `claude-sonnet-5`
+$2.00/MTok, `claude-opus-5` $5.00/MTok, `claude-haiku-4-5` $1.00/MTok.
+
+**DB match rate**, cross-checked against an independent match using
+`ts + upstream_ms` — same result: 99.8% (vs. 96.2% on raw `ts` alone).
+
+**Self-test** (`--self-test`): synthetic transcripts for a `main` thread
+(cold start, a `human` miss, a `tool_result` hit, an upstream error
+followed by a `retry` miss), a plain `subagent` thread (a `background`
+hit), and a `team_thread` (a `teammate` wake via `<teammate-message>`, a
+second via `<cross-session-message>`, and a `system` wake via an
+unmarked `isMeta` entry) — plus a tiny synthetic sqlite DB exercising the
+price fit, the response-time match (`DBIndex`, `mislabel_check`), and
+`db_only_report`'s hit rule and real-ping lookup against deliberately
+mislabeled `cache_miss_reason` rows. Asserts exact numbers throughout. Run
+it after touching anything in the cost, hit/miss, pricing, matching, or
+wake-cause logic.
 
 **Full-session comparison**, against the known session
 `6c456ae0-469f-44a1-92c1-f6ea03192715` (`fix-summarizer`, context-guru
@@ -169,16 +252,18 @@ used opus DB rows as a proxy for the main thread, since it had no thread id
 either):
 
 - Main-thread gaps by cause (exact, this script): 11 background / 29 human /
-  25 teammate / 7 tool_result / 1 retry. The issue's rough pass: 10 / 25 / 21
-  / 22 (no retry bucket). Totals are close (73 vs 78); the shift from
-  tool_result to human/teammate is expected, because the rough pass
-  attributed every opus DB row with no thread id to "the main thread",
-  which also swept in some subagent/fork calls that this script correctly
-  separates out as their own threads (several of them `team_thread`s, not
-  `main`).
-- Mislabel check: 62/71 `prefix_change` rows reclassified, $84.87. The
-  issue's rough pass: 46/65, $70.27. Same conclusion (most `prefix_change`
-  rows on this session are mislabeled TTL expiries), higher count here
-  because this script checks every thread's events, not just the main one.
+  25 teammate / 1 system / 7 tool_result / 1 retry. The issue's rough pass:
+  10 / 25 / 21 / (not tracked) / 22 / (no retry bucket). Totals are close;
+  the shift from `tool_result` to `human`/`teammate` is expected, because
+  the rough pass attributed every opus DB row with no thread id to "the
+  main thread", which also swept in some subagent/fork calls this script
+  correctly separates into their own threads (several of them
+  `team_thread`s, not `main`).
+- Mislabel check: 68/71 `prefix_change` rows reclassified, full cost $96.35.
+  The issue's rough pass: 46/65, $70.27. Same conclusion (most
+  `prefix_change` rows on this session are mislabeled TTL expiries), higher
+  count here both because this script checks every thread's events (not
+  just main) and because the tighter response-time match (see "Matching a
+  DB row to a transcript call") now finds more of them.
 - Upstream 502s: median hang 305 seconds (5.1 min), matching the issue's
   "5.3-6.0 min" range.
