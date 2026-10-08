@@ -343,3 +343,26 @@ func TestANewThreadInheritsByContentMass(t *testing.T) {
 		t.Error("the inherited thread's second request still carries the mark")
 	}
 }
+
+// Codex 0.160 re-serializes its earlier reasoning items on `codex exec resume`, adding
+// `"content": null`. Seen live on the Responses route (PR #426). The fingerprint skips reasoning
+// items, which is what keeps a resumed Codex session on its thread; without that, every resume
+// would start a new thread and its keep-alive entry would be orphaned.
+func TestACodexResumeStaysOnItsThread(t *testing.T) {
+	before := `{"model":"azure/gpt-5.6-luna","input":[
+	  {"type":"message","role":"user","content":[{"type":"input_text","text":"task"}]},
+	  {"type":"reasoning","summary":[],"encrypted_content":"ENC1"},
+	  {"type":"function_call","call_id":"c1","name":"exec_command","arguments":"{}"},
+	  {"type":"function_call_output","call_id":"c1","output":"ok"}]}`
+	resumed := `{"model":"azure/gpt-5.6-luna","input":[
+	  {"type":"message","role":"user","content":[{"type":"input_text","text":"task"}]},
+	  {"type":"reasoning","summary":[],"content":null,"encrypted_content":"ENC1"},
+	  {"type":"function_call","call_id":"c1","name":"exec_command","arguments":"{}"},
+	  {"type":"function_call_output","call_id":"c1","output":"ok"},
+	  {"type":"message","role":"user","content":[{"type":"input_text","text":"go on"}]}]}`
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", []byte(before), false)
+	if r := tr.Resolve("t\x00s", "", []byte(resumed), false); r.ID != Primary || r.Source != SourcePrefix {
+		t.Fatalf("resumed Codex request got %+v, want the primary thread by prefix", r)
+	}
+}
