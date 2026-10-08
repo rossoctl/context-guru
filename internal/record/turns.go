@@ -88,6 +88,12 @@ var injectedPrefixes = []string{
 	"[Tool use was rejected",
 	"[SUGGESTION MODE",
 	"[Image #",
+	// A tool_result image (e.g. the agent's own Read of a PNG, or a screen capture) gets
+	// flattened to a caption and replayed as plain role:user text, same shape as the
+	// pasted-image-ref case above but a different wrapper on each capture path:
+	// "[Image: source: <filename>]", "[Image: original WxH, displayed at WxH...]". Measured
+	// 2026-10-08 on a Kahoot-quiz-images session: inflated 9-10 real turns to 13.
+	"[Image:",
 	"The user stepped away and is coming back",
 	"Describe your most recent action in 3-5 words",
 	"Base directory for this skill:",
@@ -97,6 +103,7 @@ var injectedPrefixes = []string{
 	"CRITICAL: Respond with TEXT ONLY",
 	"Your directive:", // subagent task framing
 	"Analyze if this message indicates a new conversation topic",
+	"## Page contract", // Artifact tool's own skill-load preamble, injected as role:user
 
 	// Cross-session and teammate traffic. Claude Code delivers a message from another
 	// session, a teammate or a coordinator as an ordinary role:user text part, so it reads
