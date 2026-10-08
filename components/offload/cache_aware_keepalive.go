@@ -7,6 +7,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -69,6 +70,8 @@ type KeepAliveCandidateInfo struct {
 	RefreshTailTokens int
 }
 
+// keepAliveCand is keyed by thread.Key(session, thread) (#423). Every exported function below that
+// takes a "session" takes that key: the session itself for the primary thread.
 var (
 	keepAliveCandMu sync.Mutex
 	keepAliveCand   = map[string]*keepAliveCandidate{}
@@ -160,7 +163,7 @@ func (s *CacheAwareSummarizer) registerKeepAliveCandidate(c *components.Ctx, cal
 		// every single dispatch, which is indistinguishable at a glance from the call itself
 		// failing — startAsyncSummary's own detached goroutine already needs the identical
 		// detachment for the identical reason (see its own baseCtx).
-		ctx:  &components.Ctx{Session: c.Session, Store: c.Store, Ctx: context.WithoutCancel(c.Ctx)},
+		ctx:  &components.Ctx{Session: c.Session, Thread: c.Thread, Store: c.Store, Ctx: context.WithoutCancel(c.Ctx)},
 		call: call, path: path,
 		span:             append([]bschemas.ChatMessage(nil), span...),
 		coveredCount:     coveredCount,
@@ -168,8 +171,12 @@ func (s *CacheAwareSummarizer) registerKeepAliveCandidate(c *components.Ctx, cal
 		preExpirySeconds: s.trigger.PreExpirySeconds,
 		registeredAt:     time.Now(),
 	}
+	// Keyed by THREAD, not session (#423): a candidate's span is one thread's conversation, and
+	// the keep-alive is per thread. Keyed by session, a subagent's later registration replaced the
+	// main thread's candidate, and the main thread's ping then lost its substitute.
+	key := thread.Key(c.Session, c.Thread)
 	keepAliveCandMu.Lock()
-	if _, exists := keepAliveCand[c.Session]; !exists {
+	if _, exists := keepAliveCand[key]; !exists {
 		if len(keepAliveCand) >= maxKeepAliveCandidates {
 			// Try to make room from entries nothing ever cleared before refusing outright — see
 			// pruneStaleKeepAliveCandidatesLocked.
@@ -183,7 +190,7 @@ func (s *CacheAwareSummarizer) registerKeepAliveCandidate(c *components.Ctx, cal
 			return
 		}
 	}
-	keepAliveCand[c.Session] = cand
+	keepAliveCand[key] = cand
 	keepAliveCandMu.Unlock()
 }
 
@@ -338,10 +345,19 @@ func KeepAliveSubstitute(session string) (dispatch func(timeout time.Duration) K
 func RegisterKeepAliveCandidateForTest(session string, st store.Store,
 	call func(ctx context.Context) (string, error), path string, span []bschemas.ChatMessage, coveredCount int,
 	cacheState string, preExpirySeconds int) {
+	RegisterThreadKeepAliveCandidateForTest(session, thread.Primary, st, call, path, span, coveredCount,
+		cacheState, preExpirySeconds)
+}
+
+// RegisterThreadKeepAliveCandidateForTest is RegisterKeepAliveCandidateForTest for one thread of
+// the session. The registry key is then thread.Key(session, threadID).
+func RegisterThreadKeepAliveCandidateForTest(session, threadID string, st store.Store,
+	call func(ctx context.Context) (string, error), path string, span []bschemas.ChatMessage, coveredCount int,
+	cacheState string, preExpirySeconds int) {
 	(&CacheAwareSummarizer{mode: markerFull,
 		trigger: components.Trigger{CacheState: cacheState, PreExpirySeconds: preExpirySeconds},
 	}).registerKeepAliveCandidate(
-		&components.Ctx{Session: session, Store: st, Ctx: context.Background()},
+		&components.Ctx{Session: session, Thread: threadID, Store: st, Ctx: context.Background()},
 		call, path, span, coveredCount)
 }
 

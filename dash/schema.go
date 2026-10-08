@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS requests (
   -- request, so a crafted ?tenant= cannot widen a view.
   tenant_id          TEXT    NOT NULL DEFAULT '',
   session_id         TEXT    NOT NULL DEFAULT '',
+  -- The thread of the session ('' = the primary thread: the main agent, the first thread with no
+  -- agent header that declares tools). See Event.ThreadID.
+  thread_id          TEXT    NOT NULL DEFAULT '',
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)
@@ -656,6 +659,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// #240's correction factor. Additive with a default of 0, which doubles as the marker for
 	// "written before the correction existed" — see the column comment in ddl above.
 	{"requests", "billed_token_factor", "REAL NOT NULL DEFAULT 0"},
+	// #423: the thread of the session. '' on old rows, which is the primary thread — exactly
+	// how those rows were keyed when they were written.
+	{"requests", "thread_id", "TEXT NOT NULL DEFAULT ''"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},

@@ -214,7 +214,7 @@ func TestDisarmRetiresTheHeldMaterialNow(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer "+cred)
 	armOn(t, k, "armed", 60*time.Second, 3, clock.now().Add(time.Hour))
 	for i := 0; i < 2; i++ {
-		k.record(tn, "armed", clock.now().Add(time.Duration(i)*time.Second), []byte(body),
+		k.record(tn, "armed", "", clock.now().Add(time.Duration(i)*time.Second), []byte(body),
 			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
 			"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 	}

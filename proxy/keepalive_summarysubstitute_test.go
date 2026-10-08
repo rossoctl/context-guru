@@ -14,6 +14,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -151,10 +152,10 @@ func TestKeepAliveSubstituteRespectsTheCostCapAndFallsBackToAPing(t *testing.T) 
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 	r.Header.Set("Authorization", "Bearer sk-caller-secret")
 	at := clock.now()
-	k.record(tn, "sess-1", at.Add(-time.Second), []byte(kaBody),
+	k.record(tn, "sess-1", "", at.Add(-time.Second), []byte(kaBody),
 		upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages",
 		http.StatusOK, Usage{CacheRead: 20000, CacheWrite: 0}, true)
-	k.record(tn, "sess-1", at, []byte(kaBody),
+	k.record(tn, "sess-1", "", at, []byte(kaBody),
 		upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages",
 		http.StatusOK, Usage{CacheRead: 20000, CacheWrite: 0}, true)
 	if k.Stats().Live != 1 {
@@ -459,5 +460,81 @@ func TestKeepAliveSummaryCallCountsAsOnePingWithThreeMaxPings(t *testing.T) {
 	}
 	if got := k.pings.Load(); got != 3 {
 		t.Errorf("pings = %d, want 3 total — one summary call plus two plain pings", got)
+	}
+}
+
+// #423 × #402: the summarizer's keep-alive candidate is one THREAD's conversation, so the
+// registry is keyed by session + thread. Each thread's ping uses its own candidate; another
+// thread's registration cannot replace it and another thread's request cannot clear it — including
+// the PR #426 review's race, a subagent request that started before the main thread registered.
+func TestKeepAliveSubstituteIsPerThread(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	mainModel := &fakeSummaryModel{out: "<summary>main thread so far.</summary>"}
+	subModel := &fakeSummaryModel{out: "<summary>subagent so far.</summary>"}
+	const sess = "sess-thread-cand"
+	register := func(th string, m *fakeSummaryModel) {
+		msg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
+		schema.SetMessageText(&msg, "conversation of thread "+th)
+		span := []bschemas.ChatMessage{msg}
+		call := func(ctx context.Context) (string, error) { return m.CompleteMessages(ctx, "", span) }
+		offload.RegisterThreadKeepAliveCandidateForTest(sess, th, st, call, "messages", span, 1, "", 0)
+		t.Cleanup(func() { offload.ClearKeepAliveCandidate(thread.Key(sess, th)) })
+	}
+	has := func(th string) bool {
+		_, _, _, ok := offload.KeepAliveSubstitute(thread.Key(sess, th))
+		return ok
+	}
+
+	// The review's race: the subagent's request starts, the main thread registers, then the
+	// subagent's request ends and clears stale candidates for ITS thread.
+	subStart := time.Now()
+	time.Sleep(2 * time.Millisecond)
+	register("", mainModel)
+	offload.ClearStaleKeepAliveCandidate(thread.Key(sess, "a:S"), subStart)
+	if !has("") {
+		t.Fatal("a subagent's request cleared the main thread's candidate")
+	}
+	// The subagent registers LATER; the main thread's candidate must survive it.
+	register("a:S", subModel)
+	if !has("") || !has("a:S") {
+		t.Fatalf("candidates after both registered: main %v, subagent %v", has(""), has("a:S"))
+	}
+
+	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	up := upstream{base: "http://up", path: "/v1/messages"}
+	rec := func(th string, at time.Time) {
+		for i := 0; i < 2; i++ {
+			k.record(tn, sess, th, at.Add(time.Duration(i)*time.Second), []byte(kaBody), up, r,
+				bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+		}
+	}
+	// The subagent goes idle first, so its ping comes due ALONE: it must run the SUBAGENT's call.
+	t0 := clock.now()
+	rec("a:S", t0.Add(-60*time.Second))
+	rec("", t0)
+	if n := k.sweep(t0.Add(-60*time.Second + 282*time.Second)); n != 1 {
+		t.Fatalf("first sweep fired %d pings, want 1 (the subagent's)", n)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && k.summarySubstituted.Load()+int64(fs.n()) < 1 {
+		time.Sleep(time.Millisecond)
+	}
+	if subModel.calls.Load() != 1 || mainModel.calls.Load() != 0 {
+		t.Fatalf("subagent's ping: subagent calls %d, main calls %d; want 1 and 0",
+			subModel.calls.Load(), mainModel.calls.Load())
+	}
+	// The main thread's ping later may use only the MAIN thread's call. (It may also fall back to
+	// a plain ping: the summarizer's checkpoint is still per session, see the follow-up issue.)
+	if n := k.sweep(t0.Add(282 * time.Second)); n != 1 {
+		t.Fatalf("second sweep fired %d pings, want 1 (the main thread's)", n)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && k.summarySubstituted.Load()+int64(fs.n()) < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	if subModel.calls.Load() != 1 {
+		t.Errorf("the main thread's ping ran the subagent's summary call (subagent calls %d)", subModel.calls.Load())
 	}
 }

@@ -353,7 +353,12 @@ func ParseMode(s string) (Mode, error) {
 type Ctx struct {
 	Ctx     context.Context
 	Session string
-	Store   store.Store
+	// Thread is the thread of the session this request belongs to (main agent, a subagent, a
+	// fork): "" for the primary thread. A component that keeps per-CONVERSATION state between
+	// requests, outside the Store's session keys, keys it by thread.Key(Session, Thread) — each
+	// thread is its own conversation with its own provider cache entry. See internal/thread.
+	Thread string
+	Store  store.Store
 	// DisallowCountChange prevents transcript-restructuring components from
 	// running when a host cannot safely write their output back to its wire shape.
 	DisallowCountChange bool
@@ -925,11 +930,14 @@ func (NopEmitter) Run(RunReport)    {}
 // §5 implies, that doc is the one to correct, not this.
 type KeepAliveReport struct {
 	Tenant, Session, Model, Provider, Route string
-	Pings                                   int
-	CacheRead, CacheWrite, Output           int64
-	CostUSD                                 float64
-	Status                                  int
-	DurationMs                              float64
+	// Thread is the session thread the ping kept warm ("" = the primary thread), so a ping row
+	// says WHICH cache entry it protected. See internal/thread.
+	Thread                        string
+	Pings                         int
+	CacheRead, CacheWrite, Output int64
+	CostUSD                       float64
+	Status                        int
+	DurationMs                    float64
 	// TS is when this ping was recorded (the keeper's own clock, which production reads from
 	// time.Now but a replay/test may inject), in epoch milliseconds — not derivable from
 	// anything else here, and a sink that timestamps its own row from wall-clock-at-receipt

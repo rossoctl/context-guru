@@ -10,6 +10,7 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/tidwall/gjson"
 )
 
@@ -54,6 +55,12 @@ type capture struct {
 	tenant string
 	// meta is the request's own metadata, read once off the pristine inbound body.
 	meta dash.Meta
+	// thread is the session thread this request belongs to (see internal/thread), set by
+	// noteThread once the session id is known. "" is the primary thread. inherits/hasInherit
+	// name the thread a NEW thread continues by content (thread.Result.Inherits).
+	thread     string
+	inherits   string
+	hasInherit bool
 	// kaPings / kaRefreshed / kaStrategy are what the idle keep-alive did during the span
 	// this request just ended: how many pings it sent, how many tokens the last of them
 	// read from cache, and which manager-controlled strategy (if any) resolved the policy
@@ -136,6 +143,14 @@ func (c *capture) noteTrace(tr apply.Trace) {
 		if saved := rep.Saved(); saved > 0 && !rep.Reverted && !rep.Skipped {
 			c.unique[rep.Component] = c.rec.MarkUnique(c.tenant, rep.Component, rep.CacheKeys, saved)
 		}
+	}
+}
+
+// noteThread records which thread of the session this request belongs to.
+func (c *capture) noteThread(res thread.Result) {
+	if c != nil {
+		c.thread = res.ID
+		c.inherits, c.hasInherit = res.InheritsFrom()
 	}
 }
 
@@ -343,6 +358,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.Agent = dash.AgentFor(c.agent)
 	e.Meta = c.meta
 	e.FromTrace(c.trace, c.unique)
+	e.ThreadID = c.thread
 	// The provider's terminal reason, off the same response bytes the token tiers came
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason
@@ -380,8 +396,21 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Cache attribution, with a cold start treated as the non-failure it is. BEFORE
 	// pricing, because whether this is the session's first request is an input to a dollar
 	// figure and not only to a label — see Event.cachesplitSavedUSD.
-	seenSession, seenModel, sinceMs, tailChanged := c.rec.ObserveSplit(
-		e.TenantID, e.SessionID, e.Model, e.TS, e.SplitTailHash)
+	//
+	// Per THREAD (#423). Keyed on the session alone, a subagent's requests reset the main
+	// thread's idle gap, so the main thread's TTL expiries fell through to prefix_change — on
+	// one long session, 46 of 65 prefix_change rows ($70.27) were exactly that.
+	//
+	// A NEW thread whose content is mostly a known thread's is that conversation with a changed
+	// prefix (a rewind, an edit, a fork): by the mass it shares it is not a cold start.
+	observe := c.rec.ObserveThread
+	if c.hasInherit {
+		observe = func(tenant, session, threadID, model string, now int64, tail uint64) (bool, bool, int64, bool) {
+			return c.rec.ObserveThreadFrom(tenant, session, threadID, c.inherits, model, now, tail)
+		}
+	}
+	seenSession, seenModel, sinceMs, tailChanged := observe(
+		e.TenantID, e.SessionID, e.ThreadID, e.Model, e.TS, e.SplitTailHash)
 	// Only a known expiry can establish ttl_expiry. OpenAI's 30m is a
 	// minimum guarantee, so a later miss cannot be attributed to expiry alone.
 	e.AttributeCache(seenSession, seenModel, sinceMs,
