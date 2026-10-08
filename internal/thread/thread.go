@@ -19,13 +19,13 @@
 // every Codex or Bob Shell session, and every Claude Code session that never starts a subagent —
 // therefore keys exactly as it did before.
 //
-// "" means "the session's first header-less thread", NOT "the main agent". The two are the same
-// when the main agent speaks first, which Claude Code and Codex do at the start of a session. They
-// differ when an auxiliary request (a title, a classifier) comes first, or when the proxy restarts
-// mid-session and another thread speaks first: then the main agent gets a "p:" id. Every thread
-// keeps its own keep-alive entry and its own recency either way; only a reader that takes "" to be
-// the main agent is misled. Choosing "" by turn count instead would mean re-keying a thread in
-// the middle of its life, which resets its keep-alive turn count and its recency.
+// "" goes to the main agent, told apart by metadata: the first header-less thread that declares
+// tools. An auxiliary request (Claude Code's security monitor, a title) declares none, so if one
+// speaks first it holds "" only until the main agent's first request, and then moves to its own
+// "p:" id (see newID). Turn count or order would not do: order is wrong when an auxiliary request
+// comes first, and choosing by turn count would re-key a live thread. One case is still open: after
+// a proxy restart mid-session, a header-less SUBAGENT that speaks before the main agent declares
+// tools too and takes "".
 package thread
 
 import (
@@ -114,6 +114,9 @@ type threadState struct {
 	// how much a NEW thread's content shares with this one (see Result.Inherits).
 	sums []uint64
 	last time.Time
+	// tools is whether the thread's last request declared tools: the metadata that tells the
+	// main agent from an auxiliary request (see newID).
+	tools bool
 	// compacting marks a thread whose last request was the agent's own compaction request. The
 	// agent's next request starts from a summary, so it matches no thread by prefix; it is still
 	// the same thread, and it inherits this id.
@@ -170,6 +173,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 		return Result{ID: Primary, Source: SourceSession}
 	}
 	sums, mass, ok := fingerprint(body)
+	hasTools := gjson.GetBytes(body, "tools.#").Int() > 0
 	now := t.now()
 
 	t.mu.Lock()
@@ -203,7 +207,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	case match != nil:
 		res = Result{ID: match.id, Source: SourcePrefix}
 	default:
-		res = Result{ID: s.newID(sums), Source: SourcePrefix}
+		res = Result{ID: s.newID(sums, hasTools), Source: SourcePrefix}
 	}
 	if !ok {
 		// A header thread with no message list: keep its id, record nothing to match on.
@@ -218,6 +222,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 		s.add(th)
 	}
 	th.n, th.sum, th.sums, th.last = len(sums), sums[len(sums)-1], sums, now
+	th.tools = hasTools
 	th.compacting = agentCompaction && res.Source == SourcePrefix
 	return res
 }
@@ -226,8 +231,19 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 // successor of a compacting thread inherits its id; anything else is named after its own
 // fingerprint, which differs from every other thread's (a fork has its parent's prefix but not
 // its parent's full message list).
-func (s *sessionState) newID(sums []uint64) string {
-	if !s.hasPrefixThread() {
+//
+// The primary goes to the main agent, told by METADATA, not order: the main agent declares tools
+// (Claude Code's 23, Codex's exec_command), while an auxiliary request (Claude Code's security
+// monitor, a title) declares none. So a tool-less thread holds the primary id only until the first
+// thread with tools arrives; it then gets its own id. A client that never declares tools keeps
+// its first thread as the primary, exactly as before.
+func (s *sessionState) newID(sums []uint64, hasTools bool) string {
+	holder := s.find(Primary)
+	switch {
+	case holder == nil && !s.hasPrefixThread():
+		return Primary
+	case holder != nil && hasTools && !holder.tools:
+		holder.id = fingerprintID(holder.sum)
 		return Primary
 	}
 	// The MOST RECENT compacting thread: the agent sends the post-compaction request right after
@@ -245,8 +261,13 @@ func (s *sessionState) newID(sums []uint64) string {
 	}
 	// The same fingerprint as a thread that has since moved on is a resent request from that
 	// thread's past; the caller then joins it, which is right, since the prefix is the same.
+	return fingerprintID(sums[len(sums)-1])
+}
+
+// fingerprintID names a thread after the fingerprint of its first request.
+func fingerprintID(sum uint64) string {
 	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], sums[len(sums)-1])
+	binary.BigEndian.PutUint64(b[:], sum)
 	return "p:" + hex.EncodeToString(b[:6])
 }
 

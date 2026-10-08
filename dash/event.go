@@ -86,8 +86,8 @@ type Event struct {
 	TenantID  string `json:"tenant_id"`
 	SessionID string `json:"session_id"`
 	// ThreadID names the thread of the session this request belongs to: "" for the session's
-	// primary thread — its first thread without an agent header, which is the main agent when
-	// the main agent speaks first (see internal/thread) — "a:<agent id>" for a subagent that
+	// primary thread — the main agent, told apart as the first thread without an agent header
+	// that declares tools (see internal/thread) — "a:<agent id>" for a subagent that
 	// named itself in a header, and
 	// "p:<fingerprint>" for a thread told apart by prefix continuity. Each thread has its own
 	// provider cache entry, so recency and miss attribution are per thread; reporting stays per

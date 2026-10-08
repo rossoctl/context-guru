@@ -62,8 +62,8 @@ CREATE TABLE IF NOT EXISTS requests (
   -- request, so a crafted ?tenant= cannot widen a view.
   tenant_id          TEXT    NOT NULL DEFAULT '',
   session_id         TEXT    NOT NULL DEFAULT '',
-  -- The thread of the session ('' = the primary thread: the first one without an agent header,
-  -- usually but not always the main agent). See Event.ThreadID.
+  -- The thread of the session ('' = the primary thread: the main agent, the first thread with no
+  -- agent header that declares tools). See Event.ThreadID.
   thread_id          TEXT    NOT NULL DEFAULT '',
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',

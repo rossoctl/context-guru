@@ -383,3 +383,39 @@ func TestTwoCompactingThreadsTheLaterOneIsTheSuccessor(t *testing.T) {
 		t.Fatalf("post-compaction request got %q, want %q, the thread that compacted last", id, second)
 	}
 }
+
+// withTools adds a tools declaration, the metadata that marks the main agent.
+func withTools(body []byte) []byte {
+	var m map[string]any
+	_ = json.Unmarshal(body, &m)
+	m["tools"] = []any{map[string]any{"name": "Bash", "input_schema": map[string]any{"type": "object"}}}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// The #426 review's live case: a tool-less auxiliary request (a title, Claude Code's security
+// monitor) speaks before the main agent. The main agent, which declares tools, still gets "",
+// and the auxiliary thread moves to its own id and stays there.
+func TestTheMainAgentGetsThePrimaryEvenWhenAnAuxiliaryRequestComesFirst(t *testing.T) {
+	tr := testTracker()
+	if id := tr.Resolve("t\x00s", "", conv("generate a title"), false).ID; id != Primary {
+		t.Fatalf("precondition: the first request did not take the primary (%q)", id)
+	}
+	if id := tr.Resolve("t\x00s", "", withTools(conv("fix the bug")), false).ID; id != Primary {
+		t.Fatalf("main agent got %q, want the primary", id)
+	}
+	if id := tr.Resolve("t\x00s", "", withTools(conv("fix the bug", "a", "u")), false).ID; id != Primary {
+		t.Fatalf("main agent's second turn got %q", id)
+	}
+	aux := tr.Resolve("t\x00s", "", conv("generate a title", "Title", "again"), false).ID
+	if aux == Primary || !strings.HasPrefix(aux, "p:") {
+		t.Fatalf("auxiliary thread's next request got %q, want its own p: id", aux)
+	}
+	// A client that never declares tools keeps its first thread as the primary, as before.
+	tr2 := testTracker()
+	tr2.Resolve("t\x00s", "", conv("chat"), false)
+	tr2.Resolve("t\x00s", "", conv("other chat"), false)
+	if id := tr2.Resolve("t\x00s", "", conv("chat", "a", "u"), false).ID; id != Primary {
+		t.Fatalf("tool-less client: first thread got %q, want the primary", id)
+	}
+}
