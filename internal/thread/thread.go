@@ -222,7 +222,9 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 		s.add(th)
 	}
 	th.n, th.sum, th.sums, th.last = len(sums), sums[len(sums)-1], sums, now
-	th.tools = hasTools
+	// Sticky: once a thread has declared tools it stays the main-agent candidate, so one tool-less
+	// request from the main agent cannot let a later thread take "" in the middle of its life.
+	th.tools = th.tools || hasTools
 	th.compacting = agentCompaction && res.Source == SourcePrefix
 	return res
 }
@@ -264,7 +266,8 @@ func (s *sessionState) newID(sums []uint64, hasTools bool) string {
 	return fingerprintID(sums[len(sums)-1])
 }
 
-// fingerprintID names a thread after the fingerprint of its first request.
+// fingerprintID names a thread after a fingerprint: of its first request for a new thread, of its
+// last request for a tool-less thread that newID moves off the primary id.
 func fingerprintID(sum uint64) string {
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], sum)
