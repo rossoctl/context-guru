@@ -5,6 +5,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/modes"
 )
 
@@ -21,6 +22,11 @@ type Opts struct {
 	API string
 	// Session is the host-supplied session id ("" => content hash).
 	Session string
+	// ThreadOf, when set, finds the thread of the session this request belongs to (see
+	// internal/thread). It is called once, as soon as the session id is resolved and BEFORE the
+	// pipeline runs, so components see the thread on Ctx.Thread; the result rides on
+	// Trace.Thread. nil leaves every request on the primary thread.
+	ThreadOf func(session string) thread.Result
 	// Tenant namespaces the session id in a hosted, multi-tenant deployment. Empty
 	// in single-tenant use, which leaves session keys byte-identical to before this
 	// field existed.
@@ -114,4 +120,19 @@ func (o Opts) nowMs() int64 {
 		return time.Now().UnixMilli()
 	}
 	return o.Now.UnixMilli()
+}
+
+// resolveThread runs ThreadOf once for the resolved session id. Fails open: a panic in the hook
+// leaves the request on the primary thread, never fails it.
+func (o Opts) resolveThread(tr *Trace, session string) {
+	if o.ThreadOf == nil || tr.ThreadResolved {
+		return
+	}
+	tr.ThreadResolved = true
+	defer func() {
+		if recover() != nil {
+			tr.Thread = thread.Result{ID: thread.Primary, Source: thread.SourceSession}
+		}
+	}()
+	tr.Thread = o.ThreadOf(session)
 }

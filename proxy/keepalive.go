@@ -478,13 +478,6 @@ type keeper struct {
 	// session id and is cleared wholesale at the bound; give it an LRU only if session churn
 	// is ever shown to cost real pings.
 	turns map[string]int
-	// candThread names the thread whose request registered the session's cache_aware_summarizer
-	// keep-alive candidate, keyed by kaKey(tenant, session). offload keys its candidate registry by
-	// session, but the keep-alive is per thread (#423) and a candidate's span is ONE thread's
-	// conversation: substituting it for another thread's ping would refresh the wrong prefix, and
-	// another thread's request or retirement must not clear it. A session missing from the map
-	// keeps the pre-#423 behaviour (any thread owns the candidate). See noteCandidate.
-	candThread map[string]string
 	// overrides is the per-session manual keep-alive, keyed like live. In memory only and
 	// deliberately so — an authorization to spend that silently survives a restart is worse
 	// than one that does not. See keepaliveoverride.go.
@@ -566,7 +559,7 @@ func keepAliveDisabled() bool {
 
 func newKeeper(h *Handler) *keeper {
 	k := &keeper{h: h, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, candThread: map[string]string{},
+		live: map[string]*kaEntry{}, turns: map[string]int{},
 		overrides: map[string]sessionOverride{}, now: time.Now}
 	k.send = k.sendPing
 	k.dispatch = func(j pingJob) { go k.fire(j) }
@@ -619,7 +612,7 @@ func (k *keeper) Stop() {
 	for key, e := range k.live {
 		e.clear()
 		delete(k.live, key)
-		k.clearCandidateLocked(e)
+		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}
 	k.bytes = 0
 	k.turns = map[string]int{}
@@ -938,57 +931,7 @@ func (k *keeper) retire(key string) {
 	// retired here could still hold a candidate forever, which is how that registry used to fill
 	// permanently after 2,048 sessions ever passed through. Every exit from k.live must drop it
 	// too; see offload.ClearKeepAliveCandidate's own doc comment.
-	k.clearCandidateLocked(e)
-}
-
-// maxCandThreads bounds candThread. At the bound the map is emptied, which falls back to the
-// pre-#423 rule (any thread owns a candidate) rather than growing without limit.
-const maxCandThreads = 4096
-
-// noteCandidate runs after a real request's pipeline, in place of a bare
-// offload.ClearStaleKeepAliveCandidate. If THIS request registered a candidate, it records the
-// request's thread as the owner. Otherwise it drops a stale candidate only when the candidate
-// belongs to this thread: a subagent's request says nothing about the main thread's candidate.
-func (k *keeper) noteCandidate(tenantID, session, threadID string, pipelineStartedAt time.Time) {
-	if k == nil {
-		offload.ClearStaleKeepAliveCandidate(session, pipelineStartedAt)
-		return
-	}
-	if session == "" {
-		return
-	}
-	key := kaKey(tenantID, session)
-	registered := offload.KeepAliveCandidateRegisteredSince(session, pipelineStartedAt)
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if registered {
-		if len(k.candThread) >= maxCandThreads {
-			k.candThread = map[string]string{}
-		}
-		k.candThread[key] = threadID
-		return
-	}
-	if owner, known := k.candThread[key]; known && owner != threadID {
-		return
-	}
-	offload.ClearStaleKeepAliveCandidate(session, pipelineStartedAt)
-}
-
-// candidateOwnedLocked reports whether e's thread owns its session's candidate. Caller holds k.mu.
-func (k *keeper) candidateOwnedLocked(e *kaEntry) bool {
-	owner, known := k.candThread[kaKey(e.tenant, e.session)]
-	return !known || owner == e.thread
-}
-
-// clearCandidateLocked drops the session's candidate when e's thread owns it. Every exit from
-// k.live calls this (see offload.ClearKeepAliveCandidate); retiring a subagent's entry must not
-// drop the main thread's candidate. Caller holds k.mu.
-func (k *keeper) clearCandidateLocked(e *kaEntry) {
-	if !k.candidateOwnedLocked(e) {
-		return
-	}
-	offload.ClearKeepAliveCandidate(e.session)
-	delete(k.candThread, kaKey(e.tenant, e.session))
+	offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 }
 
 // retireSession releases every thread of one session: the primary thread's key and every key
@@ -1005,7 +948,7 @@ func (k *keeper) retireSession(tenantID, session string) {
 		k.bytes -= int64(len(e.body))
 		e.clear()
 		delete(k.live, key)
-		k.clearCandidateLocked(e)
+		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}
 }
 
@@ -1037,7 +980,7 @@ func (k *keeper) forget(tenantID string) {
 		e.clear()
 		delete(k.live, key)
 		delete(k.turns, key)
-		k.clearCandidateLocked(e)
+		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}
 	// Per-session overrides go too. This is the path a Settings save takes, so unticking the
 	// account-wide box must not leave armed sessions pinging on the strength of an
@@ -1063,7 +1006,7 @@ func (k *keeper) evictLocked() {
 		k.bytes -= int64(len(e.body))
 		e.clear()
 		delete(k.live, worstKey)
-		k.clearCandidateLocked(e)
+		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 		k.skipped.Add(1)
 	}
 }
@@ -1269,19 +1212,9 @@ func (k *keeper) fire(j pingJob) {
 // Fail open throughout, by construction: nothing here can leave this ping unset for the idle
 // span it was due for, because every "no" falls through to the code fire() already runs.
 func (k *keeper) fireSummarySubstitute(j pingJob) bool {
-	// The candidate's span is one thread's conversation (#423): only that thread's ping may use
-	// it. Another thread's ping is an ordinary ping, counted as "no candidate" for that thread.
-	k.mu.Lock()
-	owned := k.candidateOwnedLocked(j.e)
-	k.mu.Unlock()
-	if !owned {
-		k.summarySubstituteNoCandidate.Add(1)
-		slog.Debug("context-guru: cache_aware_summarizer keep-alive substitute not offered",
-			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
-			"reason", "other_thread")
-		return false
-	}
-	dispatch, info, reason, ok := offload.KeepAliveSubstitute(j.session)
+	// THIS thread's candidate (#423): the registry is keyed by session + thread, because a
+	// candidate's span is one thread's conversation and the ping refreshes one thread's prefix.
+	dispatch, info, reason, ok := offload.KeepAliveSubstitute(thread.Key(j.session, j.thread))
 	if !ok {
 		// WAS silent — "no candidate" (the ordinary case for most sessions) and "a candidate
 		// existed but a checkpoint already covers it" (routine, but a DIFFERENT fact) used to be
@@ -1422,7 +1355,7 @@ func (k *keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 	k.summarySubstituted.Add(1)
 	if ka, ok := j.emitter.(components.KeepAliveEmitter); ok {
 		ka.KeepAlivePing(components.KeepAliveReport{
-			Tenant: j.tenant, Session: j.session, Model: model, Provider: string(provider),
+			Tenant: j.tenant, Session: j.session, Thread: j.thread, Model: model, Provider: string(provider),
 			Route: route, Pings: j.ping, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite,
 			Output: u.Output, CostUSD: cost, Status: 200, DurationMs: ms,
 			TS: k.now().UnixMilli(), Agent: agent, Preset: preset,

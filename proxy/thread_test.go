@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -267,5 +268,27 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 				t.Errorf("keeper holds %d entries after two threads of two turns each, want 2", got)
 			}
 		})
+	}
+}
+
+// The handler's enforced path hands the thread resolver to apply, so the pipeline sees the thread
+// (cache_aware_summarizer keys its keep-alive candidate by it). Without this wiring the proxy
+// still resolves the thread after the pipeline, and every other test here still passes — which is
+// how a missing wire once went unnoticed.
+func TestApplyModeResolvesTheThreadBeforeThePipeline(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+	h, _ := dashHandler(t, up.URL, dash.Options{})
+	defer h.Close()
+	calls := 0
+	_, _, tr := h.applyMode(&reqInfo{
+		ctx: context.Background(), provider: bschemas.Anthropic, body: threadBody("fix the bug"), tn: h.static,
+		threadOf: func(string) thread.Result {
+			calls++
+			return thread.Result{ID: "a:wired", Source: thread.SourceHeader}
+		},
+	})
+	if calls != 1 || !tr.ThreadResolved || tr.Thread.ID != "a:wired" {
+		t.Fatalf("threadOf calls %d, trace thread %+v (resolved %v)", calls, tr.Thread, tr.ThreadResolved)
 	}
 }

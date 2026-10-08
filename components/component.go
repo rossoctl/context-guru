@@ -353,7 +353,12 @@ func ParseMode(s string) (Mode, error) {
 type Ctx struct {
 	Ctx     context.Context
 	Session string
-	Store   store.Store
+	// Thread is the thread of the session this request belongs to (main agent, a subagent, a
+	// fork): "" for the primary thread. A component that keeps per-CONVERSATION state between
+	// requests, outside the Store's session keys, keys it by thread.Key(Session, Thread) — each
+	// thread is its own conversation with its own provider cache entry. See internal/thread.
+	Thread string
+	Store  store.Store
 	// DisallowCountChange prevents transcript-restructuring components from
 	// running when a host cannot safely write their output back to its wire shape.
 	DisallowCountChange bool

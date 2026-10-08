@@ -35,6 +35,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
@@ -198,10 +199,13 @@ func (s slot) lossless() bool { return jsonEqual([]byte(s.raw), s.pre) }
 // input — the same material CONTEXT_GURU_DUMP writes to a file, handed to a
 // caller instead. Purely observational: nothing on it affects the rewrite.
 type Trace struct {
-	Session      string
-	Bypassed     bool
-	CacheAware   bool
-	MaxCachedIdx int
+	Session string
+	// Thread is the request's thread, from Opts.ThreadOf; ThreadResolved says ThreadOf ran.
+	Thread         thread.Result
+	ThreadResolved bool
+	Bypassed       bool
+	CacheAware     bool
+	MaxCachedIdx   int
 	// Messages is the normalized message count this request carried.
 	Messages int
 	// AttemptedTokens is the token count of the messages age/supersession
@@ -466,6 +470,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Via the same function the response path reaches through SessionIDFor, so observe mode's
 	// billed-input record and this pipeline's checkpoints cannot key on different ids.
 	sessionID := sessionIDFrom(o.Tenant, o.Session, body, norm)
+	o.resolveThread(tr, sessionID)
 	var restore restorePlan
 	if !bypass {
 		restore = planRestore(pipe, st, sessionID, string(provider), client,
@@ -616,6 +621,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	c := &components.Ctx{
 		Ctx:            ctx,
 		Session:        sessionID,
+		Thread:         tr.Thread.ID,
 		Store:          st,
 		Model:          models,
 		Bypass:         bypass,

@@ -1167,6 +1167,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// runs, so an unconditional clear placed after it deletes the very candidate this
 			// request's own run just wrote.
 			pipelineStartedAt := time.Now()
+			// The thread is resolved INSIDE apply, once the session id is known and before the
+			// pipeline runs, so components see it on Ctx.Thread (cache_aware_summarizer keys its
+			// keep-alive candidate by it). Read off `orig`, the request as the agent sent it.
+			threadOf := func(sess string) thread.Result {
+				return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
+			}
 			body, added, tr = h.applyMode(&reqInfo{
 				// cp.llmCtx: context-guru's OWN compaction-model spend under this context
 				// is charged to this request's row, and to no other tenant's.
@@ -1185,6 +1191,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				compactionPointSource: string(cpoint.Source),
 				rates:                 h.selfRates(r.Context(), gjson.GetBytes(body, "model").String()),
 				tn:                    tn,
+				threadOf:              threadOf,
 			})
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
@@ -1200,7 +1207,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// have their own cache entry, and only this request's thread was refreshed. Read
 			// off `orig`, the request as the agent sent it — the pipeline's own rewrite would
 			// break the prefix the fallback matches on.
-			th := h.threadFor(r, tn.ID, tr.Session, orig, agentCompaction, lg)
+			th := tr.Thread
+			if !tr.ThreadResolved {
+				// apply returned before resolving the session's thread (no message list, an
+				// observe-mode or bypassed request): resolve it here, as before.
+				th = h.threadFor(r, tn.ID, tr.Session, orig, agentCompaction, lg)
+			}
 			threadID = th.ID
 			cp.noteThread(th)
 			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
@@ -1210,8 +1222,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// may just have written: an unconditional clear here used to delete that candidate
 			// in the same call it was created, which is why keep-alive substitution could never
 			// actually fire. See ClearStaleKeepAliveCandidate's own comment.
-			// Per thread (#423): see keeper.noteCandidate.
-			h.keeper.noteCandidate(tn.ID, tr.Session, threadID, pipelineStartedAt)
+			// Per THREAD (#423): the registry is keyed by session + thread, so another thread's
+			// request can never clear this thread's candidate.
+			offload.ClearStaleKeepAliveCandidate(thread.Key(tr.Session, threadID), pipelineStartedAt)
 			h.setLastSession(tr.Session)
 			if h.agg != nil && !bypassed {
 				h.agg.RecordAddedLatency(addedMs)
