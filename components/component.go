@@ -173,14 +173,52 @@ type PrefixAsker interface {
 // Exported so a PrefixCoverage implementation living outside this package (the host's own
 // stash) can compute the identical hash a components/offload caller computes over its own
 // span, without either package importing the other.
+//
+// Hashes each message with its per-block cache_control stripped first (see
+// stripCacheControl): cache_control marks WHERE a client wants the provider's prompt cache to
+// break, not anything the model reads, and a client that moves the marker to a different
+// message every turn (Claude Code does, to keep it on the last message) must not change this
+// hash — otherwise SpanHash reports two slices of the identical conversation as different
+// spans purely because the cache breakpoint moved, which is exactly the false mismatch that
+// sent cache_aware_summarizer's stale-prefix guard into declining every commission at small
+// keep_last_turns values (PR #402 re-review).
 func SpanHash(msgs []schemas.ChatMessage) string {
 	h := sha256.New()
 	for i := range msgs {
-		b, _ := json.Marshal(msgs[i])
+		b, _ := json.Marshal(stripCacheControl(msgs[i]))
 		h.Write(b)
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:24]
+}
+
+// stripCacheControl returns a shallow copy of m with every content block's CacheControl
+// cleared, so SpanHash does not depend on where a cache breakpoint happens to sit. It copies
+// rather than mutates: m may be a live request's own message, about to be forwarded or
+// compacted the moment the caller gets control back, and clearing the field in place would
+// delete the real breakpoint from the request itself.
+func stripCacheControl(m schemas.ChatMessage) schemas.ChatMessage {
+	if m.Content == nil || len(m.Content.ContentBlocks) == 0 {
+		return m
+	}
+	marked := false
+	for i := range m.Content.ContentBlocks {
+		if m.Content.ContentBlocks[i].CacheControl != nil {
+			marked = true
+			break
+		}
+	}
+	if !marked {
+		return m
+	}
+	content := *m.Content
+	content.ContentBlocks = make([]schemas.ChatContentBlock, len(m.Content.ContentBlocks))
+	copy(content.ContentBlocks, m.Content.ContentBlocks)
+	for i := range content.ContentBlocks {
+		content.ContentBlocks[i].CacheControl = nil
+	}
+	m.Content = &content
+	return m
 }
 
 // PrefixCoverage, when a PrefixAsker also implements it, answers whether the body it would

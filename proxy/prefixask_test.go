@@ -259,7 +259,7 @@ func TestAskWithoutAStashedBodyReportsNoPrefix(t *testing.T) {
 func TestAskUsesTheStashedBodyForThatSession(t *testing.T) {
 	srv := newCapturePrefixed(t, 4242)
 	h := &Handler{sent: newSentStash()}
-	h.sent.put("scoped-session-1", bschemas.Anthropic, []byte(prefixBodyFixture))
+	h.sent.put("scoped-session-1", bschemas.Anthropic, []byte(prefixBodyFixture), []byte(prefixBodyFixture))
 	a := prefixAsker{stash: h.sent,
 		cli: cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "claude-sonnet-5", APIKey: "k"}}
 	_, u, err := a.Ask(context.Background(), "scoped-session-1", "THE-ASK")
@@ -286,12 +286,12 @@ func TestAskUsesTheStashedBodyForThatSession(t *testing.T) {
 // over the per-body cap is not stashed at all.
 func TestAnOversizedBodyIsNotStashed(t *testing.T) {
 	s := newSentStash()
-	s.put("sess", bschemas.Anthropic, []byte(strings.Repeat("x", maxSentBody+1)))
+	s.put("sess", bschemas.Anthropic, []byte(strings.Repeat("x", maxSentBody+1)), []byte(strings.Repeat("x", maxSentBody+1)))
 	if got := s.get("sess"); got != nil {
 		t.Fatalf("a %d-byte body was stashed past the %d cap", len(got), maxSentBody)
 	}
 	// Under the cap it is held.
-	s.put("sess", bschemas.Anthropic, []byte(prefixBodyFixture))
+	s.put("sess", bschemas.Anthropic, []byte(prefixBodyFixture), []byte(prefixBodyFixture))
 	if got := s.get("sess"); len(got) == 0 {
 		t.Fatal("a body under the cap was not stashed, so no session could ever ask")
 	}
@@ -338,7 +338,7 @@ func TestResponsesPrefixAskerUsesOnlyItsSessionAndReportsMissingPrefix(t *testin
 	}))
 	defer srv.Close()
 	stash := newSentStash()
-	stash.put("one", bschemas.OpenAI, []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"ONLY-ONE"}]}`))
+	stash.put("one", bschemas.OpenAI, []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"ONLY-ONE"}]}`), []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"ONLY-ONE"}]}`))
 	a := responsesPrefixAsker{stash: stash, cli: cheapmodel.OpenAI{BaseURL: srv.URL, Model: "gpt-5.6", APIKey: "k"}}
 	if _, _, err := a.Ask(context.Background(), "two", "ask"); err != components.ErrNoPrefix || got != nil {
 		t.Fatalf("missing session used another prefix: err=%v body=%s", err, got)
