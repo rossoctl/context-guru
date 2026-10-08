@@ -229,16 +229,34 @@ transcript alone can answer.
 With `--projects-dir`, for `main` and `team_thread` threads (not plain
 `subagent`, per the task), the report also includes:
 
-- **Per-tool wait stats**, sorted by call count: `call_count` (every
+- **Per-tool wait stats**, sorted by call count. `call_count` is every
   `tool_use` block anywhere, not just a response's last one — a plain
-  usage-frequency count), `wait_count` (the narrower population below),
-  median/p75/p90 wait and the share over 5 minutes (over **every**
-  consecutive call pair whose response's **last** `tool_use` named this
-  tool — no `GAP_THRESHOLD_MIN` floor here, since the distribution's own
-  shape, including the short waits, is what gets learned), and `best_n`
-  (the N with the lowest simulated cost, but computed only over this
-  tool's waits that *are* at least `GAP_THRESHOLD_MIN` — a sub-5-minute
-  wait never needed a ping to begin with).
+  usage-frequency count. **The PRIMARY columns are over waits of
+  `GAP_THRESHOLD_MIN` (4.67 min) or more**: `waits_ge_threshold` (count),
+  `median_wait_min`/`p75_wait_min`/`p90_wait_min`, `hits`/`misses` among
+  them (the same `Call.is_cache_hit` rule every other table uses), and
+  `best_n` — because **the keep-alive only ever acts after that much idle
+  time**, so a tool's typical sub-minute wait (true for almost every tool
+  except `AskUserQuestion`/`ExitPlanMode` and the rare long-running task)
+  tells the policy nothing; only the rare long wait does. `wait_count_all`,
+  `median_wait_min_all_waits` and `share_over_5min_all_waits` are kept as
+  SECONDARY columns, over every wait of any length, mostly useful to see
+  how rare a long wait is for that tool at all. `best_n` is `"n/a"` when a
+  tool has fewer than `MIN_TOOL_WAITS_FOR_OWN_BUDGET` (20) qualifying
+  waits — a best N computed from 0 or 1 waits is not a real signal (the
+  earlier version of this script computed one anyway, e.g. from a single
+  `Write` wait).
+
+  **This table's `waits_ge_threshold[tool]` must equal
+  `own_tool_breakdown[tool]`** (reported alongside it) for every tool
+  except `AskUserQuestion`/`ExitPlanMode` (which `own_tool_breakdown`
+  excludes — they wait on the human, not the tool) — both come from the
+  same gaps, keyed the same way (the response's LAST `tool_use`), at the
+  same threshold. `--self-test` asserts this exactly. An earlier version
+  of `own_tool_breakdown` counted EVERY `tool_use` block in a multi-tool
+  response instead of just the last one, which could inflate a tool's
+  count past what the per-tool table showed for it (e.g. `Write` showing
+  4 in one table and 1 in the other, for the same traffic).
 - **A policy comparison**: four ping-budget policies' average cost per
   gap, learned on the **first half of the project's sessions by time**
   and evaluated on the second half (so this measures generalization, not
@@ -257,6 +275,18 @@ With `--projects-dir`, for `main` and `team_thread` threads (not plain
   3. **`waiting_for`-only** — the same per-group budgets the hierarchical
      policy uses as its fallback, but with no per-tool step at all.
   4. **Today's fixed 2 pings.**
+
+  **A test set below `MIN_MEANINGFUL_TEST_GAPS` (50 gaps) is flagged with
+  a CAVEAT line** rather than reported as a result — `forever`'s
+  main-thread time-ordered split has only 14 test gaps, far too few to
+  call any policy a win or a tie there.
+
+  **A repeated-split check** (`repeated_split_policy_comparison`, 5
+  RANDOM session-level splits — a different split rule from the headline
+  time-ordered one, used only to check whether the headline result is a
+  property of the method or an artifact of that one split's particular
+  boundary) reports each policy's mean cost and its spread (min/max)
+  across the 5 splits. See Validation for what it shows.
 - **Unused tools**: declared built-in tools (the DB's
   `tool_declarations`, `kind='tool'`) that were never called (the DB's
   `tool_uses`) for this project's sessions. A transcript carries no
@@ -491,3 +521,37 @@ tracked open-tasks/open-teammates state. That reliably made a background
 task or teammate wait that was genuinely open at the START of the gap look
 already closed. Fixed by snapshotting `waiting_for` the moment each call
 finishes, before anything later can mutate the tracker.
+
+**Policy comparison, stated plainly**: on `context-guru` (the only
+project with a time-ordered test split large enough to mean anything —
+453 gaps), **the hierarchical policy loses**: 0.562x/gap, against a
+single global best N=5 at 0.539x/gap and today's fixed 2 pings at
+0.579x/gap. `waiting_for`-only (0.553x/gap) is close to hierarchical, as
+expected since they share the same fallback logic. The 5-split repeated
+check confirms this is not an artifact of one split: across 5 random
+session-level splits, global best N wins on both projects (context-guru
+mean 0.591x vs. hierarchical's 0.613x; `forever` mean 0.517x vs.
+hierarchical's 0.629x, though `forever`'s per-split spread is wide —
+0.348 to 0.877 — reflecting how few gaps its test halves actually have).
+
+**Why**: inspecting which test gaps cost the most under the hierarchical
+policy relative to global-N shows one mechanism dominating. `Bash`
+qualifies for its own learned budget (52 training waits), and that
+budget is tuned to `Bash`'s own typical wait, which is almost always
+under a minute — so its learned N is small (N=2 on this split). A handful
+of `Bash` waits in the TEST set run 15-18 minutes (a rare outlier for
+that specific tool), and N=2's window (14.3 min) misses them, costing
+1.35x each. The pooled global N=5 (learned by pooling every cause
+together, so it has to also cover the longer waits from `human` and
+`background`) has a wider window (28.4 min) that happens to catch these
+same outliers. The same pattern repeats for the `teammate` group: its
+own learned N=3 (window 19 min) misses several 20-28 minute test gaps
+that the global N=5's wider window catches. In short: fitting a smaller,
+cause-specific N to a cause's typical (short) behavior makes it
+systematically worse on that SAME cause's rare long tail than one
+coarser number learned across everything — the training population for
+`Bash`/`teammate` individually is dominated by short waits, so the
+learned per-cause N optimizes for the common case at the expense of the
+rare expensive one, while the global N, forced to also fit the
+inherently-longer `human`/`background` populations, ends up accidentally
+well-suited to those same long tails.

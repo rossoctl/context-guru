@@ -1083,17 +1083,21 @@ def waiting_for_x_wake_cause(gaps: list[Gap]) -> dict:
 
 
 def own_tool_breakdown(gaps: list[Gap]) -> dict[str, int]:
-    """How many own_tool gaps started with each tool name. A response can
-    carry more than one tool_use block (parallel tool calls), so this can sum
-    to more than the own_tool gap count — it is a breakdown of TOOL CALLS, not
-    of gaps.
+    """How many own_tool gaps started with each tool name, keyed on the
+    response's LAST tool_use block — the same rule ToolWait uses (see its
+    docstring), and deliberately so: this must reconcile exactly with
+    summarize_tool_waits()'s `waits_ge_threshold` count for the same tool
+    (both come from the same gaps, both key on the last tool_use, both use
+    GAP_THRESHOLD_MIN — the earlier version counted EVERY tool_use block in
+    a multi-tool response, which could double-count a response that called
+    2 tools and never matched the per-tool table's own count).
     """
     counts: dict[str, int] = defaultdict(int)
     for g in gaps:
         if g.is_cold_start or g.waiting_for != "own_tool":
             continue
-        for name in g.start.tool_use_names:
-            counts[name] += 1
+        if g.start.tool_use_names:
+            counts[g.start.tool_use_names[-1]] += 1
     return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
 
 
@@ -1104,6 +1108,10 @@ def own_tool_breakdown(gaps: list[Gap]) -> dict[str, int]:
 MIN_TOOL_WAITS_FOR_OWN_BUDGET = 20  # issue #424's own suggested threshold
 MAX_PING_BUDGET = 11  # issue #424: "never go above the break-even point"
 DEFAULT_PING_BUDGET = 2  # today's fixed policy
+# PR #425 review: a policy-comparison test set below this is too small to
+# call any policy a win or a tie on — say so rather than letting a 14-gap
+# test set (forever) read the same as a 445-gap one (context-guru).
+MIN_MEANINGFUL_TEST_GAPS = 50
 
 
 def best_n_for_gaps(gaps_min: list[float]) -> int:
@@ -1128,10 +1136,29 @@ def tool_call_counts(calls_by_thread: dict[str, list[Call]]) -> dict[str, int]:
 
 
 def summarize_tool_waits(tool_waits: list[ToolWait], call_counts: dict[str, int]) -> dict:
-    """Per tool: call count, wait count, median/p75/p90 wait (over EVERY
-    wait, any duration), share of waits over 5 min, and the best N (over
-    only this tool's waits of GAP_THRESHOLD_MIN or more — a sub-5-minute
-    wait never needed a ping in the first place). Sorted by call count.
+    """Per tool, sorted by call count.
+
+    PR #425 review: the keep-alive only ever acts after GAP_THRESHOLD_MIN
+    (4.67 min) of idle time, so the PRIMARY stats here are over waits of
+    that length or more — count (`waits_ge_threshold`), median/p75/p90
+    (the `_ge_threshold` fields), and hits/misses among them (the hit rule
+    is the same `Call.is_cache_hit` every other table uses). The all-wait
+    median and the share over 5 min (`median_wait_min_all_waits`,
+    `share_over_5min_all_waits`) are kept as SECONDARY columns — almost
+    every tool resolves in well under a minute, so they mostly just show
+    how rare a long wait is for that tool. `own_tool_breakdown` (reported
+    alongside this table) counts gaps the same way — the response's LAST
+    tool_use, gaps at or above the threshold — specifically so the two
+    reconcile: `own_tool_breakdown[tool]` must equal
+    `waits_ge_threshold` for every tool except `AskUserQuestion`/
+    `ExitPlanMode` (which `own_tool_breakdown` excludes, since those wait
+    on the human, not the agent's own tool — see `waiting_for`).
+
+    `best_n` is `"n/a"` when a tool has fewer than
+    MIN_TOOL_WAITS_FOR_OWN_BUDGET training waits at or above the
+    threshold — the same rule the hierarchical policy itself uses to
+    decide whether a tool has "enough" data (see `policy_n`); a best N
+    computed from 0 or 1 waits is not a real signal.
     """
     by_tool: dict[str, list[ToolWait]] = defaultdict(list)
     for tw in tool_waits:
@@ -1140,16 +1167,22 @@ def summarize_tool_waits(tool_waits: list[ToolWait], call_counts: dict[str, int]
     out = {}
     for tool, tws in by_tool.items():
         all_waits = [tw.gap_min for tw in tws]
-        long_waits = [g for g in all_waits if g >= GAP_THRESHOLD_MIN]
+        long = [tw for tw in tws if tw.gap_min >= GAP_THRESHOLD_MIN]
+        long_waits = [tw.gap_min for tw in long]
+        hits = sum(1 for tw in long if tw.end.is_cache_hit)
+        misses = sum(1 for tw in long if tw.end.is_cache_miss)
         out[tool] = {
             "call_count": call_counts.get(tool, len(tws)),
-            "wait_count": len(tws),
-            "median_wait_min": round(median(all_waits), 2) if all_waits else 0.0,
-            "p75_wait_min": round(pct(all_waits, 0.75), 2) if all_waits else 0.0,
-            "p90_wait_min": round(pct(all_waits, 0.90), 2) if all_waits else 0.0,
-            "share_over_5min": round(sum(1 for g in all_waits if g > 5.0) / len(all_waits), 3) if all_waits else 0.0,
-            "waits_ge_threshold": len(long_waits),
-            "best_n": best_n_for_gaps(long_waits),
+            "waits_ge_threshold": len(long),
+            "median_wait_min": round(median(long_waits), 2) if long_waits else 0.0,
+            "p75_wait_min": round(pct(long_waits, 0.75), 2) if long_waits else 0.0,
+            "p90_wait_min": round(pct(long_waits, 0.90), 2) if long_waits else 0.0,
+            "hits": hits,
+            "misses": misses,
+            "best_n": best_n_for_gaps(long_waits) if len(long) >= MIN_TOOL_WAITS_FOR_OWN_BUDGET else "n/a",
+            "wait_count_all": len(tws),
+            "median_wait_min_all_waits": round(median(all_waits), 2) if all_waits else 0.0,
+            "share_over_5min_all_waits": round(sum(1 for g in all_waits if g > 5.0) / len(all_waits), 3) if all_waits else 0.0,
         }
     return dict(sorted(out.items(), key=lambda kv: -kv[1]["call_count"]))
 
@@ -1230,6 +1263,56 @@ def simulate_policies(
             avg_cost(lambda g: min(MAX_PING_BUDGET, group_best_n.get(g.waiting_for, DEFAULT_PING_BUDGET))), 3
         ),
         "fixed_2_pings_cost_x_per_gap": round(avg_cost(lambda g: DEFAULT_PING_BUDGET), 3),
+    }
+
+
+def random_session_split(session_ids: list[str], seed: int) -> tuple[set[str], set[str]]:
+    """A RANDOM (not time-ordered) half/half session split, for the repeated
+    robustness check only — the headline train/test split stays time-ordered
+    (issue #424's own instruction), but one split alone cannot show whether
+    a result is a property of the method or an artifact of that one split's
+    particular train/test boundary (see PR #425 review).
+    """
+    import random
+
+    ids = sorted(session_ids)
+    random.Random(seed).shuffle(ids)
+    cutoff = (len(ids) + 1) // 2
+    return set(ids[:cutoff]), set(ids[cutoff:])
+
+
+def repeated_split_policy_comparison(
+    all_gaps: list[Gap], all_tool_waits: list[ToolWait], calls_by_thread: dict[str, list[Call]], n_splits: int = 5
+) -> dict:
+    """Run simulate_policies on N random session-level splits and report
+    each policy's mean cost and its spread (min/max across splits) — PR
+    #425 review: "so the result is not judged on one split."
+    """
+
+    def session_of(thread_id: str) -> str:
+        return thread_id.split("/", 1)[0]
+
+    session_ids = sorted({session_of(tid) for tid, calls in calls_by_thread.items() if calls})
+    real_gaps = [g for g in all_gaps if not g.is_cold_start]
+
+    per_split = []
+    for seed in range(n_splits):
+        train_s, test_s = random_session_split(session_ids, seed)
+        train_gaps = [g for g in real_gaps if session_of(g.thread_id) in train_s]
+        test_gaps = [g for g in real_gaps if session_of(g.thread_id) in test_s]
+        train_tw = [tw for tw in all_tool_waits if session_of(tw.thread_id) in train_s]
+        per_split.append(simulate_policies(train_gaps, test_gaps, train_tw))
+
+    def agg(key: str) -> dict:
+        vals = [r[key] for r in per_split]
+        return {"mean": round(sum(vals) / len(vals), 3), "min": round(min(vals), 3), "max": round(max(vals), 3), "values": vals}
+
+    return {
+        "n_splits": n_splits,
+        "hierarchical": agg("hierarchical_cost_x_per_gap"),
+        "global_best_n": agg("global_best_n_cost_x_per_gap"),
+        "waiting_for_only": agg("waiting_for_only_cost_x_per_gap"),
+        "fixed_2_pings": agg("fixed_2_pings_cost_x_per_gap"),
     }
 
 
@@ -1573,6 +1656,9 @@ def run_transcript_mode(projects_dirs: list[str], db_paths: list[str]) -> dict:
         report["projects"][project]["policy_comparison"] = simulate_policies(train_gaps, test_gaps, train_tool_waits)
         report["projects"][project]["policy_comparison"]["train_sessions"] = len(train_sessions)
         report["projects"][project]["policy_comparison"]["test_sessions"] = len(test_sessions)
+        report["projects"][project]["repeated_split_policy_comparison"] = repeated_split_policy_comparison(
+            gaps, project_tool_waits, project_calls
+        )
 
         called_from_transcripts = {name for calls in project_calls.values() for c in calls for name in c.tool_use_names}
         all_session_ids = train_sessions | test_sessions
@@ -1688,13 +1774,19 @@ def human_summary(report: dict) -> str:
             if not tool_stats:
                 continue
             label = "team_thread" if kind == "team_thread" else kind
-            lines.append(f"\n  {label}: per-tool wait stats (sorted by call count)")
+            lines.append(
+                f"\n  {label}: per-tool wait stats (sorted by call count). PRIMARY columns are "
+                f"waits >= {GAP_THRESHOLD_MIN}min (the keep-alive only ever acts after that much idle "
+                f"time); 'all waits' columns are secondary, over every wait of any length."
+            )
             for tool, stats in tool_stats.items():
                 lines.append(
-                    f"    {tool}: calls={stats['call_count']} waits={stats['wait_count']} "
-                    f"median={stats['median_wait_min']}min p75={stats['p75_wait_min']}min "
-                    f"p90={stats['p90_wait_min']}min >5min={stats['share_over_5min']*100:.0f}% "
-                    f"best N={stats['best_n']} (on {stats['waits_ge_threshold']} waits >= {GAP_THRESHOLD_MIN}min)"
+                    f"    {tool}: calls={stats['call_count']} | "
+                    f"waits>=thresh={stats['waits_ge_threshold']} (hits={stats['hits']} misses={stats['misses']}) "
+                    f"median={stats['median_wait_min']}min p75={stats['p75_wait_min']}min p90={stats['p90_wait_min']}min "
+                    f"best N={stats['best_n']} | "
+                    f"all waits: {stats['wait_count_all']}, median={stats['median_wait_min_all_waits']}min, "
+                    f">5min={stats['share_over_5min_all_waits']*100:.0f}%"
                 )
 
         pc = data.get("policy_comparison")
@@ -1703,10 +1795,22 @@ def human_summary(report: dict) -> str:
                 f"\n  Policy comparison (train {pc['train_sessions']} sessions / {pc['train_gap_count']} gaps, "
                 f"test {pc['test_sessions']} sessions / {pc['test_gap_count']} gaps):"
             )
+            if pc["test_gap_count"] < MIN_MEANINGFUL_TEST_GAPS:
+                lines.append(
+                    f"    CAVEAT: only {pc['test_gap_count']} test gaps — too few to call any policy a win or a "
+                    f"tie here; see the repeated-split check below instead."
+                )
             lines.append(f"    hierarchical policy: {pc['hierarchical_cost_x_per_gap']}x/gap")
             lines.append(f"    single global best N ({pc['global_best_n']}): {pc['global_best_n_cost_x_per_gap']}x/gap")
             lines.append(f"    waiting_for-only policy: {pc['waiting_for_only_cost_x_per_gap']}x/gap")
             lines.append(f"    today's fixed 2 pings: {pc['fixed_2_pings_cost_x_per_gap']}x/gap")
+
+        rsc = data.get("repeated_split_policy_comparison")
+        if rsc:
+            lines.append(f"\n  Repeated random session-split check ({rsc['n_splits']} splits, mean [min, max] x/gap):")
+            for label, key in (("hierarchical", "hierarchical"), ("global best N", "global_best_n"), ("waiting_for-only", "waiting_for_only"), ("fixed 2 pings", "fixed_2_pings")):
+                r = rsc[key]
+                lines.append(f"    {label}: {r['mean']} [{r['min']}, {r['max']}] (values: {r['values']})")
 
         ut = data.get("unused_tools")
         if ut:
@@ -2146,11 +2250,26 @@ def run_self_test() -> bool:
         check("call_count: SendMessage", wf_call_counts.get("SendMessage"), 1)
         wf_tool_stats = summarize_tool_waits(wf_tool_waits, wf_call_counts)
         check("tool_waits count (one per tool-ending call)", len(wf_tool_waits), 4)
-        check("Bash wait_count", wf_tool_stats["Bash"]["wait_count"], 1)
-        check("Bash median wait is the 5-min gap", wf_tool_stats["Bash"]["median_wait_min"], 5.0)
-        check("AskUserQuestion wait_count", wf_tool_stats["AskUserQuestion"]["wait_count"], 1)
+        check("Bash waits_ge_threshold (the 5-min gap qualifies)", wf_tool_stats["Bash"]["waits_ge_threshold"], 1)
+        check("Bash median wait (>= threshold) is the 5-min gap", wf_tool_stats["Bash"]["median_wait_min"], 5.0)
+        check("Bash best_n is n/a with only 1 training wait (< 20)", wf_tool_stats["Bash"]["best_n"], "n/a")
+        check("AskUserQuestion waits_ge_threshold", wf_tool_stats["AskUserQuestion"]["waits_ge_threshold"], 1)
         # sorted by call_count; all tied at 1 here, so just check every tool present.
         check("summarize_tool_waits covers all 4 tools", set(wf_tool_stats), {"Bash", "Monitor", "AskUserQuestion", "SendMessage"})
+
+        # PR #425 review: own_tool_breakdown and summarize_tool_waits must
+        # reconcile exactly (same gaps, same "last tool_use" rule, same
+        # threshold) for every tool except AskUserQuestion/ExitPlanMode,
+        # which own_tool_breakdown excludes (they wait on the human).
+        wf_breakdown_check = own_tool_breakdown(wf_gaps)
+        for tool, stats in wf_tool_stats.items():
+            if tool in ASK_HUMAN_TOOLS:
+                continue
+            check(
+                f"own_tool_breakdown[{tool}] reconciles with waits_ge_threshold",
+                wf_breakdown_check.get(tool, 0),
+                stats["waits_ge_threshold"],
+            )
 
         # --- Issue #424 section 4: the hierarchical ping-budget policy, built
         # and evaluated directly on hand-computed Gap/ToolWait objects (no
@@ -2185,6 +2304,30 @@ def run_self_test() -> bool:
         check("policy: global-N cost on test", policy["global_best_n_cost_x_per_gap"], 0.25)
         check("policy: waiting_for-only cost on test", policy["waiting_for_only_cost_x_per_gap"], 0.25)
         check("policy: fixed 2 pings costs clearly more here", policy["fixed_2_pings_cost_x_per_gap"], 0.725)
+
+        # repeated_split_policy_comparison: 4 sessions (2 train-labeled, 2
+        # test-labeled, by thread_id prefix) is enough to exercise the
+        # mechanics -- random_session_split is deterministic per seed, so a
+        # fixed n_splits must come back with exactly that many values per
+        # policy, each a valid x/gap average.
+        rs_calls_by_thread = {
+            "rs1/main": [mk_call(0.0)],
+            "rs2/main": [mk_call(0.0)],
+            "rs3/main": [mk_call(0.0)],
+            "rs4/main": [mk_call(0.0)],
+        }
+        rs_gaps = (
+            [mk_gap("rs1/main", 6.0, "own_tool", ("Bash",)) for _ in range(5)]
+            + [mk_gap("rs2/main", 20.0, "human") for _ in range(5)]
+            + [mk_gap("rs3/main", 6.0, "own_tool", ("Bash",)) for _ in range(5)]
+            + [mk_gap("rs4/main", 20.0, "human") for _ in range(5)]
+        )
+        rs_tool_waits = [mk_tool_wait("rs1/main", "Bash", 6.0) for _ in range(5)] + [mk_tool_wait("rs3/main", "Bash", 6.0) for _ in range(5)]
+        rs_result = repeated_split_policy_comparison(rs_gaps, rs_tool_waits, rs_calls_by_thread, n_splits=5)
+        check("repeated_split: n_splits", rs_result["n_splits"], 5)
+        check("repeated_split: 5 values per policy", len(rs_result["hierarchical"]["values"]), 5)
+        check("repeated_split: hierarchical mean is a plausible x/gap value", 0.0 <= rs_result["hierarchical"]["mean"] <= 1.15, True)
+        check("repeated_split: min <= mean <= max", rs_result["hierarchical"]["min"] <= rs_result["hierarchical"]["mean"] <= rs_result["hierarchical"]["max"], True)
 
         # split_sessions_by_time: 3 sessions at increasing times -> train gets
         # the first 2 (the extra one on an odd split), test gets the last 1.
