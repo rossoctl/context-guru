@@ -188,7 +188,51 @@ may expire silently in rare cases, and treating "open forever" as the
 default for an expiring task is exactly the bug issue #424 flagged in its
 own rough detector (see Validation).
 
-## Prices
+## Learning a ping budget per tool (issue #424 section 4)
+
+With `--projects-dir`, for `main` and `team_thread` threads (not plain
+`subagent`, per the task), the report also includes:
+
+- **Per-tool wait stats**, sorted by call count: `call_count` (every
+  `tool_use` block anywhere, not just a response's last one — a plain
+  usage-frequency count), `wait_count` (the narrower population below),
+  median/p75/p90 wait and the share over 5 minutes (over **every**
+  consecutive call pair whose response's **last** `tool_use` named this
+  tool — no `GAP_THRESHOLD_MIN` floor here, since the distribution's own
+  shape, including the short waits, is what gets learned), and `best_n`
+  (the N with the lowest simulated cost, but computed only over this
+  tool's waits that *are* at least `GAP_THRESHOLD_MIN` — a sub-5-minute
+  wait never needed a ping to begin with).
+- **A policy comparison**: four ping-budget policies' average cost per
+  gap, learned on the **first half of the project's sessions by time**
+  and evaluated on the second half (so this measures generalization, not
+  fit — the issue's own instruction):
+  1. **Hierarchical** (issue #424's own proposal): `AskUserQuestion` and
+     `ExitPlanMode` always use the `human` group's budget; otherwise a
+     tool with at least `MIN_TOOL_WAITS_FOR_OWN_BUDGET` (20) training
+     waits of `GAP_THRESHOLD_MIN`+ uses its own learned budget; otherwise
+     a tool-having-too-little-data falls back to the `own_tool` group's
+     budget; a gap with no tool at all uses its own `waiting_for` group's
+     budget; a default of 2 when there is no data at all. Capped at
+     `MAX_PING_BUDGET` (11 — "never go above the break-even point")
+     throughout.
+  2. **A single global best N** — one N, learned over every training gap
+     pooled together, applied to every test gap.
+  3. **`waiting_for`-only** — the same per-group budgets the hierarchical
+     policy uses as its fallback, but with no per-tool step at all.
+  4. **Today's fixed 2 pings.**
+- **Unused tools**: declared built-in tools (the DB's
+  `tool_declarations`, `kind='tool'`) that were never called (the DB's
+  `tool_uses`) for this project's sessions. A transcript carries no
+  declared-tools list of its own — checked directly: Claude Code's
+  session JSONL records the rendered conversation, not the raw request
+  body a `tools` array would live in — so **this needs `--db`**; without
+  one, the report says so and lists only the tools that *were* called,
+  from the transcripts. The DB's own `tool_uses` table can under-cover a
+  project (it may only have rows for a handful of sessions out of many),
+  so a tool the TRANSCRIPTS show as called is never reported unused just
+  because this particular DB missed that session — the two "called" sets
+  are unioned before subtracting from "declared".
 
 ## Prices
 
@@ -367,3 +411,26 @@ either):
   DB row to a transcript call") now finds more of them.
 - Upstream 502s: median hang 305 seconds (5.1 min), matching the issue's
   "5.3-6.0 min" range.
+
+**Per-tool policy comparison** (`--self-test`): built and evaluated
+directly on hand-constructed `Gap`/`ToolWait` objects (no file round-trip
+needed, since `simulate_policies`/`split_sessions_by_time` only look at
+`.ts`/`.gap_min`/`.waiting_for`/`.tool_use_names`). 25 `Bash` waits at 6
+minutes and 25 `human` waits at 20 minutes as training data (hand-derived
+best N: 1 for `Bash`, 4 for the pooled `human` group and for a single
+global N), evaluated on one 6-minute `Bash` test gap and one 20-minute
+`human` test gap: the hierarchical, global-N, and `waiting_for`-only
+policies all land on 0.25x/gap here (expected — with only one tool
+feeding the `own_tool` group, its group budget and the tool's own budget
+coincide), while today's fixed 2 pings costs 0.725x/gap on the same two
+gaps — a clear, exactly-asserted case where a learned budget beats the
+fixed default. The `unused_tools_report` DB-undercoverage fix (a tool the
+transcript shows as called must never show as unused just because the
+DB's own `tool_uses` table missed that session) is asserted directly
+too.
+
+On real data (both local projects' `main` and `team_thread` threads), the
+DB-undercoverage case is not hypothetical: before the fix, `forever`'s
+"unused tools" list included `SendMessage` and `AskUserQuestion` — tools
+the transcripts show hundreds of calls to — because the local dashboard
+DBs happen to cover only a handful of `forever`'s sessions.

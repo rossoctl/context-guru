@@ -360,6 +360,32 @@ class Gap:
     waiting_for: str = ""  # one of WAITING_FOR_VALUES, known once the gap STARTS
 
 
+@dataclass
+class ToolWait:
+    """The wait after ONE call whose response's LAST tool_use block named
+    `tool` — issue #424 section 4's per-tool learning. Unlike Gap, this is
+    recorded for EVERY consecutive call pair, with no GAP_THRESHOLD_MIN floor
+    ("every gap including the short ones"), because the distribution's own
+    shape (how many waits are short vs. long) is part of what is learned.
+
+    `fallback_group` is the waiting_for bucket this call would fall into if
+    the tool itself turns out to have too little data: "human" for
+    AskUserQuestion/ExitPlanMode (issue #424's named exception), "own_tool"
+    for every other tool — this needs no thread-state lookup, since a
+    tool_use always wins classify_waiting_for's own_tool/human check before
+    it ever looks at open tasks/teammates.
+    """
+
+    project: str
+    thread_kind: str
+    thread_id: str
+    tool: str
+    gap_min: float
+    start: Call
+    end: Call
+    fallback_group: str  # "human" or "own_tool"
+
+
 def iso_to_epoch(ts: str) -> float | None:
     if not ts:
         return None
@@ -495,11 +521,13 @@ class _CallBuffer:
 
 def iter_calls_and_gaps(
     path: str, thread_id: str, thread_kind: str, project: str
-) -> tuple[list[Call], list[Gap]]:
-    """Parse one thread's JSONL file into its calls and its gaps > threshold."""
+) -> tuple[list[Call], list[Gap], list[ToolWait]]:
+    """Parse one thread's JSONL file into its calls, its gaps > threshold,
+    and its per-tool waits (every consecutive call pair, no threshold)."""
     calls: list[Call] = []
     pending_between: list[dict] = []
     gaps: list[Gap] = []
+    tool_waits: list[ToolWait] = []
     prev_call: Call | None = None
     wait_state = ThreadWaitState()
     buffer: _CallBuffer | None = None
@@ -516,6 +544,21 @@ def iter_calls_and_gaps(
 
         if prev_call is not None:
             gap_min = (call.ts - prev_call.ts) / 60.0
+            if prev_call.tool_use_names:
+                tool = prev_call.tool_use_names[-1]
+                fallback_group = "human" if tool in ASK_HUMAN_TOOLS else "own_tool"
+                tool_waits.append(
+                    ToolWait(
+                        project=project,
+                        thread_kind=thread_kind,
+                        thread_id=thread_id,
+                        tool=tool,
+                        gap_min=gap_min,
+                        start=prev_call,
+                        end=call,
+                        fallback_group=fallback_group,
+                    )
+                )
             if gap_min >= GAP_THRESHOLD_MIN:
                 cause = "retry" if prev_call.is_error else classify_wake_cause(pending_between)
                 waiting_for = wait_state.classify_waiting_for(prev_call)
@@ -553,7 +596,7 @@ def iter_calls_and_gaps(
     try:
         fh = open(path, "r", encoding="utf-8", errors="replace")
     except OSError:
-        return [], []
+        return [], [], []
 
     with fh:
         for line in fh:
@@ -586,7 +629,7 @@ def iter_calls_and_gaps(
 
         flush_buffer()
 
-    return calls, gaps
+    return calls, gaps, tool_waits
 
 
 WORKTREE_SUFFIX_RE = re.compile(r"--claude-worktrees-.*$")
@@ -932,6 +975,218 @@ def own_tool_breakdown(gaps: list[Gap]) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Issue #424 section 4: learn the wait per tool, with a generic fallback.
+# ---------------------------------------------------------------------------
+
+MIN_TOOL_WAITS_FOR_OWN_BUDGET = 20  # issue #424's own suggested threshold
+MAX_PING_BUDGET = 11  # issue #424: "never go above the break-even point"
+DEFAULT_PING_BUDGET = 2  # today's fixed policy
+
+
+def best_n_for_gaps(gaps_min: list[float]) -> int:
+    """The N (0..12) with the lowest average sim_cost_x over these gaps."""
+    if not gaps_min:
+        return DEFAULT_PING_BUDGET
+    sim = {n: sum(sim_cost_x(g, n) for g in gaps_min) / len(gaps_min) for n in PING_BUDGETS}
+    return min(sim, key=lambda n: sim[n])
+
+
+def tool_call_counts(calls_by_thread: dict[str, list[Call]]) -> dict[str, int]:
+    """Number of calls to each tool, counting EVERY tool_use block in EVERY
+    response (not just the last one per response, unlike ToolWait) — issue
+    #424's "number of calls" stat, a plain usage-frequency count.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for calls in calls_by_thread.values():
+        for call in calls:
+            for name in call.tool_use_names:
+                counts[name] += 1
+    return dict(counts)
+
+
+def summarize_tool_waits(tool_waits: list[ToolWait], call_counts: dict[str, int]) -> dict:
+    """Per tool: call count, wait count, median/p75/p90 wait (over EVERY
+    wait, any duration), share of waits over 5 min, and the best N (over
+    only this tool's waits of GAP_THRESHOLD_MIN or more — a sub-5-minute
+    wait never needed a ping in the first place). Sorted by call count.
+    """
+    by_tool: dict[str, list[ToolWait]] = defaultdict(list)
+    for tw in tool_waits:
+        by_tool[tw.tool].append(tw)
+
+    out = {}
+    for tool, tws in by_tool.items():
+        all_waits = [tw.gap_min for tw in tws]
+        long_waits = [g for g in all_waits if g >= GAP_THRESHOLD_MIN]
+        out[tool] = {
+            "call_count": call_counts.get(tool, len(tws)),
+            "wait_count": len(tws),
+            "median_wait_min": round(median(all_waits), 2) if all_waits else 0.0,
+            "p75_wait_min": round(pct(all_waits, 0.75), 2) if all_waits else 0.0,
+            "p90_wait_min": round(pct(all_waits, 0.90), 2) if all_waits else 0.0,
+            "share_over_5min": round(sum(1 for g in all_waits if g > 5.0) / len(all_waits), 3) if all_waits else 0.0,
+            "waits_ge_threshold": len(long_waits),
+            "best_n": best_n_for_gaps(long_waits),
+        }
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]["call_count"]))
+
+
+def split_sessions_by_time(calls_by_thread: dict[str, list[Call]]) -> tuple[set[str], set[str]]:
+    """Order a project's SESSIONS (not threads) by their first call's
+    timestamp, and split into the first half (train) and second half
+    (test) — issue #424's own instruction, so the policy comparison
+    measures generalization rather than fit.
+    """
+    session_first_ts: dict[str, float] = {}
+    for thread_id, calls in calls_by_thread.items():
+        if not calls:
+            continue
+        session_id = thread_id.split("/", 1)[0]
+        ts = calls[0].ts
+        if session_id not in session_first_ts or ts < session_first_ts[session_id]:
+            session_first_ts[session_id] = ts
+    ordered = sorted(session_first_ts, key=lambda sid: session_first_ts[sid])
+    cutoff = (len(ordered) + 1) // 2  # train gets the extra session on an odd split
+    return set(ordered[:cutoff]), set(ordered[cutoff:])
+
+
+def policy_n(
+    gap: Gap,
+    tool_best_n: dict[str, tuple[int, int]],  # tool -> (best_n, train_wait_count)
+    group_best_n: dict[str, int],
+) -> int:
+    """The hierarchical policy from issue #424 section 4: a known special
+    case uses the human budget; else the tool's own budget if it has
+    enough training data; else its waiting_for group's budget; else the
+    default. Capped at MAX_PING_BUDGET throughout.
+    """
+    tool = gap.start.tool_use_names[-1] if gap.start.tool_use_names else None
+    if tool in ASK_HUMAN_TOOLS:
+        n = group_best_n.get("human", DEFAULT_PING_BUDGET)
+    elif tool is not None:
+        best_n, train_count = tool_best_n.get(tool, (DEFAULT_PING_BUDGET, 0))
+        n = best_n if train_count >= MIN_TOOL_WAITS_FOR_OWN_BUDGET else group_best_n.get("own_tool", DEFAULT_PING_BUDGET)
+    else:
+        n = group_best_n.get(gap.waiting_for, DEFAULT_PING_BUDGET)
+    return min(n, MAX_PING_BUDGET)
+
+
+def simulate_policies(
+    train_gaps: list[Gap], test_gaps: list[Gap], train_tool_waits: list[ToolWait]
+) -> dict:
+    """Learn on train_gaps/train_tool_waits, evaluate 4 policies' average
+    cost per gap on test_gaps: the hierarchical policy, a single global
+    best N, the waiting_for-only policy (no per-tool step), and today's
+    fixed 2 pings. All capped at MAX_PING_BUDGET.
+    """
+    group_best_n = {
+        wf: best_n_for_gaps([g.gap_min for g in train_gaps if g.waiting_for == wf])
+        for wf in WAITING_FOR_VALUES
+    }
+
+    by_tool: dict[str, list[float]] = defaultdict(list)
+    for tw in train_tool_waits:
+        if tw.gap_min >= GAP_THRESHOLD_MIN:
+            by_tool[tw.tool].append(tw.gap_min)
+    tool_best_n = {tool: (best_n_for_gaps(gaps_min), len(gaps_min)) for tool, gaps_min in by_tool.items()}
+
+    global_n = min(MAX_PING_BUDGET, best_n_for_gaps([g.gap_min for g in train_gaps]))
+
+    def avg_cost(n_for_gap) -> float:
+        if not test_gaps:
+            return 0.0
+        return sum(sim_cost_x(g.gap_min, n_for_gap(g)) for g in test_gaps) / len(test_gaps)
+
+    return {
+        "train_gap_count": len(train_gaps),
+        "test_gap_count": len(test_gaps),
+        "hierarchical_cost_x_per_gap": round(avg_cost(lambda g: policy_n(g, tool_best_n, group_best_n)), 3),
+        "global_best_n": global_n,
+        "global_best_n_cost_x_per_gap": round(avg_cost(lambda g: global_n), 3),
+        "waiting_for_only_cost_x_per_gap": round(
+            avg_cost(lambda g: min(MAX_PING_BUDGET, group_best_n.get(g.waiting_for, DEFAULT_PING_BUDGET))), 3
+        ),
+        "fixed_2_pings_cost_x_per_gap": round(avg_cost(lambda g: DEFAULT_PING_BUDGET), 3),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Issue #424 section 4: unused tools (declared but never called).
+# ---------------------------------------------------------------------------
+
+
+def read_tool_tables(db_path: str, session_ids: set[str]) -> tuple[set[str], set[str]]:
+    """(declared built-in tool names, called tool names) for these sessions,
+    from the DB's tool_declarations (kind='tool') and tool_uses tables —
+    the DB stores exactly this, which a transcript does not (see
+    unused_tools_report).
+    """
+    if not session_ids:
+        return set(), set()
+    uri = f"file:{db_path}?mode=ro"
+    con = sqlite3.connect(uri, uri=True)
+    try:
+        placeholders = ",".join("?" for _ in session_ids)
+        cur = con.cursor()
+        cur.execute(
+            f"select distinct name from tool_declarations where kind='tool' and session_id in ({placeholders})",
+            tuple(session_ids),
+        )
+        declared = {r[0] for r in cur.fetchall()}
+        cur.execute(
+            f"select distinct name from tool_uses where calls > 0 and session_id in ({placeholders})",
+            tuple(session_ids),
+        )
+        called = {r[0] for r in cur.fetchall()}
+    finally:
+        con.close()
+    return declared, called
+
+
+def unused_tools_report(session_ids: set[str], db_paths: list[str], called_from_transcripts: set[str]) -> dict:
+    """Declared-but-never-called built-in tools for a project's sessions.
+
+    Needs the DB's tool_declarations table: a transcript carries no `tools`
+    array of its own (checked: Claude Code session JSONL records the
+    rendered conversation, not the raw request body a declared-tools list
+    would live in), so without a DB this can only report which tools WERE
+    called, not which were declared and skipped.
+    """
+    if not db_paths:
+        return {
+            "source": "transcripts_only",
+            "note": "No --db given, and transcripts carry no declared-tools list, so unused tools cannot be found here — only the tools that were called.",
+            "called": sorted(called_from_transcripts),
+        }
+    declared: set[str] = set()
+    called: set[str] = set()
+    for db_path in db_paths:
+        try:
+            d, c = read_tool_tables(db_path, session_ids)
+        except Exception:
+            continue  # fail open: a DB that doesn't cover this project just contributes nothing
+        declared |= d
+        called |= c
+    if not declared:
+        return {
+            "source": "db_tool_declarations",
+            "note": "The DB covers none of this project's sessions (or has no tool_declarations rows for them) — only the tools that were called, from the transcripts.",
+            "called": sorted(called_from_transcripts),
+        }
+    # The DB's own tool_uses table can under-cover a project (it only has
+    # rows for sessions it captured, which may be a small subset of this
+    # project's transcripts) — a tool the transcripts show as CALLED must
+    # never be reported "unused" just because this particular DB missed it.
+    called |= called_from_transcripts
+    return {
+        "source": "db_tool_declarations",
+        "declared_count": len(declared),
+        "called_count": len(called),
+        "unused": sorted(declared - called),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Mislabel check and failure stats (needs the DB)
 # ---------------------------------------------------------------------------
 
@@ -1121,11 +1376,13 @@ def run_transcript_mode(projects_dirs: list[str], db_paths: list[str]) -> dict:
 
     per_project_gaps: dict[str, list[Gap]] = defaultdict(list)
     per_project_calls: dict[str, dict[str, list[Call]]] = defaultdict(lambda: defaultdict(list))
+    per_project_tool_waits: dict[str, list[ToolWait]] = defaultdict(list)
 
     for project, thread_id, thread_kind, path in threads:
-        calls, gaps = iter_calls_and_gaps(path, thread_id, thread_kind, project)
+        calls, gaps, tool_waits = iter_calls_and_gaps(path, thread_id, thread_kind, project)
         per_project_gaps[project].extend(gaps)
         per_project_calls[project][thread_id] = calls
+        per_project_tool_waits[project].extend(tool_waits)
         all_gaps_global.extend(gaps)
 
     db_index = DBIndex(db_rows) if db_rows else None
@@ -1143,6 +1400,36 @@ def run_transcript_mode(projects_dirs: list[str], db_paths: list[str]) -> dict:
                 "waiting_for_x_wake_cause": waiting_for_x_wake_cause(kind_gaps),
                 "own_tool_breakdown": own_tool_breakdown(kind_gaps),
             }
+
+        # --- Issue #424 section 4: per-tool stats (main and team_thread only,
+        # per spec), the hierarchical policy comparison, and unused tools. ---
+        project_tool_waits = per_project_tool_waits.get(project, [])
+        project_calls = per_project_calls.get(project, {})
+        thread_kind_of: dict[str, str] = {tid: tk for p, tid, tk, _ in threads if p == project}
+
+        report["projects"][project]["tool_waits"] = {}
+        for kind in ("main", "team_thread"):
+            kind_tool_waits = [tw for tw in project_tool_waits if tw.thread_kind == kind]
+            kind_calls = {tid: c for tid, c in project_calls.items() if thread_kind_of.get(tid) == kind}
+            report["projects"][project]["tool_waits"][kind] = summarize_tool_waits(
+                kind_tool_waits, tool_call_counts(kind_calls)
+            )
+
+        train_sessions, test_sessions = split_sessions_by_time(project_calls)
+
+        def _session_of(tid: str) -> str:
+            return tid.split("/", 1)[0]
+
+        train_gaps = [g for g in gaps if _session_of(g.thread_id) in train_sessions and not g.is_cold_start]
+        test_gaps = [g for g in gaps if _session_of(g.thread_id) in test_sessions and not g.is_cold_start]
+        train_tool_waits = [tw for tw in project_tool_waits if _session_of(tw.thread_id) in train_sessions]
+        report["projects"][project]["policy_comparison"] = simulate_policies(train_gaps, test_gaps, train_tool_waits)
+        report["projects"][project]["policy_comparison"]["train_sessions"] = len(train_sessions)
+        report["projects"][project]["policy_comparison"]["test_sessions"] = len(test_sessions)
+
+        called_from_transcripts = {name for calls in project_calls.values() for c in calls for name in c.tool_use_names}
+        all_session_ids = train_sessions | test_sessions
+        report["projects"][project]["unused_tools"] = unused_tools_report(all_session_ids, db_paths, called_from_transcripts)
 
     if db_rows:
         report["mislabel_check"] = mislabel_check(all_gaps_global, db_rows)
@@ -1244,6 +1531,43 @@ def human_summary(report: dict) -> str:
             tool_breakdown = kd.get("own_tool_breakdown") or {}
             if tool_breakdown:
                 lines.append(f"  {label}: own_tool by tool name: " + ", ".join(f"{name}={n}" for name, n in tool_breakdown.items()))
+
+        tool_waits = data.get("tool_waits") or {}
+        for kind in ("main", "team_thread"):
+            tool_stats = tool_waits.get(kind) or {}
+            if not tool_stats:
+                continue
+            label = "team_thread" if kind == "team_thread" else kind
+            lines.append(f"\n  {label}: per-tool wait stats (sorted by call count)")
+            for tool, stats in tool_stats.items():
+                lines.append(
+                    f"    {tool}: calls={stats['call_count']} waits={stats['wait_count']} "
+                    f"median={stats['median_wait_min']}min p75={stats['p75_wait_min']}min "
+                    f"p90={stats['p90_wait_min']}min >5min={stats['share_over_5min']*100:.0f}% "
+                    f"best N={stats['best_n']} (on {stats['waits_ge_threshold']} waits >= {GAP_THRESHOLD_MIN}min)"
+                )
+
+        pc = data.get("policy_comparison")
+        if pc:
+            lines.append(
+                f"\n  Policy comparison (train {pc['train_sessions']} sessions / {pc['train_gap_count']} gaps, "
+                f"test {pc['test_sessions']} sessions / {pc['test_gap_count']} gaps):"
+            )
+            lines.append(f"    hierarchical policy: {pc['hierarchical_cost_x_per_gap']}x/gap")
+            lines.append(f"    single global best N ({pc['global_best_n']}): {pc['global_best_n_cost_x_per_gap']}x/gap")
+            lines.append(f"    waiting_for-only policy: {pc['waiting_for_only_cost_x_per_gap']}x/gap")
+            lines.append(f"    today's fixed 2 pings: {pc['fixed_2_pings_cost_x_per_gap']}x/gap")
+
+        ut = data.get("unused_tools")
+        if ut:
+            if ut["source"] == "db_tool_declarations" and "unused" in ut:
+                lines.append(
+                    f"\n  Unused tools ({ut['declared_count']} declared, {ut['called_count']} called): "
+                    + (", ".join(ut["unused"]) if ut["unused"] else "(none)")
+                )
+            else:
+                lines.append(f"\n  Unused tools: {ut['note']}")
+                lines.append(f"    called: " + ", ".join(ut.get("called", [])))
 
     if report.get("mislabel_check"):
         mc = report["mislabel_check"]
@@ -1413,7 +1737,7 @@ def run_self_test() -> bool:
 
         all_gaps = []
         for project, thread_id, thread_kind, path in threads:
-            _, gaps = iter_calls_and_gaps(path, thread_id, thread_kind, project)
+            _, gaps, _ = iter_calls_and_gaps(path, thread_id, thread_kind, project)
             all_gaps.extend(gaps)
 
         main_gaps = [g for g in all_gaps if g.thread_kind == "main"]
@@ -1520,7 +1844,7 @@ def run_self_test() -> bool:
         wf_threads = find_threads([tmp])
         wf_path_found = [p for proj, tid, kind, p in wf_threads if tid == wf_session_id]
         check("waiting-for-session found as its own thread", len(wf_path_found), 1)
-        _, wf_gaps = iter_calls_and_gaps(wf_path, wf_session_id, "main", "wf-project")
+        wf_calls, wf_gaps, wf_tool_waits = iter_calls_and_gaps(wf_path, wf_session_id, "main", "wf-project")
         wf_gaps = [g for g in wf_gaps if not g.is_cold_start]
         # There is one gap per consecutive call pair (6 calls -> 5 gaps + 1 cold
         # start taken separately below); index them by which call starts them.
@@ -1540,6 +1864,93 @@ def run_self_test() -> bool:
         cross = waiting_for_x_wake_cause(wf_gaps)
         check("cross-tab has a background row", "background" in cross, True)
         check("cross-tab has a teammate row", "teammate" in cross, True)
+
+        # --- Issue #424 section 4: per-tool stats on the waiting-for-session
+        # fixture (W1=Bash, W2=Monitor, W4=AskUserQuestion, W5=SendMessage,
+        # each followed by exactly one 5-min wait; W3/W6/W7 have no tool_use
+        # so they contribute no ToolWait at all). ---
+        wf_call_counts = tool_call_counts({wf_session_id: wf_calls})
+        check("call_count: Bash", wf_call_counts.get("Bash"), 1)
+        check("call_count: Monitor", wf_call_counts.get("Monitor"), 1)
+        check("call_count: AskUserQuestion", wf_call_counts.get("AskUserQuestion"), 1)
+        check("call_count: SendMessage", wf_call_counts.get("SendMessage"), 1)
+        wf_tool_stats = summarize_tool_waits(wf_tool_waits, wf_call_counts)
+        check("tool_waits count (one per tool-ending call)", len(wf_tool_waits), 4)
+        check("Bash wait_count", wf_tool_stats["Bash"]["wait_count"], 1)
+        check("Bash median wait is the 5-min gap", wf_tool_stats["Bash"]["median_wait_min"], 5.0)
+        check("AskUserQuestion wait_count", wf_tool_stats["AskUserQuestion"]["wait_count"], 1)
+        # sorted by call_count; all tied at 1 here, so just check every tool present.
+        check("summarize_tool_waits covers all 4 tools", set(wf_tool_stats), {"Bash", "Monitor", "AskUserQuestion", "SendMessage"})
+
+        # --- Issue #424 section 4: the hierarchical ping-budget policy, built
+        # and evaluated directly on hand-computed Gap/ToolWait objects (no
+        # need to round-trip through files for this part — split_sessions_by_time
+        # and simulate_policies only look at .ts / .gap_min / .waiting_for /
+        # .tool_use_names, not at any transcript-specific field).
+        def mk_call(ts: float, tools: tuple[str, ...] = ()) -> Call:
+            return Call(ts=ts, message_id="x", model="claude-opus-5-5", is_error=False, tool_use_names=tools)
+
+        def mk_gap(thread_id: str, gap_min: float, waiting_for: str, tools: tuple[str, ...] = ()) -> Gap:
+            start = mk_call(0.0, tools)
+            end = mk_call(gap_min * 60.0)
+            return Gap(thread_id=thread_id, thread_kind="main", project="policy-test", start=start, end=end, gap_min=gap_min, cause="unknown", waiting_for=waiting_for)
+
+        def mk_tool_wait(thread_id: str, tool: str, gap_min: float) -> ToolWait:
+            start = mk_call(0.0, (tool,))
+            end = mk_call(gap_min * 60.0)
+            return ToolWait(project="policy-test", thread_kind="main", thread_id=thread_id, tool=tool, gap_min=gap_min, start=start, end=end, fallback_group="own_tool")
+
+        # 25 Bash waits @ 6 min (own_tool best N: cost is 0.1 for any N>=1,
+        # so best_n_for_gaps picks the first tied N, 1) and 25 human waits @
+        # 20 min (best N: cost is 1.15+0.1N below N=4, then flat at 0.4 for
+        # N>=4 — picks 4) -- see the comment math in the PR/README.
+        train_gaps = [mk_gap("train/t", 6.0, "own_tool", ("Bash",)) for _ in range(25)]
+        train_gaps += [mk_gap("train/t", 20.0, "human") for _ in range(25)]
+        train_tool_waits = [mk_tool_wait("train/t", "Bash", 6.0) for _ in range(25)]
+        test_gaps = [mk_gap("test/t", 6.0, "own_tool", ("Bash",)), mk_gap("test/t", 20.0, "human")]
+
+        policy = simulate_policies(train_gaps, test_gaps, train_tool_waits)
+        check("policy: Bash qualifies for its own budget (25 >= 20 train waits)", policy["hierarchical_cost_x_per_gap"], 0.25)
+        check("policy: global best N learned on train", policy["global_best_n"], 4)
+        check("policy: global-N cost on test", policy["global_best_n_cost_x_per_gap"], 0.25)
+        check("policy: waiting_for-only cost on test", policy["waiting_for_only_cost_x_per_gap"], 0.25)
+        check("policy: fixed 2 pings costs clearly more here", policy["fixed_2_pings_cost_x_per_gap"], 0.725)
+
+        # split_sessions_by_time: 3 sessions at increasing times -> train gets
+        # the first 2 (the extra one on an odd split), test gets the last 1.
+        calls_by_thread = {
+            "s1/main": [mk_call(100.0)],
+            "s2/main": [mk_call(200.0)],
+            "s3/main": [mk_call(300.0)],
+        }
+        train_s, test_s = split_sessions_by_time(calls_by_thread)
+        check("split_sessions_by_time: train gets the earlier majority", train_s, {"s1", "s2"})
+        check("split_sessions_by_time: test gets the rest", test_s, {"s3"})
+
+        # --- Issue #424 section 4: unused tools, and the DB-undercoverage fix
+        # (a tool the TRANSCRIPT shows as called must never show as unused
+        # just because the DB's own tool_uses table missed that session). ---
+        unused_db_path = os.path.join(tmp, "unused-tools.db")
+        ucon = sqlite3.connect(unused_db_path)
+        ucon.execute("create table tool_declarations (session_id text, kind text, name text)")
+        ucon.execute("create table tool_uses (session_id text, name text, calls integer)")
+        for name in ("Bash", "Read", "Write"):
+            ucon.execute("insert into tool_declarations values (?,?,?)", ("ut-session", "tool", name))
+        ucon.execute("insert into tool_uses values (?,?,?)", ("ut-session", "Bash", 5))
+        ucon.commit()
+        ucon.close()
+
+        ut = unused_tools_report({"ut-session"}, [unused_db_path], called_from_transcripts={"Write"})
+        check("unused tools: declared count", ut["declared_count"], 3)
+        # Bash: called per the DB. Write: called per the TRANSCRIPT, even
+        # though the DB's tool_uses has no row for it (the undercoverage
+        # case) -- it must NOT show up as unused. Read: never called by
+        # either source -- it is genuinely unused.
+        check("unused tools: Read is unused, Bash and Write are not", ut["unused"], ["Read"])
+
+        ut_no_db = unused_tools_report({"ut-session"}, [], called_from_transcripts={"Bash", "Write"})
+        check("unused tools, no DB: falls back to transcript-called list", ut_no_db["source"], "transcripts_only")
+        check("unused tools, no DB: reports what was called, not what's unused", ut_no_db["called"], ["Bash", "Write"])
 
         # --- Finding 1 & 5: a tiny synthetic DB, DB-fitted prices, and the
         # response-time-approximate match (ts + upstream_ms). ---
