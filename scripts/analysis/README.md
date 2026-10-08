@@ -213,16 +213,23 @@ human answer is `wake_cause=human`, never `tool_result`.
 thread's visible transcript** — there is no analogous expiry rule to a
 Monitor's. On both local projects combined: of 1,474 teammate waits, 129
 (9%) never saw a reply within the thread's own transcript (context-guru:
-91 of 276, 33%; forever: 38 of 1198, 3%); of the ones that DID close, the
-median close time is a few minutes, but the tail is long (p90 in the tens
-of minutes to a few hours, a handful in the thousands of minutes — almost
-certainly sessions that resumed days later rather than a single
-continuous wait). Reported per project as `teammate_wait_durations`, split
-into closed and never-closed (the latter is a lower bound, measured only
-to the thread's last call, not a real close). This is reported as a
-finding, not fixed: whether an un-replied teammate wait should itself have
-an assumed timeout is an open question for issue #424, not something a
-transcript alone can answer.
+91 of 276, **33%**; forever: 38 of 1198, 3%); of the ones that DID close,
+the median close time is a few minutes, but the tail is long — on
+context-guru, the **p90 of closed waits is ~3.1-3.3 hours** (it moves
+slightly run to run, since both projects' transcripts are live and still
+being appended to), with a handful of outliers in the thousands of
+minutes, almost certainly sessions that resumed days later rather than a
+single continuous wait. Reported per project as `teammate_wait_durations`,
+split into closed and never-closed (the latter is a lower bound, measured
+only to the thread's last call, not a real close).
+
+**This is reported as a finding, not fixed, and issue #424 needs to act
+on it**: a third of context-guru's teammate waits never close within the
+visible transcript, and even the ones that do can run for hours — so
+#424 must define an assumed timeout for an open teammate wait (there is
+currently no rule at all, unlike a `Monitor`'s stated expiry), or the
+keep-alive has no way to ever stop treating "teammate" as the active
+`waiting_for` value for a thread that is realistically done waiting.
 
 ## Learning a ping budget per tool (issue #424 section 4)
 
@@ -522,17 +529,24 @@ task or teammate wait that was genuinely open at the START of the gap look
 already closed. Fixed by snapshotting `waiting_for` the moment each call
 finishes, before anything later can mutate the tracker.
 
-**Policy comparison, stated plainly**: on `context-guru` (the only
-project with a time-ordered test split large enough to mean anything —
-453 gaps), **the hierarchical policy loses**: 0.562x/gap, against a
-single global best N=5 at 0.539x/gap and today's fixed 2 pings at
-0.579x/gap. `waiting_for`-only (0.553x/gap) is close to hierarchical, as
-expected since they share the same fallback logic. The 5-split repeated
-check confirms this is not an artifact of one split: across 5 random
-session-level splits, global best N wins on both projects (context-guru
-mean 0.591x vs. hierarchical's 0.613x; `forever` mean 0.517x vs.
-hierarchical's 0.629x, though `forever`'s per-split spread is wide —
-0.348 to 0.877 — reflecting how few gaps its test halves actually have).
+**Policy comparison, stated plainly**: `forever`'s time-ordered test
+split has only 14 gaps — far too few to call its policy comparison a
+result in any direction; it proves nothing and is reported with a
+CAVEAT line, not a tie or a win.
+
+**On `context-guru` (463 test gaps, the only split large enough to mean
+anything), the 3 learned policies cluster closely — hierarchical
+0.565x/gap, `waiting_for`-only 0.556x/gap, global best N=5 0.544x/gap —
+and all 3 beat today's fixed 2 pings (0.580x/gap) by roughly 3-6%. The
+best of the three is the single global N, not the per-tool hierarchical
+policy: this data does not show that per-tool learning beats one global
+N.** A 5-random-session-split check (a different, non-time-ordered split
+rule, used only for this robustness check) confirms the ranking is not
+an artifact of one split: across 5 splits, global best N has the lowest
+mean on both projects (context-guru: 0.590x vs. hierarchical's 0.614x
+and `waiting_for`-only's 0.613x; `forever`: 0.517x vs. 0.629x for both —
+`forever`'s spread is wide on every policy, 0.35-0.88x, reflecting how
+few gaps even a random half of its sessions has).
 
 **Why**: inspecting which test gaps cost the most under the hierarchical
 policy relative to global-N shows one mechanism dominating. `Bash`
