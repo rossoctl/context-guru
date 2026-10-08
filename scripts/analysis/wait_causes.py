@@ -7,11 +7,14 @@ Two modes:
 
   1. Transcript mode (--projects-dir given). Reads Claude Code session transcripts
      (one JSONL file per thread: the main session file, plus one file per subagent
-     under <session>/subagents/*.jsonl). Each thread gives an exact sequence of API
+     or in-process agent-team teammate under <session>/subagents/*.jsonl — the two
+     are told apart by meta.json's taskKind and reported as separate thread kinds,
+     "subagent" and "team_thread"). Each thread gives an exact sequence of API
      calls, exact gaps between them, and the exact signal that ended each gap
      (teammate message, background task notification, human text, or the agent's
      own tool result). Optionally also reads a dashboard DB (--db) to cross-check
-     cache-miss labels and upstream failures.
+     cache-miss labels, pull in the REAL keep-alive pings already sent (for the
+     OBSERVED cost column), and report upstream failures.
 
   2. DB-only mode (--db given, no --projects-dir). This is how it must run on the
      production proxy, which has no transcripts. There are no threads and no wake
@@ -119,8 +122,21 @@ class Call:
     output_tokens: int = 0
 
     @property
+    def is_cache_hit(self) -> bool:
+        """A hit: most of the prompt was read from cache, not rewritten.
+
+        cache_read == 0 is the obvious miss (nothing of the prefix matched),
+        but a prompt can also come back with SOME cache_read and a cache_creation
+        that dwarfs it — most of the prefix still had to be rewritten, which is
+        a miss in every way that matters for cost, even though cache_read isn't
+        literally zero. The threshold (cache_creation < half of cache_read) is
+        the team's working definition; see issue #424 discussion.
+        """
+        return (not self.is_error) and self.cache_read > 0 and self.cache_creation < 0.5 * self.cache_read
+
+    @property
     def is_cache_miss(self) -> bool:
-        return (not self.is_error) and self.cache_read == 0 and self.cache_creation > 0
+        return (not self.is_error) and not self.is_cache_hit
 
     @property
     def prompt_tokens_total(self) -> int:
@@ -130,7 +146,7 @@ class Call:
 @dataclass
 class Gap:
     thread_id: str
-    thread_kind: str  # "main" or "subagent"
+    thread_kind: str  # "main", "subagent", or "team_thread" (in-process agent-team teammate)
     project: str
     start: Call
     end: Call
@@ -311,6 +327,28 @@ def project_group_name(dir_basename: str) -> str:
     return WORKTREE_SUFFIX_RE.sub("", dir_basename)
 
 
+def subagent_thread_kind(subdir: str, sub_name: str) -> str:
+    """"subagent" (a plain Task-tool subagent) or "team_thread".
+
+    "team_thread" is an in-process agent-team teammate (a committer/reviewer/etc.
+    spawned by the AgentTeam skill, meta.json's taskKind == "in_process_teammate").
+    These are NOT the same thing as the "teammate" WAKE CAUSE (a thread woken by a
+    <teammate-message>, which either kind of thread can experience) — a team_thread
+    is itself a long-lived peer session, not a fire-and-forget task, and it is why
+    team_thread gaps run much longer (its wait is on peer coordination, not on a
+    bounded subagent task finishing).
+    """
+    meta_path = os.path.join(subdir, sub_name + ".meta.json")
+    try:
+        with open(meta_path, "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+        if meta.get("taskKind") == "in_process_teammate":
+            return "team_thread"
+    except Exception:
+        pass
+    return "subagent"
+
+
 def find_threads(projects_dirs: Iterable[str]) -> list[tuple[str, str, str, str]]:
     """Return (project, thread_id, thread_kind, path) for every thread file found."""
     threads = []
@@ -327,7 +365,8 @@ def find_threads(projects_dirs: Iterable[str]) -> list[tuple[str, str, str, str]
                 for sub_path in sorted(glob.glob(os.path.join(subdir, "*.jsonl"))):
                     sub_name = os.path.splitext(os.path.basename(sub_path))[0]
                     thread_id = f"{session_id}/{sub_name}"
-                    threads.append((project, thread_id, "subagent", sub_path))
+                    kind = subagent_thread_kind(subdir, sub_name)
+                    threads.append((project, thread_id, kind, sub_path))
     return threads
 
 
@@ -395,6 +434,43 @@ def read_db_rows(db_path: str) -> list[DBRow]:
     return rows
 
 
+MATCH_WINDOW_SEC = 60.0  # DB ts is request-START; transcript ts is response-ARRIVAL.
+
+
+class DBIndex:
+    """Matches a transcript Gap's ending call to the DB row it produced.
+
+    The DB has no thread id (issue #423), so matching is by session_id +
+    exact cache_read token count + nearest timestamp within MATCH_WINDOW_SEC.
+    Used to pull the REAL keepalive_pings already spent on a gap, for the
+    OBSERVED cost column, and by mislabel_check. Best-effort, not exact —
+    see README.
+    """
+
+    def __init__(self, db_rows: list[DBRow]):
+        self._by_key: dict[tuple[str, int], list[tuple[float, DBRow]]] = defaultdict(list)
+        for r in db_rows:
+            self._by_key[(r.session_id, r.cache_read)].append((r.ts_ms / 1000.0, r))
+        for v in self._by_key.values():
+            v.sort(key=lambda pair: pair[0])
+
+    def match(self, session_id: str, cache_read: int, ts: float) -> DBRow | None:
+        candidates = self._by_key.get((session_id, cache_read))
+        if not candidates:
+            return None
+        best, best_dt = None, MATCH_WINDOW_SEC
+        for cts, row in candidates:
+            dt = abs(cts - ts)
+            if dt <= best_dt:
+                best_dt, best = dt, row
+        return best
+
+    def pings_for(self, gap: "Gap") -> int:
+        session_id = gap.thread_id.split("/", 1)[0]
+        row = self.match(session_id, gap.end.cache_read, gap.end.ts)
+        return row.keepalive_pings if row else 0
+
+
 # ---------------------------------------------------------------------------
 # Aggregation
 # ---------------------------------------------------------------------------
@@ -423,23 +499,30 @@ def gap_dist(gaps_min: list[float]) -> dict:
     }
 
 
-def miss_cost_x_usd(gap: Gap) -> tuple[float, float]:
-    """Unmitigated (0-ping) miss cost for this gap, in x units and in USD."""
-    if gap.is_cold_start or not gap.end.is_cache_miss:
-        return 0.0, 0.0
+def miss_premium_usd(call: Call) -> float:
+    """What this call's cache_creation cost over what a hit would have, in USD."""
+    price = base_price_for_model(call.model)
+    return call.cache_creation * price * MISS_PREMIUM_X
+
+
+def observed_cost_x_usd(gap: Gap, pings: int) -> tuple[float, float]:
+    """What this gap ACTUALLY cost: `pings` real keep-alive pings (0 if unknown —
+    the DB does not cover every session) plus a miss premium if it was still a
+    miss. This is the "OBSERVED" column: real traffic, real (partial) mitigation,
+    using the corrected hit/miss rule (see Call.is_cache_hit). It is deliberately
+    NOT the same thing as the N=0 simulation, which assumes zero real pinging
+    ever happened; where the DB shows pings already in flight, observed can come
+    in below the N=0 simulated cost for the same gap.
+    """
+    is_miss = gap.end.is_cache_miss
+    x = PING_COST_X * pings + (MISS_PREMIUM_X if is_miss else 0.0)
     price = base_price_for_model(gap.end.model)
-    x_usd = gap.end.prompt_tokens_total * price
-    premium_usd = gap.end.cache_creation * price * MISS_PREMIUM_X
-    return MISS_PREMIUM_X, premium_usd
+    ping_usd = pings * PING_COST_X * price * gap.end.prompt_tokens_total
+    usd = ping_usd + (miss_premium_usd(gap.end) if is_miss else 0.0)
+    return x, usd
 
 
-def gap_x_usd_unit(gap: Gap) -> float:
-    """The dollar value of one 'x' unit for this gap's ending call."""
-    price = base_price_for_model(gap.end.model)
-    return gap.end.prompt_tokens_total * price
-
-
-def summarize_gaps_by_cause(gaps: list[Gap]) -> dict:
+def summarize_gaps_by_cause(gaps: list[Gap], db_index: "DBIndex | None" = None) -> dict:
     by_cause: dict[str, list[Gap]] = defaultdict(list)
     for g in gaps:
         if g.is_cold_start:
@@ -451,17 +534,27 @@ def summarize_gaps_by_cause(gaps: list[Gap]) -> dict:
         gap_minutes = [g.gap_min for g in gs]
         dist = gap_dist(gap_minutes)
 
-        # Unmitigated (today, no pings) miss cost average, in x units and USD.
-        x_costs = []
-        usd_costs = []
-        for g in gs:
-            x, usd = miss_cost_x_usd(g)
-            x_costs.append(x if g.end.is_cache_miss else 0.0)
-            usd_costs.append(usd)
-        avg_x = sum(x_costs) / len(gs) if gs else 0.0
-        total_usd = sum(usd_costs)
+        hits = sum(1 for g in gs if g.end.is_cache_hit)
+        misses = len(gs) - hits
 
-        # Ping-budget simulation: average cost per gap, in x units, for each N.
+        # OBSERVED: what really happened on this traffic, including real pings
+        # already sent (from the DB, where it covers the session) before this
+        # call landed.
+        x_costs, usd_costs, pings_used = [], [], []
+        for g in gs:
+            pings = db_index.pings_for(g) if db_index else 0
+            x, usd = observed_cost_x_usd(g, pings)
+            x_costs.append(x)
+            usd_costs.append(usd)
+            pings_used.append(pings)
+        avg_observed_x = sum(x_costs) / len(gs) if gs else 0.0
+        total_observed_usd = sum(usd_costs)
+
+        # SIMULATED: a hypothetical ping budget of N, applied uniformly, assuming
+        # NO pinging happens outside the budget. N=0 is therefore 1.15x for every
+        # gap over 5 minutes, by construction (sim_cost_x), regardless of what
+        # really happened on that gap — it is the "do nothing" baseline the N>0
+        # columns are compared against, not a restatement of OBSERVED.
         sim = {}
         for n in PING_BUDGETS:
             costs = [sim_cost_x(g.gap_min, n) for g in gs]
@@ -470,9 +563,12 @@ def summarize_gaps_by_cause(gaps: list[Gap]) -> dict:
 
         out[cause] = {
             "gap_distribution": dist,
-            "miss_cost_no_pings_x_per_gap": round(avg_x, 3),
-            "miss_cost_no_pings_usd_total": round(total_usd, 4),
-            "ping_sim_x_per_gap_by_n": sim,
+            "hits": hits,
+            "misses": misses,
+            "observed_cost_x_per_gap": round(avg_observed_x, 3),
+            "observed_cost_usd_total": round(total_observed_usd, 4),
+            "observed_pings_total": sum(pings_used),
+            "sim_cost_x_per_gap_by_n": sim,
             "best_n": best_n,
             "best_n_cost_x_per_gap": sim[best_n],
         }
@@ -482,11 +578,7 @@ def summarize_gaps_by_cause(gaps: list[Gap]) -> dict:
 def summarize_cold_starts(gaps: list[Gap]) -> dict:
     cold = [g for g in gaps if g.is_cold_start]
     misses = sum(1 for g in cold if g.end.is_cache_miss)
-    usd = 0.0
-    for g in cold:
-        if g.end.is_cache_miss:
-            price = base_price_for_model(g.end.model)
-            usd += g.end.cache_creation * price * MISS_PREMIUM_X
+    usd = sum(miss_premium_usd(g.end) for g in cold if g.end.is_cache_miss)
     return {"threads": len(cold), "cache_misses": misses, "miss_cost_usd_total": round(usd, 4)}
 
 
@@ -498,7 +590,7 @@ def summarize_cold_starts(gaps: list[Gap]) -> dict:
 MISLABEL_MATCH_WINDOW_SEC = 60.0
 
 
-def mislabel_check(all_gaps: list[Gap], all_calls_by_session: dict[str, list[Call]], db_rows: list[DBRow]) -> dict:
+def mislabel_check(all_gaps: list[Gap], db_rows: list[DBRow]) -> dict:
     """Count DB prefix_change rows that are really per-thread TTL expiry / cold start.
 
     The DB has no thread id (that is #423's job), so a row is matched to a
@@ -671,24 +763,19 @@ def run_transcript_mode(projects_dirs: list[str], db_paths: list[str]) -> dict:
         per_project_calls[project][thread_id] = calls
         all_gaps_global.extend(gaps)
 
+    db_index = DBIndex(db_rows) if db_rows else None
+
     for project, gaps in sorted(per_project_gaps.items()):
-        main_gaps = [g for g in gaps if g.thread_kind == "main"]
-        sub_gaps = [g for g in gaps if g.thread_kind == "subagent"]
-        report["projects"][project] = {
-            "threads": len(per_project_calls[project]),
-            "main": {
-                "cold_starts": summarize_cold_starts(main_gaps),
-                "by_cause": summarize_gaps_by_cause(main_gaps),
-            },
-            "subagent": {
-                "cold_starts": summarize_cold_starts(sub_gaps),
-                "by_cause": summarize_gaps_by_cause(sub_gaps),
-            },
-        }
+        report["projects"][project] = {"threads": len(per_project_calls[project])}
+        for kind in ("main", "subagent", "team_thread"):
+            kind_gaps = [g for g in gaps if g.thread_kind == kind]
+            report["projects"][project][kind] = {
+                "cold_starts": summarize_cold_starts(kind_gaps),
+                "by_cause": summarize_gaps_by_cause(kind_gaps, db_index),
+            }
 
     if db_rows:
-        all_calls_by_session: dict[str, list[Call]] = {}
-        report["mislabel_check"] = mislabel_check(all_gaps_global, all_calls_by_session, db_rows)
+        report["mislabel_check"] = mislabel_check(all_gaps_global, db_rows)
         report["failures"] = failure_stats(db_rows)
     else:
         report["mislabel_check"] = None
@@ -708,12 +795,12 @@ def human_summary(report: dict) -> str:
             f"p90 {d['p90_min']} min, max {d['max_min']} min"
         )
         lines.append(
-            f"Miss cost, no pings: {report['miss_cost_no_pings_x_per_gap']}x/gap "
-            f"(${report['miss_cost_no_pings_usd_total']} total)"
+            f"Observed miss cost (no transcripts, so pings unknown -> treated as 0): "
+            f"{report['miss_cost_no_pings_x_per_gap']}x/gap (${report['miss_cost_no_pings_usd_total']} total)"
         )
-        lines.append(f"Best N (0-12): {report['best_n']}, cost {report['ping_sim_x_per_gap_by_n'][report['best_n']]}x/gap")
+        lines.append(f"Simulated best N (0-12): {report['best_n']}, cost {report['ping_sim_x_per_gap_by_n'][report['best_n']]}x/gap")
         for n in (0, 2, 4, 6, 10):
-            lines.append(f"  N={n}: {report['ping_sim_x_per_gap_by_n'].get(n)}x/gap")
+            lines.append(f"  simulated N={n}: {report['ping_sim_x_per_gap_by_n'].get(n)}x/gap")
         f = report["failures"]
         lines.append(
             f"Failures: {f['failure_count']}, hang median {f['hang_ms_median']}ms, "
@@ -723,20 +810,31 @@ def human_summary(report: dict) -> str:
 
     for project, data in report["projects"].items():
         lines.append(f"\n== {project} ({data['threads']} threads) ==")
-        for kind in ("main", "subagent"):
-            kd = data[kind]
+        for kind in ("main", "subagent", "team_thread"):
+            kd = data.get(kind)
+            if not kd:
+                continue
             cs = kd["cold_starts"]
+            if cs["threads"] == 0 and not kd["by_cause"]:
+                continue
+            label = "team_thread (in-process agent-team teammate)" if kind == "team_thread" else kind
             lines.append(
-                f"  {kind}: cold starts {cs['threads']} ({cs['cache_misses']} misses, "
+                f"  {label}: cold starts {cs['threads']} ({cs['cache_misses']} misses, "
                 f"${cs['miss_cost_usd_total']})"
             )
             for cause, stats in kd["by_cause"].items():
                 dist = stats["gap_distribution"]
                 lines.append(
-                    f"    {cause}: {dist['count']} gaps, median {dist['median_min']}min, "
-                    f"p90 {dist['p90_min']}min | miss cost {stats['miss_cost_no_pings_x_per_gap']}x/gap "
-                    f"(${stats['miss_cost_no_pings_usd_total']}) | best N={stats['best_n']} "
-                    f"-> {stats['best_n_cost_x_per_gap']}x/gap"
+                    f"    {cause}: {dist['count']} gaps (hits={stats['hits']} misses={stats['misses']}), "
+                    f"median {dist['median_min']}min, p90 {dist['p90_min']}min"
+                )
+                lines.append(
+                    f"      observed: {stats['observed_cost_x_per_gap']}x/gap "
+                    f"(${stats['observed_cost_usd_total']} total, {stats['observed_pings_total']} real pings seen)"
+                )
+                lines.append(
+                    f"      simulated: N=0 -> {stats['sim_cost_x_per_gap_by_n'][0]}x/gap, "
+                    f"best N={stats['best_n']} -> {stats['best_n_cost_x_per_gap']}x/gap"
                 )
     if report.get("mislabel_check"):
         mc = report["mislabel_check"]
@@ -755,12 +853,156 @@ def human_summary(report: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Self-test: a tiny synthetic transcript with known gaps, known hits/misses.
+# ---------------------------------------------------------------------------
+
+
+def _write_call_line(fh, ts_iso: str, message_id: str, model: str, cache_read: int, cache_creation: int, is_error: bool = False) -> None:
+    entry = {
+        "type": "assistant",
+        "timestamp": ts_iso,
+        "message": {
+            "id": message_id,
+            "model": model,
+            "usage": {
+                "input_tokens": 10,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_creation,
+                "output_tokens": 50,
+            },
+        },
+    }
+    if is_error:
+        entry["isApiErrorMessage"] = True
+    fh.write(json.dumps(entry) + "\n")
+
+
+def _write_user_text_line(fh, ts_iso: str, text: str) -> None:
+    entry = {"type": "user", "timestamp": ts_iso, "message": {"content": [{"type": "text", "text": text}]}}
+    fh.write(json.dumps(entry) + "\n")
+
+
+def _write_user_tool_result_line(fh, ts_iso: str) -> None:
+    entry = {"type": "user", "timestamp": ts_iso, "message": {"content": [{"type": "tool_result", "content": "ok"}]}}
+    fh.write(json.dumps(entry) + "\n")
+
+
+def run_self_test() -> bool:
+    """Build a tiny synthetic transcript (one main thread, one plain subagent
+    thread) with known gaps, known hits/misses, and known causes; assert the
+    exact observed and simulated numbers. Exits non-zero on failure.
+    """
+    import math
+    import tempfile
+    from datetime import datetime, timedelta, timezone
+
+    ok = True
+
+    def check(label: str, got, want, tol: float = 1e-6) -> None:
+        nonlocal ok
+        same = math.isclose(got, want, abs_tol=tol) if isinstance(want, float) else got == want
+        status = "OK" if same else "FAIL"
+        if not same:
+            ok = False
+        print(f"  [{status}] {label}: got {got!r}, want {want!r}")
+
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def iso(offset_sec: float) -> str:
+        return (t0 + timedelta(seconds=offset_sec)).isoformat().replace("+00:00", "Z")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        session_id = "self-test-session"
+        main_path = os.path.join(tmp, f"{session_id}.jsonl")
+        with open(main_path, "w") as fh:
+            # Call 1: cold start. cache_read=0, cache_creation=2000 -> a miss.
+            _write_call_line(fh, iso(0), "m1", "claude-opus-5-5", cache_read=0, cache_creation=2000)
+            _write_user_text_line(fh, iso(1), "do the next thing")  # human
+            # Gap 1: 10 min, cause=human, cache_read=0 cache_creation=5000 -> miss.
+            _write_call_line(fh, iso(600), "m2", "claude-opus-5-5", cache_read=0, cache_creation=5000)
+            _write_user_tool_result_line(fh, iso(601))  # tool_result
+            # Gap 2: 400s (6.667 min), cause=tool_result, cache_read=50000
+            # cache_creation=1000 (< half of cache_read) -> hit.
+            _write_call_line(fh, iso(1000), "m3", "claude-opus-5-5", cache_read=50000, cache_creation=1000)
+
+        subdir = os.path.join(tmp, session_id, "subagents")
+        os.makedirs(subdir)
+        sub_path = os.path.join(subdir, "agent-x.jsonl")
+        with open(sub_path, "w") as fh:
+            # Cold start: cache_read=0, cache_creation=1000 -> miss.
+            _write_call_line(fh, iso(0), "s1", "claude-opus-5-5", cache_read=0, cache_creation=1000)
+            fh.write(json.dumps({"type": "user", "timestamp": iso(1), "message": {"content": "<task-notification>\n<task-id>x</task-id>\n</task-notification>"}}) + "\n")
+            # Gap: 300s (5.0 min), cause=background, cache_read=800 cache_creation=100 -> hit.
+            _write_call_line(fh, iso(300), "s2", "claude-opus-5-5", cache_read=800, cache_creation=100)
+
+        threads = find_threads([tmp])
+        kinds = {t[2] for t in threads}
+        check("thread kinds found", kinds, {"main", "subagent"})
+
+        all_gaps = []
+        for project, thread_id, thread_kind, path in threads:
+            _, gaps = iter_calls_and_gaps(path, thread_id, thread_kind, project)
+            all_gaps.extend(gaps)
+
+        main_gaps = [g for g in all_gaps if g.thread_kind == "main"]
+        sub_gaps = [g for g in all_gaps if g.thread_kind == "subagent"]
+
+        main_cold = summarize_cold_starts(main_gaps)
+        check("main cold starts", main_cold["threads"], 1)
+        check("main cold start misses", main_cold["cache_misses"], 1)
+        check("main cold start USD", main_cold["miss_cost_usd_total"], round(2000 * 15e-6 * 1.15, 4))
+
+        main_by_cause = summarize_gaps_by_cause(main_gaps, db_index=None)
+        check("main causes", set(main_by_cause), {"human", "tool_result"})
+
+        human = main_by_cause["human"]
+        check("human gap count", human["gap_distribution"]["count"], 1)
+        check("human gap minutes", human["gap_distribution"]["median_min"], round(600 / 60, 2))
+        check("human hits", human["hits"], 0)
+        check("human misses", human["misses"], 1)
+        check("human observed x/gap (no DB -> 0 pings known)", human["observed_cost_x_per_gap"], 1.15)
+        check("human observed USD", human["observed_cost_usd_total"], round(5000 * 15e-6 * 1.15, 4))
+        check("human sim N=0", human["sim_cost_x_per_gap_by_n"][0], 1.15)
+        # window(12) = 4.67*12+5 = 61.04 min >> 10 min, so it resolves inside the
+        # window: cost = 0.1 * floor(10 / 4.67) = 0.1 * 2 = 0.2.
+        check("human sim N=12", human["sim_cost_x_per_gap_by_n"][12], 0.2)
+
+        tool_result = main_by_cause["tool_result"]
+        check("tool_result gap count", tool_result["gap_distribution"]["count"], 1)
+        check("tool_result hits", tool_result["hits"], 1)
+        check("tool_result misses", tool_result["misses"], 0)
+        check("tool_result observed x/gap (a hit, no pings)", tool_result["observed_cost_x_per_gap"], 0.0)
+        check("tool_result observed USD", tool_result["observed_cost_usd_total"], 0.0)
+        check("tool_result sim N=0 (forced miss baseline)", tool_result["sim_cost_x_per_gap_by_n"][0], 1.15)
+
+        sub_cold = summarize_cold_starts(sub_gaps)
+        check("subagent cold starts", sub_cold["threads"], 1)
+        check("subagent cold start misses", sub_cold["cache_misses"], 1)
+
+        sub_by_cause = summarize_gaps_by_cause(sub_gaps, db_index=None)
+        check("subagent causes", set(sub_by_cause), {"background"})
+        background = sub_by_cause["background"]
+        check("background gap count", background["gap_distribution"]["count"], 1)
+        check("background hits", background["hits"], 1)
+        check("background misses", background["misses"], 0)
+        check("background observed x/gap", background["observed_cost_x_per_gap"], 0.0)
+
+    return ok
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--projects-dir", action="append", default=[], help="A ~/.claude/projects/<project> dir. Repeatable.")
     ap.add_argument("--db", action="append", default=[], help="A dashboard-*.db path. Repeatable.")
     ap.add_argument("--json", action="store_true", help="Print machine-readable JSON instead of a summary.")
+    ap.add_argument("--self-test", action="store_true", help="Run the built-in self-test on a synthetic transcript and exit.")
     args = ap.parse_args()
+
+    if args.self_test:
+        ok = run_self_test()
+        print("\nself-test " + ("PASSED" if ok else "FAILED"))
+        return 0 if ok else 1
 
     if not args.projects_dir and not args.db:
         ap.error("pass at least one of --projects-dir or --db")
