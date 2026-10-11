@@ -21,6 +21,18 @@ func userToolResult(toolUseID, text string) string {
 	return fmt.Sprintf(`{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":%q}]}`, toolUseID, text)
 }
 
+// userToolResultWithSibling is the real Anthropic wire shape issue #457/PR #460 fixed:
+// one user message mixing a tool_result block with another, non-tool_result block (mid-turn
+// user text, a system reminder, a task/teammate notification). apply.NormalizeMessages (via
+// apply.normalize) now splits this into TWO normalized messages, in wire order: the extracted
+// role=tool message, then a synthetic role=user message for the sibling text. Before #460,
+// the sibling was silently dropped.
+func userToolResultWithSibling(toolUseID, resultText, siblingText string) string {
+	return fmt.Sprintf(
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":%q},{"type":"text","text":%q}]}`,
+		toolUseID, resultText, siblingText)
+}
+
 func assistantToolUse(id, name, input string) string {
 	if input == "" {
 		input = "{}"
@@ -466,6 +478,54 @@ func TestObserveWakeCauseAskHumanExceptionBehindTrailingSystemNoise(t *testing.T
 	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeHuman {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeHuman)
+	}
+}
+
+// --- a sibling block beside a tool_result in the SAME wire message (issue #457/PR #460:
+// apply.normalize used to drop these; it now splits them into a synthetic role=user message,
+// in wire order, which is what internal/waitcause now reads via apply.NormalizeMessages) ---
+
+func TestObserveWakeCauseHumanBesideAToolResultSibling(t *testing.T) {
+	tr := New()
+	body := anthropicBody(strings.Join([]string{
+		assistantToolUse("call1", "Bash", `{"command":"ls"}`),
+		userToolResultWithSibling("call1", "file1\nfile2", "while that ran, also check the second file"),
+	}, ","))
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
+	if obs.WakeCause != WakeHuman {
+		t.Fatalf("got %q, want %s (mid-turn user text beside a tool_result is still a human wake)", obs.WakeCause, WakeHuman)
+	}
+}
+
+func TestObserveWakeCauseBackgroundBesideAToolResultSibling(t *testing.T) {
+	tr := New()
+	body := anthropicBody(strings.Join([]string{
+		assistantToolUse("call1", "Bash", `{"command":"ls"}`),
+		userToolResultWithSibling("call1", "file1\nfile2",
+			`<task-notification><task-id>bg1</task-id><event>done</event></task-notification>`),
+	}, ","))
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
+	if obs.WakeCause != WakeBackground {
+		t.Fatalf("got %q, want %s (a task-notification sibling still wins over the tool_result)", obs.WakeCause, WakeBackground)
+	}
+}
+
+// TestObserveWakeCauseSystemNotHumanBesideAToolResultSibling is the case the user explicitly
+// asked be checked: a sibling that is ONLY a `<system-reminder>` block (no other text) must
+// not read as human just because its role is "user" (apply.normalize's synthetic sibling
+// message is always role=user, never role=system — see TestNormalizeKeepsSiblingTextBlocksInOrder
+// in apply/normalizer_siblings_test.go). isNoiseEntry's own role check does not catch this (the
+// sibling's role genuinely is "user"); hasSystemMarker's CONTENT check is what has to, and
+// already does, independent of role.
+func TestObserveWakeCauseSystemNotHumanBesideAToolResultSibling(t *testing.T) {
+	tr := New()
+	body := anthropicBody(strings.Join([]string{
+		assistantToolUse("call1", "Bash", `{"command":"ls"}`),
+		userToolResultWithSibling("call1", "file1\nfile2", "<system-reminder>\nContext low.\n</system-reminder>"),
+	}, ","))
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
+	if obs.WakeCause != WakeSystem {
+		t.Fatalf("got %q, want %s (a system-reminder-only sibling must not read as human)", obs.WakeCause, WakeSystem)
 	}
 }
 
