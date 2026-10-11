@@ -1,83 +1,60 @@
-import importlib.util
+import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
+import threading
 import unittest
-from unittest import mock
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-MODULE_PATH = Path(__file__).with_name("insights.py")
-SPEC = importlib.util.spec_from_file_location("codex_insights", MODULE_PATH)
-INSIGHTS = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(INSIGHTS)
+HERE = Path(__file__).resolve().parent
+CLAUDE_ORIGINAL = HERE.parents[3] / "context-guru-plugin/scripts/insights.py"
+
+
+class Stub(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"ok" if self.path == "/healthz" else json.dumps({"requests": 0}).encode()
+        self.send_response(200 if self.path in ("/healthz", "/api/stats") else 404)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
 
 
 class InsightsTest(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.env = mock.patch.dict(os.environ, {"XDG_STATE_HOME": self.temp.name})
-        self.env.start()
-        INSIGHTS.state_dir().mkdir(parents=True)
-        (INSIGHTS.state_dir() / "install.json").write_text('{"port": 8791}')
+    @unittest.skipUnless(CLAUDE_ORIGINAL.is_file(), "sparse checkout: Claude plugin not present")
+    def test_core_is_a_verbatim_copy_of_the_claude_insights(self):
+        # Refresh with: cp context-guru-plugin/scripts/insights.py <this dir>/insights_core.py
+        self.assertEqual((HERE / "insights_core.py").read_bytes(), CLAUDE_ORIGINAL.read_bytes())
 
-    def tearDown(self):
-        self.env.stop()
-        self.temp.cleanup()
+    def test_empty_store_reports_in_codex_terms_only(self):
+        server = HTTPServer(("127.0.0.1", 0), Stub)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory() as state:
+            root = Path(state) / "context-guru-codex"
+            root.mkdir()
+            (root / "install.json").write_text(json.dumps({"port": server.server_port}))
+            env = dict(os.environ, XDG_STATE_HOME=state, HOME=state,
+                       ANTHROPIC_BASE_URL="https://unrelated.example")
+            out = subprocess.run([sys.executable, str(HERE / "insights.py"), "all"], env=env,
+                                 capture_output=True, text=True, timeout=60)
+        server.shutdown()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("proxy_up=true", out.stdout)
+        self.assertIn("finding.1.id=no-traffic", out.stdout)
+        self.assertIn("session_routed=false", out.stdout)
+        for claude_only in ("/context-guru:", "CLAUDE_PLUGIN", "Claude Code", "ANTHROPIC", "unrelated"):
+            self.assertNotIn(claude_only, out.stdout)
 
-    def test_negative_keepalive_is_ranked_first_with_exact_fix(self):
-        stats = {"requests": 9, "savings": {"all": {
-            "total_saved_usd": 2.5, "keepalive_net_usd": -0.25}},
-            "saved_tokens_unique": 1200}
-        with mock.patch.object(INSIGHTS, "get", return_value=stats):
-            result = INSIGHTS.report()
-        self.assertEqual([f["id"] for f in result["findings"]],
-                         ["keepalive-net", "measured-net-savings", "saved-tokens"])
-        self.assertEqual(result["findings"][0]["fix"],
-                         "python3 ../../scripts/codex_plugin.py configure --cache-strategy none")
-
-    def test_missing_or_malformed_measurements_are_not_invented_as_zero(self):
-        with mock.patch.object(INSIGHTS, "get", return_value={"requests": 1,
-                                                              "saved_tokens": "unknown"}):
-            result = INSIGHTS.report()
-        self.assertEqual(result["findings"], [])
-
-    def test_legacy_top_level_savings_remain_supported(self):
-        with mock.patch.object(INSIGHTS, "get", return_value={
-                "total_saved_usd": 1.0, "keepalive_net_usd": 0.2}):
-            result = INSIGHTS.report()
-        self.assertEqual({f["id"] for f in result["findings"]},
-                         {"measured-net-savings", "keepalive-net"})
-        net = next(f for f in result["findings"] if f["id"] == "measured-net-savings")
-        self.assertEqual(net["severity"], "ok")
-        self.assertEqual(net["fix"], "none")
-
-    def test_focused_capabilities_report_is_deterministic(self):
-        responses = {
-            "/api/stats": {"requests": 3},
-            "/api/tools": {"tools": [
-                {"name": "used", "calls": 2},
-                {"name": "unused", "calls": 0, "fix": "Disable unused."},
-            ]},
-        }
-        with mock.patch.object(INSIGHTS, "get", side_effect=lambda _port, path: responses[path]):
-            result = INSIGHTS.report("capabilities")
-        self.assertEqual([f["id"] for f in result["findings"]],
-                         ["unused-capability-unused"])
-        self.assertEqual(result["findings"][0]["fix"], "Disable unused.")
-
-    def test_null_capabilities_are_an_empty_measurement_not_a_crash(self):
-        responses = {"/api/stats": {"requests": 0}, "/api/tools": {"tools": None}}
-        with mock.patch.object(INSIGHTS, "get", side_effect=lambda _port, path: responses[path]):
-            self.assertEqual(INSIGHTS.report("capabilities")["findings"], [])
-
-    def test_focused_component_report_uses_measured_tokens(self):
-        stats = {"requests": 3, "components": {
-            "dedup": {"saved_tokens_unique": 42},
-            "unknown": {"saved_tokens": "missing"},
-        }}
-        with mock.patch.object(INSIGHTS, "get", return_value=stats):
-            result = INSIGHTS.report("components")
-        self.assertEqual([f["id"] for f in result["findings"]], ["component-dedup"])
-        self.assertEqual(result["findings"][0]["tokens"], 42)
+    def test_not_installed_makes_no_request_and_says_so(self):
+        with tempfile.TemporaryDirectory() as state:
+            env = dict(os.environ, XDG_STATE_HOME=state, HOME=state)
+            out = subprocess.run([sys.executable, str(HERE / "insights.py"), "all"], env=env,
+                                 capture_output=True, text=True, timeout=60)
+        self.assertIn("finding.1.id=no-install", out.stdout)
+        self.assertIn("$context-guru-setup", out.stdout)
 
 
 if __name__ == "__main__":
