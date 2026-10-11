@@ -334,11 +334,11 @@ shorter `claude-opus-5`.
 
 ## Matching a DB row to a transcript call
 
-The DB has no thread id (that is issue #423's job), so three things —
-the mislabel check, the OBSERVED column's real-ping lookup (`DBIndex`), and
-nothing else — all match a transcript call to a DB row the same way: same
-`session_id`, same `cache_read` token count, and the nearest **approximate
-response time** within `MATCH_WINDOW_SEC` (15 seconds).
+The DB has no thread id (that is issue #423's job), so the mislabel check
+matches a transcript call to the single real DB row it produced
+(`DBIndex.match()`): same `session_id`, same `cache_read` token count, and
+the nearest **approximate response time** within `MATCH_WINDOW_SEC` (15
+seconds).
 
 The DB's `ts` is the request's **start**; the transcript only has the
 response's **arrival** time. `approx_response_ts()` closes most of that gap
@@ -350,6 +350,42 @@ the match rate to 99.75% (2817/2824 within 15s too, with a median residual
 delta of 0.13 seconds) — the handful of unmatched calls are almost
 certainly ones a DB row's own hang or retry still displaces by more than a
 few seconds.
+
+## Reading real keep-alive pings (`DBIndex.pings_for`, `db_only_report`)
+
+The OBSERVED column's real-ping count and cost — and `ping_rows`,
+`ping_orphans` in the report — read ping rows (`requests.keepalive = 1`)
+**directly**, matching each one to the gap it falls inside by timestamp:
+same thread_id when the DB has one (issue #423, not populated on either
+local DB at the time of writing), else the best available fallback,
+`(session_id, model)`.
+
+**This replaced an earlier version that read `keepalive_pings` off the
+NEXT real row instead** — a column the Go proxy writes once, on whichever
+real request a ping run ends with. That misses every ping whose session
+never sent another real request: a production cross-check (PR #425,
+comment on `contextguru2`) found 351 real ping rows in 75 sessions where
+the old method surfaced only 28. Reading ping rows directly, and pricing
+each one from its own `cost_usd` rather than a `0.1x` estimate, fixes
+both: `ping_rows_summary()` reports every ping row in the DB regardless of
+whether it falls in a measured gap, and `DBIndex.ping_orphans()` /
+`db_only_report`'s own matching report the ones that do not — "pings for
+sessions that did not return" — separately, with their own count and
+cost, instead of just disappearing from the total.
+
+A ping row with `max_tokens = 0` is a summary-substitute call (issue
+\#458): still a ping slot, counted the same way, priced from its own
+`cost_usd` rather than the `0.1x` read-only-ping estimate (a
+summary-substitute call does real work, not just a read). Reported
+separately as `substitute_ping_rows` / `substitute_ping_cost_usd_total`.
+If a substitute ping is ALSO logged as a component action in
+`extraction_calls` (with a strategy ending `/keepalive_substitute_billed`
+or `/keepalive_substitute`), that row must be excluded from any "LLM
+spend" total built from `extraction_calls`, since the same call's cost is
+already counted once here, from `requests.cost_usd`
+(`is_keepalive_substitute_strategy()` — this script does not read
+`extraction_calls` itself today, so nothing currently needs to call it,
+but anything that someday sums LLM spend across both tables must).
 
 ## Known approximations (read before trusting a number)
 
@@ -379,10 +415,19 @@ few seconds.
   different subagents on the same model look like one thread; a main
   thread that changes model mid-session looks like several. Treat its gap
   counts as directional, not exact. It does, however, use the same hit
-  rule and the same real `keepalive_pings` as transcript mode now (not the
-  `cache_miss_reason` label, which depends on the ttl_expiry/prefix_change
-  distinction issue #423 is still fixing — a production number built on
-  that label would silently inherit whatever #423 has not yet corrected).
+  rule as transcript mode now (not the `cache_miss_reason` label, which
+  depends on the ttl_expiry/prefix_change distinction issue #423 is still
+  fixing — a production number built on that label would silently inherit
+  whatever #423 has not yet corrected).
+- **Reading real pings by `(session_id, model)` (no thread id yet) can
+  attribute a ping sent for one thread to a different thread's gap**, on a
+  session with more than one thread sharing a model — the same
+  approximation as everywhere else in this script that falls back to
+  `(session_id, model)`. This also means the SAME ping row can appear
+  attributed under more than one report view (for example, both the
+  `wake_cause` and `waiting_for` tables, which group the same gaps two
+  ways) — that is expected, not a double real cost, since both are
+  reading the one real ping row's one real `cost_usd`.
 - **The `system` wake cause is a catch-all** for an `isMeta` entry that
   carries no recognized marker (a skill load, a one-line nudge like "your
   previous response had no visible output", etc.) — it is deliberately
@@ -569,3 +614,14 @@ learned per-cause N optimizes for the common case at the expense of the
 rare expensive one, while the global N, forced to also fit the
 inherently-longer `human`/`background` populations, ends up accidentally
 well-suited to those same long tails.
+
+**Ping-row counting, before and after the fix.** On both local DBs
+(the same 25 sessions that cover any real pings): 360 real ping rows,
+read directly. Of those, DB-only mode's `(session_id, model)` grouping
+attributes 305 to a measured gap and reports 55 as pings for sessions
+that did not return ($2.83 of the $25.53 total). The earlier version —
+reading `keepalive_pings` off the next real row — would have reported
+whatever that column's own count happened to add up to on this data,
+with no way to see the orphaned 55 at all. Transcript mode's exact
+per-thread gaps attribute more precisely still: 256 pings fall inside a
+measured gap, 104 do not.

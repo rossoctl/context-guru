@@ -836,21 +836,36 @@ class DBRow:
     keepalive_pings: int
     saved_unique: int
     stop_reason: str
+    max_tokens: int = 0
+    # thread_id is issue #423's column. It does not exist on either local DB
+    # yet (checked: PRAGMA table_info has no such column there), so this is
+    # None on every row read today — read_db_rows() detects its absence and
+    # fails open rather than erroring. Code that uses it (PingIndex) must
+    # treat None as "no better key than session_id/model", never crash on it.
+    thread_id: str | None = None
+
+
+def _table_has_column(con: sqlite3.Connection, table: str, column: str) -> bool:
+    cur = con.cursor()
+    cur.execute(f"pragma table_info({table})")
+    return any(row[1] == column for row in cur.fetchall())
 
 
 def read_db_rows(db_path: str) -> list[DBRow]:
     uri = f"file:{db_path}?mode=ro"
     con = sqlite3.connect(uri, uri=True)
     con.row_factory = sqlite3.Row
+    has_thread_id = _table_has_column(con, "requests", "thread_id")
     cur = con.cursor()
     cur.execute(
         """
         select id, ts, session_id, model, status, cache_read, cache_write,
                fresh_input, output_tokens, cost_usd, cache_miss_reason,
-               upstream_ms, keepalive, keepalive_pings, saved_unique, stop_reason
+               upstream_ms, keepalive, keepalive_pings, saved_unique, stop_reason,
+               max_tokens{thread_id_col}
         from requests
         order by session_id, ts
-        """
+        """.format(thread_id_col=", thread_id" if has_thread_id else "")
     )
     rows = [
         DBRow(
@@ -870,6 +885,8 @@ def read_db_rows(db_path: str) -> list[DBRow]:
             keepalive_pings=r["keepalive_pings"],
             saved_unique=r["saved_unique"],
             stop_reason=r["stop_reason"],
+            max_tokens=r["max_tokens"],
+            thread_id=(r["thread_id"] or None) if has_thread_id else None,
         )
         for r in cur.fetchall()
     ]
@@ -893,13 +910,27 @@ def approx_response_ts(row: "DBRow") -> float:
 
 
 class DBIndex:
-    """Matches a transcript Gap's ending call to the DB row it produced.
+    """Matches DB rows to transcript events, two separate ways.
 
-    The DB has no thread id (issue #423), so matching is by session_id +
-    exact cache_read token count + nearest approximate response time (see
-    approx_response_ts) within MATCH_WINDOW_SEC. Used to pull the REAL
-    keepalive_pings already spent on a gap, for the OBSERVED cost column, and
-    by mislabel_check. Best-effort, not exact — see README.
+    `match()`: a transcript Gap's ending call to the single DB row it
+    produced, by session_id + exact cache_read token count + nearest
+    approximate response time (see approx_response_ts) within
+    MATCH_WINDOW_SEC. Used by mislabel_check. Best-effort, not exact —
+    see README.
+
+    `pings_for()`: every REAL ping row (`keepalive = 1`) that falls inside a
+    gap, found directly by timestamp range — NOT by reading `keepalive_pings`
+    off the gap's ending row, which is where the old version of this class
+    got it, and which only ever gets written once. A production
+    cross-check found 351 real ping rows in 75 sessions, of which this old
+    method surfaced only 28: every ping whose session never sent another
+    real request has no "next real row" to carry a `keepalive_pings` count
+    at all, so it was invisible. Keyed by thread_id when the DB has one
+    (issue #423, not populated on either local DB yet); by (session_id,
+    model) otherwise, which can occasionally attribute a ping sent for one
+    thread to a different thread's gap on a session with more than one.
+    `ping_orphans()` returns every ping row this never attributed to a
+    gap — almost always because its session never returned at all.
     """
 
     def __init__(self, db_rows: list[DBRow]):
@@ -908,6 +939,22 @@ class DBIndex:
             self._by_key[(r.session_id, r.cache_read)].append((approx_response_ts(r), r))
         for v in self._by_key.values():
             v.sort(key=lambda pair: pair[0])
+
+        self._pings_by_thread: dict[str, list[tuple[float, DBRow]]] = defaultdict(list)
+        self._pings_by_session_model: dict[tuple[str, str], list[tuple[float, DBRow]]] = defaultdict(list)
+        self._all_ping_ids: set[int] = set()
+        for r in db_rows:
+            if r.keepalive != 1:
+                continue
+            self._all_ping_ids.add(r.id)
+            ts = r.ts_ms / 1000.0
+            self._pings_by_session_model[(r.session_id, r.model)].append((ts, r))
+            if r.thread_id:
+                self._pings_by_thread[r.thread_id].append((ts, r))
+        for d in (self._pings_by_thread, self._pings_by_session_model):
+            for v in d.values():
+                v.sort(key=lambda pair: pair[0])
+        self._attributed_ping_ids: set[int] = set()
 
     def match(self, session_id: str, cache_read: int, ts: float) -> DBRow | None:
         candidates = self._by_key.get((session_id, cache_read))
@@ -920,10 +967,43 @@ class DBIndex:
                 best_dt, best = dt, row
         return best
 
-    def pings_for(self, gap: "Gap") -> int:
+    def pings_in_range(
+        self, session_id: str, model: str, start_ts: float, end_ts: float, thread_id: str | None = None
+    ) -> tuple[int, float]:
+        """(count, total real cost_usd) of ping rows strictly after start_ts
+        and up to and including end_ts, keyed by thread_id when available,
+        else by (session_id, model). Marks them attributed, so
+        ping_orphans() does not also count them as unreturned. The one
+        method both run_transcript_mode (via pings_for) and db_only_report
+        use to read ping rows directly — see the class docstring for why
+        that matters.
+        """
+        if thread_id and thread_id in self._pings_by_thread:
+            candidates = self._pings_by_thread[thread_id]
+        else:
+            candidates = self._pings_by_session_model.get((session_id, model), [])
+        matched = [r for ts, r in candidates if start_ts < ts <= end_ts]
+        for r in matched:
+            self._attributed_ping_ids.add(r.id)
+        return len(matched), sum(r.cost_usd for r in matched)
+
+    def pings_for(self, gap: "Gap") -> tuple[int, float]:
+        """(count, total real cost_usd) of ping rows that fell inside this
+        transcript Gap."""
         session_id = gap.thread_id.split("/", 1)[0]
-        row = self.match(session_id, gap.end.cache_read, gap.end.ts)
-        return row.keepalive_pings if row else 0
+        return self.pings_in_range(session_id, gap.end.model, gap.start.ts, gap.end.ts, gap.thread_id)
+
+    def ping_orphans(self) -> list[DBRow]:
+        """Ping rows never attributed to any measured gap — the DB-only
+        production number this class exists to fix: a ping sent for a
+        session that never sent another real request has no gap to fall
+        into at all, so it would otherwise just disappear from the count.
+        """
+        seen: dict[int, DBRow] = {}
+        for candidates in (*self._pings_by_thread.values(), *self._pings_by_session_model.values()):
+            for _, row in candidates:
+                seen[row.id] = row
+        return [row for rid, row in seen.items() if rid not in self._attributed_ping_ids]
 
 
 # ---------------------------------------------------------------------------
@@ -959,7 +1039,7 @@ def miss_premium_usd(call: Call, prices: PriceTable) -> float:
     return call.cache_creation * prices.price(call.model) * MISS_PREMIUM_X
 
 
-def observed_cost_x_usd(gap: Gap, pings: int, prices: PriceTable) -> tuple[float, float]:
+def observed_cost_x_usd(gap: Gap, pings: int, pings_cost_usd: float, prices: PriceTable) -> tuple[float, float]:
     """What this gap ACTUALLY cost: `pings` real keep-alive pings (0 if unknown —
     the DB does not cover every session) plus a miss premium if it was still a
     miss. This is the "OBSERVED" column: real traffic, real (partial) mitigation,
@@ -968,15 +1048,20 @@ def observed_cost_x_usd(gap: Gap, pings: int, prices: PriceTable) -> tuple[float
     ever happened; where the DB shows pings already in flight, observed can come
     in below the N=0 simulated cost for the same gap.
 
+    `pings_cost_usd` is the matched ping rows' own real `cost_usd`, summed —
+    not an estimate (`0.1x * price * tokens`), per the production follow-up on
+    PR #425: a ping's real cost can differ from that estimate (for example a
+    `max_tokens=0` summary-substitute ping, priced from its own call, not from
+    a fixed read-only ping formula). The x-unit figure still uses the 0.1x
+    constant, since x is a unit of the GAP's own price, not the ping's.
+
     PR #425 review finding 4: an errored call (is_error) is neither a hit nor a
     miss — Call.is_cache_miss already excludes it, so it gets no miss premium
     here, only whatever real ping cost preceded it (usually 0).
     """
     is_miss = gap.end.is_cache_miss
     x = PING_COST_X * pings + (MISS_PREMIUM_X if is_miss else 0.0)
-    price = prices.price(gap.end.model)
-    ping_usd = pings * PING_COST_X * price * gap.end.prompt_tokens_total
-    usd = ping_usd + (miss_premium_usd(gap.end, prices) if is_miss else 0.0)
+    usd = pings_cost_usd + (miss_premium_usd(gap.end, prices) if is_miss else 0.0)
     return x, usd
 
 
@@ -1016,8 +1101,8 @@ def summarize_gaps_by_cause(
         # call landed.
         x_costs, usd_costs, pings_used = [], [], []
         for g in gs:
-            pings = db_index.pings_for(g) if db_index else 0
-            x, usd = observed_cost_x_usd(g, pings, prices)
+            pings, pings_cost_usd = db_index.pings_for(g) if db_index else (0, 0.0)
+            x, usd = observed_cost_x_usd(g, pings, pings_cost_usd, prices)
             x_costs.append(x)
             usd_costs.append(usd)
             pings_used.append(pings)
@@ -1419,6 +1504,53 @@ def unused_tools_report(session_ids: set[str], db_paths: list[str], called_from_
 # ---------------------------------------------------------------------------
 
 
+# Issue #458: a summary-substitute ping can ALSO be logged as a component
+# action in extraction_calls, with a strategy ending in one of these. This
+# script does not read extraction_calls (it is not part of either report
+# here), but anything that someday sums "LLM spend" across both tables must
+# exclude these strategies, or it double-counts a substitute ping's cost —
+# already counted once, from requests.cost_usd, in ping_rows_summary() below.
+KEEPALIVE_SUBSTITUTE_STRATEGY_SUFFIXES = ("/keepalive_substitute_billed", "/keepalive_substitute")
+
+
+def is_keepalive_substitute_strategy(strategy: str) -> bool:
+    return strategy.endswith(KEEPALIVE_SUBSTITUTE_STRATEGY_SUFFIXES)
+
+
+def ping_rows_summary(db_rows: list[DBRow]) -> dict:
+    """Every real ping row (`keepalive = 1`) in the DB, counted directly —
+    not inferred from `keepalive_pings` on a later real request, which
+    misses every ping whose session never sent one (see DBIndex, whose
+    docstring has the production number this was built to fix: 351 real
+    ping rows read as 28). `substitute_*` is the `max_tokens = 0` subset: a
+    summary-substitute ping (issue #458) — still a ping slot, priced from
+    its own `cost_usd`, not from the 0.1x read-only-ping estimate.
+    """
+    pings = [r for r in db_rows if r.keepalive == 1]
+    substitutes = [r for r in pings if r.max_tokens == 0]
+    return {
+        "ping_rows": len(pings),
+        "ping_sessions": len({r.session_id for r in pings}),
+        "ping_cost_usd_total": round(sum(r.cost_usd for r in pings), 4),
+        "substitute_ping_rows": len(substitutes),
+        "substitute_ping_cost_usd_total": round(sum(r.cost_usd for r in substitutes), 4),
+    }
+
+
+def ping_orphans_summary(orphans: list[DBRow]) -> dict:
+    """Ping rows DBIndex.pings_for() never attributed to a measured gap —
+    "pings for sessions that did not return" (PR #425 production
+    follow-up): almost always because the session they were keeping warm
+    never sent another real request within the data this run covers, so
+    there is no gap for them to fall into at all.
+    """
+    return {
+        "count": len(orphans),
+        "sessions": len({r.session_id for r in orphans}),
+        "cost_usd_total": round(sum(r.cost_usd for r in orphans), 4),
+    }
+
+
 def mislabel_check(all_gaps: list[Gap], db_rows: list[DBRow]) -> dict:
     """Count DB prefix_change rows that are really per-thread TTL expiry / cold start.
 
@@ -1523,8 +1655,17 @@ def failure_stats(db_rows: list[DBRow]) -> dict:
 def db_only_report(db_rows: list[DBRow]) -> dict:
     """Approximate, thread-less report: group by (session, model) as a thread proxy."""
     prices = PriceTable(fit_model_prices(db_rows))
+    db_index = DBIndex(db_rows)
+    # PING rows (keepalive=1) are not real traffic: they never had a hit/miss
+    # of their own and must not become a gap boundary, so the gap/hit/miss
+    # loop below only ever walks REAL rows. Pings are attributed to the gap
+    # they fall inside separately, via DBIndex.pings_for() — see its
+    # docstring for why reading them directly (not via keepalive_pings on
+    # the next real row) matters.
     by_key: dict[tuple[str, str], list[DBRow]] = defaultdict(list)
     for r in db_rows:
+        if r.keepalive == 1:
+            continue
         by_key[(r.session_id, r.model)].append(r)
 
     gaps_min: list[float] = []
@@ -1542,7 +1683,6 @@ def db_only_report(db_rows: list[DBRow]) -> dict:
             if gap_min < GAP_THRESHOLD_MIN:
                 continue
             gaps_min.append(gap_min)
-            price = prices.price(cur.model)
             # PR #425 review finding 6: use the SAME hit rule as transcript mode
             # (cache_read / cache_write), not cache_miss_reason — that label
             # depends on the ttl_expiry/prefix_change distinction issue #423 is
@@ -1551,14 +1691,17 @@ def db_only_report(db_rows: list[DBRow]) -> dict:
             is_miss = not is_hit
             hits += 1 if is_hit else 0
             misses += 1 if is_miss else 0
-            # PR #425 review finding 6: also use the row's own real keepalive_pings
-            # (the production DB has this column) instead of assuming 0.
-            pings = cur.keepalive_pings or 0
+            # Production follow-up on PR #425: read ping ROWS directly (by
+            # timestamp, same session+model, between prev and cur) instead of
+            # the next real row's keepalive_pings column, and price them from
+            # their own real cost_usd — not a 0.1x estimate. See DBIndex.
+            session_id, model = key
+            pings, pings_cost_usd = db_index.pings_in_range(session_id, model, prev.ts_ms / 1000.0, cur.ts_ms / 1000.0, cur.thread_id)
             observed_pings_total += pings
             observed_x_total += PING_COST_X * pings + (MISS_PREMIUM_X if is_miss else 0.0)
-            observed_usd_total += pings * PING_COST_X * price * (cur.fresh_input + cur.cache_read + cur.cache_write)
+            observed_usd_total += pings_cost_usd
             if is_miss:
-                observed_usd_total += cur.cache_write * price * MISS_PREMIUM_X
+                observed_usd_total += cur.cache_write * prices.price(cur.model) * MISS_PREMIUM_X
             for n in PING_BUDGETS:
                 sim_totals[n].append(sim_cost_x(gap_min, n))
 
@@ -1567,6 +1710,8 @@ def db_only_report(db_rows: list[DBRow]) -> dict:
 
     return {
         "mode": "db_only_approximate",
+        "ping_rows": ping_rows_summary(db_rows),
+        "ping_orphans": ping_orphans_summary(db_index.ping_orphans()),
         "note": (
             "No transcripts: grouped by (session_id, model) as a best-effort thread "
             "proxy. Wake cause is unknown everywhere until issue #424's wake_cause "
@@ -1618,6 +1763,7 @@ def run_transcript_mode(projects_dirs: list[str], db_paths: list[str]) -> dict:
     db_index = DBIndex(db_rows) if db_rows else None
     prices = PriceTable(fit_model_prices(db_rows) if db_rows else None)
     report["price_sources"] = prices.sources_used(g.end.model for g in all_gaps_global)
+    report["ping_rows"] = ping_rows_summary(db_rows) if db_rows else None
 
     for project, gaps in sorted(per_project_gaps.items()):
         report["projects"][project] = {"threads": len(per_project_calls[project])}
@@ -1670,9 +1816,14 @@ def run_transcript_mode(projects_dirs: list[str], db_paths: list[str]) -> dict:
     if db_rows:
         report["mislabel_check"] = mislabel_check(all_gaps_global, db_rows)
         report["failures"] = failure_stats(db_rows)
+        # Computed LAST: every summarize_gaps_by_cause() call above has had
+        # its chance to attribute a ping row to a gap by now, so whatever
+        # db_index.ping_orphans() returns at this point is really unreturned.
+        report["ping_orphans"] = ping_orphans_summary(db_index.ping_orphans()) if db_index else None
     else:
         report["mislabel_check"] = None
         report["failures"] = None
+        report["ping_orphans"] = None
 
     return report
 
@@ -1686,12 +1837,29 @@ def _price_sources_lines(price_sources: dict) -> list[str]:
     return lines
 
 
+def _ping_rows_lines(ping_rows: dict | None, ping_orphans: dict | None) -> list[str]:
+    if not ping_rows:
+        return []
+    lines = [
+        f"Ping rows (keepalive=1, read directly): {ping_rows['ping_rows']} in {ping_rows['ping_sessions']} sessions, "
+        f"${ping_rows['ping_cost_usd_total']} total "
+        f"({ping_rows['substitute_ping_rows']} summary-substitute, ${ping_rows['substitute_ping_cost_usd_total']})"
+    ]
+    if ping_orphans:
+        lines.append(
+            f"Pings for sessions that did not return: {ping_orphans['count']} in {ping_orphans['sessions']} sessions, "
+            f"${ping_orphans['cost_usd_total']} total"
+        )
+    return lines
+
+
 def human_summary(report: dict) -> str:
     lines = []
     if report["mode"] == "db_only_approximate":
         lines.append("DB-only mode (no transcripts) — approximate, no wake causes.")
         lines.append(report["note"])
         lines.extend(_price_sources_lines(report.get("price_sources")))
+        lines.extend(_ping_rows_lines(report.get("ping_rows"), report.get("ping_orphans")))
         d = report["gap_distribution"]
         lines.append(
             f"Gaps >= {GAP_THRESHOLD_MIN} min: {d['count']}, median {d['median_min']} min, "
@@ -1713,6 +1881,7 @@ def human_summary(report: dict) -> str:
         return "\n".join(lines)
 
     lines.extend(_price_sources_lines(report.get("price_sources")))
+    lines.extend(_ping_rows_lines(report.get("ping_rows"), report.get("ping_orphans")))
 
     for project, data in report["projects"].items():
         lines.append(f"\n== {project} ({data['threads']} threads) ==")
@@ -2376,7 +2545,8 @@ def run_self_test() -> bool:
                 status integer, cache_read integer, cache_write integer,
                 fresh_input integer, output_tokens integer, cost_usd real,
                 cache_miss_reason text, upstream_ms real, keepalive integer,
-                keepalive_pings integer, saved_unique integer, stop_reason text
+                keepalive_pings integer, saved_unique integer, stop_reason text,
+                max_tokens integer
             )
             """
         )
@@ -2394,14 +2564,44 @@ def run_self_test() -> bool:
         con.execute(
             "insert into requests (ts, session_id, model, status, cache_read, cache_write, fresh_input, "
             "output_tokens, cost_usd, cache_miss_reason, upstream_ms, keepalive, keepalive_pings, "
-            "saved_unique, stop_reason) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (m2_ts_ms, session_id, "claude-opus-5-5", 200, 0, 5000, 10, 50, m2_cost, "prefix_change", 2000.0, 0, 2, 0, "end_turn"),
+            "saved_unique, stop_reason, max_tokens) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (m2_ts_ms, session_id, "claude-opus-5-5", 200, 0, 5000, 10, 50, m2_cost, "prefix_change", 2000.0, 0, 2, 0, "end_turn", 4096),
         )
+
+        # --- Production follow-up on PR #425: ping rows (keepalive=1) read
+        # directly, not via keepalive_pings. 3 rows, under their OWN session
+        # id ("ping-attribution-session", never shared with any other fixture
+        # in this test, since matching is by session_id+model and the
+        # existing fixtures above would otherwise collide on model
+        # "claude-opus-5-5"): one real PING inside a gap, one SUBSTITUTE
+        # ping (max_tokens=0, issue #458) also inside that gap, and one
+        # ORPHAN ping well after it, with no real request ever following.
+        ping_session = "ping-attribution-session"
+        ping_in_gap_ts = int(iso_to_epoch(iso(100)) * 1000)
+        substitute_ts = int(iso_to_epoch(iso(200)) * 1000)
+        orphan_ts = int(iso_to_epoch(iso(5000)) * 1000)
+        for ts_ms, cost, max_tok in (
+            (ping_in_gap_ts, 0.01, 4096),
+            (substitute_ts, 0.005, 0),
+            (orphan_ts, 0.02, 4096),
+        ):
+            con.execute(
+                "insert into requests (ts, session_id, model, status, cache_read, cache_write, fresh_input, "
+                "output_tokens, cost_usd, cache_miss_reason, upstream_ms, keepalive, keepalive_pings, "
+                "saved_unique, stop_reason, max_tokens) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (ts_ms, ping_session, "claude-opus-5-5", 200, 0, 0, 0, 0, cost, "", 100.0, 1, 0, 0, "end_turn", max_tok),
+            )
         con.commit()
         con.close()
 
         db_rows = read_db_rows(db_path)
-        check("db rows read", len(db_rows), 1)
+        check("db rows read (1 real request + 3 ping rows)", len(db_rows), 4)
+
+        ping_summary = ping_rows_summary(db_rows)
+        check("ping_rows_summary: 3 ping rows total", ping_summary["ping_rows"], 3)
+        check("ping_rows_summary: total cost is all 3 pings' cost_usd", ping_summary["ping_cost_usd_total"], round(0.01 + 0.005 + 0.02, 4))
+        check("ping_rows_summary: 1 substitute ping (max_tokens=0)", ping_summary["substitute_ping_rows"], 1)
+        check("ping_rows_summary: substitute ping cost is its own cost_usd", ping_summary["substitute_ping_cost_usd_total"], 0.005)
 
         fitted = fit_model_prices(db_rows)
         check("fitted price for claude-opus-5-5", fitted.get("claude-opus-5-5", 0.0), fit_price)
@@ -2411,22 +2611,37 @@ def run_self_test() -> bool:
 
         db_index = DBIndex(db_rows)
         human_db = summarize_gaps_by_cause(main_gaps, db_index, prices)["human"]
-        check("human observed_pings_total pulls the DB's real 2 pings", human_db["observed_pings_total"], 2)
-        # Finding 1: USD now uses the fitted price, not the hardcoded fallback.
-        check(
-            "human observed USD uses the DB-fitted price",
-            human_db["observed_cost_usd_total"],
-            round(2 * PING_COST_X * fit_price * (10 + 0 + 5000) + 5000 * fit_price * MISS_PREMIUM_X, 4),
+        check("human observed_pings_total: no ping row shares session+model with this gap", human_db["observed_pings_total"], 0)
+
+        # A gap in the ping-attribution session: start=0, end=iso(600) (both
+        # the real ping and the substitute fall inside; the orphan, at
+        # iso(5000), does not). Built directly (no transcript needed) since
+        # pings_for() only reads .thread_id / .end.model / .start.ts / .end.ts.
+        ping_test_start = Call(ts=iso_to_epoch(iso(0)), message_id="x", model="claude-opus-5-5", is_error=False)
+        ping_test_end = Call(ts=iso_to_epoch(iso(600)), message_id="y", model="claude-opus-5-5", is_error=False, cache_read=0, cache_creation=5000)
+        ping_test_gap = Gap(
+            thread_id=ping_session, thread_kind="main", project="ping-test",
+            start=ping_test_start, end=ping_test_end, gap_min=10.0, cause="human", waiting_for="human",
         )
+        pings_count, pings_cost = db_index.pings_for(ping_test_gap)
+        check("pings_for finds the real ping and the substitute, by timestamp range", pings_count, 2)
+        check("pings_for sums their REAL cost_usd, not a 0.1x estimate", round(pings_cost, 4), round(0.01 + 0.005, 4))
+
+        orphans = db_index.ping_orphans()
+        orphan_ids = {r.id for r in orphans}
+        check("ping_orphans excludes the 2 pings just attributed to a gap", len(orphan_ids & {r.id for r in db_rows if r.cost_usd in (0.01, 0.005)}), 0)
+        check("ping_orphans includes the one never attributed to any gap", any(abs(r.cost_usd - 0.02) < 1e-9 for r in orphans), True)
 
         mc = mislabel_check(main_gaps, db_rows)
         check("mislabel_check finds the DB's prefix_change row", mc["db_prefix_change_rows_checked"], 1)
         check("mislabel_check flags it as a TTL expiry (it's a 10-min main-thread gap)", mc["mislabeled_count"], 1)
         check("mislabel_check reports the row's FULL cost, not just its premium", mc["mislabeled_full_cost_usd"], round(m2_cost, 4))
 
-        # --- Finding 6: DB-only mode uses the real hit rule and real pings. ---
-        # Pings/hit-or-miss are attributed to whichever row ENDS a gap (same as
-        # DBIndex.pings_for in transcript mode) — row 1 is only the gap's start.
+        # --- Finding 6: DB-only mode uses the real hit rule. Production
+        # follow-up: it now also reads ping ROWS directly, same as transcript
+        # mode's DBIndex — 2 ping rows (one normal, one a max_tokens=0
+        # substitute) fall inside the row2->row3 gap; a 3rd, after row 3 (the
+        # session's last real row), is an orphan ("did not return"). ---
         db_only_rows = [
             DBRow(
                 id=1, ts_ms=0, session_id="s", model="claude-opus-5-5", status=200,
@@ -2446,16 +2661,38 @@ def run_self_test() -> bool:
             DBRow(
                 id=3, ts_ms=20 * 60 * 1000, session_id="s", model="claude-opus-5-5", status=200,
                 cache_read=0, cache_write=5000, fresh_input=10, output_tokens=50,
-                # A miss, mislabeled the other way ("hit") to prove the same thing,
-                # with 1 real keepalive ping already spent on this gap.
+                # A miss, mislabeled the other way ("hit") to prove the same thing.
                 cost_usd=0.02, cache_miss_reason="hit", upstream_ms=100.0,
-                keepalive=0, keepalive_pings=1, saved_unique=0, stop_reason="end_turn",
+                keepalive=0, keepalive_pings=0, saved_unique=0, stop_reason="end_turn",
+            ),
+            DBRow(
+                id=4, ts_ms=15 * 60 * 1000, session_id="s", model="claude-opus-5-5", status=200,
+                cache_read=0, cache_write=0, fresh_input=0, output_tokens=0,
+                cost_usd=0.03, cache_miss_reason="", upstream_ms=50.0,
+                keepalive=1, keepalive_pings=0, saved_unique=0, stop_reason="end_turn", max_tokens=4096,
+            ),
+            DBRow(
+                id=5, ts_ms=16 * 60 * 1000, session_id="s", model="claude-opus-5-5", status=200,
+                cache_read=0, cache_write=0, fresh_input=0, output_tokens=0,
+                cost_usd=0.004, cache_miss_reason="", upstream_ms=50.0,
+                keepalive=1, keepalive_pings=0, saved_unique=0, stop_reason="end_turn", max_tokens=0,
+            ),
+            DBRow(
+                id=6, ts_ms=30 * 60 * 1000, session_id="s", model="claude-opus-5-5", status=200,
+                cache_read=0, cache_write=0, fresh_input=0, output_tokens=0,
+                cost_usd=0.05, cache_miss_reason="", upstream_ms=50.0,
+                keepalive=1, keepalive_pings=0, saved_unique=0, stop_reason="end_turn", max_tokens=4096,
             ),
         ]
         db_only = db_only_report(db_only_rows)
         check("db_only hits (ignores the wrong cache_miss_reason label)", db_only["hits"], 1)
         check("db_only misses (ignores the wrong cache_miss_reason label)", db_only["misses"], 1)
-        check("db_only observed_pings_total (real keepalive_pings)", db_only["observed_pings_total"], 1)
+        check("db_only observed_pings_total: 2 ping rows found inside the row2->row3 gap", db_only["observed_pings_total"], 2)
+        check("db_only ping_rows: counts all 3 ping rows directly", db_only["ping_rows"]["ping_rows"], 3)
+        check("db_only ping_rows: total cost is all 3 pings' own cost_usd", db_only["ping_rows"]["ping_cost_usd_total"], round(0.03 + 0.004 + 0.05, 4))
+        check("db_only ping_rows: 1 substitute ping (max_tokens=0)", db_only["ping_rows"]["substitute_ping_rows"], 1)
+        check("db_only ping_orphans: the ping after row 3 never returns", db_only["ping_orphans"]["count"], 1)
+        check("db_only ping_orphans cost is that one ping's real cost_usd", db_only["ping_orphans"]["cost_usd_total"], 0.05)
 
     return ok
 
