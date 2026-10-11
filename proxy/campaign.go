@@ -341,6 +341,7 @@ func tileHours(hours []int, days []time.Weekday) []tenant.Window {
 		endStr := fmt.Sprintf("%02d:00", end+1)
 		out = append(out, tenant.Window{
 			Days: days, Start: fmt.Sprintf("%02d:00", start), End: endStr,
+			TZ: "UTC", // cells are UTC hours on UTC weekdays; unset would resolve to Asia/Jerusalem
 		})
 	}
 	return out
