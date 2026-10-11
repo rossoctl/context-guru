@@ -377,6 +377,21 @@ CREATE INDEX IF NOT EXISTS idx_bt_run ON bench_tasks(run_id, arm);
 // index, a different type — still requires a version bump, because an old file would
 // otherwise be read with the wrong shape.
 const additiveDDL = `
+-- Lifecycle signals (issue #424/#427), written only with the lifecycle flag on: the facts no
+-- requests column holds. One row per request, and one per keep-alive ping (ping_n > 0; its
+-- thread is the ping's own requests.thread_id, its outcome and cost the same row's cache and
+-- cost columns). A side table so requests is untouched. Counts, byte lengths and a tier label
+-- only. since_prev_end_ms is -1 when unknown, never 0.
+CREATE TABLE IF NOT EXISTS request_lifecycle (
+  request_id        INTEGER PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+  result_count      INTEGER NOT NULL DEFAULT 0,  -- tool_results on the incoming request
+  result_bytes      INTEGER NOT NULL DEFAULT 0,
+  result_error      INTEGER NOT NULL DEFAULT 0,
+  since_prev_end_ms INTEGER NOT NULL DEFAULT -1, -- previous response END on this thread -> this start
+  granted_ttl       TEXT    NOT NULL DEFAULT '', -- 5m|1h|mixed from the response's cache-write tiers
+  ping_n            INTEGER NOT NULL DEFAULT 0
+);
+
 -- One row per LLM call an expensive component made, with what it cost and what it bought.
 --
 -- Separate from request_components because the relationship is one-to-many and the columns
