@@ -345,9 +345,11 @@ func (d *DB) insertBatch(evs []*Event) error {
 		reasoning_effort, thinking_mode, thinking_budget, temperature, top_p, max_tokens, stream,
 		tool_choice, tools, system_blocks,
 		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
-		keepalive_strategy_id, billed_token_factor, thread_id
+		keepalive_strategy_id, billed_token_factor, thread_id,
+		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -402,6 +404,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			boolInt(e.Stream), e.ToolChoice, e.Tools, e.SystemBlocks,
 			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.StopReason,
 			strategyID, e.BilledTokenFactor, e.ThreadID,
+			e.WaitingFor, e.WaitTool, e.WakeCause, e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs,
 		)
 		if err != nil {
 			return err

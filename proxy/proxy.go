@@ -37,6 +37,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
@@ -260,6 +261,10 @@ type Handler struct {
 	// keeper and the dashboard's miss attribution can key on session + thread. See
 	// internal/thread and threadFor.
 	threads *thread.Tracker
+	// waits records, per thread, why it waits and why it woke up (issue #424's RECORD half —
+	// it never chooses a keep-alive ping budget and never changes keep-alive or compaction
+	// behaviour). See internal/waitcause and dashcapture.go's noteWaitCause/finish.
+	waits *waitcause.Tracker
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
 	promCache promCache
@@ -330,6 +335,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	h.keeper = newKeeper(h)
 	h.keeper.start()
 	h.threads = thread.New()
+	h.waits = waitcause.New()
 	h.regLim = newAnonLimiter(Limits{RequestsPerMinute: registrationsPerMinute})
 	h.authLim = newAnonLimiter(Limits{RequestsPerMinute: authFailuresPerMinute})
 	h.pwLim = newAnonLimiter(Limits{RequestsPerMinute: passwordAttemptsPerMinute})
@@ -1230,6 +1236,14 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			}
 			threadID = th.ID
 			cp.noteThread(th)
+			// Issue #424's RECORD half: why this thread is about to wait, and what woke it.
+			// Read off `orig` (as the agent sent it) for the same reason threadFor is: the
+			// pipeline's own rewrite is not the conversation the wake-cause markers arrived
+			// in. Dashboard-only (nil-safe cp): no dashboard, nothing to attribute, so skip
+			// the scan entirely.
+			if cp != nil {
+				cp.noteWaitCause(h.waits.Observe(tn.ID, tr.Session, threadID, orig))
+			}
 			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
 			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
 			// Drop any cache_aware_summarizer keep-alive substitute registered off an EARLIER
@@ -1633,6 +1647,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			}
 		}
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
+		// Issue #424's retry rule needs THIS request's own status and message count for the
+		// NEXT request on the thread's wake-cause check — see internal/waitcause's doc on why
+		// that cannot be read from a body alone. cp.waitMsgCount is 0 (never written) when
+		// noteWaitCause above never ran (dashboard off, or no usable message list), in which
+		// case this is a harmless no-op: Observe will see no previous state either.
+		if cp != nil {
+			h.waits.RecordOutcome(tn.ID, session, threadID, cp.waitMsgCount, status)
+		}
 		// THE one line per request. In a defer so every terminal path emits it exactly
 		// once — stream-through, buffered replay, the round-cap exit, an upstream failure
 		// (which also logged its own WARN with the reason).

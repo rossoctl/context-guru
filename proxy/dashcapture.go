@@ -11,6 +11,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/tidwall/gjson"
 )
 
@@ -61,6 +62,18 @@ type capture struct {
 	thread     string
 	inherits   string
 	hasInherit bool
+	// Issue #424's RECORD half: why this thread is about to wait and what woke it, set by
+	// noteWaitCause off the pristine request body (see internal/waitcause). waitTool is the
+	// LAST tool_use name on the response that STARTS the wait, filled only when that response
+	// turns out to classify as own_tool — computed at finish(), not here, since it needs the
+	// RESPONSE's own tool calls, which are not in hand until then. waitMsgCount is this
+	// request's own message count, carried to proxy.go's defer so it can hand it to
+	// waitcause.Tracker.RecordOutcome once this request's status is known.
+	wakeCause       string
+	openBackground  int
+	openTeammate    int
+	monitorExpiryMs int64
+	waitMsgCount    int
 	// kaPings / kaRefreshed / kaStrategy are what the idle keep-alive did during the span
 	// this request just ended: how many pings it sent, how many tokens the last of them
 	// read from cache, and which manager-controlled strategy (if any) resolved the policy
@@ -151,6 +164,20 @@ func (c *capture) noteThread(res thread.Result) {
 	if c != nil {
 		c.thread = res.ID
 		c.inherits, c.hasInherit = res.InheritsFrom()
+	}
+}
+
+// noteWaitCause records issue #424's RECORD half: why this request's thread woke up (known
+// now, from the request body) and the open-task/open-teammate state as of that body (needed at
+// finish() to classify what THIS response's own ending means for the NEXT wait). Call site:
+// proxy.go, right after noteThread, with the result of waitcause.Tracker.Observe.
+func (c *capture) noteWaitCause(obs waitcause.Observation) {
+	if c != nil {
+		c.wakeCause = obs.WakeCause
+		c.openBackground = obs.OpenBackground
+		c.openTeammate = obs.OpenTeammate
+		c.monitorExpiryMs = obs.MonitorExpiryMs
+		c.waitMsgCount = obs.MsgCount
 	}
 }
 
@@ -362,6 +389,21 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// The provider's terminal reason, off the same response bytes the token tiers came
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason
+	// Issue #424's RECORD half. WakeCause (why THIS request woke up) was already computed
+	// from this request's own body, back when noteWaitCause ran; WaitingFor (what the
+	// thread is about to wait on NEXT) needs this response's own tool calls and stop
+	// reason, which only exist here. failed is this proxy's own analogue of a transcript's
+	// isApiErrorMessage: a call that never completed with a 2xx. c.status is 0 before any
+	// upstream round ever returns (an early refusal), which is deliberately NOT "failed" —
+	// there is no wait to classify for a request that never reached a thread at all, and
+	// ClassifyWaitingFor's own !usageOK-and-no-stop-reason fallback already reads that case
+	// as WaitingUnknown rather than WaitingRetry.
+	failedCall := c.status != 0 && c.status/100 != 2
+	e.WaitingFor, e.WaitTool = waitcause.ClassifyWaitingFor(
+		usage.ToolUseNames, usage.StopReason, failedCall, usageOK, c.openBackground, c.openTeammate)
+	e.WakeCause = c.wakeCause
+	e.OpenBackground, e.OpenTeammate = c.openBackground, c.openTeammate
+	e.MonitorExpiryMs = c.monitorExpiryMs
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok

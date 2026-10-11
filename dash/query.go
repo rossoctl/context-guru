@@ -148,12 +148,15 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.reasoning_effort, r.thinking_mode, r.thinking_budget, r.temperature, r.top_p,
 	r.max_tokens, r.stream, r.tool_choice, r.tools, r.system_blocks,
 	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason,
-	r.thread_id`
+	r.thread_id,
+	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
 	var byp, ca, stream, keepAlive int
 	var temp, topP sql.NullFloat64
+	var waitingFor, waitTool, wakeCause sql.NullString
+	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
 	err := rows.Scan(&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
@@ -165,7 +168,11 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.ReasoningEffort, &e.ThinkingMode, &e.ThinkingBudget, &temp, &topP,
 		&e.MaxTokens, &stream, &e.ToolChoice, &e.Tools, &e.SystemBlocks,
 		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason,
-		&e.ThreadID)
+		&e.ThreadID,
+		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs)
+	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
+	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
+	e.MonitorExpiryMs = monitorExpiryMs.Int64
 	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
 	e.KeepAlive = keepAlive != 0
 	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one
@@ -1171,6 +1178,13 @@ var breakdownDims = map[string]string{
 	// Overview reports a coverage count beside every TTL figure.
 	"cache_ttl": "r.cache_ttl",
 	"stream":    "CASE WHEN r.stream <> 0 THEN 'stream' ELSE 'unary' END",
+	// Issue #424's RECORD half: let a dashboard user split cost and request count by why a
+	// thread was about to wait, or by what woke it up. NULL (a row from before this feature
+	// existed) renders as COALESCE('') below, same as every other nullable text dimension
+	// here would if one existed — there is no prior example to match because every other
+	// dimension in this map is NOT NULL from its very first column.
+	"waiting_for": "COALESCE(r.waiting_for, '')",
+	"wake_cause":  "COALESCE(r.wake_cause, '')",
 }
 
 // BreakdownDims lists the valid dimensions, sorted, for the API's error message and the

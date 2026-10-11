@@ -96,7 +96,31 @@ type Event struct {
 	// held "" at the time, so its row reads "" although the tracker later moved that thread to a
 	// "p:" id.
 	ThreadID string `json:"thread_id"`
-	Model    string `json:"model"`
+	// Issue #424's RECORD half: why this thread is about to wait, and why it woke up — read
+	// from the request body and the response's own tool calls/stop reason, by string match
+	// and structural tool_use reads, no LLM. See internal/waitcause, which defines every
+	// value and never guesses: a signal this proxy's client (Claude Code) does not send, or
+	// another agent/provider entirely, reads "unknown" rather than a label chosen for it.
+	// This package NEVER reads these columns to choose a keep-alive ping budget or change
+	// compaction behaviour — it only writes them, so a later change can.
+	//
+	// WaitingFor is set on the row whose OWN response ends a turn with nothing more to do
+	// right now (own_tool|human|background|teammate|retry|unknown); WaitTool is the LAST
+	// tool_use name on that response, filled only when WaitingFor is "own_tool". WakeCause
+	// is set on the row that ENDS a wait (tool_result|background|teammate|human|system|
+	// retry|unknown), read off its own last message. OpenBackground/OpenTeammate are the
+	// open-task/open-teammate counts as of THIS request's body (the "waiting_on" detail);
+	// MonitorExpiryMs is the latest known absolute Monitor expiry (epoch ms) among them, 0
+	// when none is open or none stated one. All six are "" / 0 on a row written before this
+	// column existed (see dash/schema.go's additiveColumns: nullable, no default, so an old
+	// row reads SQL NULL rather than a value this package never computed for it).
+	WaitingFor      string `json:"waiting_for"`
+	WaitTool        string `json:"wait_tool"`
+	WakeCause       string `json:"wake_cause"`
+	OpenBackground  int    `json:"open_background"`
+	OpenTeammate    int    `json:"open_teammate"`
+	MonitorExpiryMs int64  `json:"monitor_expiry_ms"`
+	Model           string `json:"model"`
 	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
 	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
 	// tokens.BilledDeltaFactor(Model), resolved once in Price.
