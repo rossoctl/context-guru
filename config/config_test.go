@@ -199,3 +199,13 @@ cache:
 		t.Error("a misspelled cache key was accepted silently")
 	}
 }
+
+// The recommended keep-alive policy (#435, B-policy-r2) is the default; pin the four knobs.
+func TestKeepAliveRecommendedDefaults(t *testing.T) {
+	r := CacheConfig{}.Resolved()
+	if r.KeepAliveIdleSeconds != 270 || r.KeepAliveMaxPings != 2 ||
+		r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveMaxUSDPerPing != 0.50 {
+		t.Errorf("Resolved() = idle %d, K %d, floor %d, ceiling %v; want 270, 2, 80000, 0.50",
+			r.KeepAliveIdleSeconds, r.KeepAliveMaxPings, r.KeepAliveMinPrefixTokens, r.KeepAliveMaxUSDPerPing)
+	}
+}
