@@ -204,6 +204,15 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	// chained to the main thread by Inherits, so the main thread's tail, timestamp and every
 	// structure keyed by its id (keep-alive, the prefix-ask stash, wait-cause state) are left
 	// exactly as its own last request put them.
+	//
+	// agentCompaction is excluded on purpose: the agent's own compaction request can itself be
+	// tool-less (its prompt tells the model not to call any), and it is NOT a side request — it
+	// is the main thread asking for its own summary. newID's succ lookup below finds a thread by
+	// its `compacting` flag, which only a request matched to the main thread (not diverted into
+	// a side thread of its own) can set. Diverting it here would leave the main thread never
+	// marked compacting, so the post-compaction request — which matches no prefix, by design —
+	// would get yet another new id instead of the main thread's, splitting the thread on every
+	// compaction.
 	var sideParent *threadState
 	switch {
 	case agentID != "":
@@ -215,7 +224,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 		// No message list to match on (a server-held Responses history, an unparseable body).
 		// Today's behaviour: the session itself.
 		return Result{ID: Primary, Source: SourceSession}
-	case match != nil && match.tools && !hasTools:
+	case match != nil && match.tools && !hasTools && !agentCompaction:
 		res = Result{ID: fingerprintID(sums[len(sums)-1]), Source: SourcePrefix}
 		sideParent = match
 	case match != nil:

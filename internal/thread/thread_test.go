@@ -449,6 +449,29 @@ func TestAGenuineToolLessMainTurnStillChainsForward(t *testing.T) {
 	}
 }
 
+// A tool-less AGENT COMPACTION request is not a side request, even though it is tool-less and
+// extends a tools-declaring thread's prefix exactly like one — its prompt tells the model not
+// to call any tools, so it can arrive with no tools declared. It must still match the main
+// thread and set its `compacting` flag, or the post-compaction request (which matches no
+// prefix, by design — it starts from a summary) gets a brand-new id on every compaction instead
+// of the main thread's.
+func TestAToolLessAgentCompactionDoesNotSplitTheMainThread(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withTools(conv("fix the bug")), false)
+	tr.Resolve("t\x00s", "", withTools(conv("fix the bug", "a1", "u2")), false)
+	// The compaction request: tool-less, extends the main thread's prefix, agentCompaction=true.
+	compact := tr.Resolve("t\x00s", "", conv("fix the bug", "a1", "u2", "summarize this conversation"), true)
+	if compact.ID != Primary {
+		t.Fatalf("compaction request got %q, want primary", compact.ID)
+	}
+	// The post-compaction request starts from a summary: it matches no thread by prefix, and
+	// must inherit the main thread's id via the `compacting` flag the request above set.
+	post := tr.Resolve("t\x00s", "", conv("summary of everything", "continue"), false)
+	if post.ID != Primary {
+		t.Fatalf("post-compaction request got %q, want primary (the compaction request's thread)", post.ID)
+	}
+}
+
 // withTools adds a tools declaration, the metadata that marks the main agent.
 func withTools(body []byte) []byte {
 	var m map[string]any
