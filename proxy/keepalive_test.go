@@ -104,7 +104,7 @@ func (f *fakeSender) send(j pingJob, body []byte) (Usage, int, error) {
 		st = http.StatusOK
 	}
 	u := f.usage
-	if u == (Usage{}) {
+	if u.CacheRead == 0 && u.Output == 0 && u.FreshInput == 0 && u.CacheWrite == 0 {
 		u = Usage{CacheRead: 48576, Output: 1}
 	}
 	err := f.err

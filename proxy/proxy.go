@@ -37,6 +37,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
@@ -260,6 +261,13 @@ type Handler struct {
 	// keeper and the dashboard's miss attribution can key on session + thread. See
 	// internal/thread and threadFor.
 	threads *thread.Tracker
+	// waits records, per thread, why it waits and why it woke up (issue #424's RECORD half —
+	// it never chooses a keep-alive ping budget and never changes keep-alive or compaction
+	// behaviour). The actual body scan runs on the DASHBOARD'S OWN writer goroutine, via a
+	// closure finish() builds and hands to dash.Event.WaitCause — off the request path
+	// entirely, not merely off the upstream forward. See internal/waitcause,
+	// noteWaitBody/finish in dashcapture.go, and dash/capture.go's write().
+	waits *waitcause.Tracker
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
 	promCache promCache
@@ -330,6 +338,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	h.keeper = newKeeper(h)
 	h.keeper.start()
 	h.threads = thread.New()
+	h.waits = waitcause.New()
 	h.regLim = newAnonLimiter(Limits{RequestsPerMinute: registrationsPerMinute})
 	h.authLim = newAnonLimiter(Limits{RequestsPerMinute: authFailuresPerMinute})
 	h.pwLim = newAnonLimiter(Limits{RequestsPerMinute: passwordAttemptsPerMinute})
@@ -1230,6 +1239,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			}
 			threadID = th.ID
 			cp.noteThread(th)
+			// Issue #424's RECORD half: stash the PRISTINE body (as the agent sent it, same
+			// reason threadFor reads `orig` rather than the pipeline's rewrite) for finish()
+			// to scan AFTER this request has gone upstream — see noteWaitBody's own comment,
+			// and dashcapture.go's finish() for where the actual scan (waitcause.Tracker.
+			// Observe) now runs. This line itself costs one slice-header copy, not a scan.
+			cp.noteWaitBody(orig)
 			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
 			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
 			// Drop any cache_aware_summarizer keep-alive substitute registered off an EARLIER

@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS requests (
   -- The thread of the session ('' = the primary thread: the main agent, the first thread with no
   -- agent header that declares tools). See Event.ThreadID.
   thread_id          TEXT    NOT NULL DEFAULT '',
+  -- Issue #424's RECORD half (see Event.WaitingFor's own comment for what each one means).
+  -- Nullable with NO default, unlike every other column above: a row written before this
+  -- feature existed has nothing to read here, and NULL says so, rather than '' or 0 (which
+  -- waitcause's own enums deliberately keep distinct from "never computed" by producing
+  -- "unknown"/0 themselves on a row this DID run on but found nothing — see internal/waitcause).
+  waiting_for        TEXT,
+  wait_tool          TEXT,
+  wake_cause         TEXT,
+  open_background    INTEGER,
+  open_teammate      INTEGER,
+  monitor_expiry_ms  INTEGER,
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)
@@ -662,6 +673,14 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// #423: the thread of the session. '' on old rows, which is the primary thread — exactly
 	// how those rows were keyed when they were written.
 	{"requests", "thread_id", "TEXT NOT NULL DEFAULT ''"},
+	// #424's RECORD half. Nullable, no default — see the ddl block's own comment on these
+	// six columns for why NULL (never computed) must stay distinct from a real "unknown".
+	{"requests", "waiting_for", "TEXT"},
+	{"requests", "wait_tool", "TEXT"},
+	{"requests", "wake_cause", "TEXT"},
+	{"requests", "open_background", "INTEGER"},
+	{"requests", "open_teammate", "INTEGER"},
+	{"requests", "monitor_expiry_ms", "INTEGER"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},

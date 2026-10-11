@@ -11,6 +11,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/tidwall/gjson"
 )
 
@@ -61,6 +62,18 @@ type capture struct {
 	thread     string
 	inherits   string
 	hasInherit bool
+	// Issue #424's RECORD half. waits is the handler's shared tracker (nil-checked like
+	// everything else here); waitBody is the PRISTINE request body, stashed by noteWaitBody —
+	// a plain slice-header copy, no scan. finish() builds a CLOSURE around both of these
+	// (plus the response's own facts) and hands it to the dash.Event as Event.WaitCause,
+	// which the dashboard's WRITER goroutine invokes — never finish() itself, and never
+	// anything on the request path: the actual rescan (waitcause.Tracker.Observe, ~11ms on
+	// a 783 KB body) running inside finish() was measured adding exactly that much latency
+	// to the NEXT request on a keep-alive connection, because finish() runs on the
+	// handler's own defer, before the handler returns (same reason dash.Event.Redact runs
+	// on the writer goroutine, not here). See dash/capture.go's write().
+	waits    *waitcause.Tracker
+	waitBody []byte
 	// kaPings / kaRefreshed / kaStrategy are what the idle keep-alive did during the span
 	// this request just ended: how many pings it sent, how many tokens the last of them
 	// read from cache, and which manager-controlled strategy (if any) resolved the policy
@@ -96,6 +109,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		agent: r.UserAgent(), start: time.Now(),
 		llm:    &cheapmodel.Sink{},
 		unique: map[string]int{},
+		waits:  h.waits,
 	}
 }
 
@@ -151,6 +165,19 @@ func (c *capture) noteThread(res thread.Result) {
 	if c != nil {
 		c.thread = res.ID
 		c.inherits, c.hasInherit = res.InheritsFrom()
+	}
+}
+
+// noteWaitBody stashes the PRISTINE request body for issue #424's RECORD half, so finish()
+// can scan it (waitcause.Tracker.Observe) after the request has already gone upstream. This
+// is a slice-header copy — the request path pays nothing beyond this one field write, however
+// large the body: see internal/waitcause's own benchmark for what the scan itself costs, and
+// why that cost belongs on finish()'s side of the line, not here. Call site: proxy.go, right
+// after noteThread, with `orig` — the body as the agent sent it, before any pipeline rewrite,
+// the same body threadFor already matches on.
+func (c *capture) noteWaitBody(body []byte) {
+	if c != nil {
+		c.waitBody = body
 	}
 }
 
@@ -362,6 +389,45 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// The provider's terminal reason, off the same response bytes the token tiers came
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason
+	// Issue #424's RECORD half: a CLOSURE, not a call. The body scan (waitcause.Tracker.
+	// Observe, ~11ms on a 783 KB body) must NOT run here — finish() runs on the handler's
+	// own defer, before the handler returns, so anything synchronous here delays the NEXT
+	// request on a keep-alive connection (measured: that is exactly what calling Observe
+	// inline here used to add). The dashboard's writer goroutine invokes this closure right
+	// before the insert, the same place and for the same reason e.Redact() already runs
+	// there — see dash/capture.go's write(). Everything the closure needs is captured by
+	// value/reference now, cheaply: no scan happens until the writer calls it.
+	//
+	// RecordOutcome (this request's own status + message count, for the NEXT request's
+	// retry check) is folded into the SAME closure rather than called separately on the
+	// request path, so it still runs strictly after Observe reads the PREVIOUS state —
+	// exactly the ordering the retry rule depends on — and in the same relative order
+	// requests arrived in (the writer processes one channel, FIFO, same as the order
+	// Record() was called in). The trade-off: if this row is ever DROPPED (a full capture
+	// channel under heavy load — see dash.Recorder.Record's own doc), RecordOutcome never
+	// runs for it either, so a retry right after a dropped row could be missed. Fail-open,
+	// consistent with every other field here: a missed retry reads as a fresh wake, not a
+	// wrong one.
+	//
+	// failed is this proxy's own analogue of a transcript's isApiErrorMessage: a call that
+	// never completed with a 2xx. status 0 (never reached an upstream) is deliberately NOT
+	// "failed" — ClassifyWaitingFor's own !usageOK-and-no-stop-reason fallback already reads
+	// that case as WaitingUnknown rather than WaitingRetry.
+	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
+	toolUseNames, stopReason := usage.ToolUseNames, usage.StopReason
+	failedCall := status != 0 && status/100 != 2
+	provider := bschemas.ModelProvider(c.provider)
+	e.WaitCause = func() dash.WaitCauseResult {
+		obs := waits.Observe(tenantID, sessionID, threadID, provider, waitBody)
+		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
+		waitingFor, waitTool := waitcause.ClassifyWaitingFor(
+			toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
+		return dash.WaitCauseResult{
+			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
+			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,
+			MonitorExpiryMs: obs.MonitorExpiryMs,
+		}
+	}
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok

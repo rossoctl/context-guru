@@ -410,6 +410,19 @@ func (r *Recorder) run() {
 		// request). Nothing reaches the database unredacted either way — the security
 		// property is the ordering against the INSERT, which this preserves.
 		for _, e := range batch {
+			// Issue #424's RECORD half: the body rescan (waitcause.Tracker.Observe, ~11ms on
+			// a 783 KB body) runs HERE too, on this goroutine, for the exact reason Redact
+			// does — finish() runs on the handler's own defer, before the handler returns,
+			// so anything synchronous there delays the NEXT request on a keep-alive
+			// connection, which is precisely what WaitCauseAddsNoRequestLatency-style tests
+			// caught when this ran inline in finish() instead. e.WaitCause is nil on any row
+			// this feature does not apply to (a keep-alive ping's row never sets it at all,
+			// which is also how issue #424 requires a ping to carry no wait-cause label).
+			if e.WaitCause != nil {
+				wc := e.WaitCause()
+				e.WaitingFor, e.WaitTool, e.WakeCause = wc.WaitingFor, wc.WaitTool, wc.WakeCause
+				e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs = wc.OpenBackground, wc.OpenTeammate, wc.MonitorExpiryMs
+			}
 			e.Redact()
 		}
 		if err := r.db.insertBatch(batch); err != nil {

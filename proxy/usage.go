@@ -42,6 +42,17 @@ type Usage struct {
 	// still reports finish_reason, and "we could not price this, and it stopped because it
 	// hit max_tokens" is exactly the pair worth having.
 	StopReason string
+	// ToolUseNames is every tool_use (Anthropic) / function call (OpenAI chat, Responses)
+	// block name this response carried, in the order they appeared — read off the same
+	// bytes StopReason comes from (see responseToolUseNames), for issue #424's
+	// waitcause.ClassifyWaitingFor: a response that calls a tool is a thread about to wait
+	// on ITS OWN tool call, not on a human or a background task, and the LAST name here is
+	// what the dashboard keeps for it. nil when the response carried none, or when it was
+	// never buffered/sniffed far enough to see one (a long streamed response's tool_use
+	// block can fall outside the sniffer's bounded head window — see newSniffer — in which
+	// case this is best-effort, not exhaustive, and the row reads a weaker signal
+	// (background/teammate/human from open state) rather than own_tool, never a guess).
+	ToolUseNames []string
 }
 
 // usageMiss says WHY no billed tiers came back, because "ok=false" meant five different things
@@ -383,6 +394,7 @@ func responseUsageWhy(contentType string, body []byte) (Usage, usageMiss, bool) 
 		u, why = parseUsageWhy(body)
 	}
 	u.StopReason = responseStopReason(sse, body)
+	u.ToolUseNames = responseToolUseNames(sse, body)
 	// One lookup drives both the counter and the record, so a reason cannot be alertable for one and
 	// not the other. See usageCounters.
 	if counter, alertable := usageCounters[why]; alertable {
@@ -599,6 +611,86 @@ func responseStopReason(sse bool, body []byte) string {
 		}
 	}
 	return ""
+}
+
+// responseToolUseNames reads every tool_use / function-call block NAME off a response, in the
+// order they appear, for issue #424's waitcause package. Three dialects, each read structurally
+// (never a regex over tool names) off the same bytes StopReason reads:
+//
+//	Anthropic Messages   content[].{type: "tool_use", name}         (buffered JSON, or an SSE
+//	                      content_block_start event's content_block)
+//	OpenAI chat           choices[0].message.tool_calls[].function.name (buffered), or a
+//	                      streamed delta.tool_calls[].function.name chunk
+//	OpenAI Responses      output[].{type: "function_call", name}    (buffered); not read from
+//	                      an SSE stream — Responses event names and nesting are not the same as
+//	                      Anthropic's and this proxy does not splice that transport (see
+//	                      proxy.go's own comment on wire == "responses"), so a streamed
+//	                      Responses tool call reads as if the response had none, same honest gap
+//	                      as a sniffer-truncated Anthropic stream.
+//
+// Best-effort by construction: a sniffed stream only has a bounded head+tail window (see
+// sniffer), so a tool_use far into a very long response can fall outside it. That under-reports
+// own_tool, it never invents one.
+func responseToolUseNames(sse bool, body []byte) []string {
+	if !sse {
+		return bufferedToolUseNames(body)
+	}
+	var names []string
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		// Anthropic: content_block_start carries the block once, at its start.
+		if cb := gjson.Get(payload, "content_block"); cb.Get("type").String() == "tool_use" {
+			if n := cb.Get("name").String(); n != "" {
+				names = append(names, n)
+			}
+			continue
+		}
+		// OpenAI chat: a streamed tool call's NAME arrives once, on the chunk that opens it;
+		// later chunks for the same call carry only an arguments delta with no name.
+		for _, tc := range gjson.Get(payload, "choices.0.delta.tool_calls").Array() {
+			if n := tc.Get("function.name").String(); n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	return names
+}
+
+// bufferedToolUseNames reads tool_use/function-call names off a whole, non-streamed response
+// body (or a sniffed window of one — see responseToolUseNames).
+func bufferedToolUseNames(body []byte) []string {
+	var names []string
+	root := gjson.ParseBytes(body)
+	// Anthropic Messages.
+	for _, c := range root.Get("content").Array() {
+		if c.Get("type").String() == "tool_use" {
+			if n := c.Get("name").String(); n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	// OpenAI chat.
+	for _, tc := range root.Get("choices.0.message.tool_calls").Array() {
+		if n := tc.Get("function.name").String(); n != "" {
+			names = append(names, n)
+		}
+	}
+	// OpenAI Responses.
+	for _, item := range root.Get("output").Array() {
+		if item.Get("type").String() == "function_call" {
+			if n := item.Get("name").String(); n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	return names
 }
 
 // firstStopReason returns the first non-empty stop reason among the known paths.
