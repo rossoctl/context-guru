@@ -140,7 +140,8 @@ func rowPath(l string) (path string, hit, ok bool) {
 }
 
 // CapSearchOutput keeps the first perFile match rows of every file group (plus the last one
-// when keepLast, so the line RANGE of the file stays visible) and, when maxFiles > 0, only the
+// when keepLast, so the line RANGE of the file stays visible; context rows trailing that last
+// match are dropped uncounted, recoverable via expand) and, when maxFiles > 0, only the
 // first maxFiles groups. Each elision is one visible line: `path: +K more matches` and
 // `+K more files (M matches)`. It returns ok=false for output that is not a hit listing
 // (under half the non-blank lines are rows) or in which nothing needed capping.
@@ -197,7 +198,7 @@ func CapSearchOutput(s string, perFile, maxFiles int, keepLast bool) (string, bo
 				hits = append(hits, i)
 			}
 		}
-		if perFile <= 0 || len(hits) <= perFile {
+		if perFile <= 0 || len(hits) <= perFile || (keepLast && len(hits) == perFile+1) {
 			out = append(out, lines[g.start:g.end]...)
 			continue
 		}
