@@ -970,8 +970,11 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	if gate := s.startAsyncSummary(c, call, path, "turn", reserved, span, end-start); gate != "" {
 		rep.Gate(gate)
 	}
-	rep.Skipped = true
-	return nil, nil
+	// A fresh summary is now on its way (or already was), but THIS turn still has the stale one:
+	// send it. Returning the full transcript here was the same cache flip replayStale exists to
+	// prevent, and it hit every turn whose new tail exceeded resummarize_tokens — so with large
+	// tool outputs, every turn paid for a new summary and no summary was ever applied.
+	return declineButReplayStale()
 }
 
 // splice builds [head, summary, tail] and repairs orphans already present in the inbound
