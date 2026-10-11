@@ -57,24 +57,25 @@ configuration document:
 ```yaml
 cache:
   keepalive: true
-  keepalive_idle_seconds: 280          # X — must be under 300
+  keepalive_idle_seconds: 270          # X — must be under 300
   keepalive_openai_idle_seconds: 1680  # GPT-5.6+ Responses; must be under 1730
   keepalive_max_pings: 2               # K
-  keepalive_min_prefix_tokens: 20000   # the gate
-  keepalive_max_usd_per_ping: 0.25
+  keepalive_min_prefix_tokens: 80000   # the gate
+  keepalive_max_usd_per_ping: 0.50
 ```
 
-The 280-second Anthropic interval is the measured optimum; the 1680-second
+The 270-second Anthropic interval is chosen for robustness to where the cache cliff sits (it ties
+280 on the full replay window; counterfactual, see #435), not as a measured optimum; the 1680-second
 OpenAI interval is a safety margin below the documented minimum, not an
 optimized value from a production replay. Replayed through the shipped
-decision function over the production window, the gated policy (X=280, K=2) nets **+$125.08**
+decision function over the production window, the earlier gated policy (X=280, K=2, 20k floor; replaced by the defaults above, #435) nets **+$125.08**
 against $90.76 of ping cost — within 1.7% of an ungated blanket policy while sending **9.8x
 fewer pings** (912 vs 8,915). What the gate drops is the near-free pings on tiny prefixes —
 ping cost is bimodal, p50 $0.0004 against a p99 of $0.2275 — so most of the real gateway load
 disappears and almost none of the value does, which matters on a path that already returned
 HTTP 429s in the same window.
 
-`X = 280` beats 240 because it wastes fewer pings on gaps that would have hit anyway. `K`
+In that replay `X = 280` beat 240 because it wastes fewer pings on gaps that would have hit anyway. `K`
 peaks at 2–3 and falls away after: a session that has *ended* looks exactly like one that
 is thinking, so every additional ping is spent partly on sessions that will never come
 back. K=2 ships because K=2 and K=3 are within noise here while K=2 sends 26% fewer

@@ -89,12 +89,12 @@ type CacheConfig struct {
 	// KeepAliveIdleSeconds is X: how long a session must be idle before the first ping.
 	// 0 = DefaultKeepAliveIdle (270).
 	//
-	// 270 rather than 280 is a counterfactual from the W3 time law (response-end clock, hard
-	// ~295 s cliff, explicit ping misses): for K>=2 it beats 280 by $273..$534 over 54 days
-	// (model dollars, union window, leave-one-tenant-out) because a ping that lands past the
-	// cliff pays the 1.25x rewrite. K=1 still prefers 280. The earlier 280 rationale (X=240
-	// wastes 111 pings, X=280 wastes 53, +$125.08) rested on the W1 clock and is superseded.
-	// Pending live validation (#435).
+	// 270 rather than 280 is chosen for robustness to where the provider's cache cliff sits,
+	// not for a dollar gain: on the full window the two tie (270 vs 280 at K=2, 80k floor:
+	// -19 [-462, +326] model dollars, counterfactual), and if the cliff is at ~290 s 280 loses
+	// about $420 while 270 loses nothing material. K=1 prefers 280. The earlier 280 rationale
+	// (X=240 wastes 111 pings, X=280 wastes 53, +$125.08) rested on the W1 clock and is
+	// superseded (#435).
 	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
 	// KeepAliveOpenAIIdleSeconds is the separate Responses ping interval for
 	// GPT-5.6+ implicit caches. Their guaranteed lifetime is 30 minutes after

@@ -1179,3 +1179,17 @@ func TestCampaignKeepAlive5mIsTheRecommendedPolicy(t *testing.T) {
 		t.Errorf("keepalive-5m-once idle = %d, want 280", got)
 	}
 }
+
+// once, stop-reason-gated and the 1h arms keep 280 s / the old 20k floor: the 270 s / 80k
+// evidence is K=2 ping-everyone only.
+func TestCampaignNonRecommendedArmsKeepTheirOldFloor(t *testing.T) {
+	for _, arm := range []string{kvcache.StrategyKeepAlive5mOnce, kvcache.StrategyStopReasonGated} {
+		a := campaignArmFor(arm)
+		if a.idleSeconds != 280 || a.minPrefixTokens != 20000 {
+			t.Errorf("%s = idle %d floor %d, want 280 / 20000", arm, a.idleSeconds, a.minPrefixTokens)
+		}
+	}
+	if a := campaignArmFor(kvcache.StrategyKeepAlive5m); a.minPrefixTokens != 80000 {
+		t.Errorf("keepalive-5m floor = %d, want 80000", a.minPrefixTokens)
+	}
+}

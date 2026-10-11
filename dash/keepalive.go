@@ -492,8 +492,8 @@ type KeepAliveBehaviour struct {
 	HourBins    []Band        `json:"hour_bins"`
 	Gaps        []AccountGaps `json:"account_gaps"`
 	// PrefixP10/P50/P90 in tokens, over the lapsed entries. p50 is 292,527 on the corpus and
-	// 347 of 356 are past 20k — which is the measured reason the shipped `prefix >= 20k` gate
-	// costs almost nothing, and the panel says so.
+	// 347 of 356 are past 20k — which is the measured reason a `prefix >= 20k` gate
+	// costs almost nothing at 20k (the pre-#435 gate; the shipped floor is now 80k), and the panel says so.
 	PrefixP10 int64 `json:"prefix_p10"`
 	PrefixP50 int64 `json:"prefix_p50"`
 	PrefixP90 int64 `json:"prefix_p90"`
@@ -542,10 +542,10 @@ func bandOf(edges []float64, v float64) int {
 // KeepAliveBehaviour computes the behavioural panels for one window.
 //
 // coverageSeconds is the policy the gap bands are marked against (K*X + TTL); 0 falls back to
-// the shipped default's 860 s.
+// the shipped default's 840 s.
 func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBehaviour, error) {
 	if coverageSeconds <= 0 {
-		coverageSeconds = 2*280 + ttlTTL.Seconds()
+		coverageSeconds = 2*recIdleSeconds + ttlTTL.Seconds()
 	}
 	out := &KeepAliveBehaviour{CoverageSeconds: coverageSeconds,
 		Daily: []DayPoint{}, Gaps: []AccountGaps{}}
@@ -1206,7 +1206,7 @@ func (s pingSpan) pings(idleSeconds float64, maxPings int) int {
 // The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It
 // gates at the shipped 20k default and not at the account's own configured floor, because this
 // package does not read tenant configuration — an account that tuned its floor sees a replay of
-// the default policy, and the panel's copy names 20k so the page stays self-consistent.
+// the default policy, and the panel's copy names 80k so the page stays self-consistent.
 func (d *DB) pingSpans(f Filter, minPrefix int64) ([]pingSpan, error) {
 	cond, args := f.where()
 	// LEAD, not LAG: a span belongs to the request that OPENS it, which is the request the gate
@@ -1289,7 +1289,7 @@ type KeepAliveCalc struct {
 func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model string,
 	price func(string) (modelinfo.Price, bool), currentPings int) (*KeepAliveCalc, error) {
 	if idleSeconds <= 0 {
-		idleSeconds = 280
+		idleSeconds = recIdleSeconds
 	}
 	out := &KeepAliveCalc{IdleSeconds: idleSeconds, Prefix: prefix, Model: model, Rows: []CalcRow{}}
 	var p modelinfo.Price
