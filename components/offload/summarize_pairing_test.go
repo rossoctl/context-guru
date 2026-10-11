@@ -5,6 +5,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/schema"
 )
 
@@ -176,5 +177,69 @@ func TestEmitCheckpointDoesNotOrphanAToolResultBehindASibling(t *testing.T) {
 	}
 	if got := schema.MessageText(out[2]); got != "final" {
 		t.Errorf("out[2] = %q, want %q (the tail)", got, "final")
+	}
+}
+
+// TestSummarizeDeclinesOnStaleWireGroups is #457 requirement 3: a non-nil Ctx.WireGroup whose
+// length no longer matches req.Input means an EARLIER component changed the message count, so
+// the groups' current positions are unknown. summarizeSpan's own defensive check collapses that
+// to "no groups" and computes an UNALIGNED boundary; summarize must decline rather than act on
+// it, because an unaligned boundary can split a wire message that really exists.
+func TestSummarizeDeclinesOnStaleWireGroups(t *testing.T) {
+	c, err := newSummarize([]byte("keep_last: 1\nmin_tokens: 1\ntrigger: {min_request_frac: 0}\n"))
+	if err != nil {
+		t.Fatalf("newSummarize: %v", err)
+	}
+	s := c.(*Summarize)
+
+	msgs := []bschemas.ChatMessage{userMsg("task"), userMsg("middle"), userMsg("final")}
+	req := &bschemas.BifrostChatRequest{Input: msgs}
+	rep := &components.Report{}
+	// Deliberately mismatched length (4, not 3): simulates WireGroup computed by apply.go
+	// against an EARLIER pipeline position, before some other component changed the count.
+	ctx := &components.Ctx{WireGroup: []int{0, 1, 2, 3}}
+
+	_, err = s.Offload(req, rep, ctx)
+	if err != nil {
+		t.Fatalf("Offload returned an error, want a plain decline: %v", err)
+	}
+	if !rep.Skipped {
+		t.Error("rep.Skipped = false, want true — a stale WireGroup must decline, not act unaligned")
+	}
+	if rep.Gates["wire_groups_stale"] != 1 {
+		t.Errorf("Gates = %v, want wire_groups_stale: 1", rep.Gates)
+	}
+	if len(req.Input) != 3 {
+		t.Errorf("req.Input was mutated (len=%d), want left untouched", len(req.Input))
+	}
+}
+
+// TestCacheAwareSummarizerDeclinesOnStaleWireGroups is the same requirement for
+// cache_aware_summarizer, which shares summarizeSpan but checks staleness in its own Offload.
+func TestCacheAwareSummarizerDeclinesOnStaleWireGroups(t *testing.T) {
+	c, err := newCacheAwareSummarizer([]byte("keep_last_turns: 1\nmin_tokens: 1\n" +
+		"trigger:\n  min_messages: 1\n  min_request_tokens: 1\n  min_request_frac: 0\n"))
+	if err != nil {
+		t.Fatalf("newCacheAwareSummarizer: %v", err)
+	}
+	s := c.(*CacheAwareSummarizer)
+
+	msgs := []bschemas.ChatMessage{userMsg("task"), userMsg("middle"), userMsg("final")}
+	req := &bschemas.BifrostChatRequest{Input: msgs}
+	rep := &components.Report{}
+	ctx := &components.Ctx{WireGroup: []int{0, 1, 2, 3}}
+
+	_, err = s.Offload(req, rep, ctx)
+	if err != nil {
+		t.Fatalf("Offload returned an error, want a plain decline: %v", err)
+	}
+	if !rep.Skipped {
+		t.Error("rep.Skipped = false, want true — a stale WireGroup must decline, not act unaligned")
+	}
+	if rep.Gates["wire_groups_stale"] != 1 {
+		t.Errorf("Gates = %v, want wire_groups_stale: 1", rep.Gates)
+	}
+	if len(req.Input) != 3 {
+		t.Errorf("req.Input was mutated (len=%d), want left untouched", len(req.Input))
 	}
 }

@@ -2,8 +2,23 @@ package offload
 
 import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/schema"
 )
+
+// wireGroupsStale reports whether c.WireGroup existed for this request (this provider/traffic
+// shape DOES produce wire groups — Anthropic normalized at least one shared message) but no
+// longer lines up with msgs: an earlier component changed the message count, so the groups'
+// current positions are unknown. summarizeSpan's own defensive check collapses this the same
+// way as a true nil WireGroup (no wire groups ever existed — e.g. OpenAI-shaped traffic, or a
+// Ctx built directly as most unit tests do) and computes an UNALIGNED boundary, which can split
+// a wire message that is really there, just not where WireGroup says.
+//
+// A caller (summarize.Offload, cache_aware_summarizer.Offload) checks this BEFORE calling
+// summarizeSpan and declines rather than guesses — see #457's split-boundary requirement.
+func wireGroupsStale(c *components.Ctx, msgs []bschemas.ChatMessage) bool {
+	return c.WireGroup != nil && len(c.WireGroup) != len(msgs)
+}
 
 // Tool-pairing repair for a component that REMOVES messages.
 //

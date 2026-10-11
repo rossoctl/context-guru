@@ -370,6 +370,18 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// turn. First thing, and unconditionally: the money was spent whatever this turn decides, and
 	// the compaction-episode panel charges it as a debit. See takeDeferredUsage.
 	takeDeferredUsage(c, rep)
+	// A non-nil WireGroup that no longer lines up with msgs means wire groups DO exist on this
+	// request (Anthropic traffic normalized at least one shared message) but an earlier
+	// component changed the message count, so their current positions are unknown. The
+	// headCount/start/end just computed above are UNALIGNED in that case (summarizeSpan's own
+	// defensive check collapsed WireGroup to nil, same as "no groups ever existed" — e.g.
+	// OpenAI-shaped traffic). Decline rather than risk splitting a wire message that is really
+	// there, just not where WireGroup says. See wireGroupsStale.
+	if wireGroupsStale(c, msgs) {
+		rep.Gate("wire_groups_stale")
+		rep.Skipped = true
+		return nil, nil
+	}
 	if end > start && c.AllowSummarySpan != nil && !c.AllowSummarySpan(start, end) {
 		rep.Gate("wire_span_unsafe")
 		rep.Skipped = true
