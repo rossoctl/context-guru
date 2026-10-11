@@ -28,10 +28,10 @@ The practical knobs live under the `cache` keep-alive config (see
 ```yaml
 cache:
   keepalive: true
-  keepalive_idle_seconds: 280          # ping interval — keep this under the tier's TTL
+  keepalive_idle_seconds: 270          # ping interval — keep this under the tier's TTL
   keepalive_max_pings: 2               # flat cap per idle span
-  keepalive_min_prefix_tokens: 20000   # skip small prefixes — a ping's fixed cost isn't worth it below this
-  keepalive_max_usd_per_ping: 0.25     # per-ping cost ceiling
+  keepalive_min_prefix_tokens: 80000   # skip small prefixes — a ping's fixed cost isn't worth it below this
+  keepalive_max_usd_per_ping: 0.50     # per-ping cost ceiling
 ```
 
 `keepalive_max_pings` is a **ceiling** other policies (including the predictor-driven budget

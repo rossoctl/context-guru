@@ -513,7 +513,7 @@ type KeepAliveBehaviour struct {
 // gapEdges are the idle-gap bands' fixed edges in seconds. The last is unbounded.
 var gapEdges = []float64{0, 300, 580, 600, 1800, 3600, 14400}
 
-// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 is the shipped gate.
+// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 was the pre-#435 gate (the shipped floor is now 80,000).
 var prefixEdges = []float64{0, 20000, 50000, 100000, 200000, 400000, 800000}
 
 // bandLabels renders the edge list as human labels, with a unit formatter.
@@ -1191,7 +1191,7 @@ func (s pingSpan) pings(idleSeconds float64, maxPings int) int {
 //
 // It replaced a LAG over `requests` that was wrong in two directions: it charged NO pings for a
 // session-final request, where a live policy must send K because it cannot know the session ended,
-// and it charged pings on the turn-0 and small-prefix spans the shipped gate
+// and it charged pings on the turn-0 and small-prefix spans the gate
 // (`turn >= 1 AND prefix >= MinPrefixTokens`) never touches.
 //
 // The two errors PARTLY CANCEL, and the direction is the opposite of what it looks like. Replayed
@@ -1204,7 +1204,7 @@ func (s pingSpan) pings(idleSeconds float64, maxPings int) int {
 // names, so it MOVES when the gate or K moves instead of silently ignoring both.
 //
 // The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It
-// gates at the shipped 20k default and not at the account's own configured floor, because this
+// gates at 20k (the pre-#435 default; the shipped floor is now 80k) and not at the account's own configured floor, because this
 // package does not read tenant configuration — an account that tuned its floor sees a replay of
 // the default policy, and the panel's copy names 80k so the page stays self-consistent.
 func (d *DB) pingSpans(f Filter, minPrefix int64) ([]pingSpan, error) {
