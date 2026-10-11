@@ -411,6 +411,11 @@ func (t *Tracker) pruneLocked(now time.Time) {
 //     identity, and a client may drop them from earlier turns.
 //   - the CONTENT of a tool result, kept by its call id only: Claude Code clears old tool results
 //     ("microcompact") without starting a new thread.
+//   - a message's `content` sent as a plain string versus as a one-element
+//     `[{"type":"text","text":...}]` array: Claude Code sends the newest turn in the array
+//     form (to carry a cache_control breakpoint) and the SAME message as a plain string once
+//     a later turn displaces it. The provider normalizes both to one text block and its
+//     cache still hits, so this package hashes them the same way too (see canon).
 //
 // The system prompt and the tools are left out on purpose. A thread whose system prompt changes
 // is still the same thread — that change is a prefix change, and it must be labelled as one.
@@ -483,7 +488,22 @@ func canon(h hash.Hash64, v gjson.Result) {
 			}
 			h.Write([]byte(k.Str))
 			h.Write([]byte(":"))
-			canon(h, val)
+			if k.Str == "content" && val.Type == gjson.String {
+				// Claude Code sends the newest user turn's content as a one-element block
+				// array (so it can carry a cache_control breakpoint); once that turn is no
+				// longer the newest, it resends the SAME message as a plain string. The
+				// provider normalizes both to one text block and its cache still hits, so
+				// this package must agree: hash the string exactly as it would hash
+				// [{"type":"text","text":<the string>}] — val.Raw is already the properly
+				// quoted/escaped JSON string literal, so splicing it in produces byte-for-
+				// byte the same canon() output a genuine one-text-block array would. Scoped
+				// to the "content" key only, and only this one direction (string ->
+				// canonical array shape): a content array is left exactly as canon already
+				// handles it, whether it holds one block or many.
+				canon(h, gjson.Parse(`[{"type":"text","text":`+val.Raw+`}]`))
+			} else {
+				canon(h, val)
+			}
 			h.Write([]byte(","))
 			return true
 		})

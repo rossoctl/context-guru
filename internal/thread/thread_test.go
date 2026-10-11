@@ -73,6 +73,41 @@ func TestFingerprintIgnoresWhatAnAgentRewritesInPlace(t *testing.T) {
 	}
 }
 
+// #426's real second cause (confirmed against a real request-pair capture, not a hypothesis):
+// Claude Code sends the NEWEST user turn's content as a one-element block array, carrying the
+// cache_control breakpoint. Once a later turn displaces it, it resends the SAME message as a
+// plain string. The provider normalizes both to one text block and its cache still hits — this
+// package must agree, or every second request of a new turn splits the thread.
+func TestFingerprintTreatsAStringAndAOneTextBlockArrayAsTheSameContent(t *testing.T) {
+	tr := testTracker()
+	turn1 := []byte(`{"tools":[{"name":"Bash","input_schema":{"type":"object"}}],"messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"fix the bug","cache_control":{"type":"ephemeral"}}]}]}`)
+	if id := tr.Resolve("t\x00s", "", turn1, false).ID; id != Primary {
+		t.Fatalf("precondition: turn 1 got %q, want primary", id)
+	}
+	// Turn 2's first request: the same first message, now a plain string (no longer the
+	// newest turn, so no cache_control to carry), plus the real new turn's own messages.
+	turn2 := []byte(`{"tools":[{"name":"Bash","input_schema":{"type":"object"}}],"messages":[` +
+		`{"role":"user","content":"fix the bug"},` +
+		`{"role":"assistant","content":[{"type":"text","text":"done"}]},` +
+		`{"role":"user","content":[{"type":"text","text":"now add tests",` +
+		`"cache_control":{"type":"ephemeral"}}]}]}`)
+	if id := tr.Resolve("t\x00s", "", turn2, false).ID; id != Primary {
+		t.Fatalf("turn 2 got %q, want primary (the string/array content difference split the thread)", id)
+	}
+	// Positive control, at the Fingerprint level: the string and array forms of a DIFFERENT
+	// text must still differ.
+	asString, _ := Fingerprint([]byte(`{"messages":[{"role":"user","content":"go"}]}`))
+	asArray, _ := Fingerprint([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"go"}]}]}`))
+	otherString, _ := Fingerprint([]byte(`{"messages":[{"role":"user","content":"stop"}]}`))
+	if asString[0] != asArray[0] {
+		t.Error("a string and its equivalent one-text-block array must hash the same")
+	}
+	if asString[0] == otherString[0] {
+		t.Error("the equivalence swallowed a real content difference")
+	}
+}
+
 func TestFingerprintHasNoMessageListToMatch(t *testing.T) {
 	for name, body := range map[string]string{
 		"server-held history": `{"previous_response_id":"resp_1","input":[{"role":"user","content":"hi"}]}`,
