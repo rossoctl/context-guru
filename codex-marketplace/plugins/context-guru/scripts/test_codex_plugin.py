@@ -19,10 +19,17 @@ SPEC.loader.exec_module(PLUGIN)
 
 
 class CodexPluginTest(unittest.TestCase):
-    def test_proxy_lifecycle_does_not_depend_on_a_sandboxed_session_hook(self):
-        hooks_path = MODULE_PATH.parent.parent / "hooks.json"
-        hooks = json.loads(hooks_path.read_text())
-        self.assertEqual(hooks, {"hooks": {}})
+    def test_session_hook_is_advisory_only(self):
+        hooks = json.loads((MODULE_PATH.parent.parent / "hooks.json").read_text())["hooks"]
+        self.assertEqual(list(hooks), ["SessionStart"])
+        command = hooks["SessionStart"][0]["hooks"][0]["command"]
+        self.assertIn("session-start-hook", command)
+
+    def test_plugin_wires_onboarding_and_doctor_skills(self):
+        root = MODULE_PATH.parent.parent
+        manifest = json.loads((root / ".codex-plugin/plugin.json").read_text())
+        self.assertTrue((root / manifest["onboardingSkill"]).is_file())
+        self.assertTrue((root / "skills/doctor/SKILL.md").is_file())
 
     def test_skills_cover_sandbox_boundaries(self):
         skills = MODULE_PATH.parent.parent / "skills"
@@ -73,10 +80,10 @@ class CodexPluginTest(unittest.TestCase):
                                         'requires_openai_auth = false\n'
                                         'experimental_bearer_token = "test-token"\n')
         PLUGIN.install_default_route(PLUGIN.main_config(), PLUGIN.routing_state(), 8791, provider)
-        text = PLUGIN.main_config().read_text()
+        text = PLUGIN.profile().read_text()
         self.assertIn('experimental_bearer_token = "test-token"', text)
         self.assertIn("requires_openai_auth = false", text)
-        self.assertEqual(PLUGIN.main_config().stat().st_mode & 0o777, 0o600)
+        self.assertEqual(PLUGIN.profile().stat().st_mode & 0o777, 0o600)
         command = PLUGIN.proxy_command("/proxy", 8791, provider["base_url"])
         self.assertEqual(command[3:5], ["--config", str(PLUGIN.proxy_config())])
         self.assertEqual(command[-2:], ["--openai-upstream", "https://gateway.example.test"])
@@ -165,7 +172,7 @@ screen_reader_detection_done = true
         })
 
     def test_setup_bootstraps_release_when_binary_is_missing(self):
-        args = type("Args", (), {"plan": False, "i_consent_to_traffic_interception": True})()
+        args = type("Args", (), {"plan": False, "port": 0, "i_consent_to_traffic_interception": True})()
         process = mock.Mock(pid=4321)
         with mock.patch.object(PLUGIN, "find_binary", return_value=None), \
              mock.patch.object(PLUGIN, "install_release_binary",
@@ -277,24 +284,73 @@ screen_reader_detection_done = true
         provider = {"base_url": "https://gateway.test/v1", "requires_openai_auth": False}
         PLUGIN.install_default_route(path, PLUGIN.routing_state(), 8791, provider)
         routed = path.read_text()
-        self.assertIn('model_provider = "context-guru"', routed)
-        self.assertIn('base_url = "http://127.0.0.1:8791/openai/v1"', routed)
-        self.assertIn('[model_providers.gateway]', routed)
+        self.assertEqual(routed, original)  # config.toml is not touched at all
+        profile = PLUGIN.profile().read_text()
+        self.assertIn('model_provider = "context-guru"', profile)
+        self.assertFalse(PLUGIN.is_default_routed(path))
+        self.assertIn('base_url = "http://127.0.0.1:8791/openai/v1"', profile)
         self.assertTrue(PLUGIN.is_routed(path))
         self.assertEqual(PLUGIN.restore_default_route(PLUGIN.routing_state()), "restored")
         self.assertEqual(path.read_text(), original)
+        self.assertFalse(PLUGIN.profile().exists())
 
-    def test_restore_does_not_overwrite_a_later_provider_choice(self):
+    def test_install_migrates_a_legacy_default_provider_lock_in(self):
         path = PLUGIN.main_config()
         path.parent.mkdir(parents=True)
-        path.write_text('model_provider = "gateway"\n')
+        original = 'model_provider = "gateway"\n'
+        path.write_text(original)
+        state = PLUGIN.routing_state()
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"config": str(path), "existed": True,
+                                     "original_model_provider_line": 'model_provider = "gateway"'}))
+        path.write_text('model_provider = "context-guru"\n' + "# context-guru: begin managed provider" + "\n"
+                        "[model_providers.context-guru]\nbase_url = \"http://127.0.0.1:1/openai/v1\"\n"
+                        + "# context-guru: end managed provider" + "\n")
+        self.assertTrue(PLUGIN.is_default_routed(path))
+        PLUGIN.install_default_route(path, state, 8791, {})
+        self.assertFalse(PLUGIN.is_default_routed(path))
+        self.assertIn('model_provider = "gateway"', path.read_text())
+        self.assertTrue(PLUGIN.is_routed(path))
+
+    def test_launch_falls_back_to_plain_codex_when_proxy_cannot_start(self):
+        path = PLUGIN.main_config()
+        path.parent.mkdir(parents=True)
         PLUGIN.install_default_route(path, PLUGIN.routing_state(), 8791, {})
-        path.write_text(path.read_text().replace('model_provider = "context-guru"',
-                                                 'model_provider = "new-choice"'))
-        self.assertEqual(PLUGIN.restore_default_route(PLUGIN.routing_state()),
-                         "routing_already_changed")
-        self.assertIn('model_provider = "new-choice"', path.read_text())
-        self.assertNotIn(PLUGIN.CONFIG_MARKER, path.read_text())
+        args = type("Args", (), {"codex_args": ["--", "resume"]})()
+        with mock.patch.dict(os.environ, {"CODEX_BIN": "/bin/codex"}), \
+             mock.patch.object(PLUGIN, "revive", return_value=False), \
+             mock.patch.object(PLUGIN.os, "execv") as execv, \
+             mock.patch("sys.stderr", io.StringIO()) as err:
+            PLUGIN.launch(args)
+        execv.assert_called_once_with("/bin/codex", ["/bin/codex", "resume"])
+        self.assertIn("NOT routed", err.getvalue())
+
+    def test_launch_routes_through_profile_when_proxy_is_up(self):
+        path = PLUGIN.main_config()
+        path.parent.mkdir(parents=True)
+        PLUGIN.install_default_route(path, PLUGIN.routing_state(), 8791, {})
+        args = type("Args", (), {"codex_args": ["--", "hi"]})()
+        with mock.patch.dict(os.environ, {"CODEX_BIN": "/bin/codex"}), \
+             mock.patch.object(PLUGIN, "revive", return_value=True), \
+             mock.patch.object(PLUGIN.os, "execv") as execv:
+            PLUGIN.launch(args)
+        execv.assert_called_once_with("/bin/codex", ["/bin/codex", "--profile", "context-guru", "hi"])
+
+    def test_session_hook_warns_only_on_a_real_problem(self):
+        path = PLUGIN.main_config()
+        path.parent.mkdir(parents=True)
+        PLUGIN.install_default_route(path, PLUGIN.routing_state(), 8791, {})
+        PLUGIN.state_dir().joinpath("install.json").write_text('{"port": 8791, "binary": "/p"}')
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_ROUTED": "1"}), \
+             mock.patch.object(PLUGIN, "revive", return_value=True), \
+             mock.patch("sys.stdout", io.StringIO()) as out:
+            PLUGIN.session_start_hook(None)
+        self.assertEqual(out.getvalue(), "")
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_ROUTED": "1"}), \
+             mock.patch.object(PLUGIN, "revive", return_value=False), \
+             mock.patch("sys.stdout", io.StringIO()) as out:
+            PLUGIN.session_start_hook(None)
+        self.assertIn("down", json.loads(out.getvalue())["systemMessage"])
 
     def test_release_binary_is_checksum_verified_and_installed_privately(self):
         payload = b"released proxy"
@@ -373,8 +429,8 @@ screen_reader_detection_done = true
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         backups = list((PLUGIN.state_dir() / "recovery").iterdir())
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(len(backups), 2)  # the profile (holds the bearer token) and config.toml
+        self.assertTrue(all(b.stat().st_mode & 0o777 == 0o600 for b in backups))
         self.assertFalse(PLUGIN.is_routed(PLUGIN.main_config()))
         self.assertFalse(PLUGIN.proxy_config().exists())
 

@@ -9,9 +9,10 @@ First run `python3 ../../scripts/codex_plugin.py setup --plan` from this skill d
 nothing. Read and relay its `consent_question=` as one explicit yes/no question. A missing or
 ambiguous answer is no.
 
-Explain that setup changes the default provider in `$CODEX_HOME/config.toml`, so every new Codex
-session routes through the local proxy. Explain that the current session cannot change transport,
-and name the standalone reset path printed by setup. Only after explicit consent, run
+Explain that setup adds a `context-guru` provider and profile to `$CODEX_HOME/config.toml` and
+never changes the default provider, so plain `codex` keeps working even if the proxy is down.
+Routed sessions start through the `launch=` launcher printed by the plan. The current session
+cannot change transport. Name the standalone reset path printed by setup. Only after explicit consent, run
 `python3 ../../scripts/codex_plugin.py setup --i-consent-to-traffic-interception` with
 `sandbox_permissions="require_escalated"`, explaining that setup must write user configuration
 and state, download a release when needed, start the local proxy, and verify loopback health. Do
@@ -19,5 +20,5 @@ not first run the mutating command in the sandbox: a denied write could leave a 
 
 If the binary is missing, setup downloads the matching published release and verifies its SHA-256
 checksum before installing it into plugin-owned state. On success, report the emitted `launch=`
-command. Routing starts in the next ordinary `codex` process; it cannot change the transport of the
-current session.
+command and tell the user to exit and start Codex with it. Routing starts in that next process; it
+cannot change the transport of the current session.

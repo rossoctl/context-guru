@@ -1,7 +1,9 @@
 # context-guru for Codex
 
-This is the Codex plugin bundle for context-guru. It routes ordinary Codex sessions through a
-loopback proxy, exposes health and statistics skills, and can remove only the state it owns.
+This is the Codex plugin bundle for context-guru. It routes Codex sessions that you
+start with its launcher through a loopback proxy, exposes health, doctor and insights skills, and
+can remove only the state it owns. It never changes Codex's default provider, so a stopped proxy
+cannot stop plain `codex` from starting. Requires Codex 0.134 or newer (profile files).
 
 Register the GitHub marketplace and install the plugin:
 
@@ -25,9 +27,30 @@ Start Codex and invoke the setup skill:
 $context-guru-setup
 ```
 
-Setup asks before routing model traffic, preserves the currently selected provider as the proxy's
-upstream, and updates `~/.codex/config.toml`. The change takes effect in the next session; after
-that, start Codex normally with `codex`.
+Setup asks before routing model traffic and preserves the currently selected provider as the
+proxy's upstream. It writes a `context-guru` profile file (`~/.codex/context-guru.config.toml`) and
+leaves `config.toml` alone. Start routed sessions with the launcher it prints:
+
+```sh
+~/.local/state/context-guru-codex/context-guru-codex        # same arguments as codex
+alias codex-cg=~/.local/state/context-guru-codex/context-guru-codex
+```
+
+The launcher checks the proxy, restarts its user service if it is down, and runs
+`codex --profile context-guru`. If the proxy cannot be brought up it prints a warning and starts
+plain `codex` instead, so you are never locked out. Plain `codex` is never routed. The first run
+also asks you to trust the plugin's `SessionStart` hook (`/hooks`); the hook only prints a
+warning when a session is unrouted or its proxy has died, it cannot change transport.
+
+`$context-guru-onboarding` walks a new user through this, and `$context-guru-doctor` checks each
+link (Codex on PATH, profile, default provider untouched, binary, launcher, proxy health, whether
+this session is routed) and prints the exact fix for each failure.
+
+If the proxy dies in the middle of a session, that session's requests fail (Codex fixed its
+transport at start). Exit and start `context-guru-codex` again, or plain `codex`.
+
+An install from before this change rewrote the default provider. Running setup again migrates it
+back automatically.
 
 The proxy runs as a user service—`systemd --user` on Linux or a LaunchAgent on macOS—rather than as
 a child of a Codex command. This lets it survive command-sandbox teardown and restart independently
@@ -53,10 +76,27 @@ verifies it against the release's SHA-256 checksums, and installs it into its pr
 An existing `context-guru-proxy` on `PATH` is reused instead. Codex requires proxy release v0.4.0
 or newer.
 
+## Platform gaps compared with the Claude Code plugin
+
+| Claude Code plugin | Codex | Substitute here |
+|---|---|---|
+| Status line (cost, savings, cache timer) | Plugins cannot add a status line; the only hook-adjacent surface is a hook's transient `statusMessage` | `$context-guru-status`, `$context-guru-insights` |
+| Route by editing a settings env var | Codex picks its provider at process start; a hook runs after that | Profile file + launcher |
+| Auto-start the proxy from a `SessionStart` hook | Hooks run in a command sandbox and cannot escape it | `systemd --user` / LaunchAgent, restarted by the launcher |
+| Hooks work immediately | Each hook must be reviewed with `/hooks`; plugins with hooks are not eligible for the public directory | One advisory hook, nothing depends on it |
+| Per-project install and ports | One machine-wide install | none |
+| Project and MCP-server discovery from Claude settings | `/api/tools` reflects what the Codex traffic declared | same insights engine, shared code |
+| MCP server | none shipped | not implemented; the skills read the proxy's loopback API directly |
+
+`scripts/insights_core.py` is a verbatim copy of the Claude plugin's `insights.py` (the marketplace is
+a sparse checkout and cannot import across directories); a test fails if the two drift. Refresh with
+`cp context-guru-plugin/scripts/insights.py codex-marketplace/plugins/context-guru/scripts/insights_core.py`.
+`scripts/insights.py` adapts the port, options and fix commands to Codex.
+
 Setup copies a standalone recovery command to
 `~/.local/state/context-guru-codex/context-guru-reset`. Use it from an ordinary, unrouted shell if
-the proxy is down and Codex cannot start. It restores the previous default provider, removes only
-the marked provider block, removes only context-guru's owned user service, and deletes the proxy
+a legacy install left Codex unable to start. It removes the profile file, undoes an older install's
+default-provider rewrite, removes only context-guru's owned user service, and deletes the proxy
 binary downloaded into the plugin's private state directory. A proxy binary reused from `PATH` is
 never removed. Older installations that predate user-service supervision retain the guarded
 recorded-process cleanup as a fallback.
@@ -65,12 +105,13 @@ recorded-process cleanup as a fallback.
 
 | Task | Command |
 |---|---|
+| Diagnose routing and proxy health | `$context-guru-doctor` |
 | Check routing and proxy health | `$context-guru-status` |
 | Print raw proxy statistics JSON | `$context-guru-status --stats` |
 | Check for a proxy update | `$context-guru-update` |
 | Install a proxy update | `~/.local/state/context-guru-codex/context-guru-update` from an ordinary shell |
 | Plan removal and show instructions | `$context-guru-uninstall` |
-| Remove routing and stop the proxy | `~/.local/state/context-guru-codex/context-guru-reset --yes` from an ordinary shell |
+| Remove the profile and stop the proxy | `~/.local/state/context-guru-codex/context-guru-reset --yes` from an ordinary shell |
 
 Proxy updates are not automatic on Codex. Run `$context-guru-update` periodically to check. When
 an update is available, exit Codex and run the standalone updater shown above; then start a new
@@ -86,7 +127,7 @@ when the session starts, so lifecycle operations on that proxy belong in an ordi
 `$context-guru-update` and `$context-guru-uninstall` therefore check or plan only and direct you to
 the corresponding standalone command. Exit Codex, run it, then start a new session.
 
-The uninstall skill and recovery script restore the provider that was selected before setup. They
+The uninstall skill and recovery script remove the profile file (and undo a legacy default-provider rewrite). They
 do not remove the Codex plugin registration. To remove that too, from an ordinary shell:
 
 ```sh
