@@ -13,6 +13,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
@@ -536,5 +537,46 @@ func TestKeepAliveSubstituteIsPerThread(t *testing.T) {
 	}
 	if subModel.calls.Load() != 1 {
 		t.Errorf("the main thread's ping ran the subagent's summary call (subagent calls %d)", subModel.calls.Load())
+	}
+}
+
+// usageSummaryModel is a summary model that BILLS, through the ambient usage sink, as a real
+// client does. fakeSummaryModel records nothing, so a test built on it cannot see a double bill.
+type usageSummaryModel struct{ calls atomic.Int64 }
+
+func (m *usageSummaryModel) Complete(ctx context.Context, _ string) (string, error) {
+	return m.CompleteMessages(ctx, "", nil)
+}
+func (m *usageSummaryModel) CompleteMessages(ctx context.Context, _ string, _ []bschemas.ChatMessage) (string, error) {
+	m.calls.Add(1)
+	cheapmodel.ReplayUsage(ctx, "claude-sonnet-5", 281, 683, 0, 43400)
+	return "<summary>explored the handler, 3 tests fail.</summary>", nil
+}
+
+// #455: a keep-alive summary call is booked ONCE. The keeper books its usage on the ping row it
+// replaces; it must not also be deferred onto the session's next real turn, where it would land
+// in requests.cg_llm_cost_usd and every dashboard total (cost_usd + cg_llm_cost_usd) would count
+// it twice. Live, before the fix: ping row $0.0161 AND next request cg_llm_cost_usd $0.0161.
+func TestKeepAliveSummaryCallIsNotAlsoDeferredOntoTheNextTurn(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	model := &usageSummaryModel{}
+	kaCandidate(t, "sess-1", st, model)
+
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	if n := k.sweep(clock.advance(281 * time.Second)); n != 1 {
+		t.Fatalf("the due ping did not fire (%d)", n)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if k.summarySubstituted.Load() != 1 || model.calls.Load() != 1 {
+		t.Fatalf("substituted=%d calls=%d, want 1 and 1 — the path under test never ran",
+			k.summarySubstituted.Load(), model.calls.Load())
+	}
+	if b, ok := st.Get(store.UsagePrefix + "sess-1"); ok && len(b) > 0 && string(b) != "{}" {
+		t.Fatalf("the keep-alive summary call was deferred for the next turn as well (%s) — "+
+			"it is already booked on the ping row, so it would be billed twice", b)
 	}
 }

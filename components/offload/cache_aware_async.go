@@ -313,20 +313,21 @@ func (s *CacheAwareSummarizer) commissionSync(c *components.Ctx, call summaryCal
 	// path's own goroutine — see its comment on why a chained sink would double-charge.
 	ctx, callSink := cheapmodel.WithDetachedSink(ctx)
 	atomic.AddInt64(&cacheAwareCalls, 1)
-	callStart := time.Now()
 	out, err := call(ctx)
-	callMs := float64(time.Since(callStart).Milliseconds())
-	// Deferred BEFORE the error check, and READ before being deferred: a call that timed out may
-	// still have been billed for its input, and the result the keeper books is the same figures
-	// deferUsage is about to replay onto this session's next real turn — the keeper's ping ledger
-	// and the ordinary LLM-cost ledger are two different books of the SAME spend, not two spends.
+	// READ BEFORE the error check: a call that timed out may still have been billed for its input.
+	//
+	// NOT deferred onto the next real turn (#455). The keeper books this call's full usage and
+	// cost on the keep-alive ping row it replaces (recordSummarySubstitute), and the dashboard
+	// adds requests.cost_usd and requests.cg_llm_cost_usd together (spent, saved, tenant spend).
+	// Deferring it as well put the same dollars in both columns, so every total counted the call
+	// twice. The ping row is the one record of it; the cache_aware_summarizer_* counters in /stats
+	// still see its tokens through recordCacheAwareCacheTokens.
 	_, in, outTok := callSink.Totals()
 	cw, cr := callSink.CacheTotals()
 	res := KeepAliveSummaryResult{Model: callSink.Model(),
 		FreshInput: int(in), Output: int(outTok), CacheWrite: int(cw), CacheRead: int(cr),
 		CacheWrite1h: int(callSink.CacheWrite1h())}
 	recordCacheAwareCacheTokens(callSink)
-	deferUsage(st, session, "cache_aware_summarizer", path, "keepalive_substitute", callMs, callSink)
 	if err != nil {
 		classifyCallErr(ctx, session, err)
 		return res
