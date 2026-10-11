@@ -112,3 +112,12 @@ func TestSearchcapOutputStillFolds(t *testing.T) {
 		t.Errorf("capped output no longer folds: %d -> %d", len(out), len(f))
 	}
 }
+
+// A file with exactly perFile+1 hits has nothing to elide once the last is kept: no "+0" line.
+func TestCapSearchOutputExactlyOneOverCap(t *testing.T) {
+	in := hits("a.go", 4) + hits("b.go", 30)
+	out, ok := CapSearchOutput(in, 3, 0, true)
+	if !ok || strings.Contains(out, "+0 more") || !strings.Contains(out, "a.go:40:") || !strings.Contains(out, "b.go: +26 more matches") {
+		t.Errorf("got ok=%v\n%s", ok, out)
+	}
+}
