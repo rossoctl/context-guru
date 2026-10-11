@@ -172,3 +172,30 @@ func TestXHighPresetCommitsACacheAwareSummary(t *testing.T) {
 		t.Error("the ask call's own prefix did not cover turn 2 — the fixture itself is broken")
 	}
 }
+
+// `high` runs the same summarizer as xhigh at cache_state `any` (#417), so it must commit a
+// summary on the same fixture. `medium` pins cache_state: pre_expiry, so on these warm turns it
+// must NOT ask (it waits for the pre-expiry window); its reserve path is covered by the
+// pre_expiry tests in components/offload and proxy/keepalive_summarysubstitute_test.go.
+func TestHighPresetCommitsACacheAwareSummary(t *testing.T) {
+	asked := pipelineOrderFixture(t, "preset: high\n"+
+		"components:\n  cache_aware_summarizer:\n    model:\n      source: incoming\n"+
+		"    keep_last_turns: 2\n    min_tokens: 1\n"+
+		"    trigger:\n      min_messages: 7\n      min_request_tokens: 1\n      min_request_frac: 0\n")
+	if len(asked) != 1 {
+		t.Fatalf("got %d ask calls, want exactly 1 (the high preset should have committed a summary on turn 3)", len(asked))
+	}
+	if !strings.Contains(asked[0], "MARK-T2") {
+		t.Error("the ask call's own prefix did not cover turn 2")
+	}
+}
+
+func TestMediumPresetDoesNotSummarizeOnAWarmTurn(t *testing.T) {
+	asked := pipelineOrderFixture(t, "preset: medium\n"+
+		"components:\n  cache_aware_summarizer:\n    model:\n      source: incoming\n"+
+		"    keep_last_turns: 2\n    min_tokens: 1\n"+
+		"    trigger:\n      cache_state: pre_expiry\n      min_messages: 7\n      min_request_tokens: 1\n      min_request_frac: 0\n")
+	if len(asked) != 0 {
+		t.Fatalf("got %d ask calls, want 0: medium (pre_expiry) must not summarize on a warm turn", len(asked))
+	}
+}
