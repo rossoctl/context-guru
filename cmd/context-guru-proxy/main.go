@@ -121,6 +121,8 @@ func main() {
 			"capture before/after message text for the diff view; stores arbitrary agent output on disk (scrubbed of known credential shapes and size-capped first), so it is opt-in")
 		dashContentCap = flag.Int("dashboard-content-cap", envInt("DASHBOARD_CONTENT_CAP", 16<<10),
 			"maximum bytes stored per captured before/after blob")
+		dashLifecycle = flag.Bool("dashboard-lifecycle-signals", envBool("DASHBOARD_LIFECYCLE_SIGNALS", false),
+			"record per-request thread id, previous-response tool names/stop reason, tool_result sizes, idle gaps and granted cache TTL into request_lifecycle (counts, sizes, hashes and redacted names only)")
 		dashQueue = flag.Int("dashboard-queue", envInt("DASHBOARD_QUEUE", 4096),
 			"capture channel depth; a full channel DROPS events (counted, and shown in the UI) rather than delaying a request")
 		dashCIDRs = flag.String("dashboard-trusted-cidrs", envOr("DASHBOARD_TRUSTED_CIDRS", ""),
@@ -317,14 +319,15 @@ func main() {
 	var rec *dash.Recorder
 	if *dashOn {
 		opts := dash.Options{
-			DBPath:         *dashDB,
-			RetentionAge:   *dashRetain,
-			RetentionBytes: *dashMaxBytes,
-			CaptureContent: *dashContent,
-			ContentCap:     *dashContentCap,
-			QueueSize:      *dashQueue,
-			TrustedCIDRs:   splitComma(*dashCIDRs),
-			BenchDirs:      splitComma(*dashBench),
+			DBPath:           *dashDB,
+			RetentionAge:     *dashRetain,
+			RetentionBytes:   *dashMaxBytes,
+			CaptureContent:   *dashContent,
+			ContentCap:       *dashContentCap,
+			QueueSize:        *dashQueue,
+			LifecycleSignals: *dashLifecycle,
+			TrustedCIDRs:     splitComma(*dashCIDRs),
+			BenchDirs:        splitComma(*dashBench),
 
 			DiskHighWatermark: *dashDiskHigh,
 			DiskLowWatermark:  *dashDiskLow,
@@ -843,6 +846,7 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 		KeepAliveStrategyID: r.Strategy,
 	}
 	ev.SessionID = r.Session
+	ev.Lifecycle = d.rec.PingLifecycle(r.Tenant, r.Session, r.Model, r.Pings)
 	ev.Agent = dash.AgentFor(r.Agent)
 	ev.FreshInput, ev.CacheRead = r.FreshInput, r.CacheRead
 	ev.CacheWrite, ev.OutputTokens = r.CacheWrite, r.Output

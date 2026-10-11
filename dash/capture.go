@@ -104,6 +104,9 @@ type Options struct {
 	// fills, which takes down every user's agent. Default false — reclaim and say
 	// loudly what was lost.
 	ArchiveRequired bool
+	// LifecycleSignals records the per-request thread / wait-cause signals into
+	// request_lifecycle (dash/lifecycle.go). Off by default.
+	LifecycleSignals bool
 }
 
 const (
@@ -177,6 +180,7 @@ type Recorder struct {
 	// Cache-attribution state: the last time we saw each session and whether we
 	// have seen each model, so a cold start is never reported as a bust.
 	mu        sync.Mutex
+	life      *lifecycle        // nil unless Options.LifecycleSignals
 	lastSeen  map[string]int64  // session -> epoch ms of previous request
 	lastTail  map[string]uint64 // session -> previous request's volatile-tail hash
 	seenModel map[string]bool
@@ -219,6 +223,9 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		seenModel: map[string]bool{},
 		seenKeys:  map[string]struct{}{},
 		remote:    opts.Remote,
+	}
+	if opts.LifecycleSignals {
+		r.life = newLifecycle()
 	}
 	r.wg.Add(1)
 	go r.run()
