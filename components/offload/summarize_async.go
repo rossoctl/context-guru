@@ -434,7 +434,10 @@ type deferredCall struct {
 	// BilledElsewhere marks a call whose spend another record already carries (a committed
 	// keep-alive summary call: the keeper books it on the ping row it replaces, #455). Its
 	// detail row is still written to extraction_calls, but its tokens are NOT added to the
-	// deferred ledger, so requests.cg_llm_cost_usd never counts it a second time.
+	// deferred ledger, so requests.cg_llm_cost_usd never counts it a second time. Its Trigger ends
+	// in "_billed" (keepalive_substitute_billed), so the extraction_calls row says so too: the
+	// dashboard's component-cost query (dash/query.go) leaves such rows out of the gateway
+	// cost-share split and adds their own cost back afterwards.
 	BilledElsewhere bool `json:"billed_elsewhere,omitempty"`
 }
 

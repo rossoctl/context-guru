@@ -334,7 +334,7 @@ func (s *CacheAwareSummarizer) commissionSync(c *components.Ctx, call summaryCal
 	recordCacheAwareCacheTokens(callSink)
 	defer func() {
 		if res.Committed {
-			deferDetailOnly(st, session, "cache_aware_summarizer", path, "keepalive_substitute", callMs, callSink)
+			deferDetailOnly(st, session, "cache_aware_summarizer", path, "keepalive_substitute_billed", callMs, callSink)
 		} else {
 			deferUsage(st, session, "cache_aware_summarizer", path, "keepalive_substitute", callMs, callSink)
 		}

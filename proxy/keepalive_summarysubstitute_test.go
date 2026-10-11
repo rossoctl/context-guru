@@ -609,7 +609,7 @@ func TestKeepAliveSummaryCallIsBookedOnceOnThePingRow(t *testing.T) {
 	if in != 0 {
 		t.Fatalf("the committed call's tokens were also deferred (in=%d): it would be billed twice", in)
 	}
-	if len(calls) != 1 || calls[0]["billed_elsewhere"] != true || calls[0]["trigger"] != "keepalive_substitute" {
+	if len(calls) != 1 || calls[0]["billed_elsewhere"] != true || calls[0]["trigger"] != "keepalive_substitute_billed" {
 		t.Fatalf("want one billed_elsewhere detail row for extraction_calls, got %v", calls)
 	}
 }
