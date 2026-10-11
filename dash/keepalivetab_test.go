@@ -822,12 +822,12 @@ func TestTheCalculatorChargesThePingsAPolicyWouldActuallySend(t *testing.T) {
 	const t0 = int64(1_700_000_000_000)
 	sec := func(n int64) int64 { return n * 1000 }
 	evs := []*Event{
-		// A gated session: prefix 50k throughout. turn 0, then a 300 s gap, then a 1000 s gap,
+		// A gated session: prefix 100k throughout (above the 80k floor). turn 0, then a 300 s gap, then a 1000 s gap,
 		// then nothing — the last request opens a span a live policy pings in and never closes.
-		kaAgent(t0, "big", 0.10),
-		kaAgent(t0+sec(300), "big", 0.10),
-		kaAgent(t0+sec(1300), "big", 0.10),
-		// Below the 20k prefix floor: the shipped gate never pings this session at all.
+		bigPrefix(kaAgent(t0, "big", 0.10)),
+		bigPrefix(kaAgent(t0+sec(300), "big", 0.10)),
+		bigPrefix(kaAgent(t0+sec(1300), "big", 0.10)),
+		// Below the 80k prefix floor: the shipped gate never pings this session at all.
 		smallPrefix(kaAgent(t0, "small", 0.10)),
 		smallPrefix(kaAgent(t0+sec(1000), "small", 0.10)),
 	}
@@ -866,6 +866,11 @@ func TestTheCalculatorChargesThePingsAPolicyWouldActuallySend(t *testing.T) {
 }
 
 // smallPrefix drops a fixture row's billed prefix below the replay gate's floor.
+func bigPrefix(e *Event) *Event {
+	e.CacheRead = 100_000
+	return e
+}
+
 func smallPrefix(e *Event) *Event {
 	e.CacheRead, e.CacheWrite = 1_000, 0
 	return e
@@ -874,8 +879,8 @@ func smallPrefix(e *Event) *Event {
 // The replay gate is the request path's gate. A drift here is a calculator modelling a policy
 // nobody runs, which is the whole of F5.
 func TestTheReplayGateMatchesTheShippedPolicy(t *testing.T) {
-	if kaGateMinPrefix != 20000 {
-		t.Errorf("kaGateMinPrefix = %d; config.DefaultKeepAliveMinPrefix is 20000 and the replay "+
+	if kaGateMinPrefix != 80000 {
+		t.Errorf("kaGateMinPrefix = %d; config.DefaultKeepAliveMinPrefix is 80000 and the replay "+
 			"has to gate on what the request path gates on", kaGateMinPrefix)
 	}
 }

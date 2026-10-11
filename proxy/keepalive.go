@@ -431,7 +431,7 @@ func (p CachePolicy) Ceiling() float64 {
 // DefaultMaxUSDPerPing mirrors config.DefaultKeepAliveMaxUSDPerPing, which this package may not
 // import (proxy does not depend on the configuration loader). They are pinned equal by
 // TestTheProxysPingCeilingDefaultMatchesTheConfigLoaders.
-const DefaultMaxUSDPerPing = 0.25
+const DefaultMaxUSDPerPing = 0.50
 
 // keeper runs the keep-alive. One goroutine per handler, one map, one lock.
 type keeper struct {

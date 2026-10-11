@@ -491,8 +491,8 @@ func TestCtlCreateCampaignEndToEnd(t *testing.T) {
 		t.Fatalf("got %d strategies, want 1 (coalesced): %+v", len(strategies), strategies)
 	}
 	s := strategies[0]
-	if s.IdleSeconds != 280 || len(s.Target.TenantIDs) != 2 || s.Target.Mode != tenant.TargetList {
-		t.Errorf("strategy = %+v, want idle 280s targeting both tenants", s)
+	if s.IdleSeconds != 270 || s.MinPrefixTokens != 80000 || len(s.Target.TenantIDs) != 2 || s.Target.Mode != tenant.TargetList {
+		t.Errorf("strategy = %+v, want idle 270s, 80k floor, targeting both tenants", s)
 	}
 
 	if w, _ := f.do(t, "GET", "/api/keepalive/campaigns", "", mgrJar); w.Code != http.StatusOK {
@@ -1164,5 +1164,18 @@ func TestCoalesceCampaignCellsExcludesBaselineAndNonActivatable(t *testing.T) {
 	groups := coalesceCampaignCells(cells)
 	if len(groups) != 0 {
 		t.Errorf("got %d groups, want 0 (nothing here is activatable-and-non-baseline)", len(groups))
+	}
+}
+
+// keepalive-5m carries the recommended policy (270 s, K=2, 80k floor); the K=1 and gated arms
+// stay at 280 because the 270 s evidence covers K>=2 only.
+func TestCampaignKeepAlive5mIsTheRecommendedPolicy(t *testing.T) {
+	a := campaignArmFor(kvcache.StrategyKeepAlive5m)
+	if a.idleSeconds != 270 || a.maxPings != 2 || campaignDefaultMinPrefixTokens != 80000 {
+		t.Errorf("keepalive-5m = idle %d, K %d, floor %d; want 270, 2, 80000",
+			a.idleSeconds, a.maxPings, campaignDefaultMinPrefixTokens)
+	}
+	if got := campaignArmFor(kvcache.StrategyKeepAlive5mOnce).idleSeconds; got != 280 {
+		t.Errorf("keepalive-5m-once idle = %d, want 280", got)
 	}
 }
