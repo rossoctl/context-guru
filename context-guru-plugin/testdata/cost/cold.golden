@@ -1,0 +1,27 @@
+Cache rewrites in the last 14 days: 377 full re-writes, $145.67 more than cache hits would have cost  (17% of $856.85 spend, observed)
+A rewrite = cache_write >= 80% of the request's context, read from token counts (not cache_miss_reason).
+
+By cause   (cause is inferred from the pause length and message count)
+  idle_expiry      214  31.4M  $107.79  ███████░░░  Pauses longer than the cache lives: the whole conversation was re-sent and re-cached
+  prefix_change     23   3.1M   $14.57  █░░░░░░░░░  The start of the prompt changed mid-session (tools, MCP, CLAUDE.md, model settings)
+  cold_start        96   4.0M   $14.57  █░░░░░░░░░  Starting sessions (first message writes the system prompt and tool list)
+  new_thread        41   2.3M    $7.28  ░░░░░░░░░░  Subagents or a changed tool set starting a fresh cache entry
+  history_rewrite    3   600k    $1.46  ░░░░░░░░░░  The conversation was rewound or compacted, so the cache could not be reused
+
+How long you were away before an expiry
+  5-10m   71x  $23.71  ██░░░░░░░░
+  10-30m  96x  $49.58  █████░░░░░
+  30-60m  22x  $15.09  █░░░░░░░░░
+  1-4h    19x  $14.01  █░░░░░░░░░
+  >4h      6x   $5.39  █░░░░░░░░░
+  Estimate: $88.38 followed pauses of 5-60 min, the range a 1-hour cache lifetime would cover; a longer lifetime or pings cost money too - see /context-guru:insights-idle for the net.
+
+Costliest rewrites
+  Tue 22:00  api        claude-opus-5  412k ctx  after 23:00  idle_expiry     $1.96
+  Mon 21:00  api        claude-opus-5  388k ctx  after 40:10  idle_expiry     $1.84
+  Wed 21:00  dashboard  claude-opus-5  301k ctx  after 14:00  idle_expiry     $1.43
+  Sun 21:00  api        claude-opus-5  295k ctx  after 0:52   prefix_change   $1.40
+  Sat 21:00  scripts    claude-opus-5  180k ctx  after 10:10  idle_expiry    $0.860
+
+  Possibly avoidable (everything except session starts): $131.10  [observed spend, not a promised saving]
+12 of 11995 requests had no price or incomplete token counts and are left out, not counted as free.
