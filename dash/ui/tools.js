@@ -45,7 +45,7 @@ document.head.appendChild(el('link', { rel: 'stylesheet', href: 'tools.css' }));
 // section is still built from JS rather than markup because every part of it is conditional
 // on what the report says can be answered.
 const toolsView = mountTab({
-  group: 'behaviour', after: 'components', view: 'tools', label: 'Inventory',
+  group: 'savings', after: 'keepalive', view: 'tools', label: 'Inventory',
 });
 
 // ── local state ────────────────────────────────────────────────────────────

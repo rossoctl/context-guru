@@ -37,7 +37,7 @@ document.head.appendChild(el('link', { rel: 'stylesheet', href: 'kvcache.css' })
 // is the single place that knows the nav's DOM shape; it returns the section, already
 // appended to #main and wired as this tab's tabpanel.
 const kvView = mountTab({
-  group: 'behaviour', after: 'keepalive', view: 'kvcache', label: 'KV-cache',
+  group: 'advanced', after: 'components', view: 'kvcache', label: 'KV-cache',
 });
 
 // ── local state ────────────────────────────────────────────────────────────
