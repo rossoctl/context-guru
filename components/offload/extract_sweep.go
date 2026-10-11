@@ -1399,7 +1399,18 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 			}
 			if deepest >= 0 {
 				requiredCount := deepest + 1
-				if !pc.CoversSpan(c.Session, requiredCount, components.SpanHash(req.Input[:requiredCount])) {
+				// rawSpanForHash, not req.Input[:requiredCount]: CoversSpan compares against the
+				// host's PRE-pipeline stash, and req.Input here is already whatever ran before this
+				// component in the configured pipeline (textclean, format, dedup, … in housellm/
+				// xhigh) — see rawSpanForHash's own comment and PR #431 round 1.
+				//
+				// thread.Key(c.Session, c.Thread), not bare c.Session: the host's stash (proxy's
+				// sentStash) is keyed per thread (#423), and the Ask call just below already reads
+				// it that way. Checking coverage under the plain session would almost always MISS
+				// for a non-primary thread — CoversSpan's own missing-key convention then reports
+				// "covered" and this guard would never fire for any thread but the first.
+				if span, ok := rawSpanForHash(c, req, requiredCount); !ok ||
+					!pc.CoversSpan(thread.Key(c.Session, c.Thread), requiredCount, components.SpanHash(span)) {
 					stalePrefix = true
 				}
 			}

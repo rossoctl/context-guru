@@ -160,7 +160,20 @@ func TestCacheAwareClaudeCodeStyleMovingCacheControlIsNotStale(t *testing.T) {
 // blind to an actual content change. Same three-turn, moving-marker shape as the test above, but
 // turn 3's copy of the message the stash is supposed to cover (index 4) has DIFFERENT text —
 // standing in for whatever real bug would make the host's stash and the live transcript actually
-// disagree. That must still decline as stale_prefix, marker-stripping or not.
+// disagree. The safety property (never commit a summary built over the wrong transcript) must
+// hold either way, marker-stripping or not.
+//
+// WHICH COUNTER catches it changed after #423 (thread keying) merged with this fix: turn 3's
+// edited message breaks prefix continuity with turn 2 (internal/thread's own detection rule), so
+// turn 3 is classified as a NEW thread rather than a continuation of the one turn 1/2 stashed —
+// correctly, by #423's own logic, since from the thread detector's point of view this looks
+// exactly like a subagent starting a divergent conversation. The new thread has nothing stashed
+// yet, so the commission declines as cacheAwareNoPrefix (ErrNoPrefix) rather than
+// cacheAwareStalePrefix (ErrStalePrefix): the stale-prefix hash comparison this test originally
+// exercised never runs, because there is no entry to compare against at all. Both counters guard
+// the identical outcome — no ask answered from a transcript that disagrees with what was actually
+// stashed — so this test checks that outcome (zero ask calls) and that ONE of the two decline
+// counters moved, not which one.
 func TestCacheAwareRealContentChangeInsideSpanStillDeclines(t *testing.T) {
 	var mu sync.Mutex
 	var bodies []string
@@ -194,7 +207,8 @@ func TestCacheAwareRealContentChangeInsideSpanStillDeclines(t *testing.T) {
 	defer srv.Close()
 
 	session := "it-real-content-change-" + strings.ReplaceAll(t.Name(), "/", "-")
-	before := offload.CacheAwareSummarizerStalePrefix()
+	staleBefore := offload.CacheAwareSummarizerStalePrefix()
+	noPrefixBefore := offload.CacheAwareSummarizerNoPrefix()
 
 	textBlock := func(role, text string, marked bool) any {
 		block := map[string]any{"type": "text", "text": text}
@@ -272,8 +286,15 @@ func TestCacheAwareRealContentChangeInsideSpanStillDeclines(t *testing.T) {
 		t.Fatalf("got %d ask calls; a real content change inside the span must decline BEFORE "+
 			"paying for a call that would answer from the wrong transcript: %q", len(asked), asked)
 	}
-	if got := offload.CacheAwareSummarizerStalePrefix(); got != before+1 {
-		t.Errorf("CacheAwareSummarizerStalePrefix did not increment (%d -> %d) for a real content "+
-			"change inside the span", before, got)
+	// See the test's own doc comment: #423's thread detection can intercept this case earlier
+	// (ErrNoPrefix, a new unstashed thread) than the stale-prefix hash check (ErrStalePrefix) ever
+	// runs. Either decline is the safety property this test exists to pin; which one fires is an
+	// implementation detail of thread detection, not something this test should couple to.
+	staleGot := offload.CacheAwareSummarizerStalePrefix()
+	noPrefixGot := offload.CacheAwareSummarizerNoPrefix()
+	if staleGot == staleBefore && noPrefixGot == noPrefixBefore {
+		t.Errorf("neither CacheAwareSummarizerStalePrefix (%d -> %d) nor CacheAwareSummarizerNoPrefix "+
+			"(%d -> %d) moved for a real content change inside the span — the commission must decline "+
+			"one way or the other", staleBefore, staleGot, noPrefixBefore, noPrefixGot)
 	}
 }

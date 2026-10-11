@@ -618,11 +618,20 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// provider's cap, and the dashboard records the per-location split. Two calls would
 	// be two scans of the body on the request path for one fact.
 	bps := CountBreakpoints(body)
+	// Snapshotted HERE, immediately before the pipeline runs, so it is "as apply handed it to the
+	// pipeline" and not "as the client originally sent it" (repairExpandErrors, AnswerStrayCalls and
+	// the force-model rewrite already ran above norm's own construction). A plain slice copy is
+	// enough: every component that rewrites a message's text does so via schema.SetMessageText,
+	// which replaces the Content POINTER rather than mutating the ChatMessageContent this snapshot
+	// still points at (see components.Ctx.RawInput).
+	rawInput := make([]bschemas.ChatMessage, len(norm))
+	copy(rawInput, norm)
 	c := &components.Ctx{
 		Ctx:            ctx,
 		Session:        sessionID,
 		Thread:         tr.Thread.ID,
 		Store:          st,
+		RawInput:       rawInput,
 		Model:          models,
 		Bypass:         bypass,
 		CtxWindow:      o.Window,

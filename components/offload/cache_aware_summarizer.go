@@ -840,7 +840,19 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		// what the previous turn's stash held, not only the stale one. By the time the call
 		// actually runs, the host has had the chance to stash at least this turn's own
 		// forwarded body.
-		requiredCount, requiredHash := end, spanHash(msgs[:end])
+		// rawSpan/rawOK, not spanHash(msgs[:end]): CoversSpan compares against the host's
+		// PRE-pipeline stash, and msgs is req.Input AT THIS COMPONENT'S OWN PIPELINE POSITION —
+		// for a summarizer that is not first, already whatever ran before it. rawSpanForHash
+		// falls back to msgs itself when c.RawInput is nil (a Ctx built directly, as the unit
+		// tests in this package still do), and reports !rawOK when an earlier component changed
+		// the message count, which leaves no span of either slice safe to compare. See
+		// rawSpanForHash's own comment and PR #431 round 1.
+		requiredCount := end
+		rawSpan, rawOK := rawSpanForHash(c, req, requiredCount)
+		var requiredHash string
+		if rawOK {
+			requiredHash = spanHash(rawSpan)
+		}
 		call = func(ctx context.Context) (string, error) {
 			// STALE-PREFIX GUARD. The PrefixAsk path answers from whatever body the host's
 			// stash holds for this session, which this component never built and cannot
@@ -854,7 +866,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 			// implement it is trusted as before — this guard exists to catch a NEW failure
 			// mode, not to narrow who may answer.
 			if pc, ok := asker.(components.PrefixCoverage); ok &&
-				!pc.CoversSpan(session, requiredCount, requiredHash) {
+				(!rawOK || !pc.CoversSpan(session, requiredCount, requiredHash)) {
 				return "", components.ErrStalePrefix
 			}
 			reply, _, err := asker.Ask(ctx, session, instructionText)

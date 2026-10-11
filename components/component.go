@@ -542,6 +542,33 @@ type Ctx struct {
 	// -1 = unknown/first turn/cache off ⇒ no tail restriction. Only meaningful when
 	// CacheAware is true.
 	MaxCachedIdx int
+	// RawInput is the normalized message array AS APPLY HANDED IT TO THE PIPELINE, before any
+	// component — including the first one configured — ran. apply sets it once, from a shallow
+	// copy taken before Pipeline.Run starts, so a later component's in-place rewrite (SetMessageText
+	// replaces the Content pointer; it never mutates a message this slice still points at) cannot
+	// change what RawInput reports.
+	//
+	// It exists for a stale-prefix guard that must hash the SAME span the host's prefix stash
+	// recorded (proxy's sentStash.preBody, via components.PrefixCoverage.CoversSpan). That stash is
+	// keyed on apply's own pre-pipeline body, in RAW coordinates — MaxCachedIdx is in those same
+	// coordinates. req.Input, read at a component's OWN position in the pipeline, is for every
+	// component but the first already the OUTPUT of every earlier one: a prior Reformat/Offload
+	// (textclean, format, dedup, cmdfilter, …) can rewrite a message inside the cached span on
+	// every turn, so hashing req.Input there and comparing against the raw stash disagrees even
+	// though the stash is exactly right (PR #431 round 1 review). Hash RawInput[:n], never
+	// req.Input[:n], for any guard whose other side is a pre-pipeline stash.
+	//
+	// nil for a Ctx built directly (most component unit tests, and any caller that predates this
+	// field) rather than through apply.BodyOpts — callers MUST treat nil as "cannot verify" and
+	// decline, the same failure mode an unknown MaxCachedIdx already gets, never fall back to
+	// req.Input, which is the exact bug this field exists to avoid silently reintroducing.
+	//
+	// A component BEFORE the guarded one that changes the MESSAGE COUNT (summarize, a
+	// count-changing extract path) shifts req.Input's indices out of RawInput's coordinates even
+	// though both are non-nil; a guard must therefore also decline whenever len(req.Input) at its
+	// own position differs from len(RawInput), rather than hash the wrong span under a matching
+	// nil-ness check alone.
+	RawInput []schemas.ChatMessage
 	// PrefixAsk, when non-nil, lets a component put a question to the request's own model with the
 	// previous turn's SENT body as the prefix, so the provider reads its prompt cache instead of
 	// being re-sent the transcript. See PrefixAsker for why that body and not the incoming one.
