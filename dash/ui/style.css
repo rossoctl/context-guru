@@ -1508,6 +1508,7 @@ pre.yaml {
 .badge { display: inline-block; padding: 0 7px; border-radius: 10px; font-size: var(--t-micro); font-weight: 600; line-height: 18px; }
 .badge.observed { background: var(--good-soft); color: var(--good); }
 .badge.estimated { background: var(--info-soft); color: var(--info); }
+.badge.ceiling, .badge.upper { background: var(--warn-soft); color: var(--warn); }
 .badge.unpriced { background: var(--warn-soft); color: var(--warn); }
 .bl-receipt { position: relative; display: inline-block; }
 .bl-receipt-btn { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); text-decoration: underline dotted; cursor: help; }

@@ -30,18 +30,19 @@ const BL = (() => {
         note: 'what the removed content would have cost, minus what was billed' },
       { label: 'context-guru’s own model spend', usd: -(o.cg_llm_cost_usd || 0), badge: 'Observed',
         note: 'summarizer and extractor calls we paid for' },
-      { label: 'Keep-alive, net', usd: ka, badge: 'Estimated',
-        note: 'cache re-creations avoided, minus ' + money(o.keepalive_ping_usd || 0) + ' of pings (Observed)' },
+      { label: 'Keep-alive, net (upper bound)', usd: ka, badge: 'Upper bound',
+        note: 'a ceiling: re-creations avoided if every ping rescued a prefix, minus ' + money(o.keepalive_ping_usd || 0) + ' of pings actually spent (Observed)' },
       { label: 'Prefix split', usd: split, badge: 'Estimated', note: 'cache reads saved by splitting the volatile tail' },
     ];
-    if (Math.abs(other) >= 0.005) rows.push({ label: 'Declarations dropped', usd: other, badge: 'Estimated', note: 'tool and skill schemas filtered out' });
+    if (Math.abs(other) >= 0.005) rows.push({ label: 'Other (declarations dropped)', usd: other, badge: 'Estimated', note: 'tool and skill schemas filtered out' });
     const partial = known && priced < (o.requests || 0);
     let sentence;
     if (!known) sentence = 'Not enough priced requests in this window to put a dollar figure on it yet.';
-    else if (total >= 0) sentence = 'context-guru saved you ' + money(total) + ' net in this window' + (bill > 0 ? ', ' + pc((100 * total) / bill) + ' of your ' + money(bill) + ' bill.' : '.');
+    else if (total >= 0 && ka > 0) sentence = 'context-guru saved an estimated ' + money(total - ka) + ' net from compaction, plus up to ' + money(ka) + ' from keep-alive (a ceiling, not measured)' + (bill > 0 ? ': up to ' + pc((100 * total) / bill) + ' of your ' + money(bill) + ' bill.' : '.');
+    else if (total >= 0) sentence = 'context-guru saved an estimated ' + money(total) + ' net in this window' + (bill > 0 ? ', ' + pc((100 * total) / bill) + ' of your ' + money(bill) + ' bill.' : '.');
     else sentence = 'context-guru cost you ' + money(-total) + ' more than it saved in this window.';
     return {
-      known, total, bill, rows, sentence, number: known ? money(total) : 'unknown',
+      known, total, bill, rows, sentence, number: known ? (ka > 0 ? 'up to ' : '') + money(total) : 'unknown',
       badge: known ? 'Estimated' : 'Unpriced',
       coverage: known ? 'priced on ' + nf.format(priced) + ' of ' + nf.format(o.requests || 0) + ' requests' + (partial ? ' (rest unpriced)' : '') : '',
       tone: !known ? '' : total < 0 ? 'bad' : 'good',
@@ -56,7 +57,9 @@ const BL = (() => {
     const recs = ((rep && rep.servers) || [])
       .filter((s) => s.tools_used === 0 && s.unused_usd > 0)
       .sort((a, b) => b.unused_usd - a.unused_usd).slice(0, 3)
-      .map((s) => ({ usd: s.unused_usd, text: 'Remove the ' + s.server + ' MCP server: ' + s.tools + ' tools, never called in ' + nf.format(s.sessions_declared) + ' sessions, about ' + money(s.unused_usd) + ' to carry in this window.', command: 'claude mcp remove ' + s.server, badge: 'Estimated' }));
+      // The server name comes from tool declarations, i.e. it is client/MCP-controlled: only a
+      // plain identifier is ever offered as a copyable shell command.
+      .map((s) => ({ usd: s.unused_usd, text: 'Remove the ' + s.server + ' MCP server: ' + s.tools + ' tools, never called in ' + nf.format(s.sessions_declared) + ' sessions, about ' + money(s.unused_usd) + ' to carry in this window.', command: /^[A-Za-z0-9_.-]+$/.test(s.server) ? 'claude mcp remove ' + s.server : '', badge: 'Estimated' }));
     const unusedPct = t.declared_tokens > 0 ? (100 * t.unused_tokens) / t.declared_tokens : 0;
     return {
       sentence: priced ? 'You are paying to carry ' + nf.format(t.unused_tokens || 0) + ' tokens of tools you never used: about ' + money(t.unused_usd || 0) + ' in this window.'
@@ -77,11 +80,11 @@ const BL = (() => {
     else if (lo > 0) verdict = 'Keep-alive is expected to save ' + money(lo) + ' to ' + money(hi) + ' over a window like this one.';
     else if (hi <= 0) verdict = 'Keep-alive is not expected to pay for itself on this traffic (' + money(lo) + ' to ' + money(hi) + ').';
     else verdict = 'Keep-alive could go either way on this traffic (' + money(lo) + ' to ' + money(hi) + ').';
-    const recs = have && hi > 0 ? [{ usd: hi, text: 'Use ' + rec.idle_seconds + ' s idle and at most ' + rec.max_pings + ' pings.', href: '#/admin/settings', hrefLabel: 'Open Settings', badge: 'Estimated' }] : [];
+    const recs = have && hi > 0 ? [{ usd: Math.max(lo, 0), text: 'Use ' + rec.idle_seconds + ' s idle and at most ' + rec.max_pings + ' pings.', href: '#/admin/settings', hrefLabel: 'Open Settings', badge: 'Estimated' }] : [];
     return {
       sentence: verdict, number: have ? money(lo) + ' to ' + money(hi) : 'unknown', badge: have ? 'Estimated' : 'Unpriced',
       coverage: have ? 'replay of ' + nf.format(rec.n) + ' of your own expiries' : '',
-      observed: ka ? 'Measured so far: ' + money(net) + ' net after ' + money(ka.ping_usd || 0) + ' of pings, an upper bound (Observed).' : '',
+      observed: ka ? 'Pings so far cost ' + money(ka.ping_usd || 0) + ' (Observed). The re-creations they avoided are a ceiling, so the ' + money(net) + ' net is an upper bound, not a measurement.' : '',
       tone: have && lo > 0 ? 'good' : have && hi <= 0 ? 'bad' : '', recs, rows: [],
     };
   }
@@ -121,7 +124,8 @@ const BL = (() => {
     };
   }
 
-  /** Overview recommendations, ranked by dollars. Each source is optional. */
+  /** Overview recommendations, ranked by a CONSERVATIVE dollar value (intervals contribute their
+   *  low bound, never the ceiling), so a ceiling cannot outrank an estimate. Each source is optional. */
   function rank(...lists) {
     return [].concat(...lists).filter(Boolean).sort((a, b) => b.usd - a.usd).slice(0, 3);
   }
