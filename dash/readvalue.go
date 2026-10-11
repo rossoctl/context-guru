@@ -2,6 +2,7 @@ package dash
 
 import (
 	"context"
+	"sort"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -158,6 +159,20 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 	if d == nil || p == nil || len(out) == 0 {
 		return nil
 	}
+	cond, args := f.where()
+	groups, err := d.componentGroups(cond, args)
+	if err != nil {
+		return err
+	}
+	return decomposeFromGroups(groups, p, out)
+}
+
+// decomposeFromGroups is DecomposeComponentSavedUSD over groups already read (componentGroups), so
+// the Components tab can value its rows without a second pass over the table.
+func decomposeFromGroups(cgroups map[compGroupKey]*compGroup, p modelinfo.Pricer, out []*ComponentRow) error {
+	if p == nil || len(out) == 0 {
+		return nil
+	}
 	by := make(map[string]*ComponentRow, len(out))
 	for _, c := range out {
 		by[c.Component] = c
@@ -165,37 +180,53 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 	// Rows scanned per component, and how many of them had unique differing from gross. This is
 	// what decides whether `unique` is a dedup measurement at all — see the flag below.
 	seen, differ := map[string]int64{}, map[string]int64{}
-	cond, args := f.where()
-	// Same clamps and the same three tier cases as EstimateComponentSavedUSD and
-	// Event.repeatRate, deliberately duplicated as constants rather than shared through a
-	// helper: if these two queries ever disagree the reconciliation below silently stops
-	// meaning anything, so they are written to be diffed by eye.
-	const gross = `max(c.saved_gross,0)`
-	const uniq = `min(max(c.saved_unique,0), max(c.saved_gross,0))`
-	// Grouped by whether the row carried a STORED saved_usd, because that is what decides
-	// whether comparing the two is a check or a tautology — see the cross-check note below.
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT c.component, r.model,
-		CASE WHEN r.cache_read > 0 THEN 'read'
-		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
-		     ELSE 'fresh' END,
-		CASE WHEN c.saved_usd <> 0 THEN 1 ELSE 0 END,
-		COALESCE(SUM(`+uniq+`),0), COALESCE(SUM(`+gross+` - `+uniq+`),0),
-		COUNT(*), SUM(CASE WHEN c.saved_gross <> c.saved_unique THEN 1 ELSE 0 END)
-		FROM request_components c JOIN requests r ON r.id = c.request_id
-		WHERE `+cond+` AND c.saved_gross > 0 AND r.token_accounting = 'complete'
-		GROUP BY 1, 2, 3, 4`, args...)
-	if err != nil {
-		return err
+	// The rows it values are those that removed something and were fully priced; grouped by whether
+	// the row carried a STORED saved_usd, because that is what decides whether comparing the two is
+	// a check or a tautology — see the cross-check note below. Same clamps and the same three tier
+	// cases as EstimateComponentSavedUSD and Event.repeatRate, deliberately computed twice rather
+	// than shared: if the two ever disagree the reconciliation below silently stops meaning anything.
+	type dgKey struct {
+		name, model, tier string
+		stored            int
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var name, model, tier string
-		var storedRow int
-		var unique, replay, nRows, nDiff int64
-		if err := rows.Scan(&name, &model, &tier, &storedRow, &unique, &replay,
-			&nRows, &nDiff); err != nil {
-			return err
+	type dgVal struct{ unique, replay, nRows, nDiff int64 }
+	groups := map[dgKey]*dgVal{}
+	for k, g := range cgroups {
+		if !k.gross || !k.complete {
+			continue
 		}
+		stored := 0
+		if k.usd {
+			stored = 1
+		}
+		key := dgKey{k.comp, k.model, k.tier, stored}
+		if v := groups[key]; v == nil {
+			groups[key] = &dgVal{g.uClamp, g.rClamp, g.runs, g.nDiff}
+		} else {
+			v.unique, v.replay, v.nRows, v.nDiff = v.unique+g.uClamp, v.replay+g.rClamp, v.nRows+g.runs, v.nDiff+g.nDiff
+		}
+	}
+	// Priced in a fixed order so the float sums below do not depend on map iteration.
+	keys := make([]dgKey, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		if a.name != b.name {
+			return a.name < b.name
+		}
+		if a.model != b.model {
+			return a.model < b.model
+		}
+		if a.tier != b.tier {
+			return a.tier < b.tier
+		}
+		return a.stored < b.stored
+	})
+	for _, k := range keys {
+		name, model, tier, storedRow := k.name, k.model, k.tier, k.stored
+		unique, replay, nRows, nDiff := groups[k].unique, groups[k].replay, groups[k].nRows, groups[k].nDiff
 		seen[name] += nRows
 		differ[name] += nDiff
 		c, ok := by[name]
@@ -235,9 +266,6 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 		if storedRow == 1 {
 			c.SavedUSDDecomposedStored += first + rep
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
 	}
 	for _, c := range out {
 		c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay
@@ -293,40 +321,68 @@ func (d *DB) EstimateComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Comp
 	if d == nil || p == nil || len(out) == 0 {
 		return nil
 	}
+	cond, args := f.where()
+	groups, err := d.componentGroups(cond, args)
+	if err != nil {
+		return err
+	}
+	return estimateFromGroups(groups, p, out)
+}
+
+// estimateFromGroups is EstimateComponentSavedUSD over groups already read (componentGroups).
+func estimateFromGroups(cgroups map[compGroupKey]*compGroup, p modelinfo.Pricer, out []*ComponentRow) error {
+	if p == nil || len(out) == 0 {
+		return nil
+	}
 	by := make(map[string]*ComponentRow, len(out))
 	for _, c := range out {
 		by[c.Component] = c
 	}
-	cond, args := f.where()
-	// The clamps are Event.Price's, in SQL: a negative gross is nothing saved, and a unique
-	// figure larger than this turn's gross is two components stashing the same content key,
-	// which must not be allowed to make the replay term negative. min()/max() with two
-	// arguments are SQLite's scalar forms, not the aggregates.
+	// The clamps are Event.Price's, applied row by row in the pass that read the groups: a negative
+	// gross is nothing saved, and a unique figure larger than this turn's gross is two components
+	// stashing the same content key, which must not be allowed to make the replay term negative.
 	//
-	// The tier bucket is Event.repeatRate's three cases, evaluated per request and grouped,
-	// so the estimate is priced at the tier each request actually paid rather than at a
-	// window-wide average that would flatter warm traffic.
-	const gross = `max(c.saved_gross,0)`
-	const uniq = `min(max(c.saved_unique,0), max(c.saved_gross,0))`
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT c.component, r.model,
-		CASE WHEN r.cache_read > 0 THEN 'read'
-		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
-		     ELSE 'fresh' END,
-		COUNT(*), COALESCE(SUM(`+uniq+`),0), COALESCE(SUM(`+gross+` - `+uniq+`),0)
-		FROM request_components c JOIN requests r ON r.id = c.request_id
-		WHERE `+cond+` AND c.saved_usd = 0 AND c.saved_gross > 0
-		  AND r.token_accounting = 'complete'
-		GROUP BY 1, 2, 3`, args...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var name, model, tier string
-		var n, unique, replay int64
-		if err := rows.Scan(&name, &model, &tier, &n, &unique, &replay); err != nil {
-			return err
+	// The tier bucket is Event.repeatRate's three cases, evaluated per request and grouped, so the
+	// estimate is priced at the tier each request actually paid rather than at a window-wide average
+	// that would flatter warm traffic. Only rows with no stored saved_usd that removed something.
+	type egKey struct{ name, model, tier string }
+	type egVal struct{ n, unique, replay int64 }
+	groups := map[egKey]*egVal{}
+	// Rows that removed tokens but whose request was never priced at all. Counted, not valued: "we
+	// cannot say" and "it was worth nothing" are different answers.
+	unpriced := map[string]int64{}
+	for k, g := range cgroups {
+		if k.usd || !k.gross {
+			continue
 		}
+		if !k.complete {
+			unpriced[k.comp] += g.runs
+			continue
+		}
+		key := egKey{k.comp, k.model, k.tier}
+		if v := groups[key]; v == nil {
+			groups[key] = &egVal{g.runs, g.uClamp, g.rClamp}
+		} else {
+			v.n, v.unique, v.replay = v.n+g.runs, v.unique+g.uClamp, v.replay+g.rClamp
+		}
+	}
+	keys := make([]egKey, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		if a.name != b.name {
+			return a.name < b.name
+		}
+		if a.model != b.model {
+			return a.model < b.model
+		}
+		return a.tier < b.tier
+	})
+	for _, k := range keys {
+		name, model, tier := k.name, k.model, k.tier
+		n, unique, replay := groups[k].n, groups[k].unique, groups[k].replay
 		c, ok := by[name]
 		if !ok {
 			continue
@@ -349,31 +405,10 @@ func (d *DB) EstimateComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Comp
 		c.SavedUSDEstimated += (float64(unique)*price.CacheWrite + float64(replay)*rate) * bf
 		c.SavedUSDEstimatedRows += n
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	// Rows that removed tokens but whose request was never priced at all. Counted, not
-	// valued: "we cannot say" and "it was worth nothing" are different answers.
-	urows, err := d.sql.QueryContext(d.readCtx(), `SELECT c.component, COUNT(*)
-		FROM request_components c JOIN requests r ON r.id = c.request_id
-		WHERE `+cond+` AND c.saved_usd = 0 AND c.saved_gross > 0
-		  AND r.token_accounting <> 'complete' GROUP BY 1`, args...)
-	if err != nil {
-		return err
-	}
-	defer urows.Close()
-	for urows.Next() {
-		var name string
-		var n int64
-		if err := urows.Scan(&name, &n); err != nil {
-			return err
-		}
+	for name, n := range unpriced {
 		if c, ok := by[name]; ok {
 			c.SavedUSDUnpricedRows += n
 		}
-	}
-	if err := urows.Err(); err != nil {
-		return err
 	}
 	for _, c := range out {
 		c.NetUSDWithEstimate = c.SavedUSD + c.SavedUSDEstimated - c.LLMCostUSD

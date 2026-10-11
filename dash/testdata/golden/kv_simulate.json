@@ -1,0 +1,1833 @@
+{
+ "arms": [
+  {
+   "description": "Never write cache_control. Every prompt is billed as fresh input; nothing is held.",
+   "name": "no-cache",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "baseline": true,
+   "description": "Always write the prefix at the 5-minute tier (1.25x input to create, 0.1x to read).",
+   "name": "fixed-5m",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read).",
+   "name": "fixed-1h",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x.",
+   "name": "keepalive-5m",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-once",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 1-hour tier and refresh it with keep-alives while idle. Costs 2.0x input to create, and needs one twelfth as many refreshes as the 5-minute arm to hold the same span.",
+   "name": "keepalive-1h",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 1-hour tier and refresh it with keep-alives while idle. Costs 2.0x input to create, and needs one twelfth as many refreshes as the 5-minute arm to hold the same span. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "name": "keepalive-1h-once",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Write every prefix at the 5-minute tier (1.25x input), and if a keep-alive comes due before it lapses, extend the context by an hour with a 1-hour write (2.0x) — so the long-hold premium is paid only on the conversations that actually go quiet.",
+   "name": "keepalive-5m-to-1h",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Replay the tier each request actually asked for; where no tier was recorded, assume the provider's default and count the row as uncovered.",
+   "name": "observed-policy",
+   "needs_dataset": true,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Use your own closed gaps: 5m write when P(return within 5m) \u003e= 50%, a 1-hour hold when P(return within 1h) \u003e= 50% (write or pings, whichever is cheaper on that prefix), otherwise let it expire. Prefixes under 20k tokens are never cached.",
+   "name": "historical-probability",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Write the five-minute tier on every request, but only keep-alive-ping while idle when the request just served's own stop_reason clusters as \"actually done\" (end_turn, max_tokens, refusal) — never on \"still working\" (tool_use, stop_sequence, tool_calls, length, content_filter) or \"looks done, isn't\" (stop, unset), both measured well under the ping break-even. Extends, rather than revisits, the deliberate decision already in pingable() to keep pinging on end_turn.",
+   "name": "stop-reason-gated",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Decide once, at a conversation's first request, whether to hold that whole session at the 1-hour tier or the 5-minute tier — then never revisit it, because a real deployment cannot downgrade or upgrade an existing hold in place. Commits to 1h only when the account's own P(return within 1h) clears (write_1h_rate - write_5m_rate) / (write_5m_rate - cache_read_rate), the same write-versus-recreate break-even cacheinject's own TTL derivation uses.",
+   "name": "sticky-session-1h",
+   "needs_dataset": false,
+   "partial_replay_unsafe": true,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "A predictor's per-window reuse probabilities against the rates' own break-even, compounded over up to 8 keep-alives so the option value of staying alive is counted. Chooses the budget per conversation. Reads the compiled-in reuse model v1, fitted on 2026-08-17 11:48 -\u003e 2026-09-04 21:45 UTC.",
+   "name": "keepalive-budget",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Replay an explicit action supplied per request. The seam a policy decided elsewhere — an offline predictor, a hand-written experiment — is scored through.",
+   "name": "replay",
+   "needs_dataset": true,
+   "selectable": false,
+   "unreachable": false
+  },
+  {
+   "description": "The cheapest action sequence that exists, computed exactly. Reads the true next-request time.",
+   "name": "optimal",
+   "needs_dataset": true,
+   "selectable": true,
+   "unreachable": true
+  },
+  {
+   "description": "Configured thresholds over your own closed gaps, or an in-process predictor. The seam a learned next-use model plugs into without changing this page.",
+   "name": "custom",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  }
+ ],
+ "assumptions": {
+  "formulas": [
+   {
+    "formula": "input_tokens × input_rate",
+    "name": "Uncached input",
+    "note": "A prompt with no cache_control at all: every token billed once, at the fresh rate."
+   },
+   {
+    "formula": "cache_read_tokens × cache_read_rate",
+    "name": "Cache read",
+    "note": "A hit. The read rate defaults to 0.1× input, and a read refreshes the entry's lifetime for no extra charge."
+   },
+   {
+    "formula": "written_tokens × write_5m_rate",
+    "name": "Cache write, 5-minute TTL",
+    "note": "Creating an entry that lives five minutes. Defaults to 1.25× input."
+   },
+   {
+    "formula": "written_tokens × write_1h_rate",
+    "name": "Cache write, 1-hour TTL",
+    "note": "Creating an entry that lives an hour. Defaults to 2.0× input — no gateway publishes this rate, so it is derived from the multiplier and editable above."
+   },
+   {
+    "formula": "cached_tokens × cache_read_rate + ping_input × input_rate + ping_output × output_rate",
+    "name": "Keep-alive ping",
+    "note": "One refresh. It is a cache READ, so a five-minute and a one-hour keep-alive cost the same per ping; what differs is the creation tier that put the entry there and how often a ping is needed."
+   },
+   {
+    "formula": "cached_tokens × write_rate(tier) + ping_input × input_rate + ping_output × output_rate",
+    "name": "Keep-alive that arrived late",
+    "note": "A ping that fires after the entry lapsed re-creates it, at 12.5× a read for the 5-minute tier and 20× for the 1-hour one. Counted as pings_that_rewrote."
+   },
+   {
+    "formula": "uncached_input + cache_read + cache_write + output",
+    "name": "Request cost",
+    "note": "One request's whole bill under a simulated strategy."
+   },
+   {
+    "formula": "Σ request_cost + Σ ping_cost",
+    "name": "Total cost",
+    "note": "One strategy's whole bill."
+   },
+   {
+    "formula": "total_cost − uncached_cost",
+    "name": "Incremental cache premium",
+    "note": "What the caching machinery itself cost, separate from the bill it sits inside. NEGATIVE means the cache paid for itself."
+   },
+   {
+    "formula": "baseline_cost − strategy_cost",
+    "name": "Absolute savings",
+    "note": "Negative where the strategy costs more, and shown that way — never clamped to zero."
+   },
+   {
+    "formula": "absolute_savings ÷ baseline_cost × 100",
+    "name": "Percentage savings",
+    "note": "Undefined, not 0%, when the baseline is zero."
+   },
+   {
+    "formula": "write_1h_usd − write_5m_usd",
+    "name": "Raising the TTL from five minutes to an hour",
+    "note": "What the longer hold costs, on the SAME write — the price of the extra 45 minutes of coverage, before anything it might save is counted."
+   },
+   {
+    "formula": "late_5m_usd − keep_alive_usd",
+    "name": "Saved per prevented miss",
+    "note": "What one five-minute miss costs beyond what a hit at the same tier would have. The ping overhead is in both terms and cancels, leaving the write-versus-read gap."
+   },
+   {
+    "formula": "late_5m_usd − write_1h_usd",
+    "name": "One 5m miss vs one 1h write",
+    "note": "SIGNED. Negative means paying for the 1-hour tier up front costs more than eating the one five-minute miss it would have prevented."
+   },
+   {
+    "formula": "⌈raise_5m_to_1h_usd ÷ saved_per_miss_usd⌉",
+    "name": "Prevented misses to break even",
+    "note": "How many five-minute misses raising the TTL has to prevent before it pays for itself. Undefined, not zero, when saved_per_miss_usd is not positive."
+   }
+  ],
+  "horizon_1h_seconds": 3600,
+  "horizon_5m_seconds": 300,
+  "multipliers": {
+   "cache_read": 0.1,
+   "write_1h": 2,
+   "write_5m": 1.25
+  },
+  "notes": [
+   "Every timestamp, hour and time-of-day band on this page is UTC. The store carries no per-user timezone, so a local one would be invented.",
+   "A conversation is (account, session, model). The account is in the key because a session id is client-supplied and can collide between accounts; the MODEL is in it because a cache entry does not transfer between models, so a request on one model cannot read another model's entry and the two are not each other's successor.",
+   "A request with no next request in the same conversation has NO idle time. It is counted separately and excluded from every average, never treated as a zero gap.",
+   "Keep-alive ping rows written by context-guru itself are excluded from this dataset: counted, they would split one real idle gap into two short ones.",
+   "A cache miss recorded as prefix_change or cold_start cannot be rescued by any TTL. Those rows force a miss in every simulated arm and are reported as forced_misses.",
+   "Requests whose token accounting was incomplete have an UNKNOWN cost and contribute nothing to any dollar figure. They are counted, never valued at zero.",
+   "The one-hour write rate is derived from a multiplier because no gateway publishes one. Both the multiplier and the resulting rate are editable above.",
+   "A ping cannot generate nothing on a provider that requires max_tokens ≥ 1, so its minimum output is priced and stated rather than rounded away.",
+   "Latency avoided is derived from THIS window's own means: the mean upstream time of requests that really missed, minus that of requests that really hit. It is absent where either population is under 20 rows."
+  ],
+  "schedule": {
+   "idle_seconds": 280,
+   "idle_seconds_1h": 3360,
+   "max_pings": 2
+  },
+  "semantics": {
+   "hit_refreshes_ttl": true,
+   "ping_refreshes_ttl": true,
+   "zero_generation": false
+  },
+  "time_unit": "milliseconds",
+  "time_zone": "UTC"
+ },
+ "baseline": "fixed-5m",
+ "feature_importance": {
+  "gradient_boosted": [
+   {
+    "feature": "turn",
+    "rank": 1,
+    "score": 0.198
+   },
+   {
+    "feature": "stop_cluster=still_working",
+    "rank": 2,
+    "score": 0.197
+   },
+   {
+    "feature": "request_hour_sin",
+    "rank": 3,
+    "score": 0.15
+   },
+   {
+    "feature": "user_id=t01",
+    "rank": 4,
+    "score": 0.093
+   },
+   {
+    "feature": "previous_gap_seconds",
+    "rank": 5,
+    "score": 0.064
+   }
+  ],
+  "logistic_regression": [
+   {
+    "feature": "turn",
+    "rank": 1,
+    "score": 2.99
+   },
+   {
+    "feature": "stop_cluster=still_working",
+    "rank": 2,
+    "score": 2.09
+   },
+   {
+    "feature": "user_id=t02",
+    "rank": 3,
+    "score": 1.16
+   },
+   {
+    "feature": "user_id=t04",
+    "rank": 4,
+    "score": 1.08
+   },
+   {
+    "feature": "user_id=t01",
+    "rank": 5,
+    "score": 0.92
+   }
+  ]
+ },
+ "pricing": {
+  "models": [
+   {
+    "cache_read": 0.0000015,
+    "input": 0.000015,
+    "known": true,
+    "model": "m-opus",
+    "output": 0.000075,
+    "ping_input_tokens": 1,
+    "ping_output_tokens": 1,
+    "source": "price_list",
+    "write_1h": 0.00003,
+    "write_5m": 0.00001875
+   },
+   {
+    "cache_read": 3e-7,
+    "input": 0.000003,
+    "known": true,
+    "model": "m-sonnet",
+    "output": 0.000015,
+    "ping_input_tokens": 1,
+    "ping_output_tokens": 1,
+    "source": "price_list",
+    "write_1h": 0.000006,
+    "write_5m": 0.00000375
+   },
+   {
+    "cache_read": 0,
+    "input": 0,
+    "known": false,
+    "model": "m-unpriced",
+    "output": 0,
+    "ping_input_tokens": 1,
+    "ping_output_tokens": 1,
+    "source": "",
+    "write_1h": 0,
+    "write_5m": 0
+   }
+  ],
+  "multipliers": {
+   "cache_read": 0.1,
+   "write_1h": 2,
+   "write_5m": 1.25
+  }
+ },
+ "results": [
+  {
+   "avoided_recomputations": 0,
+   "avoided_tokens": 0,
+   "by_model": [
+    {
+     "hit_rate_pct": 0,
+     "hits": 0,
+     "key": "m-opus",
+     "misses": 197,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 197,
+     "total_usd": 105.04981500000002,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 0
+    },
+    {
+     "hit_rate_pct": 0,
+     "hits": 0,
+     "key": "m-sonnet",
+     "misses": 177,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 177,
+     "total_usd": 18.114426000000005,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 0
+    },
+    {
+     "hit_rate_pct": 0,
+     "hits": 0,
+     "key": "m-unpriced",
+     "misses": 217,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 217,
+     "total_usd": 0,
+     "unpriced": 217,
+     "valued": false,
+     "writes_1h": 0,
+     "writes_5m": 0
+    }
+   ],
+   "by_user": [
+    {
+     "hit_rate_pct": 0,
+     "hits": 0,
+     "key": "t1",
+     "misses": 294,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 294,
+     "total_usd": 62.497902,
+     "unpriced": 107,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 0
+    },
+    {
+     "hit_rate_pct": 0,
+     "hits": 0,
+     "key": "t2",
+     "misses": 297,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 297,
+     "total_usd": 60.66633900000003,
+     "unpriced": 110,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 0
+    }
+   ],
+   "cache_premium_usd": 7.105427357601002e-14,
+   "cache_read_usd": 0,
+   "cache_write_usd": 0,
+   "conversations": 60,
+   "decisions": {
+    "expire": 591
+   },
+   "description": "Never write cache_control. Every prompt is billed as fresh input; nothing is held.",
+   "expires": 591,
+   "forced_misses": 0,
+   "fresh_input_usd": 122.292741,
+   "hit_rate_pct": 0,
+   "hits": 0,
+   "latency": {
+    "hit_mean_ms": 405.1240310077519,
+    "hit_n": 387,
+    "known": true,
+    "miss_mean_ms": 420.8627450980392,
+    "miss_n": 204,
+    "per_miss_ms": 15.738714090287317
+   },
+   "miss_rate_pct": 100,
+   "misses": 591,
+   "output_usd": 0.8715000000000019,
+   "ping_usd": 0,
+   "pings": 0,
+   "pings_on_open_spans": 0,
+   "pings_that_rewrote": 0,
+   "pings_that_upgraded": 0,
+   "requests": 591,
+   "retained_ms": 0,
+   "stats_levels": {
+    "global": 12,
+    "none": 1,
+    "user": 24,
+    "user+model": 110,
+    "user+model+bucket": 444
+   },
+   "strategy": "no-cache",
+   "total_usd": 123.164241,
+   "uncached_usd": 123.16424099999993,
+   "unpriced": 217,
+   "valued": true,
+   "writes_1h": 0,
+   "writes_5m": 0
+  },
+  {
+   "avoided_recomputations": 290,
+   "avoided_tokens": 9836239,
+   "by_model": [
+    {
+     "hit_rate_pct": 48.223350253807105,
+     "hits": 95,
+     "key": "m-opus",
+     "misses": 102,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 197,
+     "total_usd": 76.10936099999999,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 197
+    },
+    {
+     "hit_rate_pct": 49.717514124293785,
+     "hits": 88,
+     "key": "m-sonnet",
+     "misses": 89,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 177,
+     "total_usd": 12.627842249999999,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 177
+    },
+    {
+     "hit_rate_pct": 49.30875576036866,
+     "hits": 107,
+     "key": "m-unpriced",
+     "misses": 110,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 217,
+     "total_usd": 0,
+     "unpriced": 217,
+     "valued": false,
+     "writes_1h": 0,
+     "writes_5m": 217
+    }
+   ],
+   "by_user": [
+    {
+     "hit_rate_pct": 48.63945578231292,
+     "hits": 143,
+     "key": "t1",
+     "misses": 151,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 294,
+     "total_usd": 45.612563399999985,
+     "unpriced": 107,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 294
+    },
+    {
+     "hit_rate_pct": 49.494949494949495,
+     "hits": 147,
+     "key": "t2",
+     "misses": 150,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 297,
+     "total_usd": 43.12463985,
+     "unpriced": 110,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 297
+    }
+   ],
+   "cache_premium_usd": -34.42703774999994,
+   "cache_read_usd": 5.649161999999999,
+   "cache_write_usd": 82.07710125,
+   "conversations": 60,
+   "decisions": {
+    "write_5m": 591
+   },
+   "description": "Always write the prefix at the 5-minute tier (1.25x input to create, 0.1x to read).",
+   "expires": 0,
+   "forced_misses": 0,
+   "fresh_input_usd": 0.13944,
+   "hit_rate_pct": 49.06937394247039,
+   "hits": 290,
+   "latency": {
+    "hit_mean_ms": 405.1240310077519,
+    "hit_n": 387,
+    "known": true,
+    "miss_mean_ms": 420.8627450980392,
+    "miss_n": 204,
+    "per_miss_ms": 15.738714090287317
+   },
+   "miss_rate_pct": 50.93062605752961,
+   "misses": 301,
+   "output_usd": 0.8715000000000019,
+   "ping_usd": 0,
+   "pings": 0,
+   "pings_on_open_spans": 0,
+   "pings_that_rewrote": 0,
+   "pings_that_upgraded": 0,
+   "requests": 591,
+   "retained_ms": 128120000,
+   "stats_levels": {
+    "global": 12,
+    "none": 1,
+    "user": 24,
+    "user+model": 110,
+    "user+model+bucket": 444
+   },
+   "strategy": "fixed-5m",
+   "total_usd": 88.73720325,
+   "uncached_usd": 123.16424099999993,
+   "unpriced": 217,
+   "valued": true,
+   "writes_1h": 0,
+   "writes_5m": 591
+  },
+  {
+   "avoided_recomputations": 531,
+   "avoided_tokens": 18041563,
+   "by_model": [
+    {
+     "hit_rate_pct": 89.84771573604061,
+     "hits": 177,
+     "key": "m-opus",
+     "misses": 20,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 197,
+     "total_usd": 38.43189150000001,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 197,
+     "writes_5m": 0
+    },
+    {
+     "hit_rate_pct": 88.70056497175142,
+     "hits": 157,
+     "key": "m-sonnet",
+     "misses": 20,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 177,
+     "total_usd": 7.0349466,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 177,
+     "writes_5m": 0
+    },
+    {
+     "hit_rate_pct": 90.78341013824885,
+     "hits": 197,
+     "key": "m-unpriced",
+     "misses": 20,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 217,
+     "total_usd": 0,
+     "unpriced": 217,
+     "valued": false,
+     "writes_1h": 217,
+     "writes_5m": 0
+    }
+   ],
+   "by_user": [
+    {
+     "hit_rate_pct": 89.79591836734694,
+     "hits": 264,
+     "key": "t1",
+     "misses": 30,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 294,
+     "total_usd": 22.944949199999996,
+     "unpriced": 107,
+     "valued": true,
+     "writes_1h": 294,
+     "writes_5m": 0
+    },
+    {
+     "hit_rate_pct": 89.8989898989899,
+     "hits": 267,
+     "key": "t2",
+     "misses": 30,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 297,
+     "total_usd": 22.52188890000001,
+     "unpriced": 110,
+     "valued": true,
+     "writes_1h": 297,
+     "writes_5m": 0
+    }
+   ],
+   "cache_premium_usd": -77.69740289999982,
+   "cache_read_usd": 10.518458100000002,
+   "cache_write_usd": 33.9374400000001,
+   "conversations": 60,
+   "decisions": {
+    "write_1h": 591
+   },
+   "description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read).",
+   "expires": 0,
+   "forced_misses": 0,
+   "fresh_input_usd": 0.13944,
+   "hit_rate_pct": 89.84771573604061,
+   "hits": 531,
+   "latency": {
+    "hit_mean_ms": 405.1240310077519,
+    "hit_n": 387,
+    "known": true,
+    "miss_mean_ms": 420.8627450980392,
+    "miss_n": 204,
+    "per_miss_ms": 15.738714090287317
+   },
+   "miss_rate_pct": 10.152284263959391,
+   "misses": 60,
+   "output_usd": 0.8715000000000019,
+   "ping_usd": 0,
+   "pings": 0,
+   "pings_on_open_spans": 0,
+   "pings_that_rewrote": 0,
+   "pings_that_upgraded": 0,
+   "requests": 591,
+   "retained_ms": 525020000,
+   "stats_levels": {
+    "global": 12,
+    "none": 1,
+    "user": 24,
+    "user+model": 110,
+    "user+model+bucket": 444
+   },
+   "strategy": "fixed-1h",
+   "total_usd": 45.46683810000011,
+   "uncached_usd": 123.16424099999993,
+   "unpriced": 217,
+   "valued": true,
+   "writes_1h": 591,
+   "writes_5m": 0
+  },
+  {
+   "avoided_recomputations": 439,
+   "avoided_tokens": 14792109,
+   "by_model": [
+    {
+     "hit_rate_pct": 73.09644670050761,
+     "hits": 144,
+     "key": "m-opus",
+     "misses": 53,
+     "ping_usd": 8.863470000000001,
+     "pings": 155,
+     "requests": 197,
+     "total_usd": 57.07606199999997,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 197
+    },
+    {
+     "hit_rate_pct": 74.01129943502825,
+     "hits": 131,
+     "key": "m-sonnet",
+     "misses": 46,
+     "ping_usd": 1.4599871999999996,
+     "pings": 135,
+     "requests": 177,
+     "total_usd": 9.494119950000004,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 177
+    },
+    {
+     "hit_rate_pct": 75.57603686635944,
+     "hits": 164,
+     "key": "m-unpriced",
+     "misses": 53,
+     "ping_usd": 0,
+     "pings": 161,
+     "requests": 217,
+     "total_usd": 0,
+     "unpriced": 217,
+     "valued": false,
+     "writes_1h": 0,
+     "writes_5m": 217
+    }
+   ],
+   "by_user": [
+    {
+     "hit_rate_pct": 74.14965986394557,
+     "hits": 218,
+     "key": "t1",
+     "misses": 76,
+     "ping_usd": 5.302881000000001,
+     "pings": 227,
+     "requests": 294,
+     "total_usd": 33.99622350000001,
+     "unpriced": 107,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 294
+    },
+    {
+     "hit_rate_pct": 74.41077441077441,
+     "hits": 221,
+     "key": "t2",
+     "misses": 76,
+     "ping_usd": 5.0205762,
+     "pings": 224,
+     "requests": 297,
+     "total_usd": 32.57395845000002,
+     "unpriced": 110,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 297
+    }
+   ],
+   "cache_premium_usd": -56.594059050000126,
+   "cache_read_usd": 8.474421000000003,
+   "cache_write_usd": 46.761363749999795,
+   "conversations": 60,
+   "decisions": {
+    "ping_5m": 591
+   },
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x.",
+   "expires": 0,
+   "forced_misses": 0,
+   "fresh_input_usd": 0.13944,
+   "hit_rate_pct": 74.2808798646362,
+   "hits": 439,
+   "latency": {
+    "hit_mean_ms": 405.1240310077519,
+    "hit_n": 387,
+    "known": true,
+    "miss_mean_ms": 420.8627450980392,
+    "miss_n": 204,
+    "per_miss_ms": 15.738714090287317
+   },
+   "miss_rate_pct": 25.71912013536379,
+   "misses": 152,
+   "output_usd": 0.8715000000000019,
+   "ping_usd": 10.3234572,
+   "pings": 451,
+   "pings_on_open_spans": 118,
+   "pings_that_rewrote": 0,
+   "pings_that_upgraded": 0,
+   "requests": 591,
+   "retained_ms": 221680000,
+   "stats_levels": {
+    "global": 12,
+    "none": 1,
+    "user": 24,
+    "user+model": 110,
+    "user+model+bucket": 444
+   },
+   "strategy": "keepalive-5m",
+   "total_usd": 66.5701819499998,
+   "uncached_usd": 123.16424099999993,
+   "unpriced": 217,
+   "valued": true,
+   "writes_1h": 0,
+   "writes_5m": 591
+  },
+  {
+   "avoided_recomputations": 439,
+   "avoided_tokens": 14792109,
+   "by_model": [
+    {
+     "hit_rate_pct": 73.09644670050761,
+     "hits": 144,
+     "key": "m-opus",
+     "misses": 53,
+     "ping_usd": 5.6468430000000005,
+     "pings": 102,
+     "requests": 197,
+     "total_usd": 53.859434999999955,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 197
+    },
+    {
+     "hit_rate_pct": 74.01129943502825,
+     "hits": 131,
+     "key": "m-sonnet",
+     "misses": 46,
+     "ping_usd": 0.9301071000000001,
+     "pings": 89,
+     "requests": 177,
+     "total_usd": 8.964239850000006,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 177
+    },
+    {
+     "hit_rate_pct": 75.57603686635944,
+     "hits": 164,
+     "key": "m-unpriced",
+     "misses": 53,
+     "ping_usd": 0,
+     "pings": 109,
+     "requests": 217,
+     "total_usd": 0,
+     "unpriced": 217,
+     "valued": false,
+     "writes_1h": 0,
+     "writes_5m": 217
+    }
+   ],
+   "by_user": [
+    {
+     "hit_rate_pct": 74.14965986394557,
+     "hits": 218,
+     "key": "t1",
+     "misses": 76,
+     "ping_usd": 3.3883908,
+     "pings": 151,
+     "requests": 294,
+     "total_usd": 32.08173330000001,
+     "unpriced": 107,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 294
+    },
+    {
+     "hit_rate_pct": 74.41077441077441,
+     "hits": 221,
+     "key": "t2",
+     "misses": 76,
+     "ping_usd": 3.188559299999999,
+     "pings": 149,
+     "requests": 297,
+     "total_usd": 30.74194155000002,
+     "unpriced": 110,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 297
+    }
+   ],
+   "cache_premium_usd": -60.34056615000013,
+   "cache_read_usd": 8.474421000000003,
+   "cache_write_usd": 46.761363749999795,
+   "conversations": 60,
+   "decisions": {
+    "ping_5m": 591
+   },
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "expires": 0,
+   "forced_misses": 0,
+   "fresh_input_usd": 0.13944,
+   "hit_rate_pct": 74.2808798646362,
+   "hits": 439,
+   "latency": {
+    "hit_mean_ms": 405.1240310077519,
+    "hit_n": 387,
+    "known": true,
+    "miss_mean_ms": 420.8627450980392,
+    "miss_n": 204,
+    "per_miss_ms": 15.738714090287317
+   },
+   "miss_rate_pct": 25.71912013536379,
+   "misses": 152,
+   "output_usd": 0.8715000000000019,
+   "ping_usd": 6.5769500999999995,
+   "pings": 300,
+   "pings_on_open_spans": 59,
+   "pings_that_rewrote": 0,
+   "pings_that_upgraded": 0,
+   "requests": 591,
+   "retained_ms": 179400000,
+   "stats_levels": {
+    "global": 12,
+    "none": 1,
+    "user": 24,
+    "user+model": 110,
+    "user+model+bucket": 444
+   },
+   "strategy": "keepalive-5m-once",
+   "total_usd": 62.823674849999804,
+   "uncached_usd": 123.16424099999993,
+   "unpriced": 217,
+   "valued": true,
+   "writes_1h": 0,
+   "writes_5m": 591
+  },
+  {
+   "avoided_recomputations": 531,
+   "avoided_tokens": 18041563,
+   "by_model": [
+    {
+     "hit_rate_pct": 89.84771573604061,
+     "hits": 177,
+     "key": "m-opus",
+     "misses": 20,
+     "ping_usd": 1.4310450000000001,
+     "pings": 20,
+     "requests": 197,
+     "total_usd": 39.8629365,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 197,
+     "writes_5m": 0
+    },
+    {
+     "hit_rate_pct": 88.70056497175142,
+     "hits": 157,
+     "key": "m-sonnet",
+     "misses": 20,
+     "ping_usd": 0.2679869999999999,
+     "pings": 20,
+     "requests": 177,
+     "total_usd": 7.3029336,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 177,
+     "writes_5m": 0
+    },
+    {
+     "hit_rate_pct": 90.78341013824885,
+     "hits": 197,
+     "key": "m-unpriced",
+     "misses": 20,
+     "ping_usd": 0,
+     "pings": 19,
+     "requests": 217,
+     "total_usd": 0,
+     "unpriced": 217,
+     "valued": false,
+     "writes_1h": 217,
+     "writes_5m": 0
+    }
+   ],
+   "by_user": [
+    {
+     "hit_rate_pct": 89.79591836734694,
+     "hits": 264,
+     "key": "t1",
+     "misses": 30,
+     "ping_usd": 0.855582,
+     "pings": 30,
+     "requests": 294,
+     "total_usd": 23.800531199999998,
+     "unpriced": 107,
+     "valued": true,
+     "writes_1h": 294,
+     "writes_5m": 0
+    },
+    {
+     "hit_rate_pct": 89.8989898989899,
+     "hits": 267,
+     "key": "t2",
+     "misses": 30,
+     "ping_usd": 0.8434500000000001,
+     "pings": 29,
+     "requests": 297,
+     "total_usd": 23.365338900000015,
+     "unpriced": 110,
+     "valued": true,
+     "writes_1h": 297,
+     "writes_5m": 0
+    }
+   ],
+   "cache_premium_usd": -75.99837089999983,
+   "cache_read_usd": 10.518458100000002,
+   "cache_write_usd": 33.9374400000001,
+   "conversations": 60,
+   "decisions": {
+    "ping_1h": 591
+   },
+   "description": "Hold every prefix at the 1-hour tier and refresh it with keep-alives while idle. Costs 2.0x input to create, and needs one twelfth as many refreshes as the 5-minute arm to hold the same span. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "expires": 0,
+   "forced_misses": 0,
+   "fresh_input_usd": 0.13944,
+   "hit_rate_pct": 89.84771573604061,
+   "hits": 531,
+   "latency": {
+    "hit_mean_ms": 405.1240310077519,
+    "hit_n": 387,
+    "known": true,
+    "miss_mean_ms": 420.8627450980392,
+    "miss_n": 204,
+    "per_miss_ms": 15.738714090287317
+   },
+   "miss_rate_pct": 10.152284263959391,
+   "misses": 60,
+   "output_usd": 0.8715000000000019,
+   "ping_usd": 1.6990319999999999,
+   "pings": 59,
+   "pings_on_open_spans": 59,
+   "pings_that_rewrote": 0,
+   "pings_that_upgraded": 0,
+   "requests": 591,
+   "retained_ms": 723260000,
+   "stats_levels": {
+    "global": 12,
+    "none": 1,
+    "user": 24,
+    "user+model": 110,
+    "user+model+bucket": 444
+   },
+   "strategy": "keepalive-1h-once",
+   "total_usd": 47.16587010000011,
+   "uncached_usd": 123.16424099999993,
+   "unpriced": 217,
+   "valued": true,
+   "writes_1h": 591,
+   "writes_5m": 0
+  },
+  {
+   "avoided_recomputations": 290,
+   "avoided_tokens": 9836239,
+   "by_model": [
+    {
+     "hit_rate_pct": 48.223350253807105,
+     "hits": 95,
+     "key": "m-opus",
+     "misses": 102,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 197,
+     "total_usd": 76.10936099999999,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 197
+    },
+    {
+     "hit_rate_pct": 49.717514124293785,
+     "hits": 88,
+     "key": "m-sonnet",
+     "misses": 89,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 177,
+     "total_usd": 12.627842249999999,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 177
+    },
+    {
+     "hit_rate_pct": 49.30875576036866,
+     "hits": 107,
+     "key": "m-unpriced",
+     "misses": 110,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 217,
+     "total_usd": 0,
+     "unpriced": 217,
+     "valued": false,
+     "writes_1h": 0,
+     "writes_5m": 217
+    }
+   ],
+   "by_user": [
+    {
+     "hit_rate_pct": 48.63945578231292,
+     "hits": 143,
+     "key": "t1",
+     "misses": 151,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 294,
+     "total_usd": 45.612563399999985,
+     "unpriced": 107,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 294
+    },
+    {
+     "hit_rate_pct": 49.494949494949495,
+     "hits": 147,
+     "key": "t2",
+     "misses": 150,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 297,
+     "total_usd": 43.12463985,
+     "unpriced": 110,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 297
+    }
+   ],
+   "cache_premium_usd": -34.42703774999994,
+   "cache_read_usd": 5.649161999999999,
+   "cache_write_usd": 82.07710125,
+   "conversations": 60,
+   "decisions": {
+    "write_5m": 591
+   },
+   "description": "Replay the tier each request actually asked for; where no tier was recorded, assume 5m and count the row as uncovered.",
+   "expires": 0,
+   "forced_misses": 0,
+   "fresh_input_usd": 0.13944,
+   "hit_rate_pct": 49.06937394247039,
+   "hits": 290,
+   "latency": {
+    "hit_mean_ms": 405.1240310077519,
+    "hit_n": 387,
+    "known": true,
+    "miss_mean_ms": 420.8627450980392,
+    "miss_n": 204,
+    "per_miss_ms": 15.738714090287317
+   },
+   "miss_rate_pct": 50.93062605752961,
+   "misses": 301,
+   "observed_coverage": {
+    "assumed": 591,
+    "recorded": 0
+   },
+   "output_usd": 0.8715000000000019,
+   "ping_usd": 0,
+   "pings": 0,
+   "pings_on_open_spans": 0,
+   "pings_that_rewrote": 0,
+   "pings_that_upgraded": 0,
+   "requests": 591,
+   "retained_ms": 128120000,
+   "stats_levels": {
+    "global": 12,
+    "none": 1,
+    "user": 24,
+    "user+model": 110,
+    "user+model+bucket": 444
+   },
+   "strategy": "observed-policy",
+   "total_usd": 88.73720325,
+   "uncached_usd": 123.16424099999993,
+   "unpriced": 217,
+   "valued": true,
+   "writes_1h": 0,
+   "writes_5m": 591
+  },
+  {
+   "avoided_recomputations": 295,
+   "avoided_tokens": 9993088,
+   "by_model": [
+    {
+     "hit_rate_pct": 50.76142131979695,
+     "hits": 100,
+     "key": "m-opus",
+     "misses": 97,
+     "ping_usd": 0.720504,
+     "pings": 15,
+     "requests": 197,
+     "total_usd": 74.59954349999997,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 197
+    },
+    {
+     "hit_rate_pct": 49.717514124293785,
+     "hits": 88,
+     "key": "m-sonnet",
+     "misses": 89,
+     "ping_usd": 0.014284499999999999,
+     "pings": 1,
+     "requests": 177,
+     "total_usd": 12.532062000000002,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 176
+    },
+    {
+     "hit_rate_pct": 49.30875576036866,
+     "hits": 107,
+     "key": "m-unpriced",
+     "misses": 110,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 217,
+     "total_usd": 0,
+     "unpriced": 217,
+     "valued": false,
+     "writes_1h": 3,
+     "writes_5m": 214
+    }
+   ],
+   "by_user": [
+    {
+     "hit_rate_pct": 50,
+     "hits": 147,
+     "key": "t1",
+     "misses": 147,
+     "ping_usd": 0.628551,
+     "pings": 13,
+     "requests": 294,
+     "total_usd": 44.06479290000001,
+     "unpriced": 107,
+     "valued": true,
+     "writes_1h": 3,
+     "writes_5m": 290
+    },
+    {
+     "hit_rate_pct": 49.831649831649834,
+     "hits": 148,
+     "key": "t2",
+     "misses": 149,
+     "ping_usd": 0.10623750000000001,
+     "pings": 3,
+     "requests": 297,
+     "total_usd": 43.066812600000006,
+     "unpriced": 110,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 297
+    }
+   ],
+   "cache_premium_usd": -36.032635499999984,
+   "cache_read_usd": 5.851369499999998,
+   "cache_write_usd": 79.47450749999996,
+   "conversations": 60,
+   "decisions": {
+    "expire": 1,
+    "ping_5m": 23,
+    "write_1h": 3,
+    "write_5m": 564
+   },
+   "description": "Use your own closed gaps: 5m write when P(return within 5m) \u003e= 50%, a 1-hour hold when P(return within 1h) \u003e= 50% (write or pings, whichever is cheaper on that prefix), otherwise let it expire. Prefixes under 20k tokens are never cached.",
+   "expires": 1,
+   "forced_misses": 0,
+   "fresh_input_usd": 0.1994399999999996,
+   "hit_rate_pct": 49.91539763113367,
+   "hits": 295,
+   "latency": {
+    "hit_mean_ms": 405.1240310077519,
+    "hit_n": 387,
+    "known": true,
+    "miss_mean_ms": 420.8627450980392,
+    "miss_n": 204,
+    "per_miss_ms": 15.738714090287317
+   },
+   "miss_rate_pct": 50.08460236886633,
+   "misses": 296,
+   "output_usd": 0.8715000000000019,
+   "ping_usd": 0.7347885000000001,
+   "pings": 16,
+   "pings_on_open_spans": 4,
+   "pings_that_rewrote": 0,
+   "pings_that_upgraded": 0,
+   "requests": 591,
+   "retained_ms": 139600000,
+   "stats_levels": {
+    "global": 12,
+    "none": 1,
+    "user": 24,
+    "user+model": 110,
+    "user+model+bucket": 444
+   },
+   "strategy": "historical-probability",
+   "total_usd": 87.13160549999995,
+   "uncached_usd": 123.16424099999993,
+   "unpriced": 217,
+   "valued": true,
+   "writes_1h": 3,
+   "writes_5m": 587
+  },
+  {
+   "avoided_recomputations": 290,
+   "avoided_tokens": 9836239,
+   "by_model": [
+    {
+     "hit_rate_pct": 48.223350253807105,
+     "hits": 95,
+     "key": "m-opus",
+     "misses": 102,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 197,
+     "total_usd": 76.10936099999999,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 197
+    },
+    {
+     "hit_rate_pct": 49.717514124293785,
+     "hits": 88,
+     "key": "m-sonnet",
+     "misses": 89,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 177,
+     "total_usd": 12.627842249999999,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 177
+    },
+    {
+     "hit_rate_pct": 49.30875576036866,
+     "hits": 107,
+     "key": "m-unpriced",
+     "misses": 110,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 217,
+     "total_usd": 0,
+     "unpriced": 217,
+     "valued": false,
+     "writes_1h": 0,
+     "writes_5m": 217
+    }
+   ],
+   "by_user": [
+    {
+     "hit_rate_pct": 48.63945578231292,
+     "hits": 143,
+     "key": "t1",
+     "misses": 151,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 294,
+     "total_usd": 45.612563399999985,
+     "unpriced": 107,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 294
+    },
+    {
+     "hit_rate_pct": 49.494949494949495,
+     "hits": 147,
+     "key": "t2",
+     "misses": 150,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 297,
+     "total_usd": 43.12463985,
+     "unpriced": 110,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 297
+    }
+   ],
+   "cache_premium_usd": -34.42703774999994,
+   "cache_read_usd": 5.649161999999999,
+   "cache_write_usd": 82.07710125,
+   "conversations": 60,
+   "decisions": {
+    "write_5m": 591
+   },
+   "description": "Write the five-minute tier on every request, but only keep-alive-ping while idle when the request just served's own stop_reason clusters as \"actually done\" (end_turn, max_tokens, refusal) — never on \"still working\" (tool_use, stop_sequence, tool_calls, length, content_filter) or \"looks done, isn't\" (stop, unset), both measured well under the ping break-even. Extends, rather than revisits, the deliberate decision already in pingable() to keep pinging on end_turn.",
+   "expires": 0,
+   "forced_misses": 0,
+   "fresh_input_usd": 0.13944,
+   "hit_rate_pct": 49.06937394247039,
+   "hits": 290,
+   "latency": {
+    "hit_mean_ms": 405.1240310077519,
+    "hit_n": 387,
+    "known": true,
+    "miss_mean_ms": 420.8627450980392,
+    "miss_n": 204,
+    "per_miss_ms": 15.738714090287317
+   },
+   "miss_rate_pct": 50.93062605752961,
+   "misses": 301,
+   "output_usd": 0.8715000000000019,
+   "ping_usd": 0,
+   "pings": 0,
+   "pings_on_open_spans": 0,
+   "pings_that_rewrote": 0,
+   "pings_that_upgraded": 0,
+   "requests": 591,
+   "retained_ms": 128120000,
+   "stats_levels": {
+    "global": 12,
+    "none": 1,
+    "user": 24,
+    "user+model": 110,
+    "user+model+bucket": 444
+   },
+   "strategy": "stop-reason-gated",
+   "total_usd": 88.73720325,
+   "uncached_usd": 123.16424099999993,
+   "unpriced": 217,
+   "valued": true,
+   "writes_1h": 0,
+   "writes_5m": 591
+  },
+  {
+   "avoided_recomputations": 382,
+   "avoided_tokens": 12784953,
+   "by_model": [
+    {
+     "hit_rate_pct": 73.09644670050761,
+     "hits": 144,
+     "key": "m-opus",
+     "misses": 53,
+     "ping_usd": 8.863470000000001,
+     "pings": 155,
+     "requests": 197,
+     "total_usd": 57.07606199999997,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 197
+    },
+    {
+     "hit_rate_pct": 74.01129943502825,
+     "hits": 131,
+     "key": "m-sonnet",
+     "misses": 46,
+     "ping_usd": 1.4512691999999996,
+     "pings": 134,
+     "requests": 177,
+     "total_usd": 9.485401950000002,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 177
+    },
+    {
+     "hit_rate_pct": 49.30875576036866,
+     "hits": 107,
+     "key": "m-unpriced",
+     "misses": 110,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 217,
+     "total_usd": 0,
+     "unpriced": 217,
+     "valued": false,
+     "writes_1h": 0,
+     "writes_5m": 217
+    }
+   ],
+   "by_user": [
+    {
+     "hit_rate_pct": 64.96598639455782,
+     "hits": 191,
+     "key": "t1",
+     "misses": 103,
+     "ping_usd": 5.294163000000001,
+     "pings": 147,
+     "requests": 294,
+     "total_usd": 33.98750550000001,
+     "unpriced": 107,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 294
+    },
+    {
+     "hit_rate_pct": 64.3097643097643,
+     "hits": 191,
+     "key": "t2",
+     "misses": 106,
+     "ping_usd": 5.0205762,
+     "pings": 142,
+     "requests": 297,
+     "total_usd": 32.57395845000002,
+     "unpriced": 110,
+     "valued": true,
+     "writes_1h": 0,
+     "writes_5m": 297
+    }
+   ],
+   "cache_premium_usd": -56.60277705000013,
+   "cache_read_usd": 8.474421000000003,
+   "cache_write_usd": 46.761363749999795,
+   "conversations": 60,
+   "decisions": {
+    "ping_5m": 374,
+    "write_5m": 217
+   },
+   "description": "A predictor's per-window reuse probabilities against the rates' own break-even, compounded over up to 8 keep-alives so the option value of staying alive is counted. Chooses the budget per conversation.",
+   "expires": 0,
+   "forced_misses": 0,
+   "fresh_input_usd": 0.13944,
+   "hit_rate_pct": 64.63620981387479,
+   "hits": 382,
+   "latency": {
+    "hit_mean_ms": 405.1240310077519,
+    "hit_n": 387,
+    "known": true,
+    "miss_mean_ms": 420.8627450980392,
+    "miss_n": 204,
+    "per_miss_ms": 15.738714090287317
+   },
+   "miss_rate_pct": 35.363790186125215,
+   "misses": 209,
+   "output_usd": 0.8715000000000019,
+   "ping_usd": 10.314739200000002,
+   "pings": 289,
+   "pings_on_open_spans": 80,
+   "pings_that_rewrote": 0,
+   "pings_that_upgraded": 0,
+   "requests": 591,
+   "retained_ms": 189000000,
+   "stats_levels": {
+    "global": 12,
+    "none": 1,
+    "user": 24,
+    "user+model": 110,
+    "user+model+bucket": 444
+   },
+   "strategy": "keepalive-budget",
+   "total_usd": 66.5614639499998,
+   "uncached_usd": 123.16424099999993,
+   "unpriced": 217,
+   "valued": true,
+   "writes_1h": 0,
+   "writes_5m": 591
+  },
+  {
+   "avoided_recomputations": 334,
+   "avoided_tokens": 11088083,
+   "by_model": [
+    {
+     "hit_rate_pct": 89.84771573604061,
+     "hits": 177,
+     "key": "m-opus",
+     "misses": 20,
+     "ping_usd": 0.221841,
+     "pings": 7,
+     "requests": 197,
+     "total_usd": 30.46564500000002,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 75,
+     "writes_5m": 122
+    },
+    {
+     "hit_rate_pct": 88.70056497175142,
+     "hits": 157,
+     "key": "m-sonnet",
+     "misses": 20,
+     "ping_usd": 0.04462350000000001,
+     "pings": 7,
+     "requests": 177,
+     "total_usd": 5.4908676000000005,
+     "unpriced": 0,
+     "valued": true,
+     "writes_1h": 62,
+     "writes_5m": 115
+    },
+    {
+     "hit_rate_pct": 0,
+     "hits": 0,
+     "key": "m-unpriced",
+     "misses": 217,
+     "ping_usd": 0,
+     "pings": 0,
+     "requests": 217,
+     "total_usd": 0,
+     "unpriced": 217,
+     "valued": false,
+     "writes_1h": 0,
+     "writes_5m": 0
+    }
+   ],
+   "by_user": [
+    {
+     "hit_rate_pct": 56.802721088435376,
+     "hits": 167,
+     "key": "t1",
+     "misses": 127,
+     "ping_usd": 0.1216014,
+     "pings": 7,
+     "requests": 294,
+     "total_usd": 18.190035599999995,
+     "unpriced": 107,
+     "valued": true,
+     "writes_1h": 71,
+     "writes_5m": 116
+    },
+    {
+     "hit_rate_pct": 56.22895622895623,
+     "hits": 167,
+     "key": "t2",
+     "misses": 130,
+     "ping_usd": 0.1448631,
+     "pings": 7,
+     "requests": 297,
+     "total_usd": 17.766477000000005,
+     "unpriced": 110,
+     "valued": true,
+     "writes_1h": 66,
+     "writes_5m": 121
+    }
+   ],
+   "cache_premium_usd": -87.20772839999992,
+   "cache_read_usd": 10.518458100000002,
+   "cache_write_usd": 24.160650000000015,
+   "conversations": 60,
+   "decisions": {
+    "expire": 217,
+    "ping_5m": 14,
+    "write_1h": 137,
+    "write_5m": 223
+   },
+   "description": "The cheapest action sequence that exists, solved exactly per trajectory. It reads the true next-request time, so it is the CEILING no policy can reach — never a result.",
+   "expires": 217,
+   "forced_misses": 0,
+   "fresh_input_usd": 0.13944,
+   "hit_rate_pct": 56.51438240270728,
+   "hits": 334,
+   "latency": {
+    "hit_mean_ms": 405.1240310077519,
+    "hit_n": 387,
+    "known": true,
+    "miss_mean_ms": 420.8627450980392,
+    "miss_n": 204,
+    "per_miss_ms": 15.738714090287317
+   },
+   "miss_rate_pct": 43.48561759729272,
+   "misses": 257,
+   "output_usd": 0.8715000000000019,
+   "ping_usd": 0.2664645,
+   "pings": 14,
+   "pings_on_open_spans": 0,
+   "pings_that_rewrote": 0,
+   "pings_that_upgraded": 0,
+   "requests": 591,
+   "retained_ms": 276140000,
+   "stats_levels": {
+    "global": 12,
+    "none": 1,
+    "user": 24,
+    "user+model": 110,
+    "user+model+bucket": 444
+   },
+   "strategy": "optimal",
+   "total_usd": 35.95651260000002,
+   "uncached_usd": 123.16424099999993,
+   "unpriced": 217,
+   "valued": true,
+   "writes_1h": 137,
+   "writes_5m": 237
+  }
+ ],
+ "savings": [
+  {
+   "absolute_usd": -34.42703775000001,
+   "baseline": "fixed-5m",
+   "baseline_usd": 88.73720325,
+   "hit_delta": -290,
+   "latency_avoided_ms": -4564.227086183322,
+   "latency_known": true,
+   "percent_known": true,
+   "percent_usd": -38.796622486521755,
+   "strategy": "no-cache",
+   "strategy_usd": 123.164241
+  },
+  {
+   "absolute_usd": 0,
+   "baseline": "fixed-5m",
+   "baseline_usd": 88.73720325,
+   "hit_delta": 0,
+   "latency_avoided_ms": 0,
+   "latency_known": true,
+   "percent_known": true,
+   "percent_usd": 0,
+   "strategy": "fixed-5m",
+   "strategy_usd": 88.73720325
+  },
+  {
+   "absolute_usd": 43.27036514999988,
+   "baseline": "fixed-5m",
+   "baseline_usd": 88.73720325,
+   "hit_delta": 241,
+   "latency_avoided_ms": 3793.0300957592435,
+   "latency_known": true,
+   "percent_known": true,
+   "percent_usd": 48.762371998691414,
+   "strategy": "fixed-1h",
+   "strategy_usd": 45.46683810000011
+  },
+  {
+   "absolute_usd": 22.167021300000187,
+   "baseline": "fixed-5m",
+   "baseline_usd": 88.73720325,
+   "hit_delta": 149,
+   "latency_avoided_ms": 2345.0683994528104,
+   "latency_known": true,
+   "percent_known": true,
+   "percent_usd": 24.98052731901959,
+   "strategy": "keepalive-5m",
+   "strategy_usd": 66.5701819499998
+  },
+  {
+   "absolute_usd": 25.91352840000019,
+   "baseline": "fixed-5m",
+   "baseline_usd": 88.73720325,
+   "hit_delta": 149,
+   "latency_avoided_ms": 2345.0683994528104,
+   "latency_known": true,
+   "percent_known": true,
+   "percent_usd": 29.202552538188304,
+   "strategy": "keepalive-5m-once",
+   "strategy_usd": 62.823674849999804
+  },
+  {
+   "absolute_usd": 41.57133314999988,
+   "baseline": "fixed-5m",
+   "baseline_usd": 88.73720325,
+   "hit_delta": 241,
+   "latency_avoided_ms": 3793.0300957592435,
+   "latency_known": true,
+   "percent_known": true,
+   "percent_usd": 46.84769367012914,
+   "strategy": "keepalive-1h-once",
+   "strategy_usd": 47.16587010000011
+  },
+  {
+   "absolute_usd": 0,
+   "baseline": "fixed-5m",
+   "baseline_usd": 88.73720325,
+   "hit_delta": 0,
+   "latency_avoided_ms": 0,
+   "latency_known": true,
+   "percent_known": true,
+   "percent_usd": 0,
+   "strategy": "observed-policy",
+   "strategy_usd": 88.73720325
+  },
+  {
+   "absolute_usd": 1.6055977500000438,
+   "baseline": "fixed-5m",
+   "baseline_usd": 88.73720325,
+   "hit_delta": 5,
+   "latency_avoided_ms": 78.69357045143659,
+   "latency_known": true,
+   "percent_known": true,
+   "percent_usd": 1.8093851182987828,
+   "strategy": "historical-probability",
+   "strategy_usd": 87.13160549999995
+  },
+  {
+   "absolute_usd": 0,
+   "baseline": "fixed-5m",
+   "baseline_usd": 88.73720325,
+   "hit_delta": 0,
+   "latency_avoided_ms": 0,
+   "latency_known": true,
+   "percent_known": true,
+   "percent_usd": 0,
+   "strategy": "stop-reason-gated",
+   "strategy_usd": 88.73720325
+  },
+  {
+   "absolute_usd": 22.17573930000019,
+   "baseline": "fixed-5m",
+   "baseline_usd": 88.73720325,
+   "hit_delta": 92,
+   "latency_avoided_ms": 1447.9616963064332,
+   "latency_known": true,
+   "percent_known": true,
+   "percent_usd": 24.99035183419553,
+   "strategy": "keepalive-budget",
+   "strategy_usd": 66.5614639499998
+  },
+  {
+   "absolute_usd": 52.780690649999976,
+   "baseline": "fixed-5m",
+   "baseline_usd": 88.73720325,
+   "hit_delta": 44,
+   "latency_avoided_ms": 692.503419972642,
+   "latency_known": true,
+   "percent_known": true,
+   "percent_usd": 59.47977704604971,
+   "strategy": "optimal",
+   "strategy_usd": 35.95651260000002
+  }
+ ],
+ "scanned": 591,
+ "total": 591,
+ "truncated": false,
+ "window_end": 1768249460000
+}

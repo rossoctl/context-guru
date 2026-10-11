@@ -276,8 +276,45 @@ type declWindow struct {
 // declWindows reads the per-item observation window for a scope. Separate from the report's
 // own aggregation because the report answers "what does this cost" and this answers "how
 // much do we actually know" — and only the second may authorise a removal.
-func (d *DB) declWindows(f Filter) (map[statKey]declWindow, error) {
+func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, error) {
 	where, args := f.where()
+	if sessions, err := d.declSessionSet(f); err != nil {
+		return nil, err
+	} else if len(sessions) >= declScanMinSessions {
+		// Broad scope: fold the facts from one concurrent pass over the table (declfacts.go)
+		// instead of probing it once per session. First/last are the MIN/MAX of ts over every
+		// row, and the session count is distinct sessions per (kind, name) across servers.
+		scan, err := h.get()
+		if err != nil {
+			return nil, err
+		}
+		seen := map[statKey]map[string]bool{}
+		out := map[statKey]declWindow{}
+		for k, v := range scan.facts {
+			if !sessions[k.session] {
+				continue
+			}
+			sk := statKey{k.kind, k.name}
+			if seen[sk] == nil {
+				seen[sk] = map[string]bool{}
+			}
+			seen[sk][k.session] = true
+			w, ok := out[sk]
+			if !ok || v.first < w.first {
+				w.first = v.first
+			}
+			if !ok || v.last > w.last {
+				w.last = v.last
+			}
+			out[sk] = w
+		}
+		for sk, set := range seen {
+			w := out[sk]
+			w.sessions = len(set)
+			out[sk] = w
+		}
+		return out, nil
+	}
 	q := `SELECT d.kind, d.name, COUNT(DISTINCT d.session_id), MIN(d.ts), MAX(d.ts)
 		FROM tool_declarations d WHERE d.session_id IN
 		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
@@ -342,7 +379,8 @@ type ToolFilterDoc struct {
 // which is a deployment with no per-account configuration: the analysis is served and the
 // control is reported unavailable.
 func (d *DB) ToolFilterDocFor(f Filter, price func(string) (modelinfo.Price, bool), state ToolFilterState) (*ToolFilterDoc, error) {
-	rep, err := d.ToolReportFor(f, price)
+	scan := &declScanOnce{d: d, f: f}
+	rep, err := d.toolReportFor(f, price, scan)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +388,7 @@ func (d *DB) ToolFilterDocFor(f Filter, price func(string) (modelinfo.Price, boo
 	if err != nil {
 		return nil, err
 	}
-	win, err := d.declWindows(f)
+	win, err := d.declWindows(f, scan)
 	if err != nil {
 		return nil, err
 	}

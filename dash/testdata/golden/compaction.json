@@ -1,0 +1,79 @@
+{
+ "assumptions": {
+  "client_ceilings": null,
+  "cold_label": "turns whose cache_miss_reason is ttl_expiry — the entry had lapsed, so an uncompacted prefix would have been re-written in full",
+  "credit_quantity_note": "the removed-token count is our own tokenizer over message text, which under-states the provider's count of the same content by roughly 12% at the transcript sizes compaction happens at (issue #240). This panel therefore under-reports rather than over-reports",
+  "credit_source": "the tokens summarize removed on each turn (request_components.saved_gross), priced at the rate THAT turn's cache verdict earns: the cache-creation rate where the entry had lapsed, the cache-read rate where it hit. Nothing removed inside a span is new content, so the stored saved_usd — which prices first-time removals at the creation rate — is deliberately not used as the credit",
+  "debit_bound": "cache-creation tokens on a summarizing turn, charged ONLY where the entry was still live: on a turn whose cache had already expired the write was due whatever we did, so none of it is our cost. Where it is charged it is an upper bound, since some of that write was transcript growth that would have been paid anyway",
+  "fill_frac": 0.9,
+  "known_omission": "context_guru_expand calls inside a span are not charged against it; a summary the agent had to undo costs input tokens this figure does not subtract",
+  "open_rule": "a span that has not finished is reported with its own net, apart from the settled total: it is money committed whose payoff is still accruing, and dropping it would make the panel optimistic. It is not automatically a loss — the compaction turn is already cheaper on its own turn at better than ~12.5:1 compression",
+  "read_label": "turns whose cache_miss_reason is hit — the re-sent remainder, billed at the cache-read rate",
+  "span_frac": 0,
+  "span_measure": "provider-billed NEW content (fresh input, plus the newly-written tail on turns whose cache hit), in the units the context window is stated in",
+  "span_measure_note": "the span closes on cumulative NEW content since t0 — fresh input plus the newly-written tail on turns whose cache hit. It excludes the re-sent prefix (a cache read) and the re-creation of an expired one (a cache write on a miss), because counting either makes one turn exceed the whole span",
+  "span_rule": "the span is the CLIENT's compaction ceiling minus the fill threshold, derived rather than configured separately, because it is an ATTRIBUTION boundary: we fire at the threshold, and in the world where we had not compacted the conversation keeps growing until the CLIENT compacts at its own ceiling. Past that point both worlds are running on a summarized transcript and nothing further is attributable to us. The ceiling is an assumption about the client rather than a property of the model, measured at 0.996 of the window on one real Claude Code session on haiku and stated in PROVIDER-BILLED tokens — not in the client's own count, which read ~167,000 of 200,000 on the same turn. It bounds new content, NOT wall-clock time: a session can go cold having added 2% of the window, and a session that adds 10% in thirty seconds never goes cold at all",
+  "void_rule": "an episode whose span contains a drop in our own message-token count is voided — the client compacted, so the remainder is not comparable",
+  "window_rule": "a conversation whose model window is not exactly published contributes nothing and is counted as window_unknown"
+ },
+ "by_provenance": null,
+ "coverage": {
+  "conversations": 0,
+  "fill_frac": 0.9,
+  "no_attributable_span": 0,
+  "no_episode": 0,
+  "no_episode_cold_usd": 0,
+  "unpriced": 0,
+  "window_unknown": 60,
+  "with_episode": 0
+ },
+ "episodes": null,
+ "first_ts": 1767603620000,
+ "last_ts": 1768249460000,
+ "pricing": {
+  "models": [
+   {
+    "cache_read": 0.0000015,
+    "input": 0.000015,
+    "known": true,
+    "model": "m-opus",
+    "output": 0.000075,
+    "ping_input_tokens": 1,
+    "ping_output_tokens": 1,
+    "source": "price_list",
+    "write_1h": 0.00003,
+    "write_5m": 0.00001875
+   },
+   {
+    "cache_read": 3e-7,
+    "input": 0.000003,
+    "known": true,
+    "model": "m-sonnet",
+    "output": 0.000015,
+    "ping_input_tokens": 1,
+    "ping_output_tokens": 1,
+    "source": "price_list",
+    "write_1h": 0.000006,
+    "write_5m": 0.00000375
+   },
+   {
+    "cache_read": 0,
+    "input": 0,
+    "known": false,
+    "model": "m-unpriced",
+    "output": 0,
+    "ping_input_tokens": 1,
+    "ping_output_tokens": 1,
+    "source": "",
+    "write_1h": 0,
+    "write_5m": 0
+   }
+  ],
+  "multipliers": {
+   "cache_read": 0.1,
+   "write_1h": 2,
+   "write_5m": 1.25
+  }
+ },
+ "scanned": 591
+}

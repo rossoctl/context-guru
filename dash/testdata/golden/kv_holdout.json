@@ -1,0 +1,2785 @@
+{
+ "baseline": "fixed-5m",
+ "cells": [
+  {
+   "arm": "fixed-1h",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.8500515,
+     "train_known": true,
+     "train_saving_usd": -2.699568000000001
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": true,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": -0.32574990000000015,
+     "train_known": true,
+     "train_saving_usd": 0.0101339999999992
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": -0.02301030000000004,
+     "train_known": true,
+     "train_saving_usd": -0.08962200000000009
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0.023132699999999895,
+     "train_known": true,
+     "train_saving_usd": -0.044810999999999934
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": -0.41803590000000024,
+     "train_known": true,
+     "train_saving_usd": 0.0101339999999992
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": -0.3718929000000002,
+     "train_known": true,
+     "train_saving_usd": 0.0101339999999992
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -1.0234059,
+     "train_known": true,
+     "train_saving_usd": -0.3802185000000007
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": -0.29297700000000004,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0.019647599999999876,
+     "train_known": true,
+     "train_saving_usd": 0.0101339999999992
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0.023132699999999895,
+     "train_known": true,
+     "train_saving_usd": -0.08962200000000009
+    }
+   ],
+   "hour_utc": 3,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 6,
+   "test_saving_usd": -0.32574990000000015,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 15,
+   "train_saving_usd": 0.0101339999999992,
+   "user": "t1"
+  },
+  {
+   "arm": "keepalive-5m-once",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.24001110000000003,
+     "train_known": true,
+     "train_saving_usd": 0.061320299999999994
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.25500269999999947,
+     "train_known": true,
+     "train_saving_usd": -0.3214593000000001
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 0.4809713999999998,
+     "train_known": true,
+     "train_saving_usd": 0.1435242000000001
+    },
+    {
+     "chosen": true,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0.5499317999999997,
+     "train_known": true,
+     "train_saving_usd": 0.1637934000000001
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.13571669999999947,
+     "train_known": true,
+     "train_saving_usd": -0.3444285
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.19535969999999936,
+     "train_known": true,
+     "train_saving_usd": -0.33294390000000007
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -1.8310593000000008,
+     "train_known": true,
+     "train_saving_usd": -0.46443689999999993
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": 0.10774769999999978,
+     "train_known": true,
+     "train_saving_usd": -0.054599400000000076
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0.12029069999999997,
+     "train_known": true,
+     "train_saving_usd": -0.5379075
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0.4809713999999998,
+     "train_known": true,
+     "train_saving_usd": 0.15230880000000013
+    }
+   ],
+   "hour_utc": 4,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 7,
+   "test_saving_usd": 0.5499317999999997,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 13,
+   "train_saving_usd": 0.1637934000000001,
+   "user": "t1"
+  },
+  {
+   "arm": "fixed-1h",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.3013152
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": true,
+     "strategy": "fixed-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.03281639999999991
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.026569200000000015
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.01328459999999998
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.03281639999999991
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.03281639999999991
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.11278410000000005
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.11129940000000005
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.026569200000000015
+    }
+   ],
+   "hour_utc": 5,
+   "test_insufficient_data": false,
+   "test_known": false,
+   "test_note": "this account sent no Sunday-Thursday traffic in this hour during the test window",
+   "test_requests": 0,
+   "test_saving_usd": 0,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 5,
+   "train_saving_usd": 0.03281639999999991,
+   "user": "t1"
+  },
+  {
+   "arm": "keepalive-5m-once",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.8333208000000001
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.028103999999999685
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.24405599999999983
+    },
+    {
+     "chosen": true,
+     "strategy": "keepalive-5m-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.3077699999999999
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.0818880000000004
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.02689200000000036
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -1.5277200000000004
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.05400000000000005
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.00680399999999981
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.25277399999999983
+    }
+   ],
+   "hour_utc": 9,
+   "test_insufficient_data": false,
+   "test_known": false,
+   "test_note": "the test window's traffic in this cell could not be priced",
+   "test_requests": 8,
+   "test_saving_usd": 0,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 18,
+   "train_saving_usd": 0.3077699999999999,
+   "user": "t1"
+  },
+  {
+   "arm": "keepalive-5m-once",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.13625759999999998,
+     "train_known": true,
+     "train_saving_usd": -0.7609848000000001
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.21868559999999998,
+     "train_known": true,
+     "train_saving_usd": 0.8422295999999998
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 0.16590120000000008,
+     "train_known": true,
+     "train_saving_usd": 1.1850912
+    },
+    {
+     "chosen": true,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0.17515200000000009,
+     "train_known": true,
+     "train_saving_usd": 1.2520692
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.21868559999999998,
+     "train_known": true,
+     "train_saving_usd": 0.7082735999999996
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.21868559999999998,
+     "train_known": true,
+     "train_saving_usd": 0.7752515999999998
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.22784039999999994,
+     "train_known": true,
+     "train_saving_usd": -2.472986400000001
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": -0.058795199999999936,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.8422295999999998
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0.16590120000000008,
+     "train_known": true,
+     "train_saving_usd": 1.1850912
+    }
+   ],
+   "hour_utc": 10,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 7,
+   "test_saving_usd": 0.17515200000000009,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 18,
+   "train_saving_usd": 1.2520692,
+   "user": "t1"
+  },
+  {
+   "arm": "keepalive-5m-once",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": 0.06641399999999997,
+     "train_known": true,
+     "train_saving_usd": -1.8978215999999999
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.04458119999999999,
+     "train_known": true,
+     "train_saving_usd": -0.5926944000000005
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 0.1347264,
+     "train_known": true,
+     "train_saving_usd": -0.0191268
+    },
+    {
+     "chosen": true,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0.1347264,
+     "train_known": true,
+     "train_saving_usd": 0.0658512
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.04458119999999999,
+     "train_known": true,
+     "train_saving_usd": -0.7626504000000005
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.04458119999999999,
+     "train_known": true,
+     "train_saving_usd": -0.6776724000000005
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.10909679999999994,
+     "train_known": true,
+     "train_saving_usd": -1.9049604000000002
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": 0.032081999999999944,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.5926944000000005
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0.1347264,
+     "train_known": true,
+     "train_saving_usd": -0.0191268
+    }
+   ],
+   "hour_utc": 11,
+   "test_insufficient_data": true,
+   "test_known": true,
+   "test_requests": 2,
+   "test_saving_usd": 0.1347264,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 9,
+   "train_saving_usd": 0.0658512,
+   "user": "t1"
+  },
+  {
+   "arm": "keepalive-5m-once",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.4160970000000004,
+     "train_known": true,
+     "train_saving_usd": 0.3669003000000002
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.13512599999999986,
+     "train_known": true,
+     "train_saving_usd": 0.9755319
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 0.4432094999999996,
+     "train_known": true,
+     "train_saving_usd": 1.1468967
+    },
+    {
+     "chosen": true,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0.4432094999999996,
+     "train_known": true,
+     "train_saving_usd": 1.1999594999999998
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.13512599999999986,
+     "train_known": true,
+     "train_saving_usd": 0.8694063000000001
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.13512599999999986,
+     "train_known": true,
+     "train_saving_usd": 0.9224691
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.3589515000000003,
+     "train_known": true,
+     "train_saving_usd": -2.1271719000000004
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0.13512599999999986,
+     "train_known": true,
+     "train_saving_usd": 0.9755319
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0.4432094999999996,
+     "train_known": true,
+     "train_saving_usd": 1.1468967
+    }
+   ],
+   "hour_utc": 15,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 8,
+   "test_saving_usd": 0.4432094999999996,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 15,
+   "train_saving_usd": 1.1999594999999998,
+   "user": "t1"
+  },
+  {
+   "arm": "fixed-5m",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.5805495000000005,
+     "train_known": true,
+     "train_saving_usd": -0.8320512000000002
+    },
+    {
+     "chosen": true,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.8141444999999992,
+     "train_known": true,
+     "train_saving_usd": -0.5119110000000002
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 1.2171689999999997,
+     "train_known": true,
+     "train_saving_usd": -0.1367256000000001
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 1.2171689999999997,
+     "train_known": true,
+     "train_saving_usd": -0.06836280000000006
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.8141444999999992,
+     "train_known": true,
+     "train_saving_usd": -0.6486366000000001
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.8141444999999992,
+     "train_known": true,
+     "train_saving_usd": -0.5802738000000003
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.9856530000000006,
+     "train_known": true,
+     "train_saving_usd": -1.4335668000000004
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0.8141444999999992,
+     "train_known": true,
+     "train_saving_usd": -0.5119110000000002
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 1.2171689999999997,
+     "train_known": true,
+     "train_saving_usd": -0.1367256000000001
+    }
+   ],
+   "hour_utc": 16,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 11,
+   "test_saving_usd": 0,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 15,
+   "train_saving_usd": 0,
+   "user": "t1"
+  },
+  {
+   "arm": "",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": 0.1842974999999999,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": -0.5528924999999999,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": -0.5528924999999999,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": -0.5528924999999999,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": 0.1842974999999999,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": false,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": false,
+     "train_saving_usd": 0
+    }
+   ],
+   "hour_utc": 17,
+   "test_insufficient_data": true,
+   "test_known": false,
+   "test_note": "the arm chosen on the train window could not be replayed on the test window's rows",
+   "test_requests": 2,
+   "test_saving_usd": 0,
+   "train_insufficient_data": false,
+   "train_known": false,
+   "train_requests": 5,
+   "train_saving_usd": 0,
+   "user": "t1"
+  },
+  {
+   "arm": "keepalive-5m-once",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.5152680000000003,
+     "train_known": true,
+     "train_saving_usd": -1.2073674000000012
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.030294000000000043,
+     "train_known": true,
+     "train_saving_usd": 1.1203469999999998
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 0.34521299999999966,
+     "train_known": true,
+     "train_saving_usd": 1.1148306000000003
+    },
+    {
+     "chosen": true,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0.34521299999999966,
+     "train_known": true,
+     "train_saving_usd": 1.2126378000000004
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.030294000000000043,
+     "train_known": true,
+     "train_saving_usd": 1.0150205999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.030294000000000043,
+     "train_known": true,
+     "train_saving_usd": 1.0676837999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.27962100000000034,
+     "train_known": true,
+     "train_saving_usd": -2.5482491999999994
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": 0.08221499999999993,
+     "train_known": true,
+     "train_saving_usd": -0.2719979999999995
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 1.048959
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0.34521299999999966,
+     "train_known": true,
+     "train_saving_usd": 1.1148306000000003
+    }
+   ],
+   "hour_utc": 21,
+   "test_insufficient_data": true,
+   "test_known": true,
+   "test_requests": 4,
+   "test_saving_usd": 0.34521299999999966,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 15,
+   "train_saving_usd": 1.2126378000000004,
+   "user": "t1"
+  },
+  {
+   "arm": "keepalive-5m-once",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.5770530000000003,
+     "train_known": true,
+     "train_saving_usd": -0.6391296000000004
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.8089829999999993,
+     "train_known": true,
+     "train_saving_usd": 0.9433055999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 1.2101759999999997,
+     "train_known": true,
+     "train_saving_usd": 1.2465168
+    },
+    {
+     "chosen": true,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 1.2101759999999997,
+     "train_known": true,
+     "train_saving_usd": 1.32618
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.8089829999999993,
+     "train_known": true,
+     "train_saving_usd": 0.7839791999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.8089829999999993,
+     "train_known": true,
+     "train_saving_usd": 0.8636423999999998
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.9799920000000006,
+     "train_known": true,
+     "train_saving_usd": -2.8093296000000008
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": 0.12721499999999963,
+     "train_known": true,
+     "train_saving_usd": 0.12055500000000041
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.17561460000000118
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 1.2101759999999997,
+     "train_known": true,
+     "train_saving_usd": 1.2465168
+    }
+   ],
+   "hour_utc": 22,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 5,
+   "test_saving_usd": 1.2101759999999997,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 16,
+   "train_saving_usd": 1.32618,
+   "user": "t1"
+  },
+  {
+   "arm": "no-cache",
+   "arms": [
+    {
+     "chosen": true,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.9382679999999999,
+     "train_known": true,
+     "train_saving_usd": 0.176805
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.2957939999999999,
+     "train_known": true,
+     "train_saving_usd": -0.530415
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 0.8649630000000004,
+     "train_known": true,
+     "train_saving_usd": -0.14162400000000008
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0.8649630000000004,
+     "train_known": true,
+     "train_saving_usd": -0.07081199999999999
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.2957939999999999,
+     "train_known": true,
+     "train_saving_usd": -0.6720389999999999
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.2957939999999999,
+     "train_known": true,
+     "train_saving_usd": -0.6012270000000001
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.7003710000000001,
+     "train_known": true,
+     "train_saving_usd": -1.4853420000000006
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": -0.6604739999999998,
+     "train_known": true,
+     "train_saving_usd": 0.176805
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0.8649630000000004,
+     "train_known": true,
+     "train_saving_usd": -0.14162400000000008
+    }
+   ],
+   "hour_utc": 23,
+   "test_insufficient_data": true,
+   "test_known": true,
+   "test_requests": 4,
+   "test_saving_usd": -0.9382679999999999,
+   "train_insufficient_data": true,
+   "train_known": true,
+   "train_requests": 3,
+   "train_saving_usd": 0.176805,
+   "user": "t1"
+  },
+  {
+   "arm": "fixed-1h",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.17678775000000002,
+     "train_known": true,
+     "train_saving_usd": 0.10041375000000002
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": true,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": -0.06899625000000004,
+     "train_known": true,
+     "train_saving_usd": 0.27507434999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": -0.018435000000000007,
+     "train_known": true,
+     "train_saving_usd": 0.20673645000000007
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": -0.00921749999999999,
+     "train_known": true,
+     "train_saving_usd": 0.21568755000000006
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": -0.08743125000000004,
+     "train_known": true,
+     "train_saving_usd": 0.27507434999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": -0.07821375000000003,
+     "train_known": true,
+     "train_saving_usd": 0.27507434999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.1932255,
+     "train_known": true,
+     "train_saving_usd": -0.25789739999999994
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": -0.05849549999999998,
+     "train_known": true,
+     "train_saving_usd": 0.06642735000000011
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.27507434999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": -0.00921749999999999,
+     "train_known": true,
+     "train_saving_usd": 0.20673645000000007
+    }
+   ],
+   "hour_utc": 0,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 8,
+   "test_saving_usd": -0.06899625000000004,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 7,
+   "train_saving_usd": 0.27507434999999997,
+   "user": "t2"
+  },
+  {
+   "arm": "fixed-1h",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.06339674999999997,
+     "train_known": true,
+     "train_saving_usd": -1.842067200000002
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": true,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": -0.08249625,
+     "train_known": true,
+     "train_saving_usd": 0.5014349999999996
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": -0.022035,
+     "train_known": true,
+     "train_saving_usd": 0.29823975
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": -0.011017499999999986,
+     "train_known": true,
+     "train_saving_usd": 0.40486275000000016
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": -0.10453124999999996,
+     "train_known": true,
+     "train_saving_usd": 0.3768119999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": -0.09351374999999998,
+     "train_known": true,
+     "train_saving_usd": 0.43912349999999956
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.2310255,
+     "train_known": true,
+     "train_saving_usd": -2.097027000000001
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": -0.09089549999999996,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.5014349999999996
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": -0.011017499999999986,
+     "train_known": true,
+     "train_saving_usd": 0.29823975
+    }
+   ],
+   "hour_utc": 1,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 7,
+   "test_saving_usd": -0.08249625,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 19,
+   "train_saving_usd": 0.5014349999999996,
+   "user": "t2"
+  },
+  {
+   "arm": "no-cache",
+   "arms": [
+    {
+     "chosen": true,
+     "strategy": "no-cache",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.34485750000000004
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.233136
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.13362300000000005
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.06681150000000002
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.233136
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.233136
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.56722275
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.233136
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.06681150000000002
+    }
+   ],
+   "hour_utc": 2,
+   "test_insufficient_data": false,
+   "test_known": false,
+   "test_note": "the test window's traffic in this cell could not be priced",
+   "test_requests": 5,
+   "test_saving_usd": 0,
+   "train_insufficient_data": true,
+   "train_known": true,
+   "train_requests": 4,
+   "train_saving_usd": 0.34485750000000004,
+   "user": "t2"
+  },
+  {
+   "arm": "fixed-1h",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.42047250000000025
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": true,
+     "strategy": "fixed-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.9252555000000002
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.5949757500000004
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.7008172500000005
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.8015295000000002
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.8633925000000002
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -2.323581
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.07597125000000027
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.014766000000000279
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.5949757500000004
+    }
+   ],
+   "hour_utc": 6,
+   "test_insufficient_data": true,
+   "test_known": false,
+   "test_note": "the test window's traffic in this cell could not be priced",
+   "test_requests": 3,
+   "test_saving_usd": 0,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 14,
+   "train_saving_usd": 0.9252555000000002,
+   "user": "t2"
+  },
+  {
+   "arm": "fixed-1h",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -1.7068499999999998,
+     "train_known": true,
+     "train_saving_usd": -1.8887542500000007
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": true,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.0849599999999997,
+     "train_known": true,
+     "train_saving_usd": 1.3516672499999984
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": -0.09328500000000006,
+     "train_known": true,
+     "train_saving_usd": 0.7148977499999996
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": -0.04664249999999992,
+     "train_known": true,
+     "train_saving_usd": 0.89352375
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.0849599999999997,
+     "train_known": true,
+     "train_saving_usd": 1.1541412499999986
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.0849599999999997,
+     "train_known": true,
+     "train_saving_usd": 1.2529042499999985
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.39578625,
+     "train_known": true,
+     "train_saving_usd": -3.618155250000002
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.5164965000000006
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0.0849599999999997,
+     "train_known": true,
+     "train_saving_usd": 0.3023955000000007
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": -0.09328500000000006,
+     "train_known": true,
+     "train_saving_usd": 0.7148977499999996
+    }
+   ],
+   "hour_utc": 7,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 12,
+   "test_saving_usd": 0.0849599999999997,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 18,
+   "train_saving_usd": 1.3516672499999984,
+   "user": "t2"
+  },
+  {
+   "arm": "fixed-5m",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.09633225000000001
+    },
+    {
+     "chosen": true,
+     "strategy": "fixed-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.12049874999999999
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.032169
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.0160845
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.15266775
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.13658325
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.33743249999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.13649850000000002
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.032169
+    }
+   ],
+   "hour_utc": 8,
+   "test_insufficient_data": false,
+   "test_known": false,
+   "test_note": "this account sent no Sunday-Thursday traffic in this hour during the test window",
+   "test_requests": 0,
+   "test_saving_usd": 0,
+   "train_insufficient_data": true,
+   "train_known": true,
+   "train_requests": 4,
+   "train_saving_usd": 0,
+   "user": "t2"
+  },
+  {
+   "arm": "keepalive-5m-once",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.9342496500000004,
+     "train_known": true,
+     "train_saving_usd": -1.53385785
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.5759830499999998,
+     "train_known": true,
+     "train_saving_usd": 0.31917044999999966
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 0.16877535,
+     "train_known": true,
+     "train_saving_usd": 0.35127284999999997
+    },
+    {
+     "chosen": true,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0.27974505000000005,
+     "train_known": true,
+     "train_saving_usd": 0.4563817499999998
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.4653640499999998,
+     "train_known": true,
+     "train_saving_usd": 0.19624364999999955
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.5206735499999999,
+     "train_known": true,
+     "train_saving_usd": 0.2577070499999996
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -1.9485469499999999,
+     "train_known": true,
+     "train_saving_usd": -2.1137592
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": -0.2944754999999999,
+     "train_known": true,
+     "train_saving_usd": -0.27049949999999967
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0.030580800000000075,
+     "train_known": true,
+     "train_saving_usd": 0.21244845000000012
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0.16877535,
+     "train_known": true,
+     "train_saving_usd": 0.39491834999999975
+    }
+   ],
+   "hour_utc": 12,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 11,
+   "test_saving_usd": 0.27974505000000005,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 18,
+   "train_saving_usd": 0.4563817499999998,
+   "user": "t2"
+  },
+  {
+   "arm": "keepalive-5m-once",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.31238040000000034,
+     "train_known": true,
+     "train_saving_usd": -0.47947934999999964
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.8759069999999991,
+     "train_known": true,
+     "train_saving_usd": 0.2783407500000008
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 0.38997674999999976,
+     "train_known": true,
+     "train_saving_usd": 1.0431807000000002
+    },
+    {
+     "chosen": true,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0.5320957499999999,
+     "train_known": true,
+     "train_saving_usd": 1.1109441000000002
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.729287999999999,
+     "train_known": true,
+     "train_saving_usd": 0.14281395000000074
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.8025974999999992,
+     "train_known": true,
+     "train_saving_usd": 0.21057735000000077
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -2.6679510000000017,
+     "train_known": true,
+     "train_saving_usd": -2.3754969000000004
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": -0.5374755000000002,
+     "train_known": true,
+     "train_saving_usd": 0.055339650000000074
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": -0.10374524999999934,
+     "train_known": true,
+     "train_saving_usd": 0.7857562500000004
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0.45878624999999973,
+     "train_known": true,
+     "train_saving_usd": 1.0537986000000004
+    }
+   ],
+   "hour_utc": 13,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 8,
+   "test_saving_usd": 0.5320957499999999,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 13,
+   "train_saving_usd": 1.1109441000000002,
+   "user": "t2"
+  },
+  {
+   "arm": "keepalive-5m",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -1.0222875
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.1862999999999999
+    },
+    {
+     "chosen": true,
+     "strategy": "keepalive-5m",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.7547287500000002
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.7547287500000002
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.1862999999999999
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.1862999999999999
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": -0.61113375
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.1862999999999999
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": false,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.7547287500000002
+    }
+   ],
+   "hour_utc": 14,
+   "test_insufficient_data": false,
+   "test_known": false,
+   "test_note": "this account sent no Sunday-Thursday traffic in this hour during the test window",
+   "test_requests": 0,
+   "test_saving_usd": 0,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 9,
+   "train_saving_usd": 0.7547287500000002,
+   "user": "t2"
+  },
+  {
+   "arm": "keepalive-5m-once",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.006699149999999987,
+     "train_known": true,
+     "train_saving_usd": -0.2175009000000001
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.10222455,
+     "train_known": true,
+     "train_saving_usd": 0.08130119999999974
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 0.13818390000000005,
+     "train_known": true,
+     "train_saving_usd": 0.3907113000000001
+    },
+    {
+     "chosen": true,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0.14746800000000004,
+     "train_known": true,
+     "train_saving_usd": 0.3994626
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": 0.08365634999999999,
+     "train_known": true,
+     "train_saving_usd": 0.0637985999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.09294045000000001,
+     "train_known": true,
+     "train_saving_usd": 0.07254989999999983
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.3215837999999998,
+     "train_known": true,
+     "train_saving_usd": -0.5140895999999999
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": 0.016415250000000048,
+     "train_known": true,
+     "train_saving_usd": -0.05429970000000006
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.056718000000000046
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0.13818390000000005,
+     "train_known": true,
+     "train_saving_usd": 0.3907113000000001
+    }
+   ],
+   "hour_utc": 18,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 8,
+   "test_saving_usd": 0.14746800000000004,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 11,
+   "train_saving_usd": 0.3994626,
+   "user": "t2"
+  },
+  {
+   "arm": "fixed-1h",
+   "arms": [
+    {
+     "chosen": false,
+     "strategy": "no-cache",
+     "test_known": true,
+     "test_saving_usd": -0.2529042000000001,
+     "train_known": true,
+     "train_saving_usd": -0.36372555000000073
+    },
+    {
+     "chosen": false,
+     "strategy": "fixed-5m",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": true,
+     "strategy": "fixed-1h",
+     "test_known": true,
+     "test_saving_usd": 0.024014399999999936,
+     "train_known": true,
+     "train_saving_usd": 0.8997562499999989
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m",
+     "test_known": true,
+     "test_saving_usd": 0.08860784999999993,
+     "train_known": true,
+     "train_saving_usd": 0.5710583999999996
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-once",
+     "test_known": true,
+     "test_saving_usd": 0.10239194999999993,
+     "train_known": true,
+     "train_saving_usd": 0.6961163999999997
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h",
+     "test_known": true,
+     "test_saving_usd": -0.0035538000000000514,
+     "train_known": true,
+     "train_saving_usd": 0.7569646499999991
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-1h-once",
+     "test_known": true,
+     "test_saving_usd": 0.010230299999999914,
+     "train_known": true,
+     "train_saving_usd": 0.828360449999999
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-5m-to-1h",
+     "test_known": true,
+     "test_saving_usd": -0.38320395,
+     "train_known": true,
+     "train_saving_usd": -2.6175993000000006
+    },
+    {
+     "chosen": false,
+     "strategy": "observed-policy",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "historical-probability",
+     "test_known": true,
+     "test_saving_usd": -0.09149489999999993,
+     "train_known": true,
+     "train_saving_usd": -0.08669970000000005
+    },
+    {
+     "chosen": false,
+     "strategy": "stop-reason-gated",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0
+    },
+    {
+     "chosen": false,
+     "strategy": "sticky-session-1h",
+     "test_known": true,
+     "test_saving_usd": 0,
+     "train_known": true,
+     "train_saving_usd": 0.7463900999999988
+    },
+    {
+     "chosen": false,
+     "strategy": "keepalive-budget",
+     "test_known": true,
+     "test_saving_usd": 0.08860784999999993,
+     "train_known": true,
+     "train_saving_usd": 0.6157028999999996
+    }
+   ],
+   "hour_utc": 19,
+   "test_insufficient_data": false,
+   "test_known": true,
+   "test_requests": 10,
+   "test_saving_usd": 0.024014399999999936,
+   "train_insufficient_data": false,
+   "train_known": true,
+   "train_requests": 19,
+   "train_saving_usd": 0.8997562499999989,
+   "user": "t2"
+  }
+ ],
+ "comparable_cells": 13,
+ "min_requests": 5,
+ "notes": [
+  "Train saving is IN-SAMPLE: each cell's arm was chosen by replaying every candidate over exactly these rows and taking the best, so the figure it wins with is a measure of fit, not a forecast. It is the same number the KV-cache page's suggestions and a campaign's frozen predicted saving already show.",
+  "Test saving is the SAME arm replayed on the test window's rows, which it was not chosen on. Train minus test is this deployment's own overfitting estimate for that cell; it is not a correction to subtract from a prediction.",
+  "Expect test below train on average, including some negative cells. An arm that wins a thin cell on noise has nothing to reproduce, and a cell can genuinely change behaviour between two periods — both look the same here, which is why the request counts for both windows are shown per cell.",
+  "The two totals cover only cells priced on both sides and thin on neither (comparable_cells of total_cells). A cell missing a test figure says why, and is never counted as a zero.",
+  "Both windows read Sunday-Thursday only and are replayed per hour-of-day in UTC, exactly as the live suggester does — see dash/kvcachesuggest.go."
+ ],
+ "retention_known": true,
+ "retention_pct": 33.19053794240646,
+ "test_scanned": 281,
+ "test_since": 1767949200001,
+ "test_total": 281,
+ "test_truncated": false,
+ "test_until": 1768467600000,
+ "time_zone": "UTC",
+ "total_cells": 23,
+ "total_test_saving_usd": 2.9695100999999986,
+ "total_train_saving_usd": 8.946857399999997,
+ "train_scanned": 310,
+ "train_since": 1767603600000,
+ "train_total": 310,
+ "train_truncated": false,
+ "train_until": 1767949200000,
+ "users": [
+  "t1",
+  "t2"
+ ],
+ "weekdays_included": [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday"
+ ]
+}

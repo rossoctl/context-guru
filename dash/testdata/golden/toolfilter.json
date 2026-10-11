@@ -1,0 +1,31 @@
+{
+ "coverage": {
+  "captured": 60,
+  "not_captured": 0,
+  "requests": 591,
+  "sessions": 60,
+  "unpriced_sessions": 20
+ },
+ "enabled": false,
+ "excluded": [],
+ "min_days": 7,
+ "min_sessions": 5,
+ "reason": "this proxy has no per-account configuration, so the removal list is whatever its own config file sets",
+ "suggestions": [
+  {
+   "basis": "declared but never invoked across 60 of your sessions since 2026-01-05 (7 days)",
+   "days": 7.446296296296296,
+   "kind": "mcp_tool",
+   "name": "mcp__alpha__write",
+   "priced": false,
+   "projected_usd": 0.7214565000000002,
+   "remove_as": "mcp__alpha__write",
+   "server": "alpha",
+   "sessions": 60,
+   "since": 1767602500000,
+   "tokens": 410,
+   "unused_reads": 242310
+  }
+ ],
+ "withheld": 6
+}

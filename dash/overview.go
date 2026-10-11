@@ -3,6 +3,7 @@ package dash
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -790,10 +791,20 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// function must still sort the WHOLE table before the outer filter can narrow anything.
 	// Left as the correlated form on purpose.
 	g.Go(func() error {
-		return d.sql.QueryRowContext(d.readCtx(), `SELECT COALESCE(SUM(r.saved_unique * (
-				SELECT COUNT(*) FROM requests p WHERE p.session_id = r.session_id
-				  AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id)))),0)
-			FROM requests r WHERE `+cond+` AND r.saved_unique > 0`, args...).Scan(&replayProjectedRaw)
+		// The later-turn count is a window function now: later = rows in the session minus this
+		// row's rank in (ts, id) order, which is exactly the number of rows p with (p.ts, p.id)
+		// after (r.ts, r.id) that the correlated COUNT(*) here used to count. The comment above
+		// measured the correlated form faster at 14k rows; at 189k rows with sessions of a
+		// thousand turns it is 11 s (one index range walk per saving row) against ~1 s for one
+		// sort, which is what takes the all-time /api/stats from 13 s to a few seconds.
+		return d.sql.QueryRowContext(d.readCtx(), `WITH later AS (
+				SELECT r.id AS rid, COUNT(*) OVER (PARTITION BY r.session_id)
+					- ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
+				FROM requests r
+				WHERE r.session_id IN (SELECT s.session_id FROM requests s WHERE s.saved_unique > 0))
+			SELECT COALESCE(SUM(r.saved_unique * later.n),0)
+			FROM requests r JOIN later ON later.rid = r.id WHERE `+cond+` AND r.saved_unique > 0`,
+			args...).Scan(&replayProjectedRaw)
 	})
 	// The correction to the above, driven from the PING side: one pass to find the pings, then
 	// ONE indexed sum per ping over the earlier rows of its own session. O(pings x session)
@@ -806,34 +817,78 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// 10,000-row perf fixture, 5 trials: gated 52.7 ms against 53.0 ms ungated at 0 pings, and
 	// 58.0 against 57.3 at 100 — one extra scan for no measurable saving, so it is gone.
 	g.Go(func() error {
-		return d.sql.QueryRowContext(d.readCtx(), `SELECT COALESCE(SUM((
-				SELECT COALESCE(SUM(r.saved_unique),0) FROM requests r
-				  WHERE r.session_id = p.session_id AND r.saved_unique > 0
-				    AND (r.ts < p.ts OR (r.ts = p.ts AND r.id < p.id))
-				    AND `+cond+`)),0)
-			FROM requests p WHERE p.keepalive = 1`, args...).Scan(&inflation)
+		// Same rewrite as the ceiling above: the running saved_unique of the in-scope earlier rows
+		// of a session (frame ends one row before the current one, so strictly earlier in
+		// (ts, id) order), read off each ping, instead of one indexed sum per ping.
+		return d.sql.QueryRowContext(d.readCtx(), `WITH before AS (
+				SELECT r.id AS rid, SUM(CASE WHEN `+cond+` AND r.saved_unique > 0
+						THEN r.saved_unique ELSE 0 END)
+					OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id
+						ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS s
+				FROM requests r
+				WHERE r.session_id IN (SELECT k.session_id FROM requests k WHERE k.keepalive = 1))
+			SELECT COALESCE(SUM(before.s),0)
+			FROM requests p JOIN before ON before.rid = p.id WHERE p.keepalive = 1`, args...).Scan(&inflation)
 	})
-	// Which cache TTL tier each request asked for. A map rather than columns because ""
-	// (no cache_control at all) is a real third answer that must not be folded into 5m.
+	// Which cache TTL tier each request asked for (a map rather than columns because "" -- no
+	// cache_control at all -- is a real third answer that must not be folded into 5m), the three
+	// reason/accounting breakdowns, and the MODAL breakpoint placement (not the mean: 1.5
+	// breakpoints in a system block is not a thing any request did) are ONE grouped read of the
+	// table, each answer a re-grouping of it in Go. They were five passes over every request.
 	g.Go(func() error {
-		m, err := d.countBy(cond, args, "cache_ttl")
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.token_accounting, r.cache_miss_reason,
+				r.uncompressed_reason, r.cache_ttl, r.cache_bp_system, r.cache_bp_tools,
+				r.cache_bp_messages, r.cache_bp_blocks, COUNT(*)
+			FROM requests r WHERE `+cond+`
+			GROUP BY 1,2,3,4,5,6,7,8 ORDER BY 1,2,3,4,5,6,7,8`, args...)
 		if err != nil {
 			return err
 		}
-		ttl = m
-		return nil
-	})
-	// The MODAL breakpoint placement, not the mean: 1.5 breakpoints in a system block is not
-	// a thing any request did, and an average across locations describes no prompt at all.
-	g.Go(func() error {
-		err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages,
-				r.cache_bp_blocks, COUNT(*) AS n
-			FROM requests r WHERE `+cond+`
-			GROUP BY 1,2,3,4 ORDER BY n DESC LIMIT 1`, args...).Scan(&bs, &bt, &bm, &bb, &modalRequests)
-		if err == sql.ErrNoRows {
-			return nil
+		defer rows.Close()
+		ttl, accountingM, cacheMissM, uncompressedM = map[string]int64{}, map[string]int64{}, map[string]int64{}, map[string]int64{}
+		type bp struct{ s, t, m, b int64 }
+		placed := map[bp]int64{}
+		var order []bp
+		for rows.Next() {
+			var acct, miss, unc, tier string
+			var k bp
+			var n int64
+			if err := rows.Scan(&acct, &miss, &unc, &tier, &k.s, &k.t, &k.m, &k.b, &n); err != nil {
+				return err
+			}
+			accountingM[acct] += n
+			cacheMissM[miss] += n
+			uncompressedM[unc] += n
+			ttl[tier] += n
+			if _, seen := placed[k]; !seen {
+				order = append(order, k)
+			}
+			placed[k] += n
 		}
-		return err
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// First strictly-greater wins, walking the placements in key order: a tie goes to the
+		// smallest key, which is where the ORDER BY n DESC LIMIT 1 this replaces landed.
+		sort.Slice(order, func(i, j int) bool {
+			a, b := order[i], order[j]
+			if a.s != b.s {
+				return a.s < b.s
+			}
+			if a.t != b.t {
+				return a.t < b.t
+			}
+			if a.m != b.m {
+				return a.m < b.m
+			}
+			return a.b < b.b
+		})
+		for _, k := range order {
+			if placed[k] > modalRequests {
+				modalRequests, bs, bt, bm, bb = placed[k], k.s, k.t, k.m, k.b
+			}
+		}
+		return nil
 	})
 	// Context resets, DERIVED: a turn that arrived smaller than the previous turn of its own
 	// session. This is the bound on amortization — replay accrues only while removed content
@@ -881,51 +936,45 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// takes a bare column name and so cannot express this ratio. The median query depends on
 	// the row-count query run just before it (the OFFSET is half the count), so those two stay
 	// sequential WITHIN this one goroutine — only across the other units does this run concurrently.
+	// Both ratio medians from ONE read of the rows either population contains: tokens_before =
+	// tokens_after (nothing removed, so our count and the provider's describe the same prompt) and
+	// tokens_before > tokens_after (the rows that produce the savings figures), each with the
+	// complete-accounting, non-empty-billed-input guard. The element at n/2 of the sorted ratios is
+	// what ORDER BY ratio LIMIT 1 OFFSET n/2 returned, and n is the row count that was COUNTed.
 	g.Go(func() error {
-		const ratioPop = ` AND r.tokens_before = r.tokens_after AND r.tokens_before > 0
-			AND r.token_accounting = 'complete' AND r.fresh_input + r.cache_read + r.cache_write > 0`
-		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+ratioPop,
-			args...).Scan(&estimatorDivergenceRows); err != nil {
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT
+				CAST(r.fresh_input + r.cache_read + r.cache_write AS REAL) / r.tokens_before,
+				r.tokens_before = r.tokens_after
+			FROM requests r WHERE `+cond+` AND r.tokens_before >= r.tokens_after AND r.tokens_before > 0
+				AND r.token_accounting = 'complete' AND r.fresh_input + r.cache_read + r.cache_write > 0`, args...)
+		if err != nil {
 			return err
 		}
-		if estimatorDivergenceRows > 0 {
-			var med sql.NullFloat64
-			if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
-				CAST(r.fresh_input + r.cache_read + r.cache_write AS REAL) / r.tokens_before AS ratio
-				FROM requests r WHERE `+cond+ratioPop+`
-				ORDER BY ratio ASC LIMIT 1 OFFSET ?`,
-				append(append([]any(nil), args...), estimatorDivergenceRows/2)...).Scan(&med); err != nil {
+		defer rows.Close()
+		var same, compacted []float64
+		for rows.Next() {
+			var ratio float64
+			var eq bool
+			if err := rows.Scan(&ratio, &eq); err != nil {
 				return err
 			}
-			estimatorDivergence = med.Float64
+			if eq {
+				same = append(same, ratio)
+			} else {
+				compacted = append(compacted, ratio)
+			}
 		}
-		return nil
-	})
-	// The SAME ratio over the population that actually produces the savings figures — rows
-	// where we DID remove something. #240's reviewers reached for the divergence above as the
-	// correction factor for saved_usd, and it cannot be: ratioPop requires
-	// tokens_before = tokens_after, the strict COMPLEMENT of the rows saved_usd is nonzero on.
-	// Publishing both makes that visible instead of leaving the reader to assume one stands
-	// for the other. Measured 2026-09-15 on 281,421 production rows: the compacted population
-	// does NOT converge on the uncompacted one as transcripts grow — pooled 3.71x at
-	// 100-200k against 1.91x untouched — so the two are different facts, not one estimate.
-	g.Go(func() error {
-		const compactedPop = ` AND r.tokens_before > r.tokens_after AND r.tokens_before > 0
-			AND r.token_accounting = 'complete' AND r.fresh_input + r.cache_read + r.cache_write > 0`
-		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+compactedPop,
-			args...).Scan(&estimatorDivergenceCompactedRows); err != nil {
+		if err := rows.Err(); err != nil {
 			return err
 		}
-		if estimatorDivergenceCompactedRows > 0 {
-			var med sql.NullFloat64
-			if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
-				CAST(r.fresh_input + r.cache_read + r.cache_write AS REAL) / r.tokens_before AS ratio
-				FROM requests r WHERE `+cond+compactedPop+`
-				ORDER BY ratio ASC LIMIT 1 OFFSET ?`,
-				append(append([]any(nil), args...), estimatorDivergenceCompactedRows/2)...).Scan(&med); err != nil {
-				return err
-			}
-			estimatorDivergenceCompacted = med.Float64
+		sort.Float64s(same)
+		sort.Float64s(compacted)
+		estimatorDivergenceRows, estimatorDivergenceCompactedRows = int64(len(same)), int64(len(compacted))
+		if len(same) > 0 {
+			estimatorDivergence = same[len(same)/2]
+		}
+		if len(compacted) > 0 {
+			estimatorDivergenceCompacted = compacted[len(compacted)/2]
 		}
 		return nil
 	})
@@ -939,40 +988,33 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
 			FROM requests r WHERE `+kaCond, kaArgs...).Scan(&keepAlivePings, &keepAlivePingUSD)
 	})
-	for name, col := range map[string]string{
-		"accounting": "token_accounting", "cache_miss": "cache_miss_reason", "uncompressed": "uncompressed_reason",
-	} {
-		name, col := name, col // captured per-goroutine, not by the shared loop variable
-		g.Go(func() error {
-			m, err := d.countBy(cond, args, col)
-			if err != nil {
+	// Both p95 latencies from one read. Exact, as DB.percentile is: the sorted column's element at
+	// int((n-1)*0.95) over the rows with a value, which is what its ORDER BY .. OFFSET picked, but
+	// without sorting the whole window twice inside SQLite.
+	g.Go(func() error {
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.cg_latency_ms, r.upstream_ms
+			FROM requests r WHERE `+cond+` AND (r.cg_latency_ms > 0 OR r.upstream_ms > 0)`, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var cg, up []float64
+		for rows.Next() {
+			var a, b sql.NullFloat64
+			if err := rows.Scan(&a, &b); err != nil {
 				return err
 			}
-			switch name {
-			case "accounting":
-				accountingM = m
-			case "cache_miss":
-				cacheMissM = m
-			case "uncompressed":
-				uncompressedM = m
+			if a.Valid && a.Float64 > 0 {
+				cg = append(cg, a.Float64)
 			}
-			return nil
-		})
-	}
-	g.Go(func() error {
-		v, err := d.percentile(cond, args, "cg_latency_ms", 0.95)
-		if err != nil {
+			if b.Valid && b.Float64 > 0 {
+				up = append(up, b.Float64)
+			}
+		}
+		if err := rows.Err(); err != nil {
 			return err
 		}
-		p95cg = v
-		return nil
-	})
-	g.Go(func() error {
-		v, err := d.percentile(cond, args, "upstream_ms", 0.95)
-		if err != nil {
-			return err
-		}
-		p95up = v
+		p95cg, p95up = percentileOf(cg, 0.95), percentileOf(up, 0.95)
 		return nil
 	})
 	if err := g.Wait(); err != nil {
@@ -1276,4 +1318,14 @@ func (d *DB) percentile(cond string, args []any, col string, p float64) (float64
 		return 0, nil
 	}
 	return v.Float64, err
+}
+
+// percentileOf is DB.percentile's rank rule over values already in hand: the element at
+// int((n-1)*p) of the ascending sort, 0 for none.
+func percentileOf(xs []float64, p float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	sort.Float64s(xs)
+	return xs[int64(float64(len(xs)-1)*p)]
 }

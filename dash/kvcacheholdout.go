@@ -3,6 +3,7 @@ package dash
 import (
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -192,13 +193,20 @@ func (d *DB) KVCacheSuggestHoldout(f Filter, o KVCacheOptions, p modelinfo.Price
 	trainF.Since, trainF.Until = train.Since, train.Until
 	testF.Since, testF.Until = test.Since, test.Until
 
-	trainOut, err := d.KVCacheSuggest(trainF, o, p, cfg)
-	if err != nil {
-		return nil, err
+	// The two windows are disjoint (validHoldoutWindows), so reading and replaying them together
+	// holds no more rows than reading them one after the other would have held in total.
+	var trainOut, testOut *KVCacheSuggestions
+	var trainErr, testErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); trainOut, trainErr = d.KVCacheSuggest(trainF, o, p, cfg) }()
+	go func() { defer wg.Done(); testOut, testErr = d.KVCacheSuggest(testF, o, p, cfg) }()
+	wg.Wait()
+	if trainErr != nil {
+		return nil, trainErr
 	}
-	testOut, err := d.KVCacheSuggest(testF, o, p, cfg)
-	if err != nil {
-		return nil, err
+	if testErr != nil {
+		return nil, testErr
 	}
 
 	// Indexed by (user, hour): the test window's cells, so each train cell can look up its

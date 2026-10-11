@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -66,6 +67,11 @@ type API struct {
 	// requests to the default all-time view — /api/tools and /api/toolfilter each appear in the
 	// outage's nginx log. /api/prompt is deliberately NOT cached beside them; see routeBounds.
 	toolsCache, toolFilterCache jsonCache
+	// routeCache backs cachedRoute: the response cache for the remaining heavy GET routes, keyed by
+	// path as well as by principal and query because it is shared between them.
+	routeCache jsonCache
+	// promptCache holds the UNSTRIPPED prompt view; see (*API).prompt for why that is safe to share.
+	promptCache jsonCache
 	// jsonInflight collapses concurrent COLD reads of the same cache key onto one computation.
 	// Keyed by the same principal-scoped cacheKey as the caches, so two tenants never share a
 	// computation and a manager never shares one with a tenant.
@@ -329,11 +335,69 @@ func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, ke
 		return body, err
 	})
 	if err != nil {
+		var se *statusError
+		if errors.As(err, &se) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(se.code)
+			_, _ = w.Write(se.body)
+			return
+		}
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(v.([]byte))
+}
+
+// statusError is a handler's own non-200 answer, carried through serveJSON unchanged so a 400
+// stays a 400 instead of becoming a 500 and is never cached.
+type statusError struct {
+	code int
+	body []byte
+}
+
+func (e *statusError) Error() string { return http.StatusText(e.code) }
+
+// capture is the minimal http.ResponseWriter cachedRoute runs a handler against.
+type capture struct {
+	h    http.Header
+	code int
+	buf  bytes.Buffer
+}
+
+func (c *capture) Header() http.Header         { return c.h }
+func (c *capture) Write(b []byte) (int, error) { return c.buf.Write(b) }
+func (c *capture) WriteHeader(code int)        { c.code = code }
+
+// cachedRoute puts the stale-while-revalidate response cache (serveJSON) in front of a handler
+// that does not have one of its own. The handler is unchanged: it runs once per key against a
+// recorder, under serveJSON's detached, separately bounded context, and its 200 body is what is
+// cached and shared. Anything else it answers (a 400, a 500) is passed through and not cached.
+//
+// Every route wrapped this way was a cold 2-60 s read of the whole window that the UI re-issues
+// on each tab switch and on its five-minute refresh; none of them existed in a cache before, so
+// a reader paid the full price every time. The key is the caller's principal plus the full query
+// string (cacheKey), so two accounts never share a body, and the path, so two routes never do.
+func (a *API) cachedRoute(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p := Principal{Manager: true}
+		if a.auth != nil {
+			var ok bool
+			if p, ok = a.auth(r); !ok {
+				h(w, r) // not signed in: the handler's own 401, nothing cached
+				return
+			}
+		}
+		key := r.URL.Path + "\x00" + cacheKey(p, r)
+		a.serveJSON(w, r, &a.routeCache, key, func(db *DB) ([]byte, error) {
+			rec := &capture{h: http.Header{}, code: http.StatusOK}
+			h(rec, r.WithContext(db.readCtx()))
+			if rec.code != http.StatusOK {
+				return nil, &statusError{rec.code, append([]byte(nil), rec.buf.Bytes()...)}
+			}
+			return append([]byte(nil), rec.buf.Bytes()...), nil
+		})
+	}
 }
 
 // refreshJSON recomputes one cache entry off the request path.
@@ -611,11 +675,34 @@ func (a *API) routes() []route {
 func (a *API) Mount(m *http.ServeMux) {
 	for _, rt := range a.routes() {
 		h := rt.h
+		if cachedRoutes[rt.pattern] {
+			h = a.cachedRoute(h)
+		}
 		if d := routeBound(rt.pattern); d > 0 {
 			h = http.TimeoutHandler(h, d, dashTimeoutMsg).ServeHTTP
 		}
 		m.HandleFunc(rt.pattern, h)
 	}
+}
+
+// cachedRoutes are the routes Mount fronts with cachedRoute. Chosen by measurement: each is a read of
+// the whole window that costs seconds on a large database and is requested again on every tab
+// switch. Left out on purpose: /api/events (a stream), /api/requests* and the transcript routes
+// (row-level, and a list that must show a request the moment it lands), /api/keepalive/live (it is
+// a clock-driven snapshot), /api/prompt (serves content behind a per-address gate that the cache
+// key does not carry — see routeBounds) and anything that writes.
+var cachedRoutes = map[string]bool{
+	"GET /api/series": true, "GET /api/breakdown": true, "GET /api/sessions": true,
+	"GET /api/keepalive": true, "GET /api/keepalive/behaviour": true,
+	"GET /api/keepalive/sessions": true, "GET /api/keepalive/calc": true,
+	"GET /api/keepalive/recommend":            true,
+	"GET /api/kvcache":                        true,
+	"GET /api/kvcache/rows":                   true,
+	"GET /api/kvcache/simulate":               true,
+	"GET /api/kvcache/pricing":                true,
+	"GET /api/kvcache/suggest":                true,
+	"GET /api/kvcache/suggest/holdout":        true,
+	"GET /api/components/compaction-episodes": true,
 }
 
 // routeBounds overrides the default handler timeout for particular routes. 0 means NO timeout.
@@ -658,6 +745,17 @@ var routeBounds = map[string]time.Duration{
 	// trustedness too; that is a change to a content gate and does not belong in an outage fix, so
 	// it waits, and meanwhile it simply gets long enough to finish.
 	"GET /api/prompt": dashHeavyTimeout,
+	// The routes behind cachedRoute: the first reader after a restart or a lapsed cache waits for the
+	// real computation, so it gets the heavy bound rather than the 10 s that is right for a read that
+	// is normally already in the cache.
+	"GET /api/series": dashHeavyTimeout, "GET /api/breakdown": dashHeavyTimeout,
+	"GET /api/sessions": dashHeavyTimeout, "GET /api/keepalive": dashHeavyTimeout,
+	"GET /api/keepalive/behaviour": dashHeavyTimeout, "GET /api/keepalive/sessions": dashHeavyTimeout,
+	"GET /api/keepalive/calc": dashHeavyTimeout, "GET /api/keepalive/recommend": dashHeavyTimeout,
+	"GET /api/kvcache": dashHeavyTimeout, "GET /api/kvcache/rows": dashHeavyTimeout,
+	"GET /api/kvcache/simulate": dashHeavyTimeout, "GET /api/kvcache/pricing": dashHeavyTimeout,
+	"GET /api/kvcache/suggest": dashHeavyTimeout, "GET /api/kvcache/suggest/holdout": dashHeavyTimeout,
+	"GET /api/components/compaction-episodes": dashHeavyTimeout,
 }
 
 // routeBound is the timeout Mount applies to one route: its override if it has one, otherwise the
@@ -1256,7 +1354,7 @@ func (a *API) series(w http.ResponseWriter, r *http.Request) {
 		a.unauthorized(w)
 		return
 	}
-	bucket := atoi64(r.URL.Query().Get("bucket"))
+	bucket := a.db(r).SeriesBucketFor(f, atoi64(r.URL.Query().Get("bucket")))
 	b, err := a.db(r).Series(f, bucket)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -1374,7 +1472,8 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.serveJSON(w, r, &a.componentsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
-		rows, err := db.Components(f)
+		// ONE pass over request_components feeds the rows and both valuations below (components).
+		rows, groups, err := db.components(f)
 		if err != nil {
 			return nil, err
 		}
@@ -1382,15 +1481,14 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 		// the most-read tab in the dashboard reports $0.00 for every component over all history
 		// that predates the last restart — measured, 6 populated rows out of 100,579.
 		if a.pricer != nil {
-			// Both read-time valuations, in order: the estimate fills history that predates the
-			// saved_usd column, the decomposition splits every priced row into its first-removal
-			// and replay halves so the two opposite-signed verdicts can be shown together.
-			if err := db.DecomposeComponentSavedUSD(f, a.pricer, rows); err != nil {
+			// Both read-time valuations: the estimate fills history that predates the saved_usd
+			// column, the decomposition splits every priced row into its first-removal and replay
+			// halves so the two opposite-signed verdicts can be shown together. Both are
+			// re-groupings of what was just read, so neither touches the database.
+			if err := decomposeFromGroups(groups, a.pricer, rows); err != nil {
 				return nil, err
 			}
-			if err := db.EstimateComponentSavedUSD(f, a.pricer, rows); err != nil {
-				// Best effort, like every other read-time valuation: the stored figures are
-				// already in `rows` and a failed estimate must not cost the caller the tab.
+			if err := estimateFromGroups(groups, a.pricer, rows); err != nil {
 				slog.Warn("context-guru: component saved_usd estimate failed; pre-column rows read $0.00",
 					"err", err)
 			}
