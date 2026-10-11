@@ -749,7 +749,14 @@ func classifyWake(entries []bschemas.ChatMessage) string {
 			switch {
 			case teammateMarkerRE.MatchString(b.text):
 				hasTeammate = true
-			case taskNotifMarkerRE.MatchString(b.text):
+			// <task-notification> (a backgrounded Bash/Monitor finishing) and
+			// <agent-message from="X"> (an async agent or a background Skill finishing —
+			// see scanOpenState's doc) are both the SAME wake: a background task's own
+			// finish signal arriving, by itself, with nothing typed by a human. Found
+			// live: a backgrounded Agent's own hand-back wakes the thread with exactly
+			// this tag and nothing else, and reading it as hasPlainText (no recognized
+			// marker) misclassified it as WakeHuman instead of WakeBackground.
+			case taskNotifMarkerRE.MatchString(b.text), agentMessageFromRE.MatchString(b.text):
 				hasTaskNotif = true
 			case hasSystemMarker(b.text):
 				hasSystem = true

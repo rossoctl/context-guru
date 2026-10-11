@@ -149,6 +149,26 @@ func TestObserveWakeCauseBackground(t *testing.T) {
 	}
 }
 
+// TestObserveWakeCauseAgentMessageIsBackground pins a real defect found live (#453's own
+// live test): a backgrounded Agent's hand-back wakes the thread with ONLY an
+// `<agent-message from="X">...</agent-message>` tag (plus the harness's own boilerplate
+// explaining what it is) — no `<task-notification>`, no plain human text. Before this test
+// existed, classifyWake read that as plain, unrecognized text (hasPlainText) and reported
+// WakeHuman instead of WakeBackground.
+func TestObserveWakeCauseAgentMessageIsBackground(t *testing.T) {
+	tr := New()
+	body := anthropicBody(userText(`Another Claude session sent a message:
+<agent-message from="acbdd7e94f0c14fa7">
+status: all good
+</agent-message>
+
+That "other Claude session" is an agent working inside this same session.`))
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
+	if obs.WakeCause != WakeBackground {
+		t.Fatalf("got %q, want %s", obs.WakeCause, WakeBackground)
+	}
+}
+
 func TestObserveWakeCauseRetry(t *testing.T) {
 	tr := New()
 	body := anthropicBody(userText("please fix the bug"))
