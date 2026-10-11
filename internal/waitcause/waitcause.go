@@ -27,6 +27,9 @@ import (
 	"sync"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -68,6 +71,14 @@ var askHumanTools = map[string]bool{"AskUserQuestion": true, "ExitPlanMode": tru
 // a third of teammate waits never close within a visible transcript, so an unbounded wait would
 // make `teammate` stick for the rest of the thread's life).
 const teammateWaitCap = 56 * time.Minute
+
+// noExpiryCap bounds a background task that stated NO expiry at all (a backgrounded Bash, an
+// async agent, a Skill launch — only a Monitor ever states one). Issue #424 (fix 6): once an
+// item's finish signal and start marker have both scrolled out of a compacted body, the ONLY
+// way it ever stops counting as open is a cap like this one — matched to teammateWaitCap for
+// the same reason that one is 56 min (issue #424 section 3's own ping-cap horizon: past it, no
+// ping budget this later work could choose would still be paying for itself).
+const noExpiryCap = teammateWaitCap
 
 // ClassifyWaitingFor turns one response's own facts into a WaitingFor value and, for
 // WaitingOwnTool, the LAST tool_use block's name (issue #424: "also store the last tool_use's
@@ -133,27 +144,63 @@ type Tracker struct {
 	now     func() time.Time
 }
 
+// bgOpen is one open background task's state, kept in the thread's PERSISTENT map (see
+// threadState) rather than rebuilt from the current body alone. Issue #424 (fix 6, found live
+// against a real compacted session): once the agent compacts its history, a task's own start
+// marker — "Monitor started (task X, ...)", "running in background with ID: X.", etc. — falls
+// out of the body for good, but the task is still really running. A fresh-rescan-only design
+// would read that as closed the moment compaction happened, which is wrong in exactly the
+// case this field exists for: a long-running background task is the one case where the
+// keep-alive's choice of budget matters most.
+type bgOpen struct {
+	dur       time.Duration // 0 = no stated expiry (a backgrounded Bash, an async agent, a Skill)
+	firstSeen time.Time
+}
+
 type threadState struct {
 	lastStatus   int
 	lastMsgCount int
-	// firstSeen maps a stable, in-memory-only key (never persisted, never logged — see the
-	// package doc's privacy note) to the wall-clock time this package first observed it open.
-	// "bg:<task id>" for a background task, "tm:<teammate name, or an anonymous key>" for a
-	// SendMessage. Entries for ids that close are deleted so this cannot grow without bound
-	// over a long-lived thread with many short-lived tasks; it is NOT bounded against a thread
-	// that keeps a great many tasks open forever, which issue #424's own open-teammate finding
-	// says is realistic — maxFirstSeenPerThread guards that case.
-	firstSeen map[string]time.Time
-	last      time.Time
+	// openBackground is keyed by the task's own id, or "anon:<tool_use id>" for a background
+	// Skill launch (see blocksOf's doc on why that case has no real id to key on at all).
+	// Persists across requests; an entry leaves ONLY on its own finish signal, a TaskStop, a
+	// Monitor's stated expiry, or noExpiryCap for one with none — never because its start
+	// marker is no longer in the body.
+	openBackground map[string]*bgOpen
+	// anonOrder is the FIFO order "anon:" keys OPENED in, for the Skill case's own
+	// close-oldest-first rule (see scanOpenState's doc). Persistent for the same reason
+	// openBackground is: an anonymous task must survive compaction exactly like a named one.
+	anonOrder []string
+	// openTeammates maps a SendMessage's target (or an anonymous key when the call named no
+	// "to") to when this package first saw it open. Persistent for the same compaction reason.
+	openTeammates map[string]time.Time
+	// appliedCloses records close SIGNALS this package has already acted on, so replaying the
+	// SAME historical close (every request resends the whole conversation, so a notification
+	// that closed something on turn 10 is still right there in the body on turn 11, 12, ...)
+	// cannot act on it a second time. This matters ONLY for a close that falls back to "close
+	// the oldest open anonymous Skill task" (scanOpenState's doc): that fallback has a side
+	// effect on an ENTRY OTHER than the one named in the signal, so firing it twice for one
+	// real event would close two unrelated Skill tasks instead of one. A close that matches a
+	// real, still-open id is already naturally idempotent (deleting an absent map key is a
+	// no-op) and needs no entry here.
+	appliedCloses map[string]bool
+	last          time.Time
 }
 
 // Bounds mirroring internal/thread.Tracker's own (issue #423's package, which this one keys
-// alongside): a long-lived deployment must not let either map grow forever.
+// alongside): a long-lived deployment must not let any of these maps grow forever.
 const (
-	maxThreads            = 20000
-	staleAfter            = 2 * time.Hour
-	maxFirstSeenPerThread = 512
+	maxThreads     = 20000
+	staleAfter     = 2 * time.Hour
+	maxTrackedKeys = 512 // per map, per thread: openBackground, openTeammates, appliedCloses
 )
+
+func newThreadState() *threadState {
+	return &threadState{
+		openBackground: map[string]*bgOpen{},
+		openTeammates:  map[string]time.Time{},
+		appliedCloses:  map[string]bool{},
+	}
+}
 
 // New returns an empty tracker.
 func New() *Tracker {
@@ -167,18 +214,33 @@ func Key(tenant, session, threadID string) string {
 }
 
 // Observe reads one request's body and returns its wake cause and the open-task/open-teammate
-// state as of that body. Fails open: any panic (a malformed body, an unexpected shape) yields
-// the zero Observation (WakeCause "", read by callers as unknown) rather than escaping.
-func (t *Tracker) Observe(tenant, session, threadID string, body []byte) (obs Observation) {
+// state as of that body. provider picks the dialect apply.NormalizeMessages reads — the SAME
+// normalization the compaction pipeline itself uses, so this package carries no second
+// per-provider body parser (see the package doc). Fails open: any panic (a malformed body, an
+// unexpected shape) yields the zero Observation (WakeCause "", read by callers as unknown)
+// rather than escaping.
+func (t *Tracker) Observe(tenant, session, threadID string, provider bschemas.ModelProvider, body []byte) (obs Observation) {
 	defer func() { recover() }() //nolint:errcheck // fail open; see package doc
 	if t == nil {
 		return Observation{}
 	}
-	return t.observe(tenant, session, threadID, body)
+	return t.observe(tenant, session, threadID, provider, body)
 }
 
-func (t *Tracker) observe(tenant, session, threadID string, body []byte) Observation {
-	entries := messageEntries(body)
+func (t *Tracker) observe(tenant, session, threadID string, provider bschemas.ModelProvider, body []byte) Observation {
+	if gjson.GetBytes(body, "previous_response_id").String() != "" {
+		// A Responses request continuing SERVER-HELD history: `input` here is only the
+		// newest turn, not the full conversation. apply.NormalizeMessages does not special-
+		// case this (normalizeResponses reads `input` as-is, which is right for the
+		// PIPELINE's purposes), but for THIS package that one turn would undercount every
+		// open background task and teammate wait, and could misread "the newest turn" as
+		// the whole wake signal when the real one arrived several turns ago server-side.
+		// Same bailout internal/thread.fingerprint makes, for the same reason, and the one
+		// field check this package needs before trusting NormalizeMessages' output as "the
+		// whole conversation" — not a second message parser.
+		return Observation{}
+	}
+	entries := apply.NormalizeMessages(provider, body)
 	n := len(entries)
 	if n == 0 {
 		return Observation{}
@@ -186,31 +248,40 @@ func (t *Tracker) observe(tenant, session, threadID string, body []byte) Observa
 	key := Key(tenant, session, threadID)
 	now := t.now()
 
-	t.mu.Lock()
-	ts, ok := t.threads[key]
-	if !ok {
-		if len(t.threads) >= maxThreads {
-			t.pruneLocked(now)
-		}
-		ts = &threadState{firstSeen: map[string]time.Time{}}
-		t.threads[key] = ts
-	}
-	prevStatus, prevMsgCount := ts.lastStatus, ts.lastMsgCount
-	ts.last = now
-	t.mu.Unlock()
-
 	obs := Observation{MsgCount: n}
+	var isRetry bool
+	func() {
+		// The Tracker's lock is process-wide (one mutex for every thread, not one per
+		// thread), so the critical section stays to exactly what touches ts: nothing here
+		// needs to hold it while classifyWake (pure regex work over `entries`, no shared
+		// state) runs below.
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		ts := t.threadLocked(key, now)
+		prevStatus, prevMsgCount := ts.lastStatus, ts.lastMsgCount
+		ts.last = now
 
-	// The retry rule (issue #424, section 1): "A previous request on the same thread with a
-	// non-200 status and the same message count means retry." Structural, and checked before
-	// any content read — a resend after an upstream failure carries whatever content was
-	// already there, so classifying it by content would read the ORIGINAL wait's cause, not
-	// the retry.
-	isRetry := prevStatus != 0 && prevStatus/100 != 2 && prevMsgCount == n
+		// The retry rule (issue #424, section 1): "A previous request on the same thread
+		// with a non-200 status and the same message count means retry." Structural, and
+		// checked before any content read — a resend after an upstream failure carries
+		// whatever content was already there, so classifying it by content would read the
+		// ORIGINAL wait's cause, not the retry.
+		isRetry = prevStatus != 0 && prevStatus/100 != 2 && prevMsgCount == n
 
-	open, anonBG, openTeammates := scanOpenState(entries)
-	obs.OpenBackground, obs.MonitorExpiryMs = t.resolveBackground(key, open, anonBG, now)
-	obs.OpenTeammate = t.resolveTeammates(key, openTeammates, now)
+		// Apply this body's open/close signals onto the THREAD'S OWN PERSISTENT state (fix
+		// for issue #424's own live finding, section 6): an item leaves ts.openBackground /
+		// ts.openTeammates only on an explicit finish signal, a TaskStop, a stated Monitor
+		// expiry, or a cap for one with none — never merely because its OWN start marker
+		// has fallen out of a since-compacted body. Every request still rescans the WHOLE
+		// current body (self-correcting from anything an earlier request missed), but
+		// every write this scan makes to ts is naturally idempotent (an "if not already
+		// open" guard on each open; a delete of an absent key is a no-op) except the
+		// Skill-anonymous close fallback, which is explicitly guarded by ts.appliedCloses —
+		// see scanOpenState's doc for why that ONE path needs it.
+		scanOpenState(ts, entries, now)
+		obs.OpenBackground, obs.MonitorExpiryMs = countBackgroundLocked(ts, now)
+		obs.OpenTeammate = countTeammatesLocked(ts, now)
+	}()
 
 	if isRetry {
 		obs.WakeCause = WakeRetry
@@ -232,15 +303,22 @@ func (t *Tracker) RecordOutcome(tenant, session, threadID string, msgCount, stat
 	now := t.now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	ts, ok := t.threads[key]
-	if !ok {
-		if len(t.threads) >= maxThreads {
-			t.pruneLocked(now)
-		}
-		ts = &threadState{firstSeen: map[string]time.Time{}}
-		t.threads[key] = ts
-	}
+	ts := t.threadLocked(key, now)
 	ts.lastStatus, ts.lastMsgCount, ts.last = status, msgCount, now
+}
+
+// threadLocked returns key's thread state, creating it if needed. Caller holds t.mu.
+func (t *Tracker) threadLocked(key string, now time.Time) *threadState {
+	ts, ok := t.threads[key]
+	if ok {
+		return ts
+	}
+	if len(t.threads) >= maxThreads {
+		t.pruneLocked(now)
+	}
+	ts = newThreadState()
+	t.threads[key] = ts
+	return ts
 }
 
 // pruneLocked drops threads silent longer than staleAfter, same policy as
@@ -256,128 +334,68 @@ func (t *Tracker) pruneLocked(now time.Time) {
 	}
 }
 
-// resolveBackground turns this request's open background-task set (keyed by task id, "" value
-// meaning no stated expiry) into a count and a latest-expiry timestamp, using each task's
-// first-seen wall time (recorded here, the first time this package ever saw it open) to turn a
-// Monitor's relative "expires in Xm" into an absolute deadline. A task whose deadline has
-// already passed is NOT counted and does not contribute to the expiry — see the package doc on
-// why the body alone cannot supply "how long ago".
-func (t *Tracker) resolveBackground(key string, open map[string]time.Duration, anon int, now time.Time) (count int, expiryMs int64) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	ts := t.threads[key]
-	if ts == nil {
-		return anon, 0
-	}
+// countBackgroundLocked turns ts's persistent open-background set into a count and a latest
+// absolute Monitor expiry, applying each item's cap along the way: a stated Monitor expiry
+// (dur > 0) past its deadline, or an unbounded task (dur == 0, no stated expiry at all) past
+// noExpiryCap. Either way the entry is DELETED here, not merely skipped — once something is
+// given up on, counting on its finish signal arriving late is no better than never counting it
+// at all, and keeping it would cost memory for the life of the thread for nothing. Caller
+// holds t.mu.
+func countBackgroundLocked(ts *threadState, now time.Time) (count int, expiryMs int64) {
 	var latest time.Time
-	for id, dur := range open {
-		fs, seen := ts.firstSeen["bg:"+id]
-		if !seen {
-			fs = now
-			t.rememberLocked(ts, "bg:"+id, now)
+	for id, o := range ts.openBackground {
+		window := noExpiryCap
+		if o.dur > 0 {
+			window = o.dur
 		}
-		if dur > 0 {
-			exp := fs.Add(dur)
-			if !exp.After(now) {
-				continue // this Monitor's own stated expiry has already passed
-			}
-			if exp.After(latest) {
-				latest = exp
-			}
+		exp := o.firstSeen.Add(window)
+		if !exp.After(now) {
+			delete(ts.openBackground, id)
+			removeFromAnonOrder(ts, id)
+			continue
+		}
+		if o.dur > 0 && exp.After(latest) {
+			latest = exp // only a STATED expiry is reported; an assumed cap is not a promise
 		}
 		count++
 	}
-	// Anonymous opens (a background Skill launch: no id in the body text at all, only in a
-	// transcript's own toolUseResult.agentId — see the package doc) have no expiry to check,
-	// and are already known-open-right-now by construction (scanOpenState only reports one as
-	// still anonymous when it saw no finish signal for it at all).
-	count += anon
 	if !latest.IsZero() {
 		expiryMs = latest.UnixMilli()
 	}
 	return count, expiryMs
 }
 
-// resolveTeammates applies teammateWaitCap to this request's open-teammate set, using each
-// one's first-seen wall time the same way resolveBackground does for a Monitor's expiry.
-func (t *Tracker) resolveTeammates(key string, open map[string]bool, now time.Time) int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	ts := t.threads[key]
-	if ts == nil {
-		return 0
-	}
+// countTeammatesLocked is countBackgroundLocked for ts.openTeammates, capped at
+// teammateWaitCap. Caller holds t.mu.
+func countTeammatesLocked(ts *threadState, now time.Time) int {
 	count := 0
-	for name := range open {
-		fs, seen := ts.firstSeen["tm:"+name]
-		if !seen {
-			fs = now
-			t.rememberLocked(ts, "tm:"+name, now)
+	for name, firstSeen := range ts.openTeammates {
+		if now.Sub(firstSeen) >= teammateWaitCap {
+			delete(ts.openTeammates, name)
+			continue
 		}
-		if now.Sub(fs) < teammateWaitCap {
-			count++
-		}
-	}
-	// Drop first-seen entries for anything no longer in the open set at all (closed, or a
-	// background task that is gone) so the map cannot grow for the life of a long thread.
-	for k := range ts.firstSeen {
-		if strings.HasPrefix(k, "tm:") && !open[strings.TrimPrefix(k, "tm:")] {
-			delete(ts.firstSeen, k)
-		}
+		count++
 	}
 	return count
 }
 
-// rememberLocked records key's first-seen time, bounding the map the same crude way
-// internal/thread bounds its thread list: a single-entry eviction of something arbitrary
-// rather than a size-based policy, because this map is for memory safety under a pathological
-// thread, not for correctness — losing one entry early just means that one item's age is
-// measured from one request later than it should be.
-func (t *Tracker) rememberLocked(ts *threadState, key string, now time.Time) {
-	if len(ts.firstSeen) >= maxFirstSeenPerThread {
-		for k := range ts.firstSeen {
-			delete(ts.firstSeen, k)
-			break
-		}
-	}
-	ts.firstSeen[key] = now
-}
-
-// messageEntries returns the request body's message/input array, the same two paths
-// internal/thread.fingerprint reads (`messages`, falling back to `input`). nil when the body
-// carries no such list — a Responses request continuing server-held history, or a body this
-// package cannot parse — in which case every field reads unknown/0 rather than a guess.
-func messageEntries(body []byte) []gjson.Result {
-	root := gjson.ParseBytes(body)
-	if !root.IsObject() || root.Get("previous_response_id").String() != "" {
-		// A Responses request continuing SERVER-HELD history: `input` here is only the
-		// newest turn, not the full conversation, so scanning it would undercount every
-		// open background task and teammate wait, and misread "the last entry" as the
-		// whole wake signal when a wake could have arrived several turns ago server-side.
-		// Same bailout as internal/thread.fingerprint, for the same reason.
-		return nil
-	}
-	items := root.Get("messages")
-	if !items.IsArray() {
-		items = root.Get("input")
-	}
-	if !items.IsArray() {
-		return nil
-	}
-	return items.Array()
-}
-
-// blockKind is one content block's shape, told apart across the three dialects issue #424
-// names: Anthropic Messages, OpenAI chat, and OpenAI Responses.
+// blockKind is one normalized message's shape, as this package needs to tell it apart.
 type blockKind int
 
 const (
-	kindOther blockKind = iota
-	kindText
+	kindText blockKind = iota
 	kindToolUse
 	kindToolResult
 )
 
+// block is one signal this package reads off a bschemas.ChatMessage — the SAME normalized
+// schema the compaction pipeline itself builds via apply.NormalizeMessages, for all three
+// dialects issue #424 names (Anthropic Messages, OpenAI chat, OpenAI Responses). No second
+// per-provider body parser lives in this package: NormalizeMessages already turns a tool_use
+// (Anthropic) / function call (OpenAI chat, Responses) into ChatAssistantMessage.ToolCalls,
+// and a tool_result / function_call_output into a synthetic role=tool ChatMessage — see
+// apply.normalize and apply.normalizeResponses for exactly which text and which role each
+// becomes.
 type block struct {
 	kind      blockKind
 	text      string
@@ -386,83 +404,34 @@ type block struct {
 	input     gjson.Result
 }
 
-// blocksOf returns one message/input entry's content blocks, uniformly across dialects:
-//
-//	Anthropic Messages  {role, content: [{type: text|tool_use|tool_result|thinking, ...}]}
-//	                     (content may also be a bare string: one text block)
-//	OpenAI chat          {role, content, tool_calls: [{id, function: {name, arguments}}]}
-//	                     and a bare {role: "tool", tool_call_id, content} result message
-//	OpenAI Responses     an `input` item directly: {type: function_call, call_id, name,
-//	                     arguments} or {type: function_call_output, call_id, output}, or a
-//	                     message-shaped item with role + content parts (input_text/output_text)
-//
-// Blocks this package has no use for (thinking/reasoning, images, redacted content) are
-// skipped rather than guessed at.
-func blocksOf(e gjson.Result) []block {
+// blocksOf reads one normalized message's signals. A message is at most one kind here except
+// an assistant turn, which can carry BOTH tool_use blocks and plain text in the same turn (a
+// model that narrates before or alongside calling a tool) — so this returns every tool_use
+// call AND, if the message also carries text, one more kindText block for it.
+func blocksOf(m bschemas.ChatMessage) []block {
 	var out []block
-	switch e.Get("type").String() {
-	case "function_call": // OpenAI Responses
-		out = append(out, block{kind: kindToolUse,
-			toolName: e.Get("name").String(), toolUseID: e.Get("call_id").String(), input: e.Get("arguments")})
-		return out
-	case "function_call_output": // OpenAI Responses
-		out = append(out, block{kind: kindToolResult,
-			toolUseID: e.Get("call_id").String(), text: e.Get("output").String()})
-		return out
-	}
-	e.Get("tool_calls").ForEach(func(_ gjson.Result, tc gjson.Result) bool { // OpenAI chat, assistant
-		out = append(out, block{kind: kindToolUse,
-			toolName: tc.Get("function.name").String(), toolUseID: tc.Get("id").String(), input: tc.Get("function.arguments")})
-		return true
-	})
-	if e.Get("role").String() == "tool" { // OpenAI chat, a bare tool result message
-		out = append(out, block{kind: kindToolResult,
-			toolUseID: e.Get("tool_call_id").String(), text: e.Get("content").String()})
-		return out
-	}
-	content := e.Get("content")
-	if content.Type == gjson.String {
-		out = append(out, block{kind: kindText, text: content.String()})
-		return out
-	}
-	content.ForEach(func(_ gjson.Result, c gjson.Result) bool {
-		switch c.Get("type").String() {
-		case "tool_use":
-			out = append(out, block{kind: kindToolUse,
-				toolName: c.Get("name").String(), toolUseID: c.Get("id").String(), input: c.Get("input")})
-		case "tool_result":
-			out = append(out, block{kind: kindToolResult,
-				toolUseID: c.Get("tool_use_id").String(), text: toolResultText(c)})
-		case "text", "input_text", "output_text":
-			out = append(out, block{kind: kindText, text: c.Get("text").String()})
-		}
-		return true
-	})
-	return out
-}
-
-// toolResultText reads a tool_result block's own content, which is either a bare string or an
-// array of {type: text, text} parts (Anthropic's dialect for a multi-part tool answer).
-func toolResultText(c gjson.Result) string {
-	content := c.Get("content")
-	switch {
-	case content.Type == gjson.String:
-		return content.String()
-	case content.IsArray():
-		var sb strings.Builder
-		content.ForEach(func(_ gjson.Result, v gjson.Result) bool {
-			if v.IsObject() {
-				sb.WriteString(v.Get("text").String())
-			} else {
-				sb.WriteString(v.String())
+	if m.ChatAssistantMessage != nil {
+		for _, tc := range m.ChatAssistantMessage.ToolCalls {
+			b := block{kind: kindToolUse, input: gjson.Parse(tc.Function.Arguments)}
+			if tc.Function.Name != nil {
+				b.toolName = *tc.Function.Name
 			}
-			sb.WriteByte('\n')
-			return true
-		})
-		return sb.String()
-	default:
-		return ""
+			if tc.ID != nil {
+				b.toolUseID = *tc.ID
+			}
+			out = append(out, b)
+		}
 	}
+	if m.ChatToolMessage != nil && m.ChatToolMessage.ToolCallID != nil {
+		// A tool-role message's whole content IS its result — never also plain text, in
+		// either dialect — so there is nothing else to add for this message.
+		return append(out, block{kind: kindToolResult,
+			toolUseID: *m.ChatToolMessage.ToolCallID, text: schema.MessageText(m)})
+	}
+	if text := schema.MessageText(m); text != "" {
+		out = append(out, block{kind: kindText, text: text})
+	}
+	return out
 }
 
 // The marker shapes below are exactly scripts/analysis/wait_causes.py's (issue #425), found by
@@ -513,39 +482,71 @@ func hasSystemMarker(text string) bool {
 	return false
 }
 
-// scanOpenState scans a request's entire message/input list, front to back, and returns the
-// background tasks and teammate waits still open AS OF THE END of that list — the "waiting_on"
-// state issue #424 asks be tracked per thread. Returned fresh from a full scan every call
-// (issue #424: "incrementally if a full rescan of the body per request is too slow" — see
+// scanOpenState scans a request's entire message/input list, front to back, and APPLIES every
+// open/close signal it finds onto ts's PERSISTENT state (ts.openBackground, ts.openTeammates) —
+// the "waiting_on" state issue #424 asks be tracked per thread, and (issue #424 fix 6) tracked
+// in a way that survives the agent compacting its own history. It still runs a full rescan of
+// the WHOLE current body every call (issue #424 allows this when it is fast enough — see
 // internal/waitcause_test.go's benchmark and the PR body for the measured cost on a ~600 KB
-// body) rather than maintained incrementally: a full rescan is self-correcting from any earlier
-// request this proxy process never saw (a restart, a dropped event), where incremental state
-// would stay wrong forever.
+// body), which is what makes this self-correcting from anything an earlier request missed (a
+// restart, a dropped event); the difference from an earlier version of this package is that the
+// scan no longer DISCARDS an item just because ITS OWN start marker is no longer present —
+// only an explicit finish signal, a TaskStop, a stated Monitor expiry, or a cap (see
+// countBackgroundLocked/countTeammatesLocked) ever removes one.
 //
-// open maps a background task's id to its stated duration (0 = no stated expiry: a backgrounded
-// Bash, an async agent, or a "persistent"/unparseable-detail Monitor). anon counts background
-// Skill launches, whose id lives only in a transcript's own structured field (see blocksOf's
-// doc) and so cannot be matched to any later finish signal by content — each is treated as open
-// until SOME finish signal arrives (closed oldest-first), the same imprecise but non-silent
-// choice scripts/analysis/wait_causes.py makes for the same case.
-func scanOpenState(entries []gjson.Result) (open map[string]time.Duration, anon int, openTeammates map[string]bool) {
-	open = map[string]time.Duration{}
-	openTeammates = map[string]bool{}
-	var anonQueue []string // FIFO: oldest unmatched background-Skill open closes first
-
-	closeOldestAnon := func() {
-		if len(anonQueue) == 0 {
-			return
+// Every write here is naturally safe to repeat on the SAME historical signal across many
+// requests (a full rescan sees it again on every later turn, since a request resends the whole
+// conversation): opening an already-open id is a no-op (openBG/openAnon check first), and
+// closing a NAMED id that is not open is already a no-op (closeByID's own delete). The one
+// exception is the Skill case's "close the oldest open anonymous task" fallback — it has a
+// side effect on an entry OTHER than the one the signal names, so firing it a second time for
+// the SAME historical signal would wrongly close a second, unrelated task; see
+// threadState.appliedCloses and closeOldestAnon's own idempotency guard.
+func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Time) {
+	openBG := func(id string, dur time.Duration) {
+		if _, exists := ts.openBackground[id]; exists {
+			return // already open — do NOT reset firstSeen on a resend
 		}
-		delete(open, anonQueue[0])
-		anonQueue = anonQueue[1:]
+		if len(ts.openBackground) >= maxTrackedKeys {
+			for k := range ts.openBackground {
+				delete(ts.openBackground, k)
+				removeFromAnonOrder(ts, k)
+				break
+			}
+		}
+		ts.openBackground[id] = &bgOpen{dur: dur, firstSeen: now}
 	}
-	closeByID := func(id string) {
-		if _, ok := open[id]; ok {
-			delete(open, id)
+	openAnon := func(toolUseID string) {
+		key := "anon:" + toolUseID
+		if _, exists := ts.openBackground[key]; exists {
 			return
 		}
-		closeOldestAnon()
+		openBG(key, 0)
+		ts.anonOrder = append(ts.anonOrder, key)
+	}
+	// closeOldestAnon closes the longest-open anonymous (Skill) task, idempotent per sig: a
+	// resent transcript carries the SAME historical close signal on every later request too
+	// (see threadState.appliedCloses's own doc), and without the guard it would close a
+	// DIFFERENT, unrelated Skill task every single time that one old signal is rescanned.
+	closeOldestAnon := func(sig string) {
+		if ts.appliedCloses[sig] {
+			return
+		}
+		rememberApplied(ts, sig)
+		if len(ts.anonOrder) == 0 {
+			return
+		}
+		delete(ts.openBackground, ts.anonOrder[0])
+		ts.anonOrder = ts.anonOrder[1:]
+	}
+	// closeByID closes a NAMED task. Deleting an absent key is already a no-op, so only the
+	// anonymous fallback (an id this scan has no record of at all) needs the sig guard.
+	closeByID := func(sigPrefix, id string) {
+		if _, ok := ts.openBackground[id]; ok {
+			delete(ts.openBackground, id)
+			return
+		}
+		closeOldestAnon(sigPrefix + ":" + id)
 	}
 
 	for _, e := range entries {
@@ -558,35 +559,41 @@ func scanOpenState(entries []gjson.Result) (open map[string]time.Duration, anon 
 					if to == "" {
 						to = "anon:" + b.toolUseID
 					}
-					openTeammates[to] = true
+					if _, exists := ts.openTeammates[to]; !exists {
+						if len(ts.openTeammates) >= maxTrackedKeys {
+							for k := range ts.openTeammates {
+								delete(ts.openTeammates, k)
+								break
+							}
+						}
+						ts.openTeammates[to] = now
+					}
 				case "TaskStop":
 					if id := b.input.Get("task_id").String(); id != "" {
-						closeByID(id)
+						closeByID("taskstop", id)
 					}
 				}
 			case kindToolResult:
 				text := b.text
 				if m := monitorStartRE.FindStringSubmatch(text); m != nil {
-					open[m[1]] = parseMonitorDuration(m[2])
+					openBG(m[1], parseMonitorDuration(m[2]))
 				} else if m := bgBashStartRE.FindStringSubmatch(text); m != nil {
-					open[m[1]] = 0
+					openBG(m[1], 0)
 				} else if m := asyncAgentStartRE.FindStringSubmatch(text); m != nil {
-					open[m[1]] = 0
+					openBG(m[1], 0)
 				} else if bgSkillStartRE.MatchString(text) {
-					key := "anon:" + b.toolUseID
-					open[key] = 0
-					anonQueue = append(anonQueue, key)
+					openAnon(b.toolUseID)
 				}
 			case kindText:
 				text := b.text
 				for _, m := range teammateIDFinishRE.FindAllStringSubmatch(text, -1) {
-					delete(openTeammates, m[1])
+					delete(ts.openTeammates, m[1])
 				}
 				for _, m := range crossSessionNameRE.FindAllStringSubmatch(text, -1) {
-					delete(openTeammates, m[1])
+					delete(ts.openTeammates, m[1])
 				}
 				for _, m := range agentMessageFromRE.FindAllStringSubmatch(text, -1) {
-					closeByID(m[1])
+					closeByID("agentmsg", m[1])
 				}
 				for _, blk := range taskNotifBlockRE.FindAllStringSubmatch(text, -1) {
 					inner := blk[1]
@@ -595,24 +602,49 @@ func scanOpenState(entries []gjson.Result) (open map[string]time.Duration, anon 
 						continue // a Monitor's own mid-watch event report, not a finish
 					}
 					if idm := taskIDInBlockRE.FindStringSubmatch(inner); idm != nil {
-						closeByID(idm[1])
+						closeByID("notif", idm[1])
 					} else {
-						closeOldestAnon()
+						// No id anywhere in the block: the Skill case. The block's own text IS
+						// the signature — the same historical notification is byte-identical on
+						// every later resend, which is exactly what the idempotency guard needs.
+						sig := "notif-raw:" + inner
+						if len(sig) > 200 {
+							sig = sig[:200]
+						}
+						closeOldestAnon(sig)
 					}
 				}
 			}
 		}
 	}
-	// Anonymous (Skill) opens that this scan never saw close are reported through anon,
-	// keyed by nothing: whatever is left in open under an "anon:" key IS one of them (it was
-	// never removed from open itself, only from anonQueue, which only tracks match order).
-	for k := range open {
-		if strings.HasPrefix(k, "anon:") {
-			delete(open, k)
-			anon++
+}
+
+// removeFromAnonOrder drops id from ts.anonOrder, if present. Only ever needed when an entry
+// leaves ts.openBackground some way OTHER than closeOldestAnon (which already keeps the two in
+// sync itself) — today, that is countBackgroundLocked's own expiry eviction.
+func removeFromAnonOrder(ts *threadState, id string) {
+	for i, k := range ts.anonOrder {
+		if k == id {
+			ts.anonOrder = append(ts.anonOrder[:i], ts.anonOrder[i+1:]...)
+			return
 		}
 	}
-	return open, anon, openTeammates
+}
+
+// rememberApplied records a close signature, bounding the map the same crude way
+// internal/thread bounds its own: a single arbitrary eviction rather than a size policy,
+// because losing one old signature early just risks ONE extra (and harmless, since an
+// anonymous Skill task closing slightly early is not a measurement anyone acts on today)
+// close-oldest-anon firing a second time — not a correctness failure of the open/closed
+// state itself.
+func rememberApplied(ts *threadState, sig string) {
+	if len(ts.appliedCloses) >= maxTrackedKeys {
+		for k := range ts.appliedCloses {
+			delete(ts.appliedCloses, k)
+			break
+		}
+	}
+	ts.appliedCloses[sig] = true
 }
 
 // parseMonitorDuration reads a Monitor's stated detail text and returns how long it keeps the
@@ -659,16 +691,19 @@ func parseHMS(s string) (time.Duration, bool) {
 // bare `role: "system"` entry in the messages array itself (not the top-level `system`
 // field — that one is a request's own metadata, never scanned here at all). Seen live, on
 // real traffic, injected after both a human prompt and a tool_result alike, which is why
-// classifyWake must skip it rather than classify it as the wake. A role this explicit needs
-// no content guess, unlike the `<system-reminder>`-style text a `user`-role entry can carry
+// classifyWake must skip it rather than classify it as the wake. apply.schema.SessionHead's
+// own doc comment names the exact source: the Claude Agent SDK appends a fresh system-role
+// message on every turn carrying its remaining-budget reminder
+// (`<system-reminder><total_tokens>N tokens left</total_tokens>`). A role this explicit needs
+// no content guess, unlike the `<system-reminder>`-style TEXT a `user`-role entry can carry
 // (see systemMarkers): this is simply never a human and never a tool answering a call.
-func isNoiseEntry(e gjson.Result) bool {
-	return e.Get("role").String() == "system"
+func isNoiseEntry(m bschemas.ChatMessage) bool {
+	return m.Role == bschemas.ChatMessageRoleSystem
 }
 
 // lastSubstantiveIndex returns the index of the last entry that is not isNoiseEntry, or -1
 // if entries holds nothing else.
-func lastSubstantiveIndex(entries []gjson.Result) int {
+func lastSubstantiveIndex(entries []bschemas.ChatMessage) int {
 	for i := len(entries) - 1; i >= 0; i-- {
 		if !isNoiseEntry(entries[i]) {
 			return i
@@ -691,7 +726,7 @@ func lastSubstantiveIndex(entries []gjson.Result) int {
 // Unlike a `<system-reminder>` block, this is not something an API body ever asks us to
 // detect by content: the role itself already says "not something a human or a tool wrote",
 // which is a stronger, structural analogue of a transcript's `isMeta` flag.
-func classifyWake(entries []gjson.Result) string {
+func classifyWake(entries []bschemas.ChatMessage) string {
 	idx := lastSubstantiveIndex(entries)
 	if idx < 0 {
 		return WakeUnknown

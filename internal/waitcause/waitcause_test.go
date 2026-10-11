@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 )
 
 func anthropicBody(msgs string) []byte {
@@ -67,7 +69,7 @@ func TestClassifyWaitingFor(t *testing.T) {
 func TestObserveWakeCauseHuman(t *testing.T) {
 	tr := New()
 	body := anthropicBody(userText("please fix the bug"))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeHuman {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeHuman)
 	}
@@ -76,7 +78,7 @@ func TestObserveWakeCauseHuman(t *testing.T) {
 func TestObserveWakeCauseSystem(t *testing.T) {
 	tr := New()
 	body := anthropicBody(userText("<system-reminder>\nContext low.\n</system-reminder>"))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeSystem {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeSystem)
 	}
@@ -88,7 +90,7 @@ func TestObserveWakeCauseToolResult(t *testing.T) {
 		assistantToolUse("call1", "Bash", `{"command":"ls"}`),
 		userToolResult("call1", "file1\nfile2"),
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeToolResult {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeToolResult)
 	}
@@ -102,7 +104,7 @@ func TestObserveWakeCauseAskUserQuestionException(t *testing.T) {
 		assistantToolUse("call1", "AskUserQuestion", `{"questions":[]}`),
 		userToolResult("call1", "the user picked option B"),
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeHuman {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeHuman)
 	}
@@ -114,7 +116,7 @@ func TestObserveWakeCauseExitPlanModeException(t *testing.T) {
 		assistantToolUse("call1", "ExitPlanMode", `{"plan":"..."}`),
 		userToolResult("call1", "approved"),
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeHuman {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeHuman)
 	}
@@ -123,7 +125,7 @@ func TestObserveWakeCauseExitPlanModeException(t *testing.T) {
 func TestObserveWakeCauseTeammate(t *testing.T) {
 	tr := New()
 	body := anthropicBody(userText(`<teammate-message teammate_id="bob">hi</teammate-message>`))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeTeammate {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeTeammate)
 	}
@@ -132,7 +134,7 @@ func TestObserveWakeCauseTeammate(t *testing.T) {
 func TestObserveWakeCauseCrossSession(t *testing.T) {
 	tr := New()
 	body := anthropicBody(userText(`<cross-session-message from-name="reviewer">done</cross-session-message>`))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeTeammate {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeTeammate)
 	}
@@ -141,7 +143,7 @@ func TestObserveWakeCauseCrossSession(t *testing.T) {
 func TestObserveWakeCauseBackground(t *testing.T) {
 	tr := New()
 	body := anthropicBody(userText(`<task-notification><task-id>bg1</task-id><event>done</event></task-notification>`))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeBackground {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeBackground)
 	}
@@ -151,11 +153,11 @@ func TestObserveWakeCauseRetry(t *testing.T) {
 	tr := New()
 	body := anthropicBody(userText("please fix the bug"))
 	// First request: a normal human wake, status 502 (failed).
-	tr.Observe("t", "s", "", body)
+	tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	tr.RecordOutcome("t", "s", "", 1, 502)
 	// Same body resent (same message count), after a non-200 status: retry wins over the
 	// content classification that would otherwise say "human".
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeRetry {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeRetry)
 	}
@@ -164,9 +166,9 @@ func TestObserveWakeCauseRetry(t *testing.T) {
 func TestObserveWakeCauseNoRetryAfterSuccess(t *testing.T) {
 	tr := New()
 	body := anthropicBody(userText("please fix the bug"))
-	tr.Observe("t", "s", "", body)
+	tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	tr.RecordOutcome("t", "s", "", 1, 200)
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeHuman {
 		t.Fatalf("got %q, want %s (a successful previous call is not a retry)", obs.WakeCause, WakeHuman)
 	}
@@ -175,10 +177,10 @@ func TestObserveWakeCauseNoRetryAfterSuccess(t *testing.T) {
 func TestObserveWakeCauseNoRetryWhenMessageCountChanged(t *testing.T) {
 	tr := New()
 	body1 := anthropicBody(userText("please fix the bug"))
-	tr.Observe("t", "s", "", body1)
+	tr.Observe("t", "s", "", bschemas.Anthropic, body1)
 	tr.RecordOutcome("t", "s", "", 1, 502)
 	body2 := anthropicBody(strings.Join([]string{userText("please fix the bug"), userText("actually never mind")}, ","))
-	obs := tr.Observe("t", "s", "", body2)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body2)
 	if obs.WakeCause == WakeRetry {
 		t.Fatalf("got retry, want a content-based cause: a growing conversation is not a resend")
 	}
@@ -192,7 +194,7 @@ func TestOpenBackgroundBash(t *testing.T) {
 		assistantToolUse("call1", "Bash", `{"command":"sleep 60","run_in_background":true}`),
 		userToolResult("call1", "Command running in background with ID: bash1."),
 	}, ","))
-	obs := tr.Observe("t", "s", "", opening)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, opening)
 	if obs.OpenBackground != 1 {
 		t.Fatalf("got %d open background tasks, want 1", obs.OpenBackground)
 	}
@@ -202,7 +204,7 @@ func TestOpenBackgroundBash(t *testing.T) {
 		userToolResult("call1", "Command running in background with ID: bash1."),
 		userText(`<task-notification><task-id>bash1</task-id><event>finished</event></task-notification>`),
 	}, ","))
-	obs = tr.Observe("t", "s", "", closing)
+	obs = tr.Observe("t", "s", "", bschemas.Anthropic, closing)
 	if obs.OpenBackground != 0 {
 		t.Fatalf("got %d open background tasks after notification, want 0", obs.OpenBackground)
 	}
@@ -215,7 +217,7 @@ func TestOpenBackgroundMonitorMidWatchIsNotAFinish(t *testing.T) {
 		userToolResult("call1", "Monitor started (task mon1, expires in 15m unless the source ends first; you get one notice at expiry). You will be notified on each event."),
 		userText(`<task-notification><task-id>mon1</task-id><summary>Monitor event: a line matched</summary></task-notification>`),
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.OpenBackground != 1 {
 		t.Fatalf("got %d, want 1: a Monitor's mid-watch event must not close it", obs.OpenBackground)
 	}
@@ -231,7 +233,7 @@ func TestOpenBackgroundMonitorExpiredNoticeCloses(t *testing.T) {
 		userToolResult("call1", "Monitor started (task mon1, expires in 15m unless the source ends first)."),
 		userText(`<task-notification><task-id>mon1</task-id><summary>Monitor event: expired</summary>[Monitor expired after 15m]</task-notification>`),
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.OpenBackground != 0 {
 		t.Fatalf("got %d, want 0: the expired notice closes it", obs.OpenBackground)
 	}
@@ -244,14 +246,14 @@ func TestOpenBackgroundMonitorAbsoluteExpiry(t *testing.T) {
 		assistantToolUse("call1", "Monitor", `{"description":"watch"}`),
 		userToolResult("call1", "Monitor started (task mon1, expires in 1m unless the source ends first; you get one notice at expiry)."),
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.OpenBackground != 1 {
 		t.Fatalf("got %d open at t=1000, want 1 (not yet expired)", obs.OpenBackground)
 	}
 	// Advance past the 1-minute expiry: the same body, resent, should now read as closed by
 	// expiry alone, with no notification at all.
 	tr.now = func() time.Time { return time.Unix(1065, 0) }
-	obs = tr.Observe("t", "s", "", body)
+	obs = tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.OpenBackground != 0 {
 		t.Fatalf("got %d open at t=1065, want 0 (expiry elapsed)", obs.OpenBackground)
 	}
@@ -263,7 +265,7 @@ func TestOpenBackgroundAsyncAgent(t *testing.T) {
 		assistantToolUse("call1", "Agent", `{"run_in_background":true}`),
 		userToolResult("call1", "Async agent launched successfully. Track it with Monitor. agentId: agent1"),
 	}, ","))
-	obs := tr.Observe("t", "s", "", opening)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, opening)
 	if obs.OpenBackground != 1 {
 		t.Fatalf("got %d, want 1", obs.OpenBackground)
 	}
@@ -272,7 +274,7 @@ func TestOpenBackgroundAsyncAgent(t *testing.T) {
 		userToolResult("call1", "Async agent launched successfully. Track it with Monitor. agentId: agent1"),
 		userText(`<agent-message from="agent1">done</agent-message>`),
 	}, ","))
-	obs = tr.Observe("t", "s", "", closing)
+	obs = tr.Observe("t", "s", "", bschemas.Anthropic, closing)
 	if obs.OpenBackground != 0 {
 		t.Fatalf("got %d after agent-message, want 0", obs.OpenBackground)
 	}
@@ -284,7 +286,7 @@ func TestOpenBackgroundSkillAnonymous(t *testing.T) {
 		assistantToolUse("call1", "Skill", `{"name":"code-review"}`),
 		userToolResult("call1", `Skill "code-review" launched (forked execution, running in the background).`),
 	}, ","))
-	obs := tr.Observe("t", "s", "", opening)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, opening)
 	if obs.OpenBackground != 1 {
 		t.Fatalf("got %d, want 1 (anonymous skill open)", obs.OpenBackground)
 	}
@@ -293,7 +295,7 @@ func TestOpenBackgroundSkillAnonymous(t *testing.T) {
 		userToolResult("call1", `Skill "code-review" launched (forked execution, running in the background).`),
 		userText(`<task-notification><task-id>whatever-the-real-id-is</task-id><event>done</event></task-notification>`),
 	}, ","))
-	obs = tr.Observe("t", "s", "", closing)
+	obs = tr.Observe("t", "s", "", bschemas.Anthropic, closing)
 	if obs.OpenBackground != 0 {
 		t.Fatalf("got %d after an unmatched notification, want 0 (closes the oldest anonymous open)", obs.OpenBackground)
 	}
@@ -307,7 +309,7 @@ func TestOpenBackgroundTaskStop(t *testing.T) {
 		assistantToolUse("call2", "TaskStop", `{"task_id":"bash1"}`),
 		userToolResult("call2", "stopped"),
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.OpenBackground != 0 {
 		t.Fatalf("got %d, want 0: TaskStop closes the task", obs.OpenBackground)
 	}
@@ -318,7 +320,7 @@ func TestOpenBackgroundTaskStop(t *testing.T) {
 func TestOpenTeammateWait(t *testing.T) {
 	tr := New()
 	opening := anthropicBody(assistantToolUse("call1", "SendMessage", `{"to":"bob","message":"status?"}`))
-	obs := tr.Observe("t", "s", "", opening)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, opening)
 	if obs.OpenTeammate != 1 {
 		t.Fatalf("got %d, want 1", obs.OpenTeammate)
 	}
@@ -326,7 +328,7 @@ func TestOpenTeammateWait(t *testing.T) {
 		assistantToolUse("call1", "SendMessage", `{"to":"bob","message":"status?"}`),
 		userText(`<teammate-message teammate_id="bob">done</teammate-message>`),
 	}, ","))
-	obs = tr.Observe("t", "s", "", closing)
+	obs = tr.Observe("t", "s", "", bschemas.Anthropic, closing)
 	if obs.OpenTeammate != 0 {
 		t.Fatalf("got %d after a reply, want 0", obs.OpenTeammate)
 	}
@@ -336,12 +338,12 @@ func TestOpenTeammateExpiresAfterCap(t *testing.T) {
 	tr := New()
 	tr.now = func() time.Time { return time.Unix(0, 0) }
 	body := anthropicBody(assistantToolUse("call1", "SendMessage", `{"to":"bob","message":"status?"}`))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.OpenTeammate != 1 {
 		t.Fatalf("got %d, want 1 right after sending", obs.OpenTeammate)
 	}
 	tr.now = func() time.Time { return time.Unix(0, 0).Add(teammateWaitCap + time.Minute) }
-	obs = tr.Observe("t", "s", "", body)
+	obs = tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.OpenTeammate != 0 {
 		t.Fatalf("got %d after the ping cap, want 0: an unanswered send cannot mark every later wait teammate forever", obs.OpenTeammate)
 	}
@@ -363,7 +365,7 @@ func TestObserveWakeCauseToolResultBehindTrailingSystemNoise(t *testing.T) {
 		userToolResult("call1", "file1\nfile2"),
 		systemNoise(),
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeToolResult {
 		t.Fatalf("got %q, want %s (trailing system noise must not hide the real tool_result)", obs.WakeCause, WakeToolResult)
 	}
@@ -375,7 +377,7 @@ func TestObserveWakeCauseHumanBehindTrailingSystemNoise(t *testing.T) {
 		userText("please fix the bug"),
 		systemNoise(),
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeHuman {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeHuman)
 	}
@@ -388,7 +390,7 @@ func TestObserveWakeCauseAskHumanExceptionBehindTrailingSystemNoise(t *testing.T
 		userToolResult("call1", "option B"),
 		systemNoise(),
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	if obs.WakeCause != WakeHuman {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeHuman)
 	}
@@ -398,7 +400,7 @@ func TestObserveWakeCauseAskHumanExceptionBehindTrailingSystemNoise(t *testing.T
 
 func TestObserveFailsOpenOnMalformedBody(t *testing.T) {
 	tr := New()
-	obs := tr.Observe("t", "s", "", []byte(`{not json`))
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, []byte(`{not json`))
 	if obs.WakeCause != "" || obs.OpenBackground != 0 || obs.OpenTeammate != 0 {
 		t.Fatalf("want the zero Observation on malformed input, got %+v", obs)
 	}
@@ -406,7 +408,7 @@ func TestObserveFailsOpenOnMalformedBody(t *testing.T) {
 
 func TestObserveNilTrackerFailsOpen(t *testing.T) {
 	var tr *Tracker
-	obs := tr.Observe("t", "s", "", anthropicBody(userText("hi")))
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, anthropicBody(userText("hi")))
 	if obs.WakeCause != "" {
 		t.Fatalf("want the zero Observation from a nil tracker, got %+v", obs)
 	}
@@ -415,7 +417,7 @@ func TestObserveNilTrackerFailsOpen(t *testing.T) {
 func TestObserveNoMessageList(t *testing.T) {
 	tr := New()
 	// A Responses request continuing server-held history: no usable message list.
-	obs := tr.Observe("t", "s", "", []byte(`{"previous_response_id":"resp_1","input":"go on"}`))
+	obs := tr.Observe("t", "s", "", bschemas.OpenAI, []byte(`{"previous_response_id":"resp_1","input":"go on"}`))
 	if obs.WakeCause != "" || obs.MsgCount != 0 {
 		t.Fatalf("want the zero Observation, got %+v", obs)
 	}
@@ -433,7 +435,7 @@ func TestObserveOpenAIChatToolResult(t *testing.T) {
 		`{"role":"assistant","tool_calls":[{"id":"call1","type":"function","function":{"name":"Bash","arguments":"{}"}}]}`,
 		`{"role":"tool","tool_call_id":"call1","content":"ok"}`,
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.OpenAI, body)
 	if obs.WakeCause != WakeToolResult {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeToolResult)
 	}
@@ -442,7 +444,7 @@ func TestObserveOpenAIChatToolResult(t *testing.T) {
 func TestObserveOpenAIChatHuman(t *testing.T) {
 	tr := New()
 	body := openAIChatBody(`{"role":"user","content":"please fix the bug"}`)
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.OpenAI, body)
 	if obs.WakeCause != WakeHuman {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeHuman)
 	}
@@ -468,7 +470,7 @@ func TestObserveResponsesToolResult(t *testing.T) {
 		`{"type":"function_call","call_id":"call1","name":"Bash","arguments":"{}"}`,
 		`{"type":"function_call_output","call_id":"call1","output":"ok"}`,
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.OpenAI, body)
 	if obs.WakeCause != WakeToolResult {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeToolResult)
 	}
@@ -477,7 +479,7 @@ func TestObserveResponsesToolResult(t *testing.T) {
 func TestObserveResponsesHuman(t *testing.T) {
 	tr := New()
 	body := responsesBody(`{"type":"message","role":"user","content":[{"type":"input_text","text":"please fix the bug"}]}`)
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.OpenAI, body)
 	if obs.WakeCause != WakeHuman {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeHuman)
 	}
@@ -489,7 +491,7 @@ func TestObserveResponsesAskHumanException(t *testing.T) {
 		`{"type":"function_call","call_id":"call1","name":"AskUserQuestion","arguments":"{}"}`,
 		`{"type":"function_call_output","call_id":"call1","output":"option B"}`,
 	}, ","))
-	obs := tr.Observe("t", "s", "", body)
+	obs := tr.Observe("t", "s", "", bschemas.OpenAI, body)
 	if obs.WakeCause != WakeHuman {
 		t.Fatalf("got %q, want %s", obs.WakeCause, WakeHuman)
 	}
@@ -518,6 +520,6 @@ func BenchmarkObserveLargeBody(b *testing.B) {
 	tr := New()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tr.Observe("t", "s", "", body)
+		tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	}
 }

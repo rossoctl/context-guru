@@ -75,6 +75,14 @@ const (
 	ModeObserve = "observe"
 )
 
+// WaitCauseResult is issue #424's RECORD half's output for one request — see Event.WaitCause,
+// which runs the computation that fills this, off the request path.
+type WaitCauseResult struct {
+	WaitingFor, WaitTool, WakeCause          string
+	OpenBackground, OpenTeammate             int
+	MonitorExpiryMs                          int64
+}
+
 // Event is one captured request, as handed to the capture channel. It is built on
 // the request goroutine from values the request path already computed (no extra
 // token counting, no extra allocation of the transcript) and is then owned
@@ -120,7 +128,19 @@ type Event struct {
 	OpenBackground  int    `json:"open_background"`
 	OpenTeammate    int    `json:"open_teammate"`
 	MonitorExpiryMs int64  `json:"monitor_expiry_ms"`
-	Model           string `json:"model"`
+	// WaitCause, when set, is invoked by the WRITER goroutine (Recorder.run's write(),
+	// right beside e.Redact() and for the identical reason) to fill the six fields above —
+	// never on the request path. The actual body rescan this runs
+	// (waitcause.Tracker.Observe) measured ~11ms on a 783 KB body; called from finish()
+	// (which runs on the handler's own defer, BEFORE the handler returns) that delayed the
+	// NEXT request on a keep-alive connection by the same amount, which is exactly what
+	// this repo's own TestDashboardAddsNoRequestLatencyWithContentCapture-style tests exist
+	// to catch. nil on any row this does not apply to — a keep-alive ping's row never sets
+	// it at all, which is also how a ping is guaranteed to carry no wait-cause label (issue
+	// #424 requirement). Never serialized (there is nothing to marshal); the SIX FIELDS it
+	// fills are what reaches JSON and the database.
+	WaitCause func() WaitCauseResult `json:"-"`
+	Model     string                 `json:"model"`
 	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
 	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
 	// tokens.BilledDeltaFactor(Model), resolved once in Price.

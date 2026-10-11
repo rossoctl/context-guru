@@ -263,8 +263,10 @@ type Handler struct {
 	threads *thread.Tracker
 	// waits records, per thread, why it waits and why it woke up (issue #424's RECORD half —
 	// it never chooses a keep-alive ping budget and never changes keep-alive or compaction
-	// behaviour). The actual body scan runs in dashcapture.go's finish(), off the request's
-	// own forward-and-respond path — see internal/waitcause and noteWaitBody/finish.
+	// behaviour). The actual body scan runs on the DASHBOARD'S OWN writer goroutine, via a
+	// closure finish() builds and hands to dash.Event.WaitCause — off the request path
+	// entirely, not merely off the upstream forward. See internal/waitcause,
+	// noteWaitBody/finish in dashcapture.go, and dash/capture.go's write().
 	waits *waitcause.Tracker
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
@@ -1646,15 +1648,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			}
 		}
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
-		// Issue #424's retry rule needs THIS request's own status and message count for the
-		// NEXT request on the thread's wake-cause check — see internal/waitcause's doc on why
-		// that cannot be read from a body alone. finish() (just above) is where Observe runs
-		// and cp.waitMsgCount gets filled; with the dashboard off (cp == nil) it never ran at
-		// all, which is a harmless no-op here too: Observe will see no previous state either,
-		// on the next request that turns the dashboard on.
-		if cp != nil {
-			h.waits.RecordOutcome(tn.ID, session, threadID, cp.waitMsgCount, status)
-		}
 		// THE one line per request. In a defer so every terminal path emits it exactly
 		// once — stream-through, buffered replay, the round-cap exit, an upstream failure
 		// (which also logged its own WARN with the reason).
