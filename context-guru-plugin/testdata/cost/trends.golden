@@ -1,0 +1,22 @@
+Spend, last 14 days: $856.85  ▆▆▁▁▇▇▅▆▇▂▁▇█▆  (peak $108.60/day, observed)
+  rewrite cost ▆▆▁▁▇▇▅▆▇▂▁▇█▆  $145.67 extra paid over cache hits
+
+By model   (last column: second half of the window vs first)
+  claude-opus-5     ▅▆▁▁▇█▅▅▇▂▁▇█▆  $574.31  67%  +12%
+  claude-sonnet-5   ▆▅▁▁▇▇▅▆▆▂▁▇█▆  $237.78  28%  +16%
+  claude-haiku-4-5  ▅▆▁▁▇▇▆▆▇▂▁█▇▆   $44.75   5%  +15%
+
+By project
+  api        ▅▆▁▁▇█▅▅▇▂▁▆█▆  $440.89  51%  +10%
+  dashboard  ▆▆▁▁█▇▅▇▇▂▁██▇  $266.85  31%  +18%
+  scripts    ▆▄▁▁▆▇▄▆▆▁▁▆█▅  $104.36  12%  +14%
+  site       ▅▆▁▁▇▇▆▆▇▂▁█▇▆   $44.75   5%  +15%
+
+Ranked by dollars
+  1.  $107.79  214 pauses outlived the cache; each re-sent the whole conversation. Compact or /clear before a long break (`compact`), see `cold` for the pause lengths.  [observed]
+  2.   $37.70  MCP servers, skills and tools carried and never called (`unused` lists them with the command that removes each).  [observed carry; saving is an estimate]
+  3.   $23.31  Mid-session prompt changes forced a rewrite (toggling MCP servers, editing CLAUDE.md, rewinds, subagents). Decide tools and MCP servers before the session starts.  [observed]
+  4.    $9.60  Keep-alive pings cost more than the rewrites they are modelled to have avoided. Check /context-guru:cache-strategy-picker.  [observed cost vs modelled saving]
+
+Context Guru books: gross saved $10.28 (modelled) - own overhead $13.70 (summariser $4.10, keep-alive pings $9.60, observed) = net -$3.42
+12 of 11995 requests had no price or incomplete token counts and are left out, not counted as free.

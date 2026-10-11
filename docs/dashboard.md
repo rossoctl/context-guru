@@ -90,6 +90,13 @@ Code traffic, roughly 80% of declared tokens are typically never invoked in a se
 Reading it: `GET /api/tools` for the rollup, `GET /api/prompt` for one session's actual
 prefix text. See [Config & routes reference](reference/reference.md) for both routes.
 
+Two read-only routes serve the plugin's cost commands (`/context-guru:cost-today` and its
+siblings): `GET /api/spend/explain?since=&tz=` prices the window at the configured gateway
+rates by token type, classifies full-prefix cache rewrites from the token columns
+(`cache_write >= 0.8 x context`; the cause is inferred from the idle gap and message count),
+and reports live session cache state and Context Guru's own ledger; `GET /api/tools/last-used`
+returns when each tool or skill was last called (names and times only).
+
 Top to bottom, the panel shows:
 
 - **Headline tiles and gauge** — declared vs. invoked tokens, over the *controllable*
