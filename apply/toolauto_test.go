@@ -149,3 +149,25 @@ func TestAutoSubagentThreadIsNeverWidened(t *testing.T) {
 		t.Fatalf("restore: %s", got)
 	}
 }
+
+// A subagent's restore must not change the main thread's bytes on its next warm request.
+func TestAutoSubagentRestoreLeavesMainThreadByteIdentical(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	main1, _, _ := apply.AutoFilterTools(st, "iso", autoBody(false, ""), elig, false)
+	sub := []byte(`{"model":"m","tools":[` + autoDecl("Read") + "," + autoDecl("Artifact") + `],"system":"x","messages":[{"role":"user","content":"hi"}]}`)
+	subOut, _, _ := apply.AutoFilterTools(st, "iso", sub, nil, false)
+	back, _ := apply.RestoreTools(st, "iso", subOut, []string{"Artifact"})
+	if toolNamesOf(back) != "Read,Artifact" {
+		t.Fatalf("subagent restore: %s", toolNamesOf(back))
+	}
+	// Main thread, next warm request: identical tools to its first request.
+	main2, _, _ := apply.AutoFilterTools(st, "iso", autoBody(true, ""), nil, false)
+	if gjson.GetBytes(main2, "tools").Raw != gjson.GetBytes(main1, "tools").Raw {
+		t.Fatalf("main thread changed after a subagent restore:\n%s\n%s", toolNamesOf(main1), toolNamesOf(main2))
+	}
+	// And the subagent keeps its restore on its own next request.
+	sub2, _, _ := apply.AutoFilterTools(st, "iso", sub, nil, false)
+	if toolNamesOf(sub2) != "Read,Artifact" {
+		t.Fatalf("subagent lost its restore: %s", toolNamesOf(sub2))
+	}
+}

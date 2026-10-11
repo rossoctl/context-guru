@@ -578,7 +578,7 @@ at least 7 days and never called. The rules that keep it cache-safe:
   one whole-prefix rewrite per restore call, paid at the moment the model needs the tool, and the client's
   next request reproduces the same bytes so there is no second rewrite. Restores last for the session.
 - Threads: a session can carry several threads with different tool lists (subagents). The stub names, and a
-  restore re-inserts, only tools removed from that request's own `tools`; a restricted thread is never widened.
+  restore re-inserts, only tools removed from that request's own `tools`; a restricted thread is never widened. Removed and restored sets are kept per thread (keyed by the thread's own tool-name set), so one thread's restore never changes the bytes another thread sends.
 - Determinism also relies on the system prompt's tool references and `tool_choice` staying constant within a
   session, because both are re-evaluated on every request. If a call to a hidden tool is pending in the last
   message, that one request is forwarded unfiltered (the set flips for that request).

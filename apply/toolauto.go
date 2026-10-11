@@ -28,7 +28,10 @@ package apply
 // request. Threads: the stub and any restore are limited to tools removed from the request's own body.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -43,10 +46,31 @@ const RestoreToolName = "context_guru_tools"
 // autoMinGain: removed tokens must be at least this multiple of the stub's own tokens.
 const autoMinGain = 2
 
+// autoRec is the session's record. Removed is the name set the first thread decided on; every
+// thread (main, each subagent: identified by its own tool-name set) then keeps its OWN state, so a
+// restore by one thread never changes the bytes another thread sends.
 type autoRec struct {
-	Tools    []json.RawMessage `json:"tools"`   // the client's full declarations at decision time
-	Removed  []string          `json:"removed"` // names actually dropped (post prose gate)
+	Removed []string               `json:"removed"`
+	Threads map[string]*autoThread `json:"threads"`
+}
+
+type autoThread struct {
+	Tools    []json.RawMessage `json:"tools"`   // this thread's full declarations, as it sent them
+	Removed  []string          `json:"removed"` // names actually dropped from this thread (post prose gate)
 	Restored []string          `json:"restored,omitempty"`
+}
+
+// threadKey identifies a thread by the set of tools its client declares (proxy tools excluded).
+func threadKey(names []string) string {
+	var ns []string
+	for _, n := range names {
+		if !strings.HasPrefix(n, "context_guru_") {
+			ns = append(ns, n)
+		}
+	}
+	sort.Strings(ns)
+	h := sha256.Sum256([]byte(strings.Join(ns, "\x00")))
+	return hex.EncodeToString(h[:8])
 }
 
 func loadAuto(st store.Store, session string) *autoRec {
@@ -67,7 +91,7 @@ func saveAuto(st store.Store, session string, r *autoRec) {
 	}
 }
 
-func (r *autoRec) active() map[string]bool {
+func (r *autoThread) active() map[string]bool {
 	gone := map[string]bool{}
 	for _, n := range r.Removed {
 		gone[n] = true
@@ -201,9 +225,10 @@ func AutoFilterTools(st store.Store, session string, body []byte, eligible []str
 				gone = append(gone, k)
 			}
 		}
-		r := &autoRec{Removed: gone}
-		tools.ForEach(func(_, t gjson.Result) bool { r.Tools = append(r.Tools, json.RawMessage(t.Raw)); return true })
-		stub := stubDef(rawByName(r.Tools, r.active())) // same body: snapshot == this request
+		th := &autoThread{Removed: gone}
+		tools.ForEach(func(_, t gjson.Result) bool { th.Tools = append(th.Tools, json.RawMessage(t.Raw)); return true })
+		r := &autoRec{Removed: gone, Threads: map[string]*autoThread{threadKey(declNames(tools)): th}}
+		stub := stubDef(rawByName(th.Tools, th.active())) // same body: snapshot == this request
 		if tok < autoMinGain*tokens.Count(string(stub)) {
 			return body, 0, 0
 		}
@@ -214,12 +239,33 @@ func AutoFilterTools(st store.Store, session string, body []byte, eligible []str
 		}
 		return next, tok - tokens.Count(string(stub)), n
 	}
-	// Fixed set. Restores that happened out of band (a stub call the client saw) are picked up
-	// from the transcript (a stub call that reached the client because the model co-called a client tool).
-	for _, n := range transcriptRestores(body) {
-		rec.Restored = append(rec.Restored, n)
+	// Fixed set, per thread. A thread seen for the first time (a subagent) is filtered by the
+	// session's name set against ITS OWN tools; from then on its removed/restored sets are its own.
+	key := threadKey(declNames(tools))
+	th := rec.Threads[key]
+	if th == nil {
+		kept, _, n := filterDeclarations(body, rec.Removed)
+		if n == 0 {
+			return body, 0, 0
+		}
+		left := map[string]bool{}
+		for _, k := range declNames(gjson.GetBytes(kept, "tools")) {
+			left[k] = true
+		}
+		th = &autoThread{}
+		for _, k := range declNames(tools) {
+			if !left[k] {
+				th.Removed = append(th.Removed, k)
+			}
+		}
+		tools.ForEach(func(_, t gjson.Result) bool { th.Tools = append(th.Tools, json.RawMessage(t.Raw)); return true })
+		rec.Threads[key] = th
+		saveAuto(st, session, rec)
 	}
-	act := rec.active()
+	// Restores the client saw (a stub call co-called with a client tool) are picked up from the
+	// transcript.
+	th.Restored = append(th.Restored, transcriptRestores(body)...)
+	act := th.active()
 	if len(act) == 0 {
 		return body, 0, 0
 	}
@@ -319,9 +365,20 @@ func RestoreTools(st store.Store, session string, body []byte, names []string) (
 	if stubAt < 0 {
 		return body, "No tools are hidden in this request."
 	}
+	all := make([]string, 0, len(cur)+len(hidden))
+	for _, c := range cur {
+		all = append(all, declName(gjson.Parse(c)))
+	}
+	for n := range hidden {
+		all = append(all, n)
+	}
+	th := rec.Threads[threadKey(all)]
+	if th == nil {
+		return body, "No tools are hidden in this request."
+	}
 	snap := map[string]json.RawMessage{}
 	var order []string
-	for _, t := range rec.Tools {
+	for _, t := range th.Tools {
 		n := declName(gjson.ParseBytes(t))
 		snap[n] = t
 		order = append(order, n)
@@ -334,7 +391,7 @@ func RestoreTools(st store.Store, session string, body []byte, names []string) (
 	for _, n := range names {
 		if hidden[n] && snap[n] != nil {
 			ok = append(ok, n)
-			rec.Restored = append(rec.Restored, n)
+			th.Restored = append(th.Restored, n)
 			delete(hidden, n)
 		} else {
 			no = append(no, n)
