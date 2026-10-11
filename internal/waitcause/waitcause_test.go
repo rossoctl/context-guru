@@ -354,6 +354,59 @@ func TestOpenTeammateWait(t *testing.T) {
 	}
 }
 
+// TestTeammateReplyClosesAnOpenWaitAndWakesTheThread is the full lifecycle in one test: the
+// row that opens a teammate wait (own_tool/SendMessage, then — once the TURN ends with
+// nothing else to do — waiting_for=teammate for whatever responds next) and the row whose
+// `<teammate-message>` reply closes it (wake_cause=teammate, open_teammate back to 0). Not
+// driven live (per policy: no live tests on an individual PR — see the PR body), covered here
+// instead.
+func TestTeammateReplyClosesAnOpenWaitAndWakesTheThread(t *testing.T) {
+	tr := New()
+
+	// The row whose OWN response calls SendMessage: own_tool/SendMessage, nothing open yet
+	// (as of ITS OWN body, which has not seen the send happen yet).
+	sendBody := anthropicBody(userText("ping bob for status"))
+	before := tr.Observe("t", "s", "", bschemas.Anthropic, sendBody)
+	if before.OpenTeammate != 0 {
+		t.Fatalf("open_teammate before the send = %d, want 0", before.OpenTeammate)
+	}
+	wf, wt := ClassifyWaitingFor([]string{"SendMessage"}, "tool_use", false, true, before.OpenBackground, before.OpenTeammate)
+	if wf != WaitingOwnTool || wt != "SendMessage" {
+		t.Fatalf("got waiting_for=%s wait_tool=%s, want own_tool/SendMessage", wf, wt)
+	}
+
+	// The NEXT row (the turn that follows the send with no further tool call): open_teammate
+	// is now 1, so an end_turn response waits on the teammate.
+	open := anthropicBody(strings.Join([]string{
+		userText("ping bob for status"),
+		assistantToolUse("call1", "SendMessage", `{"to":"bob","message":"status?"}`),
+		userToolResult("call1", "Message queued for bob."),
+	}, ","))
+	mid := tr.Observe("t", "s", "", bschemas.Anthropic, open)
+	if mid.OpenTeammate != 1 {
+		t.Fatalf("open_teammate while waiting = %d, want 1", mid.OpenTeammate)
+	}
+	wf, _ = ClassifyWaitingFor(nil, "end_turn", false, true, mid.OpenBackground, mid.OpenTeammate)
+	if wf != WaitingTeammate {
+		t.Fatalf("got waiting_for=%s, want %s", wf, WaitingTeammate)
+	}
+
+	// The row whose body now carries bob's reply: wake_cause=teammate, and the wait is closed.
+	closed := anthropicBody(strings.Join([]string{
+		userText("ping bob for status"),
+		assistantToolUse("call1", "SendMessage", `{"to":"bob","message":"status?"}`),
+		userToolResult("call1", "Message queued for bob."),
+		userText(`<teammate-message teammate_id="bob">All good here.</teammate-message>`),
+	}, ","))
+	after := tr.Observe("t", "s", "", bschemas.Anthropic, closed)
+	if after.WakeCause != WakeTeammate {
+		t.Fatalf("got wake_cause=%s, want %s", after.WakeCause, WakeTeammate)
+	}
+	if after.OpenTeammate != 0 {
+		t.Fatalf("open_teammate after the reply = %d, want 0", after.OpenTeammate)
+	}
+}
+
 func TestOpenTeammateExpiresAfterCap(t *testing.T) {
 	tr := New()
 	tr.now = func() time.Time { return time.Unix(0, 0) }
