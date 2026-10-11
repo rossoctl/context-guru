@@ -642,7 +642,17 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// Attribute any spend a DETACHED summarizer call incurred since this session's last turn.
 	// First thing, and unconditionally: the money was spent whatever this turn decides.
 	takeDeferredUsage(c, rep)
-	headCount, start, end := summarizeSpan(msgs, 1, s.keepLastTurns)
+	headCount, start, end := summarizeSpan(msgs, 1, s.keepLastTurns, c.WireGroup)
+	// A non-nil WireGroup that no longer lines up with msgs means wire groups DO exist on this
+	// request but an earlier component changed the message count, so headCount/start/end just
+	// computed above are UNALIGNED (summarizeSpan's own defensive check collapsed WireGroup to
+	// nil, same as "no groups ever existed"). Decline rather than risk splitting a wire message
+	// that is really there, just not where WireGroup says. See wireGroupsStale.
+	if wireGroupsStale(c, msgs) {
+		rep.Gate("wire_groups_stale")
+		rep.Skipped = true
+		return nil, nil
+	}
 	if end <= start {
 		rep.Skipped = true
 		return nil, nil
