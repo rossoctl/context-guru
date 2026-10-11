@@ -363,6 +363,30 @@ CREATE INDEX IF NOT EXISTS idx_bt_run ON bench_tasks(run_id, arm);
 // index, a different type — still requires a version bump, because an old file would
 // otherwise be read with the wrong shape.
 const additiveDDL = `
+-- Lifecycle signals (issue #424/#427), written only with the lifecycle flag on. One row per
+-- request, and one per keep-alive ping row (ping_n > 0, linked to the thread by thread_id).
+-- A side table so the requests table is untouched. Counts, sizes, hashes and metaEnum'd tool
+-- NAMES only: no tool input, no tool_result body. Gaps are -1 when unknown, never 0.
+-- Ping outcome and cost live on the ping's own requests row (keepalive=1: cache_read>0 is a
+-- hit, cache_write>0 a miss, cost_usd, cache_read+cache_write the prefix), joined by request_id.
+CREATE TABLE IF NOT EXISTS request_lifecycle (
+  request_id        INTEGER PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+  thread_id         TEXT    NOT NULL DEFAULT '',
+  parent_thread_id  TEXT    NOT NULL DEFAULT '', -- subagent hint: tools/system differ from the session's first thread
+  thread_seq        INTEGER NOT NULL DEFAULT 0,
+  prev_stop_reason  TEXT    NOT NULL DEFAULT '', -- stop_reason of the previous response on this thread
+  prev_tool_names   TEXT    NOT NULL DEFAULT '', -- tool_use names in the response being answered
+  prev_tool_count   INTEGER NOT NULL DEFAULT 0,
+  result_count      INTEGER NOT NULL DEFAULT 0,  -- tool_results on the incoming request
+  result_bytes      INTEGER NOT NULL DEFAULT 0,
+  result_error      INTEGER NOT NULL DEFAULT 0,
+  gap_ms            INTEGER NOT NULL DEFAULT -1, -- since the previous request START on this thread
+  since_prev_end_ms INTEGER NOT NULL DEFAULT -1, -- since the previous response END
+  granted_ttl       TEXT    NOT NULL DEFAULT '', -- 5m|1h|mixed from the response's cache-write tiers
+  ping_n            INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_thread ON request_lifecycle(thread_id);
+
 -- One row per LLM call an expensive component made, with what it cost and what it bought.
 --
 -- Separate from request_components because the relationship is one-to-many and the columns

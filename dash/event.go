@@ -239,6 +239,9 @@ type Event struct {
 	// keepalive_strategy_id column — so a row from before this feature existed is
 	// distinguishable from one deliberately attributed to nothing.
 	KeepAliveStrategyID string `json:"keepalive_strategy_id,omitempty"`
+	// Lifecycle is the opt-in lifecycle-signals row (dash/lifecycle.go); nil when the flag is
+	// off. Not part of the SSE/JSON event: it lives in its own table.
+	Lifecycle *LifecycleRow `json:"-"`
 	// SinceLastMs is the gap from this session's previous REAL request, in milliseconds.
 	// Not persisted — AttributeCache already turns it into cache_miss_reason — but the
 	// keep-alive credit needs the raw number: the whole claim is that the gap exceeded the

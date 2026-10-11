@@ -68,6 +68,9 @@ type capture struct {
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
 	// the pristine body, like meta; emitted at finish, where the session id is known.
 	inv *dash.Inventory
+	// life is the request-side lifecycle scan (dash.ScanLifecycle); read only when the
+	// lifecycle-signals flag is on.
+	life dash.LifecycleReq
 }
 
 // newCapture starts a capture for one request, or returns nil when the dashboard
@@ -147,6 +150,14 @@ func (c *capture) noteTrace(tr apply.Trace) {
 func (c *capture) noteMeta(m dash.Meta) {
 	if c != nil {
 		c.meta = m
+	}
+}
+
+// noteLifecycle scans the pristine body for the lifecycle signals (tool_use names and
+// tool_result sizes around the wait, thread digests). A no-op unless the flag is on.
+func (c *capture) noteLifecycle(body []byte) {
+	if c != nil && c.rec.LifecycleOn() {
+		c.life = dash.ScanLifecycle(body)
 	}
 }
 
@@ -392,6 +403,12 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.SinceLastMs = sinceMs
 	e.KeepAlivePings, e.KeepAliveRefreshed = c.kaPings, c.kaRefreshed
 	e.KeepAliveStrategyID = c.kaStrategy
+
+	if c.rec.LifecycleOn() {
+		e.Lifecycle = c.rec.ObserveLifecycle(e.TenantID, e.SessionID, e.Model, e.TS,
+			time.Now().UnixMilli(), c.life, usage.StopReason,
+			usage.CacheWrite-usage.CacheWrite1h, usage.CacheWrite1h)
+	}
 
 	var price modelinfo.Price
 	priced := false
