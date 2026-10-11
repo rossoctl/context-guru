@@ -77,8 +77,8 @@ It's an effort ladder — each tier is everything in the one before it, plus mor
 |---|---|---|
 | `off` | nothing — requests forwarded untouched (the default; only keep-alive spends, if that's on) | no |
 | `conservative` | deterministic trimming of tool output (repeats, dead runs) — no model calls | no |
-| `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output | yes |
-| `high` | `medium` plus a summarizer that compacts older turns once the context window is nearly full | yes |
+| `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output, and a summary prepared in the background that is used only if you come back after the cache expired | yes |
+| `high` | `medium`, but the summary of older turns is used as soon as the context window is nearly full | yes |
 | `xhigh` | `high` plus a periodic deep-adjudication sweep over turns whose prompt cache has gone cold — the deepest cut | yes |
 
 Run the picker any time to switch tiers—it explains each one before asking which to set:

@@ -149,12 +149,16 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.token_accounting, r.cache_miss_reason, r.uncompressed_reason,
 	r.reasoning_effort, r.thinking_mode, r.thinking_budget, r.temperature, r.top_p,
 	r.max_tokens, r.stream, r.tool_choice, r.tools, r.system_blocks,
-	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason`
+	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason,
+	r.thread_id,
+	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
 	var byp, ca, stream, keepAlive int
 	var temp, topP sql.NullFloat64
+	var waitingFor, waitTool, wakeCause sql.NullString
+	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
 	err := rows.Scan(&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
@@ -165,7 +169,12 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.TokenAccounting, &e.CacheMissReason, &e.UncompressedReason,
 		&e.ReasoningEffort, &e.ThinkingMode, &e.ThinkingBudget, &temp, &topP,
 		&e.MaxTokens, &stream, &e.ToolChoice, &e.Tools, &e.SystemBlocks,
-		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason)
+		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason,
+		&e.ThreadID,
+		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs)
+	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
+	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
+	e.MonitorExpiryMs = monitorExpiryMs.Int64
 	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
 	e.KeepAlive = keepAlive != 0
 	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one
@@ -870,8 +879,15 @@ func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup,
 	// The per-call economics, in a second pass over the same filtered window. A JOIN into
 	// the query above would multiply the component rows by the number of calls and silently
 	// inflate every SUM in it.
+	// billedElsewhereGlob matches a call another row already bills (a committed keep-alive
+	// summary call, booked on its ping row: #455, components/offload's deferredCall.BilledElsewhere).
+	// Its extraction_calls row is real and stays in the counts above, but requests.cg_llm_cost_usd
+	// does not include it, so it must stay out of the gateway cost-share split below and have its
+	// own cost added back afterwards. GLOB, not LIKE: `_` is a LIKE wildcard.
+	const billedElsewhereGlob = "*_billed"
 	xq := `SELECT x.component, COUNT(*), SUM(x.cold), SUM(x.accepted), SUM(x.cost_usd),
-		AVG(x.latency_ms), SUM(x.saved_tokens)
+		AVG(x.latency_ms), SUM(x.saved_tokens),
+		SUM(CASE WHEN x.strategy GLOB '` + billedElsewhereGlob + `' THEN x.cost_usd ELSE 0 END)
 		FROM extraction_calls x JOIN requests r ON r.id = x.request_id
 		WHERE ` + cond + ` GROUP BY x.component`
 	xrows, err := d.sql.QueryContext(d.readCtx(), xq, args...)
@@ -883,13 +899,15 @@ func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup,
 	for _, c := range out {
 		byName[c.Component] = c
 	}
+	billedElsewhere := map[string]float64{}
 	for xrows.Next() {
 		var name string
 		var calls, cold, acc, saved int64
-		var cost, lat sql.NullFloat64
-		if err := xrows.Scan(&name, &calls, &cold, &acc, &cost, &lat, &saved); err != nil {
+		var cost, lat, billed sql.NullFloat64
+		if err := xrows.Scan(&name, &calls, &cold, &acc, &cost, &lat, &saved, &billed); err != nil {
 			return nil, nil, err
 		}
+		billedElsewhere[name] = billed.Float64
 		c, ok := byName[name]
 		if !ok {
 			continue // a call recorded against a component with no surviving component row
@@ -919,7 +937,8 @@ func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup,
 	// rather than approximate. Written as a share anyway so it stays correct if that changes.
 	iq := `WITH per AS (
 			SELECT x.request_id AS rid, x.component AS comp, SUM(x.cost_usd) AS ccost
-			FROM extraction_calls x GROUP BY 1, 2
+			FROM extraction_calls x WHERE x.strategy NOT GLOB '` + billedElsewhereGlob + `'
+			GROUP BY 1, 2
 		), tot AS (SELECT rid, SUM(ccost) AS tcost FROM per GROUP BY 1)
 		SELECT per.comp,
 			SUM(r.cg_llm_cost_usd * CASE WHEN tot.tcost > 0 THEN per.ccost / tot.tcost ELSE 0 END)
@@ -943,7 +962,9 @@ func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup,
 			// unpriced cg model) the component's own figure is all there is, so it stands
 			// rather than being replaced by a zero.
 			if c.LLMCostGatewayUSD > 0 {
-				c.LLMCostUSD = c.LLMCostGatewayUSD
+				// Plus the calls the gateway split never saw (billedElsewhereGlob): their own
+				// cost is the only figure there is for them in this tab.
+				c.LLMCostUSD = c.LLMCostGatewayUSD + billedElsewhere[name]
 			}
 		}
 	}
@@ -1441,6 +1462,13 @@ var breakdownDims = map[string]string{
 	// Overview reports a coverage count beside every TTL figure.
 	"cache_ttl": "r.cache_ttl",
 	"stream":    "CASE WHEN r.stream <> 0 THEN 'stream' ELSE 'unary' END",
+	// Issue #424's RECORD half: let a dashboard user split cost and request count by why a
+	// thread was about to wait, or by what woke it up. NULL (a row from before this feature
+	// existed) renders as COALESCE('') below, same as every other nullable text dimension
+	// here would if one existed — there is no prior example to match because every other
+	// dimension in this map is NOT NULL from its very first column.
+	"waiting_for": "COALESCE(r.waiting_for, '')",
+	"wake_cause":  "COALESCE(r.wake_cause, '')",
 }
 
 // BreakdownDims lists the valid dimensions, sorted, for the API's error message and the

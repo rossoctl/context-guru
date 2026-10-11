@@ -521,6 +521,104 @@ func TestSweepFallsBackWithNoAsker(t *testing.T) {
 	}
 }
 
+// fakeCoverageAsker adds components.PrefixCoverage to fakeAsker, so a test can control what the
+// sweep's own stale-prefix guard sees without going through proxy's real sentStash.
+type fakeCoverageAsker struct {
+	fakeAsker
+	covers bool
+	// gotCount/gotHash record what the guard actually asked for, so a test can tell "the guard
+	// never ran" from "it ran and was satisfied" — both look like covers==true from the outside.
+	gotCount atomic.Int64
+	gotHash  atomic.Value
+}
+
+func (f *fakeCoverageAsker) CoversSpan(_ string, count int, hash string) bool {
+	f.gotCount.Store(int64(count))
+	f.gotHash.Store(hash)
+	return f.covers
+}
+
+// The sweep's own version of #402's stale-prefix guard: a candidate the component believes is
+// already inside the cached prefix (i <= c.MaxCachedIdx, the same test sweep_candidate_at_depth
+// uses) must be verified against the asker's actual coverage before the ask runs — the ask reads
+// proxy's sentStash through the identical PrefixAsker.Ask construction cache_aware_summarizer
+// does, and so inherits the identical risk of answering from a transcript that does not cover
+// what this turn is about to rely on it having read.
+func TestSweepDeclinesOnAStalePrefix(t *testing.T) {
+	asker := &fakeCoverageAsker{covers: false}
+	e := newSweepSmall(t, "")
+	req := sweepReqStocked()
+	ctx := preExpiryCtx("s-stale", asker, store.NewMemory(store.Options{}))
+	// A boundary that covers two real candidates (index 1 and index 5 — see sweepReqStocked) and
+	// leaves the rest in the uncached tail, so the guard's "at-depth only" scope is actually
+	// exercised rather than vacuously true because every candidate happened to qualify.
+	ctx.MaxCachedIdx = 5
+	rep := &components.Report{}
+	if _, err := e.Offload(req, rep, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Gates["sweep_stale_prefix"] != 1 {
+		t.Fatalf("a stale stash was not counted as sweep_stale_prefix (gates: %v)", rep.Gates)
+	}
+	if atomic.LoadInt64(&asker.calls) != 0 {
+		t.Fatalf("Ask was called %d times; a stale prefix must be caught BEFORE paying for the "+
+			"call, the same discipline cache_aware_summarizer's guard uses", asker.calls)
+	}
+	if rep.Events["sweep_fallback_used"] != 1 {
+		t.Errorf("a declined stale prefix did not fall back (gates: %v, events: %v)", rep.Gates, rep.Events)
+	}
+	if got := asker.gotCount.Load(); got != 6 {
+		t.Errorf("the guard asked coverage for %d messages, want 6 (MaxCachedIdx=5 -> deepest "+
+			"at-depth candidate index 5, so requiredCount=6)", got)
+	}
+}
+
+// The mirror of the test above: the asker reports full coverage, so the ask proceeds exactly as
+// it did before this guard existed.
+func TestSweepAsksNormallyWhenPrefixCovers(t *testing.T) {
+	asker := &fakeCoverageAsker{covers: true, fakeAsker: fakeAsker{reply: "[]"}}
+	e := newSweepSmall(t, "")
+	req := sweepReqStocked()
+	ctx := preExpiryCtx("s-covers", asker, store.NewMemory(store.Options{}))
+	ctx.MaxCachedIdx = 5
+	rep := &components.Report{}
+	if _, err := e.Offload(req, rep, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Gates["sweep_stale_prefix"] != 0 {
+		t.Fatalf("a covering prefix was wrongly declined as stale (gates: %v)", rep.Gates)
+	}
+	if atomic.LoadInt64(&asker.calls) != 1 {
+		t.Fatalf("the ask did not run (calls=%d)", asker.calls)
+	}
+}
+
+// MaxCachedIdx < 0 (CacheAware off, or the boundary genuinely unknown) means TailOnly already
+// treats every index as fair game — see its own doc comment. The stale-prefix guard must agree:
+// with no known boundary there is no "at-depth" candidate to check coverage for, so it must stay
+// out of the way rather than refusing every ask on a route that never gave it a boundary to work
+// with. This is what makes every PRE-EXISTING sweep test (built on preExpiryCtx's default
+// MaxCachedIdx: -1) keep passing unchanged after this guard was added.
+func TestSweepStaleGuardStaysOutOfTheWayWithNoKnownBoundary(t *testing.T) {
+	asker := &fakeCoverageAsker{covers: false} // would decline everything, if consulted
+	e := newSweepSmall(t, "")
+	req := sweepReqStocked()
+	ctx := preExpiryCtx("s-unknown-boundary", asker, store.NewMemory(store.Options{}))
+	// preExpiryCtx already sets this; stated explicitly so the fixture this test depends on is
+	// not silently changed out from under it.
+	ctx.MaxCachedIdx = -1
+	rep := &components.Report{}
+	if _, err := e.Offload(req, rep, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Gates["sweep_stale_prefix"] != 0 {
+		t.Fatalf("the guard fired with no known cached boundary (gates: %v)", rep.Gates)
+	}
+	if atomic.LoadInt64(&asker.calls) != 1 {
+		t.Fatalf("the ask did not run despite a covering (or unchecked) prefix (calls=%d)", asker.calls)
+	}
+}
+
 // THE MODEL IS NOT A FREE CHOICE HERE, and the asymmetry with extract_llm is the point. This component
 // reads the outputs from the prompt cache of the model it asks, and only the REQUEST's model has that
 // cache — so `source: config` is incoherent rather than merely suboptimal, and must be refused with a

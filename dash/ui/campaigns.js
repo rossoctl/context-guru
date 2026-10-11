@@ -23,7 +23,7 @@
 // mountTab (app.js) is the single place that knows the nav's DOM shape; it returns the
 // section, already appended to #main and wired as this tab's tabpanel.
 const campView = mountTab({
-  group: 'savings', after: 'usage', view: 'campaigns', label: 'Campaigns',
+  group: 'advanced', after: 'kvcache', view: 'campaigns', label: 'Campaigns',
   manager: true,
 });
 

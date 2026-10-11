@@ -516,6 +516,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	}
 	sys, first := schema.SessionHead(norm)
 	res.Session = session.Scoped(o.Tenant, explicitSession(o.Session, o.Body), sys, first)
+	o.resolveThread(&res.Trace, res.Session)
 	cacheAware := resolveCacheAware(o.CacheMode, bschemas.OpenAI, o.Body)
 	// A previous_response_id request contains only this turn's delta, not a
 	// cumulatively growing transcript. Boundary/TurnAt would interpret a smaller
@@ -556,7 +557,12 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	}
 	chat := &bschemas.BifrostChatRequest{Provider: bschemas.OpenAI, Input: append([]bschemas.ChatMessage(nil), norm...)}
 	restore := planRestore(pipe, st, res.Session, "responses", client, gjson.GetBytes(client, "input").Array())
-	c := &components.Ctx{Ctx: ctx, Session: res.Session, Store: st, Model: o.Models,
+	// The pre-pipeline snapshot the stale-prefix guards hash (components.Ctx.RawInput), taken
+	// exactly as on the Messages route in BodyOpts: a separate slice, so a component's rewrite of
+	// chat.Input cannot change it.
+	rawInput := append([]bschemas.ChatMessage(nil), norm...)
+	c := &components.Ctx{Ctx: ctx, Session: res.Session, Thread: res.Thread.ID, Store: st, Model: o.Models,
+		RawInput: rawInput,
 		// OpenAI's 30m is a minimum, never proof of expiry. ColdCache stays
 		// false even after a long idle gap, matching the Chat Completions path.
 		// A previous_response_id points to upstream-held history that this

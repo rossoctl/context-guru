@@ -2,8 +2,23 @@ package offload
 
 import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/schema"
 )
+
+// wireGroupsStale reports whether c.WireGroup existed for this request (this provider/traffic
+// shape DOES produce wire groups — Anthropic normalized at least one shared message) but no
+// longer lines up with msgs: an earlier component changed the message count, so the groups'
+// current positions are unknown. summarizeSpan's own defensive check collapses this the same
+// way as a true nil WireGroup (no wire groups ever existed — e.g. OpenAI-shaped traffic, or a
+// Ctx built directly as most unit tests do) and computes an UNALIGNED boundary, which can split
+// a wire message that is really there, just not where WireGroup says.
+//
+// A caller (summarize.Offload, cache_aware_summarizer.Offload) checks this BEFORE calling
+// summarizeSpan and declines rather than guesses — see #457's split-boundary requirement.
+func wireGroupsStale(c *components.Ctx, msgs []bschemas.ChatMessage) bool {
+	return c.WireGroup != nil && len(c.WireGroup) != len(msgs)
+}
 
 // Tool-pairing repair for a component that REMOVES messages.
 //
@@ -89,8 +104,24 @@ func dropOrphanedToolResults(msgs []bschemas.ChatMessage) ([]bschemas.ChatMessag
 // system prompt and the task statement sits at msgs[1], inside the span. A deployment on
 // OpenAI-shaped traffic therefore needs keep_first: 2 to retain what it is working on.
 //
+// groups is #457's wire-message grouping: groups[i] names the ORIGINAL wire message
+// normalized message i was extracted from, so several normalized messages (an Anthropic
+// tool_result's synthetic tool message and the sibling text block beside it) can share one
+// group. Nil (the OpenAI-shaped and legacy-caller case, where every normalized message already
+// IS its own wire message) disables the check below entirely — see components.Ctx.WireGroup.
+//
 // Returns headCount (0..keepFirst), start, end. A caller that gets end <= start should skip.
-func summarizeSpan(msgs []bschemas.ChatMessage, keepFirst, keepLast int) (headCount, start, end int) {
+func summarizeSpan(msgs []bschemas.ChatMessage, keepFirst, keepLast int, groups []int) (headCount, start, end int) {
+	if len(groups) != len(msgs) {
+		groups = nil // mismatched coordinates (an earlier component changed the count) — disable
+	}
+	// sameGroup reports whether msgs[a] and msgs[b] came from the SAME wire message, so a and b
+	// must never end up on opposite sides of a boundary — see the headCount loop below. False
+	// whenever groups is disabled or either index is out of its bounds (defensive; a and b are
+	// always adjacent indices here, but a boundary at 0 or len(msgs) must not panic).
+	sameGroup := func(a, b int) bool {
+		return groups != nil && a >= 0 && b < len(groups) && groups[a] == groups[b]
+	}
 	headCount = keepFirst
 	if headCount < 0 {
 		headCount = 0
@@ -107,7 +138,12 @@ func summarizeSpan(msgs []bschemas.ChatMessage, keepFirst, keepLast int) (headCo
 	// At keepFirst: 1 this reduces to the original rule (msgs[0] is a tool-calling assistant ⇒
 	// headCount 0), and at keepFirst: 2 a call/result pair at msgs[0:2] is kept WHOLE, because
 	// msgs[1] is the result and carries no calls of its own.
-	for headCount > 0 && requestedToolCalls(msgs[headCount-1]) {
+	//
+	// The sameGroup clause (#457) retreats the SAME direction for the same reason: a head ending
+	// between a tool_result and its sibling text block would summarize one half of one wire
+	// message and keep the other half verbatim, which the count-changing rebuild cannot represent
+	// (there is no single body message that is "half rewritten").
+	for headCount > 0 && (requestedToolCalls(msgs[headCount-1]) || sameGroup(headCount-1, headCount)) {
 		headCount--
 	}
 	start = headCount
@@ -131,11 +167,56 @@ func summarizeSpan(msgs []bschemas.ChatMessage, keepFirst, keepLast int) (headCo
 	if end < start {
 		end = start
 	}
-	// Advance past a tail that would begin mid-exchange.
-	for end < len(msgs) && msgs[end].Role == bschemas.ChatMessageRoleTool {
-		end++
-	}
+	// Advance past a tail that would begin mid-exchange, mid wire-message, or on a wire message
+	// whose group hides an orphaned tool_result behind a leading sibling — see
+	// advanceSpanBoundary, same reasoning as the headCount retreat above, same direction:
+	// advancing only ever keeps MORE context verbatim, never less.
+	end = advanceSpanBoundary(msgs, groups, end)
 	return headCount, start, end
+}
+
+// advanceSpanBoundary is THE rule for "is it safe for a kept tail (or a replayed checkpoint's
+// tail, see emitCheckpoint) to begin at `at`", so there is exactly one implementation rather
+// than two that can drift. Advances `at` while it would:
+//
+//   - begin on a role=tool message directly (orphans its tool_use, which is now one message
+//     earlier, outside whatever is being kept from `at` onward);
+//   - split a wire group in half (`at-1` and `at` share one wire message — #457);
+//   - begin on a group whose FIRST member is a sibling text block, with its own tool_result
+//     one or more slots later in the SAME group (#457 round 2: `msgs[at].Role == tool` alone
+//     misses this, because `at` itself is role=user).
+//
+// groups is components.Ctx.WireGroup, or nil to disable the group-aware clauses entirely (a
+// length mismatch — an earlier count-changing component ran — is treated the same as nil).
+func advanceSpanBoundary(msgs []bschemas.ChatMessage, groups []int, at int) int {
+	if len(groups) != len(msgs) {
+		groups = nil
+	}
+	sameGroup := func(a, b int) bool {
+		return groups != nil && a >= 0 && b < len(groups) && groups[a] == groups[b]
+	}
+	// groupHasToolRole reports whether the wire group STARTING at i contains a role=tool
+	// member anywhere in it, not just at i itself. apply.normalize emits a group's members in
+	// BODY block order, so a sibling text block that precedes its tool_result puts a role=user
+	// message at the group's own start — this is what lets the boundary land there undetected
+	// by a plain `msgs[i].Role == Tool` check.
+	groupHasToolRole := func(i int) bool {
+		if groups == nil || i < 0 || i >= len(msgs) {
+			return false
+		}
+		g := groups[i]
+		for k := i; k < len(msgs) && groups[k] == g; k++ {
+			if msgs[k].Role == bschemas.ChatMessageRoleTool {
+				return true
+			}
+		}
+		return false
+	}
+	for at < len(msgs) && (msgs[at].Role == bschemas.ChatMessageRoleTool ||
+		sameGroup(at-1, at) || groupHasToolRole(at)) {
+		at++
+	}
+	return at
 }
 
 // requestedToolCalls reports whether m is an assistant message that asked for tool calls, as

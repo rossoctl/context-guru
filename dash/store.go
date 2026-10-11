@@ -350,9 +350,11 @@ func (d *DB) insertBatch(evs []*Event) error {
 		reasoning_effort, thinking_mode, thinking_budget, temperature, top_p, max_tokens, stream,
 		tool_choice, tools, system_blocks,
 		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
-		keepalive_strategy_id, billed_token_factor
+		keepalive_strategy_id, billed_token_factor, thread_id,
+		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -383,6 +385,14 @@ func (d *DB) insertBatch(evs []*Event) error {
 	}
 	defer xcallStmt.Close()
 
+	lifeStmt, err := tx.Prepare(`INSERT INTO request_lifecycle(
+		request_id, result_count, result_bytes, result_error, since_prev_end_ms, granted_ttl, ping_n)
+		VALUES (?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer lifeStmt.Close()
+
 	spend := map[spendKey]float64{}
 	for idx, e := range evs {
 		// nil, not "", when no strategy applied — so the column stores SQL NULL and stays
@@ -406,7 +416,8 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.ReasoningEffort, e.ThinkingMode, e.ThinkingBudget, e.Temperature, e.TopP, e.MaxTokens,
 			boolInt(e.Stream), e.ToolChoice, e.Tools, e.SystemBlocks,
 			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.StopReason,
-			strategyID, e.BilledTokenFactor,
+			strategyID, e.BilledTokenFactor, e.ThreadID,
+			e.WaitingFor, e.WaitTool, e.WakeCause, e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs,
 		)
 		if err != nil {
 			return err
@@ -416,6 +427,12 @@ func (d *DB) insertBatch(evs []*Event) error {
 			return err
 		}
 		e.ID = id
+		if l := e.Lifecycle; l != nil {
+			if _, err := lifeStmt.Exec(id, l.ResultCount, l.ResultBytes, boolInt(l.ResultError),
+				l.SincePrevEndMs, l.GrantedTTL, l.PingN); err != nil {
+				return err
+			}
+		}
 		for _, c := range e.Components {
 			if _, err := compStmt.Exec(id, c.Component, c.Kind,
 				boolInt(c.Acted), boolInt(c.Mutated), boolInt(c.Reverted), boolInt(c.Skipped),

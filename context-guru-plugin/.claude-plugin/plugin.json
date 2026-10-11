@@ -29,7 +29,7 @@
     "preset": {
       "type": "string",
       "title": "Preset",
-      "description": "What happens to the request body. `off` (the default) forwards it untouched. `conservative` trims obvious waste and is the safe first step; `medium` adds a cheap-model relevance pass; `high` adds a summarizer on top; `xhigh` goes furthest, adding a cold-cache adjudication sweep. Separate from Cache strategy below, which pings the cache by default regardless of this setting. Easier to pick from `/context-guru:preset-picker`, which explains each one.",
+      "description": "What happens to the request body. `off` (the default) forwards it untouched. `conservative` trims obvious waste and is the safe first step; `medium` adds a cheap-model relevance pass, and prepares a summary that is used only if you come back after the cache expired; `high` uses that summary as soon as the context window is nearly full; `xhigh` goes furthest, adding a cold-cache adjudication sweep. Separate from Cache strategy below, which pings the cache by default regardless of this setting. Easier to pick from `/context-guru:preset-picker`, which explains each one.",
       "default": "off"
     },
     "cache_strategy": {

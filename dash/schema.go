@@ -62,6 +62,20 @@ CREATE TABLE IF NOT EXISTS requests (
   -- request, so a crafted ?tenant= cannot widen a view.
   tenant_id          TEXT    NOT NULL DEFAULT '',
   session_id         TEXT    NOT NULL DEFAULT '',
+  -- The thread of the session ('' = the primary thread: the main agent, the first thread with no
+  -- agent header that declares tools). See Event.ThreadID.
+  thread_id          TEXT    NOT NULL DEFAULT '',
+  -- Issue #424's RECORD half (see Event.WaitingFor's own comment for what each one means).
+  -- Nullable with NO default, unlike every other column above: a row written before this
+  -- feature existed has nothing to read here, and NULL says so, rather than '' or 0 (which
+  -- waitcause's own enums deliberately keep distinct from "never computed" by producing
+  -- "unknown"/0 themselves on a row this DID run on but found nothing — see internal/waitcause).
+  waiting_for        TEXT,
+  wait_tool          TEXT,
+  wake_cause         TEXT,
+  open_background    INTEGER,
+  open_teammate      INTEGER,
+  monitor_expiry_ms  INTEGER,
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)
@@ -363,6 +377,21 @@ CREATE INDEX IF NOT EXISTS idx_bt_run ON bench_tasks(run_id, arm);
 // index, a different type — still requires a version bump, because an old file would
 // otherwise be read with the wrong shape.
 const additiveDDL = `
+-- Lifecycle signals (issue #424/#427), written only with the lifecycle flag on: the facts no
+-- requests column holds. One row per request, and one per keep-alive ping (ping_n > 0; its
+-- thread is the ping's own requests.thread_id, its outcome and cost the same row's cache and
+-- cost columns). A side table so requests is untouched. Counts, byte lengths and a tier label
+-- only. since_prev_end_ms is -1 when unknown, never 0.
+CREATE TABLE IF NOT EXISTS request_lifecycle (
+  request_id        INTEGER PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+  result_count      INTEGER NOT NULL DEFAULT 0,  -- tool_results on the incoming request
+  result_bytes      INTEGER NOT NULL DEFAULT 0,
+  result_error      INTEGER NOT NULL DEFAULT 0,
+  since_prev_end_ms INTEGER NOT NULL DEFAULT -1, -- previous response END on this thread -> this start
+  granted_ttl       TEXT    NOT NULL DEFAULT '', -- 5m|1h|mixed from the response's cache-write tiers
+  ping_n            INTEGER NOT NULL DEFAULT 0
+);
+
 -- One row per LLM call an expensive component made, with what it cost and what it bought.
 --
 -- Separate from request_components because the relationship is one-to-many and the columns
@@ -656,6 +685,17 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// #240's correction factor. Additive with a default of 0, which doubles as the marker for
 	// "written before the correction existed" — see the column comment in ddl above.
 	{"requests", "billed_token_factor", "REAL NOT NULL DEFAULT 0"},
+	// #423: the thread of the session. '' on old rows, which is the primary thread — exactly
+	// how those rows were keyed when they were written.
+	{"requests", "thread_id", "TEXT NOT NULL DEFAULT ''"},
+	// #424's RECORD half. Nullable, no default — see the ddl block's own comment on these
+	// six columns for why NULL (never computed) must stay distinct from a real "unknown".
+	{"requests", "waiting_for", "TEXT"},
+	{"requests", "wait_tool", "TEXT"},
+	{"requests", "wake_cause", "TEXT"},
+	{"requests", "open_background", "INTEGER"},
+	{"requests", "open_teammate", "INTEGER"},
+	{"requests", "monitor_expiry_ms", "INTEGER"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},

@@ -276,8 +276,9 @@ func (k *keeper) disarm(tenantID, session string) bool {
 	_, had := k.overrides[key]
 	delete(k.overrides, key)
 	k.mu.Unlock()
-	// Outside the lock: retire takes it itself.
-	k.retire(key)
+	// Outside the lock: retireSession takes it itself. Every thread of the session, because the
+	// override authorized the hold for all of them.
+	k.retireSession(tenantID, session)
 	return had
 }
 

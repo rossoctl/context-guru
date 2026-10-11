@@ -98,9 +98,9 @@ Only where a finding argues for it, and name what the change actually adds:
 |---|---|---|
 | `off` | nothing runs; requests forwarded untouched | no |
 | `conservative` | deterministic trimming, `extract`, and `toolfilter` | no |
-| `medium` | `conservative` plus `extract_llm`, a cheap-model relevance pass | yes, a little |
-| `high` | `medium` plus `summarize`, compacting older turns once the context is nearly full | yes |
-| `xhigh` | `high` plus `extract_llm_sweep`, a cold-cache deep-adjudication pass — the deepest cut | yes, the most |
+| `medium` | `conservative` plus `extract_llm`, a cheap-model relevance pass, and `cache_aware_summarizer` with `cache_state: pre_expiry` (a summary prepared in the background, used only on a return after the cache expired) | yes, a little |
+| `high` | `medium`, with `cache_aware_summarizer` at `cache_state: any` (the summary is used as soon as the context is nearly full) | yes |
+| `xhigh` | `high` plus `extract_llm_sweep` (a cold-cache deep-adjudication pass) — the deepest cut | yes, the most |
 
 `/context-guru:preset-picker` explains the trade in each and is the better thing to hand somebody who
 is undecided. **Say it out loud when a recommended preset spends** — every tier from `medium` up

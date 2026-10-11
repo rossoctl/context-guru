@@ -316,17 +316,29 @@ func (s *CacheAwareSummarizer) commissionSync(c *components.Ctx, call summaryCal
 	callStart := time.Now()
 	out, err := call(ctx)
 	callMs := float64(time.Since(callStart).Milliseconds())
-	// Deferred BEFORE the error check, and READ before being deferred: a call that timed out may
-	// still have been billed for its input, and the result the keeper books is the same figures
-	// deferUsage is about to replay onto this session's next real turn — the keeper's ping ledger
-	// and the ordinary LLM-cost ledger are two different books of the SAME spend, not two spends.
+	// READ BEFORE the error check: a call that timed out may still have been billed for its input.
+	//
+	// WHO BOOKS THIS CALL (#455). The dashboard adds requests.cost_usd and
+	// requests.cg_llm_cost_usd together, so the call must land in exactly one of them:
+	//   - COMMITTED: the keeper books it on the keep-alive ping row it replaces
+	//     (recordSummarySubstitute, cost_usd). Only a detail row is deferred (deferDetailOnly), so
+	//     extraction_calls still lists it and cg_llm_cost_usd does not count it again.
+	//   - NOT committed (error, empty, cut off, or the commit refused): the keeper sends an
+	//     ordinary ping instead and never books this call, so it is deferred onto the next real
+	//     turn as before (deferUsage) — otherwise a paid call would be booked nowhere.
 	_, in, outTok := callSink.Totals()
 	cw, cr := callSink.CacheTotals()
 	res := KeepAliveSummaryResult{Model: callSink.Model(),
 		FreshInput: int(in), Output: int(outTok), CacheWrite: int(cw), CacheRead: int(cr),
 		CacheWrite1h: int(callSink.CacheWrite1h())}
 	recordCacheAwareCacheTokens(callSink)
-	deferUsage(st, session, "cache_aware_summarizer", path, "keepalive_substitute", callMs, callSink)
+	defer func() {
+		if res.Committed {
+			deferDetailOnly(st, session, "cache_aware_summarizer", path, "keepalive_substitute_billed", callMs, callSink)
+		} else {
+			deferUsage(st, session, "cache_aware_summarizer", path, "keepalive_substitute", callMs, callSink)
+		}
+	}()
 	if err != nil {
 		classifyCallErr(ctx, session, err)
 		return res

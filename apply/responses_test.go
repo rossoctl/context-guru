@@ -502,3 +502,37 @@ func TestResponsesKeepAliveTouchRefreshesTheCacheClock(t *testing.T) {
 		t.Fatalf("phase after a confirmed keep-alive read = %s, want warm", got)
 	}
 }
+
+// The Responses route must set Ctx.RawInput exactly as the Messages route does (PR #431 review
+// round 2): without it, a stale-prefix guard falls back to req.Input at its own pipeline position,
+// which an earlier component has already rewritten.
+func TestResponsesSetsRawInputBeforeThePipelineRewrites(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},` +
+		`{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"call_1","output":"original output"}]}`)
+	probe := &cachePhaseProbe{}
+	p := components.NewPipeline([]components.Component{responseReducer{}, probe}, nil)
+	res := apply.BodyOpts(context.Background(), p, store.NewMemory(store.Options{}), apply.Opts{
+		Provider: bschemas.OpenAI, API: "responses", Body: body,
+	})
+	raw := probe.seen.RawInput
+	if len(raw) == 0 || len(raw) != res.Messages {
+		t.Fatalf("RawInput has %d messages, want %d (the normalized input)", len(raw), res.Messages)
+	}
+	var sawTool bool
+	for _, m := range raw {
+		if m.Role == bschemas.ChatMessageRoleTool {
+			sawTool = true
+			if got := schema.MessageText(m); got != "original output" {
+				t.Fatalf("RawInput tool output = %q, want the pre-pipeline text", got)
+			}
+		}
+	}
+	if !sawTool {
+		t.Fatal("RawInput has no tool message, so the test proves nothing")
+	}
+	if got := gjson.GetBytes(res.Body, "input.2.output").String(); got != "reduced" {
+		t.Fatalf("the earlier component did not run: output = %q", got)
+	}
+}
