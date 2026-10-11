@@ -1544,7 +1544,9 @@ function renderTiles(o) {
   // second number, or the distinguisher between two tiles that would otherwise read the
   // same ("gross" vs "unique"). Anything that only restated the label is gone — "Tokens
   // before / content tokens in" was a caption explaining a caption.
-  host.appendChild(tileGroup(null, null, [
+  // The bottom line (bottomline.js) is the one honest net; these competing figures are its
+  // detail, one click down, so three "saved" numbers no longer sit side by side as the answer.
+  const headline = tileGroup(null, null, [
     // Our two savings, added: compaction's and the prefix components'. Both are ours and
     // the token sets are disjoint. The provider's own cache saving is much larger and is
     // NOT in here — it was, under the label "compaction + provider cache", and a headline
@@ -1577,7 +1579,9 @@ function renderTiles(o) {
       costNote(o, num(o.prefix_change_requests_all) + ' turns re-billed · not netted'),
       o.prefix_change_cost_all_usd > 0 ? 'bad' : ''),
     tile('requests', 'Requests', num(o.requests), num(o.sessions) + ' sessions'),
-  ], 'headline dense'));
+  ], 'headline dense');
+  host.appendChild(el('details', { class: 'bl-more', 'data-testid': 'headline-figures' },
+    el('summary', { text: 'Every savings figure, side by side' }), headline));
 
   // Count up to the headline dollar/token figures instead of painting them already
   // settled — pure polish, skipped entirely for anyone who asked the OS not to animate.
@@ -2125,6 +2129,7 @@ async function loadOverview(opts = {}) {
       $('#refresh-now').classList.remove('has-new');
     }
     renderTiles(o);
+    if (window.CGBL) window.CGBL.overview(o);
     renderDenominators(o);
     renderWaterfall(o);
     renderSafety(o);
@@ -5383,10 +5388,11 @@ const loaders = {
  */
 const GROUPS = [
   ['overview', ['overview']],
-  ['savings', ['usage', 'benchmarks']],
-  ['behaviour', ['components', 'keepalive']],
+  ['savings', ['keepalive', 'usage']],
   ['traffic', ['sessions', 'requests']],
   ['admin', ['config', 'strategies', 'tenants', 'setup', 'settings', 'archive', 'feedback']],
+  // Operator and research views: real, and not what a user opens this page for.
+  ['advanced', ['components', 'benchmarks']],
 ];
 /** GROUP_OF maps a view onto its group. mountTab adds to it, which is how a self-mounted
  *  view gets a group without this file naming it. */
@@ -5787,6 +5793,7 @@ function refresh() {
   // changed with an idle proxy would leave the disclaimer out.
   if (state.view === 'overview') renderLive();
   loaders[state.view]();
+  if (window.CGBL) window.CGBL.render(state.view);
   if (state.view !== 'setup' && state.view !== 'settings') loadFacets();
 }
 

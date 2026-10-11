@@ -62,7 +62,7 @@ func TestTheNavHashContractIsPinned(t *testing.T) {
 	}
 	// The nav's five groups, and the fact that mountTab is the only thing that knows the
 	// nav's DOM shape.
-	for _, g := range []string{"overview", "savings", "behaviour", "traffic", "admin"} {
+	for _, g := range []string{"overview", "savings", "traffic", "admin", "advanced"} {
 		if !strings.Contains(app, "['"+g+"', [") {
 			t.Errorf("nav group %q is gone from GROUPS", g)
 		}

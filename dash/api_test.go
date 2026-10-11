@@ -340,7 +340,7 @@ func TestUIHasTestIDsForEveryStatTile(t *testing.T) {
 		// group is also a view, so it is the one that carries data-view as well, and its
 		// testid stays the way to reach the Overview view. tab-note is the one line that
 		// says why a tab in the open group is locked.
-		"group-savings", "group-behaviour", "group-traffic", "group-admin", "tab-note",
+		"group-savings", "group-advanced", "group-traffic", "group-admin", "tab-note",
 		"filter-provider", "filter-agent", "filter-preset", "filter-mode",
 		"filter-component", "filter-reason", "filter-accounting", "filter-clear",
 		"request-row", "diff-mode-git", "diff-mode-side", "diff-mode-orig", "diff-mode-raw",
