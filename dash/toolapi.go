@@ -59,6 +59,15 @@ type ToolStat struct {
 	// the "who owns the system prompt" number, which is the question the page is really
 	// answering and which no column carried.
 	SharePct float64 `json:"share_pct"`
+	// Sessions is the per-session breakdown of what carrying this cost, present only when the
+	// filter asked for it (Filter.PerSession). Opt-in because /api/tools is read by the
+	// dashboard UI, the status line and the plugin, and an array per row on a large inventory
+	// is a materially bigger payload for readers that do not use it.
+	//
+	// It exists because "this skill cost you $X" is a figure nobody can check, while "in these
+	// four sessions it cost $a, $b, $c, $d and you never called it" is one a user can audit
+	// against their own memory of what they were doing.
+	Sessions []SessionCostRow `json:"sessions,omitempty"`
 	// Removal is how to stop carrying it, in the form the user can act on. See RemovalFor.
 	Removal Removal `json:"removal"`
 	// HasText is whether this capability's own slice of the prompt was STORED and can be
@@ -344,6 +353,27 @@ func sortModelRates(m []ModelRate) {
 
 // sessionCost is one session's re-read multiplier, split by the tier each request was
 // billed at, plus the price of the model that billed it.
+// SessionCostRow is what one declaration cost in one session that never invoked it.
+//
+// Requests is how many times that session re-read its declarations, which is the multiplier that
+// turns a declaration's one-request weight into what it actually cost: a 500-token skill in an
+// eleven-request session cost 5,500 billed tokens, and the same skill in a two-request session
+// cost 1,000. Reporting only the per-request weight hides that entirely, and it is where the money
+// is.
+type SessionCostRow struct {
+	Session  string `json:"session"`
+	Requests int    `json:"requests"`
+	// Model is the session's first priced model, matching the rule the price follows. A session
+	// that used two models is valued at the first, so the row names which one.
+	Model string `json:"model,omitempty"`
+	// UnusedReads is Tokens x Requests: billed tokens spent carrying it for nothing.
+	UnusedReads int `json:"unused_reads"`
+	// UnusedUSD prices those reads at the tiers this session actually paid. Zero with
+	// Priced=false means the rate is unknown, NOT that it was free — the token count stands.
+	UnusedUSD float64 `json:"unused_usd"`
+	Priced    bool    `json:"priced"`
+}
+
 type sessionCost struct {
 	reads, writes, fresh int
 	price                modelinfo.Price
@@ -370,6 +400,44 @@ func (s sessionCost) usd(n int) float64 {
 // per session (a few tens per session, a few thousand in a scope), and the pricing step
 // needs each session's own model and cache tiers — which is a join no aggregate SUM can
 // express honestly.
+// RecentSessions returns the ids of the `n` most recently ACTIVE sessions the filter selects,
+// newest first, for a caller that wants to window a report to "the last N sessions".
+//
+// WHY RECENCY IS LAST ACTIVITY AND NOT FIRST. A session opened on Monday and still being worked in
+// on Friday is a current session. Ordered by its first request it ranks behind every session opened
+// since, so a "last 10" window would exclude the one the user is sitting in. MAX(ts) is therefore
+// the key, not MIN(ts).
+//
+// WHY THIS EXISTS AT ALL. A folder worked in for three months, with a plugin installed three weeks
+// ago, has an inventory dominated by the ninety days before that plugin existed — the aggregate
+// averages its skills over sessions that never declared them and reports them as nearly free.
+// Windowing to recent sessions is what makes a newly installed, barely used plugin visible.
+//
+// Asking for more sessions than exist returns what exists: a fresh install has one session, and a
+// selector offering "last 10" has to work there too.
+func (d *DB) RecentSessions(f Filter, n int) ([]string, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	where, args := f.where()
+	q := `SELECT r.session_id FROM requests r WHERE ` + where + `
+		AND r.session_id <> '' GROUP BY r.session_id ORDER BY MAX(r.ts) DESC LIMIT ?`
+	rows, err := d.sql.QueryContext(d.readCtx(), q, append(append([]any{}, args...), n)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) ToolReportFor(f Filter, price func(string) (modelinfo.Price, bool)) (*ToolReport, error) {
 	where, args := f.where()
 	// Sessions in scope, their re-read multiplier and the tiers they paid. tools>0
@@ -426,7 +494,7 @@ func (d *DB) ToolReportFor(f Filter, price func(string) (modelinfo.Price, bool))
 	if err != nil {
 		return nil, err
 	}
-	return buildToolReport(sessions, decls, uses), nil
+	return buildToolReport(sessions, decls, uses, f.PerSession), nil
 }
 
 // declRow / useRow are the scoped raw rows, one per session and name.
@@ -508,7 +576,8 @@ type statKey struct{ kind, name string }
 // buildToolReport does the declared-vs-used diff and the pricing. Split out from the
 // queries so the arithmetic — which is the part that can be wrong in an expensive
 // direction — is testable without a database.
-func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []useRow) *ToolReport {
+func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []useRow,
+	perSession bool) *ToolReport {
 	rep := &ToolReport{}
 	// Which capabilities each session invoked. A skill counts as used under its own name,
 	// and the Skill tool counts as used by any skill call.
@@ -616,11 +685,28 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		// figures are what the built-ins section prints, and withholding them there would only
 		// mean the page could not say how much the group it is warning about actually costs.
 		// What the aside group stays out of is the TOTALS, below.
-		st.UnusedReads += int64(dr.tokens) * int64(sc.requests())
+		reads := dr.tokens * sc.requests()
+		st.UnusedReads += int64(reads)
+		var rowUSD float64
 		if sc.priced {
-			st.UnusedUSD += sc.usd(dr.tokens)
+			rowUSD = sc.usd(dr.tokens)
+			st.UnusedUSD += rowUSD
 		} else {
 			st.Priced = false
+		}
+		// The same two figures, kept per session where the caller asked for them. Accumulated
+		// from the identical values the totals use rather than recomputed afterwards, so the
+		// breakdown cannot disagree with the total it belongs to — two contradictory numbers in
+		// one report is worse than one number with no breakdown.
+		if perSession {
+			st.Sessions = append(st.Sessions, SessionCostRow{
+				Session:     dr.session,
+				Requests:    sc.requests(),
+				Model:       sc.model,
+				UnusedReads: reads,
+				UnusedUSD:   rowUSD,
+				Priced:      sc.priced,
+			})
 		}
 		if !aside && !skillEntry { // same reason as declTok above
 			unusedTok[dr.session] += dr.tokens
@@ -909,7 +995,30 @@ func (a *API) tools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	price := a.priceFn(r)
+	// `sessions=N` windows the report to the N most recently active sessions in scope. Resolved
+	// here rather than inside Filter because it needs a query of its own, and resolved BEFORE the
+	// cached read so the resolved id set is part of what the cache key covers (cacheKey hashes the
+	// request's query string, which carries `sessions=N` verbatim).
+	//
+	// It exists for the case the aggregate cannot answer: three months in one folder with a plugin
+	// installed three weeks ago, whose skills the all-history average reports as nearly free
+	// because it is dividing them over ninety sessions that never declared them.
+	nSessions := atoiDefault(r.URL.Query().Get("sessions"), 0)
 	a.serveJSON(w, r, &a.toolsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
+		f := f
+		if nSessions > 0 {
+			ids, err := db.RecentSessions(f, nSessions)
+			if err != nil {
+				return nil, err
+			}
+			// No sessions in scope means an empty window, which must stay empty rather than
+			// fall back to every session: a silent widening would report all history under a
+			// label saying "the last N".
+			f.SessionIn = ids
+			if len(ids) == 0 {
+				f.SessionIn = []string{""}
+			}
+		}
 		rep, err := db.ToolReportFor(f, price)
 		if err != nil {
 			return nil, err

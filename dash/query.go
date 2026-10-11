@@ -33,11 +33,16 @@ type Filter struct {
 	// query per session. Mutually exclusive with Session in practice; if both are set, both
 	// apply (AND), which is never useful, so callers should pick one.
 	SessionIn []string
-	Model     string
-	Provider  string
-	Agent     string
-	Preset    string
-	Mode      string
+	// PerSession asks the tool inventory to keep its per-session cost attribution instead of
+	// collapsing it to totals. Not a row predicate — it changes the SHAPE of the response, not
+	// which rows are in it — and off by default because the breakdown is a per-row array that
+	// most readers of /api/tools do not use.
+	PerSession bool
+	Model      string
+	Provider   string
+	Agent      string
+	Preset     string
+	Mode       string
 	// Component selects requests on which this component RAN.
 	Component string
 	// Reason selects requests by their uncompressed reason bucket; the sentinel

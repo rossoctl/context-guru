@@ -1064,6 +1064,9 @@ func filterFrom(r *http.Request) Filter {
 	}
 	f.Since = atoi64(q.Get("since"))
 	f.Until = atoi64(q.Get("until"))
+	// `breakdown=session` asks a report to keep its per-session attribution. A shape parameter,
+	// not a row predicate: it changes what each row carries, never which rows are returned.
+	f.PerSession = q.Get("breakdown") == "session"
 	return f
 }
 
