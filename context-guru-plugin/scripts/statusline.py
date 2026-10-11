@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Claude Code statusLine command: by default, render what THIS session saved against what it
-has spent so far, plus the context-window bar and the proxy/upstream latency split. The
-prompt-cache TTL countdown and the keep-alive ping counter are opt-in extras (--cache /
---keepalive) — see skills/statusline/SKILL.md.
+"""Claude Code statusLine command. Layouts (--layout=minimal|balanced|detailed) pick elements:
+money saved (an `≈` estimate against the same request uncompacted, net of context-guru's own
+spend) next to money spent (observed), the prompt-cache state (warm / expiring / cold, the proxy's
+server-side truth overriding Claude Code's own guess), context fill against the window actually
+served, and at most one actionable hint. See skills/statusline/SKILL.md for flags and mockups.
 
 Why Python, not another shell script like the hooks: this reads JSON off stdin and makes one
 timeout-bounded HTTP call, and that is what Python's stdlib (`json`, `urllib.request`) does
@@ -50,18 +51,14 @@ was the answer on every render, and every project allocated another port rendere
 
 from __future__ import annotations
 
-import glob
 import json
 import os
 import re
 import signal
 import socket
 import sys
-import tempfile
+import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 
 # How long the whole script may run before its own backstop fires. Generous relative to the
 # urlopen timeout below (0.6s) so that timeout is what normally fires first; this is the net
@@ -119,28 +116,6 @@ RECOMMEND_PROJECT_MAX = 0.20
 _SKILL_NAME_RE = re.compile(r"^name:\s*(\S+)\s*$", re.MULTILINE)
 
 
-def _context_segment(payload: dict) -> str | None:
-    """The context-window bar: tokens used against the model's real window, coloured by pressure.
-
-    Same fields and thresholds as the IBM deployment's renderer (context_window.total_input_tokens
-    / .context_window_size / .used_percentage) — Claude Code's own statusLine payload, no fetch.
-    """
-    cw = payload.get("context_window")
-    if not isinstance(cw, dict):
-        return None
-    used = cw.get("total_input_tokens")
-    window = cw.get("context_window_size")
-    if not isinstance(used, (int, float)) or not isinstance(window, (int, float)) or window <= 0:
-        return None
-    percent = cw.get("used_percentage")
-    fraction = (percent / 100.0) if isinstance(percent, (int, float)) else (used / window)
-    fraction = max(0.0, min(1.0, fraction))
-    colour = GREEN if fraction <= GREEN_MAX else (YELLOW if fraction <= YELLOW_MAX else RED)
-    filled = int(round(fraction * BAR_CELLS))
-    bar = f"{colour}{'█' * filled}{DIM}{'·' * (BAR_CELLS - filled)}{RESET}"
-    return f"{bar} {colour}{_human(used)}/{_human(window)} {fraction * 100:.0f}%{RESET}"
-
-
 def _latency_segment(stats: dict | None) -> str | None:
     """`proxy: Xms · upstream: Yms` — labelled so ContextGuru's own added latency cannot be
     misread as the provider's, or vice versa. Both are /api/stats' own averages
@@ -163,6 +138,7 @@ def _configured_tool_names() -> list[str]:
     names: set[str] = set()
     try:
         skills_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills")
+        import glob  # noqa: PLC0415 - only the opt-in tools element needs it; ~8 ms of every render otherwise
         for path in glob.glob(os.path.join(skills_dir, "*", "SKILL.md")):
             try:
                 with open(path, encoding="utf-8") as fh:
@@ -319,35 +295,32 @@ def _our_port() -> str | None:
     Import is local and swallowed: this script's contract is that it never fails a render. A missing
     or broken settings.py renders no context-guru segment, exactly as an unrouted project does.
     """
+    # The answer only changes when settings files do, but computing it imports settings.py and
+    # walks the project (~25 ms, half the render budget), so it is remembered for a minute per
+    # (base URL, cwd). An unrouted project is remembered too, as an empty answer.
+    import zlib  # noqa: PLC0415 - C module, effectively free
+    key = zlib.crc32(f"{os.environ.get('ANTHROPIC_BASE_URL', '')}\0{os.getcwd()}\0{os.environ.get('HOME', '')}".encode())
+    memo = os.path.join(_tmpdir(), f"context-guru-statusline-route-{key:08x}.txt")
+    try:
+        if time.time() - os.stat(memo).st_mtime < ROUTE_MEMO_SECONDS:
+            with open(memo, encoding="ascii") as fh:
+                memo_port = fh.read(8).strip()
+            return memo_port if memo_port.isdigit() else None
+    except OSError:
+        pass
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import settings  # noqa: PLC0415 - see docstring
         port, _source = settings.resolve_routed_port()
     except Exception:  # noqa: BLE001 - a status line must never raise
         return None
-    return port if port and port.isdigit() else None
-
-
-def _cache_stopper(payload: dict) -> str:
-    """The countdown to the prompt-cache going cold, from Claude Code's OWN cache tracker.
-
-    `prompt_cache` rides on the statusLine payload already — Claude Code tracks this itself from
-    the response usage of every request it sends, independent of context-guru, so it is free
-    (zero extra network calls) and it reflects the ACTUAL wire bytes regardless of what any
-    component rewrote. It is absent before the first response of a session has usage to track,
-    which is a normal state, not an error.
-    """
-    pc = payload.get("prompt_cache")
-    if not isinstance(pc, dict):
-        return "cache –"
-    expires_at = pc.get("expires_at")
-    if not isinstance(expires_at, (int, float)):
-        return "cache –"
-    remaining = expires_at - time.time()
-    if remaining <= 0:  # covers real expiry AND clock skew alike: never show negative time
-        return "cache cold"
-    mins, secs = divmod(int(remaining), 60)
-    return f"cache {mins}:{secs:02d}"
+    port = port if port and port.isdigit() else None
+    try:
+        with open(memo, "w", encoding="ascii") as fh:
+            fh.write(port or "")
+    except OSError:
+        pass
+    return port
 
 
 def _human(n: float) -> str:
@@ -358,12 +331,47 @@ def _human(n: float) -> str:
     return f"{n:.0f}"
 
 
+def _tmpdir() -> str:
+    # tempfile.gettempdir() without importing tempfile (~11 ms of a render that has a 50 ms budget).
+    return os.environ.get("TMPDIR") or "/tmp"
+
+
+class _HTTPError(OSError):
+    """A non-2xx answer: the proxy is reachable, it just has nothing for us."""
+
+
+def _quote(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.~-]", lambda m: "%%%02X" % ord(m.group()), s)
+
+
+def _http_get(port: str, path: str) -> bytes:
+    """GET http://127.0.0.1:port/path, bounded by HTTP_TIMEOUT_SECONDS end to end. Raw socket
+    rather than urllib.request: importing that costs ~24 ms per render, half the whole budget, for
+    one loopback GET. HTTP/1.0 + Connection: close means a plain read-to-EOF with no chunking.
+    Raises TimeoutError (slow), _HTTPError (non-2xx), OSError (unreachable)."""
+    deadline = time.monotonic() + HTTP_TIMEOUT_SECONDS
+    with socket.create_connection(("127.0.0.1", int(port)), timeout=HTTP_TIMEOUT_SECONDS) as sock:
+        sock.sendall(f"GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".encode("ascii"))
+        buf = b""
+        while len(buf) < (1 << 20):
+            sock.settimeout(max(0.001, deadline - time.monotonic()))
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    head, _, body = buf.partition(b"\r\n\r\n")
+    parts = head.split(b" ", 2)
+    if len(parts) < 2 or not parts[1].startswith(b"2"):
+        raise _HTTPError(head[:40].decode("ascii", "replace"))
+    return body
+
+
 def _stats_cache_path(port: str, session_id: str | None) -> str:
     # Keyed by session too, not just port: /api/stats is now fetched SCOPED to one session (see
     # _fetch_stats), so two terminals sharing one proxy on one port must not read each other's
     # cached response back as their own.
     suffix = f"-{session_id}" if session_id else ""
-    return os.path.join(tempfile.gettempdir(), f"context-guru-statusline-{port}{suffix}.json")
+    return os.path.join(_tmpdir(), f"context-guru-statusline-{port}{suffix}.json")
 
 
 # _fetch_stats' second return value. "down" is the only one that should ever render `cg!` — see
@@ -444,12 +452,11 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     except (OSError, ValueError):
         cached, cached_age = None, None  # no usable cache; fetch for real
 
-    url = f"http://127.0.0.1:{port}/api/stats?lean=1"
+    url = "/api/stats?lean=1"
     if session_id:
-        url += "&session=" + urllib.parse.quote(session_id, safe="")
+        url += "&session=" + _quote(session_id)
     try:
-        with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as resp:
-            body = resp.read(1 << 20)  # bounded: the real payload is a few KB
+        body = _http_get(port, url)
     except (socket.timeout, TimeoutError):
         # Caught ahead of the OSError branch below ON PURPOSE: both of these ARE OSErrors
         # (TimeoutError always; socket.timeout too, pre-3.10, where it is a distinct subclass
@@ -461,17 +468,8 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
         # healthy, no connection ever refused. This is the READ-phase timeout — urlopen raises it
         # directly once the connection succeeded but no response arrived in time.
         return _timeout_result(cached, cached_age)
-    except urllib.error.HTTPError:
+    except _HTTPError:
         return None, STATS_EMPTY  # reached the proxy; it just has nothing (e.g. --dashboard is off)
-    except urllib.error.URLError as e:
-        if isinstance(e.reason, (socket.timeout, TimeoutError)):
-            # The CONNECT-phase timeout: urlopen wraps it in a URLError instead of raising it
-            # directly (unlike the read-phase case above), so it has to be unwrapped here rather
-            # than caught by the clause above — same meaning either way, the clock ran out, not a
-            # refusal. Rare on loopback (a refused connect fails instantly), but a saturated
-            # accept queue on a healthy-but-overloaded proxy can produce exactly this.
-            return _timeout_result(cached, cached_age)
-        return None, STATS_DOWN  # refused, DNS failure, or anything else NOT a timeout
     except OSError:
         return None, STATS_DOWN  # anything else unreachable: the proxy really is down
 
@@ -490,68 +488,6 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     except OSError:
         pass  # caching is an optimization; failing to write one is not this script's problem
     return stats, STATS_OK
-
-
-def _session_totals(payload: dict) -> tuple[float | None, float | None]:
-    """This SESSION's own running cost and tokens, read off Claude Code's own statusLine
-    payload — no network call, and it is the only session-scoped source there is (confirmed by
-    grepping the installed CLI: `strings <claude binary> | grep total_cost_usd` shows the payload
-    literal `cost:{total_cost_usd:...,total_duration_ms:...,...}`, and Claude Code's own SDK
-    schema describes `cost.total_cost_usd` as "Cost and usage accumulated by the current
-    session"; a real capture confirmed it climbing turn over turn against one session_id).
-
-    Tokens come from `context_window.total_input_tokens` + `total_output_tokens`, NOT from a
-    token field inside `cost` — there isn't one. Claude Code's own SDK schema has a
-    `model_usage` map that would give an exact per-turn sum, but the object literal that would
-    add it to THIS payload is dead code in the installed CLI (`cost:{total_cost_usd:ru(),...!1,
-    total_duration_ms:...}` — that `...!1` spreads the literal `false`, a no-op), so it is never
-    actually present to read. `context_window`'s pair is instead the size of the latest turn's
-    own usage (fresh input, plus whatever cache tiers it hit, plus the reply) — the same number
-    behind Claude Code's own `/context` view. It is a snapshot, NOT a running total: a long
-    session with subagents or a compaction processes far more than it. So it only gates the
-    fresh-session check in _default_segment and is never printed next to a running sum. Returns (None, None) where the payload cannot support
-    either — a malformed stdin, or a real one before the first response has anything to report.
-    """
-    usd = None
-    cost = payload.get("cost")
-    if isinstance(cost, dict) and isinstance(cost.get("total_cost_usd"), (int, float)):
-        usd = float(cost["total_cost_usd"])
-
-    tokens = None
-    cw = payload.get("context_window")
-    if isinstance(cw, dict):
-        i, o = cw.get("total_input_tokens"), cw.get("total_output_tokens")
-        if isinstance(i, (int, float)) and isinstance(o, (int, float)):
-            tokens = float(i) + float(o)
-
-    if usd is None or tokens is None:
-        return None, None
-    return usd, tokens
-
-
-def _default_segment(payload: dict, stats: dict | None) -> str | None:
-    """What THIS session saved, against what it has spent so far — the default and, unless a
-    toggle below is turned on, the ONLY thing this status line shows.
-
-    Omitted, not shown as zeroes, in the two cases that mean "nothing to report yet" rather than
-    a broken feature: a malformed/absent stdin payload, and a genuinely brand-new session (its
-    own total is 0 and 0 before the first response has usage to track — dividing "saved" by a
-    total of nothing is nonsensical, not merely undramatic, so this returns before that division
-    is ever written). A real, nonzero total with zero saved DOES still print (`$0.00 of ...
-    (-0)`), same reasoning as the old segment's negative-net case: a real $0 saved this session is
-    not the same fact as no session having happened yet.
-    """
-    total_usd, total_tokens = _session_totals(payload)
-    if total_usd is None or (total_usd == 0 and total_tokens == 0):
-        return None
-    if stats is None:  # no session-scoped savings figure to pair the total with
-        return None
-    saved_usd = stats.get("total_saved_usd", 0) or 0
-    saved_tokens = stats.get("saved_unique", 0) or 0
-    # No token total after the cost: context_window's pair is the CURRENT window size (the
-    # context bar already shows it), while saved_unique is a running sum over every request of
-    # the session — printing one "of" the other read as 750k removed out of 447k.
-    return f"${saved_usd:.2f} of ${total_usd:.2f} (-{_human(saved_tokens)})"
 
 
 def _update_check_state_dir() -> str:
@@ -605,14 +541,6 @@ def _update_available_segment() -> str | None:
     return f"{GREEN}▲ update {latest}{RESET}"
 
 
-def _cache_segment_enabled() -> bool:
-    return "--cache" in sys.argv[1:]
-
-
-def _keepalive_segment_enabled() -> bool:
-    return "--keepalive" in sys.argv[1:]
-
-
 def _keepalive_segment(stats: dict) -> str | None:
     """The ONE saving with a cause the developer did nothing to earn: cache misses the keep-alive
     pings PREVENTED, and the NET money that saved (credit minus what the pings themselves cost).
@@ -629,6 +557,298 @@ def _keepalive_segment(stats: dict) -> str | None:
     return f"{parts} ${net:.2f}"
 
 
+# ---- redesigned elements ---------------------------------------------------------------------
+# Layouts pick which elements show; --hide/--show toggle one element each; the width degrades them
+# in a fixed order. Everything below is display logic over three inputs: Claude Code's stdin, the
+# proxy's lean /api/stats (session + today) and /api/cachestate (server cache truth).
+LAYOUTS = {
+    "minimal": ("save", "cache", "hint"),
+    "balanced": ("update", "save", "cache", "ctx", "hint"),
+    "detailed": ("update", "save", "cache", "ctx", "latency", "tools", "hint"),
+}
+ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka"}
+# Dropped/shrunk first to last when the line is wider than the terminal. The hint is never in this
+# list: it is the one thing worth the space, and is truncated instead.
+DEGRADE = (("tools", None), ("latency", None), ("ka", None), ("update", None), ("hint", 1), ("save", 1),
+           ("ctx", 1), ("save", 2), ("ctx", None), ("save", None), ("cache", 1))
+DEFAULT_WIDTH = 100
+ROUTE_MEMO_SECONDS = 60
+EXPIRING_SECONDS = 60
+HINT_COLD_MIN_TOKENS = 100_000  # a cold cache under this is cheap enough not to nag about
+HINT_FULL_FRACTION = 0.85
+CACHESTATE_TTL_SECONDS = 2.0
+DAY_TTL_SECONDS = 60.0
+
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+
+def _no_color() -> bool:
+    return bool(os.environ.get("NO_COLOR")) or os.environ.get("TERM") == "dumb"
+
+
+if _no_color():
+    RESET = GREEN = YELLOW = RED = DIM = ""
+
+
+def _config(argv: list[str]) -> tuple[str, set[str], int]:
+    """(layout, enabled elements, width). Flags: --layout=minimal|balanced|detailed,
+    --hide=a,b / --show=a,b (element names), --width=N. Env CG_STATUSLINE_LAYOUT / _HIDE / _SHOW
+    / _COLUMNS do the same for people who cannot edit the installed command. Unknown names are
+    ignored: a typo must not blank the line. The old --cache and --keepalive flags still work."""
+    opt: dict[str, str] = {}
+    for key in ("layout", "hide", "show", "width"):
+        env = os.environ.get("CG_STATUSLINE_" + ("COLUMNS" if key == "width" else key.upper()))
+        if env:
+            opt[key] = env
+    for a in argv:
+        if a.startswith("--") and "=" in a:
+            k, v = a[2:].split("=", 1)
+            if k in ("layout", "hide", "show", "width"):
+                opt[k] = v
+    layout = opt.get("layout") if opt.get("layout") in LAYOUTS else "balanced"
+    on = set(LAYOUTS[layout])
+    on |= {e for e in opt.get("show", "").split(",") if e in ELEMENTS}
+    on -= set(opt.get("hide", "").split(","))
+    if "--cache" in argv:
+        on.add("cache")
+    if "--keepalive" in argv:
+        on.add("ka")
+    return layout, on, _width(opt.get("width"))
+
+
+def _width(override: str | None) -> int:
+    if override and override.isdigit() and int(override) > 0:
+        return int(override)
+    cols = os.environ.get("COLUMNS", "")  # Claude Code exports the real terminal width to the command
+    if cols.isdigit() and int(cols) > 0:
+        return int(cols)
+    for fd in (2, 1, 0):  # otherwise: a statusLine command's stdout is a pipe; stderr may be the tty
+        try:
+            return os.get_terminal_size(fd).columns
+        except OSError:
+            pass
+    return DEFAULT_WIDTH
+
+
+def _vlen(s: str) -> int:
+    return len(_ANSI_RE.sub("", s))
+
+
+def _money(x: float, approx: bool = False) -> str:
+    sign = "-" if x < -0.005 else ""
+    return f"{'≈' if approx else ''}{sign}${abs(x):.2f}"
+
+
+def _fetch_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | None, float]:
+    """(body, age_seconds) for one cheap GET, through a disk cache. A failed fetch serves the last
+    body up to STALE_STATS_MAX_AGE_SECONDS old WITH its age, so the caller can tell fresh from
+    stale; nothing cached and nothing fetched is (None, 0). Never raises."""
+    path = os.path.join(_tmpdir(), f"context-guru-statusline-{port}-{tag}.json")
+    cached, age = None, 0.0
+    try:
+        age = max(0.0, time.time() - os.stat(path).st_mtime)
+        with open(path, encoding="utf-8") as fh:
+            cached = json.load(fh)
+        if age < ttl:
+            return cached, age
+    except (OSError, ValueError):
+        cached = None
+    try:
+        body = _http_get(port, query)
+        obj = json.loads(body)
+        if not isinstance(obj, dict):
+            raise ValueError
+    except Exception:  # noqa: BLE001 - any failure means "use what we have"
+        return (cached, age) if cached is not None and age < STALE_STATS_MAX_AGE_SECONDS else (None, 0.0)
+    try:
+        tmp = path + f".{os.getpid()}.tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(body)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+    return obj, 0.0
+
+
+def _num(d: object, k: str) -> float | None:
+    v = d.get(k) if isinstance(d, dict) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _cache_view(payload: dict, cs: dict | None, cs_age: float) -> dict:
+    """Merge the two cache sources into {remaining, source, tokens, rewrite_usd}. remaining is
+    seconds to expiry (<=0 cold) or None for unknown. The proxy's answer WINS when it is fresh
+    (it saw every request, pings included); a stale one only wins while it is the later expiry,
+    because a later client expiry means a request happened that the stale copy never saw."""
+    pc = payload.get("prompt_cache") if isinstance(payload.get("prompt_cache"), dict) else {}
+    cli = None
+    exp = _num(pc, "expires_at")
+    if exp is not None:
+        cli = exp - time.time()
+    elif pc.get("warm") is False:
+        cli = 0.0
+    srv, tokens, usd = None, _num(pc, "recache_tokens_if_cold"), None
+    last, ttl, now_ms = _num(cs, "last_ts"), _num(cs, "ttl_s"), _num(cs, "now_ms")
+    if last is not None and ttl is not None and now_ms is not None:
+        srv = (last + ttl * 1000 - now_ms) / 1000 - cs_age
+        tokens = _num(cs, "prefix_tokens") or tokens
+        usd = _num(cs, "rewrite_usd") if cs.get("priced") else None
+    if srv is not None and (cs_age <= 3 or cli is None or srv >= cli):
+        return {"remaining": srv, "source": "proxy", "tokens": tokens, "usd": usd}
+    if cli is not None:
+        return {"remaining": cli, "source": "client", "tokens": tokens, "usd": None}
+    return {"remaining": None, "source": None, "tokens": tokens, "usd": usd}
+
+
+def _cache_segment(view: dict, level: int | None = 0) -> str | None:
+    rem = view["remaining"]
+    if level is None:
+        return None
+    if rem is None:
+        return f"{DIM}◌ no cache yet{RESET}" if level == 0 else f"{DIM}◌{RESET}"
+    if rem <= 0:
+        return f"{RED}○ cold{RESET}"
+    if rem <= EXPIRING_SECONDS:
+        return f"{YELLOW}◐ {int(rem)}s left{RESET}" if level == 0 else f"{YELLOW}◐ {int(rem)}s{RESET}"
+    mins = int(rem // 60)
+    when = f"{mins}m" if mins < 60 else f"{mins // 60}h{mins % 60:02d}m"
+    return f"{GREEN}● warm {when}{RESET}" if level == 0 else f"{GREEN}● {when}{RESET}"
+
+
+def _ctx_numbers(payload: dict, cs: dict | None, cs_age: float) -> tuple[float, float] | None:
+    """(used tokens, served window). Both prefer the proxy's own figures when it answered just
+    now: the window when it is a MEASURED one for the model actually served, and the tokens of the
+    last request it forwarded (Claude Code only updates its count after a response it accepts, so
+    after a failed or refused turn its bar lags what was really sent)."""
+    cw = payload.get("context_window")
+    used = _num(cw, "total_input_tokens")
+    window = _num(cw, "context_window_size")
+    if cs_age <= 3 and (_num(cs, "prefix_tokens") or 0) > 0:
+        used = _num(cs, "prefix_tokens")
+    if isinstance(cs, dict) and cs.get("window_exact") and (_num(cs, "window") or 0) > 0:
+        window = _num(cs, "window")
+    if used is None:
+        used = _num(cs, "prefix_tokens")
+    if used is None or not window or window <= 0:
+        return None
+    return used, window
+
+
+def _ctx_segment(used: float, window: float, level: int | None = 0) -> str | None:
+    if level is None:
+        return None
+    fraction = max(0.0, min(1.0, used / window))
+    colour = GREEN if fraction <= GREEN_MAX else (YELLOW if fraction <= YELLOW_MAX else RED)
+    if level == 1:
+        return f"{colour}ctx {fraction * 100:.0f}%{RESET}"
+    filled = int(round(fraction * BAR_CELLS))
+    bar = f"{colour}{'█' * filled}{DIM}{'·' * (BAR_CELLS - filled)}{RESET}"
+    return f"{bar} {colour}{_human(used)}/{_human(window)} {fraction * 100:.0f}%{RESET}"
+
+
+def _save_segment(stats: dict | None, day: dict | None, level: int | None = 0, fresh: bool = False) -> str | None:
+    """Saved is a COUNTERFACTUAL (vs the same request uncompacted, at gateway prices, net of CG's
+    own model spend and keep-alive pings), so it carries `≈`; spent is OBSERVED (gateway-priced
+    cost of the requests actually sent). The two are never added or divided into each other."""
+    saved = _num(stats, "total_saved_usd")
+    if saved is None or level is None or fresh:
+        return None
+    if level == 2:
+        return _money(saved, True)
+    if level == 1:
+        return f"saved {_money(saved, True)}"
+    out = f"saved {_money(saved, True)}"
+    spent = _num(stats, "cost_usd")
+    if spent is not None:
+        out += f" {DIM}(spent{RESET} ${spent:.2f}{DIM}){RESET}"
+    today = _num(day, "total_saved_usd")
+    if today is not None:
+        out += f" {DIM}· day{RESET} {_money(today, True)}"
+    return out
+
+
+def _fresh_session(payload: dict) -> bool:
+    """Nothing spent and nothing sent yet: dividing a saving by that is nonsense, so say nothing.
+    A real nonzero total with zero saved still prints."""
+    cost, cw = payload.get("cost"), payload.get("context_window")
+    usd, i, o = _num(cost, "total_cost_usd"), _num(cw, "total_input_tokens"), _num(cw, "total_output_tokens")
+    return usd is None or i is None or o is None or (usd == 0 and i == 0 and o == 0)
+
+
+def _hint(payload: dict, view: dict, ctx: tuple[float, float] | None) -> tuple[str, str] | None:
+    """At most ONE actionable line (long, short form), most expensive first."""
+    rem, tokens = view["remaining"], view["tokens"]
+    if rem is not None and rem <= 0 and tokens and tokens >= HINT_COLD_MIN_TOKENS:
+        price = f"≈${view['usd']:.2f}" if view["usd"] is not None else f"{_human(tokens)} tokens"
+        return (f"{RED}cold on {_human(tokens)}: next send rewrites {price} — /compact?{RESET}",
+                f"{RED}cold {_human(tokens)}: resend {price} — /compact?{RESET}")
+    if ctx and ctx[0] / ctx[1] >= HINT_FULL_FRACTION:
+        full = f"{RED}context {ctx[0] / ctx[1] * 100:.0f}% full — /compact{RESET}"
+        return full, full
+    pc = payload.get("prompt_cache") if isinstance(payload.get("prompt_cache"), dict) else {}
+    at, cause = _num(pc, "last_miss_at"), pc.get("last_miss_cause")
+    causes = cause.get("causes") if isinstance(cause, dict) else None
+    if at is not None and time.time() - at < 120 and isinstance(causes, list) and causes:
+        miss = f"{YELLOW}last miss: {','.join(str(c) for c in causes[:2])}{RESET}"
+        return miss, miss
+    return None
+
+
+def _truncate(s: str, width: int) -> str:
+    """Cut a line to `width` visible cells (ANSI-safe: escapes cost nothing)."""
+    if _vlen(s) <= width:
+        return s
+    out, n, i = [], 0, 0
+    while i < len(s) and n < width - 1:
+        m = _ANSI_RE.match(s, i)
+        if m:
+            out.append(m.group())
+            i = m.end()
+        else:
+            out.append(s[i])
+            n += 1
+            i += 1
+    return "".join(out) + "…" + RESET
+
+
+def _compose(parts: list[str], width: int) -> str:
+    return _truncate(f" {DIM}│{RESET} ".join(parts), width)
+
+
+def _day_start_ms() -> int:
+    lt = time.localtime()
+    return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)) * 1000)
+
+
+def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
+    """Run the (at most three) proxy reads in parallel under one shared deadline, so the worst
+    case is one HTTP_TIMEOUT_SECONDS, not three. Each read is disk-cached; a render that finds all
+    three fresh makes no network call at all."""
+    out: dict = {}
+    jobs = {"stats": lambda: _fetch_stats(port, session_id)}
+    if session_id and on & {"cache", "ctx", "hint"}:
+        jobs["cs"] = lambda: _fetch_json(
+            port, "/api/cachestate?session=" + _quote(session_id),
+            "cs-" + session_id, CACHESTATE_TTL_SECONDS)
+    if "save" in on:
+        jobs["day"] = lambda: _fetch_json(
+            port, f"/api/stats?lean=1&since={_day_start_ms()}", "day", DAY_TTL_SECONDS)
+
+    def run(name, fn):
+        try:
+            out[name] = fn()
+        except Exception:  # noqa: BLE001 - a failed read is an absent element, never a failed render
+            pass
+
+    threads = [threading.Thread(target=run, args=kv, daemon=True) for kv in jobs.items()]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + HTTP_TIMEOUT_SECONDS + 0.2
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    return out
+
+
 def main() -> None:
     port = _our_port()
     if port is None:
@@ -638,78 +858,64 @@ def main() -> None:
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
         session_id = None  # absent, or not the shape Claude Code actually sends: don't trust it
+    layout, on, width = _config(sys.argv[1:])
 
-    stats, status = _fetch_stats(port, session_id)
-    if status == STATS_DOWN:
-        line = "cg!"  # three characters: the proxy is unreachable, nothing else is worth saying
-        update_seg = _update_available_segment()  # local file only — independent of the proxy
-        if update_seg:
-            line += " | " + update_seg
-        print(line)
-        return
-    if status == STATS_TIMEOUT and stats is None:
-        # The proxy did not answer in time and there is no recent-enough cached answer to fall
-        # back on (the common case right after the proxy itself restarted). This is NOT `cg!`:
-        # the proxy may be perfectly healthy and merely slow on this one aggregate — see
-        # _fetch_stats' docstring — and claiming it is down when it is not sends whoever reads
-        # this looking in the wrong place. It will redraw with real numbers on its own; nothing
-        # here needs to retry or wait for that.
-        line = "cg: stats loading…"
-        update_seg = _update_available_segment()
-        if update_seg:
-            line += " | " + update_seg
-        print(line)
-        return
-    if status == STATS_HUNG:
-        # Unlike STATS_TIMEOUT above, there WAS a working proxy and every fetch since has kept
-        # timing out for long enough (STALE_STATS_MAX_AGE_SECONDS) that "merely slow" has stopped
-        # being the better read. Still not `cg!` — this is reachable at the TCP level, which a
-        # refused connection is not — but "loading…" would be dishonest here: this is not a
-        # render that is about to resolve itself on the next tick the way a genuinely slow proxy
-        # is, so it gets a distinct marker rather than reusing either wording.
-        line = "cg? not responding"
-        update_seg = _update_available_segment()
-        if update_seg:
-            line += " | " + update_seg
-        print(line)
+    got = _gather(port, session_id, on)
+    stats, status = got.get("stats", (None, STATS_TIMEOUT))
+    update_seg = _update_available_segment()  # local file only - independent of the proxy
+    notice = {
+        STATS_DOWN: "cg!",  # three characters: the proxy is unreachable, nothing else is worth saying
+        # Not `cg!`: the proxy may be healthy and merely slow on this one aggregate. It redraws on
+        # its own with real numbers.
+        STATS_HUNG: "cg? not responding",  # was working; every fetch since has timed out
+    }.get(status, "cg: stats loading…" if status == STATS_TIMEOUT and stats is None else None)
+    if notice:
+        print(notice + (" | " + update_seg if update_seg else ""))
         return
     stale = status == STATS_TIMEOUT  # stats is real, but from a past fetch, not this one
 
-    # The context bar is payload-only (no fetch) so it renders even when stats do not; the rest
-    # need `stats`. Priority is savings-vs-session-total first and always on; the cache TTL
-    # stopper and the keep-alive ping counter stay OPT-IN extras, off unless their flag is passed
-    # — see skills/statusline/SKILL.md for the one-line command that turns either on. The pending-
-    # update marker is placed FIRST, ahead of even the context bar, on purpose: it is the one
-    # segment meant as a fallback for something the user may not otherwise be told at all, and it
-    # must not scroll off the end of a long line or land after a truncation.
-    parts = []
-    update_seg = _update_available_segment()
-    if update_seg:
-        parts.append(update_seg)
-    context_seg = _context_segment(payload)
-    if context_seg:
-        parts.append(context_seg)
-    default_seg = _default_segment(payload, stats)
-    if default_seg:
-        parts.append(default_seg)
-    if _cache_segment_enabled():
-        parts.append(_cache_stopper(payload))
-    if stats is not None and _keepalive_segment_enabled():
-        keepalive = _keepalive_segment(stats)
-        if keepalive:
-            parts.append(keepalive)
-    latency_seg = _latency_segment(stats)
-    if latency_seg:
-        parts.append(latency_seg)
-    recommend_seg = _recommend_segment(payload)
-    if recommend_seg:
-        parts.append(recommend_seg)
-    line = " | ".join(parts)
+    cs, cs_age = got.get("cs", (None, 0.0))
+    day, _ = got.get("day", (None, 0.0))
+    view = _cache_view(payload, cs, cs_age)
+    ctx = _ctx_numbers(payload, cs, cs_age)
+    shown = {
+        "update": lambda lv: update_seg if lv == 0 else None,
+        "save": lambda lv: _save_segment(stats, day, lv, _fresh_session(payload)),
+        "cache": lambda lv: _cache_segment(view, lv),
+        "ctx": lambda lv: _ctx_segment(*ctx, lv) if ctx else None,
+        "ka": lambda lv: (_keepalive_segment(stats) if stats and lv == 0 else None),
+        "latency": lambda lv: _latency_segment(stats) if lv == 0 else None,
+        "tools": lambda lv: _recommend_segment(payload) if lv == 0 else None,
+    }
+    order = [e for e in ("update", "save", "cache", "ctx", "ka", "latency", "tools") if e in on]
+    level: dict[str, int | None] = {e: 0 for e in order}
+    hint = _hint(payload, view, ctx) if "hint" in on else None
+    if layout == "minimal":
+        level["save"] = 1  # minimal: `saved ≈$0.31`, no spent/day
+    hint_level = 0
+
+    def build() -> list[str]:
+        parts = [s for s in (shown[e](level[e]) for e in order) if s]
+        if hint:
+            parts.append(f"{DIM}▸{RESET} {hint[hint_level]}")
+        return parts
+
+    parts = build()
+    for element, lv in DEGRADE:
+        if _vlen(" │ ".join(parts)) <= width:
+            break
+        if element == "hint":
+            hint_level = lv
+            parts = build()
+        elif element in level and (level[element] or 0) < (lv or 9):
+            level[element] = lv
+            parts = build()
+    line = _compose(parts, width)
     if stale and line:
         # A small, honest marker that every number to its left is from the last successful
-        # fetch rather than this render — never withheld, never dressed up as fresh.
+        # fetch rather than this render - never withheld, never dressed up as fresh.
         line += f" {DIM}⏳{RESET}"
-    print(line)
+    print(line or "cg · waiting for the first request")
 
 
 if __name__ == "__main__":
