@@ -311,3 +311,37 @@ func TestARoundUnderTheRetainBoundIsStillIntercepted(t *testing.T) {
 		t.Fatal("the client received our own tool_use")
 	}
 }
+
+// The API refuses an assistant turn holding thinking blocks from two responses ("thinking
+// blocks in the latest assistant message cannot be modified"), so once the client has round
+// 1's thinking, the continuation's thinking never reaches it and the blocks after it close
+// the gap.
+func TestSpliceWithholdsAContinuationsThinkingWhenTheClientAlreadyHoldsSome(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sp := newSSESplicer(rec)
+	resp := &http.Response{StatusCode: 200, Header: http.Header{}}
+
+	sp.round(resp)
+	sp.pass(strings.NewReader(pkStart+pkThink+pkBStop+pkExpand()+pkStop), expand.ToolName)
+	prefix := rec.Body.String()
+
+	text := strings.ReplaceAll(pkText, `"index":0`, `"index":1`)
+	tool := pkOtherT // index 1 in the fixture; the continuation numbers it 2
+	tool = strings.ReplaceAll(tool, `"index":1`, `"index":2`)
+	stop1 := strings.ReplaceAll(pkBStop, `"index":0`, `"index":1`)
+	sp.round(resp)
+	sp.pass(strings.NewReader(pkStart+pkThink+pkBStop+text+stop1+tool+pkStop), expand.ToolName)
+
+	spliced := strings.TrimPrefix(rec.Body.String(), prefix)
+	if strings.Contains(spliced, `"thinking"`) {
+		t.Fatalf("the continuation's thinking must be withheld: %q", spliced)
+	}
+	for _, want := range []string{`"index":1,"content_block":{"type":"text"`, `"index":2,"content_block":{"type":"tool_use"`} {
+		if !strings.Contains(spliced, want) {
+			t.Fatalf("blocks must follow the client's single thinking block, missing %s:\n%q", want, spliced)
+		}
+	}
+	if sp.blocks != 3 {
+		t.Fatalf("client holds thinking + text + tool = 3 blocks, splicer says %d", sp.blocks)
+	}
+}
