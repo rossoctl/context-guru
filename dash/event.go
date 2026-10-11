@@ -78,9 +78,9 @@ const (
 // WaitCauseResult is issue #424's RECORD half's output for one request — see Event.WaitCause,
 // which runs the computation that fills this, off the request path.
 type WaitCauseResult struct {
-	WaitingFor, WaitTool, WakeCause          string
-	OpenBackground, OpenTeammate             int
-	MonitorExpiryMs                          int64
+	WaitingFor, WaitTool, WakeCause string
+	OpenBackground, OpenTeammate    int
+	MonitorExpiryMs                 int64
 }
 
 // Event is one captured request, as handed to the capture channel. It is built on
