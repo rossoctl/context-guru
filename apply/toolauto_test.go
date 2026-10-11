@@ -119,3 +119,33 @@ func TestRestoreCalls(t *testing.T) {
 		t.Fatalf("%+v", c)
 	}
 }
+
+// A restricted subagent thread shares the session with the main thread but has a narrower tool list.
+// Its stub must name only what was removed from ITS tools, and a restore must never add a tool its
+// allowlist excluded (Bash, or a hidden tool it was never given).
+func TestAutoSubagentThreadIsNeverWidened(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	if _, _, n := apply.AutoFilterTools(st, "sub", autoBody(false, ""), elig, false); n == 0 {
+		t.Fatal("main thread should decide")
+	}
+	subTools := autoDecl("Read") + "," + autoDecl("Artifact")
+	sub := []byte(`{"model":"m","tools":[` + subTools + `],"system":"x","messages":[{"role":"user","content":"hi"}]}`)
+	out, _, n := apply.AutoFilterTools(st, "sub", sub, nil, false)
+	if got := toolNamesOf(out); n != 1 || got != "Read,context_guru_tools" {
+		t.Fatalf("subagent tools: %s (n=%d)", got, n)
+	}
+	enum := gjson.GetBytes(out, "tools.1.input_schema.properties.names.items.enum").Raw
+	if enum != `["Artifact"]` || strings.Contains(gjson.GetBytes(out, "tools.1.description").String(), "mcp__a__one") {
+		t.Fatalf("stub leaks the main thread's hidden tools: %s", gjson.GetBytes(out, "tools.1").Raw)
+	}
+	// A hidden tool this thread was never given cannot be restored into it.
+	same, ans := apply.RestoreTools(st, "sub", out, []string{"mcp__a__one", "Bash"})
+	if toolNamesOf(same) != "Read,context_guru_tools" || !strings.Contains(ans, "nothing changed") {
+		t.Fatalf("widened: %s / %s", toolNamesOf(same), ans)
+	}
+	// Its own removal is restored in its original relative position, and nothing else appears.
+	back, _ := apply.RestoreTools(st, "sub", out, []string{"Artifact"})
+	if got := toolNamesOf(back); got != "Read,Artifact" {
+		t.Fatalf("restore: %s", got)
+	}
+}

@@ -577,6 +577,13 @@ at least 7 days and never called. The rules that keep it cache-safe:
   continuation, in their original positions, with the stub re-rendered for what is still hidden. That is
   one whole-prefix rewrite per restore call, paid at the moment the model needs the tool, and the client's
   next request reproduces the same bytes so there is no second rewrite. Restores last for the session.
+- Threads: a session can carry several threads with different tool lists (subagents). The stub names, and a
+  restore re-inserts, only tools removed from that request's own `tools`; a restricted thread is never widened.
+- Determinism also relies on the system prompt's tool references and `tool_choice` staying constant within a
+  session, because both are re-evaluated on every request. If a call to a hidden tool is pending in the last
+  message, that one request is forwarded unfiltered (the set flips for that request).
+- If the model calls the stub together with a client tool in one turn, the stub call reaches the client, which
+  answers "tool not found"; the restore still takes effect on the next request and the model retries.
 - Candidates come from the dashboard history, so it needs `--dashboard`; with no history it does nothing.
 
 On the hosted service you don't hand-write that: the dashboard's **Inventory** page has a switch per

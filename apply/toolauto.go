@@ -22,6 +22,10 @@ package apply
 // Never removed: context_guru_* tools, tools called anywhere in this transcript, tools named in the
 // system prompt's prose, a tool forced by tool_choice (all via filterDeclarations), and nothing at
 // all is decided under a non-auto tool_choice. Anthropic dialect only.
+//
+// Determinism caveats: the prose gate and tool_choice are re-evaluated per request, so the fixed set holds
+// only while they stay constant; a pending call to a hidden tool makes filterDeclarations skip that one
+// request. Threads: the stub and any restore are limited to tools removed from the request's own body.
 
 import (
 	"encoding/json"
@@ -134,11 +138,19 @@ func stubDef(removed []json.RawMessage) []byte {
 	def["input_schema"] = map[string]any{
 		"type": "object",
 		"properties": map[string]any{"names": map[string]any{
-			"type": "array", "items": map[string]any{"type": "string"},
+			"type": "array", "items": map[string]any{"type": "string", "enum": enumNames(removed)},
 			"description": "Exact names of the hidden tools to restore."}},
 		"required": []string{"names"},
 	}
 	out, _ := json.Marshal(def)
+	return out
+}
+
+func enumNames(removed []json.RawMessage) []string {
+	out := []string{}
+	for _, r := range removed {
+		out = append(out, declName(gjson.ParseBytes(r)))
+	}
 	return out
 }
 
@@ -191,7 +203,7 @@ func AutoFilterTools(st store.Store, session string, body []byte, eligible []str
 		}
 		r := &autoRec{Removed: gone}
 		tools.ForEach(func(_, t gjson.Result) bool { r.Tools = append(r.Tools, json.RawMessage(t.Raw)); return true })
-		stub := stubDef(rawByName(r.Tools, r.active()))
+		stub := stubDef(rawByName(r.Tools, r.active())) // same body: snapshot == this request
 		if tok < autoMinGain*tokens.Count(string(stub)) {
 			return body, 0, 0
 		}
@@ -219,7 +231,26 @@ func AutoFilterTools(st store.Store, session string, body []byte, eligible []str
 	if n == 0 {
 		return body, 0, 0
 	}
-	stub := stubDef(rawByName(rec.Tools, act))
+	// The stub names only what was removed from THIS request's own tools (a subagent thread has a
+	// narrower list than the main thread whose snapshot is stored): never a tool it was not given.
+	left := map[string]bool{}
+	for _, k := range declNames(gjson.GetBytes(kept, "tools")) {
+		left[k] = true
+	}
+	mine := map[string]bool{}
+	for _, k := range declNames(tools) {
+		if !left[k] {
+			mine[k] = true
+		}
+	}
+	var own []json.RawMessage
+	tools.ForEach(func(_, t gjson.Result) bool {
+		if mine[declName(t)] {
+			own = append(own, json.RawMessage(t.Raw))
+		}
+		return true
+	})
+	stub := stubDef(own)
 	next, err := sjson.SetRawBytes(kept, "tools.-1", stub)
 	if err != nil {
 		return body, 0, 0
@@ -260,21 +291,51 @@ func RestoreCalls(msg []byte) (out []RestoreCall) {
 	return out
 }
 
-// RestoreTools marks names restored for the session and rebuilds body's `tools` as the client
-// would send it with the remaining removed set: original order, then any proxy extras the body
-// carries (expand), then the re-rendered stub. answer is the stub call's tool_result text.
+// RestoreTools re-inserts only the requested names into THIS request's own tools array, and only
+// those the request's own stub lists as hidden (its enum), so a restricted thread (a subagent with a
+// narrower allowlist) can never gain a tool it was not declared. Each name goes back after the nearest
+// preceding tool of the stored snapshot that is present, i.e. its original relative position; the stub
+// is re-rendered for what is still hidden. answer is the stub call's tool_result text.
 func RestoreTools(st store.Store, session string, body []byte, names []string) (out []byte, answer string) {
 	rec := loadAuto(st, session)
 	if rec == nil {
 		return body, "No tools are hidden in this session."
 	}
-	act := rec.active()
+	stubAt := -1
+	hidden := map[string]bool{}
+	var cur []string
+	gjson.GetBytes(body, "tools").ForEach(func(i, t gjson.Result) bool {
+		if declName(t) == RestoreToolName {
+			stubAt = int(i.Int())
+			t.Get("input_schema.properties.names.items.enum").ForEach(func(_, e gjson.Result) bool {
+				hidden[e.String()] = true
+				return true
+			})
+			return true
+		}
+		cur = append(cur, t.Raw)
+		return true
+	})
+	if stubAt < 0 {
+		return body, "No tools are hidden in this request."
+	}
+	snap := map[string]json.RawMessage{}
+	var order []string
+	for _, t := range rec.Tools {
+		n := declName(gjson.ParseBytes(t))
+		snap[n] = t
+		order = append(order, n)
+	}
+	idx := map[string]int{}
+	for i, n := range order {
+		idx[n] = i
+	}
 	var ok, no []string
 	for _, n := range names {
-		if act[n] {
+		if hidden[n] && snap[n] != nil {
 			ok = append(ok, n)
 			rec.Restored = append(rec.Restored, n)
-			delete(act, n)
+			delete(hidden, n)
 		} else {
 			no = append(no, n)
 		}
@@ -283,26 +344,50 @@ func RestoreTools(st store.Store, session string, body []byte, names []string) (
 		return body, "Not hidden (nothing changed): " + strings.Join(no, ", ")
 	}
 	saveAuto(st, session, rec)
-	orig := map[string]bool{}
-	var arr []string
-	for _, t := range rec.Tools {
-		n := declName(gjson.ParseBytes(t))
-		orig[n] = true
-		if !act[n] {
-			arr = append(arr, string(t))
+	present := map[string]bool{}
+	for _, c := range cur {
+		present[declName(gjson.Parse(c))] = true
+	}
+	// Insert in snapshot order so the restored names keep their original relative order.
+	for _, n := range order {
+		isOK := false
+		for _, o := range ok {
+			isOK = isOK || o == n
+		}
+		if !isOK || present[n] {
+			continue
+		}
+		pos := 0 // after the nearest preceding snapshot tool that is present in this request
+		for k := idx[n] - 1; k >= 0 && pos == 0; k-- {
+			for j, c := range cur {
+				if declName(gjson.Parse(c)) == order[k] {
+					pos = j + 1
+					break
+				}
+			}
+		}
+		cur = append(cur[:pos], append([]string{string(snap[n])}, cur[pos:]...)...)
+		present[n] = true
+	}
+	// Stub first, then the proxy's other injected tools (expand): the order AutoFilterTools +
+	// expand.Inject produce on the client's next request.
+	var stillHidden []json.RawMessage
+	for _, n := range order {
+		if hidden[n] {
+			stillHidden = append(stillHidden, snap[n])
 		}
 	}
-	// Stub first, then the proxy's other injected tools: the order AutoFilterTools + expand.Inject
-	// produce on the client's next request, so that request does not rewrite the prefix again.
-	if len(act) > 0 {
-		arr = append(arr, string(stubDef(rawByName(rec.Tools, act))))
-	}
-	gjson.GetBytes(body, "tools").ForEach(func(_, t gjson.Result) bool {
-		if n := declName(t); !orig[n] && n != RestoreToolName {
-			arr = append(arr, t.Raw)
+	arr := cur
+	if len(stillHidden) > 0 {
+		at := len(arr) // before expand, as on the client path
+		for j, c := range arr {
+			if declName(gjson.Parse(c)) == "context_guru_expand" {
+				at = j
+				break
+			}
 		}
-		return true
-	})
+		arr = append(arr[:at], append([]string{string(stubDef(stillHidden))}, arr[at:]...)...)
+	}
 	next, err := sjson.SetRawBytes(body, "tools", []byte("["+strings.Join(arr, ",")+"]"))
 	if err != nil {
 		return body, "Restore failed; continue without: " + strings.Join(names, ", ")
