@@ -313,21 +313,32 @@ func (s *CacheAwareSummarizer) commissionSync(c *components.Ctx, call summaryCal
 	// path's own goroutine — see its comment on why a chained sink would double-charge.
 	ctx, callSink := cheapmodel.WithDetachedSink(ctx)
 	atomic.AddInt64(&cacheAwareCalls, 1)
+	callStart := time.Now()
 	out, err := call(ctx)
+	callMs := float64(time.Since(callStart).Milliseconds())
 	// READ BEFORE the error check: a call that timed out may still have been billed for its input.
 	//
-	// NOT deferred onto the next real turn (#455). The keeper books this call's full usage and
-	// cost on the keep-alive ping row it replaces (recordSummarySubstitute), and the dashboard
-	// adds requests.cost_usd and requests.cg_llm_cost_usd together (spent, saved, tenant spend).
-	// Deferring it as well put the same dollars in both columns, so every total counted the call
-	// twice. The ping row is the one record of it; the cache_aware_summarizer_* counters in /stats
-	// still see its tokens through recordCacheAwareCacheTokens.
+	// WHO BOOKS THIS CALL (#455). The dashboard adds requests.cost_usd and
+	// requests.cg_llm_cost_usd together, so the call must land in exactly one of them:
+	//   - COMMITTED: the keeper books it on the keep-alive ping row it replaces
+	//     (recordSummarySubstitute, cost_usd). Only a detail row is deferred (deferDetailOnly), so
+	//     extraction_calls still lists it and cg_llm_cost_usd does not count it again.
+	//   - NOT committed (error, empty, cut off, or the commit refused): the keeper sends an
+	//     ordinary ping instead and never books this call, so it is deferred onto the next real
+	//     turn as before (deferUsage) — otherwise a paid call would be booked nowhere.
 	_, in, outTok := callSink.Totals()
 	cw, cr := callSink.CacheTotals()
 	res := KeepAliveSummaryResult{Model: callSink.Model(),
 		FreshInput: int(in), Output: int(outTok), CacheWrite: int(cw), CacheRead: int(cr),
 		CacheWrite1h: int(callSink.CacheWrite1h())}
 	recordCacheAwareCacheTokens(callSink)
+	defer func() {
+		if res.Committed {
+			deferDetailOnly(st, session, "cache_aware_summarizer", path, "keepalive_substitute", callMs, callSink)
+		} else {
+			deferUsage(st, session, "cache_aware_summarizer", path, "keepalive_substitute", callMs, callSink)
+		}
+	}()
 	if err != nil {
 		classifyCallErr(ctx, session, err)
 		return res

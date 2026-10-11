@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -553,17 +555,39 @@ func (m *usageSummaryModel) CompleteMessages(ctx context.Context, _ string, _ []
 	return "<summary>explored the handler, 3 tests fail.</summary>", nil
 }
 
-// #455: a keep-alive summary call is booked ONCE. The keeper books its usage on the ping row it
-// replaces; it must not also be deferred onto the session's next real turn, where it would land
-// in requests.cg_llm_cost_usd and every dashboard total (cost_usd + cg_llm_cost_usd) would count
-// it twice. Live, before the fix: ping row $0.0161 AND next request cg_llm_cost_usd $0.0161.
-func TestKeepAliveSummaryCallIsNotAlsoDeferredOntoTheNextTurn(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
+// #455: a keep-alive summary call is booked EXACTLY ONCE, on every path.
+//   - Committed: the keeper books it on the ping row it replaces (cost_usd, here the keeper's
+//     spend). Only a detail row is deferred, with zero ledger tokens, so the next turn's
+//     cg_llm_cost_usd does not count it again.
+//   - Not committed (cut-off reply): the keeper sends an ordinary ping and never books the call,
+//     so the call is deferred onto the next turn as before. Booking it nowhere would hide spend
+//     (#458 review, finding 1).
+func readDeferred(t *testing.T, st store.Store, session string) (ledgerIn int, calls []map[string]any) {
+	t.Helper()
+	b, ok := st.Get(store.UsagePrefix + session)
+	if !ok || len(b) == 0 {
+		return 0, nil
+	}
+	var u struct {
+		In    int              `json:"in"`
+		Calls []map[string]any `json:"calls"`
+	}
+	if err := json.Unmarshal(b, &u); err != nil {
+		t.Fatal(err)
+	}
+	return u.In, u.Calls
+}
+
+func TestKeepAliveSummaryCallIsBookedOnceOnThePingRow(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	price := modelinfo.Price{Input: 2e-6, CacheRead: 2e-7, CacheWrite: 2.5e-6, Output: 1e-5}
+	k.h.opts.Prices = fixedPrice{price}
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	model := &usageSummaryModel{}
 	kaCandidate(t, "sess-1", st, model)
 
 	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	spentBefore := math.Float64frombits(k.spentUSD.Load())
 	if n := k.sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("the due ping did not fire (%d)", n)
 	}
@@ -571,12 +595,56 @@ func TestKeepAliveSummaryCallIsNotAlsoDeferredOntoTheNextTurn(t *testing.T) {
 	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
 		time.Sleep(time.Millisecond)
 	}
-	if k.summarySubstituted.Load() != 1 || model.calls.Load() != 1 {
-		t.Fatalf("substituted=%d calls=%d, want 1 and 1 — the path under test never ran",
-			k.summarySubstituted.Load(), model.calls.Load())
+	if k.summarySubstituted.Load() != 1 || model.calls.Load() != 1 || fs.n() != 0 {
+		t.Fatalf("substituted=%d calls=%d ordinary=%d, want 1, 1, 0 — the path under test never ran",
+			k.summarySubstituted.Load(), model.calls.Load(), fs.n())
 	}
-	if b, ok := st.Get(store.UsagePrefix + "sess-1"); ok && len(b) > 0 && string(b) != "{}" {
-		t.Fatalf("the keep-alive summary call was deferred for the next turn as well (%s) — "+
-			"it is already booked on the ping row, so it would be billed twice", b)
+	// Booked once on the ping side: the keeper's spend grew by exactly the priced call.
+	want := price.CostWithCacheWrite1h(281, 43400, 0, 683, 0)
+	if got := math.Float64frombits(k.spentUSD.Load()) - spentBefore; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("ping-row cost = %v, want the priced call %v", got, want)
+	}
+	// Not booked again on the next turn, but still listed as a detail row.
+	in, calls := readDeferred(t, st, "sess-1")
+	if in != 0 {
+		t.Fatalf("the committed call's tokens were also deferred (in=%d): it would be billed twice", in)
+	}
+	if len(calls) != 1 || calls[0]["billed_elsewhere"] != true || calls[0]["trigger"] != "keepalive_substitute" {
+		t.Fatalf("want one billed_elsewhere detail row for extraction_calls, got %v", calls)
+	}
+}
+
+// truncSummaryModel bills like a real client but returns a cut-off summary (no </summary>), so
+// the call is paid and never commits. From the #458 review's probe.
+type truncSummaryModel struct{ calls atomic.Int64 }
+
+func (m *truncSummaryModel) Complete(ctx context.Context, _ string) (string, error) {
+	return m.CompleteMessages(ctx, "", nil)
+}
+func (m *truncSummaryModel) CompleteMessages(ctx context.Context, _ string, _ []bschemas.ChatMessage) (string, error) {
+	m.calls.Add(1)
+	cheapmodel.ReplayUsage(ctx, "claude-sonnet-5", 281, 4096, 0, 43400)
+	return "<summary>explored the handler, 3 tests fa", nil
+}
+
+func TestKeepAliveSummaryCallThatDoesNotCommitIsDeferred(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	model := &truncSummaryModel{}
+	kaCandidate(t, "sess-1", st, model)
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	k.sweep(clock.advance(281 * time.Second))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && fs.n() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if model.calls.Load() != 1 || k.summarySubstituted.Load() != 0 || fs.n() != 1 {
+		t.Fatalf("calls=%d substituted=%d ordinary=%d, want 1, 0, 1 — the path under test never ran",
+			model.calls.Load(), k.summarySubstituted.Load(), fs.n())
+	}
+	in, calls := readDeferred(t, st, "sess-1")
+	if in != 281 || len(calls) != 1 || calls[0]["billed_elsewhere"] == true {
+		t.Fatalf("the paid, uncommitted call must be deferred onto the next turn with its tokens "+
+			"(in=281, one ordinary detail row); got in=%d calls=%v", in, calls)
 	}
 }
