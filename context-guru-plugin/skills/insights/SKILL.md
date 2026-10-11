@@ -15,6 +15,16 @@ One command. Everything below is presentation.
 **If invoked with `--json`**, run `"${CLAUDE_PLUGIN_ROOT}/scripts/insights.py" all --json` and print
 its output verbatim — no narration. That is for somebody who wants the document, not a reading of it.
 
+**If invoked with `--sessions N`**, pass it through. It narrows the capability report to the N most
+recently active sessions and adds the per-session breakdown — see "Windowing with `--sessions N`"
+below for what that changes and what you may claim from it. It combines with `--json` and
+`--report`.
+
+**If invoked with `--report`**, add `--report` to the command above. It writes a local HTML page
+with the per-item tables and prints `report_path=`. Give the user that path and tell them to open
+it; do not open it for them, and do not paste the page's contents back. The page is written to this
+machine and uploaded nowhere.
+
 The script resolves the configured port itself, off disk, and makes only GETs. It never writes a
 settings file, never arms a strategy and never sends a ping. **Every fix in its output is printed,
 not applied** — offer them, run one only when the user says so.
@@ -93,6 +103,96 @@ read as a bill, and each value means something different:
 `usd_window` is what it cost or would have over the measured window. `usd_month` is that scaled to
 30 days and is **absent on a window under two days** — when it is absent, do not compute it
 yourself. `usd_lo`/`usd_hi` come as a pair; a finding carrying them has no point estimate on purpose.
+
+## The per-item inventory
+
+`item.<name>.*` is every capability declared and never invoked, and it is listed **whether or not a
+removal is being recommended** — the observation floor gates the advice, not the disclosure. Each
+row carries `tokens` (weight on every request), `reads` (billed tokens spent carrying it over the
+window), `usd` or `unpriced`, and:
+
+- **`verdict`** — what this report is entitled to say about it. The one value you may present as a
+  recommendation is `remove`; the other two are not weaker versions of it.
+
+  | `verdict` | What you may say |
+  |---|---|
+  | `remove` | unused, removable, and past the proxy's own observation floor. Offer `command` |
+  | `consider` | unused and removable, but **below the floor**. Name it, give the weight and the cost, and say the evidence is too thin to act on. Never present this as a removal |
+  | `keep` | either a built-in (the question is closed at every scope) or something actually invoked. `why` says which — do not collapse them |
+
+- **`why`** — the EVIDENCE behind the verdict, in one line under 160 characters. Quote it rather
+  than paraphrasing: it carries the n (sessions of observation, or the call count) that makes the
+  verdict checkable, and a paraphrase drops exactly that.
+
+An invoked capability carries `verdict` and `why` and **nothing else** — no `tokens`, no `usd`, no
+`command`. That is not a gap: every cost column here means "spent carrying this for nothing", and
+that figure does not exist for something that was used.
+
+- **`scope`** — what removing it would even mean, and the only safe guide to what to tell somebody:
+
+  | `scope` | What you may offer |
+  |---|---|
+  | `item` | remove this one thing; `command` is runnable as printed |
+  | `server` | the MCP server is the unit. Denying one tool leaves the rest declared |
+  | `plugin` | **the plugin is the unit.** `skillOverrides` has NO effect on a plugin's skills, so never offer a per-skill setting here — offer `command` |
+  | `none` | a Claude Code built-in. Never offer a removal at any scope |
+
+- **`desc`** — what it does, from its own `SKILL.md`. `desc_full` is the untrimmed text where the
+  summary was cut. **`desc_unknown=true` means there is no file to read** (a built-in skill); say
+  so rather than describing it from memory, and never fill the gap with a guess.
+- **`plugin`** / **`server`** — the owner, where it has one.
+
+`owner.plugin.<name>.*` and `owner.server.<name>.*` are the rollups, each with its own `usd`,
+`tokens`, item counts and `command`. **These are a view, not an addend**: they re-count the same
+tokens one level up, so never sum them, and never add them to `inventory_removable_usd` — that
+figure is computed over items, each counted once, and carries
+`inventory_removable_basis`. An owner carrying `unpriced_items` has a subtotal short by an unknown
+amount; say so.
+
+`self_excluded_*` is this plugin's own weight, held out of every table above because a cost report
+that counts itself as a saving it recommends is arguing for its own removal mid-advice. Quote it if
+the user asks why the counts differ from `/plugin`; do not present it as something they should act
+on.
+
+### The savings summary
+
+- **`savings_window_usd`** — what the REMOVABLE set actually cost over the window. It excludes
+  built-ins, so it is smaller than the sum of the per-session figures below, and that gap is not an
+  error: a session's bill does not shrink because one of its declarations cannot be removed.
+- **`savings_per_session_avg_usd`** — that figure over `window_sessions_analyzed`.
+- **`savings_basis`** is `measured over the window`: this is what was spent, not a forecast. Say
+  "cost you", never "would save you".
+
+### Windowing with `--sessions N`
+
+Run `"${CLAUDE_PLUGIN_ROOT}/scripts/insights.py" capabilities --sessions N` when the all-history
+figures cannot answer the question the user actually asked. The case it exists for: a plugin
+installed last week, in a folder with three months of traffic, whose skills the aggregate reports as
+nearly free because it divides their weight over ninety sessions that never declared them.
+Windowing is also what changes which items reach `remove`, so reach for it when everything is
+`consider` and the user wants to know what is actually safe to drop.
+
+Two facts, and they are not the same number:
+
+- **`window_session_limit`** — what was ASKED for. Absent on an unwindowed run.
+- **`window_sessions_analyzed`** — what the account actually HAS. On a fresh install these differ,
+  and the second one is the sample. **Never quote the limit as the evidence.**
+
+With a window, each item also carries `item.<name>.session.<id>.{requests,reads,usd}`, and each
+session gets `session.<id>.{requests,unused_reads,unused_usd,items,model,priced}`. This is the
+figure a user can check: "$0.20 for this skill" is unverifiable, "in these two sessions it cost
+$0.16 and $0.04 and you never called it" is something they can match against their own memory of
+what they were doing. `requests` is the multiplier — the same declaration costs forty times more in
+an eighty-request session than in a two-request one — and it is **one number per session**, not a
+sum over the items reporting it.
+
+`session.*.unused_usd` INCLUDES built-ins, because it answers what that session spent carrying
+things it never touched. `savings_window_usd` is the removable subset. Do not use one for the other,
+and do not sum the two.
+
+Without `--sessions`, none of these facts exist, because the server does not send the breakdown
+unless it is asked. Their absence is not a zero and must never be filled in by computing a share of
+the item total yourself.
 
 ## The configuration audit
 

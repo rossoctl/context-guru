@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -168,10 +169,24 @@ func insightsKey(t *testing.T, dir string) string {
 
 // apiStub serves the dashboard routes insights.py reads, from a path->body map, and counts every
 // request it receives. An absent path 404s, which is what a proxy running without --dashboard does.
+//
+// `queries` records the RAW query string beside the path, and it is separate from `paths` because
+// the two answer different questions. `paths` is the read-onliness guard — which routes were
+// touched, with what method. `queries` is the parameter guard: `--sessions N` is only a window if
+// `sessions=N` actually reaches the server, and a flag that is parsed and then dropped produces a
+// report labelled "the last N sessions" computed over all of them. That failure is invisible in
+// the output, so the only place to catch it is the wire.
 type apiStub struct {
-	port  string
-	hits  *int32
-	paths *[]string
+	port    string
+	hits    *int32
+	paths   *[]string
+	queries *map[string]string
+}
+
+// query returns the raw query string the stub saw on `path`, and whether it saw the path at all.
+func (s apiStub) query(path string) (string, bool) {
+	v, ok := (*s.queries)[path]
+	return v, ok
 }
 
 func newAPIStub(t *testing.T, bodies map[string]string) apiStub {
@@ -182,10 +197,12 @@ func newAPIStub(t *testing.T, bodies map[string]string) apiStub {
 	}
 	var hits int32
 	var paths []string
+	queries := map[string]string{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		paths = append(paths, r.Method+" "+r.URL.Path)
+		queries[r.URL.Path] = r.URL.RawQuery
 		if r.URL.Path == "/healthz" {
 			w.Write([]byte("ok")) //nolint:errcheck
 			return
@@ -201,7 +218,8 @@ func newAPIStub(t *testing.T, bodies map[string]string) apiStub {
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go srv.Serve(ln) //nolint:errcheck
 	t.Cleanup(func() { srv.Close() })
-	return apiStub{port: fmt.Sprint(ln.Addr().(*net.TCPAddr).Port), hits: &hits, paths: &paths}
+	return apiStub{port: fmt.Sprint(ln.Addr().(*net.TCPAddr).Port), hits: &hits, paths: &paths,
+		queries: &queries}
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,5 +1133,1358 @@ func TestTheReportStillFindsTheInstallWhenTheSessionPointsAtAForeignLocalProxy(t
 	if f["port"] != "8850" {
 		t.Errorf("port=%q, want 8850: a foreign proxy in the environment is not evidence that this "+
 			"project has no install", f["port"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 4. Disclosure: the observation floor qualifies advice, it does not hide inventory
+// ---------------------------------------------------------------------------
+
+// toolsBelowFloorWithInventory renders an /api/tools body with three never-invoked items — an MCP
+// tool, a plugin skill and a standalone skill — over a window far too short to qualify any of them
+// for removal. This is the ordinary state of a fresh install, and it is the state in which the
+// report used to go quiet: /api/toolfilter withholds every suggestion, so nothing downstream ever
+// named an item.
+//
+// `aside` carries a built-in, because a report that lists inventory must still refuse to offer the
+// one group whose removal breaks the agent.
+func toolsBelowFloorWithInventory() string {
+	return `{
+	  "coverage": {"sessions": 2, "captured": 2, "not_captured": 0, "unpriced_sessions": 0,
+	               "requests": 62},
+	  "totals": {"declared_tokens": 4100, "unused_tokens": 4100, "unused_pct": 100,
+	             "unused_reads": 254200, "unused_usd": 0.19, "priced": true,
+	             "declared_set_tokens": 9000, "aside_tokens": 5203,
+	             "requests_per_session_typical": 31},
+	  "prompt": {"tokens": 1994, "sessions": 2},
+	  "tools": [
+	    {"kind": "mcp_tool", "name": "mcp__atlas__geocode", "server": "atlas",
+	     "tokens": 1200, "sessions_declared": 2, "sessions_used": 0, "calls": 0,
+	     "unused_reads": 74400, "unused_usd": 0.0563, "priced": true, "builtin": false,
+	     "removal": {"kind": "mcp_tool", "command": "claude mcp remove atlas",
+	                 "settings_path": "~/.claude/settings.json",
+	                 "effect": "the command removes the whole atlas server"}},
+	    {"kind": "tool", "name": "DesignSync", "tokens": 2057, "sessions_declared": 2,
+	     "sessions_used": 0, "calls": 0, "unused_reads": 127500, "unused_usd": 0.0967,
+	     "priced": true, "builtin": false,
+	     "removal": {"kind": "client_tool", "command": "claude --disallowedTools \"DesignSync\"",
+	                 "settings_path": "~/.claude/settings.json",
+	                 "effect": "removes the tool from the prompt entirely"}}
+	  ],
+	  "servers": [{"server": "atlas", "tools": 1, "tools_used": 0, "tokens": 1200,
+	               "sessions_declared": 2, "sessions_used": 0, "calls": 0,
+	               "unused_reads": 74400, "unused_usd": 0.0563, "priced": true}],
+	  "aside": [{"kind": "tool", "name": "Artifact", "tokens": 5203, "sessions_declared": 2,
+	             "sessions_used": 0, "calls": 0, "unused_reads": 322586, "unused_usd": 0.2445,
+	             "priced": true, "builtin": true,
+	             "removal": {"kind": "builtin", "danger": true,
+	                         "command": "claude --disallowedTools \"Artifact\"",
+	                         "note": "this is one of Claude Code's OWN tools"}}],
+	  "models": [],
+	  "skills": {"state": "ok", "declared": 2, "invoked": 0, "listing_tokens": 480,
+	             "unused_listing_reads": 29760, "unused_listing_usd": 0.0226,
+	             "skills": [
+	    {"kind": "skill", "name": "superpowers:brainstorming", "tokens": 332,
+	     "sessions_declared": 2, "sessions_used": 0, "calls": 0, "unused_reads": 20584,
+	     "unused_usd": 0.0156, "priced": true, "builtin": false,
+	     "removal": {"kind": "plugin_skill", "command": "claude plugin disable superpowers",
+	                 "note": "skillOverrides does not work on a plugin's skills"}},
+	    {"kind": "skill", "name": "dataviz", "tokens": 148, "sessions_declared": 2,
+	     "sessions_used": 0, "calls": 0, "unused_reads": 9176, "unused_usd": 0.0070,
+	     "priced": true, "builtin": false,
+	     "removal": {"kind": "skill", "settings": "{\"skillOverrides\":{\"dataviz\":\"off\"}}",
+	                 "settings_path": "~/.claude/settings.json",
+	                 "effect": "hides the skill from the listing"}}
+	  ]}
+	}`
+}
+
+// filterWithholdingEverything is /api/toolfilter refusing to suggest anything, which is what the
+// server does below its own floor. `withheld` is the count it is sitting on.
+func filterWithholdingEverything(withheld int) string {
+	return fmt.Sprintf(`{
+	  "enabled": false, "min_sessions": 5, "min_days": 7, "withheld": %d, "excluded": [],
+	  "coverage": {"sessions": 2, "captured": 2, "not_captured": 0},
+	  "suggestions": []
+	}`, withheld)
+}
+
+// TestInventoryIsListedEvenWhenEveryRemovalIsWithheld is the disclosure rule, and the reason it is
+// a test rather than a style preference: below the floor this command used to report
+// `suggestions=0` and name nothing, so a user who asked "what am I carrying and never using" got a
+// count and no list. The floor's argument — five sessions in one afternoon are five sessions on one
+// task — is sound for ADVICE and says nothing about DISCLOSURE. Withholding a recommendation is
+// honest; withholding the inventory is just unhelpful.
+//
+// So: every never-invoked item must appear by name, with its weight and its cost, while the
+// per-item REMOVAL advice stays gated. The two must be separable, and this pins that they are.
+func TestInventoryIsListedEvenWhenEveryRemovalIsWithheld(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsBelowFloorWithInventory(),
+		"/api/toolfilter": filterWithholdingEverything(5),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	out, code := runInsights(t, dir, nil, "capabilities")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+
+	// The floor is still in force: nothing is being recommended.
+	if f["suggestions"] != "0" {
+		t.Fatalf("suggestions=%q, want 0 — this test is about the state where the server offers "+
+			"nothing, and if it offers something the premise is gone", f["suggestions"])
+	}
+
+	// Every unused item is named, with the two numbers that make it actionable.
+	for _, want := range []struct{ name, tokens, usd string }{
+		{"mcp__atlas__geocode", "1200", "0.0563"},
+		{"DesignSync", "2057", "0.0967"},
+		{"superpowers:brainstorming", "332", "0.0156"},
+		{"dataviz", "148", "0.007"},
+	} {
+		if !strings.Contains(out, want.name) {
+			t.Errorf("item %q is never named in the output. The floor withholds the "+
+				"RECOMMENDATION; it must not withhold the inventory", want.name)
+			continue
+		}
+		if f["item."+want.name+".tokens"] != want.tokens {
+			t.Errorf("item.%s.tokens=%q, want %q", want.name,
+				f["item."+want.name+".tokens"], want.tokens)
+		}
+		if f["item."+want.name+".usd"] != want.usd {
+			t.Errorf("item.%s.usd=%q, want %q", want.name,
+				f["item."+want.name+".usd"], want.usd)
+		}
+	}
+
+	// Each item says whether it can be removed at all, and at what scope, because "remove this"
+	// and "remove the thing that owns this" are different instructions with different blast radii.
+	if got := f["item.dataviz.scope"]; got != "item" {
+		t.Errorf("item.dataviz.scope=%q, want \"item\": a standalone skill is removable on its own", got)
+	}
+	if got := f["item.superpowers:brainstorming.scope"]; got != "plugin" {
+		t.Errorf("item.superpowers:brainstorming.scope=%q, want \"plugin\": skillOverrides does "+
+			"not work on a plugin's skills, so offering a per-skill removal would be a fix that "+
+			"silently does nothing", got)
+	}
+	if got := f["item.mcp__atlas__geocode.scope"]; got != "server" {
+		t.Errorf("item.mcp__atlas__geocode.scope=%q, want \"server\"", got)
+	}
+
+	// A built-in appears in the inventory but is never offered: the weight is real and removing it
+	// breaks the agent, so it is reported as unavailable rather than as a saving.
+	if !strings.Contains(out, "Artifact") {
+		t.Error("the built-in Artifact is absent from the inventory; its weight is real and a " +
+			"report that hides it understates what the prompt costs")
+	}
+	if got := f["item.Artifact.scope"]; got != "none" {
+		t.Errorf("item.Artifact.scope=%q, want \"none\": a built-in must not be offered for "+
+			"removal at any scope", got)
+	}
+
+	// The gate itself is still reported, so the reader knows why there is no advice yet.
+	if f["suggest_withheld"] != "5" {
+		t.Errorf("suggest_withheld=%q, want 5", f["suggest_withheld"])
+	}
+}
+
+// insightsSkillOnDisk writes a SKILL.md with front matter into a fake plugin cache under `home`,
+// which is the layout Claude Code itself installs: <home>/.claude/plugins/cache/<marketplace>/
+// <plugin>/<version>/skills/<name>/SKILL.md. Tests write here rather than hoping the developer's
+// own machine has the plugin, for the reason runInsights documents about HOME.
+func insightsSkillOnDisk(t *testing.T, home, marketplace, plugin, version, name, desc string) {
+	t.Helper()
+	dir := filepath.Join(home, ".claude", "plugins", "cache", marketplace, plugin, version,
+		"skills", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: " + name + "\ndescription: " + desc + "\n---\n\n# " + name + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEachItemCarriesWhatItDoesWhereThatIsKnowable pins the "what will I lose" half of the report.
+//
+// A removal instruction without a description asks somebody to delete a thing whose purpose they
+// cannot see, which is how a cost report talks a user into breaking their own setup. The
+// description is therefore part of the finding, not decoration.
+//
+// It also pins the limit, which matters more than the feature: a skill built into Claude Code has
+// no SKILL.md anywhere on disk, so its description is NOT KNOWABLE from here. That case must be
+// reported as absent rather than filled with a plausible sentence — a description this script
+// invented would be indistinguishable from one it read, and the whole surface's claim is that
+// every line is traceable to a measurement or a file.
+func TestEachItemCarriesWhatItDoesWhereThatIsKnowable(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsBelowFloorWithInventory(),
+		"/api/toolfilter": filterWithholdingEverything(5),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	home := filepath.Join(dir, "home")
+
+	// The plugin skill the stub declares, with a description only this file can supply.
+	insightsSkillOnDisk(t, home, "claude-plugins-official", "superpowers", "6.4.1",
+		"brainstorming", "Explore user intent and requirements before implementation.")
+
+	out, code := runInsights(t, dir, nil, "capabilities")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+
+	if got := f["item.superpowers:brainstorming.desc"]; got !=
+		"Explore user intent and requirements before implementation." {
+		t.Errorf("item.superpowers:brainstorming.desc=%q, want the description from its SKILL.md: "+
+			"a removal offered without saying what the thing does is asking somebody to delete "+
+			"something they cannot evaluate", got)
+	}
+
+	// `dataviz` has no file in this sandbox, which is the built-in case. Absent, never invented.
+	if got, ok := f["item.dataviz.desc"]; ok {
+		t.Errorf("item.dataviz.desc=%q, want no key at all: no SKILL.md exists for it here, so a "+
+			"description would be fabricated, and a fabricated one is indistinguishable from a "+
+			"read one", got)
+	}
+	if got := f["item.dataviz.desc_unknown"]; got != "true" {
+		t.Errorf("item.dataviz.desc_unknown=%q, want true — the gap must be stated rather than "+
+			"left as a blank the reader mistakes for 'does nothing'", got)
+	}
+}
+
+// TestADescriptionIsNeverSplitAcrossLines is the wire-format half of the same feature, and it is
+// separate because the failure is silent. Descriptions are prose written by somebody else: they
+// contain newlines, and a multi-line front-matter description is normal YAML. Emitted raw into a
+// key=value stream, the second line becomes a fact with no key and every reader downstream sees a
+// truncated sentence or a corrupt map.
+func TestADescriptionIsNeverSplitAcrossLines(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsBelowFloorWithInventory(),
+		"/api/toolfilter": filterWithholdingEverything(0),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	home := filepath.Join(dir, "home")
+	skillDir := filepath.Join(home, ".claude", "plugins", "cache", "m", "superpowers", "1",
+		"skills", "brainstorming")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A YAML folded description over three lines, plus a stray `=` — both are legal in a
+	// description and both break a naive key=value writer.
+	body := "---\nname: brainstorming\ndescription: >\n  First line of it.\n" +
+		"  Second line a=b continues.\n  Third line ends.\nallowed-tools: Bash\n---\n\n# x\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := runInsights(t, dir, nil, "capabilities")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, "=") {
+			t.Fatalf("output line %q carries no '='; a description's newline has split the "+
+				"key=value stream and every reader after it is parsing prose as facts", line)
+		}
+	}
+	got := facts(out)["item.superpowers:brainstorming.desc"]
+	for _, want := range []string{"First line of it.", "Second line a=b continues.", "Third line ends."} {
+		if !strings.Contains(got, want) {
+			t.Errorf("desc=%q is missing %q: a folded description must be joined, not truncated "+
+				"at its first newline", got, want)
+		}
+	}
+}
+
+// TestADescriptionIsTrimmedToSomethingAHumanCanScan exists because of what a skill's `description`
+// actually is: a trigger written FOR A MODEL, not a summary written for a person. Measured on one
+// real machine, the median is 278 characters and the longest is 1,099 — a field whose tail is
+// mostly "use this when the user says X, skip it when Y". Dropped whole into a report, it buries
+// the three numbers beside it and the reader stops reading the column.
+//
+// So the inventory carries a scannable first sentence AND keeps the full text under its own key.
+// Both, because they answer different questions: `desc` is "what is this" at a glance, `desc_full`
+// is "tell me everything before I delete it". Truncating with no way back to the original would
+// make the report the only copy, and a lossy one.
+func TestADescriptionIsTrimmedToSomethingAHumanCanScan(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsBelowFloorWithInventory(),
+		"/api/toolfilter": filterWithholdingEverything(0),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	long := "Charts, graphs and plots in any medium. " +
+		"Use this skill whenever you are about to create ANY chart, graph, plot, dashboard or " +
+		"data visualization, in ANY output medium, and read it BEFORE writing the first line of " +
+		"chart code or choosing chart colors. Triggers on: chart, graph, plot, data viz, " +
+		"visualization, dashboard, analytics, categorical colors, sequential palette, stat tile."
+	insightsSkillOnDisk(t, filepath.Join(dir, "home"), "m", "superpowers", "1",
+		"brainstorming", long)
+
+	out, code := runInsights(t, dir, nil, "capabilities")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+
+	short := f["item.superpowers:brainstorming.desc"]
+	if short == "" {
+		t.Fatal("item.superpowers:brainstorming.desc is empty")
+	}
+	if len(short) > 200 {
+		t.Errorf("desc is %d chars (%q): a trigger phrase written for a model is not a summary "+
+			"for a person, and at this length it crowds out the numbers it sits beside",
+			len(short), short)
+	}
+	if !strings.HasPrefix(short, "Charts, graphs and plots in any medium.") {
+		t.Errorf("desc=%q, want it to lead with the first sentence rather than a mid-field "+
+			"fragment", short)
+	}
+	// The trigger tail is the part a human does not need and must not be what they read first.
+	if strings.Contains(short, "Triggers on:") {
+		t.Errorf("desc=%q still carries the model-facing trigger list", short)
+	}
+	// Nothing is lost: the full text stays available for somebody deciding whether to delete it.
+	full := f["item.superpowers:brainstorming.desc_full"]
+	if !strings.Contains(full, "Triggers on:") {
+		t.Errorf("desc_full=%q does not carry the whole description; truncating with no way back "+
+			"would make this report a lossy copy of the only source", full)
+	}
+}
+
+// TestALongSingleSentenceDescriptionIsStillBounded is the case the first trimming test missed, and
+// it was found on real data rather than imagined: three skills on one machine have a description
+// that is ONE sentence of 326 to 424 characters. A trimmer that cuts on sentence boundaries emits
+// such a sentence whole, so the bound held only for descriptions that happened to have an early
+// full stop.
+//
+// The budget has to hold for any shape of input, because its purpose is the column width in a
+// report, and prose does not negotiate with a layout.
+func TestALongSingleSentenceDescriptionIsStillBounded(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsBelowFloorWithInventory(),
+		"/api/toolfilter": filterWithholdingEverything(0),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	// One sentence, no internal full stop, 300+ chars — the real shape of
+	// superpowers:diagnosing-superpowers, whose description runs to 424 characters unbroken.
+	oneSentence := "Enable or disable the context-guru status line, a terminal status line showing " +
+		"the context-window bar, this session's running savings against its own running cost and " +
+		"tokens, the proxy and upstream latency split, and a least-used-tool hint, for whichever " +
+		"project happens to be routed through the local proxy right now"
+	insightsSkillOnDisk(t, filepath.Join(dir, "home"), "m", "superpowers", "1",
+		"brainstorming", oneSentence)
+
+	out, code := runInsights(t, dir, nil, "capabilities")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+	short := f["item.superpowers:brainstorming.desc"]
+	if len(short) > 210 {
+		t.Errorf("desc is %d chars: the budget must hold for a single long sentence too, not only "+
+			"for text with an early sentence break\n%q", len(short), short)
+	}
+	if !strings.HasPrefix(short, "Enable or disable the context-guru status line") {
+		t.Errorf("desc=%q, want the leading words kept", short)
+	}
+	// Truncation must be visible, so a reader knows the sentence did not simply end there.
+	if !strings.HasSuffix(short, "…") {
+		t.Errorf("desc=%q does not mark that it was cut; an invisible truncation reads as the "+
+			"author's own full stop", short)
+	}
+	if full := f["item.superpowers:brainstorming.desc_full"]; !strings.HasSuffix(full,
+		"routed through the local proxy right now") {
+		t.Errorf("desc_full=%q must keep the whole sentence", full)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 5. Hierarchy: the owner is the unit of removal, so it is the unit of reporting
+// ---------------------------------------------------------------------------
+
+// toolsWithTwoOwners renders an /api/tools body where one plugin contributes BOTH skills and MCP
+// tools, which is the shape the inventory has to roll up and the shape no single machine
+// necessarily has. One MCP server is also configured on its own, owned by nothing — the ordinary
+// case — so the two kinds of owner are exercised side by side.
+func toolsWithTwoOwners() string {
+	return `{
+	  "coverage": {"sessions": 3, "captured": 3, "not_captured": 0, "unpriced_sessions": 0,
+	               "requests": 90},
+	  "totals": {"declared_tokens": 3000, "unused_tokens": 3000, "unused_pct": 100,
+	             "unused_reads": 180000, "unused_usd": 0.30, "priced": true,
+	             "declared_set_tokens": 6000, "requests_per_session_typical": 30},
+	  "prompt": {"tokens": 1000, "sessions": 3},
+	  "tools": [
+	    {"kind": "mcp_tool", "name": "mcp__giveinfo__info", "server": "giveinfo",
+	     "tokens": 400, "sessions_declared": 3, "sessions_used": 0, "calls": 0,
+	     "unused_reads": 24000, "unused_usd": 0.0400, "priced": true,
+	     "removal": {"kind": "mcp_tool", "command": "claude mcp remove giveinfo"}},
+	    {"kind": "mcp_tool", "name": "mcp__giveinfo__list", "server": "giveinfo",
+	     "tokens": 300, "sessions_declared": 3, "sessions_used": 0, "calls": 0,
+	     "unused_reads": 18000, "unused_usd": 0.0300, "priced": true,
+	     "removal": {"kind": "mcp_tool", "command": "claude mcp remove giveinfo"}},
+	    {"kind": "mcp_tool", "name": "mcp__solo__ping", "server": "solo",
+	     "tokens": 100, "sessions_declared": 3, "sessions_used": 0, "calls": 0,
+	     "unused_reads": 6000, "unused_usd": 0.0100, "priced": true,
+	     "removal": {"kind": "mcp_tool", "command": "claude mcp remove solo"}}
+	  ],
+	  "servers": [
+	    {"server": "giveinfo", "tools": 2, "tools_used": 0, "tokens": 700,
+	     "sessions_declared": 3, "sessions_used": 0, "calls": 0, "unused_reads": 42000,
+	     "unused_usd": 0.0700, "priced": true},
+	    {"server": "solo", "tools": 1, "tools_used": 0, "tokens": 100,
+	     "sessions_declared": 3, "sessions_used": 0, "calls": 0, "unused_reads": 6000,
+	     "unused_usd": 0.0100, "priced": true}
+	  ],
+	  "aside": [], "models": [],
+	  "skills": {"state": "ok", "declared": 3, "invoked": 0, "listing_tokens": 600,
+	             "unused_listing_reads": 36000, "unused_listing_usd": 0.0600,
+	             "skills": [
+	    {"kind": "skill", "name": "giveinfo:blah-one", "tokens": 200, "sessions_declared": 3,
+	     "sessions_used": 0, "calls": 0, "unused_reads": 12000, "unused_usd": 0.0200,
+	     "priced": true,
+	     "removal": {"kind": "plugin_skill", "command": "claude plugin disable giveinfo"}},
+	    {"kind": "skill", "name": "giveinfo:blah-two", "tokens": 150, "sessions_declared": 3,
+	     "sessions_used": 0, "calls": 0, "unused_reads": 9000, "unused_usd": 0.0150,
+	     "priced": true,
+	     "removal": {"kind": "plugin_skill", "command": "claude plugin disable giveinfo"}},
+	    {"kind": "skill", "name": "lonesome", "tokens": 50, "sessions_declared": 3,
+	     "sessions_used": 0, "calls": 0, "unused_reads": 3000, "unused_usd": 0.0050,
+	     "priced": true,
+	     "removal": {"kind": "skill", "settings": "{\"skillOverrides\":{\"lonesome\":\"off\"}}",
+	                 "settings_path": "~/.claude/settings.json"}}
+	  ]}
+	}`
+}
+
+// TestOwnersRollUpTheirChildrenWithASubtotal pins the shape the report is organised around: the
+// thing you remove is an OWNER, so the owner is what carries a figure.
+//
+// Without a rollup the reader has to add rows themselves to answer the only question that decides
+// anything — "what does this plugin cost me in total" — and a reader adding dollar figures across
+// rows is a reader who will also add the two figures that must never be summed. The subtotal
+// belongs to the report, computed once, beside the command that acts on it.
+//
+// Both kinds of owner are pinned here because they are not the same: a plugin may contribute
+// skills AND MCP tools, while an MCP server owns only tools.
+func TestOwnersRollUpTheirChildrenWithASubtotal(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsWithTwoOwners(),
+		"/api/toolfilter": filterWithholdingEverything(6),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	out, code := runInsights(t, dir, nil, "capabilities")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+
+	// The plugin owns two skills (0.0200 + 0.0150) and nothing else. Its MCP-looking tools are
+	// named `mcp__giveinfo__*` but are owned by the SERVER, which is a different owner that
+	// happens to share a name — exactly the confusion a rollup has to not make.
+	if got := f["owner.plugin.giveinfo.skills"]; got != "2" {
+		t.Errorf("owner.plugin.giveinfo.skills=%q, want 2", got)
+	}
+	if got := f["owner.plugin.giveinfo.usd"]; got != "0.035" {
+		t.Errorf("owner.plugin.giveinfo.usd=%q, want 0.035 (0.0200+0.0150)", got)
+	}
+	if got := f["owner.plugin.giveinfo.tokens"]; got != "350" {
+		t.Errorf("owner.plugin.giveinfo.tokens=%q, want 350", got)
+	}
+	if got := f["owner.plugin.giveinfo.command"]; got != "claude plugin disable giveinfo" {
+		t.Errorf("owner.plugin.giveinfo.command=%q, want the plugin command: the subtotal is only "+
+			"actionable beside the thing that acts on it", got)
+	}
+
+	// The MCP server rolls up its own two tools.
+	if got := f["owner.server.giveinfo.tools"]; got != "2" {
+		t.Errorf("owner.server.giveinfo.tools=%q, want 2", got)
+	}
+	if got := f["owner.server.giveinfo.usd"]; got != "0.07" {
+		t.Errorf("owner.server.giveinfo.usd=%q, want 0.07 (0.0400+0.0300)", got)
+	}
+	if got := f["owner.server.solo.tools"]; got != "1" {
+		t.Errorf("owner.server.solo.tools=%q, want 1", got)
+	}
+
+	// A standalone skill has no owner and must not invent one, or the report grows a phantom
+	// plugin whose removal command does not exist.
+	for key := range f {
+		if strings.HasPrefix(key, "owner.plugin.lonesome") {
+			t.Errorf("%s exists; `lonesome` is a standalone skill and belongs to no plugin", key)
+		}
+	}
+	if got := f["item.lonesome.scope"]; got != "item" {
+		t.Errorf("item.lonesome.scope=%q, want item", got)
+	}
+
+	// Every child still points at its owner, so a reader can get from a row to the thing that
+	// removes it without re-deriving the relationship from a name.
+	if got := f["item.giveinfo:blah-one.plugin"]; got != "giveinfo" {
+		t.Errorf("item.giveinfo:blah-one.plugin=%q, want giveinfo", got)
+	}
+	if got := f["item.mcp__giveinfo__info.server"]; got != "giveinfo" {
+		t.Errorf("item.mcp__giveinfo__info.server=%q, want giveinfo", got)
+	}
+}
+
+// TestOwnerSubtotalsAreNeverSummedIntoAGrandTotal guards the arithmetic the rest of this surface
+// is careful about and a rollup makes newly tempting.
+//
+// An MCP tool is counted once as an item and again inside its server's subtotal; a plugin's skills
+// likewise. Those are the SAME tokens viewed at two levels, so adding every `owner.*.usd` together
+// double-counts, and adding owner subtotals to the headline `decl_unused_usd` double-counts
+// differently. The report therefore publishes one removable total, computed from items, and the
+// test pins that it equals the items rather than the owners.
+func TestOwnerSubtotalsAreNeverSummedIntoAGrandTotal(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsWithTwoOwners(),
+		"/api/toolfilter": filterWithholdingEverything(6),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	out, code := runInsights(t, dir, nil, "capabilities")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+
+	// Items: 0.04 + 0.03 + 0.01 + 0.02 + 0.015 + 0.005 = 0.12
+	if got := f["inventory_removable_usd"]; got != "0.12" {
+		t.Errorf("inventory_removable_usd=%q, want 0.12 — the sum over ITEMS, each counted once", got)
+	}
+	// Owners: plugin 0.035 + servers 0.07 + 0.01 = 0.115, which omits the standalone skill and is
+	// NOT the same number. If a future change ever makes these equal by construction, the two
+	// figures have been conflated and one of them is wrong.
+	if f["inventory_removable_usd"] == "0.115" {
+		t.Error("the removable total equals the sum of owner subtotals, which means items with no " +
+			"owner have been dropped from it")
+	}
+	// And the figure must carry a basis, like every other money in this report.
+	if !strings.Contains(out, "inventory_removable_basis=measured over the window") {
+		t.Error("inventory_removable_usd has no basis fact; an unlabelled dollar figure in this " +
+			"report is the one thing every other number here is careful not to be")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 6. Self-exclusion: the report does not bill the reader for the reporter
+// ---------------------------------------------------------------------------
+
+// toolsIncludingOurOwnPlugin renders an inventory in which context-guru's own skills are among the
+// never-invoked rows, which is the ordinary state of any machine with this plugin installed: most
+// sessions never run /context-guru:anything.
+func toolsIncludingOurOwnPlugin() string {
+	return `{
+	  "coverage": {"sessions": 3, "captured": 3, "not_captured": 0, "unpriced_sessions": 0,
+	               "requests": 90},
+	  "totals": {"declared_tokens": 1000, "unused_tokens": 1000, "unused_pct": 100,
+	             "unused_reads": 60000, "unused_usd": 0.10, "priced": true,
+	             "declared_set_tokens": 2000, "requests_per_session_typical": 30},
+	  "prompt": {"tokens": 500, "sessions": 3},
+	  "tools": [], "servers": [], "aside": [], "models": [],
+	  "skills": {"state": "ok", "declared": 3, "invoked": 0, "listing_tokens": 300,
+	             "unused_listing_reads": 18000, "unused_listing_usd": 0.0300,
+	             "skills": [
+	    {"kind": "skill", "name": "context-guru:insights", "tokens": 143,
+	     "sessions_declared": 3, "sessions_used": 0, "calls": 0, "unused_reads": 8580,
+	     "unused_usd": 0.0143, "priced": true,
+	     "removal": {"kind": "plugin_skill", "command": "claude plugin disable context-guru"}},
+	    {"kind": "skill", "name": "context-guru:install", "tokens": 160,
+	     "sessions_declared": 3, "sessions_used": 0, "calls": 0, "unused_reads": 9600,
+	     "unused_usd": 0.0160, "priced": true,
+	     "removal": {"kind": "plugin_skill", "command": "claude plugin disable context-guru"}},
+	    {"kind": "skill", "name": "lonesome", "tokens": 50, "sessions_declared": 3,
+	     "sessions_used": 0, "calls": 0, "unused_reads": 3000, "unused_usd": 0.0050,
+	     "priced": true,
+	     "removal": {"kind": "skill", "settings": "{\"skillOverrides\":{\"lonesome\":\"off\"}}"}}
+	  ]}
+	}`
+}
+
+// TestOurOwnPluginIsNotBilledToTheReader pins self-exclusion, which is a correctness rule and not
+// tact: a cost report that counts its own weight as a saving it recommends is arguing for its own
+// removal in the middle of its advice, and every total it prints is inflated by the cost of
+// printing it.
+//
+// Excluded from the ranked inventory and from the removable total — and NAMED, with its figure, in
+// a fact of its own. Silent omission would leave a reader who sees 44 skills in /plugin and 42 in
+// this report with no way to find out why, and "the tool hid its own cost" is a worse look than
+// the cost.
+func TestOurOwnPluginIsNotBilledToTheReader(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsIncludingOurOwnPlugin(),
+		"/api/toolfilter": filterWithholdingEverything(3),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	out, code := runInsights(t, dir, nil, "capabilities")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+
+	// Not an item anybody is invited to remove.
+	for _, gone := range []string{"item.context-guru:insights.usd", "item.context-guru:install.usd",
+		"owner.plugin.context-guru.usd"} {
+		if got, ok := f[gone]; ok {
+			t.Errorf("%s=%q exists; our own plugin must not appear in the inventory it produces", gone, got)
+		}
+	}
+
+	// The removable total is the OTHER items only: 0.0050, not 0.0353.
+	if got := f["inventory_removable_usd"]; got != "0.005" {
+		t.Errorf("inventory_removable_usd=%q, want 0.005 — our own weight must not inflate the "+
+			"figure this report recommends acting on", got)
+	}
+	if got := f["inventory_items"]; got != "1" {
+		t.Errorf("inventory_items=%q, want 1", got)
+	}
+
+	// And it is disclosed rather than hidden: named, counted, priced, with its own command.
+	if got := f["self_excluded_items"]; got != "2" {
+		t.Errorf("self_excluded_items=%q, want 2", got)
+	}
+	if got := f["self_excluded_usd"]; got != "0.0303" {
+		t.Errorf("self_excluded_usd=%q, want 0.0303 (0.0143+0.0160): the figure is stated so a "+
+			"reader can audit the omission rather than discover it", got)
+	}
+	if got := f["self_excluded_command"]; got != "claude plugin disable context-guru" {
+		t.Errorf("self_excluded_command=%q, want the real command — the exclusion is a reporting "+
+			"choice, not a claim that this plugin cannot be removed", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 7. The local report: a template filled on this machine, published nowhere
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The verdict, the window, and the per-session breakdown
+// ---------------------------------------------------------------------------
+
+// toolsQualifiedAndNot is an /api/tools body holding one of each case the verdict has to
+// distinguish, so a single run exercises every branch:
+//
+//   - mcp__atlas__geocode — unused, removable, and the server qualified it     -> remove
+//   - DesignSync          — unused, removable, below the server's floor        -> consider
+//   - Artifact            — unused but one of Claude Code's own (aside)        -> keep
+//   - Grep                — invoked, so it earned its place                    -> keep
+//
+// Every row carries `sessions[]`, the per-session array Phase A added, because the windowed facts
+// and the per-item verdict are read off the same body and a stub that only served one of them
+// would let a test pass while the other half was never exercised.
+//
+// The per-session `unused_reads` sum EXACTLY to the row's own `unused_reads` here, matching what
+// the server guarantees on real data. A stub whose parts did not add up would make a test about
+// per-session attribution unable to catch an implementation that re-derived the figures.
+func toolsQualifiedAndNot() string {
+	return `{
+	  "coverage": {"sessions": 5, "captured": 5, "not_captured": 0, "unpriced_sessions": 0,
+	               "requests": 120},
+	  "totals": {"declared_tokens": 9000, "unused_tokens": 4000, "unused_pct": 44.4,
+	             "unused_reads": 300000, "unused_usd": 0.50, "priced": true,
+	             "declared_set_tokens": 12000, "requests_per_session_typical": 40},
+	  "prompt": {"tokens": 2000, "sessions": 5},
+	  "tools": [
+	    {"kind": "mcp_tool", "name": "mcp__atlas__geocode", "server": "atlas",
+	     "tokens": 1200, "sessions_declared": 5, "sessions_used": 0, "calls": 0,
+	     "unused_reads": 120000, "unused_usd": 0.2000, "priced": true, "builtin": false,
+	     "sessions": [
+	       {"session": "aaa", "requests": 80, "model": "aws/claude-opus-5",
+	        "unused_reads": 96000, "unused_usd": 0.1600, "priced": true},
+	       {"session": "bbb", "requests": 20, "model": "aws/claude-opus-5",
+	        "unused_reads": 24000, "unused_usd": 0.0400, "priced": true}],
+	     "removal": {"kind": "mcp_tool", "command": "claude mcp remove atlas"}},
+	    {"kind": "tool", "name": "DesignSync", "tokens": 2057, "sessions_declared": 2,
+	     "sessions_used": 0, "calls": 0, "unused_reads": 205700, "unused_usd": 0.1000,
+	     "priced": true, "builtin": false,
+	     "sessions": [
+	       {"session": "aaa", "requests": 80, "model": "aws/claude-opus-5",
+	        "unused_reads": 164560, "unused_usd": 0.0700, "priced": true},
+	       {"session": "bbb", "requests": 20, "model": "aws/claude-opus-5",
+	        "unused_reads": 41140, "unused_usd": 0.0300, "priced": true}],
+	     "removal": {"kind": "client_tool", "command": "claude --disallowedTools \"DesignSync\""}},
+	    {"kind": "tool", "name": "Grep", "tokens": 500, "sessions_declared": 5,
+	     "sessions_used": 4, "calls": 37, "unused_reads": 0, "unused_usd": 0,
+	     "priced": true, "builtin": false,
+	     "removal": {"kind": "client_tool", "command": "claude --disallowedTools \"Grep\""}}
+	  ],
+	  "servers": [{"server": "atlas", "tools": 1, "tools_used": 0, "tokens": 1200,
+	               "sessions_declared": 5, "sessions_used": 0, "calls": 0,
+	               "unused_reads": 120000, "unused_usd": 0.2000, "priced": true}],
+	  "aside": [{"kind": "tool", "name": "Artifact", "tokens": 5203, "sessions_declared": 5,
+	             "sessions_used": 0, "calls": 0, "unused_reads": 520300, "unused_usd": 0.4000,
+	             "priced": true, "builtin": true,
+	             "sessions": [
+	               {"session": "aaa", "requests": 80, "model": "aws/claude-opus-5",
+	                "unused_reads": 416240, "unused_usd": 0.3200, "priced": true},
+	               {"session": "bbb", "requests": 20, "model": "aws/claude-opus-5",
+	                "unused_reads": 104060, "unused_usd": 0.0800, "priced": true}],
+	             "removal": {"kind": "builtin", "danger": true,
+	                         "command": "claude --disallowedTools \"Artifact\"",
+	                         "note": "this is one of Claude Code's OWN tools"}}],
+	  "models": [],
+	  "skills": {"state": "absent", "declared": 0, "invoked": 0, "listing_tokens": 0,
+	             "skills": []}
+	}`
+}
+
+// filterQualifyingAtlasOnly is /api/toolfilter past its floor for exactly ONE of the stub's items.
+//
+// This is the shape that makes the verdict testable at all. The server's suggestion list IS the
+// floor applied — it offers an item only when it was declared across min_sessions sessions spanning
+// min_days days — so a body qualifying one item and withholding another puts `remove` and
+// `consider` side by side in one run, which is the only way a test can prove the script is reading
+// the floor rather than labelling everything the same.
+func filterQualifyingAtlasOnly() string {
+	return `{
+	  "enabled": false, "min_sessions": 5, "min_days": 7, "withheld": 1, "excluded": [],
+	  "coverage": {"sessions": 5, "captured": 5, "not_captured": 0},
+	  "suggestions": [{"kind": "mcp_tool", "name": "mcp__atlas__geocode", "server": "atlas",
+	                   "remove_as": "mcp__atlas__geocode", "tokens": 1200, "sessions": 5,
+	                   "days": 9.2, "unused_reads": 120000, "projected_usd": 0.2000,
+	                   "priced": true,
+	                   "basis": "declared in 5 sessions over 9.2 days, invoked in none"}]
+	}`
+}
+
+// TestEachItemCarriesAVerdictThatMatchesItsEvidence is the whole point of Phase B, and it is one
+// test rather than three because the three verdicts are a partition: a bug that promotes
+// `consider` to `remove` is the same bug that demotes nothing, and seeing all four rows in one run
+// is what makes it visible.
+//
+// WHY THE VERDICT IS NOT A STYLE CHOICE. Every row in this inventory already carried a dollar
+// figure and a removal command, which reads as an instruction — and for two of the four rows here
+// it would be the wrong one. `Artifact` is one of Claude Code's own tools and removing it breaks
+// the agent. `DesignSync` is unused across two sessions, which is two sessions on one task and no
+// evidence at all about what the next task needs. The verdict is the field that keeps the report
+// from making a recommendation its evidence cannot carry, so each value is pinned against the
+// specific reason it exists.
+func TestEachItemCarriesAVerdictThatMatchesItsEvidence(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(9.2),
+		"/api/tools":      toolsQualifiedAndNot(),
+		"/api/toolfilter": filterQualifyingAtlasOnly(),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	out, code := runInsights(t, dir, nil, "capabilities")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+
+	for _, want := range []struct{ name, verdict, why string }{
+		// Past the floor and removable: the one row this report is entitled to recommend.
+		{"mcp__atlas__geocode", "remove", "5 session"},
+		// Unused, removable, and NOT past the floor. The evidence is real and too thin to act on,
+		// and `why` must say which of the two it is rather than leaving the reader to infer it.
+		{"DesignSync", "consider", "2 session"},
+		// A built-in. Not "we have not seen enough yet" — the question is closed at every scope.
+		{"Artifact", "keep", "built-in"},
+		// Actually invoked. The other `keep`, and a different sentence: this one earned its place,
+		// which is the opposite claim from "we may not remove it".
+		{"Grep", "keep", "37"},
+	} {
+		if got := f["item."+want.name+".verdict"]; got != want.verdict {
+			t.Errorf("item.%s.verdict=%q, want %q", want.name, got, want.verdict)
+		}
+		why := f["item."+want.name+".why"]
+		if why == "" {
+			t.Errorf("item.%s.why is absent. A verdict with no stated evidence is the thing this "+
+				"field exists to prevent: the reader cannot check it and the model narrating it "+
+				"has to invent a reason", want.name)
+			continue
+		}
+		if !strings.Contains(why, want.why) {
+			t.Errorf("item.%s.why=%q, want it to carry %q — the evidence, not a restatement of "+
+				"the verdict", want.name, why, want.why)
+		}
+		// The bound is not cosmetic. `why` is rendered in a table cell beside three numbers and
+		// read aloud by a model summarising the report; a paragraph there buries the figures it
+		// is supposed to support.
+		if len(why) >= 160 {
+			t.Errorf("item.%s.why is %d chars, want under 160: %q", want.name, len(why), why)
+		}
+	}
+
+	// The two `keep`s must not read the same. One says "you may not remove this", the other says
+	// "you would not want to", and a reader who cannot tell them apart learns nothing from either.
+	if a, b := f["item.Artifact.why"], f["item.Grep.why"]; a == b {
+		t.Errorf("item.Artifact.why and item.Grep.why are both %q. `keep` covers two different "+
+			"facts — a built-in that cannot be removed, and something that was actually invoked — "+
+			"and collapsing them into one sentence loses the only part a reader can act on", a)
+	}
+}
+
+// TestOnlyTheRemoveVerdictIsEverAutoSelectable is the contract's auto-select rule, pinned from the
+// data side because the page cannot be trusted to re-derive it.
+//
+// The page ticks `remove` rows by default. If `consider` ever came back as `remove`, the page would
+// pre-tick a removal justified by two sessions on one task — which is exactly the failure the
+// observation floor exists to prevent, arriving through a different door. So the invariant is
+// stated here as a property over every item in the output rather than over the four this stub
+// happens to hold: no item may be `remove` unless the server itself qualified it.
+func TestOnlyTheRemoveVerdictIsEverAutoSelectable(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsBelowFloorWithInventory(),
+		"/api/toolfilter": filterWithholdingEverything(5),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	out, code := runInsights(t, dir, nil, "capabilities")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+
+	// Nothing qualified, so nothing may be marked `remove`. On the real machine this test was
+	// written against, 56 of 56 unused items were below the floor and `suggestions` was 0 — the
+	// state a user is in for their first week, and the state in which a pre-ticked removal would
+	// be worst.
+	var marked []string
+	for key, value := range f {
+		if strings.HasSuffix(key, ".verdict") && value == "remove" {
+			marked = append(marked, key)
+		}
+	}
+	if len(marked) > 0 {
+		sort.Strings(marked)
+		t.Errorf("%v are marked `remove` while the server qualified nothing (suggestions=%q). "+
+			"Auto-select ticks `remove`, so this is a pre-ticked removal resting on %s of "+
+			"observation", marked, f["suggestions"], f["decl_sessions_captured"]+" sessions")
+	}
+	// And the rows are still there with the weaker verdict, because the floor gates the ADVICE and
+	// never the disclosure — the rule TestInventoryIsListedEvenWhenEveryRemovalIsWithheld pins
+	// for the listing, restated for the verdict that now sits beside it.
+	for _, name := range []string{"mcp__atlas__geocode", "DesignSync", "dataviz"} {
+		if got := f["item."+name+".verdict"]; got != "consider" {
+			t.Errorf("item.%s.verdict=%q, want \"consider\": below the floor the item is still "+
+				"listed and still unused, and the verdict says which of those two it is", name, got)
+		}
+	}
+}
+
+// TestSessionsFlagWindowsTheReportAndIsVisibleOnTheWire.
+//
+// Two failures in one test because they are indistinguishable in the output. A `--sessions N` that
+// parses and then never reaches the server produces a report labelled "the last N sessions" and
+// computed over all of them — every number plausible, every number wrong, and nothing in the
+// output that says so. And `breakdown=session` is what makes the per-session rows exist at all,
+// so sending `sessions` without it yields a window whose per-item detail is silently empty.
+//
+// The window facts are pinned beside the wire because the label is the other half of the claim:
+// `window_session_limit` is what the user ASKED for and `window_sessions_analyzed` is what the
+// account actually HAS, and a fresh install where those differ (one session, five requested) must
+// show both rather than report the request as though it were the sample.
+func TestSessionsFlagWindowsTheReportAndIsVisibleOnTheWire(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(9.2),
+		"/api/tools":      toolsQualifiedAndNot(),
+		"/api/toolfilter": filterQualifyingAtlasOnly(),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	out, code := runInsights(t, dir, nil, "capabilities", "--sessions", "3")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+
+	raw, ok := stub.query("/api/tools")
+	if !ok {
+		t.Fatal("/api/tools was never requested")
+	}
+	q, err := url.ParseQuery(raw)
+	if err != nil {
+		t.Fatalf("parsing %q: %v", raw, err)
+	}
+	if got := q.Get("sessions"); got != "3" {
+		t.Errorf("/api/tools?%s carries sessions=%q, want 3. A --sessions the server never sees "+
+			"is a report labelled as a window and computed over all history", raw, got)
+	}
+	if got := q.Get("breakdown"); got != "session" {
+		t.Errorf("/api/tools?%s carries breakdown=%q, want \"session\". The per-session rows are "+
+			"the point of windowing; without this parameter the server omits them entirely and "+
+			"every per-session fact below is silently absent", raw, got)
+	}
+
+	f := facts(out)
+	if got := f["window_session_limit"]; got != "3" {
+		t.Errorf("window_session_limit=%q, want 3 — what the user asked for", got)
+	}
+	// What the account actually has, from the server's own coverage, which is the figure every
+	// per-session average divides by.
+	if got := f["window_sessions_analyzed"]; got != "5" {
+		t.Errorf("window_sessions_analyzed=%q, want 5 (the stub's captured count). Reporting the "+
+			"REQUESTED count here would claim a sample the account does not have", got)
+	}
+
+	// Unwindowed, the limit must be absent rather than zero: "no window" and "a window of zero
+	// sessions" are different claims, and one of them is a report about nothing.
+	out2, code2 := runInsights(t, dir, nil, "capabilities")
+	if code2 != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code2, out2)
+	}
+	if got, ok := facts(out2)["window_session_limit"]; ok {
+		t.Errorf("window_session_limit=%q on an unwindowed run, want no key at all", got)
+	}
+	if raw2, _ := stub.query("/api/tools"); strings.Contains(raw2, "sessions=") {
+		t.Errorf("/api/tools?%s carries a sessions parameter on a run that asked for no window", raw2)
+	}
+}
+
+// TestPerSessionFactsAttributeTheCostToTheSessionsThatPaidIt.
+//
+// "This skill cost you $0.20" is a figure nobody can check. "In these two sessions it cost $0.16
+// and $0.04, and you never called it" is one a user can audit against their own memory of what
+// they were doing — which is the entire argument for the per-session array existing, and it only
+// pays off if the numbers are carried through rather than re-derived.
+//
+// So this pins three things that a plausible-looking implementation gets wrong in three different
+// ways: the per-item-per-session figures (carried, not averaged), the per-session rollup across
+// items (summed over the items that session carried), and `requests` (the multiplier that turns a
+// per-request weight into what it actually cost — a 1,200-token tool in an 80-request session cost
+// 96,000 billed tokens, and dropping the multiplication understates it by a factor of eighty).
+func TestPerSessionFactsAttributeTheCostToTheSessionsThatPaidIt(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(9.2),
+		"/api/tools":      toolsQualifiedAndNot(),
+		"/api/toolfilter": filterQualifyingAtlasOnly(),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	out, code := runInsights(t, dir, nil, "capabilities", "--sessions", "5")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+
+	// Per item per session, exactly as the server attributed it.
+	for _, want := range []struct{ key, value string }{
+		{"item.mcp__atlas__geocode.session.aaa.requests", "80"},
+		{"item.mcp__atlas__geocode.session.aaa.reads", "96000"},
+		{"item.mcp__atlas__geocode.session.aaa.usd", "0.16"},
+		{"item.mcp__atlas__geocode.session.bbb.reads", "24000"},
+		{"item.mcp__atlas__geocode.session.bbb.usd", "0.04"},
+		{"item.DesignSync.session.aaa.reads", "164560"},
+	} {
+		if got := f[want.key]; got != want.value {
+			t.Errorf("%s=%q, want %q", want.key, got, want.value)
+		}
+	}
+
+	// The per-session rollup: what session `aaa` spent carrying everything it never invoked. Summed
+	// over the items, each counted once — 96000 (atlas) + 164560 (DesignSync) + 416240 (Artifact).
+	// The built-in is INCLUDED here because this figure is what the session cost, not what could be
+	// removed from it; excluding it would understate a real bill, and `savings_window_usd` below is
+	// the separate figure that holds the removable part.
+	if got := f["session.aaa.unused_reads"]; got != "676800" {
+		t.Errorf("session.aaa.unused_reads=%q, want 676800 (96000+164560+416240)", got)
+	}
+	// The session's own request count, and the reason it is pinned separately from the reads is
+	// that it is the one per-session figure that must NOT be summed. Every declaration that session
+	// carried was re-read by the same 80 requests — verified on real data, where all five sessions
+	// report an identical `requests` across all 79 inventory rows — so adding them over the items
+	// would multiply the session's length by the size of its inventory and report 240.
+	if got := f["session.aaa.requests"]; got != "80" {
+		t.Errorf("session.aaa.requests=%q, want 80 — one number per session, never a sum over "+
+			"the items reporting it", got)
+	}
+	if got := f["session.aaa.items"]; got != "3" {
+		t.Errorf("session.aaa.items=%q, want 3: how many never-invoked declarations that session "+
+			"carried, which is what makes a per-session dollar figure checkable", got)
+	}
+	if got := f["session.aaa.model"]; got != "aws/claude-opus-5" {
+		t.Errorf("session.aaa.model=%q, want aws/claude-opus-5", got)
+	}
+	if got := f["session.aaa.priced"]; got != "true" {
+		t.Errorf("session.aaa.priced=%q, want true", got)
+	}
+	if got := f["session.bbb.requests"]; got != "20" {
+		t.Errorf("session.bbb.requests=%q, want 20", got)
+	}
+
+	// The savings summary, and the one figure here that is NOT the session total: it is the
+	// REMOVABLE part, so the built-in's $0.40 is excluded while it is counted in session.*.
+	// 0.20 (atlas, scope=server) + 0.10 (DesignSync, scope=item) = 0.30.
+	if got := f["savings_window_usd"]; got != "0.3" {
+		t.Errorf("savings_window_usd=%q, want 0.3 (atlas 0.20 + DesignSync 0.10; the built-in's "+
+			"0.40 is NOT removable and must not be in a savings figure)", got)
+	}
+	// Over the sessions the account actually has, not the five requested.
+	if got := f["savings_per_session_avg_usd"]; got != "0.06" {
+		t.Errorf("savings_per_session_avg_usd=%q, want 0.06 (0.30 over 5 analyzed sessions)", got)
+	}
+	if got := f["savings_basis"]; got != "measured over the window" {
+		t.Errorf("savings_basis=%q, want \"measured over the window\" — this is what was spent, "+
+			"not a forecast, and the basis is the field that keeps the two apart", got)
+	}
+
+	// Nothing per-session is ever SYNTHESISED. The server sends the array only when asked, so the
+	// absence of the parameter must leave these facts absent rather than reconstructed from the
+	// item total — an attribution this script invented would be indistinguishable from one the
+	// proxy measured, and the whole surface's claim is that it is not.
+	//
+	// Asserted against a stub that serves the array REGARDLESS of the query, which is the strictest
+	// available form of the check: a stub that withheld it unasked would make the test pass for
+	// an implementation that reads the field and one that could not have, equally.
+	bare := newAPIStub(t, map[string]string{
+		"/api/stats":      window(9.2),
+		"/api/tools":      strings.ReplaceAll(toolsQualifiedAndNot(), `"sessions": [`, `"ignored": [`),
+		"/api/toolfilter": filterQualifyingAtlasOnly(),
+	})
+	dir2 := insightsProject(t, map[string]any{"port": bare.port})
+	out2, code2 := runInsights(t, dir2, nil, "capabilities", "--sessions", "5")
+	if code2 != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code2, out2)
+	}
+	for _, line := range strings.Split(out2, "\n") {
+		if strings.HasPrefix(line, "session.") || strings.Contains(line, ".session.") {
+			t.Errorf("a body with no per-session array still produced %q. The attribution was "+
+				"not read from the server, so it was invented", line)
+		}
+	}
+	// And the rest of the report still stands: a missing breakdown costs the per-session detail
+	// and nothing else, because the aggregate figures come from fields that are always present.
+	if got := facts(out2)["item.mcp__atlas__geocode.verdict"]; got != "remove" {
+		t.Errorf("item.mcp__atlas__geocode.verdict=%q with no per-session array, want \"remove\": "+
+			"the verdict rests on the floor and the call counts, not on the breakdown", got)
+	}
+}
+
+// TestReportWritesALocalFileAndNothingLeavesTheMachine is the rule the whole report mode exists
+// under, and it is pinned first because it is the one that matters: the user's traffic goes through
+// a gateway holding their credential, and a reporting command that fetched a stylesheet or posted
+// a figure anywhere would be exfiltrating their configuration from inside a tool that claims to be
+// read-only.
+//
+// So: the template ships in the plugin, is filled from data already fetched, is written under the
+// state directory, and the script prints the path rather than opening anything. Every asset is
+// inline. No http(s) reference of any kind survives in the output.
+func TestReportWritesALocalFileAndNothingLeavesTheMachine(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsWithTwoOwners(),
+		"/api/toolfilter": filterWithholdingEverything(6),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	out, code := runInsights(t, dir, nil, "capabilities", "--report")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+
+	path := facts(out)["report_path"]
+	if path == "" {
+		t.Fatalf("no report_path in output; the script must say where it put the file rather than "+
+			"leave the user to find it\n%s", out)
+	}
+	if !strings.HasPrefix(path, filepath.Join(dir, "state")) {
+		t.Errorf("report_path=%q is outside the sandbox state dir %q; a reporting command must "+
+			"not write wherever it likes", path, filepath.Join(dir, "state"))
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the report the script said it wrote: %v", err)
+	}
+	html := string(body)
+
+	// Nothing is FETCHED when the page is opened. A remote font or script would turn opening a
+	// local cost report into a network event that names this machine to a third party.
+	//
+	// The check is on markup that causes a fetch, not on the substring "https://": a URL is
+	// ordinary DATA here — the report states the user's own upstream and base_url — and banning
+	// the substring would fail on a correct report while still missing, say, a background-image.
+	// So: the data island is excised first, then the remaining markup is checked for anything
+	// that loads.
+	markup := html
+	if i := strings.Index(markup, `<script type="application/json"`); i != -1 {
+		if j := strings.Index(markup[i:], "</script>"); j != -1 {
+			markup = markup[:i] + markup[i+j:]
+		}
+	}
+	for _, forbidden := range []string{
+		"http://", "https://", "//", "<script src", "<link ", "@import", "url(",
+	} {
+		if strings.Contains(markup, forbidden) {
+			t.Errorf("the report's markup contains %q outside its data block; every asset must be "+
+				"inline so that opening the file reaches no network at all", forbidden)
+		}
+	}
+	// And the user's own configuration, which legitimately contains URLs, must still be in the
+	// data block rather than quietly stripped.
+	if !strings.Contains(html, `type="application/json"`) {
+		t.Error("the report has no JSON data island; values interpolated into markup instead " +
+			"would mean splicing somebody else's prose into HTML")
+	}
+	// It has to be a page, not a fragment, because it is opened straight off disk with no host.
+	if !strings.Contains(strings.ToLower(html), "<!doctype html>") {
+		t.Error("the report has no doctype; opened from the filesystem it renders in quirks mode")
+	}
+	// And the data must actually be in it.
+	for _, want := range []string{"giveinfo", "mcp__giveinfo__info", "lonesome", "0.12"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("the report does not mention %q, so it is not a rendering of this inventory", want)
+		}
+	}
+}
+
+// TestReportIsStillReadOnly extends the existing read-onliness guarantee to the new mode. --report
+// writes exactly one file, under the state directory, and touches no settings file: a command that
+// explains somebody's spending must not alter their configuration while doing it.
+func TestReportIsStillReadOnly(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsWithTwoOwners(),
+		"/api/toolfilter": filterWithholdingEverything(6),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	// Snapshot everything EXCEPT the state dir, which is where the one new file is allowed.
+	before := snapshotTree(t, filepath.Join(dir, ".claude"))
+	beforeHome := snapshotTree(t, filepath.Join(dir, "home"))
+
+	out, code := runInsights(t, dir, nil, "all", "--report")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	if diff := treeDiff(before, snapshotTree(t, filepath.Join(dir, ".claude"))); diff != "" {
+		t.Errorf("--report changed the project's settings: %s", diff)
+	}
+	if diff := treeDiff(beforeHome, snapshotTree(t, filepath.Join(dir, "home"))); diff != "" {
+		t.Errorf("--report changed the user's configuration: %s", diff)
+	}
+}
+
+// TestReportRefusesRatherThanRenderAnEmptyPage covers the state every other part of this surface
+// has a rule for: there is no install, or no traffic, so there is nothing to render. A page of
+// zeroes and empty tables reads as a clean bill of health, which is the one misreading this whole
+// command is built to prevent, so the mode declines and says why.
+func TestReportRefusesRatherThanRenderAnEmptyPage(t *testing.T) {
+	dir := insightsProject(t, nil) // no port configured anywhere: no install routes this directory
+	out, code := runInsights(t, dir, nil, "capabilities", "--report")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+	if f["report_path"] != "" {
+		t.Errorf("report_path=%q: with no install there is no measurement, and a rendered page of "+
+			"blanks would read as 'nothing is wrong'", f["report_path"])
+	}
+	if f["report_refused"] == "" {
+		t.Error("no report_refused fact; the refusal and its reason are the answer here, and " +
+			"silence would look like a failure to run")
+	}
+	// The gating finding is still the real output.
+	if !strings.Contains(out, "no-install") {
+		t.Error("the no-install finding is missing; --report must not suppress the diagnosis that " +
+			"explains why there is no report")
+	}
+}
+
+// treeDiff names the first difference between two snapshots, so a failure says which file changed
+// rather than only that something did.
+func treeDiff(before, after map[string]string) string {
+	for path, body := range after {
+		was, existed := before[path]
+		if !existed {
+			return fmt.Sprintf("created %s", path)
+		}
+		if was != body {
+			return fmt.Sprintf("modified %s", path)
+		}
+	}
+	for path := range before {
+		if _, ok := after[path]; !ok {
+			return fmt.Sprintf("deleted %s", path)
+		}
+	}
+	return ""
+}
+
+// TestReportDoesNotSpliceTheFactDocumentIntoMarkup pins a defect the sibling report test could not
+// see, and the reason it could not is the lesson: its stub facts contain no URL, so a report that
+// splices the whole fact document into the page's markup passes a check for "no http:// outside the
+// data island" purely because nothing in the fixture looks like a URL.
+//
+// The real defect: the template is filled with str.replace, which substitutes EVERY occurrence of
+// the placeholder. The template's own header comment named the token to document it, so the fact
+// document — which carries the user's base_url and their upstream gateway, from running_fingerprint
+// — was written into an HTML comment as well as the island. Measured on a real machine: 134,036
+// bytes instead of 91,675, with the upstream URL in markup.
+//
+// This test therefore asserts on a FACT VALUE that is unmistakably configuration, and asserts the
+// placeholder appears exactly once in the template. Either alone would have missed it.
+func TestReportDoesNotSpliceTheFactDocumentIntoMarkup(t *testing.T) {
+	tpl := readFileString(t, filepath.Join(scriptsDir(t), "insights_report.html"))
+	if n := strings.Count(tpl, "__CG_DATA__"); n != 1 {
+		t.Fatalf("the template names the placeholder %d times; it is filled with a replace-all, so "+
+			"every occurrence beyond the data island receives a copy of the whole fact document", n)
+	}
+
+	// A fact whose value is a URL, as the real env block always carries.
+	const canary = "https://canary.invalid/upstream"
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsBelowFloorWithInventory(),
+		"/api/toolfilter": filterWithholdingEverything(1),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port, "upstream": canary})
+	out, code := runInsights(t, dir, nil, "capabilities", "--report")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	path := facts(out)["report_path"]
+	if path == "" {
+		t.Fatalf("no report_path\n%s", out)
+	}
+	html := readFileString(t, path)
+	if !strings.Contains(html, canary) {
+		t.Skip("the configured upstream did not reach the report's facts, so this test cannot " +
+			"observe where it was written; the placeholder count above still applies")
+	}
+
+	// Excise the data island — the one place a URL-valued fact legitimately belongs — and the
+	// canary must be gone from everything that remains.
+	markup := html
+	if i := strings.Index(markup, `<script type="application/json"`); i != -1 {
+		if j := strings.Index(markup[i:], "</script>"); j != -1 {
+			markup = markup[:i] + markup[i+j:]
+		}
+	}
+	if strings.Contains(markup, canary) {
+		t.Errorf("the configured upstream %q appears in the report's MARKUP, outside the data "+
+			"island: the fact document is being spliced somewhere beyond the island it belongs in, "+
+			"which puts the user's own configuration into the page's prose", canary)
+	}
+}
+
+// TestNothingIsSelectableThatTheCommandCannotRemove pins the page's central promise, in the one
+// place it can be checked without a browser: the template's own selection rule.
+//
+// A tick box is a promise that the generated command will act on that thing. A plugin's skill and
+// an MCP server's tool have no per-item switch — the unit is the plugin or the server — so a box on
+// one of those rows can only ever produce a command that takes its siblings too. An earlier version
+// offered them anyway and explained the consequence in a warning afterwards, which is the wrong
+// order: it let the user express a choice the page could not honour, then argued with it. Reported
+// by a user as "bad UI interface that allows to select skills that can't be deleted".
+//
+// So the rule is `scope === "item"`, and the inverse holds too: what cannot be removed is not
+// offered. The owner's own box is the control for a whole unit.
+func TestNothingIsSelectableThatTheCommandCannotRemove(t *testing.T) {
+	tpl := readFileString(t, filepath.Join(scriptsDir(t), "insights_report.html"))
+
+	// The guard itself. Pinned as a string because the alternative is executing the page, and the
+	// one thing that must not drift is which scopes get a box at all.
+	if !strings.Contains(tpl, `function selectable(o){ return o.verdict!=="keep" && o.scope==="item" }`) {
+		t.Error("the selection rule is no longer `scope===\"item\"`. Any wider rule hands the " +
+			"reader a checkbox for something the generated command cannot act on alone, which is " +
+			"the defect this test exists to prevent — widen the OWNER's box instead")
+	}
+	// The owner's box must select the whole unit, or a plugin becomes unremovable from the page
+	// once its children lose their own boxes.
+	if !strings.Contains(tpl, `o.scope==="plugin"||o.scope==="server"`) {
+		t.Error("the owner checkbox no longer collects its unit-scoped children; with per-item " +
+			"boxes gone, that box is the ONLY way to select a plugin or a server, and without it " +
+			"they cannot be selected at all")
+	}
+	// A row with no box says why, and where the real control is. A bare disabled control invites
+	// the reader to wonder what they did wrong.
+	if !strings.Contains(tpl, "select the plugin above instead") ||
+		!strings.Contains(tpl, "select the server above instead") {
+		t.Error("a row that cannot be picked individually must say where its real control is")
+	}
+}
+
+// TestTheReportTellsYouHowToRegenerateItWithACommandThatRuns pins a defect reported from real use:
+// the page printed `python3 insights.py capabilities --report`, which resolves from nowhere. This
+// script lives in a versioned plugin-cache directory nobody ever cd's into, so a bare filename is
+// an instruction that cannot be followed from anywhere the reader is plausibly standing.
+//
+// The fix is one fact — the script's own absolute path — and the test asserts the fact exists AND
+// that the path it names is really there. A path fact that pointed at nothing would pass a
+// presence check and still leave the reader with a broken command.
+func TestTheReportTellsYouHowToRegenerateItWithACommandThatRuns(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":      window(0.4),
+		"/api/tools":      toolsBelowFloorWithInventory(),
+		"/api/toolfilter": filterWithholdingEverything(1),
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port})
+	out, code := runInsights(t, dir, nil, "capabilities", "--report")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	f := facts(out)
+
+	script := f["report_script"]
+	if script == "" {
+		t.Fatal("no report_script fact; without it the page can only print a bare filename, and " +
+			"a command the reader cannot run is worse than no command — they conclude the whole " +
+			"page is decorative")
+	}
+	if !filepath.IsAbs(script) {
+		t.Errorf("report_script=%q is not absolute; a relative path is exactly the bug", script)
+	}
+	if _, err := os.Stat(script); err != nil {
+		t.Errorf("report_script=%q does not exist: %v. A path fact that names nothing passes a "+
+			"presence check and still hands the reader a broken command", script, err)
+	}
+	// The area is carried too, or regenerating a components report silently switches surface.
+	if f["report_area"] != "capabilities" {
+		t.Errorf("report_area=%q, want capabilities", f["report_area"])
+	}
+
+	// The wrapper the user is told to run must exist beside the script, and be executable.
+	wrapper := filepath.Join(filepath.Dir(script), "insights-report.sh")
+	info, err := os.Stat(wrapper)
+	if err != nil {
+		t.Fatalf("insights-report.sh is missing beside the script: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Errorf("insights-report.sh is not executable (mode %v); the user is told to run it", info.Mode())
+	}
+}
+
+// TestTheItemTableDoesNotSpendAColumnOnMostlyEmptyProse pins a layout decision that was measured
+// rather than guessed: on a real inventory of 58 items, 41 had nothing to put in the "what it does"
+// column, because a description exists only for a skill with a readable SKILL.md. A column serving
+// 17 rows of 58 still takes width from all 58, and the three number columns are what the page is
+// for — so the prose moved to the item name's `title`, where it costs no layout.
+//
+// Pinned because the pull to re-add a description column is strong (it reads as helpful) and the
+// cost of doing so is invisible in a screenshot of a wide window.
+func TestTheItemTableDoesNotSpendAColumnOnMostlyEmptyProse(t *testing.T) {
+	tpl := readFileString(t, filepath.Join(scriptsDir(t), "insights_report.html"))
+	// Asserted on the COLUMN LIST, not on the phrase: the phrase also appears in the comment
+	// explaining why the column is gone, and in the footnote telling the reader to hover. A test
+	// that cannot tell a column from a sentence about columns fails on its own documentation.
+	if !strings.Contains(tpl, `cols.push(["item",""],["recommendation","rec"]);`) {
+		t.Error(`the item table's column list has changed. It is deliberately item + ` +
+			`recommendation and no prose column: measured on a real inventory a description is ` +
+			`empty for 41 of 58 rows, and the column takes width from the number columns on ` +
+			`every row — put the text on the name's title attribute instead`)
+	}
+	// The text has to be somewhere, or removing the column just lost it.
+	if !strings.Contains(tpl, `nameCell.setAttribute("title"`) {
+		t.Error("nothing attaches a description to the item name, so dropping the column dropped " +
+			"the information with it")
+	}
+	// The full text, not the trimmed summary: a tooltip has no layout to protect.
+	if !strings.Contains(tpl, "o.desc_full||o.desc") {
+		t.Error("the tooltip does not prefer desc_full; the summary exists to fit a table column, " +
+			"and a tooltip has no column to fit")
+	}
+	// And the rows that have one must be visually distinguishable, or nobody hovers.
+	if !strings.Contains(tpl, "has-tip") {
+		t.Error("no affordance marks which names carry a tooltip; an invisible tooltip is the " +
+			"same as no tooltip")
 	}
 }
