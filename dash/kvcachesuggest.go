@@ -250,21 +250,33 @@ func (d *DB) KVCacheSuggest(f Filter, o KVCacheOptions, p modelinfo.Pricer,
 	}
 	sort.Strings(out.Users)
 
+	// The cells are independent replays of disjoint rows (kvcache.Simulate shares nothing between
+	// calls), so they run side by side and are folded in the order the nested loops produced them.
+	type job struct {
+		user string
+		hour int
+		grp  []*kvcache.Request
+	}
+	var jobs []job
 	for _, u := range out.Users {
 		for h := 0; h < 24; h++ {
-			grp := groups[cellKey{u, h}]
-			if len(grp) == 0 {
-				continue
+			if grp := groups[cellKey{u, h}]; len(grp) > 0 {
+				jobs = append(jobs, job{u, h, grp})
 			}
-			cell := kvSuggestCell(u, h, grp, candidates, baseName, prices, cfg)
-			out.Cells = append(out.Cells, cell)
-			out.TotalUnpricedRequests += cell.UnpricedRequests
-			// SavingKnown and full pricing coverage, not just Valued: see TotalSavingUSD.
-			if cell.Valued && cell.SavingKnown && cell.UnpricedRequests == 0 && !cell.InsufficientData {
-				out.TotalSavingUSD += cell.SavingUSD
-				out.TotalSavingCells++
-				out.TotalSavingKnown = true
-			}
+		}
+	}
+	cells := make([]KVCacheSuggestion, len(jobs))
+	parallelFor(len(jobs), func(i int) {
+		cells[i] = kvSuggestCell(jobs[i].user, jobs[i].hour, jobs[i].grp, candidates, baseName, prices, cfg)
+	})
+	for _, cell := range cells {
+		out.Cells = append(out.Cells, cell)
+		out.TotalUnpricedRequests += cell.UnpricedRequests
+		// SavingKnown and full pricing coverage, not just Valued: see TotalSavingUSD.
+		if cell.Valued && cell.SavingKnown && cell.UnpricedRequests == 0 && !cell.InsufficientData {
+			out.TotalSavingUSD += cell.SavingUSD
+			out.TotalSavingCells++
+			out.TotalSavingKnown = true
 		}
 	}
 

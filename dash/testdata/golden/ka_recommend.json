@@ -1,0 +1,13 @@
+{
+ "hi_usd": 0.38662399999999986,
+ "idle_seconds": 280,
+ "keepalive_recorded_from": 1767606380000,
+ "keepalive_recorded_rows": 585,
+ "lo_usd": 0.27113600000000004,
+ "max_pings": 2,
+ "n": 204,
+ "requests": 591,
+ "service_hi_usd": 237,
+ "service_lo_usd": 95,
+ "sessions": 60
+}

@@ -274,15 +274,21 @@ func (d *DB) KVCacheSimulate(f Filter, o KVCacheOptions, p modelinfo.Pricer,
 	}
 	names = orderStrategies(names)
 	byName := map[string]*kvcache.Result{}
-	for _, name := range names {
-		s := buildStrategy(name, rows, cfg, sim)
-		if s == nil {
+	// Each arm is an independent replay of the same read-only rows (kvcache.Simulate keeps all of its
+	// state inside the call), so the arms run side by side and are folded in registry order.
+	results := make([]*kvcache.Result, len(names))
+	parallelFor(len(names), func(i int) {
+		if s := buildStrategy(names[i], rows, cfg, sim); s != nil {
+			results[i] = kvcache.Simulate(rows, s, sim)
+		}
+	})
+	for i, name := range names {
+		if results[i] == nil {
 			out.Unknown = append(out.Unknown, name)
 			continue
 		}
-		r := kvcache.Simulate(rows, s, sim)
-		out.Results = append(out.Results, r)
-		byName[r.Strategy] = r
+		out.Results = append(out.Results, results[i])
+		byName[results[i].Strategy] = results[i]
 	}
 	// The baseline. A named one that was not run is an error the caller must see, not a
 	// silent substitution — every percentage on the page is divided by this arm's total.
@@ -622,6 +628,13 @@ func (d *DB) KVCacheModels(f Filter) ([]string, error) {
 // is: an estimate here is a number nobody can reproduce.
 func (d *DB) KVCacheMedianPrefix(f Filter, o KVCacheOptions) (int64, error) {
 	q, args := kvCacheQuery(f, o, "r.cache_read + r.cache_write")
+	if conds, _ := kvCacheDerivedPreds(o); len(conds) == 0 {
+		// Nothing narrows on a derived column, so the window function (the expensive part: it
+		// sorts every request in scope) contributes no row and no predicate. The same rows,
+		// read straight off the table.
+		cond, cargs := f.where()
+		q, args = `SELECT r.cache_read + r.cache_write FROM requests r WHERE `+cond, cargs
+	}
 	q += " AND (r.cache_read + r.cache_write) > 0 ORDER BY r.ts DESC LIMIT ?"
 	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, kvCacheMaxRows)...)
 	if err != nil {

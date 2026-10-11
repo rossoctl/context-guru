@@ -32,6 +32,7 @@ package dash
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"sort"
 )
@@ -92,7 +93,7 @@ type PromptView struct {
 
 // promptRoutes is mounted from toolRoutes, so the scoping test walks it like every other.
 func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
-	f, _, ok := a.scope(r)
+	f, principal, ok := a.scope(r)
 	if !ok {
 		a.unauthorized(w)
 		return
@@ -107,8 +108,22 @@ func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
 	if a.auth != nil {
 		trusted = true
 	}
-	view, err := a.db(r).PromptViewFor(f)
-	if err != nil {
+	// The view is read through the response cache, but what is cached is the UNSTRIPPED view and the
+	// strip below is applied to each reader's own copy. That is the whole of why this route can be
+	// cached at all: the cache key is the principal and the query, not the caller's address, and
+	// the address is what decides whether the text may be shown. Caching the body that was written
+	// for a trusted address would hand it to an untrusted one on the same account, so nothing that
+	// depends on the address is ever stored.
+	var view PromptView
+	rec := &capture{h: http.Header{}, code: http.StatusOK}
+	a.serveJSON(rec, r, &a.promptCache, r.URL.Path+"\x00"+cacheKey(principal, r), func(db *DB) ([]byte, error) {
+		v, err := db.PromptViewFor(f)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(v)
+	})
+	if rec.code != http.StatusOK || json.Unmarshal(rec.buf.Bytes(), &view) != nil {
 		httpErr(w, http.StatusInternalServerError, "could not read the prompt text")
 		return
 	}
@@ -136,7 +151,7 @@ func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
 			view.Regions[i].Parts, view.Regions[i].PartsTokens = nil, 0
 		}
 	}
-	writeJSON(w, view)
+	writeJSON(w, &view)
 }
 
 // The three fragments every read of stored prompt text is built from, in one place because
@@ -173,6 +188,12 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 	// declaration set mid-way has several rows saying the same thing — raw rows came out at
 	// 4,192 where the report's PromptStat said 309, and two coverage figures 13x apart on one
 	// page with nothing connecting them is how a dashboard loses a reader's trust for good.
+	if sessions, err := d.declSessionSet(f); err != nil {
+		return nil, err
+	} else if len(sessions) >= declScanMinSessions {
+		// Broad scope: both reads below from one concurrent pass over the table (declfacts.go).
+		return d.promptViewScan(f, v, sessions)
+	}
 	tq := `SELECT COUNT(*), SUM(txt) FROM (
 		SELECT MAX(CASE WHEN ` + declHasText + ` THEN 1 ELSE 0 END) txt
 		FROM tool_declarations d WHERE d.session_id IN ` + sub
@@ -213,7 +234,13 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 	case err != nil:
 		return nil, err
 	}
-	v.Session, v.Digest, v.TS, v.Captured = session, digest, ts, txt == 1
+	return d.promptRegions(v, tenant, session, digest, ts, txt == 1)
+}
+
+// promptRegions reads the regions of the chosen set and shapes the view. Shared by the two ways of
+// choosing the set (the per-session SQL above, the whole-table pass in promptViewScan).
+func (d *DB) promptRegions(v *PromptView, tenant, session, digest string, ts int64, captured bool) (*PromptView, error) {
+	v.Session, v.Digest, v.TS, v.Captured = session, digest, ts, captured
 
 	// Pinned to the tenant the chosen row belongs to, ALWAYS — not only when the filter
 	// narrows. A session id is client-supplied, so two accounts can present the same one
@@ -272,4 +299,46 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 		return a.Name < b.Name
 	})
 	return v, nil
+}
+
+// promptViewScan is PromptViewFor for a broad scope: the coverage counts and the set to show, both
+// from one concurrent pass over tool_declarations instead of two probing GROUP BYs (10 s each).
+// The set shown is the digest group with the greatest (has-text, newest-ts); on an exact tie the
+// smallest (tenant, session, digest), which is the group SQLite's ordered GROUP BY reaches first.
+func (d *DB) promptViewScan(f Filter, v *PromptView, sessions map[string]bool) (*PromptView, error) {
+	scan, err := d.scanDecls(f, true)
+	if err != nil {
+		return nil, err
+	}
+	type grp struct{ session, kind, name, server string }
+	text := map[grp]bool{}
+	for k, fact := range scan.facts {
+		if sessions[k.session] {
+			g := grp{k.session, k.kind, k.name, k.server}
+			text[g] = text[g] || fact.hasText
+		}
+	}
+	v.Rows = len(text)
+	for _, t := range text {
+		if t {
+			v.TextRows++
+		}
+	}
+	var best digestKey
+	var bf *digestFact
+	for k, fact := range scan.digests {
+		if !sessions[k.session] {
+			continue
+		}
+		if bf == nil || (fact.hasText && !bf.hasText) ||
+			(fact.hasText == bf.hasText && (fact.ts > bf.ts ||
+				(fact.ts == bf.ts && (k.tenant < best.tenant || (k.tenant == best.tenant &&
+					(k.session < best.session || (k.session == best.session && k.digest < best.digest))))))) {
+			best, bf = k, fact
+		}
+	}
+	if bf == nil {
+		return v, nil // nothing captured in scope at all
+	}
+	return d.promptRegions(v, best.tenant, best.session, best.digest, bf.ts, bf.hasText)
 }

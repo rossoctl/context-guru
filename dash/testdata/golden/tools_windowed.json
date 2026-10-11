@@ -1,0 +1,344 @@
+{
+ "aside": [
+  {
+   "builtin": true,
+   "calls": 96,
+   "has_text": false,
+   "kind": "tool",
+   "name": "Bash",
+   "priced": true,
+   "removal": {
+    "command": "claude --disallowedTools \"Bash\"",
+    "danger": true,
+    "effect": "Removes the tool from the prompt entirely.",
+    "kind": "builtin",
+    "note": "This is one of Claude Code's OWN tools. Removing it does not degrade the agent gracefully — it takes away a capability the model is expected to have, and anything that depended on it fails. The token saving is real and it is almost never worth it.",
+    "settings": "{\n  \"permissions\": {\n    \"deny\": [\"Bash\"]\n  }\n}",
+    "settings_path": "~/.claude/settings.json"
+   },
+   "sessions_declared": 24,
+   "sessions_used": 24,
+   "share_pct": 5.288673424416042,
+   "tokens": 120,
+   "unused_reads": 0,
+   "unused_usd": 0
+  }
+ ],
+ "coverage": {
+  "captured": 24,
+  "not_captured": 0,
+  "requests": 237,
+  "sessions": 24,
+  "unpriced_sessions": 8
+ },
+ "models": [
+  {
+   "cache_read_usd_per_token": 0,
+   "cache_write_usd_per_token": 0,
+   "model": "m-unpriced",
+   "priced": false,
+   "requests": 88,
+   "sessions": 8
+  },
+  {
+   "cache_read_usd_per_token": 0.0000015,
+   "cache_write_usd_per_token": 0.00001875,
+   "model": "m-opus",
+   "priced": true,
+   "requests": 80,
+   "sessions": 8
+  },
+  {
+   "cache_read_usd_per_token": 3e-7,
+   "cache_write_usd_per_token": 0.00000375,
+   "model": "m-sonnet",
+   "priced": true,
+   "requests": 69,
+   "sessions": 8
+  }
+ ],
+ "prompt": {
+  "rows": 144,
+  "sessions": 0,
+  "text_rows": 0,
+  "tokens": 0
+ },
+ "self_removed": [
+  {
+   "avoided_reads": 9240,
+   "avoided_usd": 0.018875999999999997,
+   "kind": "skill",
+   "last_seen": 1767940220000,
+   "name": "skill-1",
+   "overlap": false,
+   "priced": false,
+   "sessions_after": 4,
+   "sessions_before": 2,
+   "tokens": 220
+  },
+  {
+   "avoided_reads": 8360,
+   "avoided_usd": 0.021383999999999997,
+   "kind": "skill",
+   "last_seen": 1767928820000,
+   "name": "skill-0",
+   "overlap": false,
+   "priced": false,
+   "sessions_after": 4,
+   "sessions_before": 2,
+   "tokens": 220
+  },
+  {
+   "avoided_reads": 6600,
+   "avoided_usd": 0.016565999999999997,
+   "kind": "skill",
+   "last_seen": 1767963020000,
+   "name": "skill-3",
+   "overlap": false,
+   "priced": false,
+   "sessions_after": 3,
+   "sessions_before": 2,
+   "tokens": 220
+  },
+  {
+   "avoided_reads": 5940,
+   "avoided_usd": 0.021383999999999997,
+   "kind": "skill",
+   "last_seen": 1767951620000,
+   "name": "skill-2",
+   "overlap": false,
+   "priced": false,
+   "sessions_after": 3,
+   "sessions_before": 2,
+   "tokens": 220
+  }
+ ],
+ "servers": [
+  {
+   "calls": 16,
+   "priced": false,
+   "server": "alpha",
+   "sessions_declared": 24,
+   "sessions_used": 8,
+   "tokens": 749,
+   "tools": 2,
+   "tools_used": 1,
+   "unused_reads": 152056,
+   "unused_usd": 0.47120324999999996
+  },
+  {
+   "calls": 0,
+   "priced": false,
+   "server": "beta",
+   "sessions_declared": 24,
+   "sessions_used": 0,
+   "tokens": 500,
+   "tools": 1,
+   "tools_used": 0,
+   "unused_reads": 118500,
+   "unused_usd": 0.34117499999999995
+  }
+ ],
+ "skills": {
+  "calls": 0,
+  "declared": 5,
+  "invoked": 0,
+  "listing_tokens": 900,
+  "skills": [
+   {
+    "builtin": false,
+    "calls": 0,
+    "has_text": false,
+    "kind": "skill",
+    "name": "skill-1",
+    "priced": false,
+    "removal": {
+     "effect": "Hides the skill from the listing, so its entry stops being sent.",
+     "kind": "skill",
+     "note": "Denying a skill with `Skill(skill-1)` instead would NOT save anything — a scoped rule blocks the call but leaves the entry in the prompt. Deleting `~/.claude/skills/skill-1/` also works and is permanent. If you want to KEEP this skill and still stop paying for most of it, set it to \"name-only\" instead of \"off\": that lists the name without the description, which is nearly all of the weight. \"user-invocable-only\" hides it from the model while leaving /skill-1 working for you.",
+     "settings": "{\n  \"skillOverrides\": {\n    \"skill-1\": \"off\"\n  }\n}",
+     "settings_path": "~/.claude/settings.json"
+    },
+    "sessions_declared": 5,
+    "sessions_used": 0,
+    "share_pct": 9.695901278096077,
+    "tokens": 220,
+    "unused_reads": 11440,
+    "unused_usd": 0.047289
+   },
+   {
+    "builtin": false,
+    "calls": 0,
+    "has_text": false,
+    "kind": "skill",
+    "name": "skill-4",
+    "priced": false,
+    "removal": {
+     "effect": "Hides the skill from the listing, so its entry stops being sent.",
+     "kind": "skill",
+     "note": "Denying a skill with `Skill(skill-4)` instead would NOT save anything — a scoped rule blocks the call but leaves the entry in the prompt. Deleting `~/.claude/skills/skill-4/` also works and is permanent. If you want to KEEP this skill and still stop paying for most of it, set it to \"name-only\" instead of \"off\": that lists the name without the description, which is nearly all of the weight. \"user-invocable-only\" hides it from the model while leaving /skill-4 working for you.",
+     "settings": "{\n  \"skillOverrides\": {\n    \"skill-4\": \"off\"\n  }\n}",
+     "settings_path": "~/.claude/settings.json"
+    },
+    "sessions_declared": 5,
+    "sessions_used": 0,
+    "share_pct": 9.695901278096077,
+    "tokens": 220,
+    "unused_reads": 10780,
+    "unused_usd": 0.036069
+   },
+   {
+    "builtin": false,
+    "calls": 0,
+    "has_text": false,
+    "kind": "skill",
+    "name": "skill-2",
+    "priced": false,
+    "removal": {
+     "effect": "Hides the skill from the listing, so its entry stops being sent.",
+     "kind": "skill",
+     "note": "Denying a skill with `Skill(skill-2)` instead would NOT save anything — a scoped rule blocks the call but leaves the entry in the prompt. Deleting `~/.claude/skills/skill-2/` also works and is permanent. If you want to KEEP this skill and still stop paying for most of it, set it to \"name-only\" instead of \"off\": that lists the name without the description, which is nearly all of the weight. \"user-invocable-only\" hides it from the model while leaving /skill-2 working for you.",
+     "settings": "{\n  \"skillOverrides\": {\n    \"skill-2\": \"off\"\n  }\n}",
+     "settings_path": "~/.claude/settings.json"
+    },
+    "sessions_declared": 5,
+    "sessions_used": 0,
+    "share_pct": 9.695901278096077,
+    "tokens": 220,
+    "unused_reads": 10560,
+    "unused_usd": 0.026498999999999998
+   },
+   {
+    "builtin": false,
+    "calls": 0,
+    "has_text": false,
+    "kind": "skill",
+    "name": "skill-0",
+    "priced": false,
+    "removal": {
+     "effect": "Hides the skill from the listing, so its entry stops being sent.",
+     "kind": "skill",
+     "note": "Denying a skill with `Skill(skill-0)` instead would NOT save anything — a scoped rule blocks the call but leaves the entry in the prompt. Deleting `~/.claude/skills/skill-0/` also works and is permanent. If you want to KEEP this skill and still stop paying for most of it, set it to \"name-only\" instead of \"off\": that lists the name without the description, which is nearly all of the weight. \"user-invocable-only\" hides it from the model while leaving /skill-0 working for you.",
+     "settings": "{\n  \"skillOverrides\": {\n    \"skill-0\": \"off\"\n  }\n}",
+     "settings_path": "~/.claude/settings.json"
+    },
+    "sessions_declared": 4,
+    "sessions_used": 0,
+    "share_pct": 9.695901278096077,
+    "tokens": 220,
+    "unused_reads": 9680,
+    "unused_usd": 0.026136
+   },
+   {
+    "builtin": false,
+    "calls": 0,
+    "has_text": false,
+    "kind": "skill",
+    "name": "skill-3",
+    "priced": false,
+    "removal": {
+     "effect": "Hides the skill from the listing, so its entry stops being sent.",
+     "kind": "skill",
+     "note": "Denying a skill with `Skill(skill-3)` instead would NOT save anything — a scoped rule blocks the call but leaves the entry in the prompt. Deleting `~/.claude/skills/skill-3/` also works and is permanent. If you want to KEEP this skill and still stop paying for most of it, set it to \"name-only\" instead of \"off\": that lists the name without the description, which is nearly all of the weight. \"user-invocable-only\" hides it from the model while leaving /skill-3 working for you.",
+     "settings": "{\n  \"skillOverrides\": {\n    \"skill-3\": \"off\"\n  }\n}",
+     "settings_path": "~/.claude/settings.json"
+    },
+    "sessions_declared": 5,
+    "sessions_used": 0,
+    "share_pct": 9.695901278096077,
+    "tokens": 220,
+    "unused_reads": 9680,
+    "unused_usd": 0.014123999999999998
+   }
+  ],
+  "state": "ok",
+  "unknown_sessions": 0,
+  "unused_listing_reads": 213300,
+  "unused_listing_usd": 0.614115
+ },
+ "tools": [
+  {
+   "builtin": false,
+   "calls": 0,
+   "has_text": false,
+   "kind": "mcp_tool",
+   "name": "mcp__beta__x",
+   "priced": false,
+   "removal": {
+    "command": "claude mcp remove beta",
+    "effect": "The command removes the whole `beta` server and every tool it declares. The settings fragment removes just this one tool and keeps the rest.",
+    "kind": "mcp_tool",
+    "note": "`claude mcp remove` takes an optional `-s local|user|project`; with no scope it removes the server from whichever scope it is defined in. There is no `claude mcp disable` — to keep the config and turn the server off, use the `/mcp` panel.",
+    "settings": "{\n  \"permissions\": {\n    \"deny\": [\"mcp__beta__x\"]\n  }\n}",
+    "settings_path": "~/.claude/settings.json"
+   },
+   "server": "beta",
+   "sessions_declared": 24,
+   "sessions_used": 0,
+   "share_pct": 22.036139268400177,
+   "tokens": 500,
+   "unused_reads": 118500,
+   "unused_usd": 0.34117499999999995
+  },
+  {
+   "builtin": false,
+   "calls": 0,
+   "has_text": false,
+   "kind": "mcp_tool",
+   "name": "mcp__alpha__write",
+   "priced": false,
+   "removal": {
+    "command": "claude mcp remove alpha",
+    "effect": "The command removes the whole `alpha` server and every tool it declares. The settings fragment removes just this one tool and keeps the rest.",
+    "kind": "mcp_tool",
+    "note": "`claude mcp remove` takes an optional `-s local|user|project`; with no scope it removes the server from whichever scope it is defined in. There is no `claude mcp disable` — to keep the config and turn the server off, use the `/mcp` panel.",
+    "settings": "{\n  \"permissions\": {\n    \"deny\": [\"mcp__alpha__write\"]\n  }\n}",
+    "settings_path": "~/.claude/settings.json"
+   },
+   "server": "alpha",
+   "sessions_declared": 24,
+   "sessions_used": 0,
+   "share_pct": 18.069634200088146,
+   "tokens": 410,
+   "unused_reads": 97170,
+   "unused_usd": 0.27976349999999994
+  },
+  {
+   "builtin": false,
+   "calls": 16,
+   "has_text": false,
+   "kind": "mcp_tool",
+   "name": "mcp__alpha__read",
+   "priced": false,
+   "removal": {
+    "command": "claude mcp remove alpha",
+    "effect": "The command removes the whole `alpha` server and every tool it declares. The settings fragment removes just this one tool and keeps the rest.",
+    "kind": "mcp_tool",
+    "note": "`claude mcp remove` takes an optional `-s local|user|project`; with no scope it removes the server from whichever scope it is defined in. There is no `claude mcp disable` — to keep the config and turn the server off, use the `/mcp` panel.",
+    "settings": "{\n  \"permissions\": {\n    \"deny\": [\"mcp__alpha__read\"]\n  }\n}",
+    "settings_path": "~/.claude/settings.json"
+   },
+   "server": "alpha",
+   "sessions_declared": 24,
+   "sessions_used": 8,
+   "share_pct": 14.94050242397532,
+   "tokens": 339,
+   "unused_reads": 54886,
+   "unused_usd": 0.19143975
+  }
+ ],
+ "totals": {
+  "aside_set_tokens": 120,
+  "aside_tokens": 120,
+  "declared_set_tokens": 2269,
+  "declared_tokens": 2137,
+  "priced": false,
+  "requests_per_session": 9.875,
+  "requests_per_session_median": 10,
+  "requests_per_session_typical": 10.611814345991561,
+  "unused_pct": 94.87719298245614,
+  "unused_reads": 483856,
+  "unused_tokens": 2028,
+  "unused_usd": 1.4264932499999998
+ }
+}

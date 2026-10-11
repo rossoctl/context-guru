@@ -1,0 +1,28 @@
+{
+ "addressable_misses": 204,
+ "addressable_usd": 0.848,
+ "bytes_per_day": 802.6755852842809,
+ "keepalive_recorded_from": 1767606380000,
+ "keepalive_recorded_rows": 585,
+ "latency": {
+  "hit_mean_ms": 0,
+  "hit_n": 0,
+  "known": false,
+  "miss_mean_ms": 0,
+  "miss_n": 0,
+  "per_miss_ms": 0
+ },
+ "losers": 15,
+ "misses_avoided": 0,
+ "net_usd": -0.006,
+ "ping_usd": 0.006,
+ "pings": 15,
+ "pings_per_day": 2.0066889632107023,
+ "pings_that_read_nothing": 0,
+ "pings_that_wrote": 0,
+ "requests": 591,
+ "saved_usd": 0,
+ "sessions_touched": 15,
+ "winners": 0,
+ "worst_net_usd": -0.0004
+}

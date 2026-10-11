@@ -1,0 +1,47 @@
+{
+ "addressable_misses": 204,
+ "addressable_usd": 0.8480000000000006,
+ "idle_seconds": 280,
+ "keepalive_recorded_from": 1767606380000,
+ "keepalive_recorded_rows": 585,
+ "model": "m-unpriced",
+ "prefix_source": "account_median",
+ "prefix_tokens": 30998,
+ "priced": false,
+ "requests": 591,
+ "rows": [
+  {
+   "convertible_misses": 112,
+   "convertible_usd": 0.6000000000000004,
+   "coverage_seconds": 580,
+   "max_pings": 1,
+   "pings": 281,
+   "share_of_addressable_pct": 70.75471698113208
+  },
+  {
+   "convertible_misses": 112,
+   "convertible_usd": 0.6000000000000004,
+   "coverage_seconds": 860,
+   "current": true,
+   "max_pings": 2,
+   "pings": 433,
+   "share_of_addressable_pct": 70.75471698113208
+  },
+  {
+   "convertible_misses": 112,
+   "convertible_usd": 0.6000000000000004,
+   "coverage_seconds": 1140,
+   "max_pings": 3,
+   "pings": 585,
+   "share_of_addressable_pct": 70.75471698113208
+  },
+  {
+   "convertible_misses": 112,
+   "convertible_usd": 0.6000000000000004,
+   "coverage_seconds": 1420,
+   "max_pings": 4,
+   "pings": 737,
+   "share_of_addressable_pct": 70.75471698113208
+  }
+ ]
+}
