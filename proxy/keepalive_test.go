@@ -133,7 +133,7 @@ func recordTurn(t *testing.T, k *keeper, pol CachePolicy, body string, at time.T
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 	r.Header.Set("Authorization", "Bearer sk-caller-secret")
 	r.Header.Set("Anthropic-Version", "2023-06-01")
-	k.record(tn, "sess-1", at, []byte(body), up, r, bschemas.Anthropic, "/v1/messages",
+	k.record(tn, "sess-1", "", at, []byte(body), up, r, bschemas.Anthropic, "/v1/messages",
 		http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
 }
 
@@ -308,7 +308,7 @@ func TestFailedRequestIsNotTracked(t *testing.T) {
 	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 	for _, status := range []int{0, http.StatusBadRequest, http.StatusBadGateway} {
-		k.record(tn, "s", clock.now(), []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"},
+		k.record(tn, "s", "", clock.now(), []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"},
 			r, bschemas.Anthropic, "/v1/messages", status, Usage{}, false)
 	}
 	if got := k.Stats().Live; got != 0 {
@@ -350,7 +350,7 @@ func TestGateSkipsFirstRequestAndSmallPrefixes(t *testing.T) {
 		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 		for i := 0; i < 2; i++ {
 			// 19,999 billed tokens: one short of the 20,000 floor.
-			k.record(tn, "small", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+			k.record(tn, "small", "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
 				upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
 				"/v1/messages", http.StatusOK, Usage{CacheRead: 19_999}, true)
 		}
@@ -374,7 +374,7 @@ func TestPerPingCostGuard(t *testing.T) {
 	// at RECORD time, which is also the security-relevant answer: no body and no credential is
 	// held for a session we have already decided not to ping.
 	big := func(tn *Tenancy, i int) {
-		k.record(tn, "big", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+		k.record(tn, "big", "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
 			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
 			"/v1/messages", http.StatusOK, Usage{CacheRead: 400_000}, true)
 	}
@@ -405,7 +405,7 @@ func TestArriveCancelsAndReports(t *testing.T) {
 	k.sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 
-	pings, refreshed, strategyID := k.arrive("t1", "sess-1")
+	pings, refreshed, strategyID := k.arrive("t1", "sess-1", "")
 	if pings != 1 {
 		t.Errorf("pings = %d, want 1", pings)
 	}
@@ -418,7 +418,7 @@ func TestArriveCancelsAndReports(t *testing.T) {
 	if got := k.Stats().Live; got != 0 {
 		t.Errorf("still tracking %d sessions after the next request arrived", got)
 	}
-	if p, r, s := k.arrive("t1", "sess-1"); p != 0 || r != 0 || s != "" {
+	if p, r, s := k.arrive("t1", "sess-1", ""); p != 0 || r != 0 || s != "" {
 		t.Errorf("arrive reported %d/%d/%q for an untracked session, want 0/0/\"\"", p, r, s)
 	}
 }
@@ -440,7 +440,7 @@ func TestArriveReportsTheStrategyThatSentThePing(t *testing.T) {
 	k.sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 
-	_, _, strategyID := k.arrive("t1", "sess-1")
+	_, _, strategyID := k.arrive("t1", "sess-1", "")
 	if strategyID != "s1" {
 		t.Errorf("strategyID = %q, want %q — a real request's credit must trace back to the "+
 			"strategy that sent the ping which earned it", strategyID, "s1")
@@ -462,7 +462,7 @@ func TestCredentialRetentionRules(t *testing.T) {
 		// Twice, and over the prefix floor: the gate refuses a session's first request, and the
 		// subject here is the credential rather than the gate.
 		for i := 0; i < 2; i++ {
-			k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody), up, r,
+			k.record(tn, "s", "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody), up, r,
 				bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 		}
 		k.mu.Lock()
@@ -552,7 +552,7 @@ func TestCredentialRetentionRules(t *testing.T) {
 		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 		r.Header.Set("Authorization", caller)
 		for i := 0; i < 2; i++ {
-			k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+			k.record(tn, "s", "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
 				upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
 				"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 		}
@@ -574,7 +574,7 @@ func TestCredentialRetentionRules(t *testing.T) {
 		r.Header.Set("Authorization", caller)
 		on := &Tenancy{ID: "t1", Cache: kaPolicy()}
 		for i := 0; i < 2; i++ {
-			k.record(on, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+			k.record(on, "s", "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
 				upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
 				"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 		}
@@ -584,7 +584,7 @@ func TestCredentialRetentionRules(t *testing.T) {
 		// The account turns the setting off. Its very next request must drop the hold — a stale
 		// flag from when the hold began must never be able to extend it.
 		off := &Tenancy{ID: "t1", Cache: CachePolicy{}}
-		k.record(off, "s", clock.now().Add(3*time.Second), []byte(kaBody),
+		k.record(off, "s", "", clock.now().Add(3*time.Second), []byte(kaBody),
 			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
 			"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 		if got := k.Stats().Live; got != 0 {
@@ -646,7 +646,7 @@ func TestSessionBoundEvicts(t *testing.T) {
 	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 	for i := 0; i < maxKeepAliveSessions+10; i++ {
-		k.record(tn, "sess-"+strings.Repeat("x", i%7)+string(rune('a'+i%26))+time.Duration(i).String(),
+		k.record(tn, "sess-"+strings.Repeat("x", i%7)+string(rune('a'+i%26))+time.Duration(i).String(), "",
 			clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
 			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages",
 			http.StatusOK, Usage{CacheRead: 1}, true)
@@ -802,7 +802,7 @@ func TestRetainedMaterialReachesNoOutputSurface(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 	r.Header.Set("Authorization", "Bearer "+cred)
 	for i := 0; i < 2; i++ {
-		k.record(tn, "leaky", clock.now().Add(time.Duration(i)*time.Second), []byte(body),
+		k.record(tn, "leaky", "", clock.now().Add(time.Duration(i)*time.Second), []byte(body),
 			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
 			"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 	}
@@ -869,7 +869,7 @@ func TestForgetReleasesOneTenantsMaterial(t *testing.T) {
 	for _, id := range []string{"victim", "bystander"} {
 		tn := &Tenancy{ID: id, Cache: kaPolicy()}
 		for i := 0; i < 2; i++ {
-			k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+			k.record(tn, "s", "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
 				upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
 				"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 		}
@@ -923,7 +923,7 @@ func TestRetainedBodyIsMaskedAtRest(t *testing.T) {
 	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 	for i := 0; i < 2; i++ {
-		k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(body),
+		k.record(tn, "s", "", clock.now().Add(time.Duration(i)*time.Second), []byte(body),
 			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
 			"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 	}

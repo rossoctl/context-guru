@@ -46,15 +46,16 @@ import (
 //   - a body larger than maxSentBody is NOT stashed at all, rather than evicting others to hold it.
 //     The next turn's ask then finds nothing, reports errNoPrefix, and the sweep declines. One
 //     forgone opportunity, no wrong answer.
-//   - past maxSentSessions or maxSentBytes the WHOLE stash is dropped. Crude on purpose: a missing
-//     prefix costs one declined sweep, while an LRU here would be state to get wrong for no
-//     measurable gain. The worst case is a busy proxy that never accumulates a usable prefix, which
-//     is visible as sweep_no_prefix rather than as a silent cost.
+//   - past maxSentSessions or maxSentBytes the OLDEST entries are dropped until the new one fits.
+//     This was a wholesale drop until #423 keyed the stash by thread. Since then one Claude Code
+//     session adds a new short-lived entry on almost every turn (each auxiliary request is its own
+//     thread), so a wholesale drop would regularly throw away the main thread's body — the one the
+//     next prefix ask needs. Dropping the oldest keeps the active threads.
 //
-// 64 sessions x up to 1.5 MB is ~96 MB, which is the outer bound and why maxSentBytes states it
-// explicitly rather than leaving it to be multiplied out.
+// The entry bound counts THREADS. 256 entries is still bounded in bytes by maxSentBytes (~96 MB),
+// which is the outer bound and why it is stated explicitly rather than left to be multiplied out.
 const (
-	maxSentSessions = 64
+	maxSentSessions = 256
 	maxSentBody     = 1_500_000
 	maxSentBytes    = 96_000_000
 )
@@ -70,13 +71,18 @@ const (
 type sentEntry struct {
 	body     []byte
 	provider bschemas.ModelProvider
+	// seq orders entries by the time they were put, for oldest-first eviction.
+	seq uint64
 }
 
-// sentStash holds the last body forwarded upstream per session.
+// sentStash holds the last body forwarded upstream per THREAD, keyed by thread.Key(session, thread)
+// (#423). Per session, a subagent's request replaced the main thread's body, so a prefix ask on the
+// main thread failed its coverage check (ErrStalePrefix) or answered from the wrong conversation.
 type sentStash struct {
 	mu    sync.Mutex
 	m     map[string]sentEntry
 	bytes int
+	seq   uint64
 }
 
 func newSentStash() *sentStash { return &sentStash{m: map[string]sentEntry{}} }
@@ -112,12 +118,20 @@ func (s *sentStash) put(session string, provider bschemas.ModelProvider, body []
 	defer s.mu.Unlock()
 	if old, ok := s.m[session]; ok {
 		s.bytes -= len(old.body)
+		delete(s.m, session)
 	}
-	if len(s.m) >= maxSentSessions || s.bytes+len(cp) > maxSentBytes {
-		s.m = map[string]sentEntry{}
-		s.bytes = 0
+	for len(s.m) > 0 && (len(s.m) >= maxSentSessions || s.bytes+len(cp) > maxSentBytes) {
+		oldestKey, oldest := "", uint64(0)
+		for k, e := range s.m {
+			if oldestKey == "" || e.seq < oldest {
+				oldestKey, oldest = k, e.seq
+			}
+		}
+		s.bytes -= len(s.m[oldestKey].body)
+		delete(s.m, oldestKey)
 	}
-	s.m[session] = sentEntry{body: cp, provider: provider}
+	s.seq++
+	s.m[session] = sentEntry{body: cp, provider: provider, seq: s.seq}
 	s.bytes += len(cp)
 }
 

@@ -233,7 +233,7 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanke
 		if n := k.Stats().Live; n > out.peakLive {
 			out.peakLive = n
 		}
-		pings, _, _ := k.arrive(r.tenant, r.session)
+		pings, _, _ := k.arrive(r.tenant, r.session, "")
 		e := entries[r.session]
 		addressable := r.reason == "ttl_expiry" && r.cacheWrite > 0
 		if addressable {
@@ -278,7 +278,7 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanke
 			tenancies[r.tenant] = tn
 		}
 		seedTurn(kaKey(r.tenant, r.session))
-		k.record(tn, r.session, at, body, up, req, providerOf(r.provider), "/v1/messages",
+		k.record(tn, r.session, "", at, body, up, req, providerOf(r.provider), "/v1/messages",
 			http.StatusOK, Usage{CacheRead: r.cacheRead, CacheWrite: r.cacheWrite}, usageOK)
 	}
 	// Cost is accumulated by the shipped record1, from the shipped Pricer.

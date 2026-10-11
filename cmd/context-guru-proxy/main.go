@@ -842,7 +842,7 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 		// tagged on the ping's own row, never on the real request it later rescues.
 		KeepAliveStrategyID: r.Strategy,
 	}
-	ev.SessionID = r.Session
+	ev.SessionID, ev.ThreadID = r.Session, r.Thread
 	ev.Agent = dash.AgentFor(r.Agent)
 	ev.FreshInput, ev.CacheRead = r.FreshInput, r.CacheRead
 	ev.CacheWrite, ev.OutputTokens = r.CacheWrite, r.Output
