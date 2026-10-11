@@ -3227,14 +3227,14 @@ STRATEGIES: dict[str, dict] = {
         # cannot silently re-tune an already-armed install.
         "cache": {
             "keepalive": True,
-            "keepalive_idle_seconds": 280,
+            "keepalive_idle_seconds": 270,
             "keepalive_max_pings": 2,
-            "keepalive_max_usd_per_ping": 0.25,
-            "keepalive_min_prefix_tokens": 20000,
+            "keepalive_max_usd_per_ping": 0.50,
+            "keepalive_min_prefix_tokens": 80000,
         },
         "spends": True,
-        "desc": "an idle ping just under the provider's 5-minute TTL (280s, at most 2 per "
-                "idle span, >=20k-token prefix, <=$0.25/ping). SPENDS THE CALLER'S CREDENTIAL "
+        "desc": "an idle ping just under the provider's 5-minute TTL (270s, at most 2 per "
+                "idle span, >=80k-token prefix, <=$0.50/ping). SPENDS THE CALLER'S CREDENTIAL "
                 "while nobody is at the keyboard.",
     },
     "1-hour-head": {

@@ -7260,7 +7260,7 @@ function loadSettings() {
           'Keep my prompt cache warm while I am away')),
       el('p', { class: 'hint' },
         'Spends a small amount to avoid a much larger cache-recreation charge. After '
-        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 280)) + 's idle, up to '
+        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 270)) + 's idle, up to '
         + (((cfg.cache && cfg.cache.keepalive_max_pings) || 2)) + ' minimal requests re-read '
         + 'your cached prompt so the provider refreshes its 5-minute lifetime for free. '
         + 'Only on sessions with a large enough cached prompt to be worth it, and never on a '
@@ -8613,9 +8613,9 @@ function buildStrategyForm(form) {
   $('#strategy-form-title').textContent = 'New strategy';
 
   const name = el('input', { type: 'text', id: 'sf-name', maxlength: '64', required: 'required' });
-  const idle = el('input', { type: 'number', id: 'sf-idle', value: '280', min: '1' });
+  const idle = el('input', { type: 'number', id: 'sf-idle', value: '270', min: '1' });
   const pings = el('input', { type: 'number', id: 'sf-pings', value: '1', min: '1' });
-  const prefix = el('input', { type: 'number', id: 'sf-prefix', value: '20000', min: '0' });
+  const prefix = el('input', { type: 'number', id: 'sf-prefix', value: '80000', min: '0' });
   const usdCap = el('input', { type: 'number', id: 'sf-usd', value: '0', min: '0', step: '0.01' });
   const active = el('input', { type: 'checkbox', id: 'sf-active', checked: 'checked' });
 
@@ -10334,7 +10334,7 @@ async function loadKARecommend() {
       el('div', { class: 'small' },
         `For scale: measured over 357 cache expiries across this whole service, the 90% `
         + `interval on this policy is ${usd(rec.service_lo_usd)} to ${usd(rec.service_hi_usd)}. `
-        + 'Use the default (280 s idle, 2 pings) or arm a single session above and read your '
+        + 'Use the default (270 s idle, 2 pings) or arm a single session above and read your '
         + 'own ledger.')));
     return;
   }

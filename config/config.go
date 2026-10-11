@@ -87,14 +87,14 @@ type CacheConfig struct {
 	// default.
 	KeepAlive bool `yaml:"keepalive"`
 	// KeepAliveIdleSeconds is X: how long a session must be idle before the first ping.
-	// 0 = DefaultKeepAliveIdle (280).
+	// 0 = DefaultKeepAliveIdle (270).
 	//
-	// 280 rather than 240 is measured, not tuned by feel. The provider's default lifetime
-	// is 5 minutes and "the lifetime is measured from the start of the request that writes
-	// or reads the cache entry, not from the end of its response", so the budget is 300s
-	// from the previous request's START. Simulated over the production window: X=240 wastes
-	// 111 pings on gaps that would have hit anyway, X=280 wastes 53, and the net moves from
-	// +$94.85 to +$125.08.
+	// 270 rather than 280 is chosen for robustness to where the provider's cache cliff sits,
+	// not for a dollar gain: on the full window the two tie (270 vs 280 at K=2, 80k floor:
+	// -19 [-462, +326] model dollars, counterfactual), and if the cliff is at ~290 s 280 loses
+	// about $420 while 270 loses nothing material. K=1 prefers 280. The earlier 280 rationale
+	// (X=240 wastes 111 pings, X=280 wastes 53, +$125.08) rested on the W1 clock and is
+	// superseded (#435).
 	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
 	// KeepAliveOpenAIIdleSeconds is the separate Responses ping interval for
 	// GPT-5.6+ implicit caches. Their guaranteed lifetime is 30 minutes after
@@ -186,11 +186,11 @@ type CacheConfig struct {
 // in tests and quoted in the settings page, and three copies of 280 is how one of them
 // becomes 240.
 const (
-	DefaultKeepAliveIdle          = 280
+	DefaultKeepAliveIdle          = 270
 	DefaultKeepAliveOpenAIIdle    = int(modelinfo.OpenAIDefaultKeepAliveIdle / time.Second)
 	DefaultKeepAliveMaxPings      = 2
-	DefaultKeepAliveMaxUSDPerPing = 0.25
-	DefaultKeepAliveMinPrefix     = 20000
+	DefaultKeepAliveMaxUSDPerPing = 0.50
+	DefaultKeepAliveMinPrefix     = 80000
 	DefaultHeadTTLMinTokens       = 50000
 )
 
