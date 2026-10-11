@@ -62,18 +62,17 @@ type capture struct {
 	thread     string
 	inherits   string
 	hasInherit bool
-	// Issue #424's RECORD half: why this thread is about to wait and what woke it, set by
-	// noteWaitCause off the pristine request body (see internal/waitcause). waitTool is the
-	// LAST tool_use name on the response that STARTS the wait, filled only when that response
-	// turns out to classify as own_tool — computed at finish(), not here, since it needs the
-	// RESPONSE's own tool calls, which are not in hand until then. waitMsgCount is this
-	// request's own message count, carried to proxy.go's defer so it can hand it to
-	// waitcause.Tracker.RecordOutcome once this request's status is known.
-	wakeCause       string
-	openBackground  int
-	openTeammate    int
-	monitorExpiryMs int64
-	waitMsgCount    int
+	// Issue #424's RECORD half. waits is the handler's shared tracker (nil-checked like
+	// everything else here); waitBody is the PRISTINE request body, stashed by noteWaitBody —
+	// a plain slice-header copy, no scan — so that waitcause.Tracker.Observe (the actual
+	// rescan, ~11ms on a 783 KB body, measured in internal/waitcause's own benchmark) runs
+	// from finish(), AFTER the request has already been forwarded upstream, never on the
+	// path that decides when the upstream call goes out. waitMsgCount is filled by finish()
+	// once Observe has run, and read back by proxy.go's defer to feed
+	// waitcause.Tracker.RecordOutcome once this request's own status is known.
+	waits        *waitcause.Tracker
+	waitBody     []byte
+	waitMsgCount int
 	// kaPings / kaRefreshed / kaStrategy are what the idle keep-alive did during the span
 	// this request just ended: how many pings it sent, how many tokens the last of them
 	// read from cache, and which manager-controlled strategy (if any) resolved the policy
@@ -109,6 +108,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		agent: r.UserAgent(), start: time.Now(),
 		llm:    &cheapmodel.Sink{},
 		unique: map[string]int{},
+		waits:  h.waits,
 	}
 }
 
@@ -167,17 +167,16 @@ func (c *capture) noteThread(res thread.Result) {
 	}
 }
 
-// noteWaitCause records issue #424's RECORD half: why this request's thread woke up (known
-// now, from the request body) and the open-task/open-teammate state as of that body (needed at
-// finish() to classify what THIS response's own ending means for the NEXT wait). Call site:
-// proxy.go, right after noteThread, with the result of waitcause.Tracker.Observe.
-func (c *capture) noteWaitCause(obs waitcause.Observation) {
+// noteWaitBody stashes the PRISTINE request body for issue #424's RECORD half, so finish()
+// can scan it (waitcause.Tracker.Observe) after the request has already gone upstream. This
+// is a slice-header copy — the request path pays nothing beyond this one field write, however
+// large the body: see internal/waitcause's own benchmark for what the scan itself costs, and
+// why that cost belongs on finish()'s side of the line, not here. Call site: proxy.go, right
+// after noteThread, with `orig` — the body as the agent sent it, before any pipeline rewrite,
+// the same body threadFor already matches on.
+func (c *capture) noteWaitBody(body []byte) {
 	if c != nil {
-		c.wakeCause = obs.WakeCause
-		c.openBackground = obs.OpenBackground
-		c.openTeammate = obs.OpenTeammate
-		c.monitorExpiryMs = obs.MonitorExpiryMs
-		c.waitMsgCount = obs.MsgCount
+		c.waitBody = body
 	}
 }
 
@@ -389,21 +388,31 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// The provider's terminal reason, off the same response bytes the token tiers came
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason
-	// Issue #424's RECORD half. WakeCause (why THIS request woke up) was already computed
-	// from this request's own body, back when noteWaitCause ran; WaitingFor (what the
-	// thread is about to wait on NEXT) needs this response's own tool calls and stop
-	// reason, which only exist here. failed is this proxy's own analogue of a transcript's
-	// isApiErrorMessage: a call that never completed with a 2xx. c.status is 0 before any
-	// upstream round ever returns (an early refusal), which is deliberately NOT "failed" —
-	// there is no wait to classify for a request that never reached a thread at all, and
-	// ClassifyWaitingFor's own !usageOK-and-no-stop-reason fallback already reads that case
-	// as WaitingUnknown rather than WaitingRetry.
+	// Issue #424's RECORD half. The body scan (waitcause.Tracker.Observe, ~11ms on a 783 KB
+	// body — see internal/waitcause's own benchmark) runs HERE, in finish(), never on the
+	// path that decides when the request goes upstream: by the time finish() runs, the
+	// response has already been forwarded to the client (see finish()'s own doc comment on
+	// WHEN this method runs relative to the client's bytes). c.waitBody is nil, and Observe
+	// is nil-safe on it (see messageEntries), on a ping row and on any row the dashboard
+	// never asked noteWaitBody to fill — c.waits itself is also nil-safe (see Tracker.Observe
+	// and RecordOutcome's own nil receiver checks), so a request that skipped noteWaitBody
+	// (none should, but fail-open means never trusting that) still gets the zero Observation.
+	//
+	// WaitingFor (what the thread is about to wait on NEXT) needs this response's OWN tool
+	// calls and stop reason, which only exist here regardless. failed is this proxy's own
+	// analogue of a transcript's isApiErrorMessage: a call that never completed with a 2xx.
+	// c.status is 0 before any upstream round ever returns (an early refusal), which is
+	// deliberately NOT "failed" — there is no wait to classify for a request that never
+	// reached a thread at all, and ClassifyWaitingFor's own !usageOK-and-no-stop-reason
+	// fallback already reads that case as WaitingUnknown rather than WaitingRetry.
+	obs := c.waits.Observe(e.TenantID, e.SessionID, e.ThreadID, c.waitBody)
+	c.waitMsgCount = obs.MsgCount
 	failedCall := c.status != 0 && c.status/100 != 2
 	e.WaitingFor, e.WaitTool = waitcause.ClassifyWaitingFor(
-		usage.ToolUseNames, usage.StopReason, failedCall, usageOK, c.openBackground, c.openTeammate)
-	e.WakeCause = c.wakeCause
-	e.OpenBackground, e.OpenTeammate = c.openBackground, c.openTeammate
-	e.MonitorExpiryMs = c.monitorExpiryMs
+		usage.ToolUseNames, usage.StopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
+	e.WakeCause = obs.WakeCause
+	e.OpenBackground, e.OpenTeammate = obs.OpenBackground, obs.OpenTeammate
+	e.MonitorExpiryMs = obs.MonitorExpiryMs
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok

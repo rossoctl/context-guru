@@ -263,7 +263,8 @@ type Handler struct {
 	threads *thread.Tracker
 	// waits records, per thread, why it waits and why it woke up (issue #424's RECORD half —
 	// it never chooses a keep-alive ping budget and never changes keep-alive or compaction
-	// behaviour). See internal/waitcause and dashcapture.go's noteWaitCause/finish.
+	// behaviour). The actual body scan runs in dashcapture.go's finish(), off the request's
+	// own forward-and-respond path — see internal/waitcause and noteWaitBody/finish.
 	waits *waitcause.Tracker
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
@@ -1236,14 +1237,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			}
 			threadID = th.ID
 			cp.noteThread(th)
-			// Issue #424's RECORD half: why this thread is about to wait, and what woke it.
-			// Read off `orig` (as the agent sent it) for the same reason threadFor is: the
-			// pipeline's own rewrite is not the conversation the wake-cause markers arrived
-			// in. Dashboard-only (nil-safe cp): no dashboard, nothing to attribute, so skip
-			// the scan entirely.
-			if cp != nil {
-				cp.noteWaitCause(h.waits.Observe(tn.ID, tr.Session, threadID, orig))
-			}
+			// Issue #424's RECORD half: stash the PRISTINE body (as the agent sent it, same
+			// reason threadFor reads `orig` rather than the pipeline's rewrite) for finish()
+			// to scan AFTER this request has gone upstream — see noteWaitBody's own comment,
+			// and dashcapture.go's finish() for where the actual scan (waitcause.Tracker.
+			// Observe) now runs. This line itself costs one slice-header copy, not a scan.
+			cp.noteWaitBody(orig)
 			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
 			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
 			// Drop any cache_aware_summarizer keep-alive substitute registered off an EARLIER
@@ -1649,9 +1648,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 		// Issue #424's retry rule needs THIS request's own status and message count for the
 		// NEXT request on the thread's wake-cause check — see internal/waitcause's doc on why
-		// that cannot be read from a body alone. cp.waitMsgCount is 0 (never written) when
-		// noteWaitCause above never ran (dashboard off, or no usable message list), in which
-		// case this is a harmless no-op: Observe will see no previous state either.
+		// that cannot be read from a body alone. finish() (just above) is where Observe runs
+		// and cp.waitMsgCount gets filled; with the dashboard off (cp == nil) it never ran at
+		// all, which is a harmless no-op here too: Observe will see no previous state either,
+		// on the next request that turns the dashboard on.
 		if cp != nil {
 			h.waits.RecordOutcome(tn.ID, session, threadID, cp.waitMsgCount, status)
 		}
