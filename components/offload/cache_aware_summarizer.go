@@ -642,7 +642,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// Attribute any spend a DETACHED summarizer call incurred since this session's last turn.
 	// First thing, and unconditionally: the money was spent whatever this turn decides.
 	takeDeferredUsage(c, rep)
-	headCount, start, end := summarizeSpan(msgs, 1, s.keepLastTurns)
+	headCount, start, end := summarizeSpan(msgs, 1, s.keepLastTurns, c.WireGroup)
 	if end <= start {
 		rep.Skipped = true
 		return nil, nil

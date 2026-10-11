@@ -569,6 +569,21 @@ type Ctx struct {
 	// own position differs from len(RawInput), rather than hash the wrong span under a matching
 	// nil-ness check alone.
 	RawInput []schemas.ChatMessage
+	// WireGroup names, for each req.Input index, the ORIGINAL wire message it came from (#457).
+	// On Anthropic traffic several normalized messages can share one wire message — a
+	// tool_result's synthetic role=tool message and a sibling text block beside it (mid-turn
+	// user text, a system reminder, a task/teammate notification) — and a span boundary that
+	// landed between them would ask the count-changing rebuild to keep half of one wire message
+	// and summarize the other half, which it cannot represent. summarizeSpan's groups parameter
+	// uses this to push a boundary candidate out to the nearest WIRE-message edge instead.
+	//
+	// Nil (OpenAI-shaped traffic, and a Ctx built directly as most component unit tests do) means
+	// every normalized message already is its own wire message, so no boundary can ever split
+	// one — summarizeSpan treats a nil/length-mismatched groups slice as "nothing to align".
+	// apply sets it in the SAME coordinates as RawInput (pre-pipeline), for the same reason: a
+	// value computed against req.Input at a later component's own position would already be
+	// shifted by any earlier count-changing component.
+	WireGroup []int
 	// PrefixAsk, when non-nil, lets a component put a question to the request's own model with the
 	// previous turn's SENT body as the prefix, so the provider reads its prompt cache instead of
 	// being re-sent the transcript. See PrefixAsker for why that body and not the incoming one.

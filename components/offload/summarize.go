@@ -348,7 +348,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	msgs := req.Input
 	// Keep msg0 (system/first) + the last keepLast; summarize the span between — with both
 	// boundaries aligned so neither cuts inside a tool exchange. See summarizeSpan.
-	headCount, start, end := summarizeSpan(msgs, s.keepFirst, s.keepLast)
+	headCount, start, end := summarizeSpan(msgs, s.keepFirst, s.keepLast, c.WireGroup)
 
 	// THE GATES DECIDE WHETHER TO PAY FOR A *NEW* SUMMARY. THEY DO NOT DECIDE WHETHER THE SUMMARY
 	// THIS SESSION ALREADY MADE STAYS IN THE BODY WE FORWARD. Those were one decision until the

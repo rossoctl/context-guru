@@ -169,6 +169,19 @@ const (
 	// Anthropic tool_result block; a change rewrites only that block's `content`
 	// string field, which is byte-lossless for the rest of the message.
 	anthropicToolText
+	// anthropicSiblingText: norm message is a synthetic role=user message holding a
+	// top-level TEXT block that shares an Anthropic user message with a tool_result —
+	// mid-turn text the user typed while a tool ran, a system reminder, a task or
+	// teammate notification (#457). It exists so components that read the normalized
+	// view (summarizers, the stale-prefix guard, wake-cause) see this text instead of
+	// losing it to the "body carries the rest verbatim" shortcut below.
+	//
+	// Read-only: unlike anthropicToolText, there is no single field a change could
+	// splice into — several of these can share one message alongside tool_result
+	// blocks, and the combination has no byte-lossless partial-write shape. A
+	// component that changes one has that change silently discarded rather than
+	// risking a corrupt body; see the write-back switch below and rebuildCountChanged.
+	anthropicSiblingText
 )
 
 // slot records how one normalized message writes back to the raw body.
@@ -632,6 +645,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		Thread:         tr.Thread.ID,
 		Store:          st,
 		RawInput:       rawInput,
+		WireGroup:      wireGroups(slots),
 		Model:          models,
 		Bypass:         bypass,
 		CtxWindow:      o.Window,
@@ -778,6 +792,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	for i := range chat.Input {
 		s := slots[i]
 		switch s.kind {
+		case anthropicSiblingText:
+			// Read-only (#457): whatever a component did to this synthetic sibling
+			// message, the body's tool_result/text blocks it was extracted from are left
+			// exactly as they arrived. Never written back, so never counted as a change.
+			continue
 		case anthropicToolText:
 			newText := schema.MessageText(chat.Input[i])
 			if newText == s.preText {
@@ -1419,10 +1438,15 @@ func dumpChanges(session string, changes []Change) {
 // normalize builds the message slice the pipeline runs on plus a write-back slot
 // per message. For OpenAI (and any non-Anthropic dialect) every message maps
 // 1:1 to a whole-message slot — the request is already in the shape components
-// expect. For Anthropic, each user-message `tool_result` block with string
-// content becomes a synthetic role=tool message with a text-field write-back
-// slot; the block's siblings and every other message are left for the raw body
-// to carry verbatim.
+// expect. For Anthropic, a user message that holds a `tool_result` block is
+// walked block by block: each `tool_result` with string content becomes a
+// synthetic role=tool message with a text-field write-back slot, and each
+// sibling top-level TEXT block (mid-turn user text, a system reminder, a task
+// or teammate notification, …) becomes a synthetic read-only role=user message
+// — both in the SAME order they appear in the body (#457). Any other sibling
+// block kind (image, …) is skipped and left for the raw body to carry verbatim,
+// as before. A user message with no `tool_result` at all is untouched by any of
+// this and falls through to the ordinary whole-message slot below.
 func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bschemas.ChatMessage, slots []slot) {
 	for i, m := range arr {
 		if provider == bschemas.Anthropic &&
@@ -1438,42 +1462,77 @@ func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bsch
 			if blocks.IsArray() {
 				blks = blocks.Array()
 			}
-			for b, blk := range blks {
-				if blk.Get("type").String() != "tool_result" {
-					continue
+			// A plain text (or text-array) user message, with no tool_result anywhere in
+			// it, is untouched by any of this and falls through to the ordinary
+			// whole-message slot below — exactly as before #457. Checked up front, rather
+			// than inferred from `handled` after the fact, so a sibling TEXT block never
+			// gets a slot of its own unless this message actually earns the special
+			// handling by also carrying a tool_result (the thing #457 is about).
+			hasToolResult := false
+			for _, blk := range blks {
+				if blk.Get("type").String() == "tool_result" {
+					hasToolResult = true
+					break
 				}
-				add := func(text, path string) {
-					handled = true
-					tm := toolMessage(text, blk.Get("tool_use_id").String())
-					pre, _ := json.Marshal(tm)
-					norm = append(norm, tm)
-					slots = append(slots, slot{
-						kind: anthropicToolText, path: path, preText: text, pre: pre, raw: m.Raw,
-					})
-				}
-				base := "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".content"
-				content := blk.Get("content")
-				if content.Type == gjson.String {
-					add(content.String(), base)
-					continue
-				}
-				// The Messages API also permits an ARRAY of content blocks, and many clients
-				// emit that shape. Extract each TEXT block as its own synthetic tool message
-				// with a write-back slot one level deeper — otherwise the whole message fell
-				// to the whole-message slot, which bifrost cannot model, and 100% of that
-				// request's tool output was silently uncompactable. Non-text blocks (images,
-				// …) are skipped and left in the body untouched: never lose one.
-				if content.IsArray() {
-					for k, cb := range content.Array() {
-						if cb.Get("type").String() != "text" || cb.Get("text").Type != gjson.String {
+			}
+			addSibling := func(text string, b int) {
+				handled = true
+				sm := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
+				schema.SetMessageText(&sm, text)
+				pre, _ := json.Marshal(sm)
+				norm = append(norm, sm)
+				slots = append(slots, slot{
+					kind:    anthropicSiblingText,
+					path:    "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".text",
+					preText: text, pre: pre, raw: m.Raw,
+				})
+			}
+			if hasToolResult {
+				for b, blk := range blks {
+					switch blk.Get("type").String() {
+					case "tool_result":
+						add := func(text, path string) {
+							handled = true
+							tm := toolMessage(text, blk.Get("tool_use_id").String())
+							pre, _ := json.Marshal(tm)
+							norm = append(norm, tm)
+							slots = append(slots, slot{
+								kind: anthropicToolText, path: path, preText: text, pre: pre, raw: m.Raw,
+							})
+						}
+						base := "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".content"
+						content := blk.Get("content")
+						if content.Type == gjson.String {
+							add(content.String(), base)
 							continue
 						}
-						add(cb.Get("text").String(), base+"."+strconv.Itoa(k)+".text")
+						// The Messages API also permits an ARRAY of content blocks, and many clients
+						// emit that shape. Extract each TEXT block as its own synthetic tool message
+						// with a write-back slot one level deeper — otherwise the whole message fell
+						// to the whole-message slot, which bifrost cannot model, and 100% of that
+						// request's tool output was silently uncompactable. Non-text blocks (images,
+						// …) are skipped and left in the body untouched: never lose one.
+						if content.IsArray() {
+							for k, cb := range content.Array() {
+								if cb.Get("type").String() != "text" || cb.Get("text").Type != gjson.String {
+									continue
+								}
+								add(cb.Get("text").String(), base+"."+strconv.Itoa(k)+".text")
+							}
+						}
+					case "text":
+						// A sibling of the tool_result(s) above or below it in this same message
+						// (#457): the mid-turn text Claude Code appends next to a tool_result block.
+						if txt := blk.Get("text"); txt.Type == gjson.String {
+							addSibling(txt.String(), b)
+						}
+					default:
+						// images and other block kinds: left in the body untouched, as before.
 					}
 				}
 			}
 			if handled {
-				continue // this user message contributed its tool_result blocks; body carries the rest
+				continue // this user message contributed its tool_result/sibling blocks; body carries the rest
 			}
 		}
 		// Default: whole-message slot. Unmarshal via bifrost, keeping the raw bytes for
@@ -1767,6 +1826,25 @@ func splitSlotPath(path string) (idx int, rel string, ok bool) {
 		return 0, "", false
 	}
 	return i, rel, true
+}
+
+// wireGroups builds components.Ctx.WireGroup (#457): for each slot, the wire (body) message
+// index its path names — i.e. the thing that must never be split by a span boundary. A
+// wholeMessage slot's path is always "messages.<i>" for a DISTINCT i (one wholeMessage slot per
+// body message), so it is automatically its own group; an anthropicToolText or
+// anthropicSiblingText slot's path names the SHARED body message several of them were
+// extracted from, which is exactly the grouping summarizeSpan needs. Returns nil (meaning "no
+// grouping, nothing to align") if any slot's path doesn't parse — fail open, never guess.
+func wireGroups(slots []slot) []int {
+	groups := make([]int, len(slots))
+	for i, s := range slots {
+		bi, _, ok := splitSlotPath(s.path)
+		if !ok {
+			return nil
+		}
+		groups[i] = bi
+	}
+	return groups
 }
 
 // spliceMessages rebuilds body with each edited message's bytes swapped in at that
