@@ -14,6 +14,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/logging"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"gopkg.in/yaml.v3"
@@ -826,7 +827,8 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	if usePrefixAsk {
 		path = "prefix_ask"
 		atomic.AddInt64(&cacheAwarePrefixAskUsed, 1)
-		asker, session, instructionText := c.PrefixAsk, c.Session, schema.MessageText(instruction)
+		// The stash key is the THREAD's (#423): the host stashes each thread's last body apart.
+		asker, session, instructionText := c.PrefixAsk, thread.Key(c.Session, c.Thread), schema.MessageText(instruction)
 		// requiredCount/requiredHash freeze THIS turn's own idea of what span the eventual call
 		// must cover — computed now, synchronously, while msgs is still exactly what this turn
 		// saw. The call itself runs later: detached (startAsyncSummary) or substituted for an

@@ -292,3 +292,27 @@ func TestApplyModeResolvesTheThreadBeforeThePipeline(t *testing.T) {
 		t.Fatalf("threadOf calls %d, trace thread %+v (resolved %v)", calls, tr.Thread, tr.ThreadResolved)
 	}
 }
+
+// The prefix-ask stash is per thread since #423, so one Claude Code session adds an entry on
+// almost every turn (each auxiliary request is its own thread). A full stash drops the OLDEST
+// entries, so a thread that keeps sending — the main agent — is never the one dropped.
+func TestSentStashDropsTheOldestThreadNotTheActiveOne(t *testing.T) {
+	s := newSentStash()
+	body := []byte(`{"messages":[{"role":"user","content":"x"}]}`)
+	s.put(thread.Key("sess", ""), bschemas.Anthropic, body) // the main thread, first
+	for i := 0; i < maxSentSessions*2; i++ {
+		s.put(thread.Key("sess", fmt.Sprint("p:aux", i)), bschemas.Anthropic, body)
+		if i%10 == 0 {
+			s.put(thread.Key("sess", ""), bschemas.Anthropic, body) // the main thread keeps talking
+		}
+	}
+	if s.get(thread.Key("sess", "")) == nil {
+		t.Fatal("the active main thread's body was evicted")
+	}
+	if s.get(thread.Key("sess", "p:aux0")) != nil {
+		t.Error("the oldest auxiliary entry survived; eviction is not oldest-first")
+	}
+	if n := len(s.m); n > maxSentSessions {
+		t.Errorf("stash holds %d entries, bound is %d", n, maxSentSessions)
+	}
+}

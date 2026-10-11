@@ -164,6 +164,10 @@ type PrefixUsage struct {
 // non-Anthropic route, or the feature switched off. A caller must decide for itself what nil means;
 // see extract_llm_sweep, which DECLINES rather than falling back, because the fallback is the cost the
 // mechanism exists to avoid.
+//
+// session is the THREAD key, thread.Key(Ctx.Session, Ctx.Thread) (#423): the host stashes each
+// thread's last body apart, because each thread is its own conversation. Pass Ctx.Session alone
+// and a subagent's question is answered against the main thread's transcript.
 type PrefixAsker interface {
 	Ask(ctx context.Context, session, ask string) (reply string, usage PrefixUsage, err error)
 }

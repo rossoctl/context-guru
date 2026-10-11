@@ -18,6 +18,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/schema"
 	"gopkg.in/yaml.v3"
@@ -1400,7 +1401,8 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 				}
 			}
 		}
-		reply, usage, err = c.PrefixAsk.Ask(ctx, c.Session, askPrompt)
+		// The THREAD's stashed body (#423), not whichever thread of the session spoke last.
+		reply, usage, err = c.PrefixAsk.Ask(ctx, thread.Key(c.Session, c.Thread), askPrompt)
 		askMs = float64(time.Since(askStart).Milliseconds())
 		// ErrNoPrefix is refused LOCALLY — there is no stashed body to append to, so no request
 		// leaves the process. Booking it as a call would put a 0 ms, $0 sample into the mean that

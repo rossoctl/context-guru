@@ -1643,7 +1643,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// KEYED BY THE SCOPED SESSION ID, which is what serve receives (tr.Session) and what a
 			// component reads as Ctx.Session. Keying it by the raw header instead would make every
 			// Ask miss while the mechanism looked switched on.
-			h.sent.put(session, provider, body)
+			// Per THREAD (#423): a prefix ask reads the last body of ITS thread's conversation.
+			h.sent.put(thread.Key(session, threadID), provider, body)
 		}
 		if err != nil {
 			// LOG it, and record it on the captured row. An upstream failure used to be
