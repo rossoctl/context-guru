@@ -213,7 +213,7 @@ func TestTheKVCacheTabRespectsTheTimeRange(t *testing.T) {
 	if !strings.Contains(src, "mountTab({") || !strings.Contains(src, "view: 'kvcache'") {
 		t.Error("the KV-cache view does not mount its own tab via mountTab()")
 	}
-	if !strings.Contains(src, "group: 'behaviour'") {
+	if !strings.Contains(src, "group: 'advanced'") {
 		t.Error("the KV-cache tab does not name its nav group; mountTab would throw")
 	}
 	if strings.Contains(src, "$('.tabs')") || strings.Contains(src, "insertBefore(tab") {

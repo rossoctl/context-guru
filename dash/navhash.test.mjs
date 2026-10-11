@@ -203,18 +203,21 @@ test('#/group/view, #/group alone, and a stale group segment', () => {
   // one-level form left: the LAST segment is the view, so `savings/campaigns` cannot be
   // read as a view literally named "savings/campaigns".
   assert.equal(app.at('#savings/campaigns').view, 'campaigns');
-  assert.equal(app.roundTrip('#savings/campaigns'), '#/savings/campaigns');
+  assert.equal(app.roundTrip('#savings/campaigns'), '#/advanced/campaigns');
   // A group on its own opens its first tab.
-  assert.equal(app.at('#/savings').view, 'usage');
-  assert.equal(app.at('#/behaviour').view, 'components');
+  assert.equal(app.at('#/savings').view, 'keepalive');
+  assert.equal(app.at('#/advanced').view, 'components');
+  // The retired Behaviour group: its views kept their names and moved, so old links resolve.
+  assert.equal(app.roundTrip('#/behaviour/keepalive'), '#/savings/keepalive');
+  assert.equal(app.roundTrip('#/behaviour/components'), '#/advanced/components');
   assert.equal(app.at('#/traffic').view, 'sessions');
   assert.equal(app.at('#/admin').view, 'config');
   assert.equal(app.at('#/overview').view, 'overview');
   // A view that moved group is still found; the segment before it is only a hint.
   assert.equal(app.at('#/admin/campaigns').view, 'campaigns');
-  assert.equal(app.roundTrip('#/admin/campaigns'), '#/savings/campaigns');
+  assert.equal(app.roundTrip('#/admin/campaigns'), '#/advanced/campaigns');
   // A group that survived and a view name that did not.
-  assert.equal(app.at('#/savings/typo').view, 'usage');
+  assert.equal(app.at('#/savings/typo').view, 'keepalive');
   // Filters ride along on both forms.
   assert.equal(app.at('#/savings/usage?model=m1').filter.model, 'm1');
 });
