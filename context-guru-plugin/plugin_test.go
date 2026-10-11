@@ -2076,7 +2076,7 @@ func runStatusline(t *testing.T, env map[string]string, stdin string, args ...st
 	t.Helper()
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "statusline.py")}, args...)...)
-	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir())
+	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=200")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -2176,7 +2176,9 @@ func statsStubCapturingQuery(t *testing.T, body string, gotQuery *string) (port 
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
-		*gotQuery = r.URL.RawQuery
+		if !strings.Contains(r.URL.RawQuery, "since=") { // the "day" read is asserted elsewhere
+			*gotQuery = r.URL.RawQuery
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(body))
 	})
@@ -2269,7 +2271,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 
 	// Priming call: the stub is still answering, so this both renders the live figure and
 	// writes it to this script's own on-disk /api/stats cache.
-	if got := run(); !strings.Contains(got, "$0.03 of $0.41 (-12.0k)") {
+	if got := run(); !strings.Contains(got, "saved ≈$0.03") {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
@@ -2285,7 +2287,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 
 	stall() // same port, same cache key — now it accepts and never answers
 	got := run()
-	if !strings.Contains(got, "$0.03 of $0.41 (-12.0k)") {
+	if !strings.Contains(got, "saved ≈$0.03") {
 		t.Errorf("got %q; want the cached savings figure still rendered from the earlier fetch", got)
 	}
 	if !strings.Contains(got, "⏳") {
@@ -2325,7 +2327,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 		return strings.TrimSpace(string(out))
 	}
 
-	if got := run(); !strings.Contains(got, "$0.03 of $0.41 (-12.0k)") {
+	if got := run(); !strings.Contains(got, "saved ≈$0.03") {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
@@ -2369,32 +2371,32 @@ print(int(getattr(m, sys.argv[2])))
 	return n
 }
 
-// TestStatuslineTreatsAConnectPhaseTimeoutAsATimeoutNotDown is the review's third finding,
-// first half: a timeout during urlopen's CONNECT phase reaches Python wrapped as
-// urllib.error.URLError(reason=socket.timeout(...)) rather than raised directly the way a
-// READ-phase timeout is (the shape every other test in this file exercises, via toggleStub/
-// stallingPort, both of which accept the TCP connection first). Reproducing a genuine
-// connect-phase timeout needs an unroutable network path, which is not reliable to construct in
-// a test — so this drives the real _fetch_stats function with urlopen replaced by a stub that
-// raises exactly the shape urllib actually raises there, and checks the real except clauses
-// route it to STATS_TIMEOUT rather than STATS_DOWN.
+// TestStatuslineTreatsAConnectPhaseTimeoutAsATimeoutNotDown: a timeout while CONNECTING (a
+// saturated accept queue on a healthy-but-overloaded proxy) is raised by socket.create_connection
+// itself, a different place from a READ-phase timeout (the shape every other test here exercises
+// via toggleStub/stallingPort, which accept the TCP connection first). A genuine connect timeout
+// needs an unroutable network path, which is not reliable to construct in a test, so this drives
+// the real _fetch_stats with create_connection replaced by one that raises it, and checks the real
+// except clauses route it to STATS_TIMEOUT rather than STATS_DOWN.
 func TestStatuslineTreatsAConnectPhaseTimeoutAsATimeoutNotDown(t *testing.T) {
 	py := requireTool(t, "python3")
 	script := `
-import importlib.util, sys, socket, urllib.error
+import importlib.util, sys, socket
 spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
-def fake_urlopen(url, timeout=None):
-    raise urllib.error.URLError(socket.timeout("timed out"))
+def fake_connect(addr, timeout=None):
+    raise socket.timeout("timed out")
 
-m.urllib.request.urlopen = fake_urlopen
+m.socket.create_connection = fake_connect
 stats, status = m._fetch_stats("9", None)
 assert stats is None, stats
 print(status)
 `
-	out, err := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	cmd := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py"))
+	cmd.Env = append(sandboxEnv(t), "NO_COLOR=1")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("running the stub: %v\n%s", err, out)
 	}
@@ -2449,7 +2451,7 @@ func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d; must never fail a render", code)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(out), "cache 1:") {
+	if !strings.HasPrefix(strings.TrimSpace(out), "● warm 1m") {
 		t.Errorf("got %q; the cache stopper must still render off a malformed /api/stats body", out)
 	}
 	if strings.Contains(out, " of $") {
@@ -2463,11 +2465,14 @@ func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 // flaky by construction, not a property of the script.
 func parseCacheSeconds(t *testing.T, seg string) int {
 	t.Helper()
-	m, s := 0, 0
-	if _, err := fmt.Sscanf(seg, "cache %d:%d", &m, &s); err != nil {
+	m, sec := 0, 0
+	if _, err := fmt.Sscanf(seg, "◐ %ds left", &sec); err == nil {
+		return sec
+	}
+	if _, err := fmt.Sscanf(seg, "● warm %dm", &m); err != nil {
 		t.Fatalf("%q does not parse as a cache countdown: %v", seg, err)
 	}
-	return m*60 + s
+	return m * 60
 }
 
 // TestStatuslineCacheCountdownMath is the boundary table for the TTL "stopper" — the single most
@@ -2495,21 +2500,27 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("exit %d", code)
 			}
-			got := strings.SplitN(strings.TrimSpace(out), " | ", 2)[0]
+			got := strings.SplitN(strings.TrimSpace(out), " │ ", 2)[0]
 			if c.wantCold {
-				if got != "cache cold" {
-					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache cold")
+				if got != "○ cold" {
+					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "○ cold")
 				}
 				return
 			}
-			if got == "cache cold" {
+			if got == "○ cold" {
 				t.Fatalf("remaining=%.0fs: reported cold while still positive", c.remainingSec)
 			}
 			gotSec := parseCacheSeconds(t, got)
 			// Truncation only ever rounds DOWN (never up, never negative here), so the tolerance
 			// is asymmetric: at most the subprocess's own wall-clock overhead behind the expected
 			// value, never ahead of it.
-			if gotSec > int(c.remainingSec) || gotSec < int(c.remainingSec)-2 {
+			// Minutes are shown whole above EXPIRING_SECONDS (a calm, non-ticking figure), so the
+			// tolerance there is a whole minute, rounded down.
+			tol := 2
+			if c.remainingSec > 60 {
+				tol = 60
+			}
+			if gotSec > int(c.remainingSec) || gotSec < int(c.remainingSec)-tol {
 				t.Errorf("remaining=%.0fs: got %q (%ds), want within 2s below that", c.remainingSec, got, gotSec)
 			}
 		})
@@ -2534,16 +2545,19 @@ spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m.time.time = lambda: 1_700_000_000.0
-print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.0}}))        # remaining == 0
-print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.5}}))        # remaining +0.5s
-print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.0 - 0.5}}))  # remaining -0.5s
+seg = lambda e: m._cache_segment(m._cache_view({"prompt_cache": {"expires_at": e}}, None, 0))
+print(seg(1_700_000_000.0))        # remaining == 0
+print(seg(1_700_000_000.5))        # remaining +0.5s
+print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 `
-	out, err := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	cmd := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py"))
+	cmd.Env = append(sandboxEnv(t), "NO_COLOR=1")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("running the boundary check: %v\n%s", err, out)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	want := []string{"cache cold", "cache 0:00", "cache cold"}
+	want := []string{"○ cold", "◐ 0s left", "○ cold"}
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
 	}
@@ -2561,8 +2575,8 @@ func TestStatuslineOmitsPromptCacheWhenAbsent(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "cache –" {
-		t.Errorf("got %q, want the neutral placeholder %q", strings.TrimSpace(out), "cache –")
+	if strings.TrimSpace(out) != "◌ no cache yet" {
+		t.Errorf("got %q, want the neutral placeholder %q", strings.TrimSpace(out), "◌ no cache yet")
 	}
 }
 
@@ -2577,7 +2591,7 @@ func TestStatuslineOmitsZeroSavings(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "cache –" {
+	if strings.TrimSpace(out) != "◌ no cache yet" {
 		t.Errorf("got %q, want only the neutral cache placeholder (no session totals to show, no "+
 			"keep-alive pings to report)", out)
 	}
@@ -2596,8 +2610,8 @@ func TestStatuslineDefaultSegmentZeroTotal(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "" {
-		t.Errorf("got %q, want nothing — a zero session total is a fresh session, not a fault", out)
+	if strings.Contains(out, "saved") {
+		t.Errorf("got %q, want no saving claim — a zero session total is a fresh session, not a fault", out)
 	}
 	if strings.Contains(strings.ToLower(out), "nan") || strings.Contains(strings.ToLower(out), "inf") {
 		t.Fatalf("a zero-total render produced %q — this must never divide by the total at all", out)
@@ -2618,11 +2632,11 @@ func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 	got := strings.TrimSpace(out)
-	if got != "$0.03 of $0.41 (-12.0k)" {
-		t.Errorf("got %q, want the savings-vs-session-total segment exactly", got)
+	if !strings.HasPrefix(got, "saved ≈$0.03") {
+		t.Errorf("got %q, want the labelled, estimated saving first", got)
 	}
-	if strings.Contains(got, "cache") || strings.Contains(got, "ka ") {
-		t.Errorf("got %q — an extra segment appeared without its flag", got)
+	if strings.Contains(got, "ka ") || strings.Contains(got, "proxy:") {
+		t.Errorf("got %q — a detailed-layout/opt-in segment appeared in the balanced layout", got)
 	}
 }
 
@@ -2637,12 +2651,12 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
 		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
-	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--hide=cache")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.Contains(out, "cache") {
-		t.Errorf("got %q — the cache segment showed without --cache", out)
+	if strings.Contains(out, "warm") {
+		t.Errorf("got %q — the cache segment showed despite --hide=cache", out)
 	}
 	if strings.Contains(out, "ka ") {
 		t.Errorf("got %q — the keep-alive segment showed without --keepalive", out)
@@ -2662,7 +2676,7 @@ func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "cache 1:") {
+	if !strings.Contains(out, "● warm 1m") {
 		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
 	}
 	// The keep-alive segment now shows the NET dollar figure and the misses it prevented, not the
@@ -2670,7 +2684,7 @@ func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 	if !strings.Contains(out, "ka ≤4miss $0.07") {
 		t.Errorf("got %q, want %q with --keepalive passed", out, "ka ≤4miss $0.07")
 	}
-	if !strings.Contains(out, "$0.03 of $0.41 (-12.0k)") {
+	if !strings.Contains(out, "saved ≈$0.03") {
 		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
 	}
 }
@@ -2687,7 +2701,7 @@ func TestStatuslineShowsANegativeNetHonestly(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "$-0.05 of $1.00 (-0)") {
+	if !strings.Contains(out, "saved ≈-$0.05") {
 		t.Errorf("got %q, want a segment showing the negative net, not an omission", out)
 	}
 }
@@ -2751,8 +2765,8 @@ func TestStatuslineDefaultSegmentRequiresStats(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "" {
-		t.Errorf("got %q, want nothing — a real session total with no savings figure to pair "+
+	if strings.Contains(out, "saved") {
+		t.Errorf("got %q, want no saving claim — a real session total with no savings figure to pair "+
 			"it with must not render half a claim", out)
 	}
 }
@@ -2798,6 +2812,8 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 			w.Write([]byte(`{"total_saved_usd": 0.01, "saved_unique": 100}`))
 		case "lean=1&session=sess-b":
 			w.Write([]byte(`{"total_saved_usd": 9.99, "saved_unique": 9000}`))
+		case "lean=1&since=" + r.URL.Query().Get("since"): // the unscoped "day" read
+			w.Write([]byte(`{"total_saved_usd": 0}`))
 		default:
 			t.Errorf("unexpected query %q", r.URL.RawQuery)
 		}
@@ -2823,11 +2839,11 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 	}
 	a := run("sess-a")
 	b := run("sess-b")
-	if !strings.Contains(a, "$0.01 of $1.00 (-100)") {
-		t.Errorf("session a: got %q, want its own $0.01 of $1.00 (-100)", a)
+	if !strings.Contains(a, "saved ≈$0.01") {
+		t.Errorf("session a: got %q, want its own saved ≈$0.01", a)
 	}
-	if !strings.Contains(b, "$9.99 of $1.00 (-9.0k)") {
-		t.Errorf("session b: got %q, want its own $9.99 of $1.00 (-9.0k) — not session a's cached figure", b)
+	if !strings.Contains(b, "saved ≈$9.99") {
+		t.Errorf("session b: got %q, want its own saved ≈$9.99 — not session a's cached figure", b)
 	}
 }
 
@@ -2841,8 +2857,10 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt64(&hits, 1)
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.RawQuery, "since=") { // the day read has its own 60s cache
+			atomic.AddInt64(&hits, 1)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"total_saved_usd": 0.01, "saved_unique": 1}`))
 	})
