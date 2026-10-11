@@ -949,8 +949,10 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	if phase == components.CachePhaseCold {
 		s.deferColdSummary(c, call, path, span, end-start)
 		rep.Event("cold_commission_deferred")
-		rep.Skipped = true
-		return nil, nil
+		// The forwarded request re-writes the cold prefix either way, so send the stale summary
+		// if there is one: the rewrite is then the short [head, summary, tail], not the full
+		// transcript.
+		return declineButReplayStale()
 	}
 
 	// reserved marks a cache_state: pre_expiry commission as NOT YET APPLIED — see
