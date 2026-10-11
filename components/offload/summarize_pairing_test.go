@@ -119,3 +119,62 @@ func TestSummarizeSpanGroupsIgnoredWhenMismatched(t *testing.T) {
 		t.Errorf("mismatched groups: end=%d, want 3 (disabled, not out-of-range)", end)
 	}
 }
+
+// TestEmitCheckpointDoesNotOrphanAToolResultBehindASibling is #457 round 2's second site:
+// emitCheckpoint (the REPLAY path — tryReuse and replayStale both call it) had its own copy of
+// just the role==tool half of the boundary-safety rule, so it had the exact gap
+// summarizeSpan's fresh path had before this PR: a replayed checkpoint's boundary can land
+// exactly on a sibling text block whose tool_result, one slot later in the SAME wire group,
+// pairs with a tool_use that the checkpoint's span is about to summarize away.
+//
+// This is a DIFFERENT call path from TestSummarizeRebuildWithASplitGroup's "kept tail" case in
+// apply/normalizer_siblings_test.go: there, the boundary reaching emitCheckpoint was already
+// clean because it came straight from a FRESH summarizeSpan call. Here, boundary is given
+// directly (as tryReuse/replayStale actually do: `start + cp.CoveredCount`, independent of any
+// fresh span computation), so it is the only test that can catch emitCheckpoint failing to
+// apply the rule itself.
+func TestEmitCheckpointDoesNotOrphanAToolResultBehindASibling(t *testing.T) {
+	id := "call_a"
+	asst := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleAssistant,
+		ChatAssistantMessage: &bschemas.ChatAssistantMessage{
+			ToolCalls: []bschemas.ChatAssistantMessageToolCall{{ID: &id}}}}
+	tool := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleTool,
+		ChatToolMessage: &bschemas.ChatToolMessage{ToolCallID: &id}}
+	schema.SetMessageText(&tool, "tool output")
+
+	msgs := []bschemas.ChatMessage{
+		userMsg("task"),         // group 0 — head
+		asst,                    // group 1 — the tool_use
+		userMsg("sibling text"), // group 2 — sibling, FIRST in body order
+		tool,                    // group 2 — the paired tool_result, same group
+		userMsg("final"),        // group 3 — tail
+	}
+	groups := []int{0, 1, 2, 2, 3}
+
+	s := &Summarize{}
+	cp := sumCheckpoint{SummaryMsg: "<summary>covers the task</summary>", CoveredCount: 1}
+	// boundary = headCount(1) + CoveredCount(1) = 2, exactly the sibling's index: role=user
+	// there, so the plain `msgs[boundary].Role == Tool` check this replaced saw nothing wrong,
+	// while msgs[1] (the tool_use) is about to be dropped and msgs[3] (its result) would have
+	// survived in the tail two slots later.
+	out, _ := s.emitCheckpoint(cp, msgs, 1, 2, groups)
+
+	for _, m := range out {
+		if m.Role == bschemas.ChatMessageRoleTool {
+			t.Fatalf("a role=tool message leaked into the replayed output (orphaned tool_result "+
+				"not caught): %+v", out)
+		}
+	}
+	// Correct behaviour: the whole group (sibling + tool_result) and its tool_use are pulled
+	// into the summarized half along with the head, and the tail is just the final message —
+	// never a partial group. [head, summary, final].
+	if len(out) != 3 {
+		t.Fatalf("got %d messages, want 3 (head, summary, final): %+v", len(out), out)
+	}
+	if got := schema.MessageText(out[0]); got != "task" {
+		t.Errorf("out[0] = %q, want %q (the head)", got, "task")
+	}
+	if got := schema.MessageText(out[2]); got != "final" {
+		t.Errorf("out[2] = %q, want %q (the tail)", got, "final")
+	}
+}

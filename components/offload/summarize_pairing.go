@@ -101,31 +101,11 @@ func summarizeSpan(msgs []bschemas.ChatMessage, keepFirst, keepLast int, groups 
 		groups = nil // mismatched coordinates (an earlier component changed the count) — disable
 	}
 	// sameGroup reports whether msgs[a] and msgs[b] came from the SAME wire message, so a and b
-	// must never end up on opposite sides of a boundary — see the two loops below. False whenever
-	// groups is disabled or either index is out of its bounds (defensive; a and b are always
-	// adjacent indices here, but a boundary at 0 or len(msgs) must not panic).
+	// must never end up on opposite sides of a boundary — see the headCount loop below. False
+	// whenever groups is disabled or either index is out of its bounds (defensive; a and b are
+	// always adjacent indices here, but a boundary at 0 or len(msgs) must not panic).
 	sameGroup := func(a, b int) bool {
 		return groups != nil && a >= 0 && b < len(groups) && groups[a] == groups[b]
-	}
-	// groupHasToolRole reports whether the wire group STARTING at i contains a role=tool
-	// member anywhere in it, not just at i itself. It exists because a group's members are
-	// not always tool-first: apply.normalize emits them in BODY block order, so a sibling
-	// text block that precedes its tool_result (`[{type:text,...},{type:tool_result,...}]`)
-	// puts a role=user message at the group's own start. Without this, a tail beginning
-	// exactly on that sibling passes the plain `msgs[end].Role == Tool` check — it IS a
-	// user message — while the tool_result right behind it, in the SAME group, orphans its
-	// tool_use the moment that call ends up in the summarized span. #457 round 2.
-	groupHasToolRole := func(i int) bool {
-		if groups == nil || i < 0 || i >= len(msgs) {
-			return false
-		}
-		g := groups[i]
-		for k := i; k < len(msgs) && groups[k] == g; k++ {
-			if msgs[k].Role == bschemas.ChatMessageRoleTool {
-				return true
-			}
-		}
-		return false
 	}
 	headCount = keepFirst
 	if headCount < 0 {
@@ -172,15 +152,56 @@ func summarizeSpan(msgs []bschemas.ChatMessage, keepFirst, keepLast int, groups 
 	if end < start {
 		end = start
 	}
-	// Advance past a tail that would begin mid-exchange, mid wire-message, or on a wire
-	// message whose group hides an orphaned tool_result behind a leading sibling (#457, same
-	// reasoning as the headCount retreat above, same direction: advancing only ever keeps MORE
-	// context verbatim, never less).
-	for end < len(msgs) && (msgs[end].Role == bschemas.ChatMessageRoleTool ||
-		sameGroup(end-1, end) || groupHasToolRole(end)) {
-		end++
-	}
+	// Advance past a tail that would begin mid-exchange, mid wire-message, or on a wire message
+	// whose group hides an orphaned tool_result behind a leading sibling — see
+	// advanceSpanBoundary, same reasoning as the headCount retreat above, same direction:
+	// advancing only ever keeps MORE context verbatim, never less.
+	end = advanceSpanBoundary(msgs, groups, end)
 	return headCount, start, end
+}
+
+// advanceSpanBoundary is THE rule for "is it safe for a kept tail (or a replayed checkpoint's
+// tail, see emitCheckpoint) to begin at `at`", so there is exactly one implementation rather
+// than two that can drift. Advances `at` while it would:
+//
+//   - begin on a role=tool message directly (orphans its tool_use, which is now one message
+//     earlier, outside whatever is being kept from `at` onward);
+//   - split a wire group in half (`at-1` and `at` share one wire message — #457);
+//   - begin on a group whose FIRST member is a sibling text block, with its own tool_result
+//     one or more slots later in the SAME group (#457 round 2: `msgs[at].Role == tool` alone
+//     misses this, because `at` itself is role=user).
+//
+// groups is components.Ctx.WireGroup, or nil to disable the group-aware clauses entirely (a
+// length mismatch — an earlier count-changing component ran — is treated the same as nil).
+func advanceSpanBoundary(msgs []bschemas.ChatMessage, groups []int, at int) int {
+	if len(groups) != len(msgs) {
+		groups = nil
+	}
+	sameGroup := func(a, b int) bool {
+		return groups != nil && a >= 0 && b < len(groups) && groups[a] == groups[b]
+	}
+	// groupHasToolRole reports whether the wire group STARTING at i contains a role=tool
+	// member anywhere in it, not just at i itself. apply.normalize emits a group's members in
+	// BODY block order, so a sibling text block that precedes its tool_result puts a role=user
+	// message at the group's own start — this is what lets the boundary land there undetected
+	// by a plain `msgs[i].Role == Tool` check.
+	groupHasToolRole := func(i int) bool {
+		if groups == nil || i < 0 || i >= len(msgs) {
+			return false
+		}
+		g := groups[i]
+		for k := i; k < len(msgs) && groups[k] == g; k++ {
+			if msgs[k].Role == bschemas.ChatMessageRoleTool {
+				return true
+			}
+		}
+		return false
+	}
+	for at < len(msgs) && (msgs[at].Role == bschemas.ChatMessageRoleTool ||
+		sameGroup(at-1, at) || groupHasToolRole(at)) {
+		at++
+	}
+	return at
 }
 
 // requestedToolCalls reports whether m is an assistant message that asked for tool calls, as

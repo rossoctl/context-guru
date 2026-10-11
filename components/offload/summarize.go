@@ -683,7 +683,7 @@ func (s *Summarize) replayStale(c *components.Ctx, rep *components.Report, req *
 			commitRefresh(c, rep, markerFull, cp.Key, string(b))
 		}
 	}
-	out, keys := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	out, keys := s.emitCheckpoint(cp, msgs, headCount, boundary, c.WireGroup)
 	if len(keys) == 0 {
 		rep.Irreversible = true
 	}
@@ -722,17 +722,19 @@ func (s *Summarize) replayStale(c *components.Ctx, rep *components.Report, req *
 // tryReuse and the refusal fallback so a replayed checkpoint is byte-identical whichever path
 // emits it — a difference between them would itself be a cache flip.
 func (s *Summarize) emitCheckpoint(cp sumCheckpoint, msgs []bschemas.ChatMessage,
-	headCount, boundary int) ([]bschemas.ChatMessage, []string) {
+	headCount, boundary int, groups []int) ([]bschemas.ChatMessage, []string) {
 	// USER for the same reason as the fresh-summary path: a system role at index 1 is rejected
 	// by the provider. The replayed checkpoint must match that shape exactly, or a replayed
 	// turn would emit different bytes from the turn that created it.
 	summaryMsg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&summaryMsg, cp.SummaryMsg)
-	// The replayed boundary must respect exchange atomicity exactly as the fresh path does,
-	// or a replayed turn emits different bytes from the turn that created it.
-	for boundary < len(msgs) && msgs[boundary].Role == bschemas.ChatMessageRoleTool {
-		boundary++
-	}
+	// The replayed boundary must respect exchange AND wire-message atomicity exactly as the
+	// fresh path does (advanceSpanBoundary — #457 round 2), or a replayed turn emits different
+	// bytes from the turn that created it. This used to be its own copy of just the role==tool
+	// half of that rule, which is exactly the shape of gap summarizeSpan had before #457: a
+	// sibling-first group lets the tail begin on the sibling (role=user) while its tool_result
+	// orphans a tool_use one slot earlier.
+	boundary = advanceSpanBoundary(msgs, groups, boundary)
 	out := make([]bschemas.ChatMessage, 0, 2+(len(msgs)-boundary))
 	out = append(out, msgs[:headCount]...)
 	out = append(out, summaryMsg)
@@ -839,7 +841,7 @@ func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []b
 			commitRefresh(c, rep, markerFull, cp.Key, string(b))
 		}
 	}
-	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary, c.WireGroup)
 	return emitted, ks, true, false
 }
 
