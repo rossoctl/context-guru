@@ -3599,8 +3599,9 @@ PRESETS: dict[str, str] = {
     "conservative": "trims obvious waste from tool output (repeats, dead runs) — deterministic, "
                      "no model calls, the safe first step into carrying less",
     "medium": "conservative plus a cheap model that keeps only what looks relevant in recent "
-              "tool output — the first tier that can spend on its own",
-    "high": "medium plus a summarizer that compacts older turns once the context window is "
+              "tool output, and a summary prepared in the background that is used only if you "
+              "come back after the cache expired — the first tier that can spend on its own",
+    "high": "medium, but the summary of older turns is used as soon as the context window is "
             "nearly full",
     "xhigh": "high plus a periodic deep-adjudication sweep over turns whose prompt cache has "
              "already gone cold — the deepest cut this picker offers",

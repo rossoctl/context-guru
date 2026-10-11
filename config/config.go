@@ -507,29 +507,28 @@ var presets = map[string][]string{
 
 	// conservative/medium/high/xhigh: the effort ladder the Claude Code plugin's preset picker
 	// offers (context-guru-plugin/skills/preset-picker), replacing the old off/cache/house/
-	// codesmart/housellm chooser. Each tier is a strict superset of the one below it:
-	//   conservative = house, verbatim.
-	//   medium       = housellm minus extract_llm_sweep — the cheap-model pass, no cold-cache sweep.
-	//   high         = medium + summarize, at its own default trigger (min_request_frac 0.9,
-	//                  cache_state any — see the note beside its presetConfigs entry below for
-	//                  why cache_state is NOT overridden to pre_expiry despite the name "high").
-	//   xhigh        = high's summarizer swapped for cache_aware_summarizer (#413), plus
-	//                  extract_llm_sweep back in — i.e. housellm + the cache-reusing summarizer.
-	// `high` keeps `summarize` unchanged — that swap is `xhigh`-only. `cache_aware_summarizer`
-	// needs #402's trigger defaults, cold-turn ordering and keep-alive substitution, and #406's
-	// prefix-ask fix, to do anything at all on Anthropic incoming-model traffic; on the OpenAI
-	// path it needed none of those, which is why `high` was left on `summarize` rather than
-	// moved at the same time — one component changing under two presets at once from two
-	// different causes would be two changes wearing one commit.
-	// Unmeasured: nobody has benchmarked either summarizer ahead of the housellm offloaders (or
-	// in combination with them at all) for savings, only for wire-shape correctness
-	// (apply/shape_validate_test.go, which tests `summarize`). Both are placed first on that
-	// test's precedent, not on evidence that the order matters — keep_last_turns (default 10 for
-	// cache_aware_summarizer, matching summarize's own keep_last tuning) leaves the tail either
-	// component would interact with untouched regardless of order.
+	// codesmart/housellm chooser. Each tier is a strict superset of the one below it (#417):
+	//   conservative = house, verbatim. No summarizer.
+	//   medium       = housellm minus extract_llm_sweep, plus cache_aware_summarizer with
+	//                  cache_state: pre_expiry — the conservative mode. It prepares a summary in
+	//                  the background (in place of one keep-alive ping), keeps it in reserve, and
+	//                  uses it only when the user returns after the cache expired. It never
+	//                  changes the history while the user is working.
+	//   high         = medium with cache_aware_summarizer at its own default cache_state (`any`):
+	//                  summarize at 0.9 of the window and use the summary on the next request.
+	//   xhigh        = high + extract_llm_sweep — i.e. housellm + the cache-reusing summarizer.
+	// `summarize` is no longer in any picker tier. It stays available by name for the cases
+	// where it is the better choice (a much cheaper summary model than the agent's; a route with
+	// no stored request; a gateway that rejects the reused-request shape) — see
+	// docs/components/advanced-offload.md, "Two ways to use cache_state".
+	// Unmeasured: nobody has benchmarked the summarizer ahead of the housellm offloaders (or in
+	// combination with them at all) for savings, only for wire-shape correctness and for the
+	// pipeline-order guard (proxy/cache_aware_pipeline_order_integration_test.go). It is placed
+	// first so its stale-prefix guard and the stored request see the same messages; keep_last_turns
+	// (default 10) leaves the tail the other components act on untouched regardless of order.
 	"conservative": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
-	"medium":       {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
-	"high":         {"summarize", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
+	"medium":       {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
+	"high":         {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 	"xhigh":        {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
 }
 
@@ -733,8 +732,16 @@ components:
 components:
   extract:
     min_tokens: 400`,
-	"medium": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
+	// medium's summarizer runs in the conservative mode (#417): cache_state: pre_expiry holds the
+	// summary in reserve and uses it only on a cold return. Everything else comes from the
+	// component's defaults (min_request_frac 0.9, the money-gated refresh of #415).
+	"medium": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
 components:
+  cache_aware_summarizer:
+    model:
+      source: incoming
+    trigger:
+      cache_state: pre_expiry
   extract:
     min_tokens: 400
   extract_llm:
@@ -753,17 +760,12 @@ components:
     strategy: code
     trigger:
       min_request_tokens: 3000`,
-	// high's summarize block sets only model.source: incoming (reuse the request's own model and
-	// key). trigger.cache_state is left at its component default (`any`) ON PURPOSE: an earlier
-	// revision pinned `cache_state: pre_expiry` here on the theory that it made this a
-	// "cache-aware" summarizer, which components/offload/summarize.go's own docstring (above
-	// summarizeDefaultCacheState) retracts for exactly this component — `summarize` flattens its
-	// prompt into a single string and reuses no live prefix, so `pre_expiry` is honoured as a
-	// gate but "buys nothing but a lower firing rate" here. That is `cache_aware_summarizer`'s
-	// job, not this one's. Caught in review of #358.
-	"high": `pipeline: [summarize, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
+	// high's summarizer is cache_aware_summarizer at its default cache_state (`any`): summarize at
+	// 0.9 of the window and use the summary on the next request (#417). Only model.source is
+	// carried over, as for xhigh below.
+	"high": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
 components:
-  summarize:
+  cache_aware_summarizer:
     model:
       source: incoming
   extract:
@@ -784,14 +786,8 @@ components:
     strategy: code
     trigger:
       min_request_tokens: 3000`,
-	// xhigh's summarizer is cache_aware_summarizer, not summarize — the one tier that uses it.
-	// model.source: incoming is the only setting carried over; trigger is left at the
-	// component's own defaults (min_request_frac 0.9, cache_state any — see
-	// applyCacheAwareTriggerDefaults) rather than pinned here, the same choice `high` makes for
-	// `summarize` and for the same reason (see the comment above `high`'s entry). On Anthropic
-	// incoming-model traffic this needs #402 (the trigger/cold-turn/keep-alive work and the
-	// PrefixAsk fallback), #406 (the prefix-ask max_tokens fix) and #413 (the prefix-ask
-	// insertion-point fix) to do anything at all — see the presets map comment above.
+	// xhigh = high + extract_llm_sweep. Same summarizer settings as high: model.source: incoming,
+	// trigger at the component's own defaults (min_request_frac 0.9, cache_state any).
 	"xhigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
 components:
   cache_aware_summarizer:

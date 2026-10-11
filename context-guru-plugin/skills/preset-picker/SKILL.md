@@ -35,8 +35,8 @@ a fault, just unset.
 |---|---|
 | `off` | nothing runs, requests go through untouched |
 | `conservative` | trims obvious waste — the safe first step into "carry less" |
-| `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output |
-| `high` | `medium` plus a summarizer that compacts older turns once the context window is nearly full |
+| `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output, and a summary prepared in the background that is used only if you come back after the cache expired |
+| `high` | `medium`, but the summary of older turns is used as soon as the context window is nearly full |
 | `xhigh` | `high` plus a deep-adjudication sweep over turns whose cache has already gone cold — the deepest cut |
 
 Recommend `conservative` to someone who wants to carry less context but hasn't said they want an
@@ -71,5 +71,5 @@ restart is the way to confirm it stuck.
 - Do not invent a preset name. `settings.py preset list` is the authoritative set; anything else
   exits 2 with `reason=unknown_preset`.
 - Do not push someone toward `high` or `xhigh` by default. `medium` is already the first tier that
-  makes its own model calls and spends on its own; `high`/`xhigh` add a compaction-model summarizer
-  on top. Offer them, don't default to them.
+  makes its own model calls and spends on its own; `high`/`xhigh` use the summary of older turns
+  while you work, not only after a cold return. Offer them, don't default to them.

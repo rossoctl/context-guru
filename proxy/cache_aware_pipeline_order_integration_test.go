@@ -15,6 +15,7 @@ import (
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
+	"gopkg.in/yaml.v3"
 )
 
 // PR #414's review of this follow-up: the stale-prefix guard compares
@@ -141,6 +142,43 @@ func pipelineOrderFixture(t *testing.T, configYAML string) (asked []string) {
 
 // The minimal reproduction: cache_aware_summarizer followed by exactly the one component whose
 // rewrite exposes the bug.
+// presetWithLowTrigger loads `preset` and returns a config that keeps the preset's OWN
+// cache_aware_summarizer block (model.source, cache_state, …) and only lowers its trigger so a
+// three-turn fixture reaches it. A plain `components:` override would replace the preset's block
+// as a whole (applyPreset: merged[k] = v), so the test would check its own settings, not the
+// preset's (PR #456 review).
+func presetWithLowTrigger(t *testing.T, preset string) string {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte("preset: " + preset + "\n"))
+	if err != nil {
+		t.Fatalf("load preset %s: %v", preset, err)
+	}
+	node, ok := cfg.Components["cache_aware_summarizer"]
+	if !ok {
+		t.Fatalf("preset %s carries no cache_aware_summarizer block", preset)
+	}
+	block := map[string]any{}
+	if err := node.Decode(&block); err != nil {
+		t.Fatal(err)
+	}
+	block["keep_last_turns"] = 2
+	block["min_tokens"] = 1
+	trig, _ := block["trigger"].(map[string]any)
+	if trig == nil {
+		trig = map[string]any{}
+	}
+	trig["min_messages"] = 7
+	trig["min_request_tokens"] = 1
+	trig["min_request_frac"] = 0
+	block["trigger"] = trig
+	out, err := yaml.Marshal(map[string]any{"preset": preset,
+		"components": map[string]any{"cache_aware_summarizer": block}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
 func TestCacheAwarePipelineOrderMinimalTextCleanCase(t *testing.T) {
 	asked := pipelineOrderFixture(t, "pipeline: [cache_aware_summarizer, textclean]\n"+
 		"components:\n  cache_aware_summarizer:\n    keep_last_turns: 2\n    min_tokens: 1\n"+
@@ -156,19 +194,44 @@ func TestCacheAwarePipelineOrderMinimalTextCleanCase(t *testing.T) {
 
 // The shipped `xhigh` preset, loaded by name (PR #414 switched it to cache_aware_summarizer, first
 // in the pipeline). Only the summarizer's trigger is lowered so a three-turn fixture reaches it; the
-// pipeline itself, and every other component's settings, come from the preset. If the stale-prefix
+// pipeline, and the summarizer's own settings other than its trigger, come from the preset. If the stale-prefix
 // guard's basis regresses to the forwarded body, this reproduces the live #414 finding: 0
 // commissions, every one declining as stale_prefix.
 func TestXHighPresetCommitsACacheAwareSummary(t *testing.T) {
-	asked := pipelineOrderFixture(t, "preset: xhigh\n"+
-		"components:\n  cache_aware_summarizer:\n    model:\n      source: incoming\n"+
-		"    keep_last_turns: 2\n    min_tokens: 1\n"+
-		"    trigger:\n      min_messages: 7\n      min_request_tokens: 1\n      min_request_frac: 0\n")
+	asked := pipelineOrderFixture(t, presetWithLowTrigger(t, "xhigh"))
 	if len(asked) != 1 {
 		t.Fatalf("got %d ask calls, want exactly 1 (the xhigh preset should have "+
 			"committed a summary on turn 3)", len(asked))
 	}
 	if !strings.Contains(asked[0], "MARK-T2") {
 		t.Error("the ask call's own prefix did not cover turn 2 — the fixture itself is broken")
+	}
+}
+
+// `high` runs the same summarizer as xhigh at cache_state `any` (#417), so it must commit a
+// summary on the same fixture. `medium` pins cache_state: pre_expiry, so on these warm turns it
+// must NOT ask (it waits for the pre-expiry window); its reserve path is covered by the
+// pre_expiry tests in components/offload and proxy/keepalive_summarysubstitute_test.go.
+func TestHighPresetCommitsACacheAwareSummary(t *testing.T) {
+	asked := pipelineOrderFixture(t, presetWithLowTrigger(t, "high"))
+	if len(asked) != 1 {
+		t.Fatalf("got %d ask calls, want exactly 1 (the high preset should have committed a summary on turn 3)", len(asked))
+	}
+	if !strings.Contains(asked[0], "MARK-T2") {
+		t.Error("the ask call's own prefix did not cover turn 2")
+	}
+}
+
+func TestMediumPresetDoesNotSummarizeOnAWarmTurn(t *testing.T) {
+	before := offload.CacheAwareSummarizerPrefixAskUsed()
+	asked := pipelineOrderFixture(t, presetWithLowTrigger(t, "medium"))
+	if len(asked) != 0 {
+		t.Fatalf("got %d ask calls, want 0: medium (pre_expiry) must not summarize on a warm turn", len(asked))
+	}
+	// Positive half: the summarizer DID run and reach its model step, then stopped at the
+	// cache_state gate. Without this, a medium with no summarizer at all would also pass.
+	if offload.CacheAwareSummarizerPrefixAskUsed() == before {
+		t.Fatal("cache_aware_summarizer never reached its model step — medium is not running it, " +
+			"so 0 ask calls proves nothing")
 	}
 }
