@@ -557,6 +557,28 @@ components:
 Names are exactly as the inventory reports them. `mcp__<server>` (no tool half) removes a whole MCP
 server, which is the unit you actually added and the unit you'd remove.
 
+### Auto mode (`auto_remove: true`, off by default, Anthropic dialect)
+
+```yaml
+  toolfilter:
+    auto_remove: true
+```
+
+Adds, to `remove`, every tool the account's own history shows was declared in at least 5 sessions over
+at least 7 days and never called. The rules that keep it cache-safe:
+
+- The set is chosen once per session, on the first request (no assistant turn yet: a cold start anyway)
+  or on the first proven-cold request, then stored and applied unchanged. A warm session is never touched.
+- Never removed: `context_guru_*` tools, tools already called in the transcript, tools the system prompt
+  names, a forced `tool_choice` tool (a non-auto `tool_choice` skips the decision entirely).
+- Never-worse guard: removed tokens must be at least twice the restore stub's tokens, or nothing is removed.
+- A `context_guru_tools` stub lists the hidden tools (name plus a clipped one-line description). When the
+  model calls it with names, the proxy answers in band and re-declares them on that same upstream
+  continuation, in their original positions, with the stub re-rendered for what is still hidden. That is
+  one whole-prefix rewrite per restore call, paid at the moment the model needs the tool, and the client's
+  next request reproduces the same bytes so there is no second rewrite. Restores last for the session.
+- Candidates come from the dashboard history, so it needs `--dashboard`; with no history it does nothing.
+
 On the hosted service you don't hand-write that: the dashboard's **Inventory** page has a switch per
 declaration, which posts to `POST /api/toolfilter` (`{kind, name, server, action:"exclude"|"include"}`).
 `GET /api/toolfilter` is the read half:
