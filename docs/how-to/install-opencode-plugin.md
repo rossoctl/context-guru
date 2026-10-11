@@ -32,7 +32,7 @@ Restart OpenCode after changing the config. On the first startup, the plugin:
 1. Reuses `context-guru-proxy` from `PATH`, or downloads the current release and verifies its SHA-256 checksum.
 2. Starts one loopback proxy for the project, using a free port beginning at `8787`.
 3. Routes Anthropic requests to `/anthropic` and OpenAI requests to `/openai/v1`.
-4. Preserves any configured provider `baseURL` as the proxy's upstream.
+4. Preserves any configured provider gateway host and path prefix as the proxy's upstream, avoiding a duplicate trailing `/v1`.
 
 The proxy state, log, dashboard database, and recovery command live under:
 

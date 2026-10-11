@@ -1,8 +1,8 @@
 # opencode-context-guru
 
 This plugin starts a local `context-guru-proxy` and routes OpenCode's Anthropic and OpenAI provider
-requests through it. It preserves configured provider base URLs as the proxy's upstreams, adds the
-OpenCode session ID to each request, and fails open if the proxy cannot start.
+requests through it. It preserves configured provider gateway hosts and path prefixes as the proxy's
+upstreams, adds the OpenCode session ID to each request, and fails open if the proxy cannot start.
 
 Install it in `~/.config/opencode/opencode.json` for all projects:
 

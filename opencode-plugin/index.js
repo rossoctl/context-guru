@@ -183,6 +183,16 @@ function modelProviderIds(config) {
   return ids
 }
 
+function proxyUpstreamURL(original) {
+  try {
+    const url = new URL(original)
+    url.pathname = url.pathname.replace(/\/v1\/?$/, "") || "/"
+    return url.href.replace(/\/$/, "")
+  } catch {
+    return original.replace(/\/+$/, "")
+  }
+}
+
 function routeProviders(config, port) {
   config.provider ||= {}
   const configuredIds = Object.keys(config.provider)
@@ -199,7 +209,7 @@ function routeProviders(config, port) {
     if (!dialect) continue
     const original = config.provider[id]?.options?.baseURL
     const defaultUpstream = dialect === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com"
-    const upstream = typeof original === "string" && original && !original.includes("127.0.0.1:") && !original.includes("localhost:") ? original : defaultUpstream
+    const upstream = typeof original === "string" && original && !original.includes("127.0.0.1:") && !original.includes("localhost:") ? proxyUpstreamURL(original) : defaultUpstream
     routes.push({ dialect, upstream })
   }
   for (const dialect of ["anthropic", "openai"]) {
