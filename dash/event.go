@@ -140,7 +140,12 @@ type Event struct {
 	// #424 requirement). Never serialized (there is nothing to marshal); the SIX FIELDS it
 	// fills are what reaches JSON and the database.
 	WaitCause func() WaitCauseResult `json:"-"`
-	Model     string                 `json:"model"`
+	// Lifecycle is the opt-in lifecycle-signals row (dash/lifecycle.go), nil when the flag is
+	// off; LifecycleFn fills it on the writer goroutine, for the same reason WaitCause runs
+	// there (it rescans the request body). Neither is part of the JSON event.
+	Lifecycle   *LifecycleRow        `json:"-"`
+	LifecycleFn func() *LifecycleRow `json:"-"`
+	Model       string               `json:"model"`
 	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
 	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
 	// tokens.BilledDeltaFactor(Model), resolved once in Price.

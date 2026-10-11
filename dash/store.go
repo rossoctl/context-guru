@@ -380,6 +380,14 @@ func (d *DB) insertBatch(evs []*Event) error {
 	}
 	defer xcallStmt.Close()
 
+	lifeStmt, err := tx.Prepare(`INSERT INTO request_lifecycle(
+		request_id, result_count, result_bytes, result_error, since_prev_end_ms, granted_ttl, ping_n)
+		VALUES (?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer lifeStmt.Close()
+
 	spend := map[spendKey]float64{}
 	for idx, e := range evs {
 		// nil, not "", when no strategy applied — so the column stores SQL NULL and stays
@@ -414,6 +422,12 @@ func (d *DB) insertBatch(evs []*Event) error {
 			return err
 		}
 		e.ID = id
+		if l := e.Lifecycle; l != nil {
+			if _, err := lifeStmt.Exec(id, l.ResultCount, l.ResultBytes, boolInt(l.ResultError),
+				l.SincePrevEndMs, l.GrantedTTL, l.PingN); err != nil {
+				return err
+			}
+		}
 		for _, c := range e.Components {
 			if _, err := compStmt.Exec(id, c.Component, c.Kind,
 				boolInt(c.Acted), boolInt(c.Mutated), boolInt(c.Reverted), boolInt(c.Skipped),

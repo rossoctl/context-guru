@@ -417,6 +417,14 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	toolUseNames, stopReason := usage.ToolUseNames, usage.StopReason
 	failedCall := status != 0 && status/100 != 2
 	provider := bschemas.ModelProvider(c.provider)
+	if c.rec.LifecycleOn() {
+		ts, endTS, cacheW, cacheW1h := e.TS, time.Now().UnixMilli(), usage.CacheWrite-usage.CacheWrite1h, usage.CacheWrite1h
+		rec := c.rec
+		e.LifecycleFn = func() *dash.LifecycleRow {
+			return rec.ObserveLifecycle(tenantID, sessionID, threadID, ts, endTS,
+				scanLifecycle(provider, waitBody), cacheW, cacheW1h)
+		}
+	}
 	e.WaitCause = func() dash.WaitCauseResult {
 		obs := waits.Observe(tenantID, sessionID, threadID, provider, waitBody)
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
