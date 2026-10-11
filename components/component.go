@@ -558,10 +558,10 @@ type Ctx struct {
 	// though the stash is exactly right (PR #431 round 1 review). Hash RawInput[:n], never
 	// req.Input[:n], for any guard whose other side is a pre-pipeline stash.
 	//
-	// nil for a Ctx built directly (most component unit tests, and any caller that predates this
-	// field) rather than through apply.BodyOpts — callers MUST treat nil as "cannot verify" and
-	// decline, the same failure mode an unknown MaxCachedIdx already gets, never fall back to
-	// req.Input, which is the exact bug this field exists to avoid silently reintroducing.
+	// apply sets it on every route (Messages and Responses). It is nil only for a Ctx built
+	// directly, as most component unit tests do. A guard then falls back to req.Input
+	// (offload.rawSpanForHash), which is correct only when no component runs before the guarded
+	// one. So every host path that builds a Ctx for a real request must set this field.
 	//
 	// A component BEFORE the guarded one that changes the MESSAGE COUNT (summarize, a
 	// count-changing extract path) shifts req.Input's indices out of RawInput's coordinates even

@@ -557,7 +557,12 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	}
 	chat := &bschemas.BifrostChatRequest{Provider: bschemas.OpenAI, Input: append([]bschemas.ChatMessage(nil), norm...)}
 	restore := planRestore(pipe, st, res.Session, "responses", client, gjson.GetBytes(client, "input").Array())
+	// The pre-pipeline snapshot the stale-prefix guards hash (components.Ctx.RawInput), taken
+	// exactly as on the Messages route in BodyOpts: a separate slice, so a component's rewrite of
+	// chat.Input cannot change it.
+	rawInput := append([]bschemas.ChatMessage(nil), norm...)
 	c := &components.Ctx{Ctx: ctx, Session: res.Session, Thread: res.Thread.ID, Store: st, Model: o.Models,
+		RawInput: rawInput,
 		// OpenAI's 30m is a minimum, never proof of expiry. ColdCache stays
 		// false even after a long idle gap, matching the Chat Completions path.
 		// A previous_response_id points to upstream-held history that this
