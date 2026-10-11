@@ -37,10 +37,23 @@ reference — port its *logic*, re-implement its transport in Go.
 Go is not installed on the developer laptops. Builds and tests run on a shared Linux box, through
 `~/cgssh2 '<command>'`.
 
-- **Run remote builds and tests in the foreground.** Use a long Bash timeout (up to 10 minutes).
-  Split a slower suite into several foreground calls.
-- **Never start a remote run detached and then end the turn to wait for it.** A job on the box is
-  not a task the local harness tracks, so nothing wakes an idle agent when it finishes.
+- **Run remote builds and tests in the foreground by default.** Use a long Bash timeout (up to
+  10 minutes) and one package set per call. `./proxy/...` takes about 7.5 minutes and `./dash/...`
+  about 6 minutes with `-race`, so run them as separate calls.
+- **A subagent runs remote work in the foreground only.** It is not woken by its own
+  `run_in_background` task once it ends its turn, so it must never end the turn to wait.
+- **A detached remote run is for main sessions only,** and only when the run takes more than
+  10 minutes. Start ONE local poller with `run_in_background: true` that waits for the run's done
+  marker, with a timeout inside it. Then make no tool calls until its notification arrives. A job
+  on the box by itself is not a task the local harness tracks, so without the poller nothing
+  wakes you.
+- **Write the done marker on ANY exit,** with the exit code:
+  `trap 'echo "DONE rc=$?" >> ~/<run>.out' EXIT`. A marker written only at the end of a `set -e`
+  script is never written when a test fails, so a failure looks like a timeout.
+- **Never spin-wait.** Do not call `true`, `echo` or `sleep` to pass time. Each call is a paid model
+  request on the whole context.
+- **Never re-sync code to the box while a run is in progress there.** It mixes two versions of the
+  code within one test run.
 - **Commit a WIP before any long run.**
 - **`go` is not on the non-interactive PATH.** Use `/usr/local/go/bin/go`. `cgo` is needed for
   `-race` (`CGO_ENABLED=1`).
