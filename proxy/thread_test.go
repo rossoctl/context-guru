@@ -16,6 +16,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 )
 
 // threadBody is an Anthropic-dialect body whose messages are the given texts, with Claude Code's
@@ -314,5 +315,153 @@ func TestSentStashDropsTheOldestThreadNotTheActiveOne(t *testing.T) {
 	}
 	if n := len(s.m); n > maxSentSessions {
 		t.Errorf("stash holds %d entries, bound is %d", n, maxSentSessions)
+	}
+}
+
+// threadBodyWithTools is threadBody plus a tools declaration — the metadata internal/thread
+// reads to tell the main agent from a side request (title, quota check, end-of-turn note).
+func threadBodyWithTools(texts ...string) []byte {
+	var m map[string]any
+	_ = json.Unmarshal(threadBody(texts...), &m)
+	m["tools"] = []any{map[string]any{"name": "Bash", "input_schema": map[string]any{"type": "object"}}}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// #426 fix, the prefix-ask stash: a side request gets its OWN thread id from internal/thread
+// (TestASideRequestDoesNotMoveTheMainThreadsTail), so its own put() can no longer land on the
+// main thread's key and replace its stashed body.
+func TestSentStashSurvivesASideRequest(t *testing.T) {
+	tr := thread.New()
+	s := newSentStash()
+	scope := "t1\x00sess"
+
+	mainBody := threadBodyWithTools("fix the bug")
+	main := tr.Resolve(scope, "", mainBody, false)
+	if main.ID != thread.Primary {
+		t.Fatalf("precondition: main thread got %q, want primary", main.ID)
+	}
+	s.put(thread.Key("sess", main.ID), bschemas.Anthropic, mainBody, mainBody)
+
+	sideBody := threadBody("fix the bug", "generate a title")
+	side := tr.Resolve(scope, "", sideBody, false)
+	if side.ID == main.ID {
+		t.Fatal("precondition: the side request got the main thread's id")
+	}
+	s.put(thread.Key("sess", side.ID), bschemas.Anthropic, sideBody, sideBody)
+
+	if got := s.get(thread.Key("sess", main.ID)); string(got) != string(mainBody) {
+		t.Fatalf("the side request's own stash entry replaced the main thread's: got %.80q", got)
+	}
+}
+
+// #426 fix, the keeper: a side request gets its OWN thread id, so its own arrival can no
+// longer clear the main thread's live keep-alive entry — the #426 bug in the form the issue's
+// own live case (a resumed turn's title/quota request) would have hit it.
+func TestKeeperSurvivesASideRequestsArrival(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	tr := thread.New()
+	scope := "t1\x00sess"
+	pol := kaPolicy()
+	pol.MinPrefixTokens = 1000
+	tn := &Tenancy{ID: "t1", Cache: pol}
+	r := httptest.NewRequest(http.MethodPost, "/x", nil)
+	up := upstream{base: "http://up", path: "/v1/messages"}
+	start := clock.now()
+
+	rec := func(id string, at time.Time, body []byte) {
+		k.record(tn, "sess", id, at, body, up, r, bschemas.Anthropic, "/v1/messages",
+			http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 100}, true)
+	}
+
+	// The main thread's first two turns (the gate skips a session's first request).
+	body1 := threadBodyWithTools("fix the bug")
+	main := tr.Resolve(scope, "", body1, false)
+	k.arrive("t1", "sess", main.ID)
+	rec(main.ID, start, body1)
+	body2 := threadBodyWithTools("fix the bug", "a1", "u2")
+	main = tr.Resolve(scope, "", body2, false)
+	if main.ID != thread.Primary {
+		t.Fatalf("precondition: main thread got %q, want primary", main.ID)
+	}
+	k.arrive("t1", "sess", main.ID)
+	rec(main.ID, start.Add(time.Second), body2)
+	if got := k.Stats().Live; got != 1 {
+		t.Fatalf("precondition: %d live entries, want 1 (the main thread)", got)
+	}
+
+	// A tool-less side request shares the main thread's prefix and appends its own message.
+	sideBody := threadBody("fix the bug", "a1", "u2", "generate a title")
+	side := tr.Resolve(scope, "", sideBody, false)
+	if side.ID == thread.Primary {
+		t.Fatal("precondition: the side request got the main thread's id")
+	}
+	if p, _, _ := k.arrive("t1", "sess", side.ID); p != 0 {
+		t.Fatal("a side request's own first arrival reported the main thread's pings")
+	}
+
+	if got := k.Stats().Live; got != 1 {
+		t.Fatalf("after the side request's arrival: %d live entries, want 1 (the main thread survives)", got)
+	}
+	if n := k.sweep(clock.advance(300 * time.Second)); n != 1 {
+		t.Fatalf("sweep fired %d pings, want 1 (the main thread, still live)", n)
+	}
+}
+
+// #426 fix, wait-cause (#453): a side request gets its OWN thread id, so its own Observe can
+// no longer land on the main thread's key and perturb its open-task state or wake_cause.
+func TestWaitCauseSurvivesASideRequest(t *testing.T) {
+	tr := thread.New()
+	wc := waitcause.New()
+	scope := "t1\x00sess"
+
+	// Built by hand, in the same key order as turn2 and side3 below (role before content):
+	// internal/thread's fingerprint hashes an object's keys in DOCUMENT order, so turn2's first
+	// message must be byte-for-byte the same shape as this one for the prefix match to hold.
+	turn1 := []byte(`{"model":"claude-sonnet-5",` +
+		`"tools":[{"name":"Bash","input_schema":{"type":"object"}}],` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"fix the bug"}]}]}`)
+	main := tr.Resolve(scope, "", turn1, false)
+	if main.ID != thread.Primary {
+		t.Fatalf("precondition: main thread got %q, want primary", main.ID)
+	}
+
+	// Turn 2 opens a background task.
+	turn2 := []byte(`{"model":"claude-sonnet-5",` +
+		`"tools":[{"name":"Bash","input_schema":{"type":"object"}}],` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"fix the bug"}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"call1","name":"Bash",` +
+		`"input":{"command":"sleep 60","run_in_background":true}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"call1",` +
+		`"content":"Command running in background with ID: bash1."}]}]}`)
+	main = tr.Resolve(scope, "", turn2, false)
+	if main.ID != thread.Primary {
+		t.Fatalf("precondition: main thread's second turn got %q, want primary", main.ID)
+	}
+	obs := wc.Observe("t1", "sess", main.ID, bschemas.Anthropic, turn2)
+	if obs.OpenBackground != 1 {
+		t.Fatalf("precondition: main thread's open background count = %d, want 1", obs.OpenBackground)
+	}
+	wc.RecordOutcome("t1", "sess", main.ID, obs.MsgCount, http.StatusOK)
+
+	// A tool-less side request shares turn 2's prefix and appends its own extra message.
+	side3 := []byte(`{"model":"claude-sonnet-5",` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"fix the bug"}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"call1","name":"Bash",` +
+		`"input":{"command":"sleep 60","run_in_background":true}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"call1",` +
+		`"content":"Command running in background with ID: bash1."}]},` +
+		`{"role":"user","content":[{"type":"text","text":"generate a title"}]}]}`)
+	side := tr.Resolve(scope, "", side3, false)
+	if side.ID == main.ID {
+		t.Fatal("precondition: the side request got the main thread's id")
+	}
+	wc.Observe("t1", "sess", side.ID, bschemas.Anthropic, side3)
+
+	// The main thread's open task must still read as open, unperturbed by the side request's
+	// Observe call on a different id.
+	again := wc.Observe("t1", "sess", main.ID, bschemas.Anthropic, turn2)
+	if again.OpenBackground != 1 {
+		t.Fatalf("main thread's open background count = %d after a side request, want 1", again.OpenBackground)
 	}
 }

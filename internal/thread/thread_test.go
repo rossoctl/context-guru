@@ -384,6 +384,71 @@ func TestTwoCompactingThreadsTheLaterOneIsTheSuccessor(t *testing.T) {
 	}
 }
 
+// #426: a tool-less side request (Claude Code's title suggestion, quota check, end-of-turn note)
+// shares the main thread's prefix and appends its OWN extra message. It must not move the main
+// thread's recorded tail: the next real turn extends the ORIGINAL conversation, not the side
+// request's, so if the tail moved, the real turn's prefix no longer matches it and the main
+// thread wrongly splits into a new "p:" id instead of staying "".
+func TestASideRequestDoesNotMoveTheMainThreadsTail(t *testing.T) {
+	tr := testTracker()
+	if id := tr.Resolve("t\x00s", "", withTools(conv("fix the bug")), false).ID; id != Primary {
+		t.Fatalf("precondition: main agent's first turn got %q, want primary", id)
+	}
+	if id := tr.Resolve("t\x00s", "", withTools(conv("fix the bug", "a1", "u2")), false).ID; id != Primary {
+		t.Fatalf("precondition: main agent's second turn got %q, want primary", id)
+	}
+	// A side request: same prefix as the main thread's last request, plus its own extra message,
+	// no tools declared. It must get its OWN thread — never the main thread's id, which every
+	// other structure keyed by that id (keep-alive, the prefix-ask stash, wait-cause state) is
+	// still relying on reading exactly as the main thread's own traffic left it — and that
+	// thread must say it inherits from the main thread.
+	side := tr.Resolve("t\x00s", "", conv("fix the bug", "a1", "u2", "generate a title"), false)
+	if side.ID == Primary || strings.HasPrefix(side.ID, "a:") {
+		t.Fatalf("side request got %q, want its own thread, not the main thread's", side.ID)
+	}
+	if from, ok := side.InheritsFrom(); !ok || from != Primary {
+		t.Fatalf("side request Inherits = %q, %v, want the main thread", from, ok)
+	}
+	// The real next turn extends the conversation BEFORE the side request, not the side
+	// request's own tail, and must still be the main thread.
+	if id := tr.Resolve("t\x00s", "", withTools(conv("fix the bug", "a1", "u2", "a3", "u4")), false).ID; id != Primary {
+		t.Fatalf("main agent's third turn got %q, want primary (the side request split the thread)", id)
+	}
+}
+
+// A side request's own thread must never take the primary id "" — Primary is reserved for the
+// main agent, told by metadata (declaring tools), and a side request never does.
+func TestASideRequestNeverTakesThePrimaryID(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withTools(conv("fix the bug")), false)
+	side := tr.Resolve("t\x00s", "", conv("fix the bug", "generate a title"), false)
+	if side.ID == Primary {
+		t.Fatal("a side request took the primary id")
+	}
+}
+
+// Edge case: if the main agent itself ever sends one genuinely tool-less request — not a side
+// request, but its own next turn, continued afterwards by a tools-declaring request — the
+// tracker cannot tell the two apart by content alone (both are "tool-less, extends a
+// tools-declaring thread's prefix"). It resolves the same way a side request does: its own new
+// thread, chained to the main thread by Inherits. The REAL point of this test is that the chain
+// does not break: the FOLLOWING tools-declaring request, which extends THIS tool-less request's
+// own tail, continues THAT thread (the longest matching prefix), not a third, unrelated one, and
+// not the stale main thread. Attribution (which reads Inherits) still sees one continuous
+// conversation; it is only the literal "" label that does not survive.
+func TestAGenuineToolLessMainTurnStillChainsForward(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withTools(conv("fix the bug")), false)
+	mid := tr.Resolve("t\x00s", "", conv("fix the bug", "a1", "u2"), false)
+	if mid.ID == Primary {
+		t.Fatal("precondition: the tool-less turn took the primary id (would mean no fix is needed)")
+	}
+	cont := tr.Resolve("t\x00s", "", withTools(conv("fix the bug", "a1", "u2", "a3", "u4")), false)
+	if cont.ID != mid.ID {
+		t.Fatalf("the next turn continued %q, want %q (the tool-less turn's own thread)", cont.ID, mid.ID)
+	}
+}
+
 // withTools adds a tools declaration, the metadata that marks the main agent.
 func withTools(body []byte) []byte {
 	var m map[string]any
