@@ -1307,9 +1307,9 @@ func (k *keeper) fireSummarySubstitute(j pingJob) bool {
 // KeepAliveReport — plus the one difference that justifies a separate function: `pings` is
 // incremented here as PINGS.Add(1) the same as record1, so a substituted ping is counted once
 // toward the process-wide ping figure (never twice: the ordinary ping path that would have
-// counted it never runs, because fireSummarySubstitute returned true). The summarizer's OWN
-// spend is a separate figure, already booked onto the regular LLM-cost ledger by commissionSync's
-// call to deferUsage — this function books only the ping-ledger side of the same event.
+// counted it never runs, because fireSummarySubstitute returned true). This row is the ONE record
+// of a committed substitute call's spend: commissionSync defers only a detail row for it (no
+// ledger tokens), so requests.cg_llm_cost_usd does not count it a second time (#455).
 func (k *keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummaryResult, ms float64, startedAt time.Time) float64 {
 	e := j.e
 	k.mu.Lock()

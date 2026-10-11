@@ -431,6 +431,14 @@ type deferredCall struct {
 	// only the one shape.
 	Trigger   string  `json:"trigger,omitempty"`
 	LatencyMs float64 `json:"latency_ms"`
+	// BilledElsewhere marks a call whose spend another record already carries (a committed
+	// keep-alive summary call: the keeper books it on the ping row it replaces, #455). Its
+	// detail row is still written to extraction_calls, but its tokens are NOT added to the
+	// deferred ledger, so requests.cg_llm_cost_usd never counts it a second time. Its Trigger ends
+	// in "_billed" (keepalive_substitute_billed), so the extraction_calls row says so too: the
+	// dashboard's component-cost query (dash/query.go) leaves such rows out of the gateway
+	// cost-share split and adds their own cost back afterwards.
+	BilledElsewhere bool `json:"billed_elsewhere,omitempty"`
 }
 
 // maxDeferredCallDetails bounds the per-call detail list — see deferredUsage's own comment on
@@ -458,6 +466,17 @@ const maxDeferredCallDetails = 4
 var deferredUsageMu sync.Mutex
 
 func deferUsage(st store.Store, session, component, path, trigger string, latencyMs float64, sink *cheapmodel.Sink) {
+	deferUsageAs(st, session, component, path, trigger, latencyMs, sink, false)
+}
+
+// deferDetailOnly records a call's detail row for the next real turn WITHOUT adding its tokens to
+// the deferred ledger — for a call another record already bills (see deferredCall.BilledElsewhere).
+func deferDetailOnly(st store.Store, session, component, path, trigger string, latencyMs float64, sink *cheapmodel.Sink) {
+	deferUsageAs(st, session, component, path, trigger, latencyMs, sink, true)
+}
+
+func deferUsageAs(st store.Store, session, component, path, trigger string, latencyMs float64,
+	sink *cheapmodel.Sink, billedElsewhere bool) {
 	if st == nil || session == "" || sink == nil {
 		return
 	}
@@ -468,10 +487,12 @@ func deferUsage(st store.Store, session, component, path, trigger string, latenc
 	if calls == 0 || (in == 0 && out == 0 && cw == 0 && cr == 0) {
 		return
 	}
-	u := deferredUsage{Model: sink.Model(), In: int(in), Out: int(out),
-		CacheWrite: int(cw), CacheRead: int(cr)}
-	detail := deferredCall{Model: u.Model, In: u.In, Out: u.Out, CacheWrite: u.CacheWrite, CacheRead: u.CacheRead,
-		Component: component, Path: path, Trigger: trigger, LatencyMs: latencyMs}
+	detail := deferredCall{Model: sink.Model(), In: int(in), Out: int(out), CacheWrite: int(cw), CacheRead: int(cr),
+		Component: component, Path: path, Trigger: trigger, LatencyMs: latencyMs, BilledElsewhere: billedElsewhere}
+	u := deferredUsage{Model: sink.Model()}
+	if !billedElsewhere {
+		u.In, u.Out, u.CacheWrite, u.CacheRead = int(in), int(out), int(cw), int(cr)
+	}
 	if b, ok := st.Get(store.UsagePrefix + session); ok && len(b) > 0 {
 		var prev deferredUsage
 		if json.Unmarshal(b, &prev) == nil {
@@ -539,12 +560,16 @@ func takeDeferredUsage(c *components.Ctx, rep *components.Report) {
 	if json.Unmarshal(b, &u) != nil {
 		return
 	}
-	if u.In == 0 && u.Out == 0 && u.CacheWrite == 0 && u.CacheRead == 0 {
-		// An already-cleared record. Returning here matters: ReplayUsage would otherwise
-		// increment the sink's CALL count for a call that is being counted a second time.
+	ledger := u.In != 0 || u.Out != 0 || u.CacheWrite != 0 || u.CacheRead != 0
+	if !ledger && len(u.Calls) == 0 {
+		// An already-cleared record.
 		return
 	}
-	cheapmodel.ReplayUsage(c.Ctx, u.Model, u.In, u.Out, u.CacheWrite, u.CacheRead)
+	// Replayed only when the ledger is non-zero: ReplayUsage would otherwise increment the sink's
+	// CALL count for a call another record already bills (deferredCall.BilledElsewhere).
+	if ledger {
+		cheapmodel.ReplayUsage(c.Ctx, u.Model, u.In, u.Out, u.CacheWrite, u.CacheRead)
+	}
 	if rep == nil {
 		return
 	}

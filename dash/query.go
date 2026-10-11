@@ -819,8 +819,15 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	// The per-call economics, in a second pass over the same filtered window. A JOIN into
 	// the query above would multiply the component rows by the number of calls and silently
 	// inflate every SUM in it.
+	// billedElsewhereGlob matches a call another row already bills (a committed keep-alive
+	// summary call, booked on its ping row: #455, components/offload's deferredCall.BilledElsewhere).
+	// Its extraction_calls row is real and stays in the counts above, but requests.cg_llm_cost_usd
+	// does not include it, so it must stay out of the gateway cost-share split below and have its
+	// own cost added back afterwards. GLOB, not LIKE: `_` is a LIKE wildcard.
+	const billedElsewhereGlob = "*_billed"
 	xq := `SELECT x.component, COUNT(*), SUM(x.cold), SUM(x.accepted), SUM(x.cost_usd),
-		AVG(x.latency_ms), SUM(x.saved_tokens)
+		AVG(x.latency_ms), SUM(x.saved_tokens),
+		SUM(CASE WHEN x.strategy GLOB '` + billedElsewhereGlob + `' THEN x.cost_usd ELSE 0 END)
 		FROM extraction_calls x JOIN requests r ON r.id = x.request_id
 		WHERE ` + cond + ` GROUP BY x.component`
 	xrows, err := d.sql.QueryContext(d.readCtx(), xq, args...)
@@ -832,13 +839,15 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	for _, c := range out {
 		byName[c.Component] = c
 	}
+	billedElsewhere := map[string]float64{}
 	for xrows.Next() {
 		var name string
 		var calls, cold, acc, saved int64
-		var cost, lat sql.NullFloat64
-		if err := xrows.Scan(&name, &calls, &cold, &acc, &cost, &lat, &saved); err != nil {
+		var cost, lat, billed sql.NullFloat64
+		if err := xrows.Scan(&name, &calls, &cold, &acc, &cost, &lat, &saved, &billed); err != nil {
 			return nil, err
 		}
+		billedElsewhere[name] = billed.Float64
 		c, ok := byName[name]
 		if !ok {
 			continue // a call recorded against a component with no surviving component row
@@ -868,7 +877,8 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	// rather than approximate. Written as a share anyway so it stays correct if that changes.
 	iq := `WITH per AS (
 			SELECT x.request_id AS rid, x.component AS comp, SUM(x.cost_usd) AS ccost
-			FROM extraction_calls x GROUP BY 1, 2
+			FROM extraction_calls x WHERE x.strategy NOT GLOB '` + billedElsewhereGlob + `'
+			GROUP BY 1, 2
 		), tot AS (SELECT rid, SUM(ccost) AS tcost FROM per GROUP BY 1)
 		SELECT per.comp,
 			SUM(r.cg_llm_cost_usd * CASE WHEN tot.tcost > 0 THEN per.ccost / tot.tcost ELSE 0 END)
@@ -892,7 +902,9 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 			// unpriced cg model) the component's own figure is all there is, so it stands
 			// rather than being replaced by a zero.
 			if c.LLMCostGatewayUSD > 0 {
-				c.LLMCostUSD = c.LLMCostGatewayUSD
+				// Plus the calls the gateway split never saw (billedElsewhereGlob): their own
+				// cost is the only figure there is for them in this tab.
+				c.LLMCostUSD = c.LLMCostGatewayUSD + billedElsewhere[name]
 			}
 		}
 	}
