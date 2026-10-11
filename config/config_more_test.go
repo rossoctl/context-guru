@@ -167,7 +167,7 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 // house's or housellm's pipeline verbatim, toon included, rather than re-deriving it.
 func TestToonIsInNoPreset(t *testing.T) {
 	byOperatorRequest := map[string]bool{
-		"house": true, "housellm": true,
+		"house": true, "housellm": true, "house2": true,
 		"conservative": true, "medium": true, "high": true, "xhigh": true,
 	}
 	for name, pipeline := range presets {
@@ -354,5 +354,44 @@ func TestExpandFixedRestoreReachesThePipeline(t *testing.T) {
 	}
 	if _, err := LoadBytes([]byte("expand:\n  fixed_restor: true\n")); err == nil {
 		t.Error("a typo'd expand key was accepted")
+	}
+}
+
+// house2 is house plus exactly two reversible offloaders, and linecap runs with its duplicate-line
+// collapse OFF: that rule retained 77.1% of the lines later actions quoted, against the 98% bound the
+// programme set before measuring. Turning it back on is a decision that needs a new measurement.
+func TestHouse2IsHousePlusFailedRunAndLongLineCapOnly(t *testing.T) {
+	house, _ := PresetPipeline("house")
+	h2, ok := PresetPipeline("house2")
+	if !ok {
+		t.Fatal("house2 is not a preset")
+	}
+	extra := map[string]bool{}
+	in := map[string]bool{}
+	for _, c := range house {
+		in[c] = true
+	}
+	for _, c := range h2 {
+		if !in[c] {
+			extra[c] = true
+		}
+	}
+	if len(extra) != 2 || !extra["failed_run"] || !extra["linecap"] {
+		t.Errorf("house2 should add only failed_run and linecap to house, adds %v", extra)
+	}
+	cfg, err := LoadBytes([]byte("preset: house2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lc struct {
+		Dups *bool `yaml:"collapse_duplicate_lines"`
+		Max  int   `yaml:"max_line_chars"`
+	}
+	node := cfg.Components["linecap"]
+	if err := node.Decode(&lc); err != nil {
+		t.Fatal(err)
+	}
+	if lc.Dups == nil || *lc.Dups || lc.Max != 2000 {
+		t.Errorf("house2 linecap must be the 2000-char cap alone, got %+v", lc)
 	}
 }

@@ -504,6 +504,17 @@ var presets = map[string][]string{
 	// deterministic lever", which is what the gross number reads as.
 	"house":    {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"housellm": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	// house2: `house` plus the two content-aware, reversible offloaders that showed NO needed-info
+	// miss in the A4/A5 screen (programme issue #434; the units are too few to certify the 98%
+	// bound, so this is "not falsified", not "proven"): failed_run (an earlier FAILING test/build run,
+	// removed only once a later run of the same kind arrives) and linecap's long-line cap
+	// (one line over 2,000 characters, i.e. minified or base64 payload; paths and file:line
+	// rows are never cut). Everything is stashed behind a <<cg:HASH>> marker, so the agent can
+	// expand it. Deliberately NOT here, with the measurement that excluded each: mask and collapse
+	// (size or age, not content: needed-info retained 74.4% for collapse at 3,000 tokens and 80.0% for mask, below the
+	// 98% bound), linecap's duplicate-line collapse (77.1%), readlifecycle's stale class (78.3%).
+	// PROVISIONAL: the offline replay gain is small and live benchmarks are pending.
+	"house2": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "failed_run", "toolfilter", "linecap", "cachesplit"},
 
 	// conservative/medium/high/xhigh: the effort ladder the Claude Code plugin's preset picker
 	// offers (context-guru-plugin/skills/preset-picker), replacing the old off/cache/house/
@@ -695,6 +706,13 @@ components:
 	//
 	// The WIDTH of that window is the one unmeasured number in this preset, and widening it is a
 	// yield/cost trade nothing has measured. See extract_llm_sweep's own comment.
+	"house2": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, failed_run, toolfilter, linecap, cachesplit]
+components:
+  extract:
+    min_tokens: 400
+  linecap:
+    collapse_duplicate_lines: false
+    max_line_chars: 2000`,
 	"housellm": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
 components:
   extract:
