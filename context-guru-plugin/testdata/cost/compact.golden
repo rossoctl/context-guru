@@ -1,0 +1,11 @@
+Cache state of your recent sessions  (context and last touch observed; the rest is estimate)
+  project    context   cache    state            cost of the next turn (estimate)
+  api        212k tok  5m tier  warm 3:25 left   next turn if cold $1.01, if warm $0.081
+  dashboard  96k tok   5m tier  COLD 20:00 ago   next turn if cold $0.182, if warm $0.015
+  scripts    18k tok   1h tier  warm 30:00 left  next turn if cold $0.034, if warm $0.003
+
+  api: warm for 3:25. Compact now costs ~$0.153 extra if you come back in time and saves ~$0.773 if you stay away past the TTL. Worth it if you think there is more than a 17% chance you will be away that long.
+  dashboard: cache already expired. Your next message rewrites 96k tokens ($0.182) whatever you do - /compact now would pay that same rewrite, so it saves nothing on this turn. Compact (or /clear with a handoff note) only to shrink every later turn.
+  scripts: warm, but the context is small enough that compacting does not pay. Leave it.
+
+Estimate assumptions: a compaction writes ~4k tokens of summary and leaves ~15k tokens of context; it ignores the saving on later turns of a smaller context, so it understates the case for compacting a long session.

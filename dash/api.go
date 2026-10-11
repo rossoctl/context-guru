@@ -72,6 +72,8 @@ type API struct {
 	routeCache jsonCache
 	// promptCache holds the UNSTRIPPED prompt view; see (*API).prompt for why that is safe to share.
 	promptCache jsonCache
+	// spendCache covers /api/spend/explain, a whole-window pass over requests.
+	spendCache jsonCache
 	// jsonInflight collapses concurrent COLD reads of the same cache key onto one computation.
 	// Keyed by the same principal-scoped cacheKey as the caches, so two tenants never share a
 	// computation and a manager never shares one with a tenant.
@@ -655,6 +657,7 @@ func (a *API) routes() []route {
 	// appended here rather than mounted separately: this table is what the scoping test walks,
 	// so a route mounted around it would be a route whose scope nothing checks.
 	rs = append(rs, a.toolRoutes()...)
+	rs = append(rs, a.spendRoutes()...)
 	// The keep-alive tab's reads, declared beside their handlers in keepaliveapi.go and
 	// appended here for the same reason: this table is what both scoping tests walk.
 	rs = append(rs, a.keepAliveRoutes()...)
@@ -757,6 +760,8 @@ var routeBounds = map[string]time.Duration{
 	"GET /api/kvcache/simulate": dashHeavyTimeout, "GET /api/kvcache/pricing": dashHeavyTimeout,
 	"GET /api/kvcache/suggest": dashHeavyTimeout, "GET /api/kvcache/suggest/holdout": dashHeavyTimeout,
 	"GET /api/components/compaction-episodes": dashHeavyTimeout,
+	// A whole-window pass over requests, like the three aggregate reads above.
+	"GET /api/spend/explain": dashHeavyTimeout,
 }
 
 // routeBound is the timeout Mount applies to one route: its override if it has one, otherwise the
