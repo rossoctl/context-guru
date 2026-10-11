@@ -44,7 +44,12 @@ import (
 // config.DefaultKeepAliveMaxUSDPerPing. Never left at the zero value: MinPrefixTokens 0
 // on a strategy means NO floor at all — pingable() pings every session that clears
 // turn >= 1 — which is 20000x looser than the account default, not equal to it.
-const campaignDefaultMinPrefixTokens = 20000
+const campaignDefaultMinPrefixTokens = 80000
+
+// campaignKeepAlive5mIdle mirrors config.DefaultKeepAliveIdle for the keepalive-5m arm only.
+// The once and stop-reason-gated arms stay at 280: the 270 s evidence (analysis B-policy-r2,
+// K>=2 under the response-end clock) does not cover K=1 (which prefers 280) or the gate.
+const campaignKeepAlive5mIdle = 270
 
 // campaignDefaultMaxPings mirrors config.DefaultKeepAliveMaxPings.
 const campaignDefaultMaxPings = 2
@@ -110,7 +115,7 @@ func campaignArmFor(arm string) campaignArm {
 	case kvcache.StrategyNoCache, kvcache.StrategyFixed5m, kvcache.StrategyFixed1h:
 		return campaignArm{activatable: true, baseline: true}
 	case kvcache.StrategyKeepAlive5m:
-		return campaignArm{activatable: true, idleSeconds: 280, maxPings: campaignDefaultMaxPings}
+		return campaignArm{activatable: true, idleSeconds: campaignKeepAlive5mIdle, maxPings: campaignDefaultMaxPings}
 	case kvcache.StrategyKeepAlive5mOnce:
 		return campaignArm{activatable: true, idleSeconds: 280, maxPings: 1}
 	case kvcache.StrategyStopReasonGated:
