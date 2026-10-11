@@ -32,6 +32,26 @@ reference — port its *logic*, re-implement its transport in Go.
   line. Conventional-commit titles.
 - Observability follows OpenTelemetry **GenAI semantic conventions** (`gen_ai.*`).
 
+## Eval boxes
+
+Go is not installed on the developer laptops. Builds and tests run on a shared Linux box, through
+`~/cgssh2 '<command>'`.
+
+- **Run remote builds and tests in the foreground.** Use a long Bash timeout (up to 10 minutes).
+  Split a slower suite into several foreground calls.
+- **Never start a remote run detached and then end the turn to wait for it.** A job on the box is
+  not a task the local harness tracks, so nothing wakes an idle agent when it finishes.
+- **Commit a WIP before any long run.**
+- **`go` is not on the non-interactive PATH.** Use `/usr/local/go/bin/go`. `cgo` is needed for
+  `-race` (`CGO_ENABLED=1`).
+- **Sync with tar, not rsync:** `tar czf - --exclude .git . | ~/cgssh2 "tar xzf - -C ~/<branch-dir>"`.
+- **The box is shared** with other engineers and sessions, as the same Unix user. Kill only by
+  pid. Never `pkill` or `killall`. Never assume the box is idle.
+- **Two tests fail on the box itself**, not on your change: `TestInstallRefusesAnUnverifiedDownload`
+  and `TestInstallReportsPATHFromTheSourceFallbackToo` (the box has a root-owned
+  `/usr/local/bin/context-guru-proxy`). Before you believe a failure is yours, run the same test on
+  an unmodified `origin/main` on the box.
+
 ## Layout
 
 See [docs/design.md](docs/design.md) for package layout.

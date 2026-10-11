@@ -177,14 +177,52 @@ type PrefixAsker interface {
 // Exported so a PrefixCoverage implementation living outside this package (the host's own
 // stash) can compute the identical hash a components/offload caller computes over its own
 // span, without either package importing the other.
+//
+// Hashes each message with its per-block cache_control stripped first (see
+// stripCacheControl): cache_control marks WHERE a client wants the provider's prompt cache to
+// break, not anything the model reads, and a client that moves the marker to a different
+// message every turn (Claude Code does, to keep it on the last message) must not change this
+// hash — otherwise SpanHash reports two slices of the identical conversation as different
+// spans purely because the cache breakpoint moved, which is exactly the false mismatch that
+// sent cache_aware_summarizer's stale-prefix guard into declining every commission at small
+// keep_last_turns values (PR #402 re-review).
 func SpanHash(msgs []schemas.ChatMessage) string {
 	h := sha256.New()
 	for i := range msgs {
-		b, _ := json.Marshal(msgs[i])
+		b, _ := json.Marshal(stripCacheControl(msgs[i]))
 		h.Write(b)
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:24]
+}
+
+// stripCacheControl returns a shallow copy of m with every content block's CacheControl
+// cleared, so SpanHash does not depend on where a cache breakpoint happens to sit. It copies
+// rather than mutates: m may be a live request's own message, about to be forwarded or
+// compacted the moment the caller gets control back, and clearing the field in place would
+// delete the real breakpoint from the request itself.
+func stripCacheControl(m schemas.ChatMessage) schemas.ChatMessage {
+	if m.Content == nil || len(m.Content.ContentBlocks) == 0 {
+		return m
+	}
+	marked := false
+	for i := range m.Content.ContentBlocks {
+		if m.Content.ContentBlocks[i].CacheControl != nil {
+			marked = true
+			break
+		}
+	}
+	if !marked {
+		return m
+	}
+	content := *m.Content
+	content.ContentBlocks = make([]schemas.ChatContentBlock, len(m.Content.ContentBlocks))
+	copy(content.ContentBlocks, m.Content.ContentBlocks)
+	for i := range content.ContentBlocks {
+		content.ContentBlocks[i].CacheControl = nil
+	}
+	m.Content = &content
+	return m
 }
 
 // PrefixCoverage, when a PrefixAsker also implements it, answers whether the body it would
@@ -504,6 +542,33 @@ type Ctx struct {
 	// -1 = unknown/first turn/cache off ⇒ no tail restriction. Only meaningful when
 	// CacheAware is true.
 	MaxCachedIdx int
+	// RawInput is the normalized message array AS APPLY HANDED IT TO THE PIPELINE, before any
+	// component — including the first one configured — ran. apply sets it once, from a shallow
+	// copy taken before Pipeline.Run starts, so a later component's in-place rewrite (SetMessageText
+	// replaces the Content pointer; it never mutates a message this slice still points at) cannot
+	// change what RawInput reports.
+	//
+	// It exists for a stale-prefix guard that must hash the SAME span the host's prefix stash
+	// recorded (proxy's sentStash.preBody, via components.PrefixCoverage.CoversSpan). That stash is
+	// keyed on apply's own pre-pipeline body, in RAW coordinates — MaxCachedIdx is in those same
+	// coordinates. req.Input, read at a component's OWN position in the pipeline, is for every
+	// component but the first already the OUTPUT of every earlier one: a prior Reformat/Offload
+	// (textclean, format, dedup, cmdfilter, …) can rewrite a message inside the cached span on
+	// every turn, so hashing req.Input there and comparing against the raw stash disagrees even
+	// though the stash is exactly right (PR #431 round 1 review). Hash RawInput[:n], never
+	// req.Input[:n], for any guard whose other side is a pre-pipeline stash.
+	//
+	// apply sets it on every route (Messages and Responses). It is nil only for a Ctx built
+	// directly, as most component unit tests do. A guard then falls back to req.Input
+	// (offload.rawSpanForHash), which is correct only when no component runs before the guarded
+	// one. So every host path that builds a Ctx for a real request must set this field.
+	//
+	// A component BEFORE the guarded one that changes the MESSAGE COUNT (summarize, a
+	// count-changing extract path) shifts req.Input's indices out of RawInput's coordinates even
+	// though both are non-nil; a guard must therefore also decline whenever len(req.Input) at its
+	// own position differs from len(RawInput), rather than hash the wrong span under a matching
+	// nil-ness check alone.
+	RawInput []schemas.ChatMessage
 	// PrefixAsk, when non-nil, lets a component put a question to the request's own model with the
 	// previous turn's SENT body as the prefix, so the provider reads its prompt cache instead of
 	// being re-sent the transcript. See PrefixAsker for why that body and not the incoming one.
