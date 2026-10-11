@@ -637,3 +637,22 @@ func TestEveryShippedStrategyDescribesItself(t *testing.T) {
 		t.Error("a strategy name moved; the dashboard groups results by these keys")
 	}
 }
+
+// A request the provider rejected before it read a prefix (4xx/5xx, no token accounting, nothing
+// cached) leaves the entry exactly as it was. Replayed as "cached 0 tokens" it erased a live entry,
+// so the request after it was billed a full rewrite: +$1.0k (2.7%) of the production fixed-5m
+// replay's gap to the real bill.
+func TestARejectedRequestDoesNotEraseTheLiveEntry(t *testing.T) {
+	rows := chain("u", "s", "m", base, 60_000, 60_000)
+	rej := rows[1]
+	rej.CachedContext, rej.InputTokens, rej.OutputTokens, rej.CostKnown = 0, 0, 0, false
+	r := Simulate(rows, Fixed5m(), Config{Prices: testPrices()})
+
+	if r.NoOps != 1 || r.Requests != 2 {
+		t.Fatalf("no-ops/requests = %d/%d, want 1/2", r.NoOps, r.Requests)
+	}
+	if r.Hits != 1 || r.Misses != 1 {
+		t.Fatalf("hits/misses = %d/%d, want 1/1: the third request is 120 s after the entry was written", r.Hits, r.Misses)
+	}
+	near(t, "total", r.TotalUSD, costMiss+costHit)
+}

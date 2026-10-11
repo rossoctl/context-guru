@@ -204,6 +204,13 @@ type Result struct {
 	Requests      int64 `json:"requests"`
 	Conversations int64 `json:"conversations"`
 
+	// NoOps is requests the replay did not touch the cache for: no token accounting and nothing
+	// cached (a 4xx/5xx the provider rejected before it read a prefix). They bill nothing and
+	// leave the provider's entry exactly as it was, so replaying them as a cache event ("this
+	// request cached 0 tokens") erased a live entry and billed the next request a full rewrite.
+	// On the production snapshot that was +$1.0k (2.7%) of the fixed-5m replay's gap to the bill.
+	NoOps int64 `json:"-"` // not on the wire: wire_test.go pins the key set
+
 	// The cost decomposition. TotalUSD is their sum and is the figure a comparison uses.
 	TotalUSD      float64 `json:"total_usd"`
 	FreshInputUSD float64 `json:"fresh_input_usd"`
@@ -436,6 +443,10 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 	})
 
 	for _, r := range order {
+		if !r.CostKnown && r.CachedContext == 0 {
+			out.NoOps++
+			continue
+		}
 		key := r.Key()
 		st := states[key]
 		if st == nil {
