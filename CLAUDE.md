@@ -57,7 +57,11 @@ Go is not installed on the developer laptops. Builds and tests run on a shared L
 - **Commit a WIP before any long run.**
 - **`go` is not on the non-interactive PATH.** Use `/usr/local/go/bin/go`. `cgo` is needed for
   `-race` (`CGO_ENABLED=1`).
-- **Sync with tar, not rsync:** `tar czf - --exclude .git . | ~/cgssh2 "tar xzf - -C ~/<branch-dir>"`.
+- **Sync with tar, not rsync, into an EMPTY directory:**
+  `~/cgssh2 "rm -rf ~/<branch-dir> && mkdir -p ~/<branch-dir>"`, then
+  `tar czf - --exclude .git . | ~/cgssh2 "tar xzf - -C ~/<branch-dir>"`. `tar` adds and overwrites
+  files but never deletes one. A file you removed locally (a test, for example) stays on the box
+  and keeps running against the old behaviour.
 - **The box is shared** with other engineers and sessions, as the same Unix user. Kill only by
   pid. Never `pkill` or `killall`. Never assume the box is idle.
 - **Two tests fail on the box itself**, not on your change: `TestInstallRefusesAnUnverifiedDownload`
