@@ -155,10 +155,14 @@ type InsightsDoc struct {
 	// RemovableTokens / RemovableUSD are the per-request weight and the measured cost of the
 	// items that can actually be removed. Deliberately NOT the inventory's headline figure, which
 	// excludes built-ins entirely: this one excludes them from the OFFER and still lists them.
-	RemovableTokens int           `json:"removable_tokens"`
-	RemovableUSD    float64       `json:"removable_usd"`
-	Basis           string        `json:"basis"`
-	SelfExcluded    SelfExclusion `json:"self_excluded"`
+	RemovableTokens int     `json:"removable_tokens"`
+	RemovableUSD    float64 `json:"removable_usd"`
+	Basis           string  `json:"basis"`
+	// Timeline is the per-item picture, present only when the caller asked for it. Attached rather
+	// than merged into Items because the two series are aligned to ONE shared bucket list: a copy
+	// of the axis on every row would be the same array sixty-eight times.
+	Timeline     *ToolTimeline `json:"timeline,omitempty"`
+	SelfExcluded SelfExclusion `json:"self_excluded"`
 }
 
 // InsightsOptions carries what shaping cannot derive from the inventory itself.

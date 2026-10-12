@@ -77,10 +77,26 @@ func (a *API) insights(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		return json.Marshal(ShapeInsights(rep, InsightsOptions{
+		doc := ShapeInsights(rep, InsightsOptions{
 			Qualified:    qualified,
 			Descriptions: skillDescriptions(""),
-		}))
+		})
+
+		// The per-item timeline, when asked for. Opt-in because it is two int arrays per item over
+		// every day the store holds, which is a materially bigger payload than the verdicts, and
+		// most readers of this document want the table rather than the picture.
+		//
+		// `timeline_days` narrows the axis; absent means every day there is. Unbounded by default
+		// on purpose: the value of the picture is seeing a phase CHANGE, and a default window
+		// would hide the phase before it — the exact thing the reader came to look at.
+		if r.URL.Query().Get("timeline") != "" {
+			tl, err := db.ToolTimeline(f, atoiDefault(r.URL.Query().Get("timeline_days"), 0))
+			if err != nil {
+				return nil, err
+			}
+			doc.Timeline = tl
+		}
+		return json.Marshal(doc)
 	})
 }
 
