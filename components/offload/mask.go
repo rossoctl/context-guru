@@ -5,6 +5,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
 )
 
 func init() { components.Register("mask", newMask) }
@@ -19,6 +20,7 @@ type Mask struct {
 	keepHeadChars int
 	mode          markerMode
 	coldCache     bool
+	deepBatch     int
 }
 
 type maskConfig struct {
@@ -33,6 +35,10 @@ type maskConfig struct {
 	// replacement is a pure function of (content, config), which is what makes the
 	// sweep safe; see coldCacheDefault.
 	ColdCache *bool `yaml:"cold_cache"`
+	// DeepBatch > 0 lifts the cached-prefix gate on a turn when at least this many eligible older outputs
+	// are waiting to be masked, so they are masked together (one cache rewrite, not one per turn). Meant
+	// to run with the cacheanchor component, which keeps that rewrite to the tail. 0 = off (tail only).
+	DeepBatch int `yaml:"deep_batch"`
 }
 
 func newMask(raw []byte) (components.Component, error) {
@@ -45,7 +51,7 @@ func newMask(raw []byte) (components.Component, error) {
 		keepHead = *cfg.KeepHeadChars
 	}
 	return &Mask{keepRecent: cfg.KeepRecent, minTokens: cfg.MinTokens, keepHeadChars: keepHead,
-		mode: parseMarkerMode(cfg.MarkerMode), coldCache: coldCacheDefault(cfg.ColdCache)}, nil
+		mode: parseMarkerMode(cfg.MarkerMode), coldCache: coldCacheDefault(cfg.ColdCache), deepBatch: cfg.DeepBatch}, nil
 }
 
 func (Mask) Name() string                 { return "mask" }
@@ -62,6 +68,7 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 	}
 	var keys []string
 	changed := 0
+	deep := m.deepBatch > 0 && m.pendingMasks(req, tools[:len(tools)-m.keepRecent], c) >= m.deepBatch
 	// Mask every tool output except the most recent keepRecent.
 	for _, i := range tools[:len(tools)-m.keepRecent] {
 		msg := &req.Input[i]
@@ -102,7 +109,7 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 		// provably expired (cold_cache, ON by default): there is no cached prefix left to
 		// flip, so the freeze below simply establishes the decision a turn earlier than the
 		// tail would have.
-		if !c.TailOnlyCold(i, m.coldCache) && !repairLostFreeze(c, m.Name(), content) {
+		if !deep && !c.TailOnlyCold(i, m.coldCache) && !repairLostFreeze(c, m.Name(), content) {
 			rep.Gate("cached_prefix")
 			continue
 		}
@@ -134,6 +141,8 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 
 func init() {
 	components.RegisterFields("mask", maskConfig{}, []components.Field{
+		{Key: "deep_batch", Type: components.FieldInt, Default: 0, Min: 0,
+			Hint: "0 = mask only in the uncached tail. N > 0 = when N or more older outputs are waiting, mask them all at once even inside the cached prefix (one cache rewrite); use with the cacheanchor component."},
 		{Key: "keep_recent", Type: components.FieldInt, Default: 3,
 			Hint: "How many of the newest tool results stay verbatim. Everything older is masked; 0 masks them all."},
 		{Key: "min_tokens", Type: components.FieldInt, Default: 100, Min: 1,
@@ -195,4 +204,27 @@ func coldCacheDefault(v *bool) bool {
 		return true
 	}
 	return *v
+}
+
+// pendingMasks counts the older outputs that would be masked now but are not yet (no frozen decision).
+func (m *Mask) pendingMasks(req *bschemas.BifrostChatRequest, older []int, c *components.Ctx) int {
+	n := 0
+	for _, i := range older {
+		msg := req.Input[i]
+		if !schema.Rewritable(msg) {
+			continue
+		}
+		content := schema.MessageText(msg)
+		if content == "" || schema.TextTokens(content) < m.minTokens {
+			continue
+		}
+		if _, skip := skipReduce(c, content); skip {
+			continue
+		}
+		if store.Peek(c.Store, frozenKey(c.Session, m.Name(), contentKey(content))) {
+			continue
+		}
+		n++
+	}
+	return n
 }

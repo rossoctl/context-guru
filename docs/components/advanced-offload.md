@@ -9,6 +9,19 @@ requirements) that the deterministic components in
 
 ---
 
+## cacheanchor
+
+An edit inside the cached history normally costs a rewrite of everything after the system prompt, because
+the client marks only its last message and the provider's look-back is 20 blocks. `cacheanchor` is a
+pipeline-level answer for any component that edits earlier messages. It runs after the editors, compares
+the request with the thread's previous forwarded request, and when they first differ at message p it puts
+one cache_control mark on the assistant turn that follows the latest earlier request end whose forwarded
+prefix is unchanged (and whose entry is younger than the cache lifetime). That mark reads the prefix up to
+the entry and only the tail is rewritten. It adds at most one breakpoint, never beyond four counting the
+client's own, skips cold requests, and does nothing for appends. It is not in any preset: add it as the
+last component of a pipeline that edits history, for example `mask` with `deep_batch: N`, which masks N or
+more older outputs at once inside the cached prefix.
+
 ## extract_llm_sweep
 
 **Kind:** Offload. **Reversible:** yes (`marker_mode: full`, the default). **In presets:** `housellm`.

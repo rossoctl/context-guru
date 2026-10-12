@@ -112,6 +112,8 @@ type gateCase struct {
 // TestEveryOffloadComponentIsHeldToTheCommitGate — which is the point: the invariant's whole
 // weakness is the caller nobody thought about.
 var gateExempt = map[string]string{
+	"cacheanchor": "removes nothing and stashes nothing: it only adds one cache_control mark to an assistant " +
+		"turn, so there is no marker, stash or frozen decision for a commit gate to guard; covered by cacheanchor_test.go",
 	"failed_run": "needs a superseded failed RUN (a later successful invocation of the same " +
 		"command) to have anything to collapse; the shape is covered by mask, which shares " +
 		"its commit path verbatim — tryMark, commitMark, SetMessageText, freeze",
