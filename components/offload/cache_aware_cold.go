@@ -7,6 +7,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/thread"
 )
 
 // Cold-turn ordering for cache_aware_summarizer's `any` cache state.
@@ -26,7 +27,7 @@ import (
 // request's usage is observed (succeeded or not — see its own doc for why "not" still resolves).
 type coldDeferral struct {
 	s            *CacheAwareSummarizer
-	ctx          *components.Ctx // minimal: Session, Store, Ctx — see deferColdSummary
+	ctx          *components.Ctx // minimal: Session, Thread, Store, Ctx — see deferColdSummary
 	call         summaryCaller
 	path         string
 	span         []bschemas.ChatMessage
@@ -89,16 +90,17 @@ func (s *CacheAwareSummarizer) deferColdSummary(c *components.Ctx, call summaryC
 		return
 	}
 	spanCopy := append([]bschemas.ChatMessage(nil), span...)
-	// A minimal Ctx: startAsyncSummary reads only Session, Store and Ctx off it (see its own
+	// A minimal Ctx: startAsyncSummary reads only Session, Thread, Store and Ctx off it (see its own
 	// comment on why those three are read on the request's goroutine rather than from inside the
 	// goroutine it starts). c.Ctx is a value-holder past the request's lifetime — WithoutCancel
 	// detaches it from cancellation anyway, inside startAsyncSummary — so holding onto it here is
 	// safe even though the request itself has long since returned by the time this resolves.
-	lite := &components.Ctx{Session: c.Session, Store: c.Store, Ctx: c.Ctx}
+	lite := &components.Ctx{Session: c.Session, Thread: c.Thread, Store: c.Store, Ctx: c.Ctx}
+	conv := convKey(c)
 	d := &coldDeferral{s: s, ctx: lite, call: call, path: path, span: spanCopy, coveredCount: coveredCount}
 
 	coldDeferredMu.Lock()
-	if len(coldDeferred) >= maxColdDeferred && coldDeferred[c.Session] == nil {
+	if len(coldDeferred) >= maxColdDeferred && coldDeferred[conv] == nil {
 		// The registry is full and this is a NEW session, not a replacement — fail open by firing
 		// now rather than refusing to remember the commission at all. This reintroduces the
 		// double-rewrite risk for this one turn, which is the lesser cost against losing the
@@ -108,25 +110,25 @@ func (s *CacheAwareSummarizer) deferColdSummary(c *components.Ctx, call summaryC
 		s.startAsyncSummary(lite, call, path, "cold_deferred", false, spanCopy, coveredCount)
 		return
 	}
-	if prev, ok := coldDeferred[c.Session]; ok && prev.timer != nil {
+	if prev, ok := coldDeferred[conv]; ok && prev.timer != nil {
 		prev.timer.Stop()
 	}
-	d.timer = time.AfterFunc(coldDeferralFallback, func() { s.resolveFallback(c.Session) })
-	coldDeferred[c.Session] = d
+	d.timer = time.AfterFunc(coldDeferralFallback, func() { s.resolveFallback(conv) })
+	coldDeferred[conv] = d
 	coldDeferredMu.Unlock()
 	atomic.AddInt64(&cacheAwareColdDeferredStarted, 1)
 }
 
-// takeColdDeferral removes and returns the session's pending deferral, if any. Shared by the
+// takeColdDeferral removes and returns the thread's pending deferral, if any (conv is convKey). Shared by the
 // proxy hook and the fallback timer so exactly one of them ever dispatches a given deferral.
-func takeColdDeferral(session string) *coldDeferral {
+func takeColdDeferral(conv string) *coldDeferral {
 	coldDeferredMu.Lock()
 	defer coldDeferredMu.Unlock()
-	d, ok := coldDeferred[session]
+	d, ok := coldDeferred[conv]
 	if !ok {
 		return nil
 	}
-	delete(coldDeferred, session)
+	delete(coldDeferred, conv)
 	if d.timer != nil {
 		d.timer.Stop()
 	}
@@ -134,8 +136,8 @@ func takeColdDeferral(session string) *coldDeferral {
 }
 
 // resolveFallback is the deferral's own safety-net exit — see coldDeferralFallback.
-func (s *CacheAwareSummarizer) resolveFallback(session string) {
-	d := takeColdDeferral(session)
+func (s *CacheAwareSummarizer) resolveFallback(conv string) {
+	d := takeColdDeferral(conv)
 	if d == nil {
 		return // already resolved via the proxy hook
 	}
@@ -155,10 +157,14 @@ func (s *CacheAwareSummarizer) resolveFallback(session string) {
 // outcome than occasionally dispatching the side call against a prefix that, in fact, never got
 // rewritten (which is simply the ordinary cold-and-will-miss case this deferral did not create).
 //
-// A no-op when no deferral is pending for the session — the common case, since most sessions
+// A no-op when no deferral is pending for the thread — the common case, since most sessions
 // never arrive cold in the first place.
-func ResolveDeferredCacheAwareSummary(session string) {
-	d := takeColdDeferral(session)
+//
+// threadID is the request's thread (Ctx.Thread): the deferral is keyed by thread (convKey, #430),
+// so a subagent's forwarded request resolves only the subagent's own deferral, never the main
+// thread's, whose cache that request did not rewrite.
+func ResolveDeferredCacheAwareSummary(session, threadID string) {
+	d := takeColdDeferral(thread.Key(session, threadID))
 	if d == nil {
 		return
 	}

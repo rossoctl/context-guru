@@ -660,6 +660,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		Thread:         tr.Thread.ID,
 		ThreadParent:   threadParent,
 		ThreadInherits: threadInherits,
+		DeclaresTools:  gjson.GetBytes(body, "tools.#").Int() > 0,
 		Store:          st,
 		RawInput:       rawInput,
 		WireGroup:      wireGroups(slots),

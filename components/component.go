@@ -408,7 +408,12 @@ type Ctx struct {
 	// nowhere else. apply's cached boundary does exactly that (modes.Tracker.TurnFrom).
 	ThreadParent   string
 	ThreadInherits bool
-	Store          store.Store
+	// DeclaresTools says the request declares tools: the metadata internal/thread uses to tell the
+	// main agent (and a fork of it) from a tool-less side request (a title, a quota check, an
+	// end-of-turn note). cache_aware_summarizer and summarize use it to decide whether a new
+	// inheriting thread keeps a copy of its parent's checkpoint (see offload.adoptParentCheckpoint).
+	DeclaresTools bool
+	Store         store.Store
 	// DisallowCountChange prevents transcript-restructuring components from
 	// running when a host cannot safely write their output back to its wire shape.
 	DisallowCountChange bool

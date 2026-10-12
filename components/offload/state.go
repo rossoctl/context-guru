@@ -9,6 +9,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/extract"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -497,7 +498,7 @@ type sumCheckpoint struct {
 	// Reserved marks a cache_aware_summarizer checkpoint commissioned under cache_state:
 	// pre_expiry that has not yet been spliced into any forwarded body. It is cache_aware_
 	// summarizer's own field, in a struct this file shares with summarize (same store key
-	// namespace, store.SumPrefix+session) — summarize never sets it, and cache_aware_summarizer
+	// namespace, sumKey(convKey(c))) — summarize never sets it, and cache_aware_summarizer
 	// never sets it for its own cache_state: any, so a zero value here always means "apply
 	// immediately", exactly as both components behaved before this field existed. See
 	// cache_aware_summarizer.go's own package comment on the two cache-state modes, and
@@ -505,10 +506,47 @@ type sumCheckpoint struct {
 	Reserved bool `json:"reserved,omitempty"`
 }
 
-func sumKey(session string) string { return store.SumPrefix + session }
+func sumKey(conv string) string { return store.SumPrefix + conv }
 
+// convKey is the key of the ONE conversation a request continues: its thread, not its session
+// (#430). A Claude Code session holds many threads (the main agent, each subagent, each fork), and
+// each thread is its own message list with its own provider cache entry (#423). Keyed by session,
+// one thread's summary checkpoint was offered to every thread of the session, one thread's
+// commission in flight blocked the others, and a committed summary on a subagent took the keep-alive
+// substitute away from the main thread. The summary checkpoint, the single-flight registry and the
+// cold-deferral registry all key by it. The primary thread keys by the bare session, so a
+// single-thread session keeps the keys, and the checkpoints, it had before threads existed.
+//
+// Deferred billing (deferUsage, takeDeferredUsage) stays per SESSION on purpose: it only has to land
+// on some later request of the session, and keyed by thread a subagent that never sends again would
+// keep its summary call's cost off every row.
+func convKey(c *components.Ctx) string { return thread.Key(c.Session, c.Thread) }
+
+// parentConvKey is the conversation key of the thread this request's NEW thread continues
+// (Ctx.ThreadParent), or ok=false when it continues none. Set only on a new thread's first
+// request: the one request whose own checkpoint key is still empty.
+func parentConvKey(c *components.Ctx) (string, bool) {
+	if c == nil || !c.ThreadInherits {
+		return "", false
+	}
+	k := thread.Key(c.Session, c.ThreadParent)
+	return k, k != convKey(c)
+}
+
+// loadCheckpoint reads the thread's own checkpoint. On a new thread's first request that has none,
+// it reads the PARENT's, read-only. A side request (a title, a quota check, an end-of-turn note) or
+// a fork carries the parent's prefix, and the provider cached that prefix with the parent's summary
+// spliced in; splicing the same summary lets the new thread read that cache instead of re-writing
+// the whole unsummarized history. Every write goes to the thread's own key (saveCheckpoint), so the
+// parent's checkpoint is never changed. The span-hash check on every reuse still refuses a splice
+// whose covered span this request does not carry.
 func loadCheckpoint(c *components.Ctx) (sumCheckpoint, bool) {
-	b, ok := c.Store.Get(sumKey(c.Session))
+	b, ok := c.Store.Get(sumKey(convKey(c)))
+	if !ok {
+		if pk, has := parentConvKey(c); has {
+			b, ok = c.Store.Get(sumKey(pk))
+		}
+	}
 	if !ok {
 		return sumCheckpoint{}, false
 	}
@@ -519,9 +557,45 @@ func loadCheckpoint(c *components.Ctx) (sumCheckpoint, bool) {
 	return cp, true
 }
 
+// sideRequest reports a tool-less request that starts a new thread on another thread's prefix: a
+// Claude Code title, quota check or end-of-turn note. Such a request may splice its parent's
+// checkpoint (loadCheckpoint) but must never pay for a summary. Its thread id is new on every side
+// request, so a summary commissioned under it is never reused. Before #430 the session-wide
+// in-flight guard also stopped it from commissioning beside the main thread; with per-thread keys
+// nothing else does.
+func sideRequest(c *components.Ctx) bool {
+	return c != nil && c.ThreadInherits && !c.DeclaresTools
+}
+
+// adoptParentCheckpoint gives a new inheriting thread a COPY of its parent's checkpoint, under the
+// thread's own key. Ctx.ThreadInherits is set only on the thread's first request, so without a copy
+// the thread's second request would find no checkpoint, send the unsummarized history, and re-write
+// the prefix its first request read from cache.
+//
+// Only a thread that declares tools gets a copy: a fork or a rewind of the main agent, which goes on
+// for more turns. A tool-less side request is one request long, so it reads the parent's checkpoint
+// read-only (loadCheckpoint) and stores nothing. Since #469 every Claude Code side request is a
+// thread of its own, and a copy for each would fill the Store with checkpoints nothing reads again.
+func adoptParentCheckpoint(c *components.Ctx) {
+	if c == nil || c.Store == nil || !c.DeclaresTools {
+		return
+	}
+	pk, ok := parentConvKey(c)
+	if !ok {
+		return
+	}
+	own := sumKey(convKey(c))
+	if store.Peek(c.Store, own) {
+		return
+	}
+	if b, ok := c.Store.Get(sumKey(pk)); ok {
+		c.Store.Put(own, append([]byte(nil), b...))
+	}
+}
+
 func saveCheckpoint(c *components.Ctx, cp sumCheckpoint) {
 	if b, err := json.Marshal(cp); err == nil {
-		c.Store.Put(sumKey(c.Session), b)
+		c.Store.Put(sumKey(convKey(c)), b)
 	}
 }
 
