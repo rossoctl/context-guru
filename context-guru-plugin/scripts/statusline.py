@@ -64,11 +64,19 @@ import time
 # How long the whole script may run before its own backstop fires. Generous relative to the
 # urlopen timeout below (0.6s) so that timeout is what normally fires first; this is the net
 # under it, covering a stuck stdin read or anything else unaccounted for.
-SCRIPT_BUDGET_SECONDS = 2
+SCRIPT_BUDGET_SECONDS = 2  # historical net; the real bound is RENDER_BUDGET_SECONDS below
+
+# The whole render must finish in half a second, Python start-up included (25-70 ms before this
+# module even runs). The budget is measured from import, so it is set well under 0.5 s; every network
+# read is sized from what is left of it (see _remaining), and the detached refresher lifts it.
+_T0 = time.monotonic()
+RENDER_BUDGET_SECONDS = 0.36
+RENDER_SAFETY_SECONDS = 0.03  # kept back for composing and printing the line
 
 # The HTTP call's own timeout. /api/stats on a healthy local proxy answers in single-digit
 # milliseconds; 0.6s is already generous and still leaves headroom under the script budget above.
-HTTP_TIMEOUT_SECONDS = 0.6
+HTTP_TIMEOUT_SECONDS = 0.6  # ceiling for one read; the render budget is what usually bounds it
+COLD_READ_SECONDS = 0.15  # a read with NOTHING cached to show may wait this long for its first answer
 
 SLOW_UPSTREAM_MS = 3000  # the detailed layout names the provider only when it is this slow
 
@@ -342,13 +350,20 @@ def _quote(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.~-]", lambda m: "%%%02X" % ord(m.group()), s)
 
 
-def _http_get(port: str, path: str) -> bytes:
+def _remaining() -> float:
+    """Seconds of the render budget left for a read, never below 20 ms (a read that cannot start
+    in time times out at once, which every caller already treats as 'slow')."""
+    return max(0.02, _T0 + RENDER_BUDGET_SECONDS - RENDER_SAFETY_SECONDS - time.monotonic())
+
+
+def _http_get(port: str, path: str, cap: float | None = None) -> bytes:
     """GET http://127.0.0.1:port/path, bounded by HTTP_TIMEOUT_SECONDS end to end. Raw socket
     rather than urllib.request: importing that costs ~24 ms per render, half the whole budget, for
     one loopback GET. HTTP/1.0 + Connection: close means a plain read-to-EOF with no chunking.
     Raises TimeoutError (slow), _HTTPError (non-2xx), OSError (unreachable)."""
-    deadline = time.monotonic() + HTTP_TIMEOUT_SECONDS
-    with socket.create_connection(("127.0.0.1", int(port)), timeout=HTTP_TIMEOUT_SECONDS) as sock:
+    limit = min(HTTP_TIMEOUT_SECONDS, _remaining(), cap or HTTP_TIMEOUT_SECONDS)
+    deadline = time.monotonic() + limit
+    with socket.create_connection(("127.0.0.1", int(port)), timeout=limit) as sock:
         sock.sendall(f"GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".encode("ascii"))
         buf = b""
         while len(buf) < (1 << 20):
@@ -589,7 +604,6 @@ CACHESTATE_TTL_SECONDS = 2.0
 DAY_TTL_SECONDS = 60.0
 LIFE_TTL_SECONDS = 300.0  # the all-time total moves slowly and is the most expensive read
 CACHE_BAR_CELLS = 6
-DAY_MS = 86_400_000
 SERIES_TTL_SECONDS = 120.0  # day and hour totals move slowly; a stale one is fine for a glance
 REQUESTS_TTL_SECONDS = 4.0
 STRIP_REQUESTS = 20
@@ -738,12 +752,13 @@ def _bg_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | None, 
         cached, age = None, 0.0
     if cached is not None and age < ttl:
         return cached, age
-    try:
-        _refresh(port, query, path, 0.0)
-        with open(path, encoding="utf-8") as fh:
-            return json.load(fh), 0.0
-    except Exception:  # noqa: BLE001 - too slow or down: fall through to the stale copy
-        pass
+    if cached is None:  # nothing to show yet: one short try for a first answer; never when there IS a stale copy
+        try:
+            _refresh(port, query, path, 0.0)
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh), 0.0
+        except Exception:  # noqa: BLE001 - too slow or down: the detached refresher fills it for a later render
+            pass
     lock = path + ".lock"
     try:
         if time.time() - os.stat(lock).st_mtime < 30:
@@ -764,10 +779,10 @@ def _bg_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | None, 
 def _refresh(port: str, query: str, path: str, timeout: float = 60.0) -> None:
     """One GET written atomically to `path`. timeout 0 keeps the normal short bound (inline use);
     the detached refresher passes the default, patient one."""
-    global HTTP_TIMEOUT_SECONDS
+    global HTTP_TIMEOUT_SECONDS, RENDER_BUDGET_SECONDS
     if timeout:
-        HTTP_TIMEOUT_SECONDS = timeout
-    body = _http_get(port, query)
+        HTTP_TIMEOUT_SECONDS, RENDER_BUDGET_SECONDS = timeout, 1e9  # the detached refresher is patient
+    body = _http_get(port, query, None if timeout else COLD_READ_SECONDS)
     json.loads(body)
     tmp = path + f".{os.getpid()}.tmp"
     with open(tmp, "wb") as fh:
@@ -1089,9 +1104,18 @@ def _spark_row(day: dict | None, series: dict | None, lv: int, tv, e) -> str | N
     buckets = series.get("buckets") if isinstance(series, dict) else None
     if today is None or not isinstance(buckets, list):
         return None
-    by_day = {int(b["ts"] // DAY_MS): _num(b, "saved_usd") or 0.0 for b in buckets if isinstance(b, dict) and _num(b, "ts")}
-    last = int(_now_s() * 1000 // DAY_MS)
-    vals = [by_day.get(d, 0.0) for d in range(last - 13, last)] + [today]  # today from the same read as the number
+    # The proxy's buckets are aligned to the UNIX epoch (UTC), so a day bucket is a UTC day. Hourly
+    # buckets are summed into the user's LOCAL days instead, each placed by its midpoint (so a zone
+    # on a half hour puts a bucket where most of it falls).
+    def local_day(ms: float) -> tuple[int, int, int]:
+        lt = time.localtime(ms / 1000 + 1800)
+        return lt.tm_year, lt.tm_mon, lt.tm_mday
+
+    by_day: dict[tuple[int, int, int], float] = {}
+    for b in buckets:
+        if isinstance(b, dict) and _num(b, "ts"):
+            by_day[local_day(b["ts"])] = by_day.get(local_day(b["ts"]), 0.0) + (_num(b, "saved_usd") or 0.0)
+    vals = [by_day.get(local_day(_day_start_ms(n) + 12 * 3_600_000 - 1800_000), 0.0) for n in range(13, 0, -1)] + [today]  # today: same read as the number
     return f"{DIM}saved{RESET} {_money(today)} {DIM}today{RESET}" + \
         ("" if lv else f" {DIM}· last 14 days{RESET}") + f" {e.paint('ok', e.spark(vals))}"
 
@@ -1126,7 +1150,7 @@ def _heat_row(hourly: dict | None, spend: dict | None, lv: int, tv, e) -> str | 
     per = [0.0] * 24
     for b in buckets:
         if isinstance(b, dict) and _num(b, "ts"):
-            per[time.localtime(b["ts"] / 1000).tm_hour] += _num(b, "cache_misses") or 0.0
+            per[time.localtime(b["ts"] / 1000 + 1800).tm_hour] += _num(b, "cache_misses") or 0.0
     top, now_h = max(per), time.localtime(_now_s()).tm_hour
     if top <= 0:
         return f"{e.paint('ok', 'no cache misses today')}"
@@ -1195,9 +1219,10 @@ def _now_s() -> float:
     return float(pinned) if pinned.replace(".", "", 1).isdigit() else time.time()
 
 
-def _day_start_ms() -> int:
+def _day_start_ms(days_ago: int = 0) -> int:
+    """Local midnight, `days_ago` days back (mktime normalises the day-of-month, DST included)."""
     lt = time.localtime(_now_s())
-    return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)) * 1000)
+    return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_ago, 0, 0, 0, 0, 0, -1)) * 1000)
 
 
 def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
@@ -1213,7 +1238,7 @@ def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
     now_ms, midnight = int(_now_s() * 1000), _day_start_ms()
     if "spark" in on:
         jobs["series"] = lambda: _bg_json(
-            port, f"/api/series?bucket={DAY_MS}&since={midnight - 13 * DAY_MS}&until={now_ms}", "series14", SERIES_TTL_SECONDS)
+            port, f"/api/series?bucket=3600000&since={_day_start_ms(13)}&until={now_ms}", "series14h", SERIES_TTL_SECONDS)
     if "heat" in on:
         jobs["hourly"] = lambda: _bg_json(
             port, f"/api/series?bucket=3600000&since={midnight}&until={now_ms}", "hourly", SERIES_TTL_SECONDS)
@@ -1242,7 +1267,7 @@ def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
     threads = [threading.Thread(target=run, args=kv, daemon=True) for kv in jobs.items()]
     for t in threads:
         t.start()
-    deadline = time.monotonic() + HTTP_TIMEOUT_SECONDS + 0.2
+    deadline = time.monotonic() + _remaining() + 0.04  # a hair after the reads' own timeouts, so they report first
     for t in threads:
         t.join(max(0.0, deadline - time.monotonic()))
     return out
@@ -1359,7 +1384,7 @@ if __name__ == "__main__":
     try:
         if hasattr(signal, "SIGALRM"):  # POSIX only, same as the plugin's shell hooks
             signal.signal(signal.SIGALRM, _on_alarm)
-            signal.alarm(SCRIPT_BUDGET_SECONDS)
+            signal.setitimer(signal.ITIMER_REAL, RENDER_BUDGET_SECONDS + 0.05)  # last-resort net under the read deadlines
         main()
     except Exception:
         pass  # never a traceback on a user's terminal; silence is the correct failure mode here

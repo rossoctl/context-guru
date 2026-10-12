@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -260,13 +261,23 @@ func TestStatuslineSetLayout(t *testing.T) {
 	}
 }
 
-// TestStatuslineGoldenModes pins the five terminal-view layouts at three widths. The clock is pinned
-// (CG_STATUSLINE_NOW, TZ=UTC) so the day- and hour-based views are reproducible.
-func TestStatuslineGoldenModes(t *testing.T) {
-	const nowS = 1_800_000_000 // 2027-01-15 08:00:00 UTC
-	const now = nowS * 1000
-	const day = 86_400_000
-	midnight := int64(nowS/86400) * day
+// modesRender runs one status line layout against a stub that serves the series, spend and request
+// reads the way the proxy does (series buckets aligned to the UNIX epoch, not to the user's day), in
+// time zone tz with the clock pinned to nowS. It renders twice: the series and totals are background
+// reads, so the first render may have only the cache.
+func modesRender(t *testing.T, tz string, nowS int64, layout string, width int) string {
+	t.Helper()
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		t.Skipf("no tz database for %s: %v", tz, err)
+	}
+	const hour = int64(3_600_000)
+	now := nowS * 1000
+	localMidnight := func(daysAgo int) int64 {
+		n := time.Unix(nowS, 0).In(loc)
+		return time.Date(n.Year(), n.Month(), n.Day()-daysAgo, 0, 0, 0, 0, loc).UnixMilli()
+	}
+	epochHour := func(ms int64) int64 { return ms / hour * hour } // the proxy buckets by (ts/bucket)*bucket
 	th := func(id string, agoSec int) string {
 		return fmt.Sprintf(`{"id":%q,"main":%t,"model":"claude-sonnet-5-5","last_ts":%d,"end_ts":%d,"ttl_s":300,`+
 			`"prefix_tokens":412000,"priced":true,"rewrite_usd":1.20}`, id, id == "", now-int64(agoSec)*1000, now-int64(agoSec)*1000)
@@ -276,20 +287,23 @@ func TestStatuslineGoldenModes(t *testing.T) {
 		now-100_000, now, th("", 100), th("a:01", 30), th("a:02", 250), th("a:03", 3000))
 	extra := func(mux *http.ServeMux) {
 		mux.HandleFunc("/api/series", func(w http.ResponseWriter, r *http.Request) {
+			since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 			var b []string
-			if strings.Contains(r.URL.RawQuery, "bucket=3600000") { // hourly: misses at 02h, 03h, 06h (6 of them)
-				for h, n := range map[int]int{2: 1, 3: 2, 6: 6, 7: 1} {
-					b = append(b, fmt.Sprintf(`{"ts":%d,"cache_misses":%d}`, midnight+int64(h)*3_600_000, n))
+			add := func(ts int64, body string) {
+				if ts >= since && ts <= now {
+					b = append(b, fmt.Sprintf(`{"ts":%d,%s}`, epochHour(ts), body))
 				}
-			} else { // 14 days of saving, rising, then a good day
-				for d := 0; d < 13; d++ {
-					b = append(b, fmt.Sprintf(`{"ts":%d,"saved_usd":%d}`, midnight-int64(13-d)*day, 1+d%5))
-				}
+			}
+			for n := 13; n >= 1; n-- { // one distinct amount per past day, oldest 1 ... yesterday 13, at local noon
+				add(localMidnight(n)+12*hour, fmt.Sprintf(`"saved_usd":%d`, 14-n))
+			}
+			for h, n := range map[int64]int{2: 1, 3: 2, 6: 6, 7: 1} { // today's misses by local hour
+				add(localMidnight(0)+h*hour, fmt.Sprintf(`"cache_misses":%d`, n))
 			}
 			fmt.Fprintf(w, `{"buckets":[%s]}`, strings.Join(b, ","))
 		})
 		mux.HandleFunc("/api/spend/explain", func(w http.ResponseWriter, _ *http.Request) {
-			fmt.Fprintf(w, `{"daily":[{"day":%d,"rewrite_usd":1.4}]}`, midnight)
+			fmt.Fprintf(w, `{"daily":[{"day":%d,"rewrite_usd":1.4}]}`, localMidnight(0))
 		})
 		mux.HandleFunc("/api/requests", func(w http.ResponseWriter, _ *http.Request) {
 			var rows []string
@@ -309,15 +323,34 @@ func TestStatuslineGoldenModes(t *testing.T) {
 		})
 	}
 	stdin := `{"session_id":"sess-gold","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":200000}}`
+	env := routedEnv(cgStub(t, cache, extra))
+	env["CG_STATUSLINE_COLUMNS"], env["CG_STATUSLINE_NOW"], env["TZ"] = fmt.Sprint(width), fmt.Sprint(nowS), tz
+	env["NO_COLOR"] = "1"
+	runStatusline(t, env, stdin, "--layout="+layout)
+	out, code, _ := runStatusline(t, env, stdin, "--layout="+layout)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	got := strings.TrimRight(out, "\n")
+	for _, ln := range strings.Split(got, "\n") {
+		if n := len([]rune(ln)); n > width {
+			t.Errorf("line is %d columns, wider than %d: %q", n, width, ln)
+		}
+	}
+	return got
+}
+
+// TestStatuslineGoldenModes pins the five terminal-view layouts at three widths (UTC, 08:00).
+func TestStatuslineGoldenModes(t *testing.T) {
 	for _, c := range []struct {
 		layout string
 		width  int
 		want   string
 	}{
 		{"spark", 60,
-			"saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇\ncache ● ████░░ 3:20"}, {"spark", 80,
-			"saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇\ncache ● ████░░ 3:20"}, {"spark", 120,
-			"saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇\ncache ● ████░░ 3:20"},
+			"saved $4.20 today · last 14 days ▁▂▂▃▄▄▅▅▆▇▇██▃\ncache ● ████░░ 3:20"}, {"spark", 80,
+			"saved $4.20 today · last 14 days ▁▂▂▃▄▄▅▅▆▇▇██▃\ncache ● ████░░ 3:20"}, {"spark", 120,
+			"saved $4.20 today · last 14 days ▁▂▂▃▄▄▅▅▆▇▇██▃\ncache ● ████░░ 3:20"},
 		{"strip", 60,
 			"last 20 ■■■■■■■■✖■■■■■▨▨■■■■ ✖ miss $1.40 today\ncache ● ████░░ 3:20"}, {"strip", 80,
 			"last 20 requests ■■■■■■■■✖■■■■■▨▨■■■■  ✖ miss  $1.40 lost today\ncache ● ████░░ 3:20"}, {"strip", 120,
@@ -336,23 +369,31 @@ func TestStatuslineGoldenModes(t *testing.T) {
 			"saved $0.31 │ cache ● ████░░ 3:20\nagent caches (2) ████ 4:30  █░░░ 0:50"},
 	} {
 		t.Run(fmt.Sprintf("%s/%d", c.layout, c.width), func(t *testing.T) {
-			env := routedEnv(cgStub(t, cache, extra))
-			env["CG_STATUSLINE_COLUMNS"], env["CG_STATUSLINE_NOW"], env["TZ"] = fmt.Sprint(c.width), fmt.Sprint(nowS), "UTC"
-			env["NO_COLOR"] = "1"
-			// the day total and the two series are background reads: the first render may have only the cache
-			runStatusline(t, env, stdin, "--layout="+c.layout)
-			out, code, _ := runStatusline(t, env, stdin, "--layout="+c.layout)
-			if code != 0 {
-				t.Fatalf("exit %d", code)
-			}
-			got := strings.TrimRight(out, "\n")
-			for _, ln := range strings.Split(got, "\n") {
-				if n := len([]rune(ln)); n > c.width {
-					t.Errorf("line is %d columns, wider than %d: %q", n, c.width, ln)
-				}
-			}
-			if got != c.want {
+			if got := modesRender(t, "UTC", 1_800_000_000, c.layout, c.width); got != c.want {
 				t.Errorf("got\n%s\nwant\n%s", got, c.want)
+			}
+		})
+	}
+}
+
+// The day and hour views must follow the USER's local calendar. East of UTC the local date runs ahead
+// of the proxy's UTC buckets, west of it behind; Kolkata is on a half hour. The same data (one distinct
+// amount per local day, misses at local hours 2, 3, 6, 7) must give the same sparkline in every zone,
+// and the heat strip must end at the local hour reached.
+func TestStatuslineModesFollowLocalTime(t *testing.T) {
+	const nowS = 1_800_020_000 // 13:33 UTC: 19:03 in Kolkata, 14:33 in Berlin, 05:33 in Los Angeles
+	spark := "saved $4.20 today · last 14 days ▁▂▂▃▄▄▅▅▆▇▇██▃\ncache ● ████░░ 3:20"
+	for _, c := range []struct{ tz, heat string }{
+		{"Asia/Kolkata", "misses per hour 0h  ░▒  █░            ····24h  $1.40 lost\ncache ● ████░░ 3:20"},
+		{"Europe/Berlin", "misses per hour 0h  ░▒  █░       ·········24h  $1.40 lost\ncache ● ████░░ 3:20"},
+		{"America/Los_Angeles", "misses per hour 0h  ▒█  ··················24h  $1.40 lost\ncache ● ████░░ 3:20"},
+	} {
+		t.Run(c.tz, func(t *testing.T) {
+			if got := modesRender(t, c.tz, nowS, "spark", 80); got != spark {
+				t.Errorf("spark: got\n%s\nwant\n%s", got, spark)
+			}
+			if got := modesRender(t, c.tz, nowS, "heat", 80); got != c.heat {
+				t.Errorf("heat: got\n%s\nwant\n%s", got, c.heat)
 			}
 		})
 	}
@@ -370,5 +411,39 @@ func TestStatuslineModesAscii(t *testing.T) {
 	out, _, _ := runStatusline(t, env, `{"session_id":"sess-gold"}`, "--layout=strip")
 	if !strings.Contains(out, "last 2 requests oX") {
 		t.Errorf("want ascii hit/miss glyphs, got %q", out)
+	}
+}
+
+// TestStatuslineFinishesInHalfASecondOnASlowProxy: the default layouts must return within 0.5 s wall
+// time, Python start-up included, however slow the proxy is (here it sleeps 5 s on every request) and
+// whether or not there is a cache to fall back on.
+func TestStatuslineFinishesInHalfASecondOnASlowProxy(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(5 * time.Second):
+		case <-r.Context().Done():
+		}
+		w.Write([]byte(`{"total_saved_usd":1}`)) //nolint:errcheck
+	})}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	env := routedEnv(fmt.Sprint(ln.Addr().(*net.TCPAddr).Port))
+	stdin := `{"session_id":"sess-slow","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000}}`
+	for _, layout := range []string{"minimal", "balanced", "detailed"} {
+		t.Run(layout, func(t *testing.T) {
+			for i := 0; i < 3; i++ { // the first run has no cache at all; later ones find whatever the earlier ones left
+				out, code, elapsed := runStatusline(t, env, stdin, "--layout="+layout)
+				if code != 0 {
+					t.Fatalf("exit %d", code)
+				}
+				if elapsed > 500*time.Millisecond {
+					t.Errorf("run %d took %v (> 0.5 s) against a proxy that sleeps 5 s: %q", i, elapsed, out)
+				}
+			}
+		})
 	}
 }
