@@ -360,6 +360,23 @@ func (s *sessionState) longestPrefix(sums []uint64) *threadState {
 			best = th
 		}
 	}
+	if best != nil {
+		return best
+	}
+	// No thread continues exactly. Claude Code ends a request with a mid-conversation system message
+	// (the environment reminder) that it replaces on the next turn, so the previous request's LAST
+	// message is not a prefix of the next request and every turn would start a new thread. Accept a
+	// thread whose messages EXCEPT THE LAST are a prefix of this request, when that leaves at least one
+	// message to compare; an exact match above always wins.
+	for _, th := range s.threads {
+		n := th.n - 1
+		if n < 1 || n > len(sums) || len(th.sums) < n || sums[n-1] != th.sums[n-1] {
+			continue
+		}
+		if best == nil || th.n > best.n || (th.n == best.n && th.last.After(best.last)) {
+			best = th
+		}
+	}
 	return best
 }
 

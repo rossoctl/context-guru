@@ -542,3 +542,45 @@ func TestTheMainAgentGetsThePrimaryEvenWhenAnAuxiliaryRequestComesFirst(t *testi
 		t.Fatalf("tool-less client: first thread got %q, want the primary", id)
 	}
 }
+
+// convTail builds a conversation whose last message is a volatile system reminder that the next turn
+// replaces, as Claude Code sends: texts are the stable messages, reminder is the trailing message.
+func convTail(reminder string, texts ...string) []byte {
+	msgs := make([]any, 0, len(texts)+1)
+	for i, t := range texts {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		msgs = append(msgs, map[string]any{"role": role, "content": []any{map[string]any{"type": "text", "text": t}}})
+	}
+	msgs = append(msgs, map[string]any{"role": "system", "content": []any{map[string]any{"type": "text", "text": reminder, "cache_control": map[string]any{"type": "ephemeral"}}}})
+	b, _ := json.Marshal(map[string]any{"model": "claude-sonnet-5", "system": "sys", "messages": msgs})
+	return b
+}
+
+func TestAReplacedTrailingSystemReminderDoesNotSplitTheThread(t *testing.T) {
+	tr := testTracker()
+	var ids []string
+	for n := 3; n <= 9; n += 2 { // a conversation growing by a user/assistant pair each turn
+		texts := make([]string, n)
+		for i := range texts {
+			texts[i] = fmt.Sprintf("message %d", i)
+		}
+		ids = append(ids, tr.Resolve("s", "", convTail(fmt.Sprintf("reminder for turn %d", n), texts...), false).ID)
+	}
+	for i, id := range ids {
+		if id != ids[0] {
+			t.Fatalf("turn %d resolved to thread %q, the first turn to %q: a replaced trailing reminder split the conversation", i, id, ids[0])
+		}
+	}
+}
+
+func TestATrailingMessageTolerance_DoesNotMergeADifferentConversation(t *testing.T) {
+	tr := testTracker()
+	a := tr.Resolve("s", "", convTail("r1", "alpha one", "alpha two", "alpha three"), false)
+	b := tr.Resolve("s", "", convTail("r2", "beta one", "beta two", "beta three"), false)
+	if a.ID == b.ID {
+		t.Fatalf("two conversations that share no messages must not share a thread (both %q)", a.ID)
+	}
+}
