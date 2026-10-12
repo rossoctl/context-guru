@@ -504,6 +504,9 @@ var presets = map[string][]string{
 	// deterministic lever", which is what the gross number reads as.
 	"house":    {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"housellm": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	// housetail: house plus extract_llm on the uncached tail only — no cold sweep. See its
+	// presetConfigs entry for the settings.
+	"housetail": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 
 	// conservative/medium/high/xhigh: the effort ladder the Claude Code plugin's preset picker
 	// offers (context-guru-plugin/skills/preset-picker), replacing the old off/cache/house/
@@ -724,6 +727,34 @@ components:
       min_request_tokens: 3000
   extract_llm_sweep:
     min_tokens: 1000`,
+	// housetail: house plus extract_llm restricted to what this turn adds. Every tool output of at
+	// least 860 tokens that arrives in the uncached tail is offered to the compaction model once,
+	// before it is first forwarded, so the provider never caches its verbose form and the cached
+	// prefix is never rewritten. No extract_llm_sweep (nothing at depth, cold or warm).
+	//   fire_on: size        the per-output floor decides, not context pressure
+	//   context: goal        the prompt carries the agent's goal only, not recent messages
+	//   rewrite: false       deletion-only: the result must be a subsequence of the output
+	//   skip_file_reads      false: file reads are the largest outputs in the tail
+	//   strategy: auto       the Starlark program first, a single-shot extract as fallback
+	// The model block is housellm's; pin a cheaper extraction model with `model:` if one is
+	// available.
+	"housetail": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
+components:
+  extract:
+    min_tokens: 400
+  extract_llm:
+    allow_on_caching_backend: true
+    context: goal
+    fire_on: size
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    min_tokens: 860
+    model:
+      model: claude-haiku-4-5
+      source: incoming
+    rewrite: false
+    skip_file_reads: false
+    strategy: auto`,
 	// conservative/medium/high/xhigh — the plugin picker's effort ladder. See the comment beside
 	// their entries in the `presets` map above for what distinguishes each tier; the per-component
 	// blocks below are `house`'s and `housellm`'s, copied verbatim rather than re-derived, so a

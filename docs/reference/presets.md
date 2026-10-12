@@ -43,6 +43,7 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 | `agentdiet` | `format, agentdiet, cachesplit` |
 | `house` | `format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter` |
 | `housellm` | `format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter` |
+| `housetail` | `format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter` |
 
 Order is deliberate: lossless repack first, then the cheap structural offloaders, then
 anything that costs a model call, cache directives last — except in `house` and `housellm`,
@@ -51,8 +52,9 @@ pair and `toolfilter` sits after `cachesplit`. That costs per-component attribut
 `/stats`, never content; the reasons are recorded in
 [`config/config.go`](../design.md#config-registry) and the exemption is noted below.
 
-The last three rows are not options in the chooser above. `house` and `housellm` are the
-**service** configs — what a hosted account runs unless it asks otherwise — and `agentdiet`
+The last four rows are not options in the chooser above. `house` and `housellm` are the
+**service** configs — what a hosted account runs unless it asks otherwise — `housetail` is an
+opt-in variant of `house` with the tail-only compaction-model pass, and `agentdiet`
 reproduces a published baseline for A/B comparison, not a recommendation. They are in the
 table so it lists every preset that exists; pick from the table above this one.
 
@@ -175,6 +177,7 @@ Pipelines below are taken exactly from the `presets` map in `config/config.go`.
 |---|---|---|
 | `house` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract` → `cachesplit` → `toolfilter` | **The default**, for the standalone proxy and for every hosted tenant that has not chosen otherwise. Deterministic all the way through: no model call, so it adds no upstream spend and no latency to anyone else's agent on a shared box. `toolfilter` carries an empty removal list until an account names something. The order is the operator's, not this file's lossless-first rule — see the note below the table. |
 | `housellm` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract_llm_sweep` → `extract` → `cachesplit` → `toolfilter` | `house` plus **both** compaction-model passes, applied per account on request. `extract_llm` works the uncached tail on any turn; `extract_llm_sweep` adjudicates at depth **only on a turn whose prompt cache has expired**. They were one component with a `per_output` / `cold_cache` pair of switches until the cold-sweep split — the sweep is now its own component, so "is it on" is its presence in the pipeline like everything else. The bounds that apply: the sweep's `max_calls` (default one concurrency round, each call adjudicating up to 12 outputs), `extract_llm`'s `llm_max_per_request: 8`, the economic gate on both, and a 3,000-token request trigger. |
+| `housetail` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract` → `cachesplit` → `toolfilter` | `house` plus `extract_llm` on the **uncached tail only**: each tool output of at least 860 tokens that this turn adds is offered to the compaction model once, before it is first forwarded, so the provider never caches its verbose form and nothing already cached is rewritten. No `extract_llm_sweep`. Deletion-only (`rewrite: false`), goal-only prompt context, file reads included, `fire_on: size`, at most 8 calls per request. Adds a model call (and its latency) on the turns that return a large output; `CONTEXT_GURU_LLM_TIMEOUT` bounds the wait. |
 | `conservative` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract` → `cachesplit` → `toolfilter` | The Claude Code plugin picker's tier 1, and `house` verbatim (see above) under a name that reads as an effort level rather than a product name. Deterministic, no model calls. |
 | `medium` | `cache_aware_summarizer` → `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract` → `cachesplit` → `toolfilter` | The picker's tier 2: `conservative` plus `extract_llm` (`housellm` minus its cold-cache sweep), plus [`cache_aware_summarizer`](../components/advanced-offload.md#two-ways-to-use-cache_state) with `cache_state: pre_expiry`. The summary is prepared in the background, in place of one keep-alive ping, and kept in reserve. It is used only when the user comes back after the cache expired, so the history never changes while the user works. Spends on its own, gated by `extract_llm`'s economic gate and 3,000-token trigger, and by the summarizer's 90%-of-window trigger. Needs keep-alive to prepare a summary; with cache strategy `none` the summarizer almost never acts. |
 | `high` | `cache_aware_summarizer` → `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract` → `cachesplit` → `toolfilter` | The picker's tier 3: `medium` with `cache_aware_summarizer` at its default `cache_state: any`. The summary is made at 90% of the window and used on the next request, warm or cold. `summarize` is no longer in any picker tier; it stays available by name (see [Two ways to use `cache_state`](../components/advanced-offload.md#two-ways-to-use-cache_state) for when it is the better choice). |
