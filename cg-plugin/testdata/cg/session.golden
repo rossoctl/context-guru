@@ -1,0 +1,9 @@
+In this session, cache misses cost you about $4.20 of the $13.50 billed (2 misses in 31 messages).
+
+▪▪▮▪↻·▪▪················✖▪▮▪▪▪▪▮·······✖▪▪▼▪▪▪▮▮
+12:31                                      13:40
+▪ message  ▮ busy  ✖ cache miss (cost extra)  ▼ conversation compacted  ↻ keep-alive ping  · idle
+
+Longest pause: 25:00. Next time: run /compact before a break longer than 5 minutes.
+
+More: /cg:session details

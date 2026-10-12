@@ -2451,7 +2451,7 @@ func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d; must never fail a render", code)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(out), "● warm 1m") {
+	if !strings.HasPrefix(strings.TrimSpace(out), "cache ● ██") || !strings.Contains(out, " 1:") {
 		t.Errorf("got %q; the cache stopper must still render off a malformed /api/stats body", out)
 	}
 	if strings.Contains(out, " of $") {
@@ -2465,14 +2465,13 @@ func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 // flaky by construction, not a property of the script.
 func parseCacheSeconds(t *testing.T, seg string) int {
 	t.Helper()
-	m, sec := 0, 0
-	if _, err := fmt.Sscanf(seg, "◐ %ds left", &sec); err == nil {
-		return sec
-	}
-	if _, err := fmt.Sscanf(seg, "● warm %dm", &m); err != nil {
+	var bar string
+	var m, sec int
+	// `● ██████ 4:48` (warm) or `◐ ░░░░░░ 0:42` (last minute): a six-cell draining bar, then M:SS.
+	if _, err := fmt.Sscanf(seg, "%s %s %s %d:%d", new(string), new(string), &bar, &m, &sec); err != nil {
 		t.Fatalf("%q does not parse as a cache countdown: %v", seg, err)
 	}
-	return m * 60
+	return m*60 + sec
 }
 
 // TestStatuslineCacheCountdownMath is the boundary table for the TTL "stopper" — the single most
@@ -2502,12 +2501,12 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 			}
 			got := strings.SplitN(strings.TrimSpace(out), " │ ", 2)[0]
 			if c.wantCold {
-				if got != "○ cold" {
-					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "○ cold")
+				if got != "cache ○ ░░░░░░ cold" {
+					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache ○ ░░░░░░ cold")
 				}
 				return
 			}
-			if got == "○ cold" {
+			if got == "cache ○ ░░░░░░ cold" {
 				t.Fatalf("remaining=%.0fs: reported cold while still positive", c.remainingSec)
 			}
 			gotSec := parseCacheSeconds(t, got)
@@ -2557,7 +2556,7 @@ print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 		t.Fatalf("running the boundary check: %v\n%s", err, out)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	want := []string{"○ cold", "◐ 0s left", "○ cold"}
+	want := []string{"cache ○ ░░░░░░ cold", "cache ◐ ░░░░░░ 0:00", "cache ○ ░░░░░░ cold"}
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
 	}
@@ -2676,7 +2675,7 @@ func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "● warm 1m") {
+	if !strings.Contains(out, "cache ● ██") || !strings.Contains(out, " 1:") {
 		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
 	}
 	// The keep-alive segment now shows the NET dollar figure and the misses it prevented, not the
@@ -2812,7 +2811,7 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 			w.Write([]byte(`{"total_saved_usd": 0.01, "saved_unique": 100}`))
 		case "lean=1&session=sess-b":
 			w.Write([]byte(`{"total_saved_usd": 9.99, "saved_unique": 9000}`))
-		case "lean=1&since=" + r.URL.Query().Get("since"): // the unscoped "day" read
+		case "lean=1&since=" + r.URL.Query().Get("since"): // the unscoped "day" and lifetime (since=0) reads
 			w.Write([]byte(`{"total_saved_usd": 0}`))
 		default:
 			t.Errorf("unexpected query %q", r.URL.RawQuery)
@@ -2858,7 +2857,7 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(r.URL.RawQuery, "since=") { // the day read has its own 60s cache
+		if !strings.Contains(r.URL.RawQuery, "since=") { // the day and lifetime reads have their own caches
 			atomic.AddInt64(&hits, 1)
 		}
 		w.Header().Set("Content-Type", "application/json")

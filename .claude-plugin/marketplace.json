@@ -16,6 +16,17 @@
       "license": "Apache-2.0",
       "keywords": ["cache", "cost", "proxy", "tokens", "prompt-caching"],
       "category": "productivity"
+    },
+    {
+      "name": "cg",
+      "source": "./cg-plugin",
+      "displayName": "cg",
+      "description": "Short commands for the same proxy: /cg, /cg:savings, /cg:cache, /cg:waste, /cg:session, /cg:doctor. Dollars first, one bottom line each.",
+      "homepage": "https://github.com/rossoctl/context-guru",
+      "repository": "https://github.com/rossoctl/context-guru",
+      "license": "Apache-2.0",
+      "keywords": ["cache", "cost", "savings"],
+      "category": "productivity"
     }
   ]
 }

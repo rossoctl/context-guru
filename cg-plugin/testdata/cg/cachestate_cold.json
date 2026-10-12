@@ -1,0 +1,13 @@
+{
+ "session": "session-A",
+ "model": "claude-opus-5",
+ "last_ts": 1791472500000,
+ "now_ms": 1791473400000,
+ "ttl_s": 300,
+ "prefix_tokens": 412000,
+ "keepalive": false,
+ "rewrite_usd": 1.91,
+ "priced": true,
+ "window": 1000000,
+ "window_exact": true
+}

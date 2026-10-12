@@ -1,0 +1,15 @@
+6 things you carry were never used: $37.70 in 7 days, about $161.57 a month.
+
+Top 5 of 6:
+  MCP server     playwright    $18.40  ██████████
+  MCP server     sentry         $7.10  ████░░░░░░
+  MCP server     figma          $6.20  ███░░░░░░░
+  built-in tool  NotebookEdit   $3.30  ██░░░░░░░░
+  skill          brand-voice    $1.60  █░░░░░░░░░
+
+Remove the first:
+  claude mcp remove playwright
+
+Observed carry; the monthly figure is an estimate that assumes your usage stays the same.
+
+More: /cg:waste details

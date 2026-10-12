@@ -56,6 +56,7 @@ import os
 import re
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -576,8 +577,13 @@ ROUTE_MEMO_SECONDS = 60
 EXPIRING_SECONDS = 60
 HINT_COLD_MIN_TOKENS = 100_000  # a cold cache under this is cheap enough not to nag about
 HINT_FULL_FRACTION = 0.85
+HINT_EXPIRING_MIN_USD = 0.50  # below this a rewrite is not worth a line of anyone's attention
 CACHESTATE_TTL_SECONDS = 2.0
 DAY_TTL_SECONDS = 60.0
+LIFE_TTL_SECONDS = 300.0  # the all-time total moves slowly and is the most expensive read
+CACHE_BAR_CELLS = 6
+# Which line each element sits on in a two-line layout. `minimal` ignores this: it is one line.
+ROW = {"update": 0, "save": 0, "cache": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1, "hint": 1}
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
@@ -670,9 +676,67 @@ def _fetch_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | Non
     return obj, 0.0
 
 
+def _bg_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | None, float]:
+    """(body, age) for a read that can be too slow to wait for on a render (the all-time and today
+    totals take seconds on a large history). Fresh cache wins; otherwise one inline GET under the
+    normal short timeout; and when that fails, serve whatever is cached however old and start ONE
+    detached refresher (a lock file bounds it to one per 30 s) that fills the cache for a later
+    render. Never waits longer than the inline timeout, never raises."""
+    path = os.path.join(_tmpdir(), f"context-guru-statusline-{port}-{tag}.json")
+    cached, age = None, 0.0
+    try:
+        age = max(0.0, time.time() - os.stat(path).st_mtime)
+        with open(path, encoding="utf-8") as fh:
+            cached = json.load(fh)
+    except (OSError, ValueError):
+        cached, age = None, 0.0
+    if cached is not None and age < ttl:
+        return cached, age
+    try:
+        _refresh(port, query, path, 0.0)
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh), 0.0
+    except Exception:  # noqa: BLE001 - too slow or down: fall through to the stale copy
+        pass
+    lock = path + ".lock"
+    try:
+        if time.time() - os.stat(lock).st_mtime < 30:
+            return cached, age
+    except OSError:
+        pass
+    try:
+        with open(lock, "w"):
+            pass
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "--refresh", port, query, path],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+    return cached, age
+
+
+def _refresh(port: str, query: str, path: str, timeout: float = 60.0) -> None:
+    """One GET written atomically to `path`. timeout 0 keeps the normal short bound (inline use);
+    the detached refresher passes the default, patient one."""
+    global HTTP_TIMEOUT_SECONDS
+    if timeout:
+        HTTP_TIMEOUT_SECONDS = timeout
+    body = _http_get(port, query)
+    json.loads(body)
+    tmp = path + f".{os.getpid()}.tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(body)
+    os.replace(tmp, path)
+
+
 def _num(d: object, k: str) -> float | None:
     v = d.get(k) if isinstance(d, dict) else None
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def ttl_s_bad(cs: dict) -> bool:
+    t = cs.get("ttl_s")
+    return not isinstance(t, (int, float)) or isinstance(t, bool) or t <= 0
 
 
 def _cache_view(payload: dict, cs: dict | None, cs_age: float) -> dict:
@@ -687,32 +751,44 @@ def _cache_view(payload: dict, cs: dict | None, cs_age: float) -> dict:
         cli = exp - time.time()
     elif pc.get("warm") is False:
         cli = 0.0
-    srv, tokens, usd = None, _num(pc, "recache_tokens_if_cold"), None
+    srv, tokens, usd, ping = None, _num(pc, "recache_tokens_if_cold"), None, False
+    ttl = 3600.0 if pc.get("ttl") == "1h" else 300.0
     last, ttl, now_ms = _num(cs, "last_ts"), _num(cs, "ttl_s"), _num(cs, "now_ms")
     if last is not None and ttl is not None and now_ms is not None:
         srv = (last + ttl * 1000 - now_ms) / 1000 - cs_age
         tokens = _num(cs, "prefix_tokens") or tokens
         usd = _num(cs, "rewrite_usd") if cs.get("priced") else None
+        ttl, ping = ttl if ttl_s_bad(cs) else cs["ttl_s"], bool(cs.get("keepalive"))
     if srv is not None and (cs_age <= 3 or cli is None or srv >= cli):
-        return {"remaining": srv, "source": "proxy", "tokens": tokens, "usd": usd}
+        return {"remaining": srv, "source": "proxy", "tokens": tokens, "usd": usd, "ttl": ttl, "ping": ping}
     if cli is not None:
-        return {"remaining": cli, "source": "client", "tokens": tokens, "usd": None}
-    return {"remaining": None, "source": None, "tokens": tokens, "usd": usd}
+        return {"remaining": cli, "source": "client", "tokens": tokens, "usd": None, "ttl": ttl, "ping": False}
+    return {"remaining": None, "source": None, "tokens": tokens, "usd": usd, "ttl": ttl, "ping": False}
+
+
+def _clock(sec: float) -> str:
+    sec = int(sec)
+    return f"{sec // 3600}h{sec % 3600 // 60:02d}m" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
 
 
 def _cache_segment(view: dict, level: int | None = 0) -> str | None:
+    """A bar that DRAINS toward expiry: full = just written, empty = gone. Green while warm, yellow
+    in the last minute (or last fifth of the lifetime), red and empty once cold. `↻` marks that
+    the proxy plans a keep-alive ping, so an expiring bar there is about to be topped up."""
     rem = view["remaining"]
     if level is None:
         return None
     if rem is None:
         return f"{DIM}◌ no cache yet{RESET}" if level == 0 else f"{DIM}◌{RESET}"
-    if rem <= 0:
-        return f"{RED}○ cold{RESET}"
-    if rem <= EXPIRING_SECONDS:
-        return f"{YELLOW}◐ {int(rem)}s left{RESET}" if level == 0 else f"{YELLOW}◐ {int(rem)}s{RESET}"
-    mins = int(rem // 60)
-    when = f"{mins}m" if mins < 60 else f"{mins // 60}h{mins % 60:02d}m"
-    return f"{GREEN}● warm {when}{RESET}" if level == 0 else f"{GREEN}● {when}{RESET}"
+    ttl = view.get("ttl") or 300.0
+    cells = max(0, min(CACHE_BAR_CELLS, int(round(rem / ttl * CACHE_BAR_CELLS)))) if rem > 0 else 0
+    expiring = rem <= max(EXPIRING_SECONDS, ttl / 5)
+    colour, glyph = (RED, "○") if rem <= 0 else ((YELLOW, "◐") if expiring else (GREEN, "●"))
+    ping = " ↻" if view.get("ping") and rem > 0 else ""
+    if level == 1:
+        return f"{DIM}cache{RESET} {colour}{glyph} {'cold' if rem <= 0 else _clock(rem)}{ping}{RESET}"
+    bar = f"{colour}{'█' * cells}{DIM}{'░' * (CACHE_BAR_CELLS - cells)}{RESET}"
+    return f"{DIM}cache{RESET} {colour}{glyph}{RESET} {bar} {colour}{'cold' if rem <= 0 else _clock(rem)}{ping}{RESET}"
 
 
 def _ctx_numbers(payload: dict, cs: dict | None, cs_age: float) -> tuple[float, float] | None:
@@ -740,31 +816,35 @@ def _ctx_segment(used: float, window: float, level: int | None = 0) -> str | Non
     fraction = max(0.0, min(1.0, used / window))
     colour = GREEN if fraction <= GREEN_MAX else (YELLOW if fraction <= YELLOW_MAX else RED)
     if level == 1:
-        return f"{colour}ctx {fraction * 100:.0f}%{RESET}"
+        return f"{DIM}ctx{RESET} {colour}{fraction * 100:.0f}%{RESET}"
     filled = int(round(fraction * BAR_CELLS))
-    bar = f"{colour}{'█' * filled}{DIM}{'·' * (BAR_CELLS - filled)}{RESET}"
-    return f"{bar} {colour}{_human(used)}/{_human(window)} {fraction * 100:.0f}%{RESET}"
+    bar = f"{colour}{'█' * filled}{DIM}{'░' * (BAR_CELLS - filled)}{RESET}"
+    near = f" {RED}⚠ rewrite near{RESET}" if fraction >= HINT_FULL_FRACTION else ""
+    return f"{DIM}ctx{RESET} {bar} {colour}{fraction * 100:.0f}%{RESET}{near}"
 
 
-def _save_segment(stats: dict | None, day: dict | None, level: int | None = 0, fresh: bool = False) -> str | None:
+def _save_segment(stats: dict | None, day: dict | None, life: dict | None, level: int | None = 0,
+                  fresh: bool = False) -> str | None:
     """Saved is a COUNTERFACTUAL (vs the same request uncompacted, at gateway prices, net of CG's
-    own model spend and keep-alive pings), so it carries `≈`; spent is OBSERVED (gateway-priced
-    cost of the requests actually sent). The two are never added or divided into each other."""
-    saved = _num(stats, "total_saved_usd")
-    if saved is None or level is None or fresh:
+    own model spend and keep-alive pings), so it carries `≈`. Session, today and lifetime are
+    three windows of that one measure. Spend is not shown here: it is Claude Code's own `cost`."""
+    sess, today, ever = _num(stats, "total_saved_usd"), _num(day, "total_saved_usd"), _num(life, "total_saved_usd")
+    # A window with nothing saved says nothing: "today ≈$0.00" on a fresh day is noise, not news.
+    today, ever = (today if today and today >= 0.005 else None), (ever if ever and ever >= 0.005 else None)
+    if level is None or (fresh and today is None and ever is None) or (sess is None and today is None):
         return None
     if level == 2:
-        return _money(saved, True)
+        return _money(sess if sess is not None else today, True)
     if level == 1:
-        return f"saved {_money(saved, True)}"
-    out = f"saved {_money(saved, True)}"
-    spent = _num(stats, "cost_usd")
-    if spent is not None:
-        out += f" {DIM}(spent{RESET} ${spent:.2f}{DIM}){RESET}"
-    today = _num(day, "total_saved_usd")
+        return f"saved {_money(sess if sess is not None else today, True)}"
+    parts = []
+    if sess is not None and not fresh:
+        parts.append(f"saved {_money(sess, True)} {DIM}session{RESET}")
     if today is not None:
-        out += f" {DIM}· day{RESET} {_money(today, True)}"
-    return out
+        parts.append(f"{_money(today, True)} {DIM}today{RESET}" if parts else f"saved {_money(today, True)} {DIM}today{RESET}")
+    if ever is not None:
+        parts.append(f"{DIM}★{RESET} {_money(ever, True)} {DIM}lifetime{RESET}")
+    return f" {DIM}·{RESET} ".join(parts) or None
 
 
 def _fresh_session(payload: dict) -> bool:
@@ -779,11 +859,15 @@ def _hint(payload: dict, view: dict, ctx: tuple[float, float] | None) -> tuple[s
     """At most ONE actionable line (long, short form), most expensive first."""
     rem, tokens = view["remaining"], view["tokens"]
     if rem is not None and rem <= 0 and tokens and tokens >= HINT_COLD_MIN_TOKENS:
-        price = f"≈${view['usd']:.2f}" if view["usd"] is not None else f"{_human(tokens)} tokens"
-        return (f"{RED}cold on {_human(tokens)}: next send rewrites {price} — /compact?{RESET}",
-                f"{RED}cold {_human(tokens)}: resend {price} — /compact?{RESET}")
+        price = f"≈${view['usd']:.2f}" if view["usd"] is not None else "a full re-send"
+        return (f"{RED}cache is cold: your next message costs {price} extra — /compact first?{RESET}",
+                f"{RED}cold: next message {price} extra — /compact?{RESET}")
+    if (rem is not None and 0 < rem <= EXPIRING_SECONDS and not view.get("ping") and view["usd"] is not None
+            and view["usd"] >= HINT_EXPIRING_MIN_USD):
+        msg = f"{YELLOW}cache gone in {int(rem)}s: a pause now costs ≈${view['usd']:.2f} to rewrite{RESET}"
+        return msg, f"{YELLOW}gone in {int(rem)}s: a pause costs ≈${view['usd']:.2f}{RESET}"
     if ctx and ctx[0] / ctx[1] >= HINT_FULL_FRACTION:
-        full = f"{RED}context {ctx[0] / ctx[1] * 100:.0f}% full — /compact{RESET}"
+        full = f"{RED}context {min(ctx[0] / ctx[1], 1.0) * 100:.0f}% full — /compact{RESET}"
         return full, full
     pc = payload.get("prompt_cache") if isinstance(payload.get("prompt_cache"), dict) else {}
     at, cause = _num(pc, "last_miss_at"), pc.get("last_miss_cause")
@@ -811,10 +895,6 @@ def _truncate(s: str, width: int) -> str:
     return "".join(out) + "…" + RESET
 
 
-def _compose(parts: list[str], width: int) -> str:
-    return _truncate(f" {DIM}│{RESET} ".join(parts), width)
-
-
 def _day_start_ms() -> int:
     lt = time.localtime()
     return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)) * 1000)
@@ -831,8 +911,9 @@ def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
             port, "/api/cachestate?session=" + _quote(session_id),
             "cs-" + session_id, CACHESTATE_TTL_SECONDS)
     if "save" in on:
-        jobs["day"] = lambda: _fetch_json(
+        jobs["day"] = lambda: _bg_json(
             port, f"/api/stats?lean=1&since={_day_start_ms()}", "day", DAY_TTL_SECONDS)
+        jobs["life"] = lambda: _bg_json(port, "/api/stats?lean=1&since=0", "life", LIFE_TTL_SECONDS)
 
     def run(name, fn):
         try:
@@ -876,11 +957,12 @@ def main() -> None:
 
     cs, cs_age = got.get("cs", (None, 0.0))
     day, _ = got.get("day", (None, 0.0))
+    life, _ = got.get("life", (None, 0.0))
     view = _cache_view(payload, cs, cs_age)
     ctx = _ctx_numbers(payload, cs, cs_age)
     shown = {
         "update": lambda lv: update_seg if lv == 0 else None,
-        "save": lambda lv: _save_segment(stats, day, lv, _fresh_session(payload)),
+        "save": lambda lv: _save_segment(stats, day, life, lv, _fresh_session(payload)),
         "cache": lambda lv: _cache_segment(view, lv),
         "ctx": lambda lv: _ctx_segment(*ctx, lv) if ctx else None,
         "ka": lambda lv: (_keepalive_segment(stats) if stats and lv == 0 else None),
@@ -891,34 +973,56 @@ def main() -> None:
     level: dict[str, int | None] = {e: 0 for e in order}
     hint = _hint(payload, view, ctx) if "hint" in on else None
     if layout == "minimal":
-        level["save"] = 1  # minimal: `saved ≈$0.31`, no spent/day
+        level["save"] = 1  # minimal: `saved ≈$0.31`, no today/lifetime
     hint_level = 0
+    two_rows = layout != "minimal"
 
     def build() -> list[str]:
-        parts = [s for s in (shown[e](level[e]) for e in order) if s]
+        rows: list[list[str]] = [[], []]
+        for e in order:
+            seg = shown[e](level[e])
+            if seg:
+                rows[ROW[e] if two_rows else 0].append(seg)
         if hint:
-            parts.append(f"{DIM}▸{RESET} {hint[hint_level]}")
-        return parts
+            rows[1 if two_rows else 0].append(f"{DIM}▸{RESET} {hint[hint_level]}")
+        return [" │ ".join(r) for r in rows if r]
 
-    parts = build()
+    def widest() -> int:
+        return max((_vlen(r) for r in build()), default=0)
+
+    def too_wide_rows() -> set[int]:
+        if not two_rows:
+            return {0} if widest() > width else set()
+        rows = [" │ ".join(filter(None, (shown[e](level[e]) for e in order if ROW[e] == i))) for i in (0, 1)]
+        rows[1] = " │ ".join(filter(None, [rows[1], f"▸ {hint[hint_level]}" if hint else ""]))
+        return {i for i, r in enumerate(rows) if _vlen(r) > width}
+
     for element, lv in DEGRADE:
-        if _vlen(" │ ".join(parts)) <= width:
+        bad = too_wide_rows()
+        if not bad:
             break
+        if (ROW[element] if two_rows else 0) not in bad:
+            continue  # only shrink what sits on a line that is actually too wide
         if element == "hint":
             hint_level = lv
-            parts = build()
         elif element in level and (level[element] or 0) < (lv or 9):
             level[element] = lv
-            parts = build()
-    line = _compose(parts, width)
-    if stale and line:
-        # A small, honest marker that every number to its left is from the last successful
-        # fetch rather than this render - never withheld, never dressed up as fresh.
-        line += f" {DIM}⏳{RESET}"
-    print(line or "cg · waiting for the first request")
+    sep = f" {DIM}│{RESET} "
+    lines = [_truncate(r.replace(" │ ", sep), width) for r in build()]
+    if stale and lines:
+        # A small, honest marker that every number is from the last successful fetch rather than
+        # this render - never withheld, never dressed up as fresh.
+        lines[-1] += f" {DIM}⏳{RESET}"
+    print("\n".join(lines) or "cg · waiting for the first request")
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 5 and sys.argv[1] == "--refresh":
+        try:
+            _refresh(*sys.argv[2:])
+        except Exception:
+            pass
+        sys.exit(0)
     try:
         if hasattr(signal, "SIGALRM"):  # POSIX only, same as the plugin's shell hooks
             signal.signal(signal.SIGALRM, _on_alarm)

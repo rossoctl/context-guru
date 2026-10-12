@@ -1,0 +1,11 @@
+{
+  "name": "cg",
+  "displayName": "cg",
+  "description": "Context Guru in three questions: how much am I saving, is my cache about to cost me, what should I do. Commands: /cg, /cg:savings, /cg:cache, /cg:waste, /cg:session, /cg:doctor. Read-only; works with the context-guru plugin's proxy.",
+  "version": "0.1.0",
+  "author": {"name": "rossoctl", "url": "https://github.com/rossoctl/context-guru"},
+  "homepage": "https://github.com/rossoctl/context-guru",
+  "repository": "https://github.com/rossoctl/context-guru",
+  "license": "Apache-2.0",
+  "keywords": ["cache", "cost", "savings", "statusline"]
+}
