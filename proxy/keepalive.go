@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +19,7 @@ import (
 	"github.com/rossoctl/context-guru/credmask"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 	"github.com/tidwall/gjson"
@@ -99,82 +99,16 @@ import (
 // after `tool_use`, a 6.7x lift, and 83.7% of the recoverable dollars sit behind it. Stopping
 // there would discard most of the value the mechanism exists to capture.
 
-// CachePolicy is one tenant's resolved cache policy — the host-level half of the cache
-// story, which no component can reach.
-//
-// A plain struct in this package rather than config.CacheConfig, for the reason
-// ConfigBuilder exists: proxy does not depend on the configuration loader, so a library
-// host or the bifrost adapter can set this directly.
-type CachePolicy struct {
-	// KeepAlive turns the mechanism on for this tenant. Off by default.
-	KeepAlive bool
-	// Idle is X: how long a session must be idle before the first ping, measured from the
-	// previous request's START per the provider's documented lifetime rule. Zero disables.
-	Idle time.Duration
-	// OpenAIIdle is the Responses interval for GPT-5.6+ implicit caches. Zero
-	// uses the 28-minute default; it is separate from Anthropic's five-minute
-	// schedule so enabling OpenAI does not send wasteful four-minute pings.
-	OpenAIIdle time.Duration
-	// MaxPings is K: the most pings one idle span may send. Zero disables.
-	MaxPings int
-	// MaxUSDPerPing refuses a ping whose projected cost exceeds this. PER PING, because ping
-	// cost is bimodal (p50 $0.0004, p99 $0.2275, max $0.3780) while a per-SESSION budget
-	// truncates exactly the long large-prefix sessions holding the value — capping the
-	// window's pings per session at 20 drops the net from +$164 to $92.34.
-	//
-	// Read it through Ceiling(), never directly: zero here means UNCONFIGURED, and for a spend
-	// guard that has to resolve to the default rather than to infinity.
-	MaxUSDPerPing float64
-	// MinPrefixTokens is the billed-prefix floor (the previous request's cache_read +
-	// cache_write) a session must reach before it is pinged. With the first-request skip this
-	// sends 8.7x fewer pings for 3.3% less money.
-	MinPrefixTokens int
-	// HeadTTL1h asks for the one-hour tier on the head breakpoints; HeadTTLMinTokens gates
-	// it on request size. Passed through to apply.Opts — see apply/headttl.go.
-	HeadTTL1h        bool
-	HeadTTLMinTokens int
-	// PredictorID optionally names a registered predictor (see predictorFor and
-	// knownPredictorIDs in keepalivestrategy.go) that pingable() must also clear before a
-	// ping fires. "" (every account today, and every strategy created before this field
-	// existed) means no predictor gate at all — unchanged behaviour.
-	PredictorID string
-	// PredictorThreshold is the minimum probability PredictorID must return. Ignored
-	// while PredictorID is "".
-	PredictorThreshold float64
-}
+// CachePolicy is keepalive.Policy, kept under its old name for the config builder and tests.
+type CachePolicy = keepalive.Policy
 
-// on reports whether this policy can ping at all.
-func (p CachePolicy) on() bool {
-	return p.KeepAlive && p.Idle > 0 && p.MaxPings > 0
-}
-
-// Keeper bounds. Both are memory bounds and both are needed: a few enormous sessions and a
-// great many small ones are different ways to exhaust the same 8 GiB.
+// Keeper bounds, now owned by package keepalive — kept here under their old unexported names so
+// the rest of this file compiles unchanged.
 const (
-	// maxKeepAliveSessions bounds the tracked ENTRIES, which since #423 are threads, not sessions:
-	// one session holds one entry per thread that passed the gates (main agent, each subagent).
-	// The name is kept so the bound stays greppable from its history. 512 still holds: an entry
-	// exists only for a thread past its first request with a prefix over the floor, a finished
-	// thread's entry ends at the hard deadline ((K+1) x Idle, about 14 min at the defaults), and
-	// the body bound below binds first. evictLocked has no per-session fairness on purpose: it
-	// drops the entry whose ping is least imminent, whichever session it belongs to.
-	maxKeepAliveSessions = 512
-	// maxKeepAliveBytes bounds the total request bodies held for replay.
-	//
-	// THIS is the binding ceiling, not maxKeepAliveSessions — tune this one. A gated session
-	// carries at least a 20k-token prefix, so ~100 KB to 1 MiB of body, and 128 MiB therefore
-	// binds around 130 large sessions: well before the 512-session count. The replay reports a
-	// peak of 11 live sessions, but it drives ~350-byte synthetic bodies, so it exercises the
-	// count bound and says nothing about this one.
-	maxKeepAliveBytes = 128 << 20
-	// maxKeepAliveTurnKeys bounds the per-thread turn counter (per session before #423).
-	// Larger than the entry bound because it holds one int rather than a body, and it has to
-	// outlive the entry.
-	maxKeepAliveTurnKeys = 20000
-	// maxKeepAliveBodyBytes refuses to hold a single body larger than this. A body this big
-	// is a multi-million-token request whose ping would itself cost real money, and holding
-	// one would spend a fifth of the whole budget on one session.
-	maxKeepAliveBodyBytes = 8 << 20
+	maxKeepAliveSessions  = keepalive.MaxSessions
+	maxKeepAliveBytes     = keepalive.MaxBytes
+	maxKeepAliveTurnKeys  = keepalive.MaxTurnKeys
+	maxKeepAliveBodyBytes = keepalive.MaxBodyBytes
 	// keepAliveTick is how often the sweep runs. The window it is protecting is 300s wide
 	// and the default fires at 280s, so a 2s granularity spends at most 2s of the 20s of
 	// slack that leaves.
@@ -217,7 +151,7 @@ type kaEntry struct {
 	// reporting a no-op rather than a panic.
 	emitter components.Emitter
 	// body is the bytes last sent upstream, held MASKED under the same per-process key as the
-	// credential (see credMask). A keeper-owned copy, so it can be overwritten on release
+	// credential (see credmask). A keeper-owned copy, so it can be overwritten on release
 	// without corrupting a slice something else still reads.
 	//
 	// Masked for the reason the credential is, and the asymmetry decides it: a leaked key is
@@ -229,7 +163,7 @@ type kaEntry struct {
 	// hdr is the minimal NON-SECRET header set the ping needs (content type, API version, beta
 	// flags). The credential never goes in here — see auth.
 	hdr http.Header
-	// auth is the caller's provider credential, held MASKED (see credMask), and only when the
+	// auth is the caller's provider credential, held MASKED (see credmask), and only when the
 	// upstream is caller-pays.
 	//
 	// THIS IS THE ONE PLACE THIS SERVICE HOLDS A CALLER'S CREDENTIAL BEYOND THE LIFE OF A
@@ -294,7 +228,7 @@ type kaEntry struct {
 // eviction then threw away the entries that were about to pay, cutting conversions from 153 to
 // 69. Gating at record keeps nothing we will not use.
 func (e *kaEntry) due(now time.Time) bool {
-	return !e.stopped && e.pol.on() && e.pings < e.pol.MaxPings &&
+	return !e.stopped && e.pol.On() && e.pings < e.pol.MaxPings &&
 		!now.Before(e.startedAt.Add(e.pol.Idle))
 }
 
@@ -388,32 +322,9 @@ func (e *kaEntry) pingable() bool {
 	return p(e.stopReason) >= e.pol.PredictorThreshold
 }
 
-// Ceiling is the per-ping cost guard that is actually ENFORCED.
-//
-// The whole of this method is the sentinel. `MaxUSDPerPing == 0` means "nobody configured
-// one", and the shipped code read that as "no cap": `MaxUSDPerPing <= 0 || cost <= cap`. On
-// an account whose keep-alive is OFF the config builder hands the request path a zero
-// CachePolicy, and enabling one session by hand is precisely the use case a per-session
-// override exists for — so the one path where the guard was written to matter was the one
-// path that ran without it, while the arm response cheerfully reported a ceiling of $0.00.
-//
-// Zero in a money guard resolves to the DEFAULT. A caller that genuinely wants no ceiling has
-// to say so with a negative value, which is a thing somebody has to type on purpose.
-func (p CachePolicy) Ceiling() float64 {
-	switch {
-	case p.MaxUSDPerPing > 0:
-		return p.MaxUSDPerPing
-	case p.MaxUSDPerPing < 0:
-		return math.Inf(1)
-	default:
-		return DefaultMaxUSDPerPing
-	}
-}
-
-// DefaultMaxUSDPerPing mirrors config.DefaultKeepAliveMaxUSDPerPing, which this package may not
-// import (proxy does not depend on the configuration loader). They are pinned equal by
+// DefaultMaxUSDPerPing mirrors keepalive's; pinned to config's by
 // TestTheProxysPingCeilingDefaultMatchesTheConfigLoaders.
-const DefaultMaxUSDPerPing = 0.50
+const DefaultMaxUSDPerPing = keepalive.DefaultMaxUSDPerPing
 
 // keeper runs the keep-alive. One goroutine per handler, one map, one lock.
 type keeper struct {
@@ -509,13 +420,7 @@ type keeper struct {
 	summarySubstituteRefreshNotWorthIt atomic.Int64
 }
 
-// keepAliveDisabled is the operator's kill switch, read once at construction. A single
-// environment variable rather than a control-plane route: the thing an operator needs at
-// 3am is one that works when the control plane is what is broken.
-func keepAliveDisabled() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("CONTEXT_GURU_KEEPALIVE")))
-	return v == "off" || v == "0" || v == "false"
-}
+func keepAliveDisabled() bool { return keepalive.Disabled() }
 
 func newKeeper(h *Handler) *keeper {
 	k := &keeper{h: h, stop: make(chan struct{}), done: make(chan struct{}),
@@ -717,7 +622,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		}
 		pol = k.overrideForOpenAI(tn.ID, session, pol)
 	}
-	if !pol.on() {
+	if !pol.On() {
 		k.retire(key)
 		return
 	}
@@ -1680,7 +1585,7 @@ func (k *keeper) pendingPings() int {
 	defer k.mu.Unlock()
 	n := 0
 	for _, e := range k.live {
-		if !e.stopped && e.pol.on() && e.pings < e.pol.MaxPings {
+		if !e.stopped && e.pol.On() && e.pings < e.pol.MaxPings {
 			n++
 		}
 	}

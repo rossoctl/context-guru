@@ -55,7 +55,7 @@ func TestOverrideCannotRaiseThePerPingBudget(t *testing.T) {
 	// And it may switch the mechanism ON for one session while the account default is off —
 	// that is the point of it, and the arming request is the consent act.
 	off := CachePolicy{Idle: 280 * time.Second, MaxPings: 2}
-	if !k.overrideFor("t1", "sess-1", off).on() {
+	if !k.overrideFor("t1", "sess-1", off).On() {
 		t.Error("an override could not enable the keep-alive for one session on an account whose " +
 			"default is off, which is the whole use for it")
 	}
@@ -144,11 +144,11 @@ func TestOverrideExpiresAndStopsPinging(t *testing.T) {
 	k, _, clock := testKeeper(t, Limits{})
 	off := CachePolicy{Idle: 280 * time.Second, MaxPings: 2} // KeepAlive false: account is OFF
 	armOn(t, k, "sess-1", 60*time.Second, 3, clock.now().Add(10*time.Minute))
-	if !k.overrideFor("t1", "sess-1", off).on() {
+	if !k.overrideFor("t1", "sess-1", off).On() {
 		t.Fatal("the override is not in force, so its expiry proves nothing")
 	}
 	clock.advance(11 * time.Minute)
-	if k.overrideFor("t1", "sess-1", off).on() {
+	if k.overrideFor("t1", "sess-1", off).On() {
 		t.Error("an expired override still enabled the keep-alive")
 	}
 	// And it is not retained. overrideFor treats it as absent regardless; the sweep deletes it,
@@ -334,11 +334,11 @@ func TestOverrideForAnotherTenantsSessionIdIsRefusedAndWouldAddressNothing(t *te
 	}
 	// The victim's own traffic is unaffected: resolution is under THEIR tenant id.
 	off := CachePolicy{Idle: 280 * time.Second, MaxPings: 2}
-	if k.overrideFor("t-victim", victim, off).on() {
+	if k.overrideFor("t-victim", victim, off).On() {
 		t.Error("an arm under one principal reached another tenant's session")
 	}
 	// It landed under the attacker's own key, where it is inert.
-	if !k.overrideFor("t1", victim, off).on() {
+	if !k.overrideFor("t1", victim, off).On() {
 		t.Error("the arm did not land under the authenticated principal at all")
 	}
 	// The armed list is scoped too: the victim sees nothing.
@@ -459,7 +459,7 @@ func TestAnOverrideOnAKeepAliveOffAccountStillHasAPingCeiling(t *testing.T) {
 	armOn(t, k, "sess-1", 280*time.Second, 2, clock.now().Add(time.Hour))
 	// The account default: keep-alive off, nothing configured — a zero policy.
 	pol := k.overrideFor("t1", "sess-1", CachePolicy{})
-	if !pol.on() {
+	if !pol.On() {
 		t.Fatal("the override did not enable the mechanism; the rest of this test is vacuous")
 	}
 	if pol.Ceiling() != DefaultMaxUSDPerPing {
