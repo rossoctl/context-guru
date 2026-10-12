@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import sys
 
 UNI = {"full": "█", "empty": "░", "half": "▒", "spark": "▁▂▃▄▅▆▇█", "hit": "■", "part": "▨", "miss": "✖",
@@ -43,7 +42,7 @@ class Env:
                 (bool(enc) and "utf" not in enc)
         if width is None:
             width = int(os.environ["COLUMNS"]) if os.environ.get("COLUMNS", "").isdigit() else \
-                shutil.get_terminal_size((80, 24)).columns
+                __import__("shutil").get_terminal_size((80, 24)).columns
         self.color, self.ascii = color, ascii_only
         self.width = max(40, min(width, 140))
         self.theme = theme or os.environ.get("CG_THEME") or ("light" if os.environ.get("COLORFGBG", "").endswith(";15") else "dark")
