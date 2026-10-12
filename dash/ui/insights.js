@@ -143,9 +143,14 @@ function insCommandText(plan) {
 function insItemTable(rows, opts) {
   const head = [el('th', {}), el('th', { text: 'item' }), el('th', { text: 'recommendation' })];
   if (opts.sessions) head.push(el('th', { text: 'per session' }));
-  head.push(el('th', { class: 'num', text: 'tok / req' }),
-    el('th', { class: 'num', text: 'billed reads' }),
-    el('th', { class: 'num', text: 'cost' }));
+  /* EVERY NUMBER IN THIS TABLE IS WASTE, and the headers have to say so. "cost" and "billed
+   * reads" read as what the item cost in total, which is a different figure: a capability you
+   * actually invoked also costs tokens, and those were the price of using it rather than money
+   * thrown away. This view is only about the waste, so the columns are named for it — otherwise a
+   * reader reasonably sums them as a total spend and gets a number this page never computed. */
+  head.push(el('th', { class: 'num', text: 'weight / req' }),
+    el('th', { class: 'num', text: 'tokens wasted' }),
+    el('th', { class: 'num', text: 'wasted' }));
 
   const body = rows.map((it) => {
     const cells = [];
@@ -183,12 +188,20 @@ function insItemTable(rows, opts) {
     cells.push(vd);
 
     if (opts.sessions) cells.push(el('td', { text: insSessionCell(it) }));
-    cells.push(el('td', { class: 'num', text: it.tokens ? it.tokens.toLocaleString() : '—' }));
-    cells.push(el('td', { class: 'num', text: it.reads ? it.reads.toLocaleString() : '—' }));
-    cells.push(el('td', {
-      class: 'num',
-      text: it.invoked ? '—' : (it.priced ? usd(it.usd) : 'unpriced'),
-    }));
+    /* An invoked item has no figure in any of these three columns, and the dash needs a reason on
+     * hover rather than reading as missing data: its tokens were the price of using it. That is
+     * not waste, and this page reports nothing else — so the cell is empty by design, not by
+     * omission. */
+    const why = it.invoked
+      ? { title: 'invoked ' + (it.calls || 0) + ' time(s) \u2014 these tokens bought something, ' +
+          'so there is no waste to report. This page counts waste only.' }
+      : {};
+    cells.push(el('td', Object.assign({ class: 'num' }, why),
+      it.invoked || !it.tokens ? '—' : it.tokens.toLocaleString()));
+    cells.push(el('td', Object.assign({ class: 'num' }, why),
+      it.invoked || !it.reads ? '—' : it.reads.toLocaleString()));
+    cells.push(el('td', Object.assign({ class: 'num' }, why),
+      it.invoked ? '—' : (it.priced ? usd(it.usd) : 'unpriced')));
     return el('tr', {}, ...cells);
   });
 
@@ -374,31 +387,31 @@ function insRenderReview(root) {
     const k = plan.plugins[p];
     list.appendChild(el('li', {}, el('strong', { text: 'plugin ' + p }),
       ' — ' + k.length + (k.length === 1 ? ' skill' : ' skills') + ', ' + usd(sum(k)) +
-      ' over this window: ' + k.map(insShortName).sort().join(', ')));
+      ' wasted this window: ' + k.map(insShortName).sort().join(', ')));
   }
   for (const s of Object.keys(plan.servers).sort()) {
     const k = plan.servers[s];
     list.appendChild(el('li', {}, el('strong', { text: 'MCP server ' + s }),
       ' — ' + k.length + (k.length === 1 ? ' tool' : ' tools') + ', ' + usd(sum(k)) +
-      ' over this window: ' + k.map(insShortName).sort().join(', ')));
+      ' wasted this window: ' + k.map(insShortName).sort().join(', ')));
   }
   if (plan.deny.length) {
     list.appendChild(el('li', {}, el('strong', { text: 'tools denied' }),
-      ' — ' + plan.deny.length + ', ' + usd(sum(plan.deny)) + ' over this window: ' +
+      ' — ' + plan.deny.length + ', ' + usd(sum(plan.deny)) + ' wasted this window: ' +
       plan.deny.slice().sort().join(', ')));
   }
   if (plan.skills.length) {
     list.appendChild(el('li', {}, el('strong', { text: 'skills switched off' }),
-      ' — ' + plan.skills.length + ', ' + usd(sum(plan.skills)) + ' over this window: ' +
+      ' — ' + plan.skills.length + ', ' + usd(sum(plan.skills)) + ' wasted this window: ' +
       plan.skills.slice().sort().join(', ')));
   }
   box.appendChild(list);
 
   box.appendChild(el('div', { class: 'ins-total' }, el('strong', { text: usd(plan.usd) }),
     ' is what these ' + plan.count + (plan.count === 1 ? ' item' : ' items') +
-    ' cost over the measured window, carried on every request and never invoked. That is a ' +
-    'measurement rather than a forecast: it already happened, so the same traffic would cost ' +
-    'that much less.'));
+    ' WASTED over the measured window: carried on every request and invoked in none of them. ' +
+    'A measurement rather than a forecast — it already happened, so the same traffic would have ' +
+    'cost that much less. Nothing you actually used is in this figure.'));
 
   box.appendChild(el('div', { class: 'ins-review-h', text: 'What to do next' }));
   const steps = el('ol', { class: 'ins-steps' });
@@ -460,28 +473,41 @@ function insRender() {
   const removeSet = items.filter((i) => i.verdict === 'remove');
 
   /* The headline, in the page's own tile vocabulary. */
+  /* THE PAGE SAYS WHAT IT MEASURES, ONCE, AT THE TOP.
+   * Every figure below is WASTE: tokens carried on a request and never invoked in the session that
+   * carried them. A capability you did use also costs tokens, and this page does not report those
+   * at all — they were the price of using it, not money thrown away, and mixing the two would make
+   * every total here mean something a reader has to guess at. Said in the lede rather than left to
+   * the column headers, because a reader who skims the tiles never reaches them. */
+  root.appendChild(el('p', { class: 'hint', text:
+    'Every number on this page is WASTE — tokens sent on every request for a capability that was ' +
+    'never invoked in the sessions that carried it. What you actually used is not counted here: ' +
+    'those tokens bought something. Removing what is below does not change what your working ' +
+    'sessions cost; it changes what your idle declarations cost.' }));
   const tiles = el('div', { class: 'grid' },
     el('div', { class: 'tile good' },
-      el('div', { class: 'k', text: 'recoverable' }),
+      el('div', { class: 'k', text: 'wasted, recoverable' }),
       el('div', { class: 'v', text: usd(insDoc.removable_usd || 0) }),
       el('div', { class: 's', text: items.filter((i) => i.scope && i.scope !== 'none').length +
-        ' items you can remove · ' + (insDoc.removable_tokens || 0).toLocaleString() + ' tok/req' })),
+        ' unused items you can remove · ' + (insDoc.removable_tokens || 0).toLocaleString() +
+        ' tok/req thrown away' })),
     el('div', { class: 'tile' },
       el('div', { class: 'k', text: 'owners' }),
       el('div', { class: 'v', text: String((insDoc.owners || []).length) }),
       el('div', { class: 's', text: (insDoc.owners || []).filter((o) => o.kind === 'plugin').length +
         ' plugin(s), ' + (insDoc.owners || []).filter((o) => o.kind === 'server').length + ' MCP server(s)' })),
     el('div', { class: 'tile' },
-      el('div', { class: 'k', text: 'recommended' }),
+      el('div', { class: 'k', text: 'recommended to remove' }),
       el('div', { class: 'v', text: String(removeSet.length) }),
       el('div', { class: 's', text: removeSet.length
         ? 'past the observation floor'
         : 'nothing past the floor yet — the list below is still complete' })));
   if (unremovable.length) {
     tiles.appendChild(el('div', { class: 'tile bad' },
-      el('div', { class: 'k', text: 'built-ins (keep)' }),
+      el('div', { class: 'k', text: 'wasted, unrecoverable' }),
       el('div', { class: 'v', text: usd(unremovable.reduce((a, i) => a + (i.usd || 0), 0)) }),
-      el('div', { class: 's', text: unremovable.length + ' items · not available to you' })));
+      el('div', { class: 's', text: unremovable.length + ' unused built-ins · real waste, ' +
+        'but removing one breaks the agent' })));
   }
   root.appendChild(tiles);
 
@@ -589,7 +615,7 @@ function insRender() {
       ' is excluded from every table above: it is the plugin producing this view, so counting ' +
       'its weight as a saving it recommends would be circular. For the record, ' + se.items +
       ' skills, ' + (se.tokens || 0).toLocaleString() + ' tok/req' +
-      (se.usd ? ', ' + usd(se.usd) + ' over this window' : '') +
+      (se.usd ? ', ' + usd(se.usd) + ' wasted this window' : '') +
       (se.command ? '. Remove it with: ' + se.command : '.') }));
   }
 }
