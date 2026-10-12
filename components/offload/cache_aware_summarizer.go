@@ -501,6 +501,19 @@ func init() {
 //     predict: see cache_aware_cold.go, which defers the side call until the forwarded request's
 //     own usage confirms the cache it just rewrote, so the side call always reads warm.
 //
+// The 0.9 floor is also what makes `any`'s WARM splice pay. A summary committed while the cache
+// is still warm throws that cache away: the next request re-writes the whole post-summary prefix
+// at the cache-write rate instead of reading it at the cache-read rate. That one-time rewrite is
+// repaid only by the tokens the summary removes from every later request, and nothing at commit
+// time checks that it will be. At 0.9 of C the summarized span is nearly the whole conversation
+// (everything but the head and KeepLastTurns), so the per-request saving dwarfs the rewrite and
+// repays it within about a turn. Lower the floor (min_request_frac near 0, or a small
+// min_request_tokens) and that stops holding: a live run with min_request_frac 0 and
+// min_request_tokens 3000 summarized a ~1.4k-token span, re-wrote a ~170k-token warm cache, and
+// paid $0.44 for a request that cost ~$0.14 unsummarized. A deployment that wants an early
+// trigger should pair it with cache_state `pre_expiry`, which applies only a summary reserved
+// for a cache about to expire.
+//
 // `pre_expiry` stays reachable and still restricts for a deployment that wants the stronger
 // guarantee of only ever reusing a cache the component KNOWS is still alive (never Unknown either
 // — see Trigger.CacheAllows' Unknown-with-pre_expiry clause, which this component's defaults do
