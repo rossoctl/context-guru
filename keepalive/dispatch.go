@@ -31,6 +31,12 @@ type DispatchRequest struct {
 // must return an error rather than send unauthenticated. The keeper counts that as a failed ping
 // and does not retry it on that entry: the entry is already gone by the time the error comes
 // back.
+//
+// The entry can also be released AND re-Recorded while its ping is still in flight (the ping may
+// first spend up to 300s in fireSummarySubstitute). Dispatch then sends the OLD entry's body with
+// the NEW hold's credential and upstream for the same Key. Both come from the same caller and the
+// same thread, so this is accepted; but a host must not assume req.Body and the credential it
+// holds for req.Key come from the same request.
 type Dispatcher interface {
 	// Dispatch sends one ping. A non-nil error is transient (the keeper retries on the next due
 	// tick); a 4xx status stops the entry; 2xx usage feeds the write-vs-read guard.

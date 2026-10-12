@@ -86,9 +86,9 @@ type kaEntry struct {
 	// mechanism cannot exist here at all. It is held in memory only, never logged, never
 	// persisted, never in a command line, MASKED while idle, ZEROIZED on every release path, and
 	// bounded by a hard deadline of (MaxPings+1) x Idle that fires whether or not anything else
-	// in this process is awake. When the upstream DOES name a key (up.setKey != nil) nothing is
-	// retained at all: the credential is read from the environment at call time, exactly as on
-	// the request path.
+	// in this process is awake. A host that injects its own server-held key holds no caller
+	// credential at all (in cmd/context-guru-proxy, an upstream that names a key reads it from
+	// the environment at call time, exactly as on the request path).
 	held                        bool
 	provider                    bschemas.ModelProvider
 	model, route, preset, agent string
@@ -119,8 +119,8 @@ type kaEntry struct {
 	// tag is the host's label for this entry (Record.Tag) — in cmd/context-guru-proxy, the id of
 	// the manager-controlled keep-alive strategy that resolved this entry's policy, "" when none
 	// matched (account config or a session override supplied it instead). Resolved once, at
-	// record time, alongside the session override — see keeper.applyStrategy in the proxy's
-	// keepalivestrategy.go — and tagged onto the ping's own dash.Event by record1, never onto
+	// record time, alongside the session override — see the proxy host's applyStrategy in
+	// proxy/keepalivestrategy.go — and tagged onto the ping's own dash.Event by record1, never onto
 	// the real request it rescues.
 	tag string
 	// timer is the HARD retention deadline. A scheduled deadline rather than a check inside the
@@ -163,7 +163,8 @@ func (e *kaEntry) due(now time.Time) bool {
 // dollars sit behind it. That finding is exactly why StopReasonPredictor below does not
 // exclude end_turn either — it excludes the two clusters that finding never addressed.
 //
-// A strategy naming a PredictorID (opt-in, see kvcache.knownPredictorIDs and
+// A strategy naming a PredictorID (opt-in, see the proxy host's knownPredictorIDs in
+// proxy/keepalivestrategy.go, and
 // docs/results/kv-ttl-predictor-arms.md) adds ONE more condition on top of everything
 // above: the named predictor's probability at this entry's own stop_reason must clear the
 // strategy's tuned threshold. No PredictorID (every account today, and every strategy
@@ -199,9 +200,11 @@ type Options struct {
 	Dispatcher Dispatcher // required
 	Prices     Pricer     // nil: every ping is unpriced, as with no price table today
 	// Spare reserves the tenant's spare rate/concurrency headroom for one ping; nil = no limiter.
-	Spare  func(tenant string, reserveFrac float64) (release func(), err error)
-	Now    func() time.Time    // nil: time.Now
-	Go     func(f func())      // runs one ping; nil: `go f()`. Tests pass an inline runner.
+	Spare func(tenant string, reserveFrac float64) (release func(), err error)
+	Now   func() time.Time // nil: time.Now
+	// Go runs one ping; nil: `go f()`. Exported for tests and replay tooling (an inline runner
+	// makes a replay deterministic); hosts do not need it.
+	Go     func(f func())
 	OnTick func(now time.Time) // start of every sweep, outside the keeper lock; nil: none
 }
 
@@ -226,7 +229,8 @@ type Record struct {
 	Hold      func()             // called once, under the keeper lock, only if the entry is tracked
 }
 
-// EntryView is a read-only snapshot of one tracked entry, for the host's tests and tooling.
+// EntryView is a read-only snapshot of one tracked entry. Exported for tests and replay tooling;
+// hosts do not need it.
 type EntryView struct {
 	Pings, Turn    int
 	Prefix         int64
@@ -235,7 +239,7 @@ type EntryView struct {
 	Stopped        bool
 	Policy         Policy
 	Tag            string
-	MaskedBody     []byte // a copy, still masked
+	MaskedBody     []byte // a copy, still masked; for tests and replay tooling
 }
 
 // Keeper runs the keep-alive. One goroutine per host, one map, one lock.
@@ -316,13 +320,13 @@ type Keeper struct {
 // lock is held — the snapshot replay passes an inline runner instead, so a five-day simulation
 // is deterministic and needs no synchronisation.
 func New(o Options) *Keeper {
+	if o.Dispatcher == nil {
+		panic("keepalive.New: Options.Dispatcher is required")
+	}
 	if o.Now == nil {
 		o.Now = time.Now
 	}
 	if o.Go == nil {
-	if o.Dispatcher == nil {
-		panic("keepalive.New: Options.Dispatcher is required")
-	}
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
@@ -377,6 +381,10 @@ func (k *Keeper) Start() {
 }
 
 // Shutdown ends the sweep and drops every held body and credential.
+//
+// It does not wait for pings already in flight. A ping's goroutine may still finish briefly after
+// Shutdown returns, and its record1 and the entry's Emitter may run then. A host that closes its
+// event sink after Shutdown must tolerate one late report.
 func (k *Keeper) Shutdown() {
 	if k == nil {
 		return
@@ -761,7 +769,8 @@ func (k *Keeper) evictLocked() {
 	}
 }
 
-// Sweep fires every due ping. Returns how many it started, for tests.
+// Sweep fires every due ping. Returns how many it started. Exported for tests and replay tooling
+// (Start runs it on a ticker); hosts do not need it.
 //
 // The map lock is held only to select and to stamp: a ping is an HTTP round trip and holding
 // the lock across it would block every arriving request on this map.
@@ -1165,8 +1174,9 @@ func (k *Keeper) LiveSessionKeys() []string {
 	return keys
 }
 
-// Entry snapshots one tracked entry, for the host's tests and tooling. MaskedBody is a copy and
-// stays masked, so a caller can measure it without being handed a readable transcript.
+// Entry snapshots one tracked entry. Exported for tests and replay tooling; hosts do not need it.
+// MaskedBody is a copy and stays masked, so a caller can measure it without being handed a
+// readable transcript.
 func (k *Keeper) Entry(key Key) (EntryView, bool) {
 	if k == nil {
 		return EntryView{}, false

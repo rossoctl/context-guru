@@ -162,10 +162,14 @@ func (k *keeper) forget(tenant string) {
 	if k == nil {
 		return
 	}
-	k.Keeper.Forget(tenant)
+	// Overrides first, then the core's entries. That shrinks the window in which a concurrent
+	// record resolves its policy from an override that is being dropped and re-arms an entry
+	// after Forget has cleared them. It does not close it: the wrapper's mu is released before
+	// the core call, because it is never held across one.
 	k.mu.Lock()
 	k.forgetOverrides(tenant)
 	k.mu.Unlock()
+	k.Keeper.Forget(tenant)
 }
 
 func (k *keeper) pendingPings() int {

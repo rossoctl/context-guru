@@ -25,10 +25,12 @@
 // the prefix costs 1.25x. One ping buys back one re-creation at 11.5:1.
 //
 // Replayed over the production window THROUGH THIS CODE (TestKeepAliveOnProductionSnapshot) at
-// the shipped defaults: 912 pings costing $90.76 convert 148 of 357 addressable misses worth
-// $215.84, net **+$125.08** — 3.98% of spend, and 12.9x everything the whole transformation
-// pipeline delivered over the same window ($9.72). Every figure here comes from that replay, so
-// a policy change that moves the number moves this comment too.
+// the defaults shipped when it was measured (X=280s, K=2): 912 pings costing $90.76 convert 148
+// of 357 addressable misses worth $215.84, net **+$125.08** — 3.98% of spend, and 12.9x
+// everything the whole transformation pipeline delivered over the same window ($9.72). The
+// defaults have changed since (the idle default is now config.DefaultKeepAliveIdle; see Policy
+// and the config defaults), and this replay has not been rerun at them, so read these figures
+// as that measurement, not as what today's defaults deliver.
 //
 // # Why it is host-level and not a component
 //
@@ -106,8 +108,10 @@ type Usage struct {
 // (Price.CostWithCacheWrite1h).
 type Price = modelinfo.Price
 
-// Pricer resolves rates for a ping. endpoint is the upstream host the entry's request went to and
-// promptTokens the billed prefix; a host that prices by model alone ignores both.
+// Pricer resolves rates for a ping. endpoint is the upstream the entry's request went to, in the
+// host's own form (Record.Endpoint): cmd/context-guru-proxy passes the upstream base URL, Cortex
+// passes the request host. promptTokens is the billed prefix. A Pricer that prices by model alone
+// ignores both.
 type Pricer interface {
 	Price(ctx context.Context, endpoint, model string, promptTokens int64) (Price, bool)
 }
@@ -146,8 +150,8 @@ type Policy struct {
 	// it on request size. Passed through to apply.Opts — see apply/headttl.go.
 	HeadTTL1h        bool
 	HeadTTLMinTokens int
-	// PredictorID optionally names a registered predictor (see predictorFor and
-	// knownPredictorIDs in keepalivestrategy.go) that pingable() must also clear before a
+	// PredictorID optionally names a registered predictor (see predictorFor, and the proxy
+	// host's knownPredictorIDs in proxy/keepalivestrategy.go) that pingable() must also clear before a
 	// ping fires. "" (every account today, and every strategy created before this field
 	// existed) means no predictor gate at all — unchanged behaviour.
 	PredictorID string
@@ -191,9 +195,9 @@ const (
 	// is a multi-million-token request whose ping would itself cost real money, and holding
 	// one would spend a fifth of the whole budget on one session.
 	MaxBodyBytes = 8 << 20
-	// tick is how often the sweep runs. The window it is protecting is 300s wide
-	// and the default fires at 280s, so a 2s granularity spends at most 2s of the 20s of
-	// slack that leaves.
+	// tick is how often the sweep runs. The window it is protecting is 300s wide and the
+	// default idle (config.DefaultKeepAliveIdle) fires well inside it, so a 2s granularity
+	// spends at most 2s of the slack that leaves.
 	tick = 2 * time.Second
 )
 
