@@ -12,12 +12,12 @@ manage this one additional top-level key (never a second settings editor, never 
 **What it shows, once enabled and this project is routed** (default layout `balanced`):
 
 ```
-saved ≈$0.31 session · ≈$4.20 today · ★ ≈$212.40 lifetime
+saved $0.31 session · $4.20 today · ★ $212.40 lifetime
 cache ● █████░ 3:57 │ agents ◐ 0:51 ● 4:21 │ ctx ███░░░░░ 41%
-cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41% │ ▸ cache is cold: your next message costs ≈$0.78 extra
+cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41% │ ▸ your next message costs ≈$0.78 extra
 ```
 
-- **Money.** `saved ≈$0.31` is an ESTIMATE (`≈`): what the same requests would have cost
+- **Money.** `saved $0.31` is money already saved: what the same requests would have cost
   uncompacted, at the gateway's prices, net of context-guru's own model spend and keep-alive
   pings. Session, today (since local midnight) and lifetime are three windows of that one measure.
   `--layout=detailed` adds `spent $4.10 · $2.73/h · up 1h30m` (Claude Code's own running cost, the
@@ -44,7 +44,7 @@ layout outranks the installed command's flag until `auto`. Otherwise
 
 | layout | elements |
 |---|---|
-| minimal | saved, cache, hint (`saved ≈$0.31 │ cache ● ████░░ 3:57`) |
+| minimal | saved, cache, hint (`saved $0.31 │ cache ● ████░░ 3:57`) |
 | balanced | update, saved, cache, agents, ctx, hint |
 | detailed | balanced + `spent` + `upstream slow: 7.0s` (only when slow) + least-used tool/skill (`◇ github 1% remove`) |
 
