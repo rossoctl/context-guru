@@ -2,6 +2,8 @@ package offload
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -943,7 +945,7 @@ func rideEndValid(c *components.Ctx, req *bschemas.BifrostChatRequest, e int) bo
 	if !ok || e < 0 || e >= len(req.Input) || rideNow().UnixMilli()-en.T >= rideEntryTTL.Milliseconds() {
 		return false
 	}
-	return en.H == components.SpanHash(req.Input[:e+1])
+	return en.H == ridePrefixHash(req.Input[:e+1])
 }
 
 // rideRecordEnd remembers the entry this request leaves at its last message. A request that rewrote the
@@ -963,7 +965,7 @@ func rideRecordEnd(c *components.Ctx, req *bschemas.BifrostChatRequest) {
 		}
 	}
 	last := len(req.Input) - 1
-	ends[last] = rideEnd{H: components.SpanHash(req.Input), T: now}
+	ends[last] = rideEnd{H: ridePrefixHash(req.Input), T: now}
 	if len(ends) > 64 {
 		lo := last
 		for e := range ends {
@@ -1116,4 +1118,42 @@ func (e *ExtractRide) noteRemoval(offered, removed float64) {
 	e.remOffered += offered
 	e.remRemoved += removed
 	e.remMu.Unlock()
+}
+
+// ridePrefixHash identifies a message prefix the way the provider's cache sees it: the text of each
+// message however it is represented (a string, or one or several text blocks), plus every non-text part
+// (images, tool calls and results, reasoning), with cache marks excluded. SpanHash would also tell a
+// string from a one-block list, which the provider does not, and Claude Code resends an older message as
+// a string after sending it as a marked block.
+func ridePrefixHash(msgs []bschemas.ChatMessage) string {
+	h := sha1.New()
+	for i := range msgs {
+		m := msgs[i]
+		h.Write([]byte(m.Role))
+		h.Write([]byte{0})
+		h.Write([]byte(schema.MessageText(m)))
+		h.Write([]byte{0})
+		if m.ChatAssistantMessage != nil {
+			b, _ := json.Marshal(m.ChatAssistantMessage)
+			h.Write(b)
+		}
+		h.Write([]byte{0})
+		if m.ChatToolMessage != nil {
+			b, _ := json.Marshal(m.ChatToolMessage)
+			h.Write(b)
+		}
+		h.Write([]byte{0})
+		if m.Content != nil {
+			for _, blk := range m.Content.ContentBlocks {
+				if blk.Type == bschemas.ChatContentBlockTypeText {
+					continue
+				}
+				blk.CacheControl = nil
+				b, _ := json.Marshal(blk)
+				h.Write(b)
+			}
+		}
+		h.Write([]byte{1})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
