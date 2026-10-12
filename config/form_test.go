@@ -387,7 +387,6 @@ pipeline:
   - format
   - toon
   - dedup
-  - failed_run
   - cmdfilter
   - extract_llm
   - extract_llm_sweep
@@ -807,21 +806,21 @@ func TestAStoredCredentialIsNeverEchoedAndNeverLost(t *testing.T) {
 }
 
 // A component the form does not send is not touched at all. Without that, a round trip on a
-// `preset: codesafe` document deleted the tuned block of every component the preset does not
-// run — the form would be editing configuration nobody put on the page.
+// `preset: codesmart` document deleted the tuned block of every component the form did not
+// send — the form would be editing configuration nobody put on the page.
 func TestAComponentTheFormDoesNotSendIsUntouched(t *testing.T) {
-	doc := "preset: codesafe\nmode: sync\n"
+	doc := "preset: codesmart\nmode: sync\n"
 	f := mustParse(t, doc)
-	if f.Components["collapse"]["max_tokens"] != 3000 {
-		t.Fatalf("the preset's collapse block is not on the form: %v", f.Components)
+	if f.Components["extract"]["min_tokens"] != 400 {
+		t.Fatalf("the preset's extract block is not on the form: %v", f.Components)
 	}
-	f.Components = map[string]map[string]any{"extract": {"min_tokens": 500}}
+	f.Components = map[string]map[string]any{"extract_llm": f.Components["extract_llm"]}
 	out, err := ApplyForm(doc, f)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if back := mustParse(t, out); back.Components["collapse"]["max_tokens"] != 3000 {
+	if back := mustParse(t, out); back.Components["extract"]["min_tokens"] != 400 {
 		t.Errorf("a component the form did not send lost its configuration (%v):\n%s",
-			back.Components["collapse"], out)
+			back.Components["extract"], out)
 	}
 }

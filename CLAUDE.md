@@ -24,7 +24,7 @@ reference — port its *logic*, re-implement its transport in Go.
 ## Conventions
 
 - Go 1.26, module `github.com/rossoctl/context-guru`. The build is pure Go — `make build` sets
-  `CGO_ENABLED=0`. cgo is needed only for `go test -race` and for `-tags cg_skeleton` (tree-sitter),
+  `CGO_ENABLED=0`. cgo is needed only for `go test -race`,
   which is why the Makefile still exports `CGO_ENABLED=1` for the test targets.
 - Match the surrounding code's style; keep packages small and single-purpose.
 - **Commits: DCO sign-off is mandatory** — `git commit -s`. Author as the repo owner.

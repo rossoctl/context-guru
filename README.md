@@ -18,7 +18,7 @@
 ---
 
 context-guru cuts the token cost of your agent's traffic in two ways: **carry less context**
-(drop redundant tool output, collapse superseded runs, summarize before you hit the limit), and
+(drop redundant tool output, summarize before you hit the limit), and
 **pay less for what you still carry** (keep your prompt cache warm, split the volatile tail off
 the system prompt so the rest stays cacheable). Paying less is the **default** — it's on out of
 the box, before you opt into anything that trims content.

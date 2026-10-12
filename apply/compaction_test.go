@@ -53,7 +53,7 @@ func compactBody(t *testing.T, tag string, tools int) []byte {
 // runTurn sends one turn through the real entry point with a shared store + tracker.
 func runTurn(t *testing.T, o apply.Opts, st store.Store, body []byte) apply.Result {
 	t.Helper()
-	cfg := pipe(t, "pipeline: [mask]\ncomponents:\n  mask: {keep_recent: 3, min_tokens: 50}\n")
+	cfg := pipe(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 50}\n")
 	p, _ := cfg.Build(nil)
 	o.Body = body
 	return apply.BodyOpts(context.Background(), p, st, o)
@@ -86,7 +86,7 @@ func TestCompactionRestartsPrefix(t *testing.T) {
 				t.Fatalf("turn 1 MaxCachedIdx = %d, want -1", r1.Trace.MaxCachedIdx)
 			}
 			if !r1.Changed {
-				t.Fatal("turn 1: mask did not act on a 50-message transcript")
+				t.Fatal("turn 1: extract did not act on a 50-message transcript")
 			}
 
 			// Turn 2: append-only. The boundary must have GROWN to turn 1's length, so only
@@ -110,7 +110,7 @@ func TestCompactionRestartsPrefix(t *testing.T) {
 				t.Fatal("post-compaction: every message frozen, no component could act")
 			}
 			if !r3.Changed {
-				t.Fatal("post-compaction: mask acted on nothing")
+				t.Fatal("post-compaction: extract acted on nothing")
 			}
 
 			// Turn 4: the session keeps working — the boundary is now rebased on the SHORT

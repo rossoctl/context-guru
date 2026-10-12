@@ -56,7 +56,7 @@ func TestRichPresetCarriesComponentConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "linecap", "cachesplit"}
+	want := []string{"format", "textclean", "searchfold", "dedup", "cmdfilter", "extract_llm", "extract", "cachesplit"}
 	if strings.Join(c.Pipeline, ",") != strings.Join(want, ",") {
 		t.Fatalf("codesmart pipeline = %v, want %v", c.Pipeline, want)
 	}

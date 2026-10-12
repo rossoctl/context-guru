@@ -92,7 +92,7 @@ A second Terminal-Bench task was within noise and its numbers are not quoted.
 None. It is a name in the pipeline:
 
 ```yaml
-pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]
+pipeline: [format, dedup, cmdfilter, cachesplit]
 ```
 
 A `components.cachesplit:` block is an **error**, not a no-op. The constructor used to take

@@ -86,8 +86,8 @@ jobs:
   # The binary needs no C toolchain — asserted, not asserted-in-a-comment.
   #
   # Our own docs told every evaluator to install one (`docs/setup.md` even named bifrost's
-  # tokenizer as a cgo dependency, which it never was). The only cgo dependency is tree-sitter,
-  # behind the `cg_skeleton` build tag. Nothing checked that, and the `build-test` job above runs
+  # tokenizer as a cgo dependency, which it never was). Nothing in the tree needs cgo today;
+  # the guard exists so it stays that way. Nothing checked that, and the `build-test` job above runs
   # exclusively with CGO_ENABLED=1 because `go test -race` requires it — so the configuration a
   # user would actually build was never exercised.
   #

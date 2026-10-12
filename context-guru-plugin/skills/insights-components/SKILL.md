@@ -69,8 +69,8 @@ did happen. Presenting it as a projected saving is the one way to make this sect
 
 `off.<name>` facts name each unmeasured component and what it does, with no figure. **Do not go and
 find one.** A study figure from another corpus quoted as this user's saving is exactly what
-`off_unmeasured_note` is warning against, and this repo's own presets carry a worked example of why:
-`linecap`'s "20.3%" is gross reach — the share of shipped tokens its rules touch — and measured
+`off_unmeasured_note` is warning against, and this repo's own history carries a worked example of why:
+a since-removed line-cap component's "20.3%" was gross reach — the share of shipped tokens its rules touch — and measured
 incrementally on the same corpus it was worth +0.797pp, roughly a fourteenth of what the headline
 reads as.
 

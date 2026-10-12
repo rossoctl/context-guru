@@ -99,7 +99,7 @@ const (
 
 // DefaultConfigYAML is the pipeline every new tenant starts on: the config named
 // `house`, which is codesmart's structural offloaders in an operator-chosen order with
-// the LLM extractor removed and no blind collapse. Deterministic all the way through,
+// the LLM extractor removed. Deterministic all the way through,
 // which on a SHARED box is the property that matters — it makes no cheap-model
 // calls, so it adds no upstream spend, contends on no shared LLM budget, and costs
 // near-zero added latency on someone else's agent. A tenant can opt into
@@ -110,11 +110,6 @@ const (
 // configs against it BYTE for byte, and this package must not import the pipeline. The
 // two cannot drift — defaultconfig_test.go asserts this literal and `preset: house`
 // resolve to the same pipeline and the same component blocks.
-// failed_run is deliberately absent. Measured on this service and on Terminal-Bench it
-// acted ZERO times while spending real wall clock scanning every request for superseded
-// failures (843 ms across 251 requests on one account, 28.8 s on the Terminal-Bench arm).
-// A component that has never once fired on agentic traffic is latency with a name.
-//
 // textclean is here because it is the cheapest thing in the catalogue that actually
 // fires. It is a Reformat, so it is LOSSLESS — no marker, no stash, no floor, a pure
 // function of the content and therefore byte-stable across turns and restarts, which is

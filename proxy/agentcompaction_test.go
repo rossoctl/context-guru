@@ -235,7 +235,7 @@ func TestExpandToolAdvertisedOnEveryTurnButNeverOnACompaction(t *testing.T) {
 			// premise of this test is that an offload happened (hence the store seed below),
 			// so the fixture has to be a pipeline where that is possible. `linecap` does not
 			// act on these short bodies, so the forwarded bytes are unchanged.
-			h, st := buildHandler(t, "pipeline: [linecap]\n", upstream.URL)
+			h, st := buildHandler(t, "pipeline: [extract]\n", upstream.URL)
 			st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()

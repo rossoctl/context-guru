@@ -145,7 +145,6 @@ var notExportedWhy = map[string]string{
 	// travels beside the counts on /stats for the same reason llm_call_timeout_ms does — a refusal
 	// total means nothing without the ceiling it was measured against.
 	"SummarizeAsyncConcurrency": "configured bound, not a measurement",
-	"AgentDietCallTimeoutMs":    "configured budget, not a measurement",
 
 	// cmdfilter attribution is keyed by filter and by output SELECTOR, and the selector set
 	// is open by design (it is the backlog of filters worth writing) — not a bounded label
@@ -206,8 +205,6 @@ var notExportedWhy = map[string]string{
 	"SummarizeAsyncPanics":     "NOT EXPORTED YET — recovered panics in the detached goroutine; the ERROR log line beside it carries the panic value, which is the part a diagnosis needs",
 	"SummarizeAwaitedMs":       "NOT EXPORTED YET — latency a turn paid waiting for a summary another turn started",
 	"SummarizeAwaitTimeouts":   "NOT EXPORTED YET — with AwaitedMs, whether the wait cap is set anywhere near right",
-	"AgentDietTimeouts":        "NOT EXPORTED YET — agentdiet's fail-open path, same gap",
-	"AgentDietErrors":          "NOT EXPORTED YET — as above",
 	"SyncEnforced":             "NOT EXPORTED YET — the machine-readable 'we did modify requests'",
 	"CompactionResets":         "NOT EXPORTED YET — agent self-compaction restarting the cached prefix",
 	// Exported as cg_expand_prefix_flips_total, read from offload.ExpandPrefixFlips() rather than

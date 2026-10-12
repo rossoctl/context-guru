@@ -513,7 +513,7 @@ of code, and it is not in the component.
 None. It is a name in the pipeline:
 
 ```yaml
-pipeline: [format, dedup, failed_run, cmdfilter, cachesplit, toolschema]
+pipeline: [format, dedup, cmdfilter, cachesplit, toolschema]
 ```
 
 It reports `Skipped` on any request where the strip did not run or found nothing, via

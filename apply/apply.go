@@ -1319,7 +1319,7 @@ func prevBilledInput(st store.Store, session string) int {
 //
 // It reads the GATE, which means it must read the cold lift too. Ctx.TailOnlyCold lets an
 // opted-in component act at any depth once the prompt cache has provably expired, and the
-// deterministic offloaders (mask, failed_run, collapse) opt in by default — so on a cold
+// deterministic offloaders that opt in — so on a cold
 // turn nothing is frozen for cache safety and counting the prefix as frozen made the
 // biggest lever in the system invisible on its own dashboard: 742 `ttl_expiry` requests
 // reported 38.4M frozen tokens (90.8% of their context) on turns where there was no cache

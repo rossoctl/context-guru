@@ -207,7 +207,7 @@ costs content.
 **Frozen-decision health.** `frozen_hits` / `frozen_misses` / `frozen_dropped` /
 `frozen_repaired` / `frozen_flips` — see
 [Routes](../reference/reference.md#freeze-replay-health). A dropped decision is re-derived when
-re-derivation is reproducible (`mask`, `failed_run`, whose replacement is a pure function of
+re-derivation is reproducible (a deterministic offloader whose replacement is a pure function of
 content and config). `extract_llm` is excluded on purpose: its replacement is sampled model
 output, so re-deriving could splice *different* bytes into a cached prefix.
 

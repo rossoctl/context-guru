@@ -1988,3 +1988,41 @@ func init() {
 		markerModeField(),
 	})
 }
+
+// flattenForCoref projects a request onto the neutral message list internal/coref
+// indexes, 1:1 with req.Input indices so a Record points back at its message.
+//
+// The split is what defines a reference: a tool message is MASS (Results), everything
+// else is a reference-bearing SURFACE (Texts) — prose plus the tool-call name and
+// arguments, which is where a model names the path/symbol/id it took from an earlier
+// output. A later tool result echoing a token is the environment repeating itself, not
+// the model using the value, so it never counts as a reference.
+func flattenForCoref(req *bschemas.BifrostChatRequest) []coref.Message {
+	out := make([]coref.Message, len(req.Input))
+	for i := range req.Input {
+		m := req.Input[i]
+		if m.Role == bschemas.ChatMessageRoleTool {
+			id := ""
+			if m.ChatToolMessage != nil && m.ChatToolMessage.ToolCallID != nil {
+				id = *m.ChatToolMessage.ToolCallID
+			}
+			out[i] = coref.Message{Results: []coref.Result{{ID: id, Text: schema.MessageText(m)}}}
+			continue
+		}
+		texts := []string{}
+		if t := schema.MessageText(m); t != "" {
+			texts = append(texts, t)
+		}
+		if m.ChatAssistantMessage != nil {
+			for _, tc := range m.ChatAssistantMessage.ToolCalls {
+				name := ""
+				if tc.Function.Name != nil {
+					name = *tc.Function.Name
+				}
+				texts = append(texts, name+" "+tc.Function.Arguments)
+			}
+		}
+		out[i] = coref.Message{Texts: texts}
+	}
+	return out
+}

@@ -44,18 +44,14 @@ func TestExpandToolIsAdvertisedOnlyWhereMarkersCanExist(t *testing.T) {
 		// `safe` is a shipped preset with no Offload — lossless folds and the cache split only —
 		// and it was affected too.
 		{"safe", "pipeline: [format, textclean, searchfold, cachesplit]\n", false},
-		// `mcp` looks similar and is NOT affected, which is the distinction the gate has to get
-		// right: `smartcrush` implements components.Offload (components/offload/smartcrush.go),
-		// so that pipeline really can mint a marker and really does need the tool. I had this
-		// case the wrong way round at first and the test caught it — which is the argument for
-		// asking the interface rather than keeping a hand-written list of "lossy" component names.
-		{"mcp (smartcrush IS an Offload)", "pipeline: [format, textclean, smartcrush, cachesplit]\n", true},
+		// `mcp` is the same shape: no Offload, so no marker can exist and no tool is advertised.
+		{"mcp (reformat only)", "pipeline: [format, textclean, cachesplit]\n", false},
 		// `off` is the A/B control arm. A control that carries an extra tool declaration is not
 		// a control — and this was broken too.
 		{"off (the A/B control)", "pipeline: []\n", false},
 		// The feature must still work where markers can exist, or the fix has traded one silent
 		// defect for another: an offloader whose output nothing can expand.
-		{"a pipeline with an offloader", "pipeline: [linecap, cachesplit]\n", true},
+		{"a pipeline with an offloader", "pipeline: [extract, cachesplit]\n", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var up upstreamCapture

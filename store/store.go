@@ -154,7 +154,7 @@ type FrozenLoser interface {
 // reversibility guarantee degraded exactly as the pipeline removed more. They now have their
 // own reserve, claimed through PutStash and bounded by stashCap.
 const (
-	FrozenPrefix = "cg:frz:" // mask / failed_run freeze decisions
+	FrozenPrefix = "cg:frz:" // frozen offload decisions
 	ResultPrefix = "cg:res:" // extract_llm's replayed result (projection + summary, one key)
 	// SweepKeepPrefix records that extract_llm_sweep's adjudicator judged a specific output STILL
 	// NEEDED, and at what point in the conversation it said so.
@@ -408,8 +408,7 @@ const DefaultTTL = 10000 * time.Second
 // WHICH OFFLOADERS ACTUALLY DO THAT, because an earlier version of this comment said "every
 // offloader on every turn" and that quantifier is false in two ways with different consequences:
 //
-//   - The reapplyFrozen family (mask, cmdfilter, collapse, failed_run, skeleton, readlifecycle,
-//     agentdiet) does behave as described: the replay runs on every turn regardless of the
+//   - The reapplyFrozen family (cmdfilter) does behave as described: the replay runs on every turn regardless of the
 //     cache-tail gate, because it must, or the message reverts full→compacted→full.
 //   - summarize and extract_llm have GATES AHEAD of their replay phase — summarize returns at
 //     summarize.go:157 on its trigger and at :162/:165 when no model client resolves, both before
@@ -421,12 +420,12 @@ const DefaultTTL = 10000 * time.Second
 //     nothing, so no marker of its goes upstream on those turns and no marker dangles — the
 //     payload's reclamation is harmless while the skip lasts, and the exposure is only that its
 //     next firing may find the payload gone and the reserve full at the same moment.
-//   - dedup, extract, linecap and smartcrush have NO replay path at all (no reapplyFrozen and no
+//   - dedup and extract have NO replay path at all (no reapplyFrozen and no
 //     commitRefresh). They redo the transformation from the re-sent original every turn, so their
 //     per-turn write goes through the REFUSABLE commitMark. While the payload is live that lands
 //     in PutStash's refresh branch and is retained unconditionally; once reclaimed it is a NEW
 //     stash, and a new stash into a saturated reserve is refused, the component declines, and the
-//     message goes upstream verbatim after earlier turns sent it compacted. So for these four the
+//     message goes upstream verbatim after earlier turns sent it compacted. So for these two the
 //     outcome is stash_refused PLUS a representation flip, not stash_missing — and stash_refused's
 //     operator-facing text promises "nothing became irreversible", which is true about
 //     reversibility and silent about the cache-write actually paid. Reachable at 10,000s too, so

@@ -121,9 +121,7 @@ nav:
       - "Offload: deterministic reducers": components/offload-reducers.md
       - cmdfilter: components/cmdfilter.md
       - extract_llm: components/extract_llm.md
-      - skeleton: components/skeleton.md
       - summarize: components/summarize.md
-      - coref: components/coref.md
       - Advanced & experimental Offload components: components/advanced-offload.md
       - The DSL filter engine: components/dsl.md
       - Examples: examples/live-captures.md

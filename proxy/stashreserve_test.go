@@ -33,6 +33,15 @@ func offloadStashMissing() int64 { return offload.StashMissing() }
 //     handler after the aggregator snapshot is taken, so a correctly-counted refusal can be
 //     dropped on the way out — the same shape as the frozen_* family, which exported a
 //     permanent 0 for exactly that reason.
+//
+// pipNag is a real captured pip advisory pair that the shipped cmdfilter filters match.
+const pipNag = "WARNING: Running pip as the 'root' user can result in broken permissions and " +
+	"conflicting behaviour with the system package manager, possibly rendering your system " +
+	"unusable. It is recommended to use a virtual environment instead: " +
+	"https://pip.pypa.io/warnings/venv\n" +
+	"WARNING: You are using pip version 21.0.1; however, version 23.0.1 is available.\n" +
+	"You should consider upgrading via the '/usr/bin/python3 -m pip install --upgrade pip' command.\n"
+
 func TestAnExhaustedRewindReserveNeitherStampsUnbackedMarkersNorHidesItself(t *testing.T) {
 	var sent atomic.Value // the last body the upstream received
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +55,7 @@ func TestAnExhaustedRewindReserveNeitherStampsUnbackedMarkersNorHidesItself(t *t
 	// max_entries 4 => a 2-payload reserve, against five large tool outputs. Every component
 	// in the pipeline is an Offload whose marker_mode defaults to full, so the sixth removal
 	// onwards has nowhere to put its original.
-	cfg, err := config.LoadBytes([]byte("pipeline: [linecap]\ncomponents:\n  linecap: {max_line_chars: 40, min_size: 10}\n"))
+	cfg, err := config.LoadBytes([]byte("pipeline: [cmdfilter]\ncomponents:\n  cmdfilter: {min_size: 1}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +73,7 @@ func TestAnExhaustedRewindReserveNeitherStampsUnbackedMarkersNorHidesItself(t *t
 	for _, tag := range []string{"a", "b", "c", "d", "e"} {
 		msgs = append(msgs, map[string]any{
 			"role": "tool", "tool_call_id": tag,
-			"content": "line " + tag + ": " + strings.Repeat(tag+"q", 900),
+			"content": "result " + tag + "\n" + pipNag,
 		})
 	}
 	body, err := json.Marshal(map[string]any{"model": "gpt-x", "messages": msgs})
@@ -219,10 +228,10 @@ func TestStatsPublishesDanglingReplaysFromTheLiveCounter(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	// mask, because it FREEZES its decision and replays it on every later turn — the replay is
+	// cmdfilter, because it FREEZES its decision and replays it on every later turn — the replay is
 	// the path on which a payload can be found missing.
 	cfg, err := config.LoadBytes([]byte(
-		"pipeline: [mask]\ncomponents:\n  mask: {keep_recent: 0, min_tokens: 20}\n"))
+		"pipeline: [cmdfilter]\ncomponents:\n  cmdfilter: {min_size: 1}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +248,7 @@ func TestStatsPublishesDanglingReplaysFromTheLiveCounter(t *testing.T) {
 	body, err := json.Marshal(map[string]any{"model": "gpt-x", "messages": []map[string]any{
 		{"role": "user", "content": "go"},
 		{"role": "tool", "tool_call_id": "a",
-			"content": "line a: " + strings.Repeat("aq", 900)},
+			"content": "result a\n" + pipNag},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +263,7 @@ func TestStatsPublishesDanglingReplaysFromTheLiveCounter(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	// Turn 1: mask offloads, freezes the decision and stashes the original.
+	// Turn 1: cmdfilter offloads, freezes the decision and stashes the original.
 	post()
 	var stashed string
 	for _, k := range st.Memory.StashedKeysForTest() {
