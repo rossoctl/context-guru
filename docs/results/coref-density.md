@@ -309,5 +309,5 @@ rate as the precision inner loop, and only then the scored benchmarks.
   logs only. A real capture sets neither and its behaviour is unchanged.
 
 See also: the proposal (`docs/proposals/coref-compaction.md`) · [the held-out selection
-experiment](coref-selection-experiment.md) · [the component](../components/coref.md) ·
-[glossary / cheat sheet](../components/coref.md#glossary) · [improvement plan](improvement-plan.md)
+experiment](coref-selection-experiment.md) ·
+[improvement plan](improvement-plan.md)
