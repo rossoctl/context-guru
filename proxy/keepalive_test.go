@@ -15,6 +15,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/credmask"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
@@ -476,13 +477,13 @@ func TestCredentialRetentionRules(t *testing.T) {
 		if e == nil {
 			t.Fatal("session not tracked")
 		}
-		var auth *maskedHeader
+		var auth *credmask.Header
 		for i := range e.auth {
-			if strings.EqualFold(e.auth[i].name, "Authorization") {
+			if strings.EqualFold(e.auth[i].Name, "Authorization") {
 				auth = &e.auth[i]
 			}
 			// Our own token is not a provider credential and must never be retained.
-			if bytes.Contains(unmasked(e.auth[i].val), []byte("cg_live_")) {
+			if bytes.Contains(unmasked(e.auth[i].Val), []byte("cg_live_")) {
 				t.Error("retained a context-guru token as a provider credential")
 			}
 		}
@@ -491,11 +492,11 @@ func TestCredentialRetentionRules(t *testing.T) {
 		}
 		// The bytes AT REST must not contain the credential — that is what a heap dump or a
 		// string scan over a core file would see.
-		if bytes.Contains(auth.val, []byte("sk-caller-secret")) {
+		if bytes.Contains(auth.Val, []byte("sk-caller-secret")) {
 			t.Error("the credential is sitting in memory in plaintext")
 		}
 		// And it must still be recoverable, or the ping cannot authenticate.
-		if got := string(unmasked(auth.val)); got != caller {
+		if got := string(unmasked(auth.Val)); got != caller {
 			t.Errorf("unmasking gave %q, want the caller's own credential back", got)
 		}
 	})
@@ -523,7 +524,7 @@ func TestCredentialRetentionRules(t *testing.T) {
 		}
 		// Keep our own handles on the exact buffers, so the assertion is about the BYTES and not
 		// about whether the struct still points at them.
-		body, cred := e.body, e.auth[0].val
+		body, cred := e.body, e.auth[0].Val
 		if len(body) == 0 || len(cred) == 0 {
 			t.Fatal("nothing held to release")
 		}
@@ -635,7 +636,7 @@ func (s *syncBuffer) String() string {
 // masked buffer the keeper is holding.
 func unmasked(b []byte) []byte {
 	out := append([]byte(nil), b...)
-	xorMask(out)
+	credmask.Mask(out)
 	return out
 }
 
@@ -879,7 +880,7 @@ func TestForgetReleasesOneTenantsMaterial(t *testing.T) {
 	}
 	k.mu.Lock()
 	body := k.live[kaKey("victim", "s")].body
-	cred := k.live[kaKey("victim", "s")].auth[0].val
+	cred := k.live[kaKey("victim", "s")].auth[0].Val
 	k.mu.Unlock()
 
 	k.forget("victim")

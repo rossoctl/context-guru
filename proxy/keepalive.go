@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"io"
 	"log/slog"
@@ -18,6 +17,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/credmask"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/store"
@@ -98,46 +98,6 @@ import (
 // state that produces a long gap: P(gap > 300s) is 37.15% after `end_turn` against 0.74%
 // after `tool_use`, a 6.7x lift, and 83.7% of the recoverable dollars sit behind it. Stopping
 // there would discard most of the value the mechanism exists to capture.
-
-// credMask obscures a retained credential while it is idle in memory.
-//
-// Be precise about what this buys, because it is easy to oversell. A heap or core dump, a crash
-// report, a `/proc/<pid>/mem` read or a stray `strings` over a snapshot yields masked bytes
-// instead of a working key — that is the accidental-capture class, and it is the realistic one.
-// It does NOT stop an attacker with code execution in this process: the mask is right here in
-// the same address space. It is obfuscation at rest, not encryption.
-//
-// The credential is unavoidably plaintext for the duration of the ping itself: net/http's header
-// map holds strings, and a Go string cannot be overwritten. So the window is one request rather
-// than the whole idle hold, which is the part that was worth closing.
-var credMask = func() []byte {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		panic("context-guru: no entropy for the keep-alive credential mask: " + err.Error())
-	}
-	return b
-}()
-
-// xorMask masks or unmasks in place — XOR is its own inverse, so one function does both.
-func xorMask(b []byte) {
-	for i := range b {
-		b[i] ^= credMask[i%len(credMask)]
-	}
-}
-
-// zero overwrites a buffer. Dropping the reference is not enough: the bytes sit in the heap
-// until a collection that may never come, and a dump taken in between still has them.
-func zero(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
-}
-
-// maskedHeader is one auth header held masked. The NAME is not a secret; the value is.
-type maskedHeader struct {
-	name string
-	val  []byte
-}
 
 // CachePolicy is one tenant's resolved cache policy — the host-level half of the cache
 // story, which no component can reach.
@@ -283,7 +243,7 @@ type kaEntry struct {
 	// in this process is awake. When the upstream DOES name a key (up.setKey != nil) nothing is
 	// retained at all: the credential is read from the environment at call time, exactly as on
 	// the request path.
-	auth                        []maskedHeader
+	auth                        []credmask.Header
 	provider                    bschemas.ModelProvider
 	model, route, preset, agent string
 	pol                         CachePolicy
@@ -631,10 +591,10 @@ func (k *keeper) Stop() {
 // is a keeper-owned COPY precisely so it can be overwritten without corrupting a slice something
 // else still reads.
 func (e *kaEntry) clear() {
-	zero(e.body)
+	credmask.Zero(e.body)
 	e.body = nil
 	for i := range e.auth {
-		zero(e.auth[i].val)
+		credmask.Zero(e.auth[i].Val)
 	}
 	e.auth = nil
 	e.hdr = nil
@@ -798,7 +758,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// them. Zeroizing a shared slice is the kind of cleverness that produces a mystery bug in a
 	// month, and the earlier zero-copy retention was a micro-optimisation in the wrong place.
 	owned := append([]byte(nil), body...)
-	xorMask(owned)
+	credmask.Mask(owned)
 	// What the provider billed for this request's prefix, in its own units — the size of the
 	// entry a ping would refresh. Both the gate and the projected cost read it, so a request
 	// that reported no usage is not pingable: without it there is no honest estimate of either.
@@ -1056,14 +1016,14 @@ func (k *keeper) sweep(now time.Time) int {
 		prevStartedAt := e.startedAt
 		e.startedAt = now
 		e.pings++
-		auth := make([]maskedHeader, len(e.auth))
+		auth := make([]credmask.Header, len(e.auth))
 		for i, a := range e.auth {
-			auth[i] = maskedHeader{name: a.name, val: append([]byte(nil), a.val...)}
+			auth[i] = credmask.Header{Name: a.Name, Val: append([]byte(nil), a.Val...)}
 		}
 		// An UNMASKED copy for this ping, zeroized by fire when it is done. The entry's own copy
 		// stays masked, so the long-lived hold never contains a readable transcript.
 		raw := append([]byte(nil), e.body...)
-		xorMask(raw)
+		credmask.Mask(raw)
 		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), auth: auth, up: e.up,
 			tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
 			ping: e.pings, prevStartedAt: prevStartedAt})
@@ -1088,7 +1048,7 @@ type pingJob struct {
 	hdr http.Header
 	// auth is this ping's copy of the masked credential, unmasked only inside sendPing and
 	// zeroized there — so the plaintext window is one request rather than the whole idle hold.
-	auth            []maskedHeader
+	auth            []credmask.Header
 	up              upstream
 	tenant, session string
 	thread          string
@@ -1116,9 +1076,9 @@ func (k *keeper) fire(j pingJob) {
 	// the limiter refusal, the pingBody failure and a panic all release it.
 	defer func() {
 		for i := range j.auth {
-			zero(j.auth[i].val)
+			credmask.Zero(j.auth[i].Val)
 		}
-		zero(j.raw) // the unmasked body copy this ping was handed
+		credmask.Zero(j.raw) // the unmasked body copy this ping was handed
 	}()
 	// The tenant's own limits apply, and a ping only ever uses SLACK. Refusing rather than
 	// queueing is the requirement: a queued ping would sit in front of a real request the
@@ -1545,7 +1505,7 @@ func pingBody(body []byte, route string) ([]byte, bool) {
 // the fewer of a caller's headers this holds for ten minutes the better. `anthropic-beta` is
 // carried because a beta header can change how the body is interpreted, and a ping that is
 // interpreted differently is not the same request.
-func pingHeaders(r *http.Request, up upstream) (http.Header, []maskedHeader) {
+func pingHeaders(r *http.Request, up upstream) (http.Header, []credmask.Header) {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	for _, name := range []string{"Anthropic-Version", "Anthropic-Beta", "OpenAI-Organization", "OpenAI-Project"} {
@@ -1566,12 +1526,12 @@ func pingHeaders(r *http.Request, up upstream) (http.Header, []maskedHeader) {
 		}
 	}
 	scrubToken(slots)
-	var out []maskedHeader
+	var out []credmask.Header
 	for name, vs := range slots {
 		for _, v := range vs {
 			b := []byte(v)
-			xorMask(b)
-			out = append(out, maskedHeader{name: name, val: b})
+			credmask.Mask(b)
+			out = append(out, credmask.Header{Name: name, Val: b})
 		}
 	}
 	return h, out
@@ -1598,9 +1558,9 @@ func (k *keeper) sendPing(j pingJob, body []byte) (Usage, int, error) {
 	// necessarily becomes a Go string once it is in the header map, and a string cannot be
 	// overwritten — so this bounds the plaintext to this request rather than eliminating it.
 	for _, a := range j.auth {
-		xorMask(a.val)
-		req.Header.Add(a.name, string(a.val))
-		zero(a.val)
+		credmask.Mask(a.Val)
+		req.Header.Add(a.Name, string(a.Val))
+		credmask.Zero(a.Val)
 	}
 	setUpstreamAuth(req.Header, j.up)
 	resp, err := k.h.client.Do(req)
