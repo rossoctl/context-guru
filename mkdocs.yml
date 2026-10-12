@@ -101,7 +101,17 @@ nav:
       - Install the Claude Code plugin: how-to/install-plugin.md
       - The plugin's recovery files: how-to/plugin-recovery-files.md
       - Use with Claude Code: how-to/use-with-claude-code.md
-      - "Commands and status line": plugin-v2.md
+      - Claude Code plugin:
+          - Overview and install: plugin/index.md
+          - Home and status: plugin/status.md
+          - Savings: plugin/savings.md
+          - Cache: plugin/cache.md
+          - Waste: plugin/waste.md
+          - Session: plugin/session.md
+          - Doctor: plugin/doctor.md
+          - Terminal views: plugin/terminal-views.md
+          - Status line: plugin/statusline.md
+          - Configuration and troubleshooting: plugin/configuration.md
       - Test a subscription login in a sandbox: how-to/test-subscription-sandbox.md
       - How it saves money: get-started/how-it-saves.md
       - Technical overview: get-started/overview.md

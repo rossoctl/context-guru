@@ -166,3 +166,21 @@ func TestCGScriptsAreVendoredIntoCodex(t *testing.T) {
 		}
 	}
 }
+
+// The docs show real output. Each example block on a docs page must be the golden, byte for byte,
+// so a change to a screen fails here until the page is regenerated.
+func TestDocsExamplesAreTheGoldens(t *testing.T) {
+	for golden, page := range map[string]string{
+		"home": "status", "savings": "savings", "cache-warm": "cache", "cache-cold": "cache",
+		"waste": "waste", "session": "session", "doctor": "doctor",
+	} {
+		g := strings.TrimRight(string(cgRead(t, "cg", golden+".golden")), "\n")
+		b, err := os.ReadFile(filepath.Join("..", "docs", "plugin", page+".md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "```text\n"+g+"\n```") {
+			t.Errorf("docs/plugin/%s.md does not contain the %s golden verbatim", page, golden)
+		}
+	}
+}

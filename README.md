@@ -69,6 +69,35 @@ codex plugin marketplace add rossoctl/context-guru --sparse .agents --sparse cod
 codex plugin add context-guru@context-guru
 ```
 
+## Claude Code plugin
+
+The plugin answers three questions in the terminal: **how much am I saving, is my cache about to cost me, what should I do?**
+
+```
+/plugin marketplace add rossoctl/context-guru
+/plugin install context-guru@context-guru
+```
+
+<p align="center">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/statusline-live/warm-dark.svg">
+<img alt="The status line: dollars saved, a draining cache clock, context fill" src="docs/statusline-live/warm-light.svg" width="760">
+</picture>
+</p>
+
+Each command opens with one line that answers its question, then a small picture; add `details` for the tables.
+
+| Command | The question | Example first line |
+|---|---|---|
+| `/context-guru:status` | Is it working, how am I doing, what next? | Saved $41.20 in 7 days (4.6% of what the same work would have cost). |
+| `/context-guru:savings` | How much did it save? | Saved $41.20 in 7 days, net of Context Guru's own spend (4.6% of the $898.05 the same work would have cost). |
+| `/context-guru:cache` | Is my cache about to cost me? | Cache is warm for 2:41 more. If it lapses, the next message costs $1.91 extra. |
+| `/context-guru:waste` | What do I carry and never use? | 6 things you carry were never used: $37.70 in 7 days, about $161.57 a month. |
+| `/context-guru:session` | What happened in this session? | In this session, cache misses cost you about $4.20 of the $13.50 billed (2 misses in 31 messages). |
+| `/context-guru:doctor` | Is it set up right? | All 7 checks pass. |
+
+Full guide, every status line state and troubleshooting: **[rossoctl.github.io/context-guru/plugin](https://rossoctl.github.io/context-guru/plugin/)**.
+
 ## Presets
 
 It's an effort ladder — each tier is everything in the one before it, plus more:
