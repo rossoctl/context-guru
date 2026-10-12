@@ -1,4 +1,4 @@
-{"version": 2, "width": 80, "height": 8, "timestamp": 1791811857, "title": "statusline --layout=heat"}
+{"version": 2, "width": 80, "height": 8, "timestamp": 1791813271, "title": "statusline --layout=heat"}
 [0.3, "o", "s"]
 [0.33999999999999997, "o", "t"]
 [0.38, "o", "a"]
@@ -25,4 +25,4 @@
 [1.22, "o", "t"]
 [1.26, "o", "\r"]
 [1.3, "o", "\n"]
-[1.5, "o", "\u001b[H\u001b[J$ statusline --layout=heat\r\n\u001b[2mmisses per hour\u001b[0m \u001b[2m0h\u001b[0m      \u001b[48;5;88m\u2592\u001b[0m \u001b[48;5;196m\u2588\u001b[0m  \u001b[48;5;160m\u2593\u001b[0m\u001b[48;5;160m\u2593\u001b[0m\u001b[48;5;196m\u2588\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m24h\u001b[0m  $5.56 \u001b[2mlost\u001b[0m\r\n\u001b[2mcache\u001b[0m \u001b[32m\u25cf\u001b[0m \u001b[32m\u2588\u2588\u2588\u2588\u001b[2m\u2591\u2591\u001b[0m \u001b[32m3:19\u001b[0m\r\n"]
+[1.5, "o", "\u001b[H\u001b[J$ statusline --layout=heat\r\n\u001b[2mmisses/hour\u001b[0m \u001b[2m0h\u001b[0m      \u001b[48;5;52m\u2591\u001b[0m \u001b[48;5;160m\u2593\u001b[0m  \u001b[48;5;88m\u2592\u001b[0m\u001b[48;5;52m\u2591\u001b[0m\u001b[48;5;196m\u2588\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m\u00b7\u001b[0m\u001b[2m24h\u001b[0m  $5.56 \u001b[2mlost today\u001b[0m\r\n\u001b[2mcache\u001b[0m \u001b[32m\u25cf\u001b[0m \u001b[32m\u2588\u2588\u2588\u2588\u001b[2m\u2591\u2591\u001b[0m \u001b[32m3:19\u001b[0m\r\n"]

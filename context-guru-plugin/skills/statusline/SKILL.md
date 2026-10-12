@@ -50,7 +50,7 @@ layout outranks the installed command's flag until `auto`. Otherwise
 | detailed | balanced + `spent` + `upstream slow: 7.0s` (only when slow) + least-used tool/skill (`◇ github 1% remove`) |
 | spark | `saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇` over the cache clock |
 | strip | the last 20 requests as hit `■` / partial `▨` / miss `✖`, and the dollars misses cost today |
-| heat | today's cache misses by hour (0h to 24h, darker = more) and the dollars they cost |
+| heat | today's cache misses per hour (0h to 24h, darker = more) and the dollars they cost today |
 | fill | context as a stacked bar (`▒` always loaded, `█` conversation), percent and time to full |
 | watch | the main cache clock over a mini-bar and clock per sub-agent (`agent caches (2) ████ 4:22  █░░░ 0:52`, with the saving beside the clock) |
 

@@ -1162,8 +1162,8 @@ def _heat_row(hourly: dict | None, spend: dict | None, lv: int, tv, e) -> str | 
 
     cells = "".join(cell(h) for h in range(24))
     lost = _lost_today(spend, _day_start_ms())
-    tail = f"  {_money(lost)} {DIM}lost{RESET}" if lost and lost >= 0.005 else ""
-    return (f"{DIM}misses per hour{RESET} " if not lv else "") + f"{DIM}0h{RESET}{cells}{DIM}24h{RESET}{tail}"
+    tail = f"  {_money(lost)} {DIM}lost today{RESET}" if lost and lost >= 0.005 else ""
+    return f"{DIM}misses{'/hour' if not lv else '/h'}{RESET} " + f"{DIM}0h{RESET}{cells}{DIM}24h{RESET}{tail}"
 
 
 def _fill_row(reqs: dict | None, ctx: tuple[float, float] | None, lv: int, tv, e, width: int,

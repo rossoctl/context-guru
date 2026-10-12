@@ -356,9 +356,9 @@ func TestStatuslineGoldenModes(t *testing.T) {
 			"last 20 requests ■■■■■■■■✖■■■■■▨▨■■■■  ✖ miss  $1.40 lost today\ncache ● ████░░ 3:20"}, {"strip", 120,
 			"last 20 requests ■■■■■■■■✖■■■■■▨▨■■■■  ✖ miss ▨ partial ■ hit  $1.40 lost today\ncache ● ████░░ 3:20"},
 		{"heat", 60,
-			"misses per hour 0h  ░▒  █░ ···············24h  $1.40 lost\ncache ● ████░░ 3:20"}, {"heat", 80,
-			"misses per hour 0h  ░▒  █░ ···············24h  $1.40 lost\ncache ● ████░░ 3:20"}, {"heat", 120,
-			"misses per hour 0h  ░▒  █░ ···············24h  $1.40 lost\ncache ● ████░░ 3:20"},
+			"misses/hour 0h  ░▒  █░ ···············24h  $1.40 lost today\ncache ● ████░░ 3:20"}, {"heat", 80,
+			"misses/hour 0h  ░▒  █░ ···············24h  $1.40 lost today\ncache ● ████░░ 3:20"}, {"heat", 120,
+			"misses/hour 0h  ░▒  █░ ···············24h  $1.40 lost today\ncache ● ████░░ 3:20"},
 		{"fill", 60,
 			"context ▒▒▒▒▒█████░░░░░░░░░░░░░░ 41% · full in 58m\ncache ● ████░░ 3:20"}, {"fill", 80,
 			"context ▒▒▒▒▒▒▒▒████████░░░░░░░░░░░░░░░░░░░░░░░░ 41% · full in 58m\ncache ● ████░░ 3:20"}, {"fill", 120,
@@ -384,9 +384,9 @@ func TestStatuslineModesFollowLocalTime(t *testing.T) {
 	const nowS = 1_800_020_000 // 13:33 UTC: 19:03 in Kolkata, 14:33 in Berlin, 05:33 in Los Angeles
 	spark := "saved $4.20 today · last 14 days ▁▂▂▃▄▄▅▅▆▇▇██▃\ncache ● ████░░ 3:20"
 	for _, c := range []struct{ tz, heat string }{
-		{"Asia/Kolkata", "misses per hour 0h  ░▒  █░            ····24h  $1.40 lost\ncache ● ████░░ 3:20"},
-		{"Europe/Berlin", "misses per hour 0h  ░▒  █░       ·········24h  $1.40 lost\ncache ● ████░░ 3:20"},
-		{"America/Los_Angeles", "misses per hour 0h  ▒█  ··················24h  $1.40 lost\ncache ● ████░░ 3:20"},
+		{"Asia/Kolkata", "misses/hour 0h  ░▒  █░            ····24h  $1.40 lost today\ncache ● ████░░ 3:20"},
+		{"Europe/Berlin", "misses/hour 0h  ░▒  █░       ·········24h  $1.40 lost today\ncache ● ████░░ 3:20"},
+		{"America/Los_Angeles", "misses/hour 0h  ▒█  ··················24h  $1.40 lost today\ncache ● ████░░ 3:20"},
 	} {
 		t.Run(c.tz, func(t *testing.T) {
 			if got := modesRender(t, c.tz, nowS, "spark", 80); got != spark {
