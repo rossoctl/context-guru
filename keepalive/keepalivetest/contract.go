@@ -33,10 +33,12 @@ const usageJSON = `{"usage":{"input_tokens":1,"cache_read_input_tokens":4000,` +
 func RunDispatcherContract(t *testing.T, newH NewHarness) {
 	var mu sync.Mutex
 	var seen []http.Header
+	var seenBodies [][]byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
+		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		seen = append(seen, r.Header.Clone())
+		seenBodies = append(seenBodies, body)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, usageJSON)
@@ -50,13 +52,24 @@ func RunDispatcherContract(t *testing.T, newH NewHarness) {
 		}
 		return seen[len(seen)-1]
 	}
+	lastBody := func() []byte {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(seenBodies) == 0 {
+			return nil
+		}
+		return seenBodies[len(seenBodies)-1]
+	}
 	key := keepalive.Key{Tenant: "t1", Session: "s1"}
 	auth := http.Header{}
 	auth.Set("Authorization", "Bearer caller-key")
-	req := func() keepalive.DispatchRequest {
+	reqWithBody := func(body []byte) keepalive.DispatchRequest {
 		return keepalive.DispatchRequest{Key: key, Provider: bschemas.Anthropic, Model: "m",
-			Route: "/v1/messages", Body: []byte(`{"model":"m","max_tokens":1,"stream":false}`),
+			Route: "/v1/messages", Body: body,
 			Headers: keepalive.PingHeaders(http.Header{"Anthropic-Version": {"2023-06-01"}})}
+	}
+	req := func() keepalive.DispatchRequest {
+		return reqWithBody([]byte(`{"model":"m","max_tokens":1,"stream":false}`))
 	}
 
 	t.Run("dispatch attaches the held credential and returns usage", func(t *testing.T) {
@@ -113,15 +126,23 @@ func RunDispatcherContract(t *testing.T, newH NewHarness) {
 	t.Run("dispatch does not retain the body", func(t *testing.T) {
 		h := newH(t, srv.URL)
 		h.Hold(key, auth)
-		r := req()
+		b1 := []byte(`{"model":"m","max_tokens":1,"stream":false,"n":1}`)
+		r := reqWithBody(b1)
 		if _, _, err := h.D.Dispatch(context.Background(), r); err != nil {
 			t.Fatal(err)
+		}
+		if got := lastBody(); string(got) != string(b1) {
+			t.Fatalf("upstream saw body %q, want %q", got, b1)
 		}
 		for i := range r.Body {
 			r.Body[i] = 'x' // the keeper zeroizes it; a retained alias would now be corrupt
 		}
-		if _, _, err := h.D.Dispatch(context.Background(), req()); err != nil {
+		b2 := []byte(`{"model":"m","max_tokens":1,"stream":false,"n":2}`)
+		if _, _, err := h.D.Dispatch(context.Background(), reqWithBody(b2)); err != nil {
 			t.Fatal(err)
+		}
+		if got := lastBody(); string(got) != string(b2) {
+			t.Fatalf("Dispatch retained the previous body: upstream saw %q, want %q", got, b2)
 		}
 		h.D.Release(key)
 	})
