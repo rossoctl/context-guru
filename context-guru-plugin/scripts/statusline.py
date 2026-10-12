@@ -25,15 +25,15 @@ follow from that, and both are enforced structurally rather than by discipline:
   therefore the sum of the two bounds, a couple of seconds — not unbounded. Every exit is 0; on
   any error this prints whatever partial line it already has, or nothing.
 
-`cg!` means UNREACHABLE, specifically — refused, DNS failure, anything that is not "answered, just
+`cg ✕ proxy offline` means UNREACHABLE, specifically — refused, DNS failure, anything that is not "answered, just
 not within 0.6s". A proxy that is merely slow (its own aggregate endpoint can legitimately take
 some time under load, especially behind many concurrent readers — see dash/api.go's jsonCache)
 renders the last good cached numbers with a small stale marker instead, or, with no cache yet to
 fall back on, a short "stats loading…"; if a cache DOES exist but has gone stale enough that
-every fetch since has still timed out, "cg? not responding" instead — reachable, unlike `cg!`,
+every fetch since has still timed out, "cg? not responding" instead — reachable, unlike `cg ✕ proxy offline`,
 but no longer plausibly just slow either. See _fetch_stats and its STATS_* result codes for all
 four. This used to not be true: EVERY URLError/OSError, including a plain `TimeoutError`,
-rendered `cg!`, so a slow-but-healthy proxy looked exactly like a dead one on every render until
+rendered `cg ✕ proxy offline`, so a slow-but-healthy proxy looked exactly like a dead one on every render until
 the aggregate happened to answer in under 0.6s.
 
 Self-gating: exactly like the SessionStart/UserPromptSubmit hooks, this does nothing in a project
@@ -285,7 +285,7 @@ def _our_port() -> str | None:
     THE GATE, deliberately, and not settings.resolve_reportable_port: this is the one consumer with
     no second check of its own (both hooks re-compare the URL against the port after the delegate
     answers), so whatever this returns is rendered. Asked the report question instead, it printed a
-    permanent `cg!` — a down-proxy warning — in a project whose ANTHROPIC_BASE_URL pointed at the
+    permanent `cg ✕ proxy offline` — a down-proxy warning — in a project whose ANTHROPIC_BASE_URL pointed at the
     real API and whose only sin was having an install recorded on disk.
 
     The anti-false-positive property the old gate existed for is kept, and strengthened, in the
@@ -375,7 +375,7 @@ def _stats_cache_path(port: str, session_id: str | None) -> str:
     return os.path.join(_tmpdir(), f"context-guru-statusline-{port}{suffix}.json")
 
 
-# _fetch_stats' second return value. "down" is the only one that should ever render `cg!` — see
+# _fetch_stats' second return value. "down" is the only one that should ever render `cg ✕ proxy offline` — see
 # the module docstring. The other three all mean "the proxy answered, or at least exists", just
 # with varying amounts of fresh data behind the answer.
 STATS_OK = "ok"  # a fresh fetch landed, or a within-TTL cache hit answered without a fetch at all
@@ -564,17 +564,21 @@ def _keepalive_segment(stats: dict) -> str | None:
 # proxy's lean /api/stats (session + today) and /api/cachestate (server cache truth).
 LAYOUTS = {
     "minimal": ("save", "cache", "hint"),
-    "balanced": ("update", "save", "cache", "ctx", "hint"),
-    "detailed": ("update", "save", "cache", "ctx", "latency", "tools", "hint"),
+    "balanced": ("update", "save", "cache", "agents", "ctx", "hint"),
+    "detailed": ("update", "save", "spend", "cache", "agents", "ctx", "latency", "tools", "hint"),
 }
 ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka"}
 # Dropped/shrunk first to last when the line is wider than the terminal. The hint is never in this
 # list: it is the one thing worth the space, and is truncated instead.
-DEGRADE = (("tools", None), ("latency", None), ("ka", None), ("update", None), ("hint", 1), ("save", 1),
-           ("ctx", 1), ("save", 2), ("ctx", None), ("save", None), ("cache", 1))
+DEGRADE = (("tools", None), ("latency", None), ("ka", None), ("spend", None), ("update", None), ("hint", 1),
+           ("agents", 1), ("save", 1), ("ctx", 1), ("save", 2), ("cache", 1), ("agents", None), ("ctx", None),
+           ("save", None))
 DEFAULT_WIDTH = 100
 ROUTE_MEMO_SECONDS = 60
 EXPIRING_SECONDS = 60
+CRITICAL_SECONDS = 15  # the last stretch: red, and a "!" so it is not colour alone
+SPEND_RATE_MIN_SECONDS = 300  # a $/h figure over less than five minutes of wall clock is noise
+AGENTS_LISTED = 2  # more running sub-agent caches than this collapse into one aggregate
 HINT_COLD_MIN_TOKENS = 100_000  # a cold cache under this is cheap enough not to nag about
 HINT_FULL_FRACTION = 0.85
 HINT_EXPIRING_MIN_USD = 0.50  # below this a rewrite is not worth a line of anyone's attention
@@ -583,7 +587,8 @@ DAY_TTL_SECONDS = 60.0
 LIFE_TTL_SECONDS = 300.0  # the all-time total moves slowly and is the most expensive read
 CACHE_BAR_CELLS = 6
 # Which line each element sits on in a two-line layout. `minimal` ignores this: it is one line.
-ROW = {"update": 0, "save": 0, "cache": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1, "hint": 1}
+ROW = {"update": 0, "save": 0, "spend": 0, "cache": 1, "agents": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1,
+       "hint": 1}
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
@@ -611,7 +616,8 @@ def _config(argv: list[str]) -> tuple[str, set[str], int]:
             k, v = a[2:].split("=", 1)
             if k in ("layout", "hide", "show", "width"):
                 opt[k] = v
-    layout = opt.get("layout") if opt.get("layout") in LAYOUTS else "balanced"
+    chosen = _saved_layout()  # a layout picked with --set-layout outranks the installed command's flag
+    layout = chosen or (opt.get("layout") if opt.get("layout") in LAYOUTS else "balanced")
     on = set(LAYOUTS[layout])
     on |= {e for e in opt.get("show", "").split(",") if e in ELEMENTS}
     on -= set(opt.get("hide", "").split(","))
@@ -620,6 +626,38 @@ def _config(argv: list[str]) -> tuple[str, set[str], int]:
     if "--keepalive" in argv:
         on.add("ka")
     return layout, on, _width(opt.get("width"))
+
+
+def _layout_file() -> str:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "context-guru", "statusline-layout")
+
+
+def _saved_layout() -> str | None:
+    try:
+        with open(_layout_file(), encoding="utf-8") as fh:
+            name = fh.read(32).strip()
+    except OSError:
+        return None
+    return name if name in LAYOUTS else None
+
+
+def _set_layout(name: str) -> str:
+    """`--set-layout=minimal|balanced|detailed|auto`: remember a layout across renders (the
+    one-key toggle: bind it to a /command or a shell alias). `auto` forgets it again."""
+    path = _layout_file()
+    if name == "auto":
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return "status line layout: back to the installed default"
+    if name not in LAYOUTS:
+        return "usage: statusline.py --set-layout=minimal|balanced|detailed|auto"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(name)
+    return f"status line layout: {name}"
 
 
 def _width(override: str | None) -> int:
@@ -739,6 +777,59 @@ def ttl_s_bad(cs: dict) -> bool:
     return not isinstance(t, (int, float)) or isinstance(t, bool) or t <= 0
 
 
+def remaining_seconds(entry: dict | None, age: float) -> float | None:
+    """Seconds until one cache entry expires (negative = that long cold), from the SERVER's clock:
+    the entry's last response end (or its start, when the end is unknown) plus its TTL, minus the
+    server's `now_ms` sampled at fetch time, minus `age`, the seconds we have held that sample.
+    Only the difference of two server timestamps and a local elapsed time is used, so a client
+    clock that is minutes off changes nothing. None when the entry lacks the fields."""
+    last, ttl, now_ms = _num(entry, "last_ts"), _num(entry, "ttl_s"), _num(entry, "now_ms")
+    if last is None or ttl is None or ttl <= 0 or now_ms is None:
+        return None
+    end = _num(entry, "end_ts")
+    return (max(last, end or 0) + ttl * 1000 - now_ms) / 1000 - age
+
+
+def entry_state(rem: float, ttl: float) -> str:
+    """cold | critical | expiring | warm: the one place the colour bands are decided."""
+    if rem <= 0:
+        return "cold"
+    if rem <= CRITICAL_SECONDS:
+        return "critical"
+    return "expiring" if rem <= max(EXPIRING_SECONDS, ttl / 5) else "warm"
+
+
+def _main_cs(cs: dict | None) -> dict | None:
+    """/api/cachestate describes the session's latest cache touch on ANY thread, but a sub-agent has
+    its own cache entry and a much smaller prompt: shown as the session's cache, a busy sub-agent
+    would keep resetting the countdown and shrink the context bar. When the proxy lists threads,
+    the main thread's own entry replaces those fields."""
+    threads = cs.get("threads") if isinstance(cs, dict) else None
+    main = next((t for t in threads if isinstance(t, dict) and t.get("main")), None) if isinstance(threads, list) else None
+    if main is None:
+        return cs
+    merged = dict(cs)
+    for k in ("model", "last_ts", "end_ts", "ttl_s", "prefix_tokens", "rewrite_usd", "priced"):
+        if k in main:
+            merged[k] = main[k]
+    merged["keepalive"] = bool(cs.get("keepalive")) and cs.get("last_ts") == main.get("last_ts")
+    return merged
+
+
+def _agent_entries(cs: dict | None, cs_age: float) -> list[tuple[float, float]]:
+    """(remaining, ttl) of every WARM sub-agent cache, soonest-to-expire first. A cold sub-agent is
+    finished work, not something to watch."""
+    threads = cs.get("threads") if isinstance(cs, dict) else None
+    out = []
+    for t in threads if isinstance(threads, list) else []:
+        if not isinstance(t, dict) or t.get("main"):
+            continue
+        rem = remaining_seconds({**t, "now_ms": cs.get("now_ms")}, cs_age)
+        if rem is not None and rem > 0:
+            out.append((rem, float(t["ttl_s"])))
+    return sorted(out)
+
+
 def _cache_view(payload: dict, cs: dict | None, cs_age: float) -> dict:
     """Merge the two cache sources into {remaining, source, tokens, rewrite_usd}. remaining is
     seconds to expiry (<=0 cold) or None for unknown. The proxy's answer WINS when it is fresh
@@ -753,42 +844,98 @@ def _cache_view(payload: dict, cs: dict | None, cs_age: float) -> dict:
         cli = 0.0
     srv, tokens, usd, ping = None, _num(pc, "recache_tokens_if_cold"), None, False
     ttl = 3600.0 if pc.get("ttl") == "1h" else 300.0
-    last, ttl, now_ms = _num(cs, "last_ts"), _num(cs, "ttl_s"), _num(cs, "now_ms")
-    if last is not None and ttl is not None and now_ms is not None:
-        srv = (last + ttl * 1000 - now_ms) / 1000 - cs_age
+    srv = remaining_seconds(cs, cs_age)
+    if srv is not None:
         tokens = _num(cs, "prefix_tokens") or tokens
         usd = _num(cs, "rewrite_usd") if cs.get("priced") else None
         ttl, ping = ttl if ttl_s_bad(cs) else cs["ttl_s"], bool(cs.get("keepalive"))
     if srv is not None and (cs_age <= 3 or cli is None or srv >= cli):
-        return {"remaining": srv, "source": "proxy", "tokens": tokens, "usd": usd, "ttl": ttl, "ping": ping}
+        return {"remaining": srv, "source": "proxy", "tokens": tokens, "usd": usd, "ttl": ttl, "ping": ping,
+                "model": cs.get("model")}
     if cli is not None:
         return {"remaining": cli, "source": "client", "tokens": tokens, "usd": None, "ttl": ttl, "ping": False}
     return {"remaining": None, "source": None, "tokens": tokens, "usd": usd, "ttl": ttl, "ping": False}
 
 
 def _clock(sec: float) -> str:
-    sec = int(sec)
+    sec = int(max(0, sec))
     return f"{sec // 3600}h{sec % 3600 // 60:02d}m" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
 
 
 def _cache_segment(view: dict, level: int | None = 0) -> str | None:
-    """A bar that DRAINS toward expiry: full = just written, empty = gone. Green while warm, yellow
-    in the last minute (or last fifth of the lifetime), red and empty once cold. `↻` marks that
-    the proxy plans a keep-alive ping, so an expiring bar there is about to be topped up."""
+    """A bar that DRAINS toward expiry: full = just written, empty = gone. Green while warm, amber
+    in the last minute (or last fifth of the lifetime), red for the last 15 s, then red and empty:
+    the clock then counts UP how long it has been cold. `↻` marks that the proxy plans a
+    keep-alive ping, so an expiring bar there is about to be topped up."""
     rem = view["remaining"]
     if level is None:
         return None
     if rem is None:
         return f"{DIM}◌ no cache yet{RESET}" if level == 0 else f"{DIM}◌{RESET}"
     ttl = view.get("ttl") or 300.0
+    state = entry_state(rem, ttl)
     cells = max(0, min(CACHE_BAR_CELLS, int(round(rem / ttl * CACHE_BAR_CELLS)))) if rem > 0 else 0
-    expiring = rem <= max(EXPIRING_SECONDS, ttl / 5)
-    colour, glyph = (RED, "○") if rem <= 0 else ((YELLOW, "◐") if expiring else (GREEN, "●"))
+    colour, glyph = _AGENT_STYLE[state]
     ping = " ↻" if view.get("ping") and rem > 0 else ""
+    if state == "cold":
+        # A client-only answer knows it is cold but not since when: say so, don't invent a clock.
+        clock = f"cold {_clock(-rem)}" if view.get("source") == "proxy" else "cold"
+    else:
+        clock = _clock(rem) + ("!" if state == "critical" else "")
     if level == 1:
-        return f"{DIM}cache{RESET} {colour}{glyph} {'cold' if rem <= 0 else _clock(rem)}{ping}{RESET}"
+        return f"{DIM}cache{RESET} {colour}{glyph} {clock}{ping}{RESET}"
     bar = f"{colour}{'█' * cells}{DIM}{'░' * (CACHE_BAR_CELLS - cells)}{RESET}"
-    return f"{DIM}cache{RESET} {colour}{glyph}{RESET} {bar} {colour}{'cold' if rem <= 0 else _clock(rem)}{ping}{RESET}"
+    return f"{DIM}cache{RESET} {colour}{glyph}{RESET} {bar} {colour}{clock}{ping}{RESET}"
+
+
+_AGENT_STYLE = {"cold": (RED, "○"), "critical": (RED, "◐"), "expiring": (YELLOW, "◐"), "warm": (GREEN, "●")}
+
+
+def _agents_segment(entries: list[tuple[float, float]], level: int | None = 0) -> str | None:
+    """Running sub-agents' caches, each with its own countdown. Up to AGENTS_LISTED are listed
+    (`agents ● 2:10 ◐ 0:20`); more collapse to a count and the one expiring soonest
+    (`agents 5 · next ◐ 0:20`). Level 1 is the count alone."""
+    if level is None or not entries:
+        return None
+    if level == 1:
+        return f"{DIM}agents{RESET} {len(entries)}"
+
+    def one(rem: float, ttl: float) -> str:
+        colour, glyph = _AGENT_STYLE[entry_state(rem, ttl)]
+        return f"{colour}{glyph} {_clock(rem)}{RESET}"
+
+    if len(entries) <= AGENTS_LISTED:
+        return f"{DIM}agents{RESET} " + " ".join(one(*e) for e in entries)
+    return f"{DIM}agents{RESET} {len(entries)} {DIM}· next{RESET} {one(*entries[0])}"
+
+
+def _spend_segment(payload: dict, level: int | None = 0) -> str | None:
+    """What this session has cost so far (Claude Code's own running total) and, once there is
+    enough wall clock to mean something, the average $/h and the session's age."""
+    cost = payload.get("cost")
+    usd, ms = _num(cost, "total_cost_usd"), _num(cost, "total_duration_ms")
+    if level is None or usd is None or usd <= 0:
+        return None
+    out = f"{DIM}spent{RESET} {_money(usd)}"
+    if ms is not None and ms / 1000 >= SPEND_RATE_MIN_SECONDS:
+        out += f" {DIM}·{RESET} {_money(usd / (ms / 3_600_000))}{DIM}/h{RESET} {DIM}· up{RESET} {_clock(ms / 1000)}"
+    return out
+
+
+_MODEL_RE = re.compile(r"(opus|sonnet|haiku|fable)[-_ ]?(\d+(?:[-_.]\d{1,2}(?!\d))?)|(\d+(?:[-_.]\d{1,2}(?!\d))?)[-_ ](opus|sonnet|haiku)")
+
+
+def _model_key(model: object) -> tuple[str, str] | None:
+    """(family, version) from a model id in any of the spellings the gateway and Claude Code use
+    (`claude-sonnet-5-5`, `aws/claude-sonnet-5-5[1m]`, `claude-3-5-sonnet-20241022`); None when it
+    cannot be read, which means NO warning rather than a guess."""
+    if not isinstance(model, str):
+        return None
+    m = _MODEL_RE.search(model.lower())
+    if not m:
+        return None
+    fam, ver = (m.group(1), m.group(2)) if m.group(1) else (m.group(4), m.group(3))
+    return fam, re.sub(r"[-_]", ".", ver)
 
 
 def _ctx_numbers(payload: dict, cs: dict | None, cs_age: float) -> tuple[float, float] | None:
@@ -860,8 +1007,14 @@ def _hint(payload: dict, view: dict, ctx: tuple[float, float] | None) -> tuple[s
     rem, tokens = view["remaining"], view["tokens"]
     if rem is not None and rem <= 0 and tokens and tokens >= HINT_COLD_MIN_TOKENS:
         price = f"≈${view['usd']:.2f}" if view["usd"] is not None else "a full re-send"
-        return (f"{RED}cache is cold: your next message costs {price} extra — /compact first?{RESET}",
-                f"{RED}cold: next message {price} extra — /compact?{RESET}")
+        return (f"{RED}cache is cold: your next message costs {price} extra{RESET}",
+                f"{RED}cold: next message {price} extra{RESET}")
+    if rem is not None and rem > 0 and view["usd"] is not None and view["usd"] >= HINT_EXPIRING_MIN_USD:
+        now_m, cache_m = _model_key((payload.get("model") or {}).get("id") if isinstance(payload.get("model"), dict) else None), \
+            _model_key(view.get("model"))
+        if now_m and cache_m and now_m != cache_m:
+            msg = f"{YELLOW}model switched: your next message rewrites the cache (≈${view['usd']:.2f}){RESET}"
+            return msg, f"{YELLOW}model switched: rewrite ≈${view['usd']:.2f}{RESET}"
     if (rem is not None and 0 < rem <= EXPIRING_SECONDS and not view.get("ping") and view["usd"] is not None
             and view["usd"] >= HINT_EXPIRING_MIN_USD):
         msg = f"{YELLOW}cache gone in {int(rem)}s: a pause now costs ≈${view['usd']:.2f} to rewrite{RESET}"
@@ -873,7 +1026,9 @@ def _hint(payload: dict, view: dict, ctx: tuple[float, float] | None) -> tuple[s
     at, cause = _num(pc, "last_miss_at"), pc.get("last_miss_cause")
     causes = cause.get("causes") if isinstance(cause, dict) else None
     if at is not None and time.time() - at < 120 and isinstance(causes, list) and causes:
-        miss = f"{YELLOW}last miss: {','.join(str(c) for c in causes[:2])}{RESET}"
+        added, removed = _num(cause, "tools_added") or 0, _num(cause, "tools_removed") or 0
+        what = f"tool set changed (+{int(added)} −{int(removed)})" if added or removed else ",".join(str(c) for c in causes[:2])
+        miss = f"{YELLOW}last miss: {what}{RESET}"
         return miss, miss
     return None
 
@@ -906,7 +1061,7 @@ def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
     three fresh makes no network call at all."""
     out: dict = {}
     jobs = {"stats": lambda: _fetch_stats(port, session_id)}
-    if session_id and on & {"cache", "ctx", "hint"}:
+    if session_id and on & {"cache", "agents", "ctx", "hint"}:
         jobs["cs"] = lambda: _fetch_json(
             port, "/api/cachestate?session=" + _quote(session_id),
             "cs-" + session_id, CACHESTATE_TTL_SECONDS)
@@ -945,8 +1100,8 @@ def main() -> None:
     stats, status = got.get("stats", (None, STATS_TIMEOUT))
     update_seg = _update_available_segment()  # local file only - independent of the proxy
     notice = {
-        STATS_DOWN: "cg!",  # three characters: the proxy is unreachable, nothing else is worth saying
-        # Not `cg!`: the proxy may be healthy and merely slow on this one aggregate. It redraws on
+        STATS_DOWN: "cg ✕ proxy offline",  # unreachable: say so in words, nothing else is worth saying
+        # Not `cg ✕ proxy offline`: the proxy may be healthy and merely slow on this one aggregate. It redraws on
         # its own with real numbers.
         STATS_HUNG: "cg? not responding",  # was working; every fetch since has timed out
     }.get(status, "cg: stats loading…" if status == STATS_TIMEOUT and stats is None else None)
@@ -958,18 +1113,22 @@ def main() -> None:
     cs, cs_age = got.get("cs", (None, 0.0))
     day, _ = got.get("day", (None, 0.0))
     life, _ = got.get("life", (None, 0.0))
+    agents = _agent_entries(cs, cs_age)
+    cs = _main_cs(cs)
     view = _cache_view(payload, cs, cs_age)
     ctx = _ctx_numbers(payload, cs, cs_age)
     shown = {
         "update": lambda lv: update_seg if lv == 0 else None,
         "save": lambda lv: _save_segment(stats, day, life, lv, _fresh_session(payload)),
         "cache": lambda lv: _cache_segment(view, lv),
+        "agents": lambda lv: _agents_segment(agents, lv),
+        "spend": lambda lv: _spend_segment(payload, lv) if lv == 0 else None,
         "ctx": lambda lv: _ctx_segment(*ctx, lv) if ctx else None,
         "ka": lambda lv: (_keepalive_segment(stats) if stats and lv == 0 else None),
         "latency": lambda lv: _latency_segment(stats) if lv == 0 else None,
         "tools": lambda lv: _recommend_segment(payload) if lv == 0 else None,
     }
-    order = [e for e in ("update", "save", "cache", "ctx", "ka", "latency", "tools") if e in on]
+    order = [e for e in ("update", "save", "spend", "cache", "agents", "ctx", "ka", "latency", "tools") if e in on]
     level: dict[str, int | None] = {e: 0 for e in order}
     hint = _hint(payload, view, ctx) if "hint" in on else None
     if layout == "minimal":
@@ -1017,6 +1176,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1].startswith("--set-layout="):
+        print(_set_layout(sys.argv[1].split("=", 1)[1]))
+        sys.exit(0)
     if len(sys.argv) == 5 and sys.argv[1] == "--refresh":
         try:
             _refresh(*sys.argv[2:])
