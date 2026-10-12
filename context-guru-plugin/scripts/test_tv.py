@@ -76,7 +76,7 @@ SPEND = json.load(open(os.path.join(TD, "spend.json")))
 def stats():
     wf = [("baseline", 898.05, True), ("compaction", -33.9, False), ("cachesplit_saved", 0, False), ("keepalive_saved", 9.4, False),
           ("keepalive_ping", 3.1, False), ("decl_filter_saved", 7.85, False), ("self_removed", 0, False), ("cg_llm", 4.1, False)]
-    return {"total_saved_usd": 41.2, "cost_usd": 856.85, "baseline_cost_usd": 898.05, "waterfall": [{"key": k, "delta_usd": v} for k, v, _ in wf]}
+    return {"total_saved_usd": 43.95, "cost_usd": 856.85, "baseline_cost_usd": 898.05, "waterfall": [{"key": k, "delta_usd": v} for k, v, _ in wf]}
 
 
 class Fx(tv.Fast):
@@ -165,6 +165,74 @@ class Behaviour(unittest.TestCase):
         down = tv.render("fill", type("D", (tv.Fast,), {"get": lambda s, *a, **k: None})(""), o, e)
         self.assertTrue(down.startswith(first.split("\n")[0]))
         self.assertIn("Proxy not answering", down)
+
+
+class WatchSafety(unittest.TestCase):
+    def snap(self, api):
+        s = tv.Snap()
+        s.proj = type("P", (), {"name": staticmethod(lambda sid: "(unknown project)")})()
+        tv.fetch(api, {"now": NOW, "tz_min": 0, "days": 0, "session": None}, s, NOW)
+        return s
+
+    def test_listed_sessions_with_no_usable_cache_still_draw(self):
+        class NoCache(Fx):
+            def get(self, path, params=None, timeout=4):
+                return {"none": True, "now_ms": NOW} if path == "/api/cachestate" else super().get(path, params, timeout)
+        s = self.snap(NoCache(""))
+        self.assertTrue(s.ids and not s.sessions)  # listed, none usable: no half-built entries
+        out = "\n".join(tv.frame(s, {}, Env(width=80, color=False, ascii_only=False), NOW))
+        self.assertIn("No live session", out)
+
+    def test_dead_proxy_draws_and_says_so(self):
+        s = self.snap(type("D", (tv.Fast,), {"get": lambda self, *a, **k: None})(""))
+        out = "\n".join(tv.frame(s, {}, Env(width=80, color=False, ascii_only=False), NOW))
+        self.assertIn("not answering", out)
+
+    def test_cache_path_cannot_leave_the_cache_dir(self):
+        os.environ["XDG_CACHE_HOME"] = "/tmp/tvc"
+        p = tv.cache_path("fill", "../../etc/x", "4194", "7")
+        self.assertEqual(os.path.dirname(p), "/tmp/tvc/context-guru")
+        self.assertTrue(os.path.basename(p).startswith("tv-fill-"))  # separators are gone, so ".." is just letters in a name
+
+    def test_pty_quits_on_q_and_restores_the_screen(self):
+        import http.server, pty, select, subprocess, threading, time, urllib.parse
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                u = urllib.parse.urlparse(self.path)
+                q = {k: (int(v[0]) if v[0].isdigit() else v[0]) for k, v in urllib.parse.parse_qs(u.query).items()}
+                body = json.dumps(Fx("").get(u.path, q)).encode()
+                self.send_response(200); self.end_headers(); self.wfile.write(body)
+            log_message = lambda *a: None
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.environ.update(CG_URL=f"http://127.0.0.1:{srv.server_port}", COLUMNS="80")
+            os.execvp(sys.executable, [sys.executable, os.path.join(HERE, "tv.py"), "watch"])
+        buf, t0 = b"", time.time()
+        while time.time() - t0 < 2.5 and b"updated" not in buf:
+            if select.select([fd], [], [], 0.2)[0]:
+                buf += os.read(fd, 65536)
+        os.write(fd, b"\x1b[A")  # an arrow key must not quit or hang it
+        time.sleep(0.3)
+        os.write(fd, b"q")
+        t0 = time.time()
+        while time.time() - t0 < 3:
+            if select.select([fd], [], [], 0.2)[0]:
+                try:
+                    d = os.read(fd, 65536)
+                except OSError:
+                    break
+                if not d:
+                    break
+                buf += d
+        _, status = os.waitpid(pid, 0)
+        srv.shutdown()
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+        self.assertIn(b"\x1b[?1049h", buf)
+        self.assertIn(b"\x1b[?25h\x1b[?1049l", buf)  # cursor shown, normal screen restored
+        self.assertIn(b"saved today", buf)
 
 
 if __name__ == "__main__":

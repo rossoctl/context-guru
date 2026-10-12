@@ -110,6 +110,17 @@ def span(sec: float) -> str:
     return f"{sec}s" if sec < 60 else f"{sec // 60}m" if sec < 3600 else f"{sec // 3600}h{sec % 3600 // 60:02d}m"
 
 
+def flow(items: list[str], e: Env, sep: str = "   ") -> list[str]:
+    """Lay items out in lines no wider than the terminal, never splitting an item."""
+    out, cur = [], ""
+    for it in items:
+        if cur and vlen(cur) + len(sep) + vlen(it) > e.width - 1:
+            out.append(cur)
+            cur = ""
+        cur = cur + sep + it if cur else it
+    return out + ([cur] if cur else [])
+
+
 def clip(s: str, width: int, e: Env) -> str:
     """Cut a plain string to width with an ellipsis (ANSI-free input only)."""
     return s if len(s) <= width else s[:max(0, width - 1)] + ("~" if e.ascii else "…")

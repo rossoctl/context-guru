@@ -283,8 +283,8 @@
  "ledger": {
   "cg_llm_usd": 4.1,
   "gross_saved_usd": 10.28,
-  "ping_saved_usd": 0,
-  "ping_usd": 9.6
+  "ping_saved_usd": 9.4,
+  "ping_usd": 3.1
  },
  "live": [
   {

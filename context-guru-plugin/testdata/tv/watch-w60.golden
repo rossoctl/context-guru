@@ -1,15 +1,18 @@
-$41.20 saved today. 1 cache cold: next message costs $0.57
-extra.
+$43.95 saved today. 2 of 3 caches are cold: their next
+message costs about $0.65 extra.
 
-Caches  time until a full rewrite
-●  ession-A/main   █████░░░░░░░  2:14
-○  ession-A/sub-1  ░░░░░░░░░░░░  COLD
-○  ession-B/main   ░░░░░░░░░░░░  COLD
+Caches  time left before the next message costs extra
+●  session-A/main   █████░░░░░░░  2:14
+○  session-A/sub-1  ░░░░░░░░░░░░  COLD
+○  session-B/main   ░░░░░░░░░░░░  COLD
 
-Saved today $41.20  █▅█▁▆▁▄▂▁▆█▅▄▁▁▅
+Saved today $43.95  █▅█▁▆▁▄▂▁▆█▅▄▁▁▅
 
 Last 20 requests  oldest to newest
 ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■↻✖
 ■ hit  ▨ partial  ✖ miss  ↻ ping
+
+Do: the next message pays the rewrite; run /compact first
+to make it smaller.
 
 updated 22s ago   q quit  r refresh

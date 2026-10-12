@@ -5,12 +5,14 @@ messages).
 ▮▮▮▮▮▮▮▪▮▮▮▮▪▮▮▮▪▮▮▮▮───[31m✖[0m▮▪▮▪▮▮▮▮▮▮▪▮▮▮▮▮▪▮──[36m↻[0m───[31m✖[0m▮▮▮▮▪▮▮▮▮▪[33m▼[0m▮▮▮▪▮▪▮▪─────[36m↻[0m──[31m✖[0m
 [2m12:31             13:15             13:59             14:43              15:27[0m
 
-▪ message  ▮ busy  ✖ cache miss (extra cost)  ▼ compacted  ↻ keep-alive ping  ─
-pause over 5 min
+▪ message   ▮ busy   ✖ cache miss, extra cost above it   ▼ compacted
+↻ keep-alive ping   ─ pause over 5 min
 
-[1mExpensive moments[0m
-14:22  $1.20  after a 8m pause
-13:27  $0.76  after a 9m pause
-15:27  $0.25  after a 8m pause
+[1mMost expensive moments[0m
+14:22  $1.20  after a pause of 8m
+13:27  $0.76  after a pause of 9m
+15:27  $0.25  after a pause of 8m
 
+Do: run /compact before a break longer than 5 minutes, so the rewrite is
+smaller.
 [2mExtra = cost above a normal turn of the same model (estimate).[0m

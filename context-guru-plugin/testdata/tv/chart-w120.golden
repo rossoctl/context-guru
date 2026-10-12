@@ -1,4 +1,4 @@
-Saved $41.20 in 14 days, 4.6% of what the same work would have cost. Best day Tue $4.83.
+Saved $43.95 in 14 days (4.9% of the bill). Best day Tue $4.83.
 
 Saved per day  observed, net of Context Guru's own spend
   $4.83             ██ ▃▃          ▇▇    ▄▄
@@ -10,13 +10,15 @@ Saved per day  observed, net of Context Guru's own spend
         F  S  S  M  T  W  T  F  S  S  M  T  W  T
         Sep 25                            Oct 08
 
-By lever  observed, same window
+By lever  observed, same window; adds up to the total
 Compaction                      $33.90  ██████████████
 Keep-alive pings                 $6.30  ███░░░░░░░░░░░
 Tool filtering                   $7.85  ███░░░░░░░░░░░
 Context Guru's own model spend  -$4.10
+Total                           $43.95
 
 ≈ Still avoidable  estimated, not saved; rows overlap, do not add
 You paused longer than the cache lasts, 214 times    $108  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒
 Settings or tools changed mid-session              $23.31  ▒▒▒░░░░░░░░░░░
-Keep-alive pings cost more than they saved          $9.60  ▒░░░░░░░░░░░░░
+
+Do: run /compact before a long break.
