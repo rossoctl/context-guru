@@ -223,7 +223,8 @@ func (s *Summarize) summaryWait() time.Duration {
 // deployment as a busy session.
 func (s *Summarize) startAsyncSummary(c *components.Ctx, model components.Model,
 	span []bschemas.ChatMessage, spanJSON []byte, coveredHash, goal string, coveredCount int) string {
-	j, ok := inFlight.begin(c.Session)
+	conv := convKey(c)
+	j, ok := inFlight.begin(conv)
 	if !ok {
 		return "summary_already_in_flight"
 	}
@@ -233,7 +234,7 @@ func (s *Summarize) startAsyncSummary(c *components.Ctx, model components.Model,
 	select {
 	case summarySlots <- struct{}{}:
 	default:
-		inFlight.finish(c.Session, j)
+		inFlight.finish(conv, j)
 		atomic.AddInt64(&summarizeAsyncRefused, 1)
 		return "summary_concurrency_full"
 	}
@@ -264,7 +265,7 @@ func (s *Summarize) startAsyncSummary(c *components.Ctx, model components.Model,
 	// carries the same request-scoped fields the commission line did.
 	baseCtx := context.WithoutCancel(c.Ctx)
 	go func() {
-		defer inFlight.finish(session, j)
+		defer inFlight.finish(conv, j)
 		defer func() {
 			atomic.AddInt64(&summarizeUnresolved, -1)
 			<-summarySlots
@@ -317,7 +318,7 @@ func (s *Summarize) startAsyncSummary(c *components.Ctx, model components.Model,
 		if strings.TrimSpace(summary) == "" {
 			return
 		}
-		s.commitAsyncSummary(mode, session, st, spanCopy, stashCopy, coveredHash, summary, coveredCount)
+		s.commitAsyncSummary(mode, conv, st, spanCopy, stashCopy, coveredHash, summary, coveredCount)
 	}()
 	return ""
 }
@@ -333,7 +334,7 @@ func (s *Summarize) startAsyncSummary(c *components.Ctx, model components.Model,
 // and no Report to file against — both belong to a turn that has already been answered. Everything
 // it produces reaches the wire through the next turn's replay, which is the one place that splice
 // happens.
-func (s *Summarize) commitAsyncSummary(mode markerMode, session string, st store.Store,
+func (s *Summarize) commitAsyncSummary(mode markerMode, conv string, st store.Store,
 	span []bschemas.ChatMessage, spanJSON []byte, coveredHash, summary string, coveredCount int) {
 	var key string
 	if mode == markerFull {
@@ -351,7 +352,7 @@ func (s *Summarize) commitAsyncSummary(mode markerMode, session string, st store
 		Key:          key,
 	}
 	if b, err := json.Marshal(cp); err == nil {
-		st.Put(store.SumPrefix+session, b)
+		st.Put(sumKey(conv), b)
 	}
 	atomic.AddInt64(&summarizeAsyncCommitted, 1)
 }

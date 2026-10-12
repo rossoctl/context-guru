@@ -564,7 +564,8 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	// exactly as on the Messages route in BodyOpts: a separate slice, so a component's rewrite of
 	// chat.Input cannot change it.
 	rawInput := append([]bschemas.ChatMessage(nil), norm...)
-	c := &components.Ctx{Ctx: ctx, Session: res.Session, Thread: res.Thread.ID, ThreadParent: threadParent, ThreadInherits: threadInherits, Store: st, Model: o.Models,
+	c := &components.Ctx{Ctx: ctx, Session: res.Session, Thread: res.Thread.ID, ThreadParent: threadParent, ThreadInherits: threadInherits,
+		DeclaresTools: gjson.GetBytes(o.Body, "tools.#").Int() > 0, Store: st, Model: o.Models,
 		RawInput: rawInput,
 		// OpenAI's 30m is a minimum, never proof of expiry. ColdCache stays
 		// false even after a long idle gap, matching the Chat Completions path.
