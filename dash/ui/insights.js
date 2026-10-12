@@ -453,6 +453,31 @@ function insRender() {
   /* The registry describes the DOM that is about to be discarded. */
   insBoxes = [];
 
+  /* THE PAGE INTRODUCES ITSELF FIRST.
+   *
+   * It used to open with the session chips, then a thin muted line, then the tiles — so the first
+   * thing a reader met was a control, and the one sentence that defines every number on the page
+   * was the least prominent text on it. Reported as "I don't see explanations and clear
+   * presentation", which was fair: the words existed and the layout hid them.
+   *
+   * Now it opens the way every other tab does, with a titled panel, and the definition is body
+   * text inside it rather than a caption. The controls come after the explanation, because the
+   * reader has to know what is being counted before choosing how much of it to count. */
+  const intro = el('div', { class: 'panel' },
+    el('h2', { text: 'What your unused capabilities cost' }),
+    el('p', { text: 'Every figure on this page is WASTE: tokens sent in the system prompt of ' +
+      'every request, for a tool, skill or MCP server that was never invoked in the sessions ' +
+      'that carried it.' }),
+    el('p', { text: 'What you actually used is NOT counted here. Those tokens bought something — ' +
+      'they were the price of using the capability, not money thrown away. So nothing below is a ' +
+      'total spend, and removing all of it would not change what your working sessions cost. It ' +
+      'changes what you pay to carry capabilities you never reach for.' }),
+    el('p', { class: 'hint', text: 'Read a row as: this item added N tokens to every request, ' +
+      'those re-reads billed M tokens over the window, and that came to $X — all of it for ' +
+      'nothing. Hover an item\u2019s name for what it does; a row with no figures was invoked, ' +
+      'so it has no waste to report.' }));
+  root.appendChild(intro);
+
   /* The window strip. Unlike the static report's chips, these RE-QUERY — a served page can, and
    * that is the whole reason this surface is worth building. */
   const win = el('div', { class: 'ins-win' },
@@ -473,17 +498,6 @@ function insRender() {
   const removeSet = items.filter((i) => i.verdict === 'remove');
 
   /* The headline, in the page's own tile vocabulary. */
-  /* THE PAGE SAYS WHAT IT MEASURES, ONCE, AT THE TOP.
-   * Every figure below is WASTE: tokens carried on a request and never invoked in the session that
-   * carried them. A capability you did use also costs tokens, and this page does not report those
-   * at all — they were the price of using it, not money thrown away, and mixing the two would make
-   * every total here mean something a reader has to guess at. Said in the lede rather than left to
-   * the column headers, because a reader who skims the tiles never reaches them. */
-  root.appendChild(el('p', { class: 'hint', text:
-    'Every number on this page is WASTE — tokens sent on every request for a capability that was ' +
-    'never invoked in the sessions that carried it. What you actually used is not counted here: ' +
-    'those tokens bought something. Removing what is below does not change what your working ' +
-    'sessions cost; it changes what your idle declarations cost.' }));
   const tiles = el('div', { class: 'grid' },
     el('div', { class: 'tile good' },
       el('div', { class: 'k', text: 'wasted, recoverable' }),
@@ -522,7 +536,7 @@ function insRender() {
   const servers = owners.filter((o) => o.kind === 'server');
 
   if (plugins.length) {
-    root.appendChild(el('h3', { text: 'Plugins' }));
+    root.appendChild(el('h2', { text: 'Plugins' }));
     root.appendChild(el('p', { class: 'hint', text: 'A plugin contributes skills and may ' +
       'contribute MCP servers. Its skills cannot be switched off one at a time, so the tick on ' +
       "the plugin's own line is the only control — and it removes all of them together." }));
@@ -545,7 +559,7 @@ function insRender() {
     }
   }
   if (servers.length) {
-    root.appendChild(el('h3', { text: 'MCP servers' }));
+    root.appendChild(el('h2', { text: 'MCP servers' }));
     root.appendChild(el('p', { class: 'hint', text: 'Configured directly, independent of any ' +
       'plugin. Removing the server removes every tool it declares.' }));
     for (const o of servers) {
@@ -564,7 +578,10 @@ function insRender() {
   /* Owned by nothing, and removable individually. */
   const solo = items.filter((i) => i.scope === INS_SCOPE_ITEM && !i.plugin && !i.server);
   if (solo.length) {
-    root.appendChild(el('h3', { text: 'Removable individually' }));
+    root.appendChild(el('h2', { text: 'Removable individually' }));
+    root.appendChild(el('p', { class: 'hint', text: 'Owned by no plugin and no server, so each ' +
+      'one can be switched off on its own. This is usually where most of the waste is: a single ' +
+      'heavy tool declaration outweighs a whole plugin of small skill entries.' }));
     root.appendChild(insOwnerBlock(
       { name: 'standalone items', usd: solo.reduce((a, i) => a + (i.usd || 0), 0) },
       solo.slice().sort((a, b) => (b.usd || 0) - (a.usd || 0)),
@@ -583,7 +600,11 @@ function insRender() {
 
   /* Built-ins: listed so the weight is visible, offered at no scope. */
   if (unremovable.length) {
-    root.appendChild(el('h3', { text: 'Claude Code built-ins' }));
+    root.appendChild(el('h2', { text: 'Claude Code built-ins' }));
+    root.appendChild(el('p', { class: 'hint', text: 'Shown because the waste is real and you ' +
+      'should know where the weight sits \u2014 not because it is available to you. These are the ' +
+      'agent\u2019s own tools: removing one takes away a capability the model is expected to ' +
+      'have, and anything that depended on it fails. No checkboxes are offered.' }));
     root.appendChild(insOwnerBlock(
       { name: 'built-in tools', usd: unremovable.reduce((a, i) => a + (i.usd || 0), 0) },
       unremovable.slice().sort((a, b) => (b.usd || 0) - (a.usd || 0)),
@@ -601,7 +622,10 @@ function insRender() {
 
   /* The actions, then the review. Below the inventory, because this is the consequence of what the
    * reader just ticked — above it, it read as a header describing nothing yet. */
-  root.appendChild(el('h3', { text: 'What you decided to remove' }));
+  root.appendChild(el('h2', { text: 'What you decided to remove' }));
+  root.appendChild(el('p', { class: 'hint', text: 'Tick anything above and it is summarised here ' +
+    'with the exact command. Nothing on this page changes your configuration \u2014 it writes you ' +
+    'one command to run yourself.' }));
   root.appendChild(el('div', { id: 'insights-actions' }));
   root.appendChild(el('div', { id: 'insights-review' }));
   insRenderActions();
