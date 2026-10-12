@@ -185,13 +185,32 @@ func TestIdleMainThreadIsColdWhileASubagentRuns(t *testing.T) {
 func TestSingleThreadSessionIsUnchanged(t *testing.T) {
 	with, without := newThreadRun(t, true), newThreadRun(t, false)
 	base := time.Unix(1_700_000_000, 0)
+	var last apply.Result
+	var at time.Time
 	for i, tools := range []int{2, 3, 5, 2, 4} { // 5 -> 2 is a compaction
-		at := base.Add(time.Duration(i) * 7 * time.Minute) // past the 5m TTL: every turn after the first is cold
+		at = base.Add(time.Duration(i) * 7 * time.Minute) // past the 5m TTL: every turn after the first is cold
 		a, b := with.turn(thread.Primary, tools, at), without.turn(thread.Primary, tools, at)
 		if a.MaxCachedIdx != b.MaxCachedIdx || a.FrozenTokens != b.FrozenTokens || string(a.Body) != string(b.Body) {
 			t.Fatalf("turn %d: with ThreadOf (idx %d, frozen %d) differs from without (idx %d, frozen %d)",
 				i, a.MaxCachedIdx, a.FrozenTokens, b.MaxCachedIdx, b.FrozenTokens)
 		}
+		last = a
+	}
+	// Equal is not enough: both runs would also agree if the primary thread stopped keying by the
+	// bare session id. The record must be under the session id itself, as before threads existed.
+	for name, r := range map[string]*threadRun{"with ThreadOf": with, "without ThreadOf": without} {
+		assertBareSessionRecord(t, name, r.o.Tracker, last, at)
+	}
+}
+
+// assertBareSessionRecord checks that the tracker holds the last request's record under the bare
+// session id: its message count and its time.
+func assertBareSessionRecord(t *testing.T, name string, tr *modes.Tracker, last apply.Result, at time.Time) {
+	t.Helper()
+	n, prevAt := tr.TurnAt(last.Session, last.Messages, at.Add(time.Second).UnixMilli())
+	if n != last.Messages || prevAt != at.UnixMilli() {
+		t.Errorf("%s: record under the bare session id %q is (%d, %d), want (%d, %d)",
+			name, last.Session, n, prevAt, last.Messages, at.UnixMilli())
 	}
 }
 
@@ -365,14 +384,15 @@ func TestNewThreadOnASharedPrefixKeepsTheCachedPart(t *testing.T) {
 // The Responses route keys by thread.Key too, so a single-thread session there is also unchanged:
 // a ThreadOf that always answers the primary thread equals no ThreadOf at all.
 func TestResponsesSingleThreadSessionIsUnchanged(t *testing.T) {
-	run := func(withThreadOf bool) []apply.Result {
+	base := time.Unix(1_700_000_000, 0)
+	at := func(i int) time.Time { return base.Add(time.Duration(i) * 7 * time.Minute) }
+	run := func(withThreadOf bool) ([]apply.Result, *modes.Tracker) {
 		st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
 		cfg := pipe(t, "pipeline: [mask]\ncomponents:\n  mask: {keep_recent: 1, min_tokens: 50}\n")
 		p, err := cfg.Build(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		base := time.Unix(1_700_000_000, 0)
 		var out []apply.Result
 		for i, n := range []int{3, 5, 8, 2, 4} { // 8 -> 2 is a compaction
 			var items []string
@@ -382,15 +402,16 @@ func TestResponsesSingleThreadSessionIsUnchanged(t *testing.T) {
 			}
 			o := apply.Opts{Provider: bschemas.OpenAI, API: "responses", CacheMode: "on", Session: "same-session",
 				Body:    []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"go"},` + strings.Join(items, ",") + `]}`),
-				Tracker: tr, Now: base.Add(time.Duration(i) * 7 * time.Minute)}
+				Tracker: tr, Now: at(i)}
 			if withThreadOf {
 				o.ThreadOf = func(string) thread.Result { return thread.Result{ID: thread.Primary, Source: thread.SourceSession} }
 			}
 			out = append(out, apply.BodyOpts(context.Background(), p, st, o))
 		}
-		return out
+		return out, tr
 	}
-	with, without := run(true), run(false)
+	with, withTr := run(true)
+	without, withoutTr := run(false)
 	for i := range with {
 		a, b := with[i], without[i]
 		if a.MaxCachedIdx != b.MaxCachedIdx || a.FrozenTokens != b.FrozenTokens || string(a.Body) != string(b.Body) {
@@ -401,4 +422,7 @@ func TestResponsesSingleThreadSessionIsUnchanged(t *testing.T) {
 	if !with[2].Changed {
 		t.Fatal("fixture: mask acted on nothing, so the comparison proves little")
 	}
+	last := len(with) - 1
+	assertBareSessionRecord(t, "with ThreadOf", withTr, with[last], at(last))
+	assertBareSessionRecord(t, "without ThreadOf", withoutTr, without[last], at(last))
 }

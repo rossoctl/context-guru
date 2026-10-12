@@ -154,8 +154,9 @@ func (t *Tracker) TurnAt(session string, n int, nowMs int64) (prevLen int, prevA
 // somewhere inside the parent's prefix, and freezing all of it is the safe direction. It is never
 // counted as a compaction.
 //
-// A key the tracker dropped (evicted or expired) gets prevLen = n: the whole request is treated
-// as cached, so nothing changes on this one turn, and the next turn has a real record again.
+// A key the tracker dropped (evicted or expired), or a new key whose parent was dropped, gets
+// prevLen = n: the whole request is treated as cached, so nothing changes on this one turn, and
+// the next turn has a real record again.
 func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64) (prevLen int, prevAtMs int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -165,9 +166,15 @@ func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64) (prevLen int,
 		prevLen, prevAtMs = Boundary(prev.n, n), prev.at
 	case t.wasDropped(key):
 		prevLen = n
+	case parent == "":
 	default:
-		if p, pok := t.m[parent]; pok && parent != "" {
+		if p, pok := t.m[parent]; pok {
 			prevLen, prevAtMs = min(p.n, n), p.at
+		} else if t.droppedLocked(parent) {
+			// The parent was evicted, but the provider may still hold the prefix this request
+			// reads: all cached, as for a dropped key of its own. Peek only, so the parent's own
+			// next request still reads as dropped too.
+			prevLen = n
 		}
 	}
 	if !ok && len(t.m) >= t.max {
@@ -235,6 +242,12 @@ func (t *Tracker) wasDropped(key string) bool {
 		return true
 	}
 	return false
+}
+
+// droppedLocked reports whether key was evicted or expired, without forgetting it.
+func (t *Tracker) droppedLocked(key string) bool {
+	_, ok := t.dropped[keyHash(key)]
+	return ok
 }
 
 func keyHash(key string) uint64 {

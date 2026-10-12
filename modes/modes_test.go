@@ -215,6 +215,22 @@ func TestDroppedKeyReadsAsAllCached(t *testing.T) {
 	}
 }
 
+// A new thread whose parent was evicted reads as all cached too: the provider may still hold the
+// parent's prefix that this request reads. The peek does not forget the parent's drop, so the
+// parent's own next request is still all cached.
+func TestNewKeyOfADroppedParentReadsAsAllCached(t *testing.T) {
+	tr := NewTracker(1)
+	t0 := int64(1_700_000_000_000)
+	tr.TurnAt("main", 8, t0)
+	tr.TurnAt("other", 3, t0+1) // evicts main
+	if n, at := tr.TurnFrom("side", "main", 9, t0+2); n != 9 || at != 0 {
+		t.Fatalf("side of an evicted parent: (%d, %d), want (9, 0): all cached, idle unknown", n, at)
+	}
+	if n, _ := tr.TurnAt("main", 10, t0+3); n != 10 {
+		t.Fatalf("evicted parent's own next request: boundary %d, want 10 (all cached)", n)
+	}
+}
+
 // At the bound, keys idle past StaleAfter expire first, all at once, before a live key is evicted.
 // Here b was used AFTER a, so least-recently-used alone would evict a, the live one.
 func TestStaleKeysExpireBeforeLiveOnes(t *testing.T) {
