@@ -503,6 +503,21 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     return stats, STATS_OK
 
 
+def _stale_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
+    """The fetch did not report within the render budget (a loaded host can starve its thread past
+    the deadline): show the cached numbers, marked stale, as a timed-out fetch would. 'Loading'
+    is only for when there is genuinely nothing cached."""
+    cached, age = None, None
+    try:
+        path = _stats_cache_path(port, session_id)
+        age = time.time() - os.stat(path).st_mtime
+        with open(path, encoding="utf-8") as fh:
+            cached = json.load(fh)
+    except (OSError, ValueError):
+        cached = None
+    return _timeout_result(cached if isinstance(cached, dict) else None, age)
+
+
 def _update_check_state_dir() -> str:
     """Same resolution as settings.py's state_dir() / start-proxy.sh's STATE, duplicated rather
     than imported: this script is invoked on (almost) every render and must not fork python a
@@ -736,6 +751,30 @@ def _fetch_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | Non
     return obj, 0.0
 
 
+REFRESH_WINDOW_SECONDS = 30
+
+
+def _take_refresh_slot(path: str) -> bool:
+    """True for exactly ONE caller per refresh window, however many renders start at once. The lock
+    file's name carries the window number and is created with O_EXCL, so the creation itself is the
+    election: no stat-then-write gap, and no stale lock to clear (a lock left by a crashed refresher
+    belongs to an earlier window and simply stops mattering). The previous window's file is removed
+    best effort."""
+    slot = int(time.time() // REFRESH_WINDOW_SECONDS)
+    try:
+        os.close(os.open(f"{path}.lock.{slot}", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        return False  # someone else is refreshing this key
+    except OSError:
+        return False  # cannot lock (read-only tmp): better no refresh than an unbounded number of them
+    for old in (f"{path}.lock.{slot - 1}", path + ".lock"):  # last window's, and the pre-slot name
+        try:
+            os.unlink(old)
+        except OSError:
+            pass
+    return True
+
+
 def _bg_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | None, float]:
     """(body, age) for a read that can be too slow to wait for on a render (the all-time and today
     totals take seconds on a large history). Fresh cache wins; otherwise one inline GET under the
@@ -759,15 +798,9 @@ def _bg_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | None, 
                 return json.load(fh), 0.0
         except Exception:  # noqa: BLE001 - too slow or down: the detached refresher fills it for a later render
             pass
-    lock = path + ".lock"
+    if not _take_refresh_slot(path):
+        return cached, age
     try:
-        if time.time() - os.stat(lock).st_mtime < 30:
-            return cached, age
-    except OSError:
-        pass
-    try:
-        with open(lock, "w"):
-            pass
         subprocess.Popen([sys.executable, os.path.abspath(__file__), "--refresh", port, query, path],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
@@ -1285,7 +1318,7 @@ def main() -> None:
     layout, on, width = _config(sys.argv[1:])
 
     got = _gather(port, session_id, on)
-    stats, status = got.get("stats", (None, STATS_TIMEOUT))
+    stats, status = got.get("stats") or _stale_stats(port, session_id)
     update_seg = _update_available_segment()  # local file only - independent of the proxy
     notice = {
         STATS_DOWN: "cg ✕ proxy offline",  # unreachable: say so in words, nothing else is worth saying

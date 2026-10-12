@@ -447,3 +447,83 @@ func TestStatuslineFinishesInHalfASecondOnASlowProxy(t *testing.T) {
 		})
 	}
 }
+
+// The refresh lock is an election by exclusive creation: N renders starting at once on the same
+// key start exactly one detached refresher, and a lock left by a crashed one only blocks its own window.
+func TestStatuslineRefreshLockIsAtomic(t *testing.T) {
+	py := requireTool(t, "python3")
+	script := `
+import importlib.util, sys, threading, os, tempfile, time
+spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+tmp = tempfile.mkdtemp()
+path = os.path.join(tmp, "k.json")
+spawned = []
+class P:  # stands in for the detached refresher
+    def __init__(self, *a, **k): spawned.append(1)
+m.subprocess.Popen = P
+m._refresh = lambda *a, **k: (_ for _ in ()).throw(OSError("down"))   # the cold inline try fails
+def burst(n):
+    spawned.clear(); bar = threading.Barrier(n)
+    def go():
+        bar.wait(); m._bg_json("1", "/x", "k", 60)
+    ts = [threading.Thread(target=go) for _ in range(n)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    return len(spawned)
+m._tmpdir = lambda: tmp
+path = os.path.join(tmp, "context-guru-statusline-1-k.json")
+print("burst", burst(16))                       # exactly one
+print("same window again", burst(4))            # the lock holds: none
+slot = int(time.time() // m.REFRESH_WINDOW_SECONDS)
+for f in os.listdir(tmp):
+    if ".lock." in f: os.rename(os.path.join(tmp, f), os.path.join(tmp, f.rsplit(".", 1)[0] + "." + str(slot - 1)))
+print("stale lock from an earlier window", burst(4))   # recovers: one
+open(path + ".lock", "w").close()
+time.sleep(0)
+print("legacy lock name is ignored", burst(1) <= 1)
+`
+	out, err := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	want := "burst 1\nsame window again 0\nstale lock from an earlier window 1\nlegacy lock name is ignored True"
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
+	}
+}
+
+// If the stats fetch has not reported when the budget runs out, a cached body still shows (marked
+// stale); "loading" is only for when nothing is cached.
+func TestStatuslineNeverSaysLoadingWithACache(t *testing.T) {
+	py := requireTool(t, "python3")
+	script := `
+import importlib.util, sys, os, tempfile, json, io, contextlib
+spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+tmp = tempfile.mkdtemp(); m._tmpdir = lambda: tmp
+m._our_port = lambda: "1"
+m._gather = lambda *a, **k: {}                    # the fetch thread never reported in time
+m._read_stdin_json = lambda: {"session_id": "s1", "cost": {"total_cost_usd": 1}, "context_window": {"total_input_tokens": 1000, "total_output_tokens": 10}}
+def render():
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf): m.main()
+    return buf.getvalue().strip()
+print("no cache:", render())
+json.dump({"total_saved_usd": 2.5}, open(m._stats_cache_path("1", "s1"), "w"))
+print("cache:", render())
+`
+	cmd := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py"))
+	cmd.Env = append(sandboxEnv(t), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=100")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 2 || !strings.Contains(lines[0], "loading") {
+		t.Errorf("with nothing cached the line should say loading: %q", out)
+	}
+	rest := strings.Join(lines[1:], "\n")
+	if strings.Contains(rest, "loading") || !strings.Contains(rest, "$2.50") || !strings.Contains(rest, "⏳") {
+		t.Errorf("with a cache the stale numbers must show, marked ⏳, never loading: %q", rest)
+	}
+}
