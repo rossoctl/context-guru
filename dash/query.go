@@ -551,10 +551,20 @@ const cacheTTLMs int64 = 5 * 60 * 1000
 // Sessions returns the session list, most-recently-active first, filtered and
 // paginated server-side.
 func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error) {
+	return d.SessionsOrdered(f, limit, offset, false)
+}
+
+// SessionsOrdered is Sessions with a choice of order: newest first, or costliest first (the
+// five-page dashboard's "where did the money go" list).
+func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*SessionRow, int64, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
 	cond, args := f.where()
+	order := "MAX(r.ts) DESC"
+	if byCost {
+		order = "SUM(r.cost_usd) DESC, MAX(r.ts) DESC"
+	}
 	q := `SELECT r.session_id, GROUP_CONCAT(DISTINCT r.tenant_id), COUNT(*), MIN(r.ts), MAX(r.ts),
 		GROUP_CONCAT(DISTINCT r.model), GROUP_CONCAT(DISTINCT r.provider),
 		GROUP_CONCAT(DISTINCT r.agent), GROUP_CONCAT(DISTINCT r.preset),
@@ -575,7 +585,7 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 		-- keeps Turns and every average on the row agent-only. It has its own query below.
 		COALESCE(SUM(` + kaSaved("r.") + `),0)
 		FROM requests r WHERE ` + cond + `
-		GROUP BY r.session_id ORDER BY MAX(r.ts) DESC LIMIT ? OFFSET ?`
+		GROUP BY r.session_id ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err

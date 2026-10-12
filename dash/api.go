@@ -1457,8 +1457,8 @@ func (a *API) sessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	rows, total, err := a.db(r).Sessions(f,
-		atoiDefault(q.Get("limit"), 50), atoiDefault(q.Get("offset"), 0))
+	rows, total, err := a.db(r).SessionsOrdered(f,
+		atoiDefault(q.Get("limit"), 50), atoiDefault(q.Get("offset"), 0), q.Get("sort") == "cost")
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
