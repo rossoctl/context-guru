@@ -1,0 +1,133 @@
+/* Insights view: what you declare on every request, never call, and could remove.
+ *
+ * Every colour, space and size below is a token from style.css, so dark mode needs nothing here —
+ * it re-declares the tokens and this file follows. The page's existing vocabulary does most of the
+ * work and is reused as-is: .panel for each block, .tile/.k/.v/.s for the headline figures,
+ * .tblwrap + .tbl + .num for every table, .pill for a state badge, .copyblock for the command,
+ * .hint and .empty for prose.
+ *
+ * This file adds ONLY what does not exist there, and each of the five is load-bearing rather than
+ * decorative:
+ *
+ *   1. the owner header — one row carrying a checkbox, a name, a price and a command, which is the
+ *      unit of the whole decision and has no counterpart on any other tab,
+ *   2. the fold, so 58 items across five owners do not open as a wall of rows,
+ *   3. the verdict chip, whose three states are the advice,
+ *   4. the name tooltip affordance, because a tooltip nobody can see is the same as none,
+ *   5. the review block, which is the one place prose, a list and a command sit together.
+ *
+ * COLOUR ENCODES ACTIONABILITY, NOT SENTIMENT: good = you may act on this and we recommend it,
+ * warn = you could, but the evidence is not there yet, bad = do not. An earlier revision had the
+ * verdict scale inverted against the page's own badges, so the same word carried opposite colours
+ * in one report.
+ */
+
+/* ── the owner header ──────────────────────────────────────────────────────
+ * The one control for a unit whose children have no per-item switch. The box sits on the owner's
+ * own line, beside its name and its price, because that is the row the reader is deciding about —
+ * a separate "select this whole plugin" line below offered a choice that does not exist.
+ */
+.ins-own { border: 1px solid var(--border); border-radius: var(--r); margin-bottom: var(--sp-3); overflow: hidden; }
+.ins-own.keep { border-color: color-mix(in srgb, var(--bad) 34%, var(--border)); }
+.ins-head {
+  display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-sunken); border-bottom: 1px solid var(--border-soft);
+}
+.ins-own.keep .ins-head { background: var(--bad-soft); }
+.ins-head input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; margin: 0; flex: none; }
+.ins-type { font-family: var(--mono); font-size: var(--t-micro); letter-spacing: .09em; text-transform: uppercase; color: var(--fg-faint); }
+.ins-name { font-family: var(--mono); font-weight: 600; font-size: var(--t-body); }
+.ins-meta { font-family: var(--mono); font-size: var(--t-small); color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.ins-cost { margin-left: auto; font-family: var(--mono); font-weight: 600; font-size: var(--t-num); font-variant-numeric: tabular-nums; }
+/* The consequence, on the same line as the box that triggers it: at rest the header is all the
+ * reader sees, so "the plugin is the unit" cannot live inside the fold. */
+.ins-unit { font-family: var(--mono); font-size: var(--t-micro); letter-spacing: .06em; text-transform: uppercase; color: var(--fg-faint); }
+.ins-cmd {
+  font-family: var(--mono); font-size: var(--t-small); background: var(--bg);
+  border: 1px solid var(--border-soft); border-radius: var(--r-sm);
+  padding: 2px 6px; word-break: break-all; flex-basis: 100%;
+}
+
+/* ── the fold ──────────────────────────────────────────────────────────────
+ * <details>, not a scripted toggle: it folds with no JavaScript, and keyboard and find-in-page
+ * behaviour is the browser's rather than ours to re-implement.
+ */
+.ins-body > summary {
+  padding: var(--sp-2) var(--sp-3); cursor: pointer;
+  font-size: var(--t-small); color: var(--fg-muted);
+  display: flex; align-items: center; gap: var(--sp-1);
+  list-style: none; user-select: none;
+}
+.ins-body > summary::-webkit-details-marker { display: none; }
+.ins-body > summary:hover { color: var(--fg); background: var(--bg-hover); }
+.ins-body > summary:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.ins-caret { font-family: var(--mono); font-size: var(--t-micro); color: var(--fg-faint); display: inline-block; transition: transform .12s ease; }
+.ins-body[open] > summary { border-bottom: 1px solid var(--border-soft); }
+.ins-body[open] .ins-caret { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .ins-caret { transition: none; } }
+
+/* A band naming a group of children inside the fold, where a plugin contributes both skills and
+ * MCP tools and the two are different decisions to look at. */
+.ins-band {
+  display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap;
+  padding: var(--sp-1) var(--sp-3); border-bottom: 1px solid var(--border-soft);
+}
+.ins-band-n { font-family: var(--mono); font-size: var(--t-micro); letter-spacing: .08em; text-transform: uppercase; font-weight: 600; }
+.ins-band-m { font-family: var(--mono); font-size: var(--t-small); color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+
+/* ── the verdict ───────────────────────────────────────────────────────────
+ * Three states, and the colour says whether you may act rather than whether the news is good.
+ */
+.ins-vd {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--mono); font-size: var(--t-micro); letter-spacing: .08em;
+  text-transform: uppercase; font-weight: 700;
+  padding: 2px 7px; border-radius: var(--r-sm);
+  white-space: nowrap; border: 1px solid transparent;
+}
+.ins-vd::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.ins-vd.remove   { background: var(--good-soft); color: var(--good); border-color: var(--good); }
+.ins-vd.consider { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
+.ins-vd.keep     { background: var(--bad-soft);  color: var(--bad);  border-color: var(--bad); }
+.ins-vd.unknown  { background: var(--bg-sunken); color: var(--fg-faint); }
+.ins-why { display: block; color: var(--fg-muted); font-size: var(--t-small); line-height: 1.35; margin-top: 3px; max-width: 46ch; }
+
+/* ── the item name ─────────────────────────────────────────────────────────
+ * Descriptions are on the name's title rather than in a column: measured on a real inventory, 41
+ * of 58 rows had none, and the column took width from the three number columns the page is for.
+ * The dotted underline marks the rows that have one — an invisible tooltip is the same as none —
+ * and `help` says hovering reveals text rather than navigating.
+ */
+.ins-nm { font-family: var(--mono); font-size: var(--t-small); font-weight: 500; word-break: break-word; }
+.ins-nm.tip { text-decoration: underline dotted var(--border); text-underline-offset: 3px; cursor: help; }
+/* No checkbox where no per-item command exists. A disabled box invites an argument with the page;
+ * an absent one says the choice was never on offer, and the marker says where the real control is. */
+.ins-lock { color: var(--fg-faint); font-family: var(--mono); cursor: help; }
+
+/* ── the review block ──────────────────────────────────────────────────────
+ * After the inventory, not before it: this is the consequence of what the reader just ticked, and
+ * above the tables it read as a page header describing nothing yet.
+ */
+.ins-review { border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; margin-top: var(--sp-3); }
+.ins-review-h {
+  padding: var(--sp-2) var(--sp-3); background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border-soft);
+  font-family: var(--mono); font-size: var(--t-micro); letter-spacing: .08em;
+  text-transform: uppercase; color: var(--fg-faint); font-weight: 600;
+}
+.ins-list, .ins-steps { margin: 0; padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-6); font-size: var(--t-body); line-height: 1.55; }
+.ins-list li, .ins-steps li { margin-bottom: var(--sp-1); }
+.ins-list li:last-child, .ins-steps li:last-child { margin-bottom: 0; }
+.ins-total { padding: var(--sp-2) var(--sp-3); border-top: 1px solid var(--border-soft); background: var(--bg-sunken); font-size: var(--t-body); line-height: 1.55; }
+.ins-total strong { font-family: var(--mono); font-size: var(--t-num); color: var(--good); }
+.ins-warn { padding: var(--sp-2) var(--sp-3); border-top: 1px solid var(--border-soft); color: var(--bad); font-size: var(--t-small); line-height: 1.45; }
+
+/* The window strip: which sessions this view covers, and the control that changes it. Unlike the
+ * static report's chips, this one re-queries, because a served page can. */
+.ins-win { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-3); }
+.ins-win-lbl { font-family: var(--mono); font-size: var(--t-micro); letter-spacing: .07em; text-transform: uppercase; color: var(--fg-faint); }
+
+@media (max-width: 620px) {
+  .ins-cost { margin-left: 0; width: 100%; }
+}

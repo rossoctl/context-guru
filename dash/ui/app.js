@@ -5361,6 +5361,9 @@ const loaders = {
   sessions: loadSessions,
   requests: loadRequests, benchmarks: loadBenchmarks, config: loadConfig,
   keepalive: loadKeepAlive,
+  // Registered by insights.js, which mounts its own tab; named here because `loaders` is the
+  // single map the router consults and a view absent from it renders an empty section forever.
+  insights: () => (typeof loadInsights === 'function' ? loadInsights() : undefined),
 };
 
 // ── nav: two levels, five groups ───────────────────────────────────────────
