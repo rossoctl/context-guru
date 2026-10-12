@@ -174,6 +174,16 @@ func (s *sentStash) get(session string) []byte {
 	return s.m[session].forwarded
 }
 
+// AskAs implements components.RolePrefixAsker.
+func (p prefixAsker) AskAs(ctx context.Context, session, ask, role string) (string, components.PrefixUsage, error) {
+	body := p.stash.get(session)
+	if len(body) == 0 {
+		return "", components.PrefixUsage{}, components.ErrNoPrefix
+	}
+	reply, u, err := p.cli.CompletePrefixedAs(ctx, body, ask, role)
+	return reply, components.PrefixUsage(u), err
+}
+
 // CoversSpan implements components.PrefixCoverage: it reports whether the stashed PRE-PIPELINE
 // body for session (see sentEntry's own comment on why this is preBody, never forwarded),
 // re-normalized the same way the forwarding path itself normalizes a wire body
@@ -252,16 +262,6 @@ func (p prefixAsker) Ask(ctx context.Context, session, ask string) (string, comp
 // CoversSpan implements components.PrefixCoverage by delegating to the stash this asker reads
 // through Ask — see responsesPrefixAsker.CoversSpan's own comment for why this cannot live only
 // on *sentStash.
-// AskAs implements components.RolePrefixAsker.
-func (p prefixAsker) AskAs(ctx context.Context, session, ask, role string) (string, components.PrefixUsage, error) {
-	body := p.stash.get(session)
-	if len(body) == 0 {
-		return "", components.PrefixUsage{}, components.ErrNoPrefix
-	}
-	reply, u, err := p.cli.CompletePrefixedAs(ctx, body, ask, role)
-	return reply, components.PrefixUsage(u), err
-}
-
 func (p prefixAsker) CoversSpan(session string, count int, hash string) bool {
 	return p.stash.CoversSpan(session, count, hash)
 }

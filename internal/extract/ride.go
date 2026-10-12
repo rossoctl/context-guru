@@ -78,13 +78,13 @@ func ParseRideDecisions(reply string) ([]RideDecision, bool) {
 }
 
 // GroundedExtract reports whether at least minFrac of the extract's substantive lines (trimmed,
-// at least 6 bytes, not the SUMMARY: line) occur verbatim in the original. An extract the model
+// at least 6 bytes, not a leading SUMMARY: line) occur verbatim in the original. An extract the model
 // wrote from memory rather than copied fails it. An extract with no substantive line fails too.
 func GroundedExtract(original, extract string, minFrac float64) bool {
 	var n, hit int
-	for _, ln := range strings.Split(extract, "\n") {
+	for i, ln := range strings.Split(extract, "\n") {
 		ln = strings.TrimSpace(ln)
-		if len(ln) < 6 || strings.HasPrefix(ln, "SUMMARY:") {
+		if len(ln) < 6 || (i == 0 && strings.HasPrefix(ln, "SUMMARY:")) {
 			continue
 		}
 		n++
