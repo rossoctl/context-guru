@@ -4,6 +4,9 @@
   "description": "Route OpenCode model traffic through a local context-guru proxy.",
   "type": "module",
   "main": "./index.js",
+  "scripts": {
+    "test": "node --test"
+  },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
