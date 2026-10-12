@@ -181,7 +181,8 @@ def cmd_home(api: Api, o: dict) -> list[str]:
         L.append(f"  {i}. {dollars(r['usd']):>8}  {r['short']}: {r['do']}")
     if not recs:
         L.append("  Nothing worth acting on right now.")
-    L += ["", "/context-guru:savings  /context-guru:cache  /context-guru:waste  /context-guru:session  /context-guru:doctor"]
+    L += ["", "/context-guru:savings  /context-guru:cache  /context-guru:waste  /context-guru:session  /context-guru:doctor",
+          "/context-guru:watch  /context-guru:timeline  /context-guru:chart  /context-guru:heatmap  /context-guru:fill"]
     return L
 
 

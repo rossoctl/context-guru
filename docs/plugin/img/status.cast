@@ -1,4 +1,4 @@
-{"version": 2, "width": 110, "height": 24, "title": "/context-guru:status"}
+{"version": 2, "width": 130, "height": 24, "title": "/context-guru:status"}
 [0.3, "o", "/"]
 [0.34, "o", "c"]
 [0.38, "o", "o"]
@@ -34,3 +34,4 @@
 [1.84, "o", "  3.   $23.31  Settings or tools changed mid-session: pick MCP servers and edit CLAUDE.md before you start\r\n"]
 [1.9, "o", "\r\n"]
 [1.96, "o", "/context-guru:savings  /context-guru:cache  /context-guru:waste  /context-guru:session  /context-guru:doctor\r\n"]
+[2.02, "o", "/context-guru:watch  /context-guru:timeline  /context-guru:chart  /context-guru:heatmap  /context-guru:fill\r\n"]

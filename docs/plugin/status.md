@@ -25,6 +25,7 @@ Yesterday    $5.10   $118.40
   3.   $23.31  Settings or tools changed mid-session: pick MCP servers and edit CLAUDE.md before you start
 
 /context-guru:savings  /context-guru:cache  /context-guru:waste  /context-guru:session  /context-guru:doctor
+/context-guru:watch  /context-guru:timeline  /context-guru:chart  /context-guru:heatmap  /context-guru:fill
 ```
 
 ## Reading it

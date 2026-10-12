@@ -96,6 +96,8 @@ Each command opens with one line that answers its question, then a small picture
 | `/context-guru:session` | What happened in this session? | In this session, cache misses cost you about $4.20 of the $13.50 billed (2 misses in 31 messages). |
 | `/context-guru:doctor` | Is it set up right? | All 7 checks pass. |
 
+Five more views draw in the terminal (`watch`, `timeline`, `chart`, `heatmap`, `fill`).
+
 Full guide, every status line state and troubleshooting: **[rossoctl.github.io/context-guru/plugin](https://rossoctl.github.io/context-guru/plugin/)**.
 
 ## Presets

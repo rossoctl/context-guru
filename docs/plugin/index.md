@@ -31,7 +31,7 @@ One command per question. Each opens with one line that answers it, then a small
 | `/context-guru:session` | What happened in this session? | [Session](session.md) |
 | `/context-guru:doctor` | Is it set up right? | [Doctor](doctor.md) |
 
-More views for the terminal (live watch, heatmap, charts) are on [Terminal views](terminal-views.md).
+Five more views draw in the terminal: `/context-guru:watch`, `timeline`, `chart`, `heatmap` and `fill`. They are on [Terminal views](terminal-views.md).
 
 ### Moved commands
 
