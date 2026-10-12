@@ -510,7 +510,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// parentKey is set on the FIRST request of a thread that continues another thread's prefix
 	// (a side request or a fork). The provider already holds that prefix, so the new thread reads
 	// the parent's boundary and clock instead of starting at -1. See modes.Tracker.TurnFrom.
-	parentKey := inheritKey(sessionID, tr.Thread)
+	threadParent, threadInherits := tr.Thread.InheritsFrom()
+	parentKey := inheritKey(sessionID, threadParent, threadInherits)
 	if cacheAware && !bypass {
 		// Messages present on the previous turn of this session are already committed
 		// to the provider cache; only the new tail is being cache-written this turn.
@@ -657,6 +658,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		Ctx:            ctx,
 		Session:        sessionID,
 		Thread:         tr.Thread.ID,
+		ThreadParent:   threadParent,
+		ThreadInherits: threadInherits,
 		Store:          st,
 		RawInput:       rawInput,
 		WireGroup:      wireGroups(slots),
@@ -1221,12 +1224,13 @@ func storeBoundary(st store.Store, key, parent string, n int) int {
 	return min(prevLen(st, parent), n)
 }
 
-// inheritKey is the tracker key of the thread th continues, or "" when th inherits from none.
-// Result.Inherits is set only on a thread's first request, which is the one request whose own
-// key has no record yet.
-func inheritKey(session string, th thread.Result) string {
-	if from, ok := th.InheritsFrom(); ok {
-		return thread.Key(session, from)
+// inheritKey is the tracker key of the parent thread (thread.Result.InheritsFrom), or "" when the
+// request inherits from none. Inherits is set only on a thread's first request, which is the one
+// request whose own key has no record yet. The same two values go on Ctx.ThreadParent and
+// Ctx.ThreadInherits, so components and this fallback agree on the parent.
+func inheritKey(session, parent string, inherits bool) string {
+	if inherits {
+		return thread.Key(session, parent)
 	}
 	return ""
 }

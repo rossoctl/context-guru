@@ -400,7 +400,15 @@ type Ctx struct {
 	// requests, outside the Store's session keys, keys it by thread.Key(Session, Thread) — each
 	// thread is its own conversation with its own provider cache entry. See internal/thread.
 	Thread string
-	Store  store.Store
+	// ThreadInherits says this request starts a NEW thread that continues another thread's prefix
+	// (a Claude Code side request, a fork), and ThreadParent names that thread: "" with
+	// ThreadInherits true means the parent is the primary (main) thread. internal/thread sets it
+	// only on the FIRST request of a new thread, the one request whose own per-thread state is
+	// still empty, so a component may fall back to thread.Key(Session, ThreadParent) there and
+	// nowhere else. apply's cached boundary does exactly that (modes.Tracker.TurnFrom).
+	ThreadParent   string
+	ThreadInherits bool
+	Store          store.Store
 	// DisallowCountChange prevents transcript-restructuring components from
 	// running when a host cannot safely write their output back to its wire shape.
 	DisallowCountChange bool

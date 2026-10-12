@@ -69,3 +69,49 @@ func TestThreadOfPanicFailsOpen(t *testing.T) {
 		t.Fatalf("thread %+v, pipeline saw %q", res.Thread, seen)
 	}
 }
+
+type parentSpy struct{ seen *[]components.Ctx }
+
+func (parentSpy) Name() string                 { return "parentspy" }
+func (parentSpy) Enabled(*components.Ctx) bool { return true }
+func (s parentSpy) Reformat(_ *bschemas.BifrostChatRequest, _ *components.Report, c *components.Ctx) error {
+	*s.seen = append(*s.seen, *c)
+	return nil
+}
+
+// Ctx.ThreadParent and Ctx.ThreadInherits carry thread.Result.InheritsFrom to components, on both
+// wire envelopes: set on the FIRST request of a side thread (parent = the primary thread, ""),
+// and clear on the main thread's own requests.
+func TestCtxCarriesTheParentThreadOnBothEnvelopes(t *testing.T) {
+	for _, tc := range []struct {
+		name, api, field, model string
+	}{
+		{"messages", "", "messages", "claude-sonnet-5"},
+		{"responses", "responses", "input", "gpt-5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen []components.Ctx
+			pipe := components.NewPipeline([]components.Component{parentSpy{&seen}}, nil)
+			st, threads := store.NewMemory(store.Options{}), thread.New()
+			const tools = `,"tools":[{"name":"Bash","description":"run","input_schema":{"type":"object"}}]`
+			for _, body := range []string{
+				`{"model":"` + tc.model + `","` + tc.field + `":[{"role":"user","content":"fix it"}]` + tools + `}`,
+				`{"model":"` + tc.model + `","` + tc.field + `":[{"role":"user","content":"fix it"},{"role":"user","content":"title?"}]}`,
+			} {
+				b := []byte(body)
+				BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, API: tc.api, Body: b, Session: "s",
+					ThreadOf: func(s string) thread.Result { return threads.Resolve(s, "", b, false) }})
+			}
+			if len(seen) != 2 {
+				t.Fatalf("pipeline ran %d times, want 2", len(seen))
+			}
+			if seen[0].ThreadInherits || seen[0].ThreadParent != "" {
+				t.Errorf("main thread: ThreadInherits=%v ThreadParent=%q, want false, \"\"", seen[0].ThreadInherits, seen[0].ThreadParent)
+			}
+			if side := seen[1]; side.Thread == thread.Primary || !side.ThreadInherits || side.ThreadParent != thread.Primary {
+				t.Errorf("side request: Thread=%q ThreadInherits=%v ThreadParent=%q, want its own thread inheriting from the primary",
+					side.Thread, side.ThreadInherits, side.ThreadParent)
+			}
+		})
+	}
+}
