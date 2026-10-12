@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -178,7 +179,7 @@ func TestTimingIsMeasuredFromRequestStart(t *testing.T) {
 // K bounds one idle span, and the second ping's deadline is measured from the FIRST ping's
 // start — a ping is itself a request that reads the entry, so it restarts the lifetime.
 func TestMaxPingsAndPingRestartsTheClock(t *testing.T) {
-	k, _, clock := testKeeper(t)
+	k, fd, clock := testKeeper(t)
 	start := clock.now()
 	recordOne(t, k, kaPolicy(), kaBody, start)
 
@@ -193,9 +194,14 @@ func TestMaxPingsAndPingRestartsTheClock(t *testing.T) {
 	if n := k.Sweep(start.Add(560 * time.Second)); n != 1 {
 		t.Fatalf("second ping did not fire (%d)", n)
 	}
-	// K = 2.
+	// K = 2. By 1000s the entry has also spent MaxPings and is past Idle since the second
+	// ping's own start (560s + 280s = 840s < 1000s), so Sweep's eager-drop branch removes it —
+	// and must release the held credential there, not just at the hard deadline.
 	if n := k.Sweep(start.Add(1000 * time.Second)); n != 0 {
 		t.Fatalf("fired a third ping; K is 2 (%d)", n)
+	}
+	if got := fd.holds(sess1); got != 0 {
+		t.Errorf("credential still held %d time(s) after Sweep's eager drop", got)
 	}
 }
 
@@ -608,6 +614,47 @@ func TestSessionBoundEvicts(t *testing.T) {
 	}
 	if got := k.Stats().Live; got > MaxSessions {
 		t.Fatalf("tracking %d sessions, bound is %d", got, MaxSessions)
+	}
+}
+
+// evictLocked deletes the entry whose ping is least imminent, and that is the only removal
+// path reaching it — so it must release the credential right there, or an evicted entry's
+// Hold would never be matched by a Release.
+func TestEvictionReleasesTheEvictedEntriesCredentials(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	pol := kaPolicy()
+	var keys []Key
+	for i := 0; i < MaxSessions+10; i++ {
+		key := Key{Tenant: "t1", Session: "sess-" + strconv.Itoa(i)}
+		keys = append(keys, key)
+		at := clock.now().Add(time.Duration(i) * time.Second)
+		// Two records per key: turn 0 is never pingable and never held; turn 1 is, and is
+		// Held — the same pattern recordOne/rec use for every other pingable-entry test.
+		rec(k, pol, key, at.Add(-time.Second), kaBody, http.StatusOK, Usage{CacheRead: 48576}, true)
+		rec(k, pol, key, at, kaBody, http.StatusOK, Usage{CacheRead: 48576}, true)
+	}
+	if got := k.Stats().Live; got != MaxSessions {
+		t.Fatalf("tracking %d sessions, bound is %d", got, MaxSessions)
+	}
+	var survivors, evicted int
+	for _, key := range keys {
+		if _, ok := k.Entry(key); ok {
+			survivors++
+			if got := fd.holds(key); got != 1 {
+				t.Errorf("%v: surviving entry held %d time(s), want 1", key, got)
+			}
+			continue
+		}
+		evicted++
+		if got := fd.holds(key); got != 0 {
+			t.Errorf("%v: evicted entry still held %d time(s)", key, got)
+		}
+	}
+	if survivors != MaxSessions {
+		t.Fatalf("survivors = %d, want %d", survivors, MaxSessions)
+	}
+	if evicted != 10 {
+		t.Fatalf("evicted = %d, want 10", evicted)
 	}
 }
 
