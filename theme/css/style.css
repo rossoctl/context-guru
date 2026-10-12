@@ -969,3 +969,7 @@ html.js .reveal.in { opacity: 1; transform: none; }
   .footer-inner { flex-direction: column; text-align: center; }
   .announce-inner { padding: 0.5rem 1rem; font-size: 0.79rem; }
 }
+
+/* Screenshots published as a dark and a light pair: show the one that matches the page theme. */
+html[data-theme="light"] img[src$="#only-dark"],
+html:not([data-theme="light"]) img[src$="#only-light"] { display: none; }

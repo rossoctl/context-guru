@@ -33,3 +33,28 @@ func TestCacheStateServesTheLastCacheTouch(t *testing.T) {
 		t.Errorf("unknown session = %v, want none", b)
 	}
 }
+
+func TestCacheStateListsThreadsAndTheResponseEnd(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	main := mkEvent(now-100_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+	main.Status, main.CacheRead, main.UpstreamMs = 200, 5000, 20_000
+	sub := mkEvent(now-40_000, "s1", "aws/claude-haiku-5", 1000, 800)
+	sub.Status, sub.ThreadID, sub.CacheRead, sub.CacheWrite = 200, "a:X", 300, 0
+	old := mkEvent(now-3*3600*1000, "s1", "aws/claude-haiku-5", 1000, 800)
+	old.Status, old.ThreadID = 200, "a:old"
+	seed(t, rec, main, sub, old)
+
+	_, body := get(t, a, "/api/cachestate?session=s1", "")
+	ths, _ := body["threads"].([]any)
+	if len(ths) != 2 {
+		t.Fatalf("threads = %v, want main + one subagent (the 3h-old one is finished work)", body["threads"])
+	}
+	first := ths[0].(map[string]any)
+	if first["id"] != "a:X" || first["main"] != false {
+		t.Errorf("most recent thread first: got %v", first)
+	}
+	if last := ths[1].(map[string]any); last["main"] != true || last["end_ts"].(float64) != float64(now-80_000) {
+		t.Errorf("main thread end_ts must be start + upstream ms: %v", last)
+	}
+}

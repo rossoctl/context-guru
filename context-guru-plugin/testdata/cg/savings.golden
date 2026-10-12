@@ -1,0 +1,13 @@
+Saved $41.20 in 7 days, net of Context Guru's own spend (4.6% of the $898.05 the same work would have cost).
+
+✓ Saved   (vs the same requests without Context Guru, at gateway prices)  ▇▁▁█▇▇█
+  Compaction                      $33.90  ████████████
+  Keep-alive pings                 $6.30  ██░░░░░░░░░░
+  Tool filtering                   $7.85  ███░░░░░░░░░
+  Context Guru's own model spend  -$4.10  ░░░░░░░░░░░░
+
+≈ Estimated   (spend you could still avoid; rows overlap, do not add them)
+  You paused longer than the cache lasts, 214 times  $107.79  measured
+  Settings or tools changed mid-session               $23.31  measured
+
+More: /context-guru:savings details
