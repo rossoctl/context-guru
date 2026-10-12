@@ -1,0 +1,13 @@
+Carried but never called in 14 days: $37.70  (observed: declaration tokens re-read each turn, priced at the tier each turn billed)
+  Removing the 6 below saves about $82.88/month if your usage stays the same  [estimate]
+
+  MCP server   playwright     9k/turn  $18.40                             claude mcp remove playwright
+  MCP server   sentry         3k/turn   $7.10  last used 62d ago          claude mcp remove sentry
+  MCP server   figma          6k/turn   $6.20  used 4d ago - check first  claude mcp remove figma
+  client tool  NotebookEdit   1k/turn   $3.30                             claude --disallowedTools "NotebookEdit"
+  skill        brand-voice   420/turn   $1.60                             set "skillOverrides": {"brand-voice": "off"} in ~/.claude/settings.json
+  skill        pdf           310/turn   $1.10  last used 40d ago          set "skillOverrides": {"pdf": "off"} in ~/.claude/settings.json
+
+Never listed: Context Guru's own components and Claude Code's built-in tools (carrying the unused built-ins costs $2.40; you cannot remove them).
+'client tool' = a tool declared by the agent that is neither MCP nor a skill (usually one of Claude Code's own newer tools); --disallowedTools hides it for that run.
+A server removal takes effect in the next session. `claude mcp remove` takes -s user|project|local; `claude mcp list` shows where each is defined.
