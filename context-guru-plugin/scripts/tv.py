@@ -290,10 +290,11 @@ def view_fill(api, o, e: Env) -> list[str]:
     n = min(e.width - 8, 60)
     base_f = min(base / win, frac)
     fx, cv = ("=", "#") if e.ascii else ("▒", "█")
-    L = [bl, "", e.paint(kindc, e.stack([(base_f, fx), (frac - base_f, cv)], n)) + f" {pct}",
-         f"{fx} fixed start (instructions and tools)   {cv} conversation so far   {e.g['empty']} free"]
-    L += [""] + T.cols([["Fixed start", f"{base / win * 100:.0f}%"], ["Conversation", f"{(cur - base) / win * 100:.0f}%"],
-                        ["Free", f"{(1 - frac) * 100:.0f}%"]], "lr")
+    bar = e.stack([(base_f, fx), (frac - base_f, cv)], n)
+    used = bar.rstrip(e.g["empty"])
+    L = [bl, "", e.paint(kindc, used) + e.paint("dim", bar[len(used):]) + f" {pct}", ""]
+    L += T.cols([[fx, "Fixed start (instructions and tools)", f"{base / win * 100:.0f}%"], [cv, "Conversation so far", f"{(cur - base) / win * 100:.0f}%"],
+                 [e.g["empty"], "Free", f"{(1 - frac) * 100:.0f}%"]], "llr")
     if frac >= 0.8:
         L += ["", f"{e.paint('warn', e.g['up'])} Nearly full: compact before a long pause, so the next turn does not rewrite everything."]
     return L
