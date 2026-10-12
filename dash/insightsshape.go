@@ -192,10 +192,24 @@ func ShapeInsights(rep *ToolReport, opt InsightsOptions) *InsightsDoc {
 		}
 
 		it := InsightsItem{
-			Kind: r.Kind, Name: r.Name, Server: r.Server, Tokens: r.Tokens,
-			Reads: r.UnusedReads, Priced: r.Priced, Invoked: invoked, Calls: r.Calls,
-			Scope: scope, Command: r.Removal.Command, Settings: r.Removal.Settings,
+			Kind: r.Kind, Name: r.Name, Server: r.Server, Invoked: invoked, Calls: r.Calls,
 		}
+		if invoked {
+			// AN INVOKED ITEM CARRIES NO COST COLUMNS, and that is not a gap. Every cost field
+			// here means "spent carrying this for nothing": unused reads, the dollars they cost,
+			// the weight that bought nothing. None of those figures exists for a capability that
+			// was used, and filling them with its declared weight would put a real-looking price
+			// on something that earned its place — the inventory would then be wrong about the
+			// one thing it claims to measure.
+			//
+			// It carries a verdict and a reason, because "why is this not on the list" is a fair
+			// question, and no scope, because removal was never on offer.
+			it.Verdict, it.Why = verdictFor(r, ScopeNone, true, false)
+			doc.Items = append(doc.Items, it)
+			continue
+		}
+		it.Tokens, it.Reads, it.Priced = r.Tokens, r.UnusedReads, r.Priced
+		it.Scope, it.Command, it.Settings = scope, r.Removal.Command, r.Removal.Settings
 		if r.Priced {
 			it.USD = r.UnusedUSD
 		}
@@ -207,7 +221,7 @@ func ShapeInsights(rep *ToolReport, opt InsightsOptions) *InsightsDoc {
 		if d, ok := opt.Descriptions[r.Name]; ok && d != "" {
 			it.DescFull, it.Desc, it.DescKnown = d, summarizeDesc(d), true
 		}
-		it.Verdict, it.Why = verdictFor(r, scope, invoked, opt.Qualified[r.Name])
+		it.Verdict, it.Why = verdictFor(r, scope, false, opt.Qualified[r.Name])
 		doc.Items = append(doc.Items, it)
 
 		if scope == ScopeNone {
