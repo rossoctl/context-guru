@@ -53,6 +53,7 @@ type ExtractRide struct {
 	expectRemoval                                    float64
 	measuredRemoval                                  bool
 	gateMargin                                       float64
+	forceApply                                       bool
 	remMu                                            sync.Mutex
 	remOffered, remRemoved                           float64 // tokens, over all asks of this instance
 	applyCold, earlyApply, calibrated, anchor        bool
@@ -85,6 +86,7 @@ type extractRideConfig struct {
 	Anchor             bool    `yaml:"anchor"`
 	MeasuredRemoval    *bool   `yaml:"measured_removal"`
 	GateMargin         float64 `yaml:"gate_margin"`
+	ForceApply         bool    `yaml:"force_apply"`
 	RemovalPrior       float64 `yaml:"removal_prior"`
 	ExtractMaxRatio    float64 `yaml:"extract_max_ratio"`
 	MinVerbatim        float64 `yaml:"min_verbatim"`
@@ -174,6 +176,7 @@ func newExtractRide(raw []byte) (components.Component, error) {
 	if cfg.GateMargin > 0 {
 		e.gateMargin = cfg.GateMargin
 	}
+	e.forceApply = cfg.ForceApply
 	if cfg.RemovalPrior > 0 && cfg.RemovalPrior <= 1 {
 		e.expectRemoval = cfg.RemovalPrior
 	}
@@ -770,6 +773,8 @@ func init() {
 			Hint: "Use a running estimate of the share of offered mass the model really removes (prior removal_prior) in the pre-ask economic test, instead of the fixed expected_removal."},
 		{Key: "gate_margin", Type: components.FieldFloat, Min: 0,
 			Hint: "Ask only when the expected net exceeds (1 + gate_margin) times the ask's own price, so a call is made when it is clearly positive."},
+		{Key: "force_apply", Type: components.FieldBool,
+			Hint: "Analysis only: apply every held decision at once, whatever it costs (the net a decision would have if applied)."},
 		{Key: "removal_prior", Type: components.FieldFloat,
 			Hint: "Prior for measured_removal (0 = expected_removal). Worth 20,000 offered tokens when blended with measurements."},
 		{Key: "extract_max_ratio", Type: components.FieldFloat, Default: 0.5,
@@ -855,6 +860,9 @@ func (e *ExtractRide) settle(req *bschemas.BifrostChatRequest, rep *components.R
 		return 0
 	}
 	reason := "cold"
+	if e.forceApply {
+		rewrite = true // analysis knob: apply every held decision as soon as it exists
+	}
 	if !rewrite {
 		// Latest-first prefixes: an older edit makes the rewrite longer, so the best set may be a suffix.
 		ord := append([]rideHeld(nil), held...)
