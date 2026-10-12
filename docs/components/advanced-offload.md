@@ -27,8 +27,11 @@ triggers it and in the answer shape.
   (pending candidate tokens), `trigger_pending` (pending candidate count), `trigger_fill_min` /
   `trigger_fill_max` (share of the model window), `trigger_pre_expiry` (the pre-expiry window). With no
   size/pending/fill key set, 4,000 tokens or 3 candidates apply.
-- `econ: true` (default) applies only the removals whose saving, credited for at most `horizon_turns`,
-  repays the cache rewrite they force; it is skipped in the pre-expiry window.
+- `econ: true` (default) tests the ask before it is made: a share of the pending mass (`expected_removal`,
+  0.6) is credited for at most `horizon_turns` turns, against one write of the whole conversation that
+  remains (an edit anywhere in history leaves only the system prompt readable when the client marks only the
+  last message) and the ask's own price. After the answer the same test is applied to the removals actually
+  chosen; all or none are applied. Skipped in the pre-expiry window.
 - `instruction_role: auto` sends the instruction as a mid-conversation system message on models whose
   route accepted it in testing, and as a final user turn otherwise. `user` and `system` force a channel; a
   system message is only sent when the stored body ends on a user message.

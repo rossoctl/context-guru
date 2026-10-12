@@ -46,6 +46,7 @@ type ExtractRide struct {
 	role                                             string // auto | user | system
 	econ                                             bool
 	horizon                                          int
+	expectRemoval                                    float64
 	maxRatio, minVerbatim                            float64
 	allowThinkingStrip                               bool
 	mode                                             markerMode
@@ -68,6 +69,7 @@ type extractRideConfig struct {
 	InstructionRole    string  `yaml:"instruction_role"`
 	Econ               *bool   `yaml:"econ"`
 	HorizonTurns       int     `yaml:"horizon_turns"`
+	ExpectedRemoval    float64 `yaml:"expected_removal"`
 	ExtractMaxRatio    float64 `yaml:"extract_max_ratio"`
 	MinVerbatim        float64 `yaml:"min_verbatim"`
 	AllowThinkingStrip bool    `yaml:"allow_thinking_strip"`
@@ -137,6 +139,10 @@ func newExtractRide(raw []byte) (components.Component, error) {
 	}
 	if cfg.PreExpirySeconds > 0 {
 		e.preExpiry = time.Duration(cfg.PreExpirySeconds) * time.Second
+	}
+	e.expectRemoval = cfg.ExpectedRemoval
+	if e.expectRemoval <= 0 || e.expectRemoval > 1 {
+		e.expectRemoval = 0.6
 	}
 	if e.maxRatio <= 0 || e.maxRatio >= 1 {
 		e.maxRatio = 0.5
@@ -321,6 +327,17 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 		rep.Gate("ride_no_asker")
 		return keys, nil
 	}
+	if e.econ && !preExpiry {
+		// The ask itself must be expected to repay: a fraction of the pending mass is removed, the
+		// removal is credited for at most horizon turns, and the price is one rewrite of the whole
+		// conversation plus the ask (a read of the prefix, the instruction and the answer), all in
+		// cache-read equivalents.
+		saved := int(e.expectRemoval * float64(mass))
+		if e.rideNet(req, c, saved)-e.askCostEquiv(req) <= 0 {
+			rep.Gate("ride_ask_not_repaid")
+			return keys, nil
+		}
+	}
 	if !e.allowThinkingStrip && e.profiles != nil && e.profiles.thinkingLastTurnOnly(c.ModelName) &&
 		thinkingWouldBeStripped(req.Input) {
 		rep.Gate("ride_thinking_would_strip")
@@ -450,34 +467,48 @@ func containsRemoval(s []rideRemoval, k int) bool {
 	return false
 }
 
-// affordable keeps the latest-first prefix of rs whose net, saved*min(turns, horizon) - 11.5*rewritten
-// (cache-read equivalents), is highest, and nothing when no prefix is positive. The horizon cap is
-// the difference from the sweep's selectAffordableDrops, which credits every turn until the window
-// fills: a figure that can exceed the number of turns a session lasts. Without a known window it
-// keeps everything.
-func (e *ExtractRide) affordable(req *bschemas.BifrostChatRequest, c *components.Ctx,
-	cands []sweepCand, rs []rideRemoval) []rideRemoval {
+// rideNet is the net benefit, in cache-read equivalents, of removing `saved` tokens: each later turn
+// reads them no more, credited for at most horizon turns (the sweep's variant credits every turn until
+// the window fills, which can exceed the turns a session lasts), against one write of the whole
+// conversation that remains. The write covers everything after the system prompt, not only what follows
+// the edit: with a breakpoint on the last message only, an edit anywhere leaves just the head readable.
+func (e *ExtractRide) rideNet(req *bschemas.BifrostChatRequest, c *components.Ctx, saved int) float64 {
+	if saved <= 0 {
+		return 0
+	}
+	reqNow := schema.MessagesTokens(req)
+	after := reqNow - saved
+	if after < 1 {
+		after = 1
+	}
+	turns := e.horizon
+	if c != nil && c.CtxWindow > 0 {
+		if t := turnsRemainingAfter(reqNow, after, modelTurns(req), c.CtxWindow); t < turns {
+			turns = t
+		}
+	}
+	return float64(saved)*float64(turns) - cacheWriteX*float64(after)
+}
 
-	if c == nil || c.CtxWindow <= 0 {
-		return rs
+// askCostEquiv prices one ask in cache-read equivalents: a read of the conversation, the instruction
+// and inventory at fresh price, and about 250 output tokens at 5x fresh.
+func (e *ExtractRide) askCostEquiv(req *bschemas.BifrostChatRequest) float64 {
+	return float64(schema.MessagesTokens(req)) + 10*(600+250*5)
+}
+
+// affordable applies all of rs or none: the rewrite is paid once for the whole batch, so the net grows
+// with the mass removed and a subset is never better than the set.
+func (e *ExtractRide) affordable(req *bschemas.BifrostChatRequest, c *components.Ctx,
+	_ []sweepCand, rs []rideRemoval) []rideRemoval {
+
+	saved := 0
+	for _, r := range rs {
+		saved += r.saved
 	}
-	ord := append([]rideRemoval(nil), rs...)
-	sort.Slice(ord, func(a, b int) bool { return cands[ord[a].k].i > cands[ord[b].k].i })
-	best, bestK, saved, shallowest := 0.0, 0, 0, 0
-	for n := 1; n <= len(ord); n++ {
-		saved += ord[n-1].saved
-		if i := cands[ord[n-1].k].i; n == 1 || i < shallowest {
-			shallowest = i
-		}
-		_, rewritten, turns := prefixRewriteNet(req, saved, shallowest, c)
-		if turns > e.horizon {
-			turns = e.horizon
-		}
-		if net := float64(saved)*float64(turns) - cacheWriteX*float64(rewritten); net > best {
-			best, bestK = net, n
-		}
+	if e.rideNet(req, c, saved) <= 0 {
+		return nil
 	}
-	return ord[:bestK]
+	return rs
 }
 
 type rideCall struct {
@@ -614,6 +645,8 @@ func init() {
 			Hint: "Apply only the removals that repay the cache rewrite they force, within horizon_turns. Skipped in the pre-expiry window."},
 		{Key: "horizon_turns", Type: components.FieldInt, Default: 30, Min: 1,
 			Hint: "Turns a removal is credited for in the affordability test."},
+		{Key: "expected_removal", Type: components.FieldFloat, Default: 0.6,
+			Hint: "Share of the pending candidate mass the pre-ask economic test assumes will be removed."},
 		{Key: "extract_max_ratio", Type: components.FieldFloat, Default: 0.5,
 			Hint: "An extract must be at most this share of the original's tokens."},
 		{Key: "min_verbatim", Type: components.FieldFloat, Default: 0.8,

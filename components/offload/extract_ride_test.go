@@ -221,18 +221,27 @@ func TestRideOffersOnlyWhatThePrefixHolds(t *testing.T) {
 	}
 }
 
-func TestRideEconPrunesARemovalThatDoesNotRepayItsRewrite(t *testing.T) {
+func TestRideEconDeclinesAnAskThatCannotRepayItself(t *testing.T) {
 	asker := &rideAsker{script: map[int]string{0: `"action":"park"`}}
 	asker.cacheRead = 30000
-	e := newRide(t, "econ: true\nhorizon_turns: 1\nmin_inventory: 1\n")
 	req := rideReq(4)
-	rep := &components.Report{Component: "extract_llm_ride"}
-	c := rideCtx("ride-g", asker, store.NewMemory(store.Options{MaxEntries: 400}))
-	c.MaxCachedIdx = len(req.Input) - 1
-	e.Offload(req, rep, c)
-	if rep.Gates["ride_unaffordable_pruned"] == 0 || strings.Contains(schema.MessageText(req.Input[1]), "<<cg:") {
-		t.Errorf("a 1-turn horizon cannot repay rewriting the early prefix: %v", rep.Gates)
+	for _, tc := range []struct {
+		name, yaml string
+		asked      bool
+	}{
+		{"one-turn horizon", "econ: true\nhorizon_turns: 1\nmin_inventory: 1\n", false},
+		{"thirty-turn horizon", "econ: true\nhorizon_turns: 30\nmin_inventory: 1\n", true},
+	} {
+		asker.calls = 0
+		rep := &components.Report{Component: "extract_llm_ride"}
+		c := rideCtx("ride-g-"+tc.name, asker, store.NewMemory(store.Options{MaxEntries: 400}))
+		c.MaxCachedIdx = len(req.Input) - 1
+		newRide(t, tc.yaml).Offload(rideReq(4), rep, c)
+		if (asker.calls == 1) != tc.asked || (!tc.asked && rep.Gates["ride_ask_not_repaid"] != 1) {
+			t.Errorf("%s: asks %d gates %v", tc.name, asker.calls, rep.Gates)
+		}
 	}
+	_ = req
 }
 
 func TestRideConfigRejectsBadRole(t *testing.T) {
