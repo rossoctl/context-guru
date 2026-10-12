@@ -507,6 +507,10 @@ type Ctx struct {
 	ModelName string
 	// ToolsHash identifies the request's declared tool set (a hash of the raw `tools` array, empty when there is none). A change between two requests of a thread rewrites the cache from the tools on, so a component may treat it as a moment when a rewrite is free.
 	ToolsHash string
+	// LastMarkTTL is the TTL tier ("5m" or "1h") of the last cache_control mark in prompt order (tools,
+	// system, messages) on the raw request, "" when it has none. A mark a component adds must not have a
+	// shorter TTL than any mark after it, since the provider rejects a 1h mark that follows a 5m one.
+	LastMarkTTL string
 	// SelfRates are the per-token rates for the model a component would call itself — the
 	// incoming model's, since that is what `source: incoming` uses. Zero when unknown.
 	SelfRates TokenRates

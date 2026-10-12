@@ -682,6 +682,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		PrevBilledInput: prevBilledInput(st, sessionID),
 		ModelName:       gjson.GetBytes(body, "model").String(),
 		ToolsHash:       toolsHash(body),
+		LastMarkTTL:     lastMarkTTL(body),
 		SelfRates:       o.SelfRates,
 		RatesFor:        o.RatesFor,
 		CacheAware:      cacheAware,
@@ -1976,4 +1977,33 @@ func toolsHash(body []byte) string {
 	}
 	h := sha256.Sum256([]byte(t.Raw))
 	return hex.EncodeToString(h[:6])
+}
+
+// lastMarkTTL returns the TTL tier of the last cache_control mark in prompt order (tools, system,
+// messages) of an Anthropic-shaped body: "1h", "5m" (no ttl field), or "" when there is none.
+func lastMarkTTL(body []byte) string {
+	tier := func(m gjson.Result) string {
+		if m.Get("ttl").String() == "1h" {
+			return "1h"
+		}
+		return "5m"
+	}
+	msgs := gjson.GetBytes(body, "messages").Array()
+	for i := len(msgs) - 1; i >= 0; i-- {
+		blocks := msgs[i].Get("content").Array()
+		for j := len(blocks) - 1; j >= 0; j-- {
+			if m := blocks[j].Get("cache_control"); m.Exists() {
+				return tier(m)
+			}
+		}
+	}
+	for _, key := range []string{"system", "tools"} {
+		items := gjson.GetBytes(body, key).Array()
+		for i := len(items) - 1; i >= 0; i-- {
+			if m := items[i].Get("cache_control"); m.Exists() {
+				return tier(m)
+			}
+		}
+	}
+	return ""
 }

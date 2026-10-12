@@ -260,7 +260,7 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 			rep.Skipped = true
 		}
 		if e.anchor {
-			rideRecordEnd(c, len(req.Input))
+			rideRecordEnd(c, req)
 		}
 	}()
 
@@ -902,7 +902,7 @@ func (e *ExtractRide) settle(req *bschemas.BifrostChatRequest, rep *components.R
 					first = h.I
 				}
 			}
-			if idx, ok := e.anchorAt(req, c, first); ok && markBreakpoint(&req.Input[idx]) {
+			if idx, ok := e.anchorAt(req, c, first); ok && markBreakpoint(&req.Input[idx], c.LastMarkTTL) {
 				rep.Event("ride_anchor_placed")
 			}
 		}
@@ -912,36 +912,66 @@ func (e *ExtractRide) settle(req *bschemas.BifrostChatRequest, rep *components.R
 }
 
 func rideEndsKey(c *components.Ctx) string {
-	return store.SweepKeepPrefix + "ride-ends:" + thread.Key(c.Session, c.Thread)
+	return store.SweepKeepPrefix + rideStatePrefix + "ends:" + thread.Key(c.Session, c.Thread)
 }
 
-// rideWasRequestEnd reports whether an earlier request of this thread ended at message index i, i.e.
-// whether a breakpoint on the last message wrote a cache entry exactly there.
-func rideWasRequestEnd(c *components.Ctx, i int) bool {
-	var ends []int
+// rideEnd is a cache entry a request left at its last message: the hash of the forwarded prefix it
+// described (every field of every message, cache marks excluded) and when it was written or last read.
+type rideEnd struct {
+	H string `json:"h"`
+	T int64  `json:"t"`
+}
+
+// rideNow is the clock; a test replaces it. rideEntryTTL is how long an entry is trusted: the provider
+// keeps one five minutes after its last use, with a margin for skew.
+var rideNow = time.Now
+
+const rideEntryTTL = 270 * time.Second
+
+func rideLoadEnds(c *components.Ctx) map[int]rideEnd {
+	ends := map[int]rideEnd{}
 	if b, ok := c.Store.Get(rideEndsKey(c)); ok {
 		_ = json.Unmarshal(b, &ends)
 	}
-	for _, x := range ends {
-		if x == i {
-			return true
-		}
-	}
-	return false
+	return ends
 }
 
-// rideRecordEnd remembers this request's last message index (the last 64).
-func rideRecordEnd(c *components.Ctx, n int) {
-	var ends []int
-	if b, ok := c.Store.Get(rideEndsKey(c)); ok {
-		_ = json.Unmarshal(b, &ends)
+// rideEndValid reports whether an earlier request of this thread left a live cache entry exactly at
+// message e whose prefix is byte-for-byte what req carries now.
+func rideEndValid(c *components.Ctx, req *bschemas.BifrostChatRequest, e int) bool {
+	en, ok := rideLoadEnds(c)[e]
+	if !ok || e < 0 || e >= len(req.Input) || rideNow().UnixMilli()-en.T >= rideEntryTTL.Milliseconds() {
+		return false
 	}
-	if len(ends) > 0 && ends[len(ends)-1] == n-1 {
+	return en.H == components.SpanHash(req.Input[:e+1])
+}
+
+// rideRecordEnd remembers the entry this request leaves at its last message. A request that rewrote the
+// cache (cold) found none of the earlier entries alive, so they are forgotten, not trusted.
+func rideRecordEnd(c *components.Ctx, req *bschemas.BifrostChatRequest) {
+	if len(req.Input) == 0 {
 		return
 	}
-	ends = append(ends, n-1)
+	ends := rideLoadEnds(c)
+	now := rideNow().UnixMilli()
+	if c.ColdCache {
+		ends = map[int]rideEnd{}
+	}
+	for e, en := range ends {
+		if e >= len(req.Input) || now-en.T >= rideEntryTTL.Milliseconds() {
+			delete(ends, e)
+		}
+	}
+	last := len(req.Input) - 1
+	ends[last] = rideEnd{H: components.SpanHash(req.Input), T: now}
 	if len(ends) > 64 {
-		ends = ends[len(ends)-64:]
+		lo := last
+		for e := range ends {
+			if e < lo {
+				lo = e
+			}
+		}
+		delete(ends, lo)
 	}
 	if b, err := json.Marshal(ends); err == nil {
 		c.Store.Put(rideEndsKey(c), b)
@@ -967,13 +997,11 @@ func (e *ExtractRide) anchorAt(req *bschemas.BifrostChatRequest, c *components.C
 		m.Content.ContentBlocks[len(m.Content.ContentBlocks)-1].CacheControl != nil {
 		return 0, false
 	}
-	if !rideWasRequestEnd(c, first-2) {
+	if !rideEndValid(c, req, first-2) {
 		return 0, false
 	}
-	if b, ok := c.Store.Get(rideApplyEndKey(c)); ok {
-		if end, err := strconv.Atoi(string(b)); err == nil && first-2 < end {
-			return 0, false
-		}
+	if c.LastMarkTTL == "" && c.CacheTTLMs >= 3_600_000 {
+		return 0, false // a one-hour request whose last mark we cannot read: a 5m anchor could precede 1h marks
 	}
 	visible := 0
 	for i := range req.Input {
@@ -996,9 +1024,17 @@ func (e *ExtractRide) anchorAt(req *bschemas.BifrostChatRequest, c *components.C
 	return idx, true
 }
 
-func markBreakpoint(m *bschemas.ChatMessage) bool {
+// markBreakpoint puts the anchor mark on m. Its TTL is that of the last mark after it (the client's, on the
+// last message), so a one-hour mark never follows a five-minute one; marks before it are the client's
+// and, if the request is valid, at least as long.
+func markBreakpoint(m *bschemas.ChatMessage, lastTTL string) bool {
 	last := &m.Content.ContentBlocks[len(m.Content.ContentBlocks)-1]
-	last.CacheControl = &bschemas.CacheControl{Type: bschemas.CacheControlTypeEphemeral}
+	cc := &bschemas.CacheControl{Type: bschemas.CacheControlTypeEphemeral}
+	if lastTTL == "1h" {
+		ttl := "1h"
+		cc.TTL = &ttl
+	}
+	last.CacheControl = cc
 	return true
 }
 

@@ -409,7 +409,7 @@ func TestRideAnchorMarksTheAssistantTurnBeforeTheFirstEdit(t *testing.T) {
 	rep := &components.Report{Component: "extract_llm_ride"}
 	st0 := store.NewMemory(store.Options{MaxEntries: 400})
 	c := coldCtx("anchor-a", asker, st0, false)
-	st0.Put(rideEndsKey(c), []byte("[0,2,4,6]")) // earlier requests ended at these messages
+	seedEnds(c, anchoredReq(4)) // earlier requests ended at messages 0, 2, 4 and 6
 	newRide(t, cfg).Offload(req, rep, c)
 	first := -1
 	for i := range req.Input {
@@ -425,7 +425,7 @@ func TestRideAnchorMarksTheAssistantTurnBeforeTheFirstEdit(t *testing.T) {
 	req = anchoredReq(4)
 	st1 := store.NewMemory(store.Options{MaxEntries: 400})
 	c = coldCtx("anchor-b", asker, st1, false)
-	st1.Put(rideEndsKey(c), []byte("[0,2,4,6]"))
+	seedEnds(c, anchoredReq(4))
 	c.ExistingBreakpoints = 4
 	rep = &components.Report{Component: "extract_llm_ride"}
 	newRide(t, cfg).Offload(req, rep, c)
@@ -436,8 +436,10 @@ func TestRideAnchorMarksTheAssistantTurnBeforeTheFirstEdit(t *testing.T) {
 	req = anchoredReq(4)
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	c = coldCtx("anchor-c", asker, st, false)
-	st.Put(rideApplyEndKey(c), []byte("99"))
-	st.Put(rideEndsKey(c), []byte("[0,2,4,6]"))
+	// the entries were written for a conversation whose message 0 differed: they no longer describe our prefix
+	other := anchoredReq(4)
+	schema.SetMessageText(&other.Input[0], "an earlier edit changed this message")
+	seedEnds(c, other)
 	rep = &components.Report{Component: "extract_llm_ride"}
 	newRide(t, cfg).Offload(req, rep, c)
 	if len(marked(req)) != 0 {
@@ -499,5 +501,85 @@ func TestRideMeasuredRemovalLearnsAndStopsAskingWhenItDoesNotPay(t *testing.T) {
 	fixed.noteRemoval(200000, 0)
 	if fixed.removalEstimate() != 0.6 {
 		t.Error("without measured_removal the expectation stays fixed")
+	}
+}
+
+// seedEnds records, as earlier requests of the thread, the entries left by requests ending at messages
+// 0, 2, 4 and 6 of full.
+func seedEnds(c *components.Ctx, full *bschemas.BifrostChatRequest) {
+	for _, n := range []int{1, 3, 5, 7} {
+		rideRecordEnd(c, &bschemas.BifrostChatRequest{Input: full.Input[:n]})
+	}
+}
+
+func TestRideAnchorTakesTheTTLOfTheMarkAfterIt(t *testing.T) {
+	asker := &rideAsker{script: map[int]string{0: `"action":"park"`, 1: `"action":"park"`, 2: `"action":"park"`}}
+	asker.cacheRead = 30000
+	cfg := "apply_mode: cold\nanchor: true\nmin_inventory: 2\nhorizon_turns: 30\necon: false\n"
+	ttlOf := func(req *bschemas.BifrostChatRequest) (found bool, ttl string) {
+		for i := range req.Input {
+			if req.Input[i].Content == nil {
+				continue
+			}
+			for _, b := range req.Input[i].Content.ContentBlocks {
+				if b.CacheControl != nil {
+					found = true
+					if b.CacheControl.TTL != nil {
+						ttl = *b.CacheControl.TTL
+					}
+				}
+			}
+		}
+		return
+	}
+	for _, tc := range []struct {
+		name, last string
+		cacheTTLMs int64
+		want       bool
+		wantTTL    string
+	}{
+		{"client marks are 5m", "5m", 0, true, ""},
+		{"client marks are 1h", "1h", 3_600_000, true, "1h"},
+		{"1h request, last mark unreadable", "", 3_600_000, false, ""},
+	} {
+		req := anchoredReq(4)
+		c := coldCtx("anchor-ttl-"+tc.name, asker, store.NewMemory(store.Options{MaxEntries: 400}), false)
+		seedEnds(c, anchoredReq(4))
+		c.LastMarkTTL, c.CacheTTLMs = tc.last, tc.cacheTTLMs
+		newRide(t, cfg).Offload(req, &components.Report{Component: "extract_llm_ride"}, c)
+		found, ttl := ttlOf(req)
+		if found != tc.want || ttl != tc.wantTTL {
+			t.Errorf("%s: anchor placed=%v ttl=%q, want placed=%v ttl=%q", tc.name, found, ttl, tc.want, tc.wantTTL)
+		}
+	}
+}
+
+func TestRideForgetsEntriesAfterAColdRequest(t *testing.T) {
+	st := store.NewMemory(store.Options{MaxEntries: 100})
+	c := coldCtx("cold-forget", &rideAsker{}, st, false)
+	seedEnds(c, anchoredReq(4))
+	if !rideEndValid(c, &bschemas.BifrostChatRequest{Input: anchoredReq(4).Input[:9]}, 2) {
+		t.Fatal("precondition: the seeded entry at message 2 is valid")
+	}
+	cold := coldCtx("cold-forget", &rideAsker{}, st, true) // a cold request rewrote the cache: nothing before it is alive
+	rideRecordEnd(cold, &bschemas.BifrostChatRequest{Input: anchoredReq(4).Input[:9]})
+	if rideEndValid(c, &bschemas.BifrostChatRequest{Input: anchoredReq(4).Input[:9]}, 2) {
+		t.Error("an entry written before a cold request must not be trusted after it")
+	}
+}
+
+func TestRideEntryHashCoversNonTextBlocks(t *testing.T) {
+	st := store.NewMemory(store.Options{MaxEntries: 100})
+	c := coldCtx("hash-nontext", &rideAsker{}, st, false)
+	req := anchoredReq(3)
+	rideRecordEnd(c, &bschemas.BifrostChatRequest{Input: req.Input[:5]})
+	mod := anchoredReq(3)
+	name := "Bash"
+	mod.Input[1].ChatAssistantMessage = &bschemas.ChatAssistantMessage{ToolCalls: []bschemas.ChatAssistantMessageToolCall{{Function: bschemas.ChatAssistantMessageToolCallFunction{Name: &name}}}}
+	if rideEndValid(c, &bschemas.BifrostChatRequest{Input: mod.Input[:5]}, 4) {
+		t.Error("a change in a non-text field (a tool call) must invalidate the recorded prefix")
+	}
+	if !rideEndValid(c, &bschemas.BifrostChatRequest{Input: req.Input[:5]}, 4) {
+		t.Error("the unchanged prefix must still be valid")
 	}
 }
