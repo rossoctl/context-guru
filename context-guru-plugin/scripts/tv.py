@@ -27,7 +27,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cg  # noqa: E402  (Api, window, levers, daily, session_rows, is_rewrite, cache_state ...)
 import tvlib as T  # noqa: E402
-from tvlib import Env, dur, span, usd  # noqa: E402
+from tvlib import Env, ctx, dur, kind, span, usd  # noqa: E402
 
 DAY = cg.DAY_MS
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -42,18 +42,6 @@ class Fast(cg.Api):
 
     def get(self, path, params=None, timeout=4):
         return super().get(path, params, timeout)
-
-
-def ctx(r: dict) -> int:
-    return r["fresh_input"] + r["cache_read"] + r["cache_write"]
-
-
-def kind(r: dict) -> str:
-    """hit / part / miss from the token columns (cache_miss_reason is not trusted): how much of the
-    prompt was re-written rather than read."""
-    c = ctx(r)
-    w = r["cache_write"] / c if c else 0
-    return "miss" if w >= 0.8 else "part" if w >= 0.1 else "hit"
 
 
 def thread_key(r: dict) -> tuple:

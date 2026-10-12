@@ -92,6 +92,18 @@ class Env:
         return self.paint("dim", (f"{label} " + line)[:self.width - 1] if label else line)
 
 
+def ctx(r: dict) -> int:
+    return r["fresh_input"] + r["cache_read"] + r["cache_write"]
+
+
+def kind(r: dict) -> str:
+    """hit / part / miss from the token columns (cache_miss_reason is not trusted): how much of the
+    prompt was re-written rather than read."""
+    c = ctx(r)
+    w = r["cache_write"] / c if c else 0
+    return "miss" if w >= 0.8 else "part" if w >= 0.1 else "hit"
+
+
 def usd(x: float) -> str:
     x = float(x or 0)
     s = "-" if x < 0 else ""
