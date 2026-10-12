@@ -126,7 +126,7 @@ func settingsInDir(t *testing.T, state, home, dir string, args ...string) (map[s
 func sandboxEnv(t *testing.T, extra ...string) []string {
 	t.Helper()
 	sandboxed := map[string]bool{
-		"HOME": true, "XDG_STATE_HOME": true, "CONTEXT_GURU_STATE": true, "CLAUDE_CONFIG_DIR": true,
+		"HOME": true, "XDG_STATE_HOME": true, "XDG_CONFIG_HOME": true, "CONTEXT_GURU_STATE": true, "CLAUDE_CONFIG_DIR": true,
 		"CONTEXT_GURU_BIN": true, "ANTHROPIC_BASE_URL": true, "ANTHROPIC_UPSTREAM": true,
 		"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true, "ANTHROPIC_CUSTOM_HEADERS": true,
 	}
@@ -148,6 +148,7 @@ func sandboxEnv(t *testing.T, extra ...string) []string {
 	env = append(env,
 		"HOME="+root,
 		"XDG_STATE_HOME="+filepath.Join(root, "xdg-state"),
+		"XDG_CONFIG_HOME="+filepath.Join(root, "xdg-config"),
 	)
 	return append(env, extra...)
 }
@@ -2416,8 +2417,8 @@ func TestStatuslineNeverFailsOnAConnectionRefusal(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d; must never fail a render", code)
 	}
-	if strings.TrimSpace(out) != "cg!" {
-		t.Errorf("got %q, want %q", strings.TrimSpace(out), "cg!")
+	if strings.TrimSpace(out) != "cg ✕ proxy offline" {
+		t.Errorf("got %q, want %q", strings.TrimSpace(out), "cg ✕ proxy offline")
 	}
 }
 
@@ -2556,7 +2557,7 @@ print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 		t.Fatalf("running the boundary check: %v\n%s", err, out)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	want := []string{"cache ○ ░░░░░░ cold", "cache ◐ ░░░░░░ 0:00", "cache ○ ░░░░░░ cold"}
+	want := []string{"cache ○ ░░░░░░ cold", "cache ◐ ░░░░░░ 0:00!", "cache ○ ░░░░░░ cold"}
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
 	}

@@ -12,39 +12,49 @@ manage this one additional top-level key (never a second settings editor, never 
 **What it shows, once enabled and this project is routed** (default layout `balanced`):
 
 ```
-saved ≈$0.31 (spent $0.41) · day ≈$4.20 │ ● warm 4m │ ███····· 412.0k/1.0M 41%
-saved ≈$0.31 (spent $0.41) · day ≈$4.20 │ ○ cold │ ███····· 412.0k/1.0M 41% │ ▸ cold on 412.0k: next send rewrites ≈$1.20 — /compact?
+saved ≈$0.31 session · ≈$4.20 today · ★ ≈$212.40 lifetime
+cache ● █████░ 3:57 │ agents ◐ 0:51 ● 4:21 │ ctx ███░░░░░ 41%
+cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41% │ ▸ cache is cold: your next message costs ≈$0.78 extra
 ```
 
 - **Money.** `saved ≈$0.31` is an ESTIMATE (`≈`): what the same requests would have cost
   uncompacted, at the gateway's prices, net of context-guru's own model spend and keep-alive
-  pings. `(spent $0.41)` is observed, gateway-priced cost of what was actually sent. They are never
-  added or divided. `day` is the same estimate since local midnight (everything your token can
-  see on this proxy). Omitted for a brand-new session; a real nonzero spend with zero saved prints.
-- **Cache.** `● warm 4m` / `◐ 42s left` (under a minute) / `○ cold` / `◌ no cache yet`. The proxy's
-  server-side state (last cache-touching request, billed 5m or 1h tier, pings included) overrides
-  Claude Code's own `prompt_cache` guess while fresh; otherwise Claude Code's is used.
-- **Context.** Bar, tokens and percent against the window actually served: the proxy's when it is a
+  pings. Session, today (since local midnight) and lifetime are three windows of that one measure.
+  `--layout=detailed` adds `spent $4.10 · $2.73/h · up 1h30m` (Claude Code's own running cost, the
+  average rate once five minutes have passed, and the session's age).
+- **Cache clock.** A live countdown to expiry, green, amber in the last minute (a fifth of the
+  lifetime on the 1h tier), red with `!` in the last 15 s, then `cold 1:20` counting UP. The proxy
+  keeps the clock from the end of the last response, so a long answer is counted. It ticks every
+  second (`refreshInterval: 1`, which `settings.py` writes; a value you tuned is kept). `↻` means
+  the last touch was a keep-alive ping.
+- **Sub-agents.** `agents ◐ 0:51 ● 4:21`: each running sub-agent has its own cache and its own
+  clock (one to two listed, then `agents 5 · next ◐ 0:52`). Finished (cold) ones are not shown.
+  The main clock and the context bar follow the main thread, not whichever agent spoke last.
+- **Context.** Bar and percent against the window actually served: the proxy's when it is a
   measured figure for the model, else Claude Code's.
-- **One hint**, only when it matters: cold with >=100k tokens (priced by the proxy), else context
-  >=85% full, else a Claude Code-reported cache-miss cause under two minutes old.
+- **One hint**, only when it matters, dollars first: cold with >=100k tokens, a model switch while
+  warm (it rewrites the cache), a pause about to cost >=$0.50, context >=85% full, or a
+  Claude Code-reported miss cause under two minutes old (`tool set changed (+2 −0)`).
 - A pending proxy update (`▲ update v0.3.2`) comes first so it cannot scroll off.
 
-**Layouts and toggles.** `--layout=minimal|balanced|detailed` (or env `CG_STATUSLINE_LAYOUT`):
+**Layouts and toggles.** `statusline.py --set-layout=detailed` (or `minimal`, `balanced`, `auto`) remembers a
+layout across renders without editing settings; bind it to an alias or a command. A remembered
+layout outranks the installed command's flag until `auto`. Otherwise
+`--layout=minimal|balanced|detailed` (or env `CG_STATUSLINE_LAYOUT`):
 
 | layout | elements |
 |---|---|
-| minimal | saved, cache, hint (`saved ≈$0.31 │ ● warm 4m`) |
-| balanced | update, saved, cache, ctx, hint |
-| detailed | balanced + `proxy: 3ms · upstream: 340ms` + least-used tool/skill (`◇ github 1% remove`) |
+| minimal | saved, cache, hint (`saved ≈$0.31 │ cache ● ████░░ 3:57`) |
+| balanced | update, saved, cache, agents, ctx, hint |
+| detailed | balanced + `spent` + `proxy: 3ms · upstream: 340ms` + least-used tool/skill (`◇ github 1% remove`) |
 
-`--hide=a,b` / `--show=a,b` toggle single elements (`update save cache ctx hint latency tools ka`;
+`--hide=a,b` / `--show=a,b` toggle single elements (`update save spend cache agents ctx hint latency tools ka`;
 env `CG_STATUSLINE_HIDE` / `_SHOW`). `--cache` and `--keepalive` still work (`ka` = keep-alive net
 saving). `NO_COLOR=1` (or `TERM=dumb`) removes colour. Width comes from the terminal (`--width=N`
 or `CG_STATUSLINE_COLUMNS` override); a line wider than that drops tools, latency, the update marker,
 the long hint form, the `saved` label and the context bar, in that order, and truncates the hint last.
 
-**Failure states.** Proxy refused: `cg!`. Slow: `cg: stats loading…`, then the last numbers with
+**Failure states.** Proxy refused: `cg ✕ proxy offline`. Slow: `cg: stats loading…`, then the last numbers with
 `⏳`. Hung for ten minutes: `cg? not responding`. Cost: each render is a disk-cached read (2 s for
 session/cache state, 60 s for day) with one 0.6 s deadline; typical render is ~40 ms.
 

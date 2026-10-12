@@ -99,7 +99,7 @@ def is_ours(data: dict, url: str) -> bool:
 # Re-run the status line this often (seconds), on top of Claude Code's own event-driven redraws,
 # so the cache countdown keeps draining while nothing is happening. Claude Code 2.1.296 honours
 # `refreshInterval` (minimum 1); an older one ignores the key and only redraws on events.
-STATUSLINE_REFRESH_SECONDS = 5
+STATUSLINE_REFRESH_SECONDS = 1
 
 
 def _statusline_value(command: str) -> dict:
