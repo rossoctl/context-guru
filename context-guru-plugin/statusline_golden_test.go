@@ -315,25 +315,25 @@ func TestStatuslineGoldenModes(t *testing.T) {
 		want   string
 	}{
 		{"spark", 60,
-			"saved $4.20 today  ▂▄▅▇█▂▄▅▇█▂▄▅▇ 14 days\ncache ● ████░░ 3:20"}, {"spark", 80,
-			"saved $4.20 today  ▂▄▅▇█▂▄▅▇█▂▄▅▇ 14 days\ncache ● ████░░ 3:20"}, {"spark", 120,
-			"saved $4.20 today  ▂▄▅▇█▂▄▅▇█▂▄▅▇ 14 days\ncache ● ████░░ 3:20"},
+			"saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇\ncache ● ████░░ 3:20"}, {"spark", 80,
+			"saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇\ncache ● ████░░ 3:20"}, {"spark", 120,
+			"saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇\ncache ● ████░░ 3:20"},
 		{"strip", 60,
-			"last 20 ■■■■■■■■✖■■■■■▨▨■■■■  $1.40 lost to misses today\ncache ● ████░░ 3:20"}, {"strip", 80,
-			"last 20 ■■■■■■■■✖■■■■■▨▨■■■■  $1.40 lost to misses today\ncache ● ████░░ 3:20"}, {"strip", 120,
-			"last 20 ■■■■■■■■✖■■■■■▨▨■■■■  $1.40 lost to misses today\ncache ● ████░░ 3:20"},
+			"last 20 ■■■■■■■■✖■■■■■▨▨■■■■ ✖ miss $1.40 today\ncache ● ████░░ 3:20"}, {"strip", 80,
+			"last 20 requests ■■■■■■■■✖■■■■■▨▨■■■■  ✖ miss  $1.40 lost today\ncache ● ████░░ 3:20"}, {"strip", 120,
+			"last 20 requests ■■■■■■■■✖■■■■■▨▨■■■■  ✖ miss ▨ partial ■ hit  $1.40 lost today\ncache ● ████░░ 3:20"},
 		{"heat", 60,
-			"misses 0h  ░▒  █░                24h  $1.40 lost\ncache ● ████░░ 3:20"}, {"heat", 80,
-			"misses 0h  ░▒  █░                24h  $1.40 lost\ncache ● ████░░ 3:20"}, {"heat", 120,
-			"misses 0h  ░▒  █░                24h  $1.40 lost\ncache ● ████░░ 3:20"},
+			"misses per hour 0h  ░▒  █░ ···············24h  $1.40 lost\ncache ● ████░░ 3:20"}, {"heat", 80,
+			"misses per hour 0h  ░▒  █░ ···············24h  $1.40 lost\ncache ● ████░░ 3:20"}, {"heat", 120,
+			"misses per hour 0h  ░▒  █░ ···············24h  $1.40 lost\ncache ● ████░░ 3:20"},
 		{"fill", 60,
 			"context ▒▒▒▒▒█████░░░░░░░░░░░░░░ 41% · full in 58m\ncache ● ████░░ 3:20"}, {"fill", 80,
 			"context ▒▒▒▒▒▒▒▒████████░░░░░░░░░░░░░░░░░░░░░░░░ 41% · full in 58m\ncache ● ████░░ 3:20"}, {"fill", 120,
-			"context ▒▒▒▒▒▒▒▒████████░░░░░░░░░░░░░░░░░░░░░░░░ 41% · full in 58m  ▒ always loaded 20% · █ conversation 21%\ncache ● ████░░ 3:20"},
+			"context ▒▒▒▒▒▒▒▒████████░░░░░░░░░░░░░░░░░░░░░░░░ 41% · full in 58m · a miss now costs $1.20\ncache ● ████░░ 3:20"},
 		{"watch", 60,
-			"cache ● ████░░ 3:20\na1 ████ 4:30  a2 █░░░ 0:50"}, {"watch", 80,
-			"cache ● ████░░ 3:20\na1 ████ 4:30  a2 █░░░ 0:50"}, {"watch", 120,
-			"cache ● ████░░ 3:20\na1 ████ 4:30  a2 █░░░ 0:50"},
+			"saved $0.31 │ cache ● ████░░ 3:20\nagent caches (2) ████ 4:30  █░░░ 0:50"}, {"watch", 80,
+			"saved $0.31 │ cache ● ████░░ 3:20\nagent caches (2) ████ 4:30  █░░░ 0:50"}, {"watch", 120,
+			"saved $0.31 │ cache ● ████░░ 3:20\nagent caches (2) ████ 4:30  █░░░ 0:50"},
 	} {
 		t.Run(fmt.Sprintf("%s/%d", c.layout, c.width), func(t *testing.T) {
 			env := routedEnv(cgStub(t, cache, extra))
@@ -368,7 +368,7 @@ func TestStatuslineModesAscii(t *testing.T) {
 	env := routedEnv(port)
 	env["NO_COLOR"], env["CG_ASCII"] = "1", "1"
 	out, _, _ := runStatusline(t, env, `{"session_id":"sess-gold"}`, "--layout=strip")
-	if !strings.Contains(out, "last 2 oX") {
+	if !strings.Contains(out, "last 2 requests oX") {
 		t.Errorf("want ascii hit/miss glyphs, got %q", out)
 	}
 }

@@ -568,7 +568,7 @@ LAYOUTS = {
     "strip": ("strip", "cache", "hint"),   # the last 20 requests as hit / partial / miss
     "heat": ("heat", "cache", "hint"),     # today's cache misses by hour
     "fill": ("fill", "cache", "hint"),     # context: always loaded vs conversation, time to full
-    "watch": ("clock0", "wagents", "hint"),  # main clock over a mini-bar per sub-agent
+    "watch": ("save", "clock0", "wagents", "hint"),  # saved, main clock, a mini-bar per sub-agent
 }
 ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka"}
 # Dropped/shrunk first to last when the line is wider than the terminal. The hint is never in this
@@ -1092,8 +1092,12 @@ def _spark_row(day: dict | None, series: dict | None, lv: int, tv, e) -> str | N
     by_day = {int(b["ts"] // DAY_MS): _num(b, "saved_usd") or 0.0 for b in buckets if isinstance(b, dict) and _num(b, "ts")}
     last = int(_now_s() * 1000 // DAY_MS)
     vals = [by_day.get(d, 0.0) for d in range(last - 13, last)] + [today]  # today from the same read as the number
-    return f"{DIM}saved{RESET} {_money(today)} {DIM}today{RESET}  {e.paint('ok', e.spark(vals))}" + \
-        ("" if lv else f" {DIM}14 days{RESET}")
+    return f"{DIM}saved{RESET} {_money(today)} {DIM}today{RESET}" + \
+        ("" if lv else f" {DIM}· last 14 days{RESET}") + f" {e.paint('ok', e.spark(vals))}"
+
+
+def tv_wide(e) -> bool:
+    return e.width >= 100
 
 
 def _strip_row(reqs: dict | None, spend: dict | None, lv: int, tv, e) -> str | None:
@@ -1104,10 +1108,15 @@ def _strip_row(reqs: dict | None, spend: dict | None, lv: int, tv, e) -> str | N
     cells = "".join(e.paint(*paint[tv.kind(r)]) for r in rows)
     lost = _lost_today(spend, _day_start_ms())
     if lost and lost >= 0.005:
-        tail = f" {_money(lost)}" if lv else f"  {_money(lost)} {DIM}lost to misses today{RESET}"
+        tail = f" {_money(lost)}" if lv else f"  {_money(lost)} {DIM}lost today{RESET}"
     else:
         tail = "" if lv else f"  {DIM}no misses cost money today{RESET}"
-    return ("" if lv else f"{DIM}last {len(rows)}{RESET} ") + cells + tail
+    key = "" if lv else f"  {e.paint('bad', e.g['miss'])} {DIM}miss{RESET}" + (
+        f" {e.paint('warn', e.g['part'])} {DIM}partial{RESET} {e.paint('ok', e.g['hit'])} {DIM}hit{RESET}" if tv_wide(e) else "")
+    if lv:
+        return f"{DIM}last {len(rows)}{RESET} " + cells + (f" {e.paint('bad', e.g['miss'])} {DIM}miss{RESET}" if lost and lost >= 0.005 else "") + \
+            (f" {_money(lost)} {DIM}today{RESET}" if lost and lost >= 0.005 else "")
+    return f"{DIM}last {len(rows)} requests{RESET} " + cells + key + tail
 
 
 def _heat_row(hourly: dict | None, spend: dict | None, lv: int, tv, e) -> str | None:
@@ -1121,13 +1130,20 @@ def _heat_row(hourly: dict | None, spend: dict | None, lv: int, tv, e) -> str | 
     top, now_h = max(per), time.localtime(_now_s()).tm_hour
     if top <= 0:
         return f"{e.paint('ok', 'no cache misses today')}"
-    cells = "".join(e.heat_cell(per[h], top, 1) if h <= now_h else " " for h in range(24))
+    def cell(h: int) -> str:  # a shade glyph AND a background, so it reads with colour off
+        if h > now_h:
+            return f"{DIM}·{RESET}"
+        lv = 0 if per[h] <= 0 else min(4, 1 + int(per[h] / top * 3.999))
+        return e.heat(lv, e.g["ramp"][lv]) if lv else " "
+
+    cells = "".join(cell(h) for h in range(24))
     lost = _lost_today(spend, _day_start_ms())
     tail = f"  {_money(lost)} {DIM}lost{RESET}" if lost and lost >= 0.005 else ""
-    return (f"{DIM}misses{RESET} " if not lv else "") + f"{DIM}0h{RESET}{cells}{DIM}24h{RESET}{tail}"
+    return (f"{DIM}misses per hour{RESET} " if not lv else "") + f"{DIM}0h{RESET}{cells}{DIM}24h{RESET}{tail}"
 
 
-def _fill_row(reqs: dict | None, ctx: tuple[float, float] | None, lv: int, tv, e, width: int) -> str | None:
+def _fill_row(reqs: dict | None, ctx: tuple[float, float] | None, lv: int, tv, e, width: int,
+              miss_usd: float | None = None) -> str | None:
     if not ctx:
         return None
     used, window = ctx
@@ -1146,10 +1162,16 @@ def _fill_row(reqs: dict | None, ctx: tuple[float, float] | None, lv: int, tv, e
         g = 0.0
     eta = (window - used) / g if g > 0 else None
     text = f"{DIM}context{RESET} {e.paint(kind_, used_part)}{DIM}{bar[len(used_part):]}{RESET} {frac * 100:.0f}%"
-    if eta and eta < 6 * 3600 and lv == 0:
-        text += f" {DIM}· full in{RESET} {tv.span(eta)}"
-    if base is not None and lv == 0 and width >= 100:
-        text += f"  {DIM}{fx} always loaded {base * 100:.0f}% · {cv} conversation {(frac - base) * 100:.0f}%{RESET}"
+    extras = []
+    if eta and eta < 6 * 3600:
+        extras.append(f" {DIM}· full in{RESET} {tv.span(eta)}")
+    if miss_usd:
+        extras.append(f" {DIM}· a miss now costs{RESET} {_money(miss_usd)}")
+    if base is not None:
+        extras.append(f"  {DIM}{fx} always loaded {base * 100:.0f}% · {cv} conversation {(frac - base) * 100:.0f}%{RESET}")
+    for x in extras if lv == 0 else []:  # as many as fit, most useful first
+        if tv.vlen(text + x) <= width - 1:
+            text += x
     return text
 
 
@@ -1158,12 +1180,13 @@ def _wagents_row(rows: list[tuple[str, float, float]], lv: int, tv, e) -> str:
         return f"{DIM}no sub-agents running{RESET}"
     kinds = {"cold": "bad", "critical": "bad", "expiring": "warn", "warm": "ok"}
     out = []
-    for i, (_id, rem, ttl) in enumerate(rows[:4], 1):
+    for _id, rem, ttl in rows[:4]:
         k = kinds[entry_state(rem, ttl)]
-        out.append(f"{DIM}a{i}{RESET} {e.bar(rem / ttl, 4, k)} {e.paint(k, _clock(rem))}")
+        out.append(f"{e.bar(rem / ttl, 4, k)} {e.paint(k, _clock(rem))}")
     if len(rows) > 4:
-        out.append(f"{DIM}+{len(rows) - 4}{RESET}")
-    return "  ".join(out) if lv == 0 else f"{DIM}agents{RESET} {len(rows)}"
+        out.append(f"{DIM}+{len(rows) - 4} more{RESET}")
+    head = f"{DIM}agent caches ({len(rows)}){RESET}"
+    return head + (" " + "  ".join(out) if lv == 0 else "")
 
 
 def _now_s() -> float:
@@ -1266,7 +1289,7 @@ def main() -> None:
         "spark": lambda lv: _spark_row(day, got.get("series", (None,))[0], lv, *_tv(width)),
         "strip": lambda lv: _strip_row(got.get("reqs", (None,))[0], got.get("spend", (None,))[0], lv, *_tv(width)),
         "heat": lambda lv: _heat_row(got.get("hourly", (None,))[0], got.get("spend", (None,))[0], lv, *_tv(width)),
-        "fill": lambda lv: _fill_row(got.get("reqs", (None,))[0], ctx, lv, *_tv(width), width),
+        "fill": lambda lv: _fill_row(got.get("reqs", (None,))[0], ctx, lv, *_tv(width), width, view["usd"]),
         "clock0": lambda lv: _cache_segment(view, lv),
         "wagents": lambda lv: _wagents_row(agent_rows, lv, *_tv(width)),
         "spend": lambda lv: _spend_segment(payload, lv) if lv == 0 else None,
@@ -1279,7 +1302,7 @@ def main() -> None:
                          "agents", "ctx", "ka", "latency", "tools") if e in on]
     level: dict[str, int | None] = {e: 0 for e in order}
     hint = _hint(payload, view, ctx) if "hint" in on else None
-    if layout == "minimal":
+    if layout in ("minimal", "watch"):
         level["save"] = 1  # minimal: `saved $0.31`, no today/lifetime
     hint_level = 0
     two_rows = layout != "minimal"
