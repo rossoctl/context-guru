@@ -15,6 +15,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/skills"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
@@ -527,9 +528,10 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	maxCachedIdx, idleMs := -1, int64(-1)
 	if cacheAware && !serverHeldHistory {
 		nowMs := o.nowMs()
+		turnKey := thread.Key(res.Session, res.Thread.ID) // per thread, as in BodyOpts (#484)
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnAt(res.Session, len(norm), nowMs)
+			maxCachedIdx, prevAt = o.Tracker.TurnAt(turnKey, len(norm), nowMs)
 			maxCachedIdx--
 			alias := session.Scoped(o.Tenant, "", sys, first)
 			if at := aliasSeen(st, alias, nowMs); at > prevAt {
@@ -539,8 +541,8 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 				idleMs = nowMs - prevAt
 			}
 		} else {
-			maxCachedIdx = modes.Boundary(prevLen(st, res.Session), len(norm)) - 1
-			defer putLen(st, res.Session, len(norm))
+			maxCachedIdx = modes.Boundary(prevLen(st, turnKey), len(norm)) - 1
+			defer putLen(st, turnKey, len(norm))
 		}
 	}
 	res.CacheAware, res.MaxCachedIdx = cacheAware, maxCachedIdx

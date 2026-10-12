@@ -501,6 +501,12 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	ttlMs := int64(0)
 	ttlMinimum := false
 	maxCachedIdx := -1
+	// The record that sets the boundary and the idle clock is the THREAD's, not the session's:
+	// each thread has its own provider cache (#423, #426). Keyed by session alone, a subagent's
+	// requests kept an idle main thread reading warm, and a subagent's message count became the
+	// main thread's boundary, so a component could rewrite messages the main thread had cached
+	// (#484). The primary thread keys by the bare session, so single-thread traffic is unchanged.
+	turnKey := thread.Key(sessionID, tr.Thread.ID)
 	if cacheAware && !bypass {
 		// Messages present on the previous turn of this session are already committed
 		// to the provider cache; only the new tail is being cache-written this turn.
@@ -521,7 +527,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// post-compaction one.
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnAt(sessionID, len(norm), nowMs)
+			maxCachedIdx, prevAt = o.Tracker.TurnAt(turnKey, len(norm), nowMs)
 			maxCachedIdx--
 			// The idle clock is per SESSION ID; the provider's prompt cache is keyed on
 			// CONTENT. When those disagree the clock can go stale while the provider's entry
@@ -592,8 +598,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				idleMs = nowMs - prevAt
 			}
 		} else {
-			maxCachedIdx = modes.Boundary(prevLen(st, sessionID), len(norm)) - 1
-			defer putLen(st, sessionID, len(norm))
+			maxCachedIdx = modes.Boundary(prevLen(st, turnKey), len(norm)) - 1
+			defer putLen(st, turnKey, len(norm))
 		}
 	} else if cacheAware && bypass {
 		// A bypassed turn still has to RECORD its length, even though it reads no
@@ -622,9 +628,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// session that had been bypassing for ten minutes look ten minutes IDLE, and a
 			// cold sweep would then rewrite a prefix the provider had just cached: the 1.25x
 			// suffix re-write this whole design exists to avoid.
-			o.Tracker.TurnAt(sessionID, len(norm), nowMs)
+			o.Tracker.TurnAt(turnKey, len(norm), nowMs)
 		} else {
-			defer putLen(st, sessionID, len(norm))
+			defer putLen(st, turnKey, len(norm))
 		}
 	}
 	// Counted ONCE and used twice: the pipeline needs the total to respect the
