@@ -1,0 +1,14 @@
+Pauses and rewrites cost you about $21.89 in 28 days. Costliest hour: Thu 13:00
+($2.00).
+
+    0     3     6     9     12    15    18    21
+Mon                   ..  ..  **    ..                  $2.73
+Tue                   ..  ..  **..  ..                  $2.73
+Wed                   ..  ..  **..  ..                  $2.73
+Thu                   ..  ....####....                  $5.54
+Fri                   ..  ..  **    ..                  $2.73
+Sat                   ..  ..  **    ..                  $2.73
+Sun                   ..  ..  **    ..                  $2.73
+
+Scale    ..::**##  $0 to $2.00 per hour slot
+Estimated extra per miss; 88 misses in the latest 486 requests since Sep 24.

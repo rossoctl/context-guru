@@ -1,0 +1,16 @@
+Cache misses cost about $2.22 of $12.58 billed in this session (3 of 126
+messages).
+
+                        $0.76                    $1.20
+▮▮▮▮▮▮▮▪▮▮▮▮▪▮▮▮▪▮▮▮▮───✖▮▪▮▪▮▮▮▮▮▮▪▮▮▮▮▮▪▮──↻───✖▮▮▮▮▪▮▮▮▮▪▼▮▮▮▪▮▪▮▪─────↻──✖
+12:31             13:15             13:59             14:43              15:27
+
+▪ message  ▮ busy  ✖ cache miss (extra cost)  ▼ compacted  ↻ keep-alive ping  ─
+pause over 5 min
+
+Expensive moments
+14:22  $1.20  after a 8m pause
+13:27  $0.76  after a 9m pause
+15:27  $0.25  after a 8m pause
+
+Extra = cost above a normal turn of the same model (estimate).
