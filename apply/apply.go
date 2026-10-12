@@ -466,7 +466,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// splitTailHash identifies the volatile half, so a later turn can tell whether the
 	// snapshot MOVED. Only on such a turn would the unsplit block have been re-created.
 	var splitTailHash uint64
-	if !bypass && pipe != nil && (pipe.Has("cachesplit") || pipe.Has("cacheinject")) {
+	// The ride's anchor breakpoint needs the fourth slot, which the split would take on a system block
+	// with a volatile tail: the pipeline that carries extract_llm_ride keeps the slot for the anchor.
+	if !bypass && pipe != nil && (pipe.Has("cachesplit") || pipe.Has("cacheinject")) && !pipe.Has("extract_llm_ride") {
 		body, systemSplit, shiftAt, shift, splitStableTokens, splitTailHash =
 			splitVolatileTail(body, provider)
 	}
