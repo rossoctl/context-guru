@@ -28,7 +28,7 @@ Estimated rows overlap (a long pause is also a cache miss). They are never added
 It renders only in a project routed through the proxy, and only after a new session. Check with `/context-guru:doctor`, then `/context-guru:statusline`.
 
 **The status line clock only moves when I send a message.**
-`refreshInterval` is missing or your Claude Code is older than the version that honours it. See [Refresh](statusline.md#refresh).
+`refreshInterval` is missing or your Claude Code is older than the version that honours it. See [Refresh](statusline.md#refresh), which also says how to trade the one-second clock for less CPU.
 
 **The status line is too wide, or I want one line.**
 `--set-layout=minimal`, or narrow the terminal; the line sheds detail in a fixed order. See [Layouts](statusline.md#layouts).

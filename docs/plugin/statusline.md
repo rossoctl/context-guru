@@ -9,7 +9,7 @@ The first line is money, the second is the cache clock, the sub-agents, the cont
 
 ```text
 saved ≈$0.31 session · ≈$4.20 today · ★ ≈$212.40 lifetime
-cache ● █████░ 3:57 │ agents ◐ 0:51 ● 4:21 │ ctx ███░░░░░ 41%
+cache ● █████░ 3:57 │ agents 2 · soonest ◐ 0:51 │ ctx ███░░░░░ 41%
 ```
 
 ## What each piece means
@@ -21,7 +21,7 @@ cache ● █████░ 3:57 │ agents ◐ 0:51 ● 4:21 │ ctx ███
 | `★ ≈$212.40 lifetime` | The same measure over everything this proxy has recorded. |
 | `cache ● █████░ 3:57` | A bar that drains as the prompt cache approaches expiry, and the clock. Time is measured from the end of the last response. |
 | `↻` after the clock | The last touch of the cache was a keep-alive ping. |
-| `agents ◐ 0:51 ● 4:21` | Running sub-agents, each with its own cache and clock. Finished (cold) ones are not shown. |
+| `agents 2 · soonest ◐ 0:51` | Running sub-agents: the count and the clock of the one whose cache expires first (a single agent shows its own clock, as `agent ● 4:21`). Each has its own cache. Finished (cold) ones are not shown. |
 | `ctx ███░░░░░ 41%` | How full the context window is, against the window actually served. |
 | `▸ hint` | At most one thing worth acting on, dollars first. |
 | `▲ update v0.3.2` | A newer proxy release is waiting; shown first so it cannot scroll off. |
@@ -110,7 +110,7 @@ At 80 columns, with the cache cold, five sub-agents and a hint:
 ![Worst case at 80 columns](../statusline-live/worst-case-80-dark.svg#only-dark)
 ![Worst case at 80 columns](../statusline-live/worst-case-80-light.svg#only-light)
 
-At 40 columns the line sheds, in order: tools, latency, the update marker, the long hint form, the `saved` label and the context bar. The hint is truncated last.
+At 40 columns the line sheds, in order: tools, latency, spend, the update marker, the long hint form, then the agents shrink to a count, then the `saved` label and the context bar. The cache clock is shortened last.
 
 ![40 columns](../statusline-live/narrow-40-dark.svg#only-dark)
 ![40 columns](../statusline-live/narrow-40-light.svg#only-light)
@@ -121,7 +121,7 @@ At 40 columns the line sheds, in order: tools, latency, the update marker, the l
 |---|---|
 | `minimal` | one line: saved, cache, hint |
 | `balanced` (default) | update, saved, cache, agents, context, hint |
-| `detailed` | balanced plus `spent`, a slow-upstream note (only when slow) and the least-used tool or skill |
+| `detailed` | balanced plus `spent $4.10 · $2.73/h · up 1h30m` (the rate appears after 5 minutes), a slow-upstream note (only when upstream averages 3 s or more) and the least-used tool or skill |
 
 ![Detailed layout](../statusline-live/detailed-dark.svg#only-dark)
 ![Detailed layout](../statusline-live/detailed-light.svg#only-light)
@@ -142,7 +142,7 @@ Claude Code redraws the status line on every message and, if you ask, on a timer
 "statusLine": { "type": "command", "command": "…", "refreshInterval": 1 }
 ```
 
-and start a new session. Older Claude Code versions ignore the key and redraw only on events. Each render reads a disk-cached copy of the proxy's answer (2 s for cache state, 60 s for the day total, 5 minutes for the lifetime total), so a one-second interval does not become a request per second; a typical render takes about 40 ms.
+and start a new session. Older Claude Code versions ignore the key and redraw only on events. The clock is arithmetic on a timestamp the proxy supplies, so a redraw needs no new network read: each render reads a disk-cached copy of the proxy's answer (2 s for cache state, 60 s for the day total, 5 minutes for the lifetime total). The cost is one short process per second per open session, about 70 ms of CPU each. If that matters, set a larger `refreshInterval` (for example 5); the clock then moves every 5 seconds.
 
 ## Colour and plain terminals
 
