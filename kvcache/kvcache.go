@@ -276,6 +276,10 @@ type Request struct {
 	CostUSD   float64 `json:"cost_usd"`
 	CostKnown bool    `json:"cost_known"`
 
+	// Rejected marks a row whose upstream status was not 2xx (or never reached upstream). The
+	// provider read no prefix for it, so a replay leaves the cache entry untouched.
+	Rejected bool `json:"-"`
+
 	// KeepAlive marks a row that IS a ping context-guru sent on its own initiative. Such
 	// rows are excluded from the dataset by default (they are not the user's traffic and
 	// they would break every idle gap they sit inside); the field is here so a caller that

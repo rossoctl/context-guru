@@ -269,7 +269,7 @@ func kvCacheScope(f Filter) Filter {
 // TestTheSQLPartitionIsExactlyTheConversationKey is the assertion that they agree.
 const kvCacheCTE = `WITH s AS (SELECT r.id, r.ts, r.tenant_id, r.session_id, r.model,
 		r.provider, r.agent, r.preset, r.mode, r.token_accounting, r.reasoning_effort,
-		r.thinking_mode, r.stop_reason, r.uncompressed_reason, r.cache_ttl, r.keepalive,
+		r.thinking_mode, r.status, r.stop_reason, r.uncompressed_reason, r.cache_ttl, r.keepalive,
 		r.fresh_input, r.output_tokens, r.cache_read, r.cache_write, r.cache_write_1h,
 		r.cache_miss_reason, r.cost_usd, r.upstream_ms,
 		LEAD(r.ts) OVER w AS next_ts, LEAD(r.id) OVER w AS next_id
@@ -354,7 +354,7 @@ func bucketHours(b kvcache.Bucket) (lo, hi int, ok bool) {
 const kvCacheCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r.agent,
 	r.cache_ttl, r.fresh_input, r.output_tokens, r.cache_read, r.cache_write, r.cache_write_1h,
 	r.cache_miss_reason, r.token_accounting, r.cost_usd, r.upstream_ms, r.keepalive,
-	r.stop_reason, r.next_ts, r.next_id`
+	r.stop_reason, r.next_ts, r.next_id, r.status`
 
 // scanKVCacheRequest reads one row and fills everything derived from it.
 //
@@ -367,14 +367,15 @@ func scanKVCacheRequest(rows interface{ Scan(...any) error }) (*kvcache.Request,
 	var r kvcache.Request
 	var cacheTTL, missReason, accounting string
 	var nextTS, nextID sql.NullInt64
-	var keepAlive int
+	var keepAlive, status int
 	if err := rows.Scan(&r.ID, &r.TS, &r.User, &r.ConversationID, &r.Model, &r.Provider,
 		&r.Agent, &cacheTTL, &r.InputTokens, &r.OutputTokens, &r.CacheRead, &r.CacheWrite,
 		&r.CacheWrite1h, &missReason, &accounting, &r.CostUSD, &r.UpstreamMs, &keepAlive,
-		&r.StopReason, &nextTS, &nextID); err != nil {
+		&r.StopReason, &nextTS, &nextID, &status); err != nil {
 		return nil, err
 	}
 	r.KeepAlive = keepAlive != 0
+	r.Rejected = status < 200 || status >= 300
 	r.MissReason = missReason
 	r.Hit = missReason == CacheHit
 	r.CachedContext = r.CacheRead + r.CacheWrite
