@@ -59,6 +59,20 @@ type ToolStat struct {
 	// the "who owns the system prompt" number, which is the question the page is really
 	// answering and which no column carried.
 	SharePct float64 `json:"share_pct"`
+	// LastUsedTS / LastCarriedTS are what make abandonment answerable without a window.
+	//
+	// A capability used heavily three months ago and carried on every request since is neither
+	// "never invoked" nor "in use", and the report had no way to say so: it fell into the same
+	// bucket as a tool called a minute ago. The obvious fix — analyse only the last N sessions —
+	// does not work, because a session is not a unit of time: measured on one real store, spans
+	// were 0.0h, 1.1h and 99.1h, with a single session covering four days. N sessions is anywhere
+	// from minutes to weeks.
+	//
+	// The gap between these two is a fact about the ITEM, independent of how anybody structures
+	// their sessions, and it is evidence a reader can check against their own memory.
+	// Zero means never: an item never invoked has no LastUsedTS, rather than one that reads as 1970.
+	LastUsedTS    int64 `json:"last_used_ts,omitempty"`
+	LastCarriedTS int64 `json:"last_carried_ts,omitempty"`
 	// Sessions is the per-session breakdown of what carrying this cost, present only when the
 	// filter asked for it (Filter.PerSession). Opt-in because /api/tools is read by the
 	// dashboard UI, the status line and the plugin, and an array per row on a large inventory
@@ -501,6 +515,8 @@ func (d *DB) ToolReportFor(f Filter, price func(string) (modelinfo.Price, bool))
 type declRow struct {
 	session, kind, name, server string
 	tokens                      int
+	// ts is the most recent request that carried this declaration.
+	ts int64
 	// hasText is whether ANY session stored this name's prompt text. MAX over the group
 	// rather than a per-session answer: the question the UI asks of a name is "can I read
 	// this one", and one stored copy is enough to answer yes.
@@ -509,6 +525,9 @@ type declRow struct {
 type useRow struct {
 	session, name, skill string
 	calls                int
+	// lastTS is the most recent invocation in this row's group. MAX rather than any one row's
+	// value, because the question is when this capability was last reached for at all.
+	lastTS int64
 }
 
 // scopedDecls reads the declarations of the sessions the filter selects. The tenant
@@ -516,7 +535,7 @@ type useRow struct {
 // own tenant_id, and a scoping bug in one place should not be enough to cross accounts.
 func (d *DB) scopedDecls(f Filter, where string, args []any) ([]declRow, error) {
 	q := `SELECT d.session_id, d.kind, d.name, d.server, MAX(d.tokens),
-		MAX(CASE WHEN ` + declHasText + ` THEN 1 ELSE 0 END)
+		MAX(CASE WHEN ` + declHasText + ` THEN 1 ELSE 0 END), MAX(d.ts)
 		FROM tool_declarations d WHERE d.session_id IN
 		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
 	a := append([]any{}, args...)
@@ -534,7 +553,8 @@ func (d *DB) scopedDecls(f Filter, where string, args []any) ([]declRow, error) 
 	for rows.Next() {
 		var r declRow
 		var hasText int
-		if err := rows.Scan(&r.session, &r.kind, &r.name, &r.server, &r.tokens, &hasText); err != nil {
+		if err := rows.Scan(&r.session, &r.kind, &r.name, &r.server, &r.tokens, &hasText,
+			&r.ts); err != nil {
 			return nil, err
 		}
 		r.hasText = hasText == 1
@@ -545,7 +565,7 @@ func (d *DB) scopedDecls(f Filter, where string, args []any) ([]declRow, error) 
 
 // scopedUses reads the invocations of the sessions the filter selects.
 func (d *DB) scopedUses(f Filter, where string, args []any) ([]useRow, error) {
-	q := `SELECT u.session_id, u.name, u.skill, SUM(u.calls)
+	q := `SELECT u.session_id, u.name, u.skill, SUM(u.calls), MAX(u.last_ts)
 		FROM tool_uses u WHERE u.session_id IN
 		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
 	a := append([]any{}, args...)
@@ -562,7 +582,7 @@ func (d *DB) scopedUses(f Filter, where string, args []any) ([]useRow, error) {
 	var out []useRow
 	for rows.Next() {
 		var r useRow
-		if err := rows.Scan(&r.session, &r.name, &r.skill, &r.calls); err != nil {
+		if err := rows.Scan(&r.session, &r.name, &r.skill, &r.calls, &r.lastTS); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -582,6 +602,15 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 	// Which capabilities each session invoked. A skill counts as used under its own name,
 	// and the Skill tool counts as used by any skill call.
 	usedIn := map[string]map[statKey]int{}
+	// The most recent invocation per capability, across every session in scope. Session-agnostic
+	// on purpose: "when was this last reached for" is the question, and which session it happened
+	// in is exactly the detail that made a window necessary.
+	lastUsed := map[statKey]int64{}
+	note := func(k statKey, ts int64) {
+		if ts > lastUsed[k] {
+			lastUsed[k] = ts
+		}
+	}
 	for _, u := range uses {
 		m := usedIn[u.session]
 		if m == nil {
@@ -589,13 +618,17 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 			usedIn[u.session] = m
 		}
 		m[statKey{KindTool, u.name}] += u.calls
+		note(statKey{KindTool, u.name}, u.lastTS)
 		if _, _, ok := SplitMCPName(u.name); ok {
 			m[statKey{KindMCPTool, u.name}] += u.calls
+			note(statKey{KindMCPTool, u.name}, u.lastTS)
 		} else {
 			m[statKey{KindServerTool, u.name}] += u.calls
+			note(statKey{KindServerTool, u.name}, u.lastTS)
 		}
 		if u.skill != "" {
 			m[statKey{KindSkill, u.skill}] += u.calls
+			note(statKey{KindSkill, u.skill}, u.lastTS)
 		}
 	}
 
@@ -661,6 +694,15 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		}
 		st.HasText = st.HasText || dr.hasText
 		st.SessionsDeclared++
+		// When this declaration was last CARRIED, and when the capability was last USED. The gap
+		// between them is how long it has been paid for while doing nothing, which is the one
+		// question a session window could never answer deterministically.
+		if dr.ts > st.LastCarriedTS {
+			st.LastCarriedTS = dr.ts
+		}
+		if lu := lastUsed[k]; lu > st.LastUsedTS {
+			st.LastUsedTS = lu
+		}
 		aside := isAside(dr.kind, dr.name)
 		// A skill entry's tokens are a SLICE of the skills listing, whose whole weight the
 		// KindSkillListing branch above already added. Adding the entry as well books the same

@@ -335,3 +335,32 @@ func sameMoney(pyVal string, goVal float64) bool {
 	}
 	return d < 5e-5
 }
+
+// TestEveryVerdictGoEmitsIsOneThePluginAlsoKnows catches the drift the main equivalence test
+// structurally cannot: a verdict Go can produce and Python has never heard of.
+//
+// That test compares the two over one fixture, so it only sees states the fixture reaches. When Go
+// gained `stale` — a capability used once and abandoned, which `calls > 0` previously filed under
+// `keep` — the fixture had no use timestamps, so `stale` was unreachable and the comparison stayed
+// green while the two surfaces had genuinely diverged. The same would be true of any verdict added
+// later.
+//
+// So this asserts on the VOCABULARY rather than on one run: every verdict constant here must
+// appear in insights.py. It is the cheap half of the pin, and it is the half that fails the moment
+// a new state is added on one side only.
+func TestEveryVerdictGoEmitsIsOneThePluginAlsoKnows(t *testing.T) {
+	script := pluginScript(t)
+	b, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatalf("reading insights.py: %v", err)
+	}
+	py := string(b)
+	for _, v := range []string{VerdictRemove, VerdictConsider, VerdictKeep, VerdictStale} {
+		if !strings.Contains(py, `"`+v+`"`) && !strings.Contains(py, `'`+v+`'`) {
+			t.Errorf("Go can emit verdict %q and insights.py never mentions it. The two surfaces "+
+				"answer the same question, so one that cannot produce a state the other can is a "+
+				"user seeing different advice depending on which they opened — add it there, or "+
+				"stop emitting it here", v)
+		}
+	}
+}

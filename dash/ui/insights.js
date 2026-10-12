@@ -49,6 +49,11 @@ const INS_WINDOWS = [0, 1, 3, 5, 10, 25];
 /* Only a `scope: "item"` row can be removed on its own, and `keep` is never on offer. */
 function insSelectable(it) { return it.verdict !== 'keep' && it.scope === INS_SCOPE_ITEM; }
 
+/* A stale item is one the reader is most likely to act on — it was useful once, so they remember
+ * installing it, and the date says plainly that it is finished with. Auto-select takes it for the
+ * same reason it takes `remove`: the evidence is a measurement, not a thin sample. */
+function insRecommended(it) { return it.verdict === 'remove' || it.verdict === 'stale'; }
+
 /* Why a row has no box, and where its real control is. Never a bare disabled control, which
  * invites the reader to wonder what they did wrong. */
 function insLockReason(it) {
@@ -353,7 +358,7 @@ function insRenderActions() {
   const host = document.getElementById('insights-actions');
   if (!host || !insDoc) return;
   clear(host);
-  const removeSet = (insDoc.items || []).filter((i) => i.verdict === 'remove');
+  const removeSet = (insDoc.items || []).filter(insRecommended);
   const chosen = Object.keys(insSel);
   host.appendChild(el('div', { class: 'actions' },
     el('button', {
@@ -376,7 +381,7 @@ function insRenderReview(root) {
   box.appendChild(el('div', { class: 'ins-review-h', text: 'Your one command' }));
 
   if (!plan.count) {
-    const anyRemove = insDoc.items.some((i) => i.verdict === 'remove');
+    const anyRemove = insDoc.items.some(insRecommended);
     box.appendChild(el('p', { class: 'empty' },
       anyRemove
         ? 'Tick an item, or use auto-select to take what is past the observation floor.'
@@ -518,7 +523,7 @@ function insRender() {
 
   const items = insDoc.items || [];
   const unremovable = items.filter((i) => i.scope === 'none');
-  const removeSet = items.filter((i) => i.verdict === 'remove');
+  const removeSet = items.filter(insRecommended);
 
   /* The headline, in the page's own tile vocabulary. */
   const tiles = el('div', { class: 'grid' },

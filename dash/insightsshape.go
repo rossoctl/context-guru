@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // The shaping layer: the step between "what is declared and what was used" and "what should you do
@@ -44,9 +45,37 @@ const (
 	// the floor gates ADVICE and not disclosure; refusing to recommend is honest, refusing to say
 	// what is there is merely unhelpful.
 	VerdictConsider = "consider"
-	// VerdictKeep — invoked at least once, or a built-in. Two different facts, worded apart.
+	// VerdictKeep — in use, or a built-in. Two different facts, worded apart.
 	VerdictKeep = "keep"
+	// VerdictStale — it WAS used, it is not any more, and it is still carried on every request.
+	//
+	// The state the report could not express. A user working three months in one project —
+	// planning, then development, now research — has planning skills used heavily in month one
+	// and dead since month two. `calls > 0` filed them under keep, alongside a tool invoked a
+	// minute ago, so the report never mentioned them.
+	//
+	// Deliberately NOT solved with a session window. A session is not a unit of time: measured on
+	// one real store, spans were 0.0h, 1.1h and 99.1h, with a single session covering four days,
+	// so "the last N sessions" is anywhere from minutes to weeks and "the last N days" anywhere
+	// from two sessions to sixty. The gap between last-used and last-carried is a property of the
+	// item instead, independent of how anybody structures their work, and it is evidence a reader
+	// can check against their own memory.
+	VerdictStale = "stale"
 )
+
+// StaleAfter is how long a capability must go unused, while still being carried, before this
+// report will call it abandoned.
+//
+// Fourteen days, and the number is a judgement rather than a measurement — so it is one constant
+// with its reasoning attached rather than a threshold scattered through the code. Shorter would
+// catch a fortnight's holiday or a two-week spell on one part of a codebase, both of which are
+// normal and neither of which means a tool is finished with. Much longer and a project that
+// changed phase a month ago still shows its old tooling as current, which is the complaint this
+// exists to answer.
+//
+// It is a floor on the EVIDENCE, not a window on the data: every use is counted however old, and
+// this only decides when a gap is long enough to report.
+const StaleAfter = 14 * 24 * time.Hour
 
 // selfPlugin is this plugin's own name. Held as a constant because it is the one string whose job
 // is keeping the reporter out of its own report.
@@ -70,19 +99,23 @@ type InsightsItem struct {
 	Plugin string `json:"plugin,omitempty"`
 	Tokens int    `json:"tokens"`
 	// Reads is billed tokens spent carrying it in sessions that never invoked it.
-	Reads     int64   `json:"reads"`
-	USD       float64 `json:"usd"`
-	Priced    bool    `json:"priced"`
-	Invoked   bool    `json:"invoked"`
-	Calls     int     `json:"calls,omitempty"`
-	Scope     string  `json:"scope"`
-	Verdict   string  `json:"verdict"`
-	Why       string  `json:"why"`
-	Command   string  `json:"command,omitempty"`
-	Settings  string  `json:"settings,omitempty"`
-	Desc      string  `json:"desc,omitempty"`
-	DescFull  string  `json:"desc_full,omitempty"`
-	DescKnown bool    `json:"desc_known"`
+	Reads    int64   `json:"reads"`
+	USD      float64 `json:"usd"`
+	Priced   bool    `json:"priced"`
+	Invoked  bool    `json:"invoked"`
+	Calls    int     `json:"calls,omitempty"`
+	Scope    string  `json:"scope"`
+	Verdict  string  `json:"verdict"`
+	Why      string  `json:"why"`
+	Command  string  `json:"command,omitempty"`
+	Settings string  `json:"settings,omitempty"`
+	// LastUsedTS / DeadDays: when it was last reached for, and how long it has been carried since.
+	// The evidence behind a stale verdict, and a figure a reader can check against their memory.
+	LastUsedTS int64   `json:"last_used_ts,omitempty"`
+	DeadDays   float64 `json:"dead_days,omitempty"`
+	Desc       string  `json:"desc,omitempty"`
+	DescFull   string  `json:"desc_full,omitempty"`
+	DescKnown  bool    `json:"desc_known"`
 }
 
 // InsightsOwner is the thing that removes a group of items, with its own subtotal.
@@ -142,6 +175,7 @@ type InsightsOptions struct {
 
 // ShapeInsights turns an inventory into the document a page renders.
 func ShapeInsights(rep *ToolReport, opt InsightsOptions) *InsightsDoc {
+	now := time.Now().UnixMilli()
 	doc := &InsightsDoc{Items: []InsightsItem{}, Owners: []InsightsOwner{},
 		Basis: "measured over the window"}
 	if rep == nil {
@@ -181,6 +215,11 @@ func ShapeInsights(rep *ToolReport, opt InsightsOptions) *InsightsDoc {
 		}
 
 		invoked := r.SessionsUsed > 0 || r.Calls > 0
+		// STALE SITS BETWEEN THE TWO EXISTING STATES. It was invoked, so it is not "never used";
+		// it has not been invoked for long enough that carrying it is now waste, so it is not
+		// "in use" either. It is reported with its cost columns BECAUSE it is removable — which
+		// is the whole difference from an item still earning its weight.
+		stale, deadDays := staleness(r, now)
 		scope := ScopeNone
 		if !r.Builtin && !r.Removal.Danger {
 			if s, ok := removalScope[r.Removal.Kind]; ok {
@@ -194,7 +233,7 @@ func ShapeInsights(rep *ToolReport, opt InsightsOptions) *InsightsDoc {
 		it := InsightsItem{
 			Kind: r.Kind, Name: r.Name, Server: r.Server, Invoked: invoked, Calls: r.Calls,
 		}
-		if invoked {
+		if invoked && !stale {
 			// AN INVOKED ITEM CARRIES NO COST COLUMNS, and that is not a gap. Every cost field
 			// here means "spent carrying this for nothing": unused reads, the dollars they cost,
 			// the weight that bought nothing. None of those figures exists for a capability that
@@ -203,7 +242,10 @@ func ShapeInsights(rep *ToolReport, opt InsightsOptions) *InsightsDoc {
 			// one thing it claims to measure.
 			//
 			// It carries a verdict and a reason, because "why is this not on the list" is a fair
-			// question, and no scope, because removal was never on offer.
+			// question, and no scope, because removal was never on offer. It DOES carry
+			// last_used: "in use" is a claim, and the date behind it is what makes the claim
+			// checkable — the same reason a stale verdict names one.
+			it.LastUsedTS = r.LastUsedTS
 			it.Verdict, it.Why = verdictFor(r, ScopeNone, true, false)
 			doc.Items = append(doc.Items, it)
 			continue
@@ -221,7 +263,12 @@ func ShapeInsights(rep *ToolReport, opt InsightsOptions) *InsightsDoc {
 		if d, ok := opt.Descriptions[r.Name]; ok && d != "" {
 			it.DescFull, it.Desc, it.DescKnown = d, summarizeDesc(d), true
 		}
-		it.Verdict, it.Why = verdictFor(r, scope, false, opt.Qualified[r.Name])
+		it.LastUsedTS, it.DeadDays = r.LastUsedTS, deadDays
+		if stale {
+			it.Verdict, it.Why = VerdictStale, staleWhy(r, deadDays)
+		} else {
+			it.Verdict, it.Why = verdictFor(r, scope, false, opt.Qualified[r.Name])
+		}
 		doc.Items = append(doc.Items, it)
 
 		if scope == ScopeNone {
@@ -343,4 +390,32 @@ func summarizeDesc(d string) string {
 		return text[:i] + "…"
 	}
 	return text[:budget] + "…"
+}
+
+// staleness decides whether a capability has been abandoned, and for how long.
+//
+// Both timestamps are required. Without LastUsedTS the item was never invoked, which is a
+// different verdict entirely; without LastCarriedTS there is nothing to measure the gap against.
+// A built-in is never stale: the question is academic for something that cannot be removed.
+func staleness(r ToolStat, now int64) (bool, float64) {
+	if r.LastUsedTS == 0 || r.LastCarriedTS == 0 || r.Builtin || r.Removal.Danger {
+		return false, 0
+	}
+	// The gap is measured from the last USE to the last time it was CARRIED, not to now: a report
+	// read a week after the traffic stopped would otherwise accuse every capability of going
+	// stale during the gap in which nothing was happening at all.
+	gap := r.LastCarriedTS - r.LastUsedTS
+	if gap < int64(StaleAfter/time.Millisecond) {
+		return false, 0
+	}
+	return true, float64(gap) / float64(24*time.Hour/time.Millisecond)
+}
+
+// staleWhy states the evidence as a DATE and a duration, which is the point of this verdict over a
+// session window: "last used 12 September, carried on every request since" is something a reader
+// can check against their own memory, and "unused in the last 10 sessions" is not.
+func staleWhy(r ToolStat, deadDays float64) string {
+	when := time.UnixMilli(r.LastUsedTS).Format("2 Jan 2006")
+	return "last used " + when + " — " + strconv.Itoa(int(deadDays+0.5)) +
+		" days carried on every request since, invoked in none of them"
 }

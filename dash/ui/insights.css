@@ -92,6 +92,9 @@
 .ins-vd::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
 .ins-vd.remove   { background: var(--good-soft); color: var(--good); border-color: var(--good); }
 .ins-vd.consider { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
+/* Stale is green like `remove`, because it is the same instruction with better evidence: this one
+   was used, so the reader remembers it, and the date proves it is finished with. */
+.ins-vd.stale    { background: var(--good-soft); color: var(--good); border-color: var(--good); }
 .ins-vd.keep     { background: var(--bad-soft);  color: var(--bad);  border-color: var(--bad); }
 .ins-vd.unknown  { background: var(--bg-sunken); color: var(--fg-faint); }
 .ins-why { display: block; color: var(--fg-muted); font-size: var(--t-small); line-height: 1.35; margin-top: 3px; max-width: 46ch; }

@@ -1246,10 +1246,20 @@ def _qualified_keys(doc: object) -> set[tuple[str, str]]:
 WHY_MAX_CHARS = 159
 
 
+# How long a capability must go unused, while still being carried, before this report calls it
+# abandoned. Mirrors dash.StaleAfter and is pinned against it by
+# TestEveryVerdictGoEmitsIsOneThePluginAlsoKnows and the equivalence test.
+#
+# Fourteen days, and it is a judgement rather than a measurement. Shorter catches a fortnight's
+# holiday or a spell on one part of a codebase, neither of which means a tool is finished with;
+# much longer and a project that changed phase a month ago still shows its old tooling as current.
+STALE_AFTER_DAYS = 14.0
+
+
 def _verdict(row: dict, aside: bool, scope: str, qualified: bool) -> tuple[str, str]:
     """What this report is entitled to say about one item, and the evidence it rests on.
 
-    Three verdicts, and each boundary between them is a specific way the report could otherwise
+    Four verdicts, and each boundary between them is a specific way the report could otherwise
     overstate what it measured:
 
       * `keep` for a built-in, because the question is closed — the weight is real and removing one
@@ -1271,6 +1281,20 @@ def _verdict(row: dict, aside: bool, scope: str, qualified: bool) -> tuple[str, 
     used = int(_num(row.get("sessions_used")))
     declared = int(_num(row.get("sessions_declared")))
 
+    # STALE sits between "invoked" and "never invoked", and it is the state this report could not
+    # express. A user working three months in one project — planning, then development, now
+    # research — has planning skills used heavily in month one and dead since. `calls > 0` filed
+    # those under `keep`, next to a tool invoked a minute ago, so they were never mentioned.
+    #
+    # NOT solved with a session window, because a session is not a unit of time: measured on one
+    # real store, spans were 0.0h, 1.1h and 99.1h, with a single session covering four days. The
+    # gap between last-used and last-carried is a property of the ITEM, so it holds however
+    # anybody structures their work — and it names a date, which a reader can check.
+    stale_days = _stale_days(row)
+    if stale_days is not None and not aside and scope != "none":
+        when = _ts_date(_num(row.get("last_used_ts")))
+        return "stale", (f"last used {when} — {stale_days:.0f} days carried on every request "
+                         f"since, invoked in none of them")
     if calls or used:
         # Invoked. The call count is the evidence and it is quoted first, because "37 calls" settles
         # the question in a way "used in 4 sessions" does not — a capability invoked once in one
@@ -1285,6 +1309,32 @@ def _verdict(row: dict, aside: bool, scope: str, qualified: bool) -> tuple[str, 
                           f"enough days to qualify under this proxy's own observation floor")
     return "consider", (f"never invoked, but only {declared} session(s) of evidence — below the "
                         f"floor, and sessions on one task say nothing about the next one")
+
+
+def _stale_days(row: dict) -> float | None:
+    """Days this capability has been carried since it was last used, or None if that is not a
+    question about it.
+
+    Both timestamps are required: without `last_used_ts` the item was never invoked, which is a
+    different verdict, and without `last_carried_ts` there is nothing to measure the gap against.
+
+    The gap runs from the last USE to the last time it was CARRIED, never to now — a report read a
+    week after the traffic stopped would otherwise accuse every capability of going stale during
+    the gap in which nothing happened at all.
+    """
+    used = _num(row.get("last_used_ts"))
+    carried = _num(row.get("last_carried_ts"))
+    if used <= 0 or carried <= 0:
+        return None
+    days = (carried - used) / 86_400_000.0
+    return days if days >= STALE_AFTER_DAYS else None
+
+
+def _ts_date(ms: float) -> str:
+    """An epoch-ms timestamp as a date a reader recognises. Local time, because the reader is at
+    this machine and comparing it against their own memory of what they were doing."""
+    import datetime
+    return datetime.datetime.fromtimestamp(ms / 1000.0).strftime("%-d %b %Y")
 
 
 def _emit_inventory(rep: Report, tools: object, qualified: set[tuple[str, str]],
