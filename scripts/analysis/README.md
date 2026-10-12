@@ -625,3 +625,67 @@ whatever that column's own count happened to add up to on this data,
 with no way to see the orphaned 55 at all. Transcript mode's exact
 per-thread gaps attribute more precisely still: 256 pings fall inside a
 measured gap, 104 do not.
+
+## `turn_gate.py`: would a "no ping before turn K" gate lose value?
+
+A second, smaller script, built on `wait_causes.py`'s parser, DB reader and
+cost model. It answers one question: by the TURN a pause falls on (1-based
+call index within its thread — turn 1 is the thread's first call), what did
+the current keep-alive gates ping and not ping, and would refusing to ping
+before turn 5 or turn 10 win or lose money?
+
+```bash
+# Transcript mode, with a DB for prices and the real-ping attribution:
+python3 -I scripts/analysis/turn_gate.py \
+  --projects-dir ~/.claude/projects/-Users-you-git-your-repo \
+  --db ~/.local/state/context-guru/dashboard-8789.db
+
+# Production proxy: DB only, no transcripts (approximate thread proxy, same
+# grouping choice as wait_causes.py's db-only mode: by `thread_id` where the
+# DB has that column, else by (session_id, model)).
+python3 -I scripts/analysis/turn_gate.py --db /path/to/dashboard.db
+
+# Override the keep-alive gates (defaults are issue #444's shipped values):
+python3 -I scripts/analysis/turn_gate.py --db /path/to/dashboard.db \
+  --pings 2 --prefix-floor 80000 --idle-sec 270 --ping-ceiling-usd 0.50
+
+python3 -I scripts/analysis/turn_gate.py --self-test
+```
+
+A pause is simulated (costed and priced) only if it passes all 3 of the
+keeper's live gates: the prefix is at least `--prefix-floor` tokens, the
+pause has already run `--idle-sec` before a ping would fire at all, and one
+ping's own USD cost does not exceed `--ping-ceiling-usd`. A pause that fails
+any gate is still counted (`pauses`), just with zero simulated ping cost and
+zero avoided-miss value — so the report also shows how much traffic never
+reaches a ping decision at all, separate from how much reaches one and is
+then declined.
+
+Reports, by turn bucket (`1`, `2-4`, `5-9`, `10+`):
+
+- `pauses` / `eligible_pauses`: every qualifying pause, and how many of
+  those the 3 gates would actually have let a ping fire for.
+- `ends` / `eligible_ends`: a thread's LAST call, once it has sat idle 20+
+  minutes — a thread the keeper is very likely still pinging for nothing,
+  since it is not coming back. No miss is ever avoided here; it is pure
+  waste when it fires.
+- `ping_cost_x` / `avoided_x` / `net_x` and the same 3 in USD: the
+  simulated ping spend, the miss-premium value it would have avoided (net
+  of the ping spend itself), and the difference, same `sim_cost_x` cost
+  model as `wait_causes.py`.
+- `real_pings` / `real_ping_cost_usd`: REAL keep-alive ping rows
+  (`keepalive = 1`) attributed to the pause they actually fell inside,
+  priced from their own real `cost_usd` — not simulated, and read the same
+  way `wait_causes.py`'s `DBIndex` does (directly, by timestamp range, not
+  from a later row's `keepalive_pings` column). Orphan pings (a session
+  that never returned) are reported separately, same as `wait_causes.py`.
+- `gate_vs_no_gate`: for a gate at turn 5 and at turn 10, the net change
+  (x and USD) from refusing to ping every turn below that cutoff, against
+  today's "ping from turn 1" baseline. **Positive means the gate would have
+  saved money** (today's early pinging is a net loss on that traffic);
+  negative means it would give up value pinging currently captures.
+
+In DB-only mode, pings (`keepalive = 1`) and failed/non-200 rows are
+excluded from the turn sequence before indexing, same as `wait_causes.py`'s
+own DB-only mode — a ping never had its own hit/miss and must not become a
+turn boundary.
