@@ -27,8 +27,9 @@ cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41% │ 
   keeps the clock from the end of the last response, so a long answer is counted. It ticks every
   second (`refreshInterval: 1`, which `settings.py` writes; a value you tuned is kept). `↻` means
   the last touch was a keep-alive ping.
-- **Sub-agents.** `agents ◐ 0:51 ● 4:21`: each running sub-agent has its own cache and its own
-  clock (one to two listed, then `agents 5 · next ◐ 0:52`). Finished (cold) ones are not shown.
+- **Sub-agents.** Each running sub-agent has its own cache: one shows its clock (`agent ● 4:21`),
+  several show the count and the one expiring soonest (`agents 5 · soonest ◐ 0:52`). Finished
+  (cold) ones are not shown.
   The main clock and the context bar follow the main thread, not whichever agent spoke last.
 - **Context.** Bar and percent against the model's context limit: the proxy's when it is a
   measured figure for the model, else Claude Code's.
