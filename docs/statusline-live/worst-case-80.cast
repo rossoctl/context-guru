@@ -1,4 +1,4 @@
-{"version": 2, "width": 80, "height": 8, "timestamp": 1791804491, "title": "statusline"}
+{"version": 2, "width": 80, "height": 8, "timestamp": 1791805002, "title": "statusline"}
 [0.3, "o", "s"]
 [0.33999999999999997, "o", "t"]
 [0.38, "o", "a"]
@@ -11,4 +11,4 @@
 [0.6599999999999999, "o", "e"]
 [0.7, "o", "\r"]
 [0.74, "o", "\n"]
-[0.94, "o", "\u001b[H\u001b[J$ statusline\r\nsaved \u2248$0.50 \u001b[2msession\u001b[0m \u001b[2m\u00b7\u001b[0m \u2248$6.20 \u001b[2mtoday\u001b[0m \u001b[2m\u00b7\u001b[0m \u001b[2m\u2605\u001b[0m \u2248$72.20 \u001b[2mlifetime\u001b[0m\r\n\u001b[2mcache\u001b[0m \u001b[31m\u25cb cold 1:15\u001b[0m \u001b[2m\u2502\u001b[0m \u001b[2magents\u001b[0m 5 \u001b[2m\u2502\u001b[0m \u001b[2mctx\u001b[0m \u001b[32m41%\u001b[0m \u001b[2m\u2502\u001b[0m \u001b[2m\u25b8\u001b[0m \u001b[31myour next message costs \u2248$0.78 extra\u001b[0m\r\n"]
+[0.94, "o", "\u001b[H\u001b[J$ statusline\r\nsaved \u2248$0.50 \u001b[2msession\u001b[0m \u001b[2m\u00b7\u001b[0m \u2248$6.20 \u001b[2mtoday\u001b[0m \u001b[2m\u00b7\u001b[0m \u001b[2m\u2605\u001b[0m \u2248$72.20 \u001b[2mlifetime\u001b[0m\r\n\u001b[2mcache\u001b[0m \u001b[31m\u25cb cold 1:16\u001b[0m \u001b[2m\u2502\u001b[0m \u001b[2magents\u001b[0m 5 \u001b[2m\u2502\u001b[0m \u001b[2mctx\u001b[0m \u001b[32m41%\u001b[0m \u001b[2m\u2502\u001b[0m \u001b[2m\u25b8\u001b[0m \u001b[31myour next message costs \u2248$0.78 extra\u001b[0m\r\n"]

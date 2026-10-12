@@ -65,7 +65,7 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 		{"warm/ping", ping(cs(60, 300, 52000, "0.30")), small, "balanced", 200,
 			sess + "\ncache ● █████░ 4:00 ↻ │ ctx ░░░░░░░░ 5%"},
 		{"warm/detailed", cs(60, 3600, 52000, "0.30"), small, "detailed", 200,
-			sess + " │ spent $0.41\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5% │ proxy: 3ms · upstream: 340ms"},
+			sess + " │ spent $0.41\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
 		{"expiring/cheap", cs(258, 300, 52000, "0.30"), small, "balanced", 200,
 			sess + "\ncache ◐ █░░░░░ 0:42 │ ctx ░░░░░░░░ 5%"},
 		{"expiring/costly", cs(258, 300, 412000, "1.20"), payload, "balanced", 200,
@@ -168,7 +168,7 @@ func TestStatuslineGoldenLive(t *testing.T) {
 		{"same-model-other-spelling", body("aws/claude-sonnet-5-5", 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-sonnet-5-5[1m]"), "balanced", 200,
 			sess + "\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41%"},
 		{"spend-detailed", body(m, 60, th("", 60, 300, 412000, "1.20")), ctxPay(m), "detailed", 200,
-			sess + " │ spent $4.10 · $4.10/h · up 1h00m\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41% │ proxy: 3ms · upstream: 340ms"},
+			sess + " │ spent $4.10 · $4.10/h · up 1h00m\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41%"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(cgStub(t, c.cache))

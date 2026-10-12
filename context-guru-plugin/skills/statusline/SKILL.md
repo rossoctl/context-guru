@@ -46,7 +46,7 @@ layout outranks the installed command's flag until `auto`. Otherwise
 |---|---|
 | minimal | saved, cache, hint (`saved ≈$0.31 │ cache ● ████░░ 3:57`) |
 | balanced | update, saved, cache, agents, ctx, hint |
-| detailed | balanced + `spent` + `proxy: 3ms · upstream: 340ms` + least-used tool/skill (`◇ github 1% remove`) |
+| detailed | balanced + `spent` + `upstream slow: 7.0s` (only when slow) + least-used tool/skill (`◇ github 1% remove`) |
 
 `--hide=a,b` / `--show=a,b` toggle single elements (`update save spend cache agents ctx hint latency tools ka`;
 env `CG_STATUSLINE_HIDE` / `_SHOW`). `--cache` and `--keepalive` still work (`ka` = keep-alive net

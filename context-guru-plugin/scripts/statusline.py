@@ -70,6 +70,8 @@ SCRIPT_BUDGET_SECONDS = 2
 # milliseconds; 0.6s is already generous and still leaves headroom under the script budget above.
 HTTP_TIMEOUT_SECONDS = 0.6
 
+SLOW_UPSTREAM_MS = 3000  # the detailed layout names the provider only when it is this slow
+
 # How long a cached /api/stats response is reused before a fresh fetch is attempted. Claude Code
 # can re-render on every token during a stream, and this is what stops that from becoming a
 # request-per-render storm against the proxy.
@@ -118,20 +120,12 @@ _SKILL_NAME_RE = re.compile(r"^name:\s*(\S+)\s*$", re.MULTILINE)
 
 
 def _latency_segment(stats: dict | None) -> str | None:
-    """`proxy: Xms · upstream: Yms` — labelled so ContextGuru's own added latency cannot be
-    misread as the provider's, or vice versa. Both are /api/stats' own averages
-    (dash.Overview.CGLatencyMsAvg / UpstreamMsAvg) — measured, not derived here.
-    """
-    if not isinstance(stats, dict):
+    """`upstream slow: 7.0s`, only when the provider is slow (/api/stats' own average,
+    dash.Overview.UpstreamMsAvg): a healthy 340ms is not news, and raw milliseconds are noise."""
+    upstream_ms = stats.get("upstream_ms_avg") if isinstance(stats, dict) else None
+    if not isinstance(upstream_ms, (int, float)) or upstream_ms < SLOW_UPSTREAM_MS:
         return None
-    proxy_ms = stats.get("cg_latency_ms_avg")
-    upstream_ms = stats.get("upstream_ms_avg")
-    if not isinstance(proxy_ms, (int, float)) or not isinstance(upstream_ms, (int, float)):
-        return None
-    def ms(v: float) -> str:
-        return f"{v / 1000:.1f}s" if v >= 1000 else f"{v:.0f}ms"
-
-    return f"{DIM}proxy:{RESET} {ms(proxy_ms)} {DIM}·{RESET} {DIM}upstream:{RESET} {ms(upstream_ms)}"
+    return f"{YELLOW}upstream slow:{RESET} {upstream_ms / 1000:.1f}s"
 
 
 def _configured_tool_names() -> list[str]:
@@ -1027,7 +1021,7 @@ def _hint(payload: dict, view: dict, ctx: tuple[float, float] | None) -> tuple[s
     if at is not None and time.time() - at < 120 and isinstance(causes, list) and causes:
         added, removed = _num(cause, "tools_added") or 0, _num(cause, "tools_removed") or 0
         what = f"tools changed (+{int(added)} −{int(removed)})" if added or removed else ",".join(str(c) for c in causes[:2])
-        miss = f"{YELLOW}last turn rewrote the cache: {what}{RESET}"
+        miss = f"{YELLOW}{what}: add tools at session start{RESET}"
         return miss, miss
     return None
 
