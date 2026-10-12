@@ -12,6 +12,6 @@ Last 20 requests  oldest to newest
 o o o o o o o o o o o o o o o o o o o@X
 o hit  ~ partial  X miss  @ ping
 
-Do: the next message pays the rewrite; run /compact first to make it smaller.
+Do: the next message costs extra; /compact first to cut it.
 
 updated 22s ago   q quit  r refresh

@@ -13,6 +13,6 @@ messages).
 13:27  $0.76  after a pause of 9m
 15:27  $0.25  after a pause of 8m
 
-Do: run /compact before a break longer than 5 minutes, so the rewrite is
+Do: run /compact before a break longer than 5 minutes, so the extra cost is
 smaller.
 [2mExtra = cost above a normal turn of the same model (estimate).[0m

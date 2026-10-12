@@ -12,6 +12,6 @@ $0.65 extra.
 [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m↻[31m✖[0m
 [32m■[0m hit  [33m▨[0m partial  [31m✖[0m miss  ↻ ping
 
-[1mDo: [0mthe next message pays the rewrite; run /compact first to make it smaller.
+[1mDo: [0mthe next message costs extra; /compact first to cut it.
 
 [2mupdated 22s ago   q quit  r refresh[0m

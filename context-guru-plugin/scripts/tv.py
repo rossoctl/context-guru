@@ -168,7 +168,7 @@ def view_timeline(api, o, e: Env) -> list[str]:
         L += T.cols([[clock(r["ts"], o), usd(ex[r["id"]]), f"after a pause of {span(gaps[r['id']] / 1000)}" if gaps[r["id"]] > 300_000
                       else "rewritten mid-conversation"] for r in sorted(miss, key=lambda r: -ex[r["id"]])[:3]], "lrl")
         long_pause = any(gaps[r["id"]] > 300_000 for r in miss)
-        L += ["", do(e, "run /compact before a break longer than 5 minutes, so the rewrite is smaller." if long_pause
+        L += ["", do(e, "run /compact before a break longer than 5 minutes, so the extra cost is smaller." if long_pause
                      else "keep tools and CLAUDE.md fixed within a session; changing them rewrites the cache.")]
     L += [e.paint("dim", "Extra = cost above a normal turn of the same model (estimate).")]
     return L
@@ -401,11 +401,10 @@ def fetch(api, o, s: Snap, now: int | None = None) -> None:
     if s.proj is None:
         s.proj = cg.C.Projects()
     if mono - s.t_sessions > SESSION_S or newer:
+        old = {x["sid"]: x for x in s.sessions}
         built = []
-        for sid in s.ids:
-            if time.monotonic() > deadline:
-                break
-            b = build_session(api, s, sid, now)
+        for sid in s.ids:  # past the deadline, keep what we knew rather than drop the session for a cycle
+            b = build_session(api, s, sid, now) if time.monotonic() <= deadline else old.get(sid)
             if b:
                 built.append(b)
         if built or not s.ids:
@@ -455,7 +454,7 @@ def _frame(s: Snap, o: dict, e: Env, now_ms: int) -> list[str]:
         strip += e.g["ping"] if r.get("keepalive") else " "
     L += [strip.rstrip(), f"{e.paint('ok', e.g['hit'])} hit  {e.paint('warn', e.g['part'])} partial  {e.paint('bad', e.g['miss'])} miss  {e.g['ping']} ping"]
     if cold:
-        L += ["", do(e, "the next message pays the rewrite; run /compact first to make it smaller.")]
+        L += ["", do(e, "the next message costs extra; /compact first to cut it.")]
     elif soon:
         L += ["", do(e, "send a message within a minute to keep the cache warm.")]
     L += ["", e.paint("dim", f"updated {age}s ago" + (f"; {s.err}, showing the last data" if s.err else "") + "   q quit  r refresh")]
