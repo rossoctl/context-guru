@@ -628,7 +628,7 @@ func intersectAllowed(order, allowed []string) []string {
 // silently turning an LLM-free configuration into one that makes model calls. Anything
 // offering these values reads them from here; TestModesAreTheModesRawStrategyOrderHonors
 // pins the list against the switch below.
-var Modes = []string{"auto", "code", "single", "rlm", "deterministic"}
+var Modes = []string{"auto", "code", "single", "rlm", "lines", "deterministic"}
 
 func strategyOrder(tokenEst int, cfg Cfg) []string {
 	return intersectAllowed(rawStrategyOrder(tokenEst, cfg), cfg.AllowedStrategies)
@@ -638,7 +638,7 @@ func rawStrategyOrder(tokenEst int, cfg Cfg) []string {
 	switch cfg.Mode {
 	case "deterministic":
 		return []string{"deterministic"}
-	case "single", "rlm":
+	case "single", "rlm", "lines":
 		order := []string{cfg.Mode}
 		if cfg.AllowDeterministic {
 			order = append(order, "deterministic")
@@ -708,6 +708,8 @@ func RunExtractionDetail(ctx context.Context, body, goal string, keepIDs []strin
 			cand, sum, why = runStarlark(ctx, body, goal, keepIDs, model, cfg.Rewrite, cfg.CacheContext, cfg.Aggressiveness)
 		case "single":
 			cand = runSingle(ctx, body, goal, keepIDs, model)
+		case "lines":
+			cand, why = runLines(ctx, body, goal, keepIDs, model)
 		case "rlm":
 			cand = runRLMBatched(ctx, body, goal, keepIDs, model)
 		case "deterministic":

@@ -131,6 +131,7 @@ type ExtractLLM struct {
 	llmMaxPerReq  int
 	llmMaxPerSess int
 	skipFileReads *bool // nil = auto (skip when cache-aware); true/false = force
+	keepIDs       bool  // harvest the agent's recent identifiers into a keep-list (keep_identifiers)
 	mu            sync.Mutex
 	llmSeen       map[string]int // session -> count of qualifying (LLM-eligible) requests
 	llmSpent      map[string]int // session -> model calls actually made (the per-session cap)
@@ -373,6 +374,12 @@ type extractLLMConfig struct {
 	// reduction is a direct saving. So AUTO skips file reads exactly when caching makes
 	// them cheap. See docs/CACHE_AWARE_ITERATIONS.md.
 	SkipFileReads *bool `yaml:"skip_file_reads"`
+	// KeepIdentifiers controls the keep-list harvested from the agent's recent words: the
+	// identifiers the prompt asks the model to preserve and the acceptance check then requires
+	// verbatim. Unset = true. false sends no list and checks none, so an extraction may drop an
+	// identifier the agent named; it stays recoverable through the marker, at the price of an
+	// expand round trip when the agent needs it.
+	KeepIdentifiers *bool `yaml:"keep_identifiers"`
 }
 
 // movedToSweep names the keys the cold-sweep split took out of this component, and where each one
@@ -489,6 +496,7 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 		pricing:    cheapmodel.PricingFromEnv(),
 		prevTokens: map[string]int{}, modelName: cfg.Model.Model,
 		modelMaxInput: cfg.ModelMaxInput,
+		keepIDs:       cfg.KeepIdentifiers == nil || *cfg.KeepIdentifiers,
 	}, nil
 }
 
@@ -798,7 +806,10 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// difference between the sweep working and the sweep being an expensive no-op. Harvesting
 	// from ctxRecent explicitly is also what makes the sweep's context mode a free choice
 	// again (see extractionContext): the keep-list no longer moves when the context does.
-	keepIDs := extract.HarvestIdentifiers(conversationContext(req, ctxRecent, e.ctxMessages), 40)
+	var keepIDs []string
+	if e.keepIDs {
+		keepIDs = extract.HarvestIdentifiers(conversationContext(req, ctxRecent, e.ctxMessages), 40)
+	}
 	// Per-call context budget (constant across this request's candidates): the extraction
 	// model's input limit, and the prompt's fixed cost around the tool output itself.
 	inputLimit := e.inputLimit(c, effSource)
@@ -1641,7 +1652,7 @@ func init() {
 		{Key: "min_tokens", Type: components.FieldInt, Default: 300, Min: 1,
 			Hint: "Per-output floor. Setting it pins the trigger to your number instead of the derived pressure curve. Under fire_on: size an unset floor is raised to 2000, because 300 is a threshold nearly every output clears."},
 		{Key: "strategy", Type: components.FieldEnum, Default: "code", Options: extract.Modes,
-			Hint: "How the extraction is produced. code = model-written Starlark filter over the body; single = one JSON-returning call; rlm = chunked, for very large bodies; deterministic = NO model call at all; auto picks by size."},
+			Hint: "How the extraction is produced. code = model-written Starlark filter over the body; single = one JSON-returning call; rlm = chunked, for very large bodies; lines = the model names the line ranges to keep and the result is those lines verbatim; deterministic = NO model call at all; auto picks by size."},
 		{Key: "aggressiveness", Type: components.FieldEnum, Default: "medium",
 			Options: []string{string(extract.AggroLow), string(extract.AggroMedium), string(extract.AggroHigh)},
 			Hint:    "The compaction target taught to the model. It changes what is ASKED for, never what is ACCEPTED — the verbatim-preservation and strictly-smaller checks are identical at every level."},
@@ -1663,6 +1674,8 @@ func init() {
 			Hint: "Only call the model when the expected saving exceeds the expected call cost, priced from real rates. Turning it off restores spend-on-size, needed only to reproduce old benchmark numbers."},
 		{Key: "rewrite", Type: components.FieldBool, Default: true,
 			Hint: "Let the program reword and summarize rather than only delete. Off forces verified deletion-only (the containment proof); ids, paths and errors are required verbatim either way."},
+		{Key: "keep_identifiers", Type: components.FieldBool, Default: true,
+			Hint: "Ask the model to keep, and require verbatim, the identifiers the agent named recently. false sends no list and checks none: more is removed, and an identifier the agent needs comes back through expand."},
 		{Key: "skip_file_reads", Type: components.FieldBool,
 			Hint: "Leave line-numbered source dumps verbatim. Unset = AUTO: skip them when the request is prompt-cached (where reducing them measured +30% billed cost), reduce them otherwise."},
 		{Key: "model_max_input_tokens", Type: components.FieldInt,
