@@ -13,7 +13,7 @@ import (
 
 // cgStub answers the three reads the redesigned status line makes. cache is the /api/cachestate
 // body; everything is fixed, so the rendered line is byte-for-byte reproducible.
-func cgStub(t *testing.T, cache string) (port string) {
+func cgStub(t *testing.T, cache string, extra ...func(*http.ServeMux)) (port string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -32,6 +32,9 @@ func cgStub(t *testing.T, cache string) (port string) {
 		w.Write([]byte(`{"total_saved_usd": 0.31, "cost_usd": 0.41, "cg_latency_ms_avg": 3, "upstream_ms_avg": 340}`))
 	})
 	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(cache)) })
+	for _, f := range extra {
+		f(mux)
+	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go srv.Serve(ln) //nolint:errcheck
 	t.Cleanup(func() { srv.Close() })
@@ -254,5 +257,118 @@ func TestStatuslineSetLayout(t *testing.T) {
 	run("--set-layout=auto")
 	if got := run(); strings.Contains(got, "spent") {
 		t.Errorf("auto must fall back to balanced: %q", got)
+	}
+}
+
+// TestStatuslineGoldenModes pins the five terminal-view layouts at three widths. The clock is pinned
+// (CG_STATUSLINE_NOW, TZ=UTC) so the day- and hour-based views are reproducible.
+func TestStatuslineGoldenModes(t *testing.T) {
+	const nowS = 1_800_000_000 // 2027-01-15 08:00:00 UTC
+	const now = nowS * 1000
+	const day = 86_400_000
+	midnight := int64(nowS/86400) * day
+	th := func(id string, agoSec int) string {
+		return fmt.Sprintf(`{"id":%q,"main":%t,"model":"claude-sonnet-5-5","last_ts":%d,"end_ts":%d,"ttl_s":300,`+
+			`"prefix_tokens":412000,"priced":true,"rewrite_usd":1.20}`, id, id == "", now-int64(agoSec)*1000, now-int64(agoSec)*1000)
+	}
+	cache := fmt.Sprintf(`{"session":"s","model":"claude-sonnet-5-5","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":412000,`+
+		`"priced":true,"rewrite_usd":1.20,"window":1000000,"window_exact":true,"threads":[%s,%s,%s,%s]}`,
+		now-100_000, now, th("", 100), th("a:01", 30), th("a:02", 250), th("a:03", 3000))
+	extra := func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/series", func(w http.ResponseWriter, r *http.Request) {
+			var b []string
+			if strings.Contains(r.URL.RawQuery, "bucket=3600000") { // hourly: misses at 02h, 03h, 06h (6 of them)
+				for h, n := range map[int]int{2: 1, 3: 2, 6: 6, 7: 1} {
+					b = append(b, fmt.Sprintf(`{"ts":%d,"cache_misses":%d}`, midnight+int64(h)*3_600_000, n))
+				}
+			} else { // 14 days of saving, rising, then a good day
+				for d := 0; d < 13; d++ {
+					b = append(b, fmt.Sprintf(`{"ts":%d,"saved_usd":%d}`, midnight-int64(13-d)*day, 1+d%5))
+				}
+			}
+			fmt.Fprintf(w, `{"buckets":[%s]}`, strings.Join(b, ","))
+		})
+		mux.HandleFunc("/api/spend/explain", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprintf(w, `{"daily":[{"day":%d,"rewrite_usd":1.4}]}`, midnight)
+		})
+		mux.HandleFunc("/api/requests", func(w http.ResponseWriter, _ *http.Request) {
+			var rows []string
+			for i := 0; i < 20; i++ { // newest first, as the API pages
+				ctx := 200_000 + (19-i)*10_000
+				read, write := ctx-2000, 2000
+				switch i {
+				case 4, 5:
+					read, write = ctx/2, ctx/2 // partial
+				case 11:
+					read, write = 0, ctx // a full rewrite
+				}
+				rows = append(rows, fmt.Sprintf(`{"id":%d,"ts":%d,"thread_id":"","messages":%d,"fresh_input":0,"cache_read":%d,"cache_write":%d}`,
+					i, now-int64(i)*60_000-100_000, 40+(19-i), read, write))
+			}
+			fmt.Fprintf(w, `{"requests":[%s]}`, strings.Join(rows, ","))
+		})
+	}
+	stdin := `{"session_id":"sess-gold","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":200000}}`
+	for _, c := range []struct {
+		layout string
+		width  int
+		want   string
+	}{
+		{"spark", 60,
+			"saved $4.20 today  ▂▄▅▇█▂▄▅▇█▂▄▅▇ 14 days\ncache ● ████░░ 3:20"}, {"spark", 80,
+			"saved $4.20 today  ▂▄▅▇█▂▄▅▇█▂▄▅▇ 14 days\ncache ● ████░░ 3:20"}, {"spark", 120,
+			"saved $4.20 today  ▂▄▅▇█▂▄▅▇█▂▄▅▇ 14 days\ncache ● ████░░ 3:20"},
+		{"strip", 60,
+			"last 20 ■■■■■■■■✖■■■■■▨▨■■■■  $1.40 lost to misses today\ncache ● ████░░ 3:20"}, {"strip", 80,
+			"last 20 ■■■■■■■■✖■■■■■▨▨■■■■  $1.40 lost to misses today\ncache ● ████░░ 3:20"}, {"strip", 120,
+			"last 20 ■■■■■■■■✖■■■■■▨▨■■■■  $1.40 lost to misses today\ncache ● ████░░ 3:20"},
+		{"heat", 60,
+			"misses 0h  ░▒  █░                24h  $1.40 lost\ncache ● ████░░ 3:20"}, {"heat", 80,
+			"misses 0h  ░▒  █░                24h  $1.40 lost\ncache ● ████░░ 3:20"}, {"heat", 120,
+			"misses 0h  ░▒  █░                24h  $1.40 lost\ncache ● ████░░ 3:20"},
+		{"fill", 60,
+			"context ▒▒▒▒▒█████░░░░░░░░░░░░░░ 41% · full in 58m\ncache ● ████░░ 3:20"}, {"fill", 80,
+			"context ▒▒▒▒▒▒▒▒████████░░░░░░░░░░░░░░░░░░░░░░░░ 41% · full in 58m\ncache ● ████░░ 3:20"}, {"fill", 120,
+			"context ▒▒▒▒▒▒▒▒████████░░░░░░░░░░░░░░░░░░░░░░░░ 41% · full in 58m  ▒ always loaded 20% · █ conversation 21%\ncache ● ████░░ 3:20"},
+		{"watch", 60,
+			"cache ● ████░░ 3:20\na1 ████ 4:30  a2 █░░░ 0:50"}, {"watch", 80,
+			"cache ● ████░░ 3:20\na1 ████ 4:30  a2 █░░░ 0:50"}, {"watch", 120,
+			"cache ● ████░░ 3:20\na1 ████ 4:30  a2 █░░░ 0:50"},
+	} {
+		t.Run(fmt.Sprintf("%s/%d", c.layout, c.width), func(t *testing.T) {
+			env := routedEnv(cgStub(t, cache, extra))
+			env["CG_STATUSLINE_COLUMNS"], env["CG_STATUSLINE_NOW"], env["TZ"] = fmt.Sprint(c.width), fmt.Sprint(nowS), "UTC"
+			env["NO_COLOR"] = "1"
+			// the day total and the two series are background reads: the first render may have only the cache
+			runStatusline(t, env, stdin, "--layout="+c.layout)
+			out, code, _ := runStatusline(t, env, stdin, "--layout="+c.layout)
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			got := strings.TrimRight(out, "\n")
+			for _, ln := range strings.Split(got, "\n") {
+				if n := len([]rune(ln)); n > c.width {
+					t.Errorf("line is %d columns, wider than %d: %q", n, c.width, ln)
+				}
+			}
+			if got != c.want {
+				t.Errorf("got\n%s\nwant\n%s", got, c.want)
+			}
+		})
+	}
+}
+
+// The modes draw with tvlib, so CG_ASCII swaps their glyphs for plain characters.
+func TestStatuslineModesAscii(t *testing.T) {
+	port := cgStub(t, `{"none":true}`, func(mux *http.ServeMux) {
+		mux.HandleFunc("/api/requests", func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(`{"requests":[{"ts":2,"fresh_input":0,"cache_read":0,"cache_write":900},{"ts":1,"fresh_input":0,"cache_read":900,"cache_write":0}]}`)) //nolint:errcheck
+		})
+	})
+	env := routedEnv(port)
+	env["NO_COLOR"], env["CG_ASCII"] = "1", "1"
+	out, _, _ := runStatusline(t, env, `{"session_id":"sess-gold"}`, "--layout=strip")
+	if !strings.Contains(out, "last 2 oX") {
+		t.Errorf("want ascii hit/miss glyphs, got %q", out)
 	}
 }

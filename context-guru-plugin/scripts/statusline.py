@@ -563,11 +563,18 @@ LAYOUTS = {
     "minimal": ("save", "cache", "hint"),
     "balanced": ("update", "save", "cache", "agents", "ctx", "hint"),
     "detailed": ("update", "save", "spend", "cache", "agents", "ctx", "latency", "tools", "hint"),
+    # The terminal views as one glanceable line (row 0) over the cache clock (row 1).
+    "spark": ("spark", "cache", "hint"),   # saved today + 14 days of saving
+    "strip": ("strip", "cache", "hint"),   # the last 20 requests as hit / partial / miss
+    "heat": ("heat", "cache", "hint"),     # today's cache misses by hour
+    "fill": ("fill", "cache", "hint"),     # context: always loaded vs conversation, time to full
+    "watch": ("clock0", "wagents", "hint"),  # main clock over a mini-bar per sub-agent
 }
 ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka"}
 # Dropped/shrunk first to last when the line is wider than the terminal. The hint is never in this
 # list: it is the one thing worth the space, and is truncated instead.
 DEGRADE = (("tools", None), ("latency", None), ("ka", None), ("spend", None), ("update", None), ("hint", 1),
+           ("spark", 1), ("strip", 1), ("heat", 1), ("fill", 1), ("wagents", 1),
            ("agents", 1), ("save", 1), ("ctx", 1), ("save", 2), ("cache", 1), ("agents", None), ("ctx", None),
            ("save", None))
 DEFAULT_WIDTH = 100
@@ -582,8 +589,13 @@ CACHESTATE_TTL_SECONDS = 2.0
 DAY_TTL_SECONDS = 60.0
 LIFE_TTL_SECONDS = 300.0  # the all-time total moves slowly and is the most expensive read
 CACHE_BAR_CELLS = 6
+DAY_MS = 86_400_000
+SERIES_TTL_SECONDS = 120.0  # day and hour totals move slowly; a stale one is fine for a glance
+REQUESTS_TTL_SECONDS = 4.0
+STRIP_REQUESTS = 20
 # Which line each element sits on in a two-line layout. `minimal` ignores this: it is one line.
-ROW = {"update": 0, "save": 0, "spend": 0, "cache": 1, "agents": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1,
+ROW = {"spark": 0, "strip": 0, "heat": 0, "fill": 0, "clock0": 0, "wagents": 1,
+       "update": 0, "save": 0, "spend": 0, "cache": 1, "agents": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1,
        "hint": 1}
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
@@ -639,7 +651,7 @@ def _saved_layout() -> str | None:
 
 
 def _set_layout(name: str) -> str:
-    """`--set-layout=minimal|balanced|detailed|auto`: remember a layout across renders (the
+    """`--set-layout=<layout>|auto`: remember a layout across renders (the
     one-key toggle: bind it to a /command or a shell alias). `auto` forgets it again."""
     path = _layout_file()
     if name == "auto":
@@ -649,7 +661,7 @@ def _set_layout(name: str) -> str:
             pass
         return "status line layout: back to the installed default"
     if name not in LAYOUTS:
-        return "usage: statusline.py --set-layout=minimal|balanced|detailed|auto"
+        return "usage: statusline.py --set-layout=" + "|".join(LAYOUTS) + "|auto"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(name)
@@ -812,9 +824,9 @@ def _main_cs(cs: dict | None) -> dict | None:
     return merged
 
 
-def _agent_entries(cs: dict | None, cs_age: float) -> list[tuple[float, float]]:
-    """(remaining, ttl) of every WARM sub-agent cache, soonest-to-expire first. A cold sub-agent is
-    finished work, not something to watch."""
+def _agent_rows(cs: dict | None, cs_age: float) -> list[tuple[str, float, float]]:
+    """(thread id, remaining, ttl) of every WARM sub-agent cache, in id order so a label stays on
+    its agent. A cold sub-agent is finished work, not something to watch."""
     threads = cs.get("threads") if isinstance(cs, dict) else None
     out = []
     for t in threads if isinstance(threads, list) else []:
@@ -822,8 +834,13 @@ def _agent_entries(cs: dict | None, cs_age: float) -> list[tuple[float, float]]:
             continue
         rem = remaining_seconds({**t, "now_ms": cs.get("now_ms")}, cs_age)
         if rem is not None and rem > 0:
-            out.append((rem, float(t["ttl_s"])))
+            out.append((str(t.get("id", "")), rem, float(t["ttl_s"])))
     return sorted(out)
+
+
+def _agent_entries(cs: dict | None, cs_age: float) -> list[tuple[float, float]]:
+    """(remaining, ttl) of the warm sub-agent caches, soonest-to-expire first."""
+    return sorted((rem, ttl) for _id, rem, ttl in _agent_rows(cs, cs_age))
 
 
 def _cache_view(payload: dict, cs: dict | None, cs_age: float) -> dict:
@@ -1043,8 +1060,131 @@ def _truncate(s: str, width: int) -> str:
     return "".join(out) + "…" + RESET
 
 
+# ---- terminal-view modes ---------------------------------------------------------------------
+# Compact versions of the /context-guru terminal views. They draw with tvlib (imported only when one
+# of these layouts is chosen, so the default layouts pay nothing) and read only what the proxy already
+# serves, through the same disk-cached, never-blocking reads as everything above.
+
+def _tv(width: int):
+    import tvlib  # noqa: PLC0415 - lazy on purpose, see above
+    return tvlib, tvlib.Env(color=not _no_color(), width=width)
+
+
+def _rows(reqs: dict | None) -> list[dict]:
+    rows = reqs.get("requests") if isinstance(reqs, dict) else None
+    return sorted((r for r in rows if isinstance(r, dict) and not r.get("keepalive")), key=lambda r: r.get("ts", 0)) \
+        if isinstance(rows, list) else []
+
+
+def _lost_today(spend: dict | None, midnight: int) -> float | None:
+    """Dollars cache misses cost today, from the proxy's own spend explanation (excess over a hit)."""
+    days = spend.get("daily") if isinstance(spend, dict) else None
+    if not isinstance(days, list):
+        return None
+    return sum(_num(d, "rewrite_usd") or 0.0 for d in days if (_num(d, "day") or 0) >= midnight - 3_600_000)
+
+
+def _spark_row(day: dict | None, series: dict | None, lv: int, tv, e) -> str | None:
+    today = _num(day, "total_saved_usd")
+    buckets = series.get("buckets") if isinstance(series, dict) else None
+    if today is None or not isinstance(buckets, list):
+        return None
+    by_day = {int(b["ts"] // DAY_MS): _num(b, "saved_usd") or 0.0 for b in buckets if isinstance(b, dict) and _num(b, "ts")}
+    last = int(_now_s() * 1000 // DAY_MS)
+    vals = [by_day.get(d, 0.0) for d in range(last - 13, last)] + [today]  # today from the same read as the number
+    return f"{DIM}saved{RESET} {_money(today)} {DIM}today{RESET}  {e.paint('ok', e.spark(vals))}" + \
+        ("" if lv else f" {DIM}14 days{RESET}")
+
+
+def _strip_row(reqs: dict | None, spend: dict | None, lv: int, tv, e) -> str | None:
+    rows = _rows(reqs)[-STRIP_REQUESTS:]
+    if not rows:
+        return None
+    paint = {"hit": ("ok", e.g["hit"]), "part": ("warn", e.g["part"]), "miss": ("bad", e.g["miss"])}
+    cells = "".join(e.paint(*paint[tv.kind(r)]) for r in rows)
+    lost = _lost_today(spend, _day_start_ms())
+    if lost and lost >= 0.005:
+        tail = f" {_money(lost)}" if lv else f"  {_money(lost)} {DIM}lost to misses today{RESET}"
+    else:
+        tail = "" if lv else f"  {DIM}no misses cost money today{RESET}"
+    return ("" if lv else f"{DIM}last {len(rows)}{RESET} ") + cells + tail
+
+
+def _heat_row(hourly: dict | None, spend: dict | None, lv: int, tv, e) -> str | None:
+    buckets = hourly.get("buckets") if isinstance(hourly, dict) else None
+    if not isinstance(buckets, list):
+        return None
+    per = [0.0] * 24
+    for b in buckets:
+        if isinstance(b, dict) and _num(b, "ts"):
+            per[time.localtime(b["ts"] / 1000).tm_hour] += _num(b, "cache_misses") or 0.0
+    top, now_h = max(per), time.localtime(_now_s()).tm_hour
+    if top <= 0:
+        return f"{e.paint('ok', 'no cache misses today')}"
+    cells = "".join(e.heat_cell(per[h], top, 1) if h <= now_h else " " for h in range(24))
+    lost = _lost_today(spend, _day_start_ms())
+    tail = f"  {_money(lost)} {DIM}lost{RESET}" if lost and lost >= 0.005 else ""
+    return (f"{DIM}misses{RESET} " if not lv else "") + f"{DIM}0h{RESET}{cells}{DIM}24h{RESET}{tail}"
+
+
+def _growth(main: list[dict]) -> float:
+    """Context tokens per second over the latest stretch of the main thread since its last compaction."""
+    pts: list[tuple[float, int, float]] = []
+    for r in main:
+        c = (r.get("fresh_input") or 0) + (r.get("cache_read") or 0) + (r.get("cache_write") or 0)
+        if pts and (r.get("messages") or 0) < pts[-1][2] * 0.5:
+            pts = []
+        pts.append((r["ts"], c, r.get("messages") or 0))
+    pts = pts[-12:]
+    if len(pts) < 3 or pts[-1][0] <= pts[0][0]:
+        return 0.0
+    return max(pts[-1][1] - pts[0][1], 0) / ((pts[-1][0] - pts[0][0]) / 1000)
+
+
+def _fill_row(reqs: dict | None, ctx: tuple[float, float] | None, lv: int, tv, e, width: int) -> str | None:
+    if not ctx:
+        return None
+    used, window = ctx
+    frac = max(0.0, min(1.0, used / window))
+    main = [r for r in _rows(reqs) if r.get("thread_id", "") == ""]
+    ctxs = [(r.get("fresh_input") or 0) + (r.get("cache_read") or 0) + (r.get("cache_write") or 0) for r in main]
+    base = min([used] + ctxs) / window if ctxs else None  # the smallest recent prompt: what loads every time
+    n = max(10, min(40, width - 36))
+    fx, cv = ("=", "#") if e.ascii else ("▒", "█")
+    bar = e.stack([(base, fx), (frac - base, cv)], n) if base is not None else e.bar(frac, n)
+    used_part = bar.rstrip(e.g["empty"])
+    kind_ = "bad" if frac >= 0.85 else "warn" if frac >= 0.65 else "ok"
+    g = _growth(main)
+    eta = (window - used) / g if g > 0 else None
+    text = f"{DIM}context{RESET} {e.paint(kind_, used_part)}{DIM}{bar[len(used_part):]}{RESET} {frac * 100:.0f}%"
+    if eta and eta < 6 * 3600 and lv == 0:
+        text += f" {DIM}· full in{RESET} {tv.span(eta)}"
+    if base is not None and lv == 0 and width >= 100:
+        text += f"  {DIM}{fx} always loaded {base * 100:.0f}% · {cv} conversation {(frac - base) * 100:.0f}%{RESET}"
+    return text
+
+
+def _wagents_row(rows: list[tuple[str, float, float]], lv: int, tv, e) -> str:
+    if not rows:
+        return f"{DIM}no sub-agents running{RESET}"
+    kinds = {"cold": "bad", "critical": "bad", "expiring": "warn", "warm": "ok"}
+    out = []
+    for i, (_id, rem, ttl) in enumerate(rows[:4], 1):
+        k = kinds[entry_state(rem, ttl)]
+        out.append(f"{DIM}a{i}{RESET} {e.bar(rem / ttl, 4, k)} {e.paint(k, _clock(rem))}")
+    if len(rows) > 4:
+        out.append(f"{DIM}+{len(rows) - 4}{RESET}")
+    return "  ".join(out) if lv == 0 else f"{DIM}agents{RESET} {len(rows)}"
+
+
+def _now_s() -> float:
+    """The wall clock; CG_STATUSLINE_NOW (epoch seconds) pins it so the day-based views can be tested."""
+    pinned = os.environ.get("CG_STATUSLINE_NOW", "")
+    return float(pinned) if pinned.replace(".", "", 1).isdigit() else time.time()
+
+
 def _day_start_ms() -> int:
-    lt = time.localtime()
+    lt = time.localtime(_now_s())
     return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)) * 1000)
 
 
@@ -1054,13 +1194,31 @@ def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
     three fresh makes no network call at all."""
     out: dict = {}
     jobs = {"stats": lambda: _fetch_stats(port, session_id)}
-    if session_id and on & {"cache", "agents", "ctx", "hint"}:
+    if session_id and on & {"cache", "agents", "ctx", "hint", "fill", "clock0", "wagents"}:
         jobs["cs"] = lambda: _fetch_json(
             port, "/api/cachestate?session=" + _quote(session_id),
             "cs-" + session_id, CACHESTATE_TTL_SECONDS)
-    if "save" in on:
+    now_ms, midnight = int(_now_s() * 1000), _day_start_ms()
+    if "spark" in on:
+        jobs["series"] = lambda: _bg_json(
+            port, f"/api/series?bucket={DAY_MS}&since={midnight - 13 * DAY_MS}&until={now_ms}", "series14", SERIES_TTL_SECONDS)
+    if "heat" in on:
+        jobs["hourly"] = lambda: _bg_json(
+            port, f"/api/series?bucket=3600000&since={midnight}&until={now_ms}", "hourly", SERIES_TTL_SECONDS)
+    if on & {"strip", "heat"}:
+        tz = time.localtime(_now_s()).tm_gmtoff // 60  # minutes east of UTC, as the spend explanation expects
+        jobs["spend"] = lambda: _bg_json(
+            port, f"/api/spend/explain?since={midnight}&tz={tz}&now={now_ms}", "spend-today", SERIES_TTL_SECONDS)
+    if session_id and "strip" in on:
+        jobs["reqs"] = lambda: _fetch_json(
+            port, "/api/requests?limit=20&session=" + _quote(session_id), "req20-" + session_id, REQUESTS_TTL_SECONDS)
+    if session_id and "fill" in on:
+        jobs["reqs"] = lambda: _fetch_json(
+            port, "/api/requests?limit=100&session=" + _quote(session_id), "req100-" + session_id, REQUESTS_TTL_SECONDS)
+    if on & {"save", "spark"}:
         jobs["day"] = lambda: _bg_json(
             port, f"/api/stats?lean=1&since={_day_start_ms()}", "day", DAY_TTL_SECONDS)
+    if "save" in on:
         jobs["life"] = lambda: _bg_json(port, "/api/stats?lean=1&since=0", "life", LIFE_TTL_SECONDS)
 
     def run(name, fn):
@@ -1107,6 +1265,7 @@ def main() -> None:
     day, _ = got.get("day", (None, 0.0))
     life, _ = got.get("life", (None, 0.0))
     agents = _agent_entries(cs, cs_age)
+    agent_rows = _agent_rows(cs, cs_age)
     cs = _main_cs(cs)
     view = _cache_view(payload, cs, cs_age)
     ctx = _ctx_numbers(payload, cs, cs_age)
@@ -1115,13 +1274,20 @@ def main() -> None:
         "save": lambda lv: _save_segment(stats, day, life, lv, _fresh_session(payload)),
         "cache": lambda lv: _cache_segment(view, lv),
         "agents": lambda lv: _agents_segment(agents, lv),
+        "spark": lambda lv: _spark_row(day, got.get("series", (None,))[0], lv, *_tv(width)),
+        "strip": lambda lv: _strip_row(got.get("reqs", (None,))[0], got.get("spend", (None,))[0], lv, *_tv(width)),
+        "heat": lambda lv: _heat_row(got.get("hourly", (None,))[0], got.get("spend", (None,))[0], lv, *_tv(width)),
+        "fill": lambda lv: _fill_row(got.get("reqs", (None,))[0], ctx, lv, *_tv(width), width),
+        "clock0": lambda lv: _cache_segment(view, lv),
+        "wagents": lambda lv: _wagents_row(agent_rows, lv, *_tv(width)),
         "spend": lambda lv: _spend_segment(payload, lv) if lv == 0 else None,
         "ctx": lambda lv: _ctx_segment(*ctx, lv) if ctx else None,
         "ka": lambda lv: (_keepalive_segment(stats) if stats and lv == 0 else None),
         "latency": lambda lv: _latency_segment(stats) if lv == 0 else None,
         "tools": lambda lv: _recommend_segment(payload) if lv == 0 else None,
     }
-    order = [e for e in ("update", "save", "spend", "cache", "agents", "ctx", "ka", "latency", "tools") if e in on]
+    order = [e for e in ("update", "save", "spend", "spark", "strip", "heat", "fill", "clock0", "wagents", "cache",
+                         "agents", "ctx", "ka", "latency", "tools") if e in on]
     level: dict[str, int | None] = {e: 0 for e in order}
     hint = _hint(payload, view, ctx) if "hint" in on else None
     if layout == "minimal":

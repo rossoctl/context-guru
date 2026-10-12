@@ -48,6 +48,14 @@ layout outranks the installed command's flag until `auto`. Otherwise
 | minimal | saved, cache, hint (`saved $0.31 │ cache ● ████░░ 3:57`) |
 | balanced | update, saved, cache, agents, ctx, hint |
 | detailed | balanced + `spent` + `upstream slow: 7.0s` (only when slow) + least-used tool/skill (`◇ github 1% remove`) |
+| spark | `saved $4.20 today ▂▄▅▇█▂▄▅▇█▂▄▅▇ 14 days` over the cache clock |
+| strip | the last 20 requests as hit `■` / partial `▨` / miss `✖`, and the dollars misses cost today |
+| heat | today's cache misses by hour (0h to 24h, darker = more) and the dollars they cost |
+| fill | context as a stacked bar (`▒` always loaded, `█` conversation), percent and time to full |
+| watch | the main cache clock over a mini-bar and clock per sub-agent (`a1 ████ 4:22  a2 █░░░ 0:52`) |
+
+The last five are one-line versions of the terminal views (`/context-guru:*`), drawn with `tvlib.py`;
+`CG_ASCII=1` swaps their glyphs for plain characters.
 
 `--hide=a,b` / `--show=a,b` toggle single elements (`update save spend cache agents ctx hint latency tools ka`;
 env `CG_STATUSLINE_HIDE` / `_SHOW`). `--cache` and `--keepalive` still work (`ka` = keep-alive net
