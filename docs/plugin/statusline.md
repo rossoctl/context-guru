@@ -140,9 +140,9 @@ Five more layouts each answer one question on the second line, next to the cache
 
 | Layout | The question | What it shows |
 |---|---|---|
-| `spark` | How much have I saved lately? | `saved $4.20 today · last 14 days ▂▄▅…`: today's saving and a 14-day sparkline; the rightmost cell is today |
+| `spark` | How much have I saved lately? | `saved $4.20 today · last 14 days ▂▄▅…`: today's saving and a 14-day sparkline by your local calendar day; the rightmost cell is today |
 | `strip` | Are my cache hits holding? | The last 20 requests as `■` hit, `▨` partial, `✖` miss (oldest on the left), and the dollars misses cost today (`$1.40 lost today`); from 100 columns a key is added |
-| `heat` | When do I lose cache? | `misses per hour 0h … 24h`: `░▒▓█` mean more misses in that hour, blank none, `·` hours not yet reached; `$1.40 lost` is the whole day |
+| `heat` | When do I lose cache? | `misses/hour 0h … 24h  $1.40 lost today`: `░▒▓█` mean more misses in that hour, blank none, `·` hours not yet reached; the dollars are the whole day |
 | `fill` | How full is my context, and with what? | A stacked bar: `▒` always loaded, `█` conversation, `░` free; the percent and, when it is filling, the time to full. At 100 columns or more, a legend with the two shares and what a miss now would cost |
 | `watch` | Which sub-agent caches are about to lapse? | Line 1 the saved figure and the main clock; line 2 `agent caches (2) ████ 4:30  █░░░ 0:50`: one mini-bar per running sub-agent in id order, up to 4, then `+N more` |
 
@@ -193,7 +193,34 @@ Claude Code redraws the status line on every message and, if you ask, on a timer
 "statusLine": { "type": "command", "command": "…", "refreshInterval": 1 }
 ```
 
-and start a new session. Older Claude Code versions ignore the key and redraw only on events. The clock is arithmetic on a timestamp the proxy supplies, so a redraw needs no new network read: each render reads a disk-cached copy of the proxy's answer (2 s for cache state, 60 s for the day total, 5 minutes for the lifetime total). The cost is one short process per second per open session, about 70 ms of CPU each. If that matters, set a larger `refreshInterval` (for example 5); the clock then moves every 5 seconds.
+and start a new session. Older Claude Code versions ignore the key and redraw only on events. The clock is arithmetic on a timestamp the proxy supplies, so a redraw needs no new network read. A render takes about 55 ms warm and 90 ms on a cold cache. The cost is one short process per second per open session. If that matters, set a larger `refreshInterval` (for example 5); the clock then moves every 5 seconds.
+
+## Render time
+
+Every layout returns in about 0.4 s at worst, Python start-up included (the slowest run in the table took 0.43 s). The render has a 0.36 s budget. Only the proxy's totals (`/api/stats?lean=1`) are waited for, and the cache state is read in parallel under the same deadline. Everything else (day and lifetime totals, series, spend, requests) comes from a disk cache that a detached background process refreshes, one per 30 seconds. A timeout shows the last numbers with `⏳`, never "proxy offline".
+
+Measured on this host, which is loaded and shared with production: 50 runs per cell, wall milliseconds, median / 95th percentile / maximum. "Slow" is a server that sleeps 5 seconds on every request.
+
+| layout | healthy, warm cache | healthy, cold cache | slow proxy | proxy down |
+|---|---|---|---|---|
+| minimal | 53 / 59 / 64 | 89 / 97 / 97 | 389 / 398 / 399 | 92 / 98 / 106 |
+| balanced | 51 / 60 / 66 | 89 / 104 / 133 | 390 / 397 / 401 | 94 / 105 / 110 |
+| detailed | 57 / 66 / 70 | 93 / 103 / 110 | 389 / 395 / 398 | 91 / 101 / 104 |
+| spark | 55 / 64 / 64 | 90 / 102 / 108 | 389 / 393 / 396 | 92 / 104 / 127 |
+| strip | 54 / 58 / 61 | 89 / 97 / 103 | 391 / 399 / 406 | 89 / 111 / 125 |
+| heat | 55 / 60 / 67 | 90 / 99 / 101 | 391 / 410 / 425 | 92 / 111 / 116 |
+| fill | 54 / 57 / 61 | 85 / 94 / 94 | 390 / 408 / 427 | 81 / 92 / 120 |
+| watch | 55 / 59 / 63 | 91 / 101 / 104 | 391 / 412 / 416 | 91 / 97 / 99 |
+
+The same harness on the status line before this work:
+
+| layout | healthy, warm cache | healthy, cold cache | slow proxy | proxy down |
+|---|---|---|---|---|
+| minimal | 42 / 59 / 63 | 80 / 89 / 93 | 682 / 691 / 692 | 76 / 90 / 91 |
+| balanced | 44 / 53 / 54 | 80 / 91 / 99 | 679 / 729 / 751 | 75 / 82 / 86 |
+| detailed | 45 / 52 / 60 | 79 / 89 / 98 | 678 / 703 / 713 | 83 / 126 / 146 |
+
+The slow-proxy case went from about 680 ms to about 390 ms. Healthy renders are about 10 ms slower than before, from the extra elements (agents, spend).
 
 ## Colour and plain terminals
 
