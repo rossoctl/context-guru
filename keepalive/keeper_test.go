@@ -470,7 +470,21 @@ func TestCredentialRetentionRules(t *testing.T) {
 		if len(body) == 0 {
 			t.Fatal("nothing held to release")
 		}
+		k.mu.Lock()
+		armed := e.timer != nil
+		k.mu.Unlock()
+		if !armed {
+			t.Fatal("a tracked entry has no hard retention deadline")
+		}
 		k.retire(s.id())
+		// The deadline is CANCELLED on release, not left to fire: a stale AfterFunc would later
+		// retire — and Release the credential of — a NEWER entry on the same thread.
+		k.mu.Lock()
+		stale := e.timer != nil
+		k.mu.Unlock()
+		if stale {
+			t.Error("the hard retention deadline was left running after release")
+		}
 		for i := range body {
 			if body[i] != 0 {
 				t.Fatalf("released buffer still holds data at byte %d; a dump taken now "+
@@ -482,6 +496,27 @@ func TestCredentialRetentionRules(t *testing.T) {
 		}
 		if got := fd.holds(s); got != 0 {
 			t.Errorf("the host still holds %d credentials after retirement", got)
+		}
+	})
+
+	t.Run("RetireSession cancels the hard deadline", func(t *testing.T) {
+		k, fd, _ := held(t)
+		k.mu.Lock()
+		e := k.live[s.id()]
+		armed := e != nil && e.timer != nil
+		k.mu.Unlock()
+		if !armed {
+			t.Fatal("session not tracked with a hard retention deadline")
+		}
+		k.RetireSession(s.Tenant, s.Session)
+		k.mu.Lock()
+		stale := e.timer != nil
+		k.mu.Unlock()
+		if stale {
+			t.Error("the hard retention deadline was left running after RetireSession")
+		}
+		if got := fd.holds(s); got != 0 {
+			t.Errorf("the host still holds %d credentials after RetireSession", got)
 		}
 	})
 
