@@ -679,16 +679,17 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// Read under the SAME sessionID the host will write back under (Trace.Session), which
 		// is what keeps the fraction gate from reading a permanent zero. See
 		// RecordBilledInput.
-		PrevBilledInput: prevBilledInput(st, sessionID),
-		ModelName:       gjson.GetBytes(body, "model").String(),
-		ToolsHash:       toolsHash(body),
-		LastMarkTTL:     lastMarkTTL(body),
-		SelfRates:       o.SelfRates,
-		RatesFor:        o.RatesFor,
-		CacheAware:      cacheAware,
-		ColdCache:       coldCache,
-		IdleMs:          idleMs,
-		MaxCachedIdx:    maxCachedIdx,
+		PrevBilledInput:  prevBilledInput(st, sessionID),
+		ModelName:        gjson.GetBytes(body, "model").String(),
+		ToolsHash:        toolsHash(body),
+		LastMarkTTL:      lastMarkTTL(body),
+		MessageMarkTiers: messageMarkTiers(body),
+		SelfRates:        o.SelfRates,
+		RatesFor:         o.RatesFor,
+		CacheAware:       cacheAware,
+		ColdCache:        coldCache,
+		IdleMs:           idleMs,
+		MaxCachedIdx:     maxCachedIdx,
 		// Every breakpoint already on the wire — including the ones no component can
 		// see (`system`, `tools`, and the marks our own normalize drops). The
 		// provider's cap of four counts them all (issue #32, defect 2).
@@ -2004,6 +2005,34 @@ func lastMarkTTL(body []byte) string {
 				return tier(m)
 			}
 		}
+	}
+	return ""
+}
+
+// messageMarkTiers summarises the TTL tiers of the cache_control marks inside `messages`: "", "5m",
+// "1h" or "mixed".
+func messageMarkTiers(body []byte) string {
+	has5, has1 := false, false
+	for _, m := range gjson.GetBytes(body, "messages").Array() {
+		for _, b := range m.Get("content").Array() {
+			cc := b.Get("cache_control")
+			if !cc.Exists() {
+				continue
+			}
+			if cc.Get("ttl").String() == "1h" {
+				has1 = true
+			} else {
+				has5 = true
+			}
+		}
+	}
+	switch {
+	case has1 && has5:
+		return "mixed"
+	case has1:
+		return "1h"
+	case has5:
+		return "5m"
 	}
 	return ""
 }

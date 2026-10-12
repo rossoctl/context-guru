@@ -597,16 +597,15 @@ func (e *ExtractRide) rideNet(req *bschemas.BifrostChatRequest, c *components.Ct
 // rideDefaultHead is the system prompt plus tool declarations the ask reads in addition to the
 // transcript, when the host does not report the previous turn's billed input (about 13k tokens for
 // Claude Code).
-const rideDefaultHead = 13000
+const rideDefaultHead = 13035
 
 // askCostEquiv prices one ask in cache-read equivalents: a read of the whole previous request (its billed
-// input when known, else the transcript plus a default head: the system prompt and tools are read too),
+// input when known, else the transcript plus the default head: the system prompt and tools are read too),
 // the instruction and inventory at fresh price, and about 250 output tokens at 5x fresh.
 func (e *ExtractRide) askCostEquiv(req *bschemas.BifrostChatRequest, c *components.Ctx) float64 {
+	// Tokenizer units throughout: the saving side counts tokens with the same estimator, so the cost
+	// side must too. (PrevBilledInput is in provider tokens, about 1.7x larger, and is not used here.)
 	prefix := float64(schema.MessagesTokens(req) + rideDefaultHead)
-	if c != nil && c.PrevBilledInput > 0 {
-		prefix = float64(c.PrevBilledInput)
-	}
 	return prefix + 10*(600+250*5)
 }
 
@@ -912,7 +911,7 @@ func (e *ExtractRide) settle(req *bschemas.BifrostChatRequest, rep *components.R
 					first = h.I
 				}
 			}
-			if idx, ok := e.anchorAt(req, c, first); ok && markBreakpoint(&req.Input[idx], c.LastMarkTTL) {
+			if idx, ok := e.anchorAt(req, c, first); ok && markBreakpoint(&req.Input[idx], c) {
 				rep.Event("ride_anchor_placed")
 			}
 		}
@@ -1010,8 +1009,11 @@ func (e *ExtractRide) anchorAt(req *bschemas.BifrostChatRequest, c *components.C
 	if !rideEndValid(c, req, first-2) {
 		return 0, false
 	}
-	if c.LastMarkTTL == "" && c.CacheTTLMs >= 3_600_000 {
-		return 0, false // a one-hour request whose last mark we cannot read: a 5m anchor could precede 1h marks
+	if c.MessageMarkTiers == "mixed" {
+		return 0, false // marks among the messages with both tiers: no TTL is valid for a mark placed among them
+	}
+	if _, ok := rideAnchorTTL(c); !ok {
+		return 0, false
 	}
 	visible := 0
 	for i := range req.Input {
@@ -1037,10 +1039,11 @@ func (e *ExtractRide) anchorAt(req *bschemas.BifrostChatRequest, c *components.C
 // markBreakpoint puts the anchor mark on m. Its TTL is that of the last mark after it (the client's, on the
 // last message), so a one-hour mark never follows a five-minute one; marks before it are the client's
 // and, if the request is valid, at least as long.
-func markBreakpoint(m *bschemas.ChatMessage, lastTTL string) bool {
+func markBreakpoint(m *bschemas.ChatMessage, c *components.Ctx) bool {
+	ttl1h, _ := rideAnchorTTL(c)
 	last := &m.Content.ContentBlocks[len(m.Content.ContentBlocks)-1]
 	cc := &bschemas.CacheControl{Type: bschemas.CacheControlTypeEphemeral}
-	if lastTTL == "1h" {
+	if ttl1h {
 		ttl := "1h"
 		cc.TTL = &ttl
 	}
@@ -1164,4 +1167,23 @@ func ridePrefixHash(msgs []bschemas.ChatMessage) string {
 		h.Write([]byte{1})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// rideAnchorTTL decides the anchor's TTL tier: one hour when any mark among the messages is one hour
+// (all of them then are, or the marks are "mixed" and no anchor is placed), else the TTL of the last mark
+// in the request. ok is false when the request is a one-hour tier whose marks cannot be read.
+func rideAnchorTTL(c *components.Ctx) (oneHour, ok bool) {
+	switch c.MessageMarkTiers {
+	case "1h":
+		return true, true
+	case "5m":
+		return false, true
+	}
+	if c.LastMarkTTL == "1h" {
+		return true, true
+	}
+	if c.LastMarkTTL == "" && c.CacheTTLMs >= 3_600_000 {
+		return false, false
+	}
+	return false, true
 }

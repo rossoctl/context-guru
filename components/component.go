@@ -511,6 +511,10 @@ type Ctx struct {
 	// system, messages) on the raw request, "" when it has none. A mark a component adds must not have a
 	// shorter TTL than any mark after it, since the provider rejects a 1h mark that follows a 5m one.
 	LastMarkTTL string
+	// MessageMarkTiers summarises the TTL tiers of the cache_control marks inside the raw `messages`:
+	// "" (none), "5m", "1h", or "mixed" (both). A mark a component adds among the messages must be at
+	// least as long as every mark after it and no longer than any before it, which "mixed" cannot satisfy.
+	MessageMarkTiers string
 	// SelfRates are the per-token rates for the model a component would call itself — the
 	// incoming model's, since that is what `source: incoming` uses. Zero when unknown.
 	SelfRates TokenRates

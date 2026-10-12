@@ -38,7 +38,7 @@ func (a *parkAsker) AskAs(_ context.Context, _, ask, _ string) (string, componen
 // snapshot the system split looks for), a tool, and (assistant tool_use, user tool_result) pairs with a
 // mark on the last message only.
 // ccBodyTTL builds ccBody with the given TTL (""/"5m"/"1h") on the system marks and the last message mark.
-var sysTTL, lastTTL string
+var sysTTL, lastTTL, midTTL string
 
 func ccBody(turns int, big map[int]bool) []byte {
 	snap := strings.Repeat("Stable instructions for the agent. ", 200) + "\nCurrent branch: main\nRecent commits:\nabc fix\n"
@@ -57,6 +57,9 @@ func ccBody(turns int, big map[int]bool) []byte {
 			map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "step"},
 				map[string]any{"type": "tool_use", "id": id, "name": "Bash", "input": map[string]any{"command": "s"}}}},
 			map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "content": sb.String()}}})
+	}
+	if midTTL != "" {
+		msgs[0].(map[string]any)["content"].([]any)[0].(map[string]any)["cache_control"] = mark(midTTL)
 	}
 	last := msgs[len(msgs)-1].(map[string]any)["content"].([]any)
 	last[len(last)-1].(map[string]any)["cache_control"] = mark(lastTTL)
@@ -201,14 +204,17 @@ func TestRideAnchorKeepsTheTTLOrderWhenTheClientAsksForOneHour(t *testing.T) {
 	defer func() { sysTTL, lastTTL = "", "" }()
 	rideCfg := "apply_mode: cold\nanchor: true\nmin_tokens: 3000\nmin_inventory: 2\ntrigger_pending: 2\n" +
 		"trigger_size_tokens: 1000\nmin_later_turns: 2\nmin_turns_between: 4\nhorizon_turns: 30\n"
+	defer func() { midTTL = "" }()
 	for _, tc := range []struct {
-		name, sys, last, wantAnchor string
+		name, sys, mid, last, wantAnchor string
 	}{
-		{"all one hour", "1h", "1h", "1h"},
-		{"system one hour, last message five minutes", "1h", "5m", "5m"},
-		{"all five minutes", "5m", "5m", "5m"},
+		{"all one hour", "1h", "", "1h", "1h"},
+		{"one-hour mark mid-transcript, five-minute last mark: no valid TTL, no anchor", "1h", "1h", "5m", "none"},
+		{"one-hour mark mid-transcript and last: four marks already, no slot", "1h", "1h", "1h", "none"},
+		{"system one hour, last message five minutes", "1h", "", "5m", "5m"},
+		{"all five minutes", "5m", "", "5m", "5m"},
 	} {
-		sysTTL, lastTTL = tc.sys, tc.last
+		sysTTL, lastTTL, midTTL = tc.sys, tc.last, tc.mid
 		ride, err := components.New("extract_llm_ride", []byte(rideCfg))
 		if err != nil {
 			t.Fatal(err)
@@ -238,7 +244,10 @@ func TestRideAnchorKeepsTheTTLOrderWhenTheClientAsksForOneHour(t *testing.T) {
 				}
 			}
 		}
-		if !anchoredSeen {
+		if tc.wantAnchor == "none" && anchoredSeen {
+			t.Errorf("%s: an anchor was placed among marks of both tiers", tc.name)
+		}
+		if tc.wantAnchor != "none" && !anchoredSeen {
 			t.Errorf("%s: the scenario never produced an anchor", tc.name)
 		}
 	}
