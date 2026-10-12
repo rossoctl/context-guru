@@ -481,9 +481,9 @@ func (e *ExtractRide) affordable(req *bschemas.BifrostChatRequest, c *components
 }
 
 type rideCall struct {
-	gates  []string
-	rec    components.ModelCall
-	ridden bool // the call read the session's cache (it did not re-create the prefix)
+	gates   []string
+	rec     components.ModelCall
+	ridden  bool // the call read the session's cache (it did not re-create the prefix)
 	notRead bool // the call completed but did not ride: the back-off case
 }
 
