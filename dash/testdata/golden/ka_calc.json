@@ -15,7 +15,7 @@
    "convertible_usd": 0.6000000000000004,
    "coverage_seconds": 580,
    "max_pings": 1,
-   "pings": 281,
+   "pings": 0,
    "share_of_addressable_pct": 70.75471698113208
   },
   {
@@ -24,7 +24,7 @@
    "coverage_seconds": 860,
    "current": true,
    "max_pings": 2,
-   "pings": 433,
+   "pings": 0,
    "share_of_addressable_pct": 70.75471698113208
   },
   {
@@ -32,7 +32,7 @@
    "convertible_usd": 0.6000000000000004,
    "coverage_seconds": 1140,
    "max_pings": 3,
-   "pings": 585,
+   "pings": 0,
    "share_of_addressable_pct": 70.75471698113208
   },
   {
@@ -40,7 +40,7 @@
    "convertible_usd": 0.6000000000000004,
    "coverage_seconds": 1420,
    "max_pings": 4,
-   "pings": 737,
+   "pings": 0,
    "share_of_addressable_pct": 70.75471698113208
   }
  ]

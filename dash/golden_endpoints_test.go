@@ -46,9 +46,12 @@ var goldenBase = time.Date(2026, 1, 5, 9, 0, 0, 0, time.UTC).UnixMilli()
 // (one unpriced), cache hits / TTL expiries / compaction, keep-alive pings, component gates and
 // events (one row of a shape the fast counter parser must refuse), and a tool inventory per
 // session. Everything is a function of the loop indices, never of the clock or a random source.
-func goldenAPI(t *testing.T) *API {
+func goldenAPI(t *testing.T) *API { return goldenAPIAt(t, "") }
+
+// goldenAPIAt builds the fixture in a database at path (a temp file when empty).
+func goldenAPIAt(t *testing.T, path string) *API {
 	t.Helper()
-	a, rec := newTestAPI(t, Options{CaptureContent: true})
+	a, rec := newTestAPI(t, Options{CaptureContent: true, DBPath: path})
 	a.SetPricer(stubPrices{})
 	models := []string{"m-sonnet", "m-opus", "m-unpriced"}
 	var evs []*Event

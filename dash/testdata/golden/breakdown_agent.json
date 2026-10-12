@@ -16,7 +16,9 @@
   "stream",
   "tenant",
   "thinking_mode",
-  "tool_choice"
+  "tool_choice",
+  "waiting_for",
+  "wake_cause"
  ],
  "groups": [
   {
