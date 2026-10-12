@@ -505,6 +505,8 @@ type Ctx struct {
 	// (model.source: incoming, the default for the LLM components) can say WHICH model it
 	// called instead of recording an empty string.
 	ModelName string
+	// ToolsHash identifies the request's declared tool set (a hash of the raw `tools` array, empty when there is none). A change between two requests of a thread rewrites the cache from the tools on, so a component may treat it as a moment when a rewrite is free.
+	ToolsHash string
 	// SelfRates are the per-token rates for the model a component would call itself — the
 	// incoming model's, since that is what `source: incoming` uses. Zero when unknown.
 	SelfRates TokenRates

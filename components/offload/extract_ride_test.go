@@ -457,3 +457,31 @@ func TestRideAnchorNeedsAnEntryExactlyThere(t *testing.T) {
 		t.Error("no earlier request ended before the first edit, so there is no entry to read: no anchor")
 	}
 }
+
+func TestRideColdModeAppliesWhenTheToolSetOrModelChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mod   func(c *components.Ctx)
+		apply bool
+	}{
+		{"tool set changed", func(c *components.Ctx) { c.ToolsHash = "bbb" }, true},
+		{"model changed", func(c *components.Ctx) { c.ModelName = "claude-opus-5" }, true},
+		{"nothing changed", func(c *components.Ctx) {}, false},
+	} {
+		asker := &rideAsker{script: map[int]string{0: `"action":"park"`}}
+		asker.cacheRead = 30000
+		e := newRide(t, "apply_mode: cold\nearly_apply: false\nmin_inventory: 2\n")
+		st := store.NewMemory(store.Options{MaxEntries: 400})
+		c1 := coldCtx("env-"+tc.name, asker, st, false)
+		c1.ToolsHash = "aaa"
+		e.Offload(rideReq(4), &components.Report{Component: "extract_llm_ride"}, c1)
+		c2 := coldCtx("env-"+tc.name, asker, st, false)
+		c2.ToolsHash = "aaa"
+		tc.mod(c2)
+		rep := &components.Report{Component: "extract_llm_ride"}
+		e.Offload(rideReq(4), rep, c2)
+		if (rep.Events["ride_applied_cold"] > 0) != tc.apply {
+			t.Errorf("%s: applied cold = %d, want apply=%v (gates %v)", tc.name, rep.Events["ride_applied_cold"], tc.apply, rep.Gates)
+		}
+	}
+}

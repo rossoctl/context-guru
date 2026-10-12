@@ -253,7 +253,7 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 	rewrite := false
 	if e.applyCold {
 		pend = ridePendLoad(c)
-		rewrite = rideCompacted(c, len(req.Input)) || c.ColdCache || c.CachePhase(0) == components.CachePhaseCold
+		rewrite = rideCompacted(c, len(req.Input)) || rideEnvChanged(c) || c.ColdCache || c.CachePhase(0) == components.CachePhaseCold
 	}
 	for _, i := range toolIndices(req) {
 		msg := &req.Input[i]
@@ -1004,4 +1004,15 @@ func (e *ExtractRide) applyDecision(req *bschemas.BifrostChatRequest, rep *compo
 			"tokens_before", schema.TextTokens(h.Content), "projected", proj)
 	}
 	return key, schema.TextTokens(h.Content) - schema.TextTokens(schema.MessageText(req.Input[h.I])), true
+}
+
+// rideEnvChanged reports whether the model or the declared tool set differs from the thread's previous
+// request. Either change invalidates the cached prefix (tools and system come first), so that request
+// is a full rewrite whatever we do. It records the current values.
+func rideEnvChanged(c *components.Ctx) bool {
+	key := store.SweepKeepPrefix + "ride-env:" + thread.Key(c.Session, c.Thread)
+	cur := c.ModelName + "|" + c.ToolsHash
+	prev, ok := c.Store.Get(key)
+	c.Store.Put(key, []byte(cur))
+	return ok && string(prev) != cur
 }

@@ -20,6 +20,8 @@ package apply
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"maps"
@@ -677,6 +679,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// RecordBilledInput.
 		PrevBilledInput: prevBilledInput(st, sessionID),
 		ModelName:       gjson.GetBytes(body, "model").String(),
+		ToolsHash:       toolsHash(body),
 		SelfRates:       o.SelfRates,
 		RatesFor:        o.RatesFor,
 		CacheAware:      cacheAware,
@@ -1961,4 +1964,14 @@ func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, c
 	res.Body, res.Changed = nb, true
 	res.Restored, res.RestoredTokens = len(plan), tokens
 	return res
+}
+
+// toolsHash is a short hash of the raw `tools` array of an Anthropic-shaped body, or "" when absent.
+func toolsHash(body []byte) string {
+	t := gjson.GetBytes(body, "tools")
+	if !t.Exists() {
+		return ""
+	}
+	h := sha256.Sum256([]byte(t.Raw))
+	return hex.EncodeToString(h[:6])
 }
