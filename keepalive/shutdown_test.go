@@ -1,6 +1,8 @@
 package keepalive
 
 import (
+	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -49,14 +51,21 @@ func TestReRecordReleasesTheOldCredentialFirst(t *testing.T) {
 	now := time.Now()
 	k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }})
 	key := Key{Tenant: "t", Session: "s"}
-	k.Record(trackedRecord(fd, key, now))
-	k.Record(trackedRecord(fd, key, now)) // tracked
+	k.Record(trackedRecord(fd, key, now)) // turn 0: counted, not tracked
+	k.Record(trackedRecord(fd, key, now)) // turn 1: tracked, Held
 	k.Record(trackedRecord(fd, key, now)) // replaces: Release old, Hold new
 	if got := fd.holds(key); got != 1 {
 		t.Fatalf("balance after replacement = %d, want 1", got)
 	}
 	if len(fd.released) != 1 {
 		t.Fatalf("Release calls = %d, want 1", len(fd.released))
+	}
+	// The balance alone cannot tell the order apart. A Dispatcher keyed by Key (the proxy's is)
+	// stores the new hold under the same key the old one used, so Hold-then-Release would delete
+	// the NEW credential. The replacement must be release(k) THEN hold(k).
+	want := []string{"hold:" + fmt.Sprint(key), "release:" + fmt.Sprint(key), "hold:" + fmt.Sprint(key)}
+	if got := fd.log(); !slices.Equal(got, want) {
+		t.Fatalf("hold/release order = %q, want %q", got, want)
 	}
 }
 
@@ -71,4 +80,16 @@ func TestKillSwitchHoldsNothing(t *testing.T) {
 	if got := fd.holds(key); got != 0 {
 		t.Fatalf("kill switch on, but Hold was called %d times", got)
 	}
+}
+
+// A nil Dispatcher would otherwise surface as a nil-interface panic on the first ping, far from
+// the misconfiguration. New refuses it up front, with a message naming the field.
+func TestNewPanicsWithoutADispatcher(t *testing.T) {
+	defer func() {
+		r := recover()
+		if s, _ := r.(string); s != "keepalive.New: Options.Dispatcher is required" {
+			t.Fatalf("recover() = %v, want the Dispatcher-required panic", r)
+		}
+	}()
+	New(Options{})
 }

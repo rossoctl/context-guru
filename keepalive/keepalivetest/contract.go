@@ -52,6 +52,11 @@ func RunDispatcherContract(t *testing.T, newH NewHarness) {
 		}
 		return seen[len(seen)-1]
 	}
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seen)
+	}
 	lastBody := func() []byte {
 		mu.Lock()
 		defer mu.Unlock()
@@ -91,13 +96,56 @@ func RunDispatcherContract(t *testing.T, newH NewHarness) {
 		h.D.Release(key)
 	})
 
+	// The Dispatcher doc: with nothing held for the key, Dispatch must return an error rather
+	// than send unauthenticated. So it must fail, AND nothing may reach the upstream.
 	t.Run("dispatch after release carries no credential", func(t *testing.T) {
 		h := newH(t, srv.URL)
 		h.Hold(key, auth)
 		h.D.Release(key)
+		before := count()
 		_, status, err := h.D.Dispatch(context.Background(), req())
-		if err == nil && last().Get("Authorization") == "Bearer caller-key" && status == 200 {
-			t.Fatal("a released credential was used")
+		if err == nil {
+			t.Fatalf("Dispatch after Release = %d, nil error; want an error", status)
+		}
+		if n := count() - before; n != 0 {
+			t.Fatalf("Dispatch after Release sent %d request(s) upstream (last Authorization %q); want none",
+				n, last().Get("Authorization"))
+		}
+	})
+
+	// Release is called while a ping is already on the wire (the keeper does not wait for it).
+	// The in-flight Dispatch must finish on its own copy of the credential.
+	t.Run("release during an in-flight dispatch", func(t *testing.T) {
+		arrived := make(chan http.Header, 1)
+		unblock := make(chan struct{})
+		blockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			arrived <- r.Header.Clone()
+			<-unblock
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, usageJSON)
+		}))
+		t.Cleanup(blockSrv.Close)
+		h := newH(t, blockSrv.URL)
+		h.Hold(key, auth)
+		type result struct {
+			status int
+			err    error
+		}
+		done := make(chan result, 1)
+		go func() {
+			_, status, err := h.D.Dispatch(context.Background(), req())
+			done <- result{status, err}
+		}()
+		got := <-arrived
+		h.D.Release(key)
+		close(unblock)
+		r := <-done
+		if r.err != nil || r.status != 200 {
+			t.Fatalf("in-flight Dispatch after Release = %d, %v; want 200, nil", r.status, r.err)
+		}
+		if a := got.Get("Authorization"); a != "Bearer caller-key" {
+			t.Fatalf("upstream saw Authorization %q, want the held credential intact", a)
 		}
 	})
 

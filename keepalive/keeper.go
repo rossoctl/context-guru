@@ -320,6 +320,9 @@ func New(o Options) *Keeper {
 		o.Now = time.Now
 	}
 	if o.Go == nil {
+	if o.Dispatcher == nil {
+		panic("keepalive.New: Options.Dispatcher is required")
+	}
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),

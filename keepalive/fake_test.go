@@ -2,6 +2,7 @@ package keepalive
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
 
@@ -15,6 +16,7 @@ type fakeDispatcher struct {
 	sent     []DispatchRequest
 	held     map[Key]int // Hold count minus Release count, per key
 	released []Key
+	events   []string // "hold:<key>" and "release:<key>", in call order
 }
 
 func newFake(resp func(DispatchRequest) (Usage, int, error)) *fakeDispatcher {
@@ -35,11 +37,24 @@ func (f *fakeDispatcher) Release(k Key) {
 	defer f.mu.Unlock()
 	f.held[k]--
 	f.released = append(f.released, k)
+	f.events = append(f.events, fmt.Sprintf("release:%v", k))
 }
 
 // hold is what a test passes as Record.Hold.
 func (f *fakeDispatcher) hold(k Key) func() {
-	return func() { f.mu.Lock(); f.held[k]++; f.mu.Unlock() }
+	return func() {
+		f.mu.Lock()
+		f.held[k]++
+		f.events = append(f.events, fmt.Sprintf("hold:%v", k))
+		f.mu.Unlock()
+	}
+}
+
+// log returns a copy of the hold/release event log, read under the lock.
+func (f *fakeDispatcher) log() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.events...)
 }
 
 // n is the ordinary-ping count, read under the lock.

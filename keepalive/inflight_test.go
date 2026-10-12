@@ -19,10 +19,14 @@ func TestArriveDuringAnInFlightPing(t *testing.T) {
 		<-finish
 		return Usage{CacheRead: 50_000}, 200, nil
 	})
-	k := New(Options{Dispatcher: fd, Now: clock}) // default Go: a real goroutine
+	// A real goroutine, as the default Go runs it, but one that signals when the whole fire
+	// (Dispatch, then the keeper's bookkeeping) has returned.
+	fired := make(chan struct{})
+	goFire := func(f func()) { go func() { defer close(fired); f() }() }
+	k := New(Options{Dispatcher: fd, Now: clock, Go: goFire})
 	key := Key{Tenant: "t", Session: "s"}
-	k.Record(trackedRecord(fd, key, start))
-	k.Record(trackedRecord(fd, key, start))
+	k.Record(trackedRecord(fd, key, start)) // turn 0: counted, not tracked
+	k.Record(trackedRecord(fd, key, start)) // turn 1: tracked, Held
 	mu.Lock()
 	now = start.Add(281 * time.Second)
 	mu.Unlock()
@@ -35,9 +39,13 @@ func TestArriveDuringAnInFlightPing(t *testing.T) {
 		t.Fatalf("balance %d after Arrive, want 0", n)
 	}
 	close(finish)
-	deadline := time.Now().Add(5 * time.Second)
-	for k.Stats().Pings == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	select {
+	case <-fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fire goroutine did not finish")
+	}
+	if p := k.Stats().Pings; p != 1 {
+		t.Fatalf("Pings = %d after the fire returned, want 1", p)
 	}
 	if _, ok := k.Entry(key); ok {
 		t.Fatal("the entry survived Arrive")
