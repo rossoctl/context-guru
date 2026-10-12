@@ -507,6 +507,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// main thread's boundary, so a component could rewrite messages the main thread had cached
 	// (#484). The primary thread keys by the bare session, so single-thread traffic is unchanged.
 	turnKey := thread.Key(sessionID, tr.Thread.ID)
+	// parentKey is set on the FIRST request of a thread that continues another thread's prefix
+	// (a side request or a fork). The provider already holds that prefix, so the new thread reads
+	// the parent's boundary and clock instead of starting at -1. See modes.Tracker.TurnFrom.
+	parentKey := inheritKey(sessionID, tr.Thread)
 	if cacheAware && !bypass {
 		// Messages present on the previous turn of this session are already committed
 		// to the provider cache; only the new tail is being cache-written this turn.
@@ -527,7 +531,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// post-compaction one.
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnAt(turnKey, len(norm), nowMs)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs)
 			maxCachedIdx--
 			// The idle clock is per SESSION ID; the provider's prompt cache is keyed on
 			// CONTENT. When those disagree the clock can go stale while the provider's entry
@@ -576,6 +580,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			if lifetimeKind == CacheLifetimeExact {
 				// Per thread too: another thread's 1h tier says nothing about this thread's cache.
 				ttl = sessionTTL(st, turnKey, ttl)
+				if p := peekTTL(st, parentKey); p > ttl { // read only: the parent's record is its own
+					ttl = p
+				}
 				if a := sessionTTL(st, alias, ttl); a > ttl {
 					ttl = a
 				}
@@ -599,7 +606,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				idleMs = nowMs - prevAt
 			}
 		} else {
-			maxCachedIdx = modes.Boundary(prevLen(st, turnKey), len(norm)) - 1
+			maxCachedIdx = storeBoundary(st, turnKey, parentKey, len(norm)) - 1
 			defer putLen(st, turnKey, len(norm))
 		}
 	} else if cacheAware && bypass {
@@ -1202,6 +1209,39 @@ func prevLen(st store.Store, session string) int {
 
 func putLen(st store.Store, session string, n int) {
 	st.Put("cg:len:"+session, []byte(strconv.Itoa(n)))
+}
+
+// storeBoundary is the store-backed twin of modes.Tracker.TurnFrom, for callers without a
+// tracker: the key's own record through modes.Boundary, else the parent's (read only), capped at
+// n. It reads only; the caller records the key's own length.
+func storeBoundary(st store.Store, key, parent string, n int) int {
+	if _, ok := st.Get("cg:len:" + key); ok || parent == "" {
+		return modes.Boundary(prevLen(st, key), n)
+	}
+	return min(prevLen(st, parent), n)
+}
+
+// inheritKey is the tracker key of the thread th continues, or "" when th inherits from none.
+// Result.Inherits is set only on a thread's first request, which is the one request whose own
+// key has no record yet.
+func inheritKey(session string, th thread.Result) string {
+	if from, ok := th.InheritsFrom(); ok {
+		return thread.Key(session, from)
+	}
+	return ""
+}
+
+// peekTTL reads a TTL record without writing it, 0 when there is none.
+func peekTTL(st store.Store, key string) time.Duration {
+	if st == nil || key == "" {
+		return 0
+	}
+	if b, ok := st.Get(store.TTLPrefix + key); ok {
+		if d, err := time.ParseDuration(string(b)); err == nil {
+			return d
+		}
+	}
+	return 0
 }
 
 // messagesArray is the ONE gate on a body's message array: it must exist and be an array. An

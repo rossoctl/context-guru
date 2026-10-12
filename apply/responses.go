@@ -16,7 +16,6 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/internal/thread"
-	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
@@ -531,7 +530,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		turnKey := thread.Key(res.Session, res.Thread.ID) // per thread, as in BodyOpts (#484)
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnAt(turnKey, len(norm), nowMs)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, inheritKey(res.Session, res.Thread), len(norm), nowMs)
 			maxCachedIdx--
 			alias := session.Scoped(o.Tenant, "", sys, first)
 			if at := aliasSeen(st, alias, nowMs); at > prevAt {
@@ -541,7 +540,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 				idleMs = nowMs - prevAt
 			}
 		} else {
-			maxCachedIdx = modes.Boundary(prevLen(st, turnKey), len(norm)) - 1
+			maxCachedIdx = storeBoundary(st, turnKey, inheritKey(res.Session, res.Thread), len(norm)) - 1
 			defer putLen(st, turnKey, len(norm))
 		}
 	}

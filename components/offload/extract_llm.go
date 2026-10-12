@@ -21,6 +21,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
 	"gopkg.in/yaml.v3"
 )
@@ -497,7 +498,16 @@ func (e *ExtractLLM) noteRequestSize(c *components.Ctx, tokens int) int {
 	key := thread.Key(c.Session, c.Thread)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	prev := e.prevTokens[key]
+	prev, ok := e.prevTokens[key]
+	if !ok && len(e.prevTokens) >= modes.DefaultMaxKeys {
+		// Bounded like the tracker, because there is one entry per thread and side request.
+		// ponytail: arbitrary eviction. A lost entry reads as no previous size, so growth is 0
+		// and the growth trigger does not fire: one missed model call, never a wrong rewrite.
+		for k := range e.prevTokens {
+			delete(e.prevTokens, k)
+			break
+		}
+	}
 	e.prevTokens[key] = tokens
 	return prev
 }

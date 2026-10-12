@@ -1,9 +1,11 @@
 package offload
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/modes"
 )
 
 // The growth rate is a thread's own: a short subagent request between two main-thread requests
@@ -30,5 +32,20 @@ func TestExtractLLMGrowthIsPerThread(t *testing.T) {
 	// The primary thread keys by the bare session, as before threads existed.
 	if prev := e.noteRequestSize(&components.Ctx{Session: "s"}, 1); prev != 120_000 {
 		t.Fatalf("primary thread key moved: prev = %d", prev)
+	}
+}
+
+// One entry per thread and per side request: the growth record must stay bounded like the tracker.
+func TestExtractLLMGrowthRecordIsBounded(t *testing.T) {
+	c, err := newExtractLLM(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := c.(*ExtractLLM)
+	for i := 0; i < modes.DefaultMaxKeys+50; i++ {
+		e.noteRequestSize(&components.Ctx{Session: "s", Thread: fmt.Sprintf("p:%d", i)}, 10)
+	}
+	if n := len(e.prevTokens); n > modes.DefaultMaxKeys {
+		t.Fatalf("growth record holds %d keys, bound is %d", n, modes.DefaultMaxKeys)
 	}
 }

@@ -261,3 +261,144 @@ func TestThreadTTLRecordIsPerThread(t *testing.T) {
 		t.Fatal("a thread that asked for the 1h tier read cold after 10 minutes")
 	}
 }
+
+// sharedPrefixBody is the main thread's transcript with `tools` tool outputs, plus `extra` user
+// messages after it. declare adds a top-level `tools` array, which is how thread.Resolve tells the
+// main agent from a tool-less side request.
+func sharedPrefixBody(t *testing.T, tools int, extra []string, declare bool) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(threadBody(t, "main", tools, false), &doc); err != nil {
+		t.Fatal(err)
+	}
+	msgs := doc["messages"].([]any)
+	for _, e := range extra {
+		msgs = append(msgs, map[string]any{"role": "user", "content": e})
+	}
+	doc["messages"] = msgs
+	if declare {
+		doc["tools"] = []any{map[string]any{"name": "Bash", "description": "run a command",
+			"input_schema": map[string]any{"type": "object"}}}
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// A NEW thread whose first request extends the main thread's cached prefix must not start at
+// MaxCachedIdx -1 (#487 review, finding 1). Claude Code's side requests (title, quota check,
+// end-of-turn note) are tool-less and get their own p:<hash> thread; a fork names itself with an
+// agent header. Both send the main thread's whole transcript, which the provider already holds.
+// The thread ids here come from the real thread.New().Resolve.
+//
+// Without TurnFrom's parent read, both got MaxCachedIdx -1 and mask changed message 5 of the
+// main thread's cached part.
+func TestNewThreadOnASharedPrefixKeepsTheCachedPart(t *testing.T) {
+	for _, tc := range []struct {
+		name, agentID string
+		declare       bool
+		noTracker     bool // the store-backed path library callers use
+	}{
+		{"side request", "", false, false},
+		{"fork", "fork1", true, false},
+		{"side request without a tracker", "", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := pipe(t, "pipeline: [mask]\ncomponents:\n  mask: {keep_recent: 1, min_tokens: 50}\n")
+			p, err := cfg.Build(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, threads := store.NewMemory(store.Options{}), thread.New()
+			var agent string
+			var body []byte
+			o := apply.Opts{Provider: bschemas.Anthropic, CacheMode: "on", Tracker: modes.NewTracker(0),
+				ThreadOf: func(s string) thread.Result { return threads.Resolve(s, agent, body, false) }}
+			if tc.noTracker {
+				o.Tracker = nil
+			}
+			base := time.Unix(1_700_000_000, 0)
+			send := func(b []byte, id string, at time.Time) apply.Result {
+				body, agent = b, id
+				o.Body, o.Now = b, at
+				return apply.BodyOpts(context.Background(), p, st, o)
+			}
+			send(sharedPrefixBody(t, 4, nil, true), "", base)
+			mainRes := send(sharedPrefixBody(t, 6, nil, true), "", base.Add(10*time.Second))
+			if mainRes.Thread.ID != thread.Primary || mainRes.MaxCachedIdx != 5 {
+				t.Fatalf("fixture: main turn 2 thread %q idx %d, want primary and 5", mainRes.Thread.ID, mainRes.MaxCachedIdx)
+			}
+			var cached []string
+			for _, m := range gjson.GetBytes(mainRes.Body, "messages").Array() {
+				cached = append(cached, m.Raw)
+			}
+
+			side := send(sharedPrefixBody(t, 6, []string{"one more question"}, tc.declare), tc.agentID, base.Add(20*time.Second))
+			if _, ok := side.Thread.InheritsFrom(); !ok || side.Thread.ID == thread.Primary {
+				t.Fatalf("fixture: the new thread %+v must be its own thread and inherit from the main one", side.Thread)
+			}
+			if side.MaxCachedIdx != len(cached)-1 {
+				t.Errorf("new thread %q: MaxCachedIdx = %d, want %d (the main thread's cached part)",
+					side.Thread.ID, side.MaxCachedIdx, len(cached)-1)
+			}
+			if side.FrozenTokens == 0 {
+				t.Error("new thread of a warm main thread read cold or unprotected: frozen_tokens = 0")
+			}
+			sent := gjson.GetBytes(side.Body, "messages").Array()
+			for i, was := range cached {
+				if i >= len(sent) || sent[i].Raw != was {
+					t.Errorf("new thread changed message %d of the main thread's cached part", i)
+				}
+			}
+
+			// The parent's record is read, never written: the main thread's next request is still
+			// measured against its OWN last request (8 messages), not the new thread's 9.
+			if next := send(sharedPrefixBody(t, 7, nil, true), "", base.Add(30*time.Second)); next.MaxCachedIdx != 7 {
+				t.Errorf("main turn 3: MaxCachedIdx = %d, want 7 (the new thread wrote the main thread's record)", next.MaxCachedIdx)
+			}
+		})
+	}
+}
+
+// The Responses route keys by thread.Key too, so a single-thread session there is also unchanged:
+// a ThreadOf that always answers the primary thread equals no ThreadOf at all.
+func TestResponsesSingleThreadSessionIsUnchanged(t *testing.T) {
+	run := func(withThreadOf bool) []apply.Result {
+		st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
+		cfg := pipe(t, "pipeline: [mask]\ncomponents:\n  mask: {keep_recent: 1, min_tokens: 50}\n")
+		p, err := cfg.Build(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := time.Unix(1_700_000_000, 0)
+		var out []apply.Result
+		for i, n := range []int{3, 5, 8, 2, 4} { // 8 -> 2 is a compaction
+			var items []string
+			for j := 0; j < n; j++ {
+				items = append(items, fmt.Sprintf(`{"type":"function_call_output","call_id":"c%d","output":"output %d\n%s"}`,
+					j, j, strings.Repeat(`payload line\n`, 60)))
+			}
+			o := apply.Opts{Provider: bschemas.OpenAI, API: "responses", CacheMode: "on", Session: "same-session",
+				Body:    []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"go"},` + strings.Join(items, ",") + `]}`),
+				Tracker: tr, Now: base.Add(time.Duration(i) * 7 * time.Minute)}
+			if withThreadOf {
+				o.ThreadOf = func(string) thread.Result { return thread.Result{ID: thread.Primary, Source: thread.SourceSession} }
+			}
+			out = append(out, apply.BodyOpts(context.Background(), p, st, o))
+		}
+		return out
+	}
+	with, without := run(true), run(false)
+	for i := range with {
+		a, b := with[i], without[i]
+		if a.MaxCachedIdx != b.MaxCachedIdx || a.FrozenTokens != b.FrozenTokens || string(a.Body) != string(b.Body) {
+			t.Fatalf("turn %d: with ThreadOf (idx %d, frozen %d) differs from without (idx %d, frozen %d)",
+				i, a.MaxCachedIdx, a.FrozenTokens, b.MaxCachedIdx, b.FrozenTokens)
+		}
+	}
+	if !with[2].Changed {
+		t.Fatal("fixture: mask acted on nothing, so the comparison proves little")
+	}
+}
