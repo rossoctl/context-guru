@@ -11,7 +11,6 @@ import os
 import re
 import shutil
 import sys
-import textwrap
 
 UNI = {"full": "█", "empty": "░", "half": "▒", "spark": "▁▂▃▄▅▆▇█", "hit": "■", "part": "▨", "miss": "✖",
        "ping": "↻", "compact": "▼", "msg": "▪", "busy": "▮", "idle": "·", "ramp": " ░▒▓█", "dot": "●",
@@ -104,6 +103,51 @@ def kind(r: dict) -> str:
     return "miss" if w >= 0.8 else "part" if w >= 0.1 else "hit"
 
 
+def thread_key(r: dict) -> tuple:
+    return (r["model"], r["tools"], r["system_blocks"])
+
+
+def extra_usd(rows: list[dict]) -> dict[int, float]:
+    """Estimated extra dollars of each cache miss: its cost above a normal (non-miss) turn of the same
+    model. The first request of a thread always writes, so it is not a miss anyone could have avoided."""
+    ok: dict[str, list[float]] = {}
+    for r in rows:
+        if kind(r) != "miss":
+            ok.setdefault(r["model"], []).append(r["cost_usd"])
+    med = {m: sorted(v)[len(v) // 2] for m, v in ok.items()}
+    seen, out = set(), {}
+    for r in sorted(rows, key=lambda r: r["ts"]):
+        k = thread_key(r)
+        if kind(r) == "miss" and k in seen:
+            out[r["id"]] = max(r["cost_usd"] - med.get(r["model"], 0.0), 0.0)
+        seen.add(k)
+    return out
+
+
+def growth(rows: list[dict]) -> float:
+    """Context tokens per second over the latest stretch of one thread since its last compaction."""
+    pts = []
+    for r in rows:
+        if pts and r["messages"] < pts[-1][2] * 0.5:
+            pts = []
+        pts.append((r["ts"], ctx(r), r["messages"]))
+    pts = pts[-12:]
+    if len(pts) < 3 or pts[-1][0] <= pts[0][0]:
+        return 0.0
+    return max(pts[-1][1] - pts[0][1], 0) / ((pts[-1][0] - pts[0][0]) / 1000)
+
+
+def heat_grid(rows: list[dict], ex: dict, off_min) -> list[list[float]]:
+    """7 x 24 dollars of extra cost by weekday (Mon=0) and local hour. `off_min(ts_ms)` gives minutes east of UTC."""
+    import time
+    grid = [[0.0] * 24 for _ in range(7)]
+    for r in rows:
+        if r["id"] in ex:
+            t = time.gmtime((r["ts"] + off_min(r["ts"]) * 60_000) / 1000)
+            grid[t.tm_wday][t.tm_hour] += ex[r["id"]]
+    return grid
+
+
 def usd(x: float) -> str:
     x = float(x or 0)
     s = "-" if x < 0 else ""
@@ -140,6 +184,7 @@ def clip(s: str, width: int, e: Env) -> str:
 
 def fit(lines: list[str], e: Env) -> list[str]:
     """Word-wrap any line wider than the terminal (colour dropped on those lines only), continuation indented."""
+    import textwrap  # lazy: only wrapping pays for it, and the status line imports this module on every render
     out = []
     for ln in lines:
         if vlen(ln) <= e.width - 1:

@@ -27,7 +27,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cg  # noqa: E402  (Api, window, levers, daily, session_rows, is_rewrite, cache_state ...)
 import tvlib as T  # noqa: E402
-from tvlib import Env, ctx, dur, kind, span, usd  # noqa: E402
+from tvlib import Env, ctx, dur, extra_usd, growth, heat_grid, kind, span, thread_key, usd  # noqa: E402
 
 DAY = cg.DAY_MS
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -44,29 +44,8 @@ class Fast(cg.Api):
         return super().get(path, params, timeout)
 
 
-def thread_key(r: dict) -> tuple:
-    return (r["model"], r["tools"], r["system_blocks"])
-
-
 def short_model(m: str) -> str:
     return re.sub(r"-\d{8}$", "", m.split("/")[-1].replace("claude-", ""))
-
-
-def extra_usd(rows: list[dict]) -> dict[int, float]:
-    """Estimated extra dollars of each cache miss: its cost above a normal (non-miss) turn of the same
-    model. The first request of a thread always writes, so it is not a miss anyone could have avoided."""
-    ok: dict[str, list[float]] = {}
-    for r in rows:
-        if kind(r) != "miss":
-            ok.setdefault(r["model"], []).append(r["cost_usd"])
-    med = {m: sorted(v)[len(v) // 2] for m, v in ok.items()}
-    seen, out = set(), {}
-    for r in sorted(rows, key=lambda r: r["ts"]):
-        k = thread_key(r)
-        if kind(r) == "miss" and k in seen:
-            out[r["id"]] = max(r["cost_usd"] - med.get(r["model"], 0.0), 0.0)
-        seen.add(k)
-    return out
 
 
 def utc_off(ms: int, o: dict) -> int:
@@ -238,13 +217,8 @@ def view_heatmap(api, o, e: Env) -> list[str]:
     if not rows:
         raise NoData
     ex = extra_usd(rows)
-    grid = [[0.0] * 24 for _ in range(7)]
-    cnt = 0
-    for r in rows:
-        if r["id"] in ex:
-            t = local(r["ts"], o)
-            grid[t.tm_wday][t.tm_hour] += ex[r["id"]]
-            cnt += 1
+    grid = heat_grid(rows, ex, lambda ts: utc_off(ts, o))
+    cnt = sum(1 for r in rows if r["id"] in ex)
     tot = sum(map(sum, grid))
     top = max(max(g) for g in grid)
     first = min(r["ts"] for r in rows)
@@ -270,19 +244,6 @@ def view_heatmap(api, o, e: Env) -> list[str]:
 
 # ---------------------------------------------------------------------------------------------
 # fill
-
-def growth(rows: list[dict]) -> float:
-    """Context tokens per second over the latest stretch of one thread since its last compaction."""
-    pts = []
-    for r in rows:
-        if pts and r["messages"] < pts[-1][2] * 0.5:
-            pts = []
-        pts.append((r["ts"], ctx(r), r["messages"]))
-    pts = pts[-12:]
-    if len(pts) < 3 or pts[-1][0] <= pts[0][0]:
-        return 0.0
-    return max(pts[-1][1] - pts[0][1], 0) / ((pts[-1][0] - pts[0][0]) / 1000)
-
 
 def view_fill(api, o, e: Env) -> list[str]:
     sid, _ = cg.session_id(api, o["session"])
