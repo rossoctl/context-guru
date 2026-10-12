@@ -5,20 +5,7 @@ It is project-safe, reversible, and does not add an API key.
 
 ## Install
 
-Add the published package to the global OpenCode config for every project:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-context-guru"]
-}
-```
-
-OpenCode stores this file at `~/.config/opencode/opencode.json`. For one project only, put the same
-entry in that project's `opencode.json`.
-
-When using a checkout before the package is published, point OpenCode at the local plugin file
-instead:
+Add the local plugin file to the global OpenCode config for every project:
 
 ```json
 {
@@ -26,6 +13,9 @@ instead:
   "plugin": ["/absolute/path/to/context-guru/opencode-plugin/index.js"]
 }
 ```
+
+OpenCode stores this file at `~/.config/opencode/opencode.json`. For one project only, put the same
+entry in that project's `opencode.json`.
 
 Restart OpenCode after changing the config. On the first startup, the plugin:
 
@@ -53,7 +43,7 @@ different preset or disable keep-alive with the tuple form:
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
-    ["opencode-context-guru", {"preset": "conservative", "cacheStrategy": "none"}]
+    ["/absolute/path/to/context-guru/opencode-plugin/index.js", {"preset": "conservative", "cacheStrategy": "none"}]
   ]
 }
 ```
@@ -68,9 +58,9 @@ authentication.
 
 ## Remove or recover
 
-Remove `opencode-context-guru` from the OpenCode config and restart OpenCode. The proxy will stop
-after its idle timeout. To stop it immediately, run the `context-guru-reset` command from the project
-state directory shown in the log, then restart OpenCode.
+Remove the local plugin path from the OpenCode config and restart OpenCode. The proxy will stop after
+its idle timeout. To stop it immediately, run the `context-guru-reset` command from the project state
+directory shown in the log, then restart OpenCode.
 
 The reset command only stops a proxy recorded by this plugin. It does not remove a proxy found on
 `PATH`, provider credentials, or unrelated OpenCode configuration.
