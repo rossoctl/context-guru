@@ -731,10 +731,20 @@ components:
 	// least 860 tokens that arrives in the uncached tail is offered to the compaction model once,
 	// before it is first forwarded, so the provider never caches its verbose form and the cached
 	// prefix is never rewritten. No extract_llm_sweep (nothing at depth, cold or warm).
-	//   fire_on: size        the per-output floor decides, not context pressure
+	//   fire_on: size        the per-output floor decides, not context pressure. This makes the
+	//                        economic gate and the caching-backend guard ADVISORY, so spend is
+	//                        bounded only by the two caps below.
+	//   llm_max_per_request  8 calls per request.
+	//   llm_max_per_session  10 calls per session: above the most calls any replayed SWE-bench
+	//                        session needed (9). A long interactive session reaches it and then
+	//                        runs as house.
 	//   context: goal        the prompt carries the agent's goal only, not recent messages
 	//   rewrite: false       deletion-only: the result must be a subsequence of the output
-	//   skip_file_reads      false: file reads are the largest outputs in the tail
+	//   skip_file_reads      false. AUTO skips file reads on cached requests because reducing them
+	//                        there was measured to raise the bill (the reduction rewrites bytes the
+	//                        provider already holds). Here only the uncached tail is touched, so the
+	//                        verbose read is never cached in the first place; on a session replay,
+	//                        including file reads was the better choice on both halves of a task split.
 	//   strategy: auto       the Starlark program first, a single-shot extract as fallback
 	// The model block is housellm's; pin a cheaper extraction model with `model:` if one is
 	// available.
@@ -747,7 +757,7 @@ components:
     context: goal
     fire_on: size
     llm_max_per_request: 8
-    llm_max_per_session: 0
+    llm_max_per_session: 10
     min_tokens: 860
     model:
       model: claude-haiku-4-5
