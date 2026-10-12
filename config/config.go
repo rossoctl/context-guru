@@ -803,6 +803,10 @@ components:
 // a /compact ?preset= query param) — a plain map lookup, no YAML parsing of
 // untrusted input.
 func PresetPipeline(name string) ([]string, bool) {
+	if name == "agentdiet" { // removed; same as the config path: warn, run no components
+		slog.Warn("config: preset was removed and is ignored", "preset", name)
+		return nil, true
+	}
 	p, ok := presets[name]
 	return append([]string(nil), p...), ok
 }

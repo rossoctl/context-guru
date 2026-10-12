@@ -352,3 +352,11 @@ func TestRemovedComponentsAreIgnoredNotFatal(t *testing.T) {
 		t.Errorf("pipeline = %s, want format,extract", got)
 	}
 }
+
+// /compact?preset=agentdiet must behave like `preset: agentdiet` in a config: empty pipeline, not an error.
+func TestRemovedPresetResolvesToEmptyPipeline(t *testing.T) {
+	p, ok := PresetPipeline("agentdiet")
+	if !ok || len(p) != 0 {
+		t.Fatalf("PresetPipeline(agentdiet) = %v, %v; want empty, true", p, ok)
+	}
+}
