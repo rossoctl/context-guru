@@ -1,4 +1,4 @@
-Carried but never called in 14 days: $37.70  (observed: declaration tokens re-read each turn, priced at the tier each turn billed)
+Carried but never called in 14 days: $37.70  (measured: declaration tokens re-read each turn, priced at the tier each turn billed)
   Removing the 6 below saves about $82.88/month if your usage stays the same  [estimate]
 
   MCP server   playwright     9k/turn  $18.40                             claude mcp remove playwright

@@ -53,8 +53,8 @@ The old names keep working for one release. Each says where it moved and runs th
 ## How the screens are written
 
 - **Dollars first.** Every screen opens with a dollar figure, never a token count (ask for `details` if you want sizes).
-- **Saved and Estimated are different things.** `✓ Saved` is what the proxy saved you, compared with the same requests without it, at your gateway's prices, net of its own spend. `≈ Estimated` is spend you could still avoid; those rows overlap, so they are not added together. Observed spend, straight from the provider's usage, is labelled as such.
-- **Plain Unicode, no colour codes** in command output, so it reads the same on a light and a dark terminal. Colour appears only in the status line.
+- **Saved and Estimated are different things.** `✓ Saved` is what the proxy saved you, compared with the same requests without it, at your gateway's prices, net of its own spend. `≈ Estimated` is spend you could still avoid; those rows overlap, so they are not added together. Plain facts, straight from the provider's usage, are labelled `measured`.
+- **Plain text for the six commands; colour for the views.** `status`, `savings`, `cache`, `waste`, `session` and `doctor` print plain Unicode with no colour codes, so they read the same on a light and a dark terminal. The five [terminal views](terminal-views.md) use colour (with `--theme light|dark`), and fall back to plain when output is not a terminal or `NO_COLOR` is set. The status line uses the basic terminal colours.
 
 ## Update
 

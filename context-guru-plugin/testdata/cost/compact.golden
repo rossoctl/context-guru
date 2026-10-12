@@ -1,4 +1,4 @@
-Cache state of your recent sessions  (context and last touch observed; the rest is estimate)
+Cache state of your recent sessions  (context and last touch measured; the rest is estimate)
   project    context   cache    state            cost of the next turn (estimate)
   api        212k tok  5m tier  warm 3:25 left   next turn if cold $1.01, if warm $0.081
   dashboard  96k tok   5m tier  COLD 20:00 ago   next turn if cold $0.182, if warm $0.015

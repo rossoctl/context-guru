@@ -2,7 +2,7 @@ Cache is COLD. The next message re-sends the whole conversation: $1.91 extra.
 
 ○ ░░░░░░░░░░░░░░░░░░░░ 0:00 of 5:00   no ping planned
 
-Cache misses in 7 days: 377 costing $145.67 extra   (observed)
+Cache misses in 7 days: 377 costing $145.67 extra   (measured)
   You paused longer than the cache lasts     214x  $107.79  ███████░░░
   Settings or tools changed mid-session       23x   $14.57  █░░░░░░░░░
   A new session started                       96x   $14.57  █░░░░░░░░░

@@ -8,7 +8,7 @@ The status line sits under the prompt and answers two questions all the time: **
 The first line is money, the second is the cache clock, the sub-agents, the context bar and at most one hint:
 
 ```text
-saved ≈$0.31 session · ≈$4.20 today · ★ ≈$212.40 lifetime
+saved $0.31 session · $4.20 today · ★ $212.40 lifetime
 cache ● █████░ 3:57 │ agents 2 · soonest ◐ 0:51 │ ctx ███░░░░░ 41%
 ```
 
@@ -16,13 +16,13 @@ cache ● █████░ 3:57 │ agents 2 · soonest ◐ 0:51 │ ctx █�
 
 | Piece | Meaning |
 |---|---|
-| `saved ≈$0.31 session` | Estimated saving for this session: what the same requests would have cost without the proxy, at your gateway's prices, net of the proxy's own spend. The `≈` marks it as an estimate. |
-| `≈$4.20 today` | The same measure since local midnight. |
-| `★ ≈$212.40 lifetime` | The same measure over everything this proxy has recorded. |
+| `saved $0.31 session` | Saved this session: modelled against the same requests without the proxy, at your gateway's prices, net of the proxy's own spend. |
+| `$4.20 today` | The same measure since local midnight. |
+| `★ $212.40 lifetime` | The same measure over everything this proxy has recorded. |
 | `cache ● █████░ 3:57` | A bar that drains as the prompt cache approaches expiry, and the clock. Time is measured from the end of the last response. |
 | `↻` after the clock | The last touch of the cache was a keep-alive ping. |
 | `agents 2 · soonest ◐ 0:51` | Running sub-agents: the count and the clock of the one whose cache expires first (a single agent shows its own clock, as `agent ● 4:21`). Each has its own cache. Finished (cold) ones are not shown. |
-| `ctx ███░░░░░ 41%` | How full the context window is, against the window actually served. |
+| `ctx ███░░░░░ 41%` | How full you are, as a share of the model's context limit. |
 | `▸ hint` | At most one thing worth acting on, dollars first. |
 | `▲ update v0.3.2` | A newer proxy release is waiting; shown first so it cannot scroll off. |
 

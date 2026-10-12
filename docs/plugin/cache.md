@@ -12,7 +12,7 @@ Cache is warm for 2:41 more. If it lapses, the next message costs $1.91 extra.
 
 ● ███████████░░░░░░░░░ 2:41 of 5:00   ping planned ↻
 
-Cache misses in 7 days: 377 costing $145.67 extra   (observed)
+Cache misses in 7 days: 377 costing $145.67 extra   (measured)
   You paused longer than the cache lasts     214x  $107.79  ███████░░░
   Settings or tools changed mid-session       23x   $14.57  █░░░░░░░░░
   A new session started                       96x   $14.57  █░░░░░░░░░
@@ -31,7 +31,7 @@ Cache is COLD. The next message re-sends the whole conversation: $1.91 extra.
 
 ○ ░░░░░░░░░░░░░░░░░░░░ 0:00 of 5:00   no ping planned
 
-Cache misses in 7 days: 377 costing $145.67 extra   (observed)
+Cache misses in 7 days: 377 costing $145.67 extra   (measured)
   You paused longer than the cache lasts     214x  $107.79  ███████░░░
   Settings or tools changed mid-session       23x   $14.57  █░░░░░░░░░
   A new session started                       96x   $14.57  █░░░░░░░░░
@@ -46,7 +46,7 @@ More: /context-guru:cache details
 ## Reading it
 
 - **Bar:** drains toward expiry. `ping planned ↻` means the proxy will touch the cache before it lapses.
-- **Misses by cause:** each cause in plain words with its count and the extra it cost; the bar is the share. The dollars are observed from billed tokens; the cause is inferred from the pause length and message count.
+- **Misses by cause:** each cause in plain words with its count and the extra it cost; the bar is the share. The dollars are measured from billed tokens; the cause is inferred from the pause length and message count.
 - Ask for `details` for the costliest single misses.
 
 The same clock runs in the [status line](statusline.md), live.

@@ -93,7 +93,7 @@ Each command opens with one line that answers its question, then a small picture
 | `/context-guru:savings` | How much did it save? | Saved $41.20 in 7 days, net of Context Guru's own spend (4.6% of the $898.05 the same work would have cost). |
 | `/context-guru:cache` | Is my cache about to cost me? | Cache is warm for 2:41 more. If it lapses, the next message costs $1.91 extra. |
 | `/context-guru:waste` | What do I carry and never use? | 6 things you carry were never used: $37.70 in 7 days, about $161.57 a month. |
-| `/context-guru:session` | What happened in this session? | In this session, cache misses cost you about $4.20 of the $13.50 billed (2 misses in 31 messages). |
+| `/context-guru:session` | What happened in this session? | In the last 4 hours of this session (9h20m long), cache misses cost you about $4.20 of the $13.50 billed (2 misses in 31 messages). |
 | `/context-guru:doctor` | Is it set up right? | All 7 checks pass. |
 
 Five more views draw in the terminal (`watch`, `timeline`, `chart`, `heatmap`, `fill`).

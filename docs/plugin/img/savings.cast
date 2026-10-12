@@ -1,4 +1,4 @@
-{"version": 2, "width": 110, "height": 24, "title": "/context-guru:savings"}
+{"version": 2, "width": 130, "height": 24, "title": "/context-guru:savings"}
 [0.3, "o", "/"]
 [0.34, "o", "c"]
 [0.38, "o", "o"]
@@ -31,7 +31,7 @@
 [1.64, "o", "  Context Guru's own model spend  -$4.10  \u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\r\n"]
 [1.7, "o", "\r\n"]
 [1.76, "o", "\u2248 Estimated   (spend you could still avoid; rows overlap, do not add them)\r\n"]
-[1.82, "o", "  You paused longer than the cache lasts, 214 times  $107.79  observed\r\n"]
-[1.88, "o", "  Settings or tools changed mid-session               $23.31  observed\r\n"]
+[1.82, "o", "  You paused longer than the cache lasts, 214 times  $107.79  measured\r\n"]
+[1.88, "o", "  Settings or tools changed mid-session               $23.31  measured\r\n"]
 [1.94, "o", "\r\n"]
 [2.0, "o", "More: /context-guru:savings details\r\n"]

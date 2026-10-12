@@ -241,7 +241,7 @@ def cmd_cache(api: Api, o: dict) -> list[str]:
     rw = (sp or {}).get("rewrites", {})
     if rw:
         tot = sum(v["usd"] for v in rw.values())
-        L += ["", f"Cache misses in {d} days: {sum(v['n'] for v in rw.values())} costing {dollars(tot)} extra   (observed)"]
+        L += ["", f"Cache misses in {d} days: {sum(v['n'] for v in rw.values())} costing {dollars(tot)} extra   (measured)"]
         L += C.table([[CAUSES.get(k, k.replace("_", " ")), str(v["n"]) + "x", dollars(v["usd"]), cells(v["usd"] / tot, 10)]
                       for k, v in sorted(rw.items(), key=lambda kv: -kv[1]["usd"])], "lrrl")
     L += ["", "The cache keeps your conversation cheap to reuse for a few minutes after each message."]
@@ -272,7 +272,7 @@ def cmd_waste(api: Api, o: dict) -> list[str]:
     if o["details"]:
         L += ["", "All of them, with the command that removes each:"]
         L += C.table([[kind(i["kind"]), i["name"], dollars(i["usd"]), i["cmd"]] for i in items], "llrl")
-    L += ["", f"Observed carry; the monthly figure is an estimate that assumes your usage stays the same."]
+    L += ["", f"Measured carry; the monthly figure is an estimate that assumes your usage stays the same."]
     return L
 
 

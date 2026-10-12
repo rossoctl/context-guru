@@ -1,4 +1,4 @@
-{"version": 2, "width": 110, "height": 24, "title": "/context-guru:waste"}
+{"version": 2, "width": 130, "height": 24, "title": "/context-guru:waste"}
 [0.3, "o", "/"]
 [0.34, "o", "c"]
 [0.38, "o", "o"]
@@ -32,6 +32,6 @@
 [1.74, "o", "Remove the first:\r\n"]
 [1.8, "o", "  claude mcp remove playwright\r\n"]
 [1.86, "o", "\r\n"]
-[1.92, "o", "Observed carry; the monthly figure is an estimate that assumes your usage stays the same.\r\n"]
+[1.92, "o", "Measured carry; the monthly figure is an estimate that assumes your usage stays the same.\r\n"]
 [1.98, "o", "\r\n"]
 [2.04, "o", "More: /context-guru:waste details\r\n"]

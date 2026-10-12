@@ -1,4 +1,4 @@
-{"version": 2, "width": 110, "height": 24, "title": "/context-guru:cache"}
+{"version": 2, "width": 130, "height": 24, "title": "/context-guru:cache"}
 [0.3, "o", "/"]
 [0.34, "o", "c"]
 [0.38, "o", "o"]
@@ -24,7 +24,7 @@
 [1.26, "o", "\r\n"]
 [1.32, "o", "\u25cb \u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591 0:00 of 5:00   no ping planned\r\n"]
 [1.38, "o", "\r\n"]
-[1.44, "o", "Cache misses in 7 days: 377 costing $145.67 extra   (observed)\r\n"]
+[1.44, "o", "Cache misses in 7 days: 377 costing $145.67 extra   (measured)\r\n"]
 [1.5, "o", "  You paused longer than the cache lasts     214x  $107.79  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2591\u2591\u2591\r\n"]
 [1.56, "o", "  Settings or tools changed mid-session       23x   $14.57  \u2588\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\r\n"]
 [1.62, "o", "  A new session started                       96x   $14.57  \u2588\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\r\n"]
