@@ -1127,20 +1127,6 @@ def _heat_row(hourly: dict | None, spend: dict | None, lv: int, tv, e) -> str | 
     return (f"{DIM}misses{RESET} " if not lv else "") + f"{DIM}0h{RESET}{cells}{DIM}24h{RESET}{tail}"
 
 
-def _growth(main: list[dict]) -> float:
-    """Context tokens per second over the latest stretch of the main thread since its last compaction."""
-    pts: list[tuple[float, int, float]] = []
-    for r in main:
-        c = (r.get("fresh_input") or 0) + (r.get("cache_read") or 0) + (r.get("cache_write") or 0)
-        if pts and (r.get("messages") or 0) < pts[-1][2] * 0.5:
-            pts = []
-        pts.append((r["ts"], c, r.get("messages") or 0))
-    pts = pts[-12:]
-    if len(pts) < 3 or pts[-1][0] <= pts[0][0]:
-        return 0.0
-    return max(pts[-1][1] - pts[0][1], 0) / ((pts[-1][0] - pts[0][0]) / 1000)
-
-
 def _fill_row(reqs: dict | None, ctx: tuple[float, float] | None, lv: int, tv, e, width: int) -> str | None:
     if not ctx:
         return None
@@ -1154,7 +1140,10 @@ def _fill_row(reqs: dict | None, ctx: tuple[float, float] | None, lv: int, tv, e
     bar = e.stack([(base, fx), (frac - base, cv)], n) if base is not None else e.bar(frac, n)
     used_part = bar.rstrip(e.g["empty"])
     kind_ = "bad" if frac >= 0.85 else "warn" if frac >= 0.65 else "ok"
-    g = _growth(main)
+    try:
+        g = tv.growth(main)
+    except (KeyError, TypeError):  # a row without the token columns: no estimate rather than a wrong one
+        g = 0.0
     eta = (window - used) / g if g > 0 else None
     text = f"{DIM}context{RESET} {e.paint(kind_, used_part)}{DIM}{bar[len(used_part):]}{RESET} {frac * 100:.0f}%"
     if eta and eta < 6 * 3600 and lv == 0:
