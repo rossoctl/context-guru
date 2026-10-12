@@ -134,6 +134,50 @@ python3 "<plugin dir>/scripts/statusline.py" --set-layout=detailed   # or minima
 
 `auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache agents ctx hint latency tools ka`), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`.
 
+## Modes
+
+Five more layouts each answer one question on the second line, next to the cache clock. Choose one with `--layout=<name>` in the installed command, or remember it with `statusline.py --set-layout=<name>` (`--set-layout=auto` goes back to the default).
+
+| Layout | The question | What it shows |
+|---|---|---|
+| `spark` | How much have I saved lately? | Today's saving and a 14-day sparkline; the rightmost cell is today |
+| `strip` | Are my cache hits holding? | The last 20 requests as `■` hit, `▨` partial, `✖` miss (oldest on the left), and the dollars misses cost today |
+| `heat` | When do I lose cache? | Today's cache misses by hour, 0h to 24h (darker means more misses; future hours blank), and the dollars they cost today |
+| `fill` | How full is my context, and with what? | A stacked bar: `▒` always loaded, `█` conversation, `░` free; the percent and, when it is filling, the time to full. At 100 columns or more, a legend with the two shares |
+| `watch` | Which sub-agent caches are about to lapse? | The main clock on line 1; line 2 a mini-bar and clock per running sub-agent, or "no sub-agents running" |
+
+### spark
+
+![spark](../statusline-live/mode-spark-dark.svg#only-dark)
+![spark](../statusline-live/mode-spark-light.svg#only-light)
+
+### strip
+
+![strip](../statusline-live/mode-strip-dark.svg#only-dark)
+![strip](../statusline-live/mode-strip-light.svg#only-light)
+
+### heat
+
+![heat](../statusline-live/mode-heat-dark.svg#only-dark)
+![heat](../statusline-live/mode-heat-light.svg#only-light)
+
+### fill
+
+![fill](../statusline-live/mode-fill-dark.svg#only-dark)
+![fill](../statusline-live/mode-fill-light.svg#only-light)
+
+With room for the legend (120 columns):
+
+![fill at 120 columns](../statusline-live/mode-fill-120-dark.svg#only-dark)
+![fill at 120 columns](../statusline-live/mode-fill-120-light.svg#only-light)
+
+### watch
+
+![watch](../statusline-live/mode-watch-dark.svg#only-dark)
+![watch](../statusline-live/mode-watch-light.svg#only-light)
+
+These layouts draw with the same renderer as the [terminal views](terminal-views.md). `NO_COLOR` removes the colour, and `CG_ASCII=1` swaps the glyphs for plain characters (`o` hit, `~` partial, `X` miss, `#`, `=` and `-` for bars). That ASCII switch exists for these layouts only; the default layouts have none. Their data is cached (series and spend for 2 minutes, requests for 4 seconds) and a render never waits for it.
+
 ## <span id="refresh"></span>Refresh and the one-second clock
 
 Claude Code redraws the status line on every message and, if you ask, on a timer. The installer writes `"refreshInterval": 1` next to the command, so the clock ticks every second (the minimum Claude Code accepts). A value you set yourself is kept when the status line is re-installed, so an install made earlier with a longer interval keeps it. To get the one-second clock on an existing install, set it by hand in the settings file that holds the status line:
@@ -146,7 +190,7 @@ and start a new session. Older Claude Code versions ignore the key and redraw on
 
 ## Colour and plain terminals
 
-Colours are the basic ANSI set plus dim, so they follow your terminal theme on light and dark backgrounds. `NO_COLOR=1` or `TERM=dumb` removes the colour; the clock, bar and symbols still carry the state. There is no separate ASCII mode: the bars and symbols are Unicode. `--layout=minimal` keeps to one short line.
+Colours are the basic ANSI set plus dim, so they follow your terminal theme on light and dark backgrounds. `NO_COLOR=1` or `TERM=dumb` removes the colour; the clock, bar and symbols still carry the state. The default layouts have no ASCII mode: their bars and symbols are Unicode (the [modes](#modes) can switch to ASCII with `CG_ASCII=1`). `--layout=minimal` keeps to one short line.
 
 ## Turn it on, off, or change it
 
