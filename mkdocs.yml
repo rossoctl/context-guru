@@ -101,6 +101,7 @@ nav:
       - Install the Claude Code plugin: how-to/install-plugin.md
       - The plugin's recovery files: how-to/plugin-recovery-files.md
       - Use with Claude Code: how-to/use-with-claude-code.md
+      - "Commands and status line": plugin-v2.md
       - Test a subscription login in a sandbox: how-to/test-subscription-sandbox.md
       - How it saves money: get-started/how-it-saves.md
       - Technical overview: get-started/overview.md

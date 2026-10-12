@@ -13,8 +13,8 @@ By project
   site       ▅▆▁▁▇▇▆▆▇▂▁█▇▆   $44.75   5%  +15%
 
 Ranked by dollars
-  1.  $107.79  214 pauses outlived the cache; each re-sent the whole conversation. Compact or /clear before a long break (`compact`), see `cold` for the pause lengths.  [observed]
-  2.   $37.70  MCP servers, skills and tools carried and never called (`unused` lists them with the command that removes each).  [observed carry; saving is an estimate]
+  1.  $107.79  214 pauses outlived the cache; each re-sent the whole conversation. Compact or /clear before a long break (see /context-guru:cache).  [observed]
+  2.   $37.70  MCP servers, skills and tools carried and never called (/context-guru:waste lists them with the command that removes each).  [observed carry; saving is an estimate]
   3.   $23.31  Mid-session prompt changes forced a rewrite (toggling MCP servers, editing CLAUDE.md, rewinds, subagents). Decide tools and MCP servers before the session starts.  [observed]
   4.    $9.60  Keep-alive pings cost more than the rewrites they are modelled to have avoided. Check /context-guru:cache-strategy-picker.  [observed cost vs modelled saving]
 

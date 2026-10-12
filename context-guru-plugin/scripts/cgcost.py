@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Five cost questions, answered from the proxy's own billed traffic.
+"""The cost engine behind /context-guru:* (cg.py is the front end); run directly it answers five cost questions,
+answered from the proxy's own billed traffic.
 
     today    what cost me most, and why                       (/api/spend/explain)
     unused   tools / MCP servers / skills I carry, never use  (/api/tools, /api/tools/last-used)
@@ -425,23 +426,28 @@ def recommendations(spend: dict, tools: dict | None, days: float) -> list[dict]:
     rw, L, recs = spend.get("rewrites", {}), spend.get("ledger", {}), []
     if "idle_expiry" in rw:
         recs.append({"usd": rw["idle_expiry"]["usd"], "cls": "observed",
+                     "short": f"You paused longer than the cache lasts, {rw['idle_expiry']['n']} times", "do": "run /compact before a long break",
                      "what": f"{rw['idle_expiry']['n']} pauses outlived the cache; each re-sent the whole conversation. "
-                             "Compact or /clear before a long break (`compact`), see `cold` for the pause lengths."})
+                             "Compact or /clear before a long break (see /context-guru:cache)."})
     other = sum(rw[k]["usd"] for k in ("prefix_change", "history_rewrite", "new_thread") if k in rw)
     if other:
         recs.append({"usd": other, "cls": "observed",
+                     "short": "Settings or tools changed mid-session", "do": "pick MCP servers and edit CLAUDE.md before you start",
                      "what": "Mid-session prompt changes forced a rewrite (toggling MCP servers, editing CLAUDE.md, rewinds, subagents). "
                              "Decide tools and MCP servers before the session starts."})
     carried = sum(i["usd"] for i in unused_items(tools, None)) if tools and tools.get("totals") else 0.0
     if carried:
         recs.append({"usd": carried, "cls": "observed carry; saving is an estimate",
-                     "what": "MCP servers, skills and tools carried and never called (`unused` lists them with the command that removes each)."})
+                     "short": "Add-ons you never use", "do": "remove them, /context-guru:waste lists them",
+                     "what": "MCP servers, skills and tools carried and never called (/context-guru:waste lists them with the command that removes each)."})
     ping = L.get("ping_usd", 0.0)
     if ping and ping > L.get("ping_saved_usd", 0.0):
         recs.append({"usd": ping - L.get("ping_saved_usd", 0.0), "cls": "observed cost vs modelled saving",
+                     "short": "Keep-alive pings cost more than they saved", "do": "check /context-guru:cache-strategy-picker",
                      "what": "Keep-alive pings cost more than the rewrites they are modelled to have avoided. Check /context-guru:cache-strategy-picker."})
     if L.get("cg_llm_usd", 0) > L.get("gross_saved_usd", 0):
         recs.append({"usd": L["cg_llm_usd"] - L["gross_saved_usd"], "cls": "observed",
+                     "short": "The summariser cost more than it saved", "do": "use a lighter preset (/context-guru:preset-picker)",
                      "what": "Context Guru's summariser spent more than it saved in this window; consider a lighter preset."})
     return sorted(recs, key=lambda r: -r["usd"])
 
@@ -556,15 +562,14 @@ def main(argv: list[str] | None = None) -> int:
         with open(a.fixture, encoding="utf-8") as f:
             fetch = fixture_fetch(json.load(f))
     else:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import insights  # the plugin's own fetcher and port resolution
+        import cg  # the same fetcher and port rule as the /context-guru:* commands
 
-        port = a.port or insights._resolve_port()[0]
-        if not port:
-            print("No Context Guru proxy is configured for this directory. Run /context-guru:install first.")
+        base = cg.proxy_base(a.port)
+        if not base:
+            print(cg.NO_PROXY)
             return 0
-        f = insights.Fetcher(port)
-        fetch = lambda path, params=None, heavy=False: f.get(path, params, heavy=True)  # noqa: E731
+        api = cg.Api(base)
+        fetch = lambda path, params=None, heavy=False: api.get(path, params, 60)  # noqa: E731
     text, doc = run(a.cmd, fetch, opts)
     print(json.dumps(doc, indent=1) if a.json else text)
     return 0
