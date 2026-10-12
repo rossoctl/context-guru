@@ -23,6 +23,14 @@ type DispatchRequest struct {
 }
 
 // Dispatcher is the host's half of a ping: transport and credential custody, never a decision.
+//
+// A host resolves the held credential for req.Key when Dispatch RUNS, not when the sweep that
+// scheduled this ping selected it — the two can be seconds apart, since the ping is sent on its
+// own goroutine outside the keeper's lock. If the entry was released in between (a real request
+// Arrived, the hard deadline fired, Shutdown ran), Dispatch finds nothing held for that key and
+// must return an error rather than send unauthenticated. The keeper counts that as a failed ping
+// and does not retry it on that entry: the entry is already gone by the time the error comes
+// back.
 type Dispatcher interface {
 	// Dispatch sends one ping. A non-nil error is transient (the keeper retries on the next due
 	// tick); a 4xx status stops the entry; 2xx usage feeds the write-vs-read guard.

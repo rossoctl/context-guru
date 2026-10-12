@@ -20,6 +20,8 @@ infrastructure the components sit on.
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
+| `keepalive/` | the idle keep-alive, host-agnostic; hosts implement `keepalive.Dispatcher` (cmd/context-guru-proxy's `httpDispatcher`; the Cortex plugin's `cortexDispatcher`) and must pass `keepalivetest.RunDispatcherContract` |
+| `credmask/` | the shared at-rest mask for held credentials and transcripts |
 | `modes/` | per-session cached-prefix boundary (`Tracker`) + the bounded off-path worker pool (`Pool`) |
 | `metrics/` | `Emitter` implementations: `Slog`, `Aggregator` (for `/stats`), `Tee` |
 | `dash/` | the persistent observability layer: SQLite store, off-hot-path capture, SSE hub, JSON API, embedded UI |
