@@ -40,6 +40,9 @@
 .ins-name { font-family: var(--mono); font-weight: 600; font-size: var(--t-body); }
 .ins-meta { font-family: var(--mono); font-size: var(--t-small); color: var(--fg-muted); font-variant-numeric: tabular-nums; }
 .ins-cost { margin-left: auto; font-family: var(--mono); font-weight: 600; font-size: var(--t-num); font-variant-numeric: tabular-nums; }
+/* The word, quieter than the figure it qualifies: a bare dollar amount on this row was read as
+   what the group COST, which is a different number this page never computes. */
+.ins-cost-k { font-weight: 400; font-size: var(--t-micro); letter-spacing: .07em; text-transform: uppercase; color: var(--fg-faint); }
 /* The consequence, on the same line as the box that triggers it: at rest the header is all the
  * reader sees, so "the plugin is the unit" cannot live inside the fold. */
 .ins-unit { font-family: var(--mono); font-size: var(--t-micro); letter-spacing: .06em; text-transform: uppercase; color: var(--fg-faint); }

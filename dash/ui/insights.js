@@ -148,9 +148,24 @@ function insItemTable(rows, opts) {
    * actually invoked also costs tokens, and those were the price of using it rather than money
    * thrown away. This view is only about the waste, so the columns are named for it — otherwise a
    * reader reasonably sums them as a total spend and gets a number this page never computed. */
-  head.push(el('th', { class: 'num', text: 'weight / req' }),
-    el('th', { class: 'num', text: 'tokens wasted' }),
-    el('th', { class: 'num', text: 'wasted' }));
+  /* THE THREE NUMBER COLUMNS ARE ONE FIGURE AT THREE SCALES, and the names have to make that
+   * obvious without a legend. An earlier revision called the first "weight / req", leaning on a
+   * carrying metaphor the page never explains — a reader asked what it meant, which is the column
+   * failing. It is simply the size of the declaration: what this item adds to the prompt of every
+   * request. The title attributes carry the full sentence, because a three-word header cannot. */
+  head.push(el('th', {
+    class: 'num', title: 'Tokens this item adds to the system prompt of EVERY request — its ' +
+      'name, description and schema. Sent whether or not you use it.',
+    text: 'tokens / request',
+  }), el('th', {
+    class: 'num', title: 'The per-request size above, multiplied by the requests that re-read ' +
+      'it in sessions where it was never invoked. The tokens you were actually billed for.',
+    text: 'billed for nothing',
+  }), el('th', {
+    class: 'num', title: 'Those billed tokens priced at the tier each request really paid — ' +
+      'cache read on a hit, the premium write rate on the turn that built the prefix.',
+    text: 'wasted',
+  }));
 
   const body = rows.map((it) => {
     const cells = [];
@@ -302,7 +317,12 @@ function insOwnerBlock(o, children, opts) {
   head.appendChild(el('span', { class: 'ins-name', text: o.name }));
   head.appendChild(el('span', { class: 'pill ' + (opts.pillClass || ''), text: opts.pill }));
   head.appendChild(el('span', { class: 'ins-meta', text: opts.meta }));
-  head.appendChild(el('span', { class: 'ins-cost', text: opts.cost }));
+  /* LABELLED, not a bare figure. The owner header showed `$0.4964` with nothing saying what it
+   * was, so it read as what the plugin cost — which is a different number, and one this page
+   * never computes. It is the sum of what its unused children wasted. */
+  head.appendChild(el('span', { class: 'ins-cost', title: 'Total wasted by this group over the ' +
+    'measured window: the sum of its never-invoked children. What you actually used is not in it.' },
+    el('span', { class: 'ins-cost-k', text: 'wasted ' }), opts.cost));
   if (opts.unitNote) head.appendChild(el('span', { class: 'ins-unit', text: opts.unitNote }));
   if (o.command) head.appendChild(el('code', { class: 'ins-cmd', text: o.command }));
 
@@ -472,10 +492,13 @@ function insRender() {
       'they were the price of using the capability, not money thrown away. So nothing below is a ' +
       'total spend, and removing all of it would not change what your working sessions cost. It ' +
       'changes what you pay to carry capabilities you never reach for.' }),
-    el('p', { class: 'hint', text: 'Read a row as: this item added N tokens to every request, ' +
-      'those re-reads billed M tokens over the window, and that came to $X — all of it for ' +
-      'nothing. Hover an item\u2019s name for what it does; a row with no figures was invoked, ' +
-      'so it has no waste to report.' }));
+    el('p', { text: 'The three number columns are one figure at three scales. ' +
+      'TOKENS / REQUEST is the size of the declaration — what the item adds to the prompt every ' +
+      'single time, whether you use it or not. BILLED FOR NOTHING is that size multiplied by the ' +
+      'requests that re-read it without ever invoking it. WASTED prices those tokens at what ' +
+      'each request really paid.' }),
+    el('p', { class: 'hint', text: 'Hover any column header or item name for the long version. ' +
+      'A row showing no figures was invoked, so it has no waste to report.' }));
   root.appendChild(intro);
 
   /* The window strip. Unlike the static report's chips, these RE-QUERY — a served page can, and
