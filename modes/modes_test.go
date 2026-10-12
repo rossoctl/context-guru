@@ -141,6 +141,31 @@ func TestTrackerStaysBounded(t *testing.T) {
 	}
 }
 
+// At its bound the tracker evicts the least recently used key, so the threads of a busy session
+// keep their record while new subagents arrive (#484). Each round adds one new key and then
+// touches the 10 hot ones; every hot key must still be there. The old random eviction picked a hot
+// key with probability 10/11 per round, so over 100 rounds it fails every time.
+func TestTrackerEvictsLeastRecentlyUsed(t *testing.T) {
+	const hot = 10
+	tr := NewTracker(hot + 1)
+	now := int64(1_700_000_000_000)
+	for i := 0; i < hot; i++ {
+		tr.TurnAt("hot"+strconv.Itoa(i), 5, now)
+	}
+	for round := 0; round < 100; round++ {
+		now++
+		tr.TurnAt("new"+strconv.Itoa(round), 5, now)
+		for i := 0; i < hot; i++ {
+			if prevLen, prevAt := tr.TurnAt("hot"+strconv.Itoa(i), 5, now); prevAt == 0 || prevLen != 5 {
+				t.Fatalf("round %d: hot key %d was evicted while still in use", round, i)
+			}
+		}
+	}
+	if n := tr.Sessions(); n != hot+1 {
+		t.Fatalf("tracker holds %d keys, want its bound %d", n, hot+1)
+	}
+}
+
 // --- Pool -------------------------------------------------------------------
 
 func TestPoolRunsJobs(t *testing.T) {

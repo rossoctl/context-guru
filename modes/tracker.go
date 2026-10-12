@@ -71,7 +71,8 @@ func Boundary(prev, n int) int {
 type Tracker struct {
 	mu  sync.Mutex
 	m   map[string]turn
-	max int // bound on tracked sessions; 0 => default
+	max int    // bound on tracked keys; 0 => default
+	seq uint64 // use counter: each TurnAt stamps its key, and the smallest stamp is evicted
 }
 
 // turn is what one session's previous request left behind: how long the transcript was,
@@ -83,13 +84,16 @@ type Tracker struct {
 // long has this session been idle — and therefore, given the provider's cache TTL, is the
 // prefix we are about to protect still cached at all?
 type turn struct {
-	n  int
-	at int64 // unix milliseconds; 0 = no previous turn recorded
+	n    int
+	at   int64  // unix milliseconds; 0 = no previous turn recorded
+	used uint64 // Tracker.seq at the last TurnAt on this key
 }
 
-// defaultMaxSessions bounds the tracker so an unbounded stream of distinct sessions
-// cannot grow it without limit. Matches the store's sticky-set bound.
-const defaultMaxSessions = 1000
+// defaultMaxSessions bounds the tracker so an unbounded stream of distinct keys cannot grow it
+// without limit. The key is a THREAD (thread.Key), not a session (#484), so one busy session
+// holds one entry per subagent. 4,096 entries of about 40 bytes plus the key is well under 1 MB.
+// Eviction is least-recently-used, so the threads still sending requests keep their record.
+const defaultMaxSessions = 4096
 
 // NewTracker returns an empty tracker. maxSessions <= 0 uses the default bound.
 func NewTracker(maxSessions int) *Tracker {
@@ -123,13 +127,7 @@ func (t *Tracker) TurnAt(session string, n int, nowMs int64) (prevLen int, prevA
 	defer t.mu.Unlock()
 	prev, ok := t.m[session]
 	if !ok && len(t.m) >= t.max {
-		// ponytail: arbitrary eviction, same policy as the store's sticky sets. A dropped
-		// session restarts at 0, which means "treat everything as tail" — correct, just
-		// less saving. Add an LRU only if session churn is shown to cost real savings.
-		for k := range t.m {
-			delete(t.m, k)
-			break
-		}
+		t.evictLRULocked()
 	}
 	// Always record THIS turn's length: on growth it is the max anyway, and on a shrink
 	// it is the new prefix every later turn must be measured against.
@@ -137,8 +135,28 @@ func (t *Tracker) TurnAt(session string, n int, nowMs int64) (prevLen int, prevA
 	if nowMs > 0 {
 		at = nowMs
 	}
-	t.m[session] = turn{n: n, at: at}
+	t.seq++
+	t.m[session] = turn{n: n, at: at, used: t.seq}
 	return Boundary(prev.n, n), prev.at
+}
+
+// evictLRULocked drops the least recently used key. A dropped key restarts at 0 ("treat
+// everything as tail", idle time unknown): correct, just less saving. The eviction used to be
+// arbitrary (a random map key), which was harmless while one session was one entry; with one
+// entry per thread, a burst of new subagents could evict the main thread of a session that was
+// still busy. The scan is O(n), and it runs only when a NEW key arrives at a full tracker.
+func (t *Tracker) evictLRULocked() {
+	var oldest string
+	var least uint64
+	first := true
+	for k, v := range t.m {
+		if first || v.used < least {
+			oldest, least, first = k, v.used, false
+		}
+	}
+	if !first {
+		delete(t.m, oldest)
+	}
 }
 
 // Sessions reports how many sessions are tracked (test/telemetry aid).

@@ -574,7 +574,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
 			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
 			if lifetimeKind == CacheLifetimeExact {
-				ttl = sessionTTL(st, sessionID, ttl)
+				// Per thread too: another thread's 1h tier says nothing about this thread's cache.
+				ttl = sessionTTL(st, turnKey, ttl)
 				if a := sessionTTL(st, alias, ttl); a > ttl {
 					ttl = a
 				}

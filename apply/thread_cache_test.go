@@ -25,12 +25,16 @@ const subThread = "agent:sub"
 
 // threadBody is one thread's transcript under the shared session id (bobSession). head names the
 // thread, so each thread has its own system prompt and first user message; tools is how many tool
-// outputs it carries, each one distinct so dedup never matches across them.
-func threadBody(t *testing.T, head string, tools int) []byte {
+// outputs it carries, each one distinct so dedup never matches across them. hourTier marks the
+// thread's first user message with the 1-hour cache tier.
+func threadBody(t *testing.T, head string, tools int, hourTier bool) []byte {
 	t.Helper()
 	msgs := []map[string]any{
 		{"role": "system", "content": "You are " + head + "."},
 		{"role": "user", "content": "the task for " + head},
+	}
+	if hourTier { // the thread asks for the provider's 1-hour cache tier
+		msgs[1]["cache_control"] = map[string]any{"type": "ephemeral", "ttl": "1h"}
 	}
 	for i := 0; i < tools; i++ {
 		msgs = append(msgs, map[string]any{
@@ -60,6 +64,8 @@ type threadRun struct {
 	p    *components.Pipeline
 	cur  string
 	sent map[string][]string
+	// hourTier lists the threads whose requests ask for the 1-hour cache tier.
+	hourTier map[string]bool
 }
 
 func newThreadRun(t *testing.T, threads bool) *threadRun {
@@ -85,7 +91,7 @@ func (r *threadRun) turn(th string, tools int, at time.Time) apply.Result {
 	}
 	r.cur = th
 	o := r.o
-	o.Body, o.Now = threadBody(r.t, head, tools), at
+	o.Body, o.Now = threadBody(r.t, head, tools, r.hourTier[th]), at
 	return apply.BodyOpts(context.Background(), r.p, r.st, o)
 }
 
@@ -226,5 +232,32 @@ func TestResponsesThreadsKeepTheirOwnCachedPart(t *testing.T) {
 	}
 	if got := modes.CompactionResets() - before; got != 0 {
 		t.Errorf("%d compaction resets counted; no thread shrank", got)
+	}
+}
+
+// The TTL record is the thread's own. The main thread asks for the 1-hour tier and the subagent
+// does not, so a subagent idle for 10 minutes is cold, whatever the main thread asked for. Keyed
+// by session, the main thread's 1h record made the subagent read warm: frozen_tokens > 0.
+func TestThreadTTLRecordIsPerThread(t *testing.T) {
+	r := newThreadRun(t, true)
+	r.hourTier = map[string]bool{thread.Primary: true}
+	base := time.Unix(1_700_000_000, 0)
+	r.turn(subThread, 20, base)
+	for m := 1; m <= 10; m++ {
+		r.turn(thread.Primary, m, base.Add(time.Duration(m)*time.Minute))
+	}
+	if res := r.turn(subThread, 21, base.Add(10*time.Minute+5*time.Second)); res.FrozenTokens != 0 {
+		t.Fatalf("subagent idle 10m on the 5m tier: frozen_tokens = %d, want 0 (another thread's 1h tier made it warm)",
+			res.FrozenTokens)
+	}
+
+	// Monotone toward warm within one thread: the main thread asked for 1h once, so 10 minutes
+	// later it is still warm even when this request carries no ttl.
+	r = newThreadRun(t, true)
+	r.hourTier = map[string]bool{thread.Primary: true}
+	r.turn(thread.Primary, 20, base)
+	r.hourTier = nil
+	if res := r.turn(thread.Primary, 21, base.Add(10*time.Minute)); res.FrozenTokens == 0 {
+		t.Fatal("a thread that asked for the 1h tier read cold after 10 minutes")
 	}
 }
