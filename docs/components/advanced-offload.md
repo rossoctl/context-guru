@@ -9,6 +9,38 @@ requirements) that the deterministic components in
 
 ---
 
+## extract_llm_ride
+
+One batched call per firing turn that asks the **session's own model**, over the **session's own cached
+prefix**, what to do with each candidate tool output: `keep`, `extract` (a shorter version made of lines
+copied verbatim from the output) or `park` (set aside behind a handle). The question is appended to the
+body the session last sent upstream, so the transcript is a cache read and the call pays only for the
+instruction, the inventory and the answer. It is a sibling of `extract_llm_sweep` that differs in what
+triggers it and in the answer shape.
+
+- Every removal is stashed behind a marker the expand tool restores. Decisions are frozen in the session
+  store and replayed byte-identically on later turns, so the session's own cache is rewritten at most once
+  per decision.
+- An extract is accepted only when it is at most `extract_max_ratio` of the original's tokens and at least
+  `min_verbatim` of its lines occur verbatim in the original.
+- Triggers, any one of which fires (then `min_turns_between` limits the rate): `trigger_size_tokens`
+  (pending candidate tokens), `trigger_pending` (pending candidate count), `trigger_fill_min` /
+  `trigger_fill_max` (share of the model window), `trigger_pre_expiry` (the pre-expiry window). With no
+  size/pending/fill key set, 4,000 tokens or 3 candidates apply.
+- `econ: true` (default) applies only the removals whose saving, credited for at most `horizon_turns`,
+  repays the cache rewrite they force; it is skipped in the pre-expiry window.
+- `instruction_role: auto` sends the instruction as a mid-conversation system message on models whose
+  route accepted it in testing, and as a final user turn otherwise. `user` and `system` force a channel; a
+  system message is only sent when the stored body ends on a user message.
+- A call whose cache read is below 80% of its prompt is recorded, paid for, and discarded; the session
+  backs off 15 turns. There is no content-copying fallback.
+- Each call is one `extraction_calls` row: cache read and write, fresh (instruction and inventory) and
+  output tokens, cost, latency, acceptance and rejection; `strategy` is `ride_user` or `ride_system` and
+  `gate_reason` carries the trigger, item count and instruction tokens.
+
+Preset: `house_ride` (`house` without `toon`, plus `extract_llm_ride`). Gates are prefixed `ride_`.
+Runs only where a prefix asker exists (Anthropic Messages and OpenAI Responses requests).
+
 ## extract_llm_sweep
 
 **Kind:** Offload. **Reversible:** yes (`marker_mode: full`, the default). **In presets:** `housellm`.

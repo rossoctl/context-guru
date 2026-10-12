@@ -1,0 +1,259 @@
+package offload
+
+import (
+	"context"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/extract"
+	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
+)
+
+// rideAsker answers the triage ask by label from a script and records the role it was sent under.
+type rideAsker struct {
+	fakeAsker
+	script map[int]string // label -> JSON object tail, e.g. `"action":"park"`
+	role   atomic.Value
+}
+
+func (r *rideAsker) AskAs(ctx context.Context, session, ask, role string) (string, components.PrefixUsage, error) {
+	r.role.Store(role)
+	parts := []string{}
+	for _, l := range askLabelRe.FindAllStringSubmatch(ask, -1) {
+		n, _ := strconv.Atoi(l[1])
+		a, ok := r.script[n]
+		if !ok {
+			a = `"action":"keep"`
+		}
+		parts = append(parts, `{"label":`+l[1]+`,`+a+`}`)
+	}
+	r.fakeAsker.reply = "[" + strings.Join(parts, ",") + "]"
+	return r.fakeAsker.Ask(ctx, session, ask)
+}
+
+func (r *rideAsker) sentRole() string { s, _ := r.role.Load().(string); return s }
+
+func newRide(t *testing.T, yaml string) *ExtractRide {
+	t.Helper()
+	c, err := newExtractRide([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c.(*ExtractRide)
+}
+
+// rideReq: a user turn, then n big tool outputs each followed by an assistant turn.
+func rideReq(n int) *bschemas.BifrostChatRequest {
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("investigate the audit logs")}}
+	for i := 0; i < n; i++ {
+		req.Input = append(req.Input,
+			toolResultMsgWithID("toolu_ride_"+strconv.Itoa(i),
+				"header "+strconv.Itoa(i)+"\n"+strings.Repeat("noise record "+strconv.Itoa(i)+" of the audit log\n", 400)+
+					"ERROR payments timeout at gateway.go:"+strconv.Itoa(100+i)+"\n"),
+			assistantMsg("noted "+strconv.Itoa(i)))
+	}
+	return req
+}
+
+func rideCtx(session string, asker components.PrefixAsker, st store.Store) *components.Ctx {
+	c := preExpiryCtx(session, asker, st)
+	c.IdleMs = 10 * 1000 // warm: only the size / pending triggers can fire
+	return c
+}
+
+func TestRideAppliesExtractAndParkAndKeeps(t *testing.T) {
+	asker := &rideAsker{script: map[int]string{
+		0: `"action":"park"`,
+		1: `"action":"extract","extract":"SUMMARY: noise dropped\nERROR payments timeout at gateway.go:101"`,
+		3: `"action":"extract","extract":"an invented line that is not in the output at all"`,
+	}}
+	asker.cacheRead = 30000
+	e := newRide(t, "econ: false\ninstruction_role: user\n")
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	req := rideReq(4)
+	orig := make([]string, len(req.Input))
+	for i := range req.Input {
+		orig[i] = schema.MessageText(req.Input[i])
+	}
+	rep := &components.Report{Component: "extract_llm_ride"}
+	if _, err := e.Offload(req, rep, rideCtx("ride-a", asker, st)); err != nil {
+		t.Fatal(err)
+	}
+	if n := atomic.LoadInt64(&asker.calls); n != 1 {
+		t.Fatalf("one batched ask expected, got %d (gates %v)", n, rep.Gates)
+	}
+	got := func(i int) string { return schema.MessageText(req.Input[i]) }
+	if !strings.Contains(got(1), "context-guru removed") || !strings.Contains(got(1), "<<cg:") {
+		t.Errorf("park must leave a descriptor and a marker, got %q", got(1))
+	}
+	if !strings.Contains(got(3), "gateway.go:101") || !strings.Contains(got(3), "<<cg:") {
+		t.Errorf("extract must leave the extract and a marker, got %q", got(3))
+	}
+	if got(5) != orig[5] {
+		t.Error("a keep verdict must leave the output verbatim")
+	}
+	if got(7) != orig[7] || rep.Gates["ride_extract_ungrounded"] != 1 {
+		t.Errorf("an ungrounded extract must be refused (gates %v)", rep.Gates)
+	}
+	if len(rep.Calls) != 1 {
+		t.Fatalf("one call record expected, got %d", len(rep.Calls))
+	}
+	rc := rep.Calls[0]
+	if rc.CacheRead != 30000 || rc.CacheWrite != 0 || rc.PromptTokens != 40 || rc.CompletionTokens != 90 ||
+		rc.Strategy != "ride_user" || !rc.Accepted || rc.SavedTokens <= 0 ||
+		!strings.Contains(rc.GateReason, "trigger=size+pending") || !strings.Contains(rc.GateReason, "instr_tokens=") {
+		t.Errorf("call record incomplete: %+v", rc)
+	}
+	if asker.sentRole() != "user" {
+		t.Errorf("an explicit user role must send a user turn, got %q", asker.sentRole())
+	}
+}
+
+func TestRideDecisionsAreFrozenAndReplayedByteIdentically(t *testing.T) {
+	asker := &rideAsker{script: map[int]string{0: `"action":"park"`, 1: `"action":"extract","extract":"ERROR payments timeout at gateway.go:101"`}}
+	asker.cacheRead = 30000
+	e := newRide(t, "econ: false\n")
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	first := rideReq(4)
+	if _, err := e.Offload(first, &components.Report{Component: "extract_llm_ride"}, rideCtx("ride-b", asker, st)); err != nil {
+		t.Fatal(err)
+	}
+	// A later turn: the client resends the ORIGINAL history plus more. No new ask, same bytes.
+	second := rideReq(4)
+	second.Input = append(second.Input, toolResultMsgWithID("toolu_new", "small"), assistantMsg("ok"))
+	rep := &components.Report{Component: "extract_llm_ride"}
+	if _, err := e.Offload(second, rep, rideCtx("ride-b", asker, st)); err != nil {
+		t.Fatal(err)
+	}
+	if n := atomic.LoadInt64(&asker.calls); n != 1 {
+		t.Fatalf("the later turn must replay, not re-ask; asks = %d", n)
+	}
+	for i := range first.Input {
+		if schema.MessageText(first.Input[i]) != schema.MessageText(second.Input[i]) {
+			t.Fatalf("message %d differs between turns; the prefix would break the main cache", i)
+		}
+	}
+	if rep.Replays != 2 {
+		t.Errorf("expected 2 replays, got %v", rep.Replays)
+	}
+}
+
+func TestRideSystemRoleIsHonouredWhenAskedFor(t *testing.T) {
+	asker := &rideAsker{}
+	asker.cacheRead = 30000
+	e := newRide(t, "econ: false\ninstruction_role: system\n")
+	rep := &components.Report{Component: "extract_llm_ride"}
+	if _, err := e.Offload(rideReq(4), rep, rideCtx("ride-c", asker, store.NewMemory(store.Options{MaxEntries: 400}))); err != nil {
+		t.Fatal(err)
+	}
+	if asker.sentRole() != "system" || rep.Calls[0].Strategy != "ride_system" {
+		t.Errorf("role = %q, strategy = %q", asker.sentRole(), rep.Calls[0].Strategy)
+	}
+}
+
+func TestRideDiscardsACallThatDidNotRideTheCache(t *testing.T) {
+	asker := &rideAsker{script: map[int]string{0: `"action":"park"`}}
+	asker.cacheRead, asker.cacheWrite = 0, 30000
+	e := newRide(t, "econ: false\n")
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	req := rideReq(4)
+	rep := &components.Report{Component: "extract_llm_ride"}
+	if _, err := e.Offload(req, rep, rideCtx("ride-d", asker, st)); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Gates["ride_not_cache_read"] != 1 || rep.Calls[0].Accepted || rep.Calls[0].CacheWrite != 30000 {
+		t.Errorf("a non-riding call must be recorded, paid for and discarded: gates %v call %+v", rep.Gates, rep.Calls)
+	}
+	if strings.Contains(schema.MessageText(req.Input[1]), "<<cg:") {
+		t.Error("an answer from a call that did not ride the cache must not be applied")
+	}
+	// Backed off: the next turns do not ask again.
+	for i := 0; i < 5; i++ {
+		e.Offload(rideReq(4), &components.Report{Component: "extract_llm_ride"}, rideCtx("ride-d", asker, st))
+	}
+	if n := atomic.LoadInt64(&asker.calls); n != 1 {
+		t.Errorf("expected the failed ride to back the session off, asks = %d", n)
+	}
+}
+
+func TestRideFiresOnlyOnATriggerAndHonoursTheCooldown(t *testing.T) {
+	asker := &rideAsker{}
+	asker.cacheRead = 30000
+	e := newRide(t, "econ: false\ntrigger_size_tokens: 1000000\ntrigger_pending: 99\ntrigger_pre_expiry: false\n")
+	rep := &components.Report{Component: "extract_llm_ride"}
+	if _, err := e.Offload(rideReq(4), rep, rideCtx("ride-e", asker, store.NewMemory(store.Options{MaxEntries: 400}))); err != nil {
+		t.Fatal(err)
+	}
+	if asker.calls != 0 || rep.Gates["ride_no_trigger"] != 1 {
+		t.Errorf("no trigger configured to fire: asks %d gates %v", asker.calls, rep.Gates)
+	}
+	// fill band: a 1M window and ~16k tokens is 1.6% full
+	e = newRide(t, "econ: false\ntrigger_size_tokens: 1000000\ntrigger_pending: 99\ntrigger_fill_min: 0.01\ntrigger_fill_max: 0.5\ntrigger_pre_expiry: false\n")
+	rep = &components.Report{Component: "extract_llm_ride"}
+	if _, err := e.Offload(rideReq(4), rep, rideCtx("ride-e2", asker, store.NewMemory(store.Options{MaxEntries: 400}))); err != nil {
+		t.Fatal(err)
+	}
+	if asker.calls != 1 || !strings.Contains(rep.Calls[0].GateReason, "trigger=fill") {
+		t.Errorf("fill band should fire: asks %d gates %v", asker.calls, rep.Gates)
+	}
+}
+
+func TestRideOffersOnlyWhatThePrefixHolds(t *testing.T) {
+	asker := &rideAsker{}
+	asker.cacheRead = 30000
+	e := newRide(t, "econ: false\nmin_inventory: 1\n")
+	c := rideCtx("ride-f", asker, store.NewMemory(store.Options{MaxEntries: 400}))
+	c.MaxCachedIdx = 4 // outputs at 5 and 7 are newer than the stored body
+	req := rideReq(4)
+	rep := &components.Report{Component: "extract_llm_ride"}
+	e.Offload(req, rep, c)
+	if rep.Gates["ride_candidate_not_in_prefix"] != 2 {
+		t.Errorf("outputs past the cached boundary are invisible to the ask: %v", rep.Gates)
+	}
+	if strings.Count(asker.ask(), "tool_use id") != 2 {
+		t.Errorf("only the two visible outputs belong in the inventory:\n%s", asker.ask())
+	}
+}
+
+func TestRideEconPrunesARemovalThatDoesNotRepayItsRewrite(t *testing.T) {
+	asker := &rideAsker{script: map[int]string{0: `"action":"park"`}}
+	asker.cacheRead = 30000
+	e := newRide(t, "econ: true\nhorizon_turns: 1\nmin_inventory: 1\n")
+	req := rideReq(4)
+	rep := &components.Report{Component: "extract_llm_ride"}
+	c := rideCtx("ride-g", asker, store.NewMemory(store.Options{MaxEntries: 400}))
+	c.MaxCachedIdx = len(req.Input) - 1
+	e.Offload(req, rep, c)
+	if rep.Gates["ride_unaffordable_pruned"] == 0 || strings.Contains(schema.MessageText(req.Input[1]), "<<cg:") {
+		t.Errorf("a 1-turn horizon cannot repay rewriting the early prefix: %v", rep.Gates)
+	}
+}
+
+func TestRideConfigRejectsBadRole(t *testing.T) {
+	if _, err := newExtractRide([]byte("instruction_role: developer\n")); err == nil {
+		t.Fatal("unknown role must be refused")
+	}
+	var _ = extract.RideKeep
+}
+
+func newRideForGate(t *testing.T) *ExtractRide { return newRide(t, "econ: false\n") }
+
+func TestRideAutoRoleIsSystemOnlyForMeasuredModels(t *testing.T) {
+	e := newRide(t, "")
+	for model, want := range map[string]string{
+		"aws/claude-opus-5": "system", "claude-sonnet-5-5": "system", "claude-haiku-4-5": "user", "gpt-5.5": "user", "": "user",
+	} {
+		if got := e.resolveRole(model); got != want {
+			t.Errorf("auto role for %q = %q, want %q", model, got, want)
+		}
+	}
+	if newRide(t, "instruction_role: user\n").resolveRole("claude-opus-5") != "user" {
+		t.Error("an explicit user role must win over the allow-list")
+	}
+}

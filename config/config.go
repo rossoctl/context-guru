@@ -504,6 +504,8 @@ var presets = map[string][]string{
 	// deterministic lever", which is what the gross number reads as.
 	"house":    {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"housellm": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	// house_ride: house plus extract_llm_ride, the batched triage that rides the session's cache.
+	"house_ride": {"format", "dedup", "cmdfilter", "searchfold", "textclean", "extract_llm_ride", "extract", "cachesplit", "toolfilter"},
 
 	// conservative/medium/high/xhigh: the effort ladder the Claude Code plugin's preset picker
 	// offers (context-guru-plugin/skills/preset-picker), replacing the old off/cache/house/
@@ -702,6 +704,14 @@ components:
 	//
 	// The WIDTH of that window is the one unmeasured number in this preset, and widening it is a
 	// yield/cost trade nothing has measured. See extract_llm_sweep's own comment.
+	// house_ride: house plus extract_llm_ride. One call per firing turn, appended to the session's own
+	// cached prefix on the session's own model; removals are reversible and frozen. Triggers are the
+	// component defaults (4,000 pending tokens or 3 pending outputs, or the pre-expiry window).
+	"house_ride": `pipeline: [format, dedup, cmdfilter, searchfold, textclean, extract_llm_ride, extract, cachesplit, toolfilter]
+components:
+  extract:
+    min_tokens: 400
+  extract_llm_ride: {}`,
 	"housellm": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
 components:
   extract:

@@ -252,6 +252,16 @@ func (p prefixAsker) Ask(ctx context.Context, session, ask string) (string, comp
 // CoversSpan implements components.PrefixCoverage by delegating to the stash this asker reads
 // through Ask — see responsesPrefixAsker.CoversSpan's own comment for why this cannot live only
 // on *sentStash.
+// AskAs implements components.RolePrefixAsker.
+func (p prefixAsker) AskAs(ctx context.Context, session, ask, role string) (string, components.PrefixUsage, error) {
+	body := p.stash.get(session)
+	if len(body) == 0 {
+		return "", components.PrefixUsage{}, components.ErrNoPrefix
+	}
+	reply, u, err := p.cli.CompletePrefixedAs(ctx, body, ask, role)
+	return reply, components.PrefixUsage(u), err
+}
+
 func (p prefixAsker) CoversSpan(session string, count int, hash string) bool {
 	return p.stash.CoversSpan(session, count, hash)
 }

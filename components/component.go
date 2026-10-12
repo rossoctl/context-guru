@@ -172,6 +172,13 @@ type PrefixAsker interface {
 	Ask(ctx context.Context, session, ask string) (reply string, usage PrefixUsage, err error)
 }
 
+// RolePrefixAsker is an optional capability of a PrefixAsker: AskAs sends the ask under the given
+// role ("user" or "system", a mid-conversation system message). A role the stored body cannot
+// carry is sent as a user turn. Callers fall back to Ask when the asker does not implement it.
+type RolePrefixAsker interface {
+	AskAs(ctx context.Context, session, ask, role string) (reply string, usage PrefixUsage, err error)
+}
+
 // SpanHash is a stable content hash of a normalized message span, shared by every caller that
 // needs to tell whether two slices of a transcript are byte-for-byte the same conversation.
 // Exported so a PrefixCoverage implementation living outside this package (the host's own
