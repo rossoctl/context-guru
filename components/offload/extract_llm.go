@@ -939,7 +939,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// caching is off, any message is fair game. File reads included (largest mass);
 		// safe because we never touch already-cached content and freeze+reapply the result.
 		sz := schema.TextTokens(content)
-		// No lost-decision repair here, unlike mask/failed_run: this replacement is a SAMPLED
+		// No lost-decision repair here, unlike the frozen-replay offloaders: this replacement is a SAMPLED
 		// model output (cheapmodel sends no temperature/seed), so re-deriving at depth could
 		// emit different bytes inside the cached prefix — the very thing the repair exists to
 		// prevent. And the trade doesn't pay even setting that aside: if the bytes differ the

@@ -36,7 +36,7 @@ type Component interface {
 }
 
 // Reformat is a lossless component: it repacks the request denser in place and
-// loses no information. Examples: format re-encode, code skeleton, cache_control
+// loses no information. Examples: format re-encode, cache_control
 // injection.
 type Reformat interface {
 	Component
