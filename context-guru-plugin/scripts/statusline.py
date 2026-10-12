@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code statusLine command. Layouts (--layout=minimal|balanced|detailed) pick elements:
-money saved (an `≈` estimate against the same request uncompacted, net of context-guru's own
-spend) next to money spent (observed), the prompt-cache state (warm / expiring / cold, the proxy's
+money saved (against the same request uncompacted, net of context-guru's own
+spend) next to money spent (measured), the prompt-cache state (warm / expiring / cold, the proxy's
 server-side truth overriding Claude Code's own guess), context fill against the window actually
 served, and at most one actionable hint. See skills/statusline/SKILL.md for flags and mockups.
 
@@ -966,24 +966,24 @@ def _ctx_segment(used: float, window: float, level: int | None = 0) -> str | Non
 def _save_segment(stats: dict | None, day: dict | None, life: dict | None, level: int | None = 0,
                   fresh: bool = False) -> str | None:
     """Saved is a COUNTERFACTUAL (vs the same request uncompacted, at gateway prices, net of CG's
-    own model spend and keep-alive pings), so it carries `≈`. Session, today and lifetime are
+    own model spend and keep-alive pings), so it is shown plainly, as money already saved; only avoidable-spend figures in the hint carry `≈`. Session, today and lifetime are
     three windows of that one measure. Spend is not shown here: it is Claude Code's own `cost`."""
     sess, today, ever = _num(stats, "total_saved_usd"), _num(day, "total_saved_usd"), _num(life, "total_saved_usd")
-    # A window with nothing saved says nothing: "today ≈$0.00" on a fresh day is noise, not news.
+    # A window with nothing saved says nothing: "today $0.00" on a fresh day is noise, not news.
     today, ever = (today if today and today >= 0.005 else None), (ever if ever and ever >= 0.005 else None)
     if level is None or (fresh and today is None and ever is None) or (sess is None and today is None):
         return None
     if level == 2:
-        return _money(sess if sess is not None else today, True)
+        return _money(sess if sess is not None else today)
     if level == 1:
-        return f"saved {_money(sess if sess is not None else today, True)}"
+        return f"saved {_money(sess if sess is not None else today)}"
     parts = []
     if sess is not None and not fresh:
-        parts.append(f"saved {_money(sess, True)} {DIM}session{RESET}")
+        parts.append(f"saved {_money(sess)} {DIM}session{RESET}")
     if today is not None:
-        parts.append(f"{_money(today, True)} {DIM}today{RESET}" if parts else f"saved {_money(today, True)} {DIM}today{RESET}")
+        parts.append(f"{_money(today)} {DIM}today{RESET}" if parts else f"saved {_money(today)} {DIM}today{RESET}")
     if ever is not None:
-        parts.append(f"{DIM}★{RESET} {_money(ever, True)} {DIM}lifetime{RESET}")
+        parts.append(f"{DIM}★{RESET} {_money(ever)} {DIM}lifetime{RESET}")
     return f" {DIM}·{RESET} ".join(parts) or None
 
 
@@ -1125,7 +1125,7 @@ def main() -> None:
     level: dict[str, int | None] = {e: 0 for e in order}
     hint = _hint(payload, view, ctx) if "hint" in on else None
     if layout == "minimal":
-        level["save"] = 1  # minimal: `saved ≈$0.31`, no today/lifetime
+        level["save"] = 1  # minimal: `saved $0.31`, no today/lifetime
     hint_level = 0
     two_rows = layout != "minimal"
 

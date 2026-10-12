@@ -53,13 +53,13 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 		`{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":200000}}`
 	small := strings.Replace(payload, "412000", "52000", 1)
 	full := strings.Replace(payload, "412000", "900000", 1)
-	sess := "saved ≈$0.31 session · ≈$4.20 today · ★ ≈$212.40 lifetime"
+	sess := "saved $0.31 session · $4.20 today · ★ $212.40 lifetime"
 	for _, c := range []struct {
 		name, cache, stdin, layout string
 		width                      int
 		want                       string
 	}{
-		{"warm/minimal", cs(60, 300, 52000, "0.30"), small, "minimal", 200, "saved ≈$0.31 │ cache ● █████░ 4:00"},
+		{"warm/minimal", cs(60, 300, 52000, "0.30"), small, "minimal", 200, "saved $0.31 │ cache ● █████░ 4:00"},
 		{"warm/balanced", cs(60, 300, 52000, "0.30"), small, "balanced", 200,
 			sess + "\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 		{"warm/ping", ping(cs(60, 300, 52000, "0.30")), small, "balanced", 200,
@@ -77,13 +77,13 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 		{"cold/balanced", cs(400, 300, 412000, "1.20"), payload, "balanced", 200,
 			sess + "\ncache ○ ░░░░░░ cold 1:40 │ ctx ███░░░░░ 41% │ ▸ your next message costs ≈$1.20 extra"},
 		{"cold/minimal", cs(400, 300, 412000, "1.20"), payload, "minimal", 200,
-			"saved ≈$0.31 │ cache ○ ░░░░░░ cold 1:40 │ ▸ your next message costs ≈$1.20 extra"},
+			"saved $0.31 │ cache ○ ░░░░░░ cold 1:40 │ ▸ your next message costs ≈$1.20 extra"},
 		{"cold/narrow", cs(400, 300, 412000, "1.20"), payload, "balanced", 60,
 			sess + "\ncache ○ cold 1:40 │ ▸ your next message costs ≈$1.20 extra"},
 		{"warm/narrow", cs(60, 300, 52000, "0.30"), small, "balanced", 40,
-			"saved ≈$0.31\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
+			"saved $0.31\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 		{"first-run", `{"session":"s","none":true,"now_ms":1}`, `{"session_id":"sess-gold"}`, "balanced", 200,
-			"saved ≈$4.20 today · ★ ≈$212.40 lifetime\n◌ no cache yet"}, // a brand-new session claims no session saving yet
+			"saved $4.20 today · ★ $212.40 lifetime\n◌ no cache yet"}, // a brand-new session claims no session saving yet
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(cgStub(t, c.cache))
@@ -137,7 +137,7 @@ func TestStatuslineGoldenLive(t *testing.T) {
 			`"priced":true,"rewrite_usd":1.20,"window":1000000,"window_exact":true,"threads":[%s]}`,
 			model, now-lastAgo*1000, now, strings.Join(threads, ","))
 	}
-	sess := "saved ≈$0.31 session · ≈$4.20 today · ★ ≈$212.40 lifetime"
+	sess := "saved $0.31 session · $4.20 today · ★ $212.40 lifetime"
 	m := "claude-sonnet-5-5"
 	for _, c := range []struct {
 		name, cache, stdin, layout string
@@ -162,7 +162,7 @@ func TestStatuslineGoldenLive(t *testing.T) {
 			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ ctx ███░░░░░ 41%"},
 		{"agents-narrow", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("a:2", 250, 300, 9000, "0.03"),
 			th("a:3", 100, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")), ctxPay(m), "balanced", 36,
-			"saved ≈$0.31\ncache ● 3:20 │ agents 3 │ ctx 41%"},
+			"saved $0.31\ncache ● 3:20 │ agents 3 │ ctx 41%"},
 		{"model-switch", body(m, 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-opus-5-5"), "balanced", 200,
 			sess + "\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41% │ ▸ model changed: your next message costs ≈$1.20 extra"},
 		{"same-model-other-spelling", body("aws/claude-sonnet-5-5", 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-sonnet-5-5[1m]"), "balanced", 200,
