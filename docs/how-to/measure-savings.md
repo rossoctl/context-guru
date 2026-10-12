@@ -155,7 +155,7 @@ runs one task through it:
 export ANTHROPIC_BASE_URL=...            # upstream Anthropic-compatible endpoint
 export ANTHROPIC_AUTH_TOKEN=...
 scripts/cc-demo.sh
-# then open http://localhost:4000/dashboard/#sessions and click the session
+# then open http://localhost:4000/dashboard/index.html#/traffic/sessions and click the session
 ```
 
 To view a full harness run, point `--dashboard-bench-dirs` at its jobs root: each run's
