@@ -33,6 +33,13 @@ triggers it and in the answer shape.
   rewrite (`early_apply`, default on). Held decisions are never re-asked. `calibrated_horizon: true`
   credits a removal for the expected remaining requests (22 - t/2, between 11 and 22, fitted on SWE-bench
   Claude Code sessions) instead of `horizon_turns`. Default `apply_mode` is `immediate`.
+- `anchor: true` (with `apply_mode: cold`): when decisions are applied on a warm request, a cache breakpoint
+  is placed on the assistant turn just before the first edited tool result. It looks back one block, finds
+  the entry the previous request wrote at its last message, and reads the prefix up to it, so only the tail
+  is rewritten. It needs a free slot (the provider cap is 4 breakpoints per request, counting the client's),
+  an earlier request that ended exactly at the preceding message, and no edit applied at or before that
+  message since. Without any of these it is not placed. It also lets the early-apply test pick the best
+  latest-first subset of the held decisions.
 - `econ: true` (default) tests the ask before it is made: a share of the pending mass (`expected_removal`,
   0.6) is credited for at most `horizon_turns` turns, against one write of the whole conversation that
   remains (an edit anywhere in history leaves only the system prompt readable when the client marks only the

@@ -48,7 +48,7 @@ type ExtractRide struct {
 	econ                                             bool
 	horizon                                          int
 	expectRemoval                                    float64
-	applyCold, earlyApply, calibrated                bool
+	applyCold, earlyApply, calibrated, anchor        bool
 	maxRatio, minVerbatim                            float64
 	allowThinkingStrip                               bool
 	mode                                             markerMode
@@ -75,6 +75,7 @@ type extractRideConfig struct {
 	ApplyMode          string  `yaml:"apply_mode"`
 	EarlyApply         *bool   `yaml:"early_apply"`
 	CalibratedHorizon  bool    `yaml:"calibrated_horizon"`
+	Anchor             bool    `yaml:"anchor"`
 	ExtractMaxRatio    float64 `yaml:"extract_max_ratio"`
 	MinVerbatim        float64 `yaml:"min_verbatim"`
 	AllowThinkingStrip bool    `yaml:"allow_thinking_strip"`
@@ -152,7 +153,7 @@ func newExtractRide(raw []byte) (components.Component, error) {
 	default:
 		return nil, fmt.Errorf("extract_llm_ride: apply_mode %q must be immediate or cold", cfg.ApplyMode)
 	}
-	e.earlyApply, e.calibrated = bfn(cfg.EarlyApply, true), cfg.CalibratedHorizon
+	e.earlyApply, e.calibrated, e.anchor = bfn(cfg.EarlyApply, true), cfg.CalibratedHorizon, cfg.Anchor
 	e.expectRemoval = cfg.ExpectedRemoval
 	if e.expectRemoval <= 0 || e.expectRemoval > 1 {
 		e.expectRemoval = 0.6
@@ -240,6 +241,9 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 	defer func() {
 		if changed == 0 {
 			rep.Skipped = true
+		}
+		if e.anchor {
+			rideRecordEnd(c, len(req.Input))
 		}
 	}()
 
@@ -366,7 +370,7 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 		// conversation plus the ask (a read of the prefix, the instruction and the answer), all in
 		// cache-read equivalents.
 		saved := int(e.expectRemoval * float64(mass))
-		if e.rideNet(req, c, saved)-e.askCostEquiv(req) <= 0 {
+		if e.rideNet(req, c, saved, firstCand(cands))-e.askCostEquiv(req) <= 0 {
 			rep.Gate("ride_ask_not_repaid")
 			return keys, nil
 		}
@@ -530,7 +534,7 @@ func containsRemoval(s []rideRemoval, k int) bool {
 // the window fills, which can exceed the turns a session lasts), against one write of the whole
 // conversation that remains. The write covers everything after the system prompt, not only what follows
 // the edit: with a breakpoint on the last message only, an edit anywhere leaves just the head readable.
-func (e *ExtractRide) rideNet(req *bschemas.BifrostChatRequest, c *components.Ctx, saved int) float64 {
+func (e *ExtractRide) rideNet(req *bschemas.BifrostChatRequest, c *components.Ctx, saved, first int) float64 {
 	if saved <= 0 {
 		return 0
 	}
@@ -545,7 +549,19 @@ func (e *ExtractRide) rideNet(req *bschemas.BifrostChatRequest, c *components.Ct
 			turns = t
 		}
 	}
-	return float64(saved)*float64(turns) - cacheWriteX*float64(after)
+	w := after
+	if _, ok := e.anchorAt(req, c, first); ok {
+		// With a breakpoint just before the first edit, the prefix up to the previous request's end is a
+		// read and only the messages from the anchor on are written.
+		w = 0
+		for k := first - 1; k < len(req.Input); k++ {
+			w += schema.TextTokens(schema.MessageText(req.Input[k]))
+		}
+		if w -= saved; w < 1 {
+			w = 1
+		}
+	}
+	return float64(saved)*float64(turns) - cacheWriteX*float64(w)
 }
 
 // askCostEquiv prices one ask in cache-read equivalents: a read of the conversation, the instruction
@@ -557,13 +573,13 @@ func (e *ExtractRide) askCostEquiv(req *bschemas.BifrostChatRequest) float64 {
 // affordable applies all of rs or none: the rewrite is paid once for the whole batch, so the net grows
 // with the mass removed and a subset is never better than the set.
 func (e *ExtractRide) affordable(req *bschemas.BifrostChatRequest, c *components.Ctx,
-	_ []sweepCand, rs []rideRemoval) []rideRemoval {
+	cands []sweepCand, rs []rideRemoval) []rideRemoval {
 
 	saved := 0
 	for _, r := range rs {
 		saved += r.saved
 	}
-	if e.rideNet(req, c, saved) <= 0 {
+	if e.rideNet(req, c, saved, firstRemoval(cands, rs)) <= 0 {
 		return nil
 	}
 	return rs
@@ -711,6 +727,8 @@ func init() {
 			Hint: "In cold mode, also apply held decisions on a warm request when saved tokens x horizon exceed the cost of one whole-conversation rewrite."},
 		{Key: "calibrated_horizon", Type: components.FieldBool,
 			Hint: "Credit a removal for the expected remaining requests (22 - t/2, between 11 and 22; fitted on SWE-bench Claude Code sessions) instead of horizon_turns."},
+		{Key: "anchor", Type: components.FieldBool,
+			Hint: "When decisions are applied on a warm request, place a cache breakpoint on the assistant message just before the first edited tool result, so the prefix up to the previous request's end is read and only the tail is rewritten. Needs a free breakpoint slot (the cap is 4 per request)."},
 		{Key: "extract_max_ratio", Type: components.FieldFloat, Default: 0.5,
 			Hint: "An extract must be at most this share of the original's tokens."},
 		{Key: "min_verbatim", Type: components.FieldFloat, Default: 0.8,
@@ -795,15 +813,24 @@ func (e *ExtractRide) settle(req *bschemas.BifrostChatRequest, rep *components.R
 	}
 	reason := "cold"
 	if !rewrite {
-		saved := 0
-		for _, h := range held {
-			saved += schema.TextTokens(h.Content) - rideProjectedTokens(h)
+		// Latest-first prefixes: an older edit makes the rewrite longer, so the best set may be a suffix.
+		ord := append([]rideHeld(nil), held...)
+		sort.Slice(ord, func(a, b int) bool { return ord[a].I > ord[b].I })
+		best, bestK, saved := 0.0, 0, 0
+		for k := 1; k <= len(ord); k++ {
+			saved += schema.TextTokens(ord[k-1].Content) - rideProjectedTokens(ord[k-1])
+			if net := e.rideNet(req, c, saved, ord[k-1].I); net > best {
+				best, bestK = net, k
+			}
 		}
-		if !e.earlyApply || e.rideNet(req, c, saved) <= 0 {
+		if !e.earlyApply || bestK == 0 {
 			rep.GateN("ride_held_waiting", len(held))
 			return 0
 		}
-		reason = "early"
+		if bestK < len(ord) {
+			rep.GateN("ride_held_waiting", len(ord)-bestK)
+		}
+		held, reason = ord[:bestK], "early"
 	}
 	pend := ridePendLoad(c)
 	total := 0
@@ -826,7 +853,132 @@ func (e *ExtractRide) settle(req *bschemas.BifrostChatRequest, rep *components.R
 		}
 	}
 	ridePendSave(c, pend)
+	if total > 0 {
+		if !rewrite && e.anchor {
+			first := held[0].I
+			for _, h := range held {
+				if h.I < first {
+					first = h.I
+				}
+			}
+			if idx, ok := e.anchorAt(req, c, first); ok && markBreakpoint(&req.Input[idx]) {
+				rep.Event("ride_anchor_placed")
+			}
+		}
+		c.Store.Put(rideApplyEndKey(c), []byte(strconv.Itoa(len(req.Input)-1)))
+	}
 	return total
+}
+
+func rideEndsKey(c *components.Ctx) string {
+	return store.SweepKeepPrefix + "ride-ends:" + thread.Key(c.Session, c.Thread)
+}
+
+// rideWasRequestEnd reports whether an earlier request of this thread ended at message index i, i.e.
+// whether a breakpoint on the last message wrote a cache entry exactly there.
+func rideWasRequestEnd(c *components.Ctx, i int) bool {
+	var ends []int
+	if b, ok := c.Store.Get(rideEndsKey(c)); ok {
+		_ = json.Unmarshal(b, &ends)
+	}
+	for _, x := range ends {
+		if x == i {
+			return true
+		}
+	}
+	return false
+}
+
+// rideRecordEnd remembers this request's last message index (the last 64).
+func rideRecordEnd(c *components.Ctx, n int) {
+	var ends []int
+	if b, ok := c.Store.Get(rideEndsKey(c)); ok {
+		_ = json.Unmarshal(b, &ends)
+	}
+	if len(ends) > 0 && ends[len(ends)-1] == n-1 {
+		return
+	}
+	ends = append(ends, n-1)
+	if len(ends) > 64 {
+		ends = ends[len(ends)-64:]
+	}
+	if b, err := json.Marshal(ends); err == nil {
+		c.Store.Put(rideEndsKey(c), b)
+	}
+}
+
+func rideApplyEndKey(c *components.Ctx) string {
+	return store.SweepKeepPrefix + "ride-applyend:" + thread.Key(c.Session, c.Thread)
+}
+
+// anchorAt reports where a cache breakpoint can sit so that an edit starting at message `first` rewrites
+// only what follows the previous request's end. The anchor is the assistant message just before the
+// edited tool result: a breakpoint there looks back one block, finds the entry the previous request wrote
+// at its last message (first-2), and reads up to it. It requires that entry to hold the content we are
+// about to send (no edit applied at or before it after it was written) and a free breakpoint slot.
+func (e *ExtractRide) anchorAt(req *bschemas.BifrostChatRequest, c *components.Ctx, first int) (int, bool) {
+	if !e.anchor || !e.applyCold || c == nil || first < 2 || first > len(req.Input) {
+		return 0, false
+	}
+	idx := first - 1
+	m := &req.Input[idx]
+	if m.Role != bschemas.ChatMessageRoleAssistant || m.Content == nil || len(m.Content.ContentBlocks) == 0 ||
+		m.Content.ContentBlocks[len(m.Content.ContentBlocks)-1].CacheControl != nil {
+		return 0, false
+	}
+	if !rideWasRequestEnd(c, first-2) {
+		return 0, false
+	}
+	if b, ok := c.Store.Get(rideApplyEndKey(c)); ok {
+		if end, err := strconv.Atoi(string(b)); err == nil && first-2 < end {
+			return 0, false
+		}
+	}
+	visible := 0
+	for i := range req.Input {
+		if req.Input[i].Content == nil {
+			continue
+		}
+		for _, blk := range req.Input[i].Content.ContentBlocks {
+			if blk.CacheControl != nil {
+				visible++
+			}
+		}
+	}
+	existing := visible
+	if c.ExistingBreakpoints > visible {
+		existing = c.ExistingBreakpoints // also counts system blocks and tool_result marks components never see
+	}
+	if existing >= 4 {
+		return 0, false
+	}
+	return idx, true
+}
+
+func markBreakpoint(m *bschemas.ChatMessage) bool {
+	last := &m.Content.ContentBlocks[len(m.Content.ContentBlocks)-1]
+	last.CacheControl = &bschemas.CacheControl{Type: bschemas.CacheControlTypeEphemeral}
+	return true
+}
+
+func firstCand(cands []sweepCand) int {
+	first := -1
+	for _, cd := range cands {
+		if first < 0 || cd.i < first {
+			first = cd.i
+		}
+	}
+	return first
+}
+
+func firstRemoval(cands []sweepCand, rs []rideRemoval) int {
+	first := -1
+	for _, r := range rs {
+		if i := cands[r.k].i; first < 0 || i < first {
+			first = i
+		}
+	}
+	return first
 }
 
 func rideProjectedTokens(h rideHeld) int {

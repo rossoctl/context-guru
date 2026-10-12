@@ -365,3 +365,95 @@ func TestRideCalibratedHorizon(t *testing.T) {
 		t.Error("an explicit horizon is used as given")
 	}
 }
+
+// blockAssistant is an assistant turn whose content is a block array, the shape a tool_use turn has on the
+// wire and the only shape that can carry a cache_control mark.
+func blockAssistant(text string) bschemas.ChatMessage {
+	return bschemas.ChatMessage{Role: bschemas.ChatMessageRoleAssistant,
+		Content: &bschemas.ChatMessageContent{ContentBlocks: []bschemas.ChatContentBlock{{Type: bschemas.ChatContentBlockTypeText, Text: &text}}}}
+}
+
+// anchoredReq is the real agent shape: user, then (assistant tool_use turn, tool result) pairs.
+func anchoredReq(n int) *bschemas.BifrostChatRequest {
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("investigate the audit logs")}}
+	for i := 0; i < n; i++ {
+		req.Input = append(req.Input, blockAssistant("step "+strconv.Itoa(i)),
+			toolResultMsgWithID("toolu_anchor_"+strconv.Itoa(i),
+				"header "+strconv.Itoa(i)+"\n"+strings.Repeat("noise record "+strconv.Itoa(i)+" of the audit log\n", 400)+
+					"ERROR payments timeout at gateway.go:"+strconv.Itoa(100+i)+"\n"))
+	}
+	req.Input = append(req.Input, blockAssistant("done"))
+	return req
+}
+
+func TestRideAnchorMarksTheAssistantTurnBeforeTheFirstEdit(t *testing.T) {
+	cfg := "apply_mode: cold\nanchor: true\nmin_inventory: 2\nhorizon_turns: 30\neconomic: x\n"
+	cfg = strings.Replace(cfg, "economic: x\n", "econ: false\n", 1)
+	asker := &rideAsker{script: map[int]string{0: `"action":"park"`, 1: `"action":"park"`, 2: `"action":"park"`}}
+	asker.cacheRead = 30000
+	marked := func(req *bschemas.BifrostChatRequest) []int {
+		var at []int
+		for i := range req.Input {
+			if req.Input[i].Content == nil {
+				continue
+			}
+			for _, b := range req.Input[i].Content.ContentBlocks {
+				if b.CacheControl != nil {
+					at = append(at, i)
+				}
+			}
+		}
+		return at
+	}
+	req := anchoredReq(4)
+	rep := &components.Report{Component: "extract_llm_ride"}
+	st0 := store.NewMemory(store.Options{MaxEntries: 400})
+	c := coldCtx("anchor-a", asker, st0, false)
+	st0.Put(rideEndsKey(c), []byte("[0,2,4,6]")) // earlier requests ended at these messages
+	newRide(t, cfg).Offload(req, rep, c)
+	first := -1
+	for i := range req.Input {
+		if strings.Contains(schema.MessageText(req.Input[i]), "<<cg:") {
+			first = i
+			break
+		}
+	}
+	if first < 0 || rep.Events["ride_anchor_placed"] != 1 || len(marked(req)) != 1 || marked(req)[0] != first-1 {
+		t.Fatalf("want one breakpoint on the assistant turn before message %d, got %v (events %v gates %v)", first, marked(req), rep.Events, rep.Gates)
+	}
+	// no free slot: the client already uses four
+	req = anchoredReq(4)
+	st1 := store.NewMemory(store.Options{MaxEntries: 400})
+	c = coldCtx("anchor-b", asker, st1, false)
+	st1.Put(rideEndsKey(c), []byte("[0,2,4,6]"))
+	c.ExistingBreakpoints = 4
+	rep = &components.Report{Component: "extract_llm_ride"}
+	newRide(t, cfg).Offload(req, rep, c)
+	if len(marked(req)) != 0 || rep.Events["ride_anchor_placed"] != 0 {
+		t.Errorf("a fifth breakpoint is a 400: %v", marked(req))
+	}
+	// the entry before the edit is stale when an earlier apply happened after it
+	req = anchoredReq(4)
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	c = coldCtx("anchor-c", asker, st, false)
+	st.Put(rideApplyEndKey(c), []byte("99"))
+	st.Put(rideEndsKey(c), []byte("[0,2,4,6]"))
+	rep = &components.Report{Component: "extract_llm_ride"}
+	newRide(t, cfg).Offload(req, rep, c)
+	if len(marked(req)) != 0 {
+		t.Errorf("an anchor on a stale entry must not be placed: %v", marked(req))
+	}
+}
+
+func TestRideAnchorNeedsAnEntryExactlyThere(t *testing.T) {
+	asker := &rideAsker{script: map[int]string{0: `"action":"park"`, 1: `"action":"park"`}}
+	asker.cacheRead = 30000
+	req := anchoredReq(4)
+	c := coldCtx("anchor-e", asker, store.NewMemory(store.Options{MaxEntries: 400}), false)
+	e := newRide(t, "apply_mode: cold\nanchor: true\nmin_inventory: 2\nhorizon_turns: 30\neconn: x\n"[0:0]+"apply_mode: cold\nanchor: true\nmin_inventory: 2\nhorizon_turns: 30\n")
+	rep := &components.Report{Component: "extract_llm_ride"}
+	e.Offload(req, rep, c) // first request of the thread: no earlier request ended anywhere
+	if rep.Events["ride_anchor_placed"] != 0 {
+		t.Error("no earlier request ended before the first edit, so there is no entry to read: no anchor")
+	}
+}
