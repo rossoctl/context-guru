@@ -10,6 +10,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
@@ -227,6 +228,63 @@ func TestRideAnchorKeepsTheTTLOrderWhenTheClientAsksForOneHour(t *testing.T) {
 		for turns := 1; turns <= 14; turns++ {
 			raw := ccBody(turns, big)
 			res := BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: raw, Session: "ttl-" + tc.name, PrefixAsk: asker})
+			out := res.Body
+			if out == nil {
+				out = raw
+			}
+			if !ttlOrderOK(out) {
+				t.Fatalf("%s turn %d: a 1h mark follows a 5m mark on the wire (the provider answers 400)", tc.name, turns)
+			}
+			if n := CountBreakpoints(out).Total(); n > 4 {
+				t.Fatalf("%s turn %d: %d breakpoints", tc.name, turns, n)
+			}
+			for _, ttl := range anchorTTLs(out) {
+				anchoredSeen = true
+				if ttl != tc.wantAnchor {
+					t.Errorf("%s turn %d: anchor TTL %s, want %s", tc.name, turns, ttl, tc.wantAnchor)
+				}
+			}
+		}
+		if tc.wantAnchor == "none" && anchoredSeen {
+			t.Errorf("%s: an anchor was placed among marks of both tiers", tc.name)
+		}
+		if tc.wantAnchor != "none" && !anchoredSeen {
+			t.Errorf("%s: the scenario never produced an anchor", tc.name)
+		}
+	}
+}
+
+// A one-hour mark among the messages AFTER the position where the anchor would sit: an anchor there takes
+// the last mark's five-minute TTL and precedes the one-hour mark, which the provider rejects. Only the
+// mixed-tier guard prevents it, so this case fails if the guard is removed. One system mark, so a slot
+// is free (system 1 + mid 1 + last 1 + anchor 1 = 4).
+func TestRideAnchorIsAbsentWhenAOneHourMarkFollowsItsPosition(t *testing.T) {
+	defer func() { sysTTL, lastTTL = "", "" }()
+	sysTTL, lastTTL = "1h", "5m"
+	rideCfg := "apply_mode: cold\nanchor: true\nmin_tokens: 3000\nmin_inventory: 2\ntrigger_pending: 2\n" +
+		"trigger_size_tokens: 1000\nmin_later_turns: 2\nmin_turns_between: 4\nhorizon_turns: 30\n"
+	for _, tc := range []struct {
+		name, mid, wantAnchor string
+	}{
+		{"control, no mid-transcript mark: the scenario anchors", "", "5m"},
+		{"one-hour mark after the anchor position, five-minute last mark", "1h", "none"},
+	} {
+		ride, err := components.New("extract_llm_ride", []byte(rideCfg))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe := components.NewPipeline([]components.Component{ride}, nil)
+		st := store.NewMemory(store.Options{MaxEntries: 4000})
+		asker := &parkAsker{}
+		big := map[int]bool{1: true, 2: true, 8: true, 9: true}
+		anchoredSeen := false
+		for turns := 1; turns <= 14; turns++ {
+			raw, _ := sjson.DeleteBytes(ccBody(turns, big), "system.0.cache_control")
+			// The tool result of turn 10 (message 20) carries the mark once it is no longer the last message.
+			if tc.mid != "" && turns > 10 {
+				raw, _ = sjson.SetBytes(raw, "messages.20.content.0.cache_control", mark(tc.mid))
+			}
+			res := BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: raw, Session: "mid-" + tc.name, PrefixAsk: asker})
 			out := res.Body
 			if out == nil {
 				out = raw

@@ -773,7 +773,7 @@ func init() {
 		{Key: "gate_margin", Type: components.FieldFloat, Min: 0,
 			Hint: "Ask only when the expected net exceeds (1 + gate_margin) times the ask's own price, so a call is made when it is clearly positive."},
 		{Key: "force_apply", Type: components.FieldBool,
-			Hint: "Analysis only: apply every held decision at once, whatever it costs (the net a decision would have if applied)."},
+			Hint: "Offline replay only, never in a serving config: apply every held decision at once, whatever it costs (the net a decision would have if applied)."},
 		{Key: "removal_prior", Type: components.FieldFloat,
 			Hint: "Prior for measured_removal (0 = expected_removal). Worth 20,000 offered tokens when blended with measurements."},
 		{Key: "extract_max_ratio", Type: components.FieldFloat, Default: 0.5,
