@@ -443,7 +443,7 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 	})
 
 	for _, r := range order {
-		if !r.CostKnown && r.CachedContext == 0 {
+		if r.Rejected && !r.CostKnown && r.CachedContext == 0 {
 			out.NoOps++
 			continue
 		}

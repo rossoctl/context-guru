@@ -645,7 +645,7 @@ func TestEveryShippedStrategyDescribesItself(t *testing.T) {
 func TestARejectedRequestDoesNotEraseTheLiveEntry(t *testing.T) {
 	rows := chain("u", "s", "m", base, 60_000, 60_000)
 	rej := rows[1]
-	rej.CachedContext, rej.InputTokens, rej.OutputTokens, rej.CostKnown = 0, 0, 0, false
+	rej.CachedContext, rej.InputTokens, rej.OutputTokens, rej.CostKnown, rej.Rejected = 0, 0, 0, false, true
 	r := Simulate(rows, Fixed5m(), Config{Prices: testPrices()})
 
 	if r.NoOps != 1 || r.Requests != 2 {
@@ -655,4 +655,14 @@ func TestARejectedRequestDoesNotEraseTheLiveEntry(t *testing.T) {
 		t.Fatalf("hits/misses = %d/%d, want 1/1: the third request is 120 s after the entry was written", r.Hits, r.Misses)
 	}
 	near(t, "total", r.TotalUSD, costMiss+costHit)
+}
+
+// A request that succeeded but lost its usage data did refresh the entry, so it is NOT skipped.
+func TestASucceededRequestWithoutUsageStillRefreshesTheEntry(t *testing.T) {
+	rows := chain("u", "s", "m", base, 60_000, 60_000)
+	rows[1].CachedContext, rows[1].InputTokens, rows[1].OutputTokens, rows[1].CostKnown = 0, 0, 0, false
+	r := Simulate(rows, Fixed5m(), Config{Prices: testPrices()})
+	if r.NoOps != 0 {
+		t.Fatalf("no-ops = %d, want 0: only a rejected request is skipped", r.NoOps)
+	}
 }
