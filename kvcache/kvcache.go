@@ -246,6 +246,49 @@ type Request struct {
 	Hit        bool   `json:"hit"`
 	MissReason string `json:"miss_reason"`
 
+	// Preset and Mode are the deployment knobs the request landed under (Mode:
+	// active|bypass|observe); Provider/Agent above already carry the other two axes the
+	// `requests` table normalizes.
+	Preset string `json:"preset"`
+	Mode   string `json:"mode"`
+
+	// The client-declared request parameters, exactly as the `requests` table normalizes
+	// them across the Anthropic and OpenAI dialects (see that table's own comment).
+	// Temperature/TopP are pointers because unset and 0 are different facts for a sampling
+	// parameter and the column is NULLable for exactly that reason; nil means the client
+	// sent neither, not that it sent zero.
+	MaxTokens       int64    `json:"max_tokens"`
+	Stream          bool     `json:"stream"`
+	ToolChoice      string   `json:"tool_choice"`
+	Temperature     *float64 `json:"temperature"`
+	TopP            *float64 `json:"top_p"`
+	ReasoningEffort string   `json:"reasoning_effort"`
+	ThinkingMode    string   `json:"thinking_mode"`
+	ThinkingBudget  int64    `json:"thinking_budget"`
+	ToolsDeclared   int      `json:"tools_declared"`
+	SystemBlocks    int      `json:"system_blocks"`
+
+	// CacheBP* are prompt-cache breakpoints on arrival, BY LOCATION — see the `requests`
+	// table's own comment: the tools and system arrays render ahead of messages, so where a
+	// breakpoint sits decides how much prefix it protects, and a single total cannot tell
+	// good placement from bad.
+	CacheBPSystem   int `json:"cache_bp_system"`
+	CacheBPTools    int `json:"cache_bp_tools"`
+	CacheBPMessages int `json:"cache_bp_messages"`
+	CacheBPBlocks   int `json:"cache_bp_blocks"`
+
+	// Reverts and Expands mirror dash.Event's own columns of the same name (see
+	// dash/schema.go's `reverts`/`expands`), added here so kvcache/predictor's feature
+	// registry has a typed field to read. UNLIKE StopReason and MissReason, these are NOT
+	// safe to read at THIS row's own decision point: their AVAILABLE-AT timestamp trails the
+	// request they describe (dash's async analysis pipeline finishes them after the request
+	// has already been billed), so a feature reading them must lag by one row — see
+	// kvcache/predictor's doc comment for the trap this avoids. Zero until whatever builds
+	// the dataset (dash/kvcache.go's row scan) is wired to populate them; that wiring is
+	// intentionally not part of this change.
+	Reverts int `json:"reverts"`
+	Expands int `json:"expands"`
+
 	// StopReason is this request's own terminal stop reason
 	// (end_turn|tool_use|stop_sequence|max_tokens|...), the strongest single feature found
 	// for predicting whether the NEXT request in this conversation lands in the 5m-1h

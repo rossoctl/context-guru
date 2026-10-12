@@ -730,6 +730,57 @@ func TestATruncatedAnalysisSaysSo(t *testing.T) {
 	}
 }
 
+// TestKVCacheDatasetCarriesTheRequestParameterAndCacheEconomicsColumns is the wiring check for
+// kvcache/predictor's request-parameter and cache-breakpoint features: scanKVCacheRequest must
+// actually read preset, mode, reverts, expands and every client-declared knob off the row, not
+// leave kvcache.Request holding the zero value the struct starts with. Temperature is set and
+// TopP is deliberately left unset, so the NULL/nil path is exercised in the same test as the
+// present one — a sentinel-zero encoding would fail exactly this asymmetry.
+func TestKVCacheDatasetCarriesTheRequestParameterAndCacheEconomicsColumns(t *testing.T) {
+	ev := kvEvent("t", "s", "m", kvBase, 1000, 0)
+	ev.Preset, ev.Mode = "default", ModeActive
+	ev.Reverts, ev.Expands = 2, 1
+	ev.MaxTokens, ev.Stream, ev.ToolChoice = 4096, true, "auto"
+	temp := 0.7
+	ev.Temperature, ev.TopP = &temp, nil
+	ev.ReasoningEffort, ev.ThinkingMode, ev.ThinkingBudget = "high", "enabled", 1024
+	ev.Tools, ev.SystemBlocks = 12, 3
+	ev.CacheBPSystem, ev.CacheBPTools, ev.CacheBPMessages, ev.CacheBPBlocks = 1, 1, 1, 1
+	db := seedKV(t, ev)
+
+	rows, _, err := db.KVCacheDataset(allTenants(), KVCacheOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	r := rows[0]
+	switch {
+	case r.Preset != "default":
+		t.Errorf("Preset = %q, want %q", r.Preset, "default")
+	case r.Mode != ModeActive:
+		t.Errorf("Mode = %q, want %q", r.Mode, ModeActive)
+	case r.Reverts != 2 || r.Expands != 1:
+		t.Errorf("Reverts/Expands = %d/%d, want 2/1", r.Reverts, r.Expands)
+	case r.MaxTokens != 4096 || !r.Stream || r.ToolChoice != "auto":
+		t.Errorf("MaxTokens/Stream/ToolChoice = %d/%v/%q, want 4096/true/\"auto\"",
+			r.MaxTokens, r.Stream, r.ToolChoice)
+	case r.Temperature == nil || *r.Temperature != 0.7:
+		t.Errorf("Temperature = %v, want 0.7", r.Temperature)
+	case r.TopP != nil:
+		t.Errorf("TopP = %v, want nil (never set on this row)", *r.TopP)
+	case r.ReasoningEffort != "high" || r.ThinkingMode != "enabled" || r.ThinkingBudget != 1024:
+		t.Errorf("ReasoningEffort/ThinkingMode/ThinkingBudget = %q/%q/%d, want high/enabled/1024",
+			r.ReasoningEffort, r.ThinkingMode, r.ThinkingBudget)
+	case r.ToolsDeclared != 12 || r.SystemBlocks != 3:
+		t.Errorf("ToolsDeclared/SystemBlocks = %d/%d, want 12/3", r.ToolsDeclared, r.SystemBlocks)
+	case r.CacheBPSystem != 1 || r.CacheBPTools != 1 || r.CacheBPMessages != 1 || r.CacheBPBlocks != 1:
+		t.Errorf("CacheBP* = %d/%d/%d/%d, want 1/1/1/1",
+			r.CacheBPSystem, r.CacheBPTools, r.CacheBPMessages, r.CacheBPBlocks)
+	}
+}
+
 // near2 is a float comparison for this file. Named apart from package kvcache's own helper
 // because the two files are in different packages and the tolerance here is a money one.
 func near2(t *testing.T, what string, got, want float64) {

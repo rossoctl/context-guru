@@ -150,6 +150,42 @@ type Observation struct {
 	// footing as CachedTokens or SinceLastMs. See StopReasonCluster/ClusterOf.
 	StopReason string
 
+	// Agent is the client dialect (claude-code, codex, ...) and Preset/Mode the deployment
+	// knobs the request landed under (operating mode: active|bypass|observe). All three are
+	// present-tense — they belong to the request just served, the same footing as
+	// StopReason.
+	Agent  string
+	Preset string
+	Mode   string
+
+	// The client-declared knobs on the request just served — sampling and shape, not
+	// content. Temperature/TopP are pointers because unset and 0 are different facts for a
+	// sampling parameter, mirroring the `requests` table's own NULLable columns; nil means
+	// the client did not send one, not that it sent zero.
+	MaxTokens       int64
+	Stream          bool
+	ToolChoice      string
+	Temperature     *float64
+	TopP            *float64
+	ReasoningEffort string
+	ThinkingMode    string
+	ThinkingBudget  int64
+	ToolsDeclared   int
+	SystemBlocks    int
+
+	// Prompt-cache breakpoints the request arrived with, by location (see kvcache.Request's
+	// own field of the same name for why location and not just a total).
+	CacheBPSystem   int
+	CacheBPTools    int
+	CacheBPMessages int
+	CacheBPBlocks   int
+
+	// The raw cache economics of the request just served — present-tense, unlike
+	// CachedTokens above only in that it splits read from write rather than summing them.
+	CacheRead    int64
+	CacheWrite   int64
+	CacheWrite1h int64
+
 	// Stats is the historical view, or nil where a caller has none. Every number it serves
 	// is accumulated from gaps that closed strictly before Now.
 	Stats Stats
