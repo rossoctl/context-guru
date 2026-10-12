@@ -485,3 +485,19 @@ func TestRideColdModeAppliesWhenTheToolSetOrModelChanges(t *testing.T) {
 		}
 	}
 }
+
+func TestRideMeasuredRemovalLearnsAndStopsAskingWhenItDoesNotPay(t *testing.T) {
+	e := newRide(t, "measured_removal: true\nremoval_prior: 0.75\n")
+	if got := e.removalEstimate(); got != 0.75 {
+		t.Fatalf("with no data the estimate is the prior, got %v", got)
+	}
+	e.noteRemoval(200000, 20000) // the model removed 10% of what it was offered
+	if got := e.removalEstimate(); got > 0.2 || got < 0.1 {
+		t.Errorf("estimate after 200k offered / 20k removed = %v, want near the realised 10%% (prior worth 20k tokens)", got)
+	}
+	fixed := newRide(t, "expected_removal: 0.6\n")
+	fixed.noteRemoval(200000, 0)
+	if fixed.removalEstimate() != 0.6 {
+		t.Error("without measured_removal the expectation stays fixed")
+	}
+}

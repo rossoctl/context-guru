@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -48,6 +49,10 @@ type ExtractRide struct {
 	econ                                             bool
 	horizon                                          int
 	expectRemoval                                    float64
+	measuredRemoval                                  bool
+	gateMargin                                       float64
+	remMu                                            sync.Mutex
+	remOffered, remRemoved                           float64 // tokens, over all asks of this instance
 	applyCold, earlyApply, calibrated, anchor        bool
 	maxRatio, minVerbatim                            float64
 	allowThinkingStrip                               bool
@@ -76,6 +81,9 @@ type extractRideConfig struct {
 	EarlyApply         *bool   `yaml:"early_apply"`
 	CalibratedHorizon  bool    `yaml:"calibrated_horizon"`
 	Anchor             bool    `yaml:"anchor"`
+	MeasuredRemoval    *bool   `yaml:"measured_removal"`
+	GateMargin         float64 `yaml:"gate_margin"`
+	RemovalPrior       float64 `yaml:"removal_prior"`
 	ExtractMaxRatio    float64 `yaml:"extract_max_ratio"`
 	MinVerbatim        float64 `yaml:"min_verbatim"`
 	AllowThinkingStrip bool    `yaml:"allow_thinking_strip"`
@@ -157,6 +165,15 @@ func newExtractRide(raw []byte) (components.Component, error) {
 	e.expectRemoval = cfg.ExpectedRemoval
 	if e.expectRemoval <= 0 || e.expectRemoval > 1 {
 		e.expectRemoval = 0.6
+	}
+	// measured_removal replaces the fixed expectation by a running estimate of the share of offered mass
+	// the model has actually removed, with expected_removal (or removal_prior) as the prior.
+	e.measuredRemoval = bfn(cfg.MeasuredRemoval, false)
+	if cfg.GateMargin > 0 {
+		e.gateMargin = cfg.GateMargin
+	}
+	if cfg.RemovalPrior > 0 && cfg.RemovalPrior <= 1 {
+		e.expectRemoval = cfg.RemovalPrior
 	}
 	if e.maxRatio <= 0 || e.maxRatio >= 1 {
 		e.maxRatio = 0.5
@@ -369,8 +386,8 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 		// removal is credited for at most horizon turns, and the price is one rewrite of the whole
 		// conversation plus the ask (a read of the prefix, the instruction and the answer), all in
 		// cache-read equivalents.
-		saved := int(e.expectRemoval * float64(mass))
-		if e.rideNet(req, c, saved, firstCand(cands))-e.askCostEquiv(req) <= 0 {
+		saved := int(e.removalEstimate() * float64(mass))
+		if e.rideNet(req, c, saved, firstCand(cands))-(1+e.gateMargin)*e.askCostEquiv(req) <= 0 {
 			rep.Gate("ride_ask_not_repaid")
 			return keys, nil
 		}
@@ -398,6 +415,7 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 		}
 	}
 
+	askMass := mass
 	decisions, call := e.ask(req, c, rep, cands, strings.Join(fired, "+"))
 	rideSetLast(c, turn)
 	for _, g := range call.gates {
@@ -433,6 +451,13 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 				ok = append(ok, rideRemoval{k: d.Label, action: d.Action, text: strings.TrimSpace(d.Extract), saved: sz - et})
 			}
 		}
+	}
+	if call.rec.Component != "" && call.ridden {
+		removed := 0
+		for _, r := range ok {
+			removed += r.saved
+		}
+		e.noteRemoval(float64(askMass), float64(removed))
 	}
 	if e.applyCold {
 		// Store the answer; apply it only if the removal repays a rewrite now, else at the next
@@ -729,6 +754,12 @@ func init() {
 			Hint: "Credit a removal for the expected remaining requests (22 - t/2, between 11 and 22; fitted on SWE-bench Claude Code sessions) instead of horizon_turns."},
 		{Key: "anchor", Type: components.FieldBool,
 			Hint: "When decisions are applied on a warm request, place a cache breakpoint on the assistant message just before the first edited tool result, so the prefix up to the previous request's end is read and only the tail is rewritten. Needs a free breakpoint slot (the cap is 4 per request)."},
+		{Key: "measured_removal", Type: components.FieldBool,
+			Hint: "Use a running estimate of the share of offered mass the model really removes (prior removal_prior) in the pre-ask economic test, instead of the fixed expected_removal."},
+		{Key: "gate_margin", Type: components.FieldFloat, Min: 0,
+			Hint: "Ask only when the expected net exceeds (1 + gate_margin) times the ask's own price, so a call is made when it is clearly positive."},
+		{Key: "removal_prior", Type: components.FieldFloat,
+			Hint: "Prior for measured_removal (0 = expected_removal). Worth 20,000 offered tokens when blended with measurements."},
 		{Key: "extract_max_ratio", Type: components.FieldFloat, Default: 0.5,
 			Hint: "An extract must be at most this share of the original's tokens."},
 		{Key: "min_verbatim", Type: components.FieldFloat, Default: 0.8,
@@ -1015,4 +1046,28 @@ func rideEnvChanged(c *components.Ctx) bool {
 	prev, ok := c.Store.Get(key)
 	c.Store.Put(key, []byte(cur))
 	return ok && string(prev) != cur
+}
+
+// removalPriorWeight is how many offered tokens the prior is worth when blending with measurements.
+const removalPriorWeight = 20000.0
+
+// removalEstimate is the share of offered mass expected to be removed: the prior until asks have been
+// made, then the prior blended with the realised share, weighted by offered tokens.
+func (e *ExtractRide) removalEstimate() float64 {
+	if !e.measuredRemoval {
+		return e.expectRemoval
+	}
+	e.remMu.Lock()
+	defer e.remMu.Unlock()
+	return (e.remRemoved + e.expectRemoval*removalPriorWeight) / (e.remOffered + removalPriorWeight)
+}
+
+func (e *ExtractRide) noteRemoval(offered, removed float64) {
+	if !e.measuredRemoval {
+		return
+	}
+	e.remMu.Lock()
+	e.remOffered += offered
+	e.remRemoved += removed
+	e.remMu.Unlock()
 }

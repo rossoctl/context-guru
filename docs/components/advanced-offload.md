@@ -45,6 +45,9 @@ triggers it and in the answer shape.
   remains (an edit anywhere in history leaves only the system prompt readable when the client marks only the
   last message) and the ask's own price. After the answer the same test is applied to the removals actually
   chosen; all or none are applied. Skipped in the pre-expiry window.
+- `measured_removal: true` replaces the fixed `expected_removal` in the pre-ask test by a running estimate of the
+  share of offered mass the model really removes (prior `removal_prior`, worth 20,000 offered tokens), and
+  `gate_margin` asks only when the expected net exceeds (1 + margin) times the ask's own price. Off by default.
 - `instruction_role: auto` sends the instruction as a mid-conversation system message on models whose
   route accepted it in testing, and as a final user turn otherwise. `user` and `system` force a channel; a
   system message is only sent when the stored body ends on a user message.
