@@ -128,7 +128,10 @@ def _latency_segment(stats: dict | None) -> str | None:
     upstream_ms = stats.get("upstream_ms_avg")
     if not isinstance(proxy_ms, (int, float)) or not isinstance(upstream_ms, (int, float)):
         return None
-    return f"{DIM}proxy:{RESET} {proxy_ms:.0f}ms {DIM}·{RESET} {DIM}upstream:{RESET} {upstream_ms:.0f}ms"
+    def ms(v: float) -> str:
+        return f"{v / 1000:.1f}s" if v >= 1000 else f"{v:.0f}ms"
+
+    return f"{DIM}proxy:{RESET} {ms(proxy_ms)} {DIM}·{RESET} {DIM}upstream:{RESET} {ms(upstream_ms)}"
 
 
 def _configured_tool_names() -> list[str]:
@@ -578,7 +581,6 @@ ROUTE_MEMO_SECONDS = 60
 EXPIRING_SECONDS = 60
 CRITICAL_SECONDS = 15  # the last stretch: red, and a "!" so it is not colour alone
 SPEND_RATE_MIN_SECONDS = 300  # a $/h figure over less than five minutes of wall clock is noise
-AGENTS_LISTED = 2  # more running sub-agent caches than this collapse into one aggregate
 HINT_COLD_MIN_TOKENS = 100_000  # a cold cache under this is cheap enough not to nag about
 HINT_FULL_FRACTION = 0.85
 HINT_EXPIRING_MIN_USD = 0.50  # below this a rewrite is not worth a line of anyone's attention
@@ -892,21 +894,18 @@ _AGENT_STYLE = {"cold": (RED, "○"), "critical": (RED, "◐"), "expiring": (YEL
 
 
 def _agents_segment(entries: list[tuple[float, float]], level: int | None = 0) -> str | None:
-    """Running sub-agents' caches, each with its own countdown. Up to AGENTS_LISTED are listed
-    (`agents ● 2:10 ◐ 0:20`); more collapse to a count and the one expiring soonest
-    (`agents 5 · next ◐ 0:20`). Level 1 is the count alone."""
+    """Running sub-agents' caches. One agent: its clock (`agent ● 4:21`). More: the count and the
+    clock of the one expiring soonest (`agents 5 · soonest ◐ 0:52`), because an unlabelled list of
+    clocks cannot say which agent is which. Level 1 is the count alone."""
     if level is None or not entries:
         return None
     if level == 1:
         return f"{DIM}agents{RESET} {len(entries)}"
-
-    def one(rem: float, ttl: float) -> str:
-        colour, glyph = _AGENT_STYLE[entry_state(rem, ttl)]
-        return f"{colour}{glyph} {_clock(rem)}{RESET}"
-
-    if len(entries) <= AGENTS_LISTED:
-        return f"{DIM}agents{RESET} " + " ".join(one(*e) for e in entries)
-    return f"{DIM}agents{RESET} {len(entries)} {DIM}· next{RESET} {one(*entries[0])}"
+    colour, glyph = _AGENT_STYLE[entry_state(*entries[0])]
+    clock = f"{colour}{glyph} {_clock(entries[0][0])}{RESET}"
+    if len(entries) == 1:
+        return f"{DIM}agent{RESET} {clock}"
+    return f"{DIM}agents{RESET} {len(entries)} {DIM}· soonest{RESET} {clock}"
 
 
 def _spend_segment(payload: dict, level: int | None = 0) -> str | None:
@@ -1007,18 +1006,18 @@ def _hint(payload: dict, view: dict, ctx: tuple[float, float] | None) -> tuple[s
     rem, tokens = view["remaining"], view["tokens"]
     if rem is not None and rem <= 0 and tokens and tokens >= HINT_COLD_MIN_TOKENS:
         price = f"≈${view['usd']:.2f}" if view["usd"] is not None else "a full re-send"
-        return (f"{RED}cache is cold: your next message costs {price} extra{RESET}",
-                f"{RED}cold: next message {price} extra{RESET}")
+        msg = f"{RED}your next message costs {price} extra{RESET}"
+        return msg, msg
     if rem is not None and rem > 0 and view["usd"] is not None and view["usd"] >= HINT_EXPIRING_MIN_USD:
         now_m, cache_m = _model_key((payload.get("model") or {}).get("id") if isinstance(payload.get("model"), dict) else None), \
             _model_key(view.get("model"))
         if now_m and cache_m and now_m != cache_m:
-            msg = f"{YELLOW}model switched: your next message rewrites the cache (≈${view['usd']:.2f}){RESET}"
-            return msg, f"{YELLOW}model switched: rewrite ≈${view['usd']:.2f}{RESET}"
+            msg = f"{YELLOW}model changed: your next message costs ≈${view['usd']:.2f} extra{RESET}"
+            return msg, msg
     if (rem is not None and 0 < rem <= EXPIRING_SECONDS and not view.get("ping") and view["usd"] is not None
             and view["usd"] >= HINT_EXPIRING_MIN_USD):
-        msg = f"{YELLOW}cache gone in {int(rem)}s: a pause now costs ≈${view['usd']:.2f} to rewrite{RESET}"
-        return msg, f"{YELLOW}gone in {int(rem)}s: a pause costs ≈${view['usd']:.2f}{RESET}"
+        msg = f"{YELLOW}a pause now costs ≈${view['usd']:.2f} extra{RESET}"
+        return msg, msg
     if ctx and ctx[0] / ctx[1] >= HINT_FULL_FRACTION:
         full = f"{RED}context {min(ctx[0] / ctx[1], 1.0) * 100:.0f}% full — /compact{RESET}"
         return full, full
@@ -1027,8 +1026,8 @@ def _hint(payload: dict, view: dict, ctx: tuple[float, float] | None) -> tuple[s
     causes = cause.get("causes") if isinstance(cause, dict) else None
     if at is not None and time.time() - at < 120 and isinstance(causes, list) and causes:
         added, removed = _num(cause, "tools_added") or 0, _num(cause, "tools_removed") or 0
-        what = f"tool set changed (+{int(added)} −{int(removed)})" if added or removed else ",".join(str(c) for c in causes[:2])
-        miss = f"{YELLOW}last miss: {what}{RESET}"
+        what = f"tools changed (+{int(added)} −{int(removed)})" if added or removed else ",".join(str(c) for c in causes[:2])
+        miss = f"{YELLOW}last turn rewrote the cache: {what}{RESET}"
         return miss, miss
     return None
 

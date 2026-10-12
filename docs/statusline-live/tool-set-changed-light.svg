@@ -1,4 +1,4 @@
-<svg class="rich-terminal" viewBox="0 0 1360 123.19999999999999" xmlns="http://www.w3.org/2000/svg">
+<svg class="rich-terminal" viewBox="0 0 994 123.19999999999999" xmlns="http://www.w3.org/2000/svg">
     <!-- Generated with Rich https://www.textualize.io -->
     <style>
 
@@ -19,52 +19,51 @@
         font-weight: 700;
     }
 
-    .terminal-116785053-matrix {
+    .terminal-731077273-matrix {
         font-family: Fira Code, monospace;
         font-size: 20px;
         line-height: 24.4px;
         font-variant-east-asian: full-width;
     }
 
-    .terminal-116785053-title {
+    .terminal-731077273-title {
         font-size: 18px;
         font-weight: bold;
         font-family: arial;
     }
 
-    .terminal-116785053-r1 { fill: #282828;font-weight: bold }
-.terminal-116785053-r2 { fill: #282828 }
-.terminal-116785053-r3 { fill: #7d7d7d }
-.terminal-116785053-r4 { fill: #0a823c }
-.terminal-116785053-r5 { fill: #6bb389 }
-.terminal-116785053-r6 { fill: #966e00 }
+    .terminal-731077273-r1 { fill: #282828;font-weight: bold }
+.terminal-731077273-r2 { fill: #282828 }
+.terminal-731077273-r3 { fill: #7d7d7d }
+.terminal-731077273-r4 { fill: #0a823c }
+.terminal-731077273-r5 { fill: #966e00 }
     </style>
 
     <defs>
-    <clipPath id="terminal-116785053-clip-terminal">
-      <rect x="0" y="0" width="1341.0" height="72.19999999999999" />
+    <clipPath id="terminal-731077273-clip-terminal">
+      <rect x="0" y="0" width="975.0" height="72.19999999999999" />
     </clipPath>
-    <clipPath id="terminal-116785053-line-0">
-    <rect x="0" y="1.5" width="1342" height="24.65"/>
+    <clipPath id="terminal-731077273-line-0">
+    <rect x="0" y="1.5" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-116785053-line-1">
-    <rect x="0" y="25.9" width="1342" height="24.65"/>
+<clipPath id="terminal-731077273-line-1">
+    <rect x="0" y="25.9" width="976" height="24.65"/>
             </clipPath>
     </defs>
 
-    <rect fill="#fdfdfd" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1358" height="121.2" rx="8"/><text class="terminal-116785053-title" fill="#282828" text-anchor="middle" x="679" y="27">statusline</text>
+    <rect fill="#fdfdfd" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="992" height="121.2" rx="8"/><text class="terminal-731077273-title" fill="#282828" text-anchor="middle" x="496" y="27">statusline</text>
             <g transform="translate(26,22)">
             <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
             <circle cx="22" cy="0" r="7" fill="#febc2e"/>
             <circle cx="44" cy="0" r="7" fill="#28c840"/>
             </g>
         
-    <g transform="translate(9, 41)" clip-path="url(#terminal-116785053-clip-terminal)">
+    <g transform="translate(9, 41)" clip-path="url(#terminal-731077273-clip-terminal)">
     
-    <g class="terminal-116785053-matrix">
-    <text class="terminal-116785053-r1" x="0" y="20" textLength="12.2" clip-path="url(#terminal-116785053-line-0)">$</text><text class="terminal-116785053-r2" x="12.2" y="20" textLength="134.2" clip-path="url(#terminal-116785053-line-0)">&#160;statusline</text><text class="terminal-116785053-r2" x="1342" y="20" textLength="12.2" clip-path="url(#terminal-116785053-line-0)">
-</text><text class="terminal-116785053-r2" x="0" y="44.4" textLength="158.6" clip-path="url(#terminal-116785053-line-1)">saved&#160;≈$0.50&#160;</text><text class="terminal-116785053-r3" x="158.6" y="44.4" textLength="85.4" clip-path="url(#terminal-116785053-line-1)">session</text><text class="terminal-116785053-r3" x="256.2" y="44.4" textLength="12.2" clip-path="url(#terminal-116785053-line-1)">·</text><text class="terminal-116785053-r2" x="268.4" y="44.4" textLength="97.6" clip-path="url(#terminal-116785053-line-1)">&#160;≈$6.20&#160;</text><text class="terminal-116785053-r3" x="366" y="44.4" textLength="61" clip-path="url(#terminal-116785053-line-1)">today</text><text class="terminal-116785053-r3" x="439.2" y="44.4" textLength="12.2" clip-path="url(#terminal-116785053-line-1)">·</text><text class="terminal-116785053-r3" x="463.6" y="44.4" textLength="12.2" clip-path="url(#terminal-116785053-line-1)">★</text><text class="terminal-116785053-r2" x="475.8" y="44.4" textLength="109.8" clip-path="url(#terminal-116785053-line-1)">&#160;≈$72.20&#160;</text><text class="terminal-116785053-r3" x="585.6" y="44.4" textLength="97.6" clip-path="url(#terminal-116785053-line-1)">lifetime</text><text class="terminal-116785053-r2" x="1342" y="44.4" textLength="12.2" clip-path="url(#terminal-116785053-line-1)">
-</text><text class="terminal-116785053-r3" x="0" y="68.8" textLength="61" clip-path="url(#terminal-116785053-line-2)">cache</text><text class="terminal-116785053-r4" x="73.2" y="68.8" textLength="12.2" clip-path="url(#terminal-116785053-line-2)">●</text><text class="terminal-116785053-r4" x="97.6" y="68.8" textLength="61" clip-path="url(#terminal-116785053-line-2)">█████</text><text class="terminal-116785053-r5" x="158.6" y="68.8" textLength="12.2" clip-path="url(#terminal-116785053-line-2)">░</text><text class="terminal-116785053-r4" x="183" y="68.8" textLength="48.8" clip-path="url(#terminal-116785053-line-2)">3:56</text><text class="terminal-116785053-r3" x="244" y="68.8" textLength="12.2" clip-path="url(#terminal-116785053-line-2)">│</text><text class="terminal-116785053-r3" x="268.4" y="68.8" textLength="36.6" clip-path="url(#terminal-116785053-line-2)">ctx</text><text class="terminal-116785053-r4" x="317.2" y="68.8" textLength="36.6" clip-path="url(#terminal-116785053-line-2)">███</text><text class="terminal-116785053-r5" x="353.8" y="68.8" textLength="61" clip-path="url(#terminal-116785053-line-2)">░░░░░</text><text class="terminal-116785053-r4" x="427" y="68.8" textLength="36.6" clip-path="url(#terminal-116785053-line-2)">41%</text><text class="terminal-116785053-r3" x="475.8" y="68.8" textLength="12.2" clip-path="url(#terminal-116785053-line-2)">│</text><text class="terminal-116785053-r3" x="500.2" y="68.8" textLength="12.2" clip-path="url(#terminal-116785053-line-2)">▸</text><text class="terminal-116785053-r6" x="524.6" y="68.8" textLength="427" clip-path="url(#terminal-116785053-line-2)">last&#160;miss:&#160;tool&#160;set&#160;changed&#160;(+2&#160;−0)</text><text class="terminal-116785053-r2" x="1342" y="68.8" textLength="12.2" clip-path="url(#terminal-116785053-line-2)">
+    <g class="terminal-731077273-matrix">
+    <text class="terminal-731077273-r1" x="0" y="20" textLength="12.2" clip-path="url(#terminal-731077273-line-0)">$</text><text class="terminal-731077273-r2" x="12.2" y="20" textLength="134.2" clip-path="url(#terminal-731077273-line-0)">&#160;statusline</text><text class="terminal-731077273-r2" x="976" y="20" textLength="12.2" clip-path="url(#terminal-731077273-line-0)">
+</text><text class="terminal-731077273-r2" x="0" y="44.4" textLength="158.6" clip-path="url(#terminal-731077273-line-1)">saved&#160;≈$0.50&#160;</text><text class="terminal-731077273-r3" x="158.6" y="44.4" textLength="85.4" clip-path="url(#terminal-731077273-line-1)">session</text><text class="terminal-731077273-r3" x="256.2" y="44.4" textLength="12.2" clip-path="url(#terminal-731077273-line-1)">·</text><text class="terminal-731077273-r2" x="268.4" y="44.4" textLength="97.6" clip-path="url(#terminal-731077273-line-1)">&#160;≈$6.20&#160;</text><text class="terminal-731077273-r3" x="366" y="44.4" textLength="61" clip-path="url(#terminal-731077273-line-1)">today</text><text class="terminal-731077273-r3" x="439.2" y="44.4" textLength="12.2" clip-path="url(#terminal-731077273-line-1)">·</text><text class="terminal-731077273-r3" x="463.6" y="44.4" textLength="12.2" clip-path="url(#terminal-731077273-line-1)">★</text><text class="terminal-731077273-r2" x="475.8" y="44.4" textLength="109.8" clip-path="url(#terminal-731077273-line-1)">&#160;≈$72.20&#160;</text><text class="terminal-731077273-r3" x="585.6" y="44.4" textLength="97.6" clip-path="url(#terminal-731077273-line-1)">lifetime</text><text class="terminal-731077273-r2" x="976" y="44.4" textLength="12.2" clip-path="url(#terminal-731077273-line-1)">
+</text><text class="terminal-731077273-r3" x="0" y="68.8" textLength="61" clip-path="url(#terminal-731077273-line-2)">cache</text><text class="terminal-731077273-r4" x="73.2" y="68.8" textLength="73.2" clip-path="url(#terminal-731077273-line-2)">●&#160;3:59</text><text class="terminal-731077273-r3" x="158.6" y="68.8" textLength="12.2" clip-path="url(#terminal-731077273-line-2)">│</text><text class="terminal-731077273-r3" x="183" y="68.8" textLength="36.6" clip-path="url(#terminal-731077273-line-2)">ctx</text><text class="terminal-731077273-r4" x="231.8" y="68.8" textLength="36.6" clip-path="url(#terminal-731077273-line-2)">41%</text><text class="terminal-731077273-r3" x="280.6" y="68.8" textLength="12.2" clip-path="url(#terminal-731077273-line-2)">│</text><text class="terminal-731077273-r3" x="305" y="68.8" textLength="12.2" clip-path="url(#terminal-731077273-line-2)">▸</text><text class="terminal-731077273-r5" x="329.4" y="68.8" textLength="610" clip-path="url(#terminal-731077273-line-2)">last&#160;turn&#160;rewrote&#160;the&#160;cache:&#160;tools&#160;changed&#160;(+2&#160;−0)</text><text class="terminal-731077273-r2" x="976" y="68.8" textLength="12.2" clip-path="url(#terminal-731077273-line-2)">
 </text>
     </g>
     </g>

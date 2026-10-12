@@ -1,4 +1,4 @@
-<svg class="rich-terminal" viewBox="0 0 1360 147.6" xmlns="http://www.w3.org/2000/svg">
+<svg class="rich-terminal" viewBox="0 0 994 123.19999999999999" xmlns="http://www.w3.org/2000/svg">
     <!-- Generated with Rich https://www.textualize.io -->
     <style>
 
@@ -19,57 +19,51 @@
         font-weight: 700;
     }
 
-    .terminal-4253310453-matrix {
+    .terminal-3773270378-matrix {
         font-family: Fira Code, monospace;
         font-size: 20px;
         line-height: 24.4px;
         font-variant-east-asian: full-width;
     }
 
-    .terminal-4253310453-title {
+    .terminal-3773270378-title {
         font-size: 18px;
         font-weight: bold;
         font-family: arial;
     }
 
-    .terminal-4253310453-r1 { fill: #dcdcdc;font-weight: bold }
-.terminal-4253310453-r2 { fill: #dcdcdc }
-.terminal-4253310453-r3 { fill: #909090 }
-.terminal-4253310453-r4 { fill: #cd3131 }
-.terminal-4253310453-r5 { fill: #872929 }
-.terminal-4253310453-r6 { fill: #0dbc79 }
-.terminal-4253310453-r7 { fill: #137c54 }
+    .terminal-3773270378-r1 { fill: #dcdcdc;font-weight: bold }
+.terminal-3773270378-r2 { fill: #dcdcdc }
+.terminal-3773270378-r3 { fill: #909090 }
+.terminal-3773270378-r4 { fill: #cd3131 }
+.terminal-3773270378-r5 { fill: #0dbc79 }
     </style>
 
     <defs>
-    <clipPath id="terminal-4253310453-clip-terminal">
-      <rect x="0" y="0" width="1341.0" height="96.6" />
+    <clipPath id="terminal-3773270378-clip-terminal">
+      <rect x="0" y="0" width="975.0" height="72.19999999999999" />
     </clipPath>
-    <clipPath id="terminal-4253310453-line-0">
-    <rect x="0" y="1.5" width="1342" height="24.65"/>
+    <clipPath id="terminal-3773270378-line-0">
+    <rect x="0" y="1.5" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-4253310453-line-1">
-    <rect x="0" y="25.9" width="1342" height="24.65"/>
-            </clipPath>
-<clipPath id="terminal-4253310453-line-2">
-    <rect x="0" y="50.3" width="1342" height="24.65"/>
+<clipPath id="terminal-3773270378-line-1">
+    <rect x="0" y="25.9" width="976" height="24.65"/>
             </clipPath>
     </defs>
 
-    <rect fill="#1e1e1e" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1358" height="145.6" rx="8"/><text class="terminal-4253310453-title" fill="#dcdcdc" text-anchor="middle" x="679" y="27">statusline&#160;(refreshInterval&#160;1)</text>
+    <rect fill="#1e1e1e" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="992" height="121.2" rx="8"/><text class="terminal-3773270378-title" fill="#dcdcdc" text-anchor="middle" x="496" y="27">statusline&#160;(refreshInterval&#160;1)</text>
             <g transform="translate(26,22)">
             <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
             <circle cx="22" cy="0" r="7" fill="#febc2e"/>
             <circle cx="44" cy="0" r="7" fill="#28c840"/>
             </g>
         
-    <g transform="translate(9, 41)" clip-path="url(#terminal-4253310453-clip-terminal)">
+    <g transform="translate(9, 41)" clip-path="url(#terminal-3773270378-clip-terminal)">
     
-    <g class="terminal-4253310453-matrix">
-    <text class="terminal-4253310453-r1" x="0" y="20" textLength="12.2" clip-path="url(#terminal-4253310453-line-0)">$</text><text class="terminal-4253310453-r2" x="12.2" y="20" textLength="378.2" clip-path="url(#terminal-4253310453-line-0)">&#160;statusline&#160;(refreshInterval&#160;1)</text><text class="terminal-4253310453-r2" x="1342" y="20" textLength="12.2" clip-path="url(#terminal-4253310453-line-0)">
-</text><text class="terminal-4253310453-r2" x="0" y="44.4" textLength="158.6" clip-path="url(#terminal-4253310453-line-1)">saved&#160;≈$0.50&#160;</text><text class="terminal-4253310453-r3" x="158.6" y="44.4" textLength="85.4" clip-path="url(#terminal-4253310453-line-1)">session</text><text class="terminal-4253310453-r3" x="256.2" y="44.4" textLength="12.2" clip-path="url(#terminal-4253310453-line-1)">·</text><text class="terminal-4253310453-r2" x="268.4" y="44.4" textLength="97.6" clip-path="url(#terminal-4253310453-line-1)">&#160;≈$6.20&#160;</text><text class="terminal-4253310453-r3" x="366" y="44.4" textLength="61" clip-path="url(#terminal-4253310453-line-1)">today</text><text class="terminal-4253310453-r3" x="439.2" y="44.4" textLength="12.2" clip-path="url(#terminal-4253310453-line-1)">·</text><text class="terminal-4253310453-r3" x="463.6" y="44.4" textLength="12.2" clip-path="url(#terminal-4253310453-line-1)">★</text><text class="terminal-4253310453-r2" x="475.8" y="44.4" textLength="109.8" clip-path="url(#terminal-4253310453-line-1)">&#160;≈$72.20&#160;</text><text class="terminal-4253310453-r3" x="585.6" y="44.4" textLength="97.6" clip-path="url(#terminal-4253310453-line-1)">lifetime</text><text class="terminal-4253310453-r2" x="1342" y="44.4" textLength="12.2" clip-path="url(#terminal-4253310453-line-1)">
-</text><text class="terminal-4253310453-r3" x="0" y="68.8" textLength="61" clip-path="url(#terminal-4253310453-line-2)">cache</text><text class="terminal-4253310453-r4" x="73.2" y="68.8" textLength="12.2" clip-path="url(#terminal-4253310453-line-2)">○</text><text class="terminal-4253310453-r5" x="97.6" y="68.8" textLength="73.2" clip-path="url(#terminal-4253310453-line-2)">░░░░░░</text><text class="terminal-4253310453-r4" x="183" y="68.8" textLength="109.8" clip-path="url(#terminal-4253310453-line-2)">cold&#160;0:20</text><text class="terminal-4253310453-r3" x="305" y="68.8" textLength="12.2" clip-path="url(#terminal-4253310453-line-2)">│</text><text class="terminal-4253310453-r3" x="329.4" y="68.8" textLength="73.2" clip-path="url(#terminal-4253310453-line-2)">agents</text><text class="terminal-4253310453-r6" x="414.8" y="68.8" textLength="73.2" clip-path="url(#terminal-4253310453-line-2)">●&#160;3:28</text><text class="terminal-4253310453-r3" x="500.2" y="68.8" textLength="12.2" clip-path="url(#terminal-4253310453-line-2)">│</text><text class="terminal-4253310453-r3" x="524.6" y="68.8" textLength="36.6" clip-path="url(#terminal-4253310453-line-2)">ctx</text><text class="terminal-4253310453-r6" x="573.4" y="68.8" textLength="36.6" clip-path="url(#terminal-4253310453-line-2)">███</text><text class="terminal-4253310453-r7" x="610" y="68.8" textLength="61" clip-path="url(#terminal-4253310453-line-2)">░░░░░</text><text class="terminal-4253310453-r6" x="683.2" y="68.8" textLength="36.6" clip-path="url(#terminal-4253310453-line-2)">41%</text><text class="terminal-4253310453-r3" x="732" y="68.8" textLength="12.2" clip-path="url(#terminal-4253310453-line-2)">│</text><text class="terminal-4253310453-r3" x="756.4" y="68.8" textLength="12.2" clip-path="url(#terminal-4253310453-line-2)">▸</text><text class="terminal-4253310453-r4" x="780.8" y="68.8" textLength="561.2" clip-path="url(#terminal-4253310453-line-2)">cache&#160;is&#160;cold:&#160;your&#160;next&#160;message&#160;costs&#160;≈$0.78&#160;</text><text class="terminal-4253310453-r2" x="1342" y="68.8" textLength="12.2" clip-path="url(#terminal-4253310453-line-2)">
-</text><text class="terminal-4253310453-r4" x="0" y="93.2" textLength="61" clip-path="url(#terminal-4253310453-line-3)">extra</text><text class="terminal-4253310453-r2" x="1342" y="93.2" textLength="12.2" clip-path="url(#terminal-4253310453-line-3)">
+    <g class="terminal-3773270378-matrix">
+    <text class="terminal-3773270378-r1" x="0" y="20" textLength="12.2" clip-path="url(#terminal-3773270378-line-0)">$</text><text class="terminal-3773270378-r2" x="12.2" y="20" textLength="378.2" clip-path="url(#terminal-3773270378-line-0)">&#160;statusline&#160;(refreshInterval&#160;1)</text><text class="terminal-3773270378-r2" x="976" y="20" textLength="12.2" clip-path="url(#terminal-3773270378-line-0)">
+</text><text class="terminal-3773270378-r2" x="0" y="44.4" textLength="158.6" clip-path="url(#terminal-3773270378-line-1)">saved&#160;≈$0.50&#160;</text><text class="terminal-3773270378-r3" x="158.6" y="44.4" textLength="85.4" clip-path="url(#terminal-3773270378-line-1)">session</text><text class="terminal-3773270378-r3" x="256.2" y="44.4" textLength="12.2" clip-path="url(#terminal-3773270378-line-1)">·</text><text class="terminal-3773270378-r2" x="268.4" y="44.4" textLength="97.6" clip-path="url(#terminal-3773270378-line-1)">&#160;≈$6.20&#160;</text><text class="terminal-3773270378-r3" x="366" y="44.4" textLength="61" clip-path="url(#terminal-3773270378-line-1)">today</text><text class="terminal-3773270378-r3" x="439.2" y="44.4" textLength="12.2" clip-path="url(#terminal-3773270378-line-1)">·</text><text class="terminal-3773270378-r3" x="463.6" y="44.4" textLength="12.2" clip-path="url(#terminal-3773270378-line-1)">★</text><text class="terminal-3773270378-r2" x="475.8" y="44.4" textLength="109.8" clip-path="url(#terminal-3773270378-line-1)">&#160;≈$72.20&#160;</text><text class="terminal-3773270378-r3" x="585.6" y="44.4" textLength="97.6" clip-path="url(#terminal-3773270378-line-1)">lifetime</text><text class="terminal-3773270378-r2" x="976" y="44.4" textLength="12.2" clip-path="url(#terminal-3773270378-line-1)">
+</text><text class="terminal-3773270378-r3" x="0" y="68.8" textLength="61" clip-path="url(#terminal-3773270378-line-2)">cache</text><text class="terminal-3773270378-r4" x="73.2" y="68.8" textLength="134.2" clip-path="url(#terminal-3773270378-line-2)">○&#160;cold&#160;0:15</text><text class="terminal-3773270378-r3" x="219.6" y="68.8" textLength="12.2" clip-path="url(#terminal-3773270378-line-2)">│</text><text class="terminal-3773270378-r3" x="244" y="68.8" textLength="73.2" clip-path="url(#terminal-3773270378-line-2)">agents</text><text class="terminal-3773270378-r2" x="317.2" y="68.8" textLength="36.6" clip-path="url(#terminal-3773270378-line-2)">&#160;2&#160;</text><text class="terminal-3773270378-r3" x="353.8" y="68.8" textLength="12.2" clip-path="url(#terminal-3773270378-line-2)">│</text><text class="terminal-3773270378-r3" x="378.2" y="68.8" textLength="36.6" clip-path="url(#terminal-3773270378-line-2)">ctx</text><text class="terminal-3773270378-r5" x="427" y="68.8" textLength="36.6" clip-path="url(#terminal-3773270378-line-2)">41%</text><text class="terminal-3773270378-r3" x="475.8" y="68.8" textLength="12.2" clip-path="url(#terminal-3773270378-line-2)">│</text><text class="terminal-3773270378-r3" x="500.2" y="68.8" textLength="12.2" clip-path="url(#terminal-3773270378-line-2)">▸</text><text class="terminal-3773270378-r4" x="524.6" y="68.8" textLength="439.2" clip-path="url(#terminal-3773270378-line-2)">your&#160;next&#160;message&#160;costs&#160;≈$0.78&#160;extra</text><text class="terminal-3773270378-r2" x="976" y="68.8" textLength="12.2" clip-path="url(#terminal-3773270378-line-2)">
 </text>
     </g>
     </g>
