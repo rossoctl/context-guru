@@ -140,11 +140,13 @@ Five more layouts each answer one question on the second line, next to the cache
 
 | Layout | The question | What it shows |
 |---|---|---|
-| `spark` | How much have I saved lately? | Today's saving and a 14-day sparkline; the rightmost cell is today |
-| `strip` | Are my cache hits holding? | The last 20 requests as `■` hit, `▨` partial, `✖` miss (oldest on the left), and the dollars misses cost today |
-| `heat` | When do I lose cache? | Today's cache misses by hour, 0h to 24h (darker means more misses; future hours blank), and the dollars they cost today |
-| `fill` | How full is my context, and with what? | A stacked bar: `▒` always loaded, `█` conversation, `░` free; the percent and, when it is filling, the time to full. At 100 columns or more, a legend with the two shares |
-| `watch` | Which sub-agent caches are about to lapse? | The main clock on line 1; line 2 a mini-bar and clock per running sub-agent, or "no sub-agents running" |
+| `spark` | How much have I saved lately? | `saved $4.20 today · last 14 days ▂▄▅…`: today's saving and a 14-day sparkline; the rightmost cell is today |
+| `strip` | Are my cache hits holding? | The last 20 requests as `■` hit, `▨` partial, `✖` miss (oldest on the left), and the dollars misses cost today (`$1.40 lost today`); from 100 columns a key is added |
+| `heat` | When do I lose cache? | `misses per hour 0h … 24h`: `░▒▓█` mean more misses in that hour, blank none, `·` hours not yet reached; `$1.40 lost` is the whole day |
+| `fill` | How full is my context, and with what? | A stacked bar: `▒` always loaded, `█` conversation, `░` free; the percent and, when it is filling, the time to full. At 100 columns or more, a legend with the two shares and what a miss now would cost |
+| `watch` | Which sub-agent caches are about to lapse? | Line 1 the saved figure and the main clock; line 2 `agent caches (2) ████ 4:30  █░░░ 0:50`: one mini-bar per running sub-agent in id order, up to 4, then `+N more` |
+
+All five show the cache clock but have no hint slot.
 
 ### spark
 
@@ -155,6 +157,11 @@ Five more layouts each answer one question on the second line, next to the cache
 
 ![strip](../statusline-live/mode-strip-dark.svg#only-dark)
 ![strip](../statusline-live/mode-strip-light.svg#only-light)
+
+At 120 columns:
+
+![strip at 120 columns](../statusline-live/mode-strip-120-dark.svg#only-dark)
+![strip at 120 columns](../statusline-live/mode-strip-120-light.svg#only-light)
 
 ### heat
 
