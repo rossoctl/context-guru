@@ -387,7 +387,7 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 		// conversation plus the ask (a read of the prefix, the instruction and the answer), all in
 		// cache-read equivalents.
 		saved := int(e.removalEstimate() * float64(mass))
-		if e.rideNet(req, c, saved, firstCand(cands))-(1+e.gateMargin)*e.askCostEquiv(req) <= 0 {
+		if e.rideNet(req, c, saved, firstCand(cands))-(1+e.gateMargin)*e.askCostEquiv(req, c) <= 0 {
 			rep.Gate("ride_ask_not_repaid")
 			return keys, nil
 		}
@@ -589,10 +589,20 @@ func (e *ExtractRide) rideNet(req *bschemas.BifrostChatRequest, c *components.Ct
 	return float64(saved)*float64(turns) - cacheWriteX*float64(w)
 }
 
-// askCostEquiv prices one ask in cache-read equivalents: a read of the conversation, the instruction
-// and inventory at fresh price, and about 250 output tokens at 5x fresh.
-func (e *ExtractRide) askCostEquiv(req *bschemas.BifrostChatRequest) float64 {
-	return float64(schema.MessagesTokens(req)) + 10*(600+250*5)
+// rideDefaultHead is the system prompt plus tool declarations the ask reads in addition to the
+// transcript, when the host does not report the previous turn's billed input (about 13k tokens for
+// Claude Code).
+const rideDefaultHead = 13000
+
+// askCostEquiv prices one ask in cache-read equivalents: a read of the whole previous request (its billed
+// input when known, else the transcript plus a default head: the system prompt and tools are read too),
+// the instruction and inventory at fresh price, and about 250 output tokens at 5x fresh.
+func (e *ExtractRide) askCostEquiv(req *bschemas.BifrostChatRequest, c *components.Ctx) float64 {
+	prefix := float64(schema.MessagesTokens(req) + rideDefaultHead)
+	if c != nil && c.PrevBilledInput > 0 {
+		prefix = float64(c.PrevBilledInput)
+	}
+	return prefix + 10*(600+250*5)
 }
 
 // affordable applies all of rs or none: the rewrite is paid once for the whole batch, so the net grows
