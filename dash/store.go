@@ -231,8 +231,13 @@ func dsn(path string) string {
 	// SQLite can only set auto_vacuum on an EMPTY database, so this takes effect for
 	// files created from here on. An existing file keeps auto_vacuum=NONE and falls
 	// back to the full VACUUM path in Prune, which is what it did before.
-	return "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
-		"&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=auto_vacuum(2)"
+	//
+	// busy_timeout is FIRST. The driver runs these in order on every new connection, and the
+	// journal_mode statement needs a lock: with the timeout set after it, a connection opened while
+	// another held the WAL (a checkpoint, a commit) failed at once with SQLITE_BUSY instead of
+	// waiting, and a burst of concurrent reads opens a burst of connections.
+	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(1)&_pragma=auto_vacuum(2)"
 }
 
 func openDSN(d, path string) (*DB, error) {

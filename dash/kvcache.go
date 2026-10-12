@@ -11,6 +11,7 @@ import (
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/kvcache"
+	"golang.org/x/sync/errgroup"
 )
 
 // The KV-cache tab's read side: turn stored request rows into the analysis dataset package
@@ -284,7 +285,21 @@ const kvCacheCTE = `WITH s AS (SELECT r.id, r.ts, r.tenant_id, r.session_id, r.m
 // comparison against the literal "%!H", which matched nothing and looked exactly like a quiet
 // afternoon. There is one format step here and it happens before any SQL text is appended.
 func kvCacheQuery(f Filter, o KVCacheOptions, projection string) (string, []any) {
+	return kvCacheQueryShard(f, o, projection, 0, 1)
+}
+
+// kvCacheQueryShard is kvCacheQuery restricted to one of n shards of the conversations.
+//
+// A shard is a set of whole sessions, chosen by the last character of the session id, so every
+// partition of the window function (tenant, session, model) lies inside exactly one shard and a
+// row's successor is the same row it would be in the unsharded read. That is the property that
+// makes running the shards concurrently and concatenating them equal to one read of everything.
+// n == 1 adds no predicate at all and is the original query byte for byte.
+func kvCacheQueryShard(f Filter, o KVCacheOptions, projection string, shard, n int) (string, []any) {
 	inCond, inArgs := kvCacheScope(f).where()
+	if n > 1 {
+		inCond += fmt.Sprintf(" AND (COALESCE(unicode(substr(r.session_id, -1)), 0) %% %d) = %d", n, shard)
+	}
 	outCond, outArgs := f.where()
 	conds, derivedArgs := kvCacheDerivedPreds(o)
 	q := strings.Replace(kvCacheCTE, "%s", inCond, 1) +
@@ -393,6 +408,22 @@ func scanKVCacheRequest(rows interface{ Scan(...any) error }) (*kvcache.Request,
 // an analysis of the recent past is useful, and one that silently stopped at some point in the
 // middle of the window is not.
 func (d *DB) KVCacheDataset(f Filter, o KVCacheOptions) ([]*kvcache.Request, int64, error) {
+	// The window function over every request is ~1 s of SQLite and the scan into Go ~2 s more at
+	// 187k rows, one core for all of it. The conversations are independent, so read them in
+	// kvCacheShards slices at once. Only worthwhile, and only EXACT, while nothing is truncated:
+	// the cap keeps the newest rows overall, which a per-shard limit cannot reproduce, so a read
+	// that comes back over the cap is thrown away and redone unsharded below.
+	if rows, ok, err := d.kvCacheDatasetSharded(f, o); err != nil {
+		return nil, 0, err
+	} else if ok {
+		return rows, int64(len(rows)), nil
+	}
+	return d.kvCacheDatasetOne(f, o)
+}
+
+// kvCacheDatasetOne is the dataset read as a single statement: the form the sharded read must
+// equal, and the one that handles a window over the cap.
+func (d *DB) kvCacheDatasetOne(f Filter, o KVCacheOptions) ([]*kvcache.Request, int64, error) {
 	// One row past the cap, so the read itself says whether it was truncated. The COUNT below is
 	// a SECOND complete pass over the same window function, and it is only needed when the answer
 	// is "yes" — on every untruncated window, which is nearly all of them, the count is exactly
@@ -432,9 +463,77 @@ func (d *DB) KVCacheDataset(f Filter, o KVCacheOptions) ([]*kvcache.Request, int
 	return out, total, nil
 }
 
+// kvCacheShards is how many concurrent slices KVCacheDataset reads. Every slice evaluates the
+// shard predicate on every row of the window, so a slice is cheap only while scanning the window is
+// (a full-table scan: ~0.2 s a pass at 187k rows). Measured on the 187k-row snapshot, all history:
+// 1 slice 3.35 s, 2 slices 2.42 s, 4 slices 1.61 s, 8 slices 1.59 s, 16 slices 1.82 s, so 4.
+const kvCacheShards = 4
+
+// kvCacheDatasetSharded reads the dataset as kvCacheShards concurrent slices and returns it
+// chronologically, with ok=false when the result would have been truncated (or on a small
+// window, where the fan-out is pure overhead), in which case the caller reads it unsharded.
+func (d *DB) kvCacheDatasetSharded(f Filter, o KVCacheOptions) ([]*kvcache.Request, bool, error) {
+	// A time-bounded window is read through an index range plus one table lookup per row, and each
+	// slice would repeat every lookup to keep one eighth of the rows: the same holdout window read
+	// 3.2 s unsharded, 5.0 s in eight slices and 11.3 s in sixteen. Only the unbounded read, which
+	// is a table scan, is split.
+	if f.Since != 0 || f.Until != 0 {
+		return nil, false, nil
+	}
+	parts := make([][]*kvcache.Request, kvCacheShards)
+	var g errgroup.Group
+	for k := 0; k < kvCacheShards; k++ {
+		k := k
+		g.Go(func() error {
+			q, args := kvCacheQueryShard(f, o, kvCacheCols, k, kvCacheShards)
+			q += " LIMIT ?"
+			rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, kvCacheMaxRows+1)...)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				r, err := scanKVCacheRequest(rows)
+				if err != nil {
+					return err
+				}
+				parts[k] = append(parts[k], r)
+			}
+			return rows.Err()
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, false, err
+	}
+	n := 0
+	for _, p := range parts {
+		n += len(p)
+	}
+	if n > kvCacheMaxRows {
+		return nil, false, nil
+	}
+	out := make([]*kvcache.Request, 0, n)
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TS != out[j].TS {
+			return out[i].TS < out[j].TS
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, true, nil
+}
+
 // kvCacheCount is how many rows match, before the cap and before paging.
 func (d *DB) kvCacheCount(f Filter, o KVCacheOptions) (int64, error) {
 	q, args := kvCacheQuery(f, o, "COUNT(*)")
+	if conds, _ := kvCacheDerivedPreds(o); len(conds) == 0 {
+		// No predicate over the derived columns, so the window function adds columns and removes
+		// no row: the count is just the filter's own, without sorting 187k rows to learn it.
+		cond, cargs := f.where()
+		q, args = `SELECT COUNT(*) FROM requests r WHERE `+cond, cargs
+	}
 	var n int64
 	err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(&n)
 	if err == sql.ErrNoRows {
@@ -480,10 +579,14 @@ func (d *DB) KVCacheRows(f Filter, o KVCacheOptions) (*KVCacheRowPage, error) {
 	if o.Offset < 0 {
 		o.Offset = 0
 	}
-	total, err := d.kvCacheCount(f, o)
-	if err != nil {
-		return nil, err
-	}
+	// The count and the page are independent reads of the same window; run them together.
+	var total int64
+	var countErr error
+	counted := make(chan struct{})
+	go func() {
+		defer close(counted)
+		total, countErr = d.kvCacheCount(f, o)
+	}()
 	dir := "DESC"
 	if o.Dir == "asc" {
 		dir = "ASC"
@@ -496,21 +599,31 @@ func (d *DB) KVCacheRows(f Filter, o KVCacheOptions) (*KVCacheRowPage, error) {
 	q += " ORDER BY " + fmt.Sprintf(order, dir) + " LIMIT ? OFFSET ?"
 	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, o.Limit, o.Offset)...)
 	if err != nil {
+		<-counted
 		return nil, err
 	}
 	defer rows.Close()
-	out := &KVCacheRowPage{Rows: []*KVCacheRow{}, Total: total, Offset: o.Offset, Limit: o.Limit,
-		Truncated: total > int64(kvCacheMaxRows)}
+	out := &KVCacheRowPage{Rows: []*KVCacheRow{}, Offset: o.Offset, Limit: o.Limit}
 	for rows.Next() {
 		r, err := scanKVCacheRequest(rows)
 		if err != nil {
+			<-counted
 			return nil, err
 		}
 		out.Rows = append(out.Rows, &KVCacheRow{Request: r,
 			RequestURL:      fmt.Sprintf("#requests?req=%d", r.ID),
 			ConversationURL: "#sessions?diff=" + url.PathEscape(r.ConversationID)})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		<-counted
+		return nil, err
+	}
+	<-counted
+	if countErr != nil {
+		return nil, countErr
+	}
+	out.Total, out.Truncated = total, total > int64(kvCacheMaxRows)
+	return out, nil
 }
 
 // modelsOf is the distinct models in a dataset, sorted, for a price list.

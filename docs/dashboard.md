@@ -10,6 +10,10 @@ context-guru-proxy --preset general --dashboard
 # open http://localhost:4000/dashboard/
 ```
 
+`/dashboard/` opens the five-page home: Home, Savings, Cache, Tools & context and Sessions, each with a
+bottom line first. The full dashboard described below (every view, settings, admin) is at
+`/dashboard/index.html`, and old links such as `/dashboard/#/savings/usage` open it there.
+
 It is **off by default**. Turning it on adds `/dashboard/` and `/api/*`; every existing
 route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
 

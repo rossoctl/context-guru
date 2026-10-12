@@ -22,6 +22,7 @@ package dash
 import (
 	"database/sql"
 	"encoding/json"
+	"golang.org/x/sync/errgroup"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -371,6 +372,12 @@ func (s sessionCost) usd(n int) float64 {
 // needs each session's own model and cache tiers — which is a join no aggregate SUM can
 // express honestly.
 func (d *DB) ToolReportFor(f Filter, price func(string) (modelinfo.Price, bool)) (*ToolReport, error) {
+	return d.toolReportFor(f, price, &declScanOnce{d: d, f: f})
+}
+
+// toolReportFor is ToolReportFor with the table pass it may need supplied by the caller, so a
+// request that also needs the observation windows shares one.
+func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool), scan *declScanOnce) (*ToolReport, error) {
 	where, args := f.where()
 	// Sessions in scope, their re-read multiplier and the tiers they paid. tools>0
 	// because a request that declared nothing has no inventory to be missing.
@@ -418,7 +425,13 @@ func (d *DB) ToolReportFor(f Filter, price func(string) (modelinfo.Price, bool))
 		return rep, nil
 	}
 
-	decls, err := d.scopedDecls(f, where, args)
+	var decls []declRow
+	if len(sessions) >= declScanMinSessions {
+		// Broad scope: one concurrent pass over the table instead of a probe per session (declfacts.go).
+		decls, err = d.scopedDeclsScan(scan, func(s string) bool { return sessions[s] != nil })
+	} else {
+		decls, err = d.scopedDecls(f, where, args)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -910,22 +923,37 @@ func (a *API) tools(w http.ResponseWriter, r *http.Request) {
 	}
 	price := a.priceFn(r)
 	a.serveJSON(w, r, &a.toolsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
-		rep, err := db.ToolReportFor(f, price)
-		if err != nil {
-			return nil, err
-		}
+		// The report and the user's own removal credit read the declarations independently, so they
+		// are read together; only the assignment of one onto the other waits.
+		var rep *ToolReport
+		var sr []SelfRemoval
+		var srErr error
+		var g errgroup.Group
+		g.Go(func() error {
+			var err error
+			rep, err = db.ToolReportFor(f, price)
+			return err
+		})
 		// Credit for what the USER removed themselves. Best-effort and non-fatal: it is an
 		// addition to the report, so a deployment where it fails still gets the inventory rather
 		// than an error page. Needs a pricer to put a dollar on, and the token counts stand
 		// without one.
 		if price != nil {
-			// The account's own server-side removal list, so a reduction that the tool filter is
-			// ALREADY credited for can be marked as overlapping instead of counted twice.
-			sr, err := db.SelfRemovals(f, price, a.toolFilterStateForScope(f).Removed)
-			if err != nil {
+			g.Go(func() error {
+				// The account's own server-side removal list, so a reduction that the tool filter is
+				// ALREADY credited for can be marked as overlapping instead of counted twice.
+				sr, srErr = db.SelfRemovals(f, price, a.toolFilterStateForScope(f).Removed)
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return nil, err
+		}
+		if price != nil {
+			if srErr != nil {
 				// Non-fatal, but never silent: swallowing this returned an empty list that was
 				// indistinguishable from "the account removed nothing", which is a claim.
-				slog.Warn("dash: self-removal credit unavailable", "err", err)
+				slog.Warn("dash: self-removal credit unavailable", "err", srErr)
 			}
 			rep.SelfRemoved = sr
 		}
