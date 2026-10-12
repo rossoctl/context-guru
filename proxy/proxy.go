@@ -1705,7 +1705,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// Ask miss while the mechanism looked switched on.
 			// Per THREAD (#423): a prefix ask reads the last body of ITS thread's conversation.
 			// Both bodies (#414/#431): preBody for CoversSpan, body for Ask's own append.
-			h.sent.put(thread.Key(session, threadID), provider, preBody, body)
+			h.sent.put(thread.Key(session, threadID), provider, preBody, body, r.Header.Get("Anthropic-Beta"))
 		}
 		if err != nil {
 			// LOG it, and record it on the captured row. An upstream failure used to be

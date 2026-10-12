@@ -300,11 +300,11 @@ func TestApplyModeResolvesTheThreadBeforeThePipeline(t *testing.T) {
 func TestSentStashDropsTheOldestThreadNotTheActiveOne(t *testing.T) {
 	s := newSentStash()
 	body := []byte(`{"messages":[{"role":"user","content":"x"}]}`)
-	s.put(thread.Key("sess", ""), bschemas.Anthropic, body, body) // the main thread, first
+	s.put(thread.Key("sess", ""), bschemas.Anthropic, body, body, "") // the main thread, first
 	for i := 0; i < maxSentSessions*2; i++ {
-		s.put(thread.Key("sess", fmt.Sprint("p:aux", i)), bschemas.Anthropic, body, body)
+		s.put(thread.Key("sess", fmt.Sprint("p:aux", i)), bschemas.Anthropic, body, body, "")
 		if i%10 == 0 {
-			s.put(thread.Key("sess", ""), bschemas.Anthropic, body, body) // the main thread keeps talking
+			s.put(thread.Key("sess", ""), bschemas.Anthropic, body, body, "") // the main thread keeps talking
 		}
 	}
 	if s.get(thread.Key("sess", "")) == nil {

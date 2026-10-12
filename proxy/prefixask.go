@@ -89,6 +89,8 @@ type sentEntry struct {
 	forwarded []byte
 	preBody   []byte
 	provider  bschemas.ModelProvider
+	// beta is the session request's anthropic-beta header, replayed on the ask.
+	beta string
 	// seq orders entries by the time they were put, for oldest-first eviction.
 	seq uint64
 }
@@ -127,7 +129,7 @@ func newSentStash() *sentStash { return &sentStash{m: map[string]sentEntry{}} }
 // one fits — never a wholesale drop, which would regularly throw away an active main thread's body
 // in favor of a short-lived subagent thread's. Both bodies' bytes are charged and released together,
 // since neither is useful without the other.
-func (s *sentStash) put(session string, provider bschemas.ModelProvider, preBody, forwarded []byte) {
+func (s *sentStash) put(session string, provider bschemas.ModelProvider, preBody, forwarded []byte, beta string) {
 	if s == nil || session == "" || len(forwarded) == 0 {
 		return
 	}
@@ -161,8 +163,17 @@ func (s *sentStash) put(session string, provider bschemas.ModelProvider, preBody
 		delete(s.m, oldestKey)
 	}
 	s.seq++
-	s.m[session] = sentEntry{forwarded: cpF, preBody: cpP, provider: provider, seq: s.seq}
+	s.m[session] = sentEntry{forwarded: cpF, preBody: cpP, provider: provider, beta: beta, seq: s.seq}
 	s.bytes += len(cpF) + len(cpP)
+}
+
+func (s *sentStash) beta(session string) string {
+	if s == nil || session == "" {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.m[session].beta
 }
 
 func (s *sentStash) get(session string) []byte {
@@ -180,7 +191,7 @@ func (p prefixAsker) AskAs(ctx context.Context, session, ask, role string) (stri
 	if len(body) == 0 {
 		return "", components.PrefixUsage{}, components.ErrNoPrefix
 	}
-	reply, u, err := p.cli.CompletePrefixedAs(ctx, body, ask, role)
+	reply, u, err := p.cli.CompletePrefixedAs(cheapmodel.WithBeta(ctx, p.stash.beta(session)), body, ask, role)
 	return reply, components.PrefixUsage(u), err
 }
 
@@ -255,7 +266,7 @@ func (p prefixAsker) Ask(ctx context.Context, session, ask string) (string, comp
 	if len(body) == 0 {
 		return "", components.PrefixUsage{}, components.ErrNoPrefix
 	}
-	reply, u, err := p.cli.CompletePrefixed(ctx, body, ask)
+	reply, u, err := p.cli.CompletePrefixed(cheapmodel.WithBeta(ctx, p.stash.beta(session)), body, ask)
 	return reply, components.PrefixUsage(u), err
 }
 

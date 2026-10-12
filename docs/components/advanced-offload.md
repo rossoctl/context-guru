@@ -33,7 +33,9 @@ triggers it and in the answer shape.
   route accepted it in testing, and as a final user turn otherwise. `user` and `system` force a channel; a
   system message is only sent when the stored body ends on a user message.
 - A call whose cache read is below 80% of its prompt is recorded, paid for, and discarded; the session
-  backs off 15 turns. There is no content-copying fallback.
+  backs off 15 turns (other failures keep the ordinary cooldown). There is no content-copying fallback.
+- The ask replays the session request's `anthropic-beta` header, so a session on a beta (for example a
+  long-context beta) asks under the same route and cache namespace.
 - Each call is one `extraction_calls` row: cache read and write, fresh (instruction and inventory) and
   output tokens, cost, latency, acceptance and rejection; `strategy` is `ride_user` or `ride_system` and
   `gate_reason` carries the trigger, item count and instruction tokens.

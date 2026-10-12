@@ -270,6 +270,18 @@ func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask 
 	return a.CompletePrefixedAs(ctx, prefixBody, ask, "user")
 }
 
+type betaKey struct{}
+
+// WithBeta carries the session's own anthropic-beta header value to CompletePrefixed*, which sends
+// it unchanged: a beta can change the route or the cache namespace (and a long-context beta is
+// required for prefixes over the base window), so an ask without it may not read the session's cache.
+func WithBeta(ctx context.Context, beta string) context.Context {
+	if beta == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, betaKey{}, beta)
+}
+
 // CompletePrefixedAs is CompletePrefixed with the ask's role chosen by the caller: "user" (the
 // default) or "system", a mid-conversation system message. "system" is only honoured when the
 // prefix ends on a user message -- the one position Anthropic accepts it in -- and is otherwise
@@ -314,6 +326,9 @@ func (a Anthropic) CompletePrefixedAs(ctx context.Context, prefixBody []byte, as
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
+	if b, _ := ctx.Value(betaKey{}).(string); b != "" {
+		req.Header.Set("anthropic-beta", b)
+	}
 	// The caller's own credential and scheme, exactly as Complete sends it — the prefix belongs to
 	// this caller's cache namespace, so presenting a different credential would read nothing.
 	if a.AuthScheme == "bearer" {

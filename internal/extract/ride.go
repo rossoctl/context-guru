@@ -49,7 +49,7 @@ func BuildRideAsk(items []AdjudicationItem) string {
 		if it.ID != "" {
 			b.WriteString(", tool_use id " + it.ID)
 		}
-		b.WriteString(", begins: " + it.Head + "\n")
+		b.WriteString(", begins: " + rideHead(it.Head) + "\n")
 	}
 	return b.String()
 }
@@ -93,4 +93,10 @@ func GroundedExtract(original, extract string, minFrac float64) bool {
 		}
 	}
 	return n > 0 && float64(hit) >= minFrac*float64(n)
+}
+
+// rideHead neutralises a tool output's first line before it enters the instruction: brackets and
+// quotes could fake an inventory line or a JSON reply.
+func rideHead(h string) string {
+	return strings.NewReplacer("[", "(", "]", ")", `"`, "'", "`", "'", "\n", " ", "\r", " ").Replace(h)
 }

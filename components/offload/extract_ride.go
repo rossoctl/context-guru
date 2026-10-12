@@ -349,8 +349,9 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 	for _, g := range call.gates {
 		rep.Gate(g)
 	}
-	if call.ridden == false && call.rec.Component != "" {
+	if call.notRead {
 		// A call that did not read the cache is the expensive failure (a full write); back off hard.
+		// Other failures (timeout, 429, unparseable) keep only the ordinary cooldown.
 		rideSetLast(c, turn+15)
 	}
 
@@ -483,6 +484,7 @@ type rideCall struct {
 	gates  []string
 	rec    components.ModelCall
 	ridden bool // the call read the session's cache (it did not re-create the prefix)
+	notRead bool // the call completed but did not ride: the back-off case
 }
 
 // ask puts the triage question to the request's own model over its cached prefix and returns the
@@ -546,6 +548,7 @@ func (e *ExtractRide) ask(req *bschemas.BifrostChatRequest, c *components.Ctx, r
 	total := u.Fresh + u.CacheRead + u.CacheWrite
 	call.ridden = total > 0 && float64(u.CacheRead) >= rideReadFloorFrac*float64(total)
 	if !call.ridden {
+		call.notRead = true
 		call.gates = append(call.gates, "ride_not_cache_read")
 		call.rec.Rejection = fmt.Sprintf("the ask did not ride the cache (read %d, write %d, fresh %d); "+
 			"its answer is discarded", u.CacheRead, u.CacheWrite, u.Fresh)
@@ -602,7 +605,7 @@ func init() {
 		{Key: "pre_expiry_seconds", Type: components.FieldInt, Default: int(defaultPreExpiry / time.Second),
 			Hint: "Width of the pre-expiry window."},
 		{Key: "min_turns_between", Type: components.FieldInt, Default: 3, Min: 0,
-			Hint: "Model turns between two asks of one session. A call that did not read the cache backs off 15 turns."},
+			Hint: "Model turns between two asks of one session. A call that completed without reading the cache backs off 15 turns; other failures keep the cooldown."},
 		{Key: "keep_recheck_turns", Type: components.FieldInt, Default: 6, Min: 0,
 			Hint: "Turns before re-offering an output the model judged still needed."},
 		{Key: "instruction_role", Type: components.FieldEnum, Default: "auto", Options: []string{"auto", "user", "system"},

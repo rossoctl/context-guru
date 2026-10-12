@@ -42,7 +42,7 @@ func TestCoversSpanRenormalizesSiblingTextGroups(t *testing.T) {
 
 	stash := newSentStash()
 	const session = "sibling-coverage-test"
-	stash.put(session, bschemas.Anthropic, preBody, preBody)
+	stash.put(session, bschemas.Anthropic, preBody, preBody, "")
 
 	fullHash := components.SpanHash(norm)
 	if !stash.CoversSpan(session, 4, fullHash) {
