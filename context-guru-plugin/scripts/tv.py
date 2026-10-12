@@ -206,7 +206,7 @@ def view_chart(api, o, e: Env) -> list[str]:
     w = 3 if d * 3 + 8 <= e.width else 2 if d * 2 + 8 <= e.width else 1
     top = max(vals + [0.0])
     H = 6
-    L += [e.paint("ok", e.paint("bold", ("+" if e.ascii else "✓") + " Saved per day")) + e.paint("dim", "  observed, net of Context Guru's own spend")]
+    L += [e.paint("ok", e.paint("bold", ("+" if e.ascii else "✓") + " Saved per day")) + e.paint("dim", "  measured, net of Context Guru's own spend")]
     for i, line in enumerate(vbars(vals, e, H, w)):
         axis = usd(top) if i == 0 else usd(top / 2) if i == H // 2 else ""
         L.append(f"{axis:>7} " + e.paint("ok", line))
@@ -220,7 +220,7 @@ def view_chart(api, o, e: Env) -> list[str]:
     if abs(other) >= 0.005:  # rows must add up to the headline
         lv.append(("Other", other))
     big = max([abs(v) for _, v in lv] + [0.01])
-    L += ["", e.paint("bold", "By lever") + e.paint("dim", "  observed, same window; adds up to the total")]
+    L += ["", e.paint("bold", "By lever") + e.paint("dim", "  measured, same window; adds up to the total")]
     L += T.cols([[n, usd(v), (e.bar(v / big, 14, "ok") if v > 0 else "")] for n, v in lv] + [["Total", usd(saved), ""]] if lv else [["Nothing saved yet", "", ""]], "lrl")
     sp = cg.spend_doc(api, o, d)
     recs = cg.C.recommendations(sp, None, d)[:3] if sp else []

@@ -4,6 +4,8 @@ Views that draw in the terminal. They read the same data as the commands and fol
 
 ## Display settings
 
+The six commands print plain text. The views use colour on a terminal; `--theme` picks light or dark and `NO_COLOR` turns it off.
+
 - Width follows the terminal, 40 to 140 columns; lines wrap or drop their least important column, never overflow.
 - `NO_COLOR` turns colour off. Colour is also off when output is not a terminal, so a command run in chat stays plain. Every view reads the same without colour.
 - `--ascii` (or `CG_ASCII=1`, or a non-UTF-8 locale) swaps every glyph for ASCII.
@@ -81,7 +83,7 @@ Misses are read from the token columns. The dollar figure above each `✖` is it
 ```text
 Saved $43.95 in 14 days (4.9% of the bill). Best day Tue $4.83.
 
-✓ Saved per day  observed, net of Context Guru's own spend
+✓ Saved per day  measured, net of Context Guru's own spend
   $4.83             ██ ▃▃          ▇▇    ▄▄
            ▃▃ ▂▂    ██ ██          ██    ██
            ██ ██    ██ ██          ██    ██ ▅▅
@@ -91,7 +93,7 @@ Saved $43.95 in 14 days (4.9% of the bill). Best day Tue $4.83.
         F  S  S  M  T  W  T  F  S  S  M  T  W  T
         Sep 25                            Oct 08
 
-By lever  observed, same window; adds up to the total
+By lever  measured, same window; adds up to the total
 Compaction                      $33.90  ██████████████
 Keep-alive pings                 $6.30  ███░░░░░░░░░░░
 Tool filtering                   $7.85  ███░░░░░░░░░░░
