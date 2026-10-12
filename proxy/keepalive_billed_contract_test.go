@@ -1,14 +1,68 @@
 package proxy
 
 import (
+	"context"
+	"encoding/json"
 	"math"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
+
+// This test stays in proxy, beside the dash side of the contract it pins; the keep-alive
+// substitute tests it borrows its offload half from live in package keepalive. The three
+// helpers below are copies of theirs.
+
+// usageSummaryModel is a summary model that BILLS, through the ambient usage sink, as a real
+// client does.
+type usageSummaryModel struct{ calls atomic.Int64 }
+
+func (m *usageSummaryModel) Complete(ctx context.Context, _ string) (string, error) {
+	return m.CompleteMessages(ctx, "", nil)
+}
+func (m *usageSummaryModel) CompleteMessages(ctx context.Context, _ string, _ []bschemas.ChatMessage) (string, error) {
+	m.calls.Add(1)
+	cheapmodel.ReplayUsage(ctx, "claude-sonnet-5", 281, 683, 0, 43400)
+	return "<summary>explored the handler, 3 tests fail.</summary>", nil
+}
+
+// kaCandidate registers a cache_aware_summarizer keep-alive candidate for a session.
+func kaCandidate(t *testing.T, session string, st store.Store, model *usageSummaryModel) {
+	t.Helper()
+	msg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
+	schema.SetMessageText(&msg, "fix the failing tests, there is a lot of context here")
+	span := []bschemas.ChatMessage{msg}
+	ask := append([]bschemas.ChatMessage(nil), span...)
+	ask = append(ask, bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser})
+	call := func(ctx context.Context) (string, error) { return model.CompleteMessages(ctx, "", ask) }
+	offload.RegisterKeepAliveCandidateForTest(session, st, call, "messages", span, 1, "", 0)
+	t.Cleanup(func() { offload.ClearKeepAliveCandidate(session) })
+}
+
+// readDeferred reads the usage the offload side deferred onto the session's next turn.
+func readDeferred(t *testing.T, st store.Store, session string) (ledgerIn int, calls []map[string]any) {
+	t.Helper()
+	b, ok := st.Get(store.UsagePrefix + session)
+	if !ok || len(b) == 0 {
+		return 0, nil
+	}
+	var u struct {
+		In    int              `json:"in"`
+		Calls []map[string]any `json:"calls"`
+	}
+	if err := json.Unmarshal(b, &u); err != nil {
+		t.Fatal(err)
+	}
+	return u.In, u.Calls
+}
 
 // The "_billed" marker is a string contract between two packages (#458 review): offload writes a
 // committed keep-alive summary call's detail row with trigger "keepalive_substitute_billed", and
@@ -23,14 +77,14 @@ func TestBilledElsewhereMarkerReachesTheDashboardCostQuery(t *testing.T) {
 	model := &usageSummaryModel{}
 	kaCandidate(t, "sess-1", st, model)
 	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
-	if n := k.sweep(clock.advance(281 * time.Second)); n != 1 {
+	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("the due ping did not fire (%d)", n)
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
+	for time.Now().Before(deadline) && k.Stats().SummarySubstituted == 0 {
 		time.Sleep(time.Millisecond)
 	}
-	if k.summarySubstituted.Load() != 1 {
+	if k.Stats().SummarySubstituted != 1 {
 		t.Fatal("no committed summary call: the offload side never ran")
 	}
 	_, calls := readDeferred(t, st, "sess-1")

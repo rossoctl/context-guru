@@ -42,7 +42,7 @@
 // A ping is a real upstream request billed to the caller's own credential. That is the trade
 // — a small certain spend against a much larger probable one — and it is not ours to make on
 // someone's behalf, so it is opt-in per account, capped per session, capped in count, and
-// recorded as its own dashboard row with its own cost. See CachePolicy.
+// recorded as its own dashboard row with its own cost. See Policy.
 //
 // # The two ways this can be WRONG, and the guards
 //
@@ -202,7 +202,7 @@ const (
 // The whole of this method is the sentinel. `MaxUSDPerPing == 0` means "nobody configured
 // one", and the shipped code read that as "no cap": `MaxUSDPerPing <= 0 || cost <= cap`. On
 // an account whose keep-alive is OFF the config builder hands the request path a zero
-// CachePolicy, and enabling one session by hand is precisely the use case a per-session
+// Policy, and enabling one session by hand is precisely the use case a per-session
 // override exists for — so the one path where the guard was written to matter was the one
 // path that ran without it, while the arm response cheerfully reported a ceiling of $0.00.
 //

@@ -1,4 +1,4 @@
-package proxy
+package keepalive
 
 import (
 	"context"
@@ -22,7 +22,7 @@ import (
 //
 // Each sub-test below drives one of the keeper's own removal paths and checks that the
 // candidate registry agrees the session is gone. None of them would have passed before
-// keeper.retire/forget/evictLocked were given their own calls to
+// Keeper.retire/Forget/evictLocked were given their own calls to
 // offload.ClearKeepAliveCandidate.
 
 // candCall is a minimal summaryCaller-shaped function for RegisterKeepAliveCandidateForTest —
@@ -39,8 +39,8 @@ func TestKeeperRetireDrainsTheKeepAliveCandidateRegistry(t *testing.T) {
 		t.Fatalf("candidate did not register in the first place (reason=%q)", reason)
 	}
 
-	k := newKeeper(&Handler{})
-	key := kaKey(tenant, session)
+	k := New(Options{Dispatcher: newFake(okPing)})
+	key := Key{Tenant: tenant, Session: session}.id()
 	k.live[key] = &kaEntry{tenant: tenant, session: session, startedAt: time.Now()}
 	k.retire(key)
 
@@ -58,10 +58,10 @@ func TestKeeperForgetDrainsTheKeepAliveCandidateRegistry(t *testing.T) {
 	st := store.NewMemory(store.Options{})
 	offload.RegisterKeepAliveCandidateForTest(session, st, candCall, "messages", nil, 0, "", 0)
 
-	k := newKeeper(&Handler{})
-	key := kaKey(tenant, session)
+	k := New(Options{Dispatcher: newFake(okPing)})
+	key := Key{Tenant: tenant, Session: session}.id()
 	k.live[key] = &kaEntry{tenant: tenant, session: session, startedAt: time.Now()}
-	k.forget(tenant)
+	k.Forget(tenant)
 
 	if _, _, reason, ok := offload.KeepAliveSubstitute(session); ok {
 		t.Fatalf("the candidate survived keeper.forget (reason=%q) — a tenant deletion/revocation "+
@@ -76,19 +76,19 @@ func TestKeeperEvictionDrainsTheKeepAliveCandidateRegistry(t *testing.T) {
 	st := store.NewMemory(store.Options{})
 	offload.RegisterKeepAliveCandidateForTest(session, st, candCall, "messages", nil, 0, "", 0)
 
-	k := newKeeper(&Handler{})
-	key := kaKey(tenant, session)
+	k := New(Options{Dispatcher: newFake(okPing)})
+	key := Key{Tenant: tenant, Session: session}.id()
 	// evictLocked picks the entry whose startedAt is the MOST RECENT — the longest still to
 	// wait before its own idle deadline, so the least imminent value (see its own comment). This
 	// session's entry is given the newest startedAt of the whole set so it is deterministically
-	// the one evictLocked's one eviction (one entry over maxKeepAliveSessions) picks.
+	// the one evictLocked's one eviction (one entry over MaxSessions) picks.
 	now := time.Now()
 	k.live[key] = &kaEntry{tenant: tenant, session: session, startedAt: now}
-	k.live[kaKey("other-tenant", "other-session")] = &kaEntry{
+	k.live[Key{Tenant: "other-tenant", Session: "other-session"}.id()] = &kaEntry{
 		tenant: "other-tenant", session: "other-session", startedAt: now.Add(-time.Hour)}
-	for i := 0; i < maxKeepAliveSessions; i++ {
+	for i := 0; i < MaxSessions; i++ {
 		s := fmt.Sprintf("%s-filler-%d", session, i)
-		k.live[kaKey("filler-tenant", s)] = &kaEntry{
+		k.live[Key{Tenant: "filler-tenant", Session: s}.id()] = &kaEntry{
 			tenant: "filler-tenant", session: s, startedAt: now.Add(-time.Hour)}
 	}
 	k.evictLocked()

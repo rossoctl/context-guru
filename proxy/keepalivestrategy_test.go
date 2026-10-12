@@ -216,21 +216,32 @@ func TestValidStrategyBounds(t *testing.T) {
 	}
 }
 
-// knownPredictorIDs and predictorFor are two separate lists by construction (a map a
-// strategy is validated against, a switch pingable() actually evaluates), and nothing
-// forces them to agree except this test — the exact drift a Strategy naming a "known"
-// predictor pingable() cannot actually run would produce.
+// knownPredictorIDs and keepalive's predictorFor are two separate lists by construction (a map a
+// strategy is validated against, a switch pingable() actually evaluates), and nothing forces them
+// to agree except this test — the exact drift a Strategy naming a "known" predictor pingable()
+// cannot actually run would produce. predictorFor is keepalive's own, so the lockstep is checked
+// through the keeper: a strategy naming a KNOWN id with threshold 0 is tracked (the gate passes every
+// prediction), and an UNKNOWN id is refused (pingable fails toward not spending).
 func TestKnownPredictorIDsMatchPredictorFor(t *testing.T) {
+	tracked := func(id string) bool {
+		k, _, clock := testKeeper(t, Limits{})
+		pol := kaPolicy()
+		pol.PredictorID = id
+		pol.PredictorThreshold = 0
+		recordOne(t, k, pol, kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+		return k.Stats().Live == 1
+	}
 	for id := range knownPredictorIDs {
-		if _, ok := predictorFor(id); !ok {
-			t.Errorf("%q is in knownPredictorIDs but predictorFor does not recognise it", id)
+		if !tracked(id) {
+			t.Errorf("%q is in knownPredictorIDs but the keeper's predictorFor does not recognise it", id)
 		}
 	}
-	for _, id := range []string{"stop-reason-gated", "not-a-real-one"} {
-		_, wantOK := knownPredictorIDs[id]
-		_, gotOK := predictorFor(id)
-		if gotOK != wantOK {
-			t.Errorf("predictorFor(%q) ok=%v, knownPredictorIDs says %v", id, gotOK, wantOK)
+	for _, id := range []string{"not-a-real-predictor", "stop_reason", "STOP-REASON-GATED"} {
+		if knownPredictorIDs[id] {
+			continue
+		}
+		if tracked(id) {
+			t.Errorf("the keeper accepted predictor %q, which knownPredictorIDs does not list", id)
 		}
 	}
 }

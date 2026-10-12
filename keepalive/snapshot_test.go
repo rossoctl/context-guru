@@ -1,19 +1,16 @@
-package proxy
+package keepalive
 
 import (
 	"database/sql"
 	"fmt"
+	"net/http"
 	"os"
 	"sort"
 	"testing"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 
 	_ "modernc.org/sqlite" // the same pure-Go driver the dashboard's own store uses
 )
@@ -22,7 +19,7 @@ import (
 //
 // The point of doing it this way rather than in a separate model: the projected dollars in
 // the pull request have to come out of the code that will run, not out of a Python script
-// that agrees with it today. So this drives the real `keeper` — the real `due()` timing, the
+// that agrees with it today. So this drives the real `Keeper` — the real `due()` timing, the
 // real K, the real per-session spend cap, the real thinking gate, the real record/arrive
 // lifecycle — over the real request timeline, and prices every ping through the same Pricer
 // the request path uses.
@@ -32,7 +29,7 @@ import (
 //
 //	CG_SNAPSHOT_DB=/tmp/cgwork/cg-snap.db \
 //	MODEL_PRICES=/etc/context-guru/prices.yaml \
-//	CGO_ENABLED=1 go test -run TestKeepAliveOnProductionSnapshot -v ./proxy/
+//	CGO_ENABLED=1 go test -run TestKeepAliveOnProductionSnapshot -v ./keepalive/
 //
 // What it does NOT model, stated because a projection that hides its assumptions is worth
 // nothing:
@@ -95,7 +92,7 @@ func TestKeepAliveOnProductionSnapshot(t *testing.T) {
 			name = fmt.Sprintf("X=%ds_K=%d_BLANKET", arm.idle, arm.maxPings)
 		}
 		t.Run(name, func(t *testing.T) {
-			r := replay(t, rows, table, CachePolicy{
+			r := replay(t, rows, table, Policy{
 				KeepAlive: true, Idle: time.Duration(arm.idle) * time.Second,
 				MaxPings: arm.maxPings, MaxUSDPerPing: 0.25,
 				MinPrefixTokens: arm.minPrefix,
@@ -106,7 +103,7 @@ func TestKeepAliveOnProductionSnapshot(t *testing.T) {
 			t.Logf("  addressable misses %d worth $%.2f | wasted pings (gap would have hit) %d worth $%.2f"+
 				" | skipped by a gate %d | live sessions: peak %d of %d bound, %d at end",
 				r.addressable, r.addressableUSD, r.wastedPings, r.wastedUSD, r.skipped,
-				r.peakLive, maxKeepAliveSessions, r.liveAtEnd)
+				r.peakLive, MaxSessions, r.liveAtEnd)
 			t.Logf("  per session: %d pinged | %d net positive | %d net NEGATIVE costing $%.2f in total"+
 				" | worst single session $%.4f",
 				r.sessions, r.sessionsWinning, r.sessionsLosing, -r.losingUSD, r.worstSessionUSD)
@@ -134,13 +131,17 @@ type replayResult struct {
 }
 
 // replay drives the shipped keeper over the snapshot's timeline.
-func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanket bool) replayResult {
+func replay(t *testing.T, rows []snapRow, table *Table2, pol Policy, blanket bool) replayResult {
 	t.Helper()
 	var out replayResult
-	// A recorder, because retention requires an audit sink. The zero value discards its events,
-	// which is what this replay wants: the decision function is under test, not the writer.
-	h := &Handler{opts: Options{Prices: table}, limiter: NewLimiter(Limits{}), rec: &dash.Recorder{}}
-	k := newKeeper(h)
+	// No limiter (Spare nil): limits are off, as the header says. No audit-sink gate either —
+	// that is the host's, and the replay hands the keeper the policy a host with a sink resolves.
+	simNow := time.UnixMilli(rows[0].ts).UTC()
+	fd := newFake(nil)
+	// Inline dispatch: a five-day replay must be deterministic, and a goroutine per ping would
+	// need synchronising against the clock the test is driving.
+	k := New(Options{Dispatcher: fd, Prices: proxyPricer{table},
+		Now: func() time.Time { return simNow }, Go: func(f func()) { f() }})
 	// The blanket arms lift the first-request gate by pre-seeding every session's turn counter,
 	// which is the only way to compare "gated" against "blanket" through the SAME code path.
 	seedTurn := func(key string) {
@@ -150,12 +151,6 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanke
 			k.mu.Unlock()
 		}
 	}
-	// Inline dispatch: a five-day replay must be deterministic, and a goroutine per ping would
-	// need synchronising against the clock the test is driving.
-	k.dispatch = k.fire
-
-	simNow := time.UnixMilli(rows[0].ts).UTC()
-	k.now = func() time.Time { return simNow }
 
 	// The provider, simulated: an entry lives 5 minutes from the last touch (a real request or
 	// a ping), which is the documented rule the whole mechanism rests on.
@@ -179,8 +174,8 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanke
 
 	// prefixOf is what a ping would re-read, and therefore what it costs: the size of the
 	// entry the previous request established.
-	k.send = func(j pingJob, body []byte) (Usage, int, error) {
-		e := entries[j.session]
+	rawSend := func(j DispatchRequest) (Usage, int, error) {
+		e := entries[j.Key.Session]
 		if e == nil {
 			return Usage{}, http.StatusOK, nil
 		}
@@ -197,23 +192,31 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanke
 	// The ping's cost, attributed to the session that caused it, read out of the entry the
 	// shipped record1 just updated. Wrapping the sender is the only place both facts are in
 	// hand at once.
-	rawSend := k.send
-	k.send = func(j pingJob, body []byte) (Usage, int, error) {
-		u, st, err := rawSend(j, body)
-		if price, ok := table.Price(nil, entryModel[j.session]); ok {
-			sessionOf(j.session).ping += float64(u.CacheRead)*price.CacheRead +
+	fd.setResp(func(j DispatchRequest) (Usage, int, error) {
+		u, st, err := rawSend(j)
+		if price, ok := table.Price(nil, entryModel[j.Key.Session]); ok {
+			sessionOf(j.Key.Session).ping += float64(u.CacheRead)*price.CacheRead +
 				float64(u.CacheWrite)*price.CacheWrite + float64(u.Output)*price.Output
 		}
 		return u, st, err
-	}
+	})
 
-	// One tenancy per tenant id: the keeper keys its map on (tenant, session), so a replay that
-	// records under "" and arrives under the real id never matches — which is exactly the bug
-	// this line fixes, and it reported zero conversions rather than an error.
-	tenancies := map[string]*Tenancy{}
-	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
-	req.Header.Set("Authorization", "Bearer replay")
-	up := upstream{base: "http://replay", path: "/v1/messages"}
+	// The policy the proxy's host resolves for each row: the account's own, except that an
+	// OpenAI row runs on the OpenAI cadence. No strategy and no override is armed in a replay,
+	// so those layers are the identity and this is the whole of it.
+	policyFor := func(p bschemas.ModelProvider) Policy {
+		if p != bschemas.OpenAI {
+			return pol
+		}
+		op := pol
+		op.Idle = op.OpenAIIdle
+		if op.Idle <= 0 {
+			op.Idle = modelinfo.OpenAIDefaultKeepAliveIdle
+		}
+		return op
+	}
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer replay")
 
 	for i := range rows {
 		r := &rows[i]
@@ -221,19 +224,22 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanke
 		at := time.UnixMilli(r.ts).UTC()
 		// Advance the clock to this request, sweeping exactly as the ticker would.
 		for simNow.Before(at) {
-			next := simNow.Add(keepAliveTick)
+			next := simNow.Add(tick)
 			if next.After(at) {
 				next = at
 			}
 			simNow = next
-			k.sweep(simNow)
+			k.Sweep(simNow)
 		}
 		simNow = at
 
 		if n := k.Stats().Live; n > out.peakLive {
 			out.peakLive = n
 		}
-		pings, _, _ := k.arrive(r.tenant, r.session, "")
+		// Keyed on the real (tenant, session): a replay that records under "" and arrives under
+		// the real id never matches — which reported zero conversions rather than an error.
+		key := Key{Tenant: r.tenant, Session: r.session}
+		pings, _, _ := k.Arrive(key)
 		e := entries[r.session]
 		addressable := r.reason == "ttl_expiry" && r.cacheWrite > 0
 		if addressable {
@@ -272,14 +278,12 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanke
 		// recorded columns.
 		body := snapBody(r)
 		usageOK := r.cacheRead > 0 || r.cacheWrite > 0
-		tn := tenancies[r.tenant]
-		if tn == nil {
-			tn = &Tenancy{ID: r.tenant, Cache: pol}
-			tenancies[r.tenant] = tn
-		}
-		seedTurn(kaKey(r.tenant, r.session))
-		k.record(tn, r.session, "", at, body, up, req, providerOf(r.provider), "/v1/messages",
-			http.StatusOK, Usage{CacheRead: r.cacheRead, CacheWrite: r.cacheWrite}, usageOK)
+		seedTurn(key.id())
+		prov := providerOf(r.provider)
+		k.Record(Record{Key: key, StartedAt: at, Body: body, Provider: prov,
+			Endpoint: "http://replay", Route: "/v1/messages", Status: http.StatusOK,
+			Usage: Usage{CacheRead: r.cacheRead, CacheWrite: r.cacheWrite}, UsageOK: usageOK,
+			Policy: policyFor(prov), Header: hdr, Hold: fd.hold(key)})
 	}
 	// Cost is accumulated by the shipped record1, from the shipped Pricer.
 	out.pings = k.pings.Load()
@@ -287,7 +291,7 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanke
 	out.pingUSD = k.Stats().SpentUSD
 	out.liveAtEnd = k.Stats().Live
 	if out.wastedPings > 0 {
-		out.wastedUSD = out.pingUSD * float64(out.wastedPings) / float64(max64(out.pings, 1))
+		out.wastedUSD = out.pingUSD * float64(out.wastedPings) / float64(max(out.pings, 1))
 	}
 	for id, l := range perSession {
 		if l.ping == 0 && l.saved == 0 {

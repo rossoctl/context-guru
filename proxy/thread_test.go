@@ -60,16 +60,15 @@ func TestKeeperHoldsOneEntryPerThread(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			k, _, clock := testKeeper(t, Limits{})
+			k, fs, clock := testKeeper(t, Limits{})
 			var mu sync.Mutex
-			sent := map[string]string{} // thread -> the body its ping carried
-			k.send = func(j pingJob, body []byte) (Usage, int, error) {
+			var sent []string // the body each ping carried; the wire does not name the thread
+			fs.fn = func(_ *http.Request, body []byte) (Usage, int, error) {
 				mu.Lock()
-				sent[j.thread] = string(body)
+				sent = append(sent, string(body))
 				mu.Unlock()
 				return Usage{CacheRead: 48576, Output: 1}, http.StatusOK, nil
 			}
-			k.dispatch = k.fire
 			pol := kaPolicy()
 			pol.MinPrefixTokens = 1000
 			pol.OpenAIIdle = 280 * time.Second
@@ -100,16 +99,25 @@ func TestKeeperHoldsOneEntryPerThread(t *testing.T) {
 			if live := k.LiveSessionKeys(); len(live) != 1 || live[0] != "sess" {
 				t.Errorf("LiveSessionKeys = %v, want the session once", live)
 			}
-			if n := k.sweep(clock.advance(300 * time.Second)); n != 2 {
+			if n := k.Sweep(clock.advance(300 * time.Second)); n != 2 {
 				t.Fatalf("sweep fired %d pings, want 2", n)
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			if !strings.Contains(sent[""], "MAIN-THREAD") {
-				t.Errorf("the main thread's ping did not carry its own body: %.80q", sent[""])
+			// Two pings, one carrying each thread's own body and not the other's.
+			var mainPings, subPings int
+			for _, b := range sent {
+				m, s := strings.Contains(b, "MAIN-THREAD"), strings.Contains(b, "SUBAGENT")
+				switch {
+				case m && !s:
+					mainPings++
+				case s && !m:
+					subPings++
+				}
 			}
-			if !strings.Contains(sent["a:S"], "SUBAGENT") {
-				t.Errorf("the subagent's ping did not carry its own body: %.80q", sent["a:S"])
+			if len(sent) != 2 || mainPings != 1 || subPings != 1 {
+				t.Errorf("pings carried %d main-thread and %d subagent bodies of %d sent, want one "+
+					"of each: each thread's ping must carry its own body", mainPings, subPings, len(sent))
 			}
 		})
 	}
@@ -403,7 +411,7 @@ func TestKeeperSurvivesASideRequestsArrival(t *testing.T) {
 	if got := k.Stats().Live; got != 1 {
 		t.Fatalf("after the side request's arrival: %d live entries, want 1 (the main thread survives)", got)
 	}
-	if n := k.sweep(clock.advance(300 * time.Second)); n != 1 {
+	if n := k.Sweep(clock.advance(300 * time.Second)); n != 1 {
 		t.Fatalf("sweep fired %d pings, want 1 (the main thread, still live)", n)
 	}
 }
