@@ -2,6 +2,7 @@ package offload
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -47,6 +48,7 @@ type ExtractRide struct {
 	econ                                             bool
 	horizon                                          int
 	expectRemoval                                    float64
+	applyCold, earlyApply, calibrated                bool
 	maxRatio, minVerbatim                            float64
 	allowThinkingStrip                               bool
 	mode                                             markerMode
@@ -70,6 +72,9 @@ type extractRideConfig struct {
 	Econ               *bool   `yaml:"econ"`
 	HorizonTurns       int     `yaml:"horizon_turns"`
 	ExpectedRemoval    float64 `yaml:"expected_removal"`
+	ApplyMode          string  `yaml:"apply_mode"`
+	EarlyApply         *bool   `yaml:"early_apply"`
+	CalibratedHorizon  bool    `yaml:"calibrated_horizon"`
 	ExtractMaxRatio    float64 `yaml:"extract_max_ratio"`
 	MinVerbatim        float64 `yaml:"min_verbatim"`
 	AllowThinkingStrip bool    `yaml:"allow_thinking_strip"`
@@ -140,6 +145,14 @@ func newExtractRide(raw []byte) (components.Component, error) {
 	if cfg.PreExpirySeconds > 0 {
 		e.preExpiry = time.Duration(cfg.PreExpirySeconds) * time.Second
 	}
+	switch strings.ToLower(strings.TrimSpace(cfg.ApplyMode)) {
+	case "", "immediate":
+	case "cold":
+		e.applyCold = true
+	default:
+		return nil, fmt.Errorf("extract_llm_ride: apply_mode %q must be immediate or cold", cfg.ApplyMode)
+	}
+	e.earlyApply, e.calibrated = bfn(cfg.EarlyApply, true), cfg.CalibratedHorizon
 	e.expectRemoval = cfg.ExpectedRemoval
 	if e.expectRemoval <= 0 || e.expectRemoval > 1 {
 		e.expectRemoval = 0.6
@@ -231,6 +244,13 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 	}()
 
 	var cands []sweepCand
+	var held []rideHeld
+	var pend map[string]ridePend
+	rewrite := false
+	if e.applyCold {
+		pend = ridePendLoad(c)
+		rewrite = rideCompacted(c, len(req.Input)) || c.ColdCache || c.CachePhase(0) == components.CachePhaseCold
+	}
 	for _, i := range toolIndices(req) {
 		msg := &req.Input[i]
 		if !schema.Rewritable(*msg) {
@@ -256,6 +276,10 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 			}
 			continue
 		}
+		if p, isPend := pend[id]; isPend {
+			held = append(held, rideHeld{I: i, ID: id, Content: content, Action: p.A, Text: p.T})
+			continue
+		}
 		if isKeptVerbatim(c, id) || schema.TextTokens(content) < e.minTokens {
 			continue
 		}
@@ -278,6 +302,15 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 			toolID = *msg.ChatToolMessage.ToolCallID
 		}
 		cands = append(cands, sweepCand{i: i, content: content, id: id, toolID: toolID})
+	}
+	if e.applyCold {
+		e.settle(req, rep, c, held, rewrite, &keys, &changed)
+		held = nil // settled or still waiting; either way not applied again this request
+		if rewrite && len(cands) > 0 {
+			// The entry is gone or the transcript was rewritten: an ask now would write, not read.
+			rep.Gate("ride_no_ask_on_rewrite")
+			return keys, nil
+		}
 	}
 	if len(cands) == 0 {
 		return keys, nil
@@ -397,6 +430,31 @@ func (e *ExtractRide) Offload(req *bschemas.BifrostChatRequest, rep *components.
 			}
 		}
 	}
+	if e.applyCold {
+		// Store the answer; apply it only if the removal repays a rewrite now, else at the next
+		// request that rewrites the cache anyway.
+		var fresh []rideHeld
+		pend = ridePendLoad(c)
+		for _, r := range ok {
+			cd := cands[r.k]
+			h := rideHeld{I: cd.i, ID: cd.id, Content: cd.content, Action: r.action, Text: r.text}
+			pend[cd.id] = ridePend{A: r.action, T: r.text}
+			fresh = append(fresh, h)
+		}
+		ridePendSave(c, pend)
+		total := e.settle(req, rep, c, fresh, false, &keys, &changed)
+		if call.rec.Component != "" {
+			call.rec.Accepted = len(ok) > 0
+			call.rec.SavedTokens = total
+			if len(ok) == 0 {
+				call.rec.Rejection = "triage returned no applicable removal"
+			} else if total == 0 {
+				call.rec.Rejection = "held: the removal is applied at the next cold or rewriting request"
+			}
+			rep.Calls = append(rep.Calls, call.rec)
+		}
+		return keys, nil
+	}
 	if e.econ && !preExpiry && len(ok) > 0 {
 		kept := e.affordable(req, c, cands, ok)
 		if pruned := len(ok) - len(kept); pruned > 0 {
@@ -481,7 +539,7 @@ func (e *ExtractRide) rideNet(req *bschemas.BifrostChatRequest, c *components.Ct
 	if after < 1 {
 		after = 1
 	}
-	turns := e.horizon
+	turns := e.horizonFor(req)
 	if c != nil && c.CtxWindow > 0 {
 		if t := turnsRemainingAfter(reqNow, after, modelTurns(req), c.CtxWindow); t < turns {
 			turns = t
@@ -647,6 +705,12 @@ func init() {
 			Hint: "Turns a removal is credited for in the affordability test."},
 		{Key: "expected_removal", Type: components.FieldFloat, Default: 0.6,
 			Hint: "Share of the pending candidate mass the pre-ask economic test assumes will be removed."},
+		{Key: "apply_mode", Type: components.FieldEnum, Default: "immediate", Options: []string{"immediate", "cold"},
+			Hint: "immediate = apply the answer on the turn it arrives. cold = ask while the prefix is warm (a cache read), store the answer, and apply it only on a request that rewrites the cache anyway (entry expired, client compaction), or earlier when the removal is expected to repay the rewrite (early_apply)."},
+		{Key: "early_apply", Type: components.FieldBool, Default: true,
+			Hint: "In cold mode, also apply held decisions on a warm request when saved tokens x horizon exceed the cost of one whole-conversation rewrite."},
+		{Key: "calibrated_horizon", Type: components.FieldBool,
+			Hint: "Credit a removal for the expected remaining requests (22 - t/2, between 11 and 22; fitted on SWE-bench Claude Code sessions) instead of horizon_turns."},
 		{Key: "extract_max_ratio", Type: components.FieldFloat, Default: 0.5,
 			Hint: "An extract must be at most this share of the original's tokens."},
 		{Key: "min_verbatim", Type: components.FieldFloat, Default: 0.8,
@@ -655,4 +719,137 @@ func init() {
 			Hint: "Ask even on models that drop earlier thinking blocks when a non-tool-result message is appended (the ask then re-writes the cache)."},
 		markerModeField(),
 	})
+}
+
+// Pending decisions (apply_mode: cold). The ask is made while the prefix is warm, so it is a cache read;
+// its answer is stored here and applied only on a request that rewrites the cache anyway (the entry has
+// expired, or the client compacted), or earlier when the removal is expected to repay the rewrite.
+type rideHeld struct {
+	I       int
+	ID      string
+	Content string
+	Action  string
+	Text    string
+}
+
+type ridePend struct {
+	A string `json:"a"`
+	T string `json:"t,omitempty"`
+}
+
+func ridePendKey(c *components.Ctx) string {
+	return store.SweepKeepPrefix + "ride-pend:" + thread.Key(c.Session, c.Thread)
+}
+
+func ridePendLoad(c *components.Ctx) map[string]ridePend {
+	m := map[string]ridePend{}
+	if b, ok := c.Store.Get(ridePendKey(c)); ok {
+		_ = json.Unmarshal(b, &m)
+	}
+	return m
+}
+
+func ridePendSave(c *components.Ctx, m map[string]ridePend) {
+	if b, err := json.Marshal(m); err == nil {
+		c.Store.Put(ridePendKey(c), b)
+	}
+}
+
+func rideLenKey(c *components.Ctx) string {
+	return store.SweepKeepPrefix + "ride-len:" + thread.Key(c.Session, c.Thread)
+}
+
+// rideCompacted reports whether the transcript is shorter than on the previous request of this thread
+// (the client compacted), which forces a full rewrite whatever we do. It records the current length.
+func rideCompacted(c *components.Ctx, n int) bool {
+	prev := -1
+	if b, ok := c.Store.Get(rideLenKey(c)); ok {
+		prev, _ = strconv.Atoi(string(b))
+	}
+	c.Store.Put(rideLenKey(c), []byte(strconv.Itoa(n)))
+	return prev > 0 && n < prev
+}
+
+// horizonFor is the number of later requests a removal is credited for. A configured horizon_turns is
+// used as is. With calibrated_horizon it is the expected number of requests still to come, fitted on 169
+// real SWE-bench Claude Code sessions (opus-5; mean remaining requests 19 at request 5, 15 at 10, 12 at
+// 15, 11 at 20 and beyond): 22 - t/2, held between 11 and 22. It is a property of that workload.
+func (e *ExtractRide) horizonFor(req *bschemas.BifrostChatRequest) int {
+	if !e.calibrated {
+		return e.horizon
+	}
+	h := 22 - modelTurns(req)/2
+	if h < 11 {
+		h = 11
+	}
+	return h
+}
+
+// settle applies the held decisions when this request rewrites the cache anyway (rewrite) or when the
+// removal is expected to repay the rewrite within the horizon (early). Returns the tokens removed.
+func (e *ExtractRide) settle(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx,
+	held []rideHeld, rewrite bool, keys *[]string, changed *int) int {
+
+	if len(held) == 0 {
+		return 0
+	}
+	reason := "cold"
+	if !rewrite {
+		saved := 0
+		for _, h := range held {
+			saved += schema.TextTokens(h.Content) - rideProjectedTokens(h)
+		}
+		if !e.earlyApply || e.rideNet(req, c, saved) <= 0 {
+			rep.GateN("ride_held_waiting", len(held))
+			return 0
+		}
+		reason = "early"
+	}
+	pend := ridePendLoad(c)
+	total := 0
+	val := savedTokenValue(c)
+	for _, h := range held {
+		key, got, done := e.applyDecision(req, rep, c, h)
+		if !done {
+			continue
+		}
+		delete(pend, h.ID)
+		if got > 0 {
+			total += got
+			metrics.RecordExtractionSaving(rep.Component, got)
+			metrics.RecordExtractionValue(rep.Component, float64(got)*val.perToken)
+		}
+		rep.Event("ride_applied_" + reason)
+		*changed++
+		if key != "" {
+			*keys = append(*keys, key)
+		}
+	}
+	ridePendSave(c, pend)
+	return total
+}
+
+func rideProjectedTokens(h rideHeld) int {
+	if h.Action == extract.RidePark {
+		return schema.TextTokens(sweepDescriptor(h.Content))
+	}
+	return schema.TextTokens(h.Text)
+}
+
+// applyDecision removes one output, freezes the decision, and returns the tokens it saved.
+func (e *ExtractRide) applyDecision(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx, h rideHeld) (string, int, bool) {
+	key, done := rideApply(c, rep, e.mode, &req.Input[h.I], h.Content, h.Action, h.Text, false)
+	if !done {
+		return "", 0, false
+	}
+	proj := h.Text
+	if h.Action == extract.RidePark {
+		proj = sweepDescriptor(h.Content)
+	}
+	putResult(c, h.ID, proj, h.Action)
+	if debugExtractLLM(c) {
+		logging.From(c.Ctx).Debug("cg.ride.decision", "session", c.Session, "action", h.Action,
+			"tokens_before", schema.TextTokens(h.Content), "projected", proj)
+	}
+	return key, schema.TextTokens(h.Content) - schema.TextTokens(schema.MessageText(req.Input[h.I])), true
 }

@@ -27,6 +27,12 @@ triggers it and in the answer shape.
   (pending candidate tokens), `trigger_pending` (pending candidate count), `trigger_fill_min` /
   `trigger_fill_max` (share of the model window), `trigger_pre_expiry` (the pre-expiry window). With no
   size/pending/fill key set, 4,000 tokens or 3 candidates apply.
+- `apply_mode: cold` splits asking from applying. The ask is made while the prefix is warm (a cache read);
+  the answer is stored per thread and applied only on a request that rewrites the cache anyway (the entry
+  expired, or the client compacted the transcript), or earlier when the removal is expected to repay one
+  rewrite (`early_apply`, default on). Held decisions are never re-asked. `calibrated_horizon: true`
+  credits a removal for the expected remaining requests (22 - t/2, between 11 and 22, fitted on SWE-bench
+  Claude Code sessions) instead of `horizon_turns`. Default `apply_mode` is `immediate`.
 - `econ: true` (default) tests the ask before it is made: a share of the pending mass (`expected_removal`,
   0.6) is credited for at most `horizon_turns` turns, against one write of the whole conversation that
   remains (an edit anywhere in history leaves only the system prompt readable when the client marks only the

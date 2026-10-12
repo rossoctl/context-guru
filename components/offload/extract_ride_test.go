@@ -266,3 +266,102 @@ func TestRideAutoRoleIsSystemOnlyForMeasuredModels(t *testing.T) {
 		t.Error("an explicit user role must win over the allow-list")
 	}
 }
+
+func coldCtx(session string, asker components.PrefixAsker, st store.Store, cold bool) *components.Ctx {
+	c := rideCtx(session, asker, st)
+	c.MaxCachedIdx = -1
+	if cold {
+		c.ColdCache, c.IdleMs = true, 10*60*1000
+	}
+	return c
+}
+
+func TestRideColdModeHoldsThenAppliesOnAColdRequestWithoutAsking(t *testing.T) {
+	asker := &rideAsker{script: map[int]string{0: `"action":"park"`, 1: `"action":"extract","extract":"ERROR payments timeout at gateway.go:101"`}}
+	asker.cacheRead = 30000
+	// early_apply off: only a rewriting request may apply.
+	e := newRide(t, "apply_mode: cold\nearly_apply: false\nmin_inventory: 2\n")
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	warm := rideReq(4)
+	orig := schema.MessageText(warm.Input[1])
+	rep := &components.Report{Component: "extract_llm_ride"}
+	if _, err := e.Offload(warm, rep, coldCtx("cold-a", asker, st, false)); err != nil {
+		t.Fatal(err)
+	}
+	if asker.calls != 1 || schema.MessageText(warm.Input[1]) != orig || rep.Gates["ride_held_waiting"] == 0 {
+		t.Fatalf("a warm ask must be held, not applied: asks %d gates %v", asker.calls, rep.Gates)
+	}
+	if len(rep.Calls) != 1 || rep.Calls[0].CacheRead != 30000 || !strings.Contains(rep.Calls[0].Rejection, "held") {
+		t.Errorf("the held ask must still be recorded in full: %+v", rep.Calls)
+	}
+	// a later warm request: still held, no new ask for the same outputs
+	w2 := rideReq(4)
+	e.Offload(w2, &components.Report{Component: "extract_llm_ride"}, coldCtx("cold-a", asker, st, false))
+	if schema.MessageText(w2.Input[1]) != orig {
+		t.Error("still warm: nothing may be applied")
+	}
+	// the cold request applies the stored decisions and makes no call
+	cold := rideReq(4)
+	rep = &components.Report{Component: "extract_llm_ride"}
+	callsBefore := asker.calls
+	e.Offload(cold, rep, coldCtx("cold-a", asker, st, true))
+	if asker.calls != callsBefore || rep.Events["ride_applied_cold"] != 2 ||
+		!strings.Contains(schema.MessageText(cold.Input[1]), "<<cg:") || !strings.Contains(schema.MessageText(cold.Input[3]), "gateway.go:101") {
+		t.Fatalf("cold request must apply both held decisions without asking: calls %d events %v", asker.calls, rep.Events)
+	}
+	// and afterwards it is an ordinary frozen replay, byte for byte
+	next := rideReq(4)
+	e.Offload(next, &components.Report{Component: "extract_llm_ride"}, coldCtx("cold-a", asker, st, false))
+	for i := range cold.Input {
+		if schema.MessageText(cold.Input[i]) != schema.MessageText(next.Input[i]) {
+			t.Fatalf("message %d differs after the cold apply", i)
+		}
+	}
+}
+
+func TestRideColdModeAppliesEarlyOnlyWhenTheRewriteIsRepaid(t *testing.T) {
+	for _, tc := range []struct {
+		yaml  string
+		early bool
+	}{
+		{"apply_mode: cold\nmin_inventory: 2\nhorizon_turns: 1\neconl: x\n", false},
+		{"apply_mode: cold\nmin_inventory: 2\nhorizon_turns: 30\n", true},
+	} {
+		tc.yaml = strings.Replace(tc.yaml, "econl: x\n", "econ: false\n", 1)
+		asker := &rideAsker{script: map[int]string{0: `"action":"park"`, 1: `"action":"park"`, 2: `"action":"park"`}}
+		asker.cacheRead = 30000
+		req := rideReq(4)
+		rep := &components.Report{Component: "extract_llm_ride"}
+		newRide(t, tc.yaml).Offload(req, rep, coldCtx("cold-b-"+tc.yaml, asker, store.NewMemory(store.Options{MaxEntries: 400}), false))
+		applied := strings.Contains(schema.MessageText(req.Input[1]), "<<cg:")
+		if applied != tc.early {
+			t.Errorf("%q: early apply = %v, want %v (gates %v)", tc.yaml, applied, tc.early, rep.Gates)
+		}
+	}
+}
+
+func TestRideColdModeAppliesWhenTheClientCompacts(t *testing.T) {
+	asker := &rideAsker{script: map[int]string{0: `"action":"park"`}}
+	asker.cacheRead = 30000
+	e := newRide(t, "apply_mode: cold\nearly_apply: false\nmin_inventory: 2\n")
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	e.Offload(rideReq(5), &components.Report{Component: "extract_llm_ride"}, coldCtx("cold-c", asker, st, false))
+	short := rideReq(4) // fewer messages than the previous request of this thread
+	rep := &components.Report{Component: "extract_llm_ride"}
+	e.Offload(short, rep, coldCtx("cold-c", asker, st, false))
+	if rep.Events["ride_applied_cold"] == 0 {
+		t.Errorf("a shorter transcript is a rewrite: the held decisions must apply (gates %v events %v)", rep.Gates, rep.Events)
+	}
+}
+
+func TestRideCalibratedHorizon(t *testing.T) {
+	e := newRide(t, "calibrated_horizon: true\n")
+	for turns, want := range map[int]int{2: 21, 10: 17, 20: 12, 40: 11} {
+		if got := e.horizonFor(rideReq(turns)); got != want {
+			t.Errorf("horizon at %d turns = %d, want %d", turns, got, want)
+		}
+	}
+	if newRide(t, "horizon_turns: 7\n").horizonFor(rideReq(3)) != 7 {
+		t.Error("an explicit horizon is used as given")
+	}
+}
