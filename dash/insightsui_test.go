@@ -66,3 +66,41 @@ func TestInsightsAssetsAreServedAndVersioned(t *testing.T) {
 		}
 	}
 }
+
+// TestASelectionChangeDoesNotRebuildTheView pins a bug a user found by hand: every tick rebuilt
+// #insights-body, so each one collapsed every open fold, dropped focus, and scrolled the reader
+// down to the command block. Selecting a second item then meant re-opening the fold you were
+// working in, which makes multi-select unusable — the reported symptom exactly.
+//
+// Asserted on the source rather than by driving a DOM, because the defect is structural: the
+// selection path must not call the function that clears the host. A renderer test would need a
+// browser; this needs only the shape of the call graph.
+func TestASelectionChangeDoesNotRebuildTheView(t *testing.T) {
+	js := readUI(t, "ui/insights.js")
+
+	// insRender is the only thing allowed to replace the DOM, and only the loader may call it.
+	// Two of the three matches are its own definition and the comment explaining this rule.
+	if n := strings.Count(js, "insRender()"); n > 3 {
+		t.Errorf("insRender() appears %d times. It clears #insights-body, so anything on the "+
+			"selection path that calls it collapses every open fold and moves focus — route the "+
+			"change through insSyncSelection instead", n)
+	}
+	// The selection path goes through the in-place sync.
+	if !strings.Contains(js, "function insSetMany(names, on) {") ||
+		!strings.Contains(js, "insSyncSelection();") {
+		t.Error("insSetMany no longer routes through insSyncSelection, so a tick rebuilds the view")
+	}
+	// The review has its own host, or it cannot be refreshed without rebuilding its parent.
+	for _, id := range []string{"insights-review", "insights-actions"} {
+		if !strings.Contains(js, id) {
+			t.Errorf("no %q host; the review and the buttons depend on the selection and need to "+
+				"re-render without taking the inventory with them", id)
+		}
+	}
+	// Focus is only restored when it was already inside the review. Restoring it unconditionally
+	// would steal it from the checkbox the reader just ticked — the same bug, reversed.
+	if !strings.Contains(js, "host.contains(document.activeElement)") {
+		t.Error("the review re-render does not check where focus was, so it will either lose it " +
+			"or steal it")
+	}
+}

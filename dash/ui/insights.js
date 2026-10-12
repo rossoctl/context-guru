@@ -155,6 +155,7 @@ function insItemTable(rows, opts) {
         onchange: (e) => { insSetMany([it.name], e.target.checked); },
       });
       cb.checked = !!insSel[it.name];
+      insBoxes.push({ el: cb, names: [it.name] });
       cells.push(el('td', {}, cb));
     } else {
       cells.push(el('td', {}, el('span', {
@@ -212,9 +213,55 @@ function insSessionCell(it) {
   return sorted.length + ' session' + (sorted.length === 1 ? '' : 's');
 }
 
+/* A SELECTION CHANGE MUST NOT REBUILD THE PAGE.
+ *
+ * This used to call insRender(), which clears #insights-body and builds it again — so every ticked
+ * box collapsed all the open folds, moved focus to the top, and scrolled the review into view.
+ * Selecting a second item then meant re-opening the fold you were working in, which makes
+ * multi-select unusable and was reported as exactly that.
+ *
+ * So the two things that actually depend on the selection are updated in place: the checkboxes
+ * that mirror it (an owner's box is checked or indeterminate from its children) and the review
+ * block at the bottom. Everything else — the folds, the tables, the scroll position, the focused
+ * element — is left exactly as the reader left it.
+ */
 function insSetMany(names, on) {
   for (const n of names) { if (on) insSel[n] = true; else delete insSel[n]; }
-  insRender();
+  insSyncSelection();
+}
+
+/* Every checkbox registers itself here with the names it governs, so a selection change can
+ * refresh the controls without knowing how the page is laid out. Rebuilt by insRender, which is
+ * the only thing that replaces the DOM. */
+let insBoxes = [];
+
+function insSyncSelection() {
+  for (const b of insBoxes) {
+    const on = b.names.filter((n) => insSel[n]).length;
+    if (b.names.length === 1) {
+      b.el.checked = on === 1;
+    } else {
+      /* An owner's box is checked only when all of its children are, and indeterminate while some
+       * are — the same three-state convention a file tree uses, so a partial selection does not
+       * read as "none". */
+      b.el.checked = on > 0 && on === b.names.length;
+      b.el.indeterminate = on > 0 && on < b.names.length;
+    }
+  }
+  insRenderActions();
+  const host = document.getElementById('insights-review');
+  if (!host) return;
+  /* Replacing the review would drop focus if it currently sits inside it, and the browser would
+   * then move focus to the document — scrolling the reader away from the box they just ticked.
+   * Only restore focus that was ALREADY in here: stealing it from a checkbox would be the same
+   * bug in the other direction. */
+  const refocus = host.contains && host.contains(document.activeElement);
+  clear(host);
+  insRenderReview(host);
+  if (refocus) {
+    const pre = host.querySelector('pre.copyblock');
+    if (pre) pre.focus();
+  }
 }
 
 function insOwnerBlock(o, children, opts) {
@@ -235,6 +282,7 @@ function insOwnerBlock(o, children, opts) {
     const on = pickable.filter((n) => insSel[n]).length;
     cb.checked = on > 0 && on === pickable.length;
     cb.indeterminate = on > 0 && on < pickable.length;
+    insBoxes.push({ el: cb, names: pickable });
     head.appendChild(cb);
   }
   head.appendChild(el('span', { class: 'ins-type', text: opts.type }));
@@ -265,6 +313,30 @@ function insOwnerBlock(o, children, opts) {
   return el('div', { class: 'ins-own' + (opts.keep ? ' keep' : '') }, head, body);
 }
 
+/* The buttons, in their own host so a selection change can refresh their disabled state without
+ * rebuilding the inventory above them. `Clear` goes through insSetMany too: resetting the object
+ * and re-rendering would collapse every fold, which is the bug this split exists to fix. */
+function insRenderActions() {
+  const host = document.getElementById('insights-actions');
+  if (!host || !insDoc) return;
+  clear(host);
+  const removeSet = (insDoc.items || []).filter((i) => i.verdict === 'remove');
+  const chosen = Object.keys(insSel);
+  host.appendChild(el('div', { class: 'actions' },
+    el('button', {
+      type: 'button', class: 'primary',
+      disabled: removeSet.length === 0,
+      text: 'Auto-select recommended (' + removeSet.length + ')',
+      onclick: () => { insSel = {}; insSetMany(removeSet.map((i) => i.name), true); },
+    }),
+    el('button', {
+      type: 'button',
+      disabled: chosen.length === 0,
+      text: chosen.length ? 'Clear (' + chosen.length + ')' : 'Clear',
+      onclick: () => { insSetMany(chosen, false); },
+    })));
+}
+
 function insRenderReview(root) {
   const plan = insPlan();
   const box = el('div', { class: 'ins-review' });
@@ -283,6 +355,10 @@ function insRenderReview(root) {
     return;
   }
 
+  /* tabindex so the block is reachable and selectable by keyboard. It is the only focusable thing
+   * the review builds, which is why rebuilding the review used to STEAL focus from the checkbox
+   * the reader had just ticked and scroll it into view — the other half of the multi-select
+   * complaint. Focus is restored below if it was ours to begin with. */
   box.appendChild(el('pre', { class: 'copyblock', tabindex: '0', text: insCommandText(plan) }));
 
   /* The itemised decision. The command alone is not a review: `claude plugin disable superpowers`
@@ -361,6 +437,8 @@ function insRender() {
   const root = document.getElementById('insights-body');
   if (!root || !insDoc) return;
   clear(root);
+  /* The registry describes the DOM that is about to be discarded. */
+  insBoxes = [];
 
   /* The window strip. Unlike the static report's chips, these RE-QUERY — a served page can, and
    * that is the whole reason this surface is worth building. */
@@ -497,22 +575,11 @@ function insRender() {
 
   /* The actions, then the review. Below the inventory, because this is the consequence of what the
    * reader just ticked — above it, it read as a header describing nothing yet. */
-  const acts = el('div', { class: 'actions' },
-    el('button', {
-      type: 'button', class: 'primary',
-      disabled: removeSet.length === 0,
-      text: 'Auto-select recommended (' + removeSet.length + ')',
-      onclick: () => { insSel = {}; insSetMany(removeSet.map((i) => i.name), true); },
-    }),
-    el('button', {
-      type: 'button',
-      disabled: Object.keys(insSel).length === 0,
-      text: 'Clear',
-      onclick: () => { insSel = {}; insRender(); },
-    }));
   root.appendChild(el('h3', { text: 'What you decided to remove' }));
-  root.appendChild(acts);
-  insRenderReview(root);
+  root.appendChild(el('div', { id: 'insights-actions' }));
+  root.appendChild(el('div', { id: 'insights-review' }));
+  insRenderActions();
+  insRenderReview(document.getElementById('insights-review'));
 
   /* The self-exclusion footnote. A reader who counts more skills in /plugin than here must be able
    * to find out why; "the tool hid its own cost" is a worse look than the cost. */
