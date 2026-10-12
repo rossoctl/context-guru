@@ -224,10 +224,21 @@ func (t *Tracker) Observe(tenant, session, threadID string, provider bschemas.Mo
 	if t == nil {
 		return Observation{}
 	}
-	return t.observe(tenant, session, threadID, provider, body)
+	return t.observe(tenant, session, threadID, body, func() []bschemas.ChatMessage { return apply.NormalizeMessages(provider, body) })
 }
 
-func (t *Tracker) observe(tenant, session, threadID string, provider bschemas.ModelProvider, body []byte) Observation {
+// ObserveWith is Observe with the normalized messages supplied by the caller (norm is called
+// at most once, and not at all for a previous_response_id body), so a caller that also needs
+// the normalization can share one pass over the body.
+func (t *Tracker) ObserveWith(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage) (obs Observation) {
+	defer func() { recover() }() //nolint:errcheck // fail open; see package doc
+	if t == nil {
+		return Observation{}
+	}
+	return t.observe(tenant, session, threadID, body, norm)
+}
+
+func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage) Observation {
 	if gjson.GetBytes(body, "previous_response_id").String() != "" {
 		// A Responses request continuing SERVER-HELD history: `input` here is only the
 		// newest turn, not the full conversation. apply.NormalizeMessages does not special-
@@ -240,7 +251,7 @@ func (t *Tracker) observe(tenant, session, threadID string, provider bschemas.Mo
 		// whole conversation" — not a second message parser.
 		return Observation{}
 	}
-	entries := apply.NormalizeMessages(provider, body)
+	entries := norm()
 	n := len(entries)
 	if n == 0 {
 		return Observation{}
