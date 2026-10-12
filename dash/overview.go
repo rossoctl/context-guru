@@ -800,14 +800,27 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		// measured the correlated form faster at 14k rows; at 189k rows with sessions of a
 		// thousand turns it is 11 s (one index range walk per saving row) against ~1 s for one
 		// sort, which is what takes the all-time /api/stats from 13 s to a few seconds.
-		return d.sql.QueryRowContext(d.readCtx(), `WITH later AS (
-				SELECT r.id AS rid, COUNT(*) OVER (PARTITION BY r.session_id)
-					- ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
-				FROM requests r
-				WHERE r.session_id IN (SELECT s.session_id FROM requests s WHERE s.saved_unique > 0))
-			SELECT COALESCE(SUM(r.saved_unique * later.n),0)
-			FROM requests r JOIN later ON later.rid = r.id WHERE `+cond+` AND r.saved_unique > 0`,
-			args...).Scan(&replayProjectedRaw)
+		//
+		// #492: that measurement does not hold for a single session scoped by `cond`. Confirmed
+		// against a real 262 MB / 12.4k-request deployment, one session of 5,723 rows: this
+		// window form, even narrowed to `r.session_id = ?` so it reads only that session's own
+		// rows (nothing else changed — see below), still took 3.6-4.8 s through
+		// modernc.org/sqlite, where the equivalent indexed correlated subquery took 165 ms for the
+		// IDENTICAL result (verified byte-for-byte on five sessions of 132-5,723 rows). The window
+		// form isn't slow because of HOW MUCH it reads here; `COUNT(*) OVER (PARTITION BY ...)`
+		// with no ORDER BY/frame, paired with a separately-ordered ROW_NUMBER() in the same CTE,
+		// is specifically what this driver executes badly — dash/overview.go's other two
+		// session-scoped window queries (CompactionResets' LAG, the inflation SUM...OVER with a
+		// ROWS frame) are fine once scoped (see their own #492 comments), so this is not blanket
+		// advice against window functions, only against this one shape.
+		//
+		// So: scoped to one session, go back to the correlated form this used to be, over
+		// idx_requests_session(session_id, ts) — bounded by that session's own size, not the
+		// deployment's, which is the opposite of the cost pattern the window form was built to
+		// avoid at full-table scale. Unscoped (the whole-deployment view), keep the window form:
+		// nothing above measured that case, and it is not what #492 is about.
+		q, qargs := replayCeilingQuery(f, cond, args)
+		return d.sql.QueryRowContext(d.readCtx(), q, qargs...).Scan(&replayProjectedRaw)
 	})
 	// The correction to the above, driven from the PING side: one pass to find the pings, then
 	// ONE indexed sum per ping over the earlier rows of its own session. O(pings x session)
@@ -823,15 +836,24 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		// Same rewrite as the ceiling above: the running saved_unique of the in-scope earlier rows
 		// of a session (frame ends one row before the current one, so strictly earlier in
 		// (ts, id) order), read off each ping, instead of one indexed sum per ping.
+		//
+		// #492: same scoping fix as `later` above, same reason — PARTITION BY session_id means a
+		// session with no pings of its own can never match `before.s` for a different reason: the
+		// CTE's own WHERE used to be every session that EVER pinged, not just the caller's.
+		beforeCond, beforeArgs := "r.session_id IN (SELECT k.session_id FROM requests k WHERE k.keepalive = 1)", []any{}
+		if f.Session != "" {
+			beforeCond, beforeArgs = "r.session_id = ?", []any{f.Session}
+		}
 		return d.sql.QueryRowContext(d.readCtx(), `WITH before AS (
 				SELECT r.id AS rid, SUM(CASE WHEN `+cond+` AND r.saved_unique > 0
 						THEN r.saved_unique ELSE 0 END)
 					OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id
 						ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS s
 				FROM requests r
-				WHERE r.session_id IN (SELECT k.session_id FROM requests k WHERE k.keepalive = 1))
+				WHERE `+beforeCond+`)
 			SELECT COALESCE(SUM(before.s),0)
-			FROM requests p JOIN before ON before.rid = p.id WHERE p.keepalive = 1`, args...).Scan(&inflation)
+			FROM requests p JOIN before ON before.rid = p.id WHERE p.keepalive = 1`,
+			append(args, beforeArgs...)...).Scan(&inflation)
 	})
 	// Which cache TTL tier each request asked for (a map rather than columns because "" -- no
 	// cache_control at all -- is a real third answer that must not be folded into 5m), the three
@@ -922,14 +944,16 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		// (37,954 rows there, 526 here) and under each tenant scope separately. Keeping the CTE
 		// self-contained but listing only the filterable columns was also tried and is the worse
 		// of the two at 135 ms.
-		q := `WITH prev AS (
-			SELECT r.id AS rid, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
-				OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
-			FROM requests r
-		) SELECT COUNT(*) FROM requests r JOIN prev ON prev.rid = r.id WHERE ` + cond + `
-			AND r.tokens_before > 0 AND prev.prev_tokens_before IS NOT NULL
-			AND r.tokens_before < prev.prev_tokens_before`
-		return d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(&o.CompactionResets)
+		// #492: the CTE used to scan `FROM requests r` with no WHERE at all — every row of every
+		// session, every call, however narrow the outer `cond` is. PARTITION BY session_id means
+		// a session's LAG values never depend on any other session's rows, so when the caller
+		// asked for one session, the CTE only needs that session's own rows: same prev_tokens_before
+		// for every row that survives, at a cost bounded by the session instead of the table.
+		// On a real deployment this unscoped scan, combined with stale planner statistics, is what
+		// made a single session's /api/stats?lean=1 call run for minutes instead of milliseconds —
+		// see the issue for the measured timings.
+		q, qargs := compactionResetsQuery(f, cond, args)
+		return d.sql.QueryRowContext(d.readCtx(), q, qargs...).Scan(&o.CompactionResets)
 	})
 	// The estimator check, on the only population where the two counts are comparable: requests
 	// where nothing was removed, so tokens_before and the provider's billed input describe the
@@ -1084,6 +1108,68 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.Denominators = o.denominators()
 	o.Waterfall = o.waterfall()
 	return o, nil
+}
+
+// replayCeilingQuery builds the SQL and args Overview uses to compute the replay ceiling
+// (replayProjectedRaw) for f — pulled out of Overview so #492's regression test
+// (TestOverviewSessionScopedQueriesDoNotScanWholeTable) can run EXPLAIN QUERY PLAN against
+// the EXACT statement the server executes, rather than a hand-copied duplicate that could
+// silently drift from the real one.
+//
+// #492: when f.Session is set, the window-function CTE this used to be — unconditionally,
+// even when scoped to one session — measured 3.6-4.8 s through modernc.org/sqlite on a real
+// deployment (262 MB, 12.4k requests, one session of 5,723), against 165 ms for this
+// correlated form, byte-identical result. `COUNT(*) OVER (PARTITION BY ...)` with no ORDER
+// BY/frame, paired with a separately-ordered ROW_NUMBER() in the same CTE, is specifically
+// what this driver executes badly, independent of how much data it reads — see
+// dash/cachehistory.go's CachesplitHistoricalUSD for the same shape, scoped the same way, and
+// compactionResetsQuery below for a sibling window query that stayed fast once scoped, so this
+// is not blanket advice against window functions. Unscoped (the whole-deployment view) keeps
+// the window form: nothing above measured that case, and #492 is not about it.
+func replayCeilingQuery(f Filter, cond string, args []any) (string, []any) {
+	if f.Session != "" {
+		return `SELECT COALESCE(SUM(r.saved_unique * (
+				SELECT COUNT(*) FROM requests p
+				WHERE p.session_id = r.session_id AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id))
+			)),0)
+			FROM requests r WHERE ` + cond + ` AND r.saved_unique > 0`, args
+	}
+	return `WITH later AS (
+			SELECT r.id AS rid, COUNT(*) OVER (PARTITION BY r.session_id)
+				- ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
+			FROM requests r
+			WHERE r.session_id IN (SELECT s.session_id FROM requests s WHERE s.saved_unique > 0))
+		SELECT COALESCE(SUM(r.saved_unique * later.n),0)
+		FROM requests r JOIN later ON later.rid = r.id WHERE ` + cond + ` AND r.saved_unique > 0`, args
+}
+
+// compactionResetsQuery builds the SQL and args Overview uses for CompactionResets — pulled
+// out for the same reason as replayCeilingQuery above, and tested the same way.
+//
+// #492: the CTE used to scan `FROM requests r` with no WHERE at all — every row of every
+// session, every call, however narrow the outer `cond` is. PARTITION BY session_id means a
+// session's LAG values never depend on any other session's rows, so when the caller asked for
+// one session, the CTE only needs that session's own rows: same prev_tokens_before for every
+// row that survives, at a cost bounded by the session instead of the table. On a real
+// deployment this unscoped scan, combined with the query planner's statistics having gone
+// stale, is what made a single session's /api/stats?lean=1 call run for minutes instead of
+// milliseconds — see the issue for the measured timings. Unlike replayCeilingQuery above, this
+// one stayed a fast window function once scoped (tens of milliseconds), so it keeps the LAG
+// form rather than moving to a correlated subquery.
+func compactionResetsQuery(f Filter, cond string, args []any) (string, []any) {
+	prevCond, prevArgs := "", []any{}
+	if f.Session != "" {
+		prevCond, prevArgs = "WHERE r.session_id = ?", []any{f.Session}
+	}
+	q := `WITH prev AS (
+		SELECT r.id AS rid, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
+			OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
+		FROM requests r
+		` + prevCond + `
+	) SELECT COUNT(*) FROM requests r JOIN prev ON prev.rid = r.id WHERE ` + cond + `
+		AND r.tokens_before > 0 AND prev.prev_tokens_before IS NOT NULL
+		AND r.tokens_before < prev.prev_tokens_before`
+	return q, append(prevArgs, args...)
 }
 
 // SetTiers attaches the read-time per-tier costing and the two figures that depend on it:

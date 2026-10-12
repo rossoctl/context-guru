@@ -97,11 +97,23 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 	// this predicate actually returns there and on 16,167 rows with the split/cache filters
 	// dropped, plus each tenant scope separately -- the frozen corpus returns ZERO rows for the
 	// shipped predicate, so a check against it alone proves nothing.
+	// #492: when the caller asked for one session, the CTE's own FROM may be narrowed to that
+	// session — NOT to `cond` (that would reintroduce exactly the bug the comment above warns
+	// against: rn=1 has to mean "nothing earlier in this session" even counting rows `cond`
+	// would otherwise filter out, like pings). Restricting to `r.session_id = ?` keeps every one
+	// of that session's rows, filtered or not, and excludes only OTHER sessions' rows, which
+	// PARTITION BY session_id never let affect this session's own rn values anyway. Unscoped
+	// callers (the whole-deployment view) still get the broad, unfiltered CTE.
+	rnCond, rnArgs := "", []any{}
+	if f.Session != "" {
+		rnCond, rnArgs = "WHERE r.session_id = ?", []any{f.Session}
+	}
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH rn AS (
 		SELECT r.id AS rid, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
 		FROM requests r
+		`+rnCond+`
 	) SELECT r.model, r.cache_read, r.cache_write FROM requests r JOIN rn ON rn.rid = r.id AND rn.n = 1
-		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0`, args...)
+		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0`, append(rnArgs, args...)...)
 	if err != nil {
 		return out, err
 	}
