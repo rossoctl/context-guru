@@ -66,6 +66,10 @@ type API struct {
 	// requests to the default all-time view — /api/tools and /api/toolfilter each appear in the
 	// outage's nginx log. /api/prompt is deliberately NOT cached beside them; see routeBounds.
 	toolsCache, toolFilterCache jsonCache
+	// insightsCache covers GET /api/insights, which reads both of the above aggregates and then
+	// shapes them. Its own entry because the shaped document is a different payload under a
+	// different key: sharing toolsCache would serve an inventory to a caller asking for advice.
+	insightsCache jsonCache
 	// jsonInflight collapses concurrent COLD reads of the same cache key onto one computation.
 	// Keyed by the same principal-scoped cacheKey as the caches, so two tenants never share a
 	// computation and a manager never shares one with a tenant.
@@ -603,7 +607,11 @@ func (a *API) routes() []route {
 	// The Components tab's compaction-episode measurement, declared beside its handler in
 	// compactepisode.go and appended here for the same reason as the rest: this table is what
 	// the scoping tests walk.
-	return append(rs, a.compactEpisodeRoutes()...)
+	rs = append(rs, a.compactEpisodeRoutes()...)
+	// The served insights view's own read: the inventory, shaped into removal advice. Declared
+	// beside its handler in insightsapi.go and appended here for the same reason as the rest —
+	// this table is what the scoping tests walk.
+	return append(rs, a.insightsRoutes()...)
 }
 
 // Mount registers every dashboard route on a mux under the given prefix
