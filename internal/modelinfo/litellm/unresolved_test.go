@@ -1,4 +1,4 @@
-package modelinfo
+package litellm
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // THE DEFECT THESE EXIST TO CATCH: a fetch that failed was silent. The error was assigned and then
@@ -121,7 +123,7 @@ func TestAnUnreachableDocumentResolvesFromTheFallbackNotToUnknown(t *testing.T) 
 
 	l := NewLiteLLM(srv.URL, nil, 0)
 	_ = l.Load(context.Background())
-	chain := Chain{l, DefaultStatic()}
+	chain := modelinfo.Chain{l, modelinfo.DefaultStatic()}
 	w, ok := chain.Window(context.Background(), "claude-sonnet-5")
 	if !ok || w != 1000000 {
 		t.Fatalf("the fallback stopped answering for an unreachable document (window=%d ok=%v); if "+
@@ -167,7 +169,7 @@ func TestChainForwardsUnresolved(t *testing.T) {
 
 	l := NewLiteLLM(srv.URL, nil, 0)
 	_ = l.Load(context.Background())
-	var chain Resolver = Chain{l, DefaultStatic()}
+	var chain modelinfo.Resolver = modelinfo.Chain{l, modelinfo.DefaultStatic()}
 	u, ok := chain.(interface{ Unresolved() (error, int) })
 	if !ok {
 		t.Fatal("a Chain cannot be asked whether the document loaded; the stats field will read 0 " +

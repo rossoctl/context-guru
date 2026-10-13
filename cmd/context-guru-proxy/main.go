@@ -33,6 +33,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/buildinfo"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/proxy"
 	"github.com/rossoctl/context-guru/store"
@@ -1270,7 +1271,7 @@ func modelWindows() modelinfo.Resolver {
 		return chain
 	}
 	url := strings.TrimSpace(os.Getenv("MODEL_INFO_URL"))
-	live := modelinfo.NewLiteLLM(url, nil, 0)
+	live := litellm.NewLiteLLM(url, nil, 0)
 	if url == "" {
 		// The public map. A fetch failure here is a network inconvenience, not a misconfiguration, so
 		// the embedded table remains the right answer and the chain keeps its fallback.

@@ -1,4 +1,4 @@
-package modelinfo
+package litellm
 
 import (
 	"compress/gzip"

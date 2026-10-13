@@ -38,6 +38,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/buildinfo"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 )
 
 // Build identity, as set by the Makefile's -ldflags. A host that wants its own stamp sets its own
@@ -70,8 +71,10 @@ type (
 	Static = modelinfo.Static
 	// Table is a table loaded from a file.
 	Table = modelinfo.Table
-	// LiteLLM resolves against a live LiteLLM /model/info endpoint.
-	LiteLLM = modelinfo.LiteLLM
+	// LiteLLM resolves against the LiteLLM community price/window map (internal/modelinfo/litellm:
+	// the one network call in this family, kept out of modelinfo itself so that package stays
+	// I/O-free).
+	LiteLLM = litellm.LiteLLM
 	// Price is one model's token prices.
 	Price = modelinfo.Price
 	// Pricer answers what a model's tokens cost.
@@ -87,7 +90,7 @@ func LoadTable(path string) (*Table, error) { return modelinfo.LoadTable(path) }
 
 // NewLiteLLM resolves model windows against a LiteLLM gateway, cached for ttl.
 func NewLiteLLM(url string, client *http.Client, ttl time.Duration) *LiteLLM {
-	return modelinfo.NewLiteLLM(url, client, ttl)
+	return litellm.NewLiteLLM(url, client, ttl)
 }
 
 // ExactWindow reports a model's window and whether the answer is exact rather than inferred. The

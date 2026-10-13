@@ -168,7 +168,7 @@ func (t *Table) lookup(model string) (tableEntry, bool) {
 	if t == nil || len(t.entries) == 0 {
 		return tableEntry{}, false
 	}
-	full, tail := normalize(model)
+	full, tail := Normalize(model)
 	for _, e := range t.entries {
 		if e.match == full || e.match == tail {
 			return e, true
