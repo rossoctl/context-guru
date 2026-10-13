@@ -271,8 +271,8 @@ func autoSpec(rows []predictive.AutoRow, tenant string, since, until int64, sess
 			"tenant_weight": r2(fit.Weight[tenant])},
 		"shipped": map[string]any{"plan": planName(kShip), "half_life_days": jsonNum(final.HalfLifeDays), "kappa": jsonNum(final.Kappa), "fleet_plan": planName(final.FleetPlan),
 			"note": "ship: the same tuner refitted on the whole window (the table above is the held-out evidence for the procedure); otherwise the refitted fleet plan"},
-		"engine": map[string]any{"benefit_scale": cfScale, "ping_scale": cfPingScale, "sim2_sha": "55373000938a"},
-		"note":   "dollars are closed-form units calibrated to the pinned replay engine; compare strategies, not absolute levels",
+		"engine": map[string]any{"benefit_scale": cfScale, "ping_scale": cfPingScale},
+		"note":   "dollars are closed-form units calibrated to an offline replay engine; compare strategies, not absolute levels",
 	}
 	spec["caveats"] = []string{"the tenant's last 30% of rows is one held-out period; a tenant with few sessions gets wide intervals, see recommendation",
 		"returns not seen before the window end count as no-return (pings wasted)", "closed-form replay: pings land on schedule and do not fail"}

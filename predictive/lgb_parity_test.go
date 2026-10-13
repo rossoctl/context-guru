@@ -247,6 +247,18 @@ func TestLGBFeatureParityWithPython(t *testing.T) {
 	}
 }
 
+// LightGBM sends a value equal to the threshold left (decision type "<="). The parity fixtures do not hit an exact tie, so pin it here.
+func TestLGBTreeSendsATieLeft(t *testing.T) {
+	tr := &lgbTree{F: []int32{0, -1, -1}, T: []float64{0.5, 0, 0}, L: []int32{1, -1, -1}, R: []int32{2, -1, -1}, D: []bool{false, false, false}, M: []uint8{0, 0, 0}, V: []float64{0, 1, 2}}
+	var x [NGBS + 2]float64
+	for _, c := range []struct{ v, want float64 }{{0.5, 1}, {math.Nextafter(0.5, 1), 2}, {math.Nextafter(0.5, 0), 1}} {
+		x[0] = c.v
+		if got := tr.eval(&x); got != c.want {
+			t.Errorf("x=%v: leaf %v, want %v", c.v, got, c.want)
+		}
+	}
+}
+
 func BenchmarkDecideLGB(b *testing.B) {
 	fx, m := loadLGBFixture(b)
 	e := &fx.Events[100]

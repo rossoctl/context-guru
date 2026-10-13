@@ -1,14 +1,7 @@
 {
- "sim2_sha": "55373000938a",
  "benefit_scale": 0.948,
  "ping_scale": 1.346,
  "r2_net": 0.968,
  "n_plans": 40,
- "fit": "sim2 net = benefit_scale * closed-form benefit - ping_scale * closed-form ping cost, least squares over the 40 uniform plans on all decision points of the union window",
- "previous": {
-  "sim2": "pre-pin",
-  "benefit_scale": 0.53,
-  "ping_scale": 1.0,
-  "r2": 0.92
- }
+ "fit": "replay net = benefit_scale * closed-form benefit - ping_scale * closed-form ping cost, least squares over 40 uniform plans"
 }
