@@ -226,9 +226,9 @@ func TestStatsLeanTotalSavedMatchesFullHandlerWhenSessionScoped(t *testing.T) {
 	// to credit; its job (below) is proving lean does not drop a credit it DOES qualify for,
 	// not proving it exists in a scope that never had one.
 	for _, tc := range []struct {
-		session   string
-		wantDecl  bool
-		wantHist  bool
+		session  string
+		wantDecl bool
+		wantHist bool
 	}{
 		{session: "s-new-hist", wantHist: true},
 		{session: "se", wantDecl: true},

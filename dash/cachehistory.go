@@ -308,7 +308,6 @@ type cachesplitSizeSpreadCache struct {
 	mu    sync.Mutex
 	at    time.Time
 	sizes map[string][2]int
-	err   error
 }
 
 // CachesplitSizeSpread reports the recorded minimum and maximum stable half per model. The
@@ -322,12 +321,12 @@ type cachesplitSizeSpreadCache struct {
 func (d *DB) CachesplitSizeSpread() (map[string][2]int, error) {
 	c := d.sizeSpread
 	c.mu.Lock()
-	if c.sizes != nil && time.Since(c.at) < cachesplitSizeSpreadTTL {
-		sizes, err := c.sizes, c.err
-		c.mu.Unlock()
-		return sizes, err
-	}
+	stale := c.sizes
+	fresh := c.sizes != nil && time.Since(c.at) < cachesplitSizeSpreadTTL
 	c.mu.Unlock() // released before the query: a slow scan must never hold other readers' cache hits
+	if fresh {
+		return stale, nil
+	}
 
 	out := map[string][2]int{}
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT model, MIN(split_stable_tokens), MAX(split_stable_tokens)
@@ -348,11 +347,21 @@ func (d *DB) CachesplitSizeSpread() (map[string][2]int, error) {
 		}
 	}
 
+	if err != nil {
+		// A failed refresh does NOT touch the cache — `at` stays whatever it was (already
+		// expired, which is why this ran at all), so the NEXT call retries immediately
+		// rather than this error being served, cached, for a further 5 minutes. If a
+		// previous good value is still sitting there (stale, but a real past answer), serve
+		// that instead of the error: a transient failure (a locked file, a slow disk) should
+		// not make CachesplitHistoricalUSD treat every model as uncovered when it has
+		// perfectly usable data a few minutes old.
+		if stale != nil {
+			return stale, nil
+		}
+		return nil, err
+	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	// A failed refresh still updates `at`: retrying every single call on a persistent error
-	// (a locked file, a closed db mid-shutdown) would be the exact per-call cost this cache
-	// exists to remove. The next TTL window tries again.
-	c.at, c.sizes, c.err = time.Now(), out, err
-	return out, err
+	c.at, c.sizes = time.Now(), out
+	c.mu.Unlock()
+	return out, nil
 }
