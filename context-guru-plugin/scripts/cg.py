@@ -19,6 +19,7 @@ captured bundle.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
 import json
 import os
@@ -430,7 +431,7 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
 
 KINDS = ("cache", "compaction", "tools")
 ADAPT_DAYS = 30
-ADAPT_TIMEOUT = 120
+ADAPT_TIMEOUT = 300
 APPLY_WAIT = 110
 EFFECT = {"now": "takes effect now", "restart": "takes effect at the next proxy restart",
           "next_session": "takes effect from the next session"}
@@ -469,10 +470,10 @@ def with_ticker(fn, label: str):
         sys.stderr.write("\r\x1b[K")
 
 
-def adapt_report(api: Api, o: dict, kind: str) -> tuple[int, dict | None]:
+def adapt_report(api: Api, o: dict, kind: str, tick: bool = True) -> tuple[int, dict | None]:
     since, now = window(o, o["days"] or ADAPT_DAYS)
-    return with_ticker(lambda: api.send("GET", f"/api/adapt/{kind}", {"since": since, "until": now}, timeout=ADAPT_TIMEOUT),
-                       f"Replaying {o['days'] or ADAPT_DAYS} days of {kind} history...")
+    get = lambda: api.send("GET", f"/api/adapt/{kind}", {"since": since, "until": now}, timeout=ADAPT_TIMEOUT)  # noqa: E731
+    return with_ticker(get, f"Replaying {o['days'] or ADAPT_DAYS} days of {kind} history...") if tick else get()
 
 
 def day(ms: int, o: dict) -> str:
@@ -561,8 +562,11 @@ def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], in
 
 def adapt_overview(api: Api, o: dict) -> list[str]:
     rows, best, read = [], 0.0, 0
-    for kind in KINDS:
-        st, rep = adapt_report(api, o, kind)
+    # In parallel, so the overview is bounded by the slowest report rather than the sum of three.
+    with concurrent.futures.ThreadPoolExecutor(len(KINDS)) as ex:
+        got = with_ticker(lambda: list(ex.map(lambda k: adapt_report(api, o, k, tick=False), KINDS)),
+                          f"Replaying {o['days'] or ADAPT_DAYS} days of history...")
+    for kind, (st, rep) in zip(KINDS, got):
         if st != 200 or not rep:
             rows.append([kind, "", adapt_error(api, kind, st, rep)])
             continue

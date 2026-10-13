@@ -3,7 +3,7 @@ name: context-guru-adapt
 description: Replay your own past sessions under each setting and recommend the cheapest cache keep-alive strategy, compaction config, or unused tools to drop; asks before applying.
 ---
 
-Say in one line that this replays the user's history and can take up to a minute. Then run this from this
+Say in one line that this replays the user's history and can take a few minutes. Then run this from this
 skill directory and print its output exactly as it is in one code block:
 
 ```bash

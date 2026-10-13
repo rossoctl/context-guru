@@ -11,7 +11,7 @@
 | `/context-guru:adapt tools` | MCP servers, skills and tools you carry but never use |
 | `/context-guru:adapt` | one line for each of the three |
 
-Add `details` for each option's settings and per-option notes, and `--days N` to change the window (default 30 days). The replay can take up to a minute; on a terminal a seconds counter runs while it works.
+Add `details` for each option's settings and per-option notes, and `--days N` to change the window (default 30 days). The replay can take a few minutes; on a terminal a seconds counter runs while it works.
 
 ## Example
 
@@ -131,7 +131,7 @@ The same command is the skill `$context-guru-adapt`, with the same words: `$cont
 | `No Context Guru proxy is routing this session` | `/context-guru:install`, or point at a proxy with `CG_URL=http://127.0.0.1:PORT` |
 | `The proxy at ... is not answering` | open a new session (it starts the proxy) or run `/context-guru:update` |
 | `This proxy is older than /context-guru:adapt` | `/context-guru:update` |
-| `The analysis took longer than 2 minutes` | a shorter window: `--days 7` |
+| `The analysis took longer than 5 minutes` | a shorter window: `--days 7` |
 | `This proxy needs a dashboard sign-in` | on the hosted service, sign in to the dashboard and change the setting there |
 
 ## The report format
