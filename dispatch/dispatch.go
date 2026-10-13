@@ -54,9 +54,12 @@ type Request struct {
 	// Header is non-secret only. No core path puts a credential here; the host adds the one it
 	// holds for Ref.
 	Header http.Header
-	// Body is owned by the caller, which zeroes it once Do returns. A host must not keep it, and
-	// must not copy it into a string, which cannot be zeroed. A host that needs the bytes after
-	// Do returns (a transport may still be writing them) copies them into a []byte it wipes itself.
+	// Body is owned by the caller. Some callers (keepalive, holding a conversation transcript)
+	// zero it once Do returns, because it is security-sensitive; others (cheapmodel, an ordinary
+	// request body) do not, because it is not. Either way, a host must not keep this slice past
+	// Do returning, and must not copy it into a string, which cannot be zeroed. A host that needs
+	// the bytes after Do returns (a transport may still be writing them) copies them into a
+	// []byte it wipes itself — never assuming the caller will do that wiping for it.
 	Body []byte
 }
 

@@ -10,8 +10,16 @@
 //
 // That is what this package removes. It is a FACADE, deliberately: aliases and thin wrappers over
 // the existing internal packages, adding no behaviour and moving no code. Nothing internal is
-// relocated, so all ~70 files that import those packages today are untouched and no existing
-// deployment changes at all.
+// relocated, so all ~70 files that import those packages today are untouched.
+//
+// ONE EXCEPTION, from the same dispatch.Dispatcher split noted below: AnthropicCheapModel and
+// OpenAICheapModel lost their BaseURL/APIKey/AuthScheme/Client fields in favor of a
+// dispatch.Dispatcher + dispatch.Ref, and proxy.Options.CheapModel changed type from
+// components.Model to *proxy.CheapModelConfig. A host built on this facade that constructed
+// either cheap-model type directly, or passed one to Options.CheapModel, stops compiling. There
+// is no way to re-export the OLD shape here without also re-exporting the credential-holding
+// code this project is removing from the core, so this one break is accepted rather than papered
+// over.
 //
 // WHY A FACADE RATHER THAN PROMOTING THE PACKAGES. Moving internal/modelinfo (38 importers) out of
 // internal/ would churn ~70 files across the tree and publish its entire surface as API this

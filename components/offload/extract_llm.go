@@ -248,10 +248,11 @@ var staticWindows = modelinfo.DefaultStatic()
 // A CONFIG-PINNED client needs no correction and never reaches the effSource branch, which is worth
 // stating because it looks like a second path that could resurrect the mismatch: Offload threads
 // effSource only through the `model == nil` branch, so a client resolved from e.modelClient keeps
-// the configured source. It is safe because modelConfig.Client() requires model.model to be
-// non-empty, so e.modelName is always set whenever e.modelClient is, and the e.modelName != ""
-// branch below (the static-table lookup) short-circuits before effSource or CtxWindow is consulted.
-// Raised in review on #110; recorded here so the next reader need not re-derive it.
+// the configured source. e.modelClient is a TEST-INJECTION SEAM ONLY now — the model: block names a
+// source, never a credential (components/offload/modelcfg.go), so production never sets it. A test
+// that sets e.modelClient directly is responsible for also giving the config a non-empty model.model
+// if it wants e.modelName set to match, since nothing else enforces that pairing once Client() is
+// gone. Raised in review on #110; recorded here so the next reader need not re-derive it.
 func (e *ExtractLLM) inputLimit(c *components.Ctx, effSource string) int {
 	if effSource == "" {
 		effSource = e.modelSource

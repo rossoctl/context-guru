@@ -43,6 +43,10 @@ type Dispatcher struct {
 	mu   sync.Mutex
 	next uint64
 	held map[dispatch.Ref]*target
+	// incomingByKey indexes the kindIncoming entries in held by their dedupKey, so incoming()
+	// resolves in O(1) instead of scanning every held ref (session and pinned refs included) on
+	// every proxied request.
+	incomingByKey map[string]dispatch.Ref
 }
 
 type targetKind uint8
@@ -75,7 +79,8 @@ func NewDispatcher(c *http.Client) *Dispatcher {
 		cc.Transport = upstreamTransport(0)
 	}
 	cc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Dispatcher{client: &cc, now: time.Now, held: map[dispatch.Ref]*target{}}
+	return &Dispatcher{client: &cc, now: time.Now, held: map[dispatch.Ref]*target{},
+		incomingByKey: map[string]dispatch.Ref{}}
 }
 
 func (d *Dispatcher) issueLocked(t *target) dispatch.Ref {
@@ -154,26 +159,52 @@ func (d *Dispatcher) Release(ref dispatch.Ref) {
 
 // incoming resolves the ref for a NeedsModel component calling the request's own endpoint and
 // credential (incomingModel). Two calls for the same (base, credential) share one ref and one
-// lastUse clock; an idle one expires after IncomingRefTTL (checked lazily, in Do and here — no
-// background sweep).
+// lastUse clock, via incomingByKey. An idle one expires after IncomingRefTTL: checked here and in
+// Do (both touch the ref directly, so expiring it there is free), and otherwise by sweepIncoming,
+// which the keeper's OnTick drives — the backstop for a ref nothing ever asks about again.
 func (d *Dispatcher) incoming(up upstream, auth http.Header) dispatch.Ref {
 	key := incomingDedupKey(up.base, auth)
 	now := d.now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for ref, t := range d.held {
-		if t.kind == kindIncoming && t.dedupKey == key {
-			if now.Sub(t.lastUse) > IncomingRefTTL {
-				zeroHeaders(t.auth)
-				delete(d.held, ref)
-				break
-			}
+	if ref, ok := d.incomingByKey[key]; ok {
+		t := d.held[ref]
+		if now.Sub(t.lastUse) <= IncomingRefTTL {
 			t.lastUse = now
 			return ref
 		}
+		d.dropIncomingLocked(ref, t)
 	}
-	return d.issueLocked(&target{kind: kindIncoming, up: up, auth: maskHeaders(auth),
+	ref := d.issueLocked(&target{kind: kindIncoming, up: up, auth: maskHeaders(auth),
 		dedupKey: key, lastUse: now})
+	d.incomingByKey[key] = ref
+	return ref
+}
+
+// dropIncomingLocked removes one kindIncoming entry from both held and incomingByKey. Called
+// under d.mu.
+func (d *Dispatcher) dropIncomingLocked(ref dispatch.Ref, t *target) {
+	zeroHeaders(t.auth)
+	delete(d.held, ref)
+	if d.incomingByKey[t.dedupKey] == ref {
+		delete(d.incomingByKey, t.dedupKey)
+	}
+}
+
+// sweepIncoming drops every kindIncoming entry idle past IncomingRefTTL. Driven by the keeper's
+// OnTick (proxy/keepalive.go), so a ref nothing asks about again — the common case: a request
+// whose component never calls the model, or a caller whose key is never reused — is freed on its
+// own instead of surviving for the life of the process.
+func (d *Dispatcher) sweepIncoming(now time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for key, ref := range d.incomingByKey {
+		if t := d.held[ref]; t != nil && now.Sub(t.lastUse) > IncomingRefTTL {
+			zeroHeaders(t.auth)
+			delete(d.held, ref)
+			delete(d.incomingByKey, key)
+		}
+	}
 }
 
 // incomingDedupKey groups by base URL and the exact credential presented, order-independent over
@@ -231,10 +262,16 @@ func (d *Dispatcher) heldCount() int {
 func (d *Dispatcher) Do(ctx context.Context, req dispatch.Request) (dispatch.Response, error) {
 	d.mu.Lock()
 	t, ok := d.held[req.Ref]
-	if ok && t.kind == kindIncoming && d.now().Sub(t.lastUse) > IncomingRefTTL {
-		zeroHeaders(t.auth)
-		delete(d.held, req.Ref)
-		ok = false
+	if ok && t.kind == kindIncoming {
+		if d.now().Sub(t.lastUse) > IncomingRefTTL {
+			d.dropIncomingLocked(req.Ref, t)
+			ok = false
+		} else {
+			// A Do counts as use too, matching IncomingRefTTL's own "without use" wording —
+			// otherwise a detached call that keeps calling Do past 2h since the last incoming()
+			// could get ErrNotHeld partway through a long-running substitute.
+			t.lastUse = d.now()
+		}
 	}
 	var up upstream
 	var auth []heldHeader
@@ -266,6 +303,11 @@ func (d *Dispatcher) Do(ctx context.Context, req dispatch.Request) (dispatch.Res
 		return dispatch.Response{}, err
 	}
 	hreq.ContentLength = int64(len(req.Body))
+	// wipeReader is not *bytes.Reader either, so http.NewRequest cannot infer GetBody from it —
+	// and without GetBody, net/http never retries a write that failed on a reused idle
+	// connection. req.Body is still live here (the core zeroes it only after Do returns), so a
+	// fresh copy for a retry is safe to make on demand.
+	hreq.GetBody = func() (io.ReadCloser, error) { return newWipeReader(req.Body), nil }
 	for name, vs := range req.Header {
 		hreq.Header[name] = append([]string(nil), vs...)
 	}

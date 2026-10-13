@@ -18,7 +18,7 @@ import (
 // mechanism and the figures behind it. This file is cmd/context-guru-proxy's HOST for it: it
 // resolves the policy (account config, manager strategy, session override — keepalivestrategy.go,
 // keepaliveoverride.go), enforces the audit-sink rule, and owns the caller credentials through
-// httpDispatcher (keepalivedispatch.go).
+// Dispatcher (dispatcher.go).
 
 // CachePolicy is keepalive.Policy, kept under its old name for the config builder and tests.
 type CachePolicy = keepalive.Policy
@@ -100,6 +100,10 @@ func newKeeperWith(h *Handler, o keepalive.Options) *keeper {
 		k.mu.Lock()
 		k.expireOverridesLocked(now)
 		k.mu.Unlock()
+		// Likewise for an incoming cheap-model ref nothing has asked about since IncomingRefTTL:
+		// incoming() and Do() only expire the one ref they were just asked about, so this is what
+		// frees the common case of a ref nobody asks about again at all.
+		k.d.sweepIncoming(now)
 	}
 	k.Keeper = keepalive.New(o)
 	// Loaded once at construction. Unlike overrides, a strategy is a standing rule a

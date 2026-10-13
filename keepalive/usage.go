@@ -11,9 +11,11 @@ import "github.com/tidwall/gjson"
 // hands back the raw body and the keeper decides what it billed.
 func PingUsage(raw []byte) Usage {
 	u := gjson.GetBytes(raw, "usage")
-	if cached := u.Get("input_tokens_details.cached_tokens"); cached.Exists() {
-		in, c := u.Get("input_tokens").Int(), cached.Int()
-		return Usage{FreshInput: max(in-c, 0), CacheRead: c, Output: u.Get("output_tokens").Int()}
+	cached, wrote := u.Get("input_tokens_details.cached_tokens"), u.Get("input_tokens_details.cache_write_tokens")
+	if cached.Exists() || wrote.Exists() {
+		in, c, w := u.Get("input_tokens").Int(), cached.Int(), wrote.Int()
+		return Usage{FreshInput: max(in-c-w, 0), CacheRead: c, CacheWrite: w,
+			Output: u.Get("output_tokens").Int()}
 	}
 	return Usage{
 		FreshInput:   u.Get("input_tokens").Int(),
