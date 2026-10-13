@@ -12,6 +12,29 @@ saved $0.31 session · $4.20 today · ★ $212.40 lifetime
 cache ● █████░ 3:57 │ agents 2 · soonest ◐ 0:51 │ ctx ███░░░░░ 41%
 ```
 
+## On a Claude subscription
+
+A subscription does not bill per token. The limit is the 5-hour window. When Claude Code sends `rate_limits` in its status-line input, the first line shows the window, not money:
+
+```text
+5h 34% · saved 1.2M rd / 85.0k wr
+cache ● █████░ 3:57 │ agents 2 · soonest ◐ 0:51 │ ctx ███░░░░░ 41%
+```
+
+| Piece | Meaning | Source |
+|---|---|---|
+| `5h 34%` | How much of the 5-hour limit you used. `--layout=detailed` adds `7d 12%`. | Claude Code's `rate_limits.five_hour.used_percentage` |
+| `rd` | Tokens compaction kept out of the prompt on **later turns** that re-send the transcript. They would have been cache reads. | `/api/stats` `replay_tokens` (`saved_gross − saved_unique`) |
+| `wr` | Tokens compaction removed, **counted once**. Sent as new content, they would have been cache writes. | `/api/stats` `saved_unique` |
+
+- The numbers are plain token counts. **They are not weighted.** Anthropic does not publish how the limit weights reads, writes and fresh input, so the status line does not guess.
+- The window starts at `five_hour.resets_at` minus 5 hours. The counts cover all traffic through this proxy since then, not only this session.
+- The counts are the proxy's own token estimates, and cover compaction only. Cachesplit, keep-alive and declaration-filter savings exist only as dollar figures, so they have no token count here.
+- A kind with nothing saved is left out. With nothing saved, or no reset time, the line shows `5h 34%` only.
+- The `spent` and `ka $…` segments are hidden. Keep-alive pings use limit, not dollars.
+- Opt-in: `--show=fit` adds `+21% fit` (saved ÷ actual cost in the window, at list prices as a stand-in weight). It is in no default layout. The weight lives in one function, `_limit_weight` in `scripts/statusline.py`.
+- With an API key, Bedrock or Vertex there is no `rate_limits`. The money view above stays.
+
 ## What each piece means
 
 | Piece | Meaning |
@@ -132,7 +155,7 @@ Switch without editing settings, and keep the choice across renders:
 python3 "<plugin dir>/scripts/statusline.py" --set-layout=detailed   # or minimal, balanced, auto
 ```
 
-`auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache agents ctx hint latency tools ka`), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`.
+`auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache agents ctx hint latency tools ka fit`), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`.
 
 ## Modes
 
