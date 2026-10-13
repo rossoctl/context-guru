@@ -543,7 +543,7 @@ func newCacheAwareSummarizer(raw []byte) (components.Component, error) {
 	cfg := cacheAwareSummarizerConfig{
 		KeepLastTurns: 10, MinTokens: 500, ResummarizeTokens: 6000, InstructionRole: "auto",
 	}
-	if err := components.Decode(raw, &cfg); err != nil {
+	if err := decodeWithModelHint(raw, &cfg); err != nil {
 		return nil, err
 	}
 	if cfg.KeepLastTurns < 0 {

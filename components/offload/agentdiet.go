@@ -111,7 +111,7 @@ type agentDietConfig struct {
 
 func newAgentDiet(raw []byte) (components.Component, error) {
 	cfg := agentDietConfig{}
-	if err := components.Decode(raw, &cfg); err != nil {
+	if err := decodeWithModelHint(raw, &cfg); err != nil {
 		return nil, err
 	}
 	d := &AgentDiet{
