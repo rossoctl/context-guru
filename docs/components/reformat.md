@@ -585,8 +585,8 @@ client-side change that stops sending it (`claude mcp remove`, a `permissions.de
 it carried; rows written before that are matched by tool count, and `usd_low`/`usd_high` bound the
 guess. Context Guru's own tools and skills are never listed.
 `POST /api/adapt/tools/apply {"option", "basis"}` writes one option of a report fetched in the last
-30 minutes into the removal list; `restore` takes those entries out, and `revert` undoes the last adapt
-change. It shares identity, rate limit, audit and the single-tenant override file with every
+30 minutes into the removal list; `restore` takes those entries out, and `revert` undoes the last tools
+apply (never another adapt command's change). It shares identity, rate limit, audit and the single-tenant override file with every
 `/api/adapt/*/apply`; on a single-tenant proxy the running pipeline is rebuilt at once. A single-tenant
 proxy accepts apply only from a caller on the same machine (loopback, no forwarding headers), which
 means it trusts every local user and process on that machine; run it on a shared host only if that is

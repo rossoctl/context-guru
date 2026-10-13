@@ -39,7 +39,7 @@ func (h *Handler) adaptToolsApply(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": "revert", "previous": "current",
 			"kind": "tools", "effective": "now",
-			"note": "restored the configuration from before the last change, whatever made it"})
+			"note": "restored the configuration from before the last tools change"})
 		return
 	}
 	if in.Basis == "" {
