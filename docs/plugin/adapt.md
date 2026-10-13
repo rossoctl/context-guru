@@ -98,7 +98,7 @@ Applied: 6 unused items filtered (playwright, figma, brand-voice and 3 more) (ta
 Undo: /context-guru:adapt apply tools restore@5d0e17aa
 ```
 
-The token after `apply` is the option and the report it came from. If the numbers have changed since you saw them (new sessions arrived, for example), the proxy refuses, nothing is written, and the current report is shown again so you can decide on what is true now:
+The token after `apply` is the option and the report it came from. An option typed without `@basis` is applied against the report as it is now, so typing it yourself skips that check. If the numbers have changed since you saw them (new sessions arrived, for example), the proxy refuses, nothing is written, and the current report is shown again so you can decide on what is true now:
 
 ```text
 Not applied: the numbers changed since you saw them. Here they are again; nothing was written.
