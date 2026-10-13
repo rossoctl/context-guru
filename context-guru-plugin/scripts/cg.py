@@ -431,6 +431,7 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
 KINDS = ("cache", "compaction", "tools")
 ADAPT_DAYS = 30
 ADAPT_TIMEOUT = 120
+APPLY_WAIT = 90
 EFFECT = {"now": "takes effect now", "restart": "takes effect at the next proxy restart",
           "next_session": "takes effect from the next session"}
 
@@ -509,7 +510,8 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
         L += [""] + [f"  {x.get('label') or x['id']}: {x['detail']}" + (f" (helped {x['sessions_helped']}, hurt {x['sessions_hurt']} sessions)"
                      if "sessions_helped" in x else "") for x in opts if x.get("detail")]
     if rec:
-        L += ["", f"Change: {rec['change']} ({EFFECT.get(rec.get('effective'), 'see the note after applying')})."]
+        eff = EFFECT.get(rec.get("effective"))
+        L += ["", f"Change: {rec['change']}" + (f" ({eff})." if eff else "")]
         if rec.get("reason"):
             L.append(f"Why: {rec['reason']}")
         L.append(f"Apply it? Say yes, or run: /context-guru:adapt {kind} apply {apply_token(rep)}")
@@ -519,8 +521,18 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
 def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], int]:
     opt, _, basis = token.partition("@")
     st, doc = api.send("POST", f"/api/adapt/{kind}/apply", body={"option": opt, "basis": basis}, timeout=60)
+    if st == 202 and isinstance(doc, dict) and doc.get("poll"):  # a long apply (a campaign build): wait for it
+        poll, deadline = doc["poll"], time.time() + APPLY_WAIT
+        while st in (200, 202) and isinstance(doc, dict) and doc.get("state") not in ("done", "failed"):
+            if time.time() > deadline:
+                return [f"Still applying after {APPLY_WAIT} s; the proxy carries on. Check again: /context-guru:adapt {kind}"], 0
+            time.sleep(2)
+            st, doc = api.send("GET", poll, timeout=30)
+        if st == 200 and isinstance(doc, dict) and doc.get("state") == "failed":
+            return ["Not applied: " + (doc.get("message") or "the proxy reported a failure.")], 1
     if st == 200 and isinstance(doc, dict) and doc.get("ok"):
-        L = [f"Applied: {doc.get('note') or doc.get('applied', opt)} ({EFFECT.get(doc.get('effective'), 'see the note above')})."]
+        eff = EFFECT.get(doc.get("effective"))
+        L = [f"Applied: {doc.get('note') or doc.get('applied', opt)}" + (f" ({eff})." if eff else "")]
         undo = (doc.get("undo") or {}).get("option")
         if undo:
             L.append(f"Undo: /context-guru:adapt {kind} apply {undo}")
@@ -544,6 +556,8 @@ def adapt_overview(api: Api, o: dict) -> list[str]:
         if rec:
             best = max(best, rec.get("net_delta_usd", 0.0))
         rows.append([kind, dollars(rec.get("net_delta_usd", 0.0)) if rec else "", rec["change"] if rec else "already on the best option"])
+    if read == 0 and len({r[2] for r in rows}) == 1:
+        return [rows[0][2]]
     d = o["days"] or ADAPT_DAYS
     L = [f"The best single change would have saved {dollars(best)} over the last {d} days." if best > 0
          else f"Nothing to change: your settings were already the cheapest on the last {d} days." if read == len(KINDS)

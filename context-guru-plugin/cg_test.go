@@ -79,6 +79,14 @@ func cgProxyStub(t *testing.T, cache string) string {
 			w.Write(cgRead(t, "cg", "adapt_apply.json"))
 		}
 	})
+	// A long apply: 202 with a poll path, then the finished result.
+	mux.HandleFunc("POST /api/adapt/tools/apply", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		w.Write([]byte(`{"state":"running","poll":"/api/adapt/tools/apply/job1"}`))
+	})
+	mux.HandleFunc("GET /api/adapt/tools/apply/job1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"state":"done","ok":true,"applied":"remove-unused","previous":"keep","effective":"now","note":"1 unused item filtered (playwright)","undo":{"option":"keep"}}`))
+	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	for path, key := range map[string]string{"/api/spend/explain": "spend", "/api/tools": "tools", "/api/tools/last-used": "last_used"} {
 		body := bundle[key]
@@ -165,6 +173,7 @@ func TestCGGoldens(t *testing.T) {
 		{"adapt-tools", warm, []string{"adapt", "tools"}, 0},
 		{"adapt-apply", warm, []string{"adapt", "cache", "apply", "adaptive@3f9a1c"}, 0},
 		{"adapt-apply-stale", warm, []string{"adapt", "cache", "apply", "adaptive@000000"}, 1},
+		{"adapt-apply-async", warm, []string{"adapt", "tools", "apply", "remove-unused"}, 0},
 		{"adapt-apply-unknown", warm, []string{"adapt", "cache", "apply", "nonsense"}, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
