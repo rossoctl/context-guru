@@ -11,19 +11,13 @@ import (
 // ownDecl is Context Guru's own tools and skills, the same rule dash/adapttools.go lists by.
 var ownDecl = regexp.MustCompile(`(?i)context[-_]?guru`)
 
-// ctlAdaptToolsApply applies one option of GET /api/adapt/tools to the caller's removal list:
-// the WRITE half of /context-guru:adapt tools. It only ever writes names the caller's own current
-// report offers, so it can add nothing the report would not list (never a built-in, never
-// Context Guru's own tools or skills), and it writes through the same validated, audited update
-// as the Inventory page's switch.
-func (h *Handler) ctlAdaptToolsApply(w http.ResponseWriter, r *http.Request) {
-	if h.registry() == nil || h.api == nil {
-		ctlErr(w, http.StatusNotImplemented, "this proxy has no account configuration to write to: "+
-			"run each item's remove command, or add its remove_as name to components.toolfilter.remove "+
-			"in the proxy's config and restart it")
-		return
-	}
-	t, err := h.webPrincipal(r)
+// adaptToolsApply applies one option of GET /api/adapt/tools to the caller's removal list: the
+// WRITE half of /context-guru:adapt tools. Who may, how it is written and how it is undone are
+// the shared adapt helper's (adaptapply.go); this decides only what the list becomes. It writes
+// only names an option of a report this account just fetched offered (dash.API.AdaptOffer), so
+// it can add nothing the report would not list: never a built-in, never Context Guru's own.
+func (h *Handler) adaptToolsApply(w http.ResponseWriter, r *http.Request) {
+	who, err := h.adaptPrincipal(r)
 	if err != nil {
 		code, msg := statusOf(err)
 		ctlErr(w, code, msg)
@@ -37,28 +31,24 @@ func (h *Handler) ctlAdaptToolsApply(w http.ResponseWriter, r *http.Request) {
 		readErr(w, err)
 		return
 	}
-	// The caller's OWN report, whatever scope a manager's default view would be.
-	// The window the report was read on (since/until) is kept, so the basis is comparable.
-	own := r.Clone(r.Context())
-	q := r.URL.Query()
-	q.Set("tenant", "me")
-	own.URL.RawQuery = q.Encode()
-	doc, err := h.api.AdaptToolsDocument(own)
-	if err != nil {
-		ctlErr(w, http.StatusInternalServerError, "could not build your report: "+err.Error())
+	if in.Option == "revert" {
+		if _, err := h.adaptRevert(who, "tools"); err != nil {
+			code, msg := statusOf(err)
+			ctlErr(w, code, msg)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": "revert", "previous": "current",
+			"effective": "now", "note": "restored the configuration from before the last adapt change, whichever command made it"})
 		return
 	}
 	if in.Basis == "" {
 		ctlErr(w, http.StatusBadRequest, "basis is required: send the basis_id of the report you are acting on")
 		return
 	}
-	if in.Basis != doc.BasisID {
-		ctlErr(w, http.StatusConflict, "the report changed since you saw it; read it again and decide on the current one")
-		return
-	}
-	names, ok := doc.OptionRemove(in.Option)
+	v, ok := h.API().AdaptOffer("tools", who.TenantID, in.Basis, in.Option)
+	names, _ := v.([]string)
 	if !ok {
-		ctlErr(w, http.StatusBadRequest, "that option is not in your current report")
+		ctlErr(w, http.StatusConflict, "that option is not in a current report; run the report again")
 		return
 	}
 	// Defence in depth: whatever the report builder does, only MCP and skill entries, and never
@@ -70,33 +60,28 @@ func (h *Handler) ctlAdaptToolsApply(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	restore := in.Option == "restore"
-	undo, note := "restore", "filtering "+strings.Join(names, ", ")
+	note := "filtering " + strings.Join(names, ", ")
 	switch {
 	case len(names) == 0:
-		undo, note = "keep", "nothing changed"
+		note = "nothing changed"
 	case restore:
-		undo, note = "keep", "stopped filtering "+strings.Join(names, ", ")
+		note = "stopped filtering " + strings.Join(names, ", ")
 	}
 	if len(names) > 0 {
-		if code, msg := h.updateRemoved(t, func(cur []string) []string {
-			for _, n := range names {
-				cur = withDecl(cur, n, !restore)
-			}
-			return cur
-		}); code != 0 {
+		if _, _, err := h.adaptWrite(who, "tools", in.Option, func(doc string) (string, error) {
+			return editRemoved(doc, func(cur []string) []string {
+				for _, n := range names {
+					cur = withDecl(cur, n, !restore)
+				}
+				return cur
+			})
+		}); err != nil {
+			code, msg := statusOf(err)
 			ctlErr(w, code, msg)
 			return
 		}
 	}
-	// The undo carries the basis of the report as it stands after this write, so undoing is
-	// held to the same staleness check as applying.
-	undoBasis := ""
-	if after, err := h.api.AdaptToolsDocument(own); err == nil {
-		undoBasis = after.BasisID
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "applied": in.Option, "previous": doc.Current,
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": in.Option, "previous": "keep",
 		// The filter acts on the next request, which re-writes the cached prefix once.
-		"effective": "now", "note": note, "undo": map[string]string{"option": undo, "basis": undoBasis},
-	})
+		"effective": "now", "note": note, "undo": map[string]string{"option": "revert"}})
 }

@@ -19,9 +19,7 @@ package dash
 // same-count choice would have given.
 
 import (
-	"errors"
 	"fmt"
-	"hash/fnv"
 	"net/http"
 	"regexp"
 	"sort"
@@ -118,7 +116,7 @@ type AdaptToolsDoc struct {
 	Class          string                    `json:"class"`
 	Method         string                    `json:"method"`
 	MethodDetail   string                    `json:"method_detail"`
-	BasisID        string                    `json:"basis_id"`
+	BasisID        string                    `json:"basis_id"` // set by the handler: the offer id apply must send
 	Current        string                    `json:"current"`
 	Default        string                    `json:"default"`
 	Best           string                    `json:"best"`
@@ -547,36 +545,6 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 		out.Warnings = append(out.Warnings, "Unused means unused in this window, not that it will never be needed.",
 			fmt.Sprintf("Removing changes the cached prefix, so the next request re-writes it once: about %s, counted as the option's spend.", usdText(out.RewriteUSD)))
 	}
-	// The basis is the DECISION, not the numbers: each option's names, sorted, so new requests
-	// that only move dollars or reorder items do not make an apply stale.
-	all, enough, restore = sortedCopy(all), sortedCopy(enough), sortedCopy(restore)
-	h := fnv.New64a()
-	for _, n := range all {
-		h.Write([]byte(n + "\x00"))
-	}
-	for _, n := range enough {
-		h.Write([]byte(n + "\x01"))
-	}
-	for _, n := range restore {
-		h.Write([]byte(n + "\x02"))
-	}
-	out.BasisID = fmt.Sprintf("%016x", h.Sum64())[:8]
-}
-
-// OptionRemove returns the toolfilter entries an option names, and false for an unknown option.
-func (out *AdaptToolsDoc) OptionRemove(id string) ([]string, bool) {
-	for _, o := range out.Options {
-		if o.ID == id {
-			return o.Remove, true
-		}
-	}
-	return nil, false
-}
-
-func sortedCopy(s []string) []string {
-	out := append([]string{}, s...)
-	sort.Strings(out)
-	return out
 }
 
 func usdText(x float64) string {
@@ -658,16 +626,6 @@ func suggestServer(server string) string {
 	return "claude mcp remove " + server
 }
 
-// AdaptToolsDocument builds the report for a request's own scope; the control plane's apply
-// route checks the option and basis against it.
-func (a *API) AdaptToolsDocument(r *http.Request) (*AdaptToolsDoc, error) {
-	f, _, ok := a.scope(r)
-	if !ok {
-		return nil, errNotPermitted
-	}
-	return a.db(r).AdaptTools(f, a.priceFn(r), a.toolFilterStateForScope(f))
-}
-
 // adaptTools serves GET /api/adapt/tools for the caller's scope.
 //
 // A removal list belongs to one account, so the report defaults to the caller's own traffic even
@@ -679,14 +637,22 @@ func (a *API) adaptTools(w http.ResponseWriter, r *http.Request) {
 		r = r.Clone(r.Context())
 		r.URL.RawQuery = q.Encode()
 	}
-	doc, err := a.AdaptToolsDocument(r)
-	if errors.Is(err, errNotPermitted) {
+	f, _, ok := a.scope(r)
+	if !ok {
 		a.unauthorized(w)
 		return
 	}
+	doc, err := a.db(r).AdaptTools(f, a.priceFn(r), a.toolFilterStateForScope(f))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// The options are frozen as offered: apply takes one of exactly these, from this report,
+	// for AdaptOfferTTL (the shared adapt helper's rule).
+	opts := make(map[string]any, len(doc.Options))
+	for _, o := range doc.Options {
+		opts[o.ID] = o.Remove
+	}
+	doc.BasisID = a.OfferAdapt("tools", f.Tenant, opts)
 	writeJSON(w, doc)
 }

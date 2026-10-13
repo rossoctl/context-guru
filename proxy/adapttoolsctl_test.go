@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -53,7 +54,7 @@ func TestAdaptToolsApplyWritesOnlyTheReportedNames(t *testing.T) {
 	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused"}`, jar); w.Code != 400 {
 		t.Fatalf("missing basis = %d %s", w.Code, w.Body)
 	}
-	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"Read","basis":"`+basis+`"}`, jar); w.Code != 400 {
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"Read","basis":"`+basis+`"}`, jar); w.Code != 409 {
 		t.Fatalf("unknown option = %d %s", w.Code, w.Body)
 	}
 	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused"}`, nil); w.Code != 401 {
@@ -70,7 +71,7 @@ func TestAdaptToolsApplyWritesOnlyTheReportedNames(t *testing.T) {
 		t.Fatalf("apply did not write the server: %q", config())
 	}
 	undo, _ := out["undo"].(map[string]any)
-	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"`+undo["option"].(string)+`","basis":"`+undo["basis"].(string)+`"}`, jar); w.Code != 200 {
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"`+undo["option"].(string)+`"}`, jar); w.Code != 200 {
 		t.Fatalf("undo = %d %s", w.Code, w.Body)
 	}
 	if strings.Contains(config(), "mcp__srv") {
@@ -78,68 +79,55 @@ func TestAdaptToolsApplyWritesOnlyTheReportedNames(t *testing.T) {
 	}
 }
 
-// On a single-tenant proxy there is no account configuration to write, and the caller is told
-// what to do instead, in JSON, rather than getting the mux's plain 404.
-func TestAdaptToolsApplyOnALocalProxySaysWhatToDo(t *testing.T) {
-	up := fakeUpstream(t)
-	defer up.Close()
-	h, _ := dashHandler(t, up.URL, dash.Options{})
-	srv := httptest.NewServer(h.Mux())
-	defer srv.Close()
-	resp, err := srv.Client().Post(srv.URL+"/api/adapt/tools/apply", "application/json", strings.NewReader(`{"option":"remove-unused"}`))
-	if err != nil {
-		t.Fatal(err)
+// On a single-tenant proxy, apply goes through the shared adapt helper: the running pipeline
+// filters the names at once, from loopback only, and revert takes them back out.
+func TestAdaptToolsApplyOnALocalProxy(t *testing.T) {
+	h := localAdaptHandler(t, filepath.Join(t.TempDir(), "d.db.adapt.json"))
+	h.API().SetToolFilterState(h.DashToolFilter())
+	mux := h.Mux()
+	do := func(method, path, body, addr string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.RemoteAddr = addr
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
 	}
-	defer resp.Body.Close()
-	var out map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != http.StatusNotImplemented ||
-		!strings.Contains(out["error"], "remove command") {
-		t.Fatalf("status %d, body %v, err %v", resp.StatusCode, out, err)
-	}
-}
-
-// A manager's dashboard default is the whole service, but a removal list is one account's: the
-// report and the apply act on the manager's own traffic, never another tenant's.
-func TestAdaptToolsApplyForAManagerWritesOnlyTheirOwn(t *testing.T) {
-	f := newMgrFixture(t)
-	f.h.API().SetToolFilterState(f.h.DashToolFilter())
-	w, _ := f.signUp(t, "boss@ibm.com", "m")
-	boss := w.Result().Cookies()
-	w, _ = f.signUp(t, "user@ibm.com", "u")
-	user := w.Result().Cookies()
-	idOf := func(jar []*http.Cookie) string {
-		_, me := f.do(t, "GET", "/api/me", "", jar)
-		tn, _ := me["tenant"].(map[string]any)
-		id, _ := tn["id"].(string)
-		return id
-	}
-	for _, s := range []struct{ id, server string }{{idOf(boss), "mine"}, {idOf(user), "other"}} {
-		e := &dash.Event{TS: time.Now().UnixMilli(), TenantID: s.id, SessionID: "s-" + s.server, Model: "m",
-			CacheRead: 1000, TokenAccounting: dash.AccountingComplete, DeclDigest: "d"}
-		e.Tools = 1
-		f.rec.Record(e)
-		f.rec.RecordInventory(s.id, "s-"+s.server, time.Now().UnixMilli(), &dash.Inventory{Digest: "d", UseFingerprint: 1,
-			Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__" + s.server + "__q", Server: s.server, Tokens: 100}}}, false)
-	}
+	e := &dash.Event{TS: time.Now().UnixMilli(), SessionID: "s1", Model: "m", CacheRead: 1000,
+		TokenAccounting: dash.AccountingComplete, DeclDigest: "d1"}
+	e.Tools = 1
+	h.rec.Record(e)
+	h.rec.RecordInventory("", "s1", time.Now().UnixMilli(), &dash.Inventory{Digest: "d1", UseFingerprint: 1,
+		Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}, false)
 	var rep map[string]any
 	for i := 0; i < 100; i++ {
-		// The fleet view sees both servers once both inventories are written.
-		if _, all := f.do(t, "GET", "/api/adapt/tools?tenant=*", "", boss); len(all["items"].([]any)) == 2 {
+		rep = map[string]any{}
+		json.Unmarshal(do("GET", "/api/adapt/tools", "", "127.0.0.1:1").Body.Bytes(), &rep)
+		if items, _ := rep["items"].([]any); len(items) == 1 {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	_, rep = f.do(t, "GET", "/api/adapt/tools", "", boss)
-	if items, _ := rep["items"].([]any); len(items) != 1 {
-		t.Fatalf("a manager's default report is not their own: %v", rep["items"])
+	body := `{"option":"remove-unused","basis":"` + rep["basis_id"].(string) + `"}`
+	if w := do("POST", "/api/adapt/tools/apply", body, "198.51.100.7:1"); w.Code != http.StatusForbidden {
+		t.Fatalf("off-loopback apply = %d %s", w.Code, w.Body)
 	}
-	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused","basis":"`+rep["basis_id"].(string)+`"}`, boss); w.Code != 200 {
+	if w := do("POST", "/api/adapt/tools/apply", body, "127.0.0.1:1"); w.Code != http.StatusOK {
 		t.Fatalf("apply = %d %s", w.Code, w.Body)
 	}
-	_, me := f.do(t, "GET", "/api/me", "", boss)
-	tn, _ := me["tenant"].(map[string]any)
-	doc, _ := tn["effective_config_yaml"].(string)
-	if !strings.Contains(doc, "mcp__mine") || strings.Contains(doc, "mcp__other") {
-		t.Fatalf("manager apply wrote the wrong account's names: %q", doc)
+	removed := func() string {
+		tf, _ := h.static.Load().Pipe.Find("toolfilter").(interface{ Removed() []string })
+		if tf == nil {
+			return ""
+		}
+		return strings.Join(tf.Removed(), ",")
+	}
+	if got := removed(); got != "mcp__srv" {
+		t.Fatalf("running pipeline filters %q", got)
+	}
+	if w := do("POST", "/api/adapt/tools/apply", `{"option":"revert"}`, "127.0.0.1:1"); w.Code != http.StatusOK {
+		t.Fatalf("revert = %d %s", w.Code, w.Body)
+	}
+	if got := removed(); got != "" {
+		t.Fatalf("after revert the pipeline filters %q", got)
 	}
 }

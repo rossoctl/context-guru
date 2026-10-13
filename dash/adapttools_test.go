@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -184,7 +185,7 @@ func TestAdaptToolsUsesTheRecordedDigestAndBoundsTheGuess(t *testing.T) {
 }
 
 // The envelope the shared adapt renderer reads: only items with enough evidence are recommended,
-// every option names exactly what it would filter, and the basis changes with the item list.
+// and every option names exactly what it would filter.
 func TestAdaptToolsEnvelope(t *testing.T) {
 	doc := &AdaptToolsDoc{RewriteUSD: 1, Window: AdaptToolsWindow{Since: day(0), Until: day(30)}, Items: []AdaptToolsItem{
 		{Name: "a", RemoveAs: "mcp__a", USD: 3, Sufficient: true},
@@ -196,29 +197,13 @@ func TestAdaptToolsEnvelope(t *testing.T) {
 		doc.Options[1].SpendUSD != 1 || doc.Options[1].NetUSD != 2 || doc.Items[0].LastUsedMS != nil {
 		t.Fatalf("doc %+v rec %+v", doc, doc.Recommendation)
 	}
-	for id, want := range map[string]string{"keep": "", "remove-sufficient": "mcp__a",
-		"remove-unused": "mcp__a,skill__b", "restore": "mcp__old"} {
-		got, ok := doc.OptionRemove(id)
-		if !ok || strings.Join(got, ",") != want {
-			t.Errorf("%s: %v %v, want %q", id, got, ok, want)
-		}
+	remove := map[string]string{}
+	for _, o := range doc.Options {
+		remove[o.ID] = strings.Join(o.Remove, ",")
 	}
-	if _, ok := doc.OptionRemove("nope"); ok {
-		t.Error("unknown option accepted")
-	}
-	basis := doc.BasisID
-	// Dollars that move and reorder the items do not change the decision, so not the basis.
-	doc.Items[0].USD, doc.Items[1].USD = 1, 9
-	doc.Items[0], doc.Items[1] = doc.Items[1], doc.Items[0]
-	doc.finish(ToolFilterState{Removed: []string{"mcp__old", "Workflow"}})
-	if doc.BasisID != basis {
-		t.Fatalf("basis moved with the dollars: %q -> %q", basis, doc.BasisID)
-	}
-	doc.Items = []AdaptToolsItem{doc.Items[1], doc.Items[0]}
-	doc.Items = doc.Items[:1]
-	doc.finish(ToolFilterState{})
-	if doc.BasisID == basis || len(doc.BasisID) != 8 {
-		t.Fatalf("basis %q did not change from %q", doc.BasisID, basis)
+	if want := map[string]string{"keep": "", "remove-sufficient": "mcp__a", "remove-unused": "mcp__a,skill__b",
+		"restore": "mcp__old"}; fmt.Sprint(remove) != fmt.Sprint(want) {
+		t.Errorf("options remove %v, want %v", remove, want)
 	}
 	dear := &AdaptToolsDoc{RewriteUSD: 5, Items: []AdaptToolsItem{{Name: "a", RemoveAs: "mcp__a", USD: 3, Sufficient: true}}}
 	dear.finish(ToolFilterState{})
