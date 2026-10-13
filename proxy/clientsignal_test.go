@@ -242,6 +242,7 @@ func TestSignalValidation(t *testing.T) {
 		`{"session":"abc-1","event":"SessionEnd","kind":"rm -rf"}`:                                                       http.StatusNoContent, // unknown reason -> "other"
 		`{"session":"abc-1","event":"SessionEnd","prompt":"x"}`:                                                          http.StatusNoContent, // read fields only
 		`{"session_id":"abc-1","hook_event_name":"SessionEnd","reason":"other","cwd":"/x","transcript_path":"/x.jsonl"}`: http.StatusNoContent,
+		`{"session_id":"abc-1","hook_event_name":"SessionEnd","reason":"prompt_input_exit","source":""}`:                 http.StatusNoContent, // the hosted snippet
 		`{"session_id":"abc-1","hook_event_name":"SessionStart","source":"compact","model":"m"}`:                         http.StatusNoContent,
 		`{"session_id":"abc-1","hook_event_name":"PreToolUse","tool_input":{}}`:                                          http.StatusBadRequest,
 		`{"session_id":"abc-1","hook_event_name":"SessionStart","source":"rm -rf"}`:                                      http.StatusBadRequest,
