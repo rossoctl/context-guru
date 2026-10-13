@@ -742,7 +742,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool) {
 	if k != nil && tn != nil && session != "" {
-		k.departed(tn.ID, session)
+		defer k.departed(tn.ID, session) // last: the request is over once its hold (if any) is stored
 	}
 	if k == nil || tn == nil || session == "" || len(body) == 0 || startedAt.IsZero() {
 		return

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,7 +40,7 @@ func TestNoPingWhileARequestOfTheSessionIsInFlight(t *testing.T) {
 			`"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1,"cache_read_input_tokens":48576,"cache_creation_input_tokens":0}}`))
 	}))
 	defer up.Close()
-	rec, err := dash.NewRecorder(dash.Options{DBPath: filepath.Join(t.TempDir(), "d.db"), BatchSize: 1, FlushInterval: time.Millisecond})
+	rec, err := dash.NewRecorder(dash.Options{DBPath: ":memory:", BatchSize: 1, FlushInterval: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +88,17 @@ func TestNoPingWhileARequestOfTheSessionIsInFlight(t *testing.T) {
 		}
 		resp.Body.Close()
 	}
+	// record runs in serve's defer, AFTER the response reaches the client: wait for it, or the next
+	// request's record can run first and take the turn the gate counts.
+	settled := func() {
+		for deadline := time.Now().Add(5 * time.Second); h.keeper.inflightCount("", sess) > 0 && time.Now().Before(deadline); {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	post(true, "fix the bug")
+	settled()
 	post(true, "fix the bug", "done", "thanks")
+	settled()
 	if h.keeper.Stats().Live != 1 {
 		t.Fatalf("setup: %d live, want 1 (%+v)", h.keeper.Stats().Live, h.keeper.Stats())
 	}
@@ -112,6 +120,7 @@ func TestNoPingWhileARequestOfTheSessionIsInFlight(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the slow request never finished")
 	}
+	settled()
 	h.keeper.sweep(clock.advance(time.Second))
 	if n := pings.Load(); n != 1 {
 		t.Errorf("%d pings after the slow request finished, want 1", n)
