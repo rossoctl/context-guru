@@ -879,7 +879,7 @@ Every dollar figure on the dashboard is `observed tokens × per-model rates`. Th
 from LiteLLM's public `model_prices_and_context_window.json`, which prices the **public API**.
 A gateway does not have to charge that, and two things go wrong when it does not:
 
-* **Wrong rates.** IBM's `ete-litellm` bills `aws/claude-sonnet-5` at $1.52/MTok in where
+* **Wrong rates.** IBM's `litellm-gateway` bills `aws/claude-sonnet-5` at $1.52/MTok in where
   anthropic.com bills $3.00 — so every cost, every baseline and every saving for that gateway
   read about twice the truth.
 * **No rates at all.** A model the public map has never heard of — a preview id, an internal
@@ -889,7 +889,7 @@ A gateway does not have to charge that, and two things go wrong when it does not
 
 `MODEL_PRICES=/etc/context-guru/prices.yaml` fixes both. Start from
 [`deploy/service/prices.example.yaml`](https://github.com/rossoctl/context-guru/blob/main/deploy/service/prices.example.yaml),
-which carries the whole ete-litellm table:
+which carries the whole litellm-gateway table:
 
 ```yaml
 cache_read_frac: 0.1     # fills cache_read where an entry omits it

@@ -165,7 +165,7 @@ view by design, and a wiped control DB means everyone re-registers.
 ## What this runbook deliberately does not do
 
 - **It does not expose Grafana.** Grafana binds `127.0.0.1:3000` and this runbook adds no
-  way in. Publishing an admin console to all of `9.0.0.0/8` was a separate decision with
+  way in. Publishing an admin console to the whole corporate network was a separate decision with
   its own review, taken afterwards: it is now at `/grafana/` on the front end, gated by
   nginx `auth_request` to context-guru **managers**, with Grafana's own login behind that.
   See `deploy/grafana/README.md`, "Reaching it: the manager gate".

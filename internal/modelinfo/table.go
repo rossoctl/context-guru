@@ -12,7 +12,7 @@ import (
 
 // A Table is an OPERATOR-SUPPLIED price list, consulted before the public LiteLLM
 // map. It exists because the public map prices the public API, and a gateway does
-// not have to charge that: IBM's ete-litellm bills claude-sonnet-5 at $1.52/MTok in
+// not have to charge that: IBM's litellm-gateway bills claude-sonnet-5 at $1.52/MTok in
 // where anthropic.com bills $3.00, so every dollar figure this dashboard produced
 // for that gateway was ~2x too high. A price list is also the only way to price a
 // model the public map has never heard of — a preview deployment, an internal

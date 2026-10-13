@@ -800,7 +800,7 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 //
 // And the amount is the STABLE HALF, not the request's whole cache_read. That distinction was
 // found by running the control arm rather than by reasoning about it. Real Claude Code
-// sessions against ete-litellm, each started after a fresh commit so the environment snapshot
+// sessions against litellm-gateway, each started after a fresh commit so the environment snapshot
 // genuinely differed, first request of each session:
 //
 //	                     first-request cache_read     cache_write
