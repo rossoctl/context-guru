@@ -130,6 +130,7 @@ func (k *keeper) signal(tenantID, scoped, event, kind string, now time.Time) boo
 		// starts after the mark and is tracked normally; see endedAfter.
 		before := k.Stats().Live
 		k.retireSession(tenantID, scoped)
+		k.pred.sessionEnded(tenantID, scoped, now, time.Time{})
 		slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "retired", before-k.Stats().Live)
 		k.mu.Lock()
 		k.markEndedLocked(tenantID, kaKey(tenantID, scoped), now)
@@ -147,6 +148,7 @@ func (k *keeper) signal(tenantID, scoped, event, kind string, now time.Time) boo
 		// entries whose last request started compactRaceMargin before the arrival are the old prefix.
 		before := k.Stats().Live
 		k.retireSessionStartedBefore(tenantID, scoped, now.Add(-compactRaceMargin))
+		k.pred.sessionEnded(tenantID, scoped, now, now.Add(-compactRaceMargin))
 		slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "retired", before-k.Stats().Live)
 		k.signalApplied.Add(1)
 		return true

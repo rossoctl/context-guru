@@ -20,6 +20,7 @@ import (
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/predictive"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 	"github.com/tidwall/gjson"
@@ -478,6 +479,8 @@ type keeper struct {
 	// session id and is cleared wholesale at the bound; give it an LRU only if session churn
 	// is ever shown to cost real pings.
 	turns map[string]int
+	// pred holds the learned keep-alive campaigns (predictive.go). Never nil.
+	pred *predRuntime
 	// overrides is the per-session manual keep-alive, keyed like live. In memory only and
 	// deliberately so — an authorization to spend that silently survives a restart is worse
 	// than one that does not. See keepaliveoverride.go.
@@ -564,6 +567,7 @@ func newKeeper(h *Handler) *keeper {
 	k := &keeper{h: h, stop: make(chan struct{}), done: make(chan struct{}),
 		live: map[string]*kaEntry{}, turns: map[string]int{},
 		overrides: map[string]sessionOverride{}, now: time.Now}
+	k.pred = newPredRuntime(h.campaignDir())
 	k.send = k.sendPing
 	k.dispatch = func(j pingJob) { go k.fire(j) }
 	// Loaded once at construction. Unlike overrides, a strategy is a standing rule a
@@ -594,6 +598,7 @@ func (k *keeper) start() {
 				return
 			case <-t.C:
 				k.sweep(k.now())
+				k.h.maybeRefreshAutoCampaigns(k.now())
 			}
 		}
 	}()
@@ -707,6 +712,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		return
 	}
 	key := kaThreadKey(tn.ID, session, threadID)
+	// A client that reported this session ended (clientsignal.go) holds nothing further: retire, and do not score or arm a campaign decision for it.
 	if clientSignalEnabled() && k.endedAfter(tn.ID, session, startedAt) {
 		k.retire(key)
 		return
@@ -732,6 +738,17 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// per request and its cache is keyed on the configuration document, so an account that turns
 	// the setting off stops being retained on its very next request; anything held for a session
 	// that goes quiet instead is dropped by the hard deadline below, within (K+1)x X.
+	// A learned campaign (predictive.go) scores every finished response of its tenant, in shadow or active mode. It runs only here, after the kill switch and the
+	// no-audit-sink refusal above, so a switched-off or unaudited keep-alive retains and tracks nothing for it, and a failure inside it is contained (recover).
+	var pdec predDecision
+	var pdecOK bool
+	if provider != bschemas.OpenAI && usageOK {
+		var arr *predictive.Arrival
+		if u.Live != nil {
+			arr = u.Live.Arrival
+		}
+		pdec, pdecOK = k.predictiveDecide(arr, !tn.Cache.KeepAlive, tn.ID, session, threadID, string(provider), startedAt, body, r.UserAgent(), u)
+	}
 	pol := tn.Cache
 	// The manager-controlled strategy layer, resolved once here and generalizing the one
 	// hook the session override already had — see keepalivestrategy.go's applyStrategy.
@@ -741,6 +758,10 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	applied := ""
 	if provider != bschemas.OpenAI {
 		pol, applied = k.applyStrategy(tn.ID, pol, k.now())
+		// An ACTIVE campaign decides the ping count unless a manager strategy matched (the more explicit instruction).
+		if pdecOK && applied == "" && pdec.active {
+			pol, applied = pdec.apply(pol), campaignStrategyID(pdec.campaign.meta.ID)
+		}
 	}
 	// A per-session manual override, if one is armed and unexpired. Everything below reads
 	// `pol` and neither knows nor cares where it came from. An override may switch the
