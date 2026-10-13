@@ -398,6 +398,7 @@ func (h *Handler) Mux() *http.ServeMux {
 	// requests — billed calls, added by a proxy sold on reducing them. See counttokens.go.
 	m.HandleFunc("POST /anthropic"+countTokensPath, h.countTokens(h.anthropicCountTokensUpstream()))
 	m.HandleFunc("POST /compact", h.compact)
+	m.HandleFunc("POST /signal", h.clientSignal)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	// A browser asks for /favicon.ico unprompted, and in hosted mode Bob's "/" catch-all
 	// would otherwise answer it with a 401 — putting a red error in the console of every

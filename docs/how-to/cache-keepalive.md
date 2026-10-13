@@ -203,6 +203,40 @@ This is opt-in per strategy; a strategy with no `predictor_id` behaves exactly a
 are concentrated in a few tenants, so scope it to the tenants it actually helps rather than
 applying it fleet-wide.
 
+## Client lifecycle signals (opt-in)
+
+The proxy cannot see from the request stream that a user has quit or that Claude Code has
+compacted the conversation, so by default it keeps pinging a cache nobody will read. With
+signals on, the Claude Code plugin tells the proxy, and the proxy stops holding that cache.
+
+Turn it on in two places:
+
+1. On the proxy: `CONTEXT_GURU_CLIENT_SIGNALS=on`. This enables `POST /signal`; without it the
+   route returns 404.
+2. In the plugin: set the `client_signals` option to `on` (`/plugin configure`), or export
+   `CONTEXT_GURU_CLIENT_SIGNALS=on` in the shell that runs Claude Code.
+
+| Event (hook) | What the proxy does |
+|---|---|
+| `SessionEnd` (any reason) | Retires every entry held for that session and remembers the end for up to 12 h, so a request that was still in flight when the user left is not held afterwards. A resumed session's next request starts after the mark and is held as usual. |
+| `SessionStart` with `source=compact` | Retires the entries holding the pre-compaction prefix (those whose last request started at least 2 s before the event). The session goes on and its next request is held as usual. |
+| `SessionStart` resume / clear / startup / fork, `Notification` | Recorded only. Offline replay found that acting on these earns little or loses money. |
+
+The event carries no content: the session id, the event name and a reason from a closed set.
+The hook reads the hook payload only to pick those three fields, sends them with the same
+credential Claude Code already sends to `ANTHROPIC_BASE_URL`, and never blocks or fails the
+session (2 s timeout, exit 0 on every path).
+
+**How it fails safe.** A signal can only remove spend: it retires a held entry, it never
+extends a hold or schedules a ping. A lost or late event leaves the keep-alive as it is without
+signals; a forged one can only stop pings for the sender's own sessions, because the session key
+is scoped to the authenticated tenant. End marks are capped per tenant (2,000), so one tenant
+cannot evict another's.
+
+If `ANTHROPIC_BASE_URL` points at something other than a context-guru proxy (a gateway, or a
+proxy in front of one), that host receives `POST /signal` with the token it already sees on
+every request. Leave the option off in that setup.
+
 ## Related
 
 - [Measuring savings](measure-savings.md) — how the ledger separates the provider's cache

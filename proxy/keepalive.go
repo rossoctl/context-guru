@@ -482,6 +482,9 @@ type keeper struct {
 	// deliberately so — an authorization to spend that silently survives a restart is worse
 	// than one that does not. See keepaliveoverride.go.
 	overrides map[string]sessionOverride
+	// ended is when a client lifecycle signal last ended each session, keyed like live. See clientsignal.go.
+	ended         map[string]map[string]time.Time
+	signalApplied atomic.Int64
 	// strategies is the manager-controlled keep-alive strategy list, loaded from the
 	// tenant registry at process start and replaced wholesale on every write through the
 	// control routes — never mutated in place, the same pattern k.overrides itself
@@ -704,6 +707,10 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		return
 	}
 	key := kaThreadKey(tn.ID, session, threadID)
+	if clientSignalEnabled() && k.endedAfter(tn.ID, session, startedAt) {
+		k.retire(key)
+		return
+	}
 	// The kill switch stops RETENTION, not merely pinging. A switch that left bodies and
 	// credentials accumulating while refusing to use them would be the worst of both.
 	if keepAliveDisabled() {
@@ -938,11 +945,17 @@ func (k *keeper) retire(key string) {
 // under it. The separator is NUL, which no session id contains, so a prefix can never reach
 // into another session.
 func (k *keeper) retireSession(tenantID, session string) {
+	k.retireSessionStartedBefore(tenantID, session, time.Time{})
+}
+
+// retireSessionStartedBefore is retireSession restricted to entries whose last request (real or
+// ping) started before cutoff; a zero cutoff retires them all.
+func (k *keeper) retireSessionStartedBefore(tenantID, session string, cutoff time.Time) {
 	base := kaKey(tenantID, session)
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	for key, e := range k.live {
-		if key != base && !strings.HasPrefix(key, base+"\x00") {
+		if (key != base && !strings.HasPrefix(key, base+"\x00")) || (!cutoff.IsZero() && !e.startedAt.Before(cutoff)) {
 			continue
 		}
 		k.bytes -= int64(len(e.body))
