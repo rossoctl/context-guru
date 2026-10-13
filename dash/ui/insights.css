@@ -164,3 +164,61 @@
   font-size: var(--t-micro); color: var(--fg-faint); font-style: normal;
   letter-spacing: .04em; cursor: help;
 }
+
+/* ── the activity chart ────────────────────────────────────────────────────
+ * A heatmap of capability against time, with a volume strip above it.
+ *
+ * THE RAMP IS SEQUENTIAL: one hue, five steps, light to dark — because the cell encodes
+ * MAGNITUDE (how many invocations) and nothing else. A categorical palette here would spend the
+ * identity channel re-encoding what the darkness already shows, and a rainbow would imply an
+ * order the hues do not have.
+ *
+ * Both ramps were computed from the dashboard's own --pal-blue and checked rather than eyeballed:
+ * luminance is monotonic across all five steps, and the end step clears 3:1 against its surface
+ * (4.30:1 light, 4.79:1 dark). THE ANCHOR FLIPS in dark mode — more becomes brighter, because on
+ * a dark ground darker means less ink, not more.
+ */
+:root {
+  --ins-s1: #dfeaf6; --ins-s2: #b9d2ef; --ins-s3: #89b3e7;
+  --ins-s4: #5895de; --ins-s5: #2a78d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ins-s1: #202e3e; --ins-s2: #254162; --ins-s3: #2c598f;
+    --ins-s4: #3371bc; --ins-s5: #3987e5;
+  }
+}
+:root[data-theme="dark"] {
+  --ins-s1: #202e3e; --ins-s2: #254162; --ins-s3: #2c598f;
+  --ins-s4: #3371bc; --ins-s5: #3987e5;
+}
+
+.ins-chart { overflow-x: auto; margin-top: var(--sp-2); }
+.ins-vol, .ins-heat { display: block; }
+/* The volume strip is CONTEXT, so it takes the same recessive ink as the grid rather than a
+   series hue: it answers "was I working at all", and competing with the heatmap for attention
+   would make the reader compare two things that are not comparable. */
+.ins-vol-bar { fill: var(--fg-faint); fill-opacity: .38; }
+.ins-vol-axis { stroke: var(--border); stroke-width: 1; }
+
+.ins-cell { stroke: none; }
+.ins-cell.s1 { fill: var(--ins-s1); }
+.ins-cell.s2 { fill: var(--ins-s2); }
+.ins-cell.s3 { fill: var(--ins-s3); }
+.ins-cell.s4 { fill: var(--ins-s4); }
+.ins-cell.s5 { fill: var(--ins-s5); }
+/* Carried but never invoked in that period. Not blank: "you were paying for this and not using
+   it" is the finding, and an empty cell says only "nothing happened". Drawn in the neutral ink
+   so it cannot be mistaken for the faintest step of the use ramp. */
+.ins-cell.carried-only { fill: var(--fg-faint); fill-opacity: .1; }
+.ins-cell:hover { stroke: var(--fg); stroke-width: 1.5; }
+
+.ins-heat-lane {
+  font-family: var(--mono); font-size: var(--t-micro); fill: var(--fg-muted);
+}
+.ins-heat-tick { font-family: var(--mono); font-size: var(--t-micro); fill: var(--fg-faint); }
+
+.ins-range { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
+.ins-scope { margin: var(--sp-2) 0 0; font-size: var(--t-body); line-height: 1.5; }
+.ins-scope strong { font-family: var(--mono); }
+.ins-scope-note { color: var(--fg-muted); }

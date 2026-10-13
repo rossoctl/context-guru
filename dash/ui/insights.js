@@ -41,7 +41,12 @@ let insSel = {};
 /* The last document fetched, so a selection change re-renders without re-querying. */
 let insDoc = null;
 /* The window in force. 0 means all sessions. */
-let insSessions = 0;
+/* The selected range, as epoch ms. Zero means unbounded — the whole history, which is the
+ * default BECAUSE the reader has to see the phases before choosing between them. Replaces an
+ * earlier session-count selector: a session is not a unit of time (spans on one real store were
+ * 0.0h, 1.1h and 99.1h), so "the last N sessions" was a window nobody could reason about. */
+let insSince = 0;
+let insUntil = 0;
 
 const INS_SCOPE_ITEM = 'item';
 const INS_WINDOWS = [0, 1, 3, 5, 10, 25];
@@ -538,20 +543,23 @@ function insRender() {
       'A row showing no figures was invoked, so it has no waste to report.' }));
   root.appendChild(intro);
 
-  /* The window strip. Unlike the static report's chips, these RE-QUERY — a served page can, and
-   * that is the whole reason this surface is worth building. */
-  const win = el('div', { class: 'ins-win' },
-    el('span', { class: 'ins-win-lbl', text: 'sessions analysed' }));
-  for (const n of INS_WINDOWS) {
-    const b = el('button', {
-      type: 'button',
-      class: 'chip' + (insSessions === n ? ' on' : ''),
-      text: n === 0 ? 'all' : 'last ' + n,
-      onclick: () => { if (insSessions !== n) { insSessions = n; loadInsights(); } },
-    });
-    win.appendChild(b);
-  }
-  root.appendChild(win);
+  /* THE CHART IS THE CONTROL, and it comes before the tables because the reader chooses a
+   * range from it. At rest it shows the whole history, so the range is picked from evidence
+   * rather than guessed — a brush on a blank frame would make the reader supply the knowledge
+   * this view was supposed to give them. */
+  const chartPanel = el('div', { class: 'panel' },
+    el('h2', { text: 'How your usage changed' }),
+    el('p', { class: 'hint', text: 'One row per capability you have actually invoked, ordered by '
+      + 'when you first used it — so the diagonal is your own progression. A darker cell means '
+      + 'more invocations in that period; the faintest means you were carrying it and never '
+      + 'reached for it. The bars above are your overall activity, so a flat stretch reads as '
+      + 'time off rather than as a change of habit.' }));
+  chartPanel.appendChild(insRangeBar());
+  const chart = insChart();
+  if (chart) chartPanel.appendChild(chart);
+  chartPanel.appendChild(insScopeLine());
+  root.appendChild(chartPanel);
+
 
   const items = insDoc.items || [];
   const unremovable = items.filter((i) => i.scope === 'none');
@@ -709,7 +717,8 @@ async function loadInsights() {
   if (root && !insDoc) root.appendChild(el('p', { class: 'empty', text: 'Loading…' }));
   try {
     const q = { timeline: 1 };
-    if (insSessions) q.sessions = insSessions;
+    if (insSince) q.since = Math.round(insSince);
+    if (insUntil) q.until = Math.round(insUntil);
     insDoc = await api('insights', q);
   } catch (e) {
     if (root) {
@@ -817,4 +826,219 @@ function insSparkline(item, tl, scale) {
   svg.appendChild(svgEl('title', {})).textContent = label;
   svg.setAttribute('aria-label', label);
   return svg;
+}
+
+/* ── the activity chart ─────────────────────────────────────────────────────
+ *
+ * A heatmap of capability (rows) against time (columns), with a volume strip above it, and a
+ * brush that narrows every table below.
+ *
+ * WHY A HEATMAP. Three forms were rendered against four months of simulated phased work —
+ * planning, documentation, testing, TDD — and only this one tells the story without explanation.
+ * A total-activity area shows WHEN you worked and hides the phase boundary completely, because
+ * volume is flat across it: the same number of calls, to a different set of tools. A
+ * distinct-capabilities count shows churn but not identity, so six tools in June and six in
+ * October look identical though they share none.
+ *
+ * ROWS ARE ORDERED BY FIRST USE, and that is the design rather than a detail: it produces a
+ * diagonal, and the diagonal IS the progression. Sorted by volume the same data looks like noise.
+ *
+ * ONLY CAPABILITIES EVER INVOKED GET A ROW. A heatmap of all 79 declared items is unreadable; of
+ * those ever used it is about 11, on the real machine and in the simulation alike. A
+ * never-invoked capability has nothing to plot and belongs in the table, which is where it is.
+ */
+
+const INS_MAX_COLS = 26;
+const INS_HEAT_ROW = 15;
+const INS_HEAT_GAP = 2;
+const INS_LANE_W = 168;
+const INS_VOL_H = 34;
+
+/* Day buckets up to 26 columns, then rolled wider. 120 days of day-buckets is 120 columns, which
+ * is a column per 3px — a texture, not a chart. The roll happens here rather than in the
+ * endpoint so the brush can still resolve to exact days. */
+function insRollup(tl) {
+  const n = tl.buckets.length;
+  const width = Math.max(1, Math.ceil(n / INS_MAX_COLS));
+  const cols = [];
+  for (let i = 0; i < n; i += width) {
+    cols.push({ from: tl.buckets[i], toIdx: Math.min(n, i + width) - 1, fromIdx: i });
+  }
+  const roll = (arr) => cols.map((c) => {
+    let s = 0;
+    for (let i = c.fromIdx; i <= c.toIdx; i++) s += arr[i] || 0;
+    return s;
+  });
+  const rows = [];
+  for (const name in tl.items) {
+    const it = tl.items[name];
+    const calls = roll(it.calls);
+    if (!calls.some((v) => v > 0)) continue; // never invoked: nothing to plot
+    rows.push({ name, calls, carried: roll(it.carried), firstUsed: it.first_used_ts || 0 });
+  }
+  /* First use, ascending — the diagonal. Ties broken by total so a busy row leads. */
+  rows.sort((a, b) => (a.firstUsed - b.firstUsed) ||
+    (b.calls.reduce((x, y) => x + y, 0) - a.calls.reduce((x, y) => x + y, 0)));
+  return { cols, rows, width, days: tl.buckets.length };
+}
+
+function insColLabel(ms, width) {
+  const d = new Date(ms);
+  const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()];
+  return width > 1 ? d.getDate() + ' ' + mon : String(d.getDate());
+}
+
+/* The ramp index for a cell. Five steps, because more are indistinguishable at 15px and fewer
+ * cannot separate "tried it once" from "lived in it". */
+function insHeatStep(v, peak) {
+  if (!v) return 0;
+  return Math.min(5, 1 + Math.floor((v / peak) * 4.999));
+}
+
+function insChart() {
+  if (!insDoc || !insDoc.timeline || !insDoc.timeline.buckets.length) return null;
+  const g = insRollup(insDoc.timeline);
+  if (!g.rows.length) {
+    return el('p', { class: 'empty', text: 'No capability was invoked in this range, so there ' +
+      'is nothing to chart. The tables below still list what you were carrying.' });
+  }
+  const nc = g.cols.length;
+  const cw = Math.max(6, Math.min(34, Math.floor((640 - INS_LANE_W) / nc)));
+  const plotW = nc * cw;
+  const totalW = INS_LANE_W + plotW + 8;
+
+  const wrap = el('div', { class: 'ins-chart' });
+
+  /* The volume strip. Context for the brush: a flat week is a holiday, not a phase, and without
+   * it a reader cannot tell "I stopped using this" from "I stopped working". */
+  const vol = g.cols.map((_, i) => g.rows.reduce((a, r) => a + r.calls[i], 0));
+  const volPeak = Math.max(1, ...vol);
+  const vsvg = svgEl('svg', {
+    class: 'ins-vol', width: totalW, height: INS_VOL_H,
+    viewBox: `0 0 ${totalW} ${INS_VOL_H}`, 'aria-hidden': 'true',
+  });
+  for (let i = 0; i < nc; i++) {
+    if (!vol[i]) continue;
+    const h = Math.max(2, (vol[i] / volPeak) * (INS_VOL_H - 4));
+    vsvg.appendChild(svgEl('rect', {
+      class: 'ins-vol-bar', x: INS_LANE_W + i * cw + 1, y: INS_VOL_H - h,
+      width: Math.max(2, cw - INS_HEAT_GAP), height: h, rx: 2,
+    }));
+  }
+  vsvg.appendChild(svgEl('line', { class: 'ins-vol-axis',
+    x1: INS_LANE_W, y1: INS_VOL_H - 0.5, x2: INS_LANE_W + plotW, y2: INS_VOL_H - 0.5 }));
+  wrap.appendChild(vsvg);
+
+  /* The heatmap. */
+  const peak = Math.max(1, ...g.rows.flatMap((r) => r.calls));
+  const h = g.rows.length * (INS_HEAT_ROW + INS_HEAT_GAP) + 22;
+  const svg = svgEl('svg', {
+    class: 'ins-heat', width: totalW, height: h, viewBox: `0 0 ${totalW} ${h}`, role: 'img',
+    'aria-label': g.rows.length + ' capabilities over ' + g.days + ' days, darker means more ' +
+      'invocations in that period',
+  });
+
+  g.rows.forEach((r, ri) => {
+    const y = ri * (INS_HEAT_ROW + INS_HEAT_GAP);
+    svg.appendChild(svgEl('text', {
+      class: 'ins-heat-lane', x: INS_LANE_W - 8, y: y + INS_HEAT_ROW - 4, 'text-anchor': 'end',
+    })).textContent = insShortName(r.name);
+    for (let i = 0; i < nc; i++) {
+      const v = r.calls[i];
+      const step = insHeatStep(v, peak);
+      /* A cell with no calls but live carriage is drawn as the faintest tint rather than left
+       * blank: "you were paying for this and not using it" is the finding, and a blank cell says
+       * only "nothing happened". */
+      const carried = r.carried[i] > 0;
+      if (!step && !carried) continue;
+      const cell = svgEl('rect', {
+        class: step ? 'ins-cell s' + step : 'ins-cell carried-only',
+        x: INS_LANE_W + i * cw + 1, y, width: Math.max(2, cw - INS_HEAT_GAP),
+        height: INS_HEAT_ROW, rx: 2,
+      });
+      const when = insColLabel(g.cols[i].from, g.width) +
+        (g.width > 1 ? ' + ' + (g.width - 1) + ' day(s)' : '');
+      cell.appendChild(svgEl('title', {})).textContent = r.name + ' — ' + when + ': ' +
+        (v ? v + ' invocation(s)' : 'carried, never invoked');
+      svg.appendChild(cell);
+    }
+  });
+
+  /* The x axis: first, last, and a couple between — never every column, which is unreadable. */
+  const ty = g.rows.length * (INS_HEAT_ROW + INS_HEAT_GAP) + 13;
+  const every = Math.max(1, Math.round(nc / 5));
+  for (let i = 0; i < nc; i += every) {
+    svg.appendChild(svgEl('text', {
+      class: 'ins-heat-tick', x: INS_LANE_W + i * cw + cw / 2, y: ty, 'text-anchor': 'middle',
+    })).textContent = insColLabel(g.cols[i].from, g.width);
+  }
+  wrap.appendChild(svg);
+  return wrap;
+}
+
+/* ── the range, which is the actual feature ─────────────────────────────────
+ *
+ * The chart is a CONTROL. Narrow the range and every table below re-queries, so the advice
+ * describes the period the reader cares about rather than an average over three months of mixed
+ * phases — a "general recommendation that may not be relevant any more".
+ *
+ * It RE-QUERIES rather than filtering the rendered rows, and that is not laziness: the verdicts,
+ * the observation floor and the owner rollups are all computed server-side over the filter's
+ * window. Filtering in JS would leave the verdicts describing all history while the rows describe
+ * a slice — the quiet kind of mismatch this whole report exists to avoid.
+ */
+
+const INS_RANGES = [
+  { days: 0, label: 'all' },
+  { days: 7, label: '7 days' },
+  { days: 30, label: '30 days' },
+  { days: 90, label: '90 days' },
+];
+
+function insRangeBar() {
+  const bar = el('div', { class: 'ins-range' },
+    el('span', { class: 'ins-win-lbl', text: 'range' }));
+  for (const r of INS_RANGES) {
+    const on = (r.days === 0 && !insSince) || (r.days > 0 && insSince &&
+      Math.abs((Date.now() - insSince) / 86400000 - r.days) < 1.5);
+    bar.appendChild(el('button', {
+      type: 'button', class: 'chip' + (on ? ' on' : ''), text: r.label,
+      onclick: () => {
+        insSince = r.days ? Date.now() - r.days * 86400000 : 0;
+        insUntil = 0;
+        loadInsights();
+      },
+    }));
+  }
+  return bar;
+}
+
+/* The scope line. Stated as a sentence and not only as two dates, because every number below it
+ * means something different depending on this range, and a reader who skipped the chips would
+ * otherwise read a narrowed figure as an all-time one. */
+function insScopeLine() {
+  const items = (insDoc.items || []);
+  const unused = items.filter((i) => !i.invoked).length;
+  const tl = insDoc.timeline;
+  let span = 'all the traffic this proxy has kept';
+  if (tl && tl.buckets && tl.buckets.length) {
+    const a = new Date(tl.buckets[0]), b = new Date(tl.buckets[tl.buckets.length - 1]);
+    const fmt = (d) => d.getDate() + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()];
+    span = tl.buckets.length === 1 ? fmt(a)
+      : fmt(a) + ' to ' + fmt(b) + ' (' + tl.buckets.length + ' days)';
+  }
+  const p = el('p', { class: 'ins-scope' },
+    el('strong', { text: items.length + ' capabilities, ' + unused + ' never invoked' }),
+    ' — measured over ' + span + '. Every figure below describes this range only.');
+  /* Narrowing weakens the verdicts, because the observation floor is computed over the selected
+   * window. That is correct — less evidence, weaker claims — but unsaid it reads as the
+   * recommendations breaking, so it is said. */
+  if (insSince) {
+    p.appendChild(el('span', { class: 'ins-scope-note', text: ' A narrower range means less ' +
+      'evidence, so fewer items will be recommended outright. That is the floor working, not a ' +
+      'fault.' }));
+  }
+  return p;
 }

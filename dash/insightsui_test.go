@@ -20,6 +20,13 @@ func TestInsightsStylesheetUsesOnlyTokensThatExist(t *testing.T) {
 		defined[m[1]] = true
 	}
 	ins := readUI(t, "ui/insights.css")
+	// A feature stylesheet may define its OWN tokens — this one declares a five-step sequential
+	// ramp, because a heatmap needs a ramp and style.css has no reason to carry one for a single
+	// view. Those count as defined; what must not happen is a reference to a token NOBODY
+	// defines, which resolves to nothing and renders as a missing colour.
+	for _, m := range cssVarDef.FindAllStringSubmatch(ins, -1) {
+		defined[m[1]] = true
+	}
 	var used int
 	for _, m := range cssVarUse.FindAllStringSubmatch(ins, -1) {
 		used++
@@ -40,9 +47,17 @@ func TestInsightsStylesheetUsesOnlyTokensThatExist(t *testing.T) {
 // background.
 func TestInsightsStylesheetHasNoLiteralColours(t *testing.T) {
 	ins := readUI(t, "ui/insights.css")
+	// A line that DEFINES a token may carry a literal — that is what a definition is, and this
+	// file declares its own sequential ramp. What must not carry one is a line that STYLES
+	// something, because a literal there cannot follow the theme. The ramp's own dark values are
+	// declared under both dark selectors, which is the mechanism that makes it theme-aware.
+	defining := regexp.MustCompile(`^\s*--[a-z0-9-]+\s*:`)
 	for i, line := range strings.Split(ins, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "*") || strings.Contains(line, "/*") {
 			continue // the header comment explains the rule and may name a colour
+		}
+		if defining.MatchString(line) {
+			continue
 		}
 		if regexp.MustCompile(`#[0-9a-fA-F]{3,8}\b`).MatchString(line) {
 			t.Errorf("insights.css:%d has a literal colour: %q. Every colour must come from a "+
