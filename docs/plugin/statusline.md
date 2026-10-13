@@ -5,24 +5,26 @@ The status line sits under the prompt and answers two questions all the time: **
 ![Warm: green, seconds ticking down](../statusline-live/warm-dark.svg#only-dark)
 ![Warm: green, seconds ticking down](../statusline-live/warm-light.svg#only-light)
 
-The first line is money, the second is the cache clock, the sub-agents, the context bar and at most one hint:
+The first line is money, the second is the cache clock, the sub-agents, the context bar, the session's keep-alive pings and at most one hint:
 
 ```text
-saved $0.31 session · $4.20 today · ★ $212.40 lifetime
-cache ● █████░ 3:57 │ agents 2 · soonest ◐ 0:51 │ ctx ███░░░░░ 41%
+saved $0.31 of $4.10
+cache ● █████░ 13:40 ↻ │ agents reviewer ● 4:21 · Explore ◐ 0:51 · 1 cold │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
 ```
+
+Every number is about this session. There is no today or lifetime total on the line; the dashboard and `/context-guru:savings` cover longer windows.
 
 ## What each piece means
 
 | Piece | Meaning |
 |---|---|
-| `saved $0.31 session` | Saved this session: modelled against the same requests without the proxy, at your gateway's prices, net of the proxy's own spend. |
-| `$4.20 today` | The same measure since local midnight. |
-| `★ $212.40 lifetime` | The same measure over everything this proxy has recorded. |
+| `saved $0.31` | Saved this session: modelled against the same requests without the proxy, at your gateway's prices, net of the proxy's own spend. |
+| `of $4.10` | What this session cost through the proxy, on the same prices: the agent's requests, the proxy's own model calls and its keep-alive pings. Left out until the proxy has priced a request. This is not Claude Code's own `cost` (its estimate at list prices), which `detailed` shows as `spent`. |
 | `cache ● █████░ 3:57` | A bar that drains as the prompt cache approaches expiry, and the clock. Time is measured from the end of the last response. |
-| `↻` after the clock | The last touch of the cache was a keep-alive ping. |
-| `agents 2 · soonest ◐ 0:51` | Running sub-agents: the count and the clock of the one whose cache expires first (a single agent shows its own clock, as `agent ● 4:21`). Each has its own cache. Finished (cold) ones are not shown. |
+| `13:40 ↻` | The proxy is holding this cache warm with keep-alive pings. The clock is then the time until the cache goes cold if you send nothing: the last planned ping plus the cache lifetime. The bar still drains over the current cache entry, so each ping refills it. `↻` alone, with the normal clock, means the last touch was a ping and none is planned. |
+| `agents reviewer ● 4:21 · Explore ◐ 0:51 · 1 cold` | Each sub-agent's cache, under the name Claude Code's agents list shows (`←` / `↓` in Claude Code), soonest to lapse first, up to three, then `+N more`. Each clock is that agent's time until cold, with `↻` when pings hold it. Cold ones are counted. See [Sub-agents](#sub-agents-and-the-selected-agent). |
 | `ctx ███░░░░░ 41%` | How full you are, as a share of the model's context limit. |
+| `ka 3 pings $0.04` | Keep-alive pings the proxy sent in this session, and what they cost. Shown after the first ping. |
 | `▸ hint` | At most one thing worth acting on, dollars first. |
 | `▲ update v0.3.2` | A newer proxy release is waiting; shown first so it cannot scroll off. |
 
@@ -71,9 +73,18 @@ The bar rescales to the tier's lifetime.
 ![Ping planned](../statusline-live/ping-planned-dark.svg#only-dark)
 ![Ping planned](../statusline-live/ping-planned-light.svg#only-light)
 
-### Sub-agents
+### <span id="sub-agents-and-the-selected-agent"></span>Sub-agents
 
-One running sub-agent, then several (the count and the one expiring soonest), then five.
+Claude Code does not tell the status line which agent is selected in its agents list: the status line command receives the same input whichever agent you are viewing (checked against Claude Code 2.1.296). So the line always shows the main agent's cache on the left, and every sub-agent's cache by name, the same name the agents list shows. Select `reviewer` in the list and read the `reviewer` clock.
+
+The names come from the session's own files next to its transcript (`<session>/subagents/agent-*.meta.json`). The proxy tells the agents apart by the `x-claude-code-agent-id` header Claude Code sends on every sub-agent and agent-team teammate request. A request the proxy grouped by its prompt instead (Claude Code's side requests, such as the auto-mode classifier) is not an agent and is not listed. A sub-agent with no name on disk keeps the unlabelled form, `agents 2 · soonest ◐ 0:51`.
+
+Named agents, with the main cache and `reviewer` held warm by keep-alive pings and one finished agent counted as cold:
+
+![Named sub-agents](../statusline-live/agents-named-dark.svg#only-dark)
+![Named sub-agents](../statusline-live/agents-named-light.svg#only-light)
+
+The unlabelled form: one running sub-agent, then several, then five.
 
 ![One sub-agent](../statusline-live/agents-1-dark.svg#only-dark)
 ![One sub-agent](../statusline-live/agents-1-light.svg#only-light)
@@ -110,7 +121,7 @@ At 80 columns, with the cache cold, five sub-agents and a hint:
 ![Worst case at 80 columns](../statusline-live/worst-case-80-dark.svg#only-dark)
 ![Worst case at 80 columns](../statusline-live/worst-case-80-light.svg#only-light)
 
-At 40 columns the line sheds, in order: tools, latency, spend, the update marker, the long hint form, then the agents shrink to a count, then the `saved` label and the context bar. The cache clock is shortened last.
+At 40 columns the line sheds, in order: tools, latency, keep-alive pings, spend, the update marker, the long hint form, then the agents shrink to a count, then the `saved` total and label and the context bar. The cache clock is shortened last.
 
 ![40 columns](../statusline-live/narrow-40-dark.svg#only-dark)
 ![40 columns](../statusline-live/narrow-40-light.svg#only-light)
@@ -120,7 +131,7 @@ At 40 columns the line sheds, in order: tools, latency, spend, the update marker
 | Layout | Shows |
 |---|---|
 | `minimal` | one line: saved, cache, hint |
-| `balanced` (default) | update, saved, cache, agents, context, hint |
+| `balanced` (default) | update, saved, cache, agents, context, keep-alive pings, hint |
 | `detailed` | balanced plus `spent $4.10 · $2.73/h · up 1h30m` (the rate appears after 5 minutes), a slow-upstream note (only when upstream averages 3 s or more) and the least-used tool or skill |
 
 ![Detailed layout](../statusline-live/detailed-dark.svg#only-dark)
@@ -197,7 +208,7 @@ and start a new session. Older Claude Code versions ignore the key and redraw on
 
 ## Render time
 
-Every layout returns in about 0.4 s at worst, Python start-up included (the slowest run in the table took 0.43 s). The render has a 0.36 s budget. Only the proxy's totals (`/api/stats?lean=1`) are waited for, and the cache state is read in parallel under the same deadline. Everything else (day and lifetime totals, series, spend, requests) comes from a disk cache that a detached background process refreshes, one per 30 seconds. A timeout shows the last numbers with `⏳`, never "proxy offline".
+Every layout returns in about 0.4 s at worst, Python start-up included (the slowest run in the table took 0.43 s). The render has a 0.36 s budget. Only the session's totals (`/api/stats?lean=1&session=…`) are waited for, and the cache state is read in parallel under the same deadline. Everything the mode layouts add (the day total, series, spend, requests) comes from a disk cache that a detached background process refreshes, one per 30 seconds. A timeout shows the last numbers with `⏳`, never "proxy offline".
 
 Measured on this host, which is loaded and shared with production: 50 runs per cell, wall milliseconds, median / 95th percentile / maximum. "Slow" is a server that sleeps 5 seconds on every request.
 

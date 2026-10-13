@@ -12,24 +12,29 @@ manage this one additional top-level key (never a second settings editor, never 
 **What it shows, once enabled and this project is routed** (default layout `balanced`):
 
 ```
-saved $0.31 session · $4.20 today · ★ $212.40 lifetime
-cache ● █████░ 3:57 │ agents ◐ 0:51 ● 4:21 │ ctx ███░░░░░ 41%
+saved $0.31 of $4.10
+cache ● █████░ 13:40 ↻ │ agents reviewer ● 4:21 · Explore ◐ 0:51 │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
 cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41% │ ▸ your next message costs ≈$0.78 extra
 ```
 
 - **Money.** `saved $0.31` is money already saved: what the same requests would have cost
   uncompacted, at the gateway's prices, net of context-guru's own model spend and keep-alive
-  pings. Session, today (since local midnight) and lifetime are three windows of that one measure.
+  pings. `of $4.10` is what this session cost through the proxy at the same prices (requests,
+  context-guru's own model calls, pings). Session only: no today or lifetime total.
   `--layout=detailed` adds `spent $4.10 · $2.73/h · up 1h30m` (Claude Code's own running cost, the
   average rate once five minutes have passed, and the session's age).
 - **Cache clock.** A live countdown to expiry, green, amber in the last minute (a fifth of the
   lifetime on the 1h tier), red with `!` in the last 15 s, then `cold 1:20` counting UP. The proxy
   keeps the clock from the end of the last response, so a long answer is counted. It ticks every
-  second (`refreshInterval: 1`, which `settings.py` writes; a value you tuned is kept). `↻` means
-  the last touch was a keep-alive ping.
-- **Sub-agents.** Each running sub-agent has its own cache: one shows its clock (`agent ● 4:21`),
-  several show the count and the one expiring soonest (`agents 5 · soonest ◐ 0:52`). Finished
-  (cold) ones are not shown.
+  second (`refreshInterval: 1`, which `settings.py` writes; a value you tuned is kept). `13:40 ↻`
+  means the proxy holds the cache warm with keep-alive pings, and the clock is the time until it
+  goes cold (the last planned ping plus the lifetime); `↻` on a normal clock means the last touch
+  was a ping.
+- **Sub-agents.** Each sub-agent's cache, by the name Claude Code's agents list shows
+  (`agents reviewer ● 4:21 · Explore ◐ 0:51 · 1 cold`), soonest first, up to three. Claude Code
+  does not tell the status line which agent is selected, so the selected agent is found by name.
+  Agents without a name on disk keep `agents 5 · soonest ◐ 0:52`.
+- **Keep-alive.** `ka 3 pings $0.04`: this session's pings and their cost, after the first one.
   The main clock and the context bar follow the main thread, not whichever agent spoke last.
 - **Context.** Bar and percent against the model's context limit: the proxy's when it is a
   measured figure for the model, else Claude Code's.
@@ -46,7 +51,7 @@ layout outranks the installed command's flag until `auto`. Otherwise
 | layout | elements |
 |---|---|
 | minimal | saved, cache, hint (`saved $0.31 │ cache ● ████░░ 3:57`) |
-| balanced | update, saved, cache, agents, ctx, hint |
+| balanced | update, saved, cache, agents, ctx, ka, hint |
 | detailed | balanced + `spent` + `upstream slow: 7.0s` (only when slow) + least-used tool/skill (`◇ github 1% remove`) |
 | spark | `saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇` over the cache clock |
 | strip | the last 20 requests as hit `■` / partial `▨` / miss `✖`, and the dollars misses cost today |

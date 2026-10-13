@@ -101,6 +101,13 @@ rates by token type, classifies full-prefix cache rewrites from the token column
 and reports live session cache state and Context Guru's own ledger; `GET /api/tools/last-used`
 returns when each tool or skill was last called (names and times only).
 
+Two more serve the status line. `GET /api/stats?lean=1&session=<id>` is one session's totals from a
+single indexed read, including `keepalive_pings` and `keepalive_ping_usd`; `lean=1` with no session
+and no `since`/`until` is answered by the full handler. `GET /api/cachestate?session=<id>` is the
+session's live cache state per thread (`threads[]`, `a:<agent id>` for a sub-agent). A thread the
+keep-alive still plans to ping also carries `pings_left` and `held_until_ms`: when its cache goes
+cold if nothing else is sent (the last planned ping's start plus the cache lifetime).
+
 Top to bottom, the panel shows:
 
 - **Headline tiles and gauge** — declared vs. invoked tokens, over the *controllable*

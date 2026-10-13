@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -57,7 +58,7 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 		`{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":200000}}`
 	small := strings.Replace(payload, "412000", "52000", 1)
 	full := strings.Replace(payload, "412000", "900000", 1)
-	sess := "saved $0.31 session · $4.20 today · ★ $212.40 lifetime"
+	sess := "saved $0.31 of $0.41"
 	for _, c := range []struct {
 		name, cache, stdin, layout string
 		width                      int
@@ -85,9 +86,9 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 		{"cold/narrow", cs(400, 300, 412000, "1.20"), payload, "balanced", 60,
 			sess + "\ncache ○ cold 1:40 │ ▸ your next message costs ≈$1.20 extra"},
 		{"warm/narrow", cs(60, 300, 52000, "0.30"), small, "balanced", 40,
-			"saved $0.31\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
+			"saved $0.31 of $0.41\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 		{"first-run", `{"session":"s","none":true,"now_ms":1}`, `{"session_id":"sess-gold"}`, "balanced", 200,
-			"saved $4.20 today · ★ $212.40 lifetime\n◌ no cache yet"}, // a brand-new session claims no session saving yet
+			"◌ no cache yet"}, // a brand-new session claims no saving yet
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(cgStub(t, c.cache))
@@ -141,7 +142,7 @@ func TestStatuslineGoldenLive(t *testing.T) {
 			`"priced":true,"rewrite_usd":1.20,"window":1000000,"window_exact":true,"threads":[%s]}`,
 			model, now-lastAgo*1000, now, strings.Join(threads, ","))
 	}
-	sess := "saved $0.31 session · $4.20 today · ★ $212.40 lifetime"
+	sess := "saved $0.31 of $0.41"
 	m := "claude-sonnet-5-5"
 	for _, c := range []struct {
 		name, cache, stdin, layout string
@@ -162,11 +163,11 @@ func TestStatuslineGoldenLive(t *testing.T) {
 		{"many-agents", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("a:2", 250, 300, 9000, "0.03"),
 			th("a:3", 100, 300, 9000, "0.03"), th("a:4", 7, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")),
 			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ agents 4 · soonest ◐ 0:50 │ ctx ███░░░░░ 41%"},
-		{"cold-agents-are-finished", body(m, 100, th("a:1", 900, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")),
-			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ ctx ███░░░░░ 41%"},
+		{"cold-agents-are-counted", body(m, 100, th("a:1", 900, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")),
+			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ agents 1 cold │ ctx ███░░░░░ 41%"},
 		{"agents-narrow", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("a:2", 250, 300, 9000, "0.03"),
 			th("a:3", 100, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")), ctxPay(m), "balanced", 36,
-			"saved $0.31\ncache ● 3:20 │ agents 3 │ ctx 41%"},
+			"saved $0.31 of $0.41\ncache ● 3:20 │ agents 3 │ ctx 41%"},
 		{"model-switch", body(m, 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-opus-5-5"), "balanced", 200,
 			sess + "\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41% │ ▸ model changed: your next message costs ≈$1.20 extra"},
 		{"same-model-other-spelling", body("aws/claude-sonnet-5-5", 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-sonnet-5-5[1m]"), "balanced", 200,
@@ -185,6 +186,94 @@ func TestStatuslineGoldenLive(t *testing.T) {
 				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestStatuslineGoldenAgentsAndKeepAlive pins the per-agent and keep-alive elements: each
+// sub-agent's cache under the name Claude Code's agents list shows (read from the session's own
+// subagents/ files, for both id forms Claude Code sends; a prefix-grouped `p:` thread is a side
+// request and not listed), the main cache held warm by planned pings
+// (clock = time until cold, `↻`), this session's pings, and that no lifetime total is ever read.
+func TestStatuslineGoldenAgentsAndKeepAlive(t *testing.T) {
+	const now = 1_800_000_000_000
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sess-gold", "subagents")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		// a plain sub-agent: its header is the file id
+		"agent-ad9ba182bf3e760e6.meta.json": `{"agentType":"Explore","description":"find the parser"}`,
+		// an agent-team teammate: its header is <name>@<team>, not the file id
+		"agent-areviewer-8808ee2f0c216961.meta.json": `{"name":"reviewer","teamName":"session-ab47f1d6","agentType":"reviewer"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(sub, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	th := func(id string, agoSec int, held string) string {
+		return fmt.Sprintf(`{"id":%q,"main":%t,"model":"m","last_ts":%d,"end_ts":%d,"ttl_s":300,`+
+			`"prefix_tokens":%d,"priced":true,"rewrite_usd":0.03%s}`, id, id == "", now-agoSec*1000, now-agoSec*1000,
+			map[bool]int{true: 52000, false: 9000}[id == ""], held)
+	}
+	held := func(sec int) string { return fmt.Sprintf(`,"pings_left":2,"held_until_ms":%d`, now+sec*1000) }
+	cache := func(threads ...string) string {
+		return fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,`+
+			`"priced":true,"rewrite_usd":0.30,"window":1000000,"window_exact":true,"threads":[%s]}`,
+			now-60_000, now, strings.Join(threads, ","))
+	}
+	stdin := `{"session_id":"sess-gold","transcript_path":"` + filepath.Join(dir, "sess-gold.jsonl") + `",` +
+		`"cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000}}`
+	var queries []string
+	stub := func(cache string) string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+			queries = append(queries, r.URL.RawQuery)
+			w.Write([]byte(`{"total_saved_usd": 0.31, "cost_usd": 2.50, "cg_llm_cost_usd": 0.10, ` +
+				`"keepalive_pings": 3, "keepalive_ping_usd": 0.04}`))
+		})
+		mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(cache)) })
+		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go srv.Serve(ln) //nolint:errcheck
+		t.Cleanup(func() { srv.Close() })
+		return fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	}
+	for _, c := range []struct {
+		name, cache string
+		width       int
+		want        string
+	}{
+		{"named-agents", cache(th("", 60, ""), th("a:ad9ba182bf3e760e6", 10, ""), th("a:reviewer@session-ab47f1d6", 250, held(700)),
+			th("a:finished", 900, ""), th("p:0123456789ab", 10, "")), 200, // p: is a side request, not an agent
+			"saved $0.31 of $2.64\ncache ● █████░ 4:00 │ agents Explore ● 4:50 · reviewer ● 11:40 ↻ · 1 cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+		{"main-held-warm", cache(th("", 60, held(820))), 200,
+			"saved $0.31 of $2.64\ncache ● █████░ 13:40 ↻ │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+		// A plan cannot revive an expired entry (the ping failed or never came): cold is cold.
+		{"plan-cannot-revive-a-cold-cache", cache(th("", 320, held(500))), 200,
+			"saved $0.31 of $2.64\ncache ○ ░░░░░░ cold 0:20 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+		{"narrow-drops-ka-first", cache(th("", 60, held(820)), th("a:ad9ba182bf3e760e6", 10, "")), 60,
+			"saved $0.31 of $2.64\ncache ● █████░ 13:40 ↻ │ agents 1 │ ctx ░░░░░░░░ 5%"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			env := routedEnv(stub(c.cache))
+			env["CG_STATUSLINE_COLUMNS"] = fmt.Sprint(c.width)
+			out, code, _ := runStatusline(t, env, stdin, "--layout=balanced")
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			if got := strings.TrimRight(out, "\n"); got != c.want {
+				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
+			}
+		})
+	}
+	for _, q := range queries {
+		if strings.Contains(q, "since=") || !strings.Contains(q, "session=sess-gold") {
+			t.Errorf("/api/stats?%s: the status line reads this session's totals only (#510)", q)
+		}
 	}
 }
 

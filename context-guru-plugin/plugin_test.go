@@ -2619,8 +2619,8 @@ func TestStatuslineDefaultSegmentZeroTotal(t *testing.T) {
 }
 
 // TestStatuslineDefaultShowsOnlySavings is the shape the feature is FOR: real, non-trivial
-// session totals (matching the live capture) paired with a real savings figure, and — with
-// neither --cache nor --keepalive passed — nothing else in the line at all. This is also the
+// session totals (matching the live capture) paired with a real savings figure, and no
+// detailed-only segment. The session's keep-alive pings are part of the default since #510's PR. This is also the
 // positive control for TestStatuslineOmitsZeroSavings above: without a working default segment,
 // that test's "" assertion (once --cache/--keepalive are added there) would pass for the wrong
 // reason — a statusline.py that rendered NO segment ever would look identical.
@@ -2635,14 +2635,17 @@ func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
 	if !strings.HasPrefix(got, "saved $0.03") {
 		t.Errorf("got %q, want the labelled, estimated saving first", got)
 	}
-	if strings.Contains(got, "ka ") || strings.Contains(got, "proxy:") {
+	if strings.Contains(got, "proxy:") || strings.Contains(got, "upstream") {
 		t.Errorf("got %q — a detailed-layout/opt-in segment appeared in the balanced layout", got)
+	}
+	if !strings.Contains(got, "ka 4 pings") {
+		t.Errorf("got %q, want the session's keep-alive pings in the balanced layout", got)
 	}
 }
 
 // TestStatuslineExtrasHiddenByDefault is the OTHER half of the toggle: the same conditions that
 // would make each extra segment render (a real prompt_cache in stdin, real keepalive_pings in
-// stats) must produce NEITHER of them without the flag that turns them on — proven alongside
+// stats) must produce NEITHER of them once --hide turns them off — proven alongside
 // TestStatuslineExtrasShownWhenEnabled below so that "hidden by default" cannot pass merely
 // because the segment is broken.
 func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
@@ -2651,7 +2654,7 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
 		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
-	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--hide=cache")
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--hide=cache,ka")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -2659,7 +2662,7 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 		t.Errorf("got %q — the cache segment showed despite --hide=cache", out)
 	}
 	if strings.Contains(out, "ka ") {
-		t.Errorf("got %q — the keep-alive segment showed without --keepalive", out)
+		t.Errorf("got %q — the keep-alive segment showed despite --hide=ka", out)
 	}
 }
 
@@ -2668,21 +2671,20 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 // would be indistinguishable from "permanently broken".
 func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4,
-		"keepalive_net_usd": 0.07, "keepalive_misses_avoided": 4}`)
+		"keepalive_ping_usd": 0.02, "keepalive_net_usd": 0.07, "keepalive_misses_avoided": 4}`)
 	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
 		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
-	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache", "--keepalive")
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--layout=minimal", "--cache", "--keepalive")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
 	if !strings.Contains(out, "cache ● ██") || !strings.Contains(out, " 1:") {
 		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
 	}
-	// The keep-alive segment now shows the NET dollar figure and the misses it prevented, not the
-	// raw ping count — see statusline.py's _keepalive_segment.
-	if !strings.Contains(out, "ka ≤4miss $0.07") {
-		t.Errorf("got %q, want %q with --keepalive passed", out, "ka ≤4miss $0.07")
+	// The keep-alive segment is this session's ping count and ping spend — see _keepalive_segment.
+	if !strings.Contains(out, "ka 4 pings $0.02") {
+		t.Errorf("got %q, want %q with --keepalive passed", out, "ka 4 pings $0.02")
 	}
 	if !strings.Contains(out, "saved $0.03") {
 		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
