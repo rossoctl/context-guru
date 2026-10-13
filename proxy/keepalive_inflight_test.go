@@ -212,6 +212,7 @@ func TestKeepAliveNameCheckIsForRelaysOnly(t *testing.T) {
 		{bschemas.Anthropic, "http://litellm:4000", "gpt-5-mini-2025-08-07", false},
 		{bschemas.Anthropic, "http://litellm:4000", arn, false},
 		{bschemas.Anthropic, "https://evil-anthropic.com.example", "gpt-5", false},
+		{bschemas.Anthropic, "https://evilanthropic.com", "gpt-5", false},
 	} {
 		if got := relayServesClaude(c.p, c.base, c.model); got != c.want {
 			t.Errorf("%s %s %s: %v, want %v", c.p, c.base, c.model, got, c.want)
@@ -328,4 +329,49 @@ func (k *keeper) inflightCount(tenant, session string) int {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.inflight[kaKey(tenant, session)]
+}
+
+// A non-retryable 4xx counts toward the breaker; forget clears an account's trip; an OpenAI ping that
+// misses twice running (fresh input, no read) stops the session.
+func TestBreakerCountsA4xxForgetClearsItAndAnOpenAIDoubleMissStops(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	k.send = func(pingJob, []byte) (Usage, int, error) { return Usage{}, http.StatusUnauthorized, nil }
+	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 3, MinPrefixTokens: 20000}
+	up := upstream{base: "http://litellm", path: "/v1/messages"}
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	r.Header.Set("Authorization", "Bearer sk-x")
+	hold := func(sess string) {
+		for i := 0; i < 2; i++ {
+			k.record(&Tenancy{ID: "t1", Cache: pol}, sess, "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody), up, r,
+				bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+		}
+	}
+	for n := 0; n < routeFailLimit; n++ {
+		hold("s" + strconv.Itoa(n))
+	}
+	k.sweep(clock.advance(290 * time.Second))
+	time.Sleep(50 * time.Millisecond)
+	if k.Stats().RouteTrips != 1 {
+		t.Fatalf("%d trips after %d 401s, want 1", k.Stats().RouteTrips, routeFailLimit)
+	}
+	k.forget("t1")
+	hold("after-forget")
+	if k.Stats().Live != 1 {
+		t.Errorf("forget left the account's trip in place")
+	}
+	k.retireSession("t1", "after-forget")
+
+	var sent atomic.Int32
+	k.send = func(pingJob, []byte) (Usage, int, error) {
+		sent.Add(1)
+		return Usage{FreshInput: 48576, Output: 1}, http.StatusOK, nil
+	}
+	hold("openai-miss")
+	for i := 0; i < 3; i++ {
+		k.sweep(clock.advance(290 * time.Second))
+		time.Sleep(30 * time.Millisecond)
+	}
+	if sent.Load() != 2 {
+		t.Errorf("%d pings, want 2 (one miss goes on, the second stops the session)", sent.Load())
+	}
 }

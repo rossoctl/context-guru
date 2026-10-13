@@ -1286,8 +1286,8 @@ func (k *keeper) fire(j pingJob) {
 	if u.CacheWrite > u.CacheRead || u.CacheRead == 0 {
 		k.wrote.Add(1)
 		k.markStopped(j.e)
-		slog.Error("context-guru: cache keep-alive ping CREATED a cache entry instead of "+
-			"refreshing one; not pinging this session again",
+		slog.Error("context-guru: cache keep-alive ping did not read the held prefix (it wrote more "+
+			"than it read, or missed twice running); not pinging this session again",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
 			"cache_write", u.CacheWrite, "cache_read", u.CacheRead)
 	} else {
