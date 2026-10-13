@@ -233,6 +233,29 @@ The same harness on the status line before this work:
 
 The slow-proxy case went from about 680 ms to about 390 ms. Healthy renders are about 10 ms slower than before, from the extra elements (agents, spend).
 
+Per-agent names, the keep-alive plan and the session-only total (which removed the lifetime read) cost nothing measurable. Interleaved runs of the previous release ("before") and this one ("after") against the same server, with three named sub-agents on disk, 50 runs each, median / 95th percentile / maximum in milliseconds:
+
+| layout | scenario | before | after |
+|---|---|---|---|
+| minimal | warm | 56 / 71 / 75 | 57 / 75 / 86 |
+| minimal | cold | 94 / 112 / 140 | 88 / 101 / 118 |
+| minimal | slow | 396 / 433 / 530 | 395 / 415 / 444 |
+| minimal | down | 93 / 141 / 171 | 84 / 103 / 144 |
+| balanced | warm | 56 / 62 / 65 | 55 / 69 / 75 |
+| balanced | cold | 95 / 151 / 438 | 95 / 119 / 160 |
+| balanced | slow | 390 / 407 / 420 | 391 / 401 / 402 |
+| balanced | down | 90 / 105 / 176 | 85 / 110 / 154 |
+| detailed | warm | 58 / 71 / 87 | 62 / 72 / 76 |
+| detailed | cold | 87 / 99 / 107 | 90 / 102 / 116 |
+| detailed | slow | 390 / 398 / 406 | 389 / 398 / 460 |
+| detailed | down | 89 / 97 / 104 | 83 / 93 / 101 |
+| watch | warm | 56 / 64 / 72 | 56 / 64 / 67 |
+| watch | cold | 87 / 96 / 104 | 85 / 95 / 102 |
+| watch | slow | 393 / 410 / 485 | 392 / 401 / 414 |
+| watch | down | 88 / 109 / 166 | 83 / 92 / 177 |
+
+Reading the names is one directory listing and a few small files, about 0.1 ms.
+
 ## Colour and plain terminals
 
 Colours are the basic ANSI set plus dim, so they follow your terminal theme on light and dark backgrounds. `NO_COLOR=1` or `TERM=dumb` removes the colour; the clock, bar and symbols still carry the state. The default layouts have no ASCII mode: their bars and symbols are Unicode (the [modes](#modes) can switch to ASCII with `CG_ASCII=1`). `--layout=minimal` keeps to one short line.
