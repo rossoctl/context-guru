@@ -432,7 +432,12 @@ func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
 	keyOf func(session, kind, name, server string) string) ([]carriedSession, []string, error) {
 	// One pass at a time, process-wide: each is carriedShards concurrent readers, and on a cold
 	// fleet view it already runs beside scanDecls' own.
-	carriedSlot <- struct{}{}
+	// An abandoned request stops waiting for the slot.
+	select {
+	case carriedSlot <- struct{}{}:
+	case <-d.readCtx().Done():
+		return nil, nil, d.readCtx().Err()
+	}
 	defer func() { <-carriedSlot }()
 	var lo, hi sql.NullInt64
 	if err := d.sql.QueryRowContext(d.readCtx(),
