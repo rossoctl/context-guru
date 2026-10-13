@@ -22,7 +22,7 @@ func seedAdapt(t *testing.T) *DB {
 	}
 	var evs []*Event
 	for i, r := range []rq{
-		{"opus", 6, 0, 5000, AccountingComplete},   // rewrote the prefix: cache-write rate
+		{"opus", 6, 0, 5000, AccountingComplete},   // rewrote the prefix with a 1h write: 2x input
 		{"haiku", 6, 5000, 10, AccountingComplete}, // read it, at haiku's rate
 		{"opus", 1, 900, 0, AccountingComplete},    // subagent set: carries nothing listed
 		{"opus", 6, 0, 0, AccountingComplete},      // uncached: input rate
@@ -32,6 +32,9 @@ func seedAdapt(t *testing.T) *DB {
 	} {
 		e := mkEvent(day(0)+int64(i), "s1", r.model, 100, 100)
 		e.TenantID, e.Tools, e.CacheRead, e.CacheWrite, e.TokenAccounting = "t1", r.tools, r.read, r.wr, r.accounting
+		if i == 0 {
+			e.CacheWrite1h = r.wr
+		}
 		evs = append(evs, e)
 	}
 	if err := db.insertBatch(evs); err != nil {
@@ -75,12 +78,12 @@ func TestAdaptToolsPricesEachRequestAtTheSetItCarried(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := doc.Coverage; c != (AdaptCoverage{Sessions: 1, SessionsCaptured: 1, Requests: 7, RequestsMapped: 6, RequestsUnpriced: 1}) {
+	if c := doc.Coverage; c != (AdaptToolsCoverage{Sessions: 1, SessionsCaptured: 1, Requests: 7, RequestsMapped: 6, RequestsUnpriced: 1}) {
 		t.Fatalf("coverage %+v", c)
 	}
 	// Carried on: r1 write at opus, r2 read at haiku, r4 input at opus (+ r7, unknown model).
 	// Not on r3: the subagent set has no MCP server, and pricing it there was the old error.
-	per := 1.25 + 0.01 + 1.0
+	per := 2.0 + 0.01 + 1.0
 	want := map[string]struct {
 		kind string
 		usd  float64
@@ -108,7 +111,7 @@ func TestAdaptToolsPricesEachRequestAtTheSetItCarried(t *testing.T) {
 	}
 	srv := doc.Items[0]
 	if srv.Name != "srv" || srv.Tools != 2 || srv.Tokens != 1500 || srv.RemoveAs != "mcp__srv" ||
-		srv.Suggest != "claude mcp remove srv" || math.Abs(srv.USDCacheWrite-1500*1.25) > 1e-9 {
+		srv.Suggest != "claude mcp remove srv" || math.Abs(srv.USDCacheWrite-1500*2.0) > 1e-9 {
 		t.Fatalf("server item %+v", srv)
 	}
 	if sk := doc.Items[2]; sk.RemoveAs != "skill__p:sk" || !strings.HasPrefix(sk.Suggest, "claude plugin disable p ") {
@@ -173,5 +176,40 @@ func TestAdaptToolsUsesTheRecordedDigestAndBoundsTheGuess(t *testing.T) {
 	if it := doc.Items[0]; math.Abs(it.USD-10) > 1e-9 || math.Abs(it.USDLow-10) > 1e-9 ||
 		math.Abs(it.USDHigh-20) > 1e-9 || it.Requests != 1 {
 		t.Fatalf("item %+v", it)
+	}
+}
+
+// The envelope the shared adapt renderer reads: only items with enough evidence are recommended,
+// every option names exactly what it would filter, and the basis changes with the item list.
+func TestAdaptToolsEnvelope(t *testing.T) {
+	doc := &AdaptToolsDoc{Window: AdaptToolsWindow{Since: day(0), Until: day(30)}, Items: []AdaptToolsItem{
+		{Name: "a", RemoveAs: "mcp__a", USD: 3, Sufficient: true},
+		{Name: "b", RemoveAs: "skill__b", USD: 2},
+	}}
+	doc.finish(ToolFilterState{Removed: []string{"mcp__old", "Workflow"}})
+	if doc.Best != "remove-sufficient" || doc.Current != "keep" || doc.Recommendation == nil ||
+		doc.Recommendation.PerMonthUSD != 3 || doc.Items[0].LastUsedMS != nil {
+		t.Fatalf("doc %+v rec %+v", doc, doc.Recommendation)
+	}
+	for id, want := range map[string]string{"keep": "", "remove-sufficient": "mcp__a",
+		"remove-unused": "mcp__a,skill__b", "restore": "mcp__old"} {
+		got, ok := doc.OptionRemove(id)
+		if !ok || strings.Join(got, ",") != want {
+			t.Errorf("%s: %v %v, want %q", id, got, ok, want)
+		}
+	}
+	if _, ok := doc.OptionRemove("nope"); ok {
+		t.Error("unknown option accepted")
+	}
+	basis := doc.BasisID
+	doc.Items = doc.Items[:1]
+	doc.finish(ToolFilterState{})
+	if doc.BasisID == basis || len(doc.BasisID) != 8 {
+		t.Fatalf("basis %q did not change from %q", doc.BasisID, basis)
+	}
+	none := &AdaptToolsDoc{Items: []AdaptToolsItem{{Name: "b", RemoveAs: "skill__b", USD: 2}}}
+	none.finish(ToolFilterState{})
+	if none.Best != "keep" || none.Recommendation != nil {
+		t.Fatalf("an item without enough evidence was recommended: %+v", none)
 	}
 }

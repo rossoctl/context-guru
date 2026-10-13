@@ -19,6 +19,9 @@ package dash
 // same-count choice would have given.
 
 import (
+	"fmt"
+	"hash/fnv"
+	"math"
 	"net/http"
 	"regexp"
 	"sort"
@@ -32,12 +35,12 @@ import (
 // KindMCPServer is a whole MCP server as one adapt item: every tool of it, none ever called.
 const KindMCPServer = "mcp_server"
 
-// adaptOwn matches the plugin's own tools and skills and the proxy's injected stubs. A removal
+// adaptToolsOwn matches the plugin's own tools and skills and the proxy's injected stubs. A removal
 // list must never contain them: removing the restore stub would strand every hidden tool.
-var adaptOwn = regexp.MustCompile(`(?i)context[-_]?guru`)
+var adaptToolsOwn = regexp.MustCompile(`(?i)context[-_]?guru`)
 
-// AdaptItem is one removable declaration with what carrying it cost.
-type AdaptItem struct {
+// AdaptToolsItem is one removable declaration with what carrying it cost.
+type AdaptToolsItem struct {
 	Kind   string `json:"kind"` // mcp_server | mcp_tool | skill
 	Name   string `json:"name"`
 	Server string `json:"server,omitempty"`
@@ -65,53 +68,100 @@ type AdaptItem struct {
 	Sufficient bool   `json:"sufficient"`
 	RemoveAs   string `json:"remove_as"` // the toolfilter `remove` entry
 	Suggest    string `json:"suggest"`   // the client-side change that stops sending it
+	// Remove is the same change for the shared /context-guru:adapt renderer, and LastUsedMS is
+	// always null: every item here is unused in the window.
+	Remove     string `json:"remove"`
+	LastUsedMS *int64 `json:"last_used_ms"`
+}
+
+// AdaptToolsOption is one choice the report offers; Apply names it by ID.
+type AdaptToolsOption struct {
+	ID       string  `json:"id"`
+	Label    string  `json:"label"`
+	Detail   string  `json:"detail,omitempty"`
+	SavedUSD float64 `json:"saved_usd"`
+	SpendUSD float64 `json:"spend_usd"`
+	NetUSD   float64 `json:"net_usd"`
+	// Remove is the toolfilter entries the option adds (or, for "restore", takes out).
+	Remove []string `json:"remove"`
+}
+
+// AdaptToolsRecommendation is the one change the report proposes.
+type AdaptToolsRecommendation struct {
+	Option      string  `json:"option"`
+	Change      string  `json:"change"`
+	NetDeltaUSD float64 `json:"net_delta_usd"`
+	PerMonthUSD float64 `json:"per_month_usd"`
+	Effective   string  `json:"effective"`
+	Reason      string  `json:"reason"`
+}
+
+// AdaptToolsWindow is the span the report covers.
+type AdaptToolsWindow struct {
+	Since    int64 `json:"since"`
+	Until    int64 `json:"until"`
+	Sessions int   `json:"sessions"`
+	Requests int   `json:"requests"`
 }
 
 // AdaptToolsDoc is the /api/adapt/tools response.
 type AdaptToolsDoc struct {
-	Version  int           `json:"version"`
-	Window   Window        `json:"window"`
-	Coverage AdaptCoverage `json:"coverage"`
-	Basis    string        `json:"basis"`
-	Items    []AdaptItem   `json:"items"`
-	TotalUSD float64       `json:"total_usd"`
-	TotalLow float64       `json:"total_usd_low"`
-	TotalHi  float64       `json:"total_usd_high"`
-	Excluded []string      `json:"excluded"`
-	Filter   AdaptFilter   `json:"filter"`
+	Kind           string                    `json:"kind"`
+	Version        int                       `json:"version"`
+	Summary        string                    `json:"summary"`
+	Window         AdaptToolsWindow          `json:"window"`
+	Class          string                    `json:"class"`
+	Method         string                    `json:"method"`
+	MethodDetail   string                    `json:"method_detail"`
+	BasisID        string                    `json:"basis_id"`
+	Current        string                    `json:"current"`
+	Default        string                    `json:"default"`
+	Best           string                    `json:"best"`
+	Options        []AdaptToolsOption        `json:"options"`
+	Recommendation *AdaptToolsRecommendation `json:"recommendation"`
+	Warnings       []string                  `json:"warnings"`
+	Coverage       AdaptToolsCoverage        `json:"coverage"`
+	Items          []AdaptToolsItem          `json:"items"`
+	TotalUSD       float64                   `json:"total_usd"`
+	TotalLow       float64                   `json:"total_usd_low"`
+	TotalHi        float64                   `json:"total_usd_high"`
+	Excluded       []string                  `json:"excluded"`
+	Filter         AdaptToolsFilter          `json:"filter"`
 }
 
-// AdaptCoverage says how much of the scope could answer the question.
-type AdaptCoverage struct {
-	Sessions         int `json:"sessions"`          // sessions with a tools>0 request
-	SessionsCaptured int `json:"sessions_captured"` // ... of which have a stored inventory
-	Requests         int `json:"requests"`          // tools>0 requests
-	RequestsMapped   int `json:"requests_mapped"`   // ... matched to a declaration set
-	RequestsExact    int `json:"requests_exact"`    // ... of which by their recorded digest
-	RequestsUnpriced int `json:"requests_unpriced"` // mapped, but incomplete token accounting
+// AdaptToolsCoverage says how much of the scope could answer the question.
+type AdaptToolsCoverage struct {
+	Sessions         int `json:"sessions"`           // sessions with a tools>0 request
+	SessionsCaptured int `json:"sessions_captured"`  // ... of which have a stored inventory
+	Requests         int `json:"requests"`           // tools>0 requests
+	RequestsMapped   int `json:"requests_mapped"`    // ... matched to a declaration set
+	RequestsExact    int `json:"requests_exact"`     // ... of which by their recorded digest
+	RequestsGuessed  int `json:"requests_ambiguous"` // ... of which had 2+ same-count candidate sets
+	RequestsUnpriced int `json:"requests_unpriced"`  // mapped, but incomplete token accounting
 }
 
-// AdaptFilter is the caller's current toolfilter removal list.
-type AdaptFilter struct {
+// AdaptToolsFilter is the caller's current toolfilter removal list.
+type AdaptToolsFilter struct {
 	Enabled bool     `json:"enabled"`
 	Removed []string `json:"removed"`
 	Reason  string   `json:"reason,omitempty"`
 }
 
-const adaptBasis = "Each request is matched to the declaration set it carried and the item's tokens " +
+const adaptToolsMethod = "Each request is matched to the declaration set it carried and the item's tokens " +
 	"are priced at that request's model and tier: cache read when the prefix was read, cache " +
 	"write when it was rewritten, input when uncached. Tokens are the proxy's own count, so the " +
 	"figures are a lower bound; keep-alive pings are not counted."
 
-type adaptReq struct {
+type adaptToolsReq struct {
 	ts                    int64
 	model, accounting     string
 	digest                string
 	tools                 int
 	cacheRead, cacheWrite int64
+	cacheWrite1h          int64
 }
 
-type adaptSet struct {
+type adaptToolsSet struct {
 	first  int64
 	ntools int
 	carry  map[string]int // item key -> tokens in this set
@@ -122,36 +172,52 @@ type adaptSet struct {
 func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), state ToolFilterState) (*AdaptToolsDoc, error) {
 	where, args := f.where()
 	out := &AdaptToolsDoc{
-		Version: 1, Window: Window{Since: f.Since, Until: f.Until}, Basis: adaptBasis,
-		Items: []AdaptItem{},
+		Kind: "tools", Version: 1, Class: "counterfactual",
+		Method: "unused declarations priced on the requests that carried them", MethodDetail: adaptToolsMethod,
+		Window: AdaptToolsWindow{Since: f.Since, Until: f.Until}, Warnings: []string{},
+		Items: []AdaptToolsItem{},
 		Excluded: []string{"Context Guru's own tools and skills", "built-in and other non-MCP tools",
 			"server tools", "anything already in the removal list"},
-		Filter: AdaptFilter{Enabled: state.Enabled, Removed: append([]string{}, state.Removed...), Reason: state.Reason},
+		Filter: AdaptToolsFilter{Enabled: state.Enabled, Removed: append([]string{}, state.Removed...), Reason: state.Reason},
 	}
 
-	reqs := map[string][]adaptReq{} // tenant\x00session -> requests, oldest first
+	reqs := map[string][]adaptToolsReq{} // tenant\x00session -> requests, oldest first
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.ts, r.model,
-		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write
+		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write, r.cache_write_1h
 		FROM requests r WHERE `+where+` AND r.tools > 0 ORDER BY r.ts`, args...)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var t, s string
-		var q adaptReq
-		if err := rows.Scan(&t, &s, &q.ts, &q.model, &q.accounting, &q.digest, &q.tools, &q.cacheRead, &q.cacheWrite); err != nil {
+		var q adaptToolsReq
+		if err := rows.Scan(&t, &s, &q.ts, &q.model, &q.accounting, &q.digest, &q.tools, &q.cacheRead, &q.cacheWrite, &q.cacheWrite1h); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		reqs[t+"\x00"+s] = append(reqs[t+"\x00"+s], q)
 		out.Coverage.Requests++
+		if out.Window.Since == 0 || q.ts < out.Window.Since {
+			out.Window.Since = q.ts
+		}
+		if q.ts > out.Window.Until {
+			out.Window.Until = q.ts
+		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	out.Coverage.Sessions = len(reqs)
+	if f.Since > 0 {
+		out.Window.Since = f.Since
+	}
+	if f.Until > 0 {
+		out.Window.Until = f.Until
+	}
+	out.Window.Sessions, out.Window.Requests = len(reqs), out.Coverage.Requests
 	if len(reqs) == 0 {
+		out.finish(state)
 		return out, nil
 	}
 
@@ -187,9 +253,9 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 	if err != nil {
 		return nil, err
 	}
-	items := map[string]*AdaptItem{}
+	items := map[string]*AdaptToolsItem{}
 	// priceSession prices one session's requests against its sets.
-	priceSession := func(list []adaptReq, sess map[string]*adaptSet) {
+	priceSession := func(list []adaptToolsReq, sess map[string]*adaptToolsSet) {
 		out.Coverage.SessionsCaptured++
 		seen := map[string]bool{}
 		for _, st := range sess {
@@ -200,7 +266,7 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 				}
 			}
 		}
-		byCount := map[int][]*adaptSet{}
+		byCount := map[int][]*adaptToolsSet{}
 		for _, st := range sess {
 			byCount[st.ntools] = append(byCount[st.ntools], st)
 		}
@@ -208,12 +274,15 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			sort.Slice(c, func(i, j int) bool { return c[i].first < c[j].first })
 		}
 		for _, r := range list {
-			st, cands := sess[r.digest], []*adaptSet(nil)
+			st, cands := sess[r.digest], []*adaptToolsSet(nil)
 			if st != nil {
 				out.Coverage.RequestsExact++
 			} else {
 				cands = byCount[r.tools]
-				st = pickSet(cands, r.ts)
+				st = adaptToolsPick(cands, r.ts)
+				if len(cands) > 1 {
+					out.Coverage.RequestsGuessed++
+				}
 			}
 			if st == nil {
 				continue
@@ -232,7 +301,9 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			case r.cacheRead > 0:
 				rate = p.CacheRead
 			case r.cacheWrite > 0:
-				rate = p.CacheWrite
+				// A one-hour write bills 2x input, not the 5-minute 1.25x; blend by its share.
+				h := math.Min(float64(r.cacheWrite1h)/float64(r.cacheWrite), 1)
+				rate = (1-h)*p.CacheWrite + h*2*p.Input
 			}
 			for key, tok := range st.carry {
 				it := items[key]
@@ -295,7 +366,7 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			}
 		}
 	}
-	cur, sess := "", map[string]*adaptSet{}
+	cur, sess := "", map[string]*adaptToolsSet{}
 	for drows.Next() {
 		var t, s, dg, kind, name, server string
 		var tok int
@@ -312,11 +383,11 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			if cur != "" {
 				priceSession(reqs[cur], sess)
 			}
-			cur, sess = sk, map[string]*adaptSet{}
+			cur, sess = sk, map[string]*adaptToolsSet{}
 		}
 		st := sess[dg]
 		if st == nil {
-			st = &adaptSet{first: ts, carry: map[string]int{}, mcpN: map[string]int{}}
+			st = &adaptToolsSet{first: ts, carry: map[string]int{}, mcpN: map[string]int{}}
 			sess[dg] = st
 		}
 		if ts < st.first {
@@ -325,7 +396,7 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 		if kind != KindSkill {
 			st.ntools++
 		}
-		key, it := adaptCandidate(kind, name, server, usedTool, usedServer, usedSkill, removed)
+		key, it := adaptToolsCandidate(kind, name, server, usedTool, usedServer, usedSkill, removed)
 		if it == nil {
 			continue
 		}
@@ -369,12 +440,121 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 		}
 		return out.Items[i].Name < out.Items[j].Name
 	})
+	out.finish(state)
 	return out, nil
 }
 
-// pickSet is the set a request at ts carried: the latest first seen at or before it, else the
+// finish fills the shared /context-guru:adapt envelope from the items: the options, the one
+// recommended change, the basis id an apply must match, and the caveats.
+func (out *AdaptToolsDoc) finish(state ToolFilterState) {
+	var all, enough []string
+	var allUSD, enoughUSD float64
+	for i := range out.Items {
+		it := &out.Items[i]
+		it.Remove = it.Suggest
+		all, allUSD = append(all, it.RemoveAs), allUSD+it.USD
+		if it.Sufficient {
+			enough, enoughUSD = append(enough, it.RemoveAs), enoughUSD+it.USD
+		}
+	}
+	out.Current, out.Default, out.Best = "keep", "keep", "keep"
+	out.Options = []AdaptToolsOption{{ID: "keep", Label: "Keep everything", Remove: []string{}}}
+	if len(enough) > 0 {
+		out.Options = append(out.Options, AdaptToolsOption{ID: "remove-sufficient",
+			Label:  fmt.Sprintf("Filter the %d unused items seen in %d+ sessions over %d+ days", len(enough), suggestMinSessions, int(suggestMinSpan.Hours()/24)),
+			Detail: strings.Join(enough, ", "), SavedUSD: enoughUSD, NetUSD: enoughUSD, Remove: enough})
+	}
+	if len(all) > len(enough) {
+		out.Options = append(out.Options, AdaptToolsOption{ID: "remove-unused",
+			Label:  fmt.Sprintf("Filter all %d unused items", len(all)),
+			Detail: strings.Join(all, ", "), SavedUSD: allUSD, NetUSD: allUSD, Remove: all})
+	}
+	var restore []string
+	for _, n := range state.Removed {
+		if strings.HasPrefix(n, "mcp__") || strings.HasPrefix(n, skills.RemovePrefix) {
+			restore = append(restore, n)
+		}
+	}
+	if len(restore) > 0 {
+		out.Options = append(out.Options, AdaptToolsOption{ID: "restore",
+			Label:  fmt.Sprintf("Stop filtering the %d MCP and skill entries already filtered", len(restore)),
+			Detail: strings.Join(restore, ", "), Remove: restore})
+	}
+	// Only items that meet the filter's own evidence bar are recommended: "unused in this
+	// window" is hindsight, and an item seen in a handful of sessions says little about the next.
+	days := float64(out.Window.Until-out.Window.Since) / float64(24*time.Hour/time.Millisecond)
+	switch {
+	case len(all) == 0:
+		out.Summary = "Every MCP server, MCP tool and skill you declared was used in this window."
+	case len(enough) == 0:
+		out.Summary = fmt.Sprintf("%d declared items were never used (%s), but none was seen in enough sessions to recommend removing it yet.",
+			len(all), usdText(allUSD))
+	default:
+		out.Best = "remove-sufficient"
+		out.Summary = fmt.Sprintf("%d declared items were never used; filtering the %d with enough evidence would have saved %s.",
+			len(all), len(enough), usdText(enoughUSD))
+		rec := &AdaptToolsRecommendation{Option: "remove-sufficient", NetDeltaUSD: enoughUSD,
+			Change:    "filter " + strings.Join(head(enough, 3), ", "),
+			Effective: "now",
+			Reason:    fmt.Sprintf("declared in %d+ sessions over %d+ days and never called", suggestMinSessions, int(suggestMinSpan.Hours()/24))}
+		if len(enough) > 3 {
+			rec.Change += fmt.Sprintf(" and %d more", len(enough)-3)
+		}
+		if days >= 1 {
+			rec.PerMonthUSD = enoughUSD / days * 30
+		}
+		out.Recommendation = rec
+	}
+	c := out.Coverage
+	if n := c.Sessions - c.SessionsCaptured; n > 0 {
+		out.Warnings = append(out.Warnings, fmt.Sprintf("%d of %d sessions have no stored inventory and are not counted.", n, c.Sessions))
+	}
+	if c.RequestsGuessed > 0 {
+		out.Warnings = append(out.Warnings, fmt.Sprintf("%d of %d requests predate per-request set records and were matched by tool count; the range is %s to %s.",
+			c.RequestsGuessed, c.RequestsMapped, usdText(out.TotalLow), usdText(out.TotalHi)))
+	}
+	if c.RequestsUnpriced > 0 {
+		out.Warnings = append(out.Warnings, fmt.Sprintf("%d requests with incomplete token accounting are not priced.", c.RequestsUnpriced))
+	}
+	if len(all) > 0 {
+		out.Warnings = append(out.Warnings, "Unused means unused in this window, not that it will never be needed.",
+			"Filtering changes the cached prefix, so the next request re-writes it once; that cost is not included.")
+	}
+	h := fnv.New64a()
+	for _, n := range all {
+		h.Write([]byte(n + "\x00"))
+	}
+	for _, n := range enough {
+		h.Write([]byte(n + "\x01"))
+	}
+	for _, n := range restore {
+		h.Write([]byte(n + "\x02"))
+	}
+	out.BasisID = fmt.Sprintf("%016x", h.Sum64())[:8]
+}
+
+// OptionRemove returns the toolfilter entries an option names, and false for an unknown option.
+func (out *AdaptToolsDoc) OptionRemove(id string) ([]string, bool) {
+	for _, o := range out.Options {
+		if o.ID == id {
+			return o.Remove, true
+		}
+	}
+	return nil, false
+}
+
+func usdText(x float64) string { return fmt.Sprintf("$%.2f", x) }
+
+func head(s []string, n int) []string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+// adaptToolsPick is the set a request at ts carried: the latest first seen at or before it, else the
 // earliest. c is sorted by first.
-func pickSet(c []*adaptSet, ts int64) *adaptSet {
+func adaptToolsPick(c []*adaptToolsSet, ts int64) *adaptToolsSet {
 	if len(c) == 0 {
 		return nil
 	}
@@ -387,10 +567,10 @@ func pickSet(c []*adaptSet, ts int64) *adaptSet {
 	return best
 }
 
-// adaptCandidate classifies one declaration row: its item key and a fresh item, or nil when it
+// adaptToolsCandidate classifies one declaration row: its item key and a fresh item, or nil when it
 // is not removable or was used.
-func adaptCandidate(kind, name, server string, usedTool, usedServer, usedSkill, removed map[string]bool) (string, *AdaptItem) {
-	if adaptOwn.MatchString(name) || adaptOwn.MatchString(server) {
+func adaptToolsCandidate(kind, name, server string, usedTool, usedServer, usedSkill, removed map[string]bool) (string, *AdaptToolsItem) {
+	if adaptToolsOwn.MatchString(name) || adaptToolsOwn.MatchString(server) {
 		return "", nil
 	}
 	switch kind {
@@ -399,10 +579,10 @@ func adaptCandidate(kind, name, server string, usedTool, usedServer, usedSkill, 
 			return "", nil
 		}
 		if !usedServer[server] {
-			return KindMCPServer + "\x00" + server, &AdaptItem{Kind: KindMCPServer, Name: server,
+			return KindMCPServer + "\x00" + server, &AdaptToolsItem{Kind: KindMCPServer, Name: server,
 				Server: server, RemoveAs: "mcp__" + server, Suggest: suggestServer(server)}
 		}
-		return kind + "\x00" + name, &AdaptItem{Kind: kind, Name: name, Server: server, RemoveAs: name,
+		return kind + "\x00" + name, &AdaptToolsItem{Kind: kind, Name: name, Server: server, RemoveAs: name,
 			Suggest: `add "` + name + `" to permissions.deny in your Claude Code settings`}
 	case KindSkill:
 		if usedSkill[name] || removed[skills.RemovePrefix+name] {
@@ -414,7 +594,7 @@ func adaptCandidate(kind, name, server string, usedTool, usedServer, usedSkill, 
 		if plugin, _, ok := strings.Cut(name, ":"); ok {
 			s = "claude plugin disable " + plugin + " (removes every skill of the plugin; to drop only this one, use the proxy filter)"
 		}
-		return kind + "\x00" + name, &AdaptItem{Kind: kind, Name: name, RemoveAs: skills.RemovePrefix + name, Suggest: s}
+		return kind + "\x00" + name, &AdaptToolsItem{Kind: kind, Name: name, RemoveAs: skills.RemovePrefix + name, Suggest: s}
 	}
 	return "", nil
 }
@@ -430,6 +610,16 @@ func suggestServer(server string) string {
 		return "disconnect the " + strings.TrimPrefix(server, "claude_ai_") + " connector in claude.ai settings"
 	}
 	return "claude mcp remove " + server
+}
+
+// AdaptToolsDocument builds the report for a request's own scope; the control plane's apply
+// route checks the option and basis against it.
+func (a *API) AdaptToolsDocument(r *http.Request) (*AdaptToolsDoc, error) {
+	f, _, ok := a.scope(r)
+	if !ok {
+		return nil, errNotPermitted
+	}
+	return a.db(r).AdaptTools(f, a.priceFn(r), a.toolFilterStateForScope(f))
 }
 
 // adaptTools serves GET /api/adapt/tools for the caller's scope.

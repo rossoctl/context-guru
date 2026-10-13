@@ -131,16 +131,27 @@ func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
 			"agent rather than saving you anything, so a manager has to make that change")
 		return
 	}
+	if code, msg := h.updateRemoved(t, func(names []string) []string {
+		return withDecl(names, name, exclude)
+	}); code != 0 {
+		ctlErr(w, code, msg)
+		return
+	}
+	h.writeToolFilterDoc(w, r, t.ID)
+}
+
+// updateRemoved rewrites the caller's removal list through edit, with the same validation and
+// audited registry Update for every writer. A non-zero code is the failure to report.
+func (h *Handler) updateRemoved(t *tenant.Tenant, edit func([]string) []string) (int, string) {
 	reg := h.registry()
 	current := reg.Config(t)
 	f, perr := config.ParseForm(current)
 	if perr != nil || f.ParseError != "" {
-		ctlErr(w, http.StatusConflict, "your stored configuration does not load, so it cannot "+
-			"be edited as fields; a manager must repair it on the account page")
-		return
+		return http.StatusConflict, "your stored configuration does not load, so it cannot " +
+			"be edited as fields; a manager must repair it on the account page"
 	}
 	names, _, _ := removedFrom(current)
-	names = withDecl(names, name, exclude)
+	names = edit(names)
 	if f.Components == nil {
 		f.Components = map[string]map[string]any{}
 	}
@@ -167,18 +178,15 @@ func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
 	doc, err := config.ApplyForm(current, f)
 	if err != nil {
 		// The message names the offending value; showing it beats "invalid".
-		ctlErr(w, http.StatusBadRequest, err.Error())
-		return
+		return http.StatusBadRequest, err.Error()
 	}
 	if err := reg.Update(t, t.ID, tenant.Patch{ConfigYAML: &doc}); err != nil {
 		if errors.Is(err, tenant.ErrForbidden) {
-			ctlErr(w, http.StatusForbidden, "not permitted")
-			return
+			return http.StatusForbidden, "not permitted"
 		}
-		ctlErr(w, http.StatusBadRequest, err.Error())
-		return
+		return http.StatusBadRequest, err.Error()
 	}
-	h.writeToolFilterDoc(w, r, t.ID)
+	return 0, ""
 }
 
 // writeToolFilterDoc answers with the read route's document, so one shape serves both.

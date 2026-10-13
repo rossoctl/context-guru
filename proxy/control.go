@@ -118,6 +118,8 @@ func (h *Handler) allCtlRoutes() []ctlRoute {
 		// entry as PUT /api/me. NOT its manager gate: one declaration is a user's own bill
 		// to stop paying — see proxy/toolfilterctl.go.
 		{"POST /api/toolfilter", ctlTenant, h.ctlToolFilter},
+		// /context-guru:adapt tools: apply one option of GET /api/adapt/tools (adapttoolsctl.go).
+		{"POST /api/adapt/tools/apply", ctlTenant, h.ctlAdaptToolsApply},
 		{"GET /api/options", ctlTenant, h.ctlOptions},
 		{"GET /api/tenants", ctlManager, h.ctlTenants},
 		{"PATCH /api/tenants/{id}", ctlManager, h.ctlPatchTenant},
