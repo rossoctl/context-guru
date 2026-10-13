@@ -22,7 +22,7 @@ had to supply a key. Tell people first.
 
 ```sh
 systemctl is-active context-guru nginx          # both active
-curl -sS -o /dev/null -w '%{http_code}\n' https://contextguru.vpc.cloud9.ibm.com/healthz
+curl -sS -o /dev/null -w '%{http_code}\n' https://cg.example.com/healthz
 sudo -u cg test -r /var/lib/context-guru/cg-control.db && echo "control db readable by cg"
 ```
 
@@ -77,7 +77,7 @@ Add (a new drop-in, so secrets in `20-local.conf` are never reopened):
 [Service]
 # Mail: the relay authorises by source IP, so no credential is needed. Port 25 is the
 # only SMTP port open outbound from this box; 465/587/2525 are blocked.
-Environment=CG_SMTP_HOST=na.relay.ibm.com
+Environment=CG_SMTP_HOST=mail-relay.internal.example.com
 Environment=CG_SMTP_PORT=25
 # MUST be a routable domain. The default (context-guru@contextguru) has no SPF and
 # will be filtered, and a filtered code means nobody can complete registration.
@@ -125,7 +125,7 @@ The startup banner must report the mail path. If it warns that nobody can sign i
 
 ```sh
 # 1. Reachable and TLS still valid
-curl -sS -o /dev/null -w '%{http_code}\n' https://contextguru.vpc.cloud9.ibm.com/healthz
+curl -sS -o /dev/null -w '%{http_code}\n' https://cg.example.com/healthz
 
 # 2. A request with NO provider key must be refused, not served on the operator's key.
 #    This is the assertion that proves step 2 took effect.
@@ -133,11 +133,11 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
   -H 'x-context-guru-token: cg_live_doesnotmatter' \
   -H 'content-type: application/json' \
   -d '{"model":"aws/claude-sonnet-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}' \
-  https://contextguru.vpc.cloud9.ibm.com/anthropic/v1/messages
+  https://cg.example.com/anthropic/v1/messages
 # expect 401
 
 # 3. /stats and /metrics must NOT be reachable through the front end
-curl -sS -o /dev/null -w '%{http_code}\n' https://contextguru.vpc.cloud9.ibm.com/stats
+curl -sS -o /dev/null -w '%{http_code}\n' https://cg.example.com/stats
 # expect 403 (loopback-only, and any forwarded header disqualifies the caller)
 ```
 

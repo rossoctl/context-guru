@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -269,13 +270,13 @@ func breakEven(prefix, saved int) int {
 func captureCorpus(t *testing.T) []string {
 	t.Helper()
 	var out []string
-	for _, p := range []string{
-		"/home/vpcuser/cg-research/bench/long.jsonl",
-		"/home/vpcuser/cg-research/bench/mixed.jsonl",
-		"/home/vpcuser/cg-research/bench/short.jsonl",
-		"/home/vpcuser/cg-research/bench/cold.jsonl",
-		"/tmp/cg-runs/capture-swebench.jsonl",
-	} {
+	paths := []string{"/tmp/cg-runs/capture-swebench.jsonl"}
+	if dir := os.Getenv("CG_BENCH_DIR"); dir != "" { // the four interactive captures
+		for _, n := range []string{"long", "mixed", "short", "cold"} {
+			paths = append(paths, filepath.Join(dir, n+".jsonl"))
+		}
+	}
+	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {
 			out = append(out, p)
 		}

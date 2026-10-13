@@ -30,8 +30,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cgenv  # base URLs and credentials for both the hosted and the local deployment
 
-CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
-HB = Path("/home/vpcuser/projects/context-engineering/harbor")
+CG = Path(__file__).resolve().parents[2]   # this checkout
+HB = Path(os.environ.get("HARBOR_DIR", CG.parent / "harbor"))
 # Overridable because two harnesses must not share a binary BASENAME: stop_proxy kills
 # by exact process name, so a second run using the same copy kills the first one's proxy
 # mid-task and the trials that follow record connection refusals as model failures.

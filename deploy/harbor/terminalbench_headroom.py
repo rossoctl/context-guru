@@ -27,8 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cgenv  # base URLs and credentials for both the hosted and the local deployment
 
-HD = Path("/home/vpcuser/projects/context-engineering/headroom")
-HB = Path("/home/vpcuser/projects/context-engineering/harbor")
+HD = Path(os.environ.get("HEADROOM_DIR", Path(__file__).resolve().parents[3] / "headroom"))
+HB = Path(os.environ.get("HARBOR_DIR", Path(__file__).resolve().parents[3] / "harbor"))
 HEADROOM_BIN = os.path.expanduser("~/.local/bin/headroom")
 PORT = 4010
 # The address containers reach this host on. Set CG_LAN to this box's LAN IP;

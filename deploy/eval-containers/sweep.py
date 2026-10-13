@@ -22,7 +22,7 @@ Usage:
 """
 import argparse, csv, json, os, subprocess, sys, time
 
-ROOT = "/Users/osherelhadad/Documents/context-engineering"
+ROOT = os.environ.get("EVAL_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))   # holds eval-containers/ and this repo
 SWE = f"{ROOT}/eval-containers/containers/benchmarks/swe-bench"
 DEPLOY = f"{ROOT}/lab-context-engineering/deploy/eval-containers"
 CG_OVERRIDE = f"{DEPLOY}/compose.contextguru.yaml"
