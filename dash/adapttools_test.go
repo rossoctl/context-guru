@@ -109,6 +109,10 @@ func TestAdaptToolsPricesEachRequestAtTheSetItCarried(t *testing.T) {
 	if math.Abs(doc.TotalUSD-total) > 1e-9 {
 		t.Fatalf("total %v, want %v", doc.TotalUSD, total)
 	}
+	// The one-off rewrite: the latest priced request (r4, 10 fresh tokens) at opus write minus read.
+	if math.Abs(doc.RewriteUSD-10*(1.25-0.1)) > 1e-9 || !strings.Contains(doc.Items[0].Basis, "unused in the observed window") {
+		t.Fatalf("rewrite %v, basis %q", doc.RewriteUSD, doc.Items[0].Basis)
+	}
 	srv := doc.Items[0]
 	if srv.Name != "srv" || srv.Tools != 2 || srv.Tokens != 1500 || srv.RemoveAs != "mcp__srv" ||
 		srv.Suggest != "claude mcp remove srv" || math.Abs(srv.USDCacheWrite-1500*2.0) > 1e-9 {
@@ -182,13 +186,14 @@ func TestAdaptToolsUsesTheRecordedDigestAndBoundsTheGuess(t *testing.T) {
 // The envelope the shared adapt renderer reads: only items with enough evidence are recommended,
 // every option names exactly what it would filter, and the basis changes with the item list.
 func TestAdaptToolsEnvelope(t *testing.T) {
-	doc := &AdaptToolsDoc{Window: AdaptToolsWindow{Since: day(0), Until: day(30)}, Items: []AdaptToolsItem{
+	doc := &AdaptToolsDoc{RewriteUSD: 1, Window: AdaptToolsWindow{Since: day(0), Until: day(30)}, Items: []AdaptToolsItem{
 		{Name: "a", RemoveAs: "mcp__a", USD: 3, Sufficient: true},
 		{Name: "b", RemoveAs: "skill__b", USD: 2},
 	}}
 	doc.finish(ToolFilterState{Removed: []string{"mcp__old", "Workflow"}})
 	if doc.Best != "remove-sufficient" || doc.Current != "keep" || doc.Recommendation == nil ||
-		doc.Recommendation.PerMonthUSD != 3 || doc.Items[0].LastUsedMS != nil {
+		doc.Recommendation.PerMonthUSD != 3 || doc.Recommendation.NetDeltaUSD != 2 ||
+		doc.Options[1].SpendUSD != 1 || doc.Options[1].NetUSD != 2 || doc.Items[0].LastUsedMS != nil {
 		t.Fatalf("doc %+v rec %+v", doc, doc.Recommendation)
 	}
 	for id, want := range map[string]string{"keep": "", "remove-sufficient": "mcp__a",
@@ -206,6 +211,11 @@ func TestAdaptToolsEnvelope(t *testing.T) {
 	doc.finish(ToolFilterState{})
 	if doc.BasisID == basis || len(doc.BasisID) != 8 {
 		t.Fatalf("basis %q did not change from %q", doc.BasisID, basis)
+	}
+	dear := &AdaptToolsDoc{RewriteUSD: 5, Items: []AdaptToolsItem{{Name: "a", RemoveAs: "mcp__a", USD: 3, Sufficient: true}}}
+	dear.finish(ToolFilterState{})
+	if dear.Best != "keep" || dear.Recommendation != nil {
+		t.Fatalf("recommended a removal that the rewrite outweighs: %+v", dear)
 	}
 	none := &AdaptToolsDoc{Items: []AdaptToolsItem{{Name: "b", RemoveAs: "skill__b", USD: 2}}}
 	none.finish(ToolFilterState{})

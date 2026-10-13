@@ -72,6 +72,8 @@ type AdaptToolsItem struct {
 	// always null: every item here is unused in the window.
 	Remove     string `json:"remove"`
 	LastUsedMS *int64 `json:"last_used_ms"`
+	// Basis states what "unused" rests on: the observed window, never a promise about later.
+	Basis string `json:"basis"`
 }
 
 // AdaptToolsOption is one choice the report offers; Apply names it by ID.
@@ -121,12 +123,17 @@ type AdaptToolsDoc struct {
 	Recommendation *AdaptToolsRecommendation `json:"recommendation"`
 	Warnings       []string                  `json:"warnings"`
 	Coverage       AdaptToolsCoverage        `json:"coverage"`
-	Items          []AdaptToolsItem          `json:"items"`
-	TotalUSD       float64                   `json:"total_usd"`
-	TotalLow       float64                   `json:"total_usd_low"`
-	TotalHi        float64                   `json:"total_usd_high"`
-	Excluded       []string                  `json:"excluded"`
-	Filter         AdaptToolsFilter          `json:"filter"`
+	// RewriteUSD is the one-off cost of removing anything: the next request re-writes the
+	// cached prefix instead of reading it. Priced on the latest priced request in scope (its
+	// whole prompt, at write minus read), which is the most it can cost a session.
+	RewriteUSD float64 `json:"rewrite_usd"`
+	rewriteTS  int64
+	Items      []AdaptToolsItem `json:"items"`
+	TotalUSD   float64          `json:"total_usd"`
+	TotalLow   float64          `json:"total_usd_low"`
+	TotalHi    float64          `json:"total_usd_high"`
+	Excluded   []string         `json:"excluded"`
+	Filter     AdaptToolsFilter `json:"filter"`
 }
 
 // AdaptToolsCoverage says how much of the scope could answer the question.
@@ -158,7 +165,7 @@ type adaptToolsReq struct {
 	digest                string
 	tools                 int
 	cacheRead, cacheWrite int64
-	cacheWrite1h          int64
+	cacheWrite1h, fresh   int64
 }
 
 type adaptToolsSet struct {
@@ -183,7 +190,7 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 
 	reqs := map[string][]adaptToolsReq{} // tenant\x00session -> requests, oldest first
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.ts, r.model,
-		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write, r.cache_write_1h
+		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write, r.cache_write_1h, r.fresh_input
 		FROM requests r WHERE `+where+` AND r.tools > 0 ORDER BY r.ts`, args...)
 	if err != nil {
 		return nil, err
@@ -191,7 +198,7 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 	for rows.Next() {
 		var t, s string
 		var q adaptToolsReq
-		if err := rows.Scan(&t, &s, &q.ts, &q.model, &q.accounting, &q.digest, &q.tools, &q.cacheRead, &q.cacheWrite, &q.cacheWrite1h); err != nil {
+		if err := rows.Scan(&t, &s, &q.ts, &q.model, &q.accounting, &q.digest, &q.tools, &q.cacheRead, &q.cacheWrite, &q.cacheWrite1h, &q.fresh); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -295,6 +302,10 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			p, ok := modelinfo.Price{}, false
 			if price != nil && r.model != "" {
 				p, ok = price(r.model)
+			}
+			if ok && r.ts >= out.rewriteTS {
+				out.rewriteTS = r.ts
+				out.RewriteUSD = float64(r.cacheRead+r.cacheWrite+r.fresh) * (p.CacheWrite - p.CacheRead)
 			}
 			rate := p.Input
 			switch {
@@ -449,9 +460,12 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 	var all, enough []string
 	var allUSD, enoughUSD float64
+	from := time.UnixMilli(out.Window.Since).UTC().Format("2006-01-02")
+	to := time.UnixMilli(out.Window.Until).UTC().Format("2006-01-02")
 	for i := range out.Items {
 		it := &out.Items[i]
 		it.Remove = it.Suggest
+		it.Basis = fmt.Sprintf("declared in %d sessions, unused in the observed window %s to %s", it.Sessions, from, to)
 		all, allUSD = append(all, it.RemoveAs), allUSD+it.USD
 		if it.Sufficient {
 			enough, enoughUSD = append(enough, it.RemoveAs), enoughUSD+it.USD
@@ -462,12 +476,14 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 	if len(enough) > 0 {
 		out.Options = append(out.Options, AdaptToolsOption{ID: "remove-sufficient",
 			Label:  fmt.Sprintf("Filter the %d unused items seen in %d+ sessions over %d+ days", len(enough), suggestMinSessions, int(suggestMinSpan.Hours()/24)),
-			Detail: strings.Join(enough, ", "), SavedUSD: enoughUSD, NetUSD: enoughUSD, Remove: enough})
+			Detail: strings.Join(enough, ", "), SavedUSD: enoughUSD, SpendUSD: out.RewriteUSD,
+			NetUSD: enoughUSD - out.RewriteUSD, Remove: enough})
 	}
 	if len(all) > len(enough) {
 		out.Options = append(out.Options, AdaptToolsOption{ID: "remove-unused",
 			Label:  fmt.Sprintf("Filter all %d unused items", len(all)),
-			Detail: strings.Join(all, ", "), SavedUSD: allUSD, NetUSD: allUSD, Remove: all})
+			Detail: strings.Join(all, ", "), SavedUSD: allUSD, SpendUSD: out.RewriteUSD,
+			NetUSD: allUSD - out.RewriteUSD, Remove: all})
 	}
 	var restore []string
 	for _, n := range state.Removed {
@@ -486,14 +502,17 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 	switch {
 	case len(all) == 0:
 		out.Summary = "Every MCP server, MCP tool and skill you declared was used in this window."
+	case len(enough) > 0 && enoughUSD <= out.RewriteUSD:
+		out.Summary = fmt.Sprintf("%d declared items were unused from %s to %s, but removing them would have saved %s, less than the %s one-off prefix rewrite it causes.",
+			len(all), from, to, usdText(enoughUSD), usdText(out.RewriteUSD))
 	case len(enough) == 0:
-		out.Summary = fmt.Sprintf("%d declared items were never used (%s), but none was seen in enough sessions to recommend removing it yet.",
-			len(all), usdText(allUSD))
+		out.Summary = fmt.Sprintf("%d declared items were unused from %s to %s (%s), but none was seen in enough sessions to recommend removing it yet.",
+			len(all), from, to, usdText(allUSD))
 	default:
 		out.Best = "remove-sufficient"
-		out.Summary = fmt.Sprintf("%d declared items were never used; filtering the %d with enough evidence would have saved %s.",
-			len(all), len(enough), usdText(enoughUSD))
-		rec := &AdaptToolsRecommendation{Option: "remove-sufficient", NetDeltaUSD: enoughUSD,
+		out.Summary = fmt.Sprintf("%d declared items were unused from %s to %s; removing the %d with enough evidence would have saved %s, %s after the one-off prefix rewrite.",
+			len(all), from, to, len(enough), usdText(enoughUSD), usdText(enoughUSD-out.RewriteUSD))
+		rec := &AdaptToolsRecommendation{Option: "remove-sufficient", NetDeltaUSD: enoughUSD - out.RewriteUSD,
 			Change:    "filter " + strings.Join(head(enough, 3), ", "),
 			Effective: "now",
 			Reason:    fmt.Sprintf("declared in %d+ sessions over %d+ days and never called", suggestMinSessions, int(suggestMinSpan.Hours()/24))}
@@ -501,7 +520,7 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 			rec.Change += fmt.Sprintf(" and %d more", len(enough)-3)
 		}
 		if days >= 1 {
-			rec.PerMonthUSD = enoughUSD / days * 30
+			rec.PerMonthUSD = enoughUSD / days * 30 // steady state: the rewrite is paid once
 		}
 		out.Recommendation = rec
 	}
@@ -518,7 +537,7 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 	}
 	if len(all) > 0 {
 		out.Warnings = append(out.Warnings, "Unused means unused in this window, not that it will never be needed.",
-			"Filtering changes the cached prefix, so the next request re-writes it once; that cost is not included.")
+			fmt.Sprintf("Removing changes the cached prefix, so the next request re-writes it once: about %s, counted as the option's spend.", usdText(out.RewriteUSD)))
 	}
 	h := fnv.New64a()
 	for _, n := range all {
