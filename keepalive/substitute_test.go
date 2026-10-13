@@ -143,7 +143,7 @@ func TestKeepAliveSubstituteRespectsTheCostCapAndFallsBackToAPing(t *testing.T) 
 	// Output-heavy pricing: the ping's own 1-token budget is cheap, but the summary's assumed
 	// 2000-token budget is not. CacheRead is kept small enough that the PING itself still
 	// passes the record-time guard (pingable()), so the entry is tracked at all.
-	k.o.Prices = proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}}
+	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	model := &fakeSummaryModel{out: "<summary>should never be reached</summary>"}
 	kaCandidate(t, "sess-1", st, model)
@@ -247,7 +247,7 @@ func TestKeepAliveRefreshBelowBreakEvenPingsNormally(t *testing.T) {
 	// CacheRead priced at 0 isolates the projected cost to the output-budget guess alone (a
 	// fixed $0.02 at these prices), so the break-even point is simply "does the tail's own
 	// cache-write value clear $0.02" — exactly the number issue #415's own worked examples use.
-	k.o.Prices = proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 0, Output: 1e-5, CacheWrite: 5e-5}}}
+	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 0, Output: 1e-5, CacheWrite: 5e-5}}})
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	model := &fakeSummaryModel{out: "<summary>should never be reached</summary>"}
 	// Two sentences of new material, on the order of 25 real tokens: at $0.00005/token
@@ -280,7 +280,7 @@ func TestKeepAliveRefreshBelowBreakEvenPingsNormally(t *testing.T) {
 // summary call fires INSTEAD of the ping, counted as both the refresh decision and the ping.
 func TestKeepAliveRefreshAboveBreakEvenRefreshes(t *testing.T) {
 	k, fs, clock := testKeeper(t)
-	k.o.Prices = proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 0, Output: 1e-5, CacheWrite: 5e-5}}}
+	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 0, Output: 1e-5, CacheWrite: 5e-5}}})
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	model := &fakeSummaryModel{out: "<summary>explored the handler, refreshed</summary>"}
 	// 100 repeats of an 11-word sentence, on the order of 1,300 real tokens: at $0.00005/token
@@ -575,7 +575,7 @@ func readDeferred(t *testing.T, st store.Store, session string) (ledgerIn int, c
 func TestKeepAliveSummaryCallIsBookedOnceOnThePingRow(t *testing.T) {
 	k, fs, clock := testKeeper(t)
 	price := modelinfo.Price{Input: 2e-6, CacheRead: 2e-7, CacheWrite: 2.5e-6, Output: 1e-5}
-	k.o.Prices = proxyPricer{fixedPrice{price}}
+	fakeOf(k).setPrices(proxyPricer{fixedPrice{price}})
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	model := &usageSummaryModel{}
 	kaCandidate(t, "sess-1", st, model)

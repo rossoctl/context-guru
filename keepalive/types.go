@@ -76,13 +76,12 @@
 package keepalive
 
 import (
-	"context"
 	"math"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/thread"
 )
 
@@ -93,8 +92,9 @@ type Key struct{ Tenant, Session, Thread string }
 // threads existed; the NUL separator is what lets RetireSession and Forget match by prefix.
 func (k Key) id() string { return k.Tenant + "\x00" + thread.Key(k.Session, k.Thread) }
 
-// Usage is what one upstream response billed, in the provider's own units. A host fills it from
-// whatever it already parses; the keeper never reads a response body itself.
+// Usage is what one upstream response billed, in the provider's own units. A host fills it in
+// Record for the real request, from whatever it already parses; for a ping the keeper reads it
+// itself from the response body the Dispatcher hands back (PingUsage).
 type Usage struct {
 	FreshInput, CacheRead, CacheWrite, Output int64
 	// CacheWrite1h is the part of CacheWrite billed at the one-hour tier.
@@ -103,18 +103,9 @@ type Usage struct {
 	StopReason string
 }
 
-// Price is one model's per-token rates in USD. An alias, so the proxy's modelinfo.Pricer and a
-// Cortex resolver produce the same struct and the keeper prices with one formula
-// (Price.CostWithCacheWrite1h).
-type Price = modelinfo.Price
-
-// Pricer resolves rates for a ping. endpoint is the upstream the entry's request went to, in the
-// host's own form (Record.Endpoint): cmd/context-guru-proxy passes the upstream base URL, Cortex
-// passes the request host. promptTokens is the billed prefix. A Pricer that prices by model alone
-// ignores both.
-type Pricer interface {
-	Price(ctx context.Context, endpoint, model string, promptTokens int64) (Price, bool)
-}
+// Price is one model's per-token rates in USD — dispatch.Price, so every host's
+// Dispatcher.Price and the keeper price with one formula (Price.CostWithCacheWrite1h).
+type Price = dispatch.Price
 
 // Policy is one tenant's resolved cache policy — the host-level half of the cache
 // story, which no component can reach.

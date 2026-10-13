@@ -11,7 +11,6 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/context-guru/credmask"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/tidwall/gjson"
 )
@@ -271,6 +270,20 @@ func TestClientErrorStopsTheSession(t *testing.T) {
 	}
 }
 
+// A 5xx is transient: the status comes from the host's Response, and the next due ping still goes.
+func TestServerErrorKeepsTheSession(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{}, http.StatusServiceUnavailable, nil
+	})
+	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
+		t.Fatalf("a 503 stopped the session: second sweep sent %d pings, want 1", n)
+	}
+}
+
 // `thinking.type: enabled` cannot be pinged: the API requires max_tokens above the thinking
 // budget (32,000 on this traffic), and changing the thinking parameters invalidates the
 // message-level prefix, so neither a cheap ping nor a matching one is possible.
@@ -356,8 +369,8 @@ func TestGateSkipsFirstRequestAndSmallPrefixes(t *testing.T) {
 // max of $0.3780 — so the outlier to refuse is an individual ping, not a session's total.
 func TestPerPingCostGuard(t *testing.T) {
 	k, _, clock := testKeeperWith(t, func(o *Options) {
-		o.Prices = proxyPricer{fixedPrice{modelinfo.Price{Input: 3.8e-6, Output: 19e-6,
-			CacheRead: 3.8e-7, CacheWrite: 4.75e-6}}}
+		o.Dispatcher.(*fakeDispatcher).setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 3.8e-6,
+			Output: 19e-6, CacheRead: 3.8e-7, CacheWrite: 4.75e-6}}})
 	})
 	pol := kaPolicy()
 	pol.MaxUSDPerPing = 0.05
@@ -599,7 +612,7 @@ func TestCredentialRetentionRules(t *testing.T) {
 // masked buffer the keeper is holding.
 func unmasked(b []byte) []byte {
 	out := append([]byte(nil), b...)
-	credmask.Mask(out)
+	mask(out)
 	return out
 }
 

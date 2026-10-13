@@ -140,7 +140,8 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol Policy, blanket boo
 	fd := newFake(nil)
 	// Inline dispatch: a five-day replay must be deterministic, and a goroutine per ping would
 	// need synchronising against the clock the test is driving.
-	k := New(Options{Dispatcher: fd, Prices: proxyPricer{table},
+	fd.setPrices(proxyPricer{table})
+	k := New(Options{Dispatcher: fd,
 		Now: func() time.Time { return simNow }, Go: func(f func()) { f() }})
 	// The blanket arms lift the first-request gate by pre-seeding every session's turn counter,
 	// which is the only way to compare "gated" against "blanket" through the SAME code path.

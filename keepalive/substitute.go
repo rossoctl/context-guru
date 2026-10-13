@@ -1,7 +1,6 @@
 package keepalive
 
 import (
-	"context"
 	"log/slog"
 	"math"
 	"time"
@@ -176,8 +175,8 @@ func (k *Keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 	}
 	var price Price
 	priced := false
-	if p := k.o.Prices; p != nil && model != "" {
-		price, priced = p.Price(context.Background(), endpoint, model, prefix)
+	if model != "" {
+		price, priced = k.price(endpoint, model, prefix)
 	}
 	u := Usage{FreshInput: int64(res.FreshInput), CacheRead: int64(res.CacheRead),
 		CacheWrite: int64(res.CacheWrite), Output: int64(res.Output),

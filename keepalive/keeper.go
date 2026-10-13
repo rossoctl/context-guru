@@ -14,7 +14,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
-	"github.com/rossoctl/context-guru/credmask"
+	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/store"
@@ -59,8 +59,7 @@ type kaEntry struct {
 	// (never nil) when the tenant has no pipeline, which type-asserts to nothing and makes
 	// reporting a no-op rather than a panic.
 	emitter components.Emitter
-	// body is the bytes last sent upstream, held MASKED under the same per-process key as the
-	// credential (see credmask). A keeper-owned copy, so it can be overwritten on release
+	// body is the bytes last sent upstream, held MASKED under a per-process key (see mask). A keeper-owned copy, so it can be overwritten on release
 	// without corrupting a slice something else still reads.
 	//
 	// Masked for the reason the credential is, and the asymmetry decides it: a leaked key is
@@ -68,13 +67,13 @@ type kaEntry struct {
 	// XOR over it costs a memcpy-shaped pass on a path that runs a few hundred times a day.
 	// The prefix hash covers this content, which is why the ping must resend it verbatim.
 	body []byte
-	// endpoint is the upstream host the request went to, passed to the Pricer.
+	// endpoint is the upstream host the request went to, passed to Dispatcher.Price.
 	endpoint string
 	// hdr is the minimal NON-SECRET header set the ping needs (content type, API version, beta
 	// flags). The credential never goes in here — see held.
 	hdr http.Header
 	// held is true between Record.Hold and Dispatcher.Release: the host is holding the caller's
-	// provider credential for this entry — MASKED (see credmask), and only when the upstream is
+	// provider credential for this entry — masked by the host, and only when the upstream is
 	// caller-pays. The credential itself is the host's; the keeper holds only the obligation to
 	// release it, exactly once, on every path that drops the entry (see releaseLocked).
 	//
@@ -89,7 +88,10 @@ type kaEntry struct {
 	// in this process is awake. A host that injects its own server-held key holds no caller
 	// credential at all (in cmd/context-guru-proxy, an upstream that names a key reads it from
 	// the environment at call time, exactly as on the request path).
-	held                        bool
+	held bool
+	// ref is the handle Record.Hold returned: what the Dispatcher sends this entry's pings with and
+	// what Release drops. Meaningful only while held.
+	ref                         dispatch.Ref
 	provider                    bschemas.ModelProvider
 	model, route, preset, agent string
 	pol                         Policy
@@ -197,8 +199,9 @@ func (e *kaEntry) pingable() bool {
 
 // Options configures a Keeper. Dispatcher is required; every other field has a default.
 type Options struct {
-	Dispatcher Dispatcher // required
-	Prices     Pricer     // nil: every ping is unpriced, as with no price table today
+	// Dispatcher sends pings and prices them. Its Price answering ok=false leaves a ping unpriced,
+	// as with no price table.
+	Dispatcher dispatch.Dispatcher // required
 	// Spare reserves the tenant's spare rate/concurrency headroom for one ping; nil = no limiter.
 	Spare func(tenant string, reserveFrac float64) (release func(), err error)
 	Now   func() time.Time // nil: time.Now
@@ -214,7 +217,7 @@ type Record struct {
 	StartedAt time.Time // when the upstream request STARTED
 	Body      []byte    // exact bytes sent upstream; the keeper copies and masks it
 	Provider  bschemas.ModelProvider
-	Endpoint  string // upstream host, passed to Pricer
+	Endpoint  string // upstream host, passed to Dispatcher.Price
 	Route     string // upstream path
 	Status    int
 	Usage     Usage
@@ -226,7 +229,10 @@ type Record struct {
 	Header    http.Header // the request's headers; only PingHeaders' allow-list is read
 	Store     store.Store
 	Emitter   components.Emitter // nil: components.NopEmitter{}
-	Hold      func()             // called once, under the keeper lock, only if the entry is tracked
+	// Hold is called once, under the keeper lock, only if the entry is tracked. The host captures
+	// the request's credential and returns the Ref it issued for it; the keeper releases it exactly
+	// once.
+	Hold func() dispatch.Ref
 }
 
 // EntryView is a read-only snapshot of one tracked entry. Exported for tests and replay tooling;
@@ -417,7 +423,7 @@ func (k *Keeper) Shutdown() {
 // is a keeper-owned COPY precisely so it can be overwritten without corrupting a slice something
 // else still reads.
 func (e *kaEntry) clear() {
-	credmask.Zero(e.body)
+	zero(e.body)
 	e.body = nil
 	e.hdr = nil
 	if e.timer != nil {
@@ -431,7 +437,8 @@ func (e *kaEntry) clear() {
 func (k *Keeper) releaseLocked(e *kaEntry) {
 	if e.held {
 		e.held = false
-		k.o.Dispatcher.Release(e.key)
+		k.o.Dispatcher.Release(e.ref)
+		e.ref = ""
 	}
 }
 
@@ -543,7 +550,7 @@ func (k *Keeper) Record(r Record) {
 	// them. Zeroizing a shared slice is the kind of cleverness that produces a mystery bug in a
 	// month, and the earlier zero-copy retention was a micro-optimisation in the wrong place.
 	owned := append([]byte(nil), body...)
-	credmask.Mask(owned)
+	mask(owned)
 	// What the provider billed for this request's prefix, in its own units — the size of the
 	// entry a ping would refresh. Both the gate and the projected cost read it, so a request
 	// that reported no usage is not pingable: without it there is no honest estimate of either.
@@ -589,15 +596,20 @@ func (k *Keeper) Record(r Record) {
 	k.live[key] = e
 	k.bytes += int64(len(owned))
 	if r.Hold != nil {
-		r.Hold()
+		e.ref = r.Hold()
+		e.held = true
 	}
-	e.held = r.Hold != nil
 	// The hard deadline. (K+1) x Idle is the longest the policy could ever still want this
 	// entry: K pings each restarting the clock, plus one final Idle to notice the last one
 	// bought nothing. After that there is no legitimate use, so the material goes whether or not
 	// anything else in this process is awake.
 	e.timer = time.AfterFunc(time.Duration(e.pol.MaxPings+1)*e.pol.Idle, func() { k.retire(key) })
 	k.evictLocked()
+}
+
+// price asks the host for a model's rates. Never nil-checked: the Dispatcher is required.
+func (k *Keeper) price(endpoint, model string, prefix int64) (Price, bool) {
+	return k.o.Dispatcher.Price(context.Background(), endpoint, model, prefix)
 }
 
 // projectedPingUSD is what one ping on this prefix will cost: the prefix at the model's own
@@ -608,11 +620,10 @@ func (k *Keeper) Record(r Record) {
 // because a price list is incomplete would be the wrong failure, and the spend still lands on
 // its own dashboard row either way.
 func (k *Keeper) projectedPingUSD(model string, prefix int64, route, endpoint string) float64 {
-	p := k.o.Prices
-	if p == nil || model == "" || prefix <= 0 {
+	if model == "" || prefix <= 0 {
 		return 0
 	}
-	price, ok := p.Price(context.Background(), endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, prefix)
 	if !ok || price.Zero() {
 		return 0
 	}
@@ -634,11 +645,10 @@ const summaryOutputBudgetGuess = 2000
 // the model's own cache-read rate, plus an assumed output budget rather than the ping's 1-token
 // one, since this call generates a full summary.
 func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float64 {
-	p := k.o.Prices
-	if p == nil || model == "" || prefix <= 0 {
+	if model == "" || prefix <= 0 {
 		return 0
 	}
-	price, ok := p.Price(context.Background(), endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, prefix)
 	if !ok || price.Zero() {
 		return 0
 	}
@@ -657,11 +667,10 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 // fireSummarySubstitute's own comparison (saving < cost) already fails toward "ping normally"
 // whenever cost cannot be shown to be zero too.
 func (k *Keeper) expectedRefreshSavingUSD(model, endpoint string, prefix int64, tailTokens int) float64 {
-	p := k.o.Prices
-	if p == nil || model == "" || tailTokens <= 0 {
+	if model == "" || tailTokens <= 0 {
 		return 0
 	}
-	price, ok := p.Price(context.Background(), endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, prefix)
 	if !ok || price.Zero() {
 		return 0
 	}
@@ -820,8 +829,8 @@ func (k *Keeper) Sweep(now time.Time) int {
 		// An UNMASKED copy for this ping, zeroized by fire when it is done. The entry's own copy
 		// stays masked, so the long-lived hold never contains a readable transcript.
 		raw := append([]byte(nil), e.body...)
-		credmask.Mask(raw)
-		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key,
+		mask(raw)
+		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
 			route: e.route, provider: e.provider, model: e.model,
 			tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
 			ping: e.pings, prevStartedAt: prevStartedAt})
@@ -845,9 +854,10 @@ type pingJob struct {
 	// map lock would stall every arriving request on this proxy.
 	raw []byte
 	hdr http.Header
-	// key, route, provider and model are what the Dispatcher needs to send this ping; the
-	// credential is the host's, looked up by key inside Dispatch.
+	// ref, route, provider and model are what the Dispatcher needs to send this ping; the
+	// credential is the host's, looked up by ref inside Do. key identifies the entry.
 	key             Key
+	ref             dispatch.Ref
 	route           string
 	provider        bschemas.ModelProvider
 	model           string
@@ -876,7 +886,7 @@ func (k *Keeper) fire(j pingJob) {
 	// The job carries its own unmasked copy of the body, so it owns the wipe. Deferred so the
 	// limiter refusal, the pingBody failure and a panic all release it.
 	defer func() {
-		credmask.Zero(j.raw) // the unmasked body copy this ping was handed
+		zero(j.raw) // the unmasked body copy this ping was handed
 	}()
 	// The tenant's own limits apply, and a ping only ever uses SLACK. Refusing rather than
 	// queueing is the requirement: a queued ping would sit in front of a real request the
@@ -923,10 +933,16 @@ func (k *Keeper) fire(j pingJob) {
 	}
 	start := k.now()
 	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
-	u, status, err := k.o.Dispatcher.Dispatch(ctx, DispatchRequest{Key: j.key,
-		Provider: j.provider, Model: j.model, Route: j.route, Body: body, Headers: j.hdr})
+	resp, err := k.o.Dispatcher.Do(ctx, dispatch.Request{Purpose: dispatch.PurposeKeepAlivePing,
+		Ref: j.ref, Provider: j.provider, Method: http.MethodPost, Path: j.route, Header: j.hdr,
+		Body: body})
 	cancel()
-	credmask.Zero(body)
+	zero(body)
+	status := resp.Status
+	var u Usage
+	if err == nil {
+		u = PingUsage(resp.Body)
+	}
 	ms := float64(k.now().Sub(start).Microseconds()) / 1000.0
 	k.pings.Add(1)
 	if err != nil {
@@ -997,8 +1013,8 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	k.mu.Unlock()
 	var price Price
 	priced := false
-	if p := k.o.Prices; p != nil && model != "" {
-		price, priced = p.Price(context.Background(), endpoint, model, prefix)
+	if model != "" {
+		price, priced = k.price(endpoint, model, prefix)
 	}
 	// A ping is not agent traffic, so it gets no cache-miss attribution and never touches
 	// the session-recency map: doing so would re-date the session and make the NEXT real
