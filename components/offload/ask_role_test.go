@@ -115,3 +115,50 @@ func TestSweepQuestionOpensWithTheSharedLine(t *testing.T) {
 		t.Errorf("the contract and inventory must still follow the line: %.120q", ask)
 	}
 }
+
+func thinkingAsst() bschemas.ChatMessage {
+	r := "thought"
+	return bschemas.ChatMessage{Role: bschemas.ChatMessageRoleAssistant,
+		ChatAssistantMessage: &bschemas.ChatAssistantMessage{Reasoning: &r}}
+}
+
+// The thinking guard: true only for a last-turn-only model AND a thinking block before the last
+// message. Every other cell must be false, so no cell can pass by always answering true.
+func TestAskStripsThinking(t *testing.T) {
+	plain := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
+	withThinking := []bschemas.ChatMessage{thinkingAsst(), plain, plain}
+	lastOnly := []bschemas.ChatMessage{plain, plain, thinkingAsst()}
+	list := []string{"haiku-4-5"}
+	for _, tc := range []struct {
+		name  string
+		list  []string
+		model string
+		msgs  []bschemas.ChatMessage
+		want  bool
+	}{
+		{"last-turn-only model, earlier thinking", list, "claude-haiku-4-5", withThinking, true},
+		{"last-turn-only model, thinking only in last message", list, "claude-haiku-4-5", lastOnly, false},
+		{"last-turn-only model, no thinking", list, "claude-haiku-4-5", []bschemas.ChatMessage{plain, plain}, false},
+		{"keep-all model, earlier thinking", list, "claude-sonnet-5", withThinking, false},
+		{"empty list", nil, "claude-haiku-4-5", withThinking, false},
+		{"empty model id", list, "", withThinking, false},
+		{"no messages", list, "claude-haiku-4-5", nil, false},
+	} {
+		if got := askStripsThinking(tc.list, tc.model, tc.msgs); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// The shipped registry names Haiku 4.5 and not Sonnet 5.
+	if !askStripsThinkingShipped("claude-haiku-4-5", withThinking) ||
+		askStripsThinkingShipped("claude-sonnet-5", withThinking) {
+		t.Error("shipped registry: Haiku 4.5 must strip and Sonnet 5 must not")
+	}
+}
+
+func TestAskBridge(t *testing.T) {
+	for role, want := range map[string]string{"system": "Understood.", "user": "", "assistant": "", "": ""} {
+		if got := askBridge(role); got != want {
+			t.Errorf("askBridge(%q) = %q, want %q", role, got, want)
+		}
+	}
+}
