@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -36,5 +37,37 @@ func TestKeepAlivePlansReportsOnlyThreadsStillToBePinged(t *testing.T) {
 	}
 	if (*Handler)(nil).KeepAlivePlans("t1", false, "s") != nil {
 		t.Error("a nil handler has no plans")
+	}
+}
+
+// TestKeepAlivePlanCountsOnlyPingsThatRefreshed: the sweep advances startedAt before a ping is
+// sent, so a ping that fails must not count as a refresh. The plan's RefreshedMS stays on the last
+// real refresh until a ping actually reads the cache.
+func TestKeepAlivePlanCountsOnlyPingsThatRefreshed(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	k.h.keeper = k
+	pol := kaPolicy()
+	pol.MaxPings = 3
+	t0 := clock.now()
+	recordOne(t, k, pol, kaBody, t0, upstream{base: "http://up", path: "/v1/messages"})
+
+	fs.mu.Lock()
+	fs.err = errors.New("dial tcp: connection refused")
+	fs.mu.Unlock()
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	p := k.h.KeepAlivePlans("t1", false, "sess-1")[""]
+	if p.RefreshedMS != t0.UnixMilli() || p.PingsLeft != 2 {
+		t.Fatalf("after a failed ping: plan %+v, want RefreshedMS at the real request (%d) and 2 pings left", p, t0.UnixMilli())
+	}
+
+	fs.mu.Lock()
+	fs.err = nil
+	fs.mu.Unlock()
+	at := clock.advance(281 * time.Second)
+	k.sweep(at)
+	waitPings(t, k, 2)
+	if p := k.h.KeepAlivePlans("t1", false, "sess-1")[""]; p.RefreshedMS != at.UnixMilli() {
+		t.Errorf("after a ping that read the cache: RefreshedMS = %d, want the ping's start %d", p.RefreshedMS, at.UnixMilli())
 	}
 }

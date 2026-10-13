@@ -66,14 +66,25 @@ type ThreadCache struct {
 
 // KeepAlivePlan is one thread's scheduled keep-alive, as the proxy's keeper holds it in memory.
 type KeepAlivePlan struct {
-	NextPingMS int64 // when the next ping fires (epoch ms)
-	PingsLeft  int   // pings still to send, the next one included
-	IdleMS     int64 // the spacing between pings
+	RefreshedMS int64 // when the provider's entry was last known refreshed (epoch ms)
+	NextPingMS  int64 // when the next ping fires (epoch ms)
+	PingsLeft   int   // pings still to send, the next one included
+	IdleMS      int64 // the spacing between pings
 }
 
-// heldUntil is when a thread's cache goes cold with this plan: the last ping's start plus the TTL.
+// heldUntil is when a thread's cache goes cold with this plan. Each planned ping extends the entry
+// only if it fires before the entry has expired, so the chain starts from the last REAL refresh,
+// not from a ping that was refused or failed, and stops at the first ping that would come too late.
 func (p KeepAlivePlan) heldUntil(ttlS int64) int64 {
-	return p.NextPingMS + int64(p.PingsLeft-1)*p.IdleMS + ttlS*1000
+	end := p.RefreshedMS + ttlS*1000
+	for i := 0; i < p.PingsLeft; i++ {
+		at := p.NextPingMS + int64(i)*p.IdleMS
+		if at >= end {
+			break
+		}
+		end = at + ttlS*1000
+	}
+	return end
 }
 
 // SetKeepAlivePlans supplies the keeper's per-thread plan for one session, keyed by thread id.

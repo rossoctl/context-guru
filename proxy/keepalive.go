@@ -308,6 +308,10 @@ type kaEntry struct {
 	// refreshed is what the last ping read from cache. It is the ceiling on what the next
 	// real request may credit to this mechanism — see dash.Event.keepaliveSavedUSD.
 	refreshed int64
+	// refreshedAt is when the provider's entry was last known refreshed: the real request's start,
+	// then each ping that READ the cache. Unlike startedAt, which the sweep advances before a ping
+	// is sent, a refused or failed ping does not move it. Read by KeepAlivePlans.
+	refreshedAt time.Time
 	// stopped means this session will not be pinged again: a ping wrote instead of reading,
 	// or the upstream refused in a way that repeating cannot fix.
 	stopped bool
@@ -806,7 +810,8 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	prefix := u.CacheRead + u.CacheWrite
 	hdr, auth := pingHeaders(r, up)
 	e := &kaEntry{
-		tenant: tn.ID, session: session, thread: threadID, startedAt: startedAt, body: owned, up: up,
+		tenant: tn.ID, session: session, thread: threadID, startedAt: startedAt, refreshedAt: startedAt,
+		body: owned, up: up,
 		st:       tn.Store,
 		emitter:  tn.Pipe.Emitter(),
 		provider: provider, model: model, route: route, preset: tn.Preset,
@@ -1345,6 +1350,9 @@ func (k *keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
+	if u.CacheRead > 0 {
+		e.refreshedAt = startedAt
+	}
 	k.mu.Unlock()
 	for {
 		old := k.spentUSD.Load()
@@ -1453,6 +1461,9 @@ func (k *keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
+	if u.CacheRead > 0 {
+		e.refreshedAt = startedAt
+	}
 	k.mu.Unlock()
 	for {
 		old := k.spentUSD.Load()
@@ -1771,8 +1782,9 @@ func (h *Handler) KeepAlivePlans(tenantID string, allTenants bool, session strin
 		if e.stopped || !e.pol.on() || e.pings >= e.pol.MaxPings || !e.pingable() {
 			continue
 		}
-		out[e.thread] = dash.KeepAlivePlan{NextPingMS: e.startedAt.Add(e.pol.Idle).UnixMilli(),
-			PingsLeft: e.pol.MaxPings - e.pings, IdleMS: e.pol.Idle.Milliseconds()}
+		out[e.thread] = dash.KeepAlivePlan{RefreshedMS: e.refreshedAt.UnixMilli(),
+			NextPingMS: e.startedAt.Add(e.pol.Idle).UnixMilli(), PingsLeft: e.pol.MaxPings - e.pings,
+			IdleMS: e.pol.Idle.Milliseconds()}
 	}
 	return out
 }

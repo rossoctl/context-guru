@@ -933,7 +933,7 @@ def _agent_rows(cs: dict | None, cs_age: float, names: dict[str, str] | None = N
         last = max(_num(t, "last_ts") or 0, _num(t, "end_ts") or 0)
         out.append({"id": tid, "name": (names or {}).get(tid, ""), "rem": rem, "ttl": float(t["ttl_s"]),
                     "held": held_seconds(t, cs.get("now_ms"), cs_age),
-                    "ago": ((_num(cs, "now_ms") or last) - last) / 1000 + cs_age})
+                    "ago": (_num(cs, "now_ms") - last) / 1000 + cs_age})  # remaining_seconds needs now_ms too
     return sorted(out, key=lambda r: r["id"])
 
 

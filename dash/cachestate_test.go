@@ -72,7 +72,7 @@ func TestCacheStateShowsTheKeepAlivePlan(t *testing.T) {
 	var asked string
 	a.SetKeepAlivePlans(func(_ string, _ bool, session string) map[string]KeepAlivePlan {
 		asked = session
-		return map[string]KeepAlivePlan{"": {NextPingMS: now + 170_000, PingsLeft: 2, IdleMS: 270_000}}
+		return map[string]KeepAlivePlan{"": {RefreshedMS: now - 100_000, NextPingMS: now + 170_000, PingsLeft: 2, IdleMS: 270_000}}
 	})
 
 	_, body := get(t, a, "/api/cachestate?session=s1", "")
@@ -90,6 +90,28 @@ func TestCacheStateShowsTheKeepAlivePlan(t *testing.T) {
 		}
 		if th["main"] == false && th["held_until_ms"] != nil {
 			t.Errorf("a thread with no plan must not claim one: %v", th)
+		}
+	}
+}
+
+// TestHeldUntilStartsFromTheLastRealRefresh: a planned ping only extends an entry that is still
+// alive when it fires. After a refused ping the next one can come too late, and then the cache is
+// cold at its own expiry, whatever is still planned.
+func TestHeldUntilStartsFromTheLastRealRefresh(t *testing.T) {
+	const ttl = 300
+	for _, c := range []struct {
+		name string
+		p    KeepAlivePlan
+		want int64
+	}{
+		{"every ping in time", KeepAlivePlan{RefreshedMS: 0, NextPingMS: 270_000, PingsLeft: 2, IdleMS: 270_000}, 840_000},
+		// the sweep moved the schedule for a ping that was refused at 270 s: the next one, at
+		// 540 s, comes after the entry refreshed at 0 expired at 300 s
+		{"after a refused ping", KeepAlivePlan{RefreshedMS: 0, NextPingMS: 540_000, PingsLeft: 1, IdleMS: 270_000}, 300_000},
+		{"no pings left", KeepAlivePlan{RefreshedMS: 1_000, NextPingMS: 271_000, PingsLeft: 0, IdleMS: 270_000}, 301_000},
+	} {
+		if got := c.p.heldUntil(ttl); got != c.want {
+			t.Errorf("%s: heldUntil = %d, want %d", c.name, got, c.want)
 		}
 	}
 }
