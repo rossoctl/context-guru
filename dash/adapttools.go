@@ -313,6 +313,7 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			case r.cacheRead > 0:
 				rate = p.CacheRead
 			case r.cacheWrite > 0:
+				rate = p.CacheWrite
 				// A one-hour breakpoint precedes every 5-minute one, so when the request wrote any
 				// 1h tokens the declarations at the head were among them: 2x input, not 1.25x.
 				if r.cacheWrite1h > 0 {

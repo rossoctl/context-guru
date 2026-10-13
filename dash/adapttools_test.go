@@ -216,3 +216,26 @@ func TestAdaptToolsEnvelope(t *testing.T) {
 		t.Fatalf("an item without enough evidence was recommended: %+v", none)
 	}
 }
+
+// A five-minute write is priced at the cache-write rate: the declarations were in the prefix the
+// request wrote, and an uncached-input price would understate it by a fifth.
+func TestAdaptToolsPricesAFiveMinuteWriteAtTheWriteRate(t *testing.T) {
+	db := openTestDB(t)
+	e := mkEvent(day(0), "s", "opus", 100, 100)
+	e.TenantID, e.Tools, e.CacheRead, e.CacheWrite, e.DeclDigest = "t1", 1, 0, 5000, "d"
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s", ts: day(0), inv: &Inventory{Digest: "d", UseFingerprint: 1,
+		Decls: []Decl{{Kind: KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := db.AdaptTools(Filter{Tenant: "t1"}, adaptPrice, ToolFilterState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Items) != 1 || math.Abs(doc.Items[0].USDCacheWrite-100*1.25) > 1e-9 {
+		t.Fatalf("items %+v", doc.Items)
+	}
+}
