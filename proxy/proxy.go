@@ -204,6 +204,9 @@ type Handler struct {
 	agg    *metrics.Aggregator
 	opts   Options
 	client *http.Client
+	// dispatch is how every core call leaves this proxy (keep-alive pings, cheap-model calls).
+	// Use dispatcher(), which builds it.
+	dispatch *Dispatcher
 	// sent holds the last body forwarded upstream per session, so a component can put a question to
 	// the request's own model with the bytes the provider's cache was populated from. See
 	// prefixask.go for the bounds and for what happens when one is hit.
@@ -335,6 +338,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	h.static = &Tenancy{Preset: opts.Preset, Pipe: pipe, Store: st,
 		Shadow: h.shadow, Mode: h.mode(), Cache: opts.Cache}
 	h.limiter = NewLimiter(opts.Limits)
+	h.dispatcher()
 	h.keeper = newKeeper(h)
 	h.keeper.start()
 	h.threads = thread.New()

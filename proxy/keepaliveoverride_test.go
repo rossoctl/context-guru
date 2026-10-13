@@ -231,7 +231,7 @@ func TestDisarmRetiresTheHeldMaterialNow(t *testing.T) {
 	if !ok || len(hu.auth) == 0 {
 		t.Fatal("no credential held, so nothing is being released")
 	}
-	held := hu.auth[0].Val
+	held := hu.auth[0].val
 	if !k.disarm("t1", "armed") {
 		t.Fatal("disarm reported nothing was armed")
 	}

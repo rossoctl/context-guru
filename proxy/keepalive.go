@@ -7,6 +7,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/tenant"
@@ -51,11 +52,11 @@ func kaKey(tenant, session string) string { return tenant + "\x00" + session }
 
 // keeper is the proxy's keep-alive host: it resolves policy (account config, manager strategy,
 // session override — keepalivestrategy.go, keepaliveoverride.go), enforces the audit-sink rule,
-// and owns the httpDispatcher. Every decision about WHEN to ping lives in keepalive.Keeper.
+// and holds the credentials its pings use, through the Handler's Dispatcher. Every decision about WHEN to ping lives in keepalive.Keeper.
 type keeper struct {
 	*keepalive.Keeper
 	h *Handler
-	d *httpDispatcher
+	d *Dispatcher
 	// mu guards overrides and strategies only — the core has its own lock.
 	mu sync.Mutex
 	// overrides is the per-session manual keep-alive, keyed by kaKey. In memory only and
@@ -73,22 +74,21 @@ type keeper struct {
 
 func newKeeper(h *Handler) *keeper { return newKeeperWith(h, keepalive.Options{}) }
 
-// newKeeperWith lets tests inject the clock and an inline runner. Dispatcher, Prices and Spare
-// are always the proxy's own.
+// newKeeperWith lets tests inject the clock and an inline runner. Dispatcher and Spare are always
+// the proxy's own.
 //
-// Prices and Spare read h.opts.Prices and h.limiter at CALL time, not here, exactly as the keeper
+// The Dispatcher's Price and Spare read h.opts.Prices and h.limiter at CALL time, not here, exactly as the keeper
 // did when it held h itself: a handler's limiter and price table may be replaced after the keeper
 // is built (tests do both), and a ping must use the ones in force when it fires.
 func newKeeperWith(h *Handler, o keepalive.Options) *keeper {
 	k := &keeper{h: h, overrides: map[string]sessionOverride{}}
-	var client *http.Client
 	if h != nil {
-		client = h.client
+		k.d = h.dispatcher()
+	} else {
+		k.d = NewDispatcher(nil)
 	}
-	k.d = newHTTPDispatcher(client)
 	o.Dispatcher = k.d
 	if h != nil {
-		o.Prices = modelPricer{h}
 		o.Spare = func(tenantID string, reserveFrac float64) (func(), error) {
 			return h.limiter.AcquireSpare(tenantID, reserveFrac)
 		}
@@ -109,15 +109,22 @@ func newKeeperWith(h *Handler, o keepalive.Options) *keeper {
 	return k
 }
 
-// modelPricer adapts the handler's modelinfo.Pricer, which prices by model alone. It reads
-// h.opts.Prices per call; with none configured every ping is unpriced, as before.
-type modelPricer struct{ h *Handler }
-
-func (m modelPricer) Price(ctx context.Context, _, model string, _ int64) (keepalive.Price, bool) {
-	if m.h.opts.Prices == nil {
-		return keepalive.Price{}, false
+// dispatcher returns the Handler's Dispatcher, building it on first use: New builds it, and a test
+// Handler built as a literal gets one when its keeper does. Construction is single-threaded.
+//
+// Its Price adapts h.opts.Prices, which prices by model alone, and reads it per call; with none
+// configured every call is unpriced, as before.
+func (h *Handler) dispatcher() *Dispatcher {
+	if h.dispatch == nil {
+		h.dispatch = NewDispatcher(h.client)
+		h.dispatch.price = func(ctx context.Context, _, model string, _ int64) (keepalive.Price, bool) {
+			if h.opts.Prices == nil {
+				return keepalive.Price{}, false
+			}
+			return h.opts.Prices.Price(ctx, model)
+		}
 	}
-	return m.h.opts.Prices.Price(ctx, model)
+	return h.dispatch
 }
 
 func (k *keeper) now() time.Time { return k.Keeper.Now() }
@@ -238,7 +245,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 			StopReason: u.StopReason},
 		UsageOK: usageOK, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
-		Hold: func() { k.d.hold(key, up, r) }})
+		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }})
 }
 
 // resolvePolicy layers the manager strategy and the session override over the account's own

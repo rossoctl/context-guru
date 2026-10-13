@@ -16,8 +16,8 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/config"
-	"github.com/rossoctl/context-guru/credmask"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
@@ -208,16 +208,20 @@ func (s *syncBuffer) String() string {
 // masked buffer being held.
 func unmasked(b []byte) []byte {
 	out := append([]byte(nil), b...)
-	credmask.Mask(out)
+	credMask(out)
 	return out
 }
 
-// heldFor is what the dispatcher holds for one key, read under its lock.
-func heldFor(k *keeper, key keepalive.Key) (heldUpstream, bool) {
+// heldFor is what the dispatcher holds for one keep-alive key, read under its lock.
+func heldFor(k *keeper, key keepalive.Key) (target, bool) {
 	k.d.mu.Lock()
 	defer k.d.mu.Unlock()
-	h, ok := k.d.held[key]
-	return h, ok
+	for _, t := range k.d.held {
+		if t.kind == kindSession && t.key == key {
+			return *t, true
+		}
+	}
+	return target{}, false
 }
 
 // pingWireBody is what a ping of body puts on the wire: the keeper's pingBody for the Messages
@@ -305,13 +309,13 @@ func TestCredentialRetentionRules(t *testing.T) {
 		if !ok {
 			t.Fatal("the dispatcher holds nothing for a tracked caller-pays session")
 		}
-		var auth *credmask.Header
+		var auth *heldHeader
 		for i := range h.auth {
-			if strings.EqualFold(h.auth[i].Name, "Authorization") {
+			if strings.EqualFold(h.auth[i].name, "Authorization") {
 				auth = &h.auth[i]
 			}
 			// Our own token is not a provider credential and must never be retained.
-			if bytes.Contains(unmasked(h.auth[i].Val), []byte("cg_live_")) {
+			if bytes.Contains(unmasked(h.auth[i].val), []byte("cg_live_")) {
 				t.Error("retained a context-guru token as a provider credential")
 			}
 		}
@@ -320,11 +324,11 @@ func TestCredentialRetentionRules(t *testing.T) {
 		}
 		// The bytes AT REST must not contain the credential — that is what a heap dump or a
 		// string scan over a core file would see.
-		if bytes.Contains(auth.Val, []byte("sk-caller-secret")) {
+		if bytes.Contains(auth.val, []byte("sk-caller-secret")) {
 			t.Error("the credential is sitting in memory in plaintext")
 		}
 		// And it must still be recoverable, or the ping cannot authenticate.
-		if got := string(unmasked(auth.Val)); got != caller {
+		if got := string(unmasked(auth.val)); got != caller {
 			t.Errorf("unmasking gave %q, want the caller's own credential back", got)
 		}
 	})
@@ -354,12 +358,12 @@ func TestCredentialRetentionRules(t *testing.T) {
 	t.Run("release ZEROIZES rather than dropping the reference", func(t *testing.T) {
 		k, _, _ := held(t, upstream{base: "http://up", path: "/v1/messages"})
 		h, _ := heldFor(k, s)
-		if len(h.auth) == 0 || len(h.auth[0].Val) == 0 {
+		if len(h.auth) == 0 || len(h.auth[0].val) == 0 {
 			t.Fatal("nothing held to release")
 		}
 		// Our own handle on the exact buffer, so the assertion is about the BYTES and not about
 		// whether the map still points at them.
-		cred := h.auth[0].Val
+		cred := h.auth[0].val
 		k.retireSession("t1", "s")
 		for i := range cred {
 			if cred[i] != 0 {
@@ -375,7 +379,7 @@ func TestCredentialRetentionRules(t *testing.T) {
 	t.Run("forget zeroizes one tenant's credential", func(t *testing.T) {
 		k, _, _ := held(t, upstream{base: "http://up", path: "/v1/messages"})
 		h, _ := heldFor(k, s)
-		cred := h.auth[0].Val
+		cred := h.auth[0].val
 		k.forget("t1")
 		for i := range cred {
 			if cred[i] != 0 {
@@ -414,15 +418,16 @@ func TestSendPingHitsTheUpstream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := newHTTPDispatcher(srv.Client())
+	d := NewDispatcher(srv.Client())
 	key := keepalive.Key{Tenant: "t1", Session: "s"}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
 	r.Header.Set("Authorization", "Bearer sk-caller")
-	d.hold(key, upstream{base: srv.URL, path: "/v1/messages"}, r)
+	ref := d.hold(key, upstream{base: srv.URL, path: "/v1/messages"}, r.Header)
 	body := pingWireBody(t, []byte(kaBody))
-	u, status, err := d.Dispatch(context.Background(), keepalive.DispatchRequest{Key: key,
-		Provider: bschemas.Anthropic, Route: "/v1/messages", Body: body,
-		Headers: keepalive.PingHeaders(r.Header)})
+	resp, err := d.Do(context.Background(), dispatch.Request{Purpose: dispatch.PurposeKeepAlivePing,
+		Ref: ref, Provider: bschemas.Anthropic, Method: http.MethodPost, Path: "/v1/messages",
+		Body: body, Header: keepalive.PingHeaders(r.Header)})
+	status, u := resp.Status, keepalive.PingUsage(resp.Body)
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("Dispatch: status=%d err=%v", status, err)
 	}
