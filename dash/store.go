@@ -36,6 +36,11 @@ type DB struct {
 	// tests, for a value only the HTTP layer can supply. The struct is two fields and holds no
 	// lock, so copying it is safe; `go vet` would say otherwise if it did.
 	ctx context.Context
+	// sizeSpread is CachesplitSizeSpread's own TTL cache (dash/cachehistory.go) — a POINTER, not
+	// an inline mutex, so WithContext's shallow copy above stays lock-free and copies the
+	// pointer, sharing one cache across every handle this *DB produces rather than giving each
+	// shallow copy its own, independently-stale one.
+	sizeSpread *cachesplitSizeSpreadCache
 }
 
 // WithContext returns a handle whose reads are cancellable, for a caller that has one.
@@ -272,7 +277,7 @@ func openDSN(d, path string) (*DB, error) {
 		sdb.Close()
 		return nil, err
 	}
-	return &DB{sql: sdb, path: path}, nil
+	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
 }
 
 // sanitizeVersion keeps a version string safe to embed in a filename.

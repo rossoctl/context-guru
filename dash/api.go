@@ -1200,68 +1200,30 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 	}
 	if statsLean(r) {
 		// ?lean=1 answers every field the status line's _fetch_stats actually reads
-		// (context-guru-plugin/scripts/statusline.py: total_saved_usd, saved_unique,
-		// cg_latency_ms_avg, upstream_ms_avg, keepalive_net_usd, keepalive_misses_avoided) at
-		// FULL precision, not an approximation — see the review of PR #403 for why this needs
-		// saying plainly rather than as "slightly conservative". The full handler below runs
-		// four things: Overview, CachesplitHistoricalUSD, TierCosts and DeclCreditFor.
-		// DeclCreditFor is two halves (dash/declcredit.go): FilterUSD, a single filtered SQL
-		// query exactly like CachesplitHistoricalUSD, folds into TotalSavedUSD; SelfUSD, which
-		// needs SelfRemovals' full-tenant scan over tool_declarations (dash/toolapi.go,
-		// IGNORING the session filter by design — self-removal is a cross-session signal),
-		// folds ONLY into TotalReducedUSD, a field this response never carries. So the one
-		// expensive call among the four (SelfRemovals) contributes NOTHING to total_saved_usd,
-		// and can be skipped here with no loss: this path runs Overview, CachesplitHistoricalUSD
-		// and DeclFilterSavings (the measured half only, bypassing DeclCreditFor's call into
-		// SelfRemovals entirely) and adds their USD into TotalSavedUSD exactly as the full
-		// handler does. TierCosts is skipped because nothing here reads it, not because it is
-		// expensive — measured at low single-digit milliseconds, same ballpark as the other two.
+		// (context-guru-plugin/scripts/statusline.py: total_saved_usd, keepalive_net_usd,
+		// keepalive_misses_avoided, upstream_ms_avg) plus what scripts/cg.py reads
+		// (cost_usd, baseline_cost_usd, cache_saved_usd and 7 waterfall keys) at FULL
+		// precision for a SESSION, and at a small, disclosed, bounded discount (the two
+		// read-time-priced credits below) for a time window or the lifetime read — see
+		// dash/overview_lean.go's own doc comment for exactly which fields and why.
+		//
+		// #502: this used to run the FULL Overview() (sixteen queries; lean reads a handful
+		// of their outputs) plus CachesplitHistoricalUSD and DeclFilterSavings
+		// UNCONDITIONALLY. Overview()'s own window-function sub-queries (the replay ceiling,
+		// CompactionResets) are exactly the per-session-squared and whole-table costs #492
+		// and #502 measured; CachesplitHistoricalUSD and DeclFilterSavings are bounded for a
+		// session but not for a time window or `since=0` (CachesplitHistoricalUSD's own
+		// comment: its ranking must see a session's whole history, so it cannot be scoped by
+		// time without changing the answer). OverviewLean runs none of the unneeded queries,
+		// and the two read-time-priced credits only when `session=` is set, where they are
+		// bounded. The rule, from #502's own plan comment: "/api/stats?lean=1 is the bounded
+		// path. Every query on it must have a cost that does not grow with the session's
+		// size squared, nor with the whole table."
 		a.serveJSON(w, r, &a.statsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
-			var (
-				o              *Overview
-				overviewErr    error
-				cachesplitHist *CachesplitHistorical
-				filterSaving   *DeclFilterSaving
-			)
-			var g errgroup.Group
-			g.Go(func() error {
-				o, overviewErr = db.Overview(f)
-				return nil // see the full handler below for why this is never folded in here
-			})
-			if a.pricer != nil {
-				g.Go(func() error {
-					if h, err := db.CachesplitHistoricalUSD(f, a.pricer); err == nil {
-						cachesplitHist = &h
-					}
-					return nil
-				})
-				g.Go(func() error {
-					if fs, err := db.DeclFilterSavings(f, a.priceFn(r)); err == nil {
-						filterSaving = fs
-					} else {
-						slog.Warn("dash: lean declaration-filter credit unavailable", "err", err)
-					}
-					return nil
-				})
+			o, err := db.OverviewLean(f, a.pricer, a.priceFn(r))
+			if err != nil {
+				return nil, err
 			}
-			g.Wait() //nolint:errcheck // every goroutine above always returns nil
-			if overviewErr != nil {
-				return nil, overviewErr
-			}
-			if cachesplitHist != nil {
-				o.CachesplitHistorical = cachesplitHist
-				o.TotalSavedUSD += cachesplitHist.USD
-			}
-			if filterSaving != nil {
-				// Unconditional on filterSaving.Priced, matching SetDeclCredit (dash/overview.go)
-				// exactly: Priced is false when ANY ONE request in scope used an unpriced model,
-				// but USD is still the priced SUBSET's real dollar figure, not a fabricated one —
-				// see DeclFilterSaving's own comment. Gating on Priced here (as an earlier version
-				// of this branch did) silently dropped the WHOLE credit over one unpriced model
-				// anywhere in scope, which SetDeclCredit never does and lean must not either.
-				o.TotalSavedUSD += filterSaving.USD
-			}
-			o.Waterfall = o.waterfall()
 			return json.Marshal(o)
 		})
 		return

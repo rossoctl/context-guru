@@ -163,10 +163,8 @@ type ToolFilterState struct {
 // aggregate can express that without either picking one model or blending rates that belong
 // to none.
 func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bool)) (*DeclFilterSaving, error) {
-	where, args := f.where()
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.ts FROM requests r
-		WHERE `+where+` AND r.filtered_decl_tokens > 0`, args...)
+	q, args := declFilterSavingsQuery(f)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -186,6 +184,17 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 	}
 	out.Sessions = len(sessions)
 	return out, nil
+}
+
+// declFilterSavingsQuery builds the SQL and args DeclFilterSavings executes — pulled out for
+// #502's EXPLAIN-plan test, same reason as cachesplitHistoricalQuery (dash/cachehistory.go).
+// Bounded by `cond` directly: a session's own index for session scope, the ts range for a
+// time window, neither for `since=0` — which is why OverviewLean never calls this unscoped.
+func declFilterSavingsQuery(f Filter) (string, []any) {
+	where, args := f.where()
+	return `SELECT r.session_id, r.model, r.filtered_decl_tokens,
+		r.cache_read, r.cache_write, r.ts FROM requests r
+		WHERE ` + where + ` AND r.filtered_decl_tokens > 0`, args
 }
 
 // accumulateDeclFilterRow folds one filtered_decl_tokens>0 row into a running total — the one

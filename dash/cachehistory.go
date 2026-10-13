@@ -2,6 +2,8 @@ package dash
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -104,16 +106,8 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 	// of that session's rows, filtered or not, and excludes only OTHER sessions' rows, which
 	// PARTITION BY session_id never let affect this session's own rn values anyway. Unscoped
 	// callers (the whole-deployment view) still get the broad, unfiltered CTE.
-	rnCond, rnArgs := "", []any{}
-	if f.Session != "" {
-		rnCond, rnArgs = "WHERE r.session_id = ?", []any{f.Session}
-	}
-	rows, err := d.sql.QueryContext(d.readCtx(), `WITH rn AS (
-		SELECT r.id AS rid, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
-		FROM requests r
-		`+rnCond+`
-	) SELECT r.model, r.cache_read, r.cache_write FROM requests r JOIN rn ON rn.rid = r.id AND rn.n = 1
-		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0`, append(rnArgs, args...)...)
+	q, qargs := cachesplitHistoricalQuery(f, cond, args)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, qargs...)
 	if err != nil {
 		return out, err
 	}
@@ -164,6 +158,37 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 	}
 	out.Models = len(seen)
 	return out, rows.Err()
+}
+
+// cachesplitHistoricalQuery builds the SQL and args CachesplitHistoricalUSD executes — pulled
+// out so #502's EXPLAIN-plan test runs against the EXACT statement the server executes, not a
+// hand-copied duplicate that could drift from it (named in #502's own review of #498 as a gap
+// the EXPLAIN test left uncovered). See CachesplitHistoricalUSD's own comment for why the CTE
+// may be scoped to the caller's session but never to `cond` (`cond`'s keepalive=0 would be
+// wrong INSIDE the ranking; tenant_id would not — see below).
+//
+// #502/#501: the session-scoped form adds `tenant_id = ?` alongside `session_id = ?`, which
+// #498 did not. Session ids are client-supplied, so two tenants can present the same one, and
+// without the tenant term the ranking would see BOTH tenants' rows as one session — exactly
+// #501's bug (overview.go's and this file's other per-session queries still have it; this is
+// the one lean's new bounded path actually calls, so it is the one fixed here, not a general
+// pass over #501). TenantAll (a manager's service-wide view) is the one caller that must NOT
+// gain this term — it has no single tenant to add.
+func cachesplitHistoricalQuery(f Filter, cond string, args []any) (string, []any) {
+	rnCond, rnArgs := "", []any{}
+	if f.Session != "" {
+		if f.TenantAll {
+			rnCond, rnArgs = "WHERE r.session_id = ?", []any{f.Session}
+		} else {
+			rnCond, rnArgs = "WHERE r.tenant_id = ? AND r.session_id = ?", []any{f.Tenant, f.Session}
+		}
+	}
+	return `WITH rn AS (
+		SELECT r.id AS rid, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
+		FROM requests r
+		` + rnCond + `
+	) SELECT r.model, r.cache_read, r.cache_write FROM requests r JOIN rn ON rn.rid = r.id AND rn.n = 1
+		WHERE ` + cond + ` AND r.split_stable_tokens = 0 AND r.cache_read > 0`, append(rnArgs, args...)
 }
 
 // CachesplitHistoricalUSDByTenant is CachesplitHistoricalUSD for every tenant since a given
@@ -263,24 +288,80 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 	return out, nil
 }
 
+// cachesplitSizeSpreadTTL bounds how long a stale CachesplitSizeSpread answer is served before
+// the next caller pays for a fresh one. #502's review (M3): this query has no WHERE clause any
+// index narrows — `split_stable_tokens > 0` has no index of its own, so it is a scan of every
+// row the deployment has ever written, deployment-wide, with no session or time bound at all.
+// CachesplitHistoricalUSD calls it on every lean call that includes a session (every status
+// line render), so uncached it was exactly the shape #492/#502 exist to remove — just hidden
+// one level down from the query the EXPLAIN test was looking at. A model's stable half changes
+// slowly if ever (cachesplitHistory.go's own comment on CachesplitHistorical), so a few minutes
+// of staleness costs nothing a user would notice.
+const cachesplitSizeSpreadTTL = 5 * time.Minute
+
+// cachesplitSizeSpreadCache is CachesplitSizeSpread's TTL cache, held behind a *DB field
+// (store.go) rather than inline in DB itself so DB's shallow copy (WithContext) stays
+// lock-free. One cache per underlying database, shared by every *DB handle WithContext hands
+// out, which is the point: a 1,000-session proxy pays the scan once per TTL window, not once
+// per lean call.
+type cachesplitSizeSpreadCache struct {
+	mu    sync.Mutex
+	at    time.Time
+	sizes map[string][2]int
+}
+
 // CachesplitSizeSpread reports the recorded minimum and maximum stable half per model. The
 // estimate above credits a model only where those are equal; this is where that gets checked
 // instead of assumed, and it is what decides the refusal rather than merely reporting on it.
+//
+// Cached with a TTL (see cachesplitSizeSpreadTTL's own comment for why this needs one at all):
+// a cache MISS still runs the full, deployment-wide scan — nothing here makes the QUERY itself
+// bounded, only how OFTEN it runs. #502's EXPLAIN test documents the miss case directly rather
+// than pretending it does not exist.
 func (d *DB) CachesplitSizeSpread() (map[string][2]int, error) {
+	c := d.sizeSpread
+	c.mu.Lock()
+	stale := c.sizes
+	fresh := c.sizes != nil && time.Since(c.at) < cachesplitSizeSpreadTTL
+	c.mu.Unlock() // released before the query: a slow scan must never hold other readers' cache hits
+	if fresh {
+		return stale, nil
+	}
+
 	out := map[string][2]int{}
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT model, MIN(split_stable_tokens), MAX(split_stable_tokens)
 		FROM requests WHERE split_stable_tokens > 0 GROUP BY model`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var m string
+			var lo, hi int
+			if serr := rows.Scan(&m, &lo, &hi); serr != nil {
+				err = serr
+				break
+			}
+			out[m] = [2]int{lo, hi}
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+	}
+
 	if err != nil {
+		// A failed refresh does NOT touch the cache — `at` stays whatever it was (already
+		// expired, which is why this ran at all), so the NEXT call retries immediately
+		// rather than this error being served, cached, for a further 5 minutes. If a
+		// previous good value is still sitting there (stale, but a real past answer), serve
+		// that instead of the error: a transient failure (a locked file, a slow disk) should
+		// not make CachesplitHistoricalUSD treat every model as uncovered when it has
+		// perfectly usable data a few minutes old.
+		if stale != nil {
+			return stale, nil
+		}
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var m string
-		var lo, hi int
-		if err := rows.Scan(&m, &lo, &hi); err != nil {
-			return nil, err
-		}
-		out[m] = [2]int{lo, hi}
-	}
-	return out, rows.Err()
+	c.mu.Lock()
+	c.at, c.sizes = time.Now(), out
+	c.mu.Unlock()
+	return out, nil
 }

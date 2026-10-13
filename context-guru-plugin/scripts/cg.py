@@ -95,7 +95,13 @@ def window(o: dict, days: int) -> tuple[int, int]:
 
 
 def stats(api: Api, since: int, until: int | None = None, session: str | None = None) -> dict | None:
-    p: dict = {"lean": 1, "since": since}
+    # The FULL endpoint, not lean=1. #502 made lean a bounded path by moving the
+    # pre-instrumentation cachesplit credit and the declaration-filter credit out of it for
+    # anything wider than a single session — every call this plugin makes is a day/week/month
+    # window, never a session, so lean would quietly understate total_saved_usd here. These
+    # commands run once per invocation, not on every status-line render, so the full handler's
+    # extra cost (bounded now, see #492/#498/#502) is the right trade for an exact number.
+    p: dict = {"since": since}
     if until:
         p["until"] = until
     if session:
