@@ -735,16 +735,14 @@ components:
 	//                        economic gate and the caching-backend guard ADVISORY, so spend is
 	//                        bounded only by the two caps below.
 	//   llm_max_per_request  8 calls per request.
-	//   llm_max_per_session  10 calls per session: above the most calls any replayed SWE-bench
-	//                        session needed (9). A long interactive session reaches it and then
-	//                        runs as house.
+	//   llm_max_per_session  10 calls per session, the outer bound on spend. A long session
+	//                        reaches it and then runs as house.
 	//   context: goal        the prompt carries the agent's goal only, not recent messages
 	//   rewrite: false       deletion-only: the result must be a subsequence of the output
 	//   skip_file_reads      false. AUTO skips file reads on cached requests because reducing them
 	//                        there was measured to raise the bill (the reduction rewrites bytes the
 	//                        provider already holds). Here only the uncached tail is touched, so the
-	//                        verbose read is never cached in the first place; on a session replay,
-	//                        including file reads was the better choice on both halves of a task split.
+	//                        verbose read is never cached in the first place.
 	//   strategy: auto       the Starlark program first, a single-shot extract as fallback
 	// The model block is housellm's; pin a cheaper extraction model with `model:` if one is
 	// available.
