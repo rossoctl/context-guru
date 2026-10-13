@@ -146,8 +146,9 @@ func New() *Tracker {
 }
 
 // ValidHeaderID reports whether an agent-id header value is usable. Empty, over-long, or
-// containing anything outside [A-Za-z0-9_.:-] is not: such a value falls back to prefix
-// continuity rather than becoming a key.
+// containing anything outside [A-Za-z0-9_.:@-] is not: such a value falls back to prefix
+// continuity rather than becoming a key. `@` is in the set because an agent-team teammate's id is
+// `<name>@<team>` (Claude Code 2.1.296); without it every teammate fell back to prefix continuity.
 func ValidHeaderID(v string) bool {
 	if v == "" || len(v) > maxHeaderID {
 		return false
@@ -156,7 +157,7 @@ func ValidHeaderID(v string) bool {
 		c := v[i]
 		switch {
 		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case c == '_', c == '.', c == ':', c == '-':
+		case c == '_', c == '.', c == ':', c == '-', c == '@':
 		default:
 			return false
 		}
