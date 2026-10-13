@@ -9868,7 +9868,8 @@ async function armSession(s) {
   const hours = prompt('Keep this session warm for how many hours?\n\n'
     + `For Anthropic, ${kaState.x}s idle and ${kaState.k} pings can hold your credential for `
     + `up to ${hold.toFixed(0)} minutes at a time ((K+1) × X) on a 5-minute cache; a session on a `
-    + '1-hour cache is held for up to 118 minutes (4 hours at most), on the account\u2019s 1-hour schedule. '
+    + `1-hour cache is pinged 59 minutes apart, at most ${Math.min(kaState.k, 3)} time(s) (your ping count, capped at 3), `
+    + `so it is held for up to ${(Math.min(kaState.k, 3) + 1) * 59} minutes. `
     + 'For GPT-5.6+ Responses, '
     + 'the account OpenAI cadence applies (at most 28 minutes), pings are capped to keep ' +
       'credential hold within 60 minutes. Between 0.25 and 12 hours, and it '
@@ -10057,8 +10058,8 @@ async function loadKAArmed() {
   host.appendChild(el('p', { class: 'hint' },
     `At most ${out.max_hours} hours per session, and ${out.max_hold_minutes} minutes is the `
     + 'ceiling on how long your credential may be held between pings on a 5-minute cache. '
-    + `A 1-hour cache is not governed by the override's timing: it is pinged on the account's `
-    + `1-hour schedule, and held for up to ${out.max_hold_minutes_1h} minutes. `,
+    + `A 1-hour cache keeps the account's 59-minute timing; the override's ping count applies to it `
+    + `(at most 3), so it is held for up to ${out.max_hold_minutes_1h} minutes. `,
     el('strong', {}, 'Armed sessions are cleared if the service restarts'),
     ' — an authorization to spend that silently outlived a restart would be worse than one '
     + 'that does not. The arm itself is in your audit log permanently.'));

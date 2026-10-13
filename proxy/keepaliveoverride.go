@@ -184,6 +184,15 @@ func (k *keeper) overrideFor(tenantID, session string, pol CachePolicy) CachePol
 	pol.KeepAlive = true
 	pol.Idle, pol.MaxPings = o.pol.Idle, o.pol.MaxPings
 	pol.MinPrefixTokens = o.pol.MinPrefixTokens
+	// The override's ping count bounds a 1-hour thread too, but only downward: its 60-290 s band
+	// cannot express an hour, so the 1-hour timing stays the account's, and the hold the person was
+	// shown is then (K+1) x 59 min at most. 0 means the proxy default, which is resolved here so
+	// that the minimum is taken against a real number.
+	k1h := pol.MaxPings1h
+	if k1h <= 0 {
+		k1h = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
+	}
+	pol.MaxPings1h = min(k1h, o.pol.MaxPings)
 	return pol
 }
 

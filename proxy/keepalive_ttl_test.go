@@ -209,21 +209,36 @@ func TestNoneStaysNoneOnAOneHourThread(t *testing.T) {
 }
 
 // An armed override enables a session on an account whose default is off. Its 60-290 s band cannot
-// express an hour, so a 1-hour thread keeps the 1-hour schedule: one ping at 59 min, none at 270 s.
-func TestOverrideOnAOneHourThreadUsesTheOneHourSchedule(t *testing.T) {
+// express an hour, so a 1-hour thread keeps the 1-hour timing: no ping at 270 s, one at 59 min. Its
+// ping count applies downward: K=4 against the default of 1 still sends 1; K=1 against an account
+// K of 3 sends 1 as well.
+func TestOverrideOnAOneHourThreadUsesTheOneHourTimingAndBoundsTheCount(t *testing.T) {
 	k, _, clock := testKeeper(t, Limits{})
 	start := clock.now()
 	armOn(t, k, "sess-1", 120*time.Second, 4, start.Add(4*time.Hour))
 	tn := &Tenancy{ID: "t1", Cache: CachePolicy{}}
 	recordThread(t, k, tn, "sess-1", "", ttlBody1h, start, bill1h)
 	if n := k.sweep(start.Add(270 * time.Second)); n != 0 {
-		t.Fatalf("a 1h thread was pinged on the override's 5-minute pair (%d)", n)
+		t.Fatalf("a 1h thread was pinged on the override's 5-minute timing (%d)", n)
 	}
 	if n := k.sweep(start.Add(59 * time.Minute)); n != 1 {
 		t.Fatalf("no ping at 59 min (%d)", n)
 	}
 	if n := k.sweep(start.Add(2 * time.Hour)); n != 0 {
-		t.Fatalf("a second ping: the override's 4 pings leaked into the 1h thread (%d)", n)
+		t.Fatalf("a second ping: K=4 must not raise the account's 1h count of 1 (%d)", n)
+	}
+
+	k2, _, clock2 := testKeeper(t, Limits{})
+	start = clock2.now()
+	armOn(t, k2, "sess-1", 120*time.Second, 1, start.Add(4*time.Hour))
+	acct := kaPolicy()
+	acct.MaxPings1h = 3
+	recordThread(t, k2, &Tenancy{ID: "t1", Cache: acct}, "sess-1", "", ttlBody1h, start, bill1h)
+	if n := k2.sweep(start.Add(59 * time.Minute)); n != 1 {
+		t.Fatalf("no first ping (%d)", n)
+	}
+	if n := k2.sweep(start.Add(118 * time.Minute)); n != 0 {
+		t.Fatalf("override K=1 did not bound the 1h thread below the account's 3 (%d)", n)
 	}
 }
 
