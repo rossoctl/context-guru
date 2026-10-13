@@ -1032,6 +1032,16 @@ func (k *keeper) forget(tenantID string) {
 	// account-wide box must not leave armed sessions pinging on the strength of an
 	// authorization the account has just withdrawn.
 	k.forgetOverrides(tenantID)
+	for key := range k.routeFails {
+		if strings.HasPrefix(key, prefix) {
+			delete(k.routeFails, key)
+		}
+	}
+	for key := range k.routeTripped {
+		if strings.HasPrefix(key, prefix) {
+			delete(k.routeTripped, key)
+		}
+	}
 }
 
 // evictLocked enforces both bounds by dropping the entries whose deadline is furthest away
@@ -1231,11 +1241,15 @@ func (k *keeper) fire(j pingJob) {
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
 		return
 	}
-	// FAILED: the upstream did not answer the ping as a model call. An error relayed as a status
-	// we let through (5xx), or a 200 with no usage at all (a translating gateway in front of a
-	// provider that refused it). Booked (the row is the audit trail), not a refresh, this session
-	// stops, and the route trips after routeFailLimit in a row.
-	if status/100 != 2 || (u.FreshInput == 0 && u.CacheRead == 0 && u.CacheWrite == 0) {
+	// A 5xx is transient (an overload burst): booked, nothing else; the next ping may work.
+	if status/100 != 2 {
+		k.record1(j, u, status, ms, start)
+		return
+	}
+	// FAILED: a 2xx with no usage at all, i.e. not answered as a model call (a translating gateway
+	// in front of a provider that refused it). Booked (the row is the audit trail), not a refresh,
+	// this session stops, and the route trips after routeFailLimit in a row.
+	if u.FreshInput == 0 && u.CacheRead == 0 && u.CacheWrite == 0 {
 		k.failed.Add(1)
 		k.markStopped(j.e)
 		k.routeFailed(kaRouteKey(j.tenant, j.up, j.e.model), k.now())
@@ -1481,6 +1495,11 @@ func (k *keeper) routeFailed(key string, now time.Time) {
 	defer k.mu.Unlock()
 	if k.routeFails == nil {
 		k.routeFails, k.routeTripped = map[string]int{}, map[string]time.Time{}
+	}
+	for kk, t := range k.routeTripped { // expired trips are dead weight
+		if !now.Before(t) {
+			delete(k.routeTripped, kk)
+		}
 	}
 	k.routeFails[key]++
 	if k.routeFails[key] >= routeFailLimit {
@@ -1785,7 +1804,9 @@ const keepAliveReserveFrac = 0.25
 // have model/retention-dependent lifetimes and are not safe to schedule here.
 func keepAliveEligible(p bschemas.ModelProvider, model, route string) bool {
 	switch p {
-	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+	case bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+		return true
+	case bschemas.Anthropic:
 		// Only a Claude model honours explicit cache_control. A gateway that serves another
 		// family on this route (an OpenAI / Azure model behind LiteLLM) caches automatically or
 		// not at all, so a ping there buys nothing.

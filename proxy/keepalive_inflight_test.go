@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,8 @@ import (
 // thread is due, but no ping goes out until that request has finished.
 func TestNoPingWhileARequestOfTheSessionIsInFlight(t *testing.T) {
 	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
 	var pings atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var b bytes.Buffer
@@ -60,6 +63,7 @@ func TestNoPingWhileARequestOfTheSessionIsInFlight(t *testing.T) {
 	h.keeper.dispatch = h.keeper.fire
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
+	defer unblock() // runs before the servers close: a failing run must not leave the upstream handler blocked
 
 	sess := "inflight-" + strconv.FormatInt(time.Now().UnixNano(), 36) // process-wide thread state outlives one run
 	post := func(tools bool, texts ...string) {
@@ -102,8 +106,12 @@ func TestNoPingWhileARequestOfTheSessionIsInFlight(t *testing.T) {
 	if n := pings.Load(); n != 0 {
 		t.Errorf("%d pings while the session's slow request was in flight", n)
 	}
-	close(release)
-	<-done
+	unblock()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the slow request never finished")
+	}
 	h.keeper.sweep(clock.advance(time.Second))
 	if n := pings.Load(); n != 1 {
 		t.Errorf("%d pings after the slow request finished, want 1", n)
@@ -244,7 +252,7 @@ func TestPingFailureNeedsNoUsageOrAnError(t *testing.T) {
 		failed bool
 	}{
 		{"no usage", Usage{}, http.StatusOK, true},
-		{"5xx", Usage{CacheRead: 48576}, http.StatusBadGateway, true},
+		{"5xx is transient", Usage{}, http.StatusBadGateway, false},
 		{"openai miss", Usage{FreshInput: 48576, Output: 1}, http.StatusOK, false},
 		{"anthropic miss", Usage{CacheWrite: 48576, Output: 1}, http.StatusOK, false},
 		{"read", Usage{CacheRead: 48576, Output: 1}, http.StatusOK, false},
@@ -274,6 +282,37 @@ func TestKeepAliveModelAliasesFromTheEnvironment(t *testing.T) {
 		"Team-Model-Large": true, "gpt-5-mini-2025-08-07": false} {
 		if got := keepAliveEligible(bschemas.Anthropic, model, "/v1/messages"); got != want {
 			t.Errorf("%s: eligible %v, want %v", model, got, want)
+		}
+	}
+}
+
+// An overload burst (529, any 5xx) is transient: it neither fails the session nor trips the route.
+func TestOverloadedPingsDoNotTripTheRoute(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	k.send = func(pingJob, []byte) (Usage, int, error) { return Usage{}, 529, nil }
+	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
+	up := upstream{base: "http://api", path: "/v1/messages"}
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	r.Header.Set("Authorization", "Bearer sk-x")
+	for n := 0; n < routeFailLimit+1; n++ {
+		for i := 0; i < 2; i++ {
+			k.record(&Tenancy{ID: "t1", Cache: pol}, "s"+strconv.Itoa(n), "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody), up, r,
+				bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+		}
+	}
+	k.sweep(clock.advance(290 * time.Second))
+	time.Sleep(50 * time.Millisecond)
+	if st := k.Stats(); st.Failed != 0 || st.RouteTrips != 0 {
+		t.Errorf("529s: failed %d, trips %d, want 0 and 0", st.Failed, st.RouteTrips)
+	}
+}
+
+// Bedrock and Vertex are Claude routes whatever the deployment is called (inference-profile ARNs).
+func TestBedrockAndVertexNeedNoClaudeName(t *testing.T) {
+	arn := "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3"
+	for _, p := range []bschemas.ModelProvider{bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex} {
+		if !keepAliveEligible(p, arn, "/v1/messages") {
+			t.Errorf("%s: an inference-profile ARN was not eligible", p)
 		}
 	}
 }
