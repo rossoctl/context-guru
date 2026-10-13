@@ -203,8 +203,18 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	// thread's request, and it must stay there: newID hands the compacting thread's id to the
 	// post-compaction request, so a compaction that got a new id here would move the main
 	// thread onto that new id for the rest of the session.
-	if ok && match == nil && agentCompaction {
+	//
+	// The same holds for an ordinary main-agent turn whose tail Claude Code rewrote instead of
+	// extending: seen on a live session (#518), a turn start that changed the last user message or
+	// dropped the trailing system message, while the provider cache still read 99.8% of the
+	// prefix. Such a request shares every message of a tools thread's last request except the last
+	// one or two, and it is that thread's next turn. A header-less fork shares less than that.
+	switch {
+	case !ok || match != nil:
+	case agentCompaction:
 		compacted = s.compactionParent(sums, model)
+	case hasTools && agentID == "":
+		compacted = s.rewrittenTailParent(sums, model)
 	}
 
 	var res Result
@@ -302,12 +312,16 @@ func (s *sessionState) newID(sums []uint64, hasTools bool, model string) string 
 	// The MOST RECENT compacting thread: the agent sends the post-compaction request right after
 	// its compaction request, so if two threads are compacting at once, the later one is the one
 	// whose summary this is. Slice order would be arbitrary.
-	// Only a request that declares tools succeeds a thread that does: Claude Code sends a
-	// tool-less side request between its compaction request and its next turn (#518), and that
-	// side request must not take the main agent's id. Between two candidates, preferOnTie.
+	// Only a request of the same kind succeeds a compacting thread: tools for a thread that
+	// declares tools, none for one that does not (#518). Claude Code sends a tool-less side
+	// request between its compaction request and its next turn, and that request must not take
+	// the main agent's id. The other way round matters too: Claude Code's auto-mode classifier
+	// sends the session transcript, which can quote the compaction prompt, so its tool-less thread
+	// can be marked compacting by mistake, and the main agent must not move onto it. Between two
+	// candidates, preferOnTie.
 	var succ *threadState
 	for _, th := range s.threads {
-		if th.compacting && (hasTools || !th.tools) && (succ == nil || preferOnTie(th, succ, model)) {
+		if th.compacting && hasTools == th.tools && (succ == nil || preferOnTie(th, succ, model)) {
 			succ = th
 		}
 	}
@@ -376,6 +390,32 @@ func (s *sessionState) compactionParent(sums []uint64, model string) *threadStat
 			th.tools && !best.tools,
 			th.tools == best.tools && lcp > bestLCP,
 			th.tools == best.tools && lcp == bestLCP && preferOnTie(th, best, model):
+			best, bestLCP = th, lcp
+		}
+	}
+	return best
+}
+
+// rewrittenTailParent returns the tools thread whose last request this request repeats except for
+// its last one or two messages: the same conversation with its tail rewritten in place (see
+// Resolve). The longest shared run wins, then preferOnTie. nil when no tools thread qualifies.
+func (s *sessionState) rewrittenTailParent(sums []uint64, model string) *threadState {
+	var best *threadState
+	bestLCP := 0
+	for _, th := range s.threads {
+		if !th.tools || th.n == 0 {
+			continue
+		}
+		lcp := 0
+		for lcp < len(th.sums) && lcp < len(sums) && th.sums[lcp] == sums[lcp] {
+			lcp++
+		}
+		// All but the last one or two messages, and more than half of them, so a short thread is
+		// not joined by a request that shares only its first message.
+		if lcp < th.n-2 || 2*lcp <= th.n {
+			continue
+		}
+		if best == nil || lcp > bestLCP || (lcp == bestLCP && preferOnTie(th, best, model)) {
 			best, bestLCP = th, lcp
 		}
 	}
