@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
+
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 )
 
 func TestOpenAIPrefixedResponsesPreservesSentPrefix(t *testing.T) {
@@ -28,7 +30,8 @@ func TestOpenAIPrefixedResponsesPreservesSentPrefix(t *testing.T) {
 	}))
 	defer up.Close()
 	body := []byte(`{"model":"gpt-5.6","stream":true,"input":[{"role":"user","content":"task"},{"type":"reasoning","encrypted_content":"opaque"}]}`)
-	cli := OpenAI{BaseURL: up.URL, Model: "gpt-5.6", APIKey: "test-key", MaxTokens: 100}
+	d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("test-key"))
+	cli := OpenAI{D: d, Ref: ref, Model: "gpt-5.6", MaxTokens: 100}
 	reply, usage, err := cli.CompletePrefixedResponses(context.Background(), body, "judge")
 	if err != nil || reply != `{"keep":[]}` || usage.CacheRead != 1100 || usage.Fresh != 100 || usage.Output != 20 {
 		t.Fatalf("reply=%q usage=%+v err=%v", reply, usage, err)
@@ -48,7 +51,8 @@ func TestOpenAIPrefixedResponsesReadsAdjudicationTool(t *testing.T) {
 			`"usage":{"input_tokens":1200,"input_tokens_details":{"cached_tokens":1100},"output_tokens":20}}`))
 	}))
 	defer up.Close()
-	cli := OpenAI{BaseURL: up.URL, Model: "gpt-5.6", APIKey: "test-key"}
+	d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("test-key"))
+	cli := OpenAI{D: d, Ref: ref, Model: "gpt-5.6"}
 	reply, usage, err := cli.CompletePrefixedResponses(context.Background(),
 		[]byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"task"}]}`), "judge")
 	if err != nil || reply != `{"verdicts":[{"i":0,"verdict":"keep"}]}` || !usage.ViaTool {
@@ -88,7 +92,8 @@ func TestOpenAIPrefixedResponsesLiveCache(t *testing.T) {
 	}
 	defer seed.Body.Close()
 	if seed.StatusCode != http.StatusOK {
-		t.Fatalf("seed status %d: %s", seed.StatusCode, clipErrBody(seed.Body))
+		b, _ := io.ReadAll(seed.Body)
+		t.Fatalf("seed status %d: %s", seed.StatusCode, clipErr(b))
 	}
 	var seeded struct {
 		Usage struct {
@@ -98,7 +103,8 @@ func TestOpenAIPrefixedResponsesLiveCache(t *testing.T) {
 	if err := json.NewDecoder(seed.Body).Decode(&seeded); err != nil {
 		t.Fatal(err)
 	}
-	cli := OpenAI{BaseURL: base, APIKey: key, Model: model, Client: client, MaxTokens: 32}
+	d, ref := dispatchtest.HTTP(base, dispatchtest.BearerAuth(key))
+	cli := OpenAI{D: d, Ref: ref, Model: model, MaxTokens: 32}
 	var u PrefixUsage
 	for attempt := 0; attempt < 3; attempt++ {
 		_, u, err = cli.CompletePrefixedResponses(context.Background(), body, "Answer with one word: ready")

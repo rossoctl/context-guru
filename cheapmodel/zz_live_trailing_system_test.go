@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 )
 
 // liveUsage is the subset of a Messages API response's usage block these tests read.
@@ -29,9 +31,8 @@ type liveUsage struct {
 // agent's own ordinary call would have written. A passing test proved nothing about the bug it
 // was meant to catch. This helper is the fix: it is a plain POST, so the entry it writes is the
 // one CompletePrefixed is actually supposed to find and read in production.
-func postRawRecordUsage(t *testing.T, cli Anthropic, body []byte) liveUsage {
+func postRawRecordUsage(t *testing.T, base, key string, body []byte) liveUsage {
 	t.Helper()
-	base := cli.BaseURL
 	if base == "" {
 		base = "https://api.anthropic.com"
 	}
@@ -41,11 +42,9 @@ func postRawRecordUsage(t *testing.T, cli Anthropic, body []byte) liveUsage {
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	if cli.AuthScheme == "bearer" {
-		req.Header.Set("Authorization", "Bearer "+cli.APIKey)
-	} else {
-		req.Header.Set("x-api-key", cli.APIKey)
-	}
+	// The live tests calling this all pin a "bearer" cli (see TestLiveCompletePrefixedWith...),
+	// matching the credential the prefix ask over the same cli presents.
+	req.Header.Set("Authorization", "Bearer "+key)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -110,12 +109,14 @@ func TestLiveCompletePrefixedWithTrailingSystemMessage(t *testing.T) {
 	if model == "" {
 		model = "claude-sonnet-5[1m]"
 	}
-	cli := Anthropic{BaseURL: os.Getenv("CG_BASE"), APIKey: os.Getenv("CG_TOKEN"), Model: model, AuthScheme: "bearer"}
+	base, key := os.Getenv("CG_BASE"), os.Getenv("CG_TOKEN")
+	d, ref := dispatchtest.HTTP(base, dispatchtest.BearerAuth(key))
+	cli := Anthropic{D: d, Ref: ref, Model: model}
 	raw := trailingSystemBody(model, 64, nil)
 
 	// THE MAIN AGENT'S OWN CALL. Establishes the entry CompletePrefixed is supposed to find and
 	// read -- a plain POST, nothing this method adds.
-	mainUsage := postRawRecordUsage(t, cli, raw)
+	mainUsage := postRawRecordUsage(t, base, key, raw)
 	t.Logf("main agent's own call: cache_read=%d cache_write=%d fresh=%d",
 		mainUsage.CacheReadTok, mainUsage.CacheCreationTok, mainUsage.InputTokens)
 	mainEntryTokens := mainUsage.CacheCreationTok + mainUsage.CacheReadTok
@@ -173,12 +174,14 @@ func TestLiveCompletePrefixedWithTrailingSystemMessageAndThinkingEnabled(t *test
 	if model == "" {
 		model = "claude-sonnet-5[1m]"
 	}
-	cli := Anthropic{BaseURL: os.Getenv("CG_BASE"), APIKey: os.Getenv("CG_TOKEN"), Model: model, AuthScheme: "bearer"}
+	base, key := os.Getenv("CG_BASE"), os.Getenv("CG_TOKEN")
+	d, ref := dispatchtest.HTTP(base, dispatchtest.BearerAuth(key))
+	cli := Anthropic{D: d, Ref: ref, Model: model}
 	// budget_tokens well under max_tokens, satisfying the Messages API's own minimum (1,024) and
 	// its "less than max_tokens" rule on the SEED call below.
 	raw := trailingSystemBody(model, 4096, map[string]any{"type": "enabled", "budget_tokens": 1024})
 
-	mainUsage := postRawRecordUsage(t, cli, raw)
+	mainUsage := postRawRecordUsage(t, base, key, raw)
 	t.Logf("main agent's own call (thinking enabled): cache_read=%d cache_write=%d fresh=%d",
 		mainUsage.CacheReadTok, mainUsage.CacheCreationTok, mainUsage.InputTokens)
 	if mainUsage.CacheCreationTok+mainUsage.CacheReadTok == 0 {

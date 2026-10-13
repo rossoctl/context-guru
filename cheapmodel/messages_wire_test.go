@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 )
 
 // THE DEFECT THIS GUARDS AGAINST
@@ -36,7 +38,8 @@ func captureBody(t *testing.T, fn func(o OpenAI) error) map[string]any {
 		io.WriteString(w, `{"choices":[{"message":{"content":"<summary>ok</summary>"}}]}`)
 	}))
 	defer srv.Close()
-	if err := fn(OpenAI{BaseURL: srv.URL, Model: "m", Client: srv.Client()}); err != nil {
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	if err := fn(OpenAI{D: d, Ref: ref, Model: "m"}); err != nil {
 		t.Fatalf("call: %v", err)
 	}
 	return got
@@ -221,7 +224,8 @@ func TestCompleteMessagesMarksThePrefixForAnthropicModels(t *testing.T) {
 		io.WriteString(w, `{"choices":[{"message":{"content":"<summary>ok</summary>"}}]}`)
 	}))
 	defer srv.Close()
-	o := OpenAI{BaseURL: srv.URL, Model: "aws/claude-opus-4-7", Client: srv.Client()}
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	o := OpenAI{D: d, Ref: ref, Model: "aws/claude-opus-4-7"}
 	if _, err := o.CompleteMessages(context.Background(), "", []bschemas.ChatMessage{
 		{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &convo}},
 		{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &instr}},

@@ -1,33 +1,39 @@
 package offload
 
-import "testing"
+import (
+	"testing"
 
-// TestModelAloneDoesNotPinThePublicAPI pins the trap that made every extraction call fail
-// authentication on a gateway deployment.
-//
-// `model: {source: incoming, model: claude-haiku-4-5}` is the shape that names the cheap model
-// to compact WITH. Client() used to treat any `model:` as a pinned endpoint, so with no base_url
-// it built a client at the provider's PUBLIC API and presented whatever credential the
-// environment held as x-api-key. Measured result: `authentication_error: API key is invalid.`
-// on every call, with `source: incoming` never consulted.
-func TestModelAloneDoesNotPinThePublicAPI(t *testing.T) {
-	prev := AllowEnvModelKey
-	AllowEnvModelKey = true // single-tenant: the env-key fallback is what made this dangerous
-	defer func() { AllowEnvModelKey = prev }()
-	t.Setenv("ANTHROPIC_API_KEY", "sk-env-key-that-must-not-be-sent-to-a-default-endpoint")
+	"github.com/rossoctl/context-guru/components"
+)
 
-	if c := (modelConfig{Source: "incoming", Model: "claude-haiku-4-5"}).Client(); c != nil {
-		t.Fatalf("a bare model: must not pin a client, got %#v", c)
+// A component's `model:` block names a source and, optionally, a model id to compact WITH — never
+// an endpoint or a credential. Those are host config now (CHEAP_MODEL_* / the operator's
+// configured cheap model), because the core must not hold a credential. Decode is strict
+// (components.Decode: yaml.KnownFields(true)), so a document that still carries one of the four
+// retired keys is rejected rather than silently ignored.
+func TestModelBlockRejectsCredentials(t *testing.T) {
+	for _, key := range []string{"base_url", "api_key", "provider", "auth"} {
+		t.Run(key, func(t *testing.T) {
+			var cfg struct {
+				Model modelConfig `yaml:"model"`
+			}
+			doc := []byte("model:\n  source: incoming\n  " + key + ": x\n")
+			if err := components.Decode(doc, &cfg); err == nil {
+				t.Fatalf("model.%s was accepted; a component config must not carry a credential", key)
+			}
+		})
 	}
-	// An endpoint or a credential is what makes it a pin.
-	if c := (modelConfig{Model: "m", BaseURL: "https://gw.example"}).Client(); c == nil {
-		t.Fatal("base_url must still pin")
+}
+
+func TestModelBlockAcceptsSourceAndModel(t *testing.T) {
+	var cfg struct {
+		Model modelConfig `yaml:"model"`
 	}
-	if c := (modelConfig{Model: "m", APIKey: "sk-explicit"}).Client(); c == nil {
-		t.Fatal("api_key must still pin")
+	doc := []byte("model:\n  source: config\n  model: claude-haiku-4-5\n")
+	if err := components.Decode(doc, &cfg); err != nil {
+		t.Fatal(err)
 	}
-	// And no model id is still no client at all.
-	if c := (modelConfig{BaseURL: "https://gw.example"}).Client(); c != nil {
-		t.Fatal("without a model id there is nothing to call")
+	if cfg.Model.Source != "config" || cfg.Model.Model != "claude-haiku-4-5" {
+		t.Fatalf("got %+v", cfg.Model)
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 )
 
 // Live proof that the appended-instruction shape actually reads the provider's cache on an
@@ -24,7 +26,8 @@ func TestLiveCompleteMessagesReadsThePrefixCache(t *testing.T) {
 	if model == "" {
 		model = "aws/claude-opus-4-7"
 	}
-	o := OpenAI{BaseURL: os.Getenv("CG_BASE"), APIKey: os.Getenv("CG_TOKEN"), Model: model, MaxTokens: 64}
+	d, ref := dispatchtest.HTTP(os.Getenv("CG_BASE"), dispatchtest.BearerAuth(os.Getenv("CG_TOKEN")))
+	o := OpenAI{D: d, Ref: ref, Model: model, MaxTokens: 64}
 	convo := strings.Repeat("the handler in src/mod/file.py returns 500 when the payload is missing a "+
 		"trailing newline; pytest tests/test_handler.py reports three failures in dispatch\n", 120)
 	instr := "[OPERATOR INSTRUCTION] Summarize the conversation above in one sentence."

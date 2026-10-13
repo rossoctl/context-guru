@@ -1,7 +1,11 @@
 package proxy
 
 import (
+	"context"
+	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -70,5 +74,57 @@ func TestPingUsageMatchesResponseUsage(t *testing.T) {
 				t.Fatalf("PingUsage = %+v, responseUsage = %+v", got, want)
 			}
 		})
+	}
+}
+
+// A detached call (a background summarizer) keeps using the incoming model after its triggering
+// request has returned. incoming must not expire a ref merely because the request ended.
+func TestIncomingRefOutlivesTheRequest(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = io.ReadAll(r.Body)
+	}))
+	defer srv.Close()
+	d := NewDispatcher(nil)
+	ref := d.incoming(upstream{base: srv.URL}, http.Header{"Authorization": {"Bearer caller-key"}})
+	// The "request" that produced ref is long gone; nothing in the proxy references it anymore
+	// except the ref itself, as a detached summarizer would hold it.
+	if _, err := d.Do(context.Background(), dispatch.Request{Purpose: dispatch.PurposeCheapModel,
+		Ref: ref, Method: http.MethodPost, Path: "/v1/messages", Body: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("sent %d requests, want 1", calls)
+	}
+}
+
+// Two calls with the same (base, credential) share one ref: a session's own cheap-model calls
+// and a detached summary over the same incoming model do not each hold their own copy.
+func TestIncomingRefDedupsOnBaseAndCredential(t *testing.T) {
+	d := NewDispatcher(nil)
+	auth := http.Header{"Authorization": {"Bearer k"}}
+	a := d.incoming(upstream{base: "http://up"}, auth)
+	b := d.incoming(upstream{base: "http://up"}, auth)
+	if a != b {
+		t.Fatalf("two incoming() calls for the same base+credential returned different refs: %q, %q", a, b)
+	}
+	c := d.incoming(upstream{base: "http://up"}, http.Header{"Authorization": {"Bearer other"}})
+	if a == c {
+		t.Fatal("a different credential must not share the first ref")
+	}
+}
+
+// An incoming ref unused past IncomingRefTTL is dropped: a detached call that never arrives must
+// not hold a caller's credential forever.
+func TestIncomingRefExpiresAfterTTL(t *testing.T) {
+	d := NewDispatcher(nil)
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return now }
+	ref := d.incoming(upstream{base: "http://up"}, http.Header{"Authorization": {"Bearer k"}})
+	now = now.Add(IncomingRefTTL + time.Second)
+	if _, err := d.Do(context.Background(), dispatch.Request{Ref: ref, Method: http.MethodPost,
+		Path: "/v1/messages", Body: []byte(`{}`)}); !errors.Is(err, dispatch.ErrNotHeld) {
+		t.Fatalf("Do on an expired incoming ref: err = %v, want ErrNotHeld", err)
 	}
 }

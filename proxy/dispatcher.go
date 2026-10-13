@@ -3,16 +3,28 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/keepalive"
 )
+
+// IncomingRefTTL is how long an incoming-model ref (the caller's own endpoint and credential,
+// resolved per request for a NeedsModel component) is kept after its last use. A detached call
+// (cache_aware_summarizer's own background summary, a keep-alive substitute) can still be running
+// after its triggering request returned, so the ref is not dropped at request end — but a request
+// that spawns no such call must not hold the caller's credential forever either.
+const IncomingRefTTL = 2 * time.Hour
 
 // Dispatcher is cmd/context-guru-proxy's dispatch.Dispatcher: every call a core package makes —
 // keep-alive pings, cheap-model completions — leaves the proxy here. It holds, per Ref, the
@@ -36,8 +48,9 @@ type Dispatcher struct {
 type targetKind uint8
 
 const (
-	kindSession targetKind = iota // a keep-alive hold; released by the keeper
-	kindPinned                    // the operator's configured model; lives as long as the proxy
+	kindSession  targetKind = iota // a keep-alive hold; released by the keeper
+	kindPinned                     // the operator's configured model; lives as long as the proxy
+	kindIncoming                   // a per-request cheap-model ref, deduped and TTL-expired
 )
 
 type target struct {
@@ -46,6 +59,10 @@ type target struct {
 	auth []heldHeader
 	// key is the keep-alive entry a session target belongs to; for tests and debugging only.
 	key keepalive.Key
+	// dedupKey and lastUse are kindIncoming-only: dedupKey groups refs by (base, credential) so
+	// repeated calls for the same caller share one, and lastUse drives IncomingRefTTL expiry.
+	dedupKey string
+	lastUse  time.Time
 }
 
 // NewDispatcher returns an empty Dispatcher sending on a copy of c (nil: a default upstream
@@ -74,6 +91,35 @@ func (d *Dispatcher) Pin(base string, auth http.Header) dispatch.Ref {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.issueLocked(&target{kind: kindPinned, up: upstream{base: base}, auth: maskHeaders(auth)})
+}
+
+// CheapModelConfig is the operator's own "config"-source cheap model: a dedicated endpoint and
+// credential, pinned once at startup rather than resolved per request.
+type CheapModelConfig struct {
+	Provider  string // anthropic (default) | openai
+	BaseURL   string // default: the provider's public API
+	APIKey    string
+	Auth      string // anthropic only: "" | x-api-key (default) | bearer
+	Model     string
+	MaxTokens int
+}
+
+// pinCheapModel pins cfg's endpoint and credential and returns the components.Model to call it.
+func (d *Dispatcher) pinCheapModel(cfg CheapModelConfig) components.Model {
+	if cfg.Provider == "openai" {
+		base := cfg.BaseURL
+		if base == "" {
+			base = "https://api.openai.com"
+		}
+		ref := d.Pin(base, AuthHeader(bschemas.OpenAI, cfg.APIKey, ""))
+		return cheapmodel.OpenAI{D: d, Ref: ref, Model: cfg.Model, MaxTokens: cfg.MaxTokens}
+	}
+	base := cfg.BaseURL
+	if base == "" {
+		base = "https://api.anthropic.com"
+	}
+	ref := d.Pin(base, AuthHeader(bschemas.Anthropic, cfg.APIKey, cfg.Auth))
+	return cheapmodel.Anthropic{D: d, Ref: ref, Model: cfg.Model, MaxTokens: cfg.MaxTokens}
 }
 
 // hold is what proxy's record passes as keepalive.Record.Hold: only the auth slots, only after our
@@ -106,6 +152,63 @@ func (d *Dispatcher) Release(ref dispatch.Ref) {
 	}
 }
 
+// incoming resolves the ref for a NeedsModel component calling the request's own endpoint and
+// credential (incomingModel). Two calls for the same (base, credential) share one ref and one
+// lastUse clock; an idle one expires after IncomingRefTTL (checked lazily, in Do and here — no
+// background sweep).
+func (d *Dispatcher) incoming(up upstream, auth http.Header) dispatch.Ref {
+	key := incomingDedupKey(up.base, auth)
+	now := d.now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for ref, t := range d.held {
+		if t.kind == kindIncoming && t.dedupKey == key {
+			if now.Sub(t.lastUse) > IncomingRefTTL {
+				zeroHeaders(t.auth)
+				delete(d.held, ref)
+				break
+			}
+			t.lastUse = now
+			return ref
+		}
+	}
+	return d.issueLocked(&target{kind: kindIncoming, up: up, auth: maskHeaders(auth),
+		dedupKey: key, lastUse: now})
+}
+
+// incomingDedupKey groups by base URL and the exact credential presented, order-independent over
+// header values: two calls differ only if the caller or the destination actually differs.
+func incomingDedupKey(base string, auth http.Header) string {
+	h := sha256.New()
+	h.Write([]byte(base))
+	names := make([]string, 0, len(auth))
+	for name := range auth {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		h.Write([]byte{0})
+		h.Write([]byte(name))
+		vs := append([]string(nil), auth[name]...)
+		sort.Strings(vs)
+		for _, v := range vs {
+			h.Write([]byte{0})
+			h.Write([]byte(v))
+		}
+	}
+	return string(h.Sum(nil))
+}
+
+// AuthHeader is the header a provider credential goes in, in the exact shape incomingModel and
+// cmd/ tools present it: x-api-key (or bearer, for an Anthropic gateway that wants one) for
+// Anthropic, Authorization: Bearer for OpenAI.
+func AuthHeader(p bschemas.ModelProvider, key, scheme string) http.Header {
+	if p == bschemas.OpenAI || scheme == "bearer" {
+		return http.Header{"Authorization": {"Bearer " + key}}
+	}
+	return http.Header{"X-Api-Key": {key}}
+}
+
 func (d *Dispatcher) Price(ctx context.Context, endpoint, model string, promptTokens int64) (dispatch.Price, bool) {
 	if d.price == nil {
 		return dispatch.Price{}, false
@@ -128,6 +231,11 @@ func (d *Dispatcher) heldCount() int {
 func (d *Dispatcher) Do(ctx context.Context, req dispatch.Request) (dispatch.Response, error) {
 	d.mu.Lock()
 	t, ok := d.held[req.Ref]
+	if ok && t.kind == kindIncoming && d.now().Sub(t.lastUse) > IncomingRefTTL {
+		zeroHeaders(t.auth)
+		delete(d.held, req.Ref)
+		ok = false
+	}
 	var up upstream
 	var auth []heldHeader
 	if ok {

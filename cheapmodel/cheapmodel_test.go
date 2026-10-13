@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 )
 
 func TestAnthropicSkipsNonTextLeadingBlock(t *testing.T) {
@@ -13,7 +15,8 @@ func TestAnthropicSkipsNonTextLeadingBlock(t *testing.T) {
 		_, _ = io.WriteString(w, `{"content":[{"type":"thinking","text":""},{"type":"text","text":"RESULT"}]}`)
 	}))
 	defer srv.Close()
-	got, err := Anthropic{BaseURL: srv.URL, Model: "m"}.Complete(context.Background(), "p")
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	got, err := Anthropic{D: d, Ref: ref, Model: "m"}.Complete(context.Background(), "p")
 	if err != nil || got != "RESULT" {
 		t.Fatalf("got %q err %v", got, err)
 	}
@@ -33,7 +36,8 @@ func TestAnthropicBearerAuth(t *testing.T) {
 		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"OK"}]}`)
 	}))
 	defer srv.Close()
-	_, err := Anthropic{BaseURL: srv.URL, APIKey: "tok", Model: "m", AuthScheme: "bearer"}.Complete(context.Background(), "p")
+	d, ref := dispatchtest.HTTP(srv.URL, dispatchtest.AnthropicAuth("tok", "bearer"))
+	_, err := Anthropic{D: d, Ref: ref, Model: "m"}.Complete(context.Background(), "p")
 	if err != nil {
 		t.Fatalf("err %v", err)
 	}
@@ -57,7 +61,8 @@ func TestAnthropicDefaultAuthUsesAPIKey(t *testing.T) {
 		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"OK"}]}`)
 	}))
 	defer srv.Close()
-	_, err := Anthropic{BaseURL: srv.URL, APIKey: "tok", Model: "m"}.Complete(context.Background(), "p")
+	d, ref := dispatchtest.HTTP(srv.URL, dispatchtest.AnthropicAuth("tok", ""))
+	_, err := Anthropic{D: d, Ref: ref, Model: "m"}.Complete(context.Background(), "p")
 	if err != nil {
 		t.Fatalf("err %v", err)
 	}
@@ -76,7 +81,8 @@ func TestOpenAIComplete(t *testing.T) {
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"OUT"}}]}`)
 	}))
 	defer srv.Close()
-	got, err := OpenAI{BaseURL: srv.URL, Model: "m"}.Complete(context.Background(), "p")
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	got, err := OpenAI{D: d, Ref: ref, Model: "m"}.Complete(context.Background(), "p")
 	if err != nil || got != "OUT" {
 		t.Fatalf("got %q err %v", got, err)
 	}

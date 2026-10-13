@@ -12,7 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
@@ -32,12 +33,8 @@ func TestDiagStarlarkOnRealOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := cheapmodel.Anthropic{
-		BaseURL:    os.Getenv("CHEAP_MODEL_BASE"),
-		APIKey:     os.Getenv("CHEAP_MODEL_AUTH"),
-		Model:      os.Getenv("CHEAP_MODEL"),
-		AuthScheme: "bearer",
-	}
+	d, ref := dispatchtest.HTTP(os.Getenv("CHEAP_MODEL_BASE"), dispatchtest.BearerAuth(os.Getenv("CHEAP_MODEL_AUTH")))
+	m := cheapmodel.Anthropic{D: d, Ref: ref, Model: os.Getenv("CHEAP_MODEL")}
 	sys, user := buildCodePromptSplit(string(raw), "explore the repository", nil, true, false, AggroMedium)
 	fmt.Printf("system blocks=%d total=%d chars   user=%d chars\n", len(sys), totalLen(sys), len(user))
 	src, err := completeSplit(context.Background(), m, sys, user)
@@ -90,11 +87,8 @@ func TestDiagCodeLegCorpus(t *testing.T) {
 		t.Fatalf("no corpus files: %v", err)
 	}
 	sort.Strings(files)
-	m := cheapmodel.Anthropic{
-		BaseURL: os.Getenv("CHEAP_MODEL_BASE"), APIKey: os.Getenv("CHEAP_MODEL_AUTH"),
-		Model: os.Getenv("CHEAP_MODEL"), AuthScheme: "bearer",
-		MaxTokens: cheapmodel.DefaultMaxTokens,
-	}
+	d, ref := dispatchtest.HTTP(os.Getenv("CHEAP_MODEL_BASE"), dispatchtest.BearerAuth(os.Getenv("CHEAP_MODEL_AUTH")))
+	m := cheapmodel.Anthropic{D: d, Ref: ref, Model: os.Getenv("CHEAP_MODEL"), MaxTokens: cheapmodel.DefaultMaxTokens}
 	cfg := DefaultCfg()
 	cfg.Mode, cfg.AllowDeterministic, cfg.AllowedStrategies = "code", false, []string{"code"}
 	cfg.Rewrite = os.Getenv("CG_DIAG_REWRITE") != "0"

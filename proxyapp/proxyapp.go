@@ -2,22 +2,27 @@
 // context-guru proxy binary.
 //
 // WHY THIS EXISTS. cmd/context-guru-proxy is this module's own composition root, and it imports
-// four internal/ packages: buildinfo, cheapmodel, logging and modelinfo. Go forbids importing an
-// internal/ package from another module, so a deployment that needs the standard proxy PLUS its
-// own routes — an enterprise build with SSO, a bespoke activation surface, a private landing page
-// — cannot reuse that root. It has to copy it, and then it owns a 1300-line fork of somebody
-// else's file for ever.
+// three internal/ packages: buildinfo, logging and modelinfo. (cheapmodel used to be a fourth —
+// see below.) Go forbids importing an internal/ package from another module, so a deployment that
+// needs the standard proxy PLUS its own routes — an enterprise build with SSO, a bespoke activation
+// surface, a private landing page — cannot reuse that root. It has to copy it, and then it owns a
+// 1300-line fork of somebody else's file for ever.
 //
 // That is what this package removes. It is a FACADE, deliberately: aliases and thin wrappers over
 // the existing internal packages, adding no behaviour and moving no code. Nothing internal is
 // relocated, so all ~70 files that import those packages today are untouched and no existing
 // deployment changes at all.
 //
-// WHY A FACADE RATHER THAN PROMOTING THE PACKAGES. Moving internal/modelinfo (38 importers) and
-// internal/cheapmodel (22) out of internal/ would churn ~70 files across the tree and publish
-// their entire surface as API this project then has to keep stable. The composition root uses
-// THIRTEEN symbols. Exporting those thirteen is a promise worth making; exporting three whole
-// packages by accident is not.
+// WHY A FACADE RATHER THAN PROMOTING THE PACKAGES. Moving internal/modelinfo (38 importers) out of
+// internal/ would churn ~70 files across the tree and publish its entire surface as API this
+// project then has to keep stable. The composition root uses THIRTEEN of its symbols. Exporting
+// those thirteen is a promise worth making; exporting the whole package by accident is not.
+//
+// cheapmodel IS promoted, by exception: the dispatch.Dispatcher split (see dispatch/dispatch.go)
+// requires it. Every host now builds its own cheapmodel.Anthropic/OpenAI directly over its own
+// Dispatcher, and a host outside this module (Cortex, say) cannot do that with an internal/
+// package. Its surface is small and host-agnostic on purpose — wire format only, no transport, no
+// credential — so promoting it is a promise this project can keep.
 //
 // WHAT THIS IS NOT. It is not a plugin system and it does not run the proxy for you. A host still
 // writes its own main(), and proxy.Options remains the contract. This only unblocks the parts a
@@ -29,8 +34,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )

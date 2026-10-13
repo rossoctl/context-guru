@@ -27,12 +27,12 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -75,10 +75,10 @@ type Options struct {
 	// (0 = defaultUpstreamHeaderTimeout). Deliberately NOT a whole-request timeout — see
 	// upstreamTransport for the 502s that cost.
 	UpstreamHeaderTimeout time.Duration
-	// CheapModel is the static "config"-source LLM client for NeedsModel
-	// components (nil = none). The "incoming"-source client is built per request
-	// from the route's upstream + the gateway's real key.
-	CheapModel components.Model
+	// CheapModel is the static "config"-source LLM for NeedsModel components (nil = none): the
+	// operator's own endpoint and credential, pinned once at New. The "incoming"-source client
+	// is built per request from the route's upstream + the gateway's real key.
+	CheapModel *CheapModelConfig
 	// Windows resolves a model's context window (max input tokens) so fraction-based
 	// Trigger thresholds scale with the model. nil => window unknown (0), fractions
 	// ignored, absolutes apply. Built in main from internal/modelinfo.
@@ -207,6 +207,9 @@ type Handler struct {
 	// dispatch is how every core call leaves this proxy (keep-alive pings, cheap-model calls).
 	// Use dispatcher(), which builds it.
 	dispatch *Dispatcher
+	// staticCheapModel is Options.CheapModel pinned on the Dispatcher at New — nil when
+	// unconfigured. staticModel() is the host-mode-aware accessor; this field is unconditional.
+	staticCheapModel components.Model
 	// sent holds the last body forwarded upstream per session, so a component can put a question to
 	// the request's own model with the bytes the provider's cache was populated from. See
 	// prefixask.go for the bounds and for what happens when one is hit.
@@ -339,6 +342,9 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 		Shadow: h.shadow, Mode: h.mode(), Cache: opts.Cache}
 	h.limiter = NewLimiter(opts.Limits)
 	h.dispatcher()
+	if opts.CheapModel != nil {
+		h.staticCheapModel = h.dispatch.pinCheapModel(*opts.CheapModel)
+	}
 	h.keeper = newKeeper(h)
 	h.keeper.start()
 	h.threads = thread.New()
@@ -818,7 +824,8 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		if key == "" {
 			return nil
 		}
-		return cheapmodel.Anthropic{BaseURL: up.base, Model: model, APIKey: key, AuthScheme: scheme, Client: h.client}
+		ref := h.dispatch.incoming(up, AuthHeader(bschemas.Anthropic, key, scheme))
+		return cheapmodel.Anthropic{D: h.dispatch, Ref: ref, Model: model}
 	case bschemas.OpenAI:
 		if key == "" {
 			key = h.serverKey(h.opts.OpenAIKey)
@@ -826,7 +833,8 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		if key == "" {
 			return nil
 		}
-		return cheapmodel.OpenAI{BaseURL: up.base, Model: model, APIKey: key, Client: h.client}
+		ref := h.dispatch.incoming(up, AuthHeader(bschemas.OpenAI, key, ""))
+		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model}
 	}
 	return nil
 }
@@ -849,7 +857,7 @@ func (h *Handler) staticModel() components.Model {
 	if h.opts.Tenants != nil {
 		return nil
 	}
-	return h.opts.CheapModel
+	return h.staticCheapModel
 }
 
 // capturePath, when set (CONTEXT_GURU_CAPTURE), names a JSONL file the proxy

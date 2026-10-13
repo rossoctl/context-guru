@@ -13,9 +13,9 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -120,9 +120,10 @@ func init() { components.Register("extract_llm", newExtractLLM) }
 // that are still medium/large AFTER the deterministic components ran. Prior
 // compactions are reused byte-for-byte from state so the request prefix stays stable.
 type ExtractLLM struct {
-	minTokens     int
-	strategy      string
-	modelSource   string
+	minTokens   int
+	strategy    string
+	modelSource string
+	// modelClient is a test-injection seam only; see AgentDiet.modelClient.
 	modelClient   components.Model
 	trigger       components.Trigger
 	mode          markerMode
@@ -478,8 +479,8 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	}
 	return &ExtractLLM{
 		minTokens: cfg.MinTokens, strategy: cfg.Strategy,
-		modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(),
-		trigger: cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode), rewrite: rewrite,
+		modelSource: cfg.Model.Source,
+		trigger:     cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode), rewrite: rewrite,
 		llmEveryN: cfg.LLMEveryN, llmMaxPerReq: cfg.LLMMaxPerReq,
 		llmMaxPerSess: cfg.LLMMaxPerSess, fireOnSize: fireOnSize, aggro: aggro,
 		ctxMode: ctxMode, ctxMessages: cfg.ContextMessages, maxChars: cfg.MaxChars,
@@ -692,7 +693,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		rep.Skipped = true
 		return nil, nil
 	}
-	model := e.modelClient
+	model := e.modelClient // test-injection seam; nil in production
 	// The source the model is ACTUALLY resolved from, which the prompt budget below must be
 	// sized against rather than the configured one — see inputLimit.
 	effSource := e.modelSource

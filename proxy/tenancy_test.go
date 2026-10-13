@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,10 +12,11 @@ import (
 	"sync"
 	"testing"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
 	"github.com/rossoctl/context-guru/config"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 )
@@ -881,26 +883,39 @@ func TestServerKeyStillSupportedAsExplicitFallback(t *testing.T) {
 // (nil client, component degrades) when there is none — never fall back to a server
 // key that would bill one account for everyone's compaction.
 func TestIncomingModelUsesCallerCredential(t *testing.T) {
+	var seenKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenKey = r.Header.Get("x-api-key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"ok"}]}`)
+	}))
+	defer srv.Close()
 	h := New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil, Options{})
 	defer h.Close()
 	body := []byte(`{"model":"claude-haiku-4-5"}`)
-	up := upstream{base: "https://upstream.invalid"}
+	up := upstream{base: srv.URL}
 
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
 	r.Header.Set("x-api-key", "caller-own-key")
-	m, ok := h.incomingModel("anthropic", up, body, r).(cheapmodel.Anthropic)
-	if !ok || m.APIKey != "caller-own-key" {
-		t.Errorf("anthropic client key = %q, want the caller's", m.APIKey)
+	m, ok := h.incomingModel(bschemas.Anthropic, up, body, r).(cheapmodel.Anthropic)
+	if !ok {
+		t.Fatal("anthropic client not built")
+	}
+	if _, err := m.Complete(context.Background(), "p"); err != nil {
+		t.Fatal(err)
+	}
+	if seenKey != "caller-own-key" {
+		t.Errorf("upstream saw x-api-key %q, want the caller's", seenKey)
 	}
 
 	// Our own token is not a provider credential: it must not be handed to the model
 	// client, and with nothing else available the component gets nil.
 	r = httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
 	r.Header.Set("Authorization", "Bearer "+tenant.TokenPrefix+strings.Repeat("C", 26))
-	if got := h.incomingModel("anthropic", up, body, r); got != nil {
+	if got := h.incomingModel(bschemas.Anthropic, up, body, r); got != nil {
 		t.Errorf("a bare context-guru token produced a model client: %#v", got)
 	}
-	if got := h.incomingModel("anthropic", up, body, httptest.NewRequest(http.MethodPost, "/", nil)); got != nil {
+	if got := h.incomingModel(bschemas.Anthropic, up, body, httptest.NewRequest(http.MethodPost, "/", nil)); got != nil {
 		t.Errorf("no credential produced a model client: %#v", got)
 	}
 }
@@ -908,9 +923,8 @@ func TestIncomingModelUsesCallerCredential(t *testing.T) {
 // The static "config"-source cheap model authenticates with a SERVER credential, so it
 // is withheld in hosted mode. Single-tenant keeps it.
 func TestStaticModelWithheldWhenHosted(t *testing.T) {
-	cm := cheapmodel.Anthropic{Model: "m", APIKey: "server-side"}
 	h := New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil,
-		Options{CheapModel: cm})
+		Options{CheapModel: &CheapModelConfig{Model: "m", APIKey: "server-side"}})
 	defer h.Close()
 	if h.staticModel() == nil {
 		t.Error("single-tenant lost its configured cheap model")

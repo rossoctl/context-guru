@@ -5,36 +5,30 @@
 package cheapmodel
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/logging"
 )
 
-// Anthropic calls a small Anthropic model with a single user prompt and returns the
-// text of the first content block.
+// Anthropic calls a small Anthropic model with a single user prompt and returns the text of the
+// first content block. The destination and the credential are the host's: D and Ref name which
+// one, resolved by the host's Dispatcher at send time. Anthropic itself never sees either.
 type Anthropic struct {
-	BaseURL   string // default https://api.anthropic.com
-	APIKey    string
+	D         dispatch.Dispatcher
+	Ref       dispatch.Ref
 	Model     string // e.g. claude-haiku-4-5
 	MaxTokens int    // default 2048
-	Client    *http.Client
-	// AuthScheme selects how the API key is sent. "" or "x-api-key" sends the
-	// x-api-key header (Anthropic default). "bearer" sends
-	// Authorization: Bearer <APIKey> instead, for gateways (e.g. an IBM LiteLLM
-	// Anthropic-compatible endpoint) that authenticate with a bearer token. The
-	// anthropic-version header is sent in both cases.
-	AuthScheme string
 }
 
 // AsModel is components.Remodeler: same endpoint, same credential, different model.
@@ -90,17 +84,9 @@ func (a Anthropic) CompleteSystem(ctx context.Context, system, prompt string) (s
 // configurations that differ in the second block, and it is paid for with another write.
 // Revisit if two levels are ever measured to be in flight at once often enough to matter.
 func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt string) (string, error) {
-	base := a.BaseURL
-	if base == "" {
-		base = "https://api.anthropic.com"
-	}
 	maxTok := a.MaxTokens
 	if maxTok == 0 {
 		maxTok = DefaultMaxTokens
-	}
-	client := a.Client
-	if client == nil {
-		client = http.DefaultClient
 	}
 	payload := map[string]any{
 		"model":      a.Model,
@@ -116,31 +102,9 @@ func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt s
 		payload["system"] = blocks
 	}
 	reqBody, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(base, "/")+"/v1/messages", bytes.NewReader(reqBody))
+	respBody, err := send(ctx, a.D, a.Ref, bschemas.Anthropic, "/v1/messages", "", anthropicHeaders(), reqBody)
 	if err != nil {
 		return "", err
-	}
-	req.Header.Set("content-type", "application/json")
-	if a.AuthScheme == "bearer" {
-		req.Header.Set("Authorization", "Bearer "+a.APIKey)
-	} else {
-		req.Header.Set("x-api-key", a.APIKey)
-	}
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		// The upstream's own message, clipped. A bare status is undiagnosable: a 401 can be a
-		// wrong auth scheme, an expired key, a model the key may not use, or a gateway policy,
-		// and those have nothing in common. Clipped and body-only — the response body of an
-		// auth failure does not echo the credential, but the REQUEST headers would, so this
-		// deliberately reads the body and never the request.
-		return "", fmt.Errorf("cheapmodel: status %d: %s", resp.StatusCode, clipErrBody(resp.Body))
 	}
 	var out struct {
 		Content []struct {
@@ -153,7 +117,7 @@ func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt s
 			CacheReadTok     int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(respBody, &out); err != nil {
 		return "", err
 	}
 	// track CG component LLM cost, split by cache tier so /stats can show whether the
@@ -173,15 +137,11 @@ func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt s
 	return "", nil
 }
 
-// clipErrBody reads at most errBodyCap bytes of an error response for the message, so a
-// gateway that answers with a whole HTML page cannot flood a log line.
-func clipErrBody(r io.Reader) string {
-	b, _ := io.ReadAll(io.LimitReader(r, errBodyCap))
-	s := strings.TrimSpace(string(b))
-	if s == "" {
-		return "(empty body)"
-	}
-	return strings.Join(strings.Fields(s), " ")
+// anthropicHeaders is the non-secret headers every Anthropic call needs. The credential is the
+// host's: it adds the one it holds for the Ref, in whatever form it holds it (x-api-key or a
+// bearer token) — this client never names a scheme.
+func anthropicHeaders() http.Header {
+	return http.Header{"Content-Type": {"application/json"}, "Anthropic-Version": {"2023-06-01"}}
 }
 
 const errBodyCap = 512
@@ -291,35 +251,12 @@ func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask 
 	}
 	body, _ = sjson.DeleteBytes(body, "stream")
 
-	base := a.BaseURL
-	if base == "" {
-		base = "https://api.anthropic.com"
-	}
-	client := a.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(base, "/")+"/v1/messages", bytes.NewReader(body))
+	// The caller's own credential, exactly as Complete sends it — the prefix belongs to this
+	// caller's cache namespace, so presenting a different credential would read nothing. a.Ref
+	// names it; the host attaches it.
+	respBody, err := send(ctx, a.D, a.Ref, bschemas.Anthropic, "/v1/messages", "prefixed ", anthropicHeaders(), body)
 	if err != nil {
 		return "", u, err
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("anthropic-version", "2023-06-01")
-	// The caller's own credential and scheme, exactly as Complete sends it — the prefix belongs to
-	// this caller's cache namespace, so presenting a different credential would read nothing.
-	if a.AuthScheme == "bearer" {
-		req.Header.Set("Authorization", "Bearer "+a.APIKey)
-	} else {
-		req.Header.Set("x-api-key", a.APIKey)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", u, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", u, fmt.Errorf("cheapmodel: prefixed status %d: %s", resp.StatusCode, clipErrBody(resp.Body))
 	}
 	var out struct {
 		Content []struct {
@@ -342,7 +279,7 @@ func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask 
 			} `json:"cache_creation"`
 		} `json:"usage"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(respBody, &out); err != nil {
 		return "", u, err
 	}
 	u = PrefixUsage{CacheRead: out.Usage.CacheReadTok, CacheWrite: out.Usage.CacheCreationTok,

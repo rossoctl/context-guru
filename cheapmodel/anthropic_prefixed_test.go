@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/tidwall/gjson"
+
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 )
 
 // THE DEFECT: Claude Code sends max_tokens=32000 with thinking.budget_tokens=31999, and
@@ -33,7 +35,8 @@ func TestCompletePrefixedRaisesMaxTokensAboveTheThinkingBudget(t *testing.T) {
 	prefixBody := []byte(`{"model":"claude-sonnet-5","max_tokens":32000,` +
 		`"thinking":{"type":"enabled","budget_tokens":31999},` +
 		`"messages":[{"role":"user","content":"carry on"}]}`)
-	cli := Anthropic{BaseURL: up.URL, Model: "claude-sonnet-5"}
+	d, ref := dispatchtest.HTTP(up.URL, nil)
+	cli := Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}
 	reply, _, err := cli.CompletePrefixed(context.Background(), prefixBody, "judge")
 	if err != nil {
 		t.Fatalf("CompletePrefixed: %v", err)
@@ -94,7 +97,8 @@ func TestCompletePrefixedCapsAtTheBodysOwnMaxTokensWhenWantWouldExceedTheModelsC
 	prefixBody := []byte(`{"model":"claude-haiku-4-5","max_tokens":64000,` +
 		`"thinking":{"type":"enabled","budget_tokens":63999},` +
 		`"messages":[{"role":"user","content":"carry on"}]}`)
-	cli := Anthropic{BaseURL: up.URL, Model: "claude-haiku-4-5"}
+	d, ref := dispatchtest.HTTP(up.URL, nil)
+	cli := Anthropic{D: d, Ref: ref, Model: "claude-haiku-4-5"}
 	if _, _, err := cli.CompletePrefixed(context.Background(), prefixBody, "judge"); err != nil {
 		t.Fatalf("CompletePrefixed: %v", err)
 	}
@@ -126,7 +130,8 @@ func TestCompletePrefixedLeavesAdaptiveThinkingUnaffected(t *testing.T) {
 
 	prefixBody := []byte(`{"model":"claude-sonnet-5","max_tokens":4096,` +
 		`"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"carry on"}]}`)
-	cli := Anthropic{BaseURL: up.URL, Model: "claude-sonnet-5"}
+	d, ref := dispatchtest.HTTP(up.URL, nil)
+	cli := Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}
 	if _, _, err := cli.CompletePrefixed(context.Background(), prefixBody, "judge"); err != nil {
 		t.Fatalf("CompletePrefixed: %v", err)
 	}
@@ -154,7 +159,8 @@ func TestCompletePrefixedLeavesNoThinkingUnaffected(t *testing.T) {
 
 	prefixBody := []byte(`{"model":"claude-sonnet-5","max_tokens":4096,` +
 		`"messages":[{"role":"user","content":"carry on"}]}`)
-	cli := Anthropic{BaseURL: up.URL, Model: "claude-sonnet-5"}
+	d, ref := dispatchtest.HTTP(up.URL, nil)
+	cli := Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}
 	if _, _, err := cli.CompletePrefixed(context.Background(), prefixBody, "judge"); err != nil {
 		t.Fatalf("CompletePrefixed: %v", err)
 	}
@@ -182,7 +188,8 @@ func TestCompletePrefixedReturnsATruncatedReplyRatherThanAnError(t *testing.T) {
 	prefixBody := []byte(`{"model":"claude-haiku-4-5","max_tokens":32000,` +
 		`"thinking":{"type":"enabled","budget_tokens":31999},` +
 		`"messages":[{"role":"user","content":"carry on"}]}`)
-	cli := Anthropic{BaseURL: up.URL, Model: "claude-haiku-4-5"}
+	d, ref := dispatchtest.HTTP(up.URL, nil)
+	cli := Anthropic{D: d, Ref: ref, Model: "claude-haiku-4-5"}
 	reply, usage, err := cli.CompletePrefixed(context.Background(), prefixBody, "judge")
 	if err != nil {
 		t.Fatalf("a truncated reply was turned into an error: %v", err)
@@ -276,7 +283,8 @@ func TestCompletePrefixedAppendsAfterATrailingSystemMessage(t *testing.T) {
 		`{"role":"user","content":"second turn"},` +
 		`{"role":"system","content":"<system-reminder>be careful</system-reminder>"}` +
 		`]}`)
-	cli := Anthropic{BaseURL: up.URL, Model: "claude-sonnet-5"}
+	d, ref := dispatchtest.HTTP(up.URL, nil)
+	cli := Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}
 	reply, _, err := cli.CompletePrefixed(context.Background(), prefixBody, "judge")
 	if err != nil {
 		t.Fatalf("CompletePrefixed: %v", err)
@@ -329,7 +337,8 @@ func TestCompletePrefixedAppendsAfterMultipleTrailingSystemMessages(t *testing.T
 		`{"role":"system","content":"reminder one"},` +
 		`{"role":"system","content":"reminder two"}` +
 		`]}`)
-	cli := Anthropic{BaseURL: up.URL, Model: "claude-sonnet-5"}
+	d, ref := dispatchtest.HTTP(up.URL, nil)
+	cli := Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}
 	if _, _, err := cli.CompletePrefixed(context.Background(), prefixBody, "judge"); err != nil {
 		t.Fatalf("CompletePrefixed: %v", err)
 	}
@@ -364,7 +373,8 @@ func TestCompletePrefixedAppendsAtTheEndWithNoTrailingSystemMessage(t *testing.T
 
 	prefixBody := []byte(`{"model":"claude-sonnet-5","max_tokens":16000,` +
 		`"messages":[{"role":"user","content":"carry on"}]}`)
-	cli := Anthropic{BaseURL: up.URL, Model: "claude-sonnet-5"}
+	d, ref := dispatchtest.HTTP(up.URL, nil)
+	cli := Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}
 	if _, _, err := cli.CompletePrefixed(context.Background(), prefixBody, "judge"); err != nil {
 		t.Fatalf("CompletePrefixed: %v", err)
 	}

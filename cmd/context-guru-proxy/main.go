@@ -28,11 +28,9 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
-	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
@@ -476,12 +474,10 @@ func main() {
 			}
 			return t.MaxRows
 		})
-		// A tenant's own configuration must never be able to spend the server's ambient
-		// provider credential: a `model:` block that names a model but no api_key would
-		// otherwise fall back to this process's ANTHROPIC_API_KEY / OPENAI_API_KEY. In
-		// hosted mode that is exactly the billing defect this deployment removes, so the
-		// fallback is switched off and such a block simply has no client (fail open).
-		offload.AllowEnvModelKey = false
+		// A tenant's own configuration can no longer carry a credential at all — the
+		// component model: block names only a source and a model id (components/offload/
+		// modelcfg.go) — so the billing defect this comment used to guard (a tenant's
+		// config spending the server's ambient provider credential) cannot occur.
 		slog.Info("context-guru: HOSTED multi-tenant mode",
 			"control_db", *controlDB, "upstreams", len(upstreams),
 			"register_domains", *registerDomains, "manager", *managerEmail != "")
@@ -1310,22 +1306,26 @@ func modelWindows() modelinfo.Resolver {
 //	CHEAP_MODEL_BASE      upstream base URL (default: the matching provider default)
 //	CHEAP_MODEL_KEY       API key (default: ANTHROPIC_API_KEY / OPENAI_API_KEY)
 //	CHEAP_MODEL_AUTH      anthropic auth scheme: x-api-key (default) | bearer
-func cheapModelFromEnv() components.Model {
+func cheapModelFromEnv() *proxy.CheapModelConfig {
 	model := os.Getenv("CHEAP_MODEL")
 	if model == "" {
 		return nil
 	}
-	switch envOr("CHEAP_MODEL_PROVIDER", "anthropic") {
-	case "openai":
-		return cheapmodel.OpenAI{
-			BaseURL: os.Getenv("CHEAP_MODEL_BASE"), Model: model,
-			APIKey: envOr("CHEAP_MODEL_KEY", os.Getenv("OPENAI_API_KEY")),
-		}
-	default:
-		return cheapmodel.Anthropic{
-			BaseURL: os.Getenv("CHEAP_MODEL_BASE"), Model: model,
-			APIKey:     envOr("CHEAP_MODEL_KEY", os.Getenv("ANTHROPIC_API_KEY")),
-			AuthScheme: os.Getenv("CHEAP_MODEL_AUTH"),
-		}
+	provider := envOr("CHEAP_MODEL_PROVIDER", "anthropic")
+	key := os.Getenv("CHEAP_MODEL_KEY")
+	if provider == "openai" {
+		return &proxy.CheapModelConfig{Provider: "openai", BaseURL: os.Getenv("CHEAP_MODEL_BASE"),
+			Model: model, APIKey: envOr0(key, os.Getenv("OPENAI_API_KEY"))}
 	}
+	return &proxy.CheapModelConfig{Provider: "anthropic", BaseURL: os.Getenv("CHEAP_MODEL_BASE"),
+		Model: model, APIKey: envOr0(key, os.Getenv("ANTHROPIC_API_KEY")), Auth: os.Getenv("CHEAP_MODEL_AUTH")}
+}
+
+// envOr0 is envOr for a value already read rather than an env var name, so cheapModelFromEnv does
+// not read CHEAP_MODEL_KEY twice.
+func envOr0(v, fallback string) string {
+	if v != "" {
+		return v
+	}
+	return fallback
 }

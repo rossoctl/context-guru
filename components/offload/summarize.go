@@ -108,9 +108,10 @@ type Summarize struct {
 	resummarizeTokens int
 	includeToolCalls  bool
 	modelSource       string
-	modelClient       components.Model // config-pinned client (model: block), or nil
-	trigger           components.Trigger
-	mode              markerMode
+	// modelClient is a test-injection seam only; see AgentDiet.modelClient.
+	modelClient components.Model
+	trigger     components.Trigger
+	mode        markerMode
 	// summaryWaitSeconds caps how long a turn will wait for a summary another turn started.
 	// 0 = defaultSummaryWait. See summarize_async.go.
 	summaryWaitSeconds int
@@ -170,7 +171,7 @@ func newSummarize(raw []byte) (components.Component, error) {
 	return &Summarize{
 		level: cfg.SummaryLevel, keepFirst: cfg.KeepFirst, customPrompt: cfg.CustomPrompt, keepLast: cfg.KeepLast,
 		minTokens: cfg.MinTokens, resummarizeTokens: cfg.ResummarizeTokens,
-		includeToolCalls: cfg.IncludeToolCalls, modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(), trigger: cfg.Trigger,
+		includeToolCalls: cfg.IncludeToolCalls, modelSource: cfg.Model.Source, trigger: cfg.Trigger,
 		mode: parseMarkerMode(cfg.MarkerMode), summaryWaitSeconds: cfg.SummaryWaitSeconds,
 	}, nil
 }
@@ -450,7 +451,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		return reusedKeys, nil
 	}
 
-	model := s.modelClient // config-pinned client wins
+	model := s.modelClient // test-injection seam; nil in production
 	if model == nil {
 		model = c.Model.For(s.modelSource)
 	}

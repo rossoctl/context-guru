@@ -3,6 +3,7 @@ package cheapmodel
 import (
 	"context"
 	"encoding/json"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"io"
 	"net/http"
@@ -26,7 +27,8 @@ func TestAnthropicSendsCachedSystemBlock(t *testing.T) {
 	// Long enough to clear the model minimum, so the breakpoint is asked for. A SHORT
 	// preamble deliberately gets no mark — see TestCacheBreakpointOnlyWhenItWouldCache.
 	preamble := strings.Repeat("INVARIANT PREAMBLE. ", 1200)
-	_, err := Anthropic{BaseURL: srv.URL, Model: "m"}.
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	_, err := Anthropic{D: d, Ref: ref, Model: "m"}.
 		CompleteSystem(context.Background(), preamble, "VARIABLE PART")
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +68,8 @@ func TestAnthropicCompleteKeepsSingleMessageShape(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := (Anthropic{BaseURL: srv.URL, Model: "m"}).Complete(context.Background(), "P"); err != nil {
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	if _, err := (Anthropic{D: d, Ref: ref, Model: "m"}).Complete(context.Background(), "P"); err != nil {
 		t.Fatal(err)
 	}
 	if _, present := body["system"]; present {
@@ -86,7 +89,8 @@ func TestOpenAIDegradesToLeadingSystemMessage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := (OpenAI{BaseURL: srv.URL, Model: "m"}).
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	if _, err := (OpenAI{D: d, Ref: ref, Model: "m"}).
 		CompleteSystem(context.Background(), "PREAMBLE", "VARIABLE"); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +123,8 @@ func TestOpenAICachedTokensAreNotDoubleCounted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := (OpenAI{BaseURL: srv.URL, Model: "m"}).Complete(context.Background(), "P"); err != nil {
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	if _, err := (OpenAI{D: d, Ref: ref, Model: "m"}).Complete(context.Background(), "P"); err != nil {
 		t.Fatal(err)
 	}
 	_, in, out := Usage()
@@ -148,7 +153,8 @@ func TestCacheReadZeroIsVisible(t *testing.T) {
 	defer srv.Close()
 
 	for i := 0; i < 3; i++ {
-		if _, err := (Anthropic{BaseURL: srv.URL, Model: "m"}).
+		d, ref := dispatchtest.HTTP(srv.URL, nil)
+		if _, err := (Anthropic{D: d, Ref: ref, Model: "m"}).
 			CompleteSystem(context.Background(), "SHORT PREAMBLE", "VAR"); err != nil {
 			t.Fatal(err)
 		}
@@ -209,7 +215,8 @@ func TestCacheBreakpointOnlyWhenItWouldCache(t *testing.T) {
 				_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"OK"}]}`)
 			}))
 			defer srv.Close()
-			if _, err := (Anthropic{BaseURL: srv.URL, Model: tc.model}).
+			d, ref := dispatchtest.HTTP(srv.URL, nil)
+			if _, err := (Anthropic{D: d, Ref: ref, Model: tc.model}).
 				CompleteSystem(context.Background(), tc.system, "VARIABLE"); err != nil {
 				t.Fatal(err)
 			}
@@ -240,7 +247,8 @@ func TestCompleteBlocksKeepsOrderAndMarksTheLastBlock(t *testing.T) {
 
 	general := strings.Repeat("general contract ", 1000)
 	aggro := strings.Repeat("compaction target ", 300)
-	if _, err := (Anthropic{BaseURL: srv.URL, Model: "aws/claude-sonnet-5"}).
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	if _, err := (Anthropic{D: d, Ref: ref, Model: "aws/claude-sonnet-5"}).
 		CompleteBlocks(context.Background(), []string{general, "", aggro}, "VARIABLE"); err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +277,8 @@ func TestBlankSystemSendsNoSystemField(t *testing.T) {
 		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"OK"}]}`)
 	}))
 	defer srv.Close()
-	if _, err := (Anthropic{BaseURL: srv.URL, Model: "m"}).
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	if _, err := (Anthropic{D: d, Ref: ref, Model: "m"}).
 		CompleteBlocks(context.Background(), []string{"", "   "}, "VARIABLE"); err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +337,8 @@ func TestAFailedCallReleasesTheWriteSlot(t *testing.T) {
 	}))
 	defer srv.Close()
 	sys := strings.Repeat("stable preamble ", 400)
-	if _, err := (Anthropic{BaseURL: srv.URL, Model: "aws/claude-sonnet-5"}).
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	if _, err := (Anthropic{D: d, Ref: ref, Model: "aws/claude-sonnet-5"}).
 		CompleteSystem(context.Background(), sys, "x"); err == nil {
 		t.Fatal("expected the 500 to be an error")
 	}

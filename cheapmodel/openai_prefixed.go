@@ -1,16 +1,17 @@
 package cheapmodel
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/rossoctl/context-guru/internal/adjudicate"
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/rossoctl/context-guru/internal/adjudicate"
 )
 
 // CompletePrefixedResponses asks the incoming Responses model one question over
@@ -35,28 +36,10 @@ func (o OpenAI) CompletePrefixedResponses(ctx context.Context, prefixBody []byte
 		return "", usage, err
 	}
 	body, _ = sjson.DeleteBytes(body, "stream")
-	base := o.BaseURL
-	if base == "" {
-		base = "https://api.openai.com"
-	}
-	client := o.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(base, "/")+"/v1/responses", bytes.NewReader(body))
+	respBody, err := send(ctx, o.D, o.Ref, bschemas.OpenAI, "/v1/responses", "prefixed Responses ",
+		http.Header{"Content-Type": {"application/json"}}, body)
 	if err != nil {
 		return "", usage, err
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("authorization", "Bearer "+o.APIKey)
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", usage, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", usage, fmt.Errorf("cheapmodel: prefixed Responses status %d: %s", resp.StatusCode, clipErrBody(resp.Body))
 	}
 	var out struct {
 		Output []struct {
@@ -77,7 +60,7 @@ func (o OpenAI) CompletePrefixedResponses(ctx context.Context, prefixBody []byte
 			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(respBody, &out); err != nil {
 		return "", usage, err
 	}
 	usage.CacheRead = out.Usage.Details.CachedTokens

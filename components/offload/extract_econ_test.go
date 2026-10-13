@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 )
 
 // The gate must suppress when the request is cache-aware and the output is small — the

@@ -77,9 +77,11 @@ type AgentDiet struct {
 	minSaved     int     // apply if the reduction saves at least this many tokens…
 	maxKeepRatio float64 // …or if it keeps less than this fraction of the step
 	modelSource  string
-	modelClient  components.Model
-	mode         markerMode
-	tailOnly     bool
+	// modelClient is a test-injection seam only: production never sets it (the model: block
+	// names a source, never a credential, since the host owns both). nil => c.Model.For(modelSource).
+	modelClient components.Model
+	mode        markerMode
+	tailOnly    bool
 }
 
 // agentDietConfig is the `agentdiet:` block.
@@ -114,8 +116,8 @@ func newAgentDiet(raw []byte) (components.Component, error) {
 	}
 	d := &AgentDiet{
 		delay: 2, ctxBefore: 1, minStep: 500, minSaved: 400, maxKeepRatio: 0.8,
-		modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(),
-		mode: parseMarkerMode(cfg.MarkerMode),
+		modelSource: cfg.Model.Source,
+		mode:        parseMarkerMode(cfg.MarkerMode),
 	}
 	if cfg.DelaySteps != nil && *cfg.DelaySteps >= 0 {
 		d.delay = *cfg.DelaySteps

@@ -1,28 +1,27 @@
 package cheapmodel
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-
-	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"strings"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/schema"
 )
 
-// OpenAI calls a small OpenAI chat-completions model with a single user prompt and
-// returns the content of the first choice. It implements engine.Model.
+// OpenAI calls a small OpenAI chat-completions model with a single user prompt and returns the
+// content of the first choice. It implements engine.Model. The destination and the credential are
+// the host's: D and Ref name which one, resolved by the host's Dispatcher at send time.
 type OpenAI struct {
-	BaseURL   string // default https://api.openai.com
-	APIKey    string
+	D         dispatch.Dispatcher
+	Ref       dispatch.Ref
 	Model     string // e.g. gpt-4o-mini
 	MaxTokens int    // default 2048
-	Client    *http.Client
 }
 
 // AsModel is components.Remodeler: same endpoint, same credential, different model.
@@ -248,43 +247,19 @@ func (o OpenAI) CompleteMessages(ctx context.Context, system string, msgs []bsch
 // Extracted so CompleteSystem and CompleteMessages cannot drift apart — the second one exists
 // to preserve a cached prefix, and a divergent request builder is exactly how that is lost.
 func (o OpenAI) post(ctx context.Context, msgs []any) (string, error) {
-	base := o.BaseURL
-	if base == "" {
-		base = "https://api.openai.com"
-	}
 	maxTok := o.MaxTokens
 	if maxTok == 0 {
 		maxTok = DefaultMaxTokens
-	}
-	client := o.Client
-	if client == nil {
-		client = http.DefaultClient
 	}
 	reqBody, _ := json.Marshal(map[string]any{
 		"model":      o.Model,
 		"max_tokens": maxTok,
 		"messages":   msgs,
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(base, "/")+"/v1/chat/completions", bytes.NewReader(reqBody))
+	respBody, err := send(ctx, o.D, o.Ref, bschemas.OpenAI, "/v1/chat/completions", "",
+		http.Header{"Content-Type": {"application/json"}}, reqBody)
 	if err != nil {
 		return "", err
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("authorization", "Bearer "+o.APIKey)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		// The upstream's own message, clipped. A bare status is undiagnosable: a 401 can be a
-		// wrong auth scheme, an expired key, a model the key may not use, or a gateway policy,
-		// and those have nothing in common. Clipped and body-only — the response body of an
-		// auth failure does not echo the credential, but the REQUEST headers would, so this
-		// deliberately reads the body and never the request.
-		return "", fmt.Errorf("cheapmodel: status %d: %s", resp.StatusCode, clipErrBody(resp.Body))
 	}
 	var out struct {
 		Choices []struct {
@@ -300,7 +275,7 @@ func (o OpenAI) post(ctx context.Context, msgs []any) (string, error) {
 			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(respBody, &out); err != nil {
 		return "", err
 	}
 	// OpenAI reports automatic prefix caching as cached_tokens, and counts them INSIDE
