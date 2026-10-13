@@ -19,9 +19,9 @@ package dash
 // same-count choice would have given.
 
 import (
+	"errors"
 	"fmt"
 	"hash/fnv"
-	"math"
 	"net/http"
 	"regexp"
 	"sort"
@@ -38,6 +38,9 @@ const KindMCPServer = "mcp_server"
 // adaptToolsOwn matches the plugin's own tools and skills and the proxy's injected stubs. A removal
 // list must never contain them: removing the restore stub would strand every hidden tool.
 var adaptToolsOwn = regexp.MustCompile(`(?i)context[-_]?guru`)
+
+// adaptToolsSafe is what a name must look like to be printed in a suggested command.
+var adaptToolsSafe = regexp.MustCompile(`^[A-Za-z0-9_.:@-]+$`)
 
 // AdaptToolsItem is one removable declaration with what carrying it cost.
 type AdaptToolsItem struct {
@@ -312,9 +315,11 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			case r.cacheRead > 0:
 				rate = p.CacheRead
 			case r.cacheWrite > 0:
-				// A one-hour write bills 2x input, not the 5-minute 1.25x; blend by its share.
-				h := math.Min(float64(r.cacheWrite1h)/float64(r.cacheWrite), 1)
-				rate = (1-h)*p.CacheWrite + h*2*p.Input
+				// A one-hour breakpoint precedes every 5-minute one, so when the request wrote any
+				// 1h tokens the declarations at the head were among them: 2x input, not 1.25x.
+				if r.cacheWrite1h > 0 {
+					rate = 2 * p.Input
+				}
 			}
 			for key, tok := range st.carry {
 				it := items[key]
@@ -532,6 +537,9 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 		out.Warnings = append(out.Warnings, fmt.Sprintf("%d of %d requests have no recorded declaration set and more than one set it could have been; the total could be %s to %s.",
 			c.RequestsGuessed, c.RequestsMapped, usdText(out.TotalLow), usdText(out.TotalHi)))
 	}
+	if n := c.Requests - c.RequestsMapped; n > 0 {
+		out.Warnings = append(out.Warnings, fmt.Sprintf("%d requests match no stored declaration set and are not counted, in the range either.", n))
+	}
 	if c.RequestsUnpriced > 0 {
 		out.Warnings = append(out.Warnings, fmt.Sprintf("%d requests with incomplete token accounting are not priced.", c.RequestsUnpriced))
 	}
@@ -606,6 +614,11 @@ func adaptToolsCandidate(kind, name, server string, usedTool, usedServer, usedSk
 	if adaptToolsOwn.MatchString(name) || adaptToolsOwn.MatchString(server) {
 		return "", nil
 	}
+	// Names are client-supplied and are printed inside commands to copy: anything that is not a
+	// plain identifier is not offered at all.
+	if !adaptToolsSafe.MatchString(name) || (server != "" && !adaptToolsSafe.MatchString(server)) {
+		return "", nil
+	}
 	switch kind {
 	case KindMCPTool:
 		if usedTool[name] || removed[name] || removed["mcp__"+server] {
@@ -656,13 +669,21 @@ func (a *API) AdaptToolsDocument(r *http.Request) (*AdaptToolsDoc, error) {
 }
 
 // adaptTools serves GET /api/adapt/tools for the caller's scope.
+//
+// A removal list belongs to one account, so the report defaults to the caller's own traffic even
+// for a manager (whose default dashboard scope is the whole service); ?tenant= still widens it.
 func (a *API) adaptTools(w http.ResponseWriter, r *http.Request) {
-	f, _, ok := a.scope(r)
-	if !ok {
+	if r.URL.Query().Get("tenant") == "" {
+		q := r.URL.Query()
+		q.Set("tenant", "me")
+		r = r.Clone(r.Context())
+		r.URL.RawQuery = q.Encode()
+	}
+	doc, err := a.AdaptToolsDocument(r)
+	if errors.Is(err, errNotPermitted) {
 		a.unauthorized(w)
 		return
 	}
-	doc, err := a.db(r).AdaptTools(f, a.priceFn(r), a.toolFilterStateForScope(f))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return

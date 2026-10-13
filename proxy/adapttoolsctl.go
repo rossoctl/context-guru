@@ -2,8 +2,14 @@ package proxy
 
 import (
 	"net/http"
+	"regexp"
 	"strings"
+
+	"github.com/rossoctl/context-guru/internal/skills"
 )
+
+// ownDecl is Context Guru's own tools and skills, the same rule dash/adapttools.go lists by.
+var ownDecl = regexp.MustCompile(`(?i)context[-_]?guru`)
 
 // ctlAdaptToolsApply applies one option of GET /api/adapt/tools to the caller's removal list:
 // the WRITE half of /context-guru:adapt tools. It only ever writes names the caller's own current
@@ -32,14 +38,21 @@ func (h *Handler) ctlAdaptToolsApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The caller's OWN report, whatever scope a manager's default view would be.
+	// The window the report was read on (since/until) is kept, so the basis is comparable.
 	own := r.Clone(r.Context())
-	own.URL.RawQuery = "tenant=me"
+	q := r.URL.Query()
+	q.Set("tenant", "me")
+	own.URL.RawQuery = q.Encode()
 	doc, err := h.api.AdaptToolsDocument(own)
 	if err != nil {
 		ctlErr(w, http.StatusInternalServerError, "could not build your report: "+err.Error())
 		return
 	}
-	if in.Basis != "" && in.Basis != doc.BasisID {
+	if in.Basis == "" {
+		ctlErr(w, http.StatusBadRequest, "basis is required: send the basis_id of the report you are acting on")
+		return
+	}
+	if in.Basis != doc.BasisID {
 		ctlErr(w, http.StatusConflict, "the report changed since you saw it; read it again and decide on the current one")
 		return
 	}
@@ -47,6 +60,14 @@ func (h *Handler) ctlAdaptToolsApply(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		ctlErr(w, http.StatusBadRequest, "that option is not in your current report")
 		return
+	}
+	// Defence in depth: whatever the report builder does, only MCP and skill entries, and never
+	// Context Guru's own, are written from here.
+	for _, n := range names {
+		if !(strings.HasPrefix(n, "mcp__") || strings.HasPrefix(n, skills.RemovePrefix)) || ownDecl.MatchString(n) {
+			ctlErr(w, http.StatusBadRequest, "refusing to write "+n)
+			return
+		}
 	}
 	restore := in.Option == "restore"
 	undo, note := "restore", "filtering "+strings.Join(names, ", ")
@@ -67,9 +88,15 @@ func (h *Handler) ctlAdaptToolsApply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The undo carries the basis of the report as it stands after this write, so undoing is
+	// held to the same staleness check as applying.
+	undoBasis := ""
+	if after, err := h.api.AdaptToolsDocument(own); err == nil {
+		undoBasis = after.BasisID
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "applied": in.Option, "previous": doc.Current,
 		// The filter acts on the next request, which re-writes the cached prefix once.
-		"effective": "now", "note": note, "undo": map[string]string{"option": undo},
+		"effective": "now", "note": note, "undo": map[string]string{"option": undo, "basis": undoBasis},
 	})
 }

@@ -33,7 +33,7 @@ func seedAdapt(t *testing.T) *DB {
 		e := mkEvent(day(0)+int64(i), "s1", r.model, 100, 100)
 		e.TenantID, e.Tools, e.CacheRead, e.CacheWrite, e.TokenAccounting = "t1", r.tools, r.read, r.wr, r.accounting
 		if i == 0 {
-			e.CacheWrite1h = r.wr
+			e.CacheWrite1h = r.wr / 5 // any 1h write covers the head: still 2x, not a blend
 		}
 		evs = append(evs, e)
 	}

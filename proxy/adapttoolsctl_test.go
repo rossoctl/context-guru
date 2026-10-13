@@ -50,7 +50,10 @@ func TestAdaptToolsApplyWritesOnlyTheReportedNames(t *testing.T) {
 	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused","basis":"stale"}`, jar); w.Code != 409 {
 		t.Fatalf("stale basis = %d %s", w.Code, w.Body)
 	}
-	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"Read"}`, jar); w.Code != 400 {
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused"}`, jar); w.Code != 400 {
+		t.Fatalf("missing basis = %d %s", w.Code, w.Body)
+	}
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"Read","basis":"`+basis+`"}`, jar); w.Code != 400 {
 		t.Fatalf("unknown option = %d %s", w.Code, w.Body)
 	}
 	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused"}`, nil); w.Code != 401 {
@@ -67,7 +70,7 @@ func TestAdaptToolsApplyWritesOnlyTheReportedNames(t *testing.T) {
 		t.Fatalf("apply did not write the server: %q", config())
 	}
 	undo, _ := out["undo"].(map[string]any)
-	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"`+undo["option"].(string)+`"}`, jar); w.Code != 200 {
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"`+undo["option"].(string)+`","basis":"`+undo["basis"].(string)+`"}`, jar); w.Code != 200 {
 		t.Fatalf("undo = %d %s", w.Code, w.Body)
 	}
 	if strings.Contains(config(), "mcp__srv") {
@@ -92,5 +95,51 @@ func TestAdaptToolsApplyOnALocalProxySaysWhatToDo(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != http.StatusNotImplemented ||
 		!strings.Contains(out["error"], "remove command") {
 		t.Fatalf("status %d, body %v, err %v", resp.StatusCode, out, err)
+	}
+}
+
+// A manager's dashboard default is the whole service, but a removal list is one account's: the
+// report and the apply act on the manager's own traffic, never another tenant's.
+func TestAdaptToolsApplyForAManagerWritesOnlyTheirOwn(t *testing.T) {
+	f := newMgrFixture(t)
+	f.h.API().SetToolFilterState(f.h.DashToolFilter())
+	w, _ := f.signUp(t, "boss@ibm.com", "m")
+	boss := w.Result().Cookies()
+	w, _ = f.signUp(t, "user@ibm.com", "u")
+	user := w.Result().Cookies()
+	idOf := func(jar []*http.Cookie) string {
+		_, me := f.do(t, "GET", "/api/me", "", jar)
+		tn, _ := me["tenant"].(map[string]any)
+		id, _ := tn["id"].(string)
+		return id
+	}
+	for _, s := range []struct{ id, server string }{{idOf(boss), "mine"}, {idOf(user), "other"}} {
+		e := &dash.Event{TS: time.Now().UnixMilli(), TenantID: s.id, SessionID: "s-" + s.server, Model: "m",
+			CacheRead: 1000, TokenAccounting: dash.AccountingComplete, DeclDigest: "d"}
+		e.Tools = 1
+		f.rec.Record(e)
+		f.rec.RecordInventory(s.id, "s-"+s.server, time.Now().UnixMilli(), &dash.Inventory{Digest: "d", UseFingerprint: 1,
+			Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__" + s.server + "__q", Server: s.server, Tokens: 100}}}, false)
+	}
+	var rep map[string]any
+	for i := 0; i < 100; i++ {
+		// The fleet view sees both servers once both inventories are written.
+		if _, all := f.do(t, "GET", "/api/adapt/tools?tenant=*", "", boss); len(all["items"].([]any)) == 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_, rep = f.do(t, "GET", "/api/adapt/tools", "", boss)
+	if items, _ := rep["items"].([]any); len(items) != 1 {
+		t.Fatalf("a manager's default report is not their own: %v", rep["items"])
+	}
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused","basis":"`+rep["basis_id"].(string)+`"}`, boss); w.Code != 200 {
+		t.Fatalf("apply = %d %s", w.Code, w.Body)
+	}
+	_, me := f.do(t, "GET", "/api/me", "", boss)
+	tn, _ := me["tenant"].(map[string]any)
+	doc, _ := tn["effective_config_yaml"].(string)
+	if !strings.Contains(doc, "mcp__mine") || strings.Contains(doc, "mcp__other") {
+		t.Fatalf("manager apply wrote the wrong account's names: %q", doc)
 	}
 }
