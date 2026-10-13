@@ -510,7 +510,7 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 		out.Warnings = append(out.Warnings, fmt.Sprintf("%d of %d sessions have no stored inventory and are not counted.", n, c.Sessions))
 	}
 	if c.RequestsGuessed > 0 {
-		out.Warnings = append(out.Warnings, fmt.Sprintf("%d of %d requests predate per-request set records and were matched by tool count; the range is %s to %s.",
+		out.Warnings = append(out.Warnings, fmt.Sprintf("%d of %d requests have no recorded declaration set and more than one set it could have been; the total could be %s to %s.",
 			c.RequestsGuessed, c.RequestsMapped, usdText(out.TotalLow), usdText(out.TotalHi)))
 	}
 	if c.RequestsUnpriced > 0 {
@@ -543,7 +543,12 @@ func (out *AdaptToolsDoc) OptionRemove(id string) ([]string, bool) {
 	return nil, false
 }
 
-func usdText(x float64) string { return fmt.Sprintf("$%.2f", x) }
+func usdText(x float64) string {
+	if x > 0 && x < 0.005 {
+		return "under $0.01"
+	}
+	return fmt.Sprintf("$%.2f", x)
+}
 
 func head(s []string, n int) []string {
 	if len(s) > n {
