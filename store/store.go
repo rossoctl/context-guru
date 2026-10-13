@@ -165,6 +165,15 @@ const (
 	// so storing keeps there would either be discarded on read or would weaken that guard for
 	// everyone. Different fact, different key.
 	SweepKeepPrefix = "cg:swk:" // extract_llm_sweep: "the adjudicator said keep, at turn N"
+	// SweepHeldPrefix holds extract_llm_sweep's HELD ANSWER for one thread: the verdicts a
+	// keep-alive-ping question produced, waiting for a cold request to use them.
+	//
+	// A SEPARATE NAMESPACE from ResultPrefix, and this is what keeps a held answer from changing a
+	// request. The same-session replay reads cg:res: and splices what it finds at any depth, so a
+	// held verdict stored there would be applied on the very next request, warm or cold. Nothing
+	// replays a cg:swh: record. PINNED, because the record is a paid model call: losing it to LRU
+	// eviction throws the answer away.
+	SweepHeldPrefix = "cg:swh:" // extract_llm_sweep: "the model said drop these, asked at the ping"
 	LenPrefix       = "cg:len:" // apply's prev-turn message count (the MaxCachedIdx boundary)
 	// XResultPrefix is extract_llm's CROSS-session result namespace. Pinned for the same
 	// reason ResultPrefix is: every entry is a model call already paid for, and the store's
@@ -237,7 +246,7 @@ const (
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
 var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
-	BilledPrefix, UsagePrefix, RestorePrefix}
+	BilledPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {

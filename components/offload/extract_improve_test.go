@@ -6,7 +6,6 @@ import (
 	"math"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
@@ -197,22 +196,17 @@ func headLine(s string) string {
 // That shape is gone. The sweep makes exactly ONE call per firing turn — an ask over the transcript
 // already in the request model's prompt cache, shipping an inventory rather than any output content —
 // so there is nothing left for a per-call cap to bound. What bounds it now is WHEN it fires: the
-// pre-expiry window, which is at most once per cache lifetime per session.
+// keep-alive ping, which is at most once per idle span per thread.
 func TestSweepMakesOneCallSoNeedsNoCallCap(t *testing.T) {
 	c, err := newExtractSweep(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := c.(*ExtractSweep)
-	// The window is the brake, and it must be bounded and non-zero: zero would never fire, and an
-	// unbounded one would fire on every warm turn and invalidate live prefixes.
-	if e.preExpiry <= 0 {
-		t.Fatalf("the pre-expiry window is %v, so the sweep can never fire", e.preExpiry)
+	if _, ok := c.(*ExtractSweep); !ok {
+		t.Fatalf("not a sweep: %T", c)
 	}
-	if e.preExpiry > 5*time.Minute {
-		t.Errorf("the default window is %v, which exceeds a bare ephemeral mark's whole 5-minute "+
-			"lifetime — it would fire on every turn of a session", e.preExpiry)
-	}
+	// What bounds it is WHEN it asks: at the keep-alive ping, which the keeper sends at most K times
+	// per idle span. It asks nothing inside a request (see TestSweepAsksNothingInsideARequestByDefault).
 	// And a call cap must not have quietly come back: it would be a knob that cannot bind.
 	if _, err := newExtractSweep([]byte("max_calls: 4\n")); err == nil {
 		t.Error("max_calls was accepted; one call per turn means it can never bind")

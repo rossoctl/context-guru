@@ -81,28 +81,3 @@ func TestPrunerHorizonIsCreditedForTheRemoval(t *testing.T) {
 			saved, reqNow-saved, window, window-(reqNow-saved), perTurn, turns)
 	}
 }
-
-// AND THE CONSEQUENCE THAT MATTERS: with the horizon credited, a batch of drops that collectively clears
-// the window is no longer pruned to one. Asserted through selectAffordableDrops, because that is where
-// the tokens were lost.
-func TestAffordableDropsAreNotPrunedToOneAtHighPressure(t *testing.T) {
-	const window = 64000
-	c := &components.Ctx{Ctx: context.Background(), CtxWindow: window}
-	e := &ExtractSweep{}
-	req, cands := pressuredReq(20, 10, 8000)
-	reqNow := schema.MessagesTokens(req)
-	if reqNow <= window {
-		t.Fatalf("fixture must exceed the window: %d", reqNow)
-	}
-	all := make([]int, len(cands))
-	for i := range cands {
-		all[i] = i
-	}
-	kept, pruned := e.selectAffordableDrops(req, c, cands, all)
-	t.Logf("req=%d window=%d perTurn=%d | offered %d drops -> kept %d, pruned %d",
-		reqNow, window, reqNow/modelTurns(req), len(all), len(kept), pruned)
-	if len(kept) <= 1 {
-		t.Errorf("kept %d of %d drops. Pruning a whole batch to one is the measured defect: every subset "+
-			"scored net = -11.5*W because the horizon was 0, so the smallest W won.", len(kept), len(all))
-	}
-}

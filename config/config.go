@@ -641,8 +641,7 @@ components:
 	// omission. It asks the REQUEST's own model, because only that model's prompt cache holds the
 	// transcript, so there is no `model` to name. The conversation IS the cached prefix, so there is
 	// no `context` to size. One ask covers every candidate, so there is no call cap. And the economic
-	// gate prices a per-output cheap-model call, which is not what this is. What remains is the floor
-	// and the window.
+	// gate prices a per-output cheap-model call, which is not what this is. What remains is the floor.
 	//
 	// The sweep's floor is 1000 and not 3000. At 3000 the old preset produced ZERO extractions
 	// across 3,437 requests: 3,401 warm turns did nothing, and on all 36 turns that DID sweep,
@@ -692,16 +691,13 @@ components:
 	// eligibility: 132 calls in three days of heavy use, under a per-session cap of 40 that
 	// was never approached. llm_max_per_request: 8 is the per-turn brake.
 	//
-	// The sweep's `pre_expiry_seconds` is UNSET on purpose, which takes its one-minute default: one
-	// apply.coldMargin, the only figure in this codebase with a stated purpose for clock uncertainty
-	// around cache expiry. The number that used to sit here was a per-sweep CALL cap, motivated by a
-	// production request that made 27 calls, spent $0.229 and added 76.6 s to a turn whose upstream
-	// took 33.5 s. That shape is gone: the sweep makes exactly one ask per firing turn, and what
-	// bounds it is how often the pre-expiry window comes round — at most once per cache lifetime per
-	// session.
+	// The sweep asks its question at the keep-alive ping, in place of the ping, and holds the answer for
+	// the next cold request (#404). There is no window to size. The number that used to sit here was a
+	// per-sweep CALL cap, motivated by a production request that made 27 calls, spent $0.229 and added
+	// 76.6 s to a turn whose upstream took 33.5 s. That shape is gone: the sweep makes exactly one ask
+	// per idle span per thread, and what bounds it is the keep-alive's own schedule.
 	//
-	// The WIDTH of that window is the one unmeasured number in this preset, and widening it is a
-	// yield/cost trade nothing has measured. See extract_llm_sweep's own comment.
+	// `shadow` is deliberately NOT set here or in any preset: it is the measurement switch.
 	"housellm": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
 components:
   extract:

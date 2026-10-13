@@ -291,6 +291,30 @@ func (t *Tracker) observe(tenant, session, threadID string, provider bschemas.Mo
 	return obs
 }
 
+// OpenCounts reports the open background-task and open-teammate counts for a thread as of the last
+// request Observe saw, with the same expiry rules Observe applies. It reads state and changes none
+// except dropping an expired item, which Observe would drop on its next call anyway.
+//
+// It exists for the keep-alive, which needs the thread's wait cause at the moment a ping falls due,
+// between requests, when no body is at hand to observe. A thread Observe has never seen reports 0, 0.
+func (t *Tracker) OpenCounts(tenant, session, threadID string) (background, teammate int) {
+	defer func() { recover() }() //nolint:errcheck // fail open; see package doc
+	if t == nil {
+		return 0, 0
+	}
+	key := Key(tenant, session, threadID)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	ts, ok := t.threads[key]
+	if !ok {
+		return 0, 0
+	}
+	now := t.now()
+	background, _ = countBackgroundLocked(ts, now)
+	teammate = countTeammatesLocked(ts, now)
+	return background, teammate
+}
+
 // RecordOutcome stores this request's own status and message count, for the NEXT request on
 // the same thread's retry check. Call once this request's upstream status is known (status 0
 // means "never reached an upstream" and is never read back as a retry predecessor).

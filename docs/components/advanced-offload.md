@@ -13,9 +13,15 @@ requirements) that the deterministic components in
 
 **Kind:** Offload. **Reversible:** yes (`marker_mode: full`, the default). **In presets:** `housellm`.
 
-On a turn whose prompt cache has expired, this component asks a cheap model — a batch of tool
-outputs at a time — which of them the agent still needs, and **removes** the ones it does not,
-leaving a short shape descriptor plus a resolvable `<<cg:HASH>>` marker. It never rewrites anything.
+When a thread goes idle, this component asks the request's own model — over the conversation that
+model has already cached, a batch of tool outputs at a time — which of them are spent. The question is
+sent **in place of the keep-alive ping**, and the answer is **held**. On the next request that arrives
+after the cache has expired, the held outputs are removed, leaving a short shape descriptor plus a
+resolvable `<<cg:HASH>>` marker. It never rewrites anything.
+
+> **What ships in which PR (#404).** The question at the ping, the held answer, the recheck and shadow
+> mode are built. **Applying a held answer on a cold request is not**: until it is, a held answer
+> changes no request, and `shadow: true` is how to see what it would have done.
 
 ### Why it is separate from `extract_llm`
 
@@ -171,33 +177,69 @@ other `tool_use` only the client can execute, so it hands that round over whole 
 `adjudicate.AnswerStrayCalls` repairs it on the next request: the agent pays one turn, the session is
 fine. `/stats` publishes `adjudicate_stray` either way — measured 0 across all three passes of arm C.
 
-### The trigger: pre-expiry, not cold
+### The trigger: the keep-alive ping
 
 The two halves of this component want **opposite** cache states:
 
 - the **ask** needs a WARM cache — it reads an entry that must still exist, or the call pays fresh for
   the whole transcript;
-- the **removal** wants a COLD cache — rewriting deep history invalidates a live prefix and forces a
-  cache-write of the whole suffix at 1.25x fresh.
+- the **removal** wants a COLD cache — rewriting deep history on a live prefix forces a cache-write of
+  the whole suffix at 1.25x fresh, and a warm removal almost never repays it (#491: 3.6% of 1,144 warm
+  moments paid back, about −$900/week).
 
-Both are cheap in the window where the entry still exists but has little life left. The sweep therefore
-fires when `0 < remaining <= pre_expiry_seconds`, where `remaining` is the cache's believed lifetime
-minus this session's idle time.
+So the two halves happen at different moments:
 
-**The TTL is derived, never assumed.** It is the same figure the cold decision uses, read out of the
-request itself: a bare `ephemeral` mark is 5 minutes, an explicit `ttl: "1h"` is an hour, widened to the
-longest lifetime this prefix has ever asked for. Unknown does not fire — a window computed from a
-guessed TTL would invalidate live prefixes on exactly the deployments whose TTL could not be read.
+1. **Ask at the keep-alive ping, in place of the ping.** The ping already reads the cached prefix to
+   refresh it; the question is the same read plus an answer, so the answer is the only extra cost. There
+   is no timer of its own. No keep-alive means no question, and a prompt under the keep-alive floor
+   (80k tokens, #444) gets none. The summary call (`cache_aware_summarizer`) takes the ping first when
+   it has material.
+2. **Ask whenever there is at least one candidate.** No economic gate and no minimum of ten
+   (`min_inventory` defaults to 1).
+3. **Hold the answer**, per thread, in the store (`cg:swh:` namespace, pinned). A held answer is never
+   replayed by the same-session replay (that reads `cg:res:`), so **it changes no request in this PR**.
+4. **Recheck before use.** For each judged output the answer keeps its `tool_use_id` and a content hash of
+   the message as the agent sent it. A verdict is dropped when the conversation is shorter than when it
+   was judged (`conversation_shorter`), the output is gone (`output_gone`) or its bytes changed
+   (`content_changed`), a later turn referenced it (`referenced_later`, from the co-reference index), or
+   the agent expanded it (`expanded`).
 
-**The window's WIDTH is the one unmeasured number in the design.** It defaults to one minute, which is
-the codebase's own clock-uncertainty margin for cache expiry. Wider fires more often and invalidates
-more remaining TTL; narrower fires rarely. Nothing measures either side.
+The old time window (`pre_expiry_seconds`: ask when `0 < remaining <= window`) is **removed** and the key
+is ignored with a warning. It fired on 7 of about 4,170 requests, and when it fired the cache was still
+alive: the removal forced a rewrite worth $0.57 and $0.45 against savings of cents.
 
-#### The second trigger, and what it has to pay for
+**Models where the question breaks the cache (#422) get a plain ping.** On Haiku 4.5 and the older Sonnet
+and Opus models, which keep only the last turn's thinking, the question strips earlier thinking blocks from
+the cached prefix. When the conversation carries one, the keeper sends an ordinary ping and counts
+`sweep_model_declined`.
 
-`econ_trigger` fires on **mass** rather than the clock, which is how the sweep reaches a session whose
-cache keeps being refreshed — the long agent run with the most to save, and the one the pre-expiry
-window can never reach. It pays a real cache-write to do it, so it has to clear a break-even first.
+#### Shadow mode
+
+`shadow: true` (off by default, in no preset) asks, holds and rechecks exactly as above and still changes
+nothing. On the first request after the ping it reports the ask; on the first **cold** request it runs
+the recheck and reports what it would drop:
+
+| event | meaning |
+|---|---|
+| `sweep_shadow_asked` / `sweep_shadow_proposed` / `sweep_shadow_proposed_tokens` | candidates asked about; drops the model voted for; tokens those drops would remove |
+| `sweep_shadow_valid` / `sweep_shadow_valid_tokens` | proposed drops still valid at the cold request |
+| `sweep_shadow_dropped_<reason>` | proposed drops the recheck turned down, by reason (above) |
+| `sweep_shadow_wait_<cause>` | the thread's wait cause (#453) when it was asked: `human`, `own_tool`, `background`, `teammate`, `retry`, `unknown`. Stored, never used to decide. |
+
+They land in `request_components.events`, and a `cg.sweep.shadow` log line carries the same numbers.
+
+#### The economic trigger (REMOVED in #404; kept here as the record behind #491)
+
+> `econ_trigger`, `econ_ignore_ask_cost`, `reward_premium`, `min_pressure` and `block_fallback` are gone, and
+> writing one is ignored: the config still loads, one warning names the key and the reason, and
+> `SweepPingCounters().RetiredKeys` counts it. Every answer is now held for a cold request, so an
+> in-request ask would only cost money, and the ping-time question never falls back to a full-price
+> completion. The warm path is #491 and will design its own gate. The rest of this section describes
+> what the removed trigger did.
+
+`econ_trigger` is the warm-path experiment (#491): it asks **inside the request** when the economics
+clear, even while the cache is live. It pays a real cache-write to do it, so it has to clear a
+break-even first. It is off by default and is the only in-request ask that remains.
 
 That break-even has three terms, and the third one is easy to forget because it is not a property of the
 transcript:
@@ -478,13 +520,9 @@ net; the model does not get to hear about it.
 | key | default | what it does |
 |---|---|---|
 | `min_tokens` | 1000 | Per-output floor for naming a candidate in the inventory. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 this produced **zero** extractions across 3,437 production requests. |
-| `reward_premium` | 1 | How much a removed token is worth relative to the cache read it saves — the only term in the break-even that is a belief rather than a measurement. 1 is the unadjusted arithmetic. Values below 1 are refused (they assert a removal is worth less than the read it saves, tightening a gate that is already the restrictive term); above 100 is refused as a typo. See [What the break-even cannot price](#what-the-break-even-cannot-price) for the 28:1 measurement behind any value above 1, and read `premium` on `cg.sweep.econ` to re-price a run's declines without re-running it. |
-| `min_inventory` | 10 | Fewest candidates worth asking about; below it the sweep declines without asking. The model's judgement is a function of how many candidates it **compares**: shown one output it scored 6% live-kept, ~15 together reached 58% at the lowest cost per output. Below the floor a removal is a guess, and a wrong removal costs content the agent still needs while a wrong keep costs one turn's tokens. |
-| `pre_expiry_seconds` | 60 | Width of the pre-expiry window. The component's one unmeasured number. |
-| `evidence` | `false` | Add the co-reference index's record to each inventory line. It is **evidence the model weighs, never a filter** over the candidates — a pre-filter left about one candidate per request, collapsing a bulk arm into the per-output shape refuted at 6% live-kept. Also adds a paragraph teaching how to read the counters; counters with no explanation invite an invented reading. |
-| `econ_trigger` | `false` | Add the **economic** trigger alongside the pre-expiry window, so a live cached prefix can be swept when the saving outruns the cache-write it forces. The two are OR'd and neither contains the other: pre-expiry fires on the clock and cannot reach a session whose cache keeps being refreshed — the long run with the most to save — while econ fires on mass and cannot know how much time is left. |
-| `econ_ignore_ask_cost` | `false` | Restore the econ trigger's original break-even, which charged the cache-write and **not** the adjudication that reads it. Left out, that authorised 9 asks in 9 on iteration 025's pre-flight, six of which removed nothing: $0.4339 spent against $0.0017 of value. Set true only to attribute a run's difference to the change. |
-| `block_fallback` | `false`; `true` under `CG_LOG_LEVEL=debug` unless set explicitly | Decline instead of falling back to a content-carrying completion when the cache read did not happen. Unset tracks the process log level because the fallback's failure reason is only recorded on the decline branch — leaving the default on under debug discarded exactly the evidence debug exists to show. Writing `false` explicitly is not the same as leaving it unset: an explicit value, either way, overrides the debug default. The prefix-ask failure is now also logged at WARN regardless of this setting. |
+| `min_inventory` | 1 | Fewest candidates worth asking about; below it the sweep does not ask. It was 10, because the model's judgement is a function of how many candidates it **compares** (shown one output it scored 6% live-kept, ~15 together reached 58%). The question now replaces a ping, so a small inventory costs a small answer and a held answer is rechecked before use; `shadow` measures the real rates. Raise it to bring the old floor back. |
+| `shadow` | `false` | Ask, hold and recheck, report what *would* be dropped, change nothing. See [Shadow mode](#shadow-mode). Not in any preset. |
+| `evidence` | `true` | Add the co-reference index's record to each inventory line (about 500 input tokens per question, under $0.003). Write `false` for the old prompt. It is **evidence the model weighs, never a filter** over the candidates — a pre-filter left about one candidate per request, collapsing a bulk arm into the per-output shape refuted at 6% live-kept. Also adds a paragraph teaching how to read the counters; counters with no explanation invite an invented reading. |
 | `marker_mode` | `full` | `full` is the only mode that keeps a removal recoverable. |
 
 Every other key is a **config error naming its reason**, not an ignored one. `strategy`, `rewrite`,
@@ -496,7 +534,13 @@ every candidate. `economic_gate` because it prices a per-output cheap-model call
 
 ### Counters
 
-`sweep_offered`, `sweep_adjudicated`, `sweep_dropped`, `sweep_kept`,
+At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `sweep_held`,
+`sweep_model_declined`, `sweep_no_inventory`, `sweep_already_asked`, `sweep_no_candidate`,
+`sweep_hold_no_tool_id`, `keepalive_sweep_substituted`, `keepalive_sweep_ask_failed`,
+`keepalive_sweep_over_budget`, and `sweep_gates`: the adjudication's own gate and event names
+(`sweep_kept`, `sweep_unparseable`, ...) summed over ping-time questions.
+
+In a request: `sweep_offered`, `sweep_adjudicated`, `sweep_dropped`, `sweep_kept`,
 `sweep_drop_refused_obligation`, `sweep_quote_fabricated`, `sweep_criterion_missing`.
 
 The two to **alert** on:
@@ -518,7 +562,7 @@ unparseable: raise the budget, not the prompt), `sweep_verdict_unusable`,
 `sweep_no_prefix`, `sweep_ask_failed`, `sweep_inventory_of_one`, `sweep_kept_everything`,
 `sweep_unparseable`, `sweep_reply_truncated`, `sweep_verdict_unusable`, `sweep_verdict_unknown_label`,
 `sweep_verdict_duplicate_label`, `sweep_verdict_missing`, `sweep_drop_would_not_shrink`,
-`not_in_pre_expiry_window`, `sweep_inventory_below_min`, `drop_unaffordable_pruned`,
+`sweep_inventory_below_min`, `drop_unaffordable_pruned`,
 `prefix_rewrite_not_repaid`, `econ_ask_not_repaid`.
 
 The last two are raised **exclusively**, and reading them as one number loses the finding:

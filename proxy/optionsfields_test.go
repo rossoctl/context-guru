@@ -118,8 +118,11 @@ func TestOptionsServesTheFieldContractTheSettingsPageDraws(t *testing.T) {
 	if sweep["min_tokens"] != components.FieldInt {
 		t.Error("the sweep's own floor is not on the page, and it is the knob that decides whether it fires")
 	}
-	if sweep["pre_expiry_seconds"] != components.FieldInt {
-		t.Error("the pre-expiry window is not on the page, and it is what decides WHEN the sweep fires")
+	if sweep["shadow"] != components.FieldBool {
+		t.Error("shadow mode is not on the page, and it is the only way to measure the sweep before it acts")
+	}
+	if _, present := sweep["pre_expiry_seconds"]; present {
+		t.Error("the retired pre-expiry window is still on the page, but the key is now ignored with a warning")
 	}
 	// THE KEYS THAT DO NOT APPLY MUST NOT BE THERE. The component refuses each of them with a named
 	// reason, so a field would put a control on the page whose only behaviour is to fail the save.
