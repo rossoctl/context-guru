@@ -378,6 +378,10 @@ function renderHeadline(host, rep) {
           + (t.unused_usd_high - t.unused_usd_low >= 0.005
             ? ' — between ' + usd(t.unused_usd_low) + ' and ' + usd(t.unused_usd_high)
               + ' (older requests did not record which tools they carried)' : '')
+          // Requests matched to no stored set are in neither figure; say how many.
+          + (rep.carried && rep.carried.requests > rep.carried.requests_mapped
+            ? ' — ' + num(rep.carried.requests - rep.carried.requests_mapped) + ' requests not matched to a declaration set, not counted'
+            : '')
         : 'no dollar: no model in this window has known rates'),
   ], 'headline'));
   host.appendChild(gauge(t));

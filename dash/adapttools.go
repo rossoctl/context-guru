@@ -414,6 +414,9 @@ func priceCarriedSession(out *carriedScan, byID []*carried, list []adaptToolsReq
 // carriedShards is how many rowid slices carriedSets reads at once.
 const carriedShards = 16
 
+// carriedSlot bounds carriedSets to one pass across the process, whatever the scope.
+var carriedSlot = make(chan struct{}, 1)
+
 // carriedSession is one in-scope session's declaration sets, by digest.
 type carriedSession struct {
 	key  string // tenant\x00session
@@ -427,6 +430,10 @@ type carriedSession struct {
 // set can straddle two), so keyOf is called concurrently and must be safe for that.
 func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
 	keyOf func(session, kind, name, server string) string) ([]carriedSession, []string, error) {
+	// One pass at a time, process-wide: each is carriedShards concurrent readers, and on a cold
+	// fleet view it already runs beside scanDecls' own.
+	carriedSlot <- struct{}{}
+	defer func() { <-carriedSlot }()
 	var lo, hi sql.NullInt64
 	if err := d.sql.QueryRowContext(d.readCtx(),
 		`SELECT MIN(rowid), MAX(rowid) FROM tool_declarations`).Scan(&lo, &hi); err != nil {
