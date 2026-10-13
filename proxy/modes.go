@@ -66,6 +66,11 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 		// cached transcript. nil on a non-Anthropic route or without an incoming client; a
 		// component decides for itself what nil means. See prefixask.go.
 		PrefixAsk: h.prefixAskerForAPI(r.provider, r.api, r.models),
+		// Whether the keep-alive can ping this thread, so a component that prepares something for a
+		// ping keeps nothing for a thread that will never get one. See keeper.canPing.
+		CanKeepAlive: func(session, thread string) bool {
+			return h.keeper.canPing(r.tn, session, r.provider)
+		},
 	})
 	added := time.Since(start)
 	if res.Body == nil {

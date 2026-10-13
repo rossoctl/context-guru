@@ -94,13 +94,14 @@ func TestSummarizerRoleForUsesTheHelper(t *testing.T) {
 	}
 }
 
-// CALLER: the sweep opens its prefix ask with the shared line, followed by the contract.
+// CALLER: the sweep opens its prefix ask with the shared line, followed by the contract. The ask is
+// made at the keep-alive ping (#404), so the test registers a request and asks as the keeper would.
 func TestSweepQuestionOpensWithTheSharedLine(t *testing.T) {
 	asker := &labelAsker{verdict: "keep", needed: "none"}
 	asker.cacheRead = 19595
 	e := newSweepSmall(t, "")
 	rep := &components.Report{}
-	if _, err := e.Offload(sweepReqStocked(), rep,
+	if _, err := askOffload(e, sweepReqStocked(), rep,
 		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
@@ -116,38 +117,9 @@ func TestSweepQuestionOpensWithTheSharedLine(t *testing.T) {
 	}
 }
 
-// CALLER: on a model that keeps only the last turn's thinking, a transcript with an earlier
-// thinking block must not get the prefix ask (#422). The sweep declines it and gates why; the same
-// request on a keep-all model still asks, so the test cannot pass by never asking.
-func TestSweepDeclinesThePrefixAskWhenItWouldStripThinking(t *testing.T) {
-	for _, tc := range []struct {
-		model string
-		asks  int64
-	}{
-		{"claude-haiku-4-5", 0},
-		{"claude-sonnet-5", 1},
-	} {
-		asker := &labelAsker{verdict: "keep", needed: "none"}
-		asker.cacheRead = 19595
-		e := newSweepSmall(t, "block_fallback: true\n")
-		req := sweepReqStocked()
-		req.Input = append([]bschemas.ChatMessage{req.Input[0], thinkingAsst()}, req.Input[1:]...)
-		c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
-		c.ModelName = tc.model
-		rep := &components.Report{}
-		if _, err := e.Offload(req, rep, c); err != nil {
-			t.Fatal(err)
-		}
-		if got := atomic.LoadInt64(&asker.calls); got != tc.asks {
-			t.Errorf("%s: %d prefix asks, want %d (gates: %v)", tc.model, got, tc.asks, rep.Gates)
-		}
-		gated := rep.Gates["sweep_thinking_would_be_stripped"] > 0
-		if gated != (tc.asks == 0) {
-			t.Errorf("%s: gate sweep_thinking_would_be_stripped present=%v, want %v (gates: %v)",
-				tc.model, gated, tc.asks == 0, rep.Gates)
-		}
-	}
-}
+// CALLER: the same rule (#422) in the sweep is applied at the keep-alive ping, where it is counted as
+// sweep_model_declined. TestModelsWhereTheQuestionBreaksTheCacheGetAPlainPing pins that for the
+// last-turn-only models and for the keep-all ones, so this file does not repeat it.
 
 func thinkingAsst() bschemas.ChatMessage {
 	r := "thought"

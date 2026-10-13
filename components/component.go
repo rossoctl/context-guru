@@ -611,6 +611,12 @@ type Ctx struct {
 	// previous turn's SENT body as the prefix, so the provider reads its prompt cache instead of
 	// being re-sent the transcript. See PrefixAsker for why that body and not the incoming one.
 	PrefixAsk PrefixAsker
+	// CanKeepAlive, when non-nil, reports whether the host's keep-alive can ping THIS request's thread:
+	// the policy is on, the kill switch is off, an audit sink exists. A component that prepares
+	// something for a ping (extract_llm_sweep's question) registers only when it returns true, so a
+	// thread that will never be pinged keeps nothing for it. nil => false: a host with no keep-alive
+	// leaves it unset and such a component keeps nothing.
+	CanKeepAlive func() bool
 	// CacheTTLMs is a known cache lifetime in milliseconds: Anthropic's explicit
 	// expiry tier or GPT-5.6+'s documented 30-minute minimum. The latter has
 	// CacheTTLMinimum set, because OpenAI may retain the entry longer. 0 means unknown.

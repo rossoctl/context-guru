@@ -92,6 +92,9 @@ type Opts struct {
 	// that wants one gets none and decides for itself; today's behaviour for every caller that does
 	// not set it.
 	PrefixAsk components.PrefixAsker
+	// CanKeepAlive, when set, tells a component whether the host's keep-alive can ping the thread of
+	// the session this request belongs to. See components.Ctx.CanKeepAlive. nil => it cannot.
+	CanKeepAlive func(session, thread string) bool
 	// Tracker, when set, owns the per-session cached-prefix boundary. Supplying it also
 	// removes the concurrent-turn race in the legacy read-then-deferred-write of prevLen.
 	// nil => the legacy store-backed path, unchanged for library callers and /compact.
@@ -120,6 +123,23 @@ func (o Opts) nowMs() int64 {
 		return time.Now().UnixMilli()
 	}
 	return o.Now.UnixMilli()
+}
+
+// canKeepAliveFor binds the host's keep-alive check to one request's session and thread. nil in, nil
+// out: a component then reads "cannot". A panic in the hook reads "cannot" as well (fail open: the
+// thread keeps nothing extra and is pinged as before).
+func canKeepAliveFor(f func(session, thread string) bool, session, thread string) func() bool {
+	if f == nil {
+		return nil
+	}
+	return func() (ok bool) {
+		defer func() {
+			if recover() != nil {
+				ok = false
+			}
+		}()
+		return f(session, thread)
+	}
 }
 
 // resolveThread runs ThreadOf once for the resolved session id. Fails open: a panic in the hook

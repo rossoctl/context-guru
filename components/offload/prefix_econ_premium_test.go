@@ -225,119 +225,18 @@ func TestCorefHorizonIsNotCredited(t *testing.T) {
 	}
 }
 
-// The premium is a CONFIG-level belief, so the config has to refuse the two ways of getting it wrong.
-func TestRewardPremiumConfigRefusesTheTwoMistakes(t *testing.T) {
-	for _, tc := range []struct {
-		name, yaml string
-		wantErr    bool
-		want       float64
-	}{
-		{"unset means unadjusted", "min_tokens: 100\n", false, 1},
-		{"one is explicit and allowed", "reward_premium: 1\n", false, 1},
-		{"twenty", "reward_premium: 20\n", false, 20},
-		{"below one is refused", "reward_premium: 0.5\n", true, 0},
-		{"a typo is refused", "reward_premium: 2000\n", true, 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cmp, err := newExtractSweep([]byte(tc.yaml))
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("accepted a reward_premium it must refuse")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("refused a valid config: %v", err)
-			}
-			if got := cmp.(*ExtractSweep).rewardPremium; got != tc.want {
-				t.Fatalf("rewardPremium = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 var _ = components.Ctx{}
 
 // ---- the counterfactual behind the two decline labels ----
 
-// THE LABEL HAS TO VARY THE ASK AND NOTHING ELSE. `askDeclined` is documented as "the same batch,
-// priced with a free ask, would have been authorised", and the counterfactual used to be
-// prefixRewritePays — which also resets the approval discount, the premium and the horizon credit. So
-// it answered a broader question, and under a premium above 1 it answers it uselessly: the re-pricing
-// happens at premium 1, nothing clears, and every decline lands on the REWRITE label regardless of
-// which cost actually refused.
-//
-// The case below is engineered to separate the two implementations: at premium 20 a free ask clears,
-// at premium 1 it does not. The old counterfactual therefore says "the rewrite refused" and the
-// correct one says "the ask refused".
-// Mutation that must fail this: replace the freeAsk pricing with prefixRewritePays.
-func TestAskDeclinedLabelHoldsThePremium(t *testing.T) {
-	const premium = 20.0
-	req := premiumReq(24, 400)
-
-	// THE FIXTURE IS SEARCHED FOR, NOT GUESSED. The case that separates the two implementations is
-	// narrow — the rewrite must repay at premium 20 and NOT at premium 1, while the ask pushes the
-	// total back over — and a hand-picked (saved, ask, window) landed outside it and t.Skip'd. A
-	// skipped test reads as a pass, which is how this assertion would have gone vacuous; the mutation
-	// run caught it. So the preconditions are evaluated with the REAL functions and a failure to find
-	// any qualifying combination is a FAILURE, never a skip.
-	type fixture struct {
-		saved, shallowest, window int
-		askUSD                    float64
-	}
-	var found *fixture
-	var tried int
-	for _, window := range []int{60_000, 80_000, 120_000, 200_000, 400_000} {
-		for _, shallowest := range []int{2, 4, 8, 12} {
-			for _, saved := range []int{400, 800, 1_600, 3_200, 6_400, 12_800} {
-				for _, askUSD := range []float64{0.05, 0.25, 1.00, 5.00, 25.00} {
-					tried++
-					c := econCtx(window)
-					full := sweepPricing(premium)
-					full.askUSD = askUSD
-					if _, _, ok := prefixRewritePaysWith(req, saved, shallowest, full, c); ok {
-						continue // the ask is not decisive here
-					}
-					free := full
-					free.askUSD = 0
-					if _, _, ok := prefixRewritePaysWith(req, saved, shallowest, free, c); !ok {
-						continue // the rewrite refuses on its own: not an ask decline
-					}
-					// The OLD counterfactual must disagree, or the fixture cannot tell them apart.
-					if _, _, ok := prefixRewritePays(req, saved, shallowest, c); ok {
-						continue
-					}
-					found = &fixture{saved, shallowest, window, askUSD}
-				}
-				if found != nil {
-					break
-				}
-			}
-			if found != nil {
-				break
-			}
-		}
-		if found != nil {
-			break
-		}
-	}
-	if found == nil {
-		t.Fatalf("no fixture in %d combinations separates the two counterfactuals; the search space "+
-			"needs widening rather than the assertion weakening", tried)
-	}
-	t.Logf("fixture: saved=%d shallowest=%d window=%d askUSD=%v",
-		found.saved, found.shallowest, found.window, found.askUSD)
-
-	c := econCtx(found.window)
-	e := &ExtractSweep{econTrigger: true, rewardPremium: premium, asks: &askLedger{}}
-	d := econDecision{offered: found.saved, approval: 1, askUSD: found.askUSD}
-	e.priceBatch(req, found.saved, found.shallowest, &d, c) // the SAME function econPays calls
-	if d.ok {
-		t.Fatalf("the component cleared where the arithmetic declines: need=%d have=%d", d.need, d.have)
-	}
-	if !d.askDeclined {
-		t.Fatalf("decline blamed on the rewrite (need=%d have=%d premium=%v) when a free ask at the "+
-			"SAME premium would have cleared: the counterfactual is resetting terms it must hold",
-			d.need, d.have, premium)
-	}
+// econCtx is a request-shaped context with a known window and the deployment's own rates left unset, so
+// agentRates falls back to the sonnet-class constants beside it. MaxCachedIdx -1 with CacheAware means
+// "cache-aware, boundary unknown", which is the case the two window conventions disagree about.
+func econCtx(window int) *components.Ctx {
+	return &components.Ctx{CtxWindow: window, CacheAware: true, MaxCachedIdx: -1}
 }
+
+// maxRewardPremium is the largest premium these tests exercise. The sweep's reward_premium setting that
+// bounded it is gone (#404); the premium term in prefix_econ.go remains until its other users are
+// reviewed.
+const maxRewardPremium = 100.0

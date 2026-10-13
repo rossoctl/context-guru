@@ -97,6 +97,13 @@ func newKeeperWith(h *Handler, o keepalive.Options) *keeper {
 		k.d = NewDispatcher(nil)
 	}
 	o.Dispatcher = k.d
+	if h != nil && h.waits != nil {
+		// The thread's open background tasks and teammate waits, for the wait cause the sweep's
+		// question stores with its held answer (#404, #453).
+		o.OpenTasks = func(tenantID, session, threadID string) (int, int) {
+			return h.waits.OpenCounts(tenantID, session, threadID)
+		}
+	}
 	if h != nil {
 		o.Spare = func(tenantID string, reserveFrac float64) (func(), error) {
 			return h.limiter.AcquireSpare(tenantID, reserveFrac)
@@ -376,11 +383,26 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
 			StopReason: u.StopReason},
-		UsageOK: usageOK, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
+		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
 	recorded = true
 	k.Keeper.Record(rec)
+}
+
+// canPing reports whether the keep-alive can ping a thread of this session on this tenancy: the kill
+// switch is off, an audit sink exists, the provider is not OpenAI (the sweep's question is Anthropic
+// only), and the resolved policy (account, manager strategy, session override) is on. It is the
+// record-time gate, evaluated before the request goes out and without a campaign decision (that one
+// needs the response), so a thread a learned campaign would turn on later gets a plain ping. That is
+// the safe direction: nothing extra is kept for it.
+func (k *keeper) canPing(tn *Tenancy, session string, provider bschemas.ModelProvider) bool {
+	if k == nil || tn == nil || k.h == nil || k.h.rec == nil || keepAliveDisabled() ||
+		provider == bschemas.OpenAI || session == "" {
+		return false
+	}
+	pol, _ := k.resolvePolicy(tn, session, provider, tn.Cache, predDecision{}, false)
+	return pol.On()
 }
 
 // resolvePolicy layers the manager strategy and the session override over the account's own

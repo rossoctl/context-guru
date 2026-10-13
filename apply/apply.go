@@ -698,6 +698,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		ExistingBreakpoints: bps.Total(),
 		Mode:                mode,
 		PrefixAsk:           o.PrefixAsk,
+		CanKeepAlive:        canKeepAliveFor(o.CanKeepAlive, sessionID, tr.Thread.ID),
 		CacheTTLMs:          ttlMs,
 		CacheTTLMinimum:     ttlMinimum,
 		// Set BEFORE the run, so cachesplit's own report is right at the source and every

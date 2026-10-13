@@ -206,6 +206,9 @@ func ClearKeepAliveCandidate(session string) {
 	keepAliveCandMu.Lock()
 	delete(keepAliveCand, session)
 	keepAliveCandMu.Unlock()
+	// The sweep's ping-time question registers per thread in the same lifecycle (extract_sweep_ping.go),
+	// so every path that stops tracking a thread clears it too.
+	clearSweepPing(session)
 }
 
 // ClearStaleKeepAliveCandidate drops session's registered substitute material ONLY IF it was
@@ -240,6 +243,7 @@ func ClearStaleKeepAliveCandidate(session string, requestStartedAt time.Time) {
 		delete(keepAliveCand, session)
 	}
 	keepAliveCandMu.Unlock()
+	clearStaleSweepPing(session, requestStartedAt)
 }
 
 // checkpointRefreshOpportunity reports whether an existing checkpoint, matched against candSpan
