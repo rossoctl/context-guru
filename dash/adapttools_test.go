@@ -249,12 +249,15 @@ func TestCarriedSetsStopsWaitingWhenCancelled(t *testing.T) {
 	db := openTestDB(t)
 	carriedSlot <- struct{}{} // another pass holds the slot
 	defer func() { <-carriedSlot }()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	start := time.Now()
 	_, _, err := db.WithContext(ctx).carriedSets(Filter{TenantAll: true},
 		map[string][]adaptToolsReq{"x": nil}, func(string, string, string, string) string { return "" })
-	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
-		t.Fatalf("err %v after %v; want the context error, promptly", err, time.Since(start))
+	if !errors.Is(err, context.Canceled) || time.Since(start) > time.Second {
+		t.Fatalf("err %v after %v; want context.Canceled within 1 s", err, time.Since(start))
+	}
+	if len(carriedSlot) != 1 {
+		t.Fatal("the cancelled request took or released the slot")
 	}
 }
