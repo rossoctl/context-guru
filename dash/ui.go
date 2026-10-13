@@ -22,28 +22,46 @@ import (
 // in the binary, so the dashboard works with the network unplugged. headroom's
 // Alpine/Tailwind/htmx script tags are exactly what we are not doing.
 //
-// Charts are hand-drawn SVG rather than a vendored chart library — with ONE exception, d3,
-// vendored for the Cleanup view's brush. The rule and the exception are both here because a
-// contradiction with no explanation is worse than either choice.
+// Charts are hand-drawn SVG rather than a vendored chart library — with ONE exception, Apache
+// ECharts, vendored for the Cleanup view's activity chart. The rule and the exception are both
+// here because a contradiction with no explanation is worse than either choice.
 //
 // THE RULE STILL HOLDS for everything else. SVG path/rect/text is a native browser feature, the
 // series on the other tabs are small, and a library would buy tooltips we can write in fifteen
 // lines. Every chart outside dash/ui/insights.js is still drawn by hand.
 //
 // THE EXCEPTION, and what changed. That reasoning was about tooltips. The Cleanup view needs a
-// RANGE BRUSH over a capability-by-time heatmap — handles you can grab, drag-to-move, keyboard
-// access, and a selection that survives leaving the plot. A hand-rolled version shipped first
-// (forty lines of pointer events) and the reported failure was "it's not clear how to select":
-// the gesture worked and the affordance did not, which is the part a library has actually solved.
+// capability-by-time HEATMAP with a RANGE CONTROL over it — handles you can grab, drag-to-move,
+// keyboard access, and a selection that survives leaving the plot, because the selection is what
+// every table on the page then describes. Two hand-built versions shipped before this one and
+// failed the same way: forty lines of pointer events first, then the same thing assembled from d3
+// primitives. Both times the reported failure was "it is not clear how to select" — the gesture
+// worked and the affordance did not, which is the part a library has actually solved.
+//
+// d3 was tried and removed. It is a toolkit, not a chart library: "use d3" still meant building a
+// heatmap out of rectangles from a scaleBand and approximating a range control with brushX, so the
+// affordance was still ours to get wrong, and it was still wrong. ECharts ships both as
+// configuration — series.type 'heatmap', dataZoom, visualMap, tooltips and axis pointers are the
+// library's job. insights.js is now a config object, which is the whole point of the dependency.
 //
 // What it costs, measured rather than assumed:
 //
-//   - d3 7.9.0, ISC, 273 KB raw and 90 KB gzipped, against a 300 KB gzipped asset baseline.
-//     app.js alone is 548 KB raw. The assets are already gzipped and content-hashed, so the
-//     marginal cost is one 90 KB download per deploy.
-//   - The per-module builds were tried first and do NOT work in a browser: d3-brush's UMD build
-//     calls require('d3-dispatch'), so the sixteen modules this needs (119 KB, tempting) cannot
-//     chain without a bundler. Verified. It is the full bundle or nothing.
+//   - ECharts 5.5.0, Apache-2.0, the FULL build: 1,005 KB raw and 326 KB gzipped, against a
+//     300 KB gzipped asset baseline. app.js alone is 548 KB raw. The assets are already gzipped
+//     and content-hashed, so the marginal cost is one 326 KB download per deploy.
+//
+//   - The full build and not the smaller "common" one, which was tried first and does NOT work:
+//     the heatmap series is not registered in it, and ECharts drops an unregistered series type
+//     SILENTLY — setOption throws nothing, getOption reports zero series, and the chart renders
+//     its axes with no cells. Measured in a browser rather than inferred: of heatmap, bar, line,
+//     scatter, custom, effectScatter and pictorialBar, the common build registers only bar, line
+//     and scatter. The "simple" build is smaller still and drops dataZoom as well.
+//
+//     Worth stating because it is a trap: the string "heatmap" DOES appear in the common build,
+//     in the visualMap and dataZoom plumbing, so grepping the file for it says yes while the
+//     series type is absent. The only check that means anything is calling setOption and reading
+//     the series count back.
+//
 //   - Vendored, not a CDN, because this page serves script-src 'self' and must keep working on
 //     an air-gapped install.
 //

@@ -211,34 +211,17 @@
 .ins-lane { font-family: var(--mono); font-size: var(--t-small); fill: var(--fg-muted); }
 .ins-tick { font-family: var(--mono); font-size: var(--t-micro); fill: var(--fg-faint); }
 
-/* ── the brush ────────────────────────────────────────────────────────────
- * d3 draws .selection and two .handle rects; these make them legible and grabbable.
- * The handles are the whole reason the library is here: the hand-rolled version had a working
- * gesture and no affordance, which reads as "it is not clear how to select".
+/* ── the chart host and the range banner ──────────────────────────────────
+ * ECharts draws into .ins-echart and owns everything inside it, including the dataZoom slider
+ * and its handles — the affordance two hand-built versions got wrong. Nothing here styles the
+ * chart's internals: those are set in the option object, from the stylesheet's own tokens, so
+ * dark mode re-steps against its own surface instead of being inverted at paint time.
+ *
+ * The height is set inline from the row count, because the y axis IS the capability list and a
+ * fixed height would either crop rows or leave a gap. Width comes from the panel: ECharts
+ * measures its container, which is why the chart is rendered after the node is in the document.
  */
-.ins-brush-g .overlay { cursor: crosshair; }
-.ins-brush-g .selection {
-  fill: var(--accent); fill-opacity: .13;
-  stroke: var(--accent); stroke-width: 1.5; stroke-opacity: .55;
-  shape-rendering: crispEdges;
-}
-/* A visible grab target at each edge, wider than it looks: 10px of hit area for a 3px mark, since
-   a handle you cannot land on is a handle that does not exist. */
-.ins-brush-g .handle {
-  fill: var(--accent); fill-opacity: .9;
-  width: 3px; rx: 1.5;
-}
-.ins-brush-g .handle--e, .ins-brush-g .handle--w { cursor: ew-resize; }
-.ins-brush-g:focus-visible .selection { stroke-opacity: 1; stroke-width: 2; }
-
-/* ── the brush and the range banner ────────────────────────────────────────
- * Drag across the chart to select a period; the band marks it while dragging.
- */
-.ins-heat { cursor: crosshair; touch-action: none; user-select: none; }
-/* The band is a WASH over the selection, not an outline: an outline reads as a frame around the
-   data, while a wash reads as "this part". Low enough that every cell under it stays legible,
-   because the reader is choosing by what they can see through it. */
-.ins-brush { fill: var(--accent); fill-opacity: .14; }
+.ins-echart { width: 100%; min-height: 240px; }
 
 .ins-banner {
   display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
