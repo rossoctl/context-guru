@@ -237,7 +237,7 @@ func TestCGNoProxy(t *testing.T) {
 // the user for permission to run it: a second gate behind the skill's own yes/no question.
 func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
 	body := readFileString(t, filepath.Join("skills", "adapt", "SKILL.md"))
-	if !strings.Contains(body, "allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py adapt:*)\n") {
+	if !strings.Contains(body, "allowed-tools: Bash(python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/cg.py\" adapt:*)\n") {
 		t.Error("adapt must pre-approve exactly `cg.py adapt:*`, not every cg.py command")
 	}
 	base := cgProxyStub(t, "cachestate_warm")
@@ -253,18 +253,21 @@ func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
 // `cg.py apply` and `cg.py revert` while that skill is active, and skip the harness's permission prompt.
 // Codex skills pre-approve nothing, and every write they run asks for escalation.
 func TestNoSkillPreApprovesAChange(t *testing.T) {
-	reads := map[string]bool{"adapt": true}
+	reads := map[string]bool{"adapt": true, "cache-campaign": true}
 	for _, c := range []string{"home", "savings", "cache", "waste", "session", "doctor"} {
 		reads[c] = true
 	}
 	allowed := regexp.MustCompile(`(?m)^allowed-tools:(.*)$`)
-	cgPat := regexp.MustCompile(`scripts/cg\.py([^)]*)\)`)
+	pattern := regexp.MustCompile(`Bash\(([^)]*)\)`)
+	cgPat := regexp.MustCompile(`scripts/cg\.py"?([^)]*)\)`)
+	call := regexp.MustCompile(`(?m)^python3 .*scripts/(cg|tv)\.py.*$`)
 	skills, _ := filepath.Glob(filepath.Join("skills", "*", "SKILL.md"))
 	if len(skills) < 10 {
 		t.Fatalf("found %d skills", len(skills))
 	}
 	for _, f := range skills {
-		m := allowed.FindStringSubmatch(readFileString(t, f))
+		body := readFileString(t, f)
+		m := allowed.FindStringSubmatch(body)
 		if m == nil {
 			continue
 		}
@@ -277,6 +280,23 @@ func TestNoSkillPreApprovesAChange(t *testing.T) {
 				if w == "apply" || w == "revert" {
 					t.Errorf("%s pre-approves a change: %q", f, "cg.py"+p[1])
 				}
+			}
+		}
+		// A pattern is a literal prefix of the command Claude Code is asked to run: the quotes count. Every read
+		// the skill runs must start with one of its own patterns, or the pre-approval silently never applies.
+		var prefixes []string
+		for _, p := range pattern.FindAllStringSubmatch(m[1], -1) {
+			prefixes = append(prefixes, strings.TrimSuffix(p[1], ":*"))
+		}
+		for _, c := range call.FindAllString(body, -1) {
+			matched := false
+			for _, p := range prefixes {
+				matched = matched || strings.HasPrefix(c, p)
+			}
+			change := strings.Contains(c, ".py\" $ARGUMENTS") // the skill's apply/revert line: must prompt
+			if matched == change {
+				t.Errorf("%s runs %q, which %s its own allowed-tools %v", f, c,
+					map[bool]string{true: "is a change but matches", false: "does not match"}[change], prefixes)
 			}
 		}
 	}

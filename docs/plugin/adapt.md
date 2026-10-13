@@ -19,6 +19,7 @@ Add `details` for each option's settings and per-option notes, and `--days N` to
 
 ```text
 Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
+  best vs default $12.40 [$3.10, $21.00]  ·  current vs default $0 [$0, $0]  ·  best vs current $12.40 [$3.10, $21.00]   (held-out, paired by session)
 
      option                            saved  spent     net
   ▸  5-min-ping  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░  current, default
@@ -106,6 +107,7 @@ The token after `apply` is the option and the report it came from. An option typ
 Not applied: the numbers changed since you saw them. Here they are again; nothing was written.
 
 Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
+  best vs default $12.40 [$3.10, $21.00]  ·  current vs default $0 [$0, $0]  ·  best vs current $12.40 [$3.10, $21.00]   (held-out, paired by session)
 
      option                            saved  spent     net
   ▸  5-min-ping  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░  current, default
@@ -181,7 +183,7 @@ The report:
 - Money is in US dollars at the prices the proxy is configured with. Every option is evaluated on the same window and the same sessions.
 - `saved_usd` is gross (versus no lever at all), `spend_usd` is what the option itself spends, `net_usd = saved_usd - spend_usd`.
 - `recommendation` is `null` when the current setting is already the best, or when there is too little data to say; `summary` then says which.
-- Optional extras the screen shows when present: `disagreement` (one line, shown under the summary), per-option `held_out` (`vs_default_usd`, `vs_default_ci95`, `builder_gate.pass`; shown under `details`), `unavailable` (an option that could not be evaluated: `net_usd` is `null`, never 0), and `calibration`.
+- Optional extras the screen shows when present: `relative` (paired differences such as `best_vs_default`, each `{usd, ci95}`, printed right under the summary), `disagreement` (one line, shown under the summary), per-option `held_out` (`vs_default_usd`, `vs_default_ci95`, `builder_gate.pass`; shown under `details`), `unavailable` (an option that could not be evaluated: `net_usd` is `null`, never 0), and `calibration`.
 - `items` is used by `tools` only. `sessions_helped`, `sessions_hurt`, `detail`, `per_month_usd` and `reason` are optional.
 
 The apply answer is `{"ok": true, "applied": "<id>", "previous": "<id>", "effective": "...", "note": "one line", "undo": {"option": "<id>", "basis": "<basis_id>"}}`. A body of `{"option": "revert"}` (no basis) undoes the last change made through this route; its answer has the same shape. `"force": true` is sent only after the user said yes a second time, when an earlier answer had `"ok": false` with `"force_available": true`. Errors are a non-2xx status with `{"error": "a sentence"}`: 400 for an unknown option, 409 when `basis` no longer matches the current report, 401 or 403 when the caller is not allowed to change the setting, 429 when too many reports or changes run at once. `basis` is required (400 without it). The command always sends one: for an option typed without one it reads the current report first and sends that report's `basis_id`. `undo` may carry its own `basis` (the report after the write), which the `Undo:` line includes. 501 means the proxy has no configuration it can write; its `error` says what to do instead.

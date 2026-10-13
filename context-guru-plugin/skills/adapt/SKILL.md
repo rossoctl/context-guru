@@ -2,7 +2,7 @@
 name: adapt
 description: Replay your own past sessions under each setting and recommend the cheapest - `cache` (keep-alive strategy), `compaction` (tail-compaction config) or `tools` (unused MCP servers, skills and tools). Shows current vs default vs best with saved, spent and net dollars, then asks before changing anything. Use when asked which setting would save money, to tune or adapt Context Guru to how they work, to apply a recommended change, or to undo one.
 argument-hint: "[cache|compaction|tools] [details] [--days N]  |  apply <kind> <option>@<basis>  |  revert <kind>"
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py adapt:*)
+allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" adapt:*)
 ---
 
 Only the read is pre-approved. A change is the separate command `cg.py apply` or `cg.py revert`, so Claude Code

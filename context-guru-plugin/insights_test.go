@@ -886,7 +886,7 @@ func TestInsightSkillsAreRedirects(t *testing.T) {
 			if !strings.Contains(body, "moved to `/context-guru:"+to+"`") {
 				t.Errorf("does not say it moved to /context-guru:%s", to)
 			}
-			if !regexp.MustCompile(`allowed-tools: Bash\(python3 \$\{CLAUDE_PLUGIN_ROOT\}/scripts/cg\.py [a-z]+:\*\)`).MatchString(body) {
+			if !regexp.MustCompile(`allowed-tools: Bash\(python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/cg\.py" [a-z]+:\*\)`).MatchString(body) {
 				t.Error("must be allowed to run only its own cg.py command")
 			}
 			if strings.Contains(body, "CLAUDE_PLUGIN_OPTION_") {

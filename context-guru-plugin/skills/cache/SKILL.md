@@ -2,7 +2,7 @@
 name: cache
 description: Is the prompt cache about to cost money: a countdown to expiry, what a miss would cost, recent misses by cause. Use when asked about the cache, TTL, idle time, misses, or why a turn was expensive.
 argument-hint: "[details]"
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py cache:*)
+allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" cache:*)
 ---
 
 Run this, then print its output exactly as it is in one code block. Add nothing before or after it.

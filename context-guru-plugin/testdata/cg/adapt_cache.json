@@ -58,5 +58,30 @@
  },
  "warnings": [
   "31 sessions ended inside the window; their last gap is censored."
- ]
+ ],
+ "relative": {
+  "best": "adaptive",
+  "best_vs_default": {
+   "usd": 12.4,
+   "ci95": [
+    3.1,
+    21.0
+   ]
+  },
+  "current_vs_default": {
+   "usd": 0,
+   "ci95": [
+    0,
+    0
+   ]
+  },
+  "best_vs_current": {
+   "usd": 12.4,
+   "ci95": [
+    3.1,
+    21.0
+   ]
+  },
+  "basis": "held-out, paired by session"
+ }
 }

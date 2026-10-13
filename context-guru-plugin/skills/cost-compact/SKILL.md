@@ -2,7 +2,7 @@
 name: cost-compact
 description: Moved to /context-guru:cache (whether a compact is worth it). Kept for one release so existing habits still work.
 argument-hint: "[details]"
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py cache:*)
+allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" cache:*)
 ---
 
 This command moved to `/context-guru:cache`. Tell the user that in one line, then run the new command:

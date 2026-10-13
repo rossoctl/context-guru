@@ -544,6 +544,11 @@ def apply_token(rep: dict) -> str:
 def render_adapt(rep: dict, o: dict) -> list[str]:
     kind, opts, rec = rep["kind"], rep.get("options") or [], rep.get("recommendation")
     L = [f"{kind.capitalize()}: {rep.get('summary', '')}"]
+    rel = rep.get("relative") or {}
+    pairs = [(k, rel[k]) for k in ("best_vs_default", "current_vs_default", "best_vs_current") if isinstance(rel.get(k), dict)]
+    if pairs:  # the paired differences come first: they are what the decision rests on
+        fmt = lambda v: f"{money(v.get('usd'))} [{', '.join(map(money, v.get('ci95') or [None, None]))}]"  # noqa: E731
+        L.append("  " + "  ·  ".join(f"{k.replace('_vs_', ' vs ')} {fmt(v)}" for k, v in pairs) + (f"   ({rel['basis']})" if rel.get("basis") else ""))
     if rep.get("disagreement"):
         L.append(f"  ! {rep['disagreement']}")
     if opts:
