@@ -113,7 +113,7 @@ def build(a):
     spec["evidence"] = dict(klass="counterfactual: closed-form replay on this scope's own history; oracle row = class oracle (hindsight, never deployable)",
                             split=f"model trained on rows ending before {int(cut)} (first 70% by response end), scored on the last 30%: {len(te)} decision points, {te.groupby(['tenant','session']).ngroups} sessions",
                             table=table_final, oracle_net_usd=round(orc, 2), paired_vs_baselines=paired, recommendation=rec, best_simple_baseline=best_simple["strategy"],
-                            engine=C.CALIBRATION, note="dollars are closed-form units calibrated to the pinned replay engine (evidence.engine); compare strategies, not absolute levels")
+                            engine=C.CALIBRATION, note="dollars are closed-form units calibrated to an offline replay engine (evidence.engine); compare strategies, not absolute levels")
     spec["caveats"] = ["history of ONE scope; a tenant with few returns gets a weak model, see recommendation", "returns not yet observed at the window end count as no-return (pings wasted), a conservative convention",
                        "closed-form replay: pings are assumed to land on schedule and not fail"]
     json.dump(spec, open(os.path.join(a.out, "spec.json"), "w"), indent=1)

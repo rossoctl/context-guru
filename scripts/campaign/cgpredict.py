@@ -140,7 +140,7 @@ def train_view(dp, horizon_ms):
 
 # ---------------------------------------------------------------- closed-form replay (engine-free)
 import os
-CALIBRATION = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine_calibration.json")))      # fitted to the pinned replay engine
+CALIBRATION = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine_calibration.json")))      # fitted to an offline replay engine
 CF_TC, CF_LATE, CF_PING_DUR = 296.5, 1.0, 2.0
 CF_SCALE, CF_PING = CALIBRATION["benefit_scale"], CALIBRATION["ping_scale"]
 
@@ -148,7 +148,7 @@ def plan_eval(dp, K, x=X_S, stop=None):
     """Per-row (net $, pings fired, rescued) of 'ping up to K[i] times, x s apart, stop at the first return'.
     benefit = CF_SCALE * stake_next if the plan keeps an entry alive that would have died; cost = CF_PING * fired * ping_cost.
     stop (optional, seconds after the response end, per row): a client SessionEnd that arrives then cancels every ping that would start later.
-    The two constants are the least-squares fit of this closed form to the pinned replay engine over 40 uniform plans (engine_calibration.json); dollars are calibrated closed-form units."""
+    The two constants are the least-squares fit of this closed form to an offline replay engine over 40 uniform plans (engine_calibration.json); dollars are calibrated closed-form units."""
     K = np.asarray(K); g = np.where(dp.compat.values == 1, dp.dt_next_s.values, np.inf)
     ga = np.fmin(g, np.where(np.isnan(dp.dt_next_any_s.values), np.inf, dp.dt_next_any_s.values)); u = (dp.t_end_ms.values - dp.ts_ms.values) / 1000.0
     stake = CF_SCALE * np.nan_to_num(dp.stake_next.values.astype(float)) * (dp.compat.values == 1); ok = dp.dp_ok.values == 1
