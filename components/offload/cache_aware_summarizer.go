@@ -213,15 +213,8 @@ type summarizerProfiles struct {
 // that can re-grant `system` to every unmatched model at once is the opposite of an allow-list,
 // so an unmatched model is now unconditionally `user`.
 func (p *summarizerProfiles) roleFor(modelID string) (role bschemas.ChatMessageRole, matched bool) {
-	id := strings.ToLower(strings.TrimSpace(modelID))
-	if id != "" {
-		for _, m := range p.SystemModels {
-			if m != "" && strings.Contains(id, strings.ToLower(strings.TrimSpace(m))) {
-				return bschemas.ChatMessageRoleSystem, true
-			}
-		}
-	}
-	return bschemas.ChatMessageRoleUser, false
+	a := resolveAsk(p.SystemModels, modelID, askViaMessages)
+	return a.Role, a.SystemAllowed
 }
 
 // thinkingLastTurnOnly reports whether modelID is one documented to keep only the LAST turn's
@@ -838,7 +831,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		// Overridden HERE rather than at `role`'s own resolution above, because that resolution
 		// also has to stay correct for a deployment that later gets a MessagesModel on the same
 		// config.
-		role = bschemas.ChatMessageRoleUser
+		role = resolveAsk(profiles.SystemModels, s.modelID, askViaPrefix).Role
 	}
 	instruction := bschemas.ChatMessage{Role: role}
 	schema.SetMessageText(&instruction, profiles.prompt(role))
