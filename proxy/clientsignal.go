@@ -153,6 +153,11 @@ func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
 		in.Session, in.Event = in.SessionID, in.HookEventName
 		in.Kind = map[string]string{"SessionEnd": in.Reason, "SessionStart": in.Source, "Notification": in.NotificationType}[in.Event]
 	}
+	// A SessionEnd reason a newer client adds still means the session ended; read it as "other"
+	// rather than refuse the event and silently lose the feature.
+	if in.Event == "SessionEnd" && !lifecycleKinds[in.Kind] {
+		in.Kind = "other"
+	}
 	scoped, ok := scopedClientID(tn.ID, strings.TrimSpace(in.Session))
 	if !ok || !lifecycleEvents[in.Event] || !lifecycleKinds[in.Kind] {
 		http.Error(w, "bad lifecycle event", http.StatusBadRequest)

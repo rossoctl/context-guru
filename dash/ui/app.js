@@ -6822,11 +6822,14 @@ const TOKEN_SLOT = 'cg_live_YOUR_TOKEN_HERE';
  *  A beginner cannot apply a diff. The env block is the routing; the hooks tell the
  *  keep-alive when a session ends (exit, Ctrl-C, closing the terminal, /clear, logout) or is
  *  compacted, so it stops pinging a cache nobody will read. The hook posts Claude Code's own
- *  hook payload; the service reads only its session id, event and reason, and a failed post
- *  changes nothing. */
+ *  hook payload (which also carries the working directory and transcript path); the service
+ *  reads only its session id, event and reason, and a failed post changes nothing. */
 function claudeSettings(base, tok) {
-  const signal = `curl -s -o /dev/null -m 2 -H \\"$ANTHROPIC_CUSTOM_HEADERS\\" `
-    + `-H 'Content-Type: application/json' --data-binary @- ${base}/signal || true`;
+  // The token never reaches an argv (/proc/<pid>/cmdline is world-readable): printf is a shell
+  // builtin, sed and curl get it on stdin as curl config lines, and the payload moves to fd 3.
+  const signal = `{ printf '%s\\\\n' \\"$ANTHROPIC_CUSTOM_HEADERS\\" | sed 's/^/header = \\"/; s/$/\\"/' `
+    + `| curl -s -o /dev/null -m 2 -K - -H 'Content-Type: application/json' `
+    + `--data-binary @/dev/fd/3 ${base}/signal; } 3<&0 || true`;
   const hook = (matcher) => [
     `      { ${matcher}"hooks": [ { "type": "command", "command": "${signal}", "timeout": 5 } ] }`,
   ];
@@ -6993,7 +6996,10 @@ function loadSetup() {
       el('pre', { class: 'code', 'data-testid': 'setup-claude' }, settings.join('\n')),
       el('p', { class: 'hint' },
         'Already have an "env" or "hooks" block? Add just these entries inside it. Leave '
-        + 'every other key alone.')),
+        + 'every other key alone. The hooks tell us when a session ends or is compacted, so '
+        + 'the cache keep-alive stops; they send Claude Code\'s hook event, which also holds '
+        + 'your working directory and transcript path (we read only the session id, event '
+        + 'and reason). Remove the "hooks" block to opt out.')),
     step(3, 'Keep your own key where it is',
       el('p', { class: 'hint' },
         'ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN stays yours: we forward it, so your '

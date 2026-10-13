@@ -208,6 +208,10 @@ func TestCodexSessionEndMatchesTheSessionIDHeader(t *testing.T) {
 		t.Fatalf("setup: %d live, want 1", k.Stats().Live)
 	}
 	end := clock.now()
+	k.signal("t2", "t1:codex-thread-1", "SessionEnd", "other", end) // another tenant naming the same scoped id
+	if k.Stats().Live != 1 {
+		t.Fatalf("another tenant's signal retired this tenant's aliased entry")
+	}
 	k.signal("t1", "t1:codex-thread-1", "SessionEnd", "other", end)
 	if k.Stats().Live != 0 {
 		t.Errorf("SessionEnd for the header id left %d entries held", k.Stats().Live)
@@ -235,12 +239,12 @@ func TestSignalValidation(t *testing.T) {
 		`{"session":"abc-1","event":"SessionStart","kind":"resume"}`:                                                     http.StatusNoContent,
 		`{"session":"abc-1","event":"SessionStart","kind":"bogus"}`:                                                      http.StatusBadRequest,
 		`{"session":"abc-1","event":"PreToolUse"}`:                                                                       http.StatusBadRequest,
-		`{"session":"abc-1","event":"SessionEnd","kind":"rm -rf"}`:                                                       http.StatusBadRequest,
+		`{"session":"abc-1","event":"SessionEnd","kind":"rm -rf"}`:                                                       http.StatusNoContent, // unknown reason -> "other"
 		`{"session":"abc-1","event":"SessionEnd","prompt":"x"}`:                                                          http.StatusNoContent, // read fields only
 		`{"session_id":"abc-1","hook_event_name":"SessionEnd","reason":"other","cwd":"/x","transcript_path":"/x.jsonl"}`: http.StatusNoContent,
 		`{"session_id":"abc-1","hook_event_name":"SessionStart","source":"compact","model":"m"}`:                         http.StatusNoContent,
 		`{"session_id":"abc-1","hook_event_name":"PreToolUse","tool_input":{}}`:                                          http.StatusBadRequest,
-		`{"session_id":"abc-1","hook_event_name":"SessionEnd","reason":"rm -rf"}`:                                        http.StatusBadRequest,
+		`{"session_id":"abc-1","hook_event_name":"SessionStart","source":"rm -rf"}`:                                      http.StatusBadRequest,
 		`{"session_id":"../x","hook_event_name":"SessionEnd"}`:                                                           http.StatusBadRequest,
 		`{"session":"../../x","event":"SessionEnd"}`:                                                                     http.StatusBadRequest,
 		`{"session":"","event":"SessionEnd"}`:                                                                            http.StatusBadRequest,

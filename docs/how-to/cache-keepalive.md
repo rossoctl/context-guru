@@ -156,8 +156,10 @@ expense.
 ## Client lifecycle signals
 
 The proxy cannot see a user leave: a session that ended looks like one that is idle. Clients
-that run hooks tell it, on `POST /signal`, with a content-free event (session id, event name,
-reason). This is on whenever the keep-alive runs; `CONTEXT_GURU_CLIENT_SIGNALS=off` turns it off.
+that run hooks tell it, on `POST /signal`, with an event that carries no conversation content.
+The plugins send only the session id, event name and reason. The hosted setup snippet posts
+Claude Code's own hook payload, which also holds the working directory and the transcript path;
+the service reads only the three fields and discards the rest unread. This is on whenever the keep-alive runs; `CONTEXT_GURU_CLIENT_SIGNALS=off` turns it off.
 
 | event | sent when | what the keep-alive does |
 |---|---|---|
