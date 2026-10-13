@@ -48,7 +48,7 @@
   "change": "cache strategy 5-min-ping -> adaptive",
   "net_delta_usd": 12.4,
   "effective": "restart",
-  "reason": "most idle gaps here end between 5 and 20 minutes"
+  "reason": "it had the highest net on your own sessions"
  },
  "warnings": [
   "31 sessions ended inside the window; their last gap is censored."

@@ -10,5 +10,5 @@ Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 
   ! 31 sessions ended inside the window; their last gap is censored.
 
 Change: cache strategy 5-min-ping -> adaptive (takes effect at the next proxy restart).
-Why: most idle gaps here end between 5 and 20 minutes
+Why: it had the highest net on your own sessions
 Apply it? Say yes, or run: /context-guru:adapt cache apply adaptive@3f9a1c
