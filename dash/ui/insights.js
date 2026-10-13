@@ -941,15 +941,31 @@ function insDrawChart(host, g, tl) {
   const rows = g.rows.map((r) => insShortName(r.name));
   const peak = Math.max(1, ...g.rows.flatMap((r) => r.calls));
 
-  /* Two series over one grid. Invocations carry the ramp; carriage-without-use is its own series
-   * in a neutral tint, because "you were paying for this and never reached for it" is the finding
-   * and the ramp's lightest step would read as a small amount of use — the opposite claim. */
+  /* FOUR SERIES OVER ONE GRID, split two ways: used vs merely carried, and inside the selection
+   * vs outside it.
+   *
+   * Invocations carry the ramp; carriage-without-use gets a neutral tint, because "you were
+   * paying for this and never reached for it" is the finding, and the ramp's lightest step would
+   * read as a small amount of use — the opposite claim.
+   *
+   * THE SELECTION IS ENCODED IN THE CELLS, NOT DRAWN OVER THEM. The first version shaded the
+   * excluded range with a markArea band, and it looked broken: a band runs to a category
+   * BOUNDARY, so it covered some cells and clipped others down the middle, and being attached to
+   * one series it left the carried-only cells unshaded entirely — "parts of chart painted gray
+   * but not all". Greying the excluded CELLS instead means the boundary is always a cell edge,
+   * every cell is treated the same way, and what the tables are counting is the part that still
+   * has colour. */
+  const sel = insSelectedCols(g, insSince, insUntil, tl);
+  const inSel = (ci) => !sel || (ci >= sel[0] && ci <= sel[1]);
   const used = [];
+  const usedOut = [];
   const idle = [];
+  const idleOut = [];
   g.rows.forEach((r, ri) => {
     r.calls.forEach((v, ci) => {
-      if (v > 0) used.push([ci, ri, v]);
-      else if (r.carried[ci] > 0) idle.push([ci, ri, 0]);
+      const live = inSel(ci);
+      if (v > 0) (live ? used : usedOut).push([ci, ri, v]);
+      else if (r.carried[ci] > 0) (live ? idle : idleOut).push([ci, ri, 0]);
     });
   });
 
@@ -1021,7 +1037,16 @@ function insDrawChart(host, g, tl) {
      * No `inside` zoom: dragging the plot would be a second, hidden way to change the range, and
      * on axis 0 it would rescale the thing we just finished pinning. */
     dataZoom: [
+      /* THE HANDLES SNAP TO WHOLE DAYS. A column is a day (or a rolled group of them) and a range
+       * is a count of columns, so "11.75" is not a selectable thing — ECharts coerces it to a
+       * category eventually, but mid-drag the handle sits between two days and the reader cannot
+       * tell which one they are about to get: "rule should be defined well 11-12-13, not allow
+       * to select 11.75". `minValueSpan: 1` keeps the span at least one whole column, and the
+       * handler below rounds both ends to an integer index before it computes a date, so the
+       * window can only ever start and end on a day boundary. The label shows that day's name,
+       * never a number, so what the handle reports is what the tables will count. */
       { type: 'slider', xAxisIndex: 1, filterMode: 'none', bottom: 4, height: 22,
+        minValueSpan: 1,
         borderColor: t.border, fillerColor: 'transparent',
         dataBackground: { lineStyle: { color: t.faint, opacity: 0.5 },
           areaStyle: { color: t.faint, opacity: 0.18 } },
@@ -1033,18 +1058,23 @@ function insDrawChart(host, g, tl) {
         labelFormatter: (i) => cols[Math.round(i)] || '' },
     ],
     series: [
+      /* Series 0 is the only one the visualMap paints, so only the SELECTED invocations get the
+       * ramp. Everything else is explicitly styled below. */
       { name: 'invocations', type: 'heatmap', data: used,
         itemStyle: { borderRadius: 2, borderWidth: 2, borderColor: 'transparent' },
-        emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } },
-        /* The EXCLUDED range, shaded — two bands rather than one over the selection. Marking
-         * what is in would put a wash over the cells the reader is trying to read; marking what
-         * is OUT leaves the selection at full contrast and still shows the rest, so nothing
-         * disappears and the axis positions stay comparable with the ruler below. */
-        markArea: { silent: true, animation: false,
-          itemStyle: { color: t.faint, opacity: 0.22 },
-          data: insBandData(g, insSince, insUntil, tl) } },
-      { name: 'carried, unused', type: 'heatmap', data: idle, silent: false,
+        emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
+      { name: 'carried, unused', type: 'heatmap', data: idle,
         itemStyle: { color: t.faint, opacity: 0.13, borderRadius: 2,
+          borderWidth: 2, borderColor: 'transparent' } },
+      /* OUTSIDE THE SELECTION. Grey, and still visible: the reader is deciding whether their
+       * range is the right one, which they cannot do if the rest of the history is blank. Kept
+       * darker than the carried-only tint so a real invocation outside the range still reads as
+       * an invocation — it is excluded from the count, not absent from the record. */
+      { name: 'outside the range', type: 'heatmap', data: usedOut,
+        itemStyle: { color: t.faint, opacity: 0.5, borderRadius: 2,
+          borderWidth: 2, borderColor: 'transparent' } },
+      { name: 'carried, outside the range', type: 'heatmap', data: idleOut,
+        itemStyle: { color: t.faint, opacity: 0.08, borderRadius: 2,
           borderWidth: 2, borderColor: 'transparent' } },
     ],
   });
@@ -1055,10 +1085,9 @@ function insDrawChart(host, g, tl) {
    * picked. Verified in a browser before and after. The window is the source of truth, so the
    * slider is restored FROM it rather than remembered separately.
    *
-   * As PERCENTAGES, because the slider is detached from the axis (xAxisIndex: []) and so has no
-   * axis to take startValue/endValue against: for a detached control those index into its own
-   * 0-100 track, which is not the column list. */
-  const sel = insSelectedCols(g, insSince, insUntil, tl);
+   * As PERCENTAGES rather than start/endValue, so the restore does not depend on how the hidden
+   * axis the slider drives resolves an index. `sel` is the same selection the cells were split
+   * on, computed once above, so the handles and the colouring cannot disagree. */
   if (sel) {
     const n = Math.max(1, g.cols.length - 1);
     insEChart.setOption({ dataZoom: [{
@@ -1092,7 +1121,13 @@ function insDrawChart(host, g, tl) {
       const whole = a === 0 && b === g.cols.length - 1;
       const nextSince = whole ? 0 : since;
       const nextUntil = whole ? 0 : until;
-      if (nextSince === insSince && nextUntil === insUntil) return;   // nothing moved
+      if (nextSince === insSince && nextUntil === insUntil) {
+        /* The window did not change, but the handle may be resting between two days. Snap it so
+         * the control shows the range it actually selected rather than where the mouse stopped. */
+        const n = Math.max(1, g.cols.length - 1);
+        insEChart.setOption({ dataZoom: [{ start: (a / n) * 100, end: (b / n) * 100 }] }, false);
+        return;
+      }
       insSince = nextSince;
       insUntil = nextUntil;
       loadInsights();
@@ -1120,17 +1155,6 @@ function insSelectedCols(g, since, until, tl) {
     if (until && g.cols[i].from <= until) { b = i; break; }
   }
   return [a, Math.max(a, b)];
-}
-
-/* insBandData shades the columns OUTSIDE the selection: up to two bands, one before and one
- * after. Empty when everything is selected, which is the resting state. */
-function insBandData(g, since, until, tl) {
-  const sel = insSelectedCols(g, since, until, tl);
-  if (!sel) return [];
-  const bands = [];
-  if (sel[0] > 0) bands.push([{ xAxis: 0 }, { xAxis: sel[0] - 1 }]);
-  if (sel[1] < g.cols.length - 1) bands.push([{ xAxis: sel[1] + 1 }, { xAxis: g.cols.length - 1 }]);
-  return bands;
 }
 
 function insColLabel(ms, width) {
