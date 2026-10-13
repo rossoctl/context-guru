@@ -736,7 +736,7 @@ compute_preset_and_strategy_notes() {
   # failure this plugin exists to avoid.
   PRESET_NOTE="$PRESET"
   # STRATEGY_NOTE is the NAME of the cache strategy in effect. Reported because a name is the only
-  # thing a user can say back to us: "put it back on 5-min-ping" has to be a sentence, not an
+  # thing a user can say back to us: "put it back on auto" has to be a sentence, not an
   # archaeology exercise over four tuning numbers. `none` is the absence of a config, so it is the
   # correct thing to report when there is no file - not "unknown", and not silence.
   #

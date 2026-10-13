@@ -123,6 +123,13 @@ type CacheConfig struct {
 	// KeepAliveMinPrefixTokens at 50,000 with K=2 gives +$125.12 on 908 pings — the same money
 	// for fewer requests, a shorter hold, and no extra exposure to the dead-entry mode.
 	KeepAliveMaxPings int `yaml:"keepalive_max_pings"`
+	// KeepAliveIdleSeconds1h and KeepAliveMaxPings1h are X and K for a session whose cache the
+	// provider BILLED at the one-hour tier (see proxy.kaEntry.ttl1h). The proxy reads the tier per
+	// session from the traffic, so one proxy serves a 1h subscription session and a 5m API or
+	// subagent session side by side: the 5m pair above runs the second, this pair runs the first.
+	// 0 = DefaultKeepAliveIdle1h (3540 = 59 min) and DefaultKeepAliveMaxPings1h (1).
+	KeepAliveIdleSeconds1h int `yaml:"keepalive_idle_seconds_1h"`
+	KeepAliveMaxPings1h    int `yaml:"keepalive_max_pings_1h"`
 	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
 	// DefaultKeepAliveMaxUSDPerPing.
 	//
@@ -189,6 +196,8 @@ const (
 	DefaultKeepAliveIdle          = 270
 	DefaultKeepAliveOpenAIIdle    = int(modelinfo.OpenAIDefaultKeepAliveIdle / time.Second)
 	DefaultKeepAliveMaxPings      = 2
+	DefaultKeepAliveIdle1h        = int(modelinfo.AnthropicDefaultKeepAliveIdle1h / time.Second)
+	DefaultKeepAliveMaxPings1h    = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
 	DefaultKeepAliveMaxUSDPerPing = 0.50
 	DefaultKeepAliveMinPrefix     = 80000
 	DefaultHeadTTLMinTokens       = 50000
@@ -206,6 +215,12 @@ func (c CacheConfig) Resolved() CacheConfig {
 	}
 	if c.KeepAliveMaxPings <= 0 {
 		c.KeepAliveMaxPings = DefaultKeepAliveMaxPings
+	}
+	if c.KeepAliveIdleSeconds1h <= 0 {
+		c.KeepAliveIdleSeconds1h = DefaultKeepAliveIdle1h
+	}
+	if c.KeepAliveMaxPings1h <= 0 {
+		c.KeepAliveMaxPings1h = DefaultKeepAliveMaxPings1h
 	}
 	if c.KeepAliveMaxUSDPerPing <= 0 {
 		c.KeepAliveMaxUSDPerPing = DefaultKeepAliveMaxUSDPerPing
@@ -227,7 +242,8 @@ func (c CacheConfig) Resolved() CacheConfig {
 func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
 		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 ||
-		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 {
+		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 ||
+		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
 	}
 	if c.KeepAliveIdleSeconds >= 300 {
@@ -235,6 +251,11 @@ func (c CacheConfig) validate() error {
 			"(the provider's 5-minute lifetime runs from the previous request's START, "+
 			"so a later ping re-creates the entry at 1.25x instead of refreshing it at 0.1x); got %d",
 			c.KeepAliveIdleSeconds)
+	}
+	if c.KeepAliveIdleSeconds1h >= 3600 {
+		return fmt.Errorf("config: cache: keepalive_idle_seconds_1h must be under 3600 "+
+			"(the one-hour lifetime runs from the previous request's START); got %d",
+			c.KeepAliveIdleSeconds1h)
 	}
 	if c.KeepAliveOpenAIIdleSeconds >= 1730 {
 		return fmt.Errorf("config: cache: keepalive_openai_idle_seconds must be under 1730 " +

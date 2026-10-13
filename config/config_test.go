@@ -173,6 +173,16 @@ cache:
 		got.HeadTTLMinTokens != DefaultHeadTTLMinTokens {
 		t.Errorf("Resolved() defaults = %+v", got)
 	}
+	if got := (CacheConfig{}).Resolved(); got.KeepAliveIdleSeconds1h != 59*60 || got.KeepAliveMaxPings1h != 1 {
+		t.Errorf("the 1-hour default is 1 ping at 59 minutes; Resolved() = %d s, %d pings",
+			got.KeepAliveIdleSeconds1h, got.KeepAliveMaxPings1h)
+	}
+	for _, idle := range []int{3600, 7200} {
+		if _, err := LoadBytes([]byte(fmt.Sprintf(
+			"preset: off\ncache:\n  keepalive: true\n  keepalive_idle_seconds_1h: %d\n", idle))); err == nil {
+			t.Errorf("keepalive_idle_seconds_1h: %d was accepted; it is at or past the 1-hour lifetime", idle)
+		}
+	}
 	if (CacheConfig{}).KeepAlive {
 		t.Error("the keep-alive is on by default; it spends the caller's money and must not be")
 	}

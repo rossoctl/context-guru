@@ -73,7 +73,7 @@ form has no explanation of what each choice does; use those for the two rows tha
 |---|---|---|
 | **Proxy port** | *(allocated)* | almost never — leave it empty and the install picks a free port for **this project** and records it. Set it only to pin a specific one. One project per port is deliberate: two projects sharing a proxy meant each project's session start killed and restarted it, losing the other's warm cache every time. The scan starts at 8787 and skips anything already listening |
 | **Preset** | `off` | you want context editing at all. `off` is passthrough: nothing dropped, no model called. `/context-guru:preset-picker` explains each one |
-| **Cache strategy** | `5-min-ping` | you don't want keep-alive pings that spend a little of your own quota to keep the cache warm. `none` turns it off. `/context-guru:cache-strategy-picker` explains whether it's paying for itself on `keepalive_net_usd` |
+| **Cache strategy** | `auto` | you don't want keep-alive pings that spend a little of your own quota to keep the cache warm. `none` turns it off. `/context-guru:cache-strategy-picker` explains whether it's paying for itself on `keepalive_net_usd` |
 | **Idle exit** | `24h` | rarely — floor is `max(2 × store.ttl_seconds, 1h)` |
 | **Upstream base URL** | *(empty)* | something else is already the gateway (a corporate proxy, a hosted-agent pod) — set it to whatever `ANTHROPIC_BASE_URL` already contains so context-guru chains behind it instead of replacing it |
 
@@ -116,7 +116,7 @@ base URL you already set elsewhere.
 ## What it does to your requests
 
 The default preset is `off` — nothing in the request body is touched. Under the default preset the
-only thing the plugin does is keep-alive: the `5-min-ping` cache strategy pings just under the
+only thing the plugin does is keep-alive: the `auto` cache strategy pings just under the
 provider's 5-minute cache TTL so an idle session's prompt cache doesn't expire between turns. That
 spends your own quota; `/context-guru:cache-strategy-picker` names it or turns it off (`none`).
 

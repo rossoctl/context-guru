@@ -2931,29 +2931,69 @@ func TestStrategyListIsTheAuthoritativeSetAndNamesItsDefault(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
-	if facts["default"] != "5-min-ping" {
-		t.Errorf("default strategy is %q, want 5-min-ping: this is the value the install writes, and "+
+	if facts["default"] != "auto" {
+		t.Errorf("default strategy is %q, want auto: this is the value the install writes, and "+
 			"plugin.json's cache_strategy default has to agree with it", facts["default"])
 	}
-	for _, k := range []string{"strategy_none", "strategy_5_min_ping", "strategy_1_hour_head"} {
+	for _, k := range []string{"strategy_none", "strategy_auto", "strategy_1_ping", "strategy_2_ping", "strategy_1_hour_head"} {
 		if facts[k] == "" {
 			t.Errorf("`strategy list` does not describe %s; a name the picker offers but list omits "+
 				"cannot be discovered", k)
 		}
 	}
 	// The honesty that matters most: exactly one strategy spends the caller's money, and it must be
-	// the one that says so. A `spends=false` on 5-min-ping would make the install's one-line
+	// the one that says so. A `spends=false` on auto would make the install's one-line
 	// disclosure wrong.
-	if facts["spends_5_min_ping"] != "true" {
-		t.Errorf("5-min-ping reports spends=%q; it pings on idle turns with the caller's own "+
+	if facts["spends_auto"] != "true" || facts["spends_1_ping"] != "true" || facts["spends_2_ping"] != "true" {
+		t.Errorf("auto reports spends=%q; it pings on idle turns with the caller's own "+
 			"credential, and the install's disclosure is generated from this",
-			facts["spends_5_min_ping"])
+			facts["spends_auto"])
 	}
 	for _, k := range []string{"spends_none", "spends_1_hour_head"} {
 		if facts[k] != "false" {
 			t.Errorf("%s reports spends=%q, want false: neither sends a ping, and claiming they "+
 				"spend would push users off the free strategies for no reason", k, facts[k])
 		}
+	}
+}
+
+// TestOldStrategyNamesStillResolve. `5-min-ping` was the default name before strategies were named by
+// ping count. An existing install, a saved plugin option and a marker already on disk all carry it.
+// Set stores the new name, show and sync read an old marker under the new name, and the written file
+// gains the 1-hour keys, so a pre-rename install picks up the per-TTL schedule on its next start.
+func TestOldStrategyNamesStillResolve(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	list, code := settingsIn(t, state, home, "strategy", "list")
+	if code != 0 || !strings.Contains(list["aliases"], "5-min-ping:auto") {
+		t.Fatalf("strategy list does not publish the alias map: %v", list)
+	}
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+		"--port", keepalivePort, "--preset", "off")
+	if code != 0 || facts["strategy"] != "auto" {
+		t.Fatalf("set --name 5-min-ping: exit %d, %v; want it stored as auto", code, facts)
+	}
+	body, err := os.ReadFile(facts["file"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"strategy=auto", "keepalive_idle_seconds: 270", "keepalive_max_pings: 2",
+		"keepalive_idle_seconds_1h: 3540", "keepalive_max_pings_1h: 1"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("auto config lacks %q:\n%s", want, body)
+		}
+	}
+	// A marker written by the old version.
+	old := strings.Replace(string(body), "strategy=auto", "strategy=5-min-ping", 1)
+	if err := os.WriteFile(facts["file"], []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	show, _ := settingsIn(t, state, home, "strategy", "show", "--port", keepalivePort)
+	if show["strategy"] != "auto" {
+		t.Errorf("show reports %q for an old 5-min-ping marker, want auto: %v", show["strategy"], show)
+	}
+	sync, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
+	if sync["result"] != "synced" || sync["strategy"] != "auto" {
+		t.Errorf("sync did not migrate the old marker: %v", sync)
 	}
 }
 
@@ -2965,11 +3005,11 @@ func TestStrategyListIsTheAuthoritativeSetAndNamesItsDefault(t *testing.T) {
 func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "codesmart")
+		"--name", "auto", "--port", keepalivePort, "--preset", "codesmart")
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
-	if facts["strategy"] != "5-min-ping" || facts["spends"] != "true" {
+	if facts["strategy"] != "auto" || facts["spends"] != "true" {
 		t.Errorf("set reported strategy=%q spends=%q; the caller reports both to the user",
 			facts["strategy"], facts["spends"])
 	}
@@ -2987,7 +3027,7 @@ func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 	}
 	// The name has to be IN the file, not merely in the command that wrote it: `strategy show` and
 	// start-proxy.sh both read it back, and the whole point of a name is that it survives.
-	if !strings.Contains(body, "strategy=5-min-ping") {
+	if !strings.Contains(body, "strategy=auto") {
 		t.Errorf("the strategy name was not recorded in the file, so nothing can report it back and "+
 			"the user cannot be told what to switch back to:\n%s", body)
 	}
@@ -3005,7 +3045,7 @@ func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 func TestStrategySplitIsTheAbsenceOfAConfig(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	if _, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "cache"); code != 0 {
+		"--name", "auto", "--port", keepalivePort, "--preset", "cache"); code != 0 {
 		t.Fatal("could not arm the strategy this test then switches away from")
 	}
 	facts, code := settingsIn(t, state, home, "strategy", "set",
@@ -3046,7 +3086,7 @@ func TestStrategyNeverTouchesAFileItDidNotWrite(t *testing.T) {
 			}
 			args := []string{"strategy", op, "--port", keepalivePort}
 			if op == "set" {
-				args = append(args, "--name", "5-min-ping", "--preset", "cache")
+				args = append(args, "--name", "auto", "--preset", "cache")
 			}
 			facts, code := settingsIn(t, state, home, args...)
 			if code != 2 {
@@ -3090,7 +3130,7 @@ func TestStrategyNeverTouchesAFileItDidNotWrite(t *testing.T) {
 func TestStrategySetRefusesAnEmptyPreset(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "")
+		"--name", "auto", "--port", keepalivePort, "--preset", "")
 	if code == 0 {
 		t.Errorf("an unresolved preset was accepted; that writes `preset:` empty, which turns "+
 			"compaction off while the strategy keeps paying for pings: %v", facts)
@@ -3128,7 +3168,7 @@ func TestStrategySetRefusesAnUnknownName(t *testing.T) {
 func TestStrategyRequiresThePortRatherThanDefaultingIt(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	for _, op := range [][]string{
-		{"strategy", "set", "--name", "5-min-ping", "--preset", "cache"},
+		{"strategy", "set", "--name", "auto", "--preset", "cache"},
 		{"strategy", "show"},
 		{"strategy", "clear"},
 	} {
@@ -3161,13 +3201,13 @@ func TestStrategyStillRecognisesTheOldKeepaliveMarker(t *testing.T) {
 			"it carries no name, and inventing one would misreport what is armed", shown["strategy"])
 	}
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "cache")
+		"--name", "auto", "--port", keepalivePort, "--preset", "cache")
 	if code != 0 {
 		t.Fatalf("a pre-rename config could not be re-set, which strands its owner: exit %d %v",
 			code, facts)
 	}
 	b, _ := os.ReadFile(strategyCfg(state))
-	if !strings.Contains(string(b), "strategy=5-min-ping") {
+	if !strings.Contains(string(b), "strategy=auto") {
 		t.Errorf("re-setting a pre-rename config did not give it a name:\n%s", b)
 	}
 }
@@ -3875,7 +3915,7 @@ func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 		{
 			// The NAME is the whole reason strategies are named: it is the only thing a user can say
 			// back to us. It has to survive from the file into the note, or "switch it back to
-			// 5-min-ping" is not a sentence anybody can act on.
+			// auto" is not a sentence anybody can act on.
 			//
 			// THE PRESET HALF OF THIS ROW FLIPPED, deliberately. It used to assert that the file's
 			// `preset: house` was reported and the plugin option was NOT — the file being the source
@@ -3916,11 +3956,11 @@ func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 		{
 			// A config we own but that predates named strategies, or one we do not own at all: report
 			// it as unnamed rather than guessing. Naming the DEFAULT here would be the worst answer —
-			// it would tell the user 5-min-ping is armed when the file might say anything.
+			// it would tell the user auto is armed when the file might say anything.
 			name:     "a config with no strategy marker is unnamed, never guessed",
 			writeCfg: true, cfg: "preset: house\ncache:\n  keepalive: true\n",
 			wantIn:    []string{"cache strategy unnamed"},
-			wantNotIn: []string{"cache strategy 5-min-ping", "cache strategy none"},
+			wantNotIn: []string{"cache strategy auto", "cache strategy none"},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -8130,7 +8170,7 @@ func TestRouteRefusesAnUnknownStrategyBeforeTouchingAnything(t *testing.T) {
 	}
 	// The names have to be in the refusal, or the model guesses — and the names differ in whether they
 	// spend the user's money, which is not a thing to guess at.
-	if !strings.Contains(facts["note"], "5-min-ping") {
+	if !strings.Contains(facts["note"], "auto") {
 		t.Errorf("the refusal does not list the real strategy names: note=%q", facts["note"])
 	}
 }
@@ -8349,7 +8389,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	const port = "9391"
 
-	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", port, "--preset", "cache"); code != 0 || facts["result"] != "set" {
 		t.Fatalf("arming a real strategy: exit %d %v", code, facts)
 	}
@@ -8376,7 +8416,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 
 	// And `clear`, invoked as itself, keeps its own vocabulary — the fix must not have flattened the
 	// distinction, only stopped one op borrowing the other's word.
-	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", port, "--preset", "cache"); code != 0 {
 		t.Fatalf("re-arming: exit %d %v", code, facts)
 	}
@@ -8533,7 +8573,7 @@ func stopFakeProxy2(t *testing.T, pidfile string) {
 
 // TestRouteDistinguishesAnUnreadableStrategyListFromABadName. An empty strategy list is not an unknown
 // name, and conflating them made the script state a false thing about the caller's input: with
-// settings.py unavailable, `--cache-strategy 5-min-ping` — the default, and obviously a strategy — came
+// settings.py unavailable, `--cache-strategy auto` — the default, and obviously a strategy — came
 // back as "is not a strategy. Known: unavailable", burying the one fault the user could act on inside a
 // sentence about a typo. The skill's next move is to ask which name they meant, about a correct name.
 func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
@@ -8559,7 +8599,7 @@ func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
 	}
 
 	cmd := exec.Command("bash", filepath.Join(broken, "install.sh"), "--route", "--plan",
-		"--cache-strategy", "5-min-ping")
+		"--cache-strategy", "auto")
 	cmd.Dir = proj
 	cmd.Env = routeEnv(t, home, t.TempDir(), "")
 	out, _ := cmd.CombinedOutput()
@@ -8567,7 +8607,7 @@ func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
 	body := string(out)
 
 	if strings.Contains(body, "is not a strategy") {
-		t.Errorf("`5-min-ping` is the default strategy and was reported as not being one, because the "+
+		t.Errorf("`auto` is the default strategy and was reported as not being one, because the "+
 			"LIST could not be read. A false statement about the caller's input:\n%s", body)
 	}
 	if !strings.Contains(body, "strategy_list_unavailable") {
@@ -8857,7 +8897,7 @@ func TestStrategySetSplitNeedsNoPreset(t *testing.T) {
 
 	// The control, because the guard is right where it applies: a strategy that DOES write a file must
 	// still refuse an empty preset, or compaction is silently off while pings keep being paid for.
-	facts, code = settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	facts, code = settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", keepalivePort, "--preset", "")
 	if code == 0 || facts["reason"] != "empty_preset" {
 		t.Errorf("the empty-preset guard was lost where it matters: exit %d %v", code, facts)
@@ -9677,7 +9717,7 @@ func TestUserScopeAdoptUnroutesTheProjectsItAdopts(t *testing.T) {
 	// survived adopt's teardown while .owner/.fingerprint were correctly removed, so the next
 	// project handed this port silently inherited a dead install's cache strategy.
 	otherKeepalive := filepath.Join(state, "context-guru", "keepalive-"+otherPort+".yaml")
-	if err := os.WriteFile(otherKeepalive, []byte("strategy=5-min-ping\n"), 0o600); err != nil {
+	if err := os.WriteFile(otherKeepalive, []byte("strategy=auto\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -11588,7 +11628,7 @@ func TestTheSpendClauseIsAnswerableByAPersonWhoDoesNotKnowWhatACacheStrategyIs(t
 		t.Fatalf("exit %d: %v", code, facts)
 	}
 	q := facts["consent_question"]
-	for _, want := range []string{spendClauseMarker, "5-min-ping", "keep-alive"} {
+	for _, want := range []string{spendClauseMarker, "auto", "keep-alive"} {
 		if !strings.Contains(q, want) {
 			t.Errorf("the question drops %q, so what it costs is no longer in it: %q", want, q)
 		}

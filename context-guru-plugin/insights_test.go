@@ -561,7 +561,7 @@ func TestEveryFindingCarriesEvidenceAFixAndABasis(t *testing.T) {
 		"/api/components": `{"components":[{"component":"extract_llm","runs":50,"acted_tokens":900,
 			"net_usd_with_estimate":-1.25,"saved_usd":0.75}]}`,
 	})
-	dir := insightsProject(t, map[string]any{"port": stub.port, "cache_strategy": "5-min-ping"})
+	dir := insightsProject(t, map[string]any{"port": stub.port, "cache_strategy": "auto"})
 	out, _ := runInsights(t, dir, nil, "all")
 	f := facts(out)
 	n := 0

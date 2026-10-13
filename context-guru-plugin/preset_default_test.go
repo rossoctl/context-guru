@@ -98,7 +98,7 @@ func TestStrategySyncMakesTheArmedFileAgreeWithTheOption(t *testing.T) {
 	port := "8787"
 
 	if facts, code := settingsIn(t, state, home,
-		"strategy", "set", "--name", "5-min-ping", "--port", port, "--preset", "off"); code != 0 {
+		"strategy", "set", "--name", "auto", "--port", port, "--preset", "off"); code != 0 {
 		t.Fatalf("arming failed: %v", facts)
 	}
 	cfg := filepath.Join(state, "keepalive-"+port+".yaml")
@@ -114,7 +114,7 @@ func TestStrategySyncMakesTheArmedFileAgreeWithTheOption(t *testing.T) {
 	if facts["result"] != "synced" {
 		t.Errorf("result=%q, want synced: %v", facts["result"], facts)
 	}
-	if facts["strategy"] != "5-min-ping" {
+	if facts["strategy"] != "auto" {
 		t.Errorf("sync changed the STRATEGY to %q. It may only change the preset — the strategy is "+
 			"the user's durable choice and re-rendering must preserve it", facts["strategy"])
 	}
@@ -146,12 +146,12 @@ func TestASyncedStrategyFileIsIdenticalToAFreshlySetOne(t *testing.T) {
 
 	// Path A: armed with `off`, then synced to `housellm`.
 	synced := t.TempDir()
-	settingsIn(t, synced, home, "strategy", "set", "--name", "5-min-ping", "--port", port, "--preset", "off")
+	settingsIn(t, synced, home, "strategy", "set", "--name", "auto", "--port", port, "--preset", "off")
 	settingsIn(t, synced, home, "strategy", "sync", "--port", port, "--preset", "housellm")
 
 	// Path B: armed with `housellm` directly.
 	fresh := t.TempDir()
-	settingsIn(t, fresh, home, "strategy", "set", "--name", "5-min-ping", "--port", port, "--preset", "housellm")
+	settingsIn(t, fresh, home, "strategy", "set", "--name", "auto", "--port", port, "--preset", "housellm")
 
 	a := readFileString(t, filepath.Join(synced, "keepalive-"+port+".yaml"))
 	b := readFileString(t, filepath.Join(fresh, "keepalive-"+port+".yaml"))
