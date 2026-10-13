@@ -128,3 +128,27 @@ func TestIncomingRefExpiresAfterTTL(t *testing.T) {
 		t.Fatalf("Do on an expired incoming ref: err = %v, want ErrNotHeld", err)
 	}
 }
+
+// A wipeReader is not *bytes.Reader, so http.NewRequest cannot auto-detect its length — Do must
+// set ContentLength itself, or the request goes out chunked. That matters beyond style: a minimal
+// HTTP server (reading a body by Content-Length and never dechunking — Cortex's own
+// scripts/dev/verify-contextguru-keepalive.sh fake upstream among them) sees an empty body.
+func TestDoSetsContentLengthRatherThanChunking(t *testing.T) {
+	var gotCL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCL = r.Header.Get("Content-Length")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+	d := NewDispatcher(nil)
+	ref := d.hold(keepalive.Key{}, upstream{base: srv.URL, path: "/v1/messages"}, http.Header{})
+	body := []byte(`{"model":"m","max_tokens":1,"stream":false}`)
+	if _, err := d.Do(context.Background(), dispatch.Request{Ref: ref, Method: http.MethodPost,
+		Path: "/v1/messages", Body: body}); err != nil {
+		t.Fatal(err)
+	}
+	if gotCL == "" {
+		t.Fatal("ping went out with no Content-Length header (chunked instead)")
+	}
+}
