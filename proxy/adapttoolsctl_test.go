@@ -196,3 +196,23 @@ func waitInventory(t *testing.T, rec *dash.Recorder, n int) {
 	}
 	t.Fatalf("inventory for %d sessions never landed", n)
 }
+
+// The last line of defence: whatever an offer holds, apply writes no built-in, no bare tool and
+// none of Context Guru's own entries.
+func TestAdaptToolsApplyRefusesOwnAndNonMCPNames(t *testing.T) {
+	h := localAdaptHandler(t, filepath.Join(t.TempDir(), "d.db.adapt.json"))
+	mux := h.Mux()
+	for _, bad := range []string{"mcp__plugin_context-guru_cg", "skill__context-guru:waste", "Read"} {
+		basis := h.API().OfferAdapt("tools", "", map[string]any{"x": []string{bad}})
+		r := httptest.NewRequest("POST", "/api/adapt/tools/apply", strings.NewReader(`{"option":"x","basis":"`+basis+`"}`))
+		r.RemoteAddr = "127.0.0.1:1"
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: apply = %d %s", bad, w.Code, w.Body)
+		}
+	}
+	if tf, _ := h.static.Load().Pipe.Find("toolfilter").(interface{ Removed() []string }); tf != nil && len(tf.Removed()) > 0 {
+		t.Fatalf("a refused name was written: %v", tf.Removed())
+	}
+}
