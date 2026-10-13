@@ -3295,6 +3295,10 @@ func TestPickerSkillOffersOnlyRealStrategies(t *testing.T) {
 		if strings.Contains(tok, ".") || strings.HasSuffix(tok, ".py") {
 			continue
 		}
+		// An alias is a real name the script accepts; the skill documents the old one.
+		if strings.Contains(","+strings.ReplaceAll(facts["aliases"], ":", ",")+",", ","+tok+",") {
+			continue
+		}
 		if !real[strings.ReplaceAll(tok, "-", "_")] && isStrategyShaped(tok) {
 			t.Errorf("the picker skill offers %q, which `strategy list` does not know: a model that "+
 				"passes it gets reason=unknown_strategy", tok)
