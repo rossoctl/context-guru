@@ -135,9 +135,13 @@ func TestPingThatRefreshesNothingFailsAndTripsTheRoute(t *testing.T) {
 	good := upstream{base: "http://api", path: "/v1/messages"}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 	r.Header.Set("Authorization", "Bearer sk-x")
-	hold := func(sess string, up upstream) {
+	hold := func(sess string, up upstream, tenant ...string) {
+		id := "t1"
+		if len(tenant) > 0 {
+			id = tenant[0]
+		}
 		for i := 0; i < 2; i++ {
-			k.record(&Tenancy{ID: "t1", Cache: pol}, sess, "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody), up, r,
+			k.record(&Tenancy{ID: id, Cache: pol}, sess, "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody), up, r,
 				bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
 		}
 	}
@@ -159,6 +163,11 @@ func TestPingThatRefreshesNothingFailsAndTripsTheRoute(t *testing.T) {
 	if k.Stats().Live != 0 {
 		t.Errorf("a tripped route still holds a new session")
 	}
+	hold("s-other-tenant", bad, "t2")
+	if k.Stats().Live != 1 {
+		t.Errorf("one tenant's failures switched off another tenant's keep-alive")
+	}
+	k.retireSession("t2", "s-other-tenant")
 	empty.Store(false)
 	hold("s-good", good)
 	k.sweep(clock.advance(290 * time.Second))

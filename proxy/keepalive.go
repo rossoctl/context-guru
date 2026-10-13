@@ -802,7 +802,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// Nothing to keep alive unless the provider honours explicit breakpoints and this
 	// request actually established or read an entry. A request that wrote and read nothing
 	// has no prefix worth a ping.
-	if !keepAliveEligible(provider, model, route) || k.routeIsTripped(kaRouteKey(up, model), k.now()) {
+	if !keepAliveEligible(provider, model, route) || k.routeIsTripped(kaRouteKey(tn.ID, up, model), k.now()) {
 		k.retire(key)
 		return
 	}
@@ -1085,7 +1085,7 @@ func (k *keeper) sweep(now time.Time) int {
 		if !e.due(now) || k.inflight[kaKey(e.tenant, e.session)] > 0 {
 			continue
 		}
-		if t, ok := k.routeTripped[kaRouteKey(e.up, e.model)]; ok && now.Before(t) {
+		if t, ok := k.routeTripped[kaRouteKey(e.tenant, e.up, e.model)]; ok && now.Before(t) {
 			e.stopped = true
 			continue
 		}
@@ -1246,14 +1246,14 @@ func (k *keeper) fire(j pingJob) {
 		// session stops, and the route trips after routeFailLimit in a row.
 		k.failed.Add(1)
 		k.markStopped(j.e)
-		k.routeFailed(kaRouteKey(j.up, j.e.model), k.now())
+		k.routeFailed(kaRouteKey(j.tenant, j.up, j.e.model), k.now())
 		slog.Warn("context-guru: cache keep-alive ping refreshed nothing; not pinging this session again",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status,
 			"cache_read", u.CacheRead, "output", u.Output)
 		k.record1(j, u, status, ms, start)
 		return
 	}
-	k.routeOK(kaRouteKey(j.up, j.e.model))
+	k.routeOK(kaRouteKey(j.tenant, j.up, j.e.model))
 	cost := k.record1(j, u, status, ms, start)
 	slog.Debug("context-guru: cache keep-alive ping",
 		"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "ping", j.ping,
@@ -1435,14 +1435,17 @@ func (k *keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 }
 
 // markStopped stops pinging one session, if it is still tracked.
-// routeFailLimit consecutive failed pings trip a route for routeTripFor. A route is the upstream
-// endpoint plus the model, so one model a gateway cannot cache does not stop another.
+// routeFailLimit consecutive failed pings trip a route for routeTripFor. A route is the tenant, the
+// upstream endpoint and the model: one model a gateway cannot cache does not stop another, and one
+// tenant's failures never switch off another tenant's keep-alive.
 const (
 	routeFailLimit = 3
 	routeTripFor   = time.Hour
 )
 
-func kaRouteKey(up upstream, model string) string { return up.base + up.path + "\x00" + model }
+func kaRouteKey(tenant string, up upstream, model string) string {
+	return tenant + "\x00" + up.base + up.path + "\x00" + model
+}
 
 // departed is arrive's other half: a real request of the session has finished.
 func (k *keeper) departed(tenant, session string) {
