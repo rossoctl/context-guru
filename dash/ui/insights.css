@@ -137,3 +137,30 @@
 @media (max-width: 620px) {
   .ins-cost { margin-left: 0; width: 100%; }
 }
+
+/* ── the per-item sparkline ────────────────────────────────────────────────
+ * Invocations against carriage, as one small picture per row.
+ *
+ * EMPHASIS, NOT TWO CATEGORIES. The calls are the subject and the carriage is context, so the
+ * bars take the accent and the wash takes the same recessive ink as the grid. Two saturated
+ * series of equal weight would invite the reader to compare them as peers, when the only question
+ * is whether the bars stopped while the wash carried on.
+ *
+ * The accent pair was validated rather than chosen by eye: --pal-blue against the chart surface
+ * clears the lightness band, the chroma floor, CVD separation and 3:1 contrast in both modes.
+ */
+.ins-spark-cell { width: 148px; padding-top: 10px; padding-bottom: 6px; }
+.ins-spark { display: block; overflow: visible; }
+/* The wash: ~10% of the ink, never a saturated block — its job is "there was weight here". */
+.ins-spark-carried { fill: var(--fg-faint); fill-opacity: .16; }
+/* The bars: the one thing allowed to be loud. */
+.ins-spark-call { fill: var(--pal-blue); }
+/* Hairline, solid, one step off the surface — so a row of all-zeros still reads as an axis
+   rather than as a chart that failed to load. */
+.ins-spark-axis { stroke: var(--border); stroke-width: 1; }
+/* A row the axis cannot reach says so in words. A flat line would read as "never used", which is
+   a different and much stronger claim than "before the window". */
+.ins-spark-none {
+  font-size: var(--t-micro); color: var(--fg-faint); font-style: normal;
+  letter-spacing: .04em; cursor: help;
+}

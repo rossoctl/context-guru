@@ -147,6 +147,15 @@ function insCommandText(plan) {
 
 function insItemTable(rows, opts) {
   const head = [el('th', {}), el('th', { text: 'item' }), el('th', { text: 'recommendation' })];
+  /* The shape sits beside the verdict it is evidence for, before the numbers. A reader scanning
+   * the column sees "bars then nothing" without reading a word. */
+  if (insDoc && insDoc.timeline) {
+    head.push(el('th', {
+      title: 'Invocations per day (bars) against how much the declaration was carried (shaded). ' +
+        'Bars that stop while the shading continues are the waste.',
+      text: 'used / carried',
+    }));
+  }
   if (opts.sessions) head.push(el('th', { text: 'per session' }));
   /* EVERY NUMBER IN THIS TABLE IS WASTE, and the headers have to say so. "cost" and "billed
    * reads" read as what the item cost in total, which is a different figure: a capability you
@@ -207,6 +216,24 @@ function insItemTable(rows, opts) {
     if (it.why) vd.appendChild(el('span', { class: 'ins-why', text: it.why }));
     cells.push(vd);
 
+    if (insDoc && insDoc.timeline) {
+      const series = insDoc.timeline.items[it.name];
+      const spark = series && insSparkline(series, insDoc.timeline, insSparkScale);
+      const cell = el('td', { class: 'ins-spark-cell' });
+      if (spark) {
+        cell.appendChild(spark);
+      } else {
+        /* No series is not an empty chart. It means this item was never declared on a day the
+         * axis covers — including a capability used BEFORE the oldest request, which the axis
+         * cannot reach. Said rather than drawn as a flat line, which would read as "never used". */
+        cell.appendChild(el('span', {
+          class: 'ins-spark-none', title: 'No day on this axis carried it. An invocation older ' +
+            'than the oldest request in the store falls outside the window the axis can show.',
+          text: 'outside the window',
+        }));
+      }
+      cells.push(cell);
+    }
     if (opts.sessions) cells.push(el('td', { text: insSessionCell(it) }));
     /* An invoked item has no figure in any of these three columns, and the dash needs a reason on
      * hover rather than reading as missing data: its tokens were the price of using it. That is
@@ -471,9 +498,14 @@ function insRenderReview(root) {
 
 /* ── the view ──────────────────────────────────────────────────────────────── */
 
+/* One scale for every row, recomputed per render. Module-level so insItemTable can reach it
+ * without threading it through four call sites. */
+let insSparkScale = { calls: 1, carried: 1 };
+
 function insRender() {
   const root = document.getElementById('insights-body');
   if (!root || !insDoc) return;
+  if (insDoc.timeline) insSparkScale = insSparkMax(insDoc.timeline);
   clear(root);
   /* The registry describes the DOM that is about to be discarded. */
   insBoxes = [];
@@ -676,7 +708,9 @@ async function loadInsights() {
   const root = document.getElementById('insights-body');
   if (root && !insDoc) root.appendChild(el('p', { class: 'empty', text: 'Loading…' }));
   try {
-    insDoc = await api('insights', insSessions ? { sessions: insSessions } : undefined);
+    const q = { timeline: 1 };
+    if (insSessions) q.sessions = insSessions;
+    insDoc = await api('insights', q);
   } catch (e) {
     if (root) {
       clear(root);
@@ -690,4 +724,97 @@ async function loadInsights() {
   const present = new Set(insDoc.items.map((i) => i.name));
   for (const n of Object.keys(insSel)) if (!present.has(n)) delete insSel[n];
   insRender();
+}
+
+/* ── the per-item timeline ──────────────────────────────────────────────────
+ *
+ * One sparkline per row: when the capability was INVOKED, against how much it was CARRIED.
+ *
+ * THE FORM IS EMPHASIS, NOT TWO CATEGORIES. The calls are the subject and the carriage is
+ * context, so the calls get the accent hue and the carriage a recessive wash of the same ink the
+ * grid uses. Two saturated series of equal weight would make the reader compare them as peers,
+ * when the question is only ever "did the bars stop while the wash carried on".
+ *
+ * WHY A PICTURE AT ALL. The `stale` verdict needs a fourteen-day threshold, and a threshold is a
+ * judgement this report cannot defend — a fortnight off work looks exactly like a capability
+ * finished with. The shape needs none: a block of bars at the left and a flat wash since IS the
+ * answer, and the reader decides what counts as abandoned for their own work.
+ *
+ * It is drawn as inline SVG with no library, which is this dashboard's existing convention — the
+ * series are tiny and the alternative is 45KB of vendored chart code for rectangles.
+ */
+
+const INS_SPARK_W = 132;
+const INS_SPARK_H = 26;
+
+/* Scale shared across EVERY row, so one item's bars are comparable with another's.
+ * Per-row scaling would make a skill invoked twice look as busy as Bash invoked nine hundred
+ * times, which is the single most misleading thing a row of sparklines can do. */
+function insSparkMax(tl) {
+  let calls = 1, carried = 1;
+  for (const k in tl.items) {
+    for (const v of tl.items[k].calls) if (v > calls) calls = v;
+    for (const v of tl.items[k].carried) if (v > carried) carried = v;
+  }
+  return { calls, carried };
+}
+
+function insSparkline(item, tl, scale) {
+  const n = tl.buckets.length;
+  if (!n) return null;
+  const svg = svgEl('svg', {
+    class: 'ins-spark', width: INS_SPARK_W, height: INS_SPARK_H,
+    viewBox: `0 0 ${INS_SPARK_W} ${INS_SPARK_H}`, role: 'img',
+  });
+  const slot = INS_SPARK_W / n;
+  /* Bars are capped and never fill their slot: the leftover is the 2px surface gap that separates
+   * neighbours, which is what makes adjacent days readable without a stroke around each bar. */
+  const w = Math.max(1.5, Math.min(10, slot - 2));
+
+  /* The carriage wash first, so the call bars sit on top of it. An area rather than a line,
+   * because its job is "there was weight here on these days" and a line implies a continuous
+   * quantity the store did not measure. */
+  let d = '';
+  for (let i = 0; i < n; i++) {
+    const v = item.carried[i] || 0;
+    const h = v ? Math.max(1, (v / scale.carried) * (INS_SPARK_H - 2)) : 0;
+    const x = i * slot, y = INS_SPARK_H - h;
+    d += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + (h ? y.toFixed(1) : INS_SPARK_H);
+    d += 'L' + (x + slot).toFixed(1) + ' ' + (h ? y.toFixed(1) : INS_SPARK_H);
+  }
+  if (d) {
+    svg.appendChild(svgEl('path', { class: 'ins-spark-carried', d: d + `L${INS_SPARK_W} ${INS_SPARK_H}L0 ${INS_SPARK_H}Z` }));
+  }
+
+  /* The call bars. 4px rounded data-end, square at the baseline — so the top reads as the value
+   * and the bottom as the axis it grows from. */
+  for (let i = 0; i < n; i++) {
+    const v = item.calls[i] || 0;
+    if (!v) continue;
+    const h = Math.max(2.5, (v / scale.calls) * (INS_SPARK_H - 3));
+    svg.appendChild(svgEl('rect', {
+      class: 'ins-spark-call', x: (i * slot + (slot - w) / 2).toFixed(1),
+      y: (INS_SPARK_H - h).toFixed(1), width: w.toFixed(1), height: h.toFixed(1),
+      rx: Math.min(2, w / 2).toFixed(1),
+    }));
+  }
+
+  /* A baseline, hairline and recessive, so a row of all-zeros still reads as an axis rather than
+   * as a missing chart. */
+  svg.appendChild(svgEl('line', {
+    class: 'ins-spark-axis', x1: 0, y1: INS_SPARK_H - 0.5,
+    x2: INS_SPARK_W, y2: INS_SPARK_H - 0.5,
+  }));
+
+  /* The accessible description, which is also the hover text: a chart nobody can read with a
+   * screen reader is a chart with no table view, and this row has no room for one. */
+  const used = item.calls.reduce((a, b) => a + b, 0);
+  const days = item.calls.filter((v) => v > 0).length;
+  const carriedDays = item.carried.filter((v) => v > 0).length;
+  const label = used
+    ? used + ' invocation(s) on ' + days + ' of ' + carriedDays + ' day(s) it was carried'
+    : 'never invoked in these ' + carriedDays + ' day(s) of being carried';
+  svg.appendChild(svgEl('title', {})).textContent = label;
+  svg.setAttribute('aria-label', label);
+  return svg;
 }
