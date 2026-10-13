@@ -1,9 +1,9 @@
 Tools: 9 declared items were never used; filtering the 6 with enough evidence would have saved $31.40.
 
-                                                                  saved  spent     net
-  ▸  Keep everything                                                 $0     $0      $0  ░░░░░░░░░░░░  current, default
-  ★  Filter the 6 unused items seen in 5+ sessions over 7+ days  $31.40     $0  $31.40  ███████████░  best
-     Filter all 9 unused items                                   $33.90     $0  $33.90  ████████████
+     option                                                                          saved  spent     net
+  ▸  keep               Keep everything                                                 $0     $0      $0  ░░░░░░░░░░░░  current, default
+  ★  remove-sufficient  Filter the 6 unused items seen in 5+ sessions over 7+ days  $31.40     $0  $31.40  ███████████░  best
+     remove-all         Filter all 9 unused items                                   $33.90     $0  $33.90  ████████████
 
   saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent.
   counterfactual · unused declarations priced on the requests that carried them · 2026-09-08..2026-10-08 · 64 sessions, 5,210 requests

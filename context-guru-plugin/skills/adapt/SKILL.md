@@ -42,7 +42,7 @@ the output is printed. The question is the `Change:` line plus the first line's 
 - If the user asks for another row of the table (there may be no `Apply it?` line at all), ask the yes/no question
   for that row first. Its question states the screen's own verdict, not a figure of yours: quote the first line's
   verdict and say the proxy does not recommend it, e.g. "The proxy does not recommend by_hour (it says: keep the
-  default). Apply it anyway?". On yes run `cg.py apply <kind> <option>@<basis>` with the report's basis.
+  default). Apply it anyway?". On yes run `cg.py` + the words after `/context-guru:adapt` on the `Any row` line (or the `Apply it?` line), with `<option>` replaced by the row's id from the `option` column.
 
 If the apply output ends with an `Apply anyway ... --force` line, the proxy's own check failed and nothing went
 live. Ask a SECOND, separate yes/no question that says so ("The go-live check failed. Switch it on anyway?").

@@ -1,12 +1,14 @@
 Compaction: No change clears the bar: the best option is $0.40 ahead on the requests that could be replayed, under the 0.5% needed to recommend it.
   ! The replay covers 14% of requests; on the rest the options were not compared.
 
-                             saved  spent    net
-  ▸  Your current pipeline   $9.60  $0.20  $9.40  ████████████  current
-     The default pipeline    $9.10  $0.20  $8.90  ███████████░  default
-  ☆  Add searchfold         $10.00  $0.20  $9.80  ████████████  highest net, not recommended
-     No compaction              $0     $0     $0  ░░░░░░░░░░░░
+     option                           saved  spent    net
+  ▸  current  Your current pipeline   $9.60  $0.20  $9.40  ████████████  current
+     default  The default pipeline    $9.10  $0.20  $8.90  ███████████░  default
+  ☆  c1       Add searchfold         $10.00  $0.20  $9.80  ████████████  highest net, not recommended
+     none     No compaction              $0     $0     $0  ░░░░░░░░░░░░
 
   saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent.
   counterfactual · the compaction components replayed on stored requests · 2026-09-08..2026-10-08 · 40 sessions, 3,100 requests
   ! 12 sessions are in cold storage and were not read.
+
+Any row, after a yes: /context-guru:adapt apply compaction <option>@a1b2c3d4

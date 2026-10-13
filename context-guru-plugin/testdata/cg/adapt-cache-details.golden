@@ -1,10 +1,10 @@
 Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
 
-                             saved  spent     net
-  ▸  Ping every 5 min       $40.10  $9.00  $31.10  █████████░░░  current, default
-  ★  Adaptive keep-alive    $51.20  $7.70  $43.50  ████████████  best
-     No pings                   $0     $0      $0  ░░░░░░░░░░░░
-     Adaptive, per segment                    n/a
+     option                              saved  spent     net
+  ▸  5-min-ping  Ping every 5 min       $40.10  $9.00  $31.10  █████████░░░  current, default
+  ★  adaptive    Adaptive keep-alive    $51.20  $7.70  $43.50  ████████████  best
+     none        No pings                   $0     $0      $0  ░░░░░░░░░░░░
+     by-segment  Adaptive, per segment                    n/a
 
   saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent.
   counterfactual · replay of past sessions · 2026-09-08..2026-10-08 · 412 sessions, 18,301 requests

@@ -24,7 +24,8 @@ If the user typed `apply <kind> <token>` or `revert <kind>` themselves, that is 
 If an output is a single `Run this instead ...` line, run that command the same way.
 
 If the user asks for a row the screen does not recommend, ask first and quote the screen's own verdict
-("The proxy does not recommend it: <first line>. Apply it anyway?"); never invent a dollar figure.
+("The proxy does not recommend it: <first line>. Apply it anyway?"); never invent a dollar figure. On yes run the
+words after `/context-guru:adapt` on the `Any row` line, with `<option>` replaced by the row's id from the `option` column.
 If an apply output ends with an `Apply anyway ... --force` line, the proxy's own check failed and nothing went live:
 ask a SECOND, separate yes/no question that says so, and only on yes run the words after `/context-guru:adapt` on
 that line, `--force` included. Never add `--force` yourself. To undo, run the `Undo:` line the same way.

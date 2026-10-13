@@ -191,6 +191,8 @@ func TestCGGoldens(t *testing.T) {
 		{"adapt-apply-async", warm, []string{"apply", "tools", "remove-sufficient@8c21e0d4"}, 0},
 		{"adapt-apply-under-adapt", warm, []string{"adapt", "cache", "apply", "adaptive@3f9a1c"}, 1},
 		{"adapt-revert-under-adapt", warm, []string{"adapt", "revert", "compaction"}, 1},
+		{"adapt-revert-kind-first", warm, []string{"compaction", "revert"}, 1},
+		{"adapt-revert-under-cache", warm, []string{"cache", "revert"}, 1},
 		{"adapt-compaction", warm, []string{"adapt", "compaction"}, 0},
 		{"adapt-compaction-details", warm, []string{"adapt", "compaction", "details"}, 0},
 		{"adapt-revert", warm, []string{"revert", "compaction"}, 0},

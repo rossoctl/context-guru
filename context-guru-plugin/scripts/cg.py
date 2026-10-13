@@ -548,7 +548,7 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
         L.append(f"  ! {rep['disagreement']}")
     if opts:
         top = max([x.get("net_usd") or 0 for x in opts] + [0.01])
-        rows = [["", "", "saved", "spent", "net", "", ""]]
+        rows = [["", "option", "", "saved", "spent", "net", "", ""]]
         # Not evaluated (too little history, say): missing is not zero, so never a $0 row. Listed by name
         # under details; otherwise counted in one line.
         skipped = [x for x in opts if x.get("net_usd") is None]
@@ -565,11 +565,11 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
                 mark, tags = "☆", [t if t != "best" else "highest net, not recommended" for t in tags]
             if x.get("net_usd") is None:
                 if o["details"] or tags:
-                    rows.append([mark, x.get("label") or x["id"], "", "", "n/a", "", ", ".join(tags)])
+                    rows.append([mark, x["id"], x.get("label") or "", "", "", "n/a", "", ", ".join(tags)])
                 continue
-            rows.append([mark, x.get("label") or x["id"], money(x.get("saved_usd")), money(x.get("spend_usd")),
+            rows.append([mark, x["id"], x.get("label") if x.get("label") != x["id"] else "", money(x.get("saved_usd")), money(x.get("spend_usd")),
                          dollars(x["net_usd"]), cells(max(x["net_usd"], 0) / top), ", ".join(tags)])
-        L += [""] + C.table(rows, "llrrrll")
+        L += [""] + C.table(rows, "lllrrrll")
         if hidden:
             L.append(f"  {len(hidden)} more option{'s' * (len(hidden) > 1)}, net {dollars(min(x['net_usd'] for x in hidden))} to "
                      f"{dollars(max(x['net_usd'] for x in hidden))} (details)")
@@ -601,6 +601,8 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
                       f"{money(cal.get('replay_ping_usd_mean'))} in the replay."]
         L += [""] + [f"  {x.get('label') or x['id']}: {x.get('unavailable') or x['detail']}" + (f" (helped {x['sessions_helped']}, hurt {x['sessions_hurt']} sessions)"
                      if "sessions_helped" in x else "") for x in opts if x.get("detail") or x.get("unavailable")]
+    if opts and rep.get("basis_id") and not rec:  # nothing recommended, but a row may still be chosen by name
+        L += ["", f"Any row, after a yes: /context-guru:adapt apply {kind} <option>@{rep['basis_id']}"]
     if rec:
         eff = EFFECT.get(rec.get("effective"))
         L += ["", f"Change: {rec['change']}" + (f" ({eff})." if eff else "")]
@@ -741,7 +743,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fixture", help="read a captured bundle of API responses from this file (tests, demos)")
     ap.add_argument("--now", help="pretend it is this ISO time")
     ap.add_argument("--tz-offset-min", type=int)
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] in ("compaction", "tools"):  # `cg.py tools`, `cg.py compaction revert`: the adapt words, read side
+        argv = ["adapt", *argv]
     a = ap.parse_args(argv)
+    if a.cmd not in ("adapt", *WRITES) and set(a.args) & set(WRITES):  # `cg.py cache revert`: say the one command that does it
+        a.args, a.cmd = [a.cmd, *a.args], "adapt"
     opts: dict = {"days": a.days, "session": a.session, "json": a.json, "force": a.force,
                   "details": "details" in a.args, "args": [x for x in a.args if x != "details"],
                   "tz_min": a.tz_offset_min if a.tz_offset_min is not None else time.localtime().tm_gmtoff // 60}

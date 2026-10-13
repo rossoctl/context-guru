@@ -20,10 +20,10 @@ Add `details` for each option's settings and per-option notes, and `--days N` to
 ```text
 Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
 
-                           saved  spent     net
-  ▸  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░  current, default
-  ★  Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████  best
-     No pings                 $0     $0      $0  ░░░░░░░░░░░░
+     option                            saved  spent     net
+  ▸  5-min-ping  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░  current, default
+  ★  adaptive    Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████  best
+     none        No pings                 $0     $0      $0  ░░░░░░░░░░░░
   1 more not evaluated: too little history: 13 held-out sessions (need 20)
 
   saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent.
@@ -58,10 +58,10 @@ For `tools`, the unused items are listed below the table:
 ```text
 Tools: 9 declared items were never used; filtering the 6 with enough evidence would have saved $31.40.
 
-                                                                  saved  spent     net
-  ▸  Keep everything                                                 $0     $0      $0  ░░░░░░░░░░░░  current, default
-  ★  Filter the 6 unused items seen in 5+ sessions over 7+ days  $31.40     $0  $31.40  ███████████░  best
-     Filter all 9 unused items                                   $33.90     $0  $33.90  ████████████
+     option                                                                          saved  spent     net
+  ▸  keep               Keep everything                                                 $0     $0      $0  ░░░░░░░░░░░░  current, default
+  ★  remove-sufficient  Filter the 6 unused items seen in 5+ sessions over 7+ days  $31.40     $0  $31.40  ███████████░  best
+     remove-all         Filter all 9 unused items                                   $33.90     $0  $33.90  ████████████
 
   saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent.
   counterfactual · unused declarations priced on the requests that carried them · 2026-09-08..2026-10-08 · 64 sessions, 5,210 requests
@@ -86,7 +86,7 @@ Nothing is changed by looking. When there is a recommendation, the screen ends w
 
 - In Claude Code, the command asks you one yes/no question. It applies the change only if you answer **Yes, apply it**; anything else leaves your settings as they were.
 - Run directly in a terminal, `cg.py adapt cache` asks `Apply this change? [y/N]`; the default is No.
-- To apply by hand, run the command on the `Apply it?` line. In a terminal the same write is `cg.py apply <kind> <token>`, and an undo is `cg.py revert <kind>`. They are separate commands from the read so that Claude Code asks permission for them as well: the read is pre-approved, a change never is. The words may come in either order (`apply tools X` or `apply X tools`); a change typed under `adapt` (`adapt compaction revert`) is not run, and the command prints the exact one to run instead.
+- To apply by hand, run the command on the `Apply it?` line. In a terminal the same write is `cg.py apply <kind> <token>`, and an undo is `cg.py revert <kind>`. They are separate commands from the read so that Claude Code asks permission for them as well: the read is pre-approved, a change never is. The words may come in either order (`apply tools X` or `apply X tools`); a change typed under `adapt` or with the kind first (`adapt compaction revert`, `compaction revert`) is not run, and the command prints the exact one to run instead.
 
 ```text
 Applied: cache strategy set to adaptive (takes effect at the next proxy restart).
@@ -107,10 +107,10 @@ Not applied: the numbers changed since you saw them. Here they are again; nothin
 
 Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
 
-                           saved  spent     net
-  ▸  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░  current, default
-  ★  Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████  best
-     No pings                 $0     $0      $0  ░░░░░░░░░░░░
+     option                            saved  spent     net
+  ▸  5-min-ping  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░  current, default
+  ★  adaptive    Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████  best
+     none        No pings                 $0     $0      $0  ░░░░░░░░░░░░
   1 more not evaluated: too little history: 13 held-out sessions (need 20)
 
   saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent.
