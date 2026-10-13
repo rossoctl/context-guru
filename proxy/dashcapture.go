@@ -566,6 +566,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// are whatever the caller wrote, up to and including something they pasted — so it rides
 	// the same captureContent decision as the transcript, and the writer stores NULL for it
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
+	if c.inv != nil {
+		e.DeclDigest = c.inv.Digest
+	}
 	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent)
 	c.rec.Record(e)
 }
