@@ -861,7 +861,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	prefix := u.CacheRead + u.CacheWrite
 	hdr, auth := pingHeaders(r, up)
 	cred := credKey(tn.ID, auth)
-	if k.credIsDead(cred, k.now()) {
+	if k.credIsDead(cred, model, k.now()) {
 		k.retire(key)
 		k.skipped.Add(1)
 		return
@@ -1133,7 +1133,7 @@ func (k *keeper) sweep(now time.Time) int {
 			e.stopped = true
 			continue
 		}
-		if t, ok := k.credDead[e.cred]; ok && now.Before(t) {
+		if k.credIsDeadLocked(e.cred, e.model, now) {
 			e.stopped = true
 			continue
 		}
@@ -1279,10 +1279,16 @@ func (k *keeper) fire(j pingJob) {
 	}
 	// FAILED, the credential: a 401/403 is about the key, not the route. Every session pinging with
 	// that key stops, and only those: one user's revoked key leaves the account's teammates alone.
+	// A 401 is the key itself, on every model; a 403 is often a per-model permission or a gateway
+	// policy / budget refusal, so it blocks only this (credential, model).
 	if (status == http.StatusUnauthorized || status == http.StatusForbidden) && j.e.cred != "" {
 		k.failed.Add(1)
 		k.markStopped(j.e)
-		k.markCredDead(j.e.cred, k.now())
+		dead := j.e.cred
+		if status == http.StatusForbidden {
+			dead = credModelKey(j.e.cred, j.e.model)
+		}
+		k.markCredDead(dead, k.now())
 		slog.Debug("context-guru: cache keep-alive ping refused the credential; not pinging with it again",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
 		return
@@ -1547,6 +1553,8 @@ func credKey(tenant string, auth []maskedHeader) string {
 	return tenant + "\x00" + hex.EncodeToString(m.Sum(nil)[:16])
 }
 
+// ponytail: credDead has no count cap; expired marks are pruned on every new mark, and a mark needs a
+// refused ping, so it grows with refused keys per hour. Cap it if a tenant can mint keys in bulk.
 func (k *keeper) markCredDead(cred string, now time.Time) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -1561,14 +1569,26 @@ func (k *keeper) markCredDead(cred string, now time.Time) {
 	k.credDead[cred] = now.Add(routeTripFor)
 }
 
-func (k *keeper) credIsDead(cred string, now time.Time) bool {
+func credModelKey(cred, model string) string { return cred + "\x00" + model }
+
+// credIsDead: the credential is blocked on every model (a 401) or on this one (a 403). A Bedrock
+// SigV4 Authorization differs on every request, so its mark only ever matches its own entry: harmless.
+func (k *keeper) credIsDead(cred, model string, now time.Time) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.credIsDeadLocked(cred, model, now)
+}
+
+func (k *keeper) credIsDeadLocked(cred, model string, now time.Time) bool {
 	if cred == "" {
 		return false
 	}
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	t, ok := k.credDead[cred]
-	return ok && now.Before(t)
+	for _, key := range [2]string{cred, credModelKey(cred, model)} {
+		if t, ok := k.credDead[key]; ok && now.Before(t) {
+			return true
+		}
+	}
+	return false
 }
 
 // departed is arrive's other half: a real request of the session has finished.

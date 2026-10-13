@@ -492,3 +492,57 @@ func TestCredentialIDsDoNotCollideOnAMask(t *testing.T) {
 		t.Errorf("the look-alike key got %d pings, want 1: it is a different credential", sentB.Load())
 	}
 }
+
+// A 403 blocks the key on that model only (a per-model permission or a gateway policy); a 401
+// blocks the key on every model. forget clears the marks.
+func TestA403BlocksTheKeyOnThatModelOnly(t *testing.T) {
+	for _, c := range []struct {
+		status       int
+		otherPings   int32
+		otherHeldNew bool
+	}{{http.StatusForbidden, 1, true}, {http.StatusUnauthorized, 0, false}} {
+		k, _, clock := testKeeper(t, Limits{})
+		var sentB atomic.Int32
+		k.send = func(j pingJob, _ []byte) (Usage, int, error) {
+			if j.e.model == "aws/claude-sonnet-5" {
+				return Usage{}, c.status, nil
+			}
+			sentB.Add(1)
+			return Usage{CacheRead: 48576, Output: 1}, http.StatusOK, nil
+		}
+		pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
+		bodyB := strings.Replace(kaBody, "aws/claude-sonnet-5", "aws/claude-opus-5", 1)
+		hold := func(sess, body string) {
+			r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+			r.Header.Set("x-api-key", "sk-shared-key")
+			for i := 0; i < 2; i++ {
+				k.record(&Tenancy{ID: "t1", Cache: pol}, sess, "", clock.now().Add(time.Duration(i)*time.Second), []byte(body),
+					upstream{base: "http://litellm", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages", http.StatusOK,
+					Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+			}
+		}
+		hold("a", kaBody)
+		k.sweep(clock.advance(290 * time.Second)) // model A refused
+		time.Sleep(50 * time.Millisecond)
+		hold("b", bodyB)
+		k.sweep(clock.advance(290 * time.Second))
+		time.Sleep(50 * time.Millisecond)
+		if sentB.Load() != c.otherPings {
+			t.Errorf("%d on model A: the same key on model B got %d pings, want %d", c.status, sentB.Load(), c.otherPings)
+		}
+		hold("b2", bodyB)
+		hold("a2", kaBody)
+		k.mu.Lock()
+		_, bHeld := k.live[kaThreadKey("t1", "b2", "")]
+		_, aHeld := k.live[kaThreadKey("t1", "a2", "")]
+		k.mu.Unlock()
+		if bHeld != c.otherHeldNew || aHeld {
+			t.Errorf("%d: new hold on model B %v (want %v), on model A %v (want false)", c.status, bHeld, c.otherHeldNew, aHeld)
+		}
+		k.forget("t1")
+		hold("a3", kaBody)
+		if k.Stats().Live != 1 {
+			t.Errorf("%d: forget left the credential blocked", c.status)
+		}
+	}
+}
