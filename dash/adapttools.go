@@ -642,6 +642,14 @@ func (a *API) adaptTools(w http.ResponseWriter, r *http.Request) {
 		a.unauthorized(w)
 		return
 	}
+	// One running report per account and a few an hour: each reads the account's whole history.
+	done, ok := a.adaptReportSlot("tools|" + f.Tenant)
+	if !ok {
+		httpErr(w, http.StatusTooManyRequests, "a report is already running for this account, or "+
+			"too many were asked for in the last hour; wait and try again")
+		return
+	}
+	defer done()
 	doc, err := a.db(r).AdaptTools(f, a.priceFn(r), a.toolFilterStateForScope(f))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())

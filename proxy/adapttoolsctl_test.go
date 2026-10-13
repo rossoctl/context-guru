@@ -30,13 +30,8 @@ func TestAdaptToolsApplyWritesOnlyTheReportedNames(t *testing.T) {
 	f.rec.RecordInventory(id, "s1", time.Now().UnixMilli(), &dash.Inventory{Digest: "d1", UseFingerprint: 1,
 		Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}, false)
 	var rep map[string]any
-	for i := 0; i < 100; i++ {
-		_, rep = f.do(t, "GET", "/api/adapt/tools", "", jar)
-		if items, _ := rep["items"].([]any); len(items) == 1 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	waitInventory(t, f.rec, 1)
+	_, rep = f.do(t, "GET", "/api/adapt/tools", "", jar)
 	basis, _ := rep["basis_id"].(string)
 	if basis == "" {
 		t.Fatalf("no report: %v", rep)
@@ -99,14 +94,8 @@ func TestAdaptToolsApplyOnALocalProxy(t *testing.T) {
 	h.rec.RecordInventory("", "s1", time.Now().UnixMilli(), &dash.Inventory{Digest: "d1", UseFingerprint: 1,
 		Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}, false)
 	var rep map[string]any
-	for i := 0; i < 100; i++ {
-		rep = map[string]any{}
-		json.Unmarshal(do("GET", "/api/adapt/tools", "", "127.0.0.1:1").Body.Bytes(), &rep)
-		if items, _ := rep["items"].([]any); len(items) == 1 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	waitInventory(t, h.rec, 1)
+	json.Unmarshal(do("GET", "/api/adapt/tools", "", "127.0.0.1:1").Body.Bytes(), &rep)
 	body := `{"option":"remove-unused","basis":"` + rep["basis_id"].(string) + `"}`
 	if w := do("POST", "/api/adapt/tools/apply", body, "198.51.100.7:1"); w.Code != http.StatusForbidden {
 		t.Fatalf("off-loopback apply = %d %s", w.Code, w.Body)
@@ -149,4 +138,61 @@ func TestAdaptToolsNoteAndPipelineOrder(t *testing.T) {
 	if got := strings.Join(withComponent([]string{"format"}, "toolfilter", true), ","); got != "format,toolfilter" {
 		t.Errorf("absent component not added: %s", got)
 	}
+}
+
+// A manager's dashboard default is the whole service, but a removal list is one account's: the
+// report and the apply act on the manager's own traffic, never another tenant's.
+func TestAdaptToolsApplyForAManagerWritesOnlyTheirOwn(t *testing.T) {
+	f := newMgrFixture(t)
+	f.h.API().SetToolFilterState(f.h.DashToolFilter())
+	w, _ := f.signUp(t, "boss@ibm.com", "m")
+	boss := w.Result().Cookies()
+	w, _ = f.signUp(t, "user@ibm.com", "u")
+	user := w.Result().Cookies()
+	idOf := func(jar []*http.Cookie) string {
+		_, me := f.do(t, "GET", "/api/me", "", jar)
+		tn, _ := me["tenant"].(map[string]any)
+		id, _ := tn["id"].(string)
+		return id
+	}
+	for _, s := range []struct{ id, server string }{{idOf(boss), "mine"}, {idOf(user), "other"}} {
+		e := &dash.Event{TS: time.Now().UnixMilli(), TenantID: s.id, SessionID: "s-" + s.server, Model: "m",
+			CacheRead: 1000, TokenAccounting: dash.AccountingComplete, DeclDigest: "d"}
+		e.Tools = 1
+		f.rec.Record(e)
+		f.rec.RecordInventory(s.id, "s-"+s.server, time.Now().UnixMilli(), &dash.Inventory{Digest: "d", UseFingerprint: 1,
+			Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__" + s.server + "__q", Server: s.server, Tokens: 100}}}, false)
+	}
+	var rep map[string]any
+	waitInventory(t, f.rec, 2)
+	_, rep = f.do(t, "GET", "/api/adapt/tools", "", boss)
+	if items, _ := rep["items"].([]any); len(items) != 1 {
+		t.Fatalf("a manager's default report is not their own: %v", rep["items"])
+	}
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused","basis":"`+rep["basis_id"].(string)+`"}`, boss); w.Code != 200 {
+		t.Fatalf("apply = %d %s", w.Code, w.Body)
+	}
+	_, me := f.do(t, "GET", "/api/me", "", boss)
+	tn, _ := me["tenant"].(map[string]any)
+	doc, _ := tn["effective_config_yaml"].(string)
+	if !strings.Contains(doc, "mcp__mine") || strings.Contains(doc, "mcp__other") {
+		t.Fatalf("manager apply wrote the wrong account's names: %q", doc)
+	}
+}
+
+// waitInventory waits for the inventory writer (its own queue and flush cadence) to have stored
+// n sessions, reading the database directly: the report route is rate-limited per account.
+func waitInventory(t *testing.T, rec *dash.Recorder, n int) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		doc, err := rec.DB().AdaptTools(dash.Filter{TenantAll: true}, nil, dash.ToolFilterState{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if doc.Coverage.SessionsCaptured >= n {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("inventory for %d sessions never landed", n)
 }
