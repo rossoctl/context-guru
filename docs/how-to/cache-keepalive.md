@@ -204,6 +204,9 @@ of a request:
 | **Audit row per ping** | every use is a durable `requests` row: tenant, session, timestamp, cost, read-or-wrote. |
 | **Purged on revocation** | account deletion, token revocation and disablement release held material immediately. |
 | **Kill switch** | `CONTEXT_GURU_KEEPALIVE=off` stops *retention*, not merely pinging. |
+| **No ping mid-request** | a due ping waits while any request of the same session is in flight (a long `/compact` reads, then replaces, the prefix itself). |
+| **Failed pings stop** | a ping that reads nothing from the cache (a 200 with no usage, or a relayed 5xx) is counted `failed` and stops that session; 3 in a row switch the keep-alive off for that upstream and model for an hour (`route_trips` in `/stats`). |
+| **Claude models only on the Anthropic route** | another model family served on that route (an OpenAI or Azure model behind LiteLLM) has no explicit cache control, so it is never held. |
 
 Bounded on volume too: 128 MiB across at most 512 sessions, and a single body over 8 MiB is not
 held. The masking is obfuscation at rest against an accidental-capture read (a crash dump, a

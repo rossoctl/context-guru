@@ -494,6 +494,15 @@ type keeper struct {
 	// ended is when a client lifecycle signal last ended each session, keyed like live. See clientsignal.go.
 	ended         map[string]map[string]time.Time
 	signalApplied atomic.Int64
+	// inflight counts each session's real requests between arrive and record, keyed like
+	// kaKey. A due ping waits while it is non-zero: the session is active, and a long call
+	// (a /compact) is often about to replace the very prefix the ping would refresh.
+	inflight map[string]int
+	// routeFails counts consecutive failed pings per upstream route (kaRouteKey); at
+	// routeFailLimit the route is tripped until routeTripped[key] and holds nothing.
+	routeFails   map[string]int
+	routeTripped map[string]time.Time
+	routeTrips   atomic.Int64
 	// strategies is the manager-controlled keep-alive strategy list, loaded from the
 	// tenant registry at process start and replaced wholesale on every write through the
 	// control routes — never mutated in place, the same pattern k.overrides itself
@@ -686,6 +695,10 @@ func (k *keeper) arrive(tenant, session, threadID string) (pings int, refreshed 
 	key := kaThreadKey(tenant, session, threadID)
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.inflight == nil {
+		k.inflight = map[string]int{}
+	}
+	k.inflight[kaKey(tenant, session)]++
 	e, ok := k.live[key]
 	if !ok {
 		return 0, 0, ""
@@ -706,6 +719,9 @@ func (k *keeper) arrive(tenant, session, threadID string) (pings int, refreshed 
 func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool) {
+	if k != nil && tn != nil && session != "" {
+		k.departed(tn.ID, session)
+	}
 	if k == nil || tn == nil || session == "" || len(body) == 0 || startedAt.IsZero() {
 		return
 	}
@@ -786,7 +802,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// Nothing to keep alive unless the provider honours explicit breakpoints and this
 	// request actually established or read an entry. A request that wrote and read nothing
 	// has no prefix worth a ping.
-	if !keepAliveEligible(provider, model, route) {
+	if !keepAliveEligible(provider, model, route) || k.routeIsTripped(kaRouteKey(up, model), k.now()) {
 		k.retire(key)
 		return
 	}
@@ -1066,7 +1082,11 @@ func (k *keeper) sweep(now time.Time) int {
 			}
 			continue
 		}
-		if !e.due(now) {
+		if !e.due(now) || k.inflight[kaKey(e.tenant, e.session)] > 0 {
+			continue
+		}
+		if t, ok := k.routeTripped[kaRouteKey(e.up, e.model)]; ok && now.Before(t) {
+			e.stopped = true
 			continue
 		}
 		// Everything the ping needs, taken HERE under the lock. Nothing outside it may read the
@@ -1219,7 +1239,21 @@ func (k *keeper) fire(j pingJob) {
 			"refreshing one; not pinging this session again",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
 			"cache_write", u.CacheWrite, "cache_read", u.CacheRead)
+	} else if status/100 != 2 || u.CacheRead == 0 {
+		// A ping that read nothing refreshed nothing: an upstream error relayed as a status we
+		// let through, or a 200 with no usage (a translating gateway in front of a provider
+		// that refused it). Booked (the row is the audit trail), but counted FAILED, this
+		// session stops, and the route trips after routeFailLimit in a row.
+		k.failed.Add(1)
+		k.markStopped(j.e)
+		k.routeFailed(kaRouteKey(j.up, j.e.model), k.now())
+		slog.Warn("context-guru: cache keep-alive ping refreshed nothing; not pinging this session again",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status,
+			"cache_read", u.CacheRead, "output", u.Output)
+		k.record1(j, u, status, ms, start)
+		return
 	}
+	k.routeOK(kaRouteKey(j.up, j.e.model))
 	cost := k.record1(j, u, status, ms, start)
 	slog.Debug("context-guru: cache keep-alive ping",
 		"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "ping", j.ping,
@@ -1401,6 +1435,56 @@ func (k *keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 }
 
 // markStopped stops pinging one session, if it is still tracked.
+// routeFailLimit consecutive failed pings trip a route for routeTripFor. A route is the upstream
+// endpoint plus the model, so one model a gateway cannot cache does not stop another.
+const (
+	routeFailLimit = 3
+	routeTripFor   = time.Hour
+)
+
+func kaRouteKey(up upstream, model string) string { return up.base + up.path + "\x00" + model }
+
+// departed is arrive's other half: a real request of the session has finished.
+func (k *keeper) departed(tenant, session string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	key := kaKey(tenant, session)
+	if k.inflight[key] <= 1 {
+		delete(k.inflight, key)
+		return
+	}
+	k.inflight[key]--
+}
+
+func (k *keeper) routeFailed(key string, now time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.routeFails == nil {
+		k.routeFails, k.routeTripped = map[string]int{}, map[string]time.Time{}
+	}
+	k.routeFails[key]++
+	if k.routeFails[key] >= routeFailLimit {
+		delete(k.routeFails, key)
+		k.routeTripped[key] = now.Add(routeTripFor)
+		k.routeTrips.Add(1)
+		slog.Warn("context-guru: cache keep-alive off for a route whose pings keep refreshing nothing",
+			"failures", routeFailLimit, "for", routeTripFor.String())
+	}
+}
+
+func (k *keeper) routeOK(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.routeFails, key)
+}
+
+func (k *keeper) routeIsTripped(key string, now time.Time) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	t, ok := k.routeTripped[key]
+	return ok && now.Before(t)
+}
+
 func (k *keeper) markStopped(e *kaEntry) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -1668,9 +1752,23 @@ const keepAliveReserveFrac = 0.25
 func keepAliveEligible(p bschemas.ModelProvider, model, route string) bool {
 	switch p {
 	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
-		return true
+		// Only a Claude model honours explicit cache_control. A gateway that serves another
+		// family on this route (an OpenAI / Azure model behind LiteLLM) caches automatically or
+		// not at all, so a ping there buys nothing.
+		// ponytail: name test; a Claude alias for another family is caught by the route breaker.
+		return claudeModel(model)
 	case bschemas.OpenAI:
 		return route == "/v1/responses" && modelinfo.OpenAI30MinuteCache(string(p), model)
+	}
+	return false
+}
+
+func claudeModel(model string) bool {
+	m := strings.ToLower(model)
+	for _, w := range []string{"claude", "opus", "sonnet", "haiku"} {
+		if strings.Contains(m, w) {
+			return true
+		}
 	}
 	return false
 }
@@ -1679,12 +1777,14 @@ func keepAliveEligible(p bschemas.ModelProvider, model, route string) bool {
 // can be worthless, which is the point of publishing them together: pings with no
 // conversions is a policy that spends and gains nothing, and `wrote` above zero is a bug.
 type KeepAliveStats struct {
-	Live     int     `json:"live_sessions"`
-	Pings    int64   `json:"pings"`
-	Skipped  int64   `json:"skipped"`
-	Failed   int64   `json:"failed"`
-	Wrote    int64   `json:"wrote_instead_of_read"`
-	SpentUSD float64 `json:"spend_usd"`
+	Live    int   `json:"live_sessions"`
+	Pings   int64 `json:"pings"`
+	Skipped int64 `json:"skipped"`
+	Failed  int64 `json:"failed"`
+	// RouteTrips counts routes switched off after routeFailLimit failed pings in a row.
+	RouteTrips int64   `json:"route_trips"`
+	Wrote      int64   `json:"wrote_instead_of_read"`
+	SpentUSD   float64 `json:"spend_usd"`
 	// SummarySubstituted, SummarySubstituteFailed and SummarySubstituteOverBudget are
 	// cache_aware_summarizer's share of Pings — see fireSummarySubstitute. A deployment running
 	// that component should see SummarySubstituted climb instead of a flat Pings/Wrote pair; a
@@ -1769,7 +1869,7 @@ func (k *keeper) Stats() KeepAliveStats {
 	live := len(k.live)
 	k.mu.Unlock()
 	return KeepAliveStats{Live: live, Pings: k.pings.Load(), Skipped: k.skipped.Load(),
-		Failed: k.failed.Load(), Wrote: k.wrote.Load(),
+		Failed: k.failed.Load(), Wrote: k.wrote.Load(), RouteTrips: k.routeTrips.Load(),
 		SpentUSD:                           math.Float64frombits(k.spentUSD.Load()),
 		SummarySubstituted:                 k.summarySubstituted.Load(),
 		SummarySubstituteFailed:            k.summarySubstituteFailed.Load(),
