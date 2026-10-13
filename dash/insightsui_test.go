@@ -119,36 +119,3 @@ func TestASelectionChangeDoesNotRebuildTheView(t *testing.T) {
 			"or steal it")
 	}
 }
-
-// TestTheSparklineIsEmphasisNotTwoCategories pins the form choice, which is the decision that
-// makes this chart readable rather than merely present.
-//
-// The calls are the SUBJECT and the carriage is CONTEXT. Drawn as two saturated series of equal
-// weight, a reader compares them as peers — but the only question the row asks is "did the bars
-// stop while the wash carried on". So the bars take the accent and the wash takes the same
-// recessive ink as the grid, at low opacity.
-//
-// Asserted on the stylesheet because that is where the decision lives, and because the pull to
-// "make the second series a real colour too" is strong and invisible in a screenshot of one row.
-func TestTheSparklineIsEmphasisNotTwoCategories(t *testing.T) {
-	css := readUI(t, "ui/insights.css")
-
-	// The subject gets a validated chart hue.
-	if !strings.Contains(css, ".ins-spark-call { fill: var(--pal-blue); }") {
-		t.Error("the call bars no longer use --pal-blue. That pair was validated against the " +
-			"chart surface for the lightness band, chroma floor, CVD separation and 3:1 " +
-			"contrast in both modes — a hand-picked replacement has not been")
-	}
-	// The context stays recessive. A fill-opacity near 1 would make it a peer series.
-	if !strings.Contains(css, ".ins-spark-carried { fill: var(--fg-faint); fill-opacity: .16; }") {
-		t.Error("the carriage wash is no longer a low-opacity neutral. Two series of equal " +
-			"weight invite a comparison the data does not support: carriage is the baseline the " +
-			"calls are read against, not a second measure")
-	}
-	// A row with no series says so in words. A flat line would read as "never used", which is a
-	// stronger and different claim than "before the window this axis can show".
-	if !strings.Contains(css, ".ins-spark-none") {
-		t.Error("no style for a row the axis cannot reach; drawing it as an empty chart asserts " +
-			"something the store never measured")
-	}
-}

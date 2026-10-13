@@ -160,15 +160,10 @@ function insCommandText(plan) {
 
 function insItemTable(rows, opts) {
   const head = [el('th', {}), el('th', { text: 'item' }), el('th', { text: 'recommendation' })];
-  /* The shape sits beside the verdict it is evidence for, before the numbers. A reader scanning
-   * the column sees "bars then nothing" without reading a word. */
-  if (insDoc && insDoc.timeline) {
-    head.push(el('th', {
-      title: 'Invocations per day (bars) against how much the declaration was carried (shaded). ' +
-        'Bars that stop while the shading continues are the waste.',
-      text: 'used / carried',
-    }));
-  }
+  /* No per-row "used / carried" sparkline. It was here, and it duplicated the chart above the
+   * tables while crowding every row — the picture belongs in one place, at a size you can read
+   * it. The `stale` verdict already carries its own evidence as a date and a day count, which is
+   * what the sparkline was really for. */
   if (opts.sessions) head.push(el('th', { text: 'per session' }));
   /* EVERY NUMBER IN THIS TABLE IS WASTE, and the headers have to say so. "cost" and "billed
    * reads" read as what the item cost in total, which is a different figure: a capability you
@@ -229,24 +224,6 @@ function insItemTable(rows, opts) {
     if (it.why) vd.appendChild(el('span', { class: 'ins-why', text: it.why }));
     cells.push(vd);
 
-    if (insDoc && insDoc.timeline) {
-      const series = insDoc.timeline.items[it.name];
-      const spark = series && insSparkline(series, insDoc.timeline, insSparkScale);
-      const cell = el('td', { class: 'ins-spark-cell' });
-      if (spark) {
-        cell.appendChild(spark);
-      } else {
-        /* No series is not an empty chart. It means this item was never declared on a day the
-         * axis covers — including a capability used BEFORE the oldest request, which the axis
-         * cannot reach. Said rather than drawn as a flat line, which would read as "never used". */
-        cell.appendChild(el('span', {
-          class: 'ins-spark-none', title: 'No day on this axis carried it. An invocation older ' +
-            'than the oldest request in the store falls outside the window the axis can show.',
-          text: 'outside the window',
-        }));
-      }
-      cells.push(cell);
-    }
     if (opts.sessions) cells.push(el('td', { text: insSessionCell(it) }));
     /* An invoked item has no figure in any of these three columns, and the dash needs a reason on
      * hover rather than reading as missing data: its tokens were the price of using it. That is
@@ -513,12 +490,10 @@ function insRenderReview(root) {
 
 /* One scale for every row, recomputed per render. Module-level so insItemTable can reach it
  * without threading it through four call sites. */
-let insSparkScale = { calls: 1, carried: 1 };
 
 function insRender() {
   const root = document.getElementById('insights-body');
   if (!root || !insDoc) return;
-  if (insDoc.timeline) insSparkScale = insSparkMax(insDoc.timeline);
   clear(root);
   /* The registry describes the DOM that is about to be discarded. */
   insBoxes = [];
@@ -748,98 +723,6 @@ async function loadInsights() {
   insRender();
 }
 
-/* ── the per-item timeline ──────────────────────────────────────────────────
- *
- * One sparkline per row: when the capability was INVOKED, against how much it was CARRIED.
- *
- * THE FORM IS EMPHASIS, NOT TWO CATEGORIES. The calls are the subject and the carriage is
- * context, so the calls get the accent hue and the carriage a recessive wash of the same ink the
- * grid uses. Two saturated series of equal weight would make the reader compare them as peers,
- * when the question is only ever "did the bars stop while the wash carried on".
- *
- * WHY A PICTURE AT ALL. The `stale` verdict needs a fourteen-day threshold, and a threshold is a
- * judgement this report cannot defend — a fortnight off work looks exactly like a capability
- * finished with. The shape needs none: a block of bars at the left and a flat wash since IS the
- * answer, and the reader decides what counts as abandoned for their own work.
- *
- * It is drawn as inline SVG with no library, which is this dashboard's existing convention — the
- * series are tiny and the alternative is 45KB of vendored chart code for rectangles.
- */
-
-const INS_SPARK_W = 132;
-const INS_SPARK_H = 26;
-
-/* Scale shared across EVERY row, so one item's bars are comparable with another's.
- * Per-row scaling would make a skill invoked twice look as busy as Bash invoked nine hundred
- * times, which is the single most misleading thing a row of sparklines can do. */
-function insSparkMax(tl) {
-  let calls = 1, carried = 1;
-  for (const k in tl.items) {
-    for (const v of tl.items[k].calls) if (v > calls) calls = v;
-    for (const v of tl.items[k].carried) if (v > carried) carried = v;
-  }
-  return { calls, carried };
-}
-
-function insSparkline(item, tl, scale) {
-  const n = tl.buckets.length;
-  if (!n) return null;
-  const svg = svgEl('svg', {
-    class: 'ins-spark', width: INS_SPARK_W, height: INS_SPARK_H,
-    viewBox: `0 0 ${INS_SPARK_W} ${INS_SPARK_H}`, role: 'img',
-  });
-  const slot = INS_SPARK_W / n;
-  /* Bars are capped and never fill their slot: the leftover is the 2px surface gap that separates
-   * neighbours, which is what makes adjacent days readable without a stroke around each bar. */
-  const w = Math.max(1.5, Math.min(10, slot - 2));
-
-  /* The carriage wash first, so the call bars sit on top of it. An area rather than a line,
-   * because its job is "there was weight here on these days" and a line implies a continuous
-   * quantity the store did not measure. */
-  let d = '';
-  for (let i = 0; i < n; i++) {
-    const v = item.carried[i] || 0;
-    const h = v ? Math.max(1, (v / scale.carried) * (INS_SPARK_H - 2)) : 0;
-    const x = i * slot, y = INS_SPARK_H - h;
-    d += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + (h ? y.toFixed(1) : INS_SPARK_H);
-    d += 'L' + (x + slot).toFixed(1) + ' ' + (h ? y.toFixed(1) : INS_SPARK_H);
-  }
-  if (d) {
-    svg.appendChild(svgEl('path', { class: 'ins-spark-carried', d: d + `L${INS_SPARK_W} ${INS_SPARK_H}L0 ${INS_SPARK_H}Z` }));
-  }
-
-  /* The call bars. 4px rounded data-end, square at the baseline — so the top reads as the value
-   * and the bottom as the axis it grows from. */
-  for (let i = 0; i < n; i++) {
-    const v = item.calls[i] || 0;
-    if (!v) continue;
-    const h = Math.max(2.5, (v / scale.calls) * (INS_SPARK_H - 3));
-    svg.appendChild(svgEl('rect', {
-      class: 'ins-spark-call', x: (i * slot + (slot - w) / 2).toFixed(1),
-      y: (INS_SPARK_H - h).toFixed(1), width: w.toFixed(1), height: h.toFixed(1),
-      rx: Math.min(2, w / 2).toFixed(1),
-    }));
-  }
-
-  /* A baseline, hairline and recessive, so a row of all-zeros still reads as an axis rather than
-   * as a missing chart. */
-  svg.appendChild(svgEl('line', {
-    class: 'ins-spark-axis', x1: 0, y1: INS_SPARK_H - 0.5,
-    x2: INS_SPARK_W, y2: INS_SPARK_H - 0.5,
-  }));
-
-  /* The accessible description, which is also the hover text: a chart nobody can read with a
-   * screen reader is a chart with no table view, and this row has no room for one. */
-  const used = item.calls.reduce((a, b) => a + b, 0);
-  const days = item.calls.filter((v) => v > 0).length;
-  const carriedDays = item.carried.filter((v) => v > 0).length;
-  const label = used
-    ? used + ' invocation(s) on ' + days + ' of ' + carriedDays + ' day(s) it was carried'
-    : 'never invoked in these ' + carriedDays + ' day(s) of being carried';
-  svg.appendChild(svgEl('title', {})).textContent = label;
-  svg.setAttribute('aria-label', label);
-  return svg;
-}
 
 /* ── the range, which is the actual feature ─────────────────────────────────
  *
@@ -893,7 +776,7 @@ function insRangeBanner() {
     return el('div', { class: 'ins-banner all' },
       el('span', { class: 'ins-banner-k', text: 'showing' }),
       el('strong', { text: 'all recorded history' }),
-      el('span', { class: 'ins-banner-note', text: 'Drag across the chart to narrow it.' }));
+      el('span', { class: 'ins-banner-note', text: 'Drag the slider beneath the chart to narrow it.' }));
   }
   const fmt = (ms) => {
     const d = new Date(ms);
@@ -1084,12 +967,25 @@ function insDrawChart(host, g, tl) {
           (p.value[2] > 0 ? p.value[2] + ' invocation(s)' : 'carried, never invoked');
       },
     },
-    xAxis: {
-      type: 'category', data: cols, splitArea: { show: false },
-      axisLabel: { color: t.faint, interval: Math.max(0, Math.round(cols.length / 8) - 1) },
-      axisLine: { lineStyle: { color: t.border } },
-      axisTick: { show: false },
-    },
+    /* TWO x AXES over one grid, and the second one is the whole trick.
+     *
+     * The heatmap sits on axis 0, which nothing ever zooms, so its columns keep their width and
+     * their position for the life of the chart. The slider drives axis 1, which is invisible and
+     * carries no series: it exists only to give the slider an extent to draw against and a range
+     * to report. Measured against the alternatives — a slider bound to axis 0 rescales it (six
+     * date ticks collapsed to three and the spacing stretched), and a slider detached with
+     * `xAxisIndex: []` is not PAINTED AT ALL, which is how this shipped briefly: the option
+     * object still reported start and end, so a probe reading those values passed while the
+     * reader saw no slider. Only this arrangement gives both a visible control and a fixed axis. */
+    xAxis: [
+      {
+        type: 'category', data: cols, splitArea: { show: false },
+        axisLabel: { color: t.faint, interval: Math.max(0, Math.round(cols.length / 8) - 1) },
+        axisLine: { lineStyle: { color: t.border } },
+        axisTick: { show: false },
+      },
+      { type: 'category', data: cols, gridIndex: 0, show: false },
+    ],
     yAxis: {
       type: 'category', data: rows, splitArea: { show: false },
       axisLabel: { color: t.muted },
@@ -1105,12 +1001,27 @@ function insDrawChart(host, g, tl) {
       text: ['more', 'fewer'],
       seriesIndex: 0,
     },
-    /* THE RANGE CONTROL. A slider you can drag by either end plus inside-drag on the plot
-     * itself — which is "select directly from the chart". filterMode 'none' so narrowing the
-     * view never drops a ROW: the y axis is the capability list, and losing rows as you brush
-     * would make the chart jump under the cursor. */
+    /* THE RANGE CONTROL — a SELECTOR, not a zoom.
+     *
+     * The obvious configuration is wrong, and it was shipped before this comment existed. A
+     * dataZoom bound to the x axis RESCALES that axis: narrow to three days and the heatmap's
+     * remaining cells stretch to fill the plot while the slider beneath keeps its full width and
+     * merely moves its window. Measured: cells went from 174px to 225px wide and eleven of them
+     * left the plot entirely. The reader's own words for it — "I lose correlation between ruler
+     * and graph, because graph range shrinked while ruler stay on same size just moved" — are
+     * the defect exactly. Two scales for one time axis, stacked, is worse than no ruler.
+     *
+     * So the heatmap's axis never rescales: the slider drives the hidden second x axis instead
+     * (see xAxis above), which keeps the control painted and its handles grabbable while zooming
+     * nothing the reader is looking at. The selection is drawn ON the heatmap as a markArea band
+     * (below), so every day stays on screen at a fixed position directly under its tick — the
+     * excluded range is dimmed rather than deleted, and the reader can still see what they are
+     * leaving out and judge whether to widen again.
+     *
+     * No `inside` zoom: dragging the plot would be a second, hidden way to change the range, and
+     * on axis 0 it would rescale the thing we just finished pinning. */
     dataZoom: [
-      { type: 'slider', xAxisIndex: 0, filterMode: 'none', bottom: 4, height: 22,
+      { type: 'slider', xAxisIndex: 1, filterMode: 'none', bottom: 4, height: 22,
         borderColor: t.border, fillerColor: 'transparent',
         dataBackground: { lineStyle: { color: t.faint, opacity: 0.5 },
           areaStyle: { color: t.faint, opacity: 0.18 } },
@@ -1120,13 +1031,18 @@ function insDrawChart(host, g, tl) {
         moveHandleStyle: { color: t.accent, opacity: 0.5 },
         textStyle: { color: t.muted, fontSize: 10 },
         labelFormatter: (i) => cols[Math.round(i)] || '' },
-      { type: 'inside', xAxisIndex: 0, filterMode: 'none', zoomOnMouseWheel: false,
-        moveOnMouseMove: true },
     ],
     series: [
       { name: 'invocations', type: 'heatmap', data: used,
         itemStyle: { borderRadius: 2, borderWidth: 2, borderColor: 'transparent' },
-        emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
+        emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } },
+        /* The EXCLUDED range, shaded — two bands rather than one over the selection. Marking
+         * what is in would put a wash over the cells the reader is trying to read; marking what
+         * is OUT leaves the selection at full contrast and still shows the rest, so nothing
+         * disappears and the axis positions stay comparable with the ruler below. */
+        markArea: { silent: true, animation: false,
+          itemStyle: { color: t.faint, opacity: 0.22 },
+          data: insBandData(g, insSince, insUntil, tl) } },
       { name: 'carried, unused', type: 'heatmap', data: idle, silent: false,
         itemStyle: { color: t.faint, opacity: 0.13, borderRadius: 2,
           borderWidth: 2, borderColor: 'transparent' } },
@@ -1137,18 +1053,18 @@ function insDrawChart(host, g, tl) {
    * and builds a fresh chart, and a fresh chart starts at full width — so the banner said
    * "11 Oct → 12 Oct" while the slider sat at 0-100%, and the reader lost the place they had just
    * picked. Verified in a browser before and after. The window is the source of truth, so the
-   * zoom is restored FROM it rather than remembered separately. */
-  if (insSince || insUntil) {
-    let a = 0;
-    let b = g.cols.length - 1;
-    for (let i = 0; i < g.cols.length; i++) {
-      if (insSince && tl.buckets[g.cols[i].toIdx] >= insSince) { a = i; break; }
-    }
-    for (let i = g.cols.length - 1; i >= 0; i--) {
-      if (insUntil && g.cols[i].from <= insUntil) { b = i; break; }
-    }
-    if (b < a) b = a;
-    insEChart.setOption({ dataZoom: [{ startValue: a, endValue: b }, {}] }, false);
+   * slider is restored FROM it rather than remembered separately.
+   *
+   * As PERCENTAGES, because the slider is detached from the axis (xAxisIndex: []) and so has no
+   * axis to take startValue/endValue against: for a detached control those index into its own
+   * 0-100 track, which is not the column list. */
+  const sel = insSelectedCols(g, insSince, insUntil, tl);
+  if (sel) {
+    const n = Math.max(1, g.cols.length - 1);
+    insEChart.setOption({ dataZoom: [{
+      start: (sel[0] / n) * 100,
+      end: (sel[1] / n) * 100,
+    }] }, false);
   }
 
   /* The brush drives the tables. Debounced, because dataZoom fires continuously while dragging
@@ -1188,6 +1104,33 @@ function insDrawChart(host, g, tl) {
     host.__ro = new ResizeObserver(() => { if (insEChart) insEChart.resize(); });
     host.__ro.observe(host);
   }
+}
+
+/* insSelectedCols maps the active window onto column indices, or null when nothing is selected.
+ * One place, because the band and the slider restore must agree: if they disagreed, the shading
+ * would mark a different range than the handles, which is the confusion this whole change fixes. */
+function insSelectedCols(g, since, until, tl) {
+  if (!since && !until) return null;
+  let a = 0;
+  let b = g.cols.length - 1;
+  for (let i = 0; i < g.cols.length; i++) {
+    if (since && tl.buckets[g.cols[i].toIdx] >= since) { a = i; break; }
+  }
+  for (let i = g.cols.length - 1; i >= 0; i--) {
+    if (until && g.cols[i].from <= until) { b = i; break; }
+  }
+  return [a, Math.max(a, b)];
+}
+
+/* insBandData shades the columns OUTSIDE the selection: up to two bands, one before and one
+ * after. Empty when everything is selected, which is the resting state. */
+function insBandData(g, since, until, tl) {
+  const sel = insSelectedCols(g, since, until, tl);
+  if (!sel) return [];
+  const bands = [];
+  if (sel[0] > 0) bands.push([{ xAxis: 0 }, { xAxis: sel[0] - 1 }]);
+  if (sel[1] < g.cols.length - 1) bands.push([{ xAxis: sel[1] + 1 }, { xAxis: g.cols.length - 1 }]);
+  return bands;
 }
 
 function insColLabel(ms, width) {

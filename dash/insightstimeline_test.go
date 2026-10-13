@@ -1,5 +1,5 @@
 // Tests for the per-item timeline: when each capability was CARRIED and when it was USED, bucketed
-// so a page can draw one sparkline per item.
+// so a page can draw the activity chart.
 //
 // WHY A PICTURE AND NOT A VERDICT. The `stale` verdict answers "is this abandoned" with a 14-day
 // threshold I had to invent, and a threshold is a judgement the report cannot defend. A timeline
@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-// TestTheTimelineBucketsUseAndCarriageByDay pins the shape a sparkline needs: two series over the
+// TestTheTimelineBucketsUseAndCarriageByDay pins the shape the chart needs: two series over the
 // same buckets, so the gap between them is drawable without the page doing arithmetic.
 func TestTheTimelineBucketsUseAndCarriageByDay(t *testing.T) {
 	db := openTestDB(t)
@@ -142,7 +142,7 @@ func TestTheTimelineNeverInventsResolutionItDoesNotHave(t *testing.T) {
 }
 
 // TestTheTimelineWindowsToRecentDaysWhenAsked keeps a three-month history from forcing 90 bars
-// into a sparkline, while leaving the default unbounded: the whole value of this view is seeing a
+// into the chart, while leaving the default unbounded: the whole value of this view is seeing a
 // phase change, and a default window would hide the phase before it.
 func TestTheTimelineWindowsToRecentDaysWhenAsked(t *testing.T) {
 	db := openTestDB(t)

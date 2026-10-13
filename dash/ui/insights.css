@@ -138,35 +138,8 @@
   .ins-cost { margin-left: 0; width: 100%; }
 }
 
-/* ── the per-item sparkline ────────────────────────────────────────────────
- * Invocations against carriage, as one small picture per row.
- *
- * EMPHASIS, NOT TWO CATEGORIES. The calls are the subject and the carriage is context, so the
- * bars take the accent and the wash takes the same recessive ink as the grid. Two saturated
- * series of equal weight would invite the reader to compare them as peers, when the only question
- * is whether the bars stopped while the wash carried on.
- *
- * The accent pair was validated rather than chosen by eye: --pal-blue against the chart surface
- * clears the lightness band, the chroma floor, CVD separation and 3:1 contrast in both modes.
- */
-.ins-spark-cell { width: 148px; padding-top: 10px; padding-bottom: 6px; }
-.ins-spark { display: block; overflow: visible; }
-/* The wash: ~10% of the ink, never a saturated block — its job is "there was weight here". */
-.ins-spark-carried { fill: var(--fg-faint); fill-opacity: .16; }
-/* The bars: the one thing allowed to be loud. */
-.ins-spark-call { fill: var(--pal-blue); }
-/* Hairline, solid, one step off the surface — so a row of all-zeros still reads as an axis
-   rather than as a chart that failed to load. */
-.ins-spark-axis { stroke: var(--border); stroke-width: 1; }
-/* A row the axis cannot reach says so in words. A flat line would read as "never used", which is
-   a different and much stronger claim than "before the window". */
-.ins-spark-none {
-  font-size: var(--t-micro); color: var(--fg-faint); font-style: normal;
-  letter-spacing: .04em; cursor: help;
-}
-
-/* ── the activity chart (d3) ──────────────────────────────────────────────
- * A heatmap of capability against time, with a volume strip above and a brush over both.
+/* ── the activity chart (ECharts) ─────────────────────────────────────────
+ * A heatmap of capability against time, with a range slider beneath it.
  *
  * THE RAMP IS SEQUENTIAL: one hue, five steps, light to dark — the cell encodes MAGNITUDE and
  * nothing else. A categorical palette would spend the identity channel re-encoding what the
@@ -202,14 +175,10 @@
 .ins-vol-bar { fill: var(--fg-faint); fill-opacity: .4; }
 .ins-vol-axis, .ins-axis-line { stroke: var(--border); stroke-width: 1; }
 
-.ins-cell { stroke: none; }
-/* Carried but never invoked. Neutral rather than the ramp's lightest step, so it cannot be
-   misread as a small amount of use — it is the opposite claim. */
-.ins-cell.carried-only { fill: var(--fg-faint); fill-opacity: .11; }
-.ins-cell:hover { stroke: var(--fg); stroke-width: 1.5; }
-
-.ins-lane { font-family: var(--mono); font-size: var(--t-small); fill: var(--fg-muted); }
-.ins-tick { font-family: var(--mono); font-size: var(--t-micro); fill: var(--fg-faint); }
+/* The cells, lanes and ticks are drawn by ECharts from the option object, not styled here: a
+   library that owns its SVG does not read our class names. The ramp tokens below ARE still read,
+   by insChartTheme(), which is why they stay in the stylesheet — declared once for both themes so
+   dark mode re-steps against its own surface instead of being inverted at paint time. */
 
 /* ── the chart host and the range banner ──────────────────────────────────
  * ECharts draws into .ins-echart and owns everything inside it, including the dataZoom slider
