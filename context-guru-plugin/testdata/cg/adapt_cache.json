@@ -41,6 +41,12 @@
    "saved_usd": 0,
    "spend_usd": 0,
    "net_usd": 0
+  },
+  {
+   "id": "by-segment",
+   "label": "Adaptive, per segment",
+   "net_usd": null,
+   "unavailable": "too little history: 13 held-out sessions (need 20)"
   }
  ],
  "recommendation": {

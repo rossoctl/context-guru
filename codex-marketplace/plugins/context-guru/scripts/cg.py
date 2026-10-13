@@ -439,6 +439,11 @@ EFFECT = {"now": "takes effect now", "restart": "takes effect at the next proxy 
           "next_session": "takes effect from the next session"}
 
 
+def money(x: float | None) -> str:
+    """dollars, or n/a for a figure the report does not have: missing is not zero."""
+    return "n/a" if x is None else dollars(x)
+
+
 def adapt_error(api: Api, kind: str, status: int, doc: dict | None, applying: bool = False) -> str:
     err = (doc or {}).get("error") if isinstance(doc, dict) else None
     if status == 0:
@@ -507,7 +512,7 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
                 if o["details"] or tags:
                     rows.append([mark, x.get("label") or x["id"], "", "", "n/a", "", ", ".join(tags)])
                 continue
-            rows.append([mark, x.get("label") or x["id"], dollars(x.get("saved_usd", 0)), dollars(x.get("spend_usd", 0)),
+            rows.append([mark, x.get("label") or x["id"], money(x.get("saved_usd")), money(x.get("spend_usd")),
                          dollars(x["net_usd"]), cells(max(x["net_usd"], 0) / top), ", ".join(tags)])
         L += [""] + C.table(rows, "llrrrll")
         if hidden:
@@ -525,7 +530,7 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
     if items:
         shown = items if o["details"] else items[:5]
         L += ["", f"Unused in this window ({len(shown)} of {len(items)}):" if len(shown) < len(items) else "Unused in this window:"]
-        L += C.table([[i.get("kind", "").replace("_", " "), i["name"], dollars(i.get("usd", 0)),
+        L += C.table([[i.get("kind", "").replace("_", " "), i["name"], money(i.get("usd") if i.get("priced", True) else None),
                        "never used" if not i.get("last_used_ms") else "last used " + day(i["last_used_ms"], o)] for i in shown], "llrl")
     if o["details"]:
         L += [""] + [f"  {x.get('label') or x['id']}: {x.get('unavailable') or x['detail']}" + (f" (helped {x['sessions_helped']}, hurt {x['sessions_hurt']} sessions)"
@@ -537,7 +542,7 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
             L.append(f"Why: {rec['reason']}")
         days = f" --days {o['days']}" if o["days"] else ""
         # Quoted when an id carries shell syntax: the line is meant to be run as it is.
-        L.append(f"Apply it? Say yes, or run: /context-guru:adapt {kind} apply {shlex.quote(apply_token(rep))}{days}")
+        L.append(f"Apply it? Say yes, or run: /context-guru:adapt apply {kind} {shlex.quote(apply_token(rep))}{days}")
     return L
 
 
@@ -568,9 +573,10 @@ def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], in
     if st == 200 and isinstance(doc, dict) and doc.get("ok"):
         eff = EFFECT.get(doc.get("effective"))
         L = [f"Applied: {(doc.get('note') or doc.get('applied', opt)).rstrip('.')}" + (f" ({eff})." if eff else ".")]
-        undo = (doc.get("undo") or {}).get("option")
-        if undo:
-            L.append(f"Undo: /context-guru:adapt {kind} apply {undo}")
+        undo = doc.get("undo") or {}
+        if undo.get("option"):
+            tok = undo["option"] + (f"@{undo['basis']}" if undo.get("basis") else "")
+            L.append(f"Undo: /context-guru:adapt apply {kind} {shlex.quote(tok)}")
         return L, 0
     if st == 409:
         L = ["Not applied: the numbers changed since you saw them. Here they are again; nothing was written.", ""]
@@ -592,8 +598,8 @@ def adapt_overview(api: Api, o: dict) -> list[str]:
         read += 1
         rec = rep.get("recommendation")
         if rec:
-            best = max(best, rec.get("net_delta_usd", 0.0))
-        rows.append([kind, dollars(rec.get("net_delta_usd", 0.0)) if rec else "", rec["change"] if rec else "already on the best option"])
+            best = max(best, rec.get("net_delta_usd") or 0.0)
+        rows.append([kind, money(rec.get("net_delta_usd")) if rec else "", rec["change"] if rec else "already on the best option"])
     if read == 0 and len({r[2] for r in rows}) == 1:
         return [rows[0][2]]
     d = o["days"] or ADAPT_DAYS
@@ -611,13 +617,12 @@ def cmd_adapt(api: Api, o: dict) -> tuple[list[str], int, dict | None]:
     if not args:
         return adapt_overview(api, o), 0, None
     kind = args[0]
+    if kind == "apply":  # the read never writes; the skill runs `cg.py apply ...` for this
+        return [f"Applying is a separate command: cg.py {' '.join(args)}"], 1, None
     if kind not in KINDS:
         return [f"Unknown subcommand {kind!r}. Use one of: {', '.join(KINDS)}."], 1, None
-    if args[1:2] == ["apply"]:
-        if len(args) < 3:
-            return [f"Say which option to apply: /context-guru:adapt {kind} apply <option>"], 1, None
-        L, rc = adapt_apply(api, o, kind, args[2])
-        return L, rc, None
+    if args[1:2] == ["apply"]:  # the write is its own top-level command, so a read permission never covers it
+        return [f"Applying is a separate command: /context-guru:adapt apply {' '.join(args[:1] + args[2:])}"], 1, None
     st, rep = adapt_report(api, o, kind)
     if st != 200 or not isinstance(rep, dict):
         return [adapt_error(api, kind, st, rep)], 1, None
@@ -626,8 +631,16 @@ def cmd_adapt(api: Api, o: dict) -> tuple[list[str], int, dict | None]:
     return render_adapt(rep, o), 0, rep if rep.get("recommendation") else None
 
 
-def adapt_main(api: Api, opts: dict) -> int:
+def adapt_main(api: Api, cmd: str, opts: dict) -> int:
     o = {"now": int(time.time() * 1000), "tz_min": 0, "days": 0, "details": False, "session": None, "args": [], **opts}
+    if cmd == "apply":
+        args = o["args"]
+        if len(args) != 2 or args[0] not in KINDS:
+            print(f"Usage: cg.py apply <{'|'.join(KINDS)}> <option>[@<basis>] [--days N]")
+            return 1
+        L, rc = adapt_apply(api, o, args[0], args[1])
+        print("\n".join(L))
+        return rc
     L, rc, rep = cmd_adapt(api, o)
     print("\n".join(L))
     if rep and sys.stdin.isatty() and sys.stdout.isatty():
@@ -652,7 +665,7 @@ def run(cmd: str, api: Api, opts: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("cmd", choices=sorted([*CMDS, "adapt"]))
+    ap.add_argument("cmd", choices=sorted([*CMDS, "adapt", "apply"]))
     ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; for adapt: <kind> [apply <option>]")
     ap.add_argument("--days", type=int, default=0)
     ap.add_argument("--port")
@@ -676,8 +689,8 @@ def main(argv: list[str] | None = None) -> int:
             print(NO_PROXY)
             return 0
         api = Api(base)
-    if a.cmd == "adapt":
-        return adapt_main(api, opts)
+    if a.cmd in ("adapt", "apply"):
+        return adapt_main(api, a.cmd, opts)
     print(run(a.cmd, api, opts))
     return 0
 

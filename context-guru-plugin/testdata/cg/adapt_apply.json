@@ -5,6 +5,7 @@
  "effective": "restart",
  "note": "cache strategy set to adaptive",
  "undo": {
-  "option": "5-min-ping"
+  "option": "5-min-ping",
+  "basis": "77b0c2e1"
  }
 }

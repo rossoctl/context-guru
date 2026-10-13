@@ -4,6 +4,7 @@ Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 
   ▸  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░  current, default
   ★  Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████  best
      No pings                 $0     $0      $0  ░░░░░░░░░░░░
+  1 more not evaluated: too little history: 13 held-out sessions (need 20)
 
   saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent.
   counterfactual · replay of past sessions · 2026-09-08..2026-10-08 · 412 sessions, 18,301 requests
@@ -11,4 +12,4 @@ Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 
 
 Change: cache strategy 5-min-ping -> adaptive (takes effect at the next proxy restart).
 Why: it had the highest net on your own sessions
-Apply it? Say yes, or run: /context-guru:adapt cache apply adaptive@3f9a1c
+Apply it? Say yes, or run: /context-guru:adapt apply cache adaptive@3f9a1c

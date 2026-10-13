@@ -85,7 +85,7 @@ func cgProxyStub(t *testing.T, cache string) string {
 		w.Write([]byte(`{"state":"running","poll":"/api/adapt/tools/apply/job1"}`))
 	})
 	mux.HandleFunc("GET /api/adapt/tools/apply/job1", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{"state":"done","ok":true,"applied":"remove-sufficient","previous":"keep","effective":"now","note":"6 unused items filtered (playwright, figma, brand-voice and 3 more)","undo":{"option":"keep"}}`))
+		w.Write([]byte(`{"state":"done","ok":true,"applied":"remove-sufficient","previous":"keep","effective":"now","note":"6 unused items filtered (playwright, figma, brand-voice and 3 more)","undo":{"option":"restore","basis":"5d0e17aa"}}`))
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	for path, key := range map[string]string{"/api/spend/explain": "spend", "/api/tools": "tools", "/api/tools/last-used": "last_used"} {
@@ -171,10 +171,11 @@ func TestCGGoldens(t *testing.T) {
 		{"adapt-cache", warm, []string{"adapt", "cache"}, 0},
 		{"adapt-cache-details", warm, []string{"adapt", "cache", "details"}, 0},
 		{"adapt-tools", warm, []string{"adapt", "tools"}, 0},
-		{"adapt-apply", warm, []string{"adapt", "cache", "apply", "adaptive@3f9a1c"}, 0},
-		{"adapt-apply-stale", warm, []string{"adapt", "cache", "apply", "adaptive@000000"}, 1},
-		{"adapt-apply-async", warm, []string{"adapt", "tools", "apply", "remove-sufficient@8c21e0d4"}, 0},
-		{"adapt-apply-unknown", warm, []string{"adapt", "cache", "apply", "nonsense"}, 1},
+		{"adapt-apply", warm, []string{"apply", "cache", "adaptive@3f9a1c"}, 0},
+		{"adapt-apply-stale", warm, []string{"apply", "cache", "adaptive@000000"}, 1},
+		{"adapt-apply-async", warm, []string{"apply", "tools", "remove-sufficient@8c21e0d4"}, 0},
+		{"adapt-apply-under-adapt", warm, []string{"adapt", "cache", "apply", "adaptive@3f9a1c"}, 1},
+		{"adapt-apply-unknown", warm, []string{"apply", "cache", "nonsense"}, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			out, code := runCGCode(t, c.base, nil, c.args...)
@@ -205,6 +206,21 @@ func TestCGNoProxy(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "No Context Guru proxy") {
 		t.Errorf("want the no-proxy message, got %v: %s", err, out)
+	}
+}
+
+// The adapt skill pre-approves only the read. The write is a separate top-level command, so Claude Code asks
+// the user for permission to run it: a second gate behind the skill's own yes/no question.
+func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
+	body := readFileString(t, filepath.Join("skills", "adapt", "SKILL.md"))
+	if !strings.Contains(body, "allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py adapt:*)\n") {
+		t.Error("adapt must pre-approve exactly `cg.py adapt:*`, not every cg.py command")
+	}
+	base := cgProxyStub(t, "cachestate_warm")
+	for _, args := range [][]string{{"adapt", "cache", "apply", "adaptive@3f9a1c"}, {"adapt", "apply", "cache", "adaptive@3f9a1c"}} {
+		if out, code := runCGCode(t, base, nil, args...); code == 0 || strings.Contains(out, "Applied") {
+			t.Errorf("%v must not write (it is inside the pre-approved prefix): exit %d\n%s", args, code, out)
+		}
 	}
 }
 

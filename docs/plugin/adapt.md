@@ -22,6 +22,7 @@ Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 
   ▸  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░  current, default
   ★  Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████  best
      No pings                 $0     $0      $0  ░░░░░░░░░░░░
+  1 more not evaluated: too little history: 13 held-out sessions (need 20)
 
   saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent.
   counterfactual · replay of past sessions · 2026-09-08..2026-10-08 · 412 sessions, 18,301 requests
@@ -29,7 +30,7 @@ Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 
 
 Change: cache strategy 5-min-ping -> adaptive (takes effect at the next proxy restart).
 Why: it had the highest net on your own sessions
-Apply it? Say yes, or run: /context-guru:adapt cache apply adaptive@3f9a1c
+Apply it? Say yes, or run: /context-guru:adapt apply cache adaptive@3f9a1c
 ```
 
 - The first line is the answer.
@@ -70,11 +71,11 @@ Unused in this window (5 of 9):
   mcp server  figma                   $6.20  never used
   skill       brand-voice             $3.10  never used
   mcp tool    sentry__list_releases   $2.20  never used
-  skill       slides                  $1.50  never used
+  skill       slides                    n/a  never used
 
 Change: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more (takes effect now).
 Why: declared in 5+ sessions over 7+ days and never called
-Apply it? Say yes, or run: /context-guru:adapt tools apply remove-sufficient@8c21e0d4
+Apply it? Say yes, or run: /context-guru:adapt apply tools remove-sufficient@8c21e0d4
 ```
 
 ## Applying a change
@@ -83,18 +84,18 @@ Nothing is changed by looking. When there is a recommendation, the screen ends w
 
 - In Claude Code, the command asks you one yes/no question. It applies the change only if you answer **Yes, apply it**; anything else leaves your settings as they were.
 - Run directly in a terminal, `cg.py adapt cache` asks `Apply this change? [y/N]`; the default is No.
-- To apply by hand, run the command on the `Apply it?` line.
+- To apply by hand, run the command on the `Apply it?` line. In a terminal the same write is `cg.py apply <kind> <token>`. It is a separate command from the read so that Claude Code asks permission for it as well (the read is pre-approved, the write is not).
 
 ```text
 Applied: cache strategy set to adaptive (takes effect at the next proxy restart).
-Undo: /context-guru:adapt cache apply 5-min-ping
+Undo: /context-guru:adapt apply cache 5-min-ping@77b0c2e1
 ```
 
 Some changes take a while on the proxy (building a keep-alive plan, for example). The command waits for up to two minutes, with a seconds counter on a terminal, then prints the result the same way:
 
 ```text
 Applied: 6 unused items filtered (playwright, figma, brand-voice and 3 more) (takes effect now).
-Undo: /context-guru:adapt tools apply keep
+Undo: /context-guru:adapt apply tools restore@5d0e17aa
 ```
 
 The token after `apply` is the option and the report it came from. If the numbers have changed since you saw them (new sessions arrived, for example), the proxy refuses, nothing is written, and the current report is shown again so you can decide on what is true now:
@@ -108,6 +109,7 @@ Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 
   ▸  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░  current, default
   ★  Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████  best
      No pings                 $0     $0      $0  ░░░░░░░░░░░░
+  1 more not evaluated: too little history: 13 held-out sessions (need 20)
 
   saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent.
   counterfactual · replay of past sessions · 2026-09-08..2026-10-08 · 412 sessions, 18,301 requests
@@ -115,7 +117,7 @@ Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 
 
 Change: cache strategy 5-min-ping -> adaptive (takes effect at the next proxy restart).
 Why: it had the highest net on your own sessions
-Apply it? Say yes, or run: /context-guru:adapt cache apply adaptive@3f9a1c
+Apply it? Say yes, or run: /context-guru:adapt apply cache adaptive@3f9a1c
 ```
 
 The `Undo:` line puts the previous setting back. Some changes take effect only after the proxy restarts or from the next session; the result line says which.
@@ -169,4 +171,4 @@ The report:
 - `recommendation` is `null` when the current setting is already the best, or when there is too little data to say; `summary` then says which.
 - `items` is used by `tools` only. `sessions_helped`, `sessions_hurt`, `detail`, `per_month_usd` and `reason` are optional.
 
-The apply answer is `{"ok": true, "applied": "<id>", "previous": "<id>", "effective": "...", "note": "one line", "undo": {"option": "<id>"}}`. Errors are a non-2xx status with `{"error": "a sentence"}`: 400 for an unknown option, 409 when `basis` no longer matches the current report, 401 or 403 when the caller is not allowed to change the setting. The command always sends a `basis`: for an option typed without one (an undo, for example) it reads the current report first and sends that report's `basis_id`.
+The apply answer is `{"ok": true, "applied": "<id>", "previous": "<id>", "effective": "...", "note": "one line", "undo": {"option": "<id>", "basis": "<basis_id>"}}`. Errors are a non-2xx status with `{"error": "a sentence"}`: 400 for an unknown option, 409 when `basis` no longer matches the current report, 401 or 403 when the caller is not allowed to change the setting. `basis` is required (400 without it). The command always sends one: for an option typed without one it reads the current report first and sends that report's `basis_id`. `undo` may carry its own `basis` (the report after the write), which the `Undo:` line includes. 501 means the proxy has no configuration it can write; its `error` says what to do instead.

@@ -15,8 +15,8 @@ Unused in this window (5 of 9):
   mcp server  figma                   $6.20  never used
   skill       brand-voice             $3.10  never used
   mcp tool    sentry__list_releases   $2.20  never used
-  skill       slides                  $1.50  never used
+  skill       slides                    n/a  never used
 
 Change: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more (takes effect now).
 Why: declared in 5+ sessions over 7+ days and never called
-Apply it? Say yes, or run: /context-guru:adapt tools apply remove-sufficient@8c21e0d4
+Apply it? Say yes, or run: /context-guru:adapt apply tools remove-sufficient@8c21e0d4

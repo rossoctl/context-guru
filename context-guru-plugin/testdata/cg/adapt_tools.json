@@ -1,26 +1,108 @@
 {
- "kind": "tools", "version": 1,
+ "kind": "tools",
+ "version": 1,
  "summary": "9 declared items were never used; filtering the 6 with enough evidence would have saved $31.40.",
- "window": {"since": 1788881400000, "until": 1791473400000, "sessions": 64, "requests": 5210},
- "class": "counterfactual", "method": "unused declarations priced on the requests that carried them",
+ "window": {
+  "since": 1788881400000,
+  "until": 1791473400000,
+  "sessions": 64,
+  "requests": 5210
+ },
+ "class": "counterfactual",
+ "method": "unused declarations priced on the requests that carried them",
  "basis_id": "8c21e0d4",
- "current": "keep", "default": "keep", "best": "remove-sufficient",
+ "current": "keep",
+ "default": "keep",
+ "best": "remove-sufficient",
  "options": [
-  {"id": "keep", "label": "Keep everything", "saved_usd": 0, "spend_usd": 0, "net_usd": 0},
-  {"id": "remove-sufficient", "label": "Filter the 6 unused items seen in 5+ sessions over 7+ days", "saved_usd": 31.4, "spend_usd": 0, "net_usd": 31.4},
-  {"id": "remove-all", "label": "Filter all 9 unused items", "saved_usd": 33.9, "spend_usd": 0, "net_usd": 33.9}
+  {
+   "id": "keep",
+   "label": "Keep everything",
+   "saved_usd": 0,
+   "spend_usd": 0,
+   "net_usd": 0
+  },
+  {
+   "id": "remove-sufficient",
+   "label": "Filter the 6 unused items seen in 5+ sessions over 7+ days",
+   "saved_usd": 31.4,
+   "spend_usd": 0,
+   "net_usd": 31.4
+  },
+  {
+   "id": "remove-all",
+   "label": "Filter all 9 unused items",
+   "saved_usd": 33.9,
+   "spend_usd": 0,
+   "net_usd": 33.9
+  }
  ],
  "items": [
-  {"kind": "mcp_server", "name": "playwright", "usd": 18.4, "last_used_ms": null},
-  {"kind": "mcp_server", "name": "figma", "usd": 6.2, "last_used_ms": null},
-  {"kind": "skill", "name": "brand-voice", "usd": 3.1, "last_used_ms": null},
-  {"kind": "mcp_tool", "name": "sentry__list_releases", "usd": 2.2, "last_used_ms": null},
-  {"kind": "skill", "name": "slides", "usd": 1.5, "last_used_ms": null},
-  {"kind": "skill", "name": "pdf-export", "usd": 1.1, "last_used_ms": null},
-  {"kind": "mcp_tool", "name": "sentry__get_event", "usd": 0.8, "last_used_ms": null},
-  {"kind": "skill", "name": "changelog", "usd": 0.4, "last_used_ms": null},
-  {"kind": "skill", "name": "release-notes", "usd": 0.2, "last_used_ms": null}
+  {
+   "kind": "mcp_server",
+   "name": "playwright",
+   "usd": 18.4,
+   "last_used_ms": null
+  },
+  {
+   "kind": "mcp_server",
+   "name": "figma",
+   "usd": 6.2,
+   "last_used_ms": null
+  },
+  {
+   "kind": "skill",
+   "name": "brand-voice",
+   "usd": 3.1,
+   "last_used_ms": null
+  },
+  {
+   "kind": "mcp_tool",
+   "name": "sentry__list_releases",
+   "usd": 2.2,
+   "last_used_ms": null
+  },
+  {
+   "kind": "skill",
+   "name": "slides",
+   "usd": 0,
+   "priced": false,
+   "last_used_ms": null
+  },
+  {
+   "kind": "skill",
+   "name": "pdf-export",
+   "usd": 1.1,
+   "last_used_ms": null
+  },
+  {
+   "kind": "mcp_tool",
+   "name": "sentry__get_event",
+   "usd": 0.8,
+   "last_used_ms": null
+  },
+  {
+   "kind": "skill",
+   "name": "changelog",
+   "usd": 0.4,
+   "last_used_ms": null
+  },
+  {
+   "kind": "skill",
+   "name": "release-notes",
+   "usd": 0.2,
+   "last_used_ms": null
+  }
  ],
- "recommendation": {"option": "remove-sufficient", "change": "filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more", "net_delta_usd": 31.4, "effective": "now", "reason": "declared in 5+ sessions over 7+ days and never called"},
- "warnings": ["Unused means unused in this window, not that it will never be needed.", "Filtering changes the cached prefix, so the next request re-writes it once; that cost is not included."]
+ "recommendation": {
+  "option": "remove-sufficient",
+  "change": "filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more",
+  "net_delta_usd": 31.4,
+  "effective": "now",
+  "reason": "declared in 5+ sessions over 7+ days and never called"
+ },
+ "warnings": [
+  "Unused means unused in this window, not that it will never be needed.",
+  "Filtering changes the cached prefix, so the next request re-writes it once; that cost is not included."
+ ]
 }
