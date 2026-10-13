@@ -22,7 +22,7 @@ Every number is about this session. There is no today or lifetime total on the l
 | `of $4.10` | What this session cost through the proxy, on the same prices: the agent's requests, the proxy's own model calls and its keep-alive pings. Left out until the proxy has priced a request. This is not Claude Code's own `cost` (its estimate at list prices), which `detailed` shows as `spent`. |
 | `cache ● █████░ 3:57` | A bar that drains as the prompt cache approaches expiry, and the clock. Time is measured from the end of the last response. |
 | `13:40 ↻` | The proxy is holding this cache warm with keep-alive pings. The clock is then the time until the cache goes cold if you send nothing: the last planned ping plus the cache lifetime. The bar still drains over the current cache entry, so each ping refills it. `↻` alone, with the normal clock, means the last touch was a ping and none is planned. |
-| `agents reviewer ● 4:21 · Explore ◐ 0:51 · 1 cold` | Each sub-agent's cache, under the name Claude Code's agents list shows (`←` / `↓` in Claude Code), soonest to lapse first, up to three, then `+N more`. Each clock is that agent's time until cold, with `↻` when pings hold it. Cold ones are counted. See [Sub-agents](#sub-agents-and-the-selected-agent). |
+| `agents reviewer active ● 4:58 · Explore ◐ 0:51 · 1 cold` | Each sub-agent's cache, under the name Claude Code's agents list shows (`←` / `↓` in Claude Code), most recently used first, up to five, then `+N more`. `active` marks an agent that made a request in the last 10 seconds. Each clock is that agent's time until cold, with `↻` when pings hold it. Cold ones are counted. See [Sub-agents](#sub-agents-and-the-selected-agent). |
 | `ctx ███░░░░░ 41%` | How full you are, as a share of the model's context limit. |
 | `ka 3 pings $0.04` | Keep-alive pings the proxy sent in this session, and what they cost. Shown after the first ping. |
 | `▸ hint` | At most one thing worth acting on, dollars first. |
@@ -75,11 +75,13 @@ The bar rescales to the tier's lifetime.
 
 ### <span id="sub-agents-and-the-selected-agent"></span>Sub-agents
 
-Claude Code does not tell the status line which agent is selected in its agents list: the status line command receives the same input whichever agent you are viewing (checked against Claude Code 2.1.296). So the line always shows the main agent's cache on the left, and every sub-agent's cache by name, the same name the agents list shows. Select `reviewer` in the list and read the `reviewer` clock.
+**Limitation: the status line cannot follow the agent you select.** Claude Code does not tell the status line command which agent is selected in its agents list; the command receives the same input whichever agent you are viewing (checked against Claude Code 2.1.296). So the line always shows the main agent's cache on the left, and every sub-agent's cache by name, the same name the agents list shows. Select `reviewer` in the list and read the `reviewer` clock.
+
+Agent-team teammates that run in their own terminal pane (`teammateMode: tmux`) are separate Claude Code sessions with their own status line. That line shows the teammate's own cache, keep-alive and money, and the lead's line does not list them. Teammates that run inside the lead's process are listed on the lead's line like any sub-agent.
 
 The names come from the session's own files next to its transcript (`<session>/subagents/agent-*.meta.json`). The proxy tells the agents apart by the `x-claude-code-agent-id` header Claude Code sends on every sub-agent and agent-team teammate request. A request the proxy grouped by its prompt instead (Claude Code's side requests, such as the auto-mode classifier) is not an agent and is not listed. A sub-agent with no name on disk keeps the unlabelled form, `agents 2 · soonest ◐ 0:51`.
 
-Named agents, with the main cache and `reviewer` held warm by keep-alive pings and one finished agent counted as cold:
+Named agents: `reviewer` just made a request (`active`), it and the main cache are held warm by keep-alive pings, and one finished agent is counted as cold:
 
 ![Named sub-agents](../statusline-live/agents-named-dark.svg#only-dark)
 ![Named sub-agents](../statusline-live/agents-named-light.svg#only-light)

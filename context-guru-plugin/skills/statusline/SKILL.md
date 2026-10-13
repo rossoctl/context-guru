@@ -31,8 +31,10 @@ cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41% │ 
   goes cold (the last planned ping plus the lifetime); `↻` on a normal clock means the last touch
   was a ping.
 - **Sub-agents.** Each sub-agent's cache, by the name Claude Code's agents list shows
-  (`agents reviewer ● 4:21 · Explore ◐ 0:51 · 1 cold`), soonest first, up to three. Claude Code
-  does not tell the status line which agent is selected, so the selected agent is found by name.
+  (`agents reviewer active ● 4:58 · Explore ◐ 0:51 · 1 cold`), most recent first, up to five;
+  `active` = a request in the last 10 s. Claude Code does not tell the status line which agent is
+  selected, so the line cannot follow the selection: find the selected agent by name. A teammate in
+  its own tmux pane is its own session and its own status line shows its own cache.
   Agents without a name on disk keep `agents 5 · soonest ◐ 0:52`.
 - **Keep-alive.** `ka 3 pings $0.04`: this session's pings and their cost, after the first one.
   The main clock and the context bar follow the main thread, not whichever agent spoke last.

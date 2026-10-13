@@ -614,6 +614,8 @@ HINT_EXPIRING_MIN_USD = 0.50  # below this a rewrite is not worth a line of anyo
 CACHESTATE_TTL_SECONDS = 2.0
 DAY_TTL_SECONDS = 60.0
 CACHE_BAR_CELLS = 6
+AGENT_ROWS = 5  # named sub-agents shown before `+N more`
+ACTIVE_SECONDS = 10  # a sub-agent whose last request ended this recently is marked `active`
 SERIES_TTL_SECONDS = 120.0  # day and hour totals move slowly; a stale one is fine for a glance
 REQUESTS_TTL_SECONDS = 4.0
 STRIP_REQUESTS = 20
@@ -911,8 +913,9 @@ def _agent_names(payload: dict) -> dict[str, str]:
 
 
 def _agent_rows(cs: dict | None, cs_age: float, names: dict[str, str] | None = None) -> list[dict]:
-    """Every sub-agent cache the proxy lists: {id, name, rem, ttl, held}, in id order so a row stays
-    on its agent. rem <= 0 is cold. held is the keep-alive plan's time until cold, or None.
+    """Every sub-agent cache the proxy lists: {id, name, rem, ttl, held, ago}, in id order so a row
+    stays on its agent. rem <= 0 is cold. held is the keep-alive plan's time until cold, or None.
+    ago is the seconds since the agent's last request ended.
 
     Only `a:` threads, the ones Claude Code named with its agent-id header: it sends one on every
     sub-agent and teammate request (2.1.296). A `p:` thread is a request the proxy grouped by
@@ -927,8 +930,10 @@ def _agent_rows(cs: dict | None, cs_age: float, names: dict[str, str] | None = N
         rem = remaining_seconds({**t, "now_ms": cs.get("now_ms")}, cs_age)
         if rem is None:
             continue
+        last = max(_num(t, "last_ts") or 0, _num(t, "end_ts") or 0)
         out.append({"id": tid, "name": (names or {}).get(tid, ""), "rem": rem, "ttl": float(t["ttl_s"]),
-                    "held": held_seconds(t, cs.get("now_ms"), cs_age)})
+                    "held": held_seconds(t, cs.get("now_ms"), cs_age),
+                    "ago": ((_num(cs, "now_ms") or last) - last) / 1000 + cs_age})
     return sorted(out, key=lambda r: r["id"])
 
 
@@ -1014,14 +1019,15 @@ _AGENT_STYLE = {"cold": (RED, "○"), "critical": (RED, "◐"), "expiring": (YEL
 
 def _agents_segment(rows: list[dict], level: int | None = 0) -> str | None:
     """Every sub-agent's cache under the name Claude Code's agents list shows, so the agent selected
-    there is found by name (the status line is not told which one is selected): `agents researcher
-    ● 4:21 ↻ · tester ◐ 0:52 · 1 cold`. Warm ones get a clock (time until cold, `↻` when pings hold
-    them), soonest first, at most three; cold ones are counted. Agents with no name on disk (not
+    there is found by name (the status line is not told which one is selected): `agents reviewer
+    active ● 4:58 · tester ◐ 0:52 ↻ · +2 more · 1 cold`. Warm ones, most recently used first, at
+    most AGENT_ROWS; `active` marks a request in the last ACTIVE_SECONDS; each clock is the time
+    until cold, `↻` when pings hold it; cold ones are counted. Agents with no name on disk (not
     Claude Code, or an older one) keep the unlabelled form, `agents 2 · soonest ◐ 0:50`, because a
     list of clocks without names cannot say which agent is which. Level 1 is the counts alone."""
     if level is None or not rows:
         return None
-    warm = sorted(_warm(rows), key=lambda r: _until_cold(r["rem"], r["held"]))
+    warm = _warm(rows)
     cold = len(rows) - len(warm)
     tail = [f"{DIM}{cold} cold{RESET}"] if cold else []
     sep = f" {DIM}·{RESET} "
@@ -1033,14 +1039,19 @@ def _agents_segment(rows: list[dict], level: int | None = 0) -> str | None:
 
     if level == 1:
         return f"{DIM}agents{RESET} " + sep.join(([str(len(warm))] if warm else []) + tail)
-    named = [r for r in warm if r["name"]]
+    named = sorted((r for r in warm if r["name"]), key=lambda r: r["ago"])
     if not named:
         if not warm:
             return f"{DIM}agents{RESET} " + sep.join(tail)
+        warm.sort(key=lambda r: _until_cold(r["rem"], r["held"]))
         head = f"{DIM}agent{RESET} {clock(warm[0])}" if len(warm) == 1 else \
             f"{DIM}agents{RESET} {len(warm)} {DIM}· soonest{RESET} {clock(warm[0])}"
         return sep.join([head] + tail)
-    parts = [f"{r['name'] if len(r['name']) <= 14 else r['name'][:13] + '…'} {clock(r)}" for r in named[:3]]
+    parts = []
+    for r in named[:AGENT_ROWS]:
+        name = r["name"] if len(r["name"]) <= 14 else r["name"][:13] + "…"
+        active = f" {GREEN}active{RESET}" if r["ago"] <= ACTIVE_SECONDS else ""
+        parts.append(f"{name}{active} {clock(r)}")
     if len(warm) > len(parts):
         parts.append(f"{DIM}+{len(warm) - len(parts)} more{RESET}")
     return f"{DIM}agents{RESET} " + sep.join(parts + tail)

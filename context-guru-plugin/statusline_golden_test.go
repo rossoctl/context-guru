@@ -211,6 +211,12 @@ func TestStatuslineGoldenAgentsAndKeepAlive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	for i := 1; i <= 7; i++ {
+		meta := fmt.Sprintf(`{"name":"w%d","teamName":"t"}`, i)
+		if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("agent-aw%d-%016x.meta.json", i, i)), []byte(meta), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	th := func(id string, agoSec int, held string) string {
 		return fmt.Sprintf(`{"id":%q,"main":%t,"model":"m","last_ts":%d,"end_ts":%d,"ttl_s":300,`+
 			`"prefix_tokens":%d,"priced":true,"rewrite_usd":0.03%s}`, id, id == "", now-agoSec*1000, now-agoSec*1000,
@@ -249,7 +255,11 @@ func TestStatuslineGoldenAgentsAndKeepAlive(t *testing.T) {
 	}{
 		{"named-agents", cache(th("", 60, ""), th("a:ad9ba182bf3e760e6", 10, ""), th("a:reviewer@session-ab47f1d6", 250, held(700)),
 			th("a:finished", 900, ""), th("p:0123456789ab", 10, "")), 200, // p: is a side request, not an agent
-			"saved $0.31 of $2.64\ncache ● █████░ 4:00 │ agents Explore ● 4:50 · reviewer ● 11:40 ↻ · 1 cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64\ncache ● █████░ 4:00 │ agents Explore active ● 4:50 · reviewer ● 11:40 ↻ · 1 cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+		// Most recently used first, at most five, then `+N more`; `active` within the last 10 s.
+		{"many-agents-capped", cache(th("", 60, ""), th("a:w1@t", 200, ""), th("a:w2@t", 5, ""), th("a:w3@t", 100, ""),
+			th("a:w4@t", 30, ""), th("a:w5@t", 250, ""), th("a:w6@t", 60, ""), th("a:w7@t", 150, "")), 300,
+			"saved $0.31 of $2.64\ncache ● █████░ 4:00 │ agents w2 active ● 4:55 · w4 ● 4:30 · w6 ● 4:00 · w3 ● 3:20 · w7 ● 2:30 · +2 more │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		{"main-held-warm", cache(th("", 60, held(820))), 200,
 			"saved $0.31 of $2.64\ncache ● █████░ 13:40 ↻ │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		// A plan cannot revive an expired entry (the ping failed or never came): cold is cold.
