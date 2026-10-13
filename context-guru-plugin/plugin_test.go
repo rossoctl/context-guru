@@ -3032,6 +3032,67 @@ func TestOneHourKeysAreWrittenOnlyWhenTheyDifferFromTheProxyDefault(t *testing.T
 	}
 }
 
+// TestTheLegacyMarkerEndsWhenTheProxyIsUpdated. The marker means "this proxy version rejected the
+// 1-hour keys". After an update (install.sh records the new version) a plain `strategy sync` must put
+// them back, or `2-ping` would stay at one ping on a 1-hour cache for good.
+func TestTheLegacyMarkerEndsWhenTheProxyIsUpdated(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "2-ping",
+		"--port", keepalivePort, "--preset", "off")
+	if code != 0 {
+		t.Fatalf("exit %d: %v", code, facts)
+	}
+	version := func(v string) {
+		if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte(v+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	version("v0.4.2")
+	settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off", "--legacy-binary")
+	if again, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off"); again["result"] != "unchanged" {
+		t.Fatalf("the same binary lost the legacy render: %v", again)
+	}
+	version("v0.5.0")
+	up, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
+	body := readFileString(t, facts["file"])
+	if up["result"] != "synced" || !strings.Contains(body, "keepalive_max_pings_1h: 2") ||
+		strings.Contains(body, "1h-keys-omitted") {
+		t.Fatalf("after the proxy update the 1-hour key did not come back (%v):\n%s", up, body)
+	}
+}
+
+// TestAStaleLogLineDoesNotTriggerTheOneHourRecovery. The proxy log is append-only across starts. A
+// rejection logged by an earlier run must not make this run drop the keys; only this attempt's own
+// output counts.
+func TestAStaleLogLineDoesNotTriggerTheOneHourRecovery(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	if f, code := settingsIn(t, state, t.TempDir(), "strategy", "set", "--name", "2-ping",
+		"--port", port, "--preset", "off"); code != 0 {
+		t.Fatalf("set: %d %v", code, f)
+	}
+	logPath := filepath.Join(dir, "context-guru-proxy-"+port+".log")
+	stale := "level=ERROR msg=\"config: yaml: unmarshal errors: field keepalive_max_pings_1h not found in type config.CacheConfig\"\n"
+	if err := os.WriteFile(logPath, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "broken-proxy")
+	script := "#!/usr/bin/env bash\nif [ \"$1\" = --version ]; then echo 'context-guru-proxy v0.5.0'; exit 0; fi\n" +
+		"echo 'level=ERROR msg=\"listen failed for an unrelated reason\"' >&2; exit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := startProxyIn(t, state, bin, port, "TMPDIR="+dir)
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if strings.Contains(out, "does not know the one-hour keep-alive keys") {
+		t.Errorf("a rejection from an earlier run triggered the recovery:\n%s", out)
+	}
+	cfg := readFileString(t, filepath.Join(state, "keepalive-"+port+".yaml"))
+	if !strings.Contains(cfg, "keepalive_max_pings_1h: 2") {
+		t.Errorf("the keys were dropped on the strength of a stale line:\n%s", cfg)
+	}
+}
+
 // TestAnOldProxyThatRejectsTheOneHourKeysStillStarts. A new plugin with an old binary: the binary's
 // strict loader exits on `keepalive_max_pings_1h`. start-proxy.sh must re-render without it and retry.
 func TestAnOldProxyThatRejectsTheOneHourKeysStillStarts(t *testing.T) {

@@ -3359,7 +3359,24 @@ ONE_HOUR_DEFAULTS = {"keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h"
 # A file re-rendered for a binary that rejected the `_1h` keys carries this line. `strategy sync` sees
 # it and keeps omitting them, so a later session start does not fail and recover again. A deliberate
 # `strategy set` renders afresh without it, and so does the next one after a proxy update.
-LEGACY_BINARY_MARKER = "# context-guru: 1h-keys-omitted (the installed proxy does not know them)"
+#
+# The marker records the proxy version it was written for. `strategy sync` keeps the keys out only
+# while the installed version is still that one: after a proxy update the keys go back in, and an old
+# binary that is still installed simply rejects them once more and takes the recovery path again.
+LEGACY_BINARY_MARKER_PREFIX = "# context-guru: 1h-keys-omitted for proxy "
+
+
+def _installed_proxy_version() -> str:
+    """The version install.sh recorded for the proxy binary, or "" when none is recorded."""
+    try:
+        with open(os.path.join(state_dir(), "proxy-version"), encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except OSError:
+        return ""
+
+
+def _legacy_marker() -> str:
+    return LEGACY_BINARY_MARKER_PREFIX + _installed_proxy_version()
 
 
 def _render_strategy(name: str, preset: str, legacy: bool = False) -> str:
@@ -3383,7 +3400,7 @@ def _render_strategy(name: str, preset: str, legacy: bool = False) -> str:
     cache = {k: v for k, v in spec["cache"].items()
              if not k.endswith("_1h") or (not legacy and ONE_HOUR_DEFAULTS.get(k) != v)}
     if legacy:
-        lines.insert(1, LEGACY_BINARY_MARKER)
+        lines.insert(1, _legacy_marker())
     if cache:
         lines.append("cache:")
         for k, v in cache.items():
@@ -3582,7 +3599,7 @@ def cmd_strategy(args) -> int:
                       "`strategy set --name none` removes it")
             return 0
         want = _render_strategy(name, args.preset,
-                                legacy=args.legacy_binary or LEGACY_BINARY_MARKER in text)
+                                legacy=args.legacy_binary or _legacy_marker() in text.splitlines())
         if want == text:
             emit(result="unchanged", strategy=name, file=path, port=port, preset=args.preset)
             return 0

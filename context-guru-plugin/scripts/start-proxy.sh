@@ -827,6 +827,10 @@ attempt_launch() {
     return 0
   fi
 
+  # Where this attempt's output starts in $LOG. The log is append-only across starts, so a rejection
+  # logged by an EARLIER run must not be read as this run's (see the one-hour-key recovery below).
+  ATTEMPT_LOG_START=$(wc -c <"$LOG" 2>/dev/null | tr -d ' ') || ATTEMPT_LOG_START=0
+  : "${ATTEMPT_LOG_START:=0}"
   PRESET="$PRESET" \
     "${STARTER[@]}" "$BIN" \
     --listen "127.0.0.1:${PORT}" \
@@ -998,7 +1002,7 @@ fi
 # settings.py ONE_HOUR_DEFAULTS), so this is the `2-ping` case; the recovery is the same shape as the
 # preset one: re-render WITHOUT the keys and retry once. The proxy then pings a 1-hour cache like a
 # 5-minute one, which is what that binary always did.
-if [ -s "$LOG" ] && sed 's/\\//g' "$LOG" 2>/dev/null | grep -qE 'field keepalive_(idle_seconds|max_pings)_1h not found'; then
+if [ -s "$LOG" ] && tail -c "+$((${ATTEMPT_LOG_START:-0} + 1))" "$LOG" 2>/dev/null | sed 's/\\//g' | grep -qE 'field keepalive_(idle_seconds|max_pings)_1h not found'; then
   note "the installed proxy (${HAVE}) does not know the one-hour keep-alive keys; starting without them."
   note "a 1-hour cache is then pinged on the 5-minute schedule until you update the proxy (/context-guru:update)."
   if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ] \
