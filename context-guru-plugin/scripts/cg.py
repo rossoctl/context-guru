@@ -479,7 +479,7 @@ def adapt_report(api: Api, o: dict, kind: str, tick: bool = True) -> tuple[int, 
 
 
 def day(ms: int, o: dict) -> str:
-    return dt.datetime.utcfromtimestamp((ms + o["tz_min"] * 60_000) / 1000).strftime("%Y-%m-%d")
+    return dt.datetime.fromtimestamp((ms + o["tz_min"] * 60_000) / 1000, dt.timezone.utc).strftime("%Y-%m-%d")
 
 
 def apply_token(rep: dict) -> str:
