@@ -1455,7 +1455,7 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		// NAMED rather than inlined, so the dump records the prompt AS SENT. A dump that rebuilt the
 		// prompt from `items` would be a reconstruction, and the whole point of capturing it is to be
 		// able to review the text the model actually received.
-		askPrompt := extract.BuildPrefixAsk(items)
+		askPrompt := resolveAsk(nil, c.ModelName, askViaPrefix).Frame(extract.BuildPrefixAsk(items))
 		if dumpDir != "" {
 			dump = newSweepAskDump(req, c.Session, c.ModelName, items, cands, askPrompt)
 			dump.Trigger = "pre_expiry"
