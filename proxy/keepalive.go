@@ -293,6 +293,8 @@ type kaEntry struct {
 	model, route, preset, agent string
 	pol                         CachePolicy
 	pings                       int
+	// missed counts this entry's pings in a row that read nothing (see fire).
+	missed int
 	// turn is how many requests this session sent BEFORE the one that established this entry.
 	// 0 means the session's first request, which the gate skips.
 	turn int
@@ -503,6 +505,7 @@ type keeper struct {
 	routeFails   map[string]int
 	routeTripped map[string]time.Time
 	routeTrips   atomic.Int64
+	missed       atomic.Int64
 	// strategies is the manager-controlled keep-alive strategy list, loaded from the
 	// tenant registry at process start and replaced wholesale on every write through the
 	// control routes — never mutated in place, the same pattern k.overrides itself
@@ -1228,32 +1231,46 @@ func (k *keeper) fire(j pingJob) {
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
 		return
 	}
+	// FAILED: the upstream did not answer the ping as a model call. An error relayed as a status
+	// we let through (5xx), or a 200 with no usage at all (a translating gateway in front of a
+	// provider that refused it). Booked (the row is the audit trail), not a refresh, this session
+	// stops, and the route trips after routeFailLimit in a row.
+	if status/100 != 2 || (u.FreshInput == 0 && u.CacheRead == 0 && u.CacheWrite == 0) {
+		k.failed.Add(1)
+		k.markStopped(j.e)
+		k.routeFailed(kaRouteKey(j.tenant, j.up, j.e.model), k.now())
+		slog.Warn("context-guru: cache keep-alive ping got no usable answer; not pinging this session again",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
+		k.record1(j, u, status, ms, start)
+		return
+	}
+	k.routeOK(kaRouteKey(j.tenant, j.up, j.e.model))
+	// MISSED: a real miss, the ping landed after the entry expired and read nothing (Anthropic
+	// writes the prefix again; OpenAI just bills it fresh). It still leaves the prefix cached, so
+	// pinging goes on. Two misses in a row are not expiry but a prefix that does not match, which
+	// is the guard below.
+	if u.CacheRead == 0 && k.notePingMiss(j.e) {
+		k.missed.Add(1)
+		cost := k.record1(j, u, status, ms, start)
+		slog.Info("context-guru: cache keep-alive ping missed (entry had expired); cache re-written",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
+			"cache_write", u.CacheWrite, "fresh_input", u.FreshInput, "cost_usd", cost)
+		return
+	}
 	// THE guard. A ping is supposed to be a pure cache READ; if the provider says it wrote
-	// more than it read, the prefix did not match and this ping cost 12.5x what a read
-	// costs instead of saving 11.5x. That is the mechanism being wrong, not expensive, so
-	// it is an ERROR and the session is dropped.
-	if u.CacheWrite > u.CacheRead {
+	// more than it read (or missed twice running), the prefix did not match and this ping cost
+	// 12.5x what a read costs instead of saving 11.5x. That is the mechanism being wrong, not
+	// expensive, so it is an ERROR and the session is dropped.
+	if u.CacheWrite > u.CacheRead || u.CacheRead == 0 {
 		k.wrote.Add(1)
 		k.markStopped(j.e)
 		slog.Error("context-guru: cache keep-alive ping CREATED a cache entry instead of "+
 			"refreshing one; not pinging this session again",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
 			"cache_write", u.CacheWrite, "cache_read", u.CacheRead)
-	} else if status/100 != 2 || u.CacheRead == 0 {
-		// A ping that read nothing refreshed nothing: an upstream error relayed as a status we
-		// let through, or a 200 with no usage (a translating gateway in front of a provider
-		// that refused it). Booked (the row is the audit trail), but counted FAILED, this
-		// session stops, and the route trips after routeFailLimit in a row.
-		k.failed.Add(1)
-		k.markStopped(j.e)
-		k.routeFailed(kaRouteKey(j.tenant, j.up, j.e.model), k.now())
-		slog.Warn("context-guru: cache keep-alive ping refreshed nothing; not pinging this session again",
-			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status,
-			"cache_read", u.CacheRead, "output", u.Output)
-		k.record1(j, u, status, ms, start)
-		return
+	} else {
+		k.notePingRead(j.e)
 	}
-	k.routeOK(kaRouteKey(j.tenant, j.up, j.e.model))
 	cost := k.record1(j, u, status, ms, start)
 	slog.Debug("context-guru: cache keep-alive ping",
 		"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "ping", j.ping,
@@ -1486,6 +1503,20 @@ func (k *keeper) routeIsTripped(key string, now time.Time) bool {
 	defer k.mu.Unlock()
 	t, ok := k.routeTripped[key]
 	return ok && now.Before(t)
+}
+
+// notePingMiss records a ping that read nothing and reports whether it is the first in a row.
+func (k *keeper) notePingMiss(e *kaEntry) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e.missed++
+	return e.missed == 1
+}
+
+func (k *keeper) notePingRead(e *kaEntry) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e.missed = 0
 }
 
 func (k *keeper) markStopped(e *kaEntry) {
@@ -1766,9 +1797,18 @@ func keepAliveEligible(p bschemas.ModelProvider, model, route string) bool {
 	return false
 }
 
+// claudeModel matches provider-prefixed ids (aws/..., vertex_ai/..., us.anthropic.claude-...,
+// Bedrock ARNs naming a Claude model) by substring. CONTEXT_GURU_KEEPALIVE_MODELS adds more,
+// comma-separated, for a deployment alias whose name says nothing (an application inference profile).
 func claudeModel(model string) bool {
 	m := strings.ToLower(model)
-	for _, w := range []string{"claude", "opus", "sonnet", "haiku"} {
+	words := []string{"claude", "opus", "sonnet", "haiku"}
+	for _, w := range strings.Split(os.Getenv("CONTEXT_GURU_KEEPALIVE_MODELS"), ",") {
+		if w = strings.ToLower(strings.TrimSpace(w)); w != "" {
+			words = append(words, w)
+		}
+	}
+	for _, w := range words {
 		if strings.Contains(m, w) {
 			return true
 		}
@@ -1785,9 +1825,11 @@ type KeepAliveStats struct {
 	Skipped int64 `json:"skipped"`
 	Failed  int64 `json:"failed"`
 	// RouteTrips counts routes switched off after routeFailLimit failed pings in a row.
-	RouteTrips int64   `json:"route_trips"`
-	Wrote      int64   `json:"wrote_instead_of_read"`
-	SpentUSD   float64 `json:"spend_usd"`
+	RouteTrips int64 `json:"route_trips"`
+	// Missed counts pings that landed after the entry expired: they re-wrote it, so pinging went on.
+	Missed   int64   `json:"missed"`
+	Wrote    int64   `json:"wrote_instead_of_read"`
+	SpentUSD float64 `json:"spend_usd"`
 	// SummarySubstituted, SummarySubstituteFailed and SummarySubstituteOverBudget are
 	// cache_aware_summarizer's share of Pings — see fireSummarySubstitute. A deployment running
 	// that component should see SummarySubstituted climb instead of a flat Pings/Wrote pair; a
@@ -1872,7 +1914,7 @@ func (k *keeper) Stats() KeepAliveStats {
 	live := len(k.live)
 	k.mu.Unlock()
 	return KeepAliveStats{Live: live, Pings: k.pings.Load(), Skipped: k.skipped.Load(),
-		Failed: k.failed.Load(), Wrote: k.wrote.Load(), RouteTrips: k.routeTrips.Load(),
+		Failed: k.failed.Load(), Wrote: k.wrote.Load(), RouteTrips: k.routeTrips.Load(), Missed: k.missed.Load(),
 		SpentUSD:                           math.Float64frombits(k.spentUSD.Load()),
 		SummarySubstituted:                 k.summarySubstituted.Load(),
 		SummarySubstituteFailed:            k.summarySubstituteFailed.Load(),
