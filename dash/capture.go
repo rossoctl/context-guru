@@ -266,6 +266,11 @@ func (r *Recorder) backgroundMigrations() {
 	defer r.wg.Done()
 	r.dedupeLoop()
 	r.keepAliveStrategyBackfillLoop()
+	// Last: #502's daily_rollup backfill is the one whose batches scale with the WHOLE
+	// table on a deployment with real history, where the other two are small and finish
+	// near-instantly. Running it last means a restart on a fresh/small database (every test,
+	// most real deployments) never notices it is there at all.
+	r.dailyRollupBackfillLoop()
 }
 
 // archiveLoop runs the age-based archival passes until the recorder closes.

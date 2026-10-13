@@ -394,6 +394,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 	defer lifeStmt.Close()
 
 	spend := map[spendKey]float64{}
+	rollup := map[string]*dailyRollupDelta{} // key: tenant_id + "\x00" + UTC day
 	for idx, e := range evs {
 		// nil, not "", when no strategy applied — so the column stores SQL NULL and stays
 		// distinguishable from a row written before this feature existed either way; see
@@ -462,6 +463,25 @@ func (d *DB) insertBatch(evs []*Event) error {
 			}
 		}
 		spend[spendKey{e.TenantID, monthKey(e.TS)}] += e.CostUSD + e.CGLLMCostUSD
+		gatedKASaved := e.KeepAliveSavedUSD
+		if !e.KeepAlive && e.KeepAliveSavedUSD > 0 {
+			// #502: kaSaved (dash/keepalive.go) does not just read keepalive_saved_usd — it
+			// gates it behind an EXISTS check for a ping still within reach at READ time.
+			// Baking the raw stored column into daily_rollup overcounted misses_avoided
+			// (measured: 63 against the live computation's 58 on a 14,253-row corpus) because
+			// it skipped that gate entirely. Reproducing it here, once per credited row (a
+			// tiny population — see kaSaved's own comment), keeps the rollup's
+			// keepalive_saved_usd/keepalive_misses_avoided answering the SAME question the
+			// live, uncached computation does, not a looser one.
+			reachable, err := reachableKeepAliveSavedUSD(tx, e)
+			if err != nil {
+				return err
+			}
+			if !reachable {
+				gatedKASaved = 0
+			}
+		}
+		addToDailyRollup(rollup, e, gatedKASaved)
 	}
 	// In the SAME transaction as the rows: a rollup committed separately would either
 	// double-count a retried batch or lose a committed one, and this number gates
@@ -473,11 +493,133 @@ func (d *DB) insertBatch(evs []*Event) error {
 			return err
 		}
 	}
+	// #502: daily_rollup, same transaction, same reason as tenant_spend above — this is what
+	// makes the lean lifetime read bounded by elapsed days rather than by every row ever
+	// written. See dash/schema.go's own comment on the table for what each column means and
+	// why nothing here is priced at write time.
+	for k, d := range rollup {
+		tenant, day := splitDailyRollupKey(k)
+		if _, err := tx.Exec(`INSERT INTO daily_rollup (
+				tenant_id, day, requests, tokens_before, tokens_after, saved_unique,
+				cost_usd, baseline_cost_usd, cg_llm_cost_usd, cache_saved_usd, cachesplit_saved_usd,
+				keepalive_saved_usd, keepalive_misses_avoided, keepalive_pings, keepalive_ping_usd,
+				upstream_ms_sum, upstream_ms_count
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(tenant_id, day) DO UPDATE SET
+				requests = requests + excluded.requests,
+				tokens_before = tokens_before + excluded.tokens_before,
+				tokens_after = tokens_after + excluded.tokens_after,
+				saved_unique = saved_unique + excluded.saved_unique,
+				cost_usd = cost_usd + excluded.cost_usd,
+				baseline_cost_usd = baseline_cost_usd + excluded.baseline_cost_usd,
+				cg_llm_cost_usd = cg_llm_cost_usd + excluded.cg_llm_cost_usd,
+				cache_saved_usd = cache_saved_usd + excluded.cache_saved_usd,
+				cachesplit_saved_usd = cachesplit_saved_usd + excluded.cachesplit_saved_usd,
+				keepalive_saved_usd = keepalive_saved_usd + excluded.keepalive_saved_usd,
+				keepalive_misses_avoided = keepalive_misses_avoided + excluded.keepalive_misses_avoided,
+				keepalive_pings = keepalive_pings + excluded.keepalive_pings,
+				keepalive_ping_usd = keepalive_ping_usd + excluded.keepalive_ping_usd,
+				upstream_ms_sum = upstream_ms_sum + excluded.upstream_ms_sum,
+				upstream_ms_count = upstream_ms_count + excluded.upstream_ms_count`,
+			tenant, day, d.requests, d.tokensBefore, d.tokensAfter, d.savedUnique,
+			d.costUSD, d.baselineCostUSD, d.cgLLMCostUSD, d.cacheSavedUSD, d.cachesplitSavedUSD,
+			d.keepaliveSavedUSD, d.keepaliveMissesAvoided, d.keepalivePings, d.keepalivePingUSD,
+			d.upstreamMsSum, d.upstreamMsCount); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
 // spendKey is one tenant-month bucket of the spend rollup.
 type spendKey struct{ tenant, month string }
+
+// dailyRollupDelta is one (tenant, UTC day) bucket's change from one insertBatch call —
+// accumulated in Go across the whole batch, then applied as one UPSERT per bucket, same shape
+// as the spend map above.
+type dailyRollupDelta struct {
+	requests, tokensBefore, tokensAfter, savedUnique     int64
+	costUSD, baselineCostUSD, cgLLMCostUSD               float64
+	cacheSavedUSD, cachesplitSavedUSD, keepaliveSavedUSD float64
+	keepaliveMissesAvoided, keepalivePings               int64
+	keepalivePingUSD, upstreamMsSum                      float64
+	upstreamMsCount                                      int64
+}
+
+// dailyRollupKey renders a (tenant, UTC day) bucket as one map key. NUL cannot appear in a
+// tenant id (it comes from an API key's own identity, not free text) or in dayKey's fixed
+// 'YYYY-MM-DD' shape, so this never collides two different buckets into one.
+func dailyRollupKey(tenant, day string) string { return tenant + "\x00" + day }
+
+func splitDailyRollupKey(k string) (tenant, day string) {
+	i := strings.IndexByte(k, 0)
+	return k[:i], k[i+1:]
+}
+
+// dayKey renders an event timestamp as the UTC calendar day daily_rollup buckets on — see the
+// table's own comment on why UTC rather than any viewer's local day.
+func dayKey(tsMillis int64) string {
+	return time.UnixMilli(tsMillis).UTC().Format("2006-01-02")
+}
+
+// reachableKeepAliveSavedUSD runs kaSaved's own EXISTS gate (dash/keepalive.go) for exactly one
+// row, within the same transaction as its own insert — so a ping earlier in the SAME batch is
+// already visible to it. Only called for the tiny population kaSaved's own comment measures
+// (105 of 133,064 on the corpus it cites), so one query per call is cheap, and it is the ONLY
+// way to keep daily_rollup's keepalive_saved_usd/keepalive_misses_avoided answering what the
+// live, uncached computation answers rather than a looser "the column was nonzero" count.
+func reachableKeepAliveSavedUSD(tx *sql.Tx, e *Event) (bool, error) {
+	floorMs := keepaliveCreditFloorMs(e.Provider, e.Model)
+	var exists int
+	err := tx.QueryRow(`SELECT EXISTS (
+			SELECT 1 FROM requests kp
+			WHERE kp.keepalive = 1 AND kp.cache_read > 0
+			  AND kp.tenant_id = ? AND kp.session_id = ?
+			  AND kp.ts <= ? AND kp.ts + ? >= ?
+		)`, e.TenantID, e.SessionID, e.TS, floorMs, e.TS).Scan(&exists)
+	return exists != 0, err
+}
+
+// addToDailyRollup folds one captured event into its (tenant, day) bucket of the lifetime
+// rollup. Mirrors Overview()'s main aggregate's DEFAULT scope exactly: a keep-alive ping
+// contributes only to the keepalive_pings/keepalive_ping_usd pair (the COST half, matching
+// Overview's separate "COST half" query), never to the agent-traffic columns above it, and a
+// real request contributes to everything except those two — the same split `cond`
+// (keepalive = 0 unless WithKeepAlive) and withKeepAlive(f) draw at read time today.
+//
+// gatedKASaved is e.KeepAliveSavedUSD after reachableKeepAliveSavedUSD's gate (0 if no
+// qualifying ping is still in reach), NOT the raw column — see the #502 comment where this is
+// called from insertBatch for why the raw column overcounts.
+func addToDailyRollup(rollup map[string]*dailyRollupDelta, e *Event, gatedKASaved float64) {
+	k := dailyRollupKey(e.TenantID, dayKey(e.TS))
+	d := rollup[k]
+	if d == nil {
+		d = &dailyRollupDelta{}
+		rollup[k] = d
+	}
+	if e.KeepAlive {
+		d.keepalivePings++
+		d.keepalivePingUSD += e.CostUSD
+		return
+	}
+	d.requests++
+	d.tokensBefore += int64(e.TokensBefore)
+	d.tokensAfter += int64(e.TokensAfter)
+	d.savedUnique += int64(e.SavedUnique)
+	d.costUSD += e.CostUSD
+	d.baselineCostUSD += e.BaselineCostUSD
+	d.cgLLMCostUSD += e.CGLLMCostUSD
+	d.cacheSavedUSD += e.CacheSavedUSD
+	d.cachesplitSavedUSD += e.CachesplitSavedUSD
+	d.keepaliveSavedUSD += gatedKASaved
+	if gatedKASaved > 0 {
+		d.keepaliveMissesAvoided++
+	}
+	if e.UpstreamMs > 0 {
+		d.upstreamMsSum += e.UpstreamMs
+		d.upstreamMsCount++
+	}
+}
 
 // monthKey renders an event timestamp as the UTC calendar month the cap bills against.
 func monthKey(tsMillis int64) string {

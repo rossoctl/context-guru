@@ -104,16 +104,8 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 	// of that session's rows, filtered or not, and excludes only OTHER sessions' rows, which
 	// PARTITION BY session_id never let affect this session's own rn values anyway. Unscoped
 	// callers (the whole-deployment view) still get the broad, unfiltered CTE.
-	rnCond, rnArgs := "", []any{}
-	if f.Session != "" {
-		rnCond, rnArgs = "WHERE r.session_id = ?", []any{f.Session}
-	}
-	rows, err := d.sql.QueryContext(d.readCtx(), `WITH rn AS (
-		SELECT r.id AS rid, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
-		FROM requests r
-		`+rnCond+`
-	) SELECT r.model, r.cache_read, r.cache_write FROM requests r JOIN rn ON rn.rid = r.id AND rn.n = 1
-		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0`, append(rnArgs, args...)...)
+	q, qargs := cachesplitHistoricalQuery(f, cond, args)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, qargs...)
 	if err != nil {
 		return out, err
 	}
@@ -164,6 +156,37 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 	}
 	out.Models = len(seen)
 	return out, rows.Err()
+}
+
+// cachesplitHistoricalQuery builds the SQL and args CachesplitHistoricalUSD executes — pulled
+// out so #502's EXPLAIN-plan test runs against the EXACT statement the server executes, not a
+// hand-copied duplicate that could drift from it (named in #502's own review of #498 as a gap
+// the EXPLAIN test left uncovered). See CachesplitHistoricalUSD's own comment for why the CTE
+// may be scoped to the caller's session but never to `cond` (`cond`'s keepalive=0 would be
+// wrong INSIDE the ranking; tenant_id would not — see below).
+//
+// #502/#501: the session-scoped form adds `tenant_id = ?` alongside `session_id = ?`, which
+// #498 did not. Session ids are client-supplied, so two tenants can present the same one, and
+// without the tenant term the ranking would see BOTH tenants' rows as one session — exactly
+// #501's bug (overview.go's and this file's other per-session queries still have it; this is
+// the one lean's new bounded path actually calls, so it is the one fixed here, not a general
+// pass over #501). TenantAll (a manager's service-wide view) is the one caller that must NOT
+// gain this term — it has no single tenant to add.
+func cachesplitHistoricalQuery(f Filter, cond string, args []any) (string, []any) {
+	rnCond, rnArgs := "", []any{}
+	if f.Session != "" {
+		if f.TenantAll {
+			rnCond, rnArgs = "WHERE r.session_id = ?", []any{f.Session}
+		} else {
+			rnCond, rnArgs = "WHERE r.tenant_id = ? AND r.session_id = ?", []any{f.Tenant, f.Session}
+		}
+	}
+	return `WITH rn AS (
+		SELECT r.id AS rid, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
+		FROM requests r
+		` + rnCond + `
+	) SELECT r.model, r.cache_read, r.cache_write FROM requests r JOIN rn ON rn.rid = r.id AND rn.n = 1
+		WHERE ` + cond + ` AND r.split_stable_tokens = 0 AND r.cache_read > 0`, append(rnArgs, args...)
 }
 
 // CachesplitHistoricalUSDByTenant is CachesplitHistoricalUSD for every tenant since a given

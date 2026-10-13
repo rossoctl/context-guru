@@ -583,6 +583,55 @@ CREATE TABLE IF NOT EXISTS declaration_text (
   ts      INTEGER NOT NULL DEFAULT 0
 );
 
+-- #502: daily_rollup is what makes /api/stats?lean=1&since=0 (the status line's "lifetime"
+-- read) bounded by elapsed days rather than by total request count. Updated incrementally,
+-- in the SAME transaction as the requests rows (dash/store.go's insertBatch), exactly the
+-- pattern tenant_spend already uses for monthly billing — not a periodic re-scan, so a stale
+-- interval is never traded for the write cost, and backfilled once for rows written before
+-- this table existed (dash/dailyrollupbackfill.go, same batched/paused/meta-marker shape as
+-- the keepalive-strategy backfill).
+--
+-- "day" is the UTC calendar day of requests.ts ('YYYY-MM-DD'), not the viewer's local day —
+-- matching tenant_spend's own UTC month key and query.go's own note on why (buckets have to
+-- mean the same thing regardless of who is asking). A caller's local "today" can therefore
+-- span 2 rows here when their offset is not a whole number of hours from UTC; the lean lifetime
+-- read sums every row for the tenant, so this never matters for IT, only a future per-day
+-- reader would need to resolve it the way query.go's existing bucketing does.
+--
+-- Every column here is a plain SUM of a "requests" column (or, for the keep-alive and
+-- upstream-latency pairs, a SUM/COUNT this needs to average later) under the SAME default
+-- scope Overview()'s main aggregate uses (keepalive = 0), except the keepalive_ping_usd/
+-- keepalive_pings pair, which is deliberately the keep-alive ROWS themselves. Nothing here is
+-- priced at write time: every field is a token/dollar figure already settled on the request
+-- row (requests.cost_usd, requests.keepalive_saved_usd, …) by the write path that inserted it,
+-- not a rate this table bakes in — the two fields #502 found that ARE priced at read time
+-- (the pre-instrumentation cachesplit credit, the declaration-filter credit) are deliberately
+-- NOT here; see dash/overview_lean.go for why lean does without them outside session scope.
+CREATE TABLE IF NOT EXISTS daily_rollup (
+  tenant_id   TEXT    NOT NULL DEFAULT '',
+  day         TEXT    NOT NULL,              -- 'YYYY-MM-DD', UTC
+  requests          INTEGER NOT NULL DEFAULT 0,
+  tokens_before     INTEGER NOT NULL DEFAULT 0,
+  tokens_after      INTEGER NOT NULL DEFAULT 0,
+  saved_unique      INTEGER NOT NULL DEFAULT 0,
+  cost_usd          REAL    NOT NULL DEFAULT 0,
+  baseline_cost_usd REAL    NOT NULL DEFAULT 0,
+  cg_llm_cost_usd   REAL    NOT NULL DEFAULT 0,
+  cache_saved_usd      REAL NOT NULL DEFAULT 0,
+  cachesplit_saved_usd REAL NOT NULL DEFAULT 0,
+  keepalive_saved_usd      REAL    NOT NULL DEFAULT 0,
+  keepalive_misses_avoided INTEGER NOT NULL DEFAULT 0,
+  -- The keep-alive COST half, over the ping rows themselves (keepalive = 1) rather than the
+  -- agent traffic the columns above describe — see Overview()'s own "COST half" query, which
+  -- this mirrors at write time instead of re-reading it.
+  keepalive_pings    INTEGER NOT NULL DEFAULT 0,
+  keepalive_ping_usd REAL    NOT NULL DEFAULT 0,
+  upstream_ms_sum   REAL    NOT NULL DEFAULT 0,
+  upstream_ms_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (tenant_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_rollup_day ON daily_rollup(day);
+
 `
 
 // additiveDDL2 is the additive phase that must run AFTER `ddl`, because it references a
