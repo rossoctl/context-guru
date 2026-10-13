@@ -787,6 +787,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	extCfg := extract.DefaultCfg()
 	extCfg.Mode, extCfg.Floor, extCfg.Rewrite = e.strategy, floor, e.rewrite
 	extCfg.Aggressiveness = e.aggro
+	extCfg.NoKeepIDs = !e.keepIDs
 	if e.maxChars > 0 {
 		extCfg.MaxChars = e.maxChars
 	}

@@ -93,6 +93,9 @@ type Cfg struct {
 	// what is ACCEPTED — the verbatim-preservation, strictly-smaller and (in deletion-only
 	// mode) subsequence checks are identical at every level.
 	Aggressiveness Aggressiveness
+	// NoKeepIDs records that the caller sent no keep-list on purpose (extract_llm's
+	// keep_identifiers: false). It changes what is accepted, so it is part of the result key.
+	NoKeepIDs bool
 }
 
 // minKeepRatioFloor is the fraction of a body an extraction must still contain to be an
@@ -256,7 +259,15 @@ func cfgFingerprint(cfg Cfg) string {
 		// PromptVersion, which covers the case of the text itself changing; this covers
 		// two levels coexisting on one deployment.)
 		string(cfg.Aggressiveness),
-	}, "|")
+	}, "|") + noKeepTag(cfg)
+}
+
+// noKeepTag is appended only when set, so every existing key stays what it was.
+func noKeepTag(cfg Cfg) string {
+	if cfg.NoKeepIDs {
+		return "|nokeep"
+	}
+	return ""
 }
 
 var identRe = regexp.MustCompile(`[A-Za-z_][\w./-]{3,}|\b\d{3,}\b`)

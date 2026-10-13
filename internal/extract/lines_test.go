@@ -32,3 +32,44 @@ func TestLinesKeepsOnlyTheNamedLinesVerbatim(t *testing.T) {
 		t.Fatalf("a prose reply was accepted: %q / %q", res, why)
 	}
 }
+
+// promptLines records the prompt and keeps the line numbers it is told to.
+type promptLines struct {
+	reply, prompt string
+}
+
+func (m *promptLines) Complete(_ context.Context, p string) (string, error) {
+	m.prompt = p
+	return m.reply, nil
+}
+
+// An output longer than the cap is shown as its head and its tail under their real line numbers,
+// so the last line (a failure summary, the final traceback) can be kept; the hidden middle cannot.
+func TestLinesShowsTheTailOfALongOutput(t *testing.T) {
+	n := maxLinesShown + 500
+	var b strings.Builder
+	for i := 1; i < n; i++ {
+		fmt.Fprintf(&b, "test_case_%d PASSED\n", i)
+	}
+	b.WriteString("FAILED tests/test_parse.py::test_parse_config - ValueError: bad key")
+	m := &promptLines{reply: fmt.Sprintf(`{"keep": [[1, 1], [%d, %d]]}`, maxLinesShown/2+1, n)}
+	res, why := runLines(context.Background(), b.String(), "fix parse_config", nil, m)
+	if !strings.Contains(m.prompt, fmt.Sprintf("%d| FAILED", n)) {
+		t.Fatalf("the last line was not shown under its own number (%s)", why)
+	}
+	// The range starts inside the hidden middle: only the visible tail of it is kept.
+	if want := 1 + maxLinesShown/2; len(strings.Split(res, "\n")) != want || !strings.HasSuffix(res, "ValueError: bad key") {
+		t.Fatalf("kept %d lines, want %d ending in the failure line: %q", len(strings.Split(res, "\n")), want, res[max(0, len(res)-80):])
+	}
+}
+
+// keep_identifiers: false changes what is accepted, so it must not share a cached result with a
+// config that checks the keep-list.
+func TestNoKeepIDsIsPartOfTheResultKey(t *testing.T) {
+	cfg := DefaultCfg()
+	off := cfg
+	off.NoKeepIDs = true
+	if ResultKey("k", "m", cfg) == ResultKey("k", "m", off) {
+		t.Fatal("a result derived without a keep-list would be served to a config that checks one")
+	}
+}
