@@ -95,7 +95,14 @@ func cgProxyStub(t *testing.T, cache string) string {
 		}
 	})
 	// A long apply: 202 with a poll path, then the finished result.
-	mux.HandleFunc("POST /api/adapt/tools/apply", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST /api/adapt/tools/apply", func(w http.ResponseWriter, r *http.Request) {
+		var b struct{ Option string }
+		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
+		if b.Option == "revert" {
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(`{"error":"nothing to revert: the last change to this setting was not made by adapt"}`))
+			return
+		}
 		w.WriteHeader(http.StatusAccepted)
 		w.Write([]byte(`{"state":"running","poll":"/api/adapt/tools/apply/job1"}`))
 	})
@@ -196,6 +203,7 @@ func TestCGGoldens(t *testing.T) {
 		{"adapt-compaction", warm, []string{"adapt", "compaction"}, 0},
 		{"adapt-compaction-details", warm, []string{"adapt", "compaction", "details"}, 0},
 		{"adapt-revert", warm, []string{"revert", "compaction"}, 0},
+		{"adapt-revert-nothing", warm, []string{"revert", "tools"}, 1},
 		{"adapt-apply-gate", warm, []string{"apply", "cache", "by-segment@3f9a1c"}, 1},
 		{"adapt-apply-force", warm, []string{"apply", "cache", "by-segment@3f9a1c", "--force"}, 0},
 		{"adapt-apply-any-order", warm, []string{"apply", "adaptive@3f9a1c", "cache"}, 0},

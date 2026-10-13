@@ -658,7 +658,7 @@ def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], in
             tok = undo["option"] + (f"@{undo['basis']}" if undo.get("basis") else "")
             L.append(f"Undo: /context-guru:adapt apply {kind} {shlex.quote(tok)}")
         return L, 0
-    if st == 409:
+    if st == 409 and opt != "revert":  # a revert has no report to go stale: its 409 is the proxy's own sentence
         L = ["Not applied: the numbers changed since you saw them. Here they are again; nothing was written.", ""]
         st2, rep = adapt_report(api, o, kind)
         return L + (render_adapt(rep, o) if st2 == 200 and rep else [adapt_error(api, kind, st2, rep)]), 1
