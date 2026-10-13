@@ -600,10 +600,10 @@ LAYOUTS = {
     "fill": ("fill", "cache", "hint"),     # context: always loaded vs conversation, time to full
     "watch": ("save", "clock0", "wagents", "hint"),  # saved, main clock, a mini-bar per sub-agent
 }
-ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka", "fit"}
+ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka"}
 # Dropped/shrunk first to last when the line is wider than the terminal. The hint is never in this
 # list: it is the one thing worth the space, and is truncated instead.
-DEGRADE = (("tools", None), ("latency", None), ("ka", None), ("fit", None), ("spend", None), ("update", None), ("hint", 1),
+DEGRADE = (("tools", None), ("latency", None), ("ka", None), ("spend", None), ("update", None), ("hint", 1),
            ("spark", 1), ("strip", 1), ("heat", 1), ("fill", 1), ("wagents", 1),
            ("agents", 1), ("save", 1), ("ctx", 1), ("save", 2), ("cache", 1), ("agents", None), ("ctx", None),
            ("save", None))
@@ -625,7 +625,7 @@ REQUESTS_TTL_SECONDS = 4.0
 STRIP_REQUESTS = 20
 # Which line each element sits on in a two-line layout. `minimal` ignores this: it is one line.
 ROW = {"spark": 0, "strip": 0, "heat": 0, "fill": 0, "clock0": 0, "wagents": 1,
-       "update": 0, "save": 0, "spend": 0, "fit": 0, "cache": 1, "agents": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1,
+       "update": 0, "save": 0, "spend": 0, "cache": 1, "agents": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1,
        "hint": 1}
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
@@ -1056,14 +1056,6 @@ def _save_segment(stats: dict | None, day: dict | None, life: dict | None, level
 WINDOW_SECONDS = 5 * 3600  # the length of Claude's short usage window (the `five_hour` limit)
 
 
-def _limit_weight(usd: float) -> float:
-    """What a list-price dollar figure weighs against a subscription's usage limit. Anthropic does
-    not publish how the limit weights fresh input, cache reads and output, so list price stands in
-    (it is what the proxy's savings maths already uses). This is the ONE place to change if data
-    shows a different weighting; today it is the identity."""
-    return usd
-
-
 def _subscription(payload: dict) -> dict | None:
     """The `five_hour` limit block of Claude Code's stdin payload, or None. Claude Code fills
     `rate_limits` only on a Claude subscription; with an API key, Bedrock or Vertex it is absent or
@@ -1079,24 +1071,15 @@ def _subscription(payload: dict) -> dict | None:
     else:
         reset = None
     week = _num(limits.get("seven_day"), "used_percentage")
-    return {"used": used, "reset": reset, "week": week}
+    # Claude Code can keep the last block after the window ended, until the next response replaces
+    # it. Its percentage and any totals since its start describe a window that is over.
+    return {"used": used, "reset": reset, "week": week, "expired": reset is not None and reset <= _now_s()}
 
 
 def _window_start_ms(sub: dict | None) -> int | None:
     """When the current 5-hour window began: its reset time minus its length."""
-    reset = sub.get("reset") if sub else None
+    reset = sub.get("reset") if sub and not sub.get("expired") else None
     return int((reset - WINDOW_SECONDS) * 1000) if reset else None
-
-
-def _fit_gain(win: dict | None) -> float | None:
-    """How much more work the window holds because of context-guru, as a fraction: saved / actual.
-    A is what this window's traffic cost (in limit weight), S what context-guru saved in the same
-    weight, so the window holds (A + S) / A as much work. None when either is not a real number."""
-    actual, saved = _num(win, "cost_usd"), _num(win, "total_saved_usd")
-    if actual is None or saved is None:
-        return None
-    a, s = _limit_weight(actual), _limit_weight(saved)
-    return s / a if a > 0 and s > 0 else None
 
 
 def _saved_tokens(win: dict | None) -> tuple[float, float] | None:
@@ -1129,24 +1112,20 @@ def _window_segment(sub: dict, win: dict | None, level: int | None = 0, detailed
     """`5h 34% · saved 1.2M rd / 85.0k wr` on a subscription: the real used share of the 5-hour
     limit (Claude Code's own number), then the tokens context-guru kept out of this window, by
     kind. Plain counts, unweighted: Anthropic does not publish how the limit weights each kind.
-    No money."""
-    if level is None:
+    The detailed layout names what the counts cover (`compaction saved`). No money. At level 2 only
+    the 5h share stays: the counts are the proxy's estimates and go first. An ended window shows
+    nothing."""
+    if level is None or sub.get("expired"):
         return None
-    saved = _saved_tokens_text(win)
-    if level == 2:
-        return saved or f"5h {sub['used']:.0f}%"
     out = f"{DIM}5h{RESET} {sub['used']:.0f}%"
-    if detailed and level == 0 and sub.get("week") is not None:
-        out += f" {DIM}·{RESET} {DIM}7d{RESET} {sub['week']:.0f}%"
-    if saved:
-        out += f" {DIM}·{RESET} {saved}"
-    return out
-
-
-def _fit_segment(sub: dict, win: dict | None, level: int | None = 0) -> str | None:
-    """Opt-in (`--show=fit`): `+21% fit`, the weighted view. Off in every layout by default."""
-    gain = _fit_gain(win)
-    return f"+{gain * 100:.0f}% fit" if level == 0 and gain is not None and gain >= 0.005 else None
+    saved = _saved_tokens_text(win)
+    if level == 2 or not saved:
+        return out
+    if detailed and level == 0:
+        if sub.get("week") is not None:
+            out += f" {DIM}·{RESET} {DIM}7d{RESET} {sub['week']:.0f}%"
+        saved = "compaction " + saved
+    return f"{out} {DIM}·{RESET} {saved}"
 
 
 def _fresh_session(payload: dict) -> bool:
@@ -1355,7 +1334,8 @@ def _day_start_ms(days_ago: int = 0) -> int:
     return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_ago, 0, 0, 0, 0, 0, -1)) * 1000)
 
 
-def _gather(port: str, session_id: str | None, on: set[str], win_start: int | None = None) -> dict:
+def _gather(port: str, session_id: str | None, on: set[str], win_start: int | None = None,
+            subscription: bool = False) -> dict:
     """Run the (at most three) proxy reads in parallel under one shared deadline, so the worst
     case is one HTTP_TIMEOUT_SECONDS, not three. Each read is disk-cached; a render that finds all
     three fresh makes no network call at all."""
@@ -1382,13 +1362,13 @@ def _gather(port: str, session_id: str | None, on: set[str], win_start: int | No
     if session_id and "fill" in on:
         jobs["reqs"] = lambda: _fetch_json(
             port, "/api/requests?limit=100&session=" + _quote(session_id), "req100-" + session_id, REQUESTS_TTL_SECONDS)
-    if on & {"save", "spark"}:
+    if "spark" in on or ("save" in on and not subscription):  # a subscription's save segment shows neither
         jobs["day"] = lambda: _bg_json(
             port, f"/api/stats?lean=1&since={_day_start_ms()}", "day", DAY_TTL_SECONDS)
-    if win_start is not None and on & {"save", "fit"}:  # subscription: totals since this 5-hour window began
+    if win_start is not None and "save" in on:  # subscription: totals since this 5-hour window began
         jobs["win"] = lambda: _bg_json(
             port, f"/api/stats?lean=1&since={win_start}", f"win-{win_start // 1000}", WINDOW_TTL_SECONDS)
-    if "save" in on:
+    if "save" in on and not subscription:
         jobs["life"] = lambda: _bg_json(port, "/api/stats?lean=1&since=0", "life", LIFE_TTL_SECONDS)
 
     def run(name, fn):
@@ -1418,7 +1398,7 @@ def main() -> None:
     layout, on, width = _config(sys.argv[1:])
 
     sub = _subscription(payload)
-    got = _gather(port, session_id, on, _window_start_ms(sub))
+    got = _gather(port, session_id, on, _window_start_ms(sub), sub is not None)
     stats, status = got.get("stats") or _stale_stats(port, session_id)
     update_seg = _update_available_segment()  # local file only - independent of the proxy
     notice = {
@@ -1458,10 +1438,9 @@ def main() -> None:
         "latency": lambda lv: _latency_segment(stats) if lv == 0 else None,
         "tools": lambda lv: _recommend_segment(payload) if lv == 0 else None,
     }
-    shown["fit"] = lambda lv: _fit_segment(sub, win, lv) if sub else None
     if sub:  # a subscription pays in limit, not dollars: the window view replaces the money view
         shown["save"] = lambda lv: _window_segment(sub, win, lv, layout == "detailed")
-    order = [e for e in ("update", "save", "fit", "spend", "spark", "strip", "heat", "fill", "clock0", "wagents", "cache",
+    order = [e for e in ("update", "save", "spend", "spark", "strip", "heat", "fill", "clock0", "wagents", "cache",
                          "agents", "ctx", "ka", "latency", "tools") if e in on]
     level: dict[str, int | None] = {e: 0 for e in order}
     hint = _hint(payload, view, ctx) if "hint" in on else None

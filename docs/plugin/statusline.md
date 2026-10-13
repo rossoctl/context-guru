@@ -32,7 +32,8 @@ cache ● █████░ 3:57 │ agents 2 · soonest ◐ 0:51 │ ctx █�
 - The counts are the proxy's own token estimates, and cover compaction only. Cachesplit, keep-alive and declaration-filter savings exist only as dollar figures, so they have no token count here.
 - A kind with nothing saved is left out. With nothing saved, or no reset time, the line shows `5h 34%` only.
 - The `spent` and `ka $…` segments are hidden. Keep-alive pings use limit, not dollars.
-- Opt-in: `--show=fit` adds `+21% fit` (saved ÷ actual cost in the window, at list prices as a stand-in weight). It is in no default layout. The weight lives in one function, `_limit_weight` in `scripts/statusline.py`.
+- An ended window (`resets_at` in the past, before Claude Code sends a new block) shows nothing, and no money. At narrow widths the counts go first. `5h 34%` stays longest.
+- `--layout=detailed` writes `compaction saved …`, so the line names what the counts cover.
 - With an API key, Bedrock or Vertex there is no `rate_limits`. The money view above stays.
 
 ## What each piece means
@@ -155,7 +156,7 @@ Switch without editing settings, and keep the choice across renders:
 python3 "<plugin dir>/scripts/statusline.py" --set-layout=detailed   # or minimal, balanced, auto
 ```
 
-`auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache agents ctx hint latency tools ka fit`), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`.
+`auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache agents ctx hint latency tools ka`), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`.
 
 ## Modes
 
