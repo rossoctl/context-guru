@@ -937,7 +937,26 @@ function insDrawChart(host, g, tl) {
   if (insEChart) { try { insEChart.dispose(); } catch (_) { /* already gone */ } }
   insEChart = echarts.init(host, null, { renderer: 'svg' });
 
-  const cols = g.cols.map((c) => insColLabel(c.from, g.width));
+  /* EDGES, NOT CENTRES — n+1 labels for n columns.
+   *
+   * A column covers a span of time: the one labelled 8 holds everything from the 8th up to the
+   * 9th. Drawn as a category axis, ECharts centres "8" under that band, so the handle that
+   * reports 8 lands at the band's left edge while the label sits in its middle — measured at 29px
+   * and 13px out, in opposite directions, which is why it read as broken rather than merely
+   * offset: "when it selects for example 8 it's not aligned with 8 in chart".
+   *
+   * So the axis is now the BOUNDARIES between columns, which is the reader's own model:
+   *
+   *     |8|--------^--------|9|--------^--------|10|
+   *
+   * A date labels an edge, a cell fills the gap between two edges, and a selection is a whole
+   * number of gaps. A value axis with interval 1 puts the ticks exactly on the integers, and each
+   * cell is placed at i + 0.5 so it straddles the gap rather than centring on an edge. Measured:
+   * labels at 19/130/240/351 with cells spanning 18→130 and 129→241 — edge-aligned, gap-filled,
+   * nothing hanging off the plot. */
+  const edges = g.cols.map((c) => insColLabel(c.from, g.width));
+  edges.push(insColLabel(insColEnd(g, tl), g.width));
+  const cols = edges;
   const rows = g.rows.map((r) => insShortName(r.name));
   const peak = Math.max(1, ...g.rows.flatMap((r) => r.calls));
 
@@ -955,7 +974,7 @@ function insDrawChart(host, g, tl) {
    * but not all". Greying the excluded CELLS instead means the boundary is always a cell edge,
    * every cell is treated the same way, and what the tables are counting is the part that still
    * has colour. */
-  const sel = insSelectedCols(g, insSince, insUntil, tl);
+  const sel = insSelectedCols(g, insSince, insUntil);
   const inSel = (ci) => !sel || (ci >= sel[0] && ci <= sel[1]);
   const used = [];
   const usedOut = [];
@@ -964,8 +983,12 @@ function insDrawChart(host, g, tl) {
   g.rows.forEach((r, ri) => {
     r.calls.forEach((v, ci) => {
       const live = inSel(ci);
-      if (v > 0) (live ? used : usedOut).push([ci, ri, v]);
-      else if (r.carried[ci] > 0) (live ? idle : idleOut).push([ci, ri, 0]);
+      /* ci + 0.5 puts the cell in the GAP between edge ci and edge ci+1, which is the span it
+       * actually describes. An integer would centre it on the edge and leave the first cell
+       * hanging half off the plot. */
+      const x = ci + 0.5;
+      if (v > 0) (live ? used : usedOut).push([x, ri, v]);
+      else if (r.carried[ci] > 0) (live ? idle : idleOut).push([x, ri, 0]);
     });
   });
 
@@ -977,8 +1000,13 @@ function insDrawChart(host, g, tl) {
       position: 'top',
       formatter: (p) => {
         const r = g.rows[p.value[1]];
-        const when = insColLabel(g.cols[p.value[0]].from, g.width) +
-          (g.width > 1 ? ' + ' + (g.width - 1) + ' day(s)' : '');
+        /* x is the gap centre (ci + 0.5), so floor it back to the column it describes. */
+        const ci = Math.floor(p.value[0]);
+        const col = g.cols[ci];
+        if (!r || !col) return '';
+        const when = g.width > 1
+          ? insColLabel(col.from, g.width) + ' → ' + edges[ci + 1]
+          : insColLabel(col.from, g.width);
         return '<strong>' + r.name + '</strong><br>' + when + ': ' +
           (p.value[2] > 0 ? p.value[2] + ' invocation(s)' : 'carried, never invoked');
       },
@@ -995,12 +1023,15 @@ function insDrawChart(host, g, tl) {
      * reader saw no slider. Only this arrangement gives both a visible control and a fixed axis. */
     xAxis: [
       {
-        type: 'category', data: cols, splitArea: { show: false },
-        axisLabel: { color: t.faint, interval: Math.max(0, Math.round(cols.length / 8) - 1) },
+        /* A VALUE axis, so a tick lands on an integer boundary and a cell can sit between two of
+         * them. `interval: 1` keeps one tick per boundary; the label comes from the edge list. */
+        type: 'value', min: 0, max: g.cols.length, interval: 1,
+        splitLine: { show: false },
+        axisLabel: { color: t.faint, formatter: (v) => insEdgeLabel(edges, v, cols.length) },
         axisLine: { lineStyle: { color: t.border } },
-        axisTick: { show: false },
+        axisTick: { show: true, lineStyle: { color: t.border } },
       },
-      { type: 'category', data: cols, gridIndex: 0, show: false },
+      { type: 'value', min: 0, max: g.cols.length, gridIndex: 0, show: false },
     ],
     yAxis: {
       type: 'category', data: rows, splitArea: { show: false },
@@ -1089,10 +1120,11 @@ function insDrawChart(host, g, tl) {
    * axis the slider drives resolves an index. `sel` is the same selection the cells were split
    * on, computed once above, so the handles and the colouring cannot disagree. */
   if (sel) {
-    const n = Math.max(1, g.cols.length - 1);
+    /* Edges again: a selection of columns sel[0]..sel[1] runs from edge sel[0] to edge sel[1]+1. */
+    const span = g.cols.length;
     insEChart.setOption({ dataZoom: [{
-      start: (sel[0] / n) * 100,
-      end: (sel[1] / n) * 100,
+      start: (sel[0] / span) * 100,
+      end: ((sel[1] + 1) / span) * 100,
     }] }, false);
   }
 
@@ -1103,10 +1135,15 @@ function insDrawChart(host, g, tl) {
   insEChart.on('dataZoom', () => {
     const opt = insEChart.getOption();
     const dz = (opt.dataZoom || [])[0] || {};
-    const a = Math.max(0, Math.round((dz.startValue !== undefined
-      ? dz.startValue : (dz.start / 100) * (g.cols.length - 1))));
-    const b = Math.min(g.cols.length - 1, Math.round((dz.endValue !== undefined
-      ? dz.endValue : (dz.end / 100) * (g.cols.length - 1))));
+    /* THE HANDLES ARE ON EDGES, 0..nCols, and the selection is the gaps BETWEEN them: edges 1
+     * and 3 select columns 1 and 2. So the left edge rounds to a column index directly, and the
+     * right edge rounds down by one to name the last column inside the selection. Both are
+     * rounded to a whole edge first, which is what keeps a range a whole number of days. */
+    const span = g.cols.length;                         // nCols gaps, nCols+1 edges
+    const e0 = Math.round(dz.start !== undefined ? (dz.start / 100) * span : 0);
+    const e1 = Math.round(dz.end !== undefined ? (dz.end / 100) * span : span);
+    const a = Math.max(0, Math.min(span - 1, e0));
+    const b = Math.max(a, Math.min(span - 1, e1 - 1));
     clearTimeout(pending);
     pending = setTimeout(() => {
       /* Exact DAYS, not the rolled bucket, with `until` at the end of the last day so the final
@@ -1122,10 +1159,11 @@ function insDrawChart(host, g, tl) {
       const nextSince = whole ? 0 : since;
       const nextUntil = whole ? 0 : until;
       if (nextSince === insSince && nextUntil === insUntil) {
-        /* The window did not change, but the handle may be resting between two days. Snap it so
+        /* The window did not change, but a handle may be resting between two edges. Snap it so
          * the control shows the range it actually selected rather than where the mouse stopped. */
-        const n = Math.max(1, g.cols.length - 1);
-        insEChart.setOption({ dataZoom: [{ start: (a / n) * 100, end: (b / n) * 100 }] }, false);
+        insEChart.setOption({ dataZoom: [{
+          start: (a / span) * 100, end: ((b + 1) / span) * 100,
+        }] }, false);
         return;
       }
       insSince = nextSince;
@@ -1144,17 +1182,40 @@ function insDrawChart(host, g, tl) {
 /* insSelectedCols maps the active window onto column indices, or null when nothing is selected.
  * One place, because the band and the slider restore must agree: if they disagreed, the shading
  * would mark a different range than the handles, which is the confusion this whole change fixes. */
-function insSelectedCols(g, since, until, tl) {
+function insSelectedCols(g, since, until) {
   if (!since && !until) return null;
   let a = 0;
   let b = g.cols.length - 1;
+  /* COMPARED START-TO-START, which is not a detail. The handler sets `since` to a column's own
+   * `from`, so matching on the column's END (`buckets[toIdx] >= since`) selects the column BEFORE
+   * the intended one whenever a column is a single day, because then its end and the next one's
+   * start are the same instant. Observed: every cell fell outside the selection and the whole
+   * chart greyed out while the banner named a correct two-day range. */
   for (let i = 0; i < g.cols.length; i++) {
-    if (since && tl.buckets[g.cols[i].toIdx] >= since) { a = i; break; }
+    if (since && g.cols[i].from >= since) { a = i; break; }
   }
   for (let i = g.cols.length - 1; i >= 0; i--) {
     if (until && g.cols[i].from <= until) { b = i; break; }
   }
   return [a, Math.max(a, b)];
+}
+
+/* insColEnd is the timestamp one bucket PAST the last column, which is the final edge: the axis
+ * needs n+1 boundaries for n columns, and the last one is where the last column stops. */
+function insColEnd(g, tl) {
+  const last = g.cols[g.cols.length - 1];
+  const dayMs = 24 * 3600 * 1000;
+  return tl.buckets[last.toIdx] + dayMs;
+}
+
+/* insEdgeLabel thins the edge labels so they do not collide, keeping the first and last. A value
+ * axis has no `interval` for labels the way a category axis does, so the thinning is ours. */
+function insEdgeLabel(edges, v, n) {
+  const i = Math.round(v);
+  if (i < 0 || i >= edges.length) return '';
+  const every = Math.max(1, Math.ceil(n / 9));
+  if (i !== 0 && i !== edges.length - 1 && i % every !== 0) return '';
+  return edges[i];
 }
 
 function insColLabel(ms, width) {
