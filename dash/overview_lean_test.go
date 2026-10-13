@@ -352,3 +352,69 @@ func TestOverviewLeanLifetimeStaysUnderBudgetOnALargeRollup(t *testing.T) {
 		t.Errorf("Requests = %d, want %d", o.Requests, want)
 	}
 }
+
+// TestDailyRollupNeverDoublesABrandNewDatabase is the regression test for a real bug this PR
+// introduced and caught before merge: a brand-new database has no row written before
+// daily_rollup existed — every row goes through insertBatch's live rollup — so the one-time
+// backfill (dash/dailyrollupbackfill.go) has NOTHING to do. Before the dailyRollupLiveFromID
+// watermark existed, the backfill could not tell that apart from "an upgrade with real history
+// to recover" and summed every row a second time: TestGoldenEndpoints' stats_lean subtest came
+// back with every number exactly doubled, intermittently, once run inside the full suite (where
+// goroutine scheduling gave the backfill's background pass enough of a window to run before the
+// assertion). This seeds a fresh database, runs the backfill EXPLICITLY and synchronously
+// (rather than racing its own background goroutine, so the test is deterministic rather than
+// merely as likely to catch the bug as the full suite happened to be), and checks the lifetime
+// read is exactly the inserted total, not double it.
+func TestDailyRollupNeverDoublesABrandNewDatabase(t *testing.T) {
+	db := openTestDB(t)
+	const tenant = "t1"
+	var evs []*Event
+	for i := 0; i < 50; i++ {
+		e := mkEvent(int64(1000+i*1000), fmt.Sprintf("s-%d", i%5), "m", 100, 90)
+		e.TenantID = tenant
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+
+	// The backfill should find nothing to do: every row above was already live-rolled-up.
+	moved, err := db.backfillDailyRollup(make(chan struct{}), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 0 {
+		t.Errorf("backfillDailyRollup moved %d rows on a brand-new database, want 0 "+
+			"(every row here was already live-rolled-up by insertBatch)", moved)
+	}
+
+	o, err := db.OverviewLean(Filter{Tenant: tenant}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantRequests, wantTokensBefore = 50, 50*100
+	if o.Requests != wantRequests {
+		t.Errorf("Requests = %d, want %d (a doubled rollup would show %d)", o.Requests, wantRequests, wantRequests*2)
+	}
+	if o.TokensBefore != wantTokensBefore {
+		t.Errorf("TokensBefore = %d, want %d (a doubled rollup would show %d)", o.TokensBefore, wantTokensBefore, wantTokensBefore*2)
+	}
+
+	// Running the backfill AGAIN must still be a no-op (idempotent), not a second pass that
+	// adds anything.
+	moved, err = db.backfillDailyRollup(make(chan struct{}), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 0 {
+		t.Errorf("a second backfillDailyRollup call moved %d rows, want 0 (not idempotent)", moved)
+	}
+	o2, err := db.OverviewLean(Filter{Tenant: tenant}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o2.Requests != wantRequests || o2.TokensBefore != wantTokensBefore {
+		t.Errorf("numbers changed after a second backfill pass: requests %d, tokens_before %d",
+			o2.Requests, o2.TokensBefore)
+	}
+}

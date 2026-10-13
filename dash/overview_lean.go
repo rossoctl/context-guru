@@ -30,23 +30,32 @@ import (
 //
 // Two fields ARE priced at read time rather than stored on the row — the pre-instrumentation
 // cachesplit credit (CachesplitHistoricalUSD) and the declaration-filter credit
-// (DeclFilterSavings) — and both need a query that is bounded ONLY when scoped to one
-// session: CachesplitHistoricalUSD's ranking has to see a session's whole history to know
-// which row was its first (dash/cachehistory.go's own comment), and DeclFilterSavings' SELECT
-// is a plain filtered scan that is bounded by the SAME index as the main aggregate for a
-// session or a time window, but not for `since=0`. So OverviewLean includes both ONLY when
-// f.Session is set; for a day window or the lifetime read, `total_saved_usd` is short by
-// those two credits. Both are small and shrink over time (the first is a historical
-// population that only gets smaller; the second needs a model's price, which the caller
-// cannot always supply either) — a disclosed, bounded trade accepted in the plan comment's
-// "if cg.py needs a field that is moved out, switch that call to the full /api/stats": cg.py's
-// own `stats()` helper now calls the full endpoint, so its numbers are exact; only the status
-// line's day/lifetime reads (which can never call anything but lean) carry the small
-// understatement, and its SESSION read — the one that renders on every tick — does not.
+// (DeclFilterSavings) — and the review of this PR corrected an earlier version of this
+// function that dropped BOTH outside session scope. Each is bounded by a DIFFERENT thing, so
+// each is included wherever ITS OWN bound holds, not wherever the other's does:
+//
+//   - DeclFilterSavings' SELECT is a plain filtered scan, bounded by the same index as the main
+//     aggregate for a session OR a time window — included for both, dropped only for the true
+//     lifetime read (`since=0`, no window at all).
+//   - CachesplitHistoricalUSD's ranking has to see a session's WHOLE history to know which row
+//     was its first (dash/cachehistory.go's own comment) — bounded for a session, not for a
+//     time window or lifetime. Worse, it cannot be precomputed once and stored even for the
+//     closed, pre-instrumentation population it credits: CachesplitHistoricalUSD's own comment
+//     explains that a model's "stable half" is NOT a fixed fact — more sessions using the split
+//     can reveal a spread where today there is a constant, or the reverse — so a value baked in
+//     today could become wrong without a single new ROW for the credited session ever arriving.
+//     Included only for a session.
+//
+// Both gaps are small and disclosed, not silent: the plan comment's "if cg.py needs a field
+// that is moved out, switch that call to the full /api/stats" is why cg.py's own `stats()`
+// helper now calls the full endpoint, so its numbers are exact regardless. Only the status
+// line's reads (which can never call anything but lean) carry either gap, and only outside
+// session scope — its SESSION read, the one that renders on every tick, carries neither.
 func (d *DB) OverviewLean(f Filter, pricer modelinfo.Pricer, priceFn func(string) (modelinfo.Price, bool)) (*Overview, error) {
+	isLifetime := f.Session == "" && f.Since == 0 && f.Until == 0
 	var o *Overview
 	var err error
-	if f.Session == "" && f.Since == 0 && f.Until == 0 {
+	if isLifetime {
 		o, err = d.overviewLeanLifetime(f)
 	} else {
 		o, err = d.overviewLeanWindow(f)
@@ -54,13 +63,15 @@ func (d *DB) OverviewLean(f Filter, pricer modelinfo.Pricer, priceFn func(string
 	if err != nil {
 		return nil, err
 	}
+	if !isLifetime && priceFn != nil {
+		if fs, err := d.DeclFilterSavings(f, priceFn); err == nil {
+			o.TotalSavedUSD += fs.USD
+		}
+	}
 	if f.Session != "" && pricer != nil {
 		if h, err := d.CachesplitHistoricalUSD(f, pricer); err == nil {
 			o.CachesplitHistorical = &h
 			o.TotalSavedUSD += h.USD
-		}
-		if fs, err := d.DeclFilterSavings(f, priceFn); err == nil {
-			o.TotalSavedUSD += fs.USD
 		}
 	}
 	o.Waterfall = o.waterfall()

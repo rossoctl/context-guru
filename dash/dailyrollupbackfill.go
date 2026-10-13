@@ -12,6 +12,7 @@ package dash
 
 import (
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -19,6 +20,14 @@ import (
 // dailyRollupBackfillDoneKey is the `meta` row this backfill sets once it has summed every
 // request row written before daily_rollup existed into their (tenant, day) buckets.
 const dailyRollupBackfillDoneKey = "daily_rollup_backfill_done"
+
+// dailyRollupLiveFromIDKey is the `meta` row dash/store.go's insertBatch writes once, ever,
+// recording the first request id this database ever live-rolled-up into daily_rollup. The
+// backfill below must never touch an id at or above it — those rows were already counted, in
+// the SAME transaction, by insertBatch's own loop; re-summing them here is exactly how a
+// brand-new database (nothing BUT live-rolled-up rows, nothing to backfill at all) got every
+// number in daily_rollup doubled before this watermark existed.
+const dailyRollupLiveFromIDKey = "daily_rollup_live_from_id"
 
 // dailyRollupBackfillBatch bounds how many requests rows one pass sums. Larger than
 // keepAliveStrategyBackfillBatch's 500: this is one GROUP BY over a contiguous id range, not
@@ -53,21 +62,43 @@ func (d *DB) backfillDailyRollup(stop <-chan struct{}, batch int, pause time.Dur
 	} else if done {
 		return 0, nil
 	}
-	// The watermark is the highest request id already folded in, NOT a timestamp: ids are
-	// assigned in insertion order, which is what guarantees "every row below the watermark
-	// has been counted exactly once" even though a batch's rows span many different days and
-	// tenants. A row that insertBatch's own rollup update already covers (anything inserted
-	// after this backfill started) has an id above every id this backfill will ever see,
-	// because AUTOINCREMENT ids only grow — so the two can never double-count one row.
-	// Snapshotted once, not re-read every pass: a row inserted WHILE this runs is already
-	// covered by insertBatch's own live rollup update (see its comment above), so chasing a
-	// moving ceiling would only risk double-counting a row that arrives between this batch's
-	// read and its commit. Anything at or below this id, however it got there, is this
-	// backfill's job and nobody else's.
-	ceiling, err := d.maxRequestID()
+	// The ceiling is dailyRollupLiveFromIDKey minus one, NOT maxRequestID(): every id at or
+	// above that watermark was already folded into daily_rollup by insertBatch's own live
+	// rollup, in the SAME transaction as its own insert (dash/store.go). Using maxRequestID()
+	// here — the ids rows LIVE-ROLLED-UP are already a subset of — summed every one of them a
+	// SECOND time: a brand-new database, where every row goes through the live path and
+	// literally nothing predates daily_rollup, got every number in it exactly doubled. ids
+	// only grow, so a watermark read once is never stale: nothing the backfill will ever see
+	// can cross it later.
+	liveFrom, err := d.dailyRollupLiveFromID()
 	if err != nil {
 		return 0, err
 	}
+	if liveFrom == 0 {
+		// Nobody has set the watermark yet — meaning no insertBatch call has EVER run on this
+		// database since daily_rollup started existing. CLAIM one, racing insertBatch's own
+		// attempt to set the SAME key (ON CONFLICT DO NOTHING on both sides): whichever of the
+		// two gets there first wins, and the loser's write is a no-op that changes nothing,
+		// because insertBatch's own live rollup never reads this key — only the backfill does.
+		// Reading maxRequestID() and claiming maxID+1 BEFORE summing anything (rather than
+		// summing up to maxRequestID() directly) is what closes the startup race: a row
+		// inserted between this read and the claim lands ABOVE the claimed watermark, so it is
+		// correctly left for the live path even though this backfill pass could not have seen
+		// it yet.
+		maxID, err := d.maxRequestID()
+		if err != nil {
+			return 0, err
+		}
+		if _, err := d.sql.Exec(`INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING`,
+			dailyRollupLiveFromIDKey, fmt.Sprint(maxID+1)); err != nil {
+			return 0, err
+		}
+		liveFrom, err = d.dailyRollupLiveFromID()
+		if err != nil {
+			return 0, err
+		}
+	}
+	ceiling := liveFrom - 1
 	var cursor, moved int64
 	started := time.Now()
 	for cursor < ceiling {
@@ -235,4 +266,23 @@ func (d *DB) dailyRollupBackfillDone() (bool, error) {
 func (d *DB) markDailyRollupBackfillDone() error {
 	_, err := d.sql.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, dailyRollupBackfillDoneKey)
 	return err
+}
+
+// dailyRollupLiveFromID reads dailyRollupLiveFromIDKey — the first request id ever
+// live-rolled-up on this database (dash/store.go's insertBatch) — or 0 if nothing has set it
+// yet (no insertBatch call has run since daily_rollup started existing).
+func (d *DB) dailyRollupLiveFromID() (int64, error) {
+	var v string
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT value FROM meta WHERE key = ?`, dailyRollupLiveFromIDKey).Scan(&v)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var id int64
+	if _, err := fmt.Sscanf(v, "%d", &id); err != nil {
+		return 0, err
+	}
+	return id, nil
 }

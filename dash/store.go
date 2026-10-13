@@ -483,6 +483,22 @@ func (d *DB) insertBatch(evs []*Event) error {
 		}
 		addToDailyRollup(rollup, e, gatedKASaved)
 	}
+	// #502: records the FIRST request id this process ever live-rolled-up into
+	// daily_rollup — written ONCE, ever, for a given database (ON CONFLICT DO NOTHING), the
+	// first time insertBatch runs after daily_rollup starts existing. dailyrollupbackfill.go
+	// reads it back and only backfills ids BELOW it: everything from here up has already been
+	// counted by the loop above, in THIS same transaction, and backfilling it again would
+	// double it — which a brand-new database (every row live-rolled-up, nothing to backfill)
+	// made obvious immediately: TestGoldenEndpoints' fixture came back with every number
+	// exactly doubled before this watermark existed, because the backfill could not tell "an
+	// upgrade with real pre-existing history" from "a database that never needed backfilling
+	// at all" and summed every row either way.
+	if len(evs) > 0 {
+		if _, err := tx.Exec(`INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING`,
+			dailyRollupLiveFromIDKey, fmt.Sprint(evs[0].ID)); err != nil {
+			return err
+		}
+	}
 	// In the SAME transaction as the rows: a rollup committed separately would either
 	// double-count a retried batch or lose a committed one, and this number gates
 	// spending the organisation's money.
