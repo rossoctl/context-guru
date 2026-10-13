@@ -174,7 +174,8 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 		removed[n] = true
 	}
 
-	// Declarations: one set per (tenant, session, digest). Only the candidate items are kept.
+	// Declarations: one set per (tenant, session, digest), read one session at a time so only that
+	// session's sets are in memory. Only the candidate items are kept.
 	q := `SELECT d.tenant_id, d.session_id, d.digest, d.kind, d.name, d.server, d.tokens, d.ts
 		FROM tool_declarations d WHERE d.kind IN ('tool', 'mcp_tool', 'server_tool', 'skill')`
 	var da []any
@@ -182,78 +183,32 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 		q += ` AND d.tenant_id = ?`
 		da = append(da, f.Tenant)
 	}
-	drows, err := d.sql.QueryContext(d.readCtx(), q, da...)
+	drows, err := d.sql.QueryContext(d.readCtx(), q+` ORDER BY d.tenant_id, d.session_id`, da...)
 	if err != nil {
 		return nil, err
 	}
-	sets := map[string]map[string]*adaptSet{} // session key -> digest -> set
 	items := map[string]*AdaptItem{}
-	itemSessions := map[string]map[string]bool{}
-	for drows.Next() {
-		var t, s, dg, kind, name, server string
-		var tok int
-		var ts int64
-		if err := drows.Scan(&t, &s, &dg, &kind, &name, &server, &tok, &ts); err != nil {
-			drows.Close()
-			return nil, err
+	// priceSession prices one session's requests against its sets.
+	priceSession := func(list []adaptReq, sess map[string]*adaptSet) {
+		out.Coverage.SessionsCaptured++
+		seen := map[string]bool{}
+		for _, st := range sess {
+			for key := range st.carry {
+				if !seen[key] {
+					seen[key] = true
+					items[key].Sessions++
+				}
+			}
 		}
-		sk := t + "\x00" + s
-		if reqs[sk] == nil {
-			continue // not in scope
-		}
-		if sets[sk] == nil {
-			sets[sk] = map[string]*adaptSet{}
-		}
-		st := sets[sk][dg]
-		if st == nil {
-			st = &adaptSet{first: ts, carry: map[string]int{}, mcpN: map[string]int{}}
-			sets[sk][dg] = st
-		}
-		if ts < st.first {
-			st.first = ts
-		}
-		if kind != KindSkill {
-			st.ntools++
-		}
-		key, it := adaptCandidate(kind, name, server, usedTool, usedServer, usedSkill, removed)
-		if it == nil {
-			continue
-		}
-		st.carry[key] += tok
-		if it.Kind == KindMCPServer {
-			st.mcpN[it.Name]++
-		}
-		cur := items[key]
-		if cur == nil {
-			cur = it
-			cur.Priced, cur.FirstTS = true, ts
-			items[key] = cur
-			itemSessions[key] = map[string]bool{}
-		}
-		itemSessions[key][sk] = true
-		if ts < cur.FirstTS {
-			cur.FirstTS = ts
-		}
-		if ts > cur.LastTS {
-			cur.LastTS = ts
-		}
-	}
-	drows.Close()
-	if err := drows.Err(); err != nil {
-		return nil, err
-	}
-	out.Coverage.SessionsCaptured = len(sets)
-
-	for sk, list := range reqs {
 		byCount := map[int][]*adaptSet{}
-		for _, st := range sets[sk] {
+		for _, st := range sess {
 			byCount[st.ntools] = append(byCount[st.ntools], st)
 		}
 		for _, c := range byCount {
 			sort.Slice(c, func(i, j int) bool { return c[i].first < c[j].first })
 		}
 		for _, r := range list {
-			st, cands := sets[sk][r.digest], []*adaptSet(nil)
+			st, cands := sess[r.digest], []*adaptSet(nil)
 			if st != nil {
 				out.Coverage.RequestsExact++
 			} else {
@@ -328,7 +283,7 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			}
 		}
 		// Per-request weight and tool count are per set, so take the heaviest set.
-		for _, st := range sets[sk] {
+		for _, st := range sess {
 			for key, tok := range st.carry {
 				it := items[key]
 				if tok > it.Tokens {
@@ -340,9 +295,66 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			}
 		}
 	}
+	cur, sess := "", map[string]*adaptSet{}
+	for drows.Next() {
+		var t, s, dg, kind, name, server string
+		var tok int
+		var ts int64
+		if err := drows.Scan(&t, &s, &dg, &kind, &name, &server, &tok, &ts); err != nil {
+			drows.Close()
+			return nil, err
+		}
+		sk := t + "\x00" + s
+		if reqs[sk] == nil {
+			continue // not in scope
+		}
+		if sk != cur {
+			if cur != "" {
+				priceSession(reqs[cur], sess)
+			}
+			cur, sess = sk, map[string]*adaptSet{}
+		}
+		st := sess[dg]
+		if st == nil {
+			st = &adaptSet{first: ts, carry: map[string]int{}, mcpN: map[string]int{}}
+			sess[dg] = st
+		}
+		if ts < st.first {
+			st.first = ts
+		}
+		if kind != KindSkill {
+			st.ntools++
+		}
+		key, it := adaptCandidate(kind, name, server, usedTool, usedServer, usedSkill, removed)
+		if it == nil {
+			continue
+		}
+		st.carry[key] += tok
+		if it.Kind == KindMCPServer {
+			st.mcpN[it.Name]++
+		}
+		ex := items[key]
+		if ex == nil {
+			ex = it
+			ex.Priced, ex.FirstTS = true, ts
+			items[key] = ex
+		}
+		if ts < ex.FirstTS {
+			ex.FirstTS = ts
+		}
+		if ts > ex.LastTS {
+			ex.LastTS = ts
+		}
+	}
+	drows.Close()
+	if err := drows.Err(); err != nil {
+		return nil, err
+	}
+	if cur != "" {
+		priceSession(reqs[cur], sess)
+	}
 
-	for key, it := range items {
-		it.Sessions = len(itemSessions[key])
+	for _, it := range items {
 		it.USD = it.USDCacheRead + it.USDCacheWrite + it.USDInput
 		it.Sufficient = it.Sessions >= suggestMinSessions &&
 			time.Duration(it.LastTS-it.FirstTS)*time.Millisecond >= suggestMinSpan
