@@ -560,6 +560,10 @@ function insRender() {
   chartPanel.appendChild(insScopeLine());
   root.appendChild(chartPanel);
 
+  /* The range, between the chart and everything it governs. A reader who scrolls past the chart
+   * still has to know which period the numbers describe. */
+  root.appendChild(insRangeBanner());
+
 
   const items = insDoc.items || [];
   const unremovable = items.filter((i) => i.scope === 'none');
@@ -568,7 +572,7 @@ function insRender() {
   /* The headline, in the page's own tile vocabulary. */
   const tiles = el('div', { class: 'grid' },
     el('div', { class: 'tile good' },
-      el('div', { class: 'k', text: 'wasted, recoverable' }),
+      el('div', { class: 'k', text: insSince ? 'wasted in range' : 'wasted, recoverable' }),
       el('div', { class: 'v', text: usd(insDoc.removable_usd || 0) }),
       el('div', { class: 's', text: items.filter((i) => i.scope && i.scope !== 'none').length +
         ' unused items you can remove · ' + (insDoc.removable_tokens || 0).toLocaleString() +
@@ -586,7 +590,7 @@ function insRender() {
         : 'nothing past the floor yet — the list below is still complete' })));
   if (unremovable.length) {
     tiles.appendChild(el('div', { class: 'tile bad' },
-      el('div', { class: 'k', text: 'wasted, unrecoverable' }),
+      el('div', { class: 'k', text: insSince ? 'unrecoverable, in range' : 'wasted, unrecoverable' }),
       el('div', { class: 'v', text: usd(unremovable.reduce((a, i) => a + (i.usd || 0), 0)) }),
       el('div', { class: 's', text: unremovable.length + ' unused built-ins · real waste, ' +
         'but removing one breaks the agent' })));
@@ -848,11 +852,16 @@ function insSparkline(item, tl, scale) {
  * never-invoked capability has nothing to plot and belongs in the table, which is where it is.
  */
 
-const INS_MAX_COLS = 26;
-const INS_HEAT_ROW = 15;
-const INS_HEAT_GAP = 2;
-const INS_LANE_W = 168;
-const INS_VOL_H = 34;
+const INS_MAX_COLS = 60;
+const INS_HEAT_ROW = 26;
+const INS_HEAT_GAP = 3;
+const INS_LANE_W = 210;
+const INS_VOL_H = 64;
+/* The chart fills its panel rather than a width I guessed. 640px was a constant I picked with no
+ * reason, and at 26px rows on a wide screen it left two thirds of the panel empty — reported as
+ * "chart very small". Measured from the host at render time, with a floor so a narrow window
+ * scrolls instead of crushing the cells. */
+const INS_MIN_PLOT = 420;
 
 /* Day buckets up to 26 columns, then rolled wider. 120 days of day-buckets is 120 columns, which
  * is a column per 3px — a texture, not a chart. The roll happens here rather than in the
@@ -904,7 +913,12 @@ function insChart() {
       'is nothing to chart. The tables below still list what you were carrying.' });
   }
   const nc = g.cols.length;
-  const cw = Math.max(6, Math.min(34, Math.floor((640 - INS_LANE_W) / nc)));
+  const host = document.getElementById('insights-body');
+  const avail = Math.max(INS_MIN_PLOT,
+    ((host && host.clientWidth) || 900) - INS_LANE_W - 36);
+  /* No upper cap on cell width. A six-day history should draw six wide columns and fill the
+   * panel, not six narrow ones huddled on the left. */
+  const cw = Math.max(5, Math.floor(avail / nc));
   const plotW = nc * cw;
   const totalW = INS_LANE_W + plotW + 8;
 
@@ -973,7 +987,10 @@ function insChart() {
       class: 'ins-heat-tick', x: INS_LANE_W + i * cw + cw / 2, y: ty, 'text-anchor': 'middle',
     })).textContent = insColLabel(g.cols[i].from, g.width);
   }
+  insAttachBrush(svg, g, { cw, totalW, h });
   wrap.appendChild(svg);
+  wrap.appendChild(el('p', { class: 'hint', text: 'Drag across the chart to select a period. ' +
+    'Everything below then describes only that period.' }));
   return wrap;
 }
 
@@ -1017,6 +1034,38 @@ function insRangeBar() {
 /* The scope line. Stated as a sentence and not only as two dates, because every number below it
  * means something different depending on this range, and a reader who skipped the chips would
  * otherwise read a narrowed figure as an all-time one. */
+/* THE SELECTED RANGE, ABOVE THE TABLES AND IMPOSSIBLE TO MISS.
+ *
+ * Every figure below means something different depending on this, so a reader who scrolled past
+ * the chart must still know what they are looking at. A banner rather than a line of prose,
+ * because a narrowed table that LOOKS like an all-time table is the worst failure this view has:
+ * it would have somebody remove a capability on the strength of one quiet week. */
+function insRangeBanner() {
+  if (!insSince && !insUntil) {
+    return el('div', { class: 'ins-banner all' },
+      el('span', { class: 'ins-banner-k', text: 'showing' }),
+      el('strong', { text: 'all recorded history' }),
+      el('span', { class: 'ins-banner-note', text: 'Drag across the chart to narrow it.' }));
+  }
+  const fmt = (ms) => {
+    const d = new Date(ms);
+    return d.getDate() + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()] + ' ' + d.getFullYear();
+  };
+  const days = insUntil && insSince
+    ? Math.max(1, Math.round((insUntil - insSince) / 86400000)) : null;
+  const b = el('div', { class: 'ins-banner' },
+    el('span', { class: 'ins-banner-k', text: 'selected range' }),
+    el('strong', { text: fmt(insSince || insDoc.timeline.buckets[0]) +
+      (insUntil ? ' \u2192 ' + fmt(insUntil) : ' \u2192 now') }));
+  if (days) b.appendChild(el('span', { class: 'ins-banner-note', text: days + ' day(s)' }));
+  b.appendChild(el('button', {
+    type: 'button', class: 'ins-banner-clear', text: 'show all history',
+    onclick: () => { insSince = 0; insUntil = 0; loadInsights(); },
+  }));
+  return b;
+}
+
 function insScopeLine() {
   const items = (insDoc.items || []);
   const unused = items.filter((i) => !i.invoked).length;
@@ -1041,4 +1090,68 @@ function insScopeLine() {
       'fault.' }));
   }
   return p;
+}
+
+/* ── the brush ──────────────────────────────────────────────────────────────
+ *
+ * Drag across the chart to select a period; release re-queries, and every table below describes
+ * that period. Written by hand rather than vendored, which was a measured decision: uPlot is the
+ * right library at 49KB and MIT, but it charts time series and has no heatmap, so it could only
+ * ever brush a strip ABOVE this grid — and the grid is the view that shows the phase progression.
+ * Pointer events on an SVG we already own cost forty lines and no policy exception. If this
+ * proves rough in use, uPlot goes in as a second panel; the heatmap stays either way.
+ *
+ * Pointer events, not mouse events: the same handlers then work for touch and pen, and
+ * setPointerCapture keeps the drag alive when the cursor leaves the chart — which it will, because
+ * the natural gesture overshoots the edge.
+ */
+function insAttachBrush(svg, g, geom) {
+  const band = svgEl('rect', { class: 'ins-brush', x: 0, y: 0, width: 0, height: geom.h,
+    'pointer-events': 'none' });
+  svg.appendChild(band);
+
+  let from = -1, to = -1, dragging = false;
+  const colAt = (clientX) => {
+    const box = svg.getBoundingClientRect();
+    /* The SVG scales to its box, so a client x has to be mapped through that ratio before it
+     * means anything in viewBox units. Reading it off offsetX would be wrong on any zoom. */
+    const vx = (clientX - box.left) * (geom.totalW / box.width);
+    return Math.max(0, Math.min(g.cols.length - 1,
+      Math.floor((vx - INS_LANE_W) / geom.cw)));
+  };
+  const paint = () => {
+    if (from < 0 || to < 0) { band.setAttribute('width', 0); return; }
+    const a = Math.min(from, to), b = Math.max(from, to);
+    band.setAttribute('x', INS_LANE_W + a * geom.cw);
+    band.setAttribute('width', (b - a + 1) * geom.cw);
+  };
+
+  svg.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    from = to = colAt(e.clientX);
+    paint();
+    try { svg.setPointerCapture(e.pointerId); } catch (_) { /* older engines */ }
+    e.preventDefault();
+  });
+  svg.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    to = colAt(e.clientX);
+    paint();
+  });
+  const finish = () => {
+    if (!dragging) return;
+    dragging = false;
+    const a = Math.min(from, to), b = Math.max(from, to);
+    /* The selection resolves to EXACT DAYS, not to the rolled bucket: a 4-day bucket brushed at
+     * its left edge still means those four days, and `until` is the end of the last one so the
+     * final day is included rather than silently dropped. */
+    insSince = g.cols[a].from;
+    const lastDay = insDoc.timeline.buckets[g.cols[b].toIdx];
+    insUntil = lastDay + 24 * 3600 * 1000 - 1;
+    loadInsights();
+  };
+  svg.addEventListener('pointerup', finish);
+  svg.addEventListener('pointercancel', () => { dragging = false; paint(); });
+  return band;
 }

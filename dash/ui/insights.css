@@ -222,3 +222,35 @@
 .ins-scope { margin: var(--sp-2) 0 0; font-size: var(--t-body); line-height: 1.5; }
 .ins-scope strong { font-family: var(--mono); }
 .ins-scope-note { color: var(--fg-muted); }
+
+/* ── the brush and the range banner ────────────────────────────────────────
+ * Drag across the chart to select a period; the band marks it while dragging.
+ */
+.ins-heat { cursor: crosshair; touch-action: none; user-select: none; }
+/* The band is a WASH over the selection, not an outline: an outline reads as a frame around the
+   data, while a wash reads as "this part". Low enough that every cell under it stays legible,
+   because the reader is choosing by what they can see through it. */
+.ins-brush { fill: var(--accent); fill-opacity: .14; }
+
+.ins-banner {
+  display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+  margin: var(--sp-3) 0; padding: var(--sp-2) var(--sp-3);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: var(--r); background: var(--accent-soft);
+}
+/* The all-history state is the resting one, so it is quiet: a loud banner on first load would
+   train the reader to ignore the banner, and it is the narrowed state that must shout. */
+.ins-banner.all { background: var(--bg-sunken); border-color: var(--border); }
+.ins-banner-k {
+  font-family: var(--mono); font-size: var(--t-micro); letter-spacing: .08em;
+  text-transform: uppercase; color: var(--fg-muted);
+}
+.ins-banner strong { font-family: var(--mono); font-size: var(--t-body); }
+.ins-banner-note { font-size: var(--t-small); color: var(--fg-muted); }
+.ins-banner-clear {
+  margin-left: auto; font-family: var(--sans); font-size: var(--t-small);
+  padding: 3px 10px; border-radius: var(--r-sm);
+  border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
+}
+.ins-banner-clear:hover { background: var(--bg-hover); }
+.ins-banner-clear:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
