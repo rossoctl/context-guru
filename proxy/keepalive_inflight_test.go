@@ -331,11 +331,11 @@ func (k *keeper) inflightCount(tenant, session string) int {
 	return k.inflight[kaKey(tenant, session)]
 }
 
-// A non-retryable 4xx counts toward the breaker; forget clears an account's trip; an OpenAI ping that
+// A non-retryable 4xx (not an auth refusal) counts toward the breaker; forget clears an account's trip; an OpenAI ping that
 // misses twice running (fresh input, no read) stops the session.
 func TestBreakerCountsA4xxForgetClearsItAndAnOpenAIDoubleMissStops(t *testing.T) {
 	k, _, clock := testKeeper(t, Limits{})
-	k.send = func(pingJob, []byte) (Usage, int, error) { return Usage{}, http.StatusUnauthorized, nil }
+	k.send = func(pingJob, []byte) (Usage, int, error) { return Usage{}, http.StatusBadRequest, nil }
 	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 3, MinPrefixTokens: 20000}
 	up := upstream{base: "http://litellm", path: "/v1/messages"}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
@@ -352,7 +352,7 @@ func TestBreakerCountsA4xxForgetClearsItAndAnOpenAIDoubleMissStops(t *testing.T)
 	k.sweep(clock.advance(290 * time.Second))
 	time.Sleep(50 * time.Millisecond)
 	if k.Stats().RouteTrips != 1 {
-		t.Fatalf("%d trips after %d 401s, want 1", k.Stats().RouteTrips, routeFailLimit)
+		t.Fatalf("%d trips after %d 400s, want 1", k.Stats().RouteTrips, routeFailLimit)
 	}
 	k.forget("t1")
 	hold("after-forget")
@@ -373,5 +373,67 @@ func TestBreakerCountsA4xxForgetClearsItAndAnOpenAIDoubleMissStops(t *testing.T)
 	}
 	if sent.Load() != 2 {
 		t.Errorf("%d pings, want 2 (one miss goes on, the second stops the session)", sent.Load())
+	}
+}
+
+// A 401/403 is about the key: it stops every session pinging with THAT credential and refuses new
+// holds with it, while a teammate's sessions on the same account, route and model ping on, and the
+// route breaker is untouched.
+func TestAuthRefusalStopsOnlyThatCredential(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	var sentA, sentB atomic.Int32
+	k.send = func(j pingJob, b []byte) (Usage, int, error) {
+		if strings.Contains(j.session, "alice") {
+			sentA.Add(1)
+			return Usage{}, http.StatusUnauthorized, nil
+		}
+		sentB.Add(1)
+		return Usage{CacheRead: 48576, Output: 1}, http.StatusOK, nil
+	}
+	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 3, MinPrefixTokens: 20000}
+	up := upstream{base: "http://litellm", path: "/v1/messages"}
+	hold := func(sess, key string) {
+		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+		r.Header.Set("x-api-key", key)
+		for i := 0; i < 2; i++ {
+			k.record(&Tenancy{ID: "t1", Cache: pol}, sess, "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody), up, r,
+				bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+		}
+	}
+	hold("alice-0", "sk-alice-revoked")
+	hold("bob-1", "sk-bob")
+	clock.advance(100 * time.Second) // alice's other sessions come due one sweep later
+	for i := 1; i < routeFailLimit+1; i++ {
+		hold("alice-"+strconv.Itoa(i), "sk-alice-revoked")
+	}
+	for _, d := range []time.Duration{190, 100, 190} { // due: alice-0 + bob, then alice-1..3, then bob again
+		k.sweep(clock.advance(d * time.Second))
+		time.Sleep(50 * time.Millisecond)
+	}
+	st := k.Stats()
+	if st.RouteTrips != 0 {
+		t.Errorf("an auth refusal tripped the route (%d trips)", st.RouteTrips)
+	}
+	if sentA.Load() != 1 {
+		t.Errorf("%d pings with the revoked key, want 1: the first refusal stops every session using it", sentA.Load())
+	}
+	if sentB.Load() != 2 {
+		t.Errorf("the teammate's session got %d pings, want 2", sentB.Load())
+	}
+	hold("alice-new", "sk-alice-revoked")
+	hold("bob-2", "sk-bob")
+	k.mu.Lock()
+	_, aliceHeld := k.live[kaThreadKey("t1", "alice-new", "")]
+	_, bobHeld := k.live[kaThreadKey("t1", "bob-2", "")]
+	k.mu.Unlock()
+	if aliceHeld || !bobHeld {
+		t.Errorf("new holds: revoked key held %v (want false), teammate held %v (want true)", aliceHeld, bobHeld)
+	}
+	hold("alice-rotated", "sk-alice-new-key")
+	k.mu.Lock()
+	_, rotated := k.live[kaThreadKey("t1", "alice-rotated", "")]
+	k.mu.Unlock()
+	if !rotated {
+		t.Errorf("a new key for the same user was refused")
 	}
 }

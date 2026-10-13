@@ -3,6 +3,8 @@ package proxy
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -237,6 +240,9 @@ type kaEntry struct {
 	// differently (Codex: the session-id header, which its hooks report, while the proxy derives the
 	// key from content). "" when there is none. A client signal matches on either.
 	client string
+	// cred identifies the caller's credential this entry pings with (credKey), "" for a
+	// server-held key. An auth refusal stops every entry with the same cred, and only those.
+	cred string
 	// thread is the session thread this entry keeps warm; "" is the primary thread.
 	thread string
 	// startedAt is when the last upstream request on this session STARTED — a real request
@@ -506,7 +512,9 @@ type keeper struct {
 	routeFails   map[string]int
 	routeTripped map[string]time.Time
 	routeTrips   atomic.Int64
-	missed       atomic.Int64
+	// credDead holds credentials (credKey) a ping was refused for (401/403), until the time given.
+	credDead map[string]time.Time
+	missed   atomic.Int64
 	// strategies is the manager-controlled keep-alive strategy list, loaded from the
 	// tenant registry at process start and replaced wholesale on every write through the
 	// control routes — never mutated in place, the same pattern k.overrides itself
@@ -842,6 +850,12 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// that reported no usage is not pingable: without it there is no honest estimate of either.
 	prefix := u.CacheRead + u.CacheWrite
 	hdr, auth := pingHeaders(r, up)
+	cred := credKey(tn.ID, auth)
+	if k.credIsDead(cred, k.now()) {
+		k.retire(key)
+		k.skipped.Add(1)
+		return
+	}
 	e := &kaEntry{
 		tenant: tn.ID, session: session, client: client, thread: threadID, startedAt: startedAt, body: owned, up: up,
 		st:       tn.Store,
@@ -849,7 +863,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		provider: provider, model: model, route: route, preset: tn.Preset,
 		agent: r.UserAgent(), pol: pol, prefix: prefix, stopReason: u.StopReason,
 		pingUSD: k.projectedPingUSD(model, prefix, route),
-		hdr:     hdr, auth: auth, appliedStrategy: applied,
+		hdr:     hdr, auth: auth, appliedStrategy: applied, cred: cred,
 	}
 	e.refreshedAt = startedAt // the real request refreshed the provider's entry
 	k.mu.Lock()
@@ -1044,6 +1058,11 @@ func (k *keeper) forget(tenantID string) {
 			delete(k.routeTripped, key)
 		}
 	}
+	for key := range k.credDead {
+		if strings.HasPrefix(key, prefix) {
+			delete(k.credDead, key)
+		}
+	}
 }
 
 // evictLocked enforces both bounds by dropping the entries whose deadline is furthest away
@@ -1101,6 +1120,10 @@ func (k *keeper) sweep(now time.Time) int {
 			continue
 		}
 		if t, ok := k.routeTripped[kaRouteKey(e.tenant, e.up, e.model)]; ok && now.Before(t) {
+			e.stopped = true
+			continue
+		}
+		if t, ok := k.credDead[e.cred]; ok && now.Before(t) {
 			e.stopped = true
 			continue
 		}
@@ -1244,8 +1267,18 @@ func (k *keeper) fire(j pingJob) {
 		k.record1(j, u, status, ms, start) // the audit row, as before
 		return
 	}
-	// FAILED, non-retryable: any other 4xx will repeat identically (a revoked key, a refused body),
-	// so the session stops and the route counts it.
+	// FAILED, the credential: a 401/403 is about the key, not the route. Every session pinging with
+	// that key stops, and only those: one user's revoked key leaves the account's teammates alone.
+	if (status == http.StatusUnauthorized || status == http.StatusForbidden) && j.e.cred != "" {
+		k.failed.Add(1)
+		k.markStopped(j.e)
+		k.markCredDead(j.e.cred, k.now())
+		slog.Debug("context-guru: cache keep-alive ping refused the credential; not pinging with it again",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
+		return
+	}
+	// FAILED, non-retryable: any other 4xx will repeat identically (a refused body), so the
+	// session stops and the route counts it.
 	if status >= 400 {
 		k.failed.Add(1)
 		k.markStopped(j.e)
@@ -1484,6 +1517,46 @@ const (
 
 func kaRouteKey(tenant string, up upstream, model string) string {
 	return tenant + "\x00" + up.base + up.path + "\x00" + model
+}
+
+// credKey is a per-process id for the credential a hold pings with: a hash of the MASKED auth
+// slots (the mask is fixed per process), so it names the key without holding it. "" when the
+// upstream injects a server-held key.
+func credKey(tenant string, auth []maskedHeader) string {
+	if len(auth) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(auth))
+	for _, a := range auth {
+		parts = append(parts, a.name+"\x00"+string(a.val))
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x01")))
+	return tenant + "\x00" + hex.EncodeToString(sum[:8])
+}
+
+func (k *keeper) markCredDead(cred string, now time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.credDead == nil {
+		k.credDead = map[string]time.Time{}
+	}
+	for c, t := range k.credDead {
+		if !now.Before(t) {
+			delete(k.credDead, c)
+		}
+	}
+	k.credDead[cred] = now.Add(routeTripFor)
+}
+
+func (k *keeper) credIsDead(cred string, now time.Time) bool {
+	if cred == "" {
+		return false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	t, ok := k.credDead[cred]
+	return ok && now.Before(t)
 }
 
 // departed is arrive's other half: a real request of the session has finished.
