@@ -24,7 +24,7 @@ the output is printed. The question is the `Change:` line plus the first line's 
 - On anything else (No, Esc, a different answer): say "Nothing changed." and stop. Do not apply.
 - Never apply because the user asked for the report, and never apply a different option than the one shown.
   If the user picks another option from the table, ask the same yes/no question for that option first and
-  apply it as `adapt <kind> apply <option>` (no `@basis`).
+  apply it as `adapt <kind> apply <option>` (no `@basis`; the command reads the current report for it).
 
 If the apply output starts with `Not applied:`, print it and stop; do not retry.
 Do not turn dollars into tokens, and do not add advice the output does not contain.

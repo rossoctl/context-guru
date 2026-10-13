@@ -543,6 +543,11 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
 
 def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], int]:
     opt, _, basis = token.partition("@")
+    if not basis:  # an option named by hand (an undo, another row of the table): act on the current report
+        st, rep = adapt_report(api, o, kind)
+        if st != 200 or not isinstance(rep, dict):
+            return ["Not applied: " + adapt_error(api, kind, st, rep)], 1
+        basis = rep.get("basis_id", "")
     since, now = window(o, o["days"] or ADAPT_DAYS)  # the report's window, so the proxy can check the basis on it
     st, doc = with_ticker(lambda: api.send("POST", f"/api/adapt/{kind}/apply", {"since": since, "until": now},
                                            {"option": opt, "basis": basis}, timeout=APPLY_WAIT + 40),
