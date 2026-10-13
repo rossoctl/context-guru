@@ -31,7 +31,7 @@ func seedRemoval(t *testing.T) *DB {
 	mk := func(session string, ts int64, filtered int) {
 		for i := 0; i < 5; i++ { // 5 cache-hit requests per session
 			e := mkEvent(ts+int64(i), session, "claude", 100, 90)
-			e.TenantID, e.Tools = "t1", 4
+			e.TenantID, e.Tools, e.DeclDigest = "t1", 4, session
 			e.FilteredDeclTokens = filtered
 			evs = append(evs, e)
 		}

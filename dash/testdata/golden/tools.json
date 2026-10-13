@@ -21,9 +21,20 @@
    "share_pct": 5.242463958060289,
    "tokens": 120,
    "unused_reads": 0,
-   "unused_usd": 0
+   "unused_usd": 0,
+   "unused_usd_high": 0,
+   "unused_usd_low": 0
   }
  ],
+ "carried": {
+  "requests": 591,
+  "requests_ambiguous": 0,
+  "requests_exact": 591,
+  "requests_mapped": 591,
+  "requests_unpriced": 0,
+  "sessions": 60,
+  "sessions_captured": 60
+ },
  "coverage": {
   "captured": 60,
   "not_captured": 0,
@@ -150,7 +161,7 @@
    "tools": 2,
    "tools_used": 1,
    "unused_reads": 379003,
-   "unused_usd": 1.2175185000000002
+   "unused_usd": 1.2175184999999997
   },
   {
    "calls": 0,
@@ -162,7 +173,7 @@
    "tools": 1,
    "tools_used": 0,
    "unused_reads": 195000,
-   "unused_usd": 0.5604750000000001
+   "unused_usd": 0.5604750000000005
   }
  ],
  "skills": {
@@ -190,7 +201,9 @@
     "share_pct": 9.611183923110529,
     "tokens": 220,
     "unused_reads": 27060,
-    "unused_usd": 0.08084999999999999
+    "unused_usd": 0.08084999999999999,
+    "unused_usd_high": 0.0808499999999999,
+    "unused_usd_low": 0.0808499999999999
    },
    {
     "builtin": false,
@@ -211,7 +224,9 @@
     "share_pct": 9.611183923110529,
     "tokens": 220,
     "unused_reads": 26400,
-    "unused_usd": 0.078045
+    "unused_usd": 0.07804499999999999,
+    "unused_usd_high": 0.07804499999999992,
+    "unused_usd_low": 0.07804499999999992
    },
    {
     "builtin": false,
@@ -232,7 +247,9 @@
     "share_pct": 9.611183923110529,
     "tokens": 220,
     "unused_reads": 25740,
-    "unused_usd": 0.07095
+    "unused_usd": 0.07094999999999999,
+    "unused_usd_high": 0.07094999999999993,
+    "unused_usd_low": 0.07094999999999993
    },
    {
     "builtin": false,
@@ -253,7 +270,9 @@
     "share_pct": 9.611183923110529,
     "tokens": 220,
     "unused_reads": 25740,
-    "unused_usd": 0.08216999999999999
+    "unused_usd": 0.08216999999999999,
+    "unused_usd_high": 0.08216999999999991,
+    "unused_usd_low": 0.08216999999999991
    },
    {
     "builtin": false,
@@ -274,13 +293,15 @@
     "share_pct": 9.611183923110529,
     "tokens": 220,
     "unused_reads": 25080,
-    "unused_usd": 0.07510800000000001
+    "unused_usd": 0.07510799999999998,
+    "unused_usd_high": 0.07510799999999991,
+    "unused_usd_low": 0.07510799999999991
    }
   ],
   "state": "ok",
   "unknown_sessions": 0,
   "unused_listing_reads": 531900,
-  "unused_listing_usd": 1.5836849999999998
+  "unused_listing_usd": 1.5836849999999973
  },
  "tools": [
   {
@@ -304,7 +325,9 @@
    "share_pct": 17.911751856705987,
    "tokens": 410,
    "unused_reads": 242310,
-   "unused_usd": 0.7214565000000002
+   "unused_usd": 0.7214564999999995,
+   "unused_usd_high": 0.7214564999999985,
+   "unused_usd_low": 0.7214564999999985
   },
   {
    "builtin": false,
@@ -327,7 +350,9 @@
    "share_pct": 21.8435998252512,
    "tokens": 500,
    "unused_reads": 195000,
-   "unused_usd": 0.5604750000000001
+   "unused_usd": 0.5604750000000005,
+   "unused_usd_high": 0.5604749999999988,
+   "unused_usd_low": 0.5604749999999988
   },
   {
    "builtin": false,
@@ -350,7 +375,9 @@
    "share_pct": 15.683704674530363,
    "tokens": 359,
    "unused_reads": 136693,
-   "unused_usd": 0.496062
+   "unused_usd": 0.4960620000000001,
+   "unused_usd_high": 0.49606199999999967,
+   "unused_usd_low": 0.49606199999999967
   }
  ],
  "totals": {
@@ -365,6 +392,8 @@
   "unused_pct": 94.44960716397736,
   "unused_reads": 1105903,
   "unused_tokens": 1863,
-  "unused_usd": 3.3616785
+  "unused_usd": 3.3616784999999973,
+  "unused_usd_high": 3.3616784999999907,
+  "unused_usd_low": 3.3616784999999907
  }
 }
