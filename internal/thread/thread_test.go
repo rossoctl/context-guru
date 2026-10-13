@@ -626,3 +626,53 @@ func TestACompactionPrefersTheThreadThatDeclaresTools(t *testing.T) {
 		t.Fatalf("compaction request got %q, want the main thread's id", id)
 	}
 }
+
+// withModel sets the request's model.
+func withModel(body []byte, model string) []byte {
+	var m map[string]any
+	_ = json.Unmarshal(body, &m)
+	m["model"] = model
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// When two threads tie on shared messages and on tools, a compaction request joins the one on
+// its own model, even when the other spoke last. Here a fork on another model is the more recent.
+func TestACompactionTieGoesToTheThreadOnTheSameModel(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withModel(withTools(conv("task", "a1", "u2")), "opus"), false)
+	if id := tr.Resolve("t\x00s", "", withModel(withTools(conv("task", "a1", "a fork")), "sonnet"), false).ID; id == Primary {
+		t.Fatal("precondition: the fork took the main thread's id")
+	}
+	compact := withModel(withTools(conv("task", "a1", "u2 + Your task is to create a detailed summary of this conversation.")), "opus")
+	if id := tr.Resolve("t\x00s", "", compact, true).ID; id != Primary {
+		t.Fatalf("compaction request got %q, want the thread on its own model", id)
+	}
+}
+
+// With two threads compacting at once, the post-compaction request takes the one on its own
+// model, even when the other compacted later. Without a model match, the later one still wins
+// (TestTwoCompactingThreadsTheLaterOneIsTheSuccessor).
+func TestTwoCompactingThreadsTheSameModelIsTheSuccessor(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withModel(withTools(conv("first conversation", "a", "u")), "opus"), false)
+	second := tr.Resolve("t\x00s", "", withModel(withTools(conv("second conversation", "a", "u")), "sonnet"), false).ID
+	if second == Primary {
+		t.Fatal("precondition: the second conversation took the primary id")
+	}
+	tr.Resolve("t\x00s", "", withModel(withTools(conv("first conversation", "a", "u", "summarize")), "opus"), true)
+	tr.Resolve("t\x00s", "", withModel(withTools(conv("second conversation", "a", "u", "summarize")), "sonnet"), true)
+	if id := tr.Resolve("t\x00s", "", withModel(withTools(conv("summary of the first", "go on")), "opus"), false).ID; id != Primary {
+		t.Fatalf("post-compaction request got %q, want the primary, the thread on its own model", id)
+	}
+}
+
+// A model change does not split a thread: Opus plan mode plans on one model and works on another
+// in the same conversation.
+func TestAModelChangeKeepsTheThread(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withModel(withTools(conv("plan the fix")), "opus"), false)
+	if id := tr.Resolve("t\x00s", "", withModel(withTools(conv("plan the fix", "a1", "now do it")), "sonnet"), false).ID; id != Primary {
+		t.Fatalf("the turn on another model got %q, want the main thread's id", id)
+	}
+}

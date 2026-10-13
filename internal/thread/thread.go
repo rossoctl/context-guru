@@ -117,6 +117,10 @@ type threadState struct {
 	// tools is whether the thread's last request declared tools: the metadata that tells the
 	// main agent from an auxiliary request (see newID).
 	tools bool
+	// model is the model the thread's last request named. A TIE-BREAKER only (see preferOnTie):
+	// one thread can change model — `/model`, Opus plan mode, a fallback on overload — so a
+	// different model never keeps a request out of a thread.
+	model string
 	// compacting marks a thread whose last request was the agent's own compaction request. The
 	// agent's next request starts from a summary, so it matches no thread by prefix; it is still
 	// the same thread, and it inherits this id.
@@ -174,6 +178,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	}
 	sums, mass, ok := fingerprint(body)
 	hasTools := gjson.GetBytes(body, "tools.#").Int() > 0
+	model := gjson.GetBytes(body, "model").String()
 	now := t.now()
 
 	t.mu.Lock()
@@ -199,7 +204,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	// post-compaction request, so a compaction that got a new id here would move the main
 	// thread onto that new id for the rest of the session.
 	if ok && match == nil && agentCompaction {
-		compacted = s.compactionParent(sums)
+		compacted = s.compactionParent(sums, model)
 	}
 
 	var res Result
@@ -241,7 +246,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	case compacted != nil:
 		res = Result{ID: compacted.id, Source: SourcePrefix}
 	default:
-		res = Result{ID: s.newID(sums, hasTools), Source: SourcePrefix}
+		res = Result{ID: s.newID(sums, hasTools, model), Source: SourcePrefix}
 	}
 	if !ok {
 		// A header thread with no message list: keep its id, record nothing to match on.
@@ -269,6 +274,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	// side branch); if a LATER request on this same id does declare tools, it matches as this
 	// thread's own continuation (the "match != nil" branch above) and sets th.tools true then.
 	th.tools = th.tools || hasTools
+	th.model = model
 	// A side thread cannot be a compaction continuation: compaction is the main agent's own act.
 	th.compacting = sideParent == nil && agentCompaction && res.Source == SourcePrefix
 	return res
@@ -284,7 +290,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 // monitor, a title) declares none. So a tool-less thread holds the primary id only until the first
 // thread with tools arrives; it then gets its own id. A client that never declares tools keeps
 // its first thread as the primary, exactly as before.
-func (s *sessionState) newID(sums []uint64, hasTools bool) string {
+func (s *sessionState) newID(sums []uint64, hasTools bool, model string) string {
 	holder := s.find(Primary)
 	switch {
 	case holder == nil && !s.hasPrefixThread():
@@ -298,10 +304,10 @@ func (s *sessionState) newID(sums []uint64, hasTools bool) string {
 	// whose summary this is. Slice order would be arbitrary.
 	// Only a request that declares tools succeeds a thread that does: Claude Code sends a
 	// tool-less side request between its compaction request and its next turn (#518), and that
-	// side request must not take the main agent's id.
+	// side request must not take the main agent's id. Between two candidates, preferOnTie.
 	var succ *threadState
 	for _, th := range s.threads {
-		if th.compacting && (hasTools || !th.tools) && (succ == nil || th.last.After(succ.last)) {
+		if th.compacting && (hasTools || !th.tools) && (succ == nil || preferOnTie(th, succ, model)) {
 			succ = th
 		}
 	}
@@ -352,9 +358,9 @@ func (s *sessionState) mostShared(sums []uint64, mass []int) *threadState {
 // compactionParent returns the thread an agent compaction request summarizes when it extends no
 // thread: the one sharing the longest run of leading messages with it. A thread that declares
 // tools wins over one that does not, because compaction is the main agent's act and a side
-// request can share the same leading run; then the most recent wins. nil when no thread shares
+// request can share the same leading run; then preferOnTie decides. nil when no thread shares
 // even the first message.
-func (s *sessionState) compactionParent(sums []uint64) *threadState {
+func (s *sessionState) compactionParent(sums []uint64, model string) *threadState {
 	var best *threadState
 	bestLCP := 0
 	for _, th := range s.threads {
@@ -369,11 +375,21 @@ func (s *sessionState) compactionParent(sums []uint64) *threadState {
 		case best == nil,
 			th.tools && !best.tools,
 			th.tools == best.tools && lcp > bestLCP,
-			th.tools == best.tools && lcp == bestLCP && th.last.After(best.last):
+			th.tools == best.tools && lcp == bestLCP && preferOnTie(th, best, model):
 			best, bestLCP = th, lcp
 		}
 	}
 	return best
+}
+
+// preferOnTie reports whether a beats b when the stronger evidence ties: the thread whose last
+// request named this request's model first, then the most recent.
+func preferOnTie(a, b *threadState, model string) bool {
+	am, bm := model != "" && a.model == model, model != "" && b.model == model
+	if am != bm {
+		return am
+	}
+	return a.last.After(b.last)
 }
 
 // hasPrefixThread reports whether the session has a thread not named by a header. Header threads
