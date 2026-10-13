@@ -28,6 +28,14 @@ reference — port its *logic*, re-implement its transport in Go.
 - **Fail open, always.** Any component error/panic reverts that component only; the
   original request is always forwarded as a valid fallback. Every lossy Offload must be
   reversible (a `<<cg:HASH>>` marker + the stashed original in the Store).
+- **Metadata first.** A component or feature works from metadata only (hashes, counts, sizes,
+  ids, flags). Depending on stored customer data (transcript text, tool output, bodies,
+  summaries) is a deliberate exception. Every PR that adds or changes a feature states its data
+  dependence and its behaviour with storage off, and updates
+  [docs/data-dependence.md](docs/data-dependence.md) — the reason in plain words, not a code
+  reference. If the PR changes a feature's data dependence in either direction, say so at the top
+  of the PR, and have the person in that row's "Decided by" confirm it before merge.
+  `components/all/datadep_test.go` fails when a registered component has no row.
 
 ## Conventions
 
