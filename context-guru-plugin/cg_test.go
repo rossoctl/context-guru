@@ -292,6 +292,37 @@ func TestNoSkillPreApprovesAChange(t *testing.T) {
 	}
 }
 
+// On the hosted service the adapt routes take the account's own proxy token; the other screens never send it.
+func TestAdaptSendsTheTokenOnlyOnAdapt(t *testing.T) {
+	requireTool(t, "python3")
+	got := map[string]string{}
+	mux := http.NewServeMux()
+	for _, p := range []string{"/api/adapt/tools", "/api/stats"} {
+		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			got[r.URL.Path] = r.Header.Get("x-context-guru-token")
+			w.Write(cgRead(t, "cg", "adapt_tools.json"))
+		})
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	for _, args := range [][]string{{"adapt", "tools"}, {"savings"}} {
+		cmd := exec.Command("python3", append([]string{filepath.Join("scripts", "cg.py")}, args...)...)
+		cmd.Env = append(os.Environ(), "CG_URL=http://"+ln.Addr().String(), "ANTHROPIC_BASE_URL=", "CG_TOKEN=", "ANTHROPIC_AUTH_TOKEN=cg_live_test")
+		cmd.CombinedOutput() //nolint:errcheck
+	}
+	if got["/api/adapt/tools"] != "cg_live_test" {
+		t.Errorf("adapt sent token %q, want the agent's cg_live_ key", got["/api/adapt/tools"])
+	}
+	if v, ok := got["/api/stats"]; ok && v != "" {
+		t.Errorf("a read screen sent the token %q", v)
+	}
+}
+
 // The Codex plugin ships the same two scripts, because plugin directories are installed apart and
 // cannot import from each other. They are copies, and this keeps them identical.
 func TestCGScriptsAreVendoredIntoCodex(t *testing.T) {
