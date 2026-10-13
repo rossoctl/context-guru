@@ -207,6 +207,14 @@ func TestAdaptToolsEnvelope(t *testing.T) {
 		t.Error("unknown option accepted")
 	}
 	basis := doc.BasisID
+	// Dollars that move and reorder the items do not change the decision, so not the basis.
+	doc.Items[0].USD, doc.Items[1].USD = 1, 9
+	doc.Items[0], doc.Items[1] = doc.Items[1], doc.Items[0]
+	doc.finish(ToolFilterState{Removed: []string{"mcp__old", "Workflow"}})
+	if doc.BasisID != basis {
+		t.Fatalf("basis moved with the dollars: %q -> %q", basis, doc.BasisID)
+	}
+	doc.Items = []AdaptToolsItem{doc.Items[1], doc.Items[0]}
 	doc.Items = doc.Items[:1]
 	doc.finish(ToolFilterState{})
 	if doc.BasisID == basis || len(doc.BasisID) != 8 {

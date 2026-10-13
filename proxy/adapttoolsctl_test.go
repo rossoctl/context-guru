@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -69,5 +72,25 @@ func TestAdaptToolsApplyWritesOnlyTheReportedNames(t *testing.T) {
 	}
 	if strings.Contains(config(), "mcp__srv") {
 		t.Fatalf("undo left the server filtered: %q", config())
+	}
+}
+
+// On a single-tenant proxy there is no account configuration to write, and the caller is told
+// what to do instead, in JSON, rather than getting the mux's plain 404.
+func TestAdaptToolsApplyOnALocalProxySaysWhatToDo(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+	h, _ := dashHandler(t, up.URL, dash.Options{})
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	resp, err := srv.Client().Post(srv.URL+"/api/adapt/tools/apply", "application/json", strings.NewReader(`{"option":"remove-unused"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != http.StatusNotImplemented ||
+		!strings.Contains(out["error"], "remove command") {
+		t.Fatalf("status %d, body %v, err %v", resp.StatusCode, out, err)
 	}
 }

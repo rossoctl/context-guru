@@ -539,6 +539,9 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 		out.Warnings = append(out.Warnings, "Unused means unused in this window, not that it will never be needed.",
 			fmt.Sprintf("Removing changes the cached prefix, so the next request re-writes it once: about %s, counted as the option's spend.", usdText(out.RewriteUSD)))
 	}
+	// The basis is the DECISION, not the numbers: each option's names, sorted, so new requests
+	// that only move dollars or reorder items do not make an apply stale.
+	all, enough, restore = sortedCopy(all), sortedCopy(enough), sortedCopy(restore)
 	h := fnv.New64a()
 	for _, n := range all {
 		h.Write([]byte(n + "\x00"))
@@ -560,6 +563,12 @@ func (out *AdaptToolsDoc) OptionRemove(id string) ([]string, bool) {
 		}
 	}
 	return nil, false
+}
+
+func sortedCopy(s []string) []string {
+	out := append([]string{}, s...)
+	sort.Strings(out)
+	return out
 }
 
 func usdText(x float64) string {

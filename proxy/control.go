@@ -188,6 +188,9 @@ func (h *Handler) ctlAuthzGrafana(w http.ResponseWriter, r *http.Request) {
 // a tenant registry there are no accounts to manage.
 func (h *Handler) MountControl(m *http.ServeMux) {
 	if h.opts.Tenants == nil {
+		// Single-tenant: no account configuration to write, but /context-guru:adapt tools still
+		// posts here, and a JSON reason beats the mux's plain 404.
+		m.HandleFunc("POST /api/adapt/tools/apply", h.ctlAdaptToolsApply)
 		return
 	}
 	for _, rt := range h.ctlRoutes() {
