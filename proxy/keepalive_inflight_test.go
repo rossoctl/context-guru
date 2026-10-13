@@ -192,23 +192,42 @@ func TestPingThatRefreshesNothingFailsAndTripsTheRoute(t *testing.T) {
 	}
 }
 
-// Explicit cache control is a Claude feature: another family on an Anthropic-shaped route is not held.
-func TestKeepAliveNeedsAClaudeModelOnTheAnthropicRoute(t *testing.T) {
-	for model, want := range map[string]bool{"aws/claude-sonnet-5": true, "claude-haiku-4-5": true, "opus5-5": true,
-		"vertex_ai/claude-opus-4-5@20251101": true, "us.anthropic.claude-sonnet-4-5-20250929-v1:0": true,
-		"arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-opus-4-5-v1:0": true,
-		"arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3":                false,
-		"gpt-5-mini-2025-08-07": false, "gpt-5.6-sol": false} {
-		if got := keepAliveEligible(bschemas.Anthropic, model, "/v1/messages"); got != want {
-			t.Errorf("%s: eligible %v, want %v", model, got, want)
+// The name check is for relays only: native Anthropic, Bedrock and Vertex are eligible by upstream
+// type whatever the deployment is called; a relay on the Anthropic route must serve a Claude name.
+func TestKeepAliveNameCheckIsForRelaysOnly(t *testing.T) {
+	arn := "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3"
+	for _, c := range []struct {
+		p           bschemas.ModelProvider
+		base, model string
+		want        bool
+	}{
+		{bschemas.Anthropic, "https://api.anthropic.com", "my-team-alias", true},
+		{bschemas.Bedrock, "https://bedrock-runtime.us-east-1.amazonaws.com", arn, true},
+		{bschemas.BedrockMantle, "https://bedrock.example", arn, true},
+		{bschemas.Vertex, "https://us-east5-aiplatform.googleapis.com", "publishers/anthropic/models/x", true},
+		{bschemas.Anthropic, "http://litellm:4000", "aws/claude-sonnet-5", true},
+		{bschemas.Anthropic, "http://litellm:4000", "vertex_ai/claude-opus-4-5@20251101", true},
+		{bschemas.Anthropic, "http://litellm:4000", "us.anthropic.claude-sonnet-4-5-20250929-v1:0", true},
+		{bschemas.Anthropic, "http://litellm:4000", "opus5-5", true},
+		{bschemas.Anthropic, "http://litellm:4000", "gpt-5-mini-2025-08-07", false},
+		{bschemas.Anthropic, "http://litellm:4000", arn, false},
+		{bschemas.Anthropic, "https://evil-anthropic.com.example", "gpt-5", false},
+	} {
+		if got := relayServesClaude(c.p, c.base, c.model); got != c.want {
+			t.Errorf("%s %s %s: %v, want %v", c.p, c.base, c.model, got, c.want)
 		}
 	}
 }
 
-func (k *keeper) inflightCount(tenant, session string) int {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	return k.inflight[kaKey(tenant, session)]
+// CONTEXT_GURU_KEEPALIVE_MODELS adds names a relay serves under aliases that do not say what they are.
+func TestKeepAliveModelAliasesFromTheEnvironment(t *testing.T) {
+	t.Setenv("CONTEXT_GURU_KEEPALIVE_MODELS", " application-inference-profile/a1b2c3 , team-model ")
+	for model, want := range map[string]bool{"arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3": true,
+		"Team-Model-Large": true, "gpt-5-mini-2025-08-07": false} {
+		if got := relayServesClaude(bschemas.Anthropic, "http://litellm:4000", model); got != want {
+			t.Errorf("%s: %v, want %v", model, got, want)
+		}
+	}
 }
 
 // A real miss (the ping landed after expiry: read 0, the prefix written again) is not a failure: it
@@ -253,6 +272,8 @@ func TestPingFailureNeedsNoUsageOrAnError(t *testing.T) {
 	}{
 		{"no usage", Usage{}, http.StatusOK, true},
 		{"5xx is transient", Usage{}, http.StatusBadGateway, false},
+		{"429 is transient", Usage{}, http.StatusTooManyRequests, false},
+		{"401 is not", Usage{}, http.StatusUnauthorized, true},
 		{"openai miss", Usage{FreshInput: 48576, Output: 1}, http.StatusOK, false},
 		{"anthropic miss", Usage{CacheWrite: 48576, Output: 1}, http.StatusOK, false},
 		{"read", Usage{CacheRead: 48576, Output: 1}, http.StatusOK, false},
@@ -275,21 +296,15 @@ func TestPingFailureNeedsNoUsageOrAnError(t *testing.T) {
 	}
 }
 
-// CONTEXT_GURU_KEEPALIVE_MODELS adds names for aliases that do not say what they are.
-func TestKeepAliveModelAliasesFromTheEnvironment(t *testing.T) {
-	t.Setenv("CONTEXT_GURU_KEEPALIVE_MODELS", " application-inference-profile/a1b2c3 , team-model ")
-	for model, want := range map[string]bool{"arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3": true,
-		"Team-Model-Large": true, "gpt-5-mini-2025-08-07": false} {
-		if got := keepAliveEligible(bschemas.Anthropic, model, "/v1/messages"); got != want {
-			t.Errorf("%s: eligible %v, want %v", model, got, want)
-		}
-	}
-}
-
-// An overload burst (529, any 5xx) is transient: it neither fails the session nor trips the route.
+// An overload burst (529, 429, any 5xx) is transient: skipped, the session goes on pinging, and the
+// route is never tripped.
 func TestOverloadedPingsDoNotTripTheRoute(t *testing.T) {
 	k, _, clock := testKeeper(t, Limits{})
-	k.send = func(pingJob, []byte) (Usage, int, error) { return Usage{}, 529, nil }
+	var sent atomic.Int32
+	k.send = func(pingJob, []byte) (Usage, int, error) {
+		sent.Add(1)
+		return Usage{}, []int{529, http.StatusTooManyRequests}[sent.Load()%2], nil
+	}
 	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
 	up := upstream{base: "http://api", path: "/v1/messages"}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
@@ -302,17 +317,15 @@ func TestOverloadedPingsDoNotTripTheRoute(t *testing.T) {
 	}
 	k.sweep(clock.advance(290 * time.Second))
 	time.Sleep(50 * time.Millisecond)
-	if st := k.Stats(); st.Failed != 0 || st.RouteTrips != 0 {
-		t.Errorf("529s: failed %d, trips %d, want 0 and 0", st.Failed, st.RouteTrips)
+	k.sweep(clock.advance(290 * time.Second)) // the next slot retries
+	time.Sleep(50 * time.Millisecond)
+	if st := k.Stats(); st.Failed != 0 || st.RouteTrips != 0 || sent.Load() != 2*(routeFailLimit+1) {
+		t.Errorf("529/429s: failed %d, trips %d, sent %d (want 0, 0, %d: every session retried)", st.Failed, st.RouteTrips, sent.Load(), 2*(routeFailLimit+1))
 	}
 }
 
-// Bedrock and Vertex are Claude routes whatever the deployment is called (inference-profile ARNs).
-func TestBedrockAndVertexNeedNoClaudeName(t *testing.T) {
-	arn := "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3"
-	for _, p := range []bschemas.ModelProvider{bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex} {
-		if !keepAliveEligible(p, arn, "/v1/messages") {
-			t.Errorf("%s: an inference-profile ARN was not eligible", p)
-		}
-	}
+func (k *keeper) inflightCount(tenant, session string) int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.inflight[kaKey(tenant, session)]
 }

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -805,7 +806,8 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// Nothing to keep alive unless the provider honours explicit breakpoints and this
 	// request actually established or read an entry. A request that wrote and read nothing
 	// has no prefix worth a ping.
-	if !keepAliveEligible(provider, model, route) || k.routeIsTripped(kaRouteKey(tn.ID, up, model), k.now()) {
+	if !keepAliveEligible(provider, model, route) || !relayServesClaude(provider, up.base, model) ||
+		k.routeIsTripped(kaRouteKey(tn.ID, up, model), k.now()) {
 		k.retire(key)
 		return
 	}
@@ -1233,17 +1235,23 @@ func (k *keeper) fire(j pingJob) {
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "err", err)
 		return
 	}
-	// A 4xx will repeat identically, so stop rather than spend the rest of K learning the
-	// same thing. A 5xx is transient and the next ping may work.
-	if status >= 400 && status < 500 {
-		k.markStopped(j.e)
-		slog.Debug("context-guru: cache keep-alive ping refused; not pinging this session again",
+	// TRANSIENT: a 429 or any 5xx (a 529 overload burst). Booked and counted skipped: nothing
+	// fails, nothing stops, and the next ping slot tries again.
+	if status == http.StatusTooManyRequests || status >= 500 {
+		k.skipped.Add(1)
+		slog.Debug("context-guru: cache keep-alive ping hit a transient error; retrying at the next slot",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
+		k.record1(j, u, status, ms, start) // the audit row, as before
 		return
 	}
-	// A 5xx is transient (an overload burst): booked, nothing else; the next ping may work.
-	if status/100 != 2 {
-		k.record1(j, u, status, ms, start)
+	// FAILED, non-retryable: any other 4xx will repeat identically (a revoked key, a refused body),
+	// so the session stops and the route counts it.
+	if status >= 400 {
+		k.failed.Add(1)
+		k.markStopped(j.e)
+		k.routeFailed(kaRouteKey(j.tenant, j.up, j.e.model), k.now())
+		slog.Debug("context-guru: cache keep-alive ping refused; not pinging this session again",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
 		return
 	}
 	// FAILED: a 2xx with no usage at all, i.e. not answered as a model call (a translating gateway
@@ -1804,18 +1812,28 @@ const keepAliveReserveFrac = 0.25
 // have model/retention-dependent lifetimes and are not safe to schedule here.
 func keepAliveEligible(p bschemas.ModelProvider, model, route string) bool {
 	switch p {
-	case bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
 		return true
-	case bschemas.Anthropic:
-		// Only a Claude model honours explicit cache_control. A gateway that serves another
-		// family on this route (an OpenAI / Azure model behind LiteLLM) caches automatically or
-		// not at all, so a ping there buys nothing.
-		// ponytail: name test; a Claude alias for another family is caught by the route breaker.
-		return claudeModel(model)
 	case bschemas.OpenAI:
 		return route == "/v1/responses" && modelinfo.OpenAI30MinuteCache(string(p), model)
 	}
 	return false
+}
+
+// relayServesClaude: the Anthropic route forwarded to anything but Anthropic itself is a relay
+// (LiteLLM, a corporate gateway) that may serve another family there, an OpenAI / Azure model
+// with automatic caching or none, where a ping buys nothing. Only those are name-checked; native
+// Anthropic, Bedrock and Vertex upstreams are eligible by type (their ARNs, inference profiles and
+// aliases often do not say "claude").
+// ponytail: name test; a Claude-named alias of another family is caught by the route breaker.
+func relayServesClaude(p bschemas.ModelProvider, base, model string) bool {
+	if p != bschemas.Anthropic {
+		return true
+	}
+	if u, err := url.Parse(base); err == nil && (u.Hostname() == "anthropic.com" || strings.HasSuffix(u.Hostname(), ".anthropic.com")) {
+		return true
+	}
+	return claudeModel(model)
 }
 
 // claudeModel matches provider-prefixed ids (aws/..., vertex_ai/..., us.anthropic.claude-...,
