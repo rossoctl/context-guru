@@ -554,7 +554,6 @@ function insRender() {
       + 'more invocations in that period; the faintest means you were carrying it and never '
       + 'reached for it. The bars above are your overall activity, so a flat stretch reads as '
       + 'time off rather than as a change of habit.' }));
-  chartPanel.appendChild(insRangeBar());
   const chart = insChart();
   if (chart) chartPanel.appendChild(chart);
   chartPanel.appendChild(insScopeLine());
@@ -832,168 +831,6 @@ function insSparkline(item, tl, scale) {
   return svg;
 }
 
-/* ── the activity chart ─────────────────────────────────────────────────────
- *
- * A heatmap of capability (rows) against time (columns), with a volume strip above it, and a
- * brush that narrows every table below.
- *
- * WHY A HEATMAP. Three forms were rendered against four months of simulated phased work —
- * planning, documentation, testing, TDD — and only this one tells the story without explanation.
- * A total-activity area shows WHEN you worked and hides the phase boundary completely, because
- * volume is flat across it: the same number of calls, to a different set of tools. A
- * distinct-capabilities count shows churn but not identity, so six tools in June and six in
- * October look identical though they share none.
- *
- * ROWS ARE ORDERED BY FIRST USE, and that is the design rather than a detail: it produces a
- * diagonal, and the diagonal IS the progression. Sorted by volume the same data looks like noise.
- *
- * ONLY CAPABILITIES EVER INVOKED GET A ROW. A heatmap of all 79 declared items is unreadable; of
- * those ever used it is about 11, on the real machine and in the simulation alike. A
- * never-invoked capability has nothing to plot and belongs in the table, which is where it is.
- */
-
-const INS_MAX_COLS = 60;
-const INS_HEAT_ROW = 26;
-const INS_HEAT_GAP = 3;
-const INS_LANE_W = 210;
-const INS_VOL_H = 64;
-/* The chart fills its panel rather than a width I guessed. 640px was a constant I picked with no
- * reason, and at 26px rows on a wide screen it left two thirds of the panel empty — reported as
- * "chart very small". Measured from the host at render time, with a floor so a narrow window
- * scrolls instead of crushing the cells. */
-const INS_MIN_PLOT = 420;
-
-/* Day buckets up to 26 columns, then rolled wider. 120 days of day-buckets is 120 columns, which
- * is a column per 3px — a texture, not a chart. The roll happens here rather than in the
- * endpoint so the brush can still resolve to exact days. */
-function insRollup(tl) {
-  const n = tl.buckets.length;
-  const width = Math.max(1, Math.ceil(n / INS_MAX_COLS));
-  const cols = [];
-  for (let i = 0; i < n; i += width) {
-    cols.push({ from: tl.buckets[i], toIdx: Math.min(n, i + width) - 1, fromIdx: i });
-  }
-  const roll = (arr) => cols.map((c) => {
-    let s = 0;
-    for (let i = c.fromIdx; i <= c.toIdx; i++) s += arr[i] || 0;
-    return s;
-  });
-  const rows = [];
-  for (const name in tl.items) {
-    const it = tl.items[name];
-    const calls = roll(it.calls);
-    if (!calls.some((v) => v > 0)) continue; // never invoked: nothing to plot
-    rows.push({ name, calls, carried: roll(it.carried), firstUsed: it.first_used_ts || 0 });
-  }
-  /* First use, ascending — the diagonal. Ties broken by total so a busy row leads. */
-  rows.sort((a, b) => (a.firstUsed - b.firstUsed) ||
-    (b.calls.reduce((x, y) => x + y, 0) - a.calls.reduce((x, y) => x + y, 0)));
-  return { cols, rows, width, days: tl.buckets.length };
-}
-
-function insColLabel(ms, width) {
-  const d = new Date(ms);
-  const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()];
-  return width > 1 ? d.getDate() + ' ' + mon : String(d.getDate());
-}
-
-/* The ramp index for a cell. Five steps, because more are indistinguishable at 15px and fewer
- * cannot separate "tried it once" from "lived in it". */
-function insHeatStep(v, peak) {
-  if (!v) return 0;
-  return Math.min(5, 1 + Math.floor((v / peak) * 4.999));
-}
-
-function insChart() {
-  if (!insDoc || !insDoc.timeline || !insDoc.timeline.buckets.length) return null;
-  const g = insRollup(insDoc.timeline);
-  if (!g.rows.length) {
-    return el('p', { class: 'empty', text: 'No capability was invoked in this range, so there ' +
-      'is nothing to chart. The tables below still list what you were carrying.' });
-  }
-  const nc = g.cols.length;
-  const host = document.getElementById('insights-body');
-  const avail = Math.max(INS_MIN_PLOT,
-    ((host && host.clientWidth) || 900) - INS_LANE_W - 36);
-  /* No upper cap on cell width. A six-day history should draw six wide columns and fill the
-   * panel, not six narrow ones huddled on the left. */
-  const cw = Math.max(5, Math.floor(avail / nc));
-  const plotW = nc * cw;
-  const totalW = INS_LANE_W + plotW + 8;
-
-  const wrap = el('div', { class: 'ins-chart' });
-
-  /* The volume strip. Context for the brush: a flat week is a holiday, not a phase, and without
-   * it a reader cannot tell "I stopped using this" from "I stopped working". */
-  const vol = g.cols.map((_, i) => g.rows.reduce((a, r) => a + r.calls[i], 0));
-  const volPeak = Math.max(1, ...vol);
-  const vsvg = svgEl('svg', {
-    class: 'ins-vol', width: totalW, height: INS_VOL_H,
-    viewBox: `0 0 ${totalW} ${INS_VOL_H}`, 'aria-hidden': 'true',
-  });
-  for (let i = 0; i < nc; i++) {
-    if (!vol[i]) continue;
-    const h = Math.max(2, (vol[i] / volPeak) * (INS_VOL_H - 4));
-    vsvg.appendChild(svgEl('rect', {
-      class: 'ins-vol-bar', x: INS_LANE_W + i * cw + 1, y: INS_VOL_H - h,
-      width: Math.max(2, cw - INS_HEAT_GAP), height: h, rx: 2,
-    }));
-  }
-  vsvg.appendChild(svgEl('line', { class: 'ins-vol-axis',
-    x1: INS_LANE_W, y1: INS_VOL_H - 0.5, x2: INS_LANE_W + plotW, y2: INS_VOL_H - 0.5 }));
-  wrap.appendChild(vsvg);
-
-  /* The heatmap. */
-  const peak = Math.max(1, ...g.rows.flatMap((r) => r.calls));
-  const h = g.rows.length * (INS_HEAT_ROW + INS_HEAT_GAP) + 22;
-  const svg = svgEl('svg', {
-    class: 'ins-heat', width: totalW, height: h, viewBox: `0 0 ${totalW} ${h}`, role: 'img',
-    'aria-label': g.rows.length + ' capabilities over ' + g.days + ' days, darker means more ' +
-      'invocations in that period',
-  });
-
-  g.rows.forEach((r, ri) => {
-    const y = ri * (INS_HEAT_ROW + INS_HEAT_GAP);
-    svg.appendChild(svgEl('text', {
-      class: 'ins-heat-lane', x: INS_LANE_W - 8, y: y + INS_HEAT_ROW - 4, 'text-anchor': 'end',
-    })).textContent = insShortName(r.name);
-    for (let i = 0; i < nc; i++) {
-      const v = r.calls[i];
-      const step = insHeatStep(v, peak);
-      /* A cell with no calls but live carriage is drawn as the faintest tint rather than left
-       * blank: "you were paying for this and not using it" is the finding, and a blank cell says
-       * only "nothing happened". */
-      const carried = r.carried[i] > 0;
-      if (!step && !carried) continue;
-      const cell = svgEl('rect', {
-        class: step ? 'ins-cell s' + step : 'ins-cell carried-only',
-        x: INS_LANE_W + i * cw + 1, y, width: Math.max(2, cw - INS_HEAT_GAP),
-        height: INS_HEAT_ROW, rx: 2,
-      });
-      const when = insColLabel(g.cols[i].from, g.width) +
-        (g.width > 1 ? ' + ' + (g.width - 1) + ' day(s)' : '');
-      cell.appendChild(svgEl('title', {})).textContent = r.name + ' — ' + when + ': ' +
-        (v ? v + ' invocation(s)' : 'carried, never invoked');
-      svg.appendChild(cell);
-    }
-  });
-
-  /* The x axis: first, last, and a couple between — never every column, which is unreadable. */
-  const ty = g.rows.length * (INS_HEAT_ROW + INS_HEAT_GAP) + 13;
-  const every = Math.max(1, Math.round(nc / 5));
-  for (let i = 0; i < nc; i += every) {
-    svg.appendChild(svgEl('text', {
-      class: 'ins-heat-tick', x: INS_LANE_W + i * cw + cw / 2, y: ty, 'text-anchor': 'middle',
-    })).textContent = insColLabel(g.cols[i].from, g.width);
-  }
-  insAttachBrush(svg, g, { cw, totalW, h });
-  wrap.appendChild(svg);
-  wrap.appendChild(el('p', { class: 'hint', text: 'Drag across the chart to select a period. ' +
-    'Everything below then describes only that period.' }));
-  return wrap;
-}
-
 /* ── the range, which is the actual feature ─────────────────────────────────
  *
  * The chart is a CONTROL. Narrow the range and every table below re-queries, so the advice
@@ -1006,30 +843,10 @@ function insChart() {
  * a slice — the quiet kind of mismatch this whole report exists to avoid.
  */
 
-const INS_RANGES = [
-  { days: 0, label: 'all' },
-  { days: 7, label: '7 days' },
-  { days: 30, label: '30 days' },
-  { days: 90, label: '90 days' },
-];
-
-function insRangeBar() {
-  const bar = el('div', { class: 'ins-range' },
-    el('span', { class: 'ins-win-lbl', text: 'range' }));
-  for (const r of INS_RANGES) {
-    const on = (r.days === 0 && !insSince) || (r.days > 0 && insSince &&
-      Math.abs((Date.now() - insSince) / 86400000 - r.days) < 1.5);
-    bar.appendChild(el('button', {
-      type: 'button', class: 'chip' + (on ? ' on' : ''), text: r.label,
-      onclick: () => {
-        insSince = r.days ? Date.now() - r.days * 86400000 : 0;
-        insUntil = 0;
-        loadInsights();
-      },
-    }));
-  }
-  return bar;
-}
+/* No preset range chips. They were a second selection surface beside the chart, and the chart IS
+ * the control — "I don't need second range selection grid, I want to select directly from chart".
+ * The banner's "show all history" button is the only range control that remains, because
+ * clearing a selection needs a target that is not a gesture. */
 
 /* The scope line. Stated as a sentence and not only as two dates, because every number below it
  * means something different depending on this range, and a reader who skipped the chips would
@@ -1092,66 +909,239 @@ function insScopeLine() {
   return p;
 }
 
+
+/* ── the activity chart, with d3 ────────────────────────────────────────────
+ *
+ * A heatmap of capability (rows) against time (columns), and a BRUSH over it: drag to select a
+ * period, and every table below describes only that period.
+ *
+ * WHY THE HEATMAP. Three forms were rendered against four months of simulated phased work —
+ * planning, documentation, testing, TDD. A total-activity area shows WHEN you worked and hides
+ * the phase boundary completely, because volume is flat across it: the same number of calls, to a
+ * different set of tools. A distinct-capabilities count shows churn but not identity, so six
+ * tools in June and six in October look identical though they share none. Only the heatmap reads
+ * as the story without explanation.
+ *
+ * WHY d3, when every other chart here is hand-drawn. The first version of this brush was forty
+ * lines of pointer events, and the reported failure was "it's not clear how to select": the
+ * gesture worked, the AFFORDANCE did not. Grab handles, drag-to-move, keyboard access and a
+ * selection that survives leaving the plot are what d3.brushX has already solved, and they are
+ * not tooltips. See the note in dash/ui.go for the cost and the rule it excepts.
+ *
+ * ROWS ARE ORDERED BY FIRST USE, which is the design rather than a detail: it produces a
+ * diagonal, and the diagonal IS the progression. Sorted by volume the same data looks like noise.
+ *
+ * ONLY CAPABILITIES EVER INVOKED GET A ROW — 11 of 79 on a real machine. A never-invoked item has
+ * nothing to plot and belongs in the table, where it already is.
+ */
+
+const INS_MAX_COLS = 60;
+const INS_ROW_H = 24;
+const INS_LANE_W = 190;
+const INS_VOL_H = 56;
+const INS_AXIS_H = 28;
+const INS_MIN_PLOT = 420;
+
+/* Day buckets up to 60 columns, then rolled wider. 120 days of day-buckets is a column per 3px —
+ * a texture, not a chart. Rolled here rather than in the endpoint so the brush can still resolve
+ * a selection to exact days. */
+function insRollup(tl) {
+  const n = tl.buckets.length;
+  const width = Math.max(1, Math.ceil(n / INS_MAX_COLS));
+  const cols = [];
+  for (let i = 0; i < n; i += width) {
+    cols.push({ from: tl.buckets[i], fromIdx: i, toIdx: Math.min(n, i + width) - 1 });
+  }
+  const roll = (arr) => cols.map((c) => {
+    let s = 0;
+    for (let i = c.fromIdx; i <= c.toIdx; i++) s += arr[i] || 0;
+    return s;
+  });
+  const rows = [];
+  for (const name in tl.items) {
+    const it = tl.items[name];
+    const calls = roll(it.calls);
+    if (!calls.some((v) => v > 0)) continue;
+    rows.push({ name, calls, carried: roll(it.carried), firstUsed: it.first_used_ts || 0 });
+  }
+  rows.sort((a, b) => (a.firstUsed - b.firstUsed) ||
+    (b.calls.reduce((x, y) => x + y, 0) - a.calls.reduce((x, y) => x + y, 0)));
+  return { cols, rows, width, days: n };
+}
+
+function insChart() {
+  if (typeof d3 === 'undefined') {
+    return el('p', { class: 'empty', text: 'The charting library did not load, so the picture is ' +
+      'unavailable. The tables below are unaffected.' });
+  }
+  const tl = insDoc && insDoc.timeline;
+  if (!tl || !tl.buckets.length) return null;
+  const g = insRollup(tl);
+  if (!g.rows.length) {
+    return el('p', { class: 'empty', text: 'No capability was invoked in this range, so there is ' +
+      'nothing to chart. The tables below still list what you were carrying.' });
+  }
+
+  const host = document.getElementById('insights-body');
+  const plotW = Math.max(INS_MIN_PLOT, ((host && host.clientWidth) || 980) - INS_LANE_W - 40);
+  const plotH = g.rows.length * INS_ROW_H;
+  const W = INS_LANE_W + plotW + 16;
+  const H = INS_VOL_H + plotH + INS_AXIS_H + 10;
+
+  const wrap = el('div', { class: 'ins-chart' });
+  const svg = d3.select(wrap).append('svg')
+    .attr('class', 'ins-d3')
+    .attr('width', W).attr('height', H)
+    .attr('viewBox', `0 0 ${W} ${H}`)
+    .attr('role', 'img')
+    .attr('aria-label', g.rows.length + ' capabilities over ' + g.days +
+      ' days. Darker means more invocations in that period. Drag to select a range.');
+
+  /* x is a BAND over the rolled columns, not a time scale: the data is bucketed, so a continuous
+   * axis would imply a resolution the store does not have. The brush then snaps to whole
+   * columns, which is also the only honest selection — half a bucket is not a thing. */
+  const x = d3.scaleBand()
+    .domain(g.cols.map((_, i) => i))
+    .range([INS_LANE_W, INS_LANE_W + plotW])
+    .paddingInner(0.08);
+  const cw = x.bandwidth();
+
+  /* ── the volume strip: CONTEXT, so the reader can tell "I stopped using this" from
+   * "I stopped working". Recessive ink, because competing with the heatmap would invite
+   * comparing two things that are not comparable. */
+  const vol = g.cols.map((_, i) => g.rows.reduce((a, r) => a + r.calls[i], 0));
+  const vy = d3.scaleLinear().domain([0, d3.max(vol) || 1]).range([INS_VOL_H - 6, 2]);
+  svg.append('g').attr('class', 'ins-vol-g')
+    .selectAll('rect').data(vol).join('rect')
+    .attr('class', 'ins-vol-bar')
+    .attr('x', (_, i) => x(i)).attr('width', cw)
+    .attr('y', (v) => v ? vy(v) : INS_VOL_H - 6)
+    .attr('height', (v) => v ? (INS_VOL_H - 6) - vy(v) : 0)
+    .attr('rx', 2);
+  svg.append('line').attr('class', 'ins-vol-axis')
+    .attr('x1', INS_LANE_W).attr('x2', INS_LANE_W + plotW)
+    .attr('y1', INS_VOL_H - 5.5).attr('y2', INS_VOL_H - 5.5);
+
+  /* ── the heatmap. Sequential ramp: the cell encodes MAGNITUDE and nothing else, so one hue
+   * light-to-dark. A categorical palette would spend the identity channel re-encoding what the
+   * darkness already shows. The steps come from CSS custom properties so dark mode re-steps them
+   * against its own surface rather than inverting automatically. */
+  const peak = d3.max(g.rows, (r) => d3.max(r.calls)) || 1;
+  const cs = getComputedStyle(document.documentElement);
+  const ramp = [1, 2, 3, 4, 5].map((i) => cs.getPropertyValue('--ins-s' + i).trim() || '#999');
+  const stepOf = (v) => ramp[Math.min(4, Math.floor((v / peak) * 4.999))];
+
+  const plot = svg.append('g').attr('class', 'ins-plot')
+    .attr('transform', `translate(0,${INS_VOL_H})`);
+
+  const rowG = plot.selectAll('g.ins-row').data(g.rows).join('g')
+    .attr('class', 'ins-row')
+    .attr('transform', (_, i) => `translate(0,${i * INS_ROW_H})`);
+
+  rowG.append('text').attr('class', 'ins-lane')
+    .attr('x', INS_LANE_W - 10).attr('y', INS_ROW_H / 2 + 4)
+    .attr('text-anchor', 'end')
+    .text((r) => insShortName(r.name))
+    .append('title').text((r) => r.name);
+
+  rowG.each(function (r) {
+    const cells = r.calls.map((v, i) => ({ v, i, carried: r.carried[i] > 0 }));
+    d3.select(this).selectAll('rect').data(cells.filter((c) => c.v || c.carried)).join('rect')
+      /* A cell with carriage but no calls is a faint neutral tint, never blank: "you were paying
+       * for this and not using it" is the finding, and an empty cell says only "nothing
+       * happened". Neutral rather than the ramp's lightest step so it cannot be misread as use. */
+      .attr('class', (c) => c.v ? 'ins-cell' : 'ins-cell carried-only')
+      .attr('x', (c) => x(c.i)).attr('width', cw)
+      .attr('y', 2).attr('height', INS_ROW_H - 4).attr('rx', 2)
+      .attr('fill', (c) => c.v ? stepOf(c.v) : null)
+      .append('title')
+      .text((c) => r.name + ' — ' + insColLabel(g.cols[c.i].from, g.width) + ': ' +
+        (c.v ? c.v + ' invocation(s)' : 'carried, never invoked'));
+  });
+
+  /* ── the axis. Ticks at month boundaries where the span is long, else evenly spaced — never
+   * every column, which is unreadable at sixty of them. */
+  const ticks = [];
+  let lastMonth = -1;
+  g.cols.forEach((c, i) => {
+    const d = new Date(c.from);
+    if (g.cols.length > 20) {
+      if (d.getMonth() !== lastMonth) { ticks.push(i); lastMonth = d.getMonth(); }
+    } else if (i % Math.max(1, Math.round(g.cols.length / 6)) === 0) {
+      ticks.push(i);
+    }
+  });
+  const axis = svg.append('g').attr('class', 'ins-axis')
+    .attr('transform', `translate(0,${INS_VOL_H + plotH})`);
+  axis.append('line').attr('class', 'ins-axis-line')
+    .attr('x1', INS_LANE_W).attr('x2', INS_LANE_W + plotW).attr('y1', 0).attr('y2', 0);
+  axis.selectAll('text').data(ticks).join('text')
+    .attr('class', 'ins-tick')
+    .attr('x', (i) => x(i) + cw / 2).attr('y', 16).attr('text-anchor', 'middle')
+    .text((i) => insColLabel(g.cols[i].from, g.width));
+
+  insAttachBrush(svg, g, { x, cw, plotW, plotH });
+  wrap.appendChild(el('p', { class: 'hint', text: 'Drag across the chart to select a period — ' +
+    'the handles at each edge resize it, and everything below then describes only that period. ' +
+    'Click once outside the selection to go back to all history.' }));
+  return wrap;
+}
+
+function insColLabel(ms, width) {
+  const d = new Date(ms);
+  const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()];
+  return width > 1 ? d.getDate() + ' ' + mon : String(d.getDate());
+}
+
 /* ── the brush ──────────────────────────────────────────────────────────────
  *
- * Drag across the chart to select a period; release re-queries, and every table below describes
- * that period. Written by hand rather than vendored, which was a measured decision: uPlot is the
- * right library at 49KB and MIT, but it charts time series and has no heatmap, so it could only
- * ever brush a strip ABOVE this grid — and the grid is the view that shows the phase progression.
- * Pointer events on an SVG we already own cost forty lines and no policy exception. If this
- * proves rough in use, uPlot goes in as a second panel; the heatmap stays either way.
- *
- * Pointer events, not mouse events: the same handlers then work for touch and pen, and
- * setPointerCapture keeps the drag alive when the cursor leaves the chart — which it will, because
- * the natural gesture overshoots the edge.
+ * d3.brushX over the whole plot, snapped to whole columns on release. The snap matters: the data
+ * is bucketed, so a selection that ended mid-bucket would describe a period the store cannot
+ * answer for — and the brush visibly settling onto the column edges is also what tells the reader
+ * the selection is discrete.
  */
 function insAttachBrush(svg, g, geom) {
-  const band = svgEl('rect', { class: 'ins-brush', x: 0, y: 0, width: 0, height: geom.h,
-    'pointer-events': 'none' });
-  svg.appendChild(band);
+  const top = INS_VOL_H - 6;
+  const brush = d3.brushX()
+    .extent([[INS_LANE_W, 2], [INS_LANE_W + geom.plotW, INS_VOL_H + geom.plotH]])
+    .on('end', (ev) => {
+      /* A click with no drag clears the selection — the standard gesture, and the one a reader
+       * tries first when they want out. */
+      if (!ev.selection) {
+        if (insSince || insUntil) { insSince = 0; insUntil = 0; loadInsights(); }
+        return;
+      }
+      const [x0, x1] = ev.selection;
+      const idx = (px) => {
+        let best = 0, bd = Infinity;
+        g.cols.forEach((_, i) => {
+          const c = geom.x(i) + geom.cw / 2;
+          const d = Math.abs(c - px);
+          if (d < bd) { bd = d; best = i; }
+        });
+        return best;
+      };
+      const a = idx(x0), b = Math.max(a, idx(x1));
+      /* Exact DAYS, not the rolled bucket: `until` is the end of the last day so the final day is
+       * included rather than silently dropped. */
+      insSince = g.cols[a].from;
+      insUntil = insDoc.timeline.buckets[g.cols[b].toIdx] + 24 * 3600 * 1000 - 1;
+      loadInsights();
+    });
 
-  let from = -1, to = -1, dragging = false;
-  const colAt = (clientX) => {
-    const box = svg.getBoundingClientRect();
-    /* The SVG scales to its box, so a client x has to be mapped through that ratio before it
-     * means anything in viewBox units. Reading it off offsetX would be wrong on any zoom. */
-    const vx = (clientX - box.left) * (geom.totalW / box.width);
-    return Math.max(0, Math.min(g.cols.length - 1,
-      Math.floor((vx - INS_LANE_W) / geom.cw)));
-  };
-  const paint = () => {
-    if (from < 0 || to < 0) { band.setAttribute('width', 0); return; }
-    const a = Math.min(from, to), b = Math.max(from, to);
-    band.setAttribute('x', INS_LANE_W + a * geom.cw);
-    band.setAttribute('width', (b - a + 1) * geom.cw);
-  };
-
-  svg.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    dragging = true;
-    from = to = colAt(e.clientX);
-    paint();
-    try { svg.setPointerCapture(e.pointerId); } catch (_) { /* older engines */ }
-    e.preventDefault();
-  });
-  svg.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
-    to = colAt(e.clientX);
-    paint();
-  });
-  const finish = () => {
-    if (!dragging) return;
-    dragging = false;
-    const a = Math.min(from, to), b = Math.max(from, to);
-    /* The selection resolves to EXACT DAYS, not to the rolled bucket: a 4-day bucket brushed at
-     * its left edge still means those four days, and `until` is the end of the last one so the
-     * final day is included rather than silently dropped. */
-    insSince = g.cols[a].from;
-    const lastDay = insDoc.timeline.buckets[g.cols[b].toIdx];
-    insUntil = lastDay + 24 * 3600 * 1000 - 1;
-    loadInsights();
-  };
-  svg.addEventListener('pointerup', finish);
-  svg.addEventListener('pointercancel', () => { dragging = false; paint(); });
-  return band;
+  const gb = svg.append('g').attr('class', 'ins-brush-g').call(brush);
+  /* Restore the current selection after a re-render, so the band stays where the reader left it
+   * rather than vanishing the moment the data arrives. */
+  if (insSince) {
+    const from = g.cols.findIndex((c) => c.from >= insSince);
+    const to = insUntil
+      ? g.cols.reduce((acc, c, i) =>
+        insDoc.timeline.buckets[c.toIdx] <= insUntil ? i : acc, from)
+      : g.cols.length - 1;
+    if (from >= 0) {
+      gb.call(brush.move, [geom.x(from), geom.x(to) + geom.cw]);
+    }
+  }
+  return gb;
 }

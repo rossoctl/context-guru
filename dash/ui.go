@@ -22,10 +22,30 @@ import (
 // in the binary, so the dashboard works with the network unplugged. headroom's
 // Alpine/Tailwind/htmx script tags are exactly what we are not doing.
 //
-// Charts are hand-drawn SVG rather than a vendored chart library: the ladder's
-// "native platform feature covers it" rung. SVG path/rect/text is a native
-// browser feature, the series here are small, and 45 KB of vendored library would
-// buy tooltips we can write in fifteen lines.
+// Charts are hand-drawn SVG rather than a vendored chart library — with ONE exception, d3,
+// vendored for the Cleanup view's brush. The rule and the exception are both here because a
+// contradiction with no explanation is worse than either choice.
+//
+// THE RULE STILL HOLDS for everything else. SVG path/rect/text is a native browser feature, the
+// series on the other tabs are small, and a library would buy tooltips we can write in fifteen
+// lines. Every chart outside dash/ui/insights.js is still drawn by hand.
+//
+// THE EXCEPTION, and what changed. That reasoning was about tooltips. The Cleanup view needs a
+// RANGE BRUSH over a capability-by-time heatmap — handles you can grab, drag-to-move, keyboard
+// access, and a selection that survives leaving the plot. A hand-rolled version shipped first
+// (forty lines of pointer events) and the reported failure was "it's not clear how to select":
+// the gesture worked and the affordance did not, which is the part a library has actually solved.
+//
+// What it costs, measured rather than assumed:
+//
+//   - d3 7.9.0, ISC, 273 KB raw and 90 KB gzipped, against a 300 KB gzipped asset baseline.
+//     app.js alone is 548 KB raw. The assets are already gzipped and content-hashed, so the
+//     marginal cost is one 90 KB download per deploy.
+//   - The per-module builds were tried first and do NOT work in a browser: d3-brush's UMD build
+//     calls require('d3-dispatch'), so the sixteen modules this needs (119 KB, tempting) cannot
+//     chain without a bundler. Verified. It is the full bundle or nothing.
+//   - Vendored, not a CDN, because this page serves script-src 'self' and must keep working on
+//     an air-gapped install.
 //
 //go:embed ui
 var uiFS embed.FS

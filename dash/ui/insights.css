@@ -165,18 +165,18 @@
   letter-spacing: .04em; cursor: help;
 }
 
-/* ── the activity chart ────────────────────────────────────────────────────
- * A heatmap of capability against time, with a volume strip above it.
+/* ── the activity chart (d3) ──────────────────────────────────────────────
+ * A heatmap of capability against time, with a volume strip above and a brush over both.
  *
- * THE RAMP IS SEQUENTIAL: one hue, five steps, light to dark — because the cell encodes
- * MAGNITUDE (how many invocations) and nothing else. A categorical palette here would spend the
- * identity channel re-encoding what the darkness already shows, and a rainbow would imply an
- * order the hues do not have.
+ * THE RAMP IS SEQUENTIAL: one hue, five steps, light to dark — the cell encodes MAGNITUDE and
+ * nothing else. A categorical palette would spend the identity channel re-encoding what the
+ * darkness already shows; a rainbow would imply an order the hues do not have.
  *
  * Both ramps were computed from the dashboard's own --pal-blue and checked rather than eyeballed:
- * luminance is monotonic across all five steps, and the end step clears 3:1 against its surface
- * (4.30:1 light, 4.79:1 dark). THE ANCHOR FLIPS in dark mode — more becomes brighter, because on
- * a dark ground darker means less ink, not more.
+ * luminance monotonic across all five steps, end step clearing 3:1 against its surface (4.30:1
+ * light, 4.79:1 dark). THE ANCHOR FLIPS in dark mode — more becomes brighter, because on a dark
+ * ground darker means less ink, not more. Exposed as custom properties because insights.js reads
+ * them with getComputedStyle, so the ramp is defined once, here, for both themes.
  */
 :root {
   --ins-s1: #dfeaf6; --ins-s2: #b9d2ef; --ins-s3: #89b3e7;
@@ -194,34 +194,42 @@
 }
 
 .ins-chart { overflow-x: auto; margin-top: var(--sp-2); }
-.ins-vol, .ins-heat { display: block; }
-/* The volume strip is CONTEXT, so it takes the same recessive ink as the grid rather than a
-   series hue: it answers "was I working at all", and competing with the heatmap for attention
-   would make the reader compare two things that are not comparable. */
-.ins-vol-bar { fill: var(--fg-faint); fill-opacity: .38; }
-.ins-vol-axis { stroke: var(--border); stroke-width: 1; }
+.ins-d3 { display: block; max-width: 100%; }
+
+/* The volume strip is CONTEXT: recessive ink, so it cannot compete with the heatmap for
+   attention. It answers "was I working at all", which is what stops a quiet row being read as a
+   change of habit when it was a holiday. */
+.ins-vol-bar { fill: var(--fg-faint); fill-opacity: .4; }
+.ins-vol-axis, .ins-axis-line { stroke: var(--border); stroke-width: 1; }
 
 .ins-cell { stroke: none; }
-.ins-cell.s1 { fill: var(--ins-s1); }
-.ins-cell.s2 { fill: var(--ins-s2); }
-.ins-cell.s3 { fill: var(--ins-s3); }
-.ins-cell.s4 { fill: var(--ins-s4); }
-.ins-cell.s5 { fill: var(--ins-s5); }
-/* Carried but never invoked in that period. Not blank: "you were paying for this and not using
-   it" is the finding, and an empty cell says only "nothing happened". Drawn in the neutral ink
-   so it cannot be mistaken for the faintest step of the use ramp. */
-.ins-cell.carried-only { fill: var(--fg-faint); fill-opacity: .1; }
+/* Carried but never invoked. Neutral rather than the ramp's lightest step, so it cannot be
+   misread as a small amount of use — it is the opposite claim. */
+.ins-cell.carried-only { fill: var(--fg-faint); fill-opacity: .11; }
 .ins-cell:hover { stroke: var(--fg); stroke-width: 1.5; }
 
-.ins-heat-lane {
-  font-family: var(--mono); font-size: var(--t-micro); fill: var(--fg-muted);
-}
-.ins-heat-tick { font-family: var(--mono); font-size: var(--t-micro); fill: var(--fg-faint); }
+.ins-lane { font-family: var(--mono); font-size: var(--t-small); fill: var(--fg-muted); }
+.ins-tick { font-family: var(--mono); font-size: var(--t-micro); fill: var(--fg-faint); }
 
-.ins-range { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
-.ins-scope { margin: var(--sp-2) 0 0; font-size: var(--t-body); line-height: 1.5; }
-.ins-scope strong { font-family: var(--mono); }
-.ins-scope-note { color: var(--fg-muted); }
+/* ── the brush ────────────────────────────────────────────────────────────
+ * d3 draws .selection and two .handle rects; these make them legible and grabbable.
+ * The handles are the whole reason the library is here: the hand-rolled version had a working
+ * gesture and no affordance, which reads as "it is not clear how to select".
+ */
+.ins-brush-g .overlay { cursor: crosshair; }
+.ins-brush-g .selection {
+  fill: var(--accent); fill-opacity: .13;
+  stroke: var(--accent); stroke-width: 1.5; stroke-opacity: .55;
+  shape-rendering: crispEdges;
+}
+/* A visible grab target at each edge, wider than it looks: 10px of hit area for a 3px mark, since
+   a handle you cannot land on is a handle that does not exist. */
+.ins-brush-g .handle {
+  fill: var(--accent); fill-opacity: .9;
+  width: 3px; rx: 1.5;
+}
+.ins-brush-g .handle--e, .ins-brush-g .handle--w { cursor: ew-resize; }
+.ins-brush-g:focus-visible .selection { stroke-opacity: 1; stroke-width: 2; }
 
 /* ── the brush and the range banner ────────────────────────────────────────
  * Drag across the chart to select a period; the band marks it while dragging.

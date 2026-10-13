@@ -1151,6 +1151,10 @@
 <script defer src="tools.js"></script>
 <!-- The cleanup view: the inventory shaped into removal advice, with its own stylesheet and tab
      registration inside insights.js, so this feature is one line here too. -->
+<!-- d3, vendored and embedded: the Cleanup view's brush needs grab handles and keyboard access,
+     which is the one thing a hand-rolled brush failed at. See dash/ui.go for the cost and the
+     rule it excepts. BEFORE insights.js, which uses it at mount time. -->
+<script defer src="d3.min.js"></script>
 <script defer src="insights.js"></script>
 <!-- The KV-cache TTL view mounts itself the same way, from kvcache.js. -->
 <script defer src="kvcache.js"></script>
