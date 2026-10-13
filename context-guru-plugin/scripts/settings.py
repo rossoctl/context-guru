@@ -3349,7 +3349,20 @@ def _strategy_name_in(text: str) -> str:
     return m.group(1) if m else ""
 
 
-def _render_strategy(name: str, preset: str) -> str:
+# What the proxy does for a 1-hour cache when the `_1h` keys are absent (config.DefaultKeepAliveIdle1h
+# and DefaultKeepAliveMaxPings1h). A key equal to its default is NOT written, and that is load-bearing:
+# the plugin and the proxy binary ship separately, and an OLD binary's strict loader rejects an
+# unknown key and exits. Omitting the defaults keeps `auto` and `1-ping` loadable by every binary;
+# only a non-default value (`2-ping`) writes a `_1h` key.
+ONE_HOUR_DEFAULTS = {"keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 1}
+
+# A file re-rendered for a binary that rejected the `_1h` keys carries this line. `strategy sync` sees
+# it and keeps omitting them, so a later session start does not fail and recover again. A deliberate
+# `strategy set` renders afresh without it, and so does the next one after a proxy update.
+LEGACY_BINARY_MARKER = "# context-guru: 1h-keys-omitted (the installed proxy does not know them)"
+
+
+def _render_strategy(name: str, preset: str, legacy: bool = False) -> str:
     spec = STRATEGIES[name]
     lines = [
         f"{STRATEGY_MARKER_PREFIX} strategy={name} {STRATEGY_MARKER_TAIL} "
@@ -3367,7 +3380,10 @@ def _render_strategy(name: str, preset: str) -> str:
         "# recorded here when the strategy was first armed - indefinitely, and with no way to tell.",
         f"preset: {preset}",
     ]
-    cache = spec["cache"]
+    cache = {k: v for k, v in spec["cache"].items()
+             if not k.endswith("_1h") or (not legacy and ONE_HOUR_DEFAULTS.get(k) != v)}
+    if legacy:
+        lines.insert(1, LEGACY_BINARY_MARKER)
     if cache:
         lines.append("cache:")
         for k, v in cache.items():
@@ -3565,7 +3581,8 @@ def cmd_strategy(args) -> int:
                  note="this config names `none`, which is expressed as no config at all; "
                       "`strategy set --name none` removes it")
             return 0
-        want = _render_strategy(name, args.preset)
+        want = _render_strategy(name, args.preset,
+                                legacy=args.legacy_binary or LEGACY_BINARY_MARKER in text)
         if want == text:
             emit(result="unchanged", strategy=name, file=path, port=port, preset=args.preset)
             return 0
@@ -4033,6 +4050,9 @@ def main() -> int:
     st.add_argument("--preset", default="",
                     help="the preset to state in the file. Required for `set` and `sync`, because "
                          "--config REPLACES --preset rather than layering over it.")
+
+    st.add_argument("--legacy-binary", action="store_true",
+                    help="`sync` only: omit the `_1h` keys, for a proxy binary that rejected them")
 
     pr = sub.add_parser("preset")
     pr.add_argument("op", choices=("list", "show", "set"))

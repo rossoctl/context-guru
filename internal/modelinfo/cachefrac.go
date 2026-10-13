@@ -18,6 +18,9 @@ const (
 const (
 	AnthropicDefaultKeepAliveIdle1h     = 59 * time.Minute
 	AnthropicDefaultKeepAliveMaxPings1h = 1
+	// AnthropicMaxKeepAliveMaxPings1h caps K for a 1-hour thread. The credential hold is
+	// (K+1) x 59 min, so 3 bounds it at 236 min; it matches the manager-strategy band.
+	AnthropicMaxKeepAliveMaxPings1h = 3
 )
 
 // OpenAI30MinuteCache is the shared provider/model gate for the GPT-5.6+

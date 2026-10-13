@@ -274,3 +274,17 @@ func TestKeepAliveRecommendedDefaults(t *testing.T) {
 			r.KeepAliveIdleSeconds, r.KeepAliveMaxPings, r.KeepAliveMinPrefixTokens, r.KeepAliveMaxUSDPerPing)
 	}
 }
+
+// The credential hold of a 1-hour thread is (K+1) x 59 min, so K is capped.
+func TestKeepAliveMaxPings1hIsCapped(t *testing.T) {
+	for _, k := range []int{1, 2, 3} {
+		if _, err := LoadBytes([]byte(fmt.Sprintf("preset: off\ncache:\n  keepalive: true\n  keepalive_max_pings_1h: %d\n", k))); err != nil {
+			t.Errorf("keepalive_max_pings_1h: %d refused: %v", k, err)
+		}
+	}
+	for _, k := range []int{4, 100} {
+		if _, err := LoadBytes([]byte(fmt.Sprintf("preset: off\ncache:\n  keepalive: true\n  keepalive_max_pings_1h: %d\n", k))); err == nil {
+			t.Errorf("keepalive_max_pings_1h: %d accepted; it would hold a credential for hours", k)
+		}
+	}
+}

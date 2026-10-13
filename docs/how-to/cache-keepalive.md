@@ -86,7 +86,7 @@ proxy-wide setting.
 One proxy can serve a 1-hour subscription session and a 5-minute subagent or API-key session at once.
 Each follows its own row. The 59-minute time is one constant, `AnthropicDefaultKeepAliveIdle1h` in
 `internal/modelinfo/cachefrac.go`, or `keepalive_idle_seconds_1h` in the config. The credential hold for
-a 1-hour thread is `(K+1) x 59 min` (118 min at K=1).
+a 1-hour thread is `(K+1) x 59 min`: 118 min at K=1, and at most 236 min, because `keepalive_max_pings_1h` is capped at 3. A 5-minute thread holds about 14 min. An armed session override does not change a 1-hour thread's schedule; it enables the session and sets its prefix floor. If the installed proxy binary is older than the plugin and rejects the `_1h` keys, `start-proxy.sh` re-renders the config without them and a 1-hour cache is pinged on the 5-minute schedule until the proxy is updated.
 
 The 270-second Anthropic interval is chosen for robustness to where the cache cliff sits (it ties
 280 on the full replay window; counterfactual, see #435), not as a measured optimum; the 1680-second

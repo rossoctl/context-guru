@@ -1054,3 +1054,33 @@ func TestTheReportStillFindsTheInstallWhenTheSessionPointsAtAForeignLocalProxy(t
 			"project has no install", f["port"])
 	}
 }
+
+// TestInsightsDoesNotCallAOneHourRescueALoss. A 1-hour thread is pinged at 59 min; the dashboard
+// ledger now credits that rescue (dash/keepalive_ttl_test.go), so the net is positive and insights
+// must say the keep-alive is paying - not recommend `none`. Before the ledger followed the thread's
+// tier, such a rescue was zeroed while its ping still counted.
+func TestInsightsDoesNotCallAOneHourRescueALoss(t *testing.T) {
+	stub := newAPIStub(t, map[string]string{
+		"/api/stats":     window(30),
+		"/api/keepalive": `{"pings":1,"ping_usd":0.02,"saved_usd":0.60,"net_usd":0.58,"misses_avoided":1}`,
+		"/api/keepalive/recommend": `{"idle_seconds":280,"max_pings":2,"lo_usd":1,"hi_usd":9,
+			"n":40,"sessions":9}`,
+	})
+	dir := insightsProject(t, map[string]any{"port": stub.port, "cache_strategy": "auto"})
+	out, _ := runInsights(t, dir, nil, "idle")
+	f := facts(out)
+	n := 0
+	fmt.Sscanf(f["findings"], "%d", &n)
+	paying := false
+	for i := 1; i <= n; i++ {
+		switch f[fmt.Sprintf("finding.%d.id", i)] {
+		case "keepalive-underwater":
+			t.Errorf("a positive-net 1-hour rescue was reported as underwater:\n%s", out)
+		case "keepalive-paying":
+			paying = true
+		}
+	}
+	if !paying {
+		t.Errorf("no keepalive-paying finding for a net of +$0.58:\n%s", out)
+	}
+}

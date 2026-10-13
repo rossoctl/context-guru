@@ -992,6 +992,27 @@ if [ -s "$LOG" ]; then
                        | sed -E 's/unknown preset "(.*)"/\1/')
 fi
 
+# The binary rejected a one-hour key (`keepalive_idle_seconds_1h`, `keepalive_max_pings_1h`). The
+# plugin updates through the marketplace and the binary does not, so a newer plugin can write a key an
+# older binary's strict loader has never heard of. Only a non-default value is ever written (see
+# settings.py ONE_HOUR_DEFAULTS), so this is the `2-ping` case; the recovery is the same shape as the
+# preset one: re-render WITHOUT the keys and retry once. The proxy then pings a 1-hour cache like a
+# 5-minute one, which is what that binary always did.
+if [ -s "$LOG" ] && sed 's/\\//g' "$LOG" 2>/dev/null | grep -qE 'field keepalive_(idle_seconds|max_pings)_1h not found'; then
+  note "the installed proxy (${HAVE}) does not know the one-hour keep-alive keys; starting without them."
+  note "a 1-hour cache is then pinged on the 5-minute schedule until you update the proxy (/context-guru:update)."
+  if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ] \
+     && CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" strategy sync \
+          --port "$PORT" --preset "$PRESET" --legacy-binary >/dev/null 2>&1; then
+    compute_preset_and_strategy_notes
+    if attempt_launch; then
+      exit 0
+    fi
+  else
+    note "could not rewrite keepalive-${PORT}.yaml without them (strategy sync failed)."
+  fi
+fi
+
 if [ -n "$rejected_preset" ] && [ "$PRESET" != off ]; then
   note "the installed proxy (${HAVE}) does not know preset \"${rejected_preset}\": config: unknown preset \"${rejected_preset}\"."
   note "starting with preset \`off\` instead so this session is not blocked; keep-alive stays armed."

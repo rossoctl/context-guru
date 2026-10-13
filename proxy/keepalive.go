@@ -197,6 +197,11 @@ func (p CachePolicy) on() bool {
 // forOneHour swaps in the one-hour schedule. The zero values resolve to the shipped defaults, the
 // same way config.CacheConfig.Resolved does for the config-file path (strategies and overrides
 // build a CachePolicy without going through it).
+//
+// MaxPings is capped at modelinfo.AnthropicMaxKeepAliveMaxPings1h whatever the source, so the
+// credential hold of a 1-hour thread never exceeds maxKeepAliveHold1h. An armed session override
+// does not change a 1-hour thread's schedule (its 60-290 s band cannot express one hour); it still
+// enables the session and sets its prefix floor.
 func (p CachePolicy) forOneHour() CachePolicy {
 	p.Idle, p.MaxPings = p.Idle1h, p.MaxPings1h
 	if p.Idle <= 0 {
@@ -205,8 +210,13 @@ func (p CachePolicy) forOneHour() CachePolicy {
 	if p.MaxPings <= 0 {
 		p.MaxPings = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
 	}
+	p.MaxPings = min(p.MaxPings, modelinfo.AnthropicMaxKeepAliveMaxPings1h)
 	return p
 }
+
+// maxKeepAliveHold1h is the longest a 1-hour thread can hold the caller's credential and
+// conversation: (cap + 1) x 59 min = 236 min. The default (1 ping) holds 118 min.
+const maxKeepAliveHold1h = (modelinfo.AnthropicMaxKeepAliveMaxPings1h + 1) * modelinfo.AnthropicDefaultKeepAliveIdle1h
 
 // resolveTier decides whether the thread's cache is a one-hour cache, from the traffic.
 //
@@ -237,7 +247,7 @@ const (
 	// one session holds one entry per thread that passed the gates (main agent, each subagent).
 	// The name is kept so the bound stays greppable from its history. 512 still holds: an entry
 	// exists only for a thread past its first request with a prefix over the floor, a finished
-	// thread's entry ends at the hard deadline ((K+1) x Idle, about 14 min at the defaults), and
+	// thread's entry ends at the hard deadline ((K+1) x Idle: about 14 min on a 5-minute thread, 118 min on a 1-hour thread at the defaults), and
 	// the body bound below binds first. evictLocked has no per-session fairness on purpose: it
 	// drops the entry whose ping is least imminent, whichever session it belongs to.
 	maxKeepAliveSessions = 512
@@ -368,6 +378,13 @@ type kaEntry struct {
 	// look, and coupling a security bound to a liveness loop is how a hold silently becomes
 	// unbounded. time.AfterFunc fires regardless.
 	timer *time.Timer
+}
+
+// hold is how long this entry may keep the caller's credential and conversation: (K+1) x X, the
+// hard deadline. 14 min for a 5-minute thread at the defaults, 118 min for a 1-hour thread, and
+// never more than maxKeepAliveHold1h (236 min) for one.
+func (e *kaEntry) hold() time.Duration {
+	return time.Duration(e.pol.MaxPings+1) * e.pol.Idle
 }
 
 // due reports whether this TRACKED entry should be pinged now. Timing, K and the stop flag
@@ -817,12 +834,12 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		k.skipped.Add(1)
 		return
 	}
+	// Read here, written below beside turns: tier1h must be bounded and reset exactly as turns is,
+	// and a request the paths above refuse must not grow it.
 	k.mu.Lock()
-	ttl1h := resolveTier(body, u, usageOK, k.tier1h[key])
-	if usageOK && (u.CacheWrite > 0 || ttl1h) {
-		k.tier1h[key] = ttl1h
-	}
+	prev1h := k.tier1h[key]
 	k.mu.Unlock()
+	ttl1h := resolveTier(body, u, usageOK, prev1h)
 	if ttl1h && provider != bschemas.OpenAI {
 		pol = pol.forOneHour()
 	}
@@ -880,9 +897,18 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// what lets a session's second request be recognised as such.
 	k.turns[key]++
 	e.turn = k.turns[key] - 1
+	// A write bills a tier; a read-only turn bills none and leaves the remembered one alone.
+	if usageOK && (u.CacheWrite > 0 || ttl1h) {
+		k.tier1h[key] = ttl1h
+	}
 	if len(k.turns) > maxKeepAliveTurnKeys {
+		// Reset both, keeping the current thread: dropping its tier here would send its next
+		// read-only turn back to the 5-minute schedule.
 		k.turns = map[string]int{key: k.turns[key]}
 		k.tier1h = map[string]bool{}
+		if usageOK && (u.CacheWrite > 0 || ttl1h) {
+			k.tier1h[key] = ttl1h
+		}
 	}
 	// Drop any previous entry either way: it is stale now, and if the gate refuses this request
 	// its body and credential must not be left behind.
@@ -902,7 +928,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// entry: K pings each restarting the clock, plus one final Idle to notice the last one
 	// bought nothing. After that there is no legitimate use, so the material goes whether or not
 	// anything else in this process is awake.
-	e.timer = time.AfterFunc(time.Duration(e.pol.MaxPings+1)*e.pol.Idle, func() { k.retire(key) })
+	e.timer = time.AfterFunc(e.hold(), func() { k.retire(key) })
 	k.evictLocked()
 }
 

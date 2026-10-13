@@ -2976,11 +2976,15 @@ func TestOldStrategyNamesStillResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"strategy=auto", "keepalive_idle_seconds: 270", "keepalive_max_pings: 2",
-		"keepalive_idle_seconds_1h: 3540", "keepalive_max_pings_1h: 1"} {
+	for _, want := range []string{"strategy=auto", "keepalive_idle_seconds: 270", "keepalive_max_pings: 2"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("auto config lacks %q:\n%s", want, body)
 		}
+	}
+	// The 1-hour defaults are the proxy's own, so they are not written: an older proxy binary's strict
+	// loader rejects a key it does not know, and the plugin ships separately from the binary.
+	if strings.Contains(string(body), "_1h") {
+		t.Errorf("auto config writes a 1-hour key an older proxy binary would reject:\n%s", body)
 	}
 	// A marker written by the old version.
 	old := strings.Replace(string(body), "strategy=auto", "strategy=5-min-ping", 1)
@@ -2994,6 +2998,77 @@ func TestOldStrategyNamesStillResolve(t *testing.T) {
 	sync, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
 	if sync["result"] != "synced" || sync["strategy"] != "auto" {
 		t.Errorf("sync did not migrate the old marker: %v", sync)
+	}
+}
+
+// TestOneHourKeysAreWrittenOnlyWhenTheyDifferFromTheProxyDefault. `2-ping` is the one strategy that
+// needs a key; `--legacy-binary` (what start-proxy.sh uses after an old binary rejected it) drops it,
+// and `strategy sync` keeps it dropped on later starts.
+func TestOneHourKeysAreWrittenOnlyWhenTheyDifferFromTheProxyDefault(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "2-ping",
+		"--port", keepalivePort, "--preset", "off")
+	if code != 0 {
+		t.Fatalf("exit %d: %v", code, facts)
+	}
+	body := readFileString(t, facts["file"])
+	if !strings.Contains(body, "keepalive_max_pings_1h: 2") || strings.Contains(body, "keepalive_idle_seconds_1h") {
+		t.Fatalf("2-ping should write only keepalive_max_pings_1h:\n%s", body)
+	}
+	sync, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off", "--legacy-binary")
+	if sync["result"] != "synced" {
+		t.Fatalf("legacy sync: %v", sync)
+	}
+	body = readFileString(t, facts["file"])
+	if strings.Contains(body, "_1h:") || !strings.Contains(body, "1h-keys-omitted") {
+		t.Fatalf("legacy render still carries a 1-hour key, or lacks its marker:\n%s", body)
+	}
+	again, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
+	if again["result"] != "unchanged" {
+		t.Errorf("a plain sync undid the legacy render: %v", again)
+	}
+	if show, _ := settingsIn(t, state, home, "strategy", "show", "--port", keepalivePort); show["strategy"] != "2-ping" {
+		t.Errorf("the legacy marker line hid the strategy name: %v", show)
+	}
+}
+
+// TestAnOldProxyThatRejectsTheOneHourKeysStillStarts. A new plugin with an old binary: the binary's
+// strict loader exits on `keepalive_max_pings_1h`. start-proxy.sh must re-render without it and retry.
+func TestAnOldProxyThatRejectsTheOneHourKeysStillStarts(t *testing.T) {
+	requireTool(t, "python3")
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	if f, code := settingsIn(t, state, t.TempDir(), "strategy", "set", "--name", "2-ping",
+		"--port", port, "--preset", "off"); code != 0 {
+		t.Fatalf("set: %d %v", code, f)
+	}
+	sentinel := filepath.Join(dir, "started")
+	// Behaves like an old binary: a config naming a 1-hour key is a parse error; any other serves.
+	script := "#!/usr/bin/env bash\n" +
+		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy v0.4.2 (commit none)'; exit 0; fi\n" +
+		"cfg=; while [ $# -gt 0 ]; do [ \"$1\" = --config ] && cfg=$2; shift; done\n" +
+		"if [ -n \"$cfg\" ] && grep -q '_1h:' \"$cfg\"; then\n" +
+		"  echo 'level=ERROR msg=\"config: yaml: unmarshal errors: field keepalive_max_pings_1h not found in type config.CacheConfig\"' >&2; exit 1; fi\n" +
+		"touch \"" + sentinel + "\"\n" +
+		"exec python3 -c '\nimport sys, http.server\n" +
+		"class H(http.server.BaseHTTPRequestHandler):\n" +
+		"    def do_GET(self):\n        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+		"    def log_message(self, *a): pass\n" +
+		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n' " + port + "\n"
+	bin := filepath.Join(dir, "old-proxy")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, code := startProxyIn(t, state, bin, port, "TMPDIR="+dir)
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("the old proxy never came up after the 1-hour keys were dropped: %s", out)
+	}
+	if !strings.Contains(out, "does not know the one-hour keep-alive keys") {
+		t.Errorf("the fallback did not say what it did: %s", out)
 	}
 }
 

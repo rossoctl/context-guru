@@ -257,6 +257,11 @@ func (c CacheConfig) validate() error {
 			"(the one-hour lifetime runs from the previous request's START); got %d",
 			c.KeepAliveIdleSeconds1h)
 	}
+	if c.KeepAliveMaxPings1h > modelinfo.AnthropicMaxKeepAliveMaxPings1h {
+		return fmt.Errorf("config: cache: keepalive_max_pings_1h must be at most %d "+
+			"(the credential hold is (K+1) x the 1-hour idle time); got %d",
+			modelinfo.AnthropicMaxKeepAliveMaxPings1h, c.KeepAliveMaxPings1h)
+	}
 	if c.KeepAliveOpenAIIdleSeconds >= 1730 {
 		return fmt.Errorf("config: cache: keepalive_openai_idle_seconds must be under 1730 " +
 			"(leave at least 70 seconds for the ping before the GPT-5.6+ 30-minute minimum ends)")
