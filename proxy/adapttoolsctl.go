@@ -60,28 +60,54 @@ func (h *Handler) adaptToolsApply(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	restore := in.Option == "restore"
-	note := "filtering " + strings.Join(names, ", ")
-	switch {
-	case len(names) == 0:
-		note = "nothing changed"
-	case restore:
-		note = "stopped filtering " + strings.Join(names, ", ")
-	}
+	note := "nothing changed"
 	if len(names) > 0 {
-		if _, _, err := h.adaptWrite(who, "tools", in.Option, func(doc string) (string, error) {
+		_, next, err := h.adaptWrite(who, "tools", in.Option, func(doc string) (string, error) {
 			return editRemoved(doc, func(cur []string) []string {
 				for _, n := range names {
 					cur = withDecl(cur, n, !restore)
 				}
 				return cur
 			})
-		}); err != nil {
+		})
+		if err != nil {
 			code, msg := statusOf(err)
 			ctlErr(w, code, msg)
 			return
 		}
+		note = applyNote(names, next, restore)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": in.Option, "previous": "keep",
 		// The filter acts on the next request, which re-writes the cached prefix once.
 		"effective": "now", "note": note, "undo": map[string]string{"option": "revert"}})
+}
+
+// applyNote says what the list now does, read back from the configuration that was written,
+// so it never claims a change that did not happen: a restore cannot take out a name the
+// configuration still lists (an operator's config file, say), and the note names those.
+func applyNote(names []string, doc string, restore bool) string {
+	after, _, _ := removedFrom(doc)
+	still := map[string]bool{}
+	for _, n := range after {
+		still[n] = true
+	}
+	var done, kept []string
+	for _, n := range names {
+		if still[n] == restore {
+			kept = append(kept, n)
+		} else {
+			done = append(done, n)
+		}
+	}
+	if !restore {
+		return "filtering " + strings.Join(done, ", ")
+	}
+	note := "stopped filtering " + strings.Join(done, ", ")
+	if len(done) == 0 {
+		note = "stopped filtering nothing"
+	}
+	if len(kept) > 0 {
+		note += "; still filtered because your configuration lists them: " + strings.Join(kept, ", ")
+	}
+	return note
 }

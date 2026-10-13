@@ -587,7 +587,10 @@ guess. Context Guru's own tools and skills are never listed.
 `POST /api/adapt/tools/apply {"option", "basis"}` writes one option of a report fetched in the last
 30 minutes into the removal list; `restore` takes those entries out, and `revert` undoes the last adapt
 change. It shares identity, rate limit, audit and the single-tenant override file with every
-`/api/adapt/*/apply`; on a single-tenant proxy the running pipeline is rebuilt at once.
+`/api/adapt/*/apply`; on a single-tenant proxy the running pipeline is rebuilt at once. A single-tenant
+proxy accepts apply only from a caller on the same machine (loopback, no forwarding headers), which
+means it trusts every local user and process on that machine; run it on a shared host only if that is
+acceptable.
 
 Any signed-in account can switch off declarations it added itself (MCP tools/servers, other
 non-Claude-Code-native tools) — those are on your own bill. Switching off one of Claude Code's

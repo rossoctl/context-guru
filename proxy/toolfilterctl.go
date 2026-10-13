@@ -282,7 +282,16 @@ func withDecl(names []string, name string, add bool) []string {
 }
 
 // withComponent ensures a component is present (appended last) or absent from a pipeline.
+// A present component keeps its position: pipeline order decides what the components produce
+// and so what is cached, and adding a name to the list must not reorder anything.
 func withComponent(pipeline []string, name string, want bool) []string {
+	if want {
+		for _, n := range pipeline {
+			if strings.TrimSpace(n) == name {
+				return pipeline
+			}
+		}
+	}
 	out := make([]string, 0, len(pipeline)+1)
 	for _, n := range pipeline {
 		if strings.TrimSpace(n) != name {

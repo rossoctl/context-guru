@@ -131,3 +131,22 @@ func TestAdaptToolsApplyOnALocalProxy(t *testing.T) {
 		t.Fatalf("after revert the pipeline filters %q", got)
 	}
 }
+
+// The apply note is read back from what was written, and adding toolfilter to a pipeline that
+// already runs it leaves the order alone.
+func TestAdaptToolsNoteAndPipelineOrder(t *testing.T) {
+	doc := "pipeline: [format, toolfilter, searchfold]\ncomponents:\n  toolfilter:\n    remove: [mcp__ops]\n"
+	if got := applyNote([]string{"mcp__ops", "mcp__srv"}, doc, true); got !=
+		"stopped filtering mcp__srv; still filtered because your configuration lists them: mcp__ops" {
+		t.Errorf("restore note %q", got)
+	}
+	if got := applyNote([]string{"mcp__ops"}, doc, false); got != "filtering mcp__ops" {
+		t.Errorf("apply note %q", got)
+	}
+	if got := strings.Join(withComponent([]string{"format", "toolfilter", "searchfold"}, "toolfilter", true), ","); got != "format,toolfilter,searchfold" {
+		t.Errorf("present component moved: %s", got)
+	}
+	if got := strings.Join(withComponent([]string{"format"}, "toolfilter", true), ","); got != "format,toolfilter" {
+		t.Errorf("absent component not added: %s", got)
+	}
+}
