@@ -576,6 +576,15 @@ A candidate is only suggested once it was declared in at least 5 distinct captur
 7+ days, and invoked in none of them — the count guards against a fluke, the span against "one
 afternoon's task didn't need it."
 
+`GET /api/adapt/tools` (what `/context-guru:adapt tools` reads) is the full list behind that: every
+MCP server, MCP tool and skill the account declared and never used, whether or not it meets the
+5-session bar (`sufficient` says which). Each item is priced on exactly the requests that carried
+it, at that request's own model and cache tier, and comes with its `remove_as` filter entry and the
+client-side change that stops sending it (`claude mcp remove`, a `permissions.deny` entry,
+`skillOverrides`, or disabling the plugin). Each request records the digest of the declaration set
+it carried; rows written before that are matched by tool count, and `usd_low`/`usd_high` bound the
+guess. Context Guru's own tools and skills are never listed.
+
 Any signed-in account can switch off declarations it added itself (MCP tools/servers, other
 non-Claude-Code-native tools) — those are on your own bill. Switching off one of Claude Code's
 **own** tools is different: it takes away equipment the model is expected to have, so that write

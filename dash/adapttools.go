@@ -439,9 +439,6 @@ func (a *API) adaptTools(w http.ResponseWriter, r *http.Request) {
 		a.unauthorized(w)
 		return
 	}
-	// Pings replay a prefix but record tools=0, so they never reach the request query; the
-	// filter is widened only so the scope matches what the caller was billed for.
-	f.WithKeepAlive = true
 	doc, err := a.db(r).AdaptTools(f, a.priceFn(r), a.toolFilterStateForScope(f))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
