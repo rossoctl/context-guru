@@ -249,14 +249,12 @@ func TestStatsLeanTotalSavedMatchesFullHandlerWhenSessionScoped(t *testing.T) {
 	}
 }
 
-// TestStatsLeanOmitsReadTimePricedCreditsWithoutASession is #502's other half: without a
-// session, CachesplitHistoricalUSD's ranking and DeclFilterSavings' scan are no longer bounded
-// (the first must see a session's whole history to know which row was its first; the second's
-// SELECT is bounded by `cond` for a session or a time window, but not for `since=0`), so lean
-// does without both there — a small, disclosed understatement of total_saved_usd, not a bug.
-// cg.py's own stats() helper calls the full endpoint for exactly this reason; only the status
-// line's day/lifetime reads, which can only ever call lean, carry this gap.
-func TestStatsLeanOmitsReadTimePricedCreditsWithoutASession(t *testing.T) {
+// TestStatsLeanMatchesFullForLifetimeToo is #502's lifetime decision: a bounded lifetime
+// (tried in an earlier version of this PR, removed on review) would have understated
+// total_saved_usd without a session. The shipped behavior instead answers `since=0` EXACTLY
+// like the full handler — Overview() plus both read-time-priced credits, unconditionally — so
+// lean and full must agree to the last cent even with no session filter at all.
+func TestStatsLeanMatchesFullForLifetimeToo(t *testing.T) {
 	db := seedCredit(t, 1000)
 	qualifies := mkEvent(9100, "s-new-hist", "aws/claude-sonnet-5", 100, 100)
 	qualifies.TenantID, qualifies.CacheRead, qualifies.CacheWrite = "t1", 54_304, 1_000
@@ -270,11 +268,13 @@ func TestStatsLeanOmitsReadTimePricedCreditsWithoutASession(t *testing.T) {
 	mux := http.NewServeMux()
 	api.Mount(mux)
 
-	fullSaved, _ := statsLeanTotalSaved(t, mux, false, "")
+	fullSaved, fullDecl := statsLeanTotalSaved(t, mux, false, "")
 	leanSaved, _ := statsLeanTotalSaved(t, mux, true, "")
-	if fullSaved <= leanSaved {
-		t.Fatalf("full total_saved_usd = %v, lean = %v — the fixture should give full a strictly "+
-			"larger number (the cachesplit-historical and declaration-filter credits), "+
-			"or this test is not exercising the gap it is named for", fullSaved, leanSaved)
+	if fullDecl <= 0 && fullSaved <= 0 {
+		t.Fatal("fixture is not exercising either credit; this test would pass for the wrong reason")
+	}
+	if math.Abs(fullSaved-leanSaved) > 1e-9 {
+		t.Errorf("lean total_saved_usd = %v, full = %v — lifetime must match exactly, "+
+			"it is not a bounded read in this release", leanSaved, fullSaved)
 	}
 }

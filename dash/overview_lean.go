@@ -6,64 +6,50 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
-// OverviewLean answers exactly what /api/stats?lean=1 needs (dash/api.go's statsLean branch),
-// and nothing else — see #502. Overview() runs sixteen queries; lean read a few of their
-// outputs. The plan this follows (issue #502's "Plan (decided)" comment) is a rule, not a
-// per-query judgement call: "/api/stats?lean=1 is the bounded path. Every query on it must
-// have a cost that does not grow with the session's size squared, nor with the whole table."
+// OverviewLean answers /api/stats?lean=1 (dash/api.go's statsLean branch) — see #502.
 //
-// What lean actually reads, confirmed against context-guru-plugin/scripts/statusline.py (the
-// status line) and scripts/cg.py (the plugin's cost commands): total_saved_usd,
-// keepalive_net_usd, keepalive_misses_avoided, upstream_ms_avg, cost_usd, baseline_cost_usd,
-// cache_saved_usd, and the waterfall rows keyed "compaction", "cachesplit_saved",
-// "keepalive_saved", "keepalive_ping", "decl_filter_saved", "self_removed", "cg_llm". Every
-// one of those is a plain SUM/AVG of a `requests` column (or, for the keep-alive COST half, a
-// SEPARATELY scoped SUM/COUNT) — a single pass over an INDEXED range, bounded by the session
-// or by the time window, same as Overview()'s own main aggregate.
+// For a SESSION or a concrete time window (anything but true lifetime), it runs 1 bounded
+// aggregate (overviewLeanWindow) instead of Overview()'s 16 queries, because lean reads only a
+// handful of their outputs: confirmed against context-guru-plugin/scripts/statusline.py and
+// scripts/cg.py, lean needs total_saved_usd, keepalive_net_usd, keepalive_misses_avoided,
+// upstream_ms_avg, cg_latency_ms_avg, cost_usd, baseline_cost_usd, cache_saved_usd, and the
+// waterfall rows keyed "compaction", "cachesplit_saved", "keepalive_saved", "keepalive_ping",
+// "decl_filter_saved", "self_removed", "cg_llm" — every one a plain SUM/AVG of a `requests`
+// column, bounded by the session or the time window, same index Overview()'s own main
+// aggregate already uses. The 7 goroutines Overview() runs beyond that aggregate (the replay
+// ceiling, its keep-alive correction, CompactionResets, the TTL/accounting breakdown, 2
+// invalid-config counts, the estimator-divergence query, the p95-latency query) feed none of
+// those fields, and the replay ceiling and CompactionResets among them are exactly the
+// per-session window queries #492 measured as slow. OverviewLean never runs any of them.
 //
-// What lean never reads: ReplayProjectedTokens, ReplayRealizedPct, CompactionResets, the
-// estimator-divergence pair, the TTL/accounting/breakpoint breakdown, the two p95 latencies,
-// InvalidConfigRequests/Recent. Those are the seven goroutines Overview() runs beyond the
-// main aggregate — the replay ceiling and CompactionResets among them being exactly the
-// per-session window queries #492 and #502 measured as slow or quadratic. OverviewLean never
-// runs any of them.
+// For TRUE lifetime (`since=0`, no session, no window — the status line's "life" job), lean
+// answers EXACTLY like the full handler: Overview() plus CachesplitHistoricalUSD plus
+// DeclFilterSavings, unconditionally. The user's own decision on this PR's review: a bounded
+// rollup for lifetime (tried in an earlier version of this PR) is its own project — tracked as
+// #510 — and should not hold up the session/day fix. In #478's plugin, the
+// lifetime read is made by the detached refresher behind a 60s disk cache
+// (context-guru-plugin/scripts/statusline.py's LIFE_TTL_SECONDS), so it never blocks a render
+// even unbounded; see dash/api.go's own serveJSON for the matching server-side protection
+// (single-flight + stale-while-revalidate) against concurrent callers piling up behind it.
 //
-// Two fields ARE priced at read time rather than stored on the row — the pre-instrumentation
-// cachesplit credit (CachesplitHistoricalUSD) and the declaration-filter credit
-// (DeclFilterSavings) — and the review of this PR corrected an earlier version of this
-// function that dropped BOTH outside session scope. Each is bounded by a DIFFERENT thing, so
-// each is included wherever ITS OWN bound holds, not wherever the other's does:
+// The 2 read-time-priced credits (CachesplitHistoricalUSD, DeclFilterSavings) are included for
+// SESSION and DAY scope, each wherever its OWN bound holds:
 //
 //   - DeclFilterSavings' SELECT is a plain filtered scan, bounded by the same index as the main
-//     aggregate for a session OR a time window — included for both, dropped only for the true
-//     lifetime read (`since=0`, no window at all).
+//     aggregate for a session OR a time window — included for both.
 //   - CachesplitHistoricalUSD's ranking has to see a session's WHOLE history to know which row
-//     was its first (dash/cachehistory.go's own comment) — bounded for a session, not for a
-//     time window or lifetime. Worse, it cannot be precomputed once and stored even for the
-//     closed, pre-instrumentation population it credits: CachesplitHistoricalUSD's own comment
-//     explains that a model's "stable half" is NOT a fixed fact — more sessions using the split
-//     can reveal a spread where today there is a constant, or the reverse — so a value baked in
-//     today could become wrong without a single new ROW for the credited session ever arriving.
-//     Included only for a session.
-//
-// Both gaps are small and disclosed, not silent: the plan comment's "if cg.py needs a field
-// that is moved out, switch that call to the full /api/stats" is why cg.py's own `stats()`
-// helper now calls the full endpoint, so its numbers are exact regardless. Only the status
-// line's reads (which can never call anything but lean) carry either gap, and only outside
-// session scope — its SESSION read, the one that renders on every tick, carries neither.
+//     was its first (dash/cachehistory.go's own comment) — bounded for a session only, so a
+//     day-window call does not get it either (it is still exact for lifetime, which runs the
+//     full, unscoped form above).
 func (d *DB) OverviewLean(f Filter, pricer modelinfo.Pricer, priceFn func(string) (modelinfo.Price, bool)) (*Overview, error) {
-	isLifetime := f.Session == "" && f.Since == 0 && f.Until == 0
-	var o *Overview
-	var err error
-	if isLifetime {
-		o, err = d.overviewLeanLifetime(f)
-	} else {
-		o, err = d.overviewLeanWindow(f)
+	if f.Session == "" && f.Since == 0 && f.Until == 0 {
+		return d.overviewLeanLifetimeExact(f, pricer, priceFn)
 	}
+	o, err := d.overviewLeanWindow(f)
 	if err != nil {
 		return nil, err
 	}
-	if !isLifetime && priceFn != nil {
+	if priceFn != nil {
 		if fs, err := d.DeclFilterSavings(f, priceFn); err == nil {
 			o.TotalSavedUSD += fs.USD
 		}
@@ -86,14 +72,14 @@ func (d *DB) OverviewLean(f Filter, pricer modelinfo.Pricer, priceFn func(string
 func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 	o := &Overview{Since: f.Since, Until: f.Until}
 	q, args := leanWindowMainQuery(f)
-	var upAvg sql.NullFloat64
+	var upAvg, cgAvg sql.NullFloat64
 	if err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(
 		&o.Requests, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD, &o.CachesplitSavedUSD,
-		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &o.KeepAlivePingUSD); err != nil {
+		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &cgAvg, &o.KeepAlivePingUSD); err != nil {
 		return nil, err
 	}
-	o.UpstreamMsAvg = upAvg.Float64
+	o.UpstreamMsAvg, o.CGLatencyMsAvg = upAvg.Float64, cgAvg.Float64
 	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
 		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD)
 	o.TotalReducedUSD = o.TotalSavedUSD
@@ -111,6 +97,11 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 // `withKeepAlive(f)` instead (every row in range, agent and ping alike) and folding the
 // agent/ping split into CASE expressions answers both in the ONE scan this range needs either
 // way — measured, ~45ms for the combined query against ~56ms for the two separately.
+//
+// #502 review (M4): cg_latency_ms_avg stays in this SELECT because the released v0.4.2 status
+// line (context-guru-plugin/scripts/statusline.py, before #478) reads it and renders
+// "proxy: 0ms" if it is ever absent — a field dropped here that an OLDER, already-installed
+// client still expects is a regression for that client, not a cleanup.
 func leanWindowMainQuery(f Filter) (string, []any) {
 	cond, args := withKeepAlive(f).where()
 	const agent = "r.keepalive = 0"
@@ -127,49 +118,34 @@ func leanWindowMainQuery(f Filter) (string, []any) {
 			COALESCE(SUM(CASE WHEN ` + agent + ` THEN ` + kaSaved("r.") + ` ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN ` + agent + ` AND ` + kaSaved("r.") + ` > 0 THEN 1 ELSE 0 END),0),
 			AVG(CASE WHEN ` + agent + ` THEN r.upstream_ms END),
+			AVG(CASE WHEN ` + agent + ` THEN r.cg_latency_ms END),
 			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
 		FROM requests r WHERE ` + cond, args
 }
 
-// overviewLeanLifetime answers `since=0` (no session, no window: the status line's "life" job)
-// from daily_rollup instead of `requests` — bounded by the number of DAYS the deployment has
-// existed, not by how many requests it has served. See dash/schema.go's comment on the table
-// for how it stays current, and dash/dailyrollupbackfill.go for how it covers history written
-// before it existed.
-func (d *DB) overviewLeanLifetime(f Filter) (*Overview, error) {
-	o := &Overview{}
-	q, args := leanLifetimeQuery(f)
-	var upSum sql.NullFloat64
-	var upCount sql.NullInt64
-	err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(
-		&o.Requests, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
-		&o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD, &o.CachesplitSavedUSD,
-		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.KeepAlivePingUSD, &upSum, &upCount)
+// overviewLeanLifetimeExact answers `since=0` (no session, no window: the status line's "life"
+// job) EXACTLY as the full /api/stats handler does — Overview() plus both read-time-priced
+// credits, unconditionally — rather than from a bounded rollup. See OverviewLean's own comment
+// for why: the user's decision on this PR was that lifetime stays exact for this release, with
+// a bounded design (a day-bucketed rollup was tried and removed) tracked as #510 rather than
+// shipped half-verified here. `since=0` is deliberately NOT covered by
+// TestOverviewLeanQueriesAreIndexed — see that test's own comment.
+func (d *DB) overviewLeanLifetimeExact(f Filter, pricer modelinfo.Pricer, priceFn func(string) (modelinfo.Price, bool)) (*Overview, error) {
+	o, err := d.Overview(f)
 	if err != nil {
 		return nil, err
 	}
-	if upCount.Valid && upCount.Int64 > 0 {
-		o.UpstreamMsAvg = upSum.Float64 / float64(upCount.Int64)
+	if pricer != nil {
+		if h, err := d.CachesplitHistoricalUSD(f, pricer); err == nil {
+			o.CachesplitHistorical = &h
+			o.TotalSavedUSD += h.USD
+		}
 	}
-	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
-		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD)
-	o.TotalReducedUSD = o.TotalSavedUSD
+	if priceFn != nil {
+		if fs, err := d.DeclFilterSavings(f, priceFn); err == nil {
+			o.TotalSavedUSD += fs.USD
+		}
+	}
+	o.Waterfall = o.waterfall()
 	return o, nil
-}
-
-// leanLifetimeQuery builds the SQL and args for overviewLeanLifetime — same reason as
-// leanWindowMainQuery above. Bounded by the number of (tenant, day) rows in daily_rollup, not
-// by the number of requests the tenant has ever sent.
-func leanLifetimeQuery(f Filter) (string, []any) {
-	cond, args := "1=1", []any{}
-	if !f.TenantAll {
-		cond, args = "tenant_id = ?", []any{f.Tenant}
-	}
-	return `SELECT
-			COALESCE(SUM(requests),0), COALESCE(SUM(tokens_before),0), COALESCE(SUM(tokens_after),0),
-			COALESCE(SUM(saved_unique),0), COALESCE(SUM(cost_usd),0), COALESCE(SUM(baseline_cost_usd),0),
-			COALESCE(SUM(cg_llm_cost_usd),0), COALESCE(SUM(cache_saved_usd),0), COALESCE(SUM(cachesplit_saved_usd),0),
-			COALESCE(SUM(keepalive_saved_usd),0), COALESCE(SUM(keepalive_misses_avoided),0),
-			COALESCE(SUM(keepalive_ping_usd),0), SUM(upstream_ms_sum), SUM(upstream_ms_count)
-		FROM daily_rollup WHERE ` + cond, args
 }

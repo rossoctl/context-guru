@@ -2,6 +2,8 @@ package dash
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -286,24 +288,71 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 	return out, nil
 }
 
+// cachesplitSizeSpreadTTL bounds how long a stale CachesplitSizeSpread answer is served before
+// the next caller pays for a fresh one. #502's review (M3): this query has no WHERE clause any
+// index narrows — `split_stable_tokens > 0` has no index of its own, so it is a scan of every
+// row the deployment has ever written, deployment-wide, with no session or time bound at all.
+// CachesplitHistoricalUSD calls it on every lean call that includes a session (every status
+// line render), so uncached it was exactly the shape #492/#502 exist to remove — just hidden
+// one level down from the query the EXPLAIN test was looking at. A model's stable half changes
+// slowly if ever (cachesplitHistory.go's own comment on CachesplitHistorical), so a few minutes
+// of staleness costs nothing a user would notice.
+const cachesplitSizeSpreadTTL = 5 * time.Minute
+
+// cachesplitSizeSpreadCache is CachesplitSizeSpread's TTL cache, held behind a *DB field
+// (store.go) rather than inline in DB itself so DB's shallow copy (WithContext) stays
+// lock-free. One cache per underlying database, shared by every *DB handle WithContext hands
+// out, which is the point: a 1,000-session proxy pays the scan once per TTL window, not once
+// per lean call.
+type cachesplitSizeSpreadCache struct {
+	mu    sync.Mutex
+	at    time.Time
+	sizes map[string][2]int
+	err   error
+}
+
 // CachesplitSizeSpread reports the recorded minimum and maximum stable half per model. The
 // estimate above credits a model only where those are equal; this is where that gets checked
 // instead of assumed, and it is what decides the refusal rather than merely reporting on it.
+//
+// Cached with a TTL (see cachesplitSizeSpreadTTL's own comment for why this needs one at all):
+// a cache MISS still runs the full, deployment-wide scan — nothing here makes the QUERY itself
+// bounded, only how OFTEN it runs. #502's EXPLAIN test documents the miss case directly rather
+// than pretending it does not exist.
 func (d *DB) CachesplitSizeSpread() (map[string][2]int, error) {
+	c := d.sizeSpread
+	c.mu.Lock()
+	if c.sizes != nil && time.Since(c.at) < cachesplitSizeSpreadTTL {
+		sizes, err := c.sizes, c.err
+		c.mu.Unlock()
+		return sizes, err
+	}
+	c.mu.Unlock() // released before the query: a slow scan must never hold other readers' cache hits
+
 	out := map[string][2]int{}
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT model, MIN(split_stable_tokens), MAX(split_stable_tokens)
 		FROM requests WHERE split_stable_tokens > 0 GROUP BY model`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var m string
-		var lo, hi int
-		if err := rows.Scan(&m, &lo, &hi); err != nil {
-			return nil, err
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var m string
+			var lo, hi int
+			if serr := rows.Scan(&m, &lo, &hi); serr != nil {
+				err = serr
+				break
+			}
+			out[m] = [2]int{lo, hi}
 		}
-		out[m] = [2]int{lo, hi}
+		if err == nil {
+			err = rows.Err()
+		}
 	}
-	return out, rows.Err()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// A failed refresh still updates `at`: retrying every single call on a persistent error
+	// (a locked file, a closed db mid-shutdown) would be the exact per-call cost this cache
+	// exists to remove. The next TTL window tries again.
+	c.at, c.sizes, c.err = time.Now(), out, err
+	return out, err
 }

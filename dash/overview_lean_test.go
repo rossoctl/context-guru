@@ -2,7 +2,11 @@ package dash
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -31,24 +35,22 @@ func explainPlan(t *testing.T, db *DB, sql string, args []any) []string {
 	return plan
 }
 
-// assertNoWholeTableScan fails if any plan step scans `requests` (under any of its aliases in
-// the lean path's queries — r, p, s, k) without an index, or scans the ranking CTE's own
-// window-sort source unindexed. "Scan" without "USING ... INDEX" against one of those aliases
-// is the #492/#502 shape: unbounded by the session or the time window, bounded only by the
-// table.
+// assertNoWholeTableScan fails if any plan step SCANs `requests` (under any of its aliases in
+// the lean path's queries — r, p) rather than SEARCHing it by index. #502's review (M3): a
+// "SCAN ... USING INDEX" is still a full scan — the index only orders what SQLite still visits
+// every row of — so it is rejected exactly like a bare "SCAN requests" with no index at all.
+// Only "SEARCH ... USING INDEX (col=?)", an indexed point/range lookup, is bounded. "SCAN
+// later"/"SCAN rn"/"SCAN before" (a ranking CTE's own small, already-materialized result, not
+// the base table) are NOT flagged — the alias list below is exact-word, not a prefix of every
+// identifier starting with the same letter.
 func assertNoWholeTableScan(t *testing.T, name string, plan []string) {
 	t.Helper()
 	full := strings.Join(plan, " | ")
 	for _, bad := range []string{"SCAN requests", "SCAN r", "SCAN p", "SCAN s", "SCAN k"} {
-		// Exactly "SCAN <alias>" (a whole word — "SCAN rn" must NOT match "SCAN r", that is
-		// the CTE's own small materialized result, not the base table) with no trailing
-		// "USING" clause is the unindexed shape; "SCAN r USING INDEX ..." or "SCAN r USING
-		// COVERING INDEX ..." is fine and must not match here.
 		for _, step := range plan {
 			if step == bad || strings.HasPrefix(step, bad+" ") {
-				if !strings.Contains(step, "USING") {
-					t.Errorf("%s: plan step %q scans the whole table unscoped: %s", name, step, full)
-				}
+				t.Errorf("%s: plan step %q scans the whole table (or the whole of an index on it) "+
+					"unscoped by session or time: %s", name, step, full)
 			}
 		}
 	}
@@ -69,20 +71,25 @@ func assertSessionOrTimeIndexed(t *testing.T, name string, plan []string) {
 	t.Errorf("%s: plan names none of the session/time indexes — not provably bounded: %s", name, full)
 }
 
-// TestOverviewLeanQueriesAreIndexed is #502's EXPLAIN-plan test, over EVERY statement the lean
-// path runs: OverviewLean calls overviewLeanWindow (session or day-window scope) or
-// overviewLeanLifetime (since=0), plus CachesplitHistoricalUSD and DeclFilterSavings for a
-// session. Each must show an indexed range read, never an unindexed scan of `requests` or of
-// a ranking CTE's own window-sort source.
+// TestOverviewLeanQueriesAreIndexed is #502's EXPLAIN-plan test, over every statement
+// OverviewLean runs for a SESSION or a DAY (time-window) scope: the main aggregate
+// (leanWindowMainQuery), the declaration-filter credit (declFilterSavingsQuery, both scopes),
+// and the pre-instrumentation cachesplit credit (cachesplitHistoricalQuery, session only). Each
+// must show an indexed range read, never an unindexed — or index-but-still-whole — scan of
+// `requests` or of a ranking CTE's own window-sort source.
 //
 // This directly answers #502's review finding on #498 ("the EXPLAIN test covers only 2 of the
-// 4 queries"): every lean statement is checked here, built by the SAME functions the server
-// calls (leanWindowMainQuery, leanLifetimeQuery, cachesplitHistoricalQuery,
-// declFilterSavingsQuery), not hand-copied duplicates that could drift from the real SQL — and
-// a wording change in a future SQLite/modernc.org/sqlite release is caught by
+// 4 queries"): every lean statement for these 2 scopes is checked here, built by the SAME
+// functions the server calls, not hand-copied duplicates that could drift from the real SQL —
+// and a wording change in a future SQLite/modernc.org/sqlite release is caught by
 // assertSessionOrTimeIndexed's POSITIVE check (an index must be named), not only by
 // assertNoWholeTableScan's negative one, which is the other half of that same review finding
 // ("the EXPLAIN patterns match only the current wording").
+//
+// Lifetime (`since=0`) is deliberately NOT covered here. The user's decision on this PR: ship
+// session and day bounded, keep lifetime exact (Overview() plus both credits, unconditionally,
+// same as main) rather than hold the release for a bounded lifetime design — tracked as #510.
+// Overview()'s own unbounded shape is not this test's job to re-litigate.
 func TestOverviewLeanQueriesAreIndexed(t *testing.T) {
 	db := openTestDB(t)
 	seedLeanFixture(t, db)
@@ -112,21 +119,73 @@ func TestOverviewLeanQueriesAreIndexed(t *testing.T) {
 	dayWindow := Filter{Since: 1000}
 	q, qargs = leanWindowMainQuery(dayWindow)
 	add("day window: main aggregate", q, qargs)
-
-	lifetime := Filter{}
-	q, qargs = leanLifetimeQuery(lifetime)
-	add("lifetime: rollup sum", q, qargs)
+	q, qargs = declFilterSavingsQuery(dayWindow)
+	add("day window: decl filter savings", q, qargs)
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			plan := explainPlan(t, db, c.sql, c.args)
 			assertNoWholeTableScan(t, c.name, plan)
-			if !strings.Contains(c.name, "lifetime") {
-				// The lifetime read sums daily_rollup, which is bounded by day count, not by
-				// an index on `requests` — nothing to assert an index name for there.
-				assertSessionOrTimeIndexed(t, c.name, plan)
-			}
+			assertSessionOrTimeIndexed(t, c.name, plan)
 		})
+	}
+}
+
+// TestCachesplitSizeSpreadQueryItselfIsAWholeTableScan documents, directly, the #502 review's
+// M3 finding: CachesplitSizeSpread's own query has no session or time bound at all — it is
+// deployment-wide by design (a model's stable half is not a per-session fact) — so run
+// uncached it is EXACTLY the shape assertNoWholeTableScan rejects everywhere else. This is why
+// it is excluded from TestOverviewLeanQueriesAreIndexed above rather than included and failing,
+// and why CachesplitSizeSpread caches it with a TTL (see TestCachesplitSizeSpreadIsCached)
+// instead of asking the query planner to bound something that is not bounded by nature.
+func TestCachesplitSizeSpreadQueryItselfIsAWholeTableScan(t *testing.T) {
+	db := openTestDB(t)
+	plan := explainPlan(t, db, `SELECT model, MIN(split_stable_tokens), MAX(split_stable_tokens)
+		FROM requests WHERE split_stable_tokens > 0 GROUP BY model`, nil)
+	full := strings.Join(plan, " | ")
+	if !strings.Contains(full, "SCAN requests") {
+		t.Errorf("expected CachesplitSizeSpread's own query to scan the whole table (that is "+
+			"the point of this test and of caching it), got: %s", full)
+	}
+}
+
+// TestCachesplitSizeSpreadIsCached is the actual M3 fix under test: a session-scoped lean call
+// runs CachesplitHistoricalUSD, which calls CachesplitSizeSpread on every invocation — without
+// a cache, that is the whole-table scan above, once per lean call, i.e. once per status-line
+// render. This inserts a row that would change the computed spread, calls
+// CachesplitSizeSpread twice back to back, and checks the second call still answers from the
+// first call's cached snapshot rather than re-scanning and picking up the new row — proving
+// the cache actually intercepts repeat calls within its TTL, not just that a TTL constant
+// exists.
+func TestCachesplitSizeSpreadIsCached(t *testing.T) {
+	db := openTestDB(t)
+	seed := mkEvent(1000, "s1", "m-cached", 100, 100)
+	seed.TenantID, seed.SplitStableTokens = "t1", 5_000
+	if err := db.insertBatch([]*Event{seed}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := db.CachesplitSizeSpread()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := first["m-cached"], [2]int{5_000, 5_000}; got != want {
+		t.Fatalf("first call: m-cached spread = %v, want %v", got, want)
+	}
+
+	// A new row that would widen the spread if this call re-queried.
+	wider := mkEvent(2000, "s2", "m-cached", 100, 100)
+	wider.TenantID, wider.SplitStableTokens = "t1", 9_000
+	if err := db.insertBatch([]*Event{wider}); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := db.CachesplitSizeSpread()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := second["m-cached"], first["m-cached"]; got != want {
+		t.Errorf("second call (within the TTL) = %v, want the FIRST call's cached %v — "+
+			"a changed answer means this re-queried instead of serving the cache", got, want)
 	}
 }
 
@@ -206,9 +265,8 @@ func TestOverviewLeanTwoTenantsSharingASessionIDStayApart(t *testing.T) {
 		e.TenantID = "tenant-b"
 		bRows = append(bRows, e)
 	}
-	// Teach the pricer the stable size, same shape as TestStatsLeanTotalSavedMatchesFullHandler
-	// above: a session that ALREADY has split_stable_tokens set establishes the model's known
-	// stable half (dash/cachehistory.go's CachesplitSizeSpread).
+	// Teach the pricer the stable size: a session that ALREADY has split_stable_tokens set
+	// establishes the model's known stable half (dash/cachehistory.go's CachesplitSizeSpread).
 	teach := mkEvent(900, "teach", "aws/claude-sonnet-5", 100, 100)
 	teach.TenantID, teach.CacheRead, teach.CacheWrite, teach.SplitStableTokens = "tenant-a", 54_304, 1_000, 5_697
 	if err := db.insertBatch(append([]*Event{teach, a}, bRows...)); err != nil {
@@ -228,6 +286,52 @@ func TestOverviewLeanTwoTenantsSharingASessionIDStayApart(t *testing.T) {
 		t.Errorf("tenant-a's session=shared-session cachesplit-historical Requests = %d, want 1 "+
 			"(tenant-b's 10 earlier-timestamped rows under the same session id must not steal "+
 			"the ranking's rn=1 from tenant-a's own row)", hist.Requests)
+	}
+}
+
+// TestOverviewLeanDeclFilterSavingsIncludedForDayScope is the fix for the first version of
+// decision 2 reviewed on this PR: DeclFilterSavings' SELECT is bounded (the same index as the
+// main aggregate) for a session OR a time window, so a day-scoped lean call must include its
+// credit — only true lifetime drops it. This seeds a row with a priced declaration-filter
+// saving and no session filter, and checks lean's total_saved_usd for a day window matches the
+// full handler's exactly.
+func TestOverviewLeanDeclFilterSavingsIncludedForDayScope(t *testing.T) {
+	db := openTestDB(t)
+	e := mkEvent(10_000, "s1", "aws/claude-sonnet-5", 100, 100)
+	e.TenantID, e.Tools, e.FilteredDeclTokens = "t1", 4, 10_000
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	rec := &Recorder{db: db, hub: NewHub(), done: make(chan struct{})}
+	t.Cleanup(func() { rec.Close() })
+	api := NewAPI(rec)
+	api.SetPricer(staticPricer{ibmSonnet})
+	mux := http.NewServeMux()
+	api.Mount(mux)
+
+	get := func(q string) (totalSaved, declUSD float64) {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/stats"+q, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /api/stats%s: %d", q, w.Code)
+		}
+		var body struct {
+			TotalSavedUSD float64 `json:"total_saved_usd"`
+			DeclFilterUSD float64 `json:"decl_filter_usd"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("GET /api/stats%s body: %v\n%s", q, err, w.Body)
+		}
+		return body.TotalSavedUSD, body.DeclFilterUSD
+	}
+	fullSaved, declUSD := get("?since=0&until=20000")
+	leanSaved, _ := get("?lean=1&since=0&until=20000")
+	if declUSD <= 0 {
+		t.Fatal("decl_filter_usd is not positive; the fixture is not exercising the filter credit")
+	}
+	if math.Abs(fullSaved-leanSaved) > 1e-9 {
+		t.Errorf("day-scoped lean total_saved_usd = %v, full = %v — DeclFilterSavings must be "+
+			"included for a day window, not just for a session", leanSaved, fullSaved)
 	}
 }
 
@@ -311,110 +415,5 @@ func TestOverviewLeanSessionStaysUnderBudgetAt20000Requests(t *testing.T) {
 	}
 	if dt := time.Since(t0); dt > 10*time.Second {
 		t.Errorf("OverviewLean(session of 20,000 requests, 5,000 more elsewhere) took %v, want well under 10s", dt)
-	}
-}
-
-// TestOverviewLeanLifetimeStaysUnderBudgetOnALargeRollup is #502's other timing requirement:
-// the lifetime read must stay fast as the ROLLUP grows across many days, which is what makes it
-// bounded by elapsed time rather than by request count — simulated here by writing directly to
-// daily_rollup for many days rather than inserting the (much larger) number of requests rows
-// that would actually produce them, since the rollup's own size is what overviewLeanLifetime's
-// query cost depends on.
-func TestOverviewLeanLifetimeStaysUnderBudgetOnALargeRollup(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short mode")
-	}
-	db := openTestDB(t)
-	const tenant = "t1"
-	const days = 3000 // ~8 years of daily rows
-	for d := 0; d < days; d++ {
-		day := time.Unix(0, 0).UTC().AddDate(0, 0, d).Format("2006-01-02")
-		if _, err := db.sql.Exec(`INSERT INTO daily_rollup (tenant_id, day, requests, cost_usd, baseline_cost_usd)
-			VALUES (?,?,?,?,?)`, tenant, day, 1000, 1.23, 2.46); err != nil {
-			t.Fatal(err)
-		}
-	}
-	f := Filter{Tenant: tenant}
-	if _, err := db.OverviewLean(f, nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	t0 := time.Now()
-	o, err := db.OverviewLean(f, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 10s, not 50ms — see TestOverviewLeanSessionStaysUnderBudgetAt20000Requests's own comment
-	// on this suite's shared, sometimes-noisy, sometimes-raced eval box.
-	if dt := time.Since(t0); dt > 10*time.Second {
-		t.Errorf("OverviewLean(lifetime, %d days in daily_rollup) took %v, want well under 10s", days, dt)
-	}
-	if want := int64(days * 1000); o.Requests != want {
-		t.Errorf("Requests = %d, want %d", o.Requests, want)
-	}
-}
-
-// TestDailyRollupNeverDoublesABrandNewDatabase is the regression test for a real bug this PR
-// introduced and caught before merge: a brand-new database has no row written before
-// daily_rollup existed — every row goes through insertBatch's live rollup — so the one-time
-// backfill (dash/dailyrollupbackfill.go) has NOTHING to do. Before the dailyRollupLiveFromID
-// watermark existed, the backfill could not tell that apart from "an upgrade with real history
-// to recover" and summed every row a second time: TestGoldenEndpoints' stats_lean subtest came
-// back with every number exactly doubled, intermittently, once run inside the full suite (where
-// goroutine scheduling gave the backfill's background pass enough of a window to run before the
-// assertion). This seeds a fresh database, runs the backfill EXPLICITLY and synchronously
-// (rather than racing its own background goroutine, so the test is deterministic rather than
-// merely as likely to catch the bug as the full suite happened to be), and checks the lifetime
-// read is exactly the inserted total, not double it.
-func TestDailyRollupNeverDoublesABrandNewDatabase(t *testing.T) {
-	db := openTestDB(t)
-	const tenant = "t1"
-	var evs []*Event
-	for i := 0; i < 50; i++ {
-		e := mkEvent(int64(1000+i*1000), fmt.Sprintf("s-%d", i%5), "m", 100, 90)
-		e.TenantID = tenant
-		evs = append(evs, e)
-	}
-	if err := db.insertBatch(evs); err != nil {
-		t.Fatal(err)
-	}
-
-	// The backfill should find nothing to do: every row above was already live-rolled-up.
-	moved, err := db.backfillDailyRollup(make(chan struct{}), 0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if moved != 0 {
-		t.Errorf("backfillDailyRollup moved %d rows on a brand-new database, want 0 "+
-			"(every row here was already live-rolled-up by insertBatch)", moved)
-	}
-
-	o, err := db.OverviewLean(Filter{Tenant: tenant}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const wantRequests, wantTokensBefore = 50, 50*100
-	if o.Requests != wantRequests {
-		t.Errorf("Requests = %d, want %d (a doubled rollup would show %d)", o.Requests, wantRequests, wantRequests*2)
-	}
-	if o.TokensBefore != wantTokensBefore {
-		t.Errorf("TokensBefore = %d, want %d (a doubled rollup would show %d)", o.TokensBefore, wantTokensBefore, wantTokensBefore*2)
-	}
-
-	// Running the backfill AGAIN must still be a no-op (idempotent), not a second pass that
-	// adds anything.
-	moved, err = db.backfillDailyRollup(make(chan struct{}), 0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if moved != 0 {
-		t.Errorf("a second backfillDailyRollup call moved %d rows, want 0 (not idempotent)", moved)
-	}
-	o2, err := db.OverviewLean(Filter{Tenant: tenant}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if o2.Requests != wantRequests || o2.TokensBefore != wantTokensBefore {
-		t.Errorf("numbers changed after a second backfill pass: requests %d, tokens_before %d",
-			o2.Requests, o2.TokensBefore)
 	}
 }
