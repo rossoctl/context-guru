@@ -284,6 +284,15 @@ func TestSignalNeedsTheTenantsTokenAndCannotReachAnotherTenant(t *testing.T) {
 	if c := post("Bearer " + tok); c != http.StatusNoContent {
 		t.Errorf("valid token: %d, want 204", c)
 	}
+	// The hosted setup snippet: the raw hook payload, authenticated by the x-context-guru-token header.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/signal",
+		strings.NewReader(`{"session_id":"s1","transcript_path":"/h/t.jsonl","cwd":"/h","hook_event_name":"SessionEnd","reason":"other"}`))
+	req.Header.Set(TokenHeader, tok)
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != http.StatusNoContent {
+		t.Errorf("hosted snippet: %v %v, want 204", err, resp)
+	} else {
+		resp.Body.Close()
+	}
 
 	k, _, clock := testKeeper(t, Limits{})
 	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
