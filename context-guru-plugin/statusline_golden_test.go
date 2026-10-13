@@ -127,23 +127,23 @@ func TestStatuslineGoldenSubscription(t *testing.T) {
 		name, stdin, layout string
 		width               int
 		want                string
-		extra               string
+		extra               []string
 	}{
 		{"fit-is-opt-in", sub, "balanced", 200,
-			"5h 34% · saved 1.2M rd / 85.0k wr │ +21% fit\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%", "--show=fit"},
-		{"balanced", sub, "balanced", 200, "5h 34% · saved 1.2M rd / 85.0k wr\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
-		{"minimal", sub, "minimal", 200, "5h 34% · saved 1.2M rd / 85.0k wr │ cache ● ██████ 59:00"},
-		{"detailed-hides-money", sub, "detailed", 200, "5h 34% · 7d 12% · saved 1.2M rd / 85.0k wr\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
-		{"narrow", sub, "balanced", 30, "saved 1.2M rd / 85.0k wr\ncache ● ██████ 59:00 │ ctx 5%"},
+			"5h 34% · saved 1.2M rd / 85.0k wr │ +21% fit\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%", []string{"--show=fit"}},
+		{"balanced", sub, "balanced", 200, "5h 34% · saved 1.2M rd / 85.0k wr\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%", nil},
+		{"minimal", sub, "minimal", 200, "5h 34% · saved 1.2M rd / 85.0k wr │ cache ● ██████ 59:00", nil},
+		{"detailed-hides-money", sub, "detailed", 200, "5h 34% · 7d 12% · saved 1.2M rd / 85.0k wr\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%", nil},
+		{"narrow", sub, "balanced", 30, "saved 1.2M rd / 85.0k wr\ncache ● ██████ 59:00 │ ctx 5%", nil},
 		{"no-reset-time", pay(`,"rate_limits":{"five_hour":{"used_percentage":34}}`), "balanced", 200,
-			"5h 34%\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
+			"5h 34%\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%", nil},
 		{"null-limits-is-api-key", pay(`,"rate_limits":null`), "detailed", 200,
-			"saved $0.31 session · $4.20 today · ★ $212.40 lifetime │ spent $0.41\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
+			"saved $0.31 session · $4.20 today · ★ $212.40 lifetime │ spent $0.41\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%", nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(cgStub(t, cache))
 			env["CG_STATUSLINE_COLUMNS"] = fmt.Sprint(c.width)
-			out, code, _ := runStatusline(t, env, c.stdin, append([]string{"--layout=" + c.layout}, strings.Fields(c.extra)...)...)
+			out, code, _ := runStatusline(t, env, c.stdin, append([]string{"--layout=" + c.layout}, c.extra...)...)
 			if code != 0 {
 				t.Fatalf("exit %d", code)
 			}
