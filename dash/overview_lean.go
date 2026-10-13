@@ -22,15 +22,9 @@ import (
 // those fields, and the replay ceiling and CompactionResets among them are exactly the
 // per-session window queries #492 measured as slow. OverviewLean never runs any of them.
 //
-// For TRUE lifetime (`since=0`, no session, no window — the status line's "life" job), lean
-// answers EXACTLY like the full handler: Overview() plus CachesplitHistoricalUSD plus
-// DeclFilterSavings, unconditionally. The user's own decision on this PR's review: a bounded
-// rollup for lifetime (tried in an earlier version of this PR) is its own project — tracked as
-// #510 — and should not hold up the session/day fix. In #478's plugin, the
-// lifetime read is made by the detached refresher behind a 60s disk cache
-// (context-guru-plugin/scripts/statusline.py's LIFE_TTL_SECONDS), so it never blocks a render
-// even unbounded; see dash/api.go's own serveJSON for the matching server-side protection
-// (single-flight + stale-while-revalidate) against concurrent callers piling up behind it.
+// TRUE lifetime (`since=0`, no session, no window) is not answered here: dash/api.go sends a lean
+// call with neither bound to the full handler, which is exact. The status line stopped reading
+// lifetime (#510), so lean is only ever a bounded read.
 //
 // The 2 read-time-priced credits (CachesplitHistoricalUSD, DeclFilterSavings) are included for
 // SESSION and DAY scope, each wherever its OWN bound holds:
@@ -39,12 +33,8 @@ import (
 //     aggregate for a session OR a time window — included for both.
 //   - CachesplitHistoricalUSD's ranking has to see a session's WHOLE history to know which row
 //     was its first (dash/cachehistory.go's own comment) — bounded for a session only, so a
-//     day-window call does not get it either (it is still exact for lifetime, which runs the
-//     full, unscoped form above).
+//     day-window call does not get it either.
 func (d *DB) OverviewLean(f Filter, pricer modelinfo.Pricer, priceFn func(string) (modelinfo.Price, bool)) (*Overview, error) {
-	if f.Session == "" && f.Since == 0 && f.Until == 0 {
-		return d.overviewLeanLifetimeExact(f, pricer, priceFn)
-	}
 	o, err := d.overviewLeanWindow(f)
 	if err != nil {
 		return nil, err
@@ -76,7 +66,7 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 	if err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(
 		&o.Requests, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD, &o.CachesplitSavedUSD,
-		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &cgAvg, &o.KeepAlivePingUSD); err != nil {
+		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &cgAvg, &o.KeepAlivePingUSD, &o.KeepAlivePings); err != nil {
 		return nil, err
 	}
 	o.UpstreamMsAvg, o.CGLatencyMsAvg = upAvg.Float64, cgAvg.Float64
@@ -119,33 +109,7 @@ func leanWindowMainQuery(f Filter) (string, []any) {
 			COALESCE(SUM(CASE WHEN ` + agent + ` AND ` + kaSaved("r.") + ` > 0 THEN 1 ELSE 0 END),0),
 			AVG(CASE WHEN ` + agent + ` THEN r.upstream_ms END),
 			AVG(CASE WHEN ` + agent + ` THEN r.cg_latency_ms END),
-			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
+			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0)
 		FROM requests r WHERE ` + cond, args
-}
-
-// overviewLeanLifetimeExact answers `since=0` (no session, no window: the status line's "life"
-// job) EXACTLY as the full /api/stats handler does — Overview() plus both read-time-priced
-// credits, unconditionally — rather than from a bounded rollup. See OverviewLean's own comment
-// for why: the user's decision on this PR was that lifetime stays exact for this release, with
-// a bounded design (a day-bucketed rollup was tried and removed) tracked as #510 rather than
-// shipped half-verified here. `since=0` is deliberately NOT covered by
-// TestOverviewLeanQueriesAreIndexed — see that test's own comment.
-func (d *DB) overviewLeanLifetimeExact(f Filter, pricer modelinfo.Pricer, priceFn func(string) (modelinfo.Price, bool)) (*Overview, error) {
-	o, err := d.Overview(f)
-	if err != nil {
-		return nil, err
-	}
-	if pricer != nil {
-		if h, err := d.CachesplitHistoricalUSD(f, pricer); err == nil {
-			o.CachesplitHistorical = &h
-			o.TotalSavedUSD += h.USD
-		}
-	}
-	if priceFn != nil {
-		if fs, err := d.DeclFilterSavings(f, priceFn); err == nil {
-			o.TotalSavedUSD += fs.USD
-		}
-	}
-	o.Waterfall = o.waterfall()
-	return o, nil
 }

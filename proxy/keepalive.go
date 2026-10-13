@@ -18,6 +18,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/store"
@@ -1749,6 +1750,31 @@ func (k *keeper) Stats() KeepAliveStats {
 		SummarySubstituteRefreshPaid:       k.summarySubstituteRefreshPaid.Load(),
 		SummarySubstituteRefreshNotWorthIt: k.summarySubstituteRefreshNotWorthIt.Load(),
 	}
+}
+
+// KeepAlivePlans is the keeper's ping plan for one session's threads, keyed by thread id, for the
+// status line's "held warm until" (dash.API.SetKeepAlivePlans). Only an entry that will still be
+// pinged has a plan: the same conditions as pendingPings, plus pingable. allTenants matches the
+// session in any tenant, for a single-tenant or service-wide scope.
+func (h *Handler) KeepAlivePlans(tenantID string, allTenants bool, session string) map[string]dash.KeepAlivePlan {
+	if h == nil || h.keeper == nil || session == "" {
+		return nil
+	}
+	k := h.keeper
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	out := map[string]dash.KeepAlivePlan{}
+	for _, e := range k.live {
+		if e.session != session || (!allTenants && e.tenant != tenantID) {
+			continue
+		}
+		if e.stopped || !e.pol.on() || e.pings >= e.pol.MaxPings || !e.pingable() {
+			continue
+		}
+		out[e.thread] = dash.KeepAlivePlan{NextPingMS: e.startedAt.Add(e.pol.Idle).UnixMilli(),
+			PingsLeft: e.pol.MaxPings - e.pings, IdleMS: e.pol.Idle.Milliseconds()}
+	}
+	return out
 }
 
 // LiveSessionKeys returns the session ids the keeper currently considers live — a copy,

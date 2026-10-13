@@ -37,6 +37,9 @@ type CacheState struct {
 	// Window is the served context window for Model, Exact=false when it is a guess.
 	Window      int  `json:"window"`
 	WindowExact bool `json:"window_exact"`
+	// PingsLeft and HeldUntilMS are the main thread's keep-alive plan (see ThreadCache).
+	PingsLeft   int   `json:"pings_left,omitempty"`
+	HeldUntilMS int64 `json:"held_until_ms,omitempty"`
 	// Threads is the session's cache entries, one per thread (the main agent and each subagent
 	// have separate provider caches), most recently used first. Only threads that touched the
 	// cache within the last two hours are listed: older ones are finished work.
@@ -54,6 +57,29 @@ type ThreadCache struct {
 	PrefixTokens int64   `json:"prefix_tokens"`
 	RewriteUSD   float64 `json:"rewrite_usd"`
 	Priced       bool    `json:"priced"`
+	// PingsLeft is how many keep-alive pings the proxy still plans for this thread, and
+	// HeldUntilMS when its cache goes cold if no real request arrives first: the last planned
+	// ping's start plus the TTL. Both omitted when no ping is planned.
+	PingsLeft   int   `json:"pings_left,omitempty"`
+	HeldUntilMS int64 `json:"held_until_ms,omitempty"`
+}
+
+// KeepAlivePlan is one thread's scheduled keep-alive, as the proxy's keeper holds it in memory.
+type KeepAlivePlan struct {
+	NextPingMS int64 // when the next ping fires (epoch ms)
+	PingsLeft  int   // pings still to send, the next one included
+	IdleMS     int64 // the spacing between pings
+}
+
+// heldUntil is when a thread's cache goes cold with this plan: the last ping's start plus the TTL.
+func (p KeepAlivePlan) heldUntil(ttlS int64) int64 {
+	return p.NextPingMS + int64(p.PingsLeft-1)*p.IdleMS + ttlS*1000
+}
+
+// SetKeepAlivePlans supplies the keeper's per-thread plan for one session, keyed by thread id.
+// dash holds no keep-alive state of its own; nil means no plan is ever shown.
+func (a *API) SetKeepAlivePlans(fn func(tenantID string, allTenants bool, session string) map[string]KeepAlivePlan) {
+	a.kaPlans = fn
 }
 
 // maxDurationMS bounds the upstream time trusted for EndTS: a bogus value must not hold a dead
@@ -168,6 +194,23 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 			ths[i].RewriteUSD, ths[i].Priced = rewrite(ths[i].Model, ths[i].PrefixTokens, ths[i].TTLSeconds)
 		}
 		s.Threads = ths
+	}
+	if a.kaPlans != nil {
+		plans := a.kaPlans(f.Tenant, f.TenantAll, f.Session)
+		for i := range s.Threads {
+			if p, ok := plans[s.Threads[i].ID]; ok && p.PingsLeft > 0 {
+				s.Threads[i].PingsLeft, s.Threads[i].HeldUntilMS = p.PingsLeft, p.heldUntil(s.Threads[i].TTLSeconds)
+			}
+		}
+		if p, ok := plans[""]; ok && p.PingsLeft > 0 {
+			ttl := s.TTLSeconds
+			for _, t := range s.Threads {
+				if t.Main {
+					ttl = t.TTLSeconds
+				}
+			}
+			s.PingsLeft, s.HeldUntilMS = p.PingsLeft, p.heldUntil(ttl)
+		}
 	}
 	s.Window, s.WindowExact, _ = modelinfo.Exact(a.windows, r.Context(), s.Model)
 	writeJSON(w, s)

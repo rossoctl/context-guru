@@ -58,3 +58,38 @@ func TestCacheStateListsThreadsAndTheResponseEnd(t *testing.T) {
 		t.Errorf("main thread end_ts must be start + upstream ms: %v", last)
 	}
 }
+
+// TestCacheStateShowsTheKeepAlivePlan: a thread the keeper still plans to ping reports how many
+// pings are left and when its cache goes cold: the last ping's start plus the TTL.
+func TestCacheStateShowsTheKeepAlivePlan(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	main := mkEvent(now-100_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+	main.Status, main.CacheRead = 200, 5000
+	sub := mkEvent(now-40_000, "s1", "aws/claude-haiku-5", 1000, 800)
+	sub.Status, sub.ThreadID, sub.CacheRead = 200, "a:X", 300
+	seed(t, rec, main, sub)
+	var asked string
+	a.SetKeepAlivePlans(func(_ string, _ bool, session string) map[string]KeepAlivePlan {
+		asked = session
+		return map[string]KeepAlivePlan{"": {NextPingMS: now + 170_000, PingsLeft: 2, IdleMS: 270_000}}
+	})
+
+	_, body := get(t, a, "/api/cachestate?session=s1", "")
+	if asked != "s1" {
+		t.Errorf("plan asked for session %q, want s1", asked)
+	}
+	want := float64(now + 170_000 + 270_000 + 300_000)
+	if body["held_until_ms"] != want || body["pings_left"] != 2.0 {
+		t.Errorf("top level held_until_ms/pings_left = %v/%v, want %v/2", body["held_until_ms"], body["pings_left"], want)
+	}
+	for _, th := range body["threads"].([]any) {
+		th := th.(map[string]any)
+		if th["main"] == true && th["held_until_ms"] != want {
+			t.Errorf("main thread held_until_ms = %v, want %v", th["held_until_ms"], want)
+		}
+		if th["main"] == false && th["held_until_ms"] != nil {
+			t.Errorf("a thread with no plan must not claim one: %v", th)
+		}
+	}
+}
