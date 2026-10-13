@@ -188,9 +188,18 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	}
 	s.last = now
 
-	var match *threadState
+	var match, compacted *threadState
 	if ok {
 		match = s.longestPrefix(sums)
+	}
+	// The agent's own compaction request need not EXTEND the thread it summarizes. Claude Code
+	// 2.1.296 adds its prompt as an extra text block inside the last user message (#518), so the
+	// request shares every message but that one and matches no thread. It is still that
+	// thread's request, and it must stay there: newID hands the compacting thread's id to the
+	// post-compaction request, so a compaction that got a new id here would move the main
+	// thread onto that new id for the rest of the session.
+	if ok && match == nil && agentCompaction {
+		compacted = s.compactionParent(sums)
 	}
 
 	var res Result
@@ -229,6 +238,8 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 		sideParent = match
 	case match != nil:
 		res = Result{ID: match.id, Source: SourcePrefix}
+	case compacted != nil:
+		res = Result{ID: compacted.id, Source: SourcePrefix}
 	default:
 		res = Result{ID: s.newID(sums, hasTools), Source: SourcePrefix}
 	}
@@ -285,9 +296,12 @@ func (s *sessionState) newID(sums []uint64, hasTools bool) string {
 	// The MOST RECENT compacting thread: the agent sends the post-compaction request right after
 	// its compaction request, so if two threads are compacting at once, the later one is the one
 	// whose summary this is. Slice order would be arbitrary.
+	// Only a request that declares tools succeeds a thread that does: Claude Code sends a
+	// tool-less side request between its compaction request and its next turn (#518), and that
+	// side request must not take the main agent's id.
 	var succ *threadState
 	for _, th := range s.threads {
-		if th.compacting && (succ == nil || th.last.After(succ.last)) {
+		if th.compacting && (hasTools || !th.tools) && (succ == nil || th.last.After(succ.last)) {
 			succ = th
 		}
 	}
@@ -331,6 +345,33 @@ func (s *sessionState) mostShared(sums []uint64, mass []int) *threadState {
 	}
 	if best == nil || float64(bestShared) < inheritMass*float64(total) {
 		return nil
+	}
+	return best
+}
+
+// compactionParent returns the thread an agent compaction request summarizes when it extends no
+// thread: the one sharing the longest run of leading messages with it. A thread that declares
+// tools wins over one that does not, because compaction is the main agent's act and a side
+// request can share the same leading run; then the most recent wins. nil when no thread shares
+// even the first message.
+func (s *sessionState) compactionParent(sums []uint64) *threadState {
+	var best *threadState
+	bestLCP := 0
+	for _, th := range s.threads {
+		lcp := 0
+		for lcp < len(th.sums) && lcp < len(sums) && th.sums[lcp] == sums[lcp] {
+			lcp++
+		}
+		if lcp == 0 {
+			continue
+		}
+		switch {
+		case best == nil,
+			th.tools && !best.tools,
+			th.tools == best.tools && lcp > bestLCP,
+			th.tools == best.tools && lcp == bestLCP && th.last.After(best.last):
+			best, bestLCP = th, lcp
+		}
 	}
 	return best
 }
