@@ -24,7 +24,7 @@ import argparse, csv, json, os, subprocess, sys, time
 
 ROOT = os.environ.get("EVAL_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))   # holds eval-containers/ and this repo
 SWE = f"{ROOT}/eval-containers/containers/benchmarks/swe-bench"
-DEPLOY = f"{ROOT}/lab-context-engineering/deploy/eval-containers"
+DEPLOY = os.path.dirname(os.path.abspath(__file__))
 CG_OVERRIDE = f"{DEPLOY}/compose.contextguru.yaml"
 HEADROOM_OVERRIDE = f"{DEPLOY}/compose.headroom.yaml"
 RESULTS = f"{DEPLOY}/sweep-results.csv"
