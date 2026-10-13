@@ -24,6 +24,7 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import socket
 import sys
 import threading
@@ -535,7 +536,8 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
         if rec.get("reason"):
             L.append(f"Why: {rec['reason']}")
         days = f" --days {o['days']}" if o["days"] else ""
-        L.append(f"Apply it? Say yes, or run: /context-guru:adapt {kind} apply {apply_token(rep)}{days}")
+        # Quoted when an id carries shell syntax: the line is meant to be run as it is.
+        L.append(f"Apply it? Say yes, or run: /context-guru:adapt {kind} apply {shlex.quote(apply_token(rep))}{days}")
     return L
 
 
@@ -560,7 +562,7 @@ def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], in
         return ["Not applied: " + (doc.get("note") or "the proxy declined the change.")], 1
     if st == 200 and isinstance(doc, dict) and doc.get("ok"):
         eff = EFFECT.get(doc.get("effective"))
-        L = [f"Applied: {doc.get('note') or doc.get('applied', opt)}" + (f" ({eff})." if eff else "")]
+        L = [f"Applied: {(doc.get('note') or doc.get('applied', opt)).rstrip('.')}" + (f" ({eff})." if eff else ".")]
         undo = (doc.get("undo") or {}).get("option")
         if undo:
             L.append(f"Undo: /context-guru:adapt {kind} apply {undo}")
