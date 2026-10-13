@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -119,6 +120,15 @@ var credMask = func() []byte {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		panic("context-guru: no entropy for the keep-alive credential mask: " + err.Error())
+	}
+	return b
+}()
+
+// credIDKey keys credKey's HMAC: random per process, in memory only, never logged or stored.
+var credIDKey = func() []byte {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic("context-guru: no entropy for the keep-alive credential id key: " + err.Error())
 	}
 	return b
 }()
@@ -1519,9 +1529,10 @@ func kaRouteKey(tenant string, up upstream, model string) string {
 	return tenant + "\x00" + up.base + up.path + "\x00" + model
 }
 
-// credKey is a per-process id for the credential a hold pings with: a hash of the MASKED auth
-// slots (the mask is fixed per process), so it names the key without holding it. "" when the
-// upstream injects a server-held key.
+// credKey is a per-process id for the credential a hold pings with: an HMAC (credIDKey) over the
+// FULL auth header values. They are hashed in their masked form, which is the whole value XORed
+// with a fixed per-process mask, a bijection: two keys collide only if they are the same key, and
+// no plaintext copy is made to compute it. "" when the upstream injects a server-held key.
 func credKey(tenant string, auth []maskedHeader) string {
 	if len(auth) == 0 {
 		return ""
@@ -1531,8 +1542,9 @@ func credKey(tenant string, auth []maskedHeader) string {
 		parts = append(parts, a.name+"\x00"+string(a.val))
 	}
 	sort.Strings(parts)
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\x01")))
-	return tenant + "\x00" + hex.EncodeToString(sum[:8])
+	m := hmac.New(sha256.New, credIDKey)
+	m.Write([]byte(strings.Join(parts, "\x01")))
+	return tenant + "\x00" + hex.EncodeToString(m.Sum(nil)[:16])
 }
 
 func (k *keeper) markCredDead(cred string, now time.Time) {

@@ -437,3 +437,49 @@ func TestAuthRefusalStopsOnlyThatCredential(t *testing.T) {
 		t.Errorf("a new key for the same user was refused")
 	}
 }
+
+// Two keys that share every character a display mask would keep (prefix and last four) are two
+// credentials: refusing one leaves the other pinging.
+func TestCredentialIDsDoNotCollideOnAMask(t *testing.T) {
+	a, b := "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAwxyz", "sk-ant-api03-BBBBBBBBBBBBBBBBBBBBwxyz"
+	id := func(v string) string {
+		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+		r.Header.Set("x-api-key", v)
+		_, auth := pingHeaders(r, upstream{base: "http://litellm", path: "/v1/messages"})
+		return credKey("t1", auth)
+	}
+	if id(a) == id(b) || id(a) != id(a) || id(a) == "" {
+		t.Fatalf("credential ids: a=%q b=%q", id(a), id(b))
+	}
+	if strings.Contains(id(a), "wxyz") || strings.Contains(id(a), "AAAA") {
+		t.Errorf("the id carries part of the key: %q", id(a))
+	}
+	k, _, clock := testKeeper(t, Limits{})
+	var sentB atomic.Int32
+	k.send = func(j pingJob, _ []byte) (Usage, int, error) {
+		if j.session == "a" {
+			return Usage{}, http.StatusUnauthorized, nil
+		}
+		sentB.Add(1)
+		return Usage{CacheRead: 48576, Output: 1}, http.StatusOK, nil
+	}
+	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
+	hold := func(sess, key string) {
+		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+		r.Header.Set("x-api-key", key)
+		for i := 0; i < 2; i++ {
+			k.record(&Tenancy{ID: "t1", Cache: pol}, sess, "", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+				upstream{base: "http://litellm", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages", http.StatusOK,
+				Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+		}
+	}
+	hold("a", a)
+	k.sweep(clock.advance(290 * time.Second)) // a's key is refused
+	time.Sleep(50 * time.Millisecond)
+	hold("b", b)
+	k.sweep(clock.advance(290 * time.Second))
+	time.Sleep(50 * time.Millisecond)
+	if sentB.Load() != 1 {
+		t.Errorf("the look-alike key got %d pings, want 1: it is a different credential", sentB.Load())
+	}
+}
