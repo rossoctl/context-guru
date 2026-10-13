@@ -431,19 +431,20 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
 KINDS = ("cache", "compaction", "tools")
 ADAPT_DAYS = 30
 ADAPT_TIMEOUT = 120
-APPLY_WAIT = 90
+APPLY_WAIT = 110
 EFFECT = {"now": "takes effect now", "restart": "takes effect at the next proxy restart",
           "next_session": "takes effect from the next session"}
 
 
-def adapt_error(api: Api, kind: str, status: int, doc: dict | None) -> str:
+def adapt_error(api: Api, kind: str, status: int, doc: dict | None, applying: bool = False) -> str:
     err = (doc or {}).get("error") if isinstance(doc, dict) else None
     if status == 0:
         return f"The proxy at {api.base} is not answering. Open a new session (it starts the proxy) or run /context-guru:update."
     if status == -1:
         return f"The analysis took longer than {ADAPT_TIMEOUT // 60} minutes. Try a shorter window: /context-guru:adapt {kind} --days 7"
     if status == 404 and not err:
-        return "This proxy is older than /context-guru:adapt. Update it: /context-guru:update"
+        return ("This proxy cannot make this change from the terminal. Update it (/context-guru:update), or change it in the dashboard."
+                if applying else "This proxy is older than /context-guru:adapt. Update it: /context-guru:update")
     if status in (401, 403):
         return "This proxy needs a dashboard sign-in for this. Open the dashboard, sign in, and change the setting there."
     return err or f"The proxy answered HTTP {status} with no explanation."
@@ -486,14 +487,23 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
     kind, opts, rec = rep["kind"], rep.get("options") or [], rep.get("recommendation")
     L = [f"{kind.capitalize()}: {rep.get('summary', '')}"]
     if opts:
-        top = max([x["net_usd"] for x in opts] + [0.01])
+        top = max([x.get("net_usd") or 0 for x in opts] + [0.01])
         rows = [["", "", "saved", "spent", "net", "", ""]]
+        # Not evaluated (too little history, say): missing is not zero, so never a $0 row. Listed by name
+        # under details; otherwise counted in one line.
+        skipped = [x for x in opts if x.get("net_usd") is None]
         for x in opts:
             tags = [t for t in ("current", "default", "best") if rep.get(t) == x["id"]]
             mark = "★" if "best" in tags else "▸" if "current" in tags else " "
-            rows.append([mark, x.get("label") or x["id"], dollars(x["saved_usd"]), dollars(x["spend_usd"]),
+            if x.get("net_usd") is None:
+                if o["details"] or tags:
+                    rows.append([mark, x.get("label") or x["id"], "", "", "n/a", "", ", ".join(tags)])
+                continue
+            rows.append([mark, x.get("label") or x["id"], dollars(x.get("saved_usd", 0)), dollars(x.get("spend_usd", 0)),
                          dollars(x["net_usd"]), cells(max(x["net_usd"], 0) / top), ", ".join(tags)])
         L += [""] + C.table(rows, "llrrrll")
+        if skipped and not o["details"]:
+            L.append(f"  {len(skipped)} more not evaluated: {skipped[0].get('unavailable') or 'not enough data'}" + (" (details)" if len(skipped) > 1 else ""))
         L += ["", "  saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent."]
     w = rep.get("window") or {}
     if w.get("since"):
@@ -507,8 +517,8 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
         L += C.table([[i.get("kind", ""), i["name"], dollars(i.get("usd", 0)),
                        "never used" if not i.get("last_used_ms") else "last used " + day(i["last_used_ms"], o)] for i in shown], "llrl")
     if o["details"]:
-        L += [""] + [f"  {x.get('label') or x['id']}: {x['detail']}" + (f" (helped {x['sessions_helped']}, hurt {x['sessions_hurt']} sessions)"
-                     if "sessions_helped" in x else "") for x in opts if x.get("detail")]
+        L += [""] + [f"  {x.get('label') or x['id']}: {x.get('unavailable') or x['detail']}" + (f" (helped {x['sessions_helped']}, hurt {x['sessions_hurt']} sessions)"
+                     if "sessions_helped" in x else "") for x in opts if x.get("detail") or x.get("unavailable")]
     if rec:
         eff = EFFECT.get(rec.get("effective"))
         L += ["", f"Change: {rec['change']}" + (f" ({eff})." if eff else "")]
@@ -520,7 +530,8 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
 
 def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], int]:
     opt, _, basis = token.partition("@")
-    st, doc = api.send("POST", f"/api/adapt/{kind}/apply", body={"option": opt, "basis": basis}, timeout=60)
+    st, doc = with_ticker(lambda: api.send("POST", f"/api/adapt/{kind}/apply", body={"option": opt, "basis": basis}, timeout=APPLY_WAIT + 40),
+                          "Applying...")
     if st == 202 and isinstance(doc, dict) and doc.get("poll"):  # a long apply (a campaign build): wait for it
         poll, deadline = doc["poll"], time.time() + APPLY_WAIT
         while st in (200, 202) and isinstance(doc, dict) and doc.get("state") not in ("done", "failed"):
@@ -530,6 +541,10 @@ def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], in
             st, doc = api.send("GET", poll, timeout=30)
         if st == 200 and isinstance(doc, dict) and doc.get("state") == "failed":
             return ["Not applied: " + (doc.get("message") or "the proxy reported a failure.")], 1
+    if st == 202 and isinstance(doc, dict):  # still running in the proxy, nothing to poll
+        return [doc.get("note") or "Still applying; the proxy carries on."], 0
+    if st == 200 and isinstance(doc, dict) and doc.get("ok") is False:  # the proxy decided not to (its own gate)
+        return ["Not applied: " + (doc.get("note") or "the proxy declined the change.")], 1
     if st == 200 and isinstance(doc, dict) and doc.get("ok"):
         eff = EFFECT.get(doc.get("effective"))
         L = [f"Applied: {doc.get('note') or doc.get('applied', opt)}" + (f" ({eff})." if eff else "")]
@@ -541,7 +556,7 @@ def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], in
         L = ["Not applied: the numbers changed since you saw them. Here they are again; nothing was written.", ""]
         st2, rep = adapt_report(api, o, kind)
         return L + (render_adapt(rep, o) if st2 == 200 and rep else [adapt_error(api, kind, st2, rep)]), 1
-    return ["Not applied: " + adapt_error(api, kind, st, doc)], 1
+    return ["Not applied: " + adapt_error(api, kind, st, doc, applying=True)], 1
 
 
 def adapt_overview(api: Api, o: dict) -> list[str]:
