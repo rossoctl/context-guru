@@ -1,4 +1,4 @@
-What cost you most in the last 14 days: $856.85  (11983 requests, observed, gateway rates)
+What cost you most in the last 14 days: $856.85  (11983 requests, measured, gateway rates)
 
 Top causes
   1.  $445.56  52%  Re-reading the conversation each turn (cache reads, normal)
@@ -28,5 +28,5 @@ Costliest sessions
   33333333  scripts    claude-sonnet-5  313 turns   $104.36  rewrites $17.74
   44444444  site       claude-sonnet-5  134 turns    $44.75
 
-Context Guru books: gross saved $10.28 (modelled) - own overhead $13.70 (summariser $4.10, keep-alive pings $9.60, observed) = net -$3.42
+Context Guru books: gross saved $10.28 (modelled) - own overhead $13.70 (summariser $4.10, keep-alive pings $9.60, measured) = net -$3.42
 12 of 11995 requests had no price or incomplete token counts and are left out, not counted as free.

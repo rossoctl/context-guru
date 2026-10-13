@@ -1,4 +1,4 @@
-Cache rewrites in the last 14 days: 377 full re-writes, $145.67 more than cache hits would have cost  (17% of $856.85 spend, observed)
+Cache rewrites in the last 14 days: 377 full re-writes, $145.67 more than cache hits would have cost  (17% of $856.85 spend, measured)
 A rewrite = cache_write >= 80% of the request's context, read from token counts (not cache_miss_reason).
 
 By cause   (cause is inferred from the pause length and message count)
@@ -23,5 +23,5 @@ Costliest rewrites
   Sun 21:00  api        claude-opus-5  295k ctx  after 0:52   prefix_change   $1.40
   Sat 21:00  scripts    claude-opus-5  180k ctx  after 10:10  idle_expiry    $0.860
 
-  Possibly avoidable (everything except session starts): $131.10  [observed spend, not a promised saving]
+  Possibly avoidable (everything except session starts): $131.10  [measured spend, not a promised saving]
 12 of 11995 requests had no price or incomplete token counts and are left out, not counted as free.

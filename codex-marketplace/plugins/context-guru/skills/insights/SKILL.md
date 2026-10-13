@@ -1,16 +1,13 @@
 ---
 name: context-guru-insights
-description: Analyze measured context, token, prompt-cache, idle-time, and tool costs. Use when asked what wastes tokens or money, what to optimize, or for context-guru recommendations.
+description: Moved to the status skill. Kept for one release so existing habits still work.
 ---
 
-# Analyze Codex context cost
+This command moved to `context-guru-status`. Say so in one line, then run the new one from this skill directory and print its output exactly as it is in one code block:
 
-Run `python3 ../../scripts/insights.py all`. Report its ranked findings in order and preserve every
-measurement label and fix command exactly. The script—not the model—does the arithmetic and sorting.
-Stop on `not_installed` or `proxy_unavailable`. On a subscription plan, describe dollar values as
-estimated usage-limit value rather than a lower bill.
+```bash
+python3 ../../scripts/cg.py home
+```
 
-Codex command sandboxes may block the local `127.0.0.1` dashboard. On `proxy_unavailable`, retry
-the same read-only command with `sandbox_permissions="require_escalated"`, explaining that
-loopback access is needed. If that retry cannot run, report the measurements as unverified rather
-than claiming that the proxy is unavailable.
+If loopback access is blocked, retry the same read-only command with `sandbox_permissions="require_escalated"`.
+If it still cannot run, say proxy state is unverified rather than guessing.

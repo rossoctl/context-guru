@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Five cost questions, answered from the proxy's own billed traffic.
+"""The cost engine behind /context-guru:* (cg.py is the front end); run directly it answers five cost questions,
+answered from the proxy's own billed traffic.
 
     today    what cost me most, and why                       (/api/spend/explain)
     unused   tools / MCP servers / skills I carry, never use  (/api/tools, /api/tools/last-used)
@@ -8,7 +9,7 @@
     trends   per-project / per-model trends, ranked actions   (/api/spend/explain, /api/tools)
 
 Every figure is priced at the GATEWAY rates the proxy was configured with (not list prices) and
-carries a class: `observed` (tokens the provider billed), `modelled` (a counterfactual the proxy
+carries a class: `measured` (tokens the provider billed), `modelled` (a counterfactual the proxy
 computed) or `estimate` (arithmetic done here, assumptions printed). Context Guru's own books are
 shown as honest net: gross saving MINUS what Context Guru itself spent (summariser calls and
 keep-alive pings).
@@ -199,7 +200,7 @@ def ledger_lines(spend: dict, S: Style) -> list[str]:
     gross = L.get("gross_saved_usd", 0.0)
     over = L.get("cg_llm_usd", 0.0) + L.get("ping_usd", 0.0)
     return [S.dim(f"Context Guru books: gross saved {usd(gross)} (modelled) - own overhead {usd(over)} "
-                  f"(summariser {usd(L.get('cg_llm_usd', 0))}, keep-alive pings {usd(L.get('ping_usd', 0))}, observed) "
+                  f"(summariser {usd(L.get('cg_llm_usd', 0))}, keep-alive pings {usd(L.get('ping_usd', 0))}, measured) "
                   f"= net {usd(gross - over)}")]
 
 
@@ -227,7 +228,7 @@ def cmd_today(spend: dict, o: dict, S: Style, proj: Projects) -> list[str]:
     if not spend["priced_requests"]:
         return ["No priced requests in this window yet."]
     total = spend["usd"]["total"]
-    L = [S.b(f"What cost you most {o['label']}: {usd(total)}") + S.dim(f"  ({spend['priced_requests']} requests, observed, gateway rates)")]
+    L = [S.b(f"What cost you most {o['label']}: {usd(total)}") + S.dim(f"  ({spend['priced_requests']} requests, measured, gateway rates)")]
     parts = partition(spend)
     L += ["", S.b("Top causes")]
     for i, r in enumerate(parts[:3], 1):
@@ -262,7 +263,7 @@ def cmd_cold(spend: dict, o: dict, S: Style, proj: Projects) -> list[str]:
         return [f"No full-prefix cache rewrites {o['label']}. Nothing went cold."]
     extra = sum(c["usd"] for c in rw.values())
     L = [S.b(f"Cache rewrites {o['label']}: {sum(c['n'] for c in rw.values())} full re-writes, "
-             f"{usd(extra)} more than cache hits would have cost") + S.dim(f"  ({pct(extra, total)} of {usd(total)} spend, observed)")]
+             f"{usd(extra)} more than cache hits would have cost") + S.dim(f"  ({pct(extra, total)} of {usd(total)} spend, measured)")]
     L.append(S.dim("A rewrite = cache_write >= 80% of the request's context, read from token counts (not cache_miss_reason)."))
     L += ["", S.b("By cause") + S.dim("   (cause is inferred from the pause length and message count)")]
     rows = [[k, str(c["n"]), ktok(c["tokens"]), usd(c["usd"]), bar(c["usd"] / extra if extra else 0), CAUSE_WORDS[k] if k in CAUSE_WORDS else ""]
@@ -281,7 +282,7 @@ def cmd_cold(spend: dict, o: dict, S: Style, proj: Projects) -> list[str]:
                  short_model(e["model"]), ktok(e["context"]) + " ctx", ("after " + fmt_dur(e["gap_s"])) if e["gap_s"] >= 0 else "first message",
                  e["cause"], usd(e["usd"])] for e in spend.get("top_rewrites", [])[:5]], "llllllr")
     avoid = sum(rw[k]["usd"] for k in AVOIDABLE if k in rw)
-    L += ["", f"  Possibly avoidable (everything except session starts): {usd(avoid)}  [observed spend, not a promised saving]"]
+    L += ["", f"  Possibly avoidable (everything except session starts): {usd(avoid)}  [measured spend, not a promised saving]"]
     L += coverage_line(spend, S)
     return L
 
@@ -305,7 +306,7 @@ def cmd_compact(spend: dict, o: dict, S: Style, proj: Projects) -> list[str]:
     live = [s for s in spend.get("live", []) if now - s["last_ts"] <= 2 * 3600_000]
     if not live:
         return ["No session has touched the cache in the last 2 hours, so there is nothing warm to protect."]
-    L = [S.b("Cache state of your recent sessions") + S.dim("  (context and last touch observed; the rest is estimate)")]
+    L = [S.b("Cache state of your recent sessions") + S.dim("  (context and last touch measured; the rest is estimate)")]
     rows, verdicts = [], []
     for s in live[:6]:
         rate = spend["rates"].get(s["model"])
@@ -381,7 +382,7 @@ def cmd_unused(tools: dict | None, last: dict | None, o: dict, S: Style, days: f
         return ["Every tool, MCP server and skill you carry was called at least once in this window."]
     carried = sum(i["usd"] for i in items)
     now, top = o["now"], items[:10]
-    L = [S.b(f"Carried but never called in {days:.0f} days: {usd(carried)}") + S.dim("  (observed: declaration tokens re-read each turn, priced at the tier each turn billed)")]
+    L = [S.b(f"Carried but never called in {days:.0f} days: {usd(carried)}") + S.dim("  (measured: declaration tokens re-read each turn, priced at the tier each turn billed)")]
     if days >= 2:
         L.append(f"  Removing the {len(top)} below saves about {usd(sum(i['usd'] for i in top) / days * 30)}/month if your usage stays the same  [estimate]")
     rows = []
@@ -424,24 +425,29 @@ def delta(vals: list[float]) -> str:
 def recommendations(spend: dict, tools: dict | None, days: float) -> list[dict]:
     rw, L, recs = spend.get("rewrites", {}), spend.get("ledger", {}), []
     if "idle_expiry" in rw:
-        recs.append({"usd": rw["idle_expiry"]["usd"], "cls": "observed",
+        recs.append({"usd": rw["idle_expiry"]["usd"], "cls": "measured",
+                     "short": f"You paused longer than the cache lasts, {rw['idle_expiry']['n']} times", "do": "run /compact before a long break",
                      "what": f"{rw['idle_expiry']['n']} pauses outlived the cache; each re-sent the whole conversation. "
-                             "Compact or /clear before a long break (`compact`), see `cold` for the pause lengths."})
+                             "Compact or /clear before a long break (see /context-guru:cache)."})
     other = sum(rw[k]["usd"] for k in ("prefix_change", "history_rewrite", "new_thread") if k in rw)
     if other:
-        recs.append({"usd": other, "cls": "observed",
+        recs.append({"usd": other, "cls": "measured",
+                     "short": "Settings or tools changed mid-session", "do": "pick MCP servers and edit CLAUDE.md before you start",
                      "what": "Mid-session prompt changes forced a rewrite (toggling MCP servers, editing CLAUDE.md, rewinds, subagents). "
                              "Decide tools and MCP servers before the session starts."})
     carried = sum(i["usd"] for i in unused_items(tools, None)) if tools and tools.get("totals") else 0.0
     if carried:
-        recs.append({"usd": carried, "cls": "observed carry; saving is an estimate",
-                     "what": "MCP servers, skills and tools carried and never called (`unused` lists them with the command that removes each)."})
+        recs.append({"usd": carried, "cls": "measured carry; saving is an estimate",
+                     "short": "Add-ons you never use", "do": "remove them, /context-guru:waste lists them",
+                     "what": "MCP servers, skills and tools carried and never called (/context-guru:waste lists them with the command that removes each)."})
     ping = L.get("ping_usd", 0.0)
     if ping and ping > L.get("ping_saved_usd", 0.0):
-        recs.append({"usd": ping - L.get("ping_saved_usd", 0.0), "cls": "observed cost vs modelled saving",
+        recs.append({"usd": ping - L.get("ping_saved_usd", 0.0), "cls": "measured cost vs modelled saving",
+                     "short": "Keep-alive pings cost more than they saved", "do": "check /context-guru:cache-strategy-picker",
                      "what": "Keep-alive pings cost more than the rewrites they are modelled to have avoided. Check /context-guru:cache-strategy-picker."})
     if L.get("cg_llm_usd", 0) > L.get("gross_saved_usd", 0):
-        recs.append({"usd": L["cg_llm_usd"] - L["gross_saved_usd"], "cls": "observed",
+        recs.append({"usd": L["cg_llm_usd"] - L["gross_saved_usd"], "cls": "measured",
+                     "short": "The summariser cost more than it saved", "do": "use a lighter preset (/context-guru:preset-picker)",
                      "what": "Context Guru's summariser spent more than it saved in this window; consider a lighter preset."})
     return sorted(recs, key=lambda r: -r["usd"])
 
@@ -450,7 +456,7 @@ def cmd_trends(spend: dict, tools: dict | None, o: dict, S: Style, proj: Project
     n = max(2, min(30, int(round(window_days(spend))) or o["days"]))
     daily = series(spend, n, lambda d: d["usd"]["total"])
     total = spend["usd"]["total"]
-    L = [S.b(f"Spend, last {n} days: {usd(total)}") + "  " + spark(daily) + S.dim(f"  (peak {usd(max(daily))}/day, observed)"),
+    L = [S.b(f"Spend, last {n} days: {usd(total)}") + "  " + spark(daily) + S.dim(f"  (peak {usd(max(daily))}/day, measured)"),
          S.dim(f"  rewrite cost {spark(series(spend, n, lambda d: d['rewrite_usd']))}  {usd(sum(c['usd'] for c in spend.get('rewrites', {}).values()))} extra paid over cache hits")]
     mrows = []
     for m in merged_models(spend)[:5]:
@@ -556,15 +562,14 @@ def main(argv: list[str] | None = None) -> int:
         with open(a.fixture, encoding="utf-8") as f:
             fetch = fixture_fetch(json.load(f))
     else:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import insights  # the plugin's own fetcher and port resolution
+        import cg  # the same fetcher and port rule as the /context-guru:* commands
 
-        port = a.port or insights._resolve_port()[0]
-        if not port:
-            print("No Context Guru proxy is configured for this directory. Run /context-guru:install first.")
+        base = cg.proxy_base(a.port)
+        if not base:
+            print(cg.NO_PROXY)
             return 0
-        f = insights.Fetcher(port)
-        fetch = lambda path, params=None, heavy=False: f.get(path, params, heavy=True)  # noqa: E731
+        api = cg.Api(base)
+        fetch = lambda path, params=None, heavy=False: api.get(path, params, 60)  # noqa: E731
     text, doc = run(a.cmd, fetch, opts)
     print(json.dumps(doc, indent=1) if a.json else text)
     return 0

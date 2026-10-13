@@ -655,6 +655,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// Attribute any spend a DETACHED summarizer call incurred since this session's last turn.
 	// First thing, and unconditionally: the money was spent whatever this turn decides.
 	takeDeferredUsage(c, rep)
+	adoptParentCheckpoint(c)
 	headCount, start, end := summarizeSpan(msgs, 1, s.keepLastTurns, c.WireGroup)
 	// A non-nil WireGroup that no longer lines up with msgs means wire groups DO exist on this
 	// request but an earlier component changed the message count, so headCount/start/end just
@@ -728,6 +729,12 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		}
 		rep.Skipped = true
 		return nil, nil
+	}
+	// A side request splices its parent's checkpoint and stops there: no commission, no cold
+	// deferral, no keep-alive candidate. See sideRequest.
+	if sideRequest(c) {
+		rep.Gate("side_request_read_only")
+		return declineButReplayStale()
 	}
 
 	// THE GATES DECIDE WHETHER TO PAY FOR A FRESH SUMMARY. `sized`/`resolvable` ask "is this
@@ -1013,7 +1020,7 @@ func (s *CacheAwareSummarizer) splice(msgs []bschemas.ChatMessage, headCount, bo
 // is identical to the one the previous turn forwarded — which is the property that keeps the
 // provider's prefix alive past the head.
 //
-// ⚠️ The checkpoint namespace is shared with `summarize` (store.SumPrefix + session). Safe
+// ⚠️ The checkpoint namespace is shared with `summarize` (sumKey(convKey(c)), per thread). Safe
 // because both components restructure the message list and therefore must run ALONE, so they
 // cannot both be in one pipeline; and CoveredHash rejects a checkpoint whose covered prefix does
 // not match, so a preset switch mid-session degrades to a fresh summary rather than reusing a

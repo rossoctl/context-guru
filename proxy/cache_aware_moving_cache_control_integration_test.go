@@ -224,6 +224,11 @@ func TestCacheAwareRealContentChangeInsideSpanStillDeclines(t *testing.T) {
 			"model": "aws/claude-sonnet-5", "max_tokens": 64,
 			"system":   "you are claude code",
 			"messages": messages,
+			// Tools, as Claude Code's main agent always declares. Without them turn 3, a new thread
+			// that inherits turn 2's prefix, reads as a tool-less SIDE request (#430), which declines
+			// before the prefix ask and so never reaches either counter this test reads.
+			"tools": []any{map[string]any{"name": "bash", "description": "run a command",
+				"input_schema": map[string]any{"type": "object"}}},
 		})
 		req, err := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", bytes.NewReader(body))
 		if err != nil {
