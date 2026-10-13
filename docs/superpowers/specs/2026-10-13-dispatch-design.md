@@ -227,6 +227,24 @@ it.
 3. A tagged engine release replaces the dev `replace` directive in the three `go.mod` files
    before merge.
 
+## Amendments (2026-10-13, found while planning)
+
+1. **A per-request `Ref` is not dropped at request end.** Async work keeps the cheap model after
+   its request ends: the detached summary (`components/offload/cache_aware_async.go`) and the
+   keep-alive summary candidate. The proxy deduplicates incoming refs by (base URL, credential)
+   and drops one after `IncomingRefTTL` (2 h) without use. Before this change the key lived
+   unmasked in the `cheapmodel` struct for as long as anything held it, so this is stricter.
+2. **Ping usage parsing.** `keepalive.PingUsage` parses a non-streaming ping response in the core.
+   The proxy's full `responseUsage` stays in `proxy` for real traffic, and a proxy test pins the
+   two equal on ping responses.
+3. **Body copy.** A host may copy `Request.Body` into a `[]byte` that it wipes when the transport
+   closes the request body, because the transport can still read it after `client.Do` returns. A
+   `string` copy stays forbidden.
+4. **Proxy host API.** `proxy.Options.CheapModel` becomes host config (`*proxy.CheapModelConfig`).
+   `proxy.NewDispatcher`, `(*Dispatcher).Pin` and `proxy.AuthHeader` are exported for `cmd/` tools.
+5. **No redirects.** The proxy's pings and cheap-model calls stop following redirects. Before this
+   change they used the proxy's default client, which follows them.
+
 ## Open questions
 
 None.
