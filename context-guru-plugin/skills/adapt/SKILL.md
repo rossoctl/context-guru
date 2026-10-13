@@ -20,7 +20,7 @@ the output is printed. The question is the `Change:` line plus the first line's 
 "Yes, apply it" and "No, leave it".
 
 - Only on "Yes, apply it": run the exact command after `run:` on the `Apply it?` line, as
-  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" adapt <kind> apply <option>@<basis>`, and print its output in one code block.
+  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" adapt <kind> apply <option>@<basis>` (keep any `--days N` it shows), and print its output in one code block.
 - On anything else (No, Esc, a different answer): say "Nothing changed." and stop. Do not apply.
 - Never apply because the user asked for the report, and never apply a different option than the one shown.
   If the user picks another option from the table, ask the same yes/no question for that option first and

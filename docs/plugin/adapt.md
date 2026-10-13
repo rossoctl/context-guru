@@ -140,7 +140,7 @@ Each subcommand reads one endpoint on the proxy's dashboard API and, after a yes
 
 ```
 GET  /api/adapt/{cache|compaction|tools}?since=<ms>&until=<ms>
-POST /api/adapt/{kind}/apply     {"option": "<id>", "basis": "<basis_id>"}
+POST /api/adapt/{kind}/apply?since=<ms>&until=<ms>     {"option": "<id>", "basis": "<basis_id>"}
 ```
 
 The report:

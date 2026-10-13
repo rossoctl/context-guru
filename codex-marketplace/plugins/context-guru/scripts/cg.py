@@ -433,6 +433,7 @@ KINDS = ("cache", "compaction", "tools")
 ADAPT_DAYS = 30
 ADAPT_TIMEOUT = 300
 APPLY_WAIT = 110
+ADAPT_ROWS = 4  # table rows without `details`: current, default, best, then the next best
 EFFECT = {"now": "takes effect now", "restart": "takes effect at the next proxy restart",
           "next_session": "takes effect from the next session"}
 
@@ -493,7 +494,12 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
         # Not evaluated (too little history, say): missing is not zero, so never a $0 row. Listed by name
         # under details; otherwise counted in one line.
         skipped = [x for x in opts if x.get("net_usd") is None]
+        tagged = {rep.get(t) for t in ("current", "default", "best")}
+        rest = sorted((x for x in opts if x["id"] not in tagged and x.get("net_usd") is not None), key=lambda x: -x["net_usd"])
+        hidden = [] if o["details"] else rest[max(0, ADAPT_ROWS - len(tagged)):]
         for x in opts:
+            if x in hidden:
+                continue
             tags = [t for t in ("current", "default", "best") if rep.get(t) == x["id"]]
             mark = "★" if "best" in tags else "▸" if "current" in tags else " "
             if x.get("net_usd") is None:
@@ -503,6 +509,9 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
             rows.append([mark, x.get("label") or x["id"], dollars(x.get("saved_usd", 0)), dollars(x.get("spend_usd", 0)),
                          dollars(x["net_usd"]), cells(max(x["net_usd"], 0) / top), ", ".join(tags)])
         L += [""] + C.table(rows, "llrrrll")
+        if hidden:
+            L.append(f"  {len(hidden)} more option{'s' * (len(hidden) > 1)}, net {dollars(min(x['net_usd'] for x in hidden))} to "
+                     f"{dollars(max(x['net_usd'] for x in hidden))} (details)")
         if skipped and not o["details"]:
             L.append(f"  {len(skipped)} more not evaluated: {skipped[0].get('unavailable') or 'not enough data'}" + (" (details)" if len(skipped) > 1 else ""))
         L += ["", "  saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent."]
@@ -525,13 +534,16 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
         L += ["", f"Change: {rec['change']}" + (f" ({eff})." if eff else "")]
         if rec.get("reason"):
             L.append(f"Why: {rec['reason']}")
-        L.append(f"Apply it? Say yes, or run: /context-guru:adapt {kind} apply {apply_token(rep)}")
+        days = f" --days {o['days']}" if o["days"] else ""
+        L.append(f"Apply it? Say yes, or run: /context-guru:adapt {kind} apply {apply_token(rep)}{days}")
     return L
 
 
 def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], int]:
     opt, _, basis = token.partition("@")
-    st, doc = with_ticker(lambda: api.send("POST", f"/api/adapt/{kind}/apply", body={"option": opt, "basis": basis}, timeout=APPLY_WAIT + 40),
+    since, now = window(o, o["days"] or ADAPT_DAYS)  # the report's window, so the proxy can check the basis on it
+    st, doc = with_ticker(lambda: api.send("POST", f"/api/adapt/{kind}/apply", {"since": since, "until": now},
+                                           {"option": opt, "basis": basis}, timeout=APPLY_WAIT + 40),
                           "Applying...")
     if st == 202 and isinstance(doc, dict) and doc.get("poll"):  # a long apply (a campaign build): wait for it
         poll, deadline = doc["poll"], time.time() + APPLY_WAIT
