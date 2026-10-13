@@ -23,7 +23,7 @@ reference — port its *logic*, re-implement its transport in Go.
 - **Metadata first.** A component or feature works from metadata only (hashes, counts, sizes,
   ids, flags). Depending on stored customer data (transcript text, tool output, bodies,
   summaries) is a deliberate exception. Every PR that adds or changes a feature states its data
-  dependence and its behaviour with storage off, and updates
+  dependence and what it does at each storage level (off, metadata only, everything), and updates
   [docs/data-dependence.md](docs/data-dependence.md) — the reason in plain words, not a code
   reference. If the PR changes a feature's data dependence in either direction, say so at the top
   of the PR, and have the person in that row's "Decided by" confirm it before merge.

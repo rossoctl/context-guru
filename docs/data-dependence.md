@@ -1,7 +1,7 @@
 # Data dependence
 
 This page says, for every component and every feature, whether it needs **stored customer data**,
-and what it does when you turn storage off.
+and what it does at each of three storage levels.
 
 **The rule:** a component or feature works from **metadata** only. Depending on **content** is a
 rare, deliberate exception. Many users turn storage off. A feature that quietly needs content stops
@@ -15,16 +15,24 @@ working for them, or works worse, and nobody notices. See [Keep this page right]
 - **Metadata**: values that do not let you read the content back: hashes, counts, sizes, ids,
   token numbers, timestamps, flags. **A short hash or fingerprint of content is metadata.** A
   shortened copy, a sample, or the first N characters of content is content.
-- **Storage off**: `store.enabled: false` in the config, or `--store=false`. The proxy then uses a
-  store that keeps nothing (`store.Nop`). This switch does **not** turn off the dashboard, the
-  keep-alive, or the in-memory stashes in the table under
-  [Features outside the pipeline](#features-outside-the-pipeline).
-- **Content capture off**: the dashboard's `--dashboard-content` is off (the default), or, in
-  hosted mode, the account's consent flag is off. This switch controls only the dashboard.
-- **Kind** in the tables: `none` (keeps nothing between requests), `metadata`, or `content`.
+- **Kept**: held after the request ends, in memory or on disk. Text held only while one request
+  runs is not kept.
+- **Kind** in the tables: `none` (keeps nothing), `metadata`, or `content`. It is what the
+  component keeps at the "Everything" level.
 - **Decided by**: the person and the issue or PR where the current behaviour was decided. Where
   no later decision exists, it is the author of the PR that added the component. Ask that person
   before you change the row.
+
+## The three storage levels
+
+| Level | What is kept | Exists today? |
+|---|---|---|
+| **Off** | Nothing in the Store. Only the in-memory trackers that every request needs (how much of the conversation the provider cached, and when it was last used) are kept. These hold counts and timestamps only. | **Partly.** `store.enabled: false` removes the Store. It does **not** remove the in-memory content listed under [Features outside the pipeline](#features-outside-the-pipeline). |
+| **Metadata only** | Hashes, counts, ids, token numbers, timestamps and flags, in the Store and in memory. No content. | **No.** The Store keeps everything or nothing. The "Metadata only" columns say what the code would do with a Store that refuses content, and what it would need to change. See [What "metadata only" would need](#what-metadata-only-would-need). |
+| **Everything** | Content and metadata. | Yes, the default. |
+
+At every level the agent still has its own copy of the transcript and sends it again each turn.
+"No way back" means the model cannot get removed text back through the `expand` tool.
 
 ## What turns off when
 
@@ -45,6 +53,7 @@ working for them, or works worse, and nobody notices. See [Keep this page right]
 
 There is **no switch** for the prefix-ask body stash.
 
+
 ## Pipeline components
 
 One row per registered component. A test (`components/all/datadep_test.go`) fails when a component
@@ -52,33 +61,35 @@ has no row, when a row names a component that does not exist, or when the reason
 only a pointer into the code.
 
 "Store" means the in-memory Store. All Store data is in memory, and none of it is written to disk.
+"Breaks the cache" means the next turn sends different bytes for a message the provider already
+cached, so the user pays to write the cache again from that message on.
 
-| Component | Kind | Where | Required? | With storage off | Reason | Decided by |
-|---|---|---|---|---|---|---|
-| `format` | none | Nothing kept | Not applicable | No change | It only removes whitespace from JSON tool output, and the result depends only on that message. The same input gives the same bytes every turn, so there is nothing to remember. | Osher Elhadad, first commit a91d6f4 |
-| `toon` | none | Nothing kept | Not applicable | No change | It rewrites a uniform JSON array as a compact table, and checks that the table converts back to the exact original. The result depends only on the message, so nothing needs saving. | Osher Elhadad, release commit 7f0379a |
-| `toolschema` | content | Memory: a cache of trimmed tool declarations, for the whole process, no size limit | No, it is a speed-up | No change. The cache stays on. | The agent sends the same tool list every turn, so it keeps the trimmed list to avoid doing the same work again. The trimming always gives the same result, so without the cache only speed changes. | Osher Elhadad, #84 |
-| `searchfold` | none | Nothing kept | Not applicable | No change | It folds repeated file paths in search output into headings, using only that output. It is used only when the fold converts back to the exact original, so nothing needs saving. | Osher Elhadad, #89 |
-| `cacheinject` | metadata | Store: one short hash per message of the last turn | No, it improves one rule | Works with less. It cannot see where this turn first differs from the last one, so it puts cache bookmarks only at its fixed positions. An edited earlier message then costs the full price instead of the cached price. | To put a cache bookmark just before the first message that changed, it must remember a fingerprint of each message from the last turn. It keeps only short hashes, never the text. | Osher Elhadad, first commit a91d6f4; budget in #32 |
-| `cachesplit` | none | Nothing kept by the component. The dashboard keeps one hash per thread for savings reports. | Not applicable | No change | It cuts the system prompt so the part that changes every session comes after the cache bookmark. That depends only on the current request, so it needs no memory. | #32 |
-| `textclean` | none | Nothing kept | Not applicable | No change | It only removes terminal colour codes and screen-redraw leftovers that were never visible text. The result depends only on the output itself, so nothing needs saving. | Osher Elhadad, #89 |
-| `toolfilter` | none | Nothing kept | Not applicable | No change. It is lossy by design, with or without storage: the client keeps its own copy of what it removes. | It removes the tool, MCP-server and skill declarations the operator listed. It decides from that fixed list and the current request, so there is nothing to remember. | Osher Elhadad, #84 |
-| `mask` | content | Store: the masked text it sent, and the original output | Yes, for a stable cache and for `expand` | Works with less. The mask cannot be undone. Next turn the message goes back to its full text, which breaks the cached prompt. | It hides old tool outputs, and must remember exactly what it wrote so every later turn sends the same bytes. It keeps the original so the agent can ask for it back. | Osher Elhadad, first commit a91d6f4; storage rules in #187 |
-| `failed_run` | content | Store: the shortened text it sent, and the original output | Yes, for a stable cache and for `expand` | Works with less. The cut cannot be undone, and the message goes back to full text next turn, which breaks the cached prompt. | It shortens failed test or build runs that the agent has since run again. It must remember the shortened text so the cached prompt stays the same, and keeps the original for the agent to ask back. | Osher Elhadad, first commit a91d6f4 |
-| `collapse` | content | Store: the head-and-tail text it sent, and the original output | Yes, for a stable cache and for `expand` | Works with less. The cut cannot be undone, and the message goes back to full text next turn, which breaks the cached prompt. | It is the last-resort limit for very large outputs. It must remember its cut so the start of the prompt stays the same, and keeps the full output so the agent can ask for it. | Osher Elhadad, first commit a91d6f4 |
-| `readlifecycle` | content | Store: the rewrite it sent, and the original file read | Yes, for a stable cache and for `expand` | Works with less. Old file reads are removed with no way back, and they come back in full next turn, which breaks the cached prompt. | It removes file reads that a later edit or read made out of date. It must remember its rewrite so the cached prompt does not change, and keeps the original for the agent to ask back. | Osher Elhadad, #89 |
-| `skeleton` | content | Store: the code skeleton it sent, and the original source | **Yes, it will not run without storage** | Skips. It leaves every message as it is. | It removes function bodies from source code. Without the saved original, the agent could not tell a removed body from an empty one, so it refuses to run without storage. | Osher Elhadad, first commit a91d6f4 |
-| `cmdfilter` | content | Store: the filtered text (a speed-up), and the original output | No, only for `expand` | Works with less. It filters again every turn and gets the same bytes, so the cache is safe. Dropped lines cannot be recovered. | It applies a filter for each known command to its output. It keeps the original so the agent can get dropped lines back. The saved result is only a speed-up, because the same output always filters to the same text. | Osher Elhadad, first commit a91d6f4; memo in #188 |
-| `linecap` | content | Store: the original output | No, only for `expand` | Works with less. Long lines are cut with no way back. | It shortens very long lines and folds repeated lines. It stores the original only so that the agent can ask for the cut lines back. | Osher Elhadad, #89 |
-| `dedup` | content | Store: the original output | No, only for `expand` | Works with less. The pointer cannot be followed through `expand`, but the first copy is still in the same request. | It replaces a repeated tool output with a pointer to the earlier copy. It saves the repeat only so that the agent can ask for it back. | Osher Elhadad, first commit a91d6f4 |
-| `smartcrush` | content | Store: the original output | No, only for `expand` | Works with less. Long JSON arrays are cut with no way back. | It keeps the first and last items of a long JSON array, plus any error items. It stores the full array only so that the agent can ask for it back. | Osher Elhadad, first commit a91d6f4 |
-| `extract` | content | Store: the original output | No, only for `expand` | Works with less. Removed noise cannot be recovered. | It removes clear noise such as repeated lines and progress bars. It stores the original only so that the agent can ask for it back. | Osher Elhadad, first commit a91d6f4 |
-| `extract_llm` | content | Store: the model's rewrite and summary, a copy shared across sessions, and the original output. Memory: counts per session. | Yes, to reuse a rewrite on later turns and across sessions | Works with less. New rewrites still call the model and cannot be undone. Next turn they are not reused, so the message goes back to full text and breaks the cached prompt. Reuse across sessions stops. | A model rewrites each large tool output. The result is saved because asking again costs money and can give different words, which would break the prompt cache. The original is saved so the agent can ask for it back. | Osher Elhadad, #51; storage rules in #40 and #188 |
-| `extract_llm_sweep` | content | Store: the removal decisions with a short description of each output, the original outputs, and "still needed" answers (metadata) | Yes, to repeat its removals on later turns | Works with less. Removals still happen, with no way back, and come back in full next turn. It asks the model again about outputs it already judged. | It asks the agent's own model which old outputs are no longer needed, and removes them. It must remember those choices so that later turns send the same shortened transcript. | David Amid, #118 |
-| `summarize` | content | Store: the model-written summary and the replaced turns. Memory: a copy of the turns while the model call runs. | Yes, for proxy traffic | **With a session (proxy):** it still pays for the model call, then throws the summary away, every time it triggers. Nothing is removed. **Without a session (`/compact`):** it summarizes and removes the turns with no way back. | It replaces old turns with a model-written summary. It must keep that summary so the next turn sends the same bytes and the prompt cache still matches, and keeps the replaced turns so they can be restored. | Osher Elhadad, commit 68e8b51; checkpoint in #430 |
-| `cache_aware_summarizer` | content | Store: the summary and the replaced turns. Memory: copies of conversation turns for summaries during idle time and after a cold turn. | Yes, a summary is never used without it | **Pays for model calls and throws the results away.** Nothing is removed. The copies in memory are still kept. | Like `summarize`, it must keep the summary so later turns send the same bytes. It also holds the conversation in memory so it can summarize while the user is idle or after the cache went cold. | Itay Nakash, #256 |
-| `agentdiet` | content | Store: the model-shortened step it sent, and the original step | Yes, the method builds on earlier turns | Works with less. Each step still costs a model call and cannot be undone. Next turn it goes back to full text, so one turn of saving costs two cache rebuilds. | A model rewrites one older agent step. The rewrite must be saved and sent again every turn, so the history stays shortened and the cache stays stable. The original is kept so the agent can ask for it back. | Itay Nakash, #66 |
-| `coref` | content | Store: the cut text it sent, the original output, and a count of cache rebuilds it spent (metadata) | **Yes, for its spending limit** | Works with less, **without its spending limit.** The rebuild count always reads zero, so it can rebuild the cache on every turn. Cuts cannot be undone and come back in full next turn. | It removes tool outputs that nothing later refers to, which deliberately changes the cached history. It must remember what it cut and how many cache rebuilds it already spent, or it repeats that cost with no limit. | David Amid, commit b224704; docs/proposals/coref-compaction.md |
+| Component | Kind | Where | Off | Metadata only | Everything | Reason | Decided by |
+|---|---|---|---|---|---|---|---|
+| `format` | none | Nothing kept | Works fully | Works fully | Works fully | It only removes whitespace from JSON tool output, and the result depends only on that message. The same input gives the same bytes every turn, so there is nothing to remember. | Osher Elhadad, first commit a91d6f4 |
+| `toon` | none | Nothing kept | Works fully | Works fully | Works fully | It rewrites a uniform JSON array as a compact table, and checks that the table converts back to the exact original. The result depends only on the message, so nothing needs saving. | Osher Elhadad, release commit 7f0379a |
+| `toolschema` | content | Memory: a cache of trimmed tool declarations, for the whole process, no size limit | Works fully. **Today the cache stays on.** | Works fully once the cache is removed. Only speed is lost. | Works fully | The agent sends the same tool list every turn, so it keeps the trimmed list to avoid doing the same work again. The trimming always gives the same result, so without the cache only speed changes. | Osher Elhadad, #84 |
+| `searchfold` | none | Nothing kept | Works fully | Works fully | Works fully | It folds repeated file paths in search output into headings, using only that output. It is used only when the fold converts back to the exact original, so nothing needs saving. | Osher Elhadad, #89 |
+| `cacheinject` | metadata | Store: one short hash per message of the last turn | Works with less: cache bookmarks only at fixed positions. An edited earlier message then costs the full price. | Works fully | Works fully | To put a cache bookmark just before the first message that changed, it must remember a fingerprint of each message from the last turn. It keeps only short hashes, never the text. | Osher Elhadad, first commit a91d6f4; budget in #32 |
+| `cachesplit` | none | Nothing kept by the component. The dashboard keeps one hash per thread for savings reports. | Works fully | Works fully | Works fully | It cuts the system prompt so the part that changes every session comes after the cache bookmark. That depends only on the current request, so it needs no memory. | #32 |
+| `textclean` | none | Nothing kept | Works fully | Works fully | Works fully | It only removes terminal colour codes and screen-redraw leftovers that were never visible text. The result depends only on the output itself, so nothing needs saving. | Osher Elhadad, #89 |
+| `toolfilter` | none | Nothing kept | Works fully | Works fully | Works fully | It removes the tool, MCP-server and skill declarations the operator listed. It decides from that fixed list and the current request, so there is nothing to remember. | Osher Elhadad, #84 |
+| `mask` | content | Store: the masked text it sent, and the original output | Shortens a message for one turn, then **breaks the cache** when the full text comes back. No way back. | Today: same as Off. **With a change:** works and keeps the cache stable, because the masked text is rebuilt from the message alone. No way back. | Works fully, with `expand` | It hides old tool outputs, and must send the same masked text every later turn. That text is built only from the message, so a flag that says "masked" is enough to rebuild it; the stored original is only for `expand`. | Osher Elhadad, first commit a91d6f4; storage rules in #187 |
+| `failed_run` | content | Store: the shortened text it sent, and the original output | Shortens once, then **breaks the cache**. No way back. | Today: same as Off. **With a change:** works and keeps the cache stable, because the replacement is a fixed sentence. No way back. | Works fully, with `expand` | It replaces failed test or build runs that the agent has since run again with a fixed sentence. A flag that says "replaced" is enough to send the same sentence again; the original is stored only for `expand`. | Osher Elhadad, first commit a91d6f4 |
+| `collapse` | content | Store: the head-and-tail text it sent, and the original output | Cuts once, then **breaks the cache**. No way back. | Today: same as Off. **With a change:** works and keeps the cache stable if it also remembers the cut size (a number), which can depend on the model's window size. No way back. | Works fully, with `expand` | It is the last-resort limit for very large outputs. The cut is rebuilt from the output and the cut size, so it needs to remember only a flag and one number; the full output is stored only for `expand`. | Osher Elhadad, first commit a91d6f4 |
+| `readlifecycle` | content | Store: the rewrite it sent, and the original file read | Removes an old read once, then **breaks the cache**. No way back. | Today: same as Off. **With a change:** works and keeps the cache stable if it also remembers which label it used ("stale" or "superseded"). No way back. | Works fully, with `expand` | It removes file reads that a later edit or read made out of date. The label can change as the conversation goes on, so it must remember the label it first used, not the text; the original is stored only for `expand`. | Osher Elhadad, #89 |
+| `skeleton` | content | Store: the code skeleton it sent, and the original source | **Skips.** | **Skips.** | Works fully, with `expand` | It removes function bodies from source code. Without the saved original, the agent could not tell a removed body from an empty one, so it refuses to run unless it can store the original. | Osher Elhadad, first commit a91d6f4 |
+| `cmdfilter` | content | Store: the filtered text (a speed-up), and the original output | Works. Same bytes every turn, so the cache is safe. No way back. | Works, as Off | Works fully, with `expand` | It applies a filter for each known command to its output, and the same output always filters to the same text. It stores the original only so the agent can get dropped lines back. | Osher Elhadad, first commit a91d6f4; memo in #188 |
+| `linecap` | content | Store: the original output | Works. Same bytes every turn. No way back. | Works, as Off | Works fully, with `expand` | It shortens very long lines and folds repeated lines, the same way every time. It stores the original only so that the agent can ask for the cut lines back. | Osher Elhadad, #89 |
+| `dedup` | content | Store: the original output | Works. Same bytes every turn. The note still says "expand" with nothing to expand. | Works, as Off | Works fully, with `expand` | It replaces a repeated tool output with a pointer to the earlier copy, which is still in the same request. It stores the repeat only so that the agent can ask for it back. | Osher Elhadad, first commit a91d6f4 |
+| `smartcrush` | content | Store: the original output | Works. Same bytes every turn. No way back. | Works, as Off | Works fully, with `expand` | It keeps the first and last items of a long JSON array, plus any error items, the same way every time. It stores the full array only so that the agent can ask for it back. | Osher Elhadad, first commit a91d6f4 |
+| `extract` | content | Store: the original output | Works. Same bytes every turn. No way back. | Works, as Off | Works fully, with `expand` | It removes clear noise such as repeated lines and progress bars, the same way every time. It stores the original only so that the agent can ask for it back. | Osher Elhadad, first commit a91d6f4 |
+| `coref` | content | Store: the cut text it sent, the original output, and a count of cache rebuilds it spent (metadata) | **No spending limit:** the count always reads zero. Each cut lasts one turn, then **breaks the cache**. | Today: **worse than useless.** The limit works, but it spends it on cuts that undo themselves next turn. **Turn it off.** **With a change:** works, because the stub it leaves is built from the cut text alone. | Works fully, with `expand` | It removes tool outputs that nothing later refers to, which deliberately changes the cached history. It must remember which outputs it cut and how many cache rebuilds it spent; the stub itself can be rebuilt from the output. | David Amid, commit b224704; docs/proposals/coref-compaction.md |
+| `extract_llm` | content | Store: the model's rewrite and summary, a copy shared across sessions, and the original output. Memory: counts per session. | Pays one model call per new large output, applies it for one turn, then **breaks the cache**. On a provider without prompt caching it pays again every turn, up to 8 calls per turn. | Same as Off, and its cost check approves **more** calls: it remembers it saw an output, and counts on reuse that cannot happen. **Cannot work:** model text cannot be rebuilt. | Works fully: one call, then free reuse | A model rewrites each large tool output. The words differ each time it asks, so the only way to send the same bytes next turn is to keep the rewrite. That is content. | Osher Elhadad, #51; storage rules in #40 and #188 |
+| `extract_llm_sweep` | content | Store: the removal decisions with a short description of each output, the original outputs, and "still needed" answers (metadata) | Has no copy of last turn's text, so it **pays full price** to send excerpts of up to 12 outputs to the model. Removals last one turn, then **break the cache**. | Today: same as Off. **With a change:** it can repeat its removals from a flag, because the description it leaves has no text. The cheap question to the model still needs last turn's text. | Works fully: a cheap question over the cached text, then free reuse | It asks the agent's model which old outputs are no longer needed. The cheap way to ask needs the exact text sent last turn; repeating the removal needs only a flag per output. | David Amid, #118 |
+| `summarize` | content | Store: the model-written summary and the replaced turns. Memory: a copy of the turns while the model call runs. | **Does not start** by default: it cannot tell how full the window is. Without a session (`/compact`) it works in one request, with no way back. | **Pays for a summary every turn above 90% full and throws it away.** The next turn can wait up to 120 seconds for it. **Cannot work:** model text cannot be rebuilt. | Works fully | It replaces old turns with a model-written summary. The words differ each time, so it must keep the summary to send the same bytes next turn. At "metadata only" it can see the window is full but cannot keep the result. | Osher Elhadad, commit 68e8b51; checkpoint in #430 |
+| `cache_aware_summarizer` | content | Store: the summary and the replaced turns. Memory: copies of conversation turns for summaries during idle time and after a cold turn. | **Does not start** by default: it cannot tell how full the window is. | It keeps copies of turns in memory, which is content. On Anthropic it cannot ask, so it costs nothing and does nothing. On OpenAI it **pays and throws the summary away** every turn. **Cannot work.** | Works fully | Like `summarize`, it must keep the summary to send the same bytes later. It also holds the conversation in memory so it can summarize while the user is idle. | Itay Nakash, #256 |
+| `agentdiet` | content | Store: the model-shortened step it sent, and the original step | **Pays one model call per turn**, and the step it shortened last turn comes back in full, which **breaks the cache**. | Same as Off. **Cannot work:** model text cannot be rebuilt. | Works fully | A model rewrites one older agent step each turn. The words differ each time, so the history stays shortened only if every rewrite is kept and sent again. | Itay Nakash, #66 |
 
 ### Libraries that are not components
 
@@ -87,24 +98,43 @@ only a pointer into the code.
 
 ## Features outside the pipeline
 
-| Feature | Kind | Where | Required? | With storage off | With content capture off | Reason |
-|---|---|---|---|---|---|---|
-| `expand` and the stashed originals | content | Store | No | The `expand` tool is not offered. Removals cannot be undone. | No effect | When the proxy replaces a large output with a short marker, it must keep the original so the model can ask for it back. |
-| Frozen decisions and cached model results | content | Store (pinned, about 2.8 hours) | No | All gone. Components work again from the request, or skip. | No effect | Once a message is shortened inside the provider's cached prompt, the proxy must send exactly the same text every later turn, or the user pays to rebuild the cache. It also keeps paid model answers so it does not pay twice. |
-| Billed-token and cache-touch records | metadata | Store | No | Not kept. `summarize`'s "how full is the window" trigger cannot fire. | No effect | To judge how full the context window is, the proxy needs the size the provider billed last turn, and the time the cached prompt was last used. |
-| **Keep-alive pings** | **content and a credential** | Memory, masked, until the next request or about 14 minutes | No | **Still kept.** Pings still go out. | **Still kept** | To keep the prompt cache warm while the user is away, the proxy must send the exact same prompt again with the user's own credential. |
-| **Prefix-ask body stash** | **content** | Memory: 2 full bodies per thread, up to 96 MB | No | **Still kept** | **Still kept** | To ask the agent's model a question cheaply, the proxy adds it to the exact text it sent last turn, which the provider has already cached. That needs the last turn's full text. |
-| Observe-mode shadow store | content | Memory | Only in observe mode | **Still a real store**, it ignores the switch | No effect | Observe mode runs the pipeline later on a copy to estimate savings, and that copy needs a store to act like the real one. |
-| Dashboard database | content and metadata | SQLite file | No | No effect | Content columns stay empty. Names of tools, MCP servers and skills, error text and rejection text are still written. Rows written before stay. | The dashboard shows what was removed and what your setup carries. Every number on it needs only counts and prices. |
-| Dashboard memos | content | Memory: declaration and system-prompt text | No | No effect | **Still kept** while the dashboard is on | It remembers declaration text so it does not count the tokens of the same tool list again on every request. |
-| Archive | content and metadata | Remote object storage, plus a local index | No | No effect | Archives only what was already captured | It moves old conversations off the local disk, so the database stays small and old history can still be opened. |
-| Insights | metadata | Reads the dashboard, keeps nothing | No | No effect | No effect | A cost report needs only counts, tool names and prices, not the text. |
-| Thread tracker | metadata | Memory | Yes | No effect | No effect | It tells the main agent from its subagents by checking, with hashes, whether a new request continues an earlier one. |
-| Session tracker | metadata | Nothing kept | Yes | No effect | No effect | It needs a stable label per conversation. When the client sends none, it makes one by hashing how the conversation starts. |
-| Mode tracker | metadata | Memory | Yes | No effect | No effect | It must know how much of the conversation the provider already cached, so it never edits that part. |
-| Wait-cause and lifecycle signals | metadata | Memory, plus dashboard rows | No | No effect | No effect | To tell why the agent paused (a tool, a person, a subagent), it reads the request once and keeps only counts and ids. |
-| Metrics (`/stats`, `/metrics`) | metadata | Memory | Yes | No effect | No effect | Totals and rates need only numbers. |
-| Accounts (hosted) | account data | Control database | Hosted only | No effect | No effect | This is the account system: who you are, your settings and your consent flag. It holds no transcripts. |
+| Feature | Kind | Off | Metadata only | Everything | Reason |
+|---|---|---|---|---|---|
+| `expand` and the stashed originals | content | Not offered. Removals cannot be undone. | Not offered. | Works | When the proxy replaces a large output with a short marker, it must keep the original so the model can ask for it back. You cannot give back text you did not keep. |
+| Frozen decisions and cached model results | content | All gone | Gone. Deterministic components could use a flag instead (see above). | Kept for about 2.8 hours | Once a message is shortened inside the cached prompt, the proxy must send exactly the same text every later turn, or the user pays to rebuild the cache. |
+| Billed-token and cache-touch records | metadata | Gone. `summarize` cannot tell how full the window is. A warm cache can look cold when one conversation arrives under two ids. | **Kept.** This is the record that makes `summarize` start, and so start wasting calls. | Kept | To judge how full the context window is, the proxy needs the size the provider billed last turn, and the time the cached prompt was last used. |
+| **Keep-alive pings** | content and a credential | **Today: still on**, holding the last body and the credential. Should be off. | Off | Works | To keep the prompt cache warm, the proxy must send the exact same prompt again with the user's own credential. Without the text there can be no ping. |
+| **Prefix-ask body stash** | content | **Today: still on**, 2 full bodies per thread. Should be off. | Off. `extract_llm_sweep` then pays full price; `cache_aware_summarizer` gives up. | Works | To ask the agent's model a question cheaply, the proxy adds it to the exact text it sent last turn, which the provider already cached. |
+| Observe-mode shadow store | content | **Today: still a real store.** Should follow the level. | Should follow the level | Works | Observe mode runs the pipeline later on a copy to estimate savings, and the copy should store what the real run would store. |
+| Dashboard database | content and metadata | Off | Numbers, enums, ids, and tool, MCP-server and skill names. **No** before/after text, summaries, declaration text, error text or rejection text. | Everything, when content capture is on | The dashboard shows what was removed and what your setup carries. Every number on it needs only counts and prices. |
+| Dashboard memos | content | Off with the dashboard | Hash and token count only. That is all they need. | Declaration and system-prompt text | They remember a tool list so they do not count its tokens again on every request. A hash and a count are enough. |
+| Archive | content and metadata | Off | Metadata rows only | Everything | It moves old conversations off the local disk, so the database stays small and old history can still be opened. |
+| Insights | metadata | Off (needs the dashboard) | Works | Works | A cost report needs only counts, tool names and prices, not the text. |
+| Thread tracker | metadata | Works | Works | Works | It tells the main agent from its subagents by checking, with hashes, whether a new request continues an earlier one. |
+| Session tracker | metadata | Works | Works | Works | It needs a stable label per conversation. When the client sends none, it makes one by hashing how the conversation starts. |
+| Mode tracker | metadata | Works | Works | Works | It must know how much of the conversation the provider already cached, so it never edits that part. |
+| Wait-cause and lifecycle signals | metadata | Off (needs the dashboard) | Works | Works | To tell why the agent paused, it reads the request once and keeps only counts and ids. |
+| Metrics (`/stats`, `/metrics`) | metadata | Works | Works | Works | Totals and rates need only numbers. |
+| Accounts (hosted) | account data | Works | Works | Works | This is the account system: who you are, your settings and your consent flag. It holds no transcripts. |
+
+## What "metadata only" would need
+
+This level does not exist yet. To add it:
+
+1. **A separate "may store content" check**, asked before every model call and before offering
+   `expand`. Today one flag answers both "can I keep the original?" and "can I keep the result?".
+   Either answer makes some components pay for a model call and then throw the result away.
+2. **An "acted on this" flag per message** for the rule-based components. 9 of the 11 can rebuild
+   the exact same text next turn from the message the agent sends again, so the flag is enough to
+   keep the cache stable. The code already has a path that rebuilds lost text; the flag would feed it.
+3. **Two small extra values:** the cut size for `collapse`, and the label for `readlifecycle`.
+4. **A replay path for `coref`.** Until it exists, turn `coref` off at this level.
+5. **A replay path for `extract_llm_sweep` removals** from the flag.
+6. **Turn off the model-written components** (`extract_llm`, `summarize`, `cache_aware_summarizer`,
+   `agentdiet`) at this level. Their text cannot be rebuilt, so they either pay without result or
+   break the cache.
+7. **Turn off** keep-alive, the prefix-ask stash and `expand`. Keep only metadata columns in the
+   dashboard, and only hashes and counts in its memos.
 
 ## What this audit found
 
@@ -129,26 +159,31 @@ needs a decision from the owner; this page does not change any behaviour.
 7. **In hosted mode `--store` changes only the operator's config.** Each account follows only its
    own `store.enabled`.
 
-### Lossy with no way back when storage is off
+### Problems with storage off today
 
-- `mask`, `failed_run`, `collapse`, `readlifecycle`, `cmdfilter`, `linecap`, `dedup`, `smartcrush`,
-  `extract`, `extract_llm`, `extract_llm_sweep`, `agentdiet`, `coref`, and `summarize` without a
-  session.
-- The agent still has its own copy of the transcript. What is lost is the model's way to get the
-  text back through `expand`.
-- `skeleton` is the only component that refuses to run.
-- Nothing warns at startup when these run with storage off.
+- **Lossy with no way back:** `mask`, `failed_run`, `collapse`, `readlifecycle`, `cmdfilter`,
+  `linecap`, `dedup`, `smartcrush`, `extract`, `extract_llm`, `extract_llm_sweep`, `agentdiet`,
+  `coref`, and `summarize` without a session. `skeleton` is the only one that refuses.
+- **Breaks the cache:** `mask`, `failed_run`, `collapse`, `readlifecycle`, `extract_llm`,
+  `extract_llm_sweep`, `agentdiet` and `coref` shorten a message once, then send it in full the
+  next turn. Storage off can therefore cost more than no compaction.
+- **Pays for model calls that last one turn:** `extract_llm`, `extract_llm_sweep` (at full price)
+  and `agentdiet`.
+- **`coref` loses its spending limit.**
+- `summarize` and `cache_aware_summarizer` do not start. This is safe, but only by accident: they
+  start as soon as the billed-token record is kept, as at "metadata only".
+- Nothing warns at startup when these components run with storage off.
 
-### Other problems with storage off
+## Open questions
 
-- **`summarize` (with a session) and `cache_aware_summarizer` pay for model calls and throw the
-  results away**, every time they trigger.
-- **`coref` loses its spending limit.** Its count of cache rebuilds always reads zero.
-- `mask`, `failed_run`, `collapse`, `readlifecycle`, `extract_llm`, `extract_llm_sweep`, `agentdiet`
-  and `coref` send a shortened message once, then the full message on the next turn. This breaks
-  the cached prompt, so storage off can cost more than no compaction.
+1. **Does "Off" allow in-memory metadata?** This page assumes yes. Without the tracker of how much
+   the provider cached, components can edit the cached part of the conversation.
+2. **Are tool, MCP-server and skill names metadata?** They are ids, but a user chooses them.
+3. **Are content hashes metadata?** They are short, unsalted SHA-256 values. Anyone who can read
+   the store can check whether a guessed exact text was seen. A secret salt would stop that.
+4. **Is a client-sent session id metadata?** It can hold a user or account id.
 
-### Comments that disagree with the defaults
+## Comments that disagree with the defaults
 
 - The dashboard's `CaptureContent` comment says it is on by default. It is off.
 - The account `CaptureContent` comment says "Off by default". A new account starts with it **on**.
@@ -162,7 +197,7 @@ The rule is in [`CLAUDE.md`](https://github.com/rossoctl/context-guru/blob/main/
 
 - Every PR that adds or changes a component or feature states its data dependence and what it does
   with storage off, and updates this page.
-- If a PR changes a row's **Kind** or its storage-off behaviour, in either direction, it says so at
+- If a PR changes a row's **Kind** or any of its three level columns, in either direction, it says so at
   the top of the PR. The person in "Decided by" confirms it before merge.
 - Write the reason in plain words: **why** the component needs the data. A file name or line number
   is not a reason. The test rejects it.

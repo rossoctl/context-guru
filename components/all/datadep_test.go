@@ -11,7 +11,7 @@ import (
 )
 
 // docs/data-dependence.md says, for every registered component, whether it depends on stored
-// customer data and what it does when the user turns storage off. Many users do turn it off, and a
+// customer data and what it does at each storage level (off, metadata only, everything). Many users do turn it off, and a
 // component that quietly starts to need data stops working for them with nothing reported (#428).
 //
 // This guard makes the table hard to skip: a component registered without a row fails, a row for a
@@ -41,15 +41,18 @@ var codeRef = regexp.MustCompile(`\.go(:\d+)?\b|:\d+\b`)
 // same way as every other component.
 var buildTagged = map[string]string{"skeleton": "cg_skeleton"}
 
-// The column order of the component table. Cells are addressed by these indexes below.
+// The column order of the component table. Cells are addressed by these indexes below. The three
+// level columns say what the component does with storage off, with metadata only, and with
+// everything stored.
 const (
-	colKind      = 0 // after the name cell
-	colWhere     = 1
-	colRequired  = 2
-	colStoreOff  = 3
-	colReason    = 4
-	colDecidedBy = 5
-	numCols      = 6
+	colKind       = 0 // after the name cell
+	colWhere      = 1
+	colOff        = 2
+	colMetaOnly   = 3
+	colEverything = 4
+	colReason     = 5
+	colDecidedBy  = 6
+	numCols       = 7
 )
 
 func TestDataDependenceDocCoversEveryComponent(t *testing.T) {
@@ -117,7 +120,10 @@ func TestDataDependenceDocCoversEveryComponent(t *testing.T) {
 		for _, c := range []struct {
 			col  int
 			what string
-		}{{colWhere, "Where"}, {colRequired, "Required"}, {colStoreOff, "With storage off"}, {colReason, "Reason"}, {colDecidedBy, "Decided by"}} {
+		}{
+			{colWhere, "Where"}, {colOff, "Off"}, {colMetaOnly, "Metadata only"}, {colEverything, "Everything"},
+			{colReason, "Reason"}, {colDecidedBy, "Decided by"},
+		} {
 			if cells[c.col] == "" {
 				t.Errorf("%s: row %q has an empty %q cell", dataDepDoc, n, c.what)
 			}
