@@ -40,12 +40,12 @@ Apply it? Say yes, or run: /context-guru:adapt cache apply adaptive@3f9a1c
 The overview runs all three and prints one line each. Each row is a separate change measured on its own, so the rows are not added together:
 
 ```text
-The best single change would have saved $12.40 over the last 30 days.
+The best single change would have saved $31.40 over the last 30 days.
 
   (each row is a separate change measured on its own; do not add them)
   cache       $12.40  cache strategy 5-min-ping -> adaptive
   compaction          the compaction replay failed: no sessions in the window
-  tools               already on the best option
+  tools       $31.40  filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more
 
 See one, and apply it: /context-guru:adapt cache | compaction | tools
 ```
@@ -53,10 +53,28 @@ See one, and apply it: /context-guru:adapt cache | compaction | tools
 For `tools`, the unused items are listed below the table:
 
 ```text
-Tools: already on the best option.
+Tools: 9 declared items were never used; filtering the 6 with enough evidence would have saved $31.40.
 
-Unused in this window:
-  MCP server  playwright  $18.40  never used
+                                                                  saved  spent     net
+  ▸  Keep everything                                                 $0     $0      $0  ░░░░░░░░░░░░  current, default
+  ★  Filter the 6 unused items seen in 5+ sessions over 7+ days  $31.40     $0  $31.40  ███████████░  best
+     Filter all 9 unused items                                   $33.90     $0  $33.90  ████████████
+
+  saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent.
+  counterfactual · unused declarations priced on the requests that carried them · 2026-09-08..2026-10-08 · 64 sessions, 5,210 requests
+  ! Unused means unused in this window, not that it will never be needed.
+  ! Filtering changes the cached prefix, so the next request re-writes it once; that cost is not included.
+
+Unused in this window (5 of 9):
+  mcp server  playwright             $18.40  never used
+  mcp server  figma                   $6.20  never used
+  skill       brand-voice             $3.10  never used
+  mcp tool    sentry__list_releases   $2.20  never used
+  skill       slides                  $1.50  never used
+
+Change: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more (takes effect now).
+Why: declared in 5+ sessions over 7+ days and never called
+Apply it? Say yes, or run: /context-guru:adapt tools apply remove-sufficient@8c21e0d4
 ```
 
 ## Applying a change
@@ -70,6 +88,13 @@ Nothing is changed by looking. When there is a recommendation, the screen ends w
 ```text
 Applied: cache strategy set to adaptive (takes effect at the next proxy restart).
 Undo: /context-guru:adapt cache apply 5-min-ping
+```
+
+Some changes take a while on the proxy (building a keep-alive plan, for example). The command waits for up to two minutes, with a seconds counter on a terminal, then prints the result the same way:
+
+```text
+Applied: 6 unused items filtered (playwright, figma, brand-voice and 3 more) (takes effect now).
+Undo: /context-guru:adapt tools apply keep
 ```
 
 The token after `apply` is the option and the report it came from. If the numbers have changed since you saw them (new sessions arrived, for example), the proxy refuses, nothing is written, and the current report is shown again so you can decide on what is true now:

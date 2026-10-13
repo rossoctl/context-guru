@@ -514,7 +514,7 @@ def render_adapt(rep: dict, o: dict) -> list[str]:
     if items:
         shown = items if o["details"] else items[:5]
         L += ["", f"Unused in this window ({len(shown)} of {len(items)}):" if len(shown) < len(items) else "Unused in this window:"]
-        L += C.table([[i.get("kind", ""), i["name"], dollars(i.get("usd", 0)),
+        L += C.table([[i.get("kind", "").replace("_", " "), i["name"], dollars(i.get("usd", 0)),
                        "never used" if not i.get("last_used_ms") else "last used " + day(i["last_used_ms"], o)] for i in shown], "llrl")
     if o["details"]:
         L += [""] + [f"  {x.get('label') or x['id']}: {x.get('unavailable') or x['detail']}" + (f" (helped {x['sessions_helped']}, hurt {x['sessions_hurt']} sessions)"

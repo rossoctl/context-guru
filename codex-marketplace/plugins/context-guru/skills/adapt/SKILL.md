@@ -13,8 +13,8 @@ python3 ../../scripts/cg.py adapt
 Append the subcommand the user named (`cache`, `compaction` or `tools`), and `details` when they ask for more.
 In the output, read `/context-guru:adapt` as this skill.
 
-If the output has no `Apply it?` line, stop. If it has one, ask the user ONE yes/no question: the `Change:` line
-followed by "Apply it? (yes/no)", and wait for the answer. Only on yes, run
+If the output has no `Apply it?` line, stop. If it has one, print the output first, then ask the user ONE yes/no
+question: the `Change:` line followed by "Apply it? (yes/no)", and wait for the answer. Only on yes, run
 `python3 ../../scripts/cg.py adapt <kind> apply <option>@<basis>` with the exact token from the `Apply it?` line,
 with `sandbox_permissions="require_escalated"` (it changes the proxy's configuration), and print its output.
 On anything else say "Nothing changed." and stop. Never apply without a yes.

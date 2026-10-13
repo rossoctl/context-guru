@@ -85,7 +85,7 @@ func cgProxyStub(t *testing.T, cache string) string {
 		w.Write([]byte(`{"state":"running","poll":"/api/adapt/tools/apply/job1"}`))
 	})
 	mux.HandleFunc("GET /api/adapt/tools/apply/job1", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{"state":"done","ok":true,"applied":"remove-unused","previous":"keep","effective":"now","note":"1 unused item filtered (playwright)","undo":{"option":"keep"}}`))
+		w.Write([]byte(`{"state":"done","ok":true,"applied":"remove-sufficient","previous":"keep","effective":"now","note":"6 unused items filtered (playwright, figma, brand-voice and 3 more)","undo":{"option":"keep"}}`))
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	for path, key := range map[string]string{"/api/spend/explain": "spend", "/api/tools": "tools", "/api/tools/last-used": "last_used"} {
@@ -173,7 +173,7 @@ func TestCGGoldens(t *testing.T) {
 		{"adapt-tools", warm, []string{"adapt", "tools"}, 0},
 		{"adapt-apply", warm, []string{"adapt", "cache", "apply", "adaptive@3f9a1c"}, 0},
 		{"adapt-apply-stale", warm, []string{"adapt", "cache", "apply", "adaptive@000000"}, 1},
-		{"adapt-apply-async", warm, []string{"adapt", "tools", "apply", "remove-unused"}, 0},
+		{"adapt-apply-async", warm, []string{"adapt", "tools", "apply", "remove-sufficient@8c21e0d4"}, 0},
 		{"adapt-apply-unknown", warm, []string{"adapt", "cache", "apply", "nonsense"}, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -229,7 +229,7 @@ func TestDocsExamplesAreTheGoldens(t *testing.T) {
 	for golden, page := range map[string]string{
 		"home": "status", "savings": "savings", "cache-warm": "cache", "cache-cold": "cache",
 		"waste": "waste", "session": "session", "doctor": "doctor",
-		"adapt": "adapt", "adapt-cache": "adapt", "adapt-tools": "adapt", "adapt-apply": "adapt", "adapt-apply-stale": "adapt",
+		"adapt": "adapt", "adapt-cache": "adapt", "adapt-tools": "adapt", "adapt-apply": "adapt", "adapt-apply-stale": "adapt", "adapt-apply-async": "adapt",
 	} {
 		g := strings.TrimRight(string(cgRead(t, "cg", golden+".golden")), "\n")
 		b, err := os.ReadFile(filepath.Join("..", "docs", "plugin", page+".md"))

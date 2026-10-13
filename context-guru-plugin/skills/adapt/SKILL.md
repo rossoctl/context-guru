@@ -5,7 +5,7 @@ argument-hint: "[cache|compaction|tools] [details] [--days N]"
 allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py:*)
 ---
 
-Tell the user in one line that the analysis replays their history and can take up to a minute. Then run this and print its output exactly as it is in one code block:
+Tell the user in one line that the analysis replays their history and can take up to a minute. Then run this with a Bash timeout of 180000 ms and print its output exactly as it is in one code block:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" adapt $ARGUMENTS
@@ -13,8 +13,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" adapt $ARGUMENTS
 
 If the output has no `Apply it?` line, stop there. Add nothing.
 
-If it has one, ask ONE yes/no question with AskUserQuestion. The question is the `Change:` line, for example
-"Apply: cache strategy 5-min-ping -> adaptive?", with the options "Yes, apply it" and "No, leave it".
+If it has one, the user must see the screen before being asked, so the order is fixed:
+first send the output as your message, then ask ONE yes/no question with AskUserQuestion. Never ask before
+the output is printed. The question is the `Change:` line plus the first line's dollar figure, for example
+"Apply: cache strategy 5-min-ping -> adaptive? (about $12.40 more saved over the last 30 days)", with the options
+"Yes, apply it" and "No, leave it".
 
 - Only on "Yes, apply it": run the exact command after `run:` on the `Apply it?` line, as
   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" adapt <kind> apply <option>@<basis>`, and print its output in one code block.
