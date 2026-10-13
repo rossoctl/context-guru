@@ -446,10 +446,16 @@ func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
 		sets map[string]map[string]*adaptToolsSet
 		keys []string
 	}
-	parts := make([]part, carriedShards)
-	step := (hi.Int64-lo.Int64)/carriedShards + 1
+	// A narrow scope reads in one query: every slice is a new connection, and a handful of
+	// sessions does not pay for sixteen (the same threshold scanDecls is used above).
+	shards := carriedShards
+	if len(reqs) < declScanMinSessions {
+		shards = 1
+	}
+	parts := make([]part, shards)
+	step := (hi.Int64-lo.Int64)/int64(shards) + 1
 	var g errgroup.Group
-	for k := 0; k < carriedShards; k++ {
+	for k := 0; k < shards; k++ {
 		k := k
 		g.Go(func() error {
 			q := `SELECT tenant_id, session_id, digest, kind, name, server, tokens, ts FROM tool_declarations
