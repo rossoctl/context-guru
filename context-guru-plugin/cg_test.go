@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -61,14 +62,28 @@ func cgProxyStub(t *testing.T, cache string) string {
 	mux.HandleFunc("/api/cachestate", file(cache))
 	mux.HandleFunc("GET /api/adapt/cache", file("adapt_cache"))
 	mux.HandleFunc("GET /api/adapt/tools", file("adapt_tools"))
-	mux.HandleFunc("GET /api/adapt/compaction", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"the compaction replay failed: no sessions in the window"}`))
-	})
-	mux.HandleFunc("POST /api/adapt/cache/apply", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/adapt/compaction", file("adapt_compaction"))
+	mux.HandleFunc("POST /api/adapt/compaction/apply", func(w http.ResponseWriter, r *http.Request) {
 		var b struct{ Option, Basis string }
 		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
+		if b.Option != "revert" || b.Basis != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"want a bare revert"}`))
+			return
+		}
+		w.Write([]byte(`{"ok":true,"kind":"compaction","applied":"revert","previous":"c1","effective":"now","note":"Restored the pipeline from before your last change."}`))
+	})
+	mux.HandleFunc("POST /api/adapt/cache/apply", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Option, Basis string
+			Force         bool
+		}
+		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
 		switch {
+		case b.Option == "by-segment" && !b.Force:
+			w.Write([]byte(`{"ok":false,"applied":"shadow","force_available":true,"note":"The go-live check did not pass, so it runs in shadow and changes nothing."}`))
+		case b.Option == "by-segment":
+			w.Write([]byte(`{"ok":true,"applied":"by-segment","effective":"now","note":"The plan is live although the go-live check did not pass","undo":{"option":"default","basis":"77b0c2e1"}}`))
 		case b.Basis != "" && b.Basis != "3f9a1c":
 			w.WriteHeader(http.StatusConflict)
 			w.Write([]byte(`{"error":"stale"}`))
@@ -175,6 +190,13 @@ func TestCGGoldens(t *testing.T) {
 		{"adapt-apply-stale", warm, []string{"apply", "cache", "adaptive@000000"}, 1},
 		{"adapt-apply-async", warm, []string{"apply", "tools", "remove-sufficient@8c21e0d4"}, 0},
 		{"adapt-apply-under-adapt", warm, []string{"adapt", "cache", "apply", "adaptive@3f9a1c"}, 1},
+		{"adapt-revert-under-adapt", warm, []string{"adapt", "revert", "compaction"}, 1},
+		{"adapt-compaction", warm, []string{"adapt", "compaction"}, 0},
+		{"adapt-compaction-details", warm, []string{"adapt", "compaction", "details"}, 0},
+		{"adapt-revert", warm, []string{"revert", "compaction"}, 0},
+		{"adapt-apply-gate", warm, []string{"apply", "cache", "by-segment@3f9a1c"}, 1},
+		{"adapt-apply-force", warm, []string{"apply", "cache", "by-segment@3f9a1c", "--force"}, 0},
+		{"adapt-apply-any-order", warm, []string{"apply", "adaptive@3f9a1c", "cache"}, 0},
 		{"adapt-apply-unknown", warm, []string{"apply", "cache", "nonsense"}, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -220,6 +242,50 @@ func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
 	for _, args := range [][]string{{"adapt", "cache", "apply", "adaptive@3f9a1c"}, {"adapt", "apply", "cache", "adaptive@3f9a1c"}} {
 		if out, code := runCGCode(t, base, nil, args...); code == 0 || strings.Contains(out, "Applied") {
 			t.Errorf("%v must not write (it is inside the pre-approved prefix): exit %d\n%s", args, code, out)
+		}
+	}
+}
+
+// No skill pre-approves a change. A pre-approved pattern names one READ command of cg.py (the first word picks
+// the command, so `cg.py waste:*` can only ever run the waste screen); a bare `cg.py:*` would also cover
+// `cg.py apply` and `cg.py revert` while that skill is active, and skip the harness's permission prompt.
+// Codex skills pre-approve nothing, and every write they run asks for escalation.
+func TestNoSkillPreApprovesAChange(t *testing.T) {
+	reads := map[string]bool{"adapt": true}
+	for _, c := range []string{"home", "savings", "cache", "waste", "session", "doctor"} {
+		reads[c] = true
+	}
+	allowed := regexp.MustCompile(`(?m)^allowed-tools:(.*)$`)
+	cgPat := regexp.MustCompile(`scripts/cg\.py([^)]*)\)`)
+	skills, _ := filepath.Glob(filepath.Join("skills", "*", "SKILL.md"))
+	if len(skills) < 10 {
+		t.Fatalf("found %d skills", len(skills))
+	}
+	for _, f := range skills {
+		m := allowed.FindStringSubmatch(readFileString(t, f))
+		if m == nil {
+			continue
+		}
+		for _, p := range cgPat.FindAllStringSubmatch(m[1], -1) {
+			words := strings.Fields(strings.TrimSuffix(p[1], ":*"))
+			if len(words) == 0 || !reads[words[0]] {
+				t.Errorf("%s pre-approves %q: name one read command, never a cg.py wildcard", f, "cg.py"+p[1])
+			}
+			for _, w := range words {
+				if w == "apply" || w == "revert" {
+					t.Errorf("%s pre-approves a change: %q", f, "cg.py"+p[1])
+				}
+			}
+		}
+	}
+	codex, _ := filepath.Glob(filepath.Join("..", "codex-marketplace", "plugins", "context-guru", "skills", "*", "SKILL.md"))
+	for _, f := range codex {
+		body := readFileString(t, f)
+		if allowed.MatchString(body) {
+			t.Errorf("%s: Codex skills pre-approve nothing", f)
+		}
+		if regexp.MustCompile(`cg\.py (apply|revert)`).MatchString(body) && !strings.Contains(body, "require_escalated") {
+			t.Errorf("%s runs a change without asking for escalation", f)
 		}
 	}
 }

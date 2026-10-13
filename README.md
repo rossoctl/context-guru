@@ -107,6 +107,7 @@ side by side (saved, spent and net dollars), and offers one change, which it mak
 | `/context-guru:adapt cache` | the cache keep-alive strategy |
 | `/context-guru:adapt compaction` | the tail-compaction configuration |
 | `/context-guru:adapt tools` | MCP servers, skills and tools you carry but never use |
+| `/context-guru:adapt revert <kind>` | undo the last change `adapt` made for that kind |
 
 ```
 Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 days.

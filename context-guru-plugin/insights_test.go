@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -885,8 +886,8 @@ func TestInsightSkillsAreRedirects(t *testing.T) {
 			if !strings.Contains(body, "moved to `/context-guru:"+to+"`") {
 				t.Errorf("does not say it moved to /context-guru:%s", to)
 			}
-			if !strings.Contains(body, "allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py:*)") {
-				t.Error("must be allowed to run only cg.py")
+			if !regexp.MustCompile(`allowed-tools: Bash\(python3 \$\{CLAUDE_PLUGIN_ROOT\}/scripts/cg\.py [a-z]+:\*\)`).MatchString(body) {
+				t.Error("must be allowed to run only its own cg.py command")
 			}
 			if strings.Contains(body, "CLAUDE_PLUGIN_OPTION_") {
 				t.Error("must not resolve plugin options; cg.py takes the proxy from the session")

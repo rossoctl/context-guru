@@ -1,1 +1,1 @@
-Applying is a separate command: /context-guru:adapt apply cache adaptive@3f9a1c
+Run this instead (a change is its own command): python3 "scripts/cg.py" apply cache adaptive@3f9a1c

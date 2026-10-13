@@ -1,0 +1,18 @@
+{
+ "kind": "compaction", "version": 1,
+ "summary": "No change clears the bar: the best option is $0.40 ahead on the requests that could be replayed, under the 0.5% needed to recommend it.",
+ "disagreement": "The replay covers 14% of requests; on the rest the options were not compared.",
+ "window": {"since": 1788881400000, "until": 1791473400000, "sessions": 40, "requests": 3100},
+ "class": "counterfactual", "method": "the compaction components replayed on stored requests",
+ "basis_id": "a1b2c3d4", "current": "current", "default": "default", "best": "c1",
+ "options": [
+  {"id": "current", "label": "Your current pipeline", "detail": "format > dedup > extract", "saved_usd": 9.6, "spend_usd": 0.2, "net_usd": 9.4},
+  {"id": "default", "label": "The default pipeline", "detail": "format > dedup > toon > extract", "saved_usd": 9.1, "spend_usd": 0.2, "net_usd": 8.9},
+  {"id": "c1", "label": "Add searchfold", "detail": "format > dedup > searchfold > extract", "saved_usd": 10.0, "spend_usd": 0.2, "net_usd": 9.8,
+   "held_out": {"vs_default_usd": 0.6, "vs_default_ci95": [-0.3, 1.5], "builder_gate": {"pass": false}}},
+  {"id": "none", "label": "No compaction", "saved_usd": 0, "spend_usd": 0, "net_usd": 0}
+ ],
+ "recommendation": null,
+ "calibration": {"observed_ping_usd_mean": 0.031, "replay_ping_usd_mean": 0.029},
+ "warnings": ["The replay covers 14% of requests; on the rest the options were not compared.", "12 sessions are in cold storage and were not read."]
+}

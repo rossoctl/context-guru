@@ -10,6 +10,8 @@
 | `/context-guru:adapt compaction` | the tail-compaction configuration |
 | `/context-guru:adapt tools` | MCP servers, skills and tools you carry but never use |
 | `/context-guru:adapt` | one line for each of the three |
+| `/context-guru:adapt apply <kind> <option>@<basis>` | make a change the screen offered (after a yes) |
+| `/context-guru:adapt revert <kind>` | undo the last change made with `adapt` for that kind |
 
 Add `details` for each option's settings and per-option notes, and `--days N` to change the window (default 30 days). The replay can take a few minutes; on a terminal a seconds counter runs while it works.
 
@@ -34,7 +36,7 @@ Apply it? Say yes, or run: /context-guru:adapt apply cache adaptive@3f9a1c
 ```
 
 - The first line is the answer.
-- `▸` marks the setting you have now, `★` the best one; the last column also names the default.
+- `▸` marks the setting you have now, `★` the recommended one; the last column also names the default. When the row with the highest net is not recommended (it failed the proxy's own check, or the gain is too small to trust), it is marked `☆` and says so.
 - **saved** is what the option avoided paying, **spent** is what the option paid for itself (keep-alive pings, Context Guru's own model calls), and **net** is saved minus spent. The bars compare net.
 - The footer line says how the numbers were obtained: `observed` (what was actually billed) or `counterfactual` (a replay of the same sessions under the other setting), the window, and how many sessions and requests it covers. Lines starting with `!` are caveats about the data.
 
@@ -45,7 +47,7 @@ The best single change would have saved $31.40 over the last 30 days.
 
   (each row is a separate change measured on its own; do not add them)
   cache       $12.40  cache strategy 5-min-ping -> adaptive
-  compaction          the compaction replay failed: no sessions in the window
+  compaction          no change recommended
   tools       $31.40  filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more
 
 See one, and apply it: /context-guru:adapt cache | compaction | tools
@@ -84,7 +86,7 @@ Nothing is changed by looking. When there is a recommendation, the screen ends w
 
 - In Claude Code, the command asks you one yes/no question. It applies the change only if you answer **Yes, apply it**; anything else leaves your settings as they were.
 - Run directly in a terminal, `cg.py adapt cache` asks `Apply this change? [y/N]`; the default is No.
-- To apply by hand, run the command on the `Apply it?` line. In a terminal the same write is `cg.py apply <kind> <token>`. It is a separate command from the read so that Claude Code asks permission for it as well (the read is pre-approved, the write is not).
+- To apply by hand, run the command on the `Apply it?` line. In a terminal the same write is `cg.py apply <kind> <token>`, and an undo is `cg.py revert <kind>`. They are separate commands from the read so that Claude Code asks permission for them as well: the read is pre-approved, a change never is. The words may come in either order (`apply tools X` or `apply X tools`); a change typed under `adapt` (`adapt compaction revert`) is not run, and the command prints the exact one to run instead.
 
 ```text
 Applied: cache strategy set to adaptive (takes effect at the next proxy restart).
@@ -120,6 +122,13 @@ Why: it had the highest net on your own sessions
 Apply it? Say yes, or run: /context-guru:adapt apply cache adaptive@3f9a1c
 ```
 
+When the proxy's own check fails (a keep-alive plan that did not beat the default on your most recent sessions, for example), nothing goes live and the result says so. Switching it on regardless is a second, separate decision, which the command asks about separately and sends only with `--force`:
+
+```text
+Not applied: The go-live check did not pass, so it runs in shadow and changes nothing.
+Apply anyway, although that check failed: /context-guru:adapt apply cache by-segment@3f9a1c --force
+```
+
 The `Undo:` line puts the previous setting back. Some changes take effect only after the proxy restarts or from the next session; the result line says which.
 
 ## Codex
@@ -134,9 +143,12 @@ The same command is the skill `$context-guru-adapt`, with the same words: `$cont
 | `The proxy at ... is not answering` | open a new session (it starts the proxy) or run `/context-guru:update` |
 | `This proxy is older than /context-guru:adapt` | `/context-guru:update` |
 | `The analysis took longer than 5 minutes` | a shorter window: `--days 7` |
-| `This proxy needs a dashboard sign-in` | on the hosted service, sign in to the dashboard and change the setting there |
+| `This proxy needs a sign-in for this` | on the hosted service, set `CG_TOKEN` to your context-guru token (it is picked up from the agent's own `cg_live_` key when there is one), or change the setting in the dashboard |
+| any other sentence | the proxy's own reason (for example, too many reports at once); act on it |
 
 ## The report format
+
+On the hosted service the command authenticates with the account's own proxy token in `x-context-guru-token`; these routes accept it for the caller's own account only. A local proxy answers loopback callers without one.
 
 Each subcommand reads one endpoint on the proxy's dashboard API and, after a yes, posts to a second one. Integrations can use them directly.
 
@@ -169,6 +181,7 @@ The report:
 - Money is in US dollars at the prices the proxy is configured with. Every option is evaluated on the same window and the same sessions.
 - `saved_usd` is gross (versus no lever at all), `spend_usd` is what the option itself spends, `net_usd = saved_usd - spend_usd`.
 - `recommendation` is `null` when the current setting is already the best, or when there is too little data to say; `summary` then says which.
+- Optional extras the screen shows when present: `disagreement` (one line, shown under the summary), per-option `held_out` (`vs_default_usd`, `vs_default_ci95`, `builder_gate.pass`; shown under `details`), `unavailable` (an option that could not be evaluated: `net_usd` is `null`, never 0), and `calibration`.
 - `items` is used by `tools` only. `sessions_helped`, `sessions_hurt`, `detail`, `per_month_usd` and `reason` are optional.
 
-The apply answer is `{"ok": true, "applied": "<id>", "previous": "<id>", "effective": "...", "note": "one line", "undo": {"option": "<id>", "basis": "<basis_id>"}}`. Errors are a non-2xx status with `{"error": "a sentence"}`: 400 for an unknown option, 409 when `basis` no longer matches the current report, 401 or 403 when the caller is not allowed to change the setting. `basis` is required (400 without it). The command always sends one: for an option typed without one it reads the current report first and sends that report's `basis_id`. `undo` may carry its own `basis` (the report after the write), which the `Undo:` line includes. 501 means the proxy has no configuration it can write; its `error` says what to do instead.
+The apply answer is `{"ok": true, "applied": "<id>", "previous": "<id>", "effective": "...", "note": "one line", "undo": {"option": "<id>", "basis": "<basis_id>"}}`. A body of `{"option": "revert"}` (no basis) undoes the last change made through this route; its answer has the same shape. `"force": true` is sent only after the user said yes a second time, when an earlier answer had `"ok": false` with `"force_available": true`. Errors are a non-2xx status with `{"error": "a sentence"}`: 400 for an unknown option, 409 when `basis` no longer matches the current report, 401 or 403 when the caller is not allowed to change the setting, 429 when too many reports or changes run at once. `basis` is required (400 without it). The command always sends one: for an option typed without one it reads the current report first and sends that report's `basis_id`. `undo` may carry its own `basis` (the report after the write), which the `Undo:` line includes. 501 means the proxy has no configuration it can write; its `error` says what to do instead.
