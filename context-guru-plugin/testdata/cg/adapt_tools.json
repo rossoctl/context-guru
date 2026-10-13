@@ -1,0 +1,17 @@
+{
+ "kind": "tools",
+ "summary": "already on the best option.",
+ "current": "keep",
+ "default": "keep",
+ "best": "keep",
+ "options": [],
+ "recommendation": null,
+ "items": [
+  {
+   "kind": "MCP server",
+   "name": "playwright",
+   "usd": 18.4,
+   "last_used_ms": null
+  }
+ ]
+}

@@ -109,6 +109,7 @@ nav:
           - Waste: plugin/waste.md
           - Session: plugin/session.md
           - Doctor: plugin/doctor.md
+          - Adapt: plugin/adapt.md
           - Terminal views: plugin/terminal-views.md
           - Status line: plugin/statusline.md
           - Configuration and troubleshooting: plugin/configuration.md

@@ -95,6 +95,29 @@ Each command opens with one line that answers its question, then a small picture
 | `/context-guru:waste` | What do I carry and never use? | 6 things you carry were never used: $37.70 in 7 days, about $161.57 a month. |
 | `/context-guru:session` | What happened in this session? | In the last 4 hours of this session (9h20m long), cache misses cost you about $4.20 of the $13.50 billed (2 misses in 31 messages). |
 | `/context-guru:doctor` | Is it set up right? | All 7 checks pass. |
+| `/context-guru:adapt` | Which setting would have cost least on my history? | The best single change would have saved $12.40 over the last 30 days. |
+
+### Adapt the settings to how you work
+
+`/context-guru:adapt` replays your own past sessions under each setting, shows the current, default and best
+side by side (saved, spent and net dollars), and offers one change, which it makes only after you say yes:
+
+| Subcommand | Tunes |
+|---|---|
+| `/context-guru:adapt cache` | the cache keep-alive strategy |
+| `/context-guru:adapt compaction` | the tail-compaction configuration |
+| `/context-guru:adapt tools` | MCP servers, skills and tools you carry but never use |
+
+```
+Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
+
+                           saved  spent     net
+  ▸  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░  current, default
+  ★  Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████  best
+     No pings                 $0     $0      $0  ░░░░░░░░░░░░
+```
+
+(Illustrative numbers.) Codex: `$context-guru-adapt cache`. Reference: [docs/plugin/adapt.md](docs/plugin/adapt.md).
 
 Five more views draw in the terminal (`watch`, `timeline`, `chart`, `heatmap`, `fill`).
 

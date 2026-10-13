@@ -1,0 +1,10 @@
+{
+ "ok": true,
+ "applied": "adaptive",
+ "previous": "5-min-ping",
+ "effective": "restart",
+ "note": "cache strategy set to adaptive",
+ "undo": {
+  "option": "5-min-ping"
+ }
+}

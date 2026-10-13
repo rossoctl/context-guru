@@ -45,6 +45,10 @@ the other setting and restart the owned proxy. `$context-guru-insights` produces
 ranked report from measured proxy data; its cost arithmetic and exact fix commands come from code,
 not model estimation.
 
+`$context-guru-adapt` (with `cache`, `compaction` or `tools`) replays your own history under each
+setting, shows current, default and best side by side, and applies the one recommended change only
+after you answer yes. See [docs/plugin/adapt.md](../../../docs/plugin/adapt.md).
+
 For a narrower report, use `$context-guru-insights-capabilities`,
 `$context-guru-insights-components`, or `$context-guru-insights-idle`.
 

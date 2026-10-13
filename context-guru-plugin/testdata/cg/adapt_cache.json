@@ -1,0 +1,56 @@
+{
+ "kind": "cache",
+ "version": 1,
+ "summary": "switch to adaptive keep-alive to save about $12.40 more over the last 30 days.",
+ "window": {
+  "since": 1788881400000,
+  "until": 1791473400000,
+  "sessions": 412,
+  "requests": 18301
+ },
+ "class": "counterfactual",
+ "method": "replay of past sessions",
+ "basis_id": "3f9a1c",
+ "current": "5-min-ping",
+ "default": "5-min-ping",
+ "best": "adaptive",
+ "options": [
+  {
+   "id": "5-min-ping",
+   "label": "Ping every 5 min",
+   "billed_usd": 300,
+   "saved_usd": 40.1,
+   "spend_usd": 9.0,
+   "net_usd": 31.1,
+   "detail": "one ping per idle 4m30s, up to 12",
+   "sessions_helped": 120,
+   "sessions_hurt": 40
+  },
+  {
+   "id": "adaptive",
+   "label": "Adaptive keep-alive",
+   "billed_usd": 287,
+   "saved_usd": 51.2,
+   "spend_usd": 7.7,
+   "net_usd": 43.5
+  },
+  {
+   "id": "none",
+   "label": "No pings",
+   "billed_usd": 331,
+   "saved_usd": 0,
+   "spend_usd": 0,
+   "net_usd": 0
+  }
+ ],
+ "recommendation": {
+  "option": "adaptive",
+  "change": "cache strategy 5-min-ping -> adaptive",
+  "net_delta_usd": 12.4,
+  "effective": "restart",
+  "reason": "most idle gaps here end between 5 and 20 minutes"
+ },
+ "warnings": [
+  "31 sessions ended inside the window; their last gap is censored."
+ ]
+}

@@ -8,8 +8,9 @@
     waste     what do I carry and never use
     session   what happened in this session
     doctor    is it set up right
+    adapt     which cache / compaction / tools setting would have cost least on my own history
 
-Read-only: GETs against the local proxy. Output is
+Read-only: GETs against the local proxy, except `adapt <kind> apply`, which the user confirms first. Output is
 plain Unicode, no colour codes, so it reads the same on a light and a dark terminal and survives
 being echoed by the model. Stdlib only; `run(cmd, api, opts)` takes the fetcher so tests feed it a
 captured bundle.
@@ -22,8 +23,11 @@ import datetime as dt
 import json
 import os
 import re
+import socket
 import sys
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -66,6 +70,31 @@ class Api:
                 return json.loads(r.read())
         except (OSError, ValueError):
             return None
+
+    def send(self, method: str, path: str, params: dict | None = None, body: dict | None = None,
+             timeout: float = 30) -> tuple[int, dict | None]:
+        """Like get, but keeps the HTTP status so a failure can be told apart: 0 = no answer, -1 = timed out."""
+        if self.fixture is not None:
+            doc = self.fixture.get(path if method == "GET" else f"{method} {path}")
+            return (200, doc) if doc is not None else (404, None)
+        q = "?" + urllib.parse.urlencode(params) if params else ""
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.base + path + q, data=data, method=method,
+                                     headers={"Content-Type": "application/json"} if data else {})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read())
+            except ValueError:
+                return e.code, None
+        except socket.timeout:
+            return -1, None
+        except urllib.error.URLError as e:
+            return (-1 if isinstance(e.reason, socket.timeout) else 0), None
+        except (OSError, ValueError):
+            return 0, None
 
 
 def proxy_base(port: str | None) -> str | None:
@@ -394,6 +423,170 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
     return L
 
 
+# ---------------------------------------------------------------------------------------------
+# /context-guru:adapt — the proxy replays your own history under each setting and returns one report
+# per kind (contract: docs/plugin/adapt.md). This side only renders it and, after a yes, sends back
+# an option id the report offered. It never composes configuration itself.
+
+KINDS = ("cache", "compaction", "tools")
+ADAPT_DAYS = 30
+ADAPT_TIMEOUT = 120
+EFFECT = {"now": "takes effect now", "restart": "takes effect at the next proxy restart",
+          "next_session": "takes effect from the next session"}
+
+
+def adapt_error(api: Api, kind: str, status: int, doc: dict | None) -> str:
+    err = (doc or {}).get("error") if isinstance(doc, dict) else None
+    if status == 0:
+        return f"The proxy at {api.base} is not answering. Open a new session (it starts the proxy) or run /context-guru:update."
+    if status == -1:
+        return f"The analysis took longer than {ADAPT_TIMEOUT // 60} minutes. Try a shorter window: /context-guru:adapt {kind} --days 7"
+    if status == 404 and not err:
+        return "This proxy is older than /context-guru:adapt. Update it: /context-guru:update"
+    if status in (401, 403):
+        return "This proxy needs a dashboard sign-in for this. Open the dashboard, sign in, and change the setting there."
+    return err or f"The proxy answered HTTP {status} with no explanation."
+
+
+def with_ticker(fn, label: str):
+    """Run fn; on a terminal, count seconds on stderr meanwhile (the read can take a minute)."""
+    if not sys.stderr.isatty():
+        return fn()
+    done = threading.Event()
+
+    def tick() -> None:
+        t0 = time.time()
+        while not done.wait(1):
+            sys.stderr.write(f"\r{label} {int(time.time() - t0)}s")
+            sys.stderr.flush()
+    threading.Thread(target=tick, daemon=True).start()
+    try:
+        return fn()
+    finally:
+        done.set()
+        sys.stderr.write("\r\x1b[K")
+
+
+def adapt_report(api: Api, o: dict, kind: str) -> tuple[int, dict | None]:
+    since, now = window(o, o["days"] or ADAPT_DAYS)
+    return with_ticker(lambda: api.send("GET", f"/api/adapt/{kind}", {"since": since, "until": now}, timeout=ADAPT_TIMEOUT),
+                       f"Replaying {o['days'] or ADAPT_DAYS} days of {kind} history...")
+
+
+def day(ms: int, o: dict) -> str:
+    return dt.datetime.utcfromtimestamp((ms + o["tz_min"] * 60_000) / 1000).strftime("%Y-%m-%d")
+
+
+def apply_token(rep: dict) -> str:
+    return f"{rep['recommendation']['option']}@{rep.get('basis_id', '')}".rstrip("@")
+
+
+def render_adapt(rep: dict, o: dict) -> list[str]:
+    kind, opts, rec = rep["kind"], rep.get("options") or [], rep.get("recommendation")
+    L = [f"{kind.capitalize()}: {rep.get('summary', '')}"]
+    if opts:
+        top = max([x["net_usd"] for x in opts] + [0.01])
+        rows = [["", "", "saved", "spent", "net", "", ""]]
+        for x in opts:
+            tags = [t for t in ("current", "default", "best") if rep.get(t) == x["id"]]
+            mark = "★" if "best" in tags else "▸" if "current" in tags else " "
+            rows.append([mark, x.get("label") or x["id"], dollars(x["saved_usd"]), dollars(x["spend_usd"]),
+                         dollars(x["net_usd"]), cells(max(x["net_usd"], 0) / top), ", ".join(tags)])
+        L += [""] + C.table(rows, "llrrrll")
+        L += ["", "  saved = what the option avoided paying; spent = what it paid for itself; net = saved - spent."]
+    w = rep.get("window") or {}
+    if w.get("since"):
+        L.append(f"  {rep.get('class', '')} · {rep.get('method', '')} · {day(w['since'], o)}..{day(w['until'], o)}"
+                 f" · {w.get('sessions', 0):,} sessions, {w.get('requests', 0):,} requests")
+    L += [f"  ! {x}" for x in rep.get("warnings") or []]
+    items = rep.get("items") or []
+    if items:
+        shown = items if o["details"] else items[:5]
+        L += ["", f"Unused in this window ({len(shown)} of {len(items)}):" if len(shown) < len(items) else "Unused in this window:"]
+        L += C.table([[i.get("kind", ""), i["name"], dollars(i.get("usd", 0)),
+                       "never used" if not i.get("last_used_ms") else "last used " + day(i["last_used_ms"], o)] for i in shown], "llrl")
+    if o["details"]:
+        L += [""] + [f"  {x.get('label') or x['id']}: {x['detail']}" + (f" (helped {x['sessions_helped']}, hurt {x['sessions_hurt']} sessions)"
+                     if "sessions_helped" in x else "") for x in opts if x.get("detail")]
+    if rec:
+        L += ["", f"Change: {rec['change']} ({EFFECT.get(rec.get('effective'), 'see the note after applying')})."]
+        if rec.get("reason"):
+            L.append(f"Why: {rec['reason']}")
+        L.append(f"Apply it? Say yes, or run: /context-guru:adapt {kind} apply {apply_token(rep)}")
+    return L
+
+
+def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], int]:
+    opt, _, basis = token.partition("@")
+    st, doc = api.send("POST", f"/api/adapt/{kind}/apply", body={"option": opt, "basis": basis}, timeout=60)
+    if st == 200 and isinstance(doc, dict) and doc.get("ok"):
+        L = [f"Applied: {doc.get('note') or doc.get('applied', opt)} ({EFFECT.get(doc.get('effective'), 'see the note above')})."]
+        undo = (doc.get("undo") or {}).get("option")
+        if undo:
+            L.append(f"Undo: /context-guru:adapt {kind} apply {undo}")
+        return L, 0
+    if st == 409:
+        L = ["Not applied: the numbers changed since you saw them. Here they are again; nothing was written.", ""]
+        st2, rep = adapt_report(api, o, kind)
+        return L + (render_adapt(rep, o) if st2 == 200 and rep else [adapt_error(api, kind, st2, rep)]), 1
+    return ["Not applied: " + adapt_error(api, kind, st, doc)], 1
+
+
+def adapt_overview(api: Api, o: dict) -> list[str]:
+    rows, best, read = [], 0.0, 0
+    for kind in KINDS:
+        st, rep = adapt_report(api, o, kind)
+        if st != 200 or not rep:
+            rows.append([kind, "", adapt_error(api, kind, st, rep)])
+            continue
+        read += 1
+        rec = rep.get("recommendation")
+        if rec:
+            best = max(best, rec.get("net_delta_usd", 0.0))
+        rows.append([kind, dollars(rec.get("net_delta_usd", 0.0)) if rec else "", rec["change"] if rec else "already on the best option"])
+    d = o["days"] or ADAPT_DAYS
+    L = [f"The best single change would have saved {dollars(best)} over the last {d} days." if best > 0
+         else f"Nothing to change: your settings were already the cheapest on the last {d} days." if read == len(KINDS)
+         else "Could not read every report; see each row."]
+    L += ["", "  (each row is a separate change measured on its own; do not add them)"] + C.table(rows, "lrl")
+    L += ["", "See one, and apply it: /context-guru:adapt cache | compaction | tools"]
+    return L
+
+
+def cmd_adapt(api: Api, o: dict) -> tuple[list[str], int, dict | None]:
+    """(lines, exit code, the report when one was rendered and has a recommendation)."""
+    args = o["args"]
+    if not args:
+        return adapt_overview(api, o), 0, None
+    kind = args[0]
+    if kind not in KINDS:
+        return [f"Unknown subcommand {kind!r}. Use one of: {', '.join(KINDS)}."], 1, None
+    if args[1:2] == ["apply"]:
+        if len(args) < 3:
+            return [f"Say which option to apply: /context-guru:adapt {kind} apply <option>"], 1, None
+        L, rc = adapt_apply(api, o, kind, args[2])
+        return L, rc, None
+    st, rep = adapt_report(api, o, kind)
+    if st != 200 or not isinstance(rep, dict):
+        return [adapt_error(api, kind, st, rep)], 1, None
+    if o.get("json"):
+        return [json.dumps(rep, indent=2)], 0, None
+    return render_adapt(rep, o), 0, rep if rep.get("recommendation") else None
+
+
+def adapt_main(api: Api, opts: dict) -> int:
+    o = {"now": int(time.time() * 1000), "tz_min": 0, "days": 0, "details": False, "session": None, "args": [], **opts}
+    L, rc, rep = cmd_adapt(api, o)
+    print("\n".join(L))
+    if rep and sys.stdin.isatty() and sys.stdout.isatty():
+        if input("\nApply this change? [y/N] ").strip().lower() in ("y", "yes"):
+            L, rc = adapt_apply(api, o, rep["kind"], apply_token(rep))
+            print("\n".join(L))
+        else:
+            print("Nothing changed.")
+    return rc
+
+
 CMDS = {"home": cmd_home, "savings": cmd_savings, "cache": cmd_cache, "waste": cmd_waste, "session": cmd_session, "doctor": cmd_doctor}
 
 
@@ -407,8 +600,8 @@ def run(cmd: str, api: Api, opts: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("cmd", choices=sorted(CMDS))
-    ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen")
+    ap.add_argument("cmd", choices=sorted([*CMDS, "adapt"]))
+    ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; for adapt: <kind> [apply <option>]")
     ap.add_argument("--days", type=int, default=0)
     ap.add_argument("--port")
     ap.add_argument("--session")
@@ -417,7 +610,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--now", help="pretend it is this ISO time")
     ap.add_argument("--tz-offset-min", type=int)
     a = ap.parse_args(argv)
-    opts: dict = {"days": a.days, "session": a.session,
+    opts: dict = {"days": a.days, "session": a.session, "json": a.json,
                   "details": "details" in a.args, "args": [x for x in a.args if x != "details"],
                   "tz_min": a.tz_offset_min if a.tz_offset_min is not None else time.localtime().tm_gmtoff // 60}
     if a.now:
@@ -431,6 +624,8 @@ def main(argv: list[str] | None = None) -> int:
             print(NO_PROXY)
             return 0
         api = Api(base)
+    if a.cmd == "adapt":
+        return adapt_main(api, opts)
     print(run(a.cmd, api, opts))
     return 0
 

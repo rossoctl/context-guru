@@ -30,6 +30,7 @@ One command per question. Each opens with one line that answers it, then a small
 | `/context-guru:waste` | What do I carry and never use? | [Waste](waste.md) |
 | `/context-guru:session` | What happened in this session? | [Session](session.md) |
 | `/context-guru:doctor` | Is it set up right? | [Doctor](doctor.md) |
+| `/context-guru:adapt` | Which setting would have cost least on my history? Change it, after a yes. | [Adapt](adapt.md) |
 
 Five more views draw in the terminal: `/context-guru:watch`, `timeline`, `chart`, `heatmap` and `fill`. They are on [Terminal views](terminal-views.md).
 
@@ -71,7 +72,7 @@ The proxy is released separately; updating the plugin does not update it. Detail
 
 ## Codex (experimental)
 
-Codex has the same skills under the same names, invoked by name: `$context-guru-status`, `$context-guru-savings`, `$context-guru-cache`, `$context-guru-waste`, `$context-guru-session`. They run the same scripts. Install, update and removal are in the [Codex plugin guide](https://github.com/rossoctl/context-guru/blob/main/codex-marketplace/plugins/context-guru/README.md).
+Codex has the same skills under the same names, invoked by name: `$context-guru-status`, `$context-guru-savings`, `$context-guru-cache`, `$context-guru-waste`, `$context-guru-session`, `$context-guru-adapt`. They run the same scripts. Install, update and removal are in the [Codex plugin guide](https://github.com/rossoctl/context-guru/blob/main/codex-marketplace/plugins/context-guru/README.md).
 
 | Capability | Claude Code | Codex |
 |---|---|---|
