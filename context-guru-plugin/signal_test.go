@@ -130,20 +130,73 @@ func TestSignalHookRetriesAProxyThatIsNotUpYet(t *testing.T) {
 	}
 }
 
-// Off by default, silent on a bad payload, and never fails when the proxy is down.
+// Silent when off, on a bad payload and (by default) toward a base URL that is not a context-guru
+// proxy; never fails when the proxy is down.
 func TestSignalHookIsInertOffAndFailsOpen(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
 	defer srv.Close()
 	base := []string{"ANTHROPIC_BASE_URL=" + srv.URL, "ANTHROPIC_AUTH_TOKEN=t"}
-	runSignal(t, base, `{"session_id":"s","hook_event_name":"SessionEnd","reason":"other"}`)                                          // flag off
-	runSignal(t, append([]string{"CONTEXT_GURU_CLIENT_SIGNALS=on"}, base...), `not json`)                                             // garbage
-	runSignal(t, append([]string{"CONTEXT_GURU_CLIENT_SIGNALS=on"}, base...), `{"session_id":"../x","hook_event_name":"SessionEnd"}`) // unusable id
-	runSignal(t, append([]string{"CONTEXT_GURU_CLIENT_SIGNALS=on"}, base...), `{"session_id":"s","hook_event_name":"PreToolUse"}`)    // not an event we send
+	end := `{"session_id":"s","hook_event_name":"SessionEnd","reason":"other"}`
+	runSignal(t, append([]string{"CONTEXT_GURU_CLIENT_SIGNALS=off"}, base...), end)                                                            // flag off
+	runSignal(t, append([]string{"CLAUDE_PLUGIN_OPTION_CLIENT_SIGNALS=off"}, base...), end)                                                    // option off
+	runSignal(t, []string{"ANTHROPIC_BASE_URL=" + strings.Replace(srv.URL, "127.0.0.1", "gateway.invalid", 1), "ANTHROPIC_AUTH_TOKEN=t"}, end) // auto: not ours
+	runSignal(t, append([]string{"CONTEXT_GURU_CLIENT_SIGNALS=on"}, base...), `not json`)                                                      // garbage
+	runSignal(t, append([]string{"CONTEXT_GURU_CLIENT_SIGNALS=on"}, base...), `{"session_id":"../x","hook_event_name":"SessionEnd"}`)          // unusable id
+	runSignal(t, append([]string{"CONTEXT_GURU_CLIENT_SIGNALS=on"}, base...), `{"session_id":"s","hook_event_name":"PreToolUse"}`)             // not an event we send
 	time.Sleep(100 * time.Millisecond)
 	if n := hits.Load(); n != 0 {
 		t.Errorf("%d requests sent when none should be", n)
 	}
 	srv.Close()
 	runSignal(t, append([]string{"CONTEXT_GURU_CLIENT_SIGNALS=on"}, base...), `{"session_id":"s","hook_event_name":"SessionEnd","reason":"other"}`) // proxy down: still exit 0
+}
+
+// On by default toward the plugin's own (loopback) proxy, with no credential needed; toward a hosted
+// service, with its x-context-guru-token header rather than the Anthropic key.
+func TestSignalHookDefaultsOnForLocalAndHosted(t *testing.T) {
+	ch := make(chan http.Header, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ch <- r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	end := `{"session_id":"abc-123","hook_event_name":"SessionEnd","reason":"prompt_input_exit"}`
+	runSignal(t, []string{"ANTHROPIC_BASE_URL=" + srv.URL + "/anthropic"}, end) // subscription login: no token in the env
+	runSignal(t, []string{"ANTHROPIC_BASE_URL=" + srv.URL + "/anthropic", "ANTHROPIC_API_KEY=sk-ant-x",
+		"ANTHROPIC_CUSTOM_HEADERS=x-context-guru-token: cg_live_abc"}, end)
+	for i, want := range []string{"", "cg_live_abc"} {
+		select {
+		case h := <-ch:
+			if got := h.Get("x-context-guru-token"); got != want || h.Get("x-api-key") != "" {
+				t.Errorf("send %d: token header %q (want %q), x-api-key %q", i, got, want, h.Get("x-api-key"))
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("send %d: no event reached the proxy", i)
+		}
+	}
+}
+
+// A non-loopback base URL is a context-guru proxy only when it carries the hosted token header.
+func TestSignalHookAutoSendsToARemoteURLOnlyWithTheHostedToken(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.2:0") // not matched as loopback by the hook's URL test
+	if err != nil {
+		t.Skipf("no second loopback address: %v", err)
+	}
+	var hits atomic.Int32
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-context-guru-token") == "cg_live_abc" {
+			hits.Add(1)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	go srv.Serve(ln)
+	defer srv.Close()
+	base := "ANTHROPIC_BASE_URL=http://" + ln.Addr().String() + "/anthropic"
+	end := `{"session_id":"abc-123","hook_event_name":"SessionEnd","reason":"other"}`
+	runSignal(t, []string{base, "ANTHROPIC_API_KEY=sk-ant-x"}, end)
+	runSignal(t, []string{base, "ANTHROPIC_API_KEY=sk-ant-x", "ANTHROPIC_CUSTOM_HEADERS=x-context-guru-token: cg_live_abc"}, end)
+	if n := hits.Load(); n != 1 {
+		t.Errorf("%d hosted sends, want 1 (only the one with the token header)", n)
+	}
 }

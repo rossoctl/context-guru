@@ -158,6 +158,7 @@ func TestLateCompactSignalKeepsThePostCompactionEntry(t *testing.T) {
 
 // With the flag off nothing changes: the route is absent and a stale mark is ignored.
 func TestSignalsAreInertWhenDisabled(t *testing.T) {
+	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "off")
 	k, _, clock := testKeeper(t, Limits{})
 	h := &Handler{keeper: k}
 	if c := sigPost(h, `{"session":"s","event":"SessionEnd"}`); c != http.StatusNotFound {
@@ -171,22 +172,80 @@ func TestSignalsAreInertWhenDisabled(t *testing.T) {
 	}
 }
 
-// Validation: closed event set, closed kind set, no unknown fields, an unusable id, an oversize body.
+// Signals are on by default whenever the keep-alive runs, and off with it.
+func TestSignalsDefaultFollowsTheKeepAlive(t *testing.T) {
+	for _, c := range []struct {
+		signals, keepalive string
+		want               bool
+	}{
+		{"", "", true}, {"on", "", true}, {"off", "", false}, {"0", "", false},
+		{"", "off", false}, {"on", "off", false},
+	} {
+		t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", c.signals)
+		t.Setenv("CONTEXT_GURU_KEEPALIVE", c.keepalive)
+		if got := clientSignalEnabled(); got != c.want {
+			t.Errorf("signals=%q keepalive=%q: enabled %v, want %v", c.signals, c.keepalive, got, c.want)
+		}
+	}
+}
+
+// Codex keys by content hash but its hooks name the session-id header's id: a SessionEnd for that id
+// retires the entry and stops an in-flight request from re-arming it.
+func TestCodexSessionEndMatchesTheSessionIDHeader(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
+	up := upstream{base: "http://up", path: "/v1/messages"}
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	r.Header.Set("Authorization", "Bearer sk-caller-secret")
+	r.Header.Set("session-id", "codex-thread-1")
+	rec := func(at time.Time) {
+		k.record(&Tenancy{ID: "t1", Cache: pol}, "t1:sha-of-content", "", at, []byte(kaBody), up, r, bschemas.Anthropic, "/v1/messages",
+			http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+	}
+	rec(clock.now().Add(-time.Minute))
+	rec(clock.now())
+	if k.Stats().Live != 1 {
+		t.Fatalf("setup: %d live, want 1", k.Stats().Live)
+	}
+	end := clock.now()
+	k.signal("t1", "t1:codex-thread-1", "SessionEnd", "other", end)
+	if k.Stats().Live != 0 {
+		t.Errorf("SessionEnd for the header id left %d entries held", k.Stats().Live)
+	}
+	rec(end.Add(-time.Second)) // in flight at the end
+	if k.Stats().Live != 0 {
+		t.Errorf("an in-flight request re-armed the hold")
+	}
+	clock.advance(290 * time.Second)
+	k.sweep(clock.now())
+	time.Sleep(50 * time.Millisecond)
+	if fs.n() != 0 {
+		t.Errorf("%d pings after SessionEnd", fs.n())
+	}
+}
+
+// Validation: closed event set, closed kind set, an unusable id, an oversize body; both wire shapes.
 func TestSignalValidation(t *testing.T) {
 	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "on")
 	k, _, _ := testKeeper(t, Limits{})
 	h := &Handler{keeper: k, limiter: NewLimiter(Limits{}), static: &Tenancy{ID: "t1"}}
 	for body, want := range map[string]int{
-		`{"session":"abc-1","event":"SessionEnd","kind":"logout"}`:             http.StatusNoContent,
-		`{"session":"abc-1","event":"SessionStart","kind":"compact"}`:          http.StatusNoContent,
-		`{"session":"abc-1","event":"SessionStart","kind":"resume"}`:           http.StatusNoContent,
-		`{"session":"abc-1","event":"SessionStart","kind":"bogus"}`:            http.StatusBadRequest,
-		`{"session":"abc-1","event":"PreToolUse"}`:                             http.StatusBadRequest,
-		`{"session":"abc-1","event":"SessionEnd","kind":"rm -rf"}`:             http.StatusBadRequest,
-		`{"session":"abc-1","event":"SessionEnd","prompt":"x"}`:                http.StatusBadRequest,
-		`{"session":"../../x","event":"SessionEnd"}`:                           http.StatusBadRequest,
-		`{"session":"","event":"SessionEnd"}`:                                  http.StatusBadRequest,
-		`{"session":"` + strings.Repeat("a", 2000) + `","event":"SessionEnd"}`: http.StatusBadRequest,
+		`{"session":"abc-1","event":"SessionEnd","kind":"logout"}`:                                                       http.StatusNoContent,
+		`{"session":"abc-1","event":"SessionStart","kind":"compact"}`:                                                    http.StatusNoContent,
+		`{"session":"abc-1","event":"SessionStart","kind":"resume"}`:                                                     http.StatusNoContent,
+		`{"session":"abc-1","event":"SessionStart","kind":"bogus"}`:                                                      http.StatusBadRequest,
+		`{"session":"abc-1","event":"PreToolUse"}`:                                                                       http.StatusBadRequest,
+		`{"session":"abc-1","event":"SessionEnd","kind":"rm -rf"}`:                                                       http.StatusBadRequest,
+		`{"session":"abc-1","event":"SessionEnd","prompt":"x"}`:                                                          http.StatusNoContent, // read fields only
+		`{"session_id":"abc-1","hook_event_name":"SessionEnd","reason":"other","cwd":"/x","transcript_path":"/x.jsonl"}`: http.StatusNoContent,
+		`{"session_id":"abc-1","hook_event_name":"SessionStart","source":"compact","model":"m"}`:                         http.StatusNoContent,
+		`{"session_id":"abc-1","hook_event_name":"PreToolUse","tool_input":{}}`:                                          http.StatusBadRequest,
+		`{"session_id":"abc-1","hook_event_name":"SessionEnd","reason":"rm -rf"}`:                                        http.StatusBadRequest,
+		`{"session_id":"../x","hook_event_name":"SessionEnd"}`:                                                           http.StatusBadRequest,
+		`{"session":"../../x","event":"SessionEnd"}`:                                                                     http.StatusBadRequest,
+		`{"session":"","event":"SessionEnd"}`:                                                                            http.StatusBadRequest,
+		`{"session":"` + strings.Repeat("a", 2000) + `","event":"SessionEnd"}`:                                           http.StatusBadRequest,
+		`{"session":"abc-1","event":"SessionEnd","cwd":"` + strings.Repeat("a", 5000) + `"}`:                             http.StatusBadRequest,
 	} {
 		if got := sigPost(h, body); got != want {
 			t.Errorf("%.60s -> %d, want %d", body, got, want)

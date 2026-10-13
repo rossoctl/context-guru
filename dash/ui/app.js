@@ -6818,14 +6818,31 @@ async function loadOptions() {
 // line that silently cannot work.
 const TOKEN_SLOT = 'cg_live_YOUR_TOKEN_HERE';
 
-/** claudeSettings is the WHOLE env block a Claude Code user ends up with — not a diff.
- *  A beginner cannot apply a diff, and the two keys are the entire change. */
+/** claudeSettings is the WHOLE settings a Claude Code user ends up with — not a diff.
+ *  A beginner cannot apply a diff. The env block is the routing; the hooks tell the
+ *  keep-alive when a session ends (exit, Ctrl-C, closing the terminal, /clear, logout) or is
+ *  compacted, so it stops pinging a cache nobody will read. The hook posts Claude Code's own
+ *  hook payload; the service reads only its session id, event and reason, and a failed post
+ *  changes nothing. */
 function claudeSettings(base, tok) {
+  const signal = `curl -s -o /dev/null -m 2 -H \\"$ANTHROPIC_CUSTOM_HEADERS\\" `
+    + `-H 'Content-Type: application/json' --data-binary @- ${base}/signal || true`;
+  const hook = (matcher) => [
+    `      { ${matcher}"hooks": [ { "type": "command", "command": "${signal}", "timeout": 5 } ] }`,
+  ];
   return [
     '{',
     '  "env": {',
     `    "ANTHROPIC_BASE_URL": "${base}/anthropic",`,
     `    "ANTHROPIC_CUSTOM_HEADERS": "x-context-guru-token: ${tok}"`,
+    '  },',
+    '  "hooks": {',
+    '    "SessionEnd": [',
+    ...hook(''),
+    '    ],',
+    '    "SessionStart": [',
+    ...hook('"matcher": "compact", '),
+    '    ]',
     '  }',
     '}',
   ];
@@ -6975,8 +6992,8 @@ function loadSetup() {
         'Your token is already filled in.'), copyButton(settings.join('\n'))),
       el('pre', { class: 'code', 'data-testid': 'setup-claude' }, settings.join('\n')),
       el('p', { class: 'hint' },
-        'Already have an "env" block? Add just those two lines inside it. Leave every '
-        + 'other key alone.')),
+        'Already have an "env" or "hooks" block? Add just these entries inside it. Leave '
+        + 'every other key alone.')),
     step(3, 'Keep your own key where it is',
       el('p', { class: 'hint' },
         'ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN stays yours: we forward it, so your '
