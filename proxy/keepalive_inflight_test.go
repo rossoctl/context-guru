@@ -56,7 +56,7 @@ func TestNoPingWhileARequestOfTheSessionIsInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: up.URL, Dashboard: rec,
-		Cache: CachePolicy{KeepAlive: true, Idle: 60 * time.Second, MaxPings: 2, MaxUSDPerPing: 1, MinPrefixTokens: 1}})
+		Cache: CachePolicy{KeepAlive: true, Idle: 60 * time.Second, MaxPings: 2, MaxUSDPerPing: -1, MinPrefixTokens: 1}}) // no $ ceiling: other tests install price tables
 	t.Cleanup(h.Close)
 	clock := &testClock{at: time.Now()}
 	h.keeper.now = clock.now
