@@ -90,7 +90,7 @@ func (h *Handler) adaptConfigApply(w http.ResponseWriter, r *http.Request, kind 
 			return "", statusError{http.StatusConflict, "your configuration changed since the report was made; run it again"}
 		}
 		if choice.Preset != "" {
-			next, err := dash.AdaptPresetDoc(doc, choice.Preset)
+			next, _, err := dash.AdaptPresetDocWith(doc, choice.Preset, len(choice.DropOverrides) > 0)
 			if err != nil {
 				return "", statusError{http.StatusBadRequest, err.Error()}
 			}

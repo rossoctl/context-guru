@@ -180,6 +180,8 @@ type AdaptCompactionOption struct {
 	// then Class "estimate" rather than "counterfactual", and Detail says what was left out.
 	NotReplayed []string `json:"not_replayed,omitempty"`
 	Class       string   `json:"class"`
+	// DropsOverrides are the account's own component settings applying this option removes.
+	DropsOverrides []string `json:"drops_overrides,omitempty"`
 	// ExpandUSD is the expand round trips this option avoids (negative) by carrying no offloader.
 	ExpandUSD float64 `json:"expand_usd,omitempty"`
 
@@ -316,10 +318,13 @@ type AdaptCompactionReport struct {
 // an id from a report the same account just fetched (see API.AdaptOffer).
 type AdaptCompactionChoice struct {
 	// Preset, when set, is a shipped preset to switch to; Candidates and Settings are then unused.
-	Preset     string
-	Candidates []string
-	Settings   map[string]map[string]int
-	Label      string
+	// DropOverrides lists the account's own blocks the switch removes ("<preset> without your
+	// overrides").
+	Preset        string
+	DropOverrides []string
+	Candidates    []string
+	Settings      map[string]map[string]int
+	Label         string
 	// ConfigHash is AdaptConfigHash of the document the report was computed against.
 	ConfigHash string
 }
@@ -329,23 +334,76 @@ type AdaptCompactionChoice struct {
 // and win over the preset's own, which is what a stated block means — and why the report prices
 // a preset option on THIS document rather than on the bare preset.
 func AdaptPresetDoc(doc, name string) (string, error) {
+	out, _, err := AdaptPresetDocWith(doc, name, false)
+	return out, err
+}
+
+// AdaptPresetDocWith is AdaptPresetDoc, optionally WITHOUT the account's overrides: its own
+// blocks for the preset's compaction components are dropped, so the preset's tuning decides.
+// overrides names the blocks that differ from the preset — the ones dropOverrides removes, and
+// the ones whose presence makes the two documents price differently. Blocks for anything else
+// (the tool removal list, a model component, a component the preset does not run) are kept
+// either way: they are not the preset's to decide.
+func AdaptPresetDocWith(doc, name string, dropOverrides bool) (string, []string, error) {
 	m := map[string]any{}
 	if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
-		return "", fmt.Errorf("your stored configuration does not parse: %w", err)
+		return "", nil, fmt.Errorf("your stored configuration does not parse: %w", err)
 	}
 	if m == nil {
 		m = map[string]any{}
 	}
 	m["preset"] = name
 	delete(m, "pipeline")
+	pipe, _ := config.PresetPipeline(name)
+	bare, err := config.LoadBytes([]byte("preset: " + name + "\n"))
+	if err != nil {
+		return "", nil, err
+	}
+	var overrides []string
+	if comps, _ := m["components"].(map[string]any); comps != nil {
+		for _, c := range slices.Sorted(maps.Keys(comps)) {
+			if !slices.Contains(pipe, c) || !isAdaptReplayable(c) {
+				continue
+			}
+			var own, preset any
+			raw, _ := yaml.Marshal(comps[c])
+			_ = yaml.Unmarshal(raw, &own)
+			if node, ok := bare.Components[c]; ok {
+				_ = node.Decode(&preset)
+			}
+			if adaptOverrides(own, preset) {
+				overrides = append(overrides, c)
+				if dropOverrides {
+					delete(comps, c)
+				}
+			}
+		}
+		if len(comps) == 0 {
+			delete(m, "components")
+		}
+	}
 	out, err := yaml.Marshal(m)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if _, err := config.LoadBytes(out); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return string(out), nil
+	return string(out), overrides, nil
+}
+
+// adaptOverrides says whether an account's block own changes the preset's block preset: a key
+// the account states with a value the preset does not have.
+func adaptOverrides(own, preset any) bool {
+	om, _ := own.(map[string]any)
+	pm, _ := preset.(map[string]any)
+	for k, v := range om {
+		pv, ok := pm[k]
+		if !ok || fmt.Sprint(pv) != fmt.Sprint(v) {
+			return true
+		}
+	}
+	return false
 }
 
 // AdaptConfigHash identifies a configuration document; an apply against a document that has
@@ -404,6 +462,9 @@ type adaptSpec struct {
 	base string
 	// preset names the shipped preset this arm is; "" for a custom arm.
 	preset string
+	// dropOverrides, on a preset arm, are the account's own blocks it drops: the preset as it
+	// ships rather than as the account's settings would tune it.
+	dropOverrides []string
 }
 
 func (s adaptSpec) key() string {
@@ -413,6 +474,9 @@ func (s adaptSpec) key() string {
 	var b strings.Builder
 	if s.preset != "" {
 		b.WriteString("preset:" + s.preset + "|")
+		if len(s.dropOverrides) > 0 {
+			b.WriteString("pure|")
+		}
 	}
 	b.WriteString(strings.Join(s.comps, "+"))
 	for _, c := range slices.Sorted(maps.Keys(s.settings)) {
@@ -472,7 +536,7 @@ func (s adaptSpec) moves(c adaptSpec) int {
 
 func (s adaptSpec) clone() adaptSpec {
 	out := adaptSpec{comps: append([]string(nil), s.comps...), settings: map[string]map[string]int{},
-		base: s.base, preset: s.preset}
+		base: s.base, preset: s.preset, dropOverrides: s.dropOverrides}
 	for c, m := range s.settings {
 		out.settings[c] = map[string]int{}
 		for k, v := range m {
@@ -1405,6 +1469,17 @@ func (run *adaptRun) eval(pop *adaptPop, spec adaptSpec) (adaptEval, error) {
 	return e, nil
 }
 
+// adaptChange is the recommendation's one line: what applying best does, in plain words,
+// including any of the account's own settings it removes.
+func adaptChange(best, cur AdaptCompactionOption) string {
+	c := "run " + best.Label + " instead of " + cur.Label
+	if d := best.spec.dropOverrides; len(d) > 0 {
+		c = "switch to preset " + best.Preset + " as it ships, which removes your own settings for " +
+			strings.Join(d, ", ")
+	}
+	return c
+}
+
 // adaptReproTolerance is how far the replay of the current configuration may sit from what the
 // rows booked for it before no recommendation is trusted: a relative error, with a dollar floor
 // below which the two are too small to tell apart.
@@ -1463,7 +1538,7 @@ func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, 
 		for _, name := range config.PresetNames() {
 			// The document applying it would store — the account's own, switched to the preset —
 			// so the account's component blocks, which win over the preset's, are priced too.
-			doc, err := AdaptPresetDoc(curDoc, name)
+			doc, overrides, err := AdaptPresetDocWith(curDoc, name, false)
 			if err != nil {
 				continue
 			}
@@ -1473,6 +1548,20 @@ func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, 
 			}
 			ps.preset = name
 			arms = append(arms, ps)
+			// The account's own blocks change this preset: the pure preset is a second option,
+			// or a tuned account could never see or reach it.
+			if len(overrides) > 0 {
+				pure, _, err := AdaptPresetDocWith(curDoc, name, true)
+				if err != nil {
+					continue
+				}
+				pp, _, err := adaptSpecFromDoc(pure)
+				if err != nil {
+					continue
+				}
+				pp.preset, pp.dropOverrides = name, overrides
+				arms = append(arms, pp)
+			}
 		}
 	}
 	if custom {
@@ -1578,14 +1667,20 @@ func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, 
 			}
 		}
 		idOf[o.ID] = id
-		rep.choices[id] = AdaptCompactionChoice{Preset: o.Preset, Candidates: adaptCandidatesOf(o.spec.comps),
-			Settings: o.spec.settings, Label: o.Label, ConfigHash: confHash}
+		rep.choices[id] = AdaptCompactionChoice{Preset: o.Preset, DropOverrides: o.spec.dropOverrides,
+			Candidates: adaptCandidatesOf(o.spec.comps),
+			Settings:   o.spec.settings, Label: o.Label, ConfigHash: confHash}
 		o.ID, o.Detail = id, detail
 		if detail == "" {
 			o.Detail = strings.Join(o.Pipeline, ", ")
 		}
 		if len(o.NotReplayed) > 0 {
 			o.Detail += "; not replayed (calls a model): " + strings.Join(o.NotReplayed, ", ")
+		}
+		if d := o.spec.dropOverrides; len(d) > 0 {
+			o.Detail = "the preset as it ships: applying it DROPS your own settings for " +
+				strings.Join(d, ", ") + "; " + o.Detail
+			o.DropsOverrides = d
 		}
 		o.SpendUSD -= none.SpendUSD
 		if rep.Coverage.CoveredRequests == 0 {
@@ -1616,6 +1711,9 @@ func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, 
 			return nil, err
 		}
 		id := s.preset // preset names are shell-safe ids; none is "current", "default" or "none"
+		if len(s.dropOverrides) > 0 {
+			id = s.preset + "-without-overrides"
+		}
 		if s.preset == "" {
 			id = "c" + strconv.Itoa(shown+1)
 		}
@@ -1652,7 +1750,7 @@ func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, 
 			days = float64(time.Now().UnixMilli()-f.Since) / float64(24*time.Hour/time.Millisecond)
 		}
 		rec := &AdaptCompactionRecommendation{Option: bestOpt.ID, NetDeltaUSD: gain, GainUSD: gain,
-			Effective: "now", Change: "run " + bestOpt.Label + " instead of " + curOpt.Label,
+			Effective: "now", Change: adaptChange(bestOpt, curOpt),
 			Reason: fmt.Sprintf("%.1f%% less on the %d requests whose content is stored; savings on the "+
 				"others are not claimed", 100*gain/curOpt.cost, rep.Coverage.CoveredRequests)}
 		rec.GainRangeUSD = [2]float64{gain, gain + (bestOpt.RangeUSD[1] - bestOpt.RangeUSD[0])}
@@ -1758,6 +1856,9 @@ func (run *adaptRun) search(sessions []*adaptSession, rep *AdaptCompactionReport
 }
 
 func adaptLabel(s adaptSpec) string {
+	if s.preset != "" && len(s.dropOverrides) > 0 {
+		return "preset " + s.preset + " without your overrides"
+	}
 	if s.preset != "" {
 		return "preset " + s.preset
 	}

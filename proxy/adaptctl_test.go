@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -399,5 +400,31 @@ func TestSaveMoreAppliesAPresetAndRevertsIt(t *testing.T) {
 	}
 	if form, _ = storedForm(t, f, jar); strings.Join(form.Pipeline, ",") != "format,dedup,cachesplit" {
 		t.Fatalf("revert left %v", form.Pipeline)
+	}
+}
+
+// "<preset> without your overrides": applying it writes exactly the pure document the report
+// priced, without the account's own block for the preset's component.
+func TestSaveMoreAppliesThePresetWithoutOverrides(t *testing.T) {
+	f := adaptHostedFixture(t)
+	bw, _ := f.signUp(t, "boss@ibm.com", "l")
+	w, verify := f.signUp(t, "user@ibm.com", "u")
+	jar := w.Result().Cookies()
+	id := verify["tenant"].(map[string]any)["id"].(string)
+	start := "components:\n    format:\n        min_tokens: 999999\npipeline:\n    - cachesplit\n"
+	body, _ := json.Marshal(map[string]string{"config_yaml": start})
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, string(body), bw.Result().Cookies()); w.Code != http.StatusOK {
+		t.Fatalf("manager edit = %d %s", w.Code, w.Body)
+	}
+	_, stored := storedForm(t, f, jar)
+	basis := f.h.API().OfferAdapt("compaction", id, map[string]any{"safe-without-overrides": dash.AdaptCompactionChoice{
+		Preset: "safe", DropOverrides: []string{"format"}, ConfigHash: dash.AdaptConfigHash(stored)}})
+	if w, _ := f.do(t, "POST", "/api/adapt/compaction/apply", `{"option":"safe-without-overrides","basis":"`+basis+`"}`, jar); w.Code != http.StatusOK {
+		t.Fatalf("apply = %d %s", w.Code, w.Body)
+	}
+	_, doc := storedForm(t, f, jar)
+	want, _, _ := dash.AdaptPresetDocWith(stored, "safe", true)
+	if doc != want || strings.Contains(doc, "999999") {
+		t.Fatalf("stored %q, priced %q", doc, want)
 	}
 }

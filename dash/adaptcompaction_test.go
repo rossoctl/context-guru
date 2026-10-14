@@ -788,3 +788,44 @@ func TestSaveMorePricesThePresetDocumentApplyStores(t *testing.T) {
 		t.Fatalf("applied pipeline %v, want the preset's %v", cfg.Pipeline, want)
 	}
 }
+
+// A tuned account: its own format block switches format off, so preset safe with its settings
+// and safe as it ships price differently. Both are offered, each priced on exactly the document
+// applying it stores, and the pure one says it drops the account's settings.
+func TestSaveMoreOffersThePresetWithoutTheAccountsOverrides(t *testing.T) {
+	cur := "pipeline: [cachesplit]\ncomponents:\n  format:\n    min_tokens: 999999\n"
+	rep, err := formattedHistory(t, 1).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
+		staticTable{"m": bigPrice}, cur, defaultAdaptDocForTest, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	with, pure := adaptOpt(t, rep, "safe"), adaptOpt(t, rep, "safe-without-overrides")
+	if *pure.NetUSD <= *with.NetUSD {
+		t.Fatalf("the pure preset should save more here: with %g, pure %g", *with.NetUSD, *pure.NetUSD)
+	}
+	if !slices.Equal(pure.DropsOverrides, []string{"format"}) || !strings.Contains(pure.Detail, "DROPS your own settings for format") ||
+		len(with.DropsOverrides) != 0 {
+		t.Fatalf("with %+v / pure %+v", with, pure)
+	}
+	for _, c := range []struct {
+		o    AdaptCompactionOption
+		drop bool
+	}{{with, false}, {pure, true}} {
+		applied, _, err := AdaptPresetDocWith(cur, "safe", c.drop)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.o.spec.base != applied || (len(rep.choices[c.o.ID].DropOverrides) > 0) != c.drop {
+			t.Errorf("%s priced %q, applies %q", c.o.ID, c.o.spec.base, applied)
+		}
+	}
+	if pureDoc, _, _ := AdaptPresetDocWith(cur, "safe", true); strings.Contains(pureDoc, "999999") {
+		t.Fatalf("the pure document kept the override: %s", pureDoc)
+	}
+	// A preset the account's blocks do not touch gets no second row.
+	for _, o := range rep.Options {
+		if o.ID == "off-without-overrides" || o.ID == "cache-without-overrides" {
+			t.Errorf("unexpected %s", o.ID)
+		}
+	}
+}
