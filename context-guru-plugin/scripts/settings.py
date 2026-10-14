@@ -724,7 +724,10 @@ RECORDED_COMMANDS = ("save-more", "remove-mcp-and-skills")
 def cmd_record_run(args: argparse.Namespace) -> int:
     """Record that one of the commands the status line's weekly tip names just ran: its epoch
     seconds under its name in `<state dir>/last-run.json`, merged into what is there and replaced
-    atomically. The status line only reads the file (statusline.py _tip_segment)."""
+    atomically. The status line only reads the file (statusline.py _tip_segment).
+
+    Silent on success: the commands chain this after their own report, which the skill shows the
+    user verbatim, so it must add nothing to it. A failure goes to stderr with exit 1."""
     path = os.path.join(state_dir(), "last-run.json")
     try:
         with open(path, encoding="utf-8") as fh:
@@ -733,12 +736,15 @@ def cmd_record_run(args: argparse.Namespace) -> int:
         runs = {}
     runs = runs if isinstance(runs, dict) else {}
     runs[args.name] = int(time.time())
-    os.makedirs(state_dir(), exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(runs, fh)
-    os.replace(tmp, path)
-    emit(result="recorded", name=args.name, file=path)
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(runs, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"record-run: could not write {path}: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

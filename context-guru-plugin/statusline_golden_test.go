@@ -921,7 +921,8 @@ func TestTipCommandsRecordTheirRuns(t *testing.T) {
 }
 
 // TestRecordRunFeedsTheWeeklyTip: `settings.py record-run <command>` is how the commands note a
-// run. It merges its key into last-run.json, and refuses a name the tip does not know.
+// run. It prints nothing on success (the skills chain it after their report), merges its key into
+// last-run.json, and refuses a name the tip does not know.
 func TestRecordRunFeedsTheWeeklyTip(t *testing.T) {
 	py := requireTool(t, "python3")
 	state := t.TempDir()
@@ -931,10 +932,10 @@ func TestRecordRunFeedsTheWeeklyTip(t *testing.T) {
 	run := func(name string) ([]byte, error) {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "record-run", name)
 		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state)
-		return cmd.CombinedOutput()
+		return cmd.Output() // stdout only: it lands in the command's report
 	}
-	if b, err := run("save-more"); err != nil || !strings.Contains(string(b), "result=recorded") {
-		t.Fatalf("record-run save-more: %v %s", err, b)
+	if b, err := run("save-more"); err != nil || len(b) != 0 {
+		t.Fatalf("record-run save-more: err %v, stdout %q; want silent success", err, b)
 	}
 	var runs map[string]float64
 	b, _ := os.ReadFile(filepath.Join(state, "last-run.json"))
