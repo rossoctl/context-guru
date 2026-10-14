@@ -1239,6 +1239,13 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, err
 			}
+			// Bounded for a session only: the ledger reads that session's rows in order.
+			if f.Session != "" && a.pricer != nil && a.windows != nil {
+				if l, lerr := db.SummarizeLedgerFor(f, a.windows, a.pricer); lerr == nil {
+					o.ApplySummarizeLedger(l)
+					o.Waterfall = o.waterfall()
+				}
+			}
 			return json.Marshal(o)
 		})
 		return
@@ -1297,10 +1304,24 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 			declCredit = c
 			return nil
 		})
+		var sumLedger *SummarizeLedger
+		if a.pricer != nil && a.windows != nil {
+			g.Go(func() error {
+				l, err := db.SummarizeLedgerFor(f, a.windows, a.pricer)
+				if err != nil {
+					slog.Warn("context-guru: summarize attribution unavailable; the headline keeps its stored credit", "err", err)
+					return nil
+				}
+				sumLedger = l
+				return nil
+			})
+		}
 		g.Wait() //nolint:errcheck // every goroutine above always returns nil; see each one's own error handling
 		if overviewErr != nil {
 			return nil, overviewErr
 		}
+		// Before the additions below: they add to the totals this corrects.
+		o.ApplySummarizeLedger(sumLedger)
 		if cachesplitHist != nil {
 			o.CachesplitHistorical = cachesplitHist
 			// Folded into the running total here, not inside Overview() itself, because
@@ -1474,6 +1495,17 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 			if err := estimateFromGroups(groups, a.pricer, rows); err != nil {
 				slog.Warn("context-guru: component saved_usd estimate failed; pre-column rows read $0.00",
 					"err", err)
+			}
+			// summarize's credit, put through the attribution rule: nothing past its span, and the
+			// first removal priced at the rate the previous turn paid. The same ledger moves the
+			// headline, so the two cannot disagree.
+			if l, err := db.SummarizeLedgerFor(f, a.windows, a.pricer); err != nil {
+				slog.Warn("context-guru: summarize attribution failed; summarize reads its stored credit",
+					"err", err)
+			} else {
+				for _, c := range rows {
+					applySummarizeLedgerToRow(c, l)
+				}
 			}
 		}
 		return json.Marshal(map[string]any{"components": rows})

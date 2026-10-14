@@ -10,7 +10,6 @@ import (
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/kvcache"
 )
 
@@ -92,10 +91,22 @@ type compactRow struct {
 	// of the same content by ~12% at the transcript sizes compaction happens at — issue #240.
 	// Conservative for a savings figure, and stated in the panel's assumptions.
 	SavedGross int64
-	// SavedUSD is summarize's share of this request's baseline delta, priced at write time. Read
-	// ONLY to detect that summarize did something priceable on this turn, never as a credit — see
-	// creditTurn.
+	// SavedUSD is summarize's share of this request's baseline delta: the credit this turn earns.
+	// The dataset loader prices it through Event.ComponentSavedUSD, the same path Event.Price
+	// stores, so a row written before the first-removal rule changed is valued like a new one.
+	// Zero means summarize did nothing priceable on this turn (or the row predates the column).
 	SavedUSD float64
+	// FirstUSD is the part of SavedUSD that is a FIRST removal: the unique tokens, priced at the rate
+	// the turn before paid for them (Event.uniqueRate). Zero for a replay, and for a row that was not
+	// re-priced. On the async path the unique part reaches the table on the turn that replays the
+	// checkpoint, one turn after the turn that commissioned it, so this is the row-level fact the
+	// first removal is read from, not the event name.
+	FirstUSD float64
+	// StoredUSD is request_components.saved_usd as the row was written. The ledger compares it
+	// with what is counted, so the headline can be corrected by the difference.
+	StoredUSD float64
+	// FreshInput and SavedUnique are the stored inputs the first removal is priced from again.
+	FreshInput, SavedUnique int64
 	// Events is summarize's Report.Events for this request, as stored JSON. It says whether this
 	// turn PAID for a summary or replayed one, which is what identifies an episode's t0.
 	Events string
@@ -113,7 +124,15 @@ const (
 	// EpisodeVoided: the client compacted its own transcript inside the span. The client did the
 	// very thing the trigger exists to get ahead of, so the remainder is not comparable to a
 	// world where we had not compacted. Counted, never averaged in.
+	//
+	// No longer produced. A client compaction ends the attribution span, and the credit earned up
+	// to it counts (EpisodeClientCompacted). The constant and the group fields stay so the JSON
+	// shape does not change under a reader.
 	EpisodeVoided = "voided_client_compaction"
+	// EpisodeClientCompacted: the client compacted its own transcript inside the span. From that
+	// turn on both worlds carry a summarized transcript, so nothing later is ours. What the summary
+	// earned BEFORE that turn is real and counts, exactly like a closed span.
+	EpisodeClientCompacted = "closed_client_compaction"
 )
 
 // Episode provenance. Kept apart and NEVER summed, the same discipline declcredit.go keeps
@@ -156,6 +175,11 @@ type CompactionEpisode struct {
 	// usually the larger of the two simply because warm turns are far more numerous.
 	ColdCreditUSD float64 `json:"cold_credit_usd"`
 	ReadCreditUSD float64 `json:"read_credit_usd"`
+	// FirstRemovalCreditUSD is the saving on the turn that made a summary: the removed content
+	// priced at the rate the turn before it paid for that content (a read when its cache was
+	// live). Kept apart from the replay buckets because it is a different claim: one turn, no
+	// replay multiple.
+	FirstRemovalCreditUSD float64 `json:"first_removal_credit_usd"`
 	// OtherCreditUSD is cold_start and unknown turns. Reported apart rather than folded into
 	// either: a session's first turn had no entry to preserve, and "unknown" is not a verdict.
 	OtherCreditUSD float64 `json:"other_credit_usd"`
@@ -176,18 +200,22 @@ type CompactionEpisode struct {
 
 // CompactionEpisodeGroup is one provenance's totals.
 type CompactionEpisodeGroup struct {
-	Provenance           string  `json:"provenance"`
-	Episodes             int64   `json:"episodes"`
-	Closed               int64   `json:"closed"`
-	Open                 int64   `json:"open"`
-	Voided               int64   `json:"voided"`
-	Turns                int64   `json:"turns"`
-	ColdCreditUSD        float64 `json:"cold_credit_usd"`
-	ReadCreditUSD        float64 `json:"read_credit_usd"`
-	OtherCreditUSD       float64 `json:"other_credit_usd"`
-	InvalidationDebitUSD float64 `json:"invalidation_debit_usd"`
-	SummarizerCostUSD    float64 `json:"summarizer_cost_usd"`
-	NetUSD               float64 `json:"net_usd"`
+	Provenance string `json:"provenance"`
+	Episodes   int64  `json:"episodes"`
+	Closed     int64  `json:"closed"`
+	Open       int64  `json:"open"`
+	Voided     int64  `json:"voided"`
+	// ClientCompacted counts episodes the client's own compaction ended inside the span. They
+	// are totalled like closed ones: the credit up to that turn is real.
+	ClientCompacted       int64   `json:"client_compacted"`
+	FirstRemovalCreditUSD float64 `json:"first_removal_credit_usd"`
+	Turns                 int64   `json:"turns"`
+	ColdCreditUSD         float64 `json:"cold_credit_usd"`
+	ReadCreditUSD         float64 `json:"read_credit_usd"`
+	OtherCreditUSD        float64 `json:"other_credit_usd"`
+	InvalidationDebitUSD  float64 `json:"invalidation_debit_usd"`
+	SummarizerCostUSD     float64 `json:"summarizer_cost_usd"`
+	NetUSD                float64 `json:"net_usd"`
 	// UnpricedEpisodes are closed episodes on a model with no rates: counted, never valued.
 	UnpricedEpisodes int64 `json:"unpriced_episodes"`
 	// OpenNetUSD is the net of spans that have NOT finished — money committed whose payoff is
@@ -281,11 +309,45 @@ type CompactionEpisodes struct {
 	Episodes    []CompactionEpisode   `json:"episodes"`
 	Coverage    CompactionCoverage    `json:"coverage"`
 	Assumptions CompactionAssumptions `json:"assumptions"`
-	Pricing     *kvcache.PriceList    `json:"pricing"`
-	FirstTS     int64                 `json:"first_ts"`
-	LastTS      int64                 `json:"last_ts"`
-	Scanned     int64                 `json:"scanned"`
+	// Ledger is summarize's credit, row by row, split into what counts and what does not. The
+	// headline and /api/components read the same ledger, so the three figures agree.
+	Ledger  SummarizeLedger    `json:"ledger"`
+	Pricing *kvcache.PriceList `json:"pricing"`
+	FirstTS int64              `json:"first_ts"`
+	LastTS  int64              `json:"last_ts"`
+	Scanned int64              `json:"scanned"`
 }
+
+// SummarizeLedger is every summarize credit row the walk saw, sorted into what counts and what
+// does not. It is the ONE attribution rule: the episode view reads its episodes from it and the
+// headline and the Components tab read its totals, so none of the three has a pricing or
+// attribution path of its own.
+//
+// Rows are credit rows when summarize removed something priceable (SavedUSD != 0).
+type SummarizeLedger struct {
+	// FirstRemovalUSD is the counted saving on the turns that made a summary.
+	FirstRemovalUSD float64 `json:"first_removal_usd"`
+	// ReplayUSD is the counted saving on later turns, inside the attribution span.
+	ReplayUSD float64 `json:"replay_usd"`
+	// StoredUSD is what request_components.saved_usd holds for the same rows. CountedUSD less
+	// StoredUSD is the correction the headline and the component table apply.
+	StoredUSD float64 `json:"stored_usd"`
+	// PastSpanUSD is stored credit on turns after the span ended (it closed, or the client
+	// compacted). Nothing there is ours.
+	PastSpanUSD float64 `json:"past_span_usd"`
+	// PrefixChangeUSD is stored credit on replay turns that missed because the prompt changed.
+	// Inside a span we opened the thing that changed it is us, so it is not credited.
+	PrefixChangeUSD float64 `json:"prefix_change_usd"`
+	Rows            int64   `json:"rows"`
+}
+
+// CountedUSD is what the ledger credits to summarize.
+func (l SummarizeLedger) CountedUSD() float64 {
+	return l.FirstRemovalUSD + l.ReplayUSD
+}
+
+// DeltaUSD is the correction to apply to a figure built from the stored credit.
+func (l SummarizeLedger) DeltaUSD() float64 { return l.CountedUSD() - l.StoredUSD }
 
 // Defaults for the two fractions. Both are parameters rather than constants of nature, and both
 // are reported in Assumptions.
@@ -450,7 +512,7 @@ func walkCompactEpisodes(rows []compactRow, window windowFn, price priceFn,
 			}
 		}
 		out.Assumptions.noteCeiling(conv[0].Model, ceil, convSpan)
-		eps := conversationEpisodes(conv, w, p, convSpan)
+		eps := conversationEpisodes(conv, w, p, convSpan, &out.Ledger)
 
 		// Coverage is about the conversation, not the episodes: did it get big enough to be
 		// this trigger's business, and did anything happen when it did?
@@ -475,6 +537,8 @@ func walkCompactEpisodes(rows []compactRow, window windowFn, price priceFn,
 			switch e.State {
 			case EpisodeClosed:
 				g.Closed++
+			case EpisodeClientCompacted:
+				g.ClientCompacted++
 			case EpisodeOpen:
 				g.Open++
 			case EpisodeVoided:
@@ -486,11 +550,12 @@ func walkCompactEpisodes(rows []compactRow, window windowFn, price priceFn,
 			switch {
 			case !e.Priced:
 				// Unpriced: counted, never valued. An unpriced model is not a free one.
-				if e.State == EpisodeClosed {
+				if e.State == EpisodeClosed || e.State == EpisodeClientCompacted {
 					g.UnpricedEpisodes++
 				}
-			case e.State == EpisodeClosed:
+			case e.State == EpisodeClosed || e.State == EpisodeClientCompacted:
 				g.Turns += e.Turns
+				g.FirstRemovalCreditUSD += e.FirstRemovalCreditUSD
 				g.ColdCreditUSD += e.ColdCreditUSD
 				g.ReadCreditUSD += e.ReadCreditUSD
 				g.OtherCreditUSD += e.OtherCreditUSD
@@ -521,7 +586,12 @@ func walkCompactEpisodes(rows []compactRow, window windowFn, price priceFn,
 }
 
 // conversationEpisodes finds every episode in one conversation's ordered rows.
-func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac float64) []CompactionEpisode {
+//
+// led collects every credit row (see SummarizeLedger); nil skips the bookkeeping.
+func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac float64, led *SummarizeLedger) []CompactionEpisode {
+	if led == nil {
+		led = &SummarizeLedger{}
+	}
 	span := int64(spanFrac * float64(w))
 	if span <= 0 {
 		// A degenerate span would close every episode on its own t0, measuring nothing. Emit
@@ -531,7 +601,22 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 	var out []CompactionEpisode
 	var cur *CompactionEpisode
 	var prevTokensBefore int64
+	// endedBefore is true once an episode has ended in this conversation: a credit row after
+	// that, outside a new episode, is past the span.
+	endedBefore := false
+	// ghost is a span that only the ledger sees. A conversation can open on summarize credit with no
+	// summary event and no first removal before it: the summary is older than the events (the old
+	// size-only trigger) or than the queried range. It is not an episode (there is no t0 to cost),
+	// but its replay turns are bounded by the same span, anchored at the first turn we can see.
+	// Leaving such a run uncapped let one session's 296 replay turns ($30.82) through; anchoring at
+	// the first turn we can see over-credits at most the part of the span that came before it.
+	var ghost struct {
+		active bool
+		new    int64
+	}
 	for _, r := range conv {
+		credited := false
+		anchored := false
 		// ONE ROW CAN BELONG TO TWO EPISODES: the turn that closes a span AND itself commissions
 		// the next summary. Its SAVING was earned inside the span that is closing and is credited
 		// there; its COSTS — the new summary's own call, and the cache write that rewrite caused —
@@ -546,18 +631,28 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 			// A DROP in our own message-token count means the client compacted its own
 			// transcript. Scale-free (one measure against itself), which is why this is the
 			// one thing tokens_before is used for here.
+			//
+			// The span ends HERE. From this turn on both worlds carry a summarized transcript, so
+			// nothing later is ours — but what the summary earned before it is real and counts.
+			// This episode used to be voided and counted as $0, which threw away the credit of the
+			// five episodes in six that end this way.
 			if prevTokensBefore > 0 && r.TokensBefore > 0 && r.TokensBefore < prevTokensBefore {
-				cur.State = EpisodeVoided
-				cur.EndTS, cur.EndBilled = r.TS, r.Billed
+				cur.State = EpisodeClientCompacted
 				finishEpisode(cur, p)
 				out = append(out, *cur)
 				cur = nil
+				endedBefore = true
 			}
+		}
+		if cur == nil && ghost.active && prevTokensBefore > 0 && r.TokensBefore > 0 && r.TokensBefore < prevTokensBefore {
+			// The client compacted: the ghost span ends here as an episode's would.
+			ghost.active = false
+			endedBefore = true
 		}
 		if cur != nil {
 			cur.Turns++
 			cur.EndTS, cur.EndBilled = r.TS, r.Billed
-			creditTurn(cur, r, p)
+			credited = creditTurn(cur, led, r, isFreshSummary(r) != "")
 			// CUMULATIVE NEW CONTENT, which is neither of the two obvious axes.
 			//
 			// Per-turn SIZE does not work: compaction reduces what a turn sends, so `r.Billed`
@@ -599,10 +694,19 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 				finishEpisode(cur, p)
 				out = append(out, *cur)
 				cur = nil
+				endedBefore = true
 			}
 		}
 		if cur == nil {
-			if prov := isFreshSummary(r); prov != "" {
+			prov := isFreshSummary(r)
+			if prov == "" && r.SavedGross > 0 && r.SavedUSD != 0 && r.SavedUnique > 0 {
+				// A first removal with no summary event before it: the removal is the evidence that a
+				// summary landed, so the span starts here (inferred, like any row that acted without a
+				// name).
+				prov = EpisodeInferred
+			}
+			if prov != "" {
+				ghost.active = false
 				cur = &CompactionEpisode{
 					TenantID: r.Tenant, SessionID: r.Session, Model: r.Model,
 					Provenance: prov, State: EpisodeOpen, Window: w,
@@ -616,14 +720,35 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 					InvalidationDebitUSD: causedWriteUSD(r, p),
 					SummarizerCostUSD:    r.CGLLMCostUSD,
 				}
-				// NO CREDIT ON THE COMPACTION TURN.
+				// THE COMPACTION TURN IS CREDITED FOR WHAT IT REMOVED, AT THE RATE IT WOULD HAVE PAID.
 				//
-				// At t0 nothing has been saved — we have only SPENT: a model call, and a cache
-				// write for the new smaller prefix. The saving arrives on later turns, as reads
-				// against a shorter transcript and as cold rewrites that cost 1.25xC instead of
-				// 1.25xF. Crediting t0 front-loaded a saving at the cache-CREATION rate for work
-				// that had not yet paid off, which is the one direction a savings figure must
-				// never lean.
+				// An earlier version gave t0 no credit, because the dashboard priced it at the
+				// cache-WRITE rate for content the turn before had READ from cache: $2.945 against a
+				// real saving of about $0.14. That was a pricing bug, not a reason to hide the turn.
+				// Event.uniqueRate now prices a summary's removal as a read when the entry was live,
+				// and the headline credits this turn, so this view must too or the two disagree.
+				if !credited {
+					creditTurn(cur, led, r, isFreshSummary(r) != "")
+				}
+			} else if !credited && r.SavedUSD != 0 && r.SavedGross > 0 {
+				// A credit row outside every episode.
+				if ghost.active || !endedBefore {
+					if !ghost.active {
+						ghost.active, ghost.new, anchored = true, 0, true
+					}
+					creditTurn(&CompactionEpisode{}, led, r, false)
+				} else {
+					led.Rows++
+					led.StoredUSD += r.StoredUSD
+					led.PastSpanUSD += r.StoredUSD
+				}
+			}
+			if cur == nil && ghost.active && !anchored {
+				ghost.new += newContentBilled(r)
+				if ghost.new >= span {
+					ghost.active = false
+					endedBefore = true
+				}
 			}
 		}
 		prevTokensBefore = r.TokensBefore
@@ -682,96 +807,61 @@ func chargeRowCosts(e *CompactionEpisode, r compactRow, p kvcache.Pricing, opens
 	}
 }
 
-// creditTurn adds one turn's summarize saving to the bucket its cache verdict names, PRICED HERE
-// rather than inherited from request_components.saved_usd.
+// creditTurn adds one turn's summarize saving to the bucket its cache verdict names. It reports
+// whether the row carried a credit at all.
 //
-// # Why this does not use saved_usd, though an earlier version did
+// # The amount is the ledger's, not a price of its own
 //
-// saved_usd is Event.baselineDeltaUSD: `unique × cacheWriteRate + (gross − unique) × repeatRate`.
-// The repeat term is right. The UNIQUE term has no meaning inside an episode, and pricing it at the
-// cache-creation rate on a turn whose cache HIT overstated that turn by the full write:read ratio —
-// 12.5x on the Anthropic family.
+// r.SavedUSD is Event.ComponentSavedUSD: the first removal at uniqueRate, the re-sent remainder
+// at repeatRate, both with the tokenizer correction (#240). This function used to re-price the
+// quantity itself (SavedGross at a rate picked from the verdict), so the episode view had a
+// pricing path of its own. It could disagree with repeatRate, and did: the headline and this view
+// priced the same turn two ways. Now the verdict only decides WHICH BUCKET the one figure lands
+// in, and whether it counts.
 //
-// NOTHING SUMMARIZE REMOVES INSIDE A SPAN IS NEW CONTENT. That is what makes it summarizable: the
-// span it drops is transcript the provider has already been sent, at least once, on an earlier turn.
-// So the counterfactual for a removed span is never "this content enters the prompt for the first
-// time" — it is "this content is re-sent, and billed at whatever rate this turn paid for its
-// prefix". `unique` is a dedup of STASH keys, and it answers a different question.
+// # Which buckets count
 //
-// A LIVE REVIEW RUN CAUGHT THIS, and it had inverted the panel's sign. On the async path the stash
-// is written by the background goroutine, which has no Report — so the checkpoint key first reaches
-// rep.CacheKeys on the turn that REPLAYS it, one turn after the summary was commissioned.
-// Recorder.MarkUnique sees a key it has never seen, returns the whole removal as unique, and the row
-// lands with saved_usd priced at the cache-creation rate. That turn is a cache HIT, and unlike t0 it
-// IS credited. So going async moved the write-rate term off the uncredited compaction turn and onto
-// a credited warm one: a measured episode that LOST $0.0397 was published as +$0.376, and the
-// write-rate term was $0.358 of that gap — larger than the missing summarizer debit by ~5x.
-//
-// The bucket labels and the arithmetic now agree, which they did not before: a figure sitting in
-// ReadCreditUSD — the bucket documented as "billed at the cache-read rate" — had been priced at the
-// cache-WRITE rate.
-//
-// # The rate each verdict earns
-//
-//   - ttl_expiry: the entry had lapsed, so an uncompacted prefix would have been RE-CREATED. The
-//     cache-creation rate, and this is the one bucket where the write rate belongs. Its 1h-tier
-//     subset is split the same way the debit's is, assuming the counterfactual write would have used
-//     the tier this turn's actual write did — the only tier evidence the row carries.
-//   - hit: the entry was live, so the removed span would have been served from it. The cache-READ
-//     rate.
-//   - cold_start / unknown: reported apart and never blended into either, at the read rate, which is
-//     the conservative choice for a bucket no total picks up.
-//
-// prefix_change is deliberately absent from all three buckets. That verdict means the entry missed
-// because the prompt had CHANGED — which on a summarized session is frequently our own doing — so
-// counting it as a saving would credit this component for the misses it caused.
-//
-// # The quantity, and its correction
-//
-// saved_gross is summarize's own tokenizer over message text and the RATES here are the provider's,
-// so the two had to be reconciled — issue #240. This comment used to state the gap as "~12.4%,
-// which under-reports, which is the safe direction". Both halves were wrong to leave: 12.4% came
-// from a single cross-turn substitution, and MEASURED against real bills the gap is larger —
-// f = 1.3686 on haiku-4-5 and 1.6857 on the sonnet-5/opus-5 tokenizer (see
-// tokens.BilledDeltaFactor). "Conservative" is not a reason to leave a savings figure wrong, and
-// the direction was never the whole story: the same root cause OVER-reports wherever a cache-write
-// premium was fabricated (modelinfo.CacheWriteFracFor).
-//
-// So the quantity is corrected by the same per-family factor the write path and the read-time
-// estimator use. The token counts on the row are untouched — only the counterfactual dollars.
-func creditTurn(e *CompactionEpisode, r compactRow, p kvcache.Pricing) {
-	// saved_usd is read for exactly one thing: it is non-zero iff summarize removed something on
-	// this turn that the savings pipeline was willing to price. Cheaper than re-deriving that
-	// condition, and it keeps this bucket's population identical to the one the Components tab
-	// reports for the same component.
-	if r.SavedUSD == 0 || r.SavedGross <= 0 || !p.Known {
-		return
+//   - first removal (fresh): always. The turn made a summary; what it removed was priced at the
+//     rate the previous turn paid for it.
+//   - ttl_expiry: the entry had lapsed, so an uncompacted prefix would have been RE-CREATED.
+//     ColdCreditUSD.
+//   - hit: the entry was live, so the removed span would have been read. ReadCreditUSD.
+//   - cold_start / unknown: reported apart, never blended into either. OtherCreditUSD.
+//   - prefix_change: not credited. The entry missed because the prompt CHANGED, which inside a
+//     span we opened is frequently our own doing, so crediting it would credit this component for
+//     the misses it caused. The write is charged instead (see chargeRowCosts).
+func creditTurn(e *CompactionEpisode, led *SummarizeLedger, r compactRow, fresh bool) bool {
+	if r.SavedUSD == 0 || r.SavedGross <= 0 {
+		return false
 	}
-	bf, _ := tokens.BilledDeltaFactor(r.Model)
-	switch r.MissReason {
-	case CacheTTLExpiry:
-		// The counterfactual write is the whole removed span, at the tier this turn wrote at.
-		e.ColdCreditUSD += writeUSD(r.SavedGross, scaledWrite1h(r), p) * bf
-	case CacheHit:
-		e.ReadCreditUSD += float64(r.SavedGross) * p.CacheRead * bf
-	case CacheColdStart, CacheUnknown, "":
-		e.OtherCreditUSD += float64(r.SavedGross) * p.CacheRead * bf
+	led.Rows++
+	led.StoredUSD += r.StoredUSD
+	// The first removal on this row, whatever the verdict: it was priced at the rate the previous
+	// turn paid, so it does not depend on whether THIS turn hit. A fresh-summary row's whole removal
+	// is a first removal.
+	first := r.FirstUSD
+	if fresh && first == 0 {
+		first = r.SavedUSD
 	}
-}
-
-// scaledWrite1h is how much of a counterfactual write of SavedGross tokens would have been billed at
-// the 1-hour tier, assuming the removed span would have used the same tier mix this turn's own write
-// did. All of it, none of it, or a proportional share — there is no per-span tier on the row, and
-// the alternative is to assume the cheaper 5m tier for everything, which would understate the one
-// bucket that carries the headline.
-func scaledWrite1h(r compactRow) int64 {
-	if r.CacheWrite1h <= 0 || r.CacheWrite <= 0 {
-		return 0
+	first = math.Min(math.Max(first, 0), r.SavedUSD)
+	rest := r.SavedUSD - first
+	e.FirstRemovalCreditUSD += first
+	led.FirstRemovalUSD += first
+	switch {
+	case rest == 0:
+	case r.MissReason == CacheTTLExpiry:
+		e.ColdCreditUSD += rest
+		led.ReplayUSD += rest
+	case r.MissReason == CacheHit:
+		e.ReadCreditUSD += rest
+		led.ReplayUSD += rest
+	case r.MissReason == CachePrefixChange:
+		led.PrefixChangeUSD += rest
+	default: // cold_start, unknown, ""
+		e.OtherCreditUSD += rest
+		led.ReplayUSD += rest
 	}
-	if r.CacheWrite1h >= r.CacheWrite {
-		return r.SavedGross
-	}
-	return r.SavedGross * r.CacheWrite1h / r.CacheWrite
+	return true
 }
 
 // finishEpisode computes the net once the credits and debits are all in.
@@ -787,12 +877,12 @@ func finishEpisode(e *CompactionEpisode, p kvcache.Pricing) {
 		// The rendered panel was safe: every cell goes through usdOrNA with the group's priced flag.
 		// A JSON consumer was not, and this is a public API route. A review flagged the general form
 		// ("an unpriced episode still publishes dollars"); this is the one field where it was true.
-		e.ColdCreditUSD, e.ReadCreditUSD, e.OtherCreditUSD = 0, 0, 0
+		e.ColdCreditUSD, e.ReadCreditUSD, e.OtherCreditUSD, e.FirstRemovalCreditUSD = 0, 0, 0, 0
 		e.InvalidationDebitUSD, e.SummarizerCostUSD, e.NetUSD = 0, 0, 0
 		e.Priced = false
 		return
 	}
-	e.NetUSD = e.ColdCreditUSD + e.ReadCreditUSD + e.OtherCreditUSD -
+	e.NetUSD = e.FirstRemovalCreditUSD + e.ColdCreditUSD + e.ReadCreditUSD + e.OtherCreditUSD -
 		e.InvalidationDebitUSD - e.SummarizerCostUSD
 }
 
@@ -1052,15 +1142,28 @@ const compactEpisodeSelect = `SELECT r.tenant_id, r.session_id, r.model, r.ts, r
 		r.fresh_input + r.cache_read + r.cache_write AS billed,
 		r.cache_miss_reason, r.cache_write, r.cache_write_1h, r.cache_read, r.cg_llm_cost_usd,
 		COALESCE(c.saved_gross, 0), COALESCE(c.saved_usd, 0), COALESCE(c.events, ''),
-		COALESCE(c.acted, 0)
+		COALESCE(c.acted, 0), r.fresh_input, COALESCE(c.saved_unique, 0)
 	FROM requests r
 	LEFT JOIN request_components c ON c.request_id = r.id AND c.component = 'summarize'
 	WHERE %s
 	ORDER BY r.tenant_id, r.session_id, r.model, r.ts, r.id`
 
-// compactEpisodeDataset reads the ordered rows one filter selects.
-func (d *DB) compactEpisodeDataset(f Filter) ([]compactRow, error) {
+// summarizeSessionsOnly narrows the dataset to sessions in which summarize ever acted. The
+// ledger needs no others, and it runs on the stats path, which must not load every request.
+const summarizeSessionsOnly = ` AND EXISTS (SELECT 1 FROM request_components c2 JOIN requests r2 ON r2.id = c2.request_id
+	WHERE c2.component = 'summarize' AND c2.acted = 1
+	AND r2.session_id = r.session_id AND r2.tenant_id = r.tenant_id)`
+
+// rePriceFn resolves a model's rates for the read-time pricing of a stored row.
+type rePriceFn func(model string) (modelinfo.Price, bool)
+
+// compactEpisodeDataset reads the ordered rows one filter selects. price, when set, values each
+// summarize first removal again through Event.ComponentSavedUSD (see rePriceRow).
+func (d *DB) compactEpisodeDataset(f Filter, price rePriceFn, summarizeOnly bool) ([]compactRow, error) {
 	cond, args := f.where()
+	if summarizeOnly {
+		cond += summarizeSessionsOnly
+	}
 	q := strings.Replace(compactEpisodeSelect, "%s", cond, 1)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
@@ -1073,10 +1176,13 @@ func (d *DB) compactEpisodeDataset(f Filter) ([]compactRow, error) {
 		var acted int
 		if err := rows.Scan(&r.Tenant, &r.Session, &r.Model, &r.TS, &r.TokensBefore,
 			&r.Billed, &r.MissReason, &r.CacheWrite, &r.CacheWrite1h, &r.CacheRead,
-			&r.CGLLMCostUSD, &r.SavedGross, &r.SavedUSD, &r.Events, &acted); err != nil {
+			&r.CGLLMCostUSD, &r.SavedGross, &r.SavedUSD, &r.Events, &acted,
+			&r.FreshInput, &r.SavedUnique); err != nil {
 			return nil, err
 		}
 		r.Acted = acted != 0
+		r.StoredUSD = r.SavedUSD
+		rePriceRow(&r, price)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -1089,11 +1195,11 @@ func (d *DB) compactEpisodeDataset(f Filter) ([]compactRow, error) {
 // a guess.
 func (d *DB) CompactionEpisodesFor(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer,
 	cfg KVCacheSimConfig, spanFrac, fillFrac, ceilingFrac float64) (*CompactionEpisodes, error) {
-	rows, err := d.compactEpisodeDataset(f)
+	ctx := d.readCtx()
+	rows, err := d.compactEpisodeDataset(f, pricerFn(ctx, p), false)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
 	}
-	ctx := d.readCtx()
 	models := map[string]bool{}
 	for _, r := range rows {
 		models[r.Model] = true

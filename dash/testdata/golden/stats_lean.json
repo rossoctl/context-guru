@@ -144,6 +144,7 @@
  "sse_recorded": 0,
  "sse_stream_rows": 0,
  "sse_streamed": 0,
+ "summarize_correction_usd": 0,
  "tier_costs": {
   "addressable_usd": 66.0497145,
   "cache_read_usd": 7.5462045,

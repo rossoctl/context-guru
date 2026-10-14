@@ -718,8 +718,26 @@ func kaThreadKey(tenant, session, threadID string) string {
 // Only THIS thread's entry is cleared: a subagent's request says nothing about whether the main
 // thread is still idle.
 func (k *keeper) arrive(tenant, session, threadID string) (pings int, refreshed int64, strategyID string) {
+	a := k.arriveAt(tenant, session, threadID)
+	return a.pings, a.refreshed, a.strategyID
+}
+
+// kaArrival is what the keeper knew about an idle span at the moment a real request ended it.
+type kaArrival struct {
+	pings      int
+	refreshed  int64
+	strategyID string
+	// refreshedAt is when the provider's entry was last known refreshed: the previous real
+	// request's start, or the start of the last ping that READ the cache. Zero when no entry.
+	refreshedAt time.Time
+}
+
+// arriveAt is arrive plus the instant the provider's entry was last refreshed. The cache-miss
+// verdict needs it: the dashboard's idle gap runs from the last real request, but a ping that
+// read the cache moved the provider's clock, so the entry's true age is shorter.
+func (k *keeper) arriveAt(tenant, session, threadID string) kaArrival {
 	if k == nil || session == "" {
-		return 0, 0, ""
+		return kaArrival{}
 	}
 	key := kaThreadKey(tenant, session, threadID)
 	k.mu.Lock()
@@ -730,13 +748,13 @@ func (k *keeper) arrive(tenant, session, threadID string) (pings int, refreshed 
 	k.inflight[key]++
 	e, ok := k.live[key]
 	if !ok {
-		return 0, 0, ""
+		return kaArrival{}
 	}
-	pings, refreshed, strategyID = e.pings, e.refreshed, e.appliedStrategy
+	a := kaArrival{pings: e.pings, refreshed: e.refreshed, strategyID: e.appliedStrategy, refreshedAt: e.refreshedAt}
 	k.bytes -= int64(len(e.body))
 	e.clear()
 	delete(k.live, key)
-	return pings, refreshed, strategyID
+	return a
 }
 
 // record hands the keeper what it needs to ping this thread, once the request that

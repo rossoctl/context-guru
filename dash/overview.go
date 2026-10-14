@@ -146,6 +146,11 @@ type Overview struct {
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
 	NetSavedUSD     float64 `json:"net_saved_usd"`
+	// SummarizeCorrectionUSD is what ApplySummarizeLedger moved the baseline by: summarize's
+	// counted credit less the stored one. Negative when the stored figure over-credited (a first
+	// removal priced as a write, or turns past the attribution span). Zero until the API layer,
+	// which holds the rates and the window resolver, has applied it.
+	SummarizeCorrectionUSD float64 `json:"summarize_correction_usd"`
 	// CacheSavedUSD is what the PROVIDER's prompt cache saved over paying the fresh rate
 	// for the same tokens. Context, not credit: the agent places most of the breakpoints
 	// itself. It is here because it is the number that collapses when a pipeline rewrites
