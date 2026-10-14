@@ -483,7 +483,7 @@ def adapt_words(cmd: str, args: list[str], o: dict) -> tuple[str, list[str], str
     words = [ALIAS.get(w, w) for w in [cmd] + args]
     verbs = [w for w in words if w in WRITES]
     kinds = [w for w in words if w in KINDS]
-    rest = [w for w in words if w not in WRITES and w not in KINDS and w not in READS]
+    rest = [w for w in words if w not in WRITES and w not in KINDS and w not in READS and w != "insights"]
     verb = verbs[0] if verbs else "read"
     if cmd == "remove-mcp-and-skills" and not kinds:
         kinds = ["tools"]
