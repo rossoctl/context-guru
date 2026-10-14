@@ -1248,6 +1248,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			cp.noteWaitBody(orig)
 			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
 			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
+			if cp != nil {
+				cp.predArrival = h.predRT().arrive(tn.ID, tr.Session, threadID, time.Now())
+			}
 			// Drop any cache_aware_summarizer keep-alive substitute registered off an EARLIER
 			// turn's conversation — but never the one this request's own pipeline run (above)
 			// may just have written: an unconditional clear here used to delete that candidate
@@ -1593,6 +1596,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// actually went upstream on the final round (an expand round rewrites it) and the
 		// prefix a ping would replay is the one the provider just hashed. Costs nothing when
 		// no tenant has opted in.
+		ttfb := 0.0
+		if sse && !sseBuffered {
+			ttfb = msSince(reqStart, sseFirstByte)
+		}
+		usage.Live = cp.liveFacts(ttfb)
 		h.keeper.record(tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache
 		// was COLD: this request has now either rewritten that prefix or failed trying to, and

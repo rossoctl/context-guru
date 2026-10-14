@@ -237,6 +237,16 @@ If `ANTHROPIC_BASE_URL` points at something other than a context-guru proxy (a g
 proxy in front of one), that host receives `POST /signal` with the token it already sees on
 every request. Leave the option off in that setup.
 
+## Predictive campaigns (opt-in, per tenant)
+
+Instead of one fixed ping count for everyone, a manager can build a **campaign** for a tenant from
+that tenant's own history: either a learned model that decides at the end of each response how
+many pings pay for themselves, or (`builder: "auto"`) the best fixed plan for that tenant, rebuilt
+daily. A campaign runs in `shadow` (scores live decisions, changes nothing) or `active` (sets the
+ping count of a keep-alive the tenant already has on). `active` is refused unless the build's own
+held-out comparison recommended it. Routes, settings and safety properties:
+`predictive/README.md` in the repository.
+
 ## Related
 
 - [Measuring savings](measure-savings.md) — how the ledger separates the provider's cache
