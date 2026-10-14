@@ -200,7 +200,7 @@ func TestAdaptToolsEnvelope(t *testing.T) {
 		doc.Options[1].SpendUSD != 1 || doc.Options[1].NetUSD != 2 || doc.Items[0].LastUsedMS != nil ||
 		doc.WouldAddUSD != 2 || doc.Recommendation.SavedToDateUSD != 3 || doc.Recommendation.RewriteUSD != 1 ||
 		math.Abs(doc.Recommendation.SavedPerWeekUSD-0.7) > 1e-9 ||
-		doc.Recommendation.Question != "Remove 1 item (a), saving about $0.70 a week? The one-off cache rewrite costs about $1.00, so it pays back in about 2 weeks." ||
+		doc.Recommendation.Question != "Remove 1 item (a)? Over the last 30 days they would have saved about $0.70 a week. The one-off cache rewrite costs about $1.00, so it pays back in about 2 weeks." ||
 		doc.PaybackWeeks == nil || math.Abs(*doc.PaybackWeeks-1/0.7) > 1e-9 || doc.Recommendation.ItemsN != 1 {
 		t.Fatalf("doc %+v rec %+v", doc, doc.Recommendation)
 	}
@@ -395,5 +395,43 @@ func TestAdaptToolsEstimatesAClientSideRemovalPerRequest(t *testing.T) {
 	if doc.SavedSoFar.TotalUSD != 0 || doc.ToDate.SavedUSD != 0 || doc.ToDate.Items != 0 ||
 		len(doc.Removed) != 1 || doc.Removed[0].Class != "estimated" {
 		t.Fatalf("measured %v, to_date %+v, removed %+v", doc.SavedSoFar.TotalUSD, doc.ToDate, doc.Removed)
+	}
+}
+
+// The filter's measured total and its per-item rows price a one-hour write the same way (2x
+// input), and when the filter's own token count differs from the items', the difference is a row
+// of its own instead of a silent gap.
+func TestAdaptToolsSavedItemsAndTotalAgree(t *testing.T) {
+	seed := func(filtered int) *AdaptToolsDoc {
+		db := openTestDB(t)
+		read := mkEvent(day(0), "s", "opus", 100, 100)
+		read.TenantID, read.Tools, read.CacheRead, read.CacheWrite, read.DeclDigest, read.FilteredDeclTokens = "t1", 2, 1000, 0, "d", filtered
+		hour := mkEvent(day(0)+1, "s", "opus", 100, 100)
+		hour.TenantID, hour.Tools, hour.CacheRead, hour.CacheWrite, hour.CacheWrite1h, hour.DeclDigest, hour.FilteredDeclTokens =
+			"t1", 2, 0, 5000, 5000, "d", filtered
+		if err := db.insertBatch([]*Event{read, hour}); err != nil {
+			t.Fatal(err)
+		}
+		w := &invWriter{db: db, seen: map[string]*invSession{}}
+		if err := w.write([]invMsg{{tenant: "t1", session: "s", ts: day(0), inv: &Inventory{Digest: "d", UseFingerprint: 1,
+			Decls: []Decl{{Kind: KindTool, Name: "Read", Tokens: 50}, {Kind: KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}}}); err != nil {
+			t.Fatal(err)
+		}
+		doc, err := db.AdaptTools(Filter{Tenant: "t1"}, adaptPrice, ToolFilterState{Enabled: true, Removed: []string{"mcp__srv"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return doc
+	}
+	// 100 tokens read at 0.1, plus 100 tokens in a one-hour write at 2x input.
+	want := 100*0.1 + 100*2.0
+	same := seed(100).SavedSoFar.Filter
+	if math.Abs(same.USD-want) > 1e-9 || len(same.Items) != 1 || math.Abs(same.Items[0].USD-want) > 1e-9 {
+		t.Fatalf("filter %+v, want total and the one item both $%v", same, want)
+	}
+	// The filter counted 150 tokens where the set says the item is 100: a 50-token gap per request.
+	gap := seed(150).SavedSoFar.Filter
+	if len(gap.Items) != 2 || gap.Items[1].Kind != "unattributed" || math.Abs(gap.Items[1].USD-50*(0.1+2.0)) > 1e-9 {
+		t.Fatalf("filter %+v, want an unattributed row of the gap", gap)
 	}
 }

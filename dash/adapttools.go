@@ -835,7 +835,7 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 		if days >= 1 && enoughHigh-enoughLow >= 0.005 {
 			rec.RangePerWeekUSD = []float64{enoughLow / days * 7, enoughHigh / days * 7}
 		}
-		rec.Question = adaptToolsQuestion(enough, rec.SavedPerWeekUSD, enoughUSD, from, out.RewriteUSD, out.PaybackWeeks)
+		rec.Question = adaptToolsQuestion(enough, rec.SavedPerWeekUSD, enoughUSD, from, out.RewriteUSD, out.PaybackWeeks, days)
 		out.Recommendation = rec
 		out.WouldAddUSD = rec.NetDeltaUSD
 	}
@@ -861,7 +861,7 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 
 // adaptToolsQuestion is the recommendation as one question: the set, the weekly saving, and the
 // one-off rewrite, saying plainly when it takes more than a week to pay back.
-func adaptToolsQuestion(remove []string, perWeek, toDate float64, since string, rewrite float64, payback *float64) string {
+func adaptToolsQuestion(remove []string, perWeek, toDate float64, since string, rewrite float64, payback *float64, days float64) string {
 	names := make([]string, 0, 3)
 	for _, n := range head(remove, 3) {
 		names = append(names, strings.TrimPrefix(strings.TrimPrefix(n, skills.RemovePrefix), "mcp__"))
@@ -874,9 +874,11 @@ func adaptToolsQuestion(remove []string, perWeek, toDate float64, since string, 
 	if len(remove) == 1 {
 		n = "1 item"
 	}
-	q := fmt.Sprintf("Remove %s (%s), saving about %s a week? ", n, what, usdText(perWeek))
+	// Hindsight, phrased as hindsight: what removing them would have saved, not a promise.
+	q := fmt.Sprintf("Remove %s (%s)? Over the last %.0f days they would have saved about %s a week. ",
+		n, what, days, usdText(perWeek))
 	if payback == nil {
-		q = fmt.Sprintf("Remove %s (%s), saving %s since %s? ", n, what, usdText(toDate), since)
+		q = fmt.Sprintf("Remove %s (%s)? They would have saved %s since %s. ", n, what, usdText(toDate), since)
 	}
 	q += "The one-off cache rewrite costs about " + usdText(rewrite)
 	if payback != nil && *payback > 1 {
@@ -939,6 +941,18 @@ func (d *DB) adaptToolsSaved(f Filter, price func(string) (modelinfo.Price, bool
 			out.Filter.Items = append(out.Filter.Items, AdaptToolsSavedItem{Kind: kind, Name: name,
 				RemoveAs: removeAs, USD: c.USD(), Requests: c.Requests, Since: c.FirstTS})
 		}
+	}
+	// The items are priced from the declaration set and the total from the filter's own count of
+	// what it did not send. They agree when every filtered request carried a currently listed item
+	// counted the same way; they differ for items filtered earlier but no longer listed, or when the
+	// two token counts disagree. The difference is shown as its own row rather than hidden.
+	sum := 0.0
+	for _, it := range out.Filter.Items {
+		sum += it.USD
+	}
+	if gap := out.Filter.USD - sum; out.Filter.Requests > 0 && math.Abs(gap) >= 0.005 {
+		out.Filter.Items = append(out.Filter.Items, AdaptToolsSavedItem{Kind: "unattributed",
+			Name: "not matched to an item on the current list", USD: gap})
 	}
 	// Client-side removals: SelfRemovals only DETECTS them (a name that stopped appearing in later
 	// sessions that still carried MCP tools or skills). The figure is priced here, per request:
