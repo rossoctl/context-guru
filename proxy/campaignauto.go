@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -279,6 +280,61 @@ func autoSpec(rows []predictive.AutoRow, tenant string, since, until int64, sess
 	return spec, rec
 }
 
+// autoData is what an auto build reads: the fleet's rows for the tuner's prior, from one read capped at the dashboard's newest-rows limit, plus
+// each scope tenant's own rows read on their own. A busy fleet can then never push a tenant's history out of its build. Truncation is reported,
+// never silent.
+type autoData struct {
+	reqs                    []*kvcache.Request
+	fleetRead, fleetMatched int64
+	ownTruncated            []string // tenants whose own rows exceeded the cap
+}
+
+func (h *Handler) autoDataset(tenants []string, since, until int64) (*autoData, error) {
+	db := h.opts.Dashboard.DB()
+	fleet, total, err := db.KVCacheDataset(dash.Filter{TenantAll: true, Since: since, Until: until}, dash.KVCacheOptions{})
+	if err != nil {
+		return nil, err
+	}
+	d := &autoData{reqs: fleet, fleetRead: int64(len(fleet)), fleetMatched: total}
+	seen := make(map[int64]bool, len(fleet))
+	for _, r := range fleet {
+		seen[r.ID] = true
+	}
+	for _, tn := range tenants {
+		own, n, err := db.KVCacheDataset(dash.Filter{Tenant: tn, Since: since, Until: until}, dash.KVCacheOptions{})
+		if err != nil {
+			return nil, err
+		}
+		if n > int64(len(own)) {
+			d.ownTruncated = append(d.ownTruncated, tn)
+		}
+		for _, r := range own {
+			if !seen[r.ID] {
+				seen[r.ID] = true
+				d.reqs = append(d.reqs, r)
+			}
+		}
+	}
+	return d, nil
+}
+
+// note records in the spec what the build read, and says so when a read was cut at the cap.
+func (d *autoData) note(spec map[string]any, tenant string) {
+	ev, _ := spec["evidence"].(map[string]any)
+	if ev != nil {
+		ev["data"] = map[string]any{"fleet_rows_read": d.fleetRead, "fleet_rows_in_window": d.fleetMatched, "fleet_truncated": d.fleetMatched > d.fleetRead,
+			"tenant_truncated": slices.Contains(d.ownTruncated, tenant)}
+	}
+	cv, _ := spec["caveats"].([]string)
+	if d.fleetMatched > d.fleetRead {
+		cv = append(cv, fmt.Sprintf("the fleet prior used the newest %d of %d rows in the window (the tenant's own rows are all read)", d.fleetRead, d.fleetMatched))
+	}
+	if slices.Contains(d.ownTruncated, tenant) {
+		cv = append(cv, "the tenant's own history exceeds the read cap: only its newest rows are used")
+	}
+	spec["caveats"] = cv
+}
+
 func (h *Handler) runAutoBuild(id, out string, in cacheBuildIn, since, until int64) {
 	defer func() { buildMu.Lock(); delete(buildActive, id); buildMu.Unlock() }()
 	t0 := time.Now()
@@ -286,12 +342,13 @@ func (h *Handler) runAutoBuild(id, out string, in cacheBuildIn, since, until int
 		slog.Warn("context-guru: auto campaign build failed", "campaign", id, "err", err)
 		_ = writeJSONFile(filepath.Join(out, "status.json"), map[string]any{"state": "failed", "error": msg})
 	}
-	reqs, _, err := h.opts.Dashboard.DB().KVCacheDataset(dash.Filter{TenantAll: true, Since: since, Until: until}, dash.KVCacheOptions{})
+	data, err := h.autoDataset([]string{in.ID}, since, until)
 	if err != nil {
 		fail("could not read the fleet's history", err)
 		return
 	}
-	spec, rec := autoSpec(autoRows(reqs, h.autoPrice(), in.SessionEnd, until), in.ID, since, until, in.SessionEnd)
+	spec, rec := autoSpec(autoRows(data.reqs, h.autoPrice(), in.SessionEnd, until), in.ID, since, until, in.SessionEnd)
+	data.note(spec, in.ID)
 	if err := writeSpecValidated(out, spec); err != nil {
 		fail("the built spec did not validate: "+err.Error(), err)
 		return
@@ -345,8 +402,8 @@ func (h *Handler) refreshAutoCampaigns(now time.Time) {
 		live = append(live, pc)
 	}
 	rt.mu.RUnlock()
-	// One read of the fleet's history per pass, for the longest window any live auto campaign uses, shared by all of them (the dataset read is
-	// capped at the dashboard's kvCacheMaxRows newest rows), and released when the pass ends.
+	// One read of the fleet's history per pass, for the longest window any live auto campaign uses, shared by all of them (the fleet read is
+	// capped at the dashboard's newest-rows limit; each campaign tenant's own rows are read in full, see autoDataset), released when the pass ends.
 	type job struct {
 		pc     *predCampaign
 		base   string
@@ -379,7 +436,11 @@ func (h *Handler) refreshAutoCampaigns(now time.Time) {
 	if len(jobs) == 0 {
 		return
 	}
-	reqs, _, err := h.opts.Dashboard.DB().KVCacheDataset(dash.Filter{TenantAll: true, Since: oldest, Until: u}, dash.KVCacheOptions{})
+	tenants := make([]string, 0, len(jobs))
+	for _, j := range jobs {
+		tenants = append(tenants, j.pc.meta.Tenant)
+	}
+	data, err := h.autoDataset(tenants, oldest, u)
 	if err != nil {
 		slog.Warn("context-guru: auto campaign refresh could not read the history", "err", err)
 		return
@@ -389,7 +450,7 @@ func (h *Handler) refreshAutoCampaigns(now time.Time) {
 	for _, j := range jobs {
 		all, ok := rowsBySE[j.se]
 		if !ok {
-			all = autoRows(reqs, price, j.se, u)
+			all = autoRows(data.reqs, price, j.se, u)
 			rowsBySE[j.se] = all
 		}
 		rows := make([]predictive.AutoRow, 0, len(all))
@@ -399,6 +460,7 @@ func (h *Handler) refreshAutoCampaigns(now time.Time) {
 			}
 		}
 		spec, rec := autoSpec(rows, j.pc.meta.Tenant, j.since, u, j.se)
+		data.note(spec, j.pc.meta.Tenant)
 		if rec == "insufficient_data" || (j.active && rec != "ship") {
 			// an ACTIVE campaign changes its plan only on a rebuild that passed the same ship gate the mode change needs
 			_ = writeJSONFile(filepath.Join(j.base, "status.json"), map[string]any{"state": "done", "recommendation": readStatus(j.base)["recommendation"],

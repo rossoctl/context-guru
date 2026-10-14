@@ -293,3 +293,40 @@ func TestAutoRefreshSwapRechecksTheModeUnderTheLock(t *testing.T) {
 		}
 	}
 }
+
+// The auto builder's tenant rows do not ride on the capped fleet read: an account with 4 requests, older than other tenants' 6 that fill a cap of
+// 6, still gets all 4 of its own rows, and the build says the fleet read was truncated.
+func TestAutoDatasetReadsTheTenantsOwnRowsPastTheFleetCap(t *testing.T) {
+	f, _ := newCampaignFixture(t, "ship", "parity.model.json")
+	_, tid := f.signUpJar(t, "user@ibm.com")
+	t0 := time.Now().Add(-3 * time.Hour).UnixMilli()
+	for i := 0; i < 4; i++ {
+		f.record(t, tid, "mine", &dash.Event{TS: t0 + int64(i)*60e3, Model: "m1", Status: 200, CacheRead: 50000, UpstreamMs: 1000})
+	}
+	for i := 0; i < 6; i++ {
+		f.record(t, "other-tenant", fmt.Sprintf("s%d", i), &dash.Event{TS: t0 + 3600e3 + int64(i)*60e3, Model: "m1", Status: 200, CacheRead: 50000, UpstreamMs: 1000})
+	}
+	defer dash.SetKVCacheMaxRows(6)()
+	since, until := t0-60e3, time.Now().UnixMilli()
+	d, err := f.h.autoDataset([]string{tid}, since, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine := 0
+	for _, r := range d.reqs {
+		if r.User == tid {
+			mine++
+		}
+	}
+	if mine != 4 || len(d.reqs) != 10 {
+		t.Fatalf("own rows %d (want 4), all rows %d (want 10)", mine, len(d.reqs))
+	}
+	spec := map[string]any{"evidence": map[string]any{}}
+	d.note(spec, tid)
+	if data := spec["evidence"].(map[string]any)["data"].(map[string]any); data["fleet_truncated"] != true || data["fleet_rows_in_window"] != int64(10) || data["tenant_truncated"] != false {
+		t.Errorf("evidence.data = %v; want the fleet read reported as truncated (6 of 10), the tenant's not", data)
+	}
+	if cv, _ := spec["caveats"].([]string); len(cv) != 1 {
+		t.Errorf("caveats %v; want one saying the fleet prior was cut", cv)
+	}
+}

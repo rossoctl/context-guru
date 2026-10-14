@@ -61,6 +61,13 @@ import (
 // is a branch no test reaches.
 var kvCacheMaxRows = 200_000
 
+// SetKVCacheMaxRows lowers the row cap for a test in another package and returns the restore.
+func SetKVCacheMaxRows(n int) (restore func()) {
+	old := kvCacheMaxRows
+	kvCacheMaxRows = n
+	return func() { kvCacheMaxRows = old }
+}
+
 // kvCacheMaxConcurrent bounds how many analysis reads run at once, which is the half of the
 // ceiling kvCacheMaxRows does not cover.
 //
