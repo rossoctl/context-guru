@@ -104,9 +104,17 @@ Switching model rewrites the cache, so the hint says so before you send.
 ![Model switch](../statusline-live/model-switch-dark.svg#only-dark)
 ![Model switch](../statusline-live/model-switch-light.svg#only-light)
 
-### Tool set changed
+### Why the last cache miss happened
 
-From Claude Code's own miss report, when it is under two minutes old.
+From Claude Code's own miss report, when it is under two minutes old. The hint names the first cause Claude Code gave (`+N more` when it gave several), and only a tool change comes with advice:
+
+| Cause | Hint |
+|---|---|
+| tool definitions changed | `tools changed (+2 −1): add tools at session start` |
+| idle past the 5 min or 1 h lifetime | `cache expired after 5 min idle`, plus `, no keep-alive ping held it` when the proxy sent no ping in this session |
+| model, system prompt, earlier messages, effort, thinking, fast or auto mode, beta headers, and the rest of Claude Code's list | `cache miss: model changed` and so on, in Claude Code's own words |
+| prompt unchanged | `cache miss: prompt unchanged, likely the provider` |
+| unknown, or a code this version does not know | `cache miss, cause unknown`, or `cache miss: <code>` |
 
 ![Tool set changed](../statusline-live/tool-set-changed-dark.svg#only-dark)
 ![Tool set changed](../statusline-live/tool-set-changed-light.svg#only-light)

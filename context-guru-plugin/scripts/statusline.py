@@ -1230,7 +1230,8 @@ def _fresh_session(payload: dict) -> bool:
     return usd is None or i is None or o is None or (usd == 0 and i == 0 and o == 0)
 
 
-def _hint(payload: dict, view: dict, ctx: tuple[float, float] | None) -> tuple[str, str] | None:
+def _hint(payload: dict, view: dict, ctx: tuple[float, float] | None,
+          stats: dict | None = None) -> tuple[str, str] | None:
     """At most ONE actionable line (long, short form), most expensive first."""
     rem, tokens = view["remaining"], view["tokens"]
     if rem is not None and rem <= 0 and tokens and tokens >= HINT_COLD_MIN_TOKENS:
@@ -1254,11 +1255,42 @@ def _hint(payload: dict, view: dict, ctx: tuple[float, float] | None) -> tuple[s
     at, cause = _num(pc, "last_miss_at"), pc.get("last_miss_cause")
     causes = cause.get("causes") if isinstance(cause, dict) else None
     if at is not None and time.time() - at < 120 and isinstance(causes, list) and causes:
-        added, removed = _num(cause, "tools_added") or 0, _num(cause, "tools_removed") or 0
-        what = f"tools changed (+{int(added)} −{int(removed)})" if added or removed else ",".join(str(c) for c in causes[:2])
-        miss = f"{YELLOW}{what}: add tools at session start{RESET}"
-        return miss, miss
+        msg = _miss_message(cause, causes, stats)
+        return msg, msg
     return None
+
+
+# Claude Code's prompt-cache miss causes (the closed set its payload documents; 2.1.296), each with
+# what the line says. Labels follow Claude Code's own. Only a tool change gets advice: it is the one
+# cause a user fixes by doing something differently next session.
+MISS_CAUSES = {
+    "system_prompt_changed": "system prompt changed", "model_changed": "model changed",
+    "fast_mode_changed": "fast mode toggled", "cache_scope_or_ttl_changed": "cache scope or TTL changed",
+    "betas_changed": "beta headers changed", "effort_changed": "effort changed",
+    "thinking_mode_changed": "thinking toggled", "thinking_display_changed": "thinking display changed",
+    "auto_mode_changed": "auto mode toggled", "overage_changed": "usage-limit state changed",
+    "extra_body_changed": "extra request fields changed", "defer_loading_changed": "deferred tool loading changed",
+    "messages_rewritten": "earlier messages changed", "likely_server_side": "prompt unchanged, likely the provider",
+}
+
+
+def _miss_message(cause: dict, causes: list, stats: dict | None) -> str:
+    """The hint for Claude Code's last cache miss, by its first cause (`+N` when it gave more).
+    A tool change says how to avoid it. An idle expiry says so, and adds that no keep-alive ping
+    held the cache only when this session sent none (counted by the proxy). Anything else names
+    the cause and gives no advice; a code this script does not know is shown as it came."""
+    first, more = str(causes[0]), f" (+{len(causes) - 1} more)" if len(causes) > 1 else ""
+    if first == "tools_changed":
+        added, removed = _num(cause, "tools_added") or 0, _num(cause, "tools_removed") or 0
+        what = f"tools changed (+{int(added)} −{int(removed)})" if added or removed else "tools changed"
+        return f"{YELLOW}{what}{more}: add tools at session start{RESET}"
+    if first in ("ttl_expired_5m", "ttl_expired_1h"):
+        idle = "5 min" if first == "ttl_expired_5m" else "1 h"
+        unpinged = _num(stats, "keepalive_pings") == 0
+        return f"{YELLOW}cache expired after {idle} idle{', no keep-alive ping held it' if unpinged else ''}{more}{RESET}"
+    if first == "unknown":
+        return f"{YELLOW}cache miss, cause unknown{more}{RESET}"
+    return f"{YELLOW}cache miss: {MISS_CAUSES.get(first, first)}{more}{RESET}"
 
 
 def _truncate(s: str, width: int) -> str:
@@ -1528,7 +1560,7 @@ def main() -> None:
     order = [e for e in ("update", "save", "spend", "spark", "strip", "heat", "fill", "clock0", "wagents", "cache",
                          "agents", "ctx", "ka", "latency", "tools") if e in on]
     level: dict[str, int | None] = {e: 0 for e in order}
-    hint = _hint(payload, view, ctx) if "hint" in on else None
+    hint = _hint(payload, view, ctx, stats) if "hint" in on else None
     if layout in ("minimal", "watch"):
         level["save"] = 1  # minimal: `saved $0.31 of $4.10`, the main thread only
     hint_level = 0

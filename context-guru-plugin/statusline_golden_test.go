@@ -772,3 +772,66 @@ print("cache:", render())
 		t.Errorf("with a cache the stale numbers must show, marked ⏳, never loading: %q", rest)
 	}
 }
+
+// TestStatuslineGoldenMissCause pins the hint for Claude Code's last cache miss, one per cause it
+// reports (the closed set in its 2.1.296 payload) plus a code this script does not know. Only a
+// tool change gets the "add tools at session start" advice. An idle expiry says it expired, and
+// that no keep-alive ping held it only when the proxy counted none for this session.
+func TestStatuslineGoldenMissCause(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"now_ms":%d,"ttl_s":300,"prefix_tokens":52000,`+
+		`"priced":true,"rewrite_usd":0.30,"window":1000000,"window_exact":true}`, now-60_000, now)
+	stub := func(stats string) string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(stats)) })
+		mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(cache)) })
+		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go srv.Serve(ln) //nolint:errcheck
+		t.Cleanup(func() { srv.Close() })
+		return fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	}
+	const noPings, pinged, unknownPings = `{"keepalive_pings": 0}`, `{"keepalive_pings": 3}`, `{}`
+	for _, c := range []struct {
+		name, cause, stats, want string
+	}{
+		{"tools-with-counts", `"causes":["tools_changed"],"tools_added":2,"tools_removed":1`, noPings,
+			"tools changed (+2 −1): add tools at session start"},
+		{"tools-no-counts", `"causes":["tools_changed"]`, noPings, "tools changed: add tools at session start"},
+		{"ttl-5m-no-pings", `"causes":["ttl_expired_5m"]`, noPings, "cache expired after 5 min idle, no keep-alive ping held it"},
+		{"ttl-5m-pinged", `"causes":["ttl_expired_5m"]`, pinged, "cache expired after 5 min idle"},
+		{"ttl-1h-pings-unknown", `"causes":["ttl_expired_1h"]`, unknownPings, "cache expired after 1 h idle"},
+		{"model", `"causes":["model_changed"]`, noPings, "cache miss: model changed"},
+		{"system-and-more", `"causes":["system_prompt_changed","messages_rewritten"]`, noPings,
+			"cache miss: system prompt changed (+1 more)"},
+		{"messages", `"causes":["messages_rewritten"]`, noPings, "cache miss: earlier messages changed"},
+		{"server-side", `"causes":["likely_server_side"]`, noPings, "cache miss: prompt unchanged, likely the provider"},
+		{"effort", `"causes":["effort_changed"]`, noPings, "cache miss: effort changed"},
+		{"unknown", `"causes":["unknown"]`, noPings, "cache miss, cause unknown"},
+		{"unrecognized-code", `"causes":["brand_new_cause"]`, noPings, "cache miss: brand_new_cause"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			stdin := fmt.Sprintf(`{"session_id":"sess-miss","cost":{"total_cost_usd":0.41},`+
+				`"context_window":{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000},`+
+				`"prompt_cache":{"last_miss_at":%d,"last_miss_cause":{%s}}}`, time.Now().Unix()-10, c.cause)
+			env := routedEnv(stub(c.stats))
+			out, code, elapsed := runStatusline(t, env, stdin, "--layout=balanced")
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			line := strings.TrimRight(out, "\n")
+			if !strings.HasSuffix(line, "│ ▸ "+c.want) {
+				t.Errorf("got %q, want the hint %q", line, c.want)
+			}
+			if !strings.HasPrefix(c.name, "tools") && strings.Contains(line, "add tools") {
+				t.Errorf("got %q: only a tool change may advise adding tools at session start", line)
+			}
+			if elapsed > 500*time.Millisecond {
+				t.Errorf("render took %v; the budget is 0.5 s", elapsed)
+			}
+		})
+	}
+}

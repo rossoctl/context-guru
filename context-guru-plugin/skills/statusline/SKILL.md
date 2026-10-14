@@ -45,7 +45,9 @@ cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41% │ 
   measured figure for the model, else Claude Code's.
 - **One hint**, only when it matters, dollars first: cold with >=100k tokens, a model switch while
   warm (it rewrites the cache), a pause about to cost >=$0.50, context >=85% full, or a
-  Claude Code-reported miss cause under two minutes old (`tool set changed (+2 −0)`).
+  Claude Code-reported miss cause under two minutes old, in words that match the cause: `tools
+  changed (+2 −0): add tools at session start`, `cache expired after 5 min idle`, `cache miss:
+  model changed`. Only a tool change gets advice.
 - A pending proxy update (`▲ update v0.3.2`) comes first so it cannot scroll off.
 
 **Layouts and toggles.** `statusline.py --set-layout=detailed` (or `minimal`, `balanced`, `auto`) remembers a
