@@ -296,3 +296,23 @@ func TestSessionEndCancelsPlannedPingsInTheCampaignScore(t *testing.T) {
 	}
 	(*predRuntime)(nil).sessionEnded("T", "S1", time.Now(), time.Time{}) // nil-safe
 }
+
+// A compact signal resolves the main thread's open decisions only (only the main agent compacts): a subagent thread's decision stays open and is
+// not scored as never-returned. SessionEnd still resolves every thread.
+func TestCompactSignalLeavesASubagentThreadsDecisionOpen(t *testing.T) {
+	pc := &predCampaign{pending: map[string][]predPending{}}
+	rt := &predRuntime{byTenant: map[string]*predCampaign{"T": pc}}
+	old := predPending{endMs: 1_000_000, startMs: 990_000, k: 4, x: 280, stake: 10, ping: 0.5}
+	pc.pending["S\x00"], pc.pending["S\x00a:sub"], pc.npend = []predPending{old}, []predPending{old}, 2
+	rt.sessionEnded("T", "S", time.UnixMilli(1_100_000), time.UnixMilli(1_098_000)) // SessionStart compact
+	if _, open := pc.pending["S\x00a:sub"]; !open || pc.npend != 1 || pc.stats.Resolved != 1 {
+		t.Fatalf("compact: pending %v, npend %d, %+v; want only the main thread resolved", pc.pending, pc.npend, pc.stats)
+	}
+	if _, open := pc.pending["S\x00"]; open {
+		t.Fatal("compact left the main thread's pre-compaction decision open")
+	}
+	rt.sessionEnded("T", "S", time.UnixMilli(1_200_000), time.Time{}) // SessionEnd
+	if len(pc.pending) != 0 || pc.npend != 0 || pc.stats.Resolved != 2 {
+		t.Fatalf("SessionEnd: pending %v, npend %d, %+v; want every thread resolved", pc.pending, pc.npend, pc.stats)
+	}
+}

@@ -503,7 +503,8 @@ func (rt *predRuntime) eraseTenant(tenantID string) {
 // sessionEnded scores a campaign's open decisions of an ended session as never-returned with the pings after the end cancelled.
 // This is what the client's SessionEnd (or SessionStart compact: the old prefix is dead) signal is worth to the policy; it is called by the signal handler.
 // Only decisions whose request started before cutoff are resolved (a zero cutoff resolves them all): a late compact event must not score the
-// post-compaction request's own decision as never-returned. Nil-safe.
+// post-compaction request's own decision as never-returned. A non-zero cutoff is the compact path, which (like retireSessionStartedBefore)
+// covers the main thread only: a subagent's or teammate's open decision stays open. Nil-safe.
 func (rt *predRuntime) sessionEnded(tenantID, session string, now, cutoff time.Time) {
 	pc := rt.forTenant(tenantID)
 	if pc == nil {
@@ -513,7 +514,7 @@ func (rt *predRuntime) sessionEnded(tenantID, session string, now, cutoff time.T
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	for key, ps := range pc.pending {
-		if !strings.HasPrefix(key, pre) {
+		if !strings.HasPrefix(key, pre) || (!cutoff.IsZero() && key != pre) {
 			continue
 		}
 		keep := ps[:0]
