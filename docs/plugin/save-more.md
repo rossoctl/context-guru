@@ -18,6 +18,9 @@ Codex: `$context-guru-save-more`, with the same words.
 
 ## The screen
 
+![/context-guru:save-more](img/save-more-dark.svg#only-dark)
+![/context-guru:save-more](img/save-more-light.svg#only-light)
+
 Each report opens with a card that answers two questions in plain words: what your **current** setting saved so far, and what the **recommended** change would add, per week, with its likely range. Then a ranked table of every option, and the caveats.
 
 ```text
@@ -180,6 +183,17 @@ Question: apply both, only one of them, or neither?
 ## Applying, and undoing
 
 Looking never changes anything. When there is a recommendation, the report ends with an `Apply it?` line, and the command asks one question: "Apply both recommended changes?" with the choices both, only config, only cache, or neither. In Claude Code, the change itself is a separate command (`cg.py apply` or `cg.py revert`), so Claude Code also asks permission to run it; reads are pre-approved, changes never are. Run in a terminal, the command asks `[y/N]` for each change; the default is No.
+
+In Claude Code (real session, synthetic data): the one question, then Claude Code's own permission prompt for the change, then the result.
+
+![the question](img/cc-save-1-question-dark.svg#only-dark)
+![the question](img/cc-save-1-question-light.svg#only-light)
+
+![the permission prompt for the change](img/cc-save-2-permission-1-dark.svg#only-dark)
+![the permission prompt for the change](img/cc-save-2-permission-1-light.svg#only-light)
+
+![applied](img/cc-save-3-applied-dark.svg#only-dark)
+![applied](img/cc-save-3-applied-light.svg#only-light)
 
 ```text
 Applied: preset set to medium (takes effect now).

@@ -4,6 +4,9 @@
 
 `/context-guru:remove-mcp-and-skills` lists the MCP servers, MCP tools and skills that were declared on your requests and never used, prices what carrying them cost, and shows what the ones you already removed have **measurably** saved since. Built-in tools (Read, Bash, Edit and the like) are never listed. It asks one question and filters them only on a yes.
 
+![/context-guru:remove-mcp-and-skills](img/remove-mcp-and-skills-dark.svg#only-dark)
+![/context-guru:remove-mcp-and-skills](img/remove-mcp-and-skills-light.svg#only-light)
+
 ```text
 ╭─ Remove MCP servers and skills ─────────────────────────────────────────────────────────────────╮
 │ So far: the 2 items you already removed saved $4.20 (measured, since 2026-09-15).               │
@@ -48,6 +51,12 @@ Question: Remove these 6 items, saving ≈$7.33/week?
 - `details` lists every item and each earlier removal with its measured saving.
 
 The question is exactly the last line: "Remove these N items, saving ≈$X/week?". On yes the proxy filters them from the next request on:
+
+![the question in Claude Code](img/cc-remove-1-question-dark.svg#only-dark)
+![the question in Claude Code](img/cc-remove-1-question-light.svg#only-light)
+
+![the permission prompt for the change](img/cc-remove-2-permission-dark.svg#only-dark)
+![the permission prompt for the change](img/cc-remove-2-permission-light.svg#only-light)
 
 ```text
 Applied: 6 unused items filtered (playwright, figma, brand-voice and 3 more) (takes effect now).

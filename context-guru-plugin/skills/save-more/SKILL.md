@@ -5,22 +5,17 @@ argument-hint: "[config|cache] [details] [--custom] [--days N]  |  apply <config
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" save-more:*)
 ---
 
-Only the read is pre-approved. A change is the separate command `cg.py apply` or `cg.py revert`, so Claude Code
-also asks the user for permission to run it: that second prompt is expected, do not work around it.
-
-**If the arguments start with `apply` or `revert`** (the user typed the change themselves, which is their yes),
-run this and print its output in one code block:
-
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" $ARGUMENTS
-```
-
-**Otherwise,** tell the user in one line that this replays their history and can take a few minutes. Then run
-this with a Bash timeout of 420000 ms and print its output exactly as it is in one code block:
+Run this now, with a Bash timeout of 420000 ms (it replays the user's history and can take a few minutes), and print its output exactly as it is in one code block:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" save-more $ARGUMENTS
 ```
+
+(Exception: if the arguments start with `apply` or `revert`, the user typed the change themselves, which is their
+yes: run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" $ARGUMENTS` instead and print its output.)
+
+Only the read is pre-approved. A change is the separate command `cg.py apply` or `cg.py revert`, so Claude Code
+also asks the user for permission to run it: that second prompt is expected, do not work around it.
 
 If an output is a single `Run this instead ...` line, run that exact command and print its output.
 
@@ -44,4 +39,4 @@ If an apply output ends with an `Apply anyway ... --force` line, the proxy's own
 live. Ask a SECOND, separate yes/no question that says so ("The go-live check failed. Switch it on anyway?").
 Only on yes run the words after `/context-guru:save-more` on that line, `--force` included. Never add `--force`
 yourself. If an apply output starts with `Not applied:`, print it and stop; do not retry.
-To undo, run the `Undo:` line the same way. Do not turn dollars into tokens or add advice the output does not contain.
+To undo, run the `Undo:` line the same way. After an apply or a revert, print its output and stop; ask nothing more. Do not turn dollars into tokens or add advice the output does not contain.
