@@ -67,7 +67,6 @@
   <div class="grouppanel" role="tabpanel" id="grp-advanced-panel" data-group="advanced" aria-labelledby="grp-advanced" hidden>
     <div class="viewtabs" role="tablist" data-group="advanced" aria-label="Advanced views">
       <template id="tpl-tab-components"><button role="tab" class="tab" id="tab-components" data-view="components" data-testid="tab-components" aria-controls="view-components" aria-selected="false" tabindex="-1" data-manager data-local-ok>Components</button></template>
-      <template id="tpl-tab-benchmarks"><button role="tab" class="tab" id="tab-benchmarks" data-view="benchmarks" data-testid="tab-benchmarks" aria-controls="view-benchmarks" aria-selected="false" tabindex="-1" data-manager data-local-ok>Benchmarks</button></template>
     </div>
   </div>
   <div class="grouppanel" role="tabpanel" id="grp-traffic-panel" data-group="traffic" aria-labelledby="grp-traffic" hidden>
@@ -286,12 +285,13 @@
 <main id="main">
 
 <!-- ── Overview ───────────────────────────────────────────────────────────── -->
-<section class="view" id="view-overview" role="tabpanel" aria-labelledby="tab-overview"None>
-  <!-- The freshness bar. This page used to repaint itself every ten seconds, which made
-       every figure on it unreadable and every open explanation close under the reader.
-       Now it refreshes when the reader asks, or when the SSE stream says a request was
-       actually captured AND nobody is mid-interaction — so the page has to SAY how old
-       what you are reading is, which the always-repainting version never had to. -->
+<section class="view" id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
+  <!-- Every view starts with a heading and one plain line saying what it shows; they are
+       written once, in TAB_INFO (app.js), and put above the panel by ensureIntro().
+
+       The freshness bar: this page does not repaint itself on a timer. It refreshes when the
+       reader asks, or when a request was actually captured AND nobody is mid-interaction, so it
+       has to SAY how old what you are reading is. -->
   <div class="refresh-bar">
     <button id="refresh-now" class="btn" data-testid="refresh-now">Refresh</button>
     <span id="refresh-age" class="refresh-age" data-testid="refresh-age" aria-live="polite"></span>
@@ -301,201 +301,83 @@
     </label>
   </div>
 
-  <!-- renderOverviewBrief: up to four synthesized sentences with a real number inline, ahead
-       of the evidence below — see its own comment in app.js for how each is gated. Hidden
-       whenever none of them has enough support to say anything. -->
-  <div class="insight-brief" id="overview-brief" hidden></div>
+  <!-- 1. What was saved: three levers, each in money and in tokens, against what was spent. -->
+  <section class="ov-sec" aria-labelledby="ov-saved-h">
+    <h2 id="ov-saved-h" class="sec-title">What context-guru saved
+      <span class="sec-links"><a href="#/usage">Spend by day</a></span></h2>
+    <div id="tiles" class="saved-ledger" data-testid="saved-ledger" aria-live="polite"></div>
+    <p class="note ov-foot" id="ov-saved-note"></p>
+  </section>
 
-  <!-- renderTiles() builds the grouped tile grids in here: a headline row of the three
-       numbers that answer "is this working", then one labelled group per subject. Twenty
-       tiles in one flat grid is twenty things of equal importance, i.e. no hierarchy. -->
-  <div id="tiles"></div>
-
-  <!-- Your latest session's latency beside your average across this window — "is it fast
-       right now" and "is it fast overall" are different questions and a single averaged
-       tile answers neither. Fed from the same /api/sessions read the usage panel below
-       already needs, so this costs no extra request. -->
-  <div class="panel" id="latency-panel" hidden>
-    <h2>Latency</h2>
-    <div id="latency-tiles"></div>
-  </div>
-
-  <!-- What you actually added yourself — MCP servers and skills, never Claude Code's own
-       built-ins — and what to do about the ones not earning their place. Reuses the
-       Inventory tab's own GET /api/tools report; no new backend read. -->
-  <div class="panel" id="inventory-panel" hidden>
-    <h2>Your tools &amp; skills</h2>
-    <p class="note">What you added yourself. Claude Code's own built-in tools are left out —
-      see the Inventory tab for the full picture, including those.</p>
-    <div id="inventory-tiles"></div>
+  <!-- 2. What to do about tools and skills. Nothing about caching or prefixes lives here. -->
+  <section class="ov-sec" id="inventory-panel" aria-labelledby="ov-reco-h" hidden>
+    <h2 id="ov-reco-h" class="sec-title">Tools and skills to remove
+      <span class="sec-links"><a href="#/tools" data-testid="ov-inventory-link">Open the Inventory tab</a></span></h2>
     <div id="recommendations" data-testid="recommendations"></div>
-  </div>
+  </section>
 
-  <!-- Caching insights: keep-alive's own $ kept apart from cache-reuse behaviour in general.
-       Reuses GET /api/kvcache (the KV-cache tab's own read) plus the keepalive_* fields
-       already on /api/stats; no new backend field. -->
-  <div class="panel" id="caching-insights-panel" hidden>
-    <h2>Caching insights</h2>
-    <p class="note">Cache reuse (any request hitting a warm prefix) and keep-alive (the
-      mechanism that stops one from lapsing) are different levers — kept apart below rather
-      than blended into one savings figure.</p>
-    <div id="caching-insights-tiles" class="caching-statrow"></div>
-  </div>
+  <!-- 3. A plain-language map of the rest of the dashboard. -->
+  <section class="ov-sec" aria-labelledby="ov-tabs-h">
+    <h2 id="ov-tabs-h" class="sec-title">About the other tabs</h2>
+    <dl class="tab-map" id="tab-map" data-testid="tab-map"></dl>
+  </section>
 
-  <!-- How many of your sessions actually did something, not just how many exist. Reuses
-       GET /api/sessions; no new backend read. -->
-  <div class="panel" id="session-usage-panel" hidden>
-    <h2>Your sessions</h2>
-    <div id="session-usage-tiles"></div>
-    <p class="note" id="session-usage-note"></p>
-  </div>
+  <!-- 4. Everything below is real and correct, and most readers never need it: the plots
+       behind the numbers above, folded away. Latency is in here, not outside. -->
+  <details class="diag" id="overview-diagnostics" data-testid="overview-diagnostics">
+    <summary><span>Detailed diagnostics</span><span class="diag-hint">Plots behind the numbers above</span></summary>
+    <div class="diag-body">
+      <div class="plot-wide">
+        <h3>Net saving, adding up over time</h3>
+        <p class="note">Baseline cost minus what you were billed minus our own model spend, accumulated. A line below zero means context-guru cost more than it saved.</p>
+        <details class="why">
+          <summary>How the baseline is priced</summary>
+          <p>The baseline prices the <strong>unique</strong> tokens we removed at the cache-write rate they would have entered as, and the re-sent remainder at the cache-read rate the provider would have served it from. Token counts are our own estimate, so they are scaled to the provider's own count of the same content before being priced (roughly 1.37&times; on haiku-4-5 and 1.69&times; on the sonnet-5 and opus-5 tokenizer, issue #240). The scaling applies to these counterfactual dollars only.</p>
+        </details>
+        <div id="chart-cost" class="chart" data-testid="chart-cost"></div>
+      </div>
 
-  <!-- Everything below is real and correct, and most viewers never need it: the operator-
-       level detail behind the numbers above, folded the same way Keep-alive's own gap-timing
-       diagnostics are. -->
-  <details class="setup-others" id="overview-diagnostics">
-    <summary>Detailed diagnostics</summary>
+      <div class="plot-wide">
+        <h3>From baseline to net</h3>
+        <p class="note">What the window would have cost, each reduction, each penalty, and what is left. A negative net is shown, not hidden.</p>
+        <div id="waterfall" data-testid="waterfall"></div>
+      </div>
 
-  <!-- A small callout, for every user — not just managers — reusing GET /api/keepalive's
-       already-computed ledger. Hidden until the keep-alive has actually run on this
-       account (keepalive_recorded_from), so a zero here never reads as a measurement. -->
-  <div class="panel" id="overview-keepalive-panel" hidden>
-    <h2>Keep-alive savings</h2>
-    <p class="note">What the idle keep-alive has spent and avoided on your own traffic.
-      The full picture, including whether you are in the losing majority, is on the
-      Keep-alive tab.</p>
-    <div id="overview-keepalive-tiles"></div>
-  </div>
+      <div class="plot-grid">
+        <div>
+          <h3>Tokens over time</h3>
+          <p class="note">Input tokens before and after compaction.</p>
+          <div id="chart-tokens" class="chart" data-testid="chart-tokens"></div>
+        </div>
+        <div>
+          <h3>Cache reads and writes</h3>
+          <p class="note">Reads are cheap. Writes are what you pay when the provider has to store a prompt again.</p>
+          <div id="chart-cache" class="chart" data-testid="chart-cache"></div>
+        </div>
+        <div>
+          <h3>Latency</h3>
+          <p class="note">Time context-guru added to each request, next to time spent waiting on the provider.</p>
+          <div id="chart-latency" class="chart" data-testid="chart-latency"></div>
+        </div>
+        <div>
+          <h3>Requests and restorations</h3>
+          <p class="note">How many requests came through, and how often the model asked for removed text back.</p>
+          <div id="chart-volume" class="chart" data-testid="chart-volume"></div>
+        </div>
+      </div>
 
-  <!-- Where the total above actually comes from: one line per component that ran, plus
-       keep-alive and the declaration filter (real levers, not entries in the component
-       registry). Hidden until something in it has actually run. -->
-  <div class="panel" id="value-breakdown-panel" hidden>
-    <h2>Where the value comes from</h2>
-    <p class="note">One line per lever that ran in this window. A negative net is a real
-      outcome, not hidden — see the Components tab for the full breakdown.</p>
-    <div id="value-breakdown-tiles"></div>
-  </div>
-
-  <div class="panel">
-    <h2>Savings percentage</h2>
-    <!-- Four bars, four denominators. The note stays short but must never let two of them
-         read as the same measurement, so each bar keeps its divisor on screen (see
-         .bar-formula) and only the prose folds away. -->
-    <p class="note">Four denominators, four questions. Missing inputs read <em>n/a</em>, never 0.</p>
-    <div id="denominators" data-testid="denominators"></div>
-    <!-- The ceiling those four ratios are measured against. It was on the page only as a COST
-         row in the safety panel, so nothing told a reader that the frozen prefix is the
-         EXPLANATION for the numbers directly above. renderFrozenCeiling fills it. -->
-    <p class="note" id="frozen-ceiling" data-testid="frozen-ceiling"></p>
-  </div>
-
-  <div class="panel">
-    <h2>Cumulative net saving</h2>
-    <!-- This panel used to plot baseline and billed cost as two lines and call the area
-         between them the money. On real traffic they are a fraction of a percent apart, so
-         there was no visible area and the caption described something the chart could not
-         show. Plotting the difference puts the money on its own axis, and makes the crossing
-         below zero — our own spend overtaking what compaction avoided — impossible to miss. -->
-    <p class="note">Baseline &minus; billed &minus; our own model spend, accumulated. Below zero
-      means context-guru cost more than it saved.</p>
-    <details class="why">
-      <summary>How the baseline is priced</summary>
-      <p>The baseline prices the <strong>unique</strong> tokens we removed at the cache-write
-        rate they would have entered as (~12.5&times; a cache read on a prompt-caching
-        backend), and the re-sent remainder at the cache-read rate the provider would have
-        served it from. Pricing gross savings as writes is how a dashboard overstates itself
-        by its own overcount ratio — which is why dollar savings and token savings diverge so
-        sharply on this workload.</p>
-      <p>Those token counts are our own estimate (an o200k BPE over message text), and the
-        rates are the provider's, so the counts are scaled to the provider's own count of the
-        same removed content before being priced — a measured per-model-family factor, roughly
-        1.37&times; on haiku-4-5 and 1.69&times; on the sonnet-5/opus-5 tokenizer. Without it
-        every figure on this page understated itself; see issue #240. The scaling applies to
-        these counterfactual <em>dollars</em> only. The token figures shown elsewhere are
-        unchanged, because component gates are evaluated against them and moving those would
-        change what gets compacted rather than what gets reported.</p>
-    </details>
-    <div id="chart-cost" class="chart" data-testid="chart-cost"></div>
-  </div>
-
-  <div class="panel">
-    <h2>Savings waterfall</h2>
-    <p class="note">Baseline, each reduction, each penalty, the net. A negative net is shown, not hidden.</p>
-    <div id="waterfall" data-testid="waterfall"></div>
-  </div>
-
-  <div class="grid-2">
-    <div class="panel">
-      <h2>Tokens over time</h2>
-      <div id="chart-tokens" class="chart" data-testid="chart-tokens"></div>
+      <div class="plot-wide">
+        <h3>Live requests <span class="section-note">since you opened this page</span></h3>
+        <p class="note">The last 25 requests as they arrive. The Requests tab has the full history.</p>
+        <p class="note" id="live-filter-note" data-testid="live-filter-note" hidden></p>
+        <div class="tblwrap" tabindex="0">
+          <table class="tbl compact" data-testid="live-table">
+            <thead><tr><th>Time</th><th>Session</th><th>Model</th><th class="num">Before</th><th class="num">After</th><th class="num">Saved (gross)</th><th class="num">CG ms</th><th>Accounting</th></tr></thead>
+            <tbody id="live-body"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
-    <div class="panel">
-      <h2>Cache reads vs writes</h2>
-      <div id="chart-cache" class="chart" data-testid="chart-cache"></div>
-    </div>
-    <div class="panel">
-      <h2>Latency</h2>
-      <div id="chart-latency" class="chart" data-testid="chart-latency"></div>
-    </div>
-    <div class="panel">
-      <h2>Volume &amp; restorations</h2>
-      <div id="chart-volume" class="chart" data-testid="chart-volume"></div>
-    </div>
-  </div>
-
-  <div class="grid-2">
-    <div class="panel">
-      <h2>What safety cost</h2>
-      <p class="note">Five units, five rows — bar lengths compare within a row, not across.</p>
-      <!-- The server's own long description, folded. It is the authoritative wording (and
-           part of /api/stats), so it is shown rather than paraphrased here. -->
-      <details class="why"><summary>What these five are</summary>
-        <p id="safety-note"></p>
-      </details>
-      <div id="safety" data-testid="safety-cost"></div>
-    </div>
-    <div class="panel">
-      <h2>Cache-miss attribution</h2>
-      <p class="note">A cold start is not a failure — the first request has nothing to hit.</p>
-      <div id="cachemiss" data-testid="cache-miss"></div>
-      <!-- prefix_change_cost_usd. Filled by loadOverview; deliberately a note beside the
-           bucket it is computed from and NOT a tile, because it is observational and is
-           subtracted from nothing. -->
-      <p id="prefix-change-note" class="note" data-testid="prefix-change-cost" hidden></p>
-    </div>
-    <div class="panel">
-      <h2>Why we didn't compact</h2>
-      <div id="reasons" data-testid="uncompressed-reasons"></div>
-    </div>
-    <div class="panel">
-      <h2>Token accounting</h2>
-      <p class="note">Only <code>complete</code> rows carry all four billed tiers; the rest are estimates.</p>
-      <div id="accounting" data-testid="accounting"></div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <h2>Live feed <span class="section-note">since you opened this page</span></h2>
-    <!-- Says what the row count IS. The feed is fed only by SSE from page load, capped at
-         25, and never seeded from history — so it sat at 24 rows beside a "Requests 26"
-         tile and the two looked like they disagreed about the same window. That fact is
-         load-bearing, so it stays in the layout; the rest folds. -->
-    <p class="note">Last 25 arrivals, newest first. Does not count up to the tiles above.</p>
-    <details class="why"><summary>Why it does not match the tiles</summary>
-      <p>The feed starts empty and fills from the live SSE stream, so it holds only what has
-        arrived since you opened the page — never the most recent rows of history. The
-        Requests tab has the full history. Content is never pushed to a live client; open a
-        request to inspect it.</p>
-    </details>
-    <p class="note" id="live-filter-note" data-testid="live-filter-note" hidden></p>
-    <div class="tblwrap" tabindex="0">
-      <table class="tbl compact" data-testid="live-table">
-        <thead><tr><th>Time</th><th>Session</th><th>Model</th><th class="num">Before</th><th class="num">After</th><th class="num">Saved (gross)</th><th class="num">CG ms</th><th>Accounting</th></tr></thead>
-        <tbody id="live-body"></tbody>
-      </table>
-    </div>
-  </div>
   </details>
 </section>
 
@@ -505,23 +387,24 @@
      filter bar above, so the time range is the range selected there. -->
 <section class="view" id="view-usage" role="tabpanel" aria-labelledby="tab-usage" hidden>
   <div class="panel">
-    <h2>Per day <span class="section-note">UTC</span></h2>
+    <h2>What did I spend each day? <span class="section-note">UTC days</span></h2>
     <!-- Two dollar figures, and they are NOT either of the token savings ratios above: this
          "Saved" is the daily counterfactual in dollars. The legend and the direct labels on
          both bars carry that; the note only has to say which is which. -->
-    <p class="note"><strong>Spent</strong> = billed + our own model spend.
-      <strong>Saved</strong> = baseline − spent, and goes negative when it should.</p>
+    <p class="note">One pair of bars per day. <strong>Spent</strong> is what you paid (the provider's bill plus
+      our own model calls). <strong>Saved</strong> is what the same work would have cost without
+      context-guru, minus what you spent; it dips below zero on days it cost more than it saved.</p>
     <div id="chart-daily" class="chart" data-testid="chart-daily"></div>
   </div>
   <div class="panel">
-    <h2>Spent vs saved, by <select id="f-dim" data-testid="filter-dim" aria-label="Breakdown dimension"></select></h2>
-    <p class="note">Same two figures, one group per value. Unpriced groups read
-      <em>unknown</em>, never 0.</p>
-    <details class="why"><summary>Which dimension answers what</summary>
+    <h2>Where did the money go, by <select id="f-dim" data-testid="filter-dim" aria-label="Breakdown dimension"></select></h2>
+    <p class="note">The same spent and saved figures, split by the choice above. A group whose
+      price is not known shows <em>unknown</em>, not $0.</p>
+    <details class="why"><summary>Technical details: which split answers what</summary>
       <dl>
         <dt>model, provider, agent</dt><dd>where the money goes</dd>
         <dt>reasoning effort, thinking mode</dt><dd>whether the agent's knobs move the bill</dd>
-        <dt>cache_control breakpoints</dt><dd>whether placement pays — the question this project exists to answer</dd>
+        <dt>cache_control breakpoints</dt><dd>whether where the cache markers sit pays off</dd>
       </dl>
     </details>
     <div id="chart-breakdown" class="chart" data-testid="chart-breakdown"></div>
@@ -546,10 +429,11 @@
        time in a drawer, so "which of my prompts protect the right prefix" could not be asked
        above a single request. -->
   <div class="panel">
-    <h2>Prompt cache</h2>
-    <p class="note">Where the money actually is. Cache reads cost about a tenth of full rate
-      and cache writes about 12.5&times; a read, so which tier your tokens land in matters far
-      more than how many of them there are.</p>
+    <h2>How much did the provider's prompt cache cover?</h2>
+    <p class="note">The provider remembers the start of a prompt for a few minutes. Reading it back costs about a tenth of the normal price,
+      so most of your bill depends on how many tokens were remembered, not how many there were.</p>
+    <details class="why"><summary>Technical details</summary><p>A cache write costs about 12.5&times; a cache read, so which of the three price tiers
+      (read, write, fresh) your tokens land in matters far more than their count.</p></details>
     <div id="cache-detail" data-testid="cache-detail"></div>
     <div id="cache-miss-detail" data-testid="cache-miss-detail"></div>
   </div>
@@ -561,16 +445,17 @@
 <template id="tpl-view-components">
 <section class="view" id="view-components" role="tabpanel" aria-labelledby="tab-components" hidden>
   <div class="panel">
-    <h2>Per-component economics</h2>
-    <p class="note">Which components earn their place. A row opens that component's requests.</p>
-    <details class="why"><summary>What the columns mean</summary>
+    <h2>Did each step pay for itself?</h2>
+    <p class="note">Each row is one step that trims your prompt. <strong>Net $</strong> is what it saved minus what it cost to run.
+      Click a row to see its requests.</p>
+    <details class="why"><summary>Technical details: what the columns mean</summary>
       <dl>
         <dt>Unique saved</dt><dd>each distinct compaction counted once</dd>
         <dt>Gross saved</dt><dd>re-counted every turn the agent re-sends the transcript</dd>
         <dt>Overcount</dt><dd>gross ÷ unique — how inflated the gross figure is</dd>
         <dt>Own latency</dt><dd>wall time this component spent on the hot path</dd>
         <dt>LLM calls / cost</dt><dd>model calls this component made itself, and what they cost — blank for every deterministic component</dd>
-        <dt>Net $</dt><dd><strong>the amortized verdict.</strong> Everything this component's
+        <dt>Net $</dt><dd><strong>counts every turn.</strong> Everything this component's
           removals were worth across every turn they stayed removed for, minus its own LLM
           spend. This is the honest answer to &ldquo;has this component paid for itself?&rdquo;</dd>
         <dt>Net $ (counted once)</dt><dd><strong>the same verdict with the repeat business
@@ -614,7 +499,8 @@
     <div id="net-reconcile" class="panel sub" data-testid="net-reconcile" hidden></div>
   </div>
   <div class="panel">
-    <h2>Unique savings by component</h2>
+    <h2>Which step removed the most text?</h2>
+    <p class="note">Tokens each step took out, counting each piece of text once. This is size, not dollars.</p>
     <div id="chart-comp" class="chart" data-testid="chart-components"></div>
   </div>
   <!-- What a summary was WORTH over a fixed span of work after it was made. Separate from the
@@ -622,11 +508,10 @@
        earns its place over a whole window, this one measures one mechanism — summarize's
        cache-aware trigger — against the specific cost it exists to avoid. -->
   <div class="panel">
-    <h2>What each summary earned</h2>
-    <p class="note">Every summary, followed for <strong>10% more of the model's context
-      window</strong>. Cold rewrites avoided, warm reads made cheaper, minus what the summary
-      itself cost.</p>
-    <details class="why"><summary>What these columns mean, and what they leave out</summary>
+    <h2>Did summarizing a long chat pay off?</h2>
+    <p class="note">After each summary we follow the chat a while longer and add up the cache rewrites it avoided and the cheaper
+      reads, minus the summary's own cost.</p>
+    <details class="why"><summary>Technical details: what these columns mean, and what they leave out</summary>
       <dl>
         <dt>Episode</dt><dd>one summary plus the span of work after it — from the turn it was
           made until the session had been billed 10% more of the window. Measured in the
@@ -685,10 +570,10 @@
 <!-- ── Sessions ───────────────────────────────────────────────────────────── -->
 <section class="view" id="view-sessions" role="tabpanel" aria-labelledby="tab-sessions" hidden>
   <div class="panel">
-    <h2>Sessions</h2>
-    <p class="note">A row opens its requests; <strong>Diff</strong> opens what compaction
-      changed.</p>
-    <details class="why"><summary>Cold storage, and the &dagger; on a dollar figure</summary>
+    <h2>All sessions</h2>
+    <p class="note">Each row is one working session with an AI agent. Click a row to see its
+      requests, or <strong>Diff</strong> to see what was removed from it.</p>
+    <details class="why"><summary>Technical details: cold storage, the &dagger; mark, gross vs unique</summary>
       <p>A transcript that has moved to cold storage is fetched only when you ask for it. A
         <strong>&dagger;</strong> means some of that session's turns carried no usable provider
         usage data, so the dollar figure covers its priced turns only — while the token
@@ -706,12 +591,12 @@
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="sessions-table">
         <thead><tr>
-          <th>Session</th><th data-scope-col hidden>Account</th><th>Model</th><th>Agent</th><th>Preset</th>
-          <th class="num">Turns</th><th class="num">Before</th>
-          <th class="num">Saved tokens<br><span class="hint">gross / unique</span></th>
-          <th class="num">Net saved $</th><th class="num">Cache r/w</th>
-          <th class="num">Keep-alive net</th><th class="num">Expands</th>
-          <th class="num">CG ms</th><th>Started</th><th><span class="vh">Row actions</span></th>
+          <th>Session</th><th data-scope-col hidden>Account</th><th>Model</th><th>Agent</th><th title="The named compaction settings this session used">Preset</th>
+          <th class="num" title="Number of requests the agent sent in this session">Turns</th><th class="num" title="Tokens sent to context-guru, before any removal">Before</th>
+          <th class="num" title="Gross counts a removed span once per request it was missing from; unique counts it once.">Tokens removed<br><span class="hint">total / distinct</span></th>
+          <th class="num" title="Dollars saved after subtracting what context-guru itself cost">Net saved $</th><th class="num" title="Tokens read from / written to the provider prompt cache">Cache read / write</th>
+          <th class="num" title="Dollars gained or lost by keeping the cache warm with pings">Keep-alive net</th><th class="num" title="Times the agent asked for removed text to be restored">Restores</th>
+          <th class="num" title="Milliseconds context-guru added to the request">Added delay</th><th>Started</th><th><span class="vh">Row actions</span></th>
         </tr></thead>
         <tbody id="sessions-body"></tbody>
       </table>
@@ -728,10 +613,9 @@
      that led with the calculator would be selling. -->
 <section class="view" id="view-keepalive" role="tabpanel" aria-labelledby="tab-keepalive" hidden>
   <div class="panel">
-    <h2>Verdict</h2>
-    <p class="note">What the idle keep-alive has spent on your traffic and what it has
-      avoided, over the window selected above. The <strong>net</strong> is the only one of
-      these figures worth a decision.</p>
+    <h2>Did keep-alive save you money?</h2>
+    <p class="note">Keep-alive sends a tiny request just before your <span class="term" tabindex="0">prompt cache<span class="tip" role="tooltip">The provider remembers the start of your conversation for a few minutes so it does not have to reprocess it. Reading it back is cheap; rewriting it after it was forgotten is expensive.</span></span> is forgotten, so the next turn is not charged for a full rewrite.
+      Below: what that cost and what it avoided in the selected window. Decide on the <strong>net</strong>.</p>
     <div id="ka-coverage"></div>
     <!-- The reconciliation of the three verdicts this tab gives on one window, ABOVE the tiles
          and above the fold: cost belongs beside its benefit (DESIGN §3.7), not 2,900 px below
@@ -741,14 +625,17 @@
   </div>
 
   <div class="panel" id="ka-downside-panel">
-    <h2>Am I in the losing majority?</h2>
+    <h2>Which sessions gained and which lost</h2>
     <!-- Unconditional. It renders on a positive net too, which is the point: the tax on the
          many is how the rebate on the few is funded, and a reader deciding whether to leave
          this on has to meet that fact whether or not their own number is green today. -->
-    <p class="note" data-testid="ka-downside-note">This mechanism is a small tax on most of
-      the sessions it touches, funding a large rebate on a few. Across this service
+    <p class="note" data-testid="ka-downside-note">This is a small tax on most of
+      the sessions it touches that pays a large rebate to a few. Across this service
       <strong>34 of 119</strong> pinged sessions came out ahead and the worst single session
       paid <strong>$2.42</strong> for nothing.</p>
+    <p class="hint">The bar splits your sessions into winners and losers. Each table row is
+      one session: <em>Expiries</em> are times its cache ran out while idle, <em>Pings</em> are keep-alive
+      requests sent, and <em>Net</em> is what was avoided minus what was spent (the avoided figure is a ceiling, not a measurement).</p>
     <div id="ka-split"></div>
     <div id="ka-worst"></div>
     <div class="tblwrap" tabindex="0">
@@ -767,14 +654,15 @@
   </div>
 
   <div class="panel" id="ka-live-panel">
-    <h2>Your sessions right now</h2>
-    <p class="note" data-testid="ka-live-note">Every session of yours whose prompt cache has not
-      lapsed yet: the lifetime <em>in force on it</em>, what is left of that lifetime, and what one
-      ping and one lapse would each cost on that session&rsquo;s own prefix. The lifetime is read
-      off the tier the provider BILLED, not off configuration &mdash; a <code>ttl: "1h"</code>
-      request on a model that does not support it comes back a normal 200 with a five-minute
-      entry. It runs from each request&rsquo;s START, so a response that streamed for four minutes
-      has already spent four minutes of its own entry&rsquo;s life.</p>
+    <h2>Sessions with a warm cache right now</h2>
+    <p class="note" data-testid="ka-live-note">One row per session whose cache is still alive: how
+      long it has left (the lifetime the provider BILLED, counted from each request&rsquo;s START),
+      and what one ping or one lapse would cost on it.</p>
+    <details class="why"><summary>Technical details</summary>
+      <p>The lifetime is read off the tier the provider billed, not off configuration: a
+        <code>ttl: "1h"</code> request on a model that does not support it comes back a normal 200 with a
+        five-minute entry. It runs from each request&rsquo;s start, so a response that streamed for
+        four minutes has already spent four minutes of its own entry&rsquo;s life. A <span class="term" tabindex="0">prefix<span class="tip" role="tooltip">The start of the conversation that the cache holds: system prompt, tool list and earlier turns.</span></span> is the cached part of the prompt.</p></details>
     <div id="ka-live-warning" data-testid="ka-live-warning"></div>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="ka-live-table">
@@ -792,10 +680,9 @@
   </div>
 
   <div class="panel">
-    <h2>Your TTL expiries</h2>
-    <p class="note">A cached prefix has a five-minute lifetime, and a session idle longer
-      loses it — the next turn re-bills every token at the cache-creation rate. These are
-      yours: how often, when, how far apart, and how big.</p>
+    <h2>How often your cache ran out</h2>
+    <p class="note">The cache lasts about five minutes. If a session sits idle longer, the next turn pays to rewrite the
+      whole prompt. Each such event is an <span class="term" tabindex="0">expiry<span class="tip" role="tooltip">The moment a session came back after its cached prompt had already been forgotten.</span></span>. Below: how often, when and how costly.</p>
     <details class="why"><summary>Why some ttl_expiry rows are not counted here</summary>
       <p>A <code>ttl_expiry</code> row that wrote nothing had no prefix to protect and no
         charge a ping could have avoided. On this service 385 of 742 were exactly that, and
@@ -806,10 +693,12 @@
     <div class="grid-2">
       <div class="panel">
         <h3>Expiries per day</h3>
+        <p class="hint">Each point is one day. Higher means more cache rewrites.</p>
         <div id="ka-chart-misses" class="chart" data-testid="ka-chart-misses"></div>
       </div>
       <div class="panel">
         <h3>What they cost, per day</h3>
+        <p class="hint">Each point is one day. Higher means those rewrites cost more.</p>
         <div id="ka-chart-usd" class="chart" data-testid="ka-chart-usd"></div>
       </div>
     </div>
@@ -829,38 +718,40 @@
       <p class="note" id="ka-hour-note"></p>
       <div id="ka-hour-bins" data-testid="ka-hour-bins"></div>
       <h3>How long between expiries</h3>
-      <p class="note">Per account, never blended: on this service the per-account mean runs
-        from 0.64 h to 6.56 h with maxima past 30 h, so a single service-wide average would
-        describe nobody.</p>
+      <p class="note">One row per account. Accounts differ a lot (means from 0.64 h to 6.56 h on this
+        service), so there is no single average.</p>
       <div id="ka-account-gaps" data-testid="ka-account-gaps"></div>
     </details>
   </div>
 
   <div class="panel">
-    <h2>What would X and K buy me?</h2>
-    <p class="note">A replay of <em>your own past gaps</em>, not a forecast. Each rung keeps
-      the cache alive for <strong>K &times; X + 300 s</strong> — the last ping is itself a
-      cache read, and a read refreshes the lifetime for free, which is why the trailing
-      five minutes belong in the arithmetic.</p>
+    <h2>What would other settings have earned?</h2>
+    <p class="note">Replays your own past idle gaps with different settings; it is not a forecast.
+      <strong>X</strong> is how many idle seconds to wait before a ping, and <strong>K</strong> is
+      the <span class="term" tabindex="0">most pings<span class="tip" role="tooltip">the cap on pings sent in a row for one idle spell</span></span> per spell. Each row below is one value of K.</p>
+    <details class="why"><summary>Technical details</summary>
+      <p>Each rung keeps the cache alive for K &times; X + 300 s: the last ping is itself a cache
+        read, and a read refreshes the lifetime for free, so the trailing five minutes belong in the arithmetic.</p></details>
     <div class="ka-calc-controls" id="ka-calc-controls"></div>
     <div id="ka-calc" data-testid="ka-calc"></div>
   </div>
 
   <div class="panel" data-ka-arm-panel>
     <h2>Keep one session warm</h2>
-    <p class="note" data-testid="ka-arm-note">Pick a session and keep its cache warm for a
-      stated time. This is a manual override for a session you are working in now, not a
-      strategy: chosen from history, session lists do not transfer — on this service's own
-      traffic, a list fitted on one half of a week earned <strong>$5.27</strong> in the next
-      half where the plain account-wide rule earned <strong>$53.32</strong>.</p>
-    <p class="note">The 60–290 second interval is for Anthropic. On GPT-5.6+ Responses,
-      a manual arm enables the session at the account OpenAI cadence (at most 28 minutes),
-      with pings capped so credential hold stays within one hour.</p>
+    <p class="note" data-testid="ka-arm-note">Pick one session and keep its cache warm for a set time.
+      Use it for a session you are working in now. Picking sessions from history does not work well: on this
+      service, a list chosen on one half of a week earned <strong>$5.27</strong> in the next half, while the
+      plain account-wide rule earned <strong>$53.32</strong>.</p>
+    <details class="why"><summary>Technical details</summary>
+      <p>The 60&ndash;290 second interval is for Anthropic. On GPT-5.6+ Responses, a manual arm enables
+        the session at the account OpenAI cadence (at most 28 minutes), with pings capped so credential
+        hold stays within one hour.</p></details>
     <div id="ka-armed" data-testid="ka-armed"></div>
   </div>
 
   <div class="panel">
-    <h2>What should I set?</h2>
+    <h2>Which setting should I use?</h2>
+    <p class="hint">A suggested idle time and ping count, as a range because the size of the gain is uncertain.</p>
     <div id="ka-recommend" data-testid="ka-recommend"></div>
   </div>
 </section>
@@ -868,14 +759,16 @@
 <!-- ── Requests ───────────────────────────────────────────────────────────── -->
 <section class="view" id="view-requests" role="tabpanel" aria-labelledby="tab-requests" hidden>
   <div class="panel">
-    <h2>Requests</h2>
+    <h2>All requests</h2>
+    <p class="note">Each row is one call an agent made to the AI provider, newest first.
+      Click a row for what it contained and what it cost.</p>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="requests-table">
         <thead><tr>
-          <th>ID</th><th>Time</th><th>Session</th><th data-scope-col hidden>Account</th><th>Model</th><th>Mode</th>
-          <th class="num">Before</th><th class="num">After</th><th class="num">Saved (gross)</th>
-          <th class="num">Cache r/w</th><th class="num">$</th><th class="num">CG ms</th>
-          <th>Cache</th><th>Accounting</th>
+          <th>ID</th><th>Time</th><th>Session</th><th data-scope-col hidden>Account</th><th>Model</th><th title="How context-guru handled this request">Mode</th>
+          <th class="num" title="Tokens before removal">Before</th><th class="num" title="Tokens actually sent to the provider">After</th><th class="num" title="Tokens removed, counted for this request alone">Removed</th>
+          <th class="num" title="Tokens read from / written to the provider prompt cache">Cache read / write</th><th class="num" title="Cost in dollars">$</th><th class="num" title="Milliseconds context-guru added">Added delay</th>
+          <th title="Whether the provider cache was hit">Cache</th><th title="Whether the provider reported full token counts for this request">Usage data</th>
         </tr></thead>
         <tbody id="requests-body"></tbody>
       </table>
@@ -888,24 +781,6 @@
   </div>
 </section>
 
-<!-- ── Benchmarks ─────────────────────────────────────────────────────────── -->
-<!-- Manager-only: wrapped in a <template> (revealed by revealManagerTemplates in app.js) so
-     a plain hosted account's browser never builds this panel at all, not just hides it. -->
-<template id="tpl-view-benchmarks">
-<section class="view" id="view-benchmarks" role="tabpanel" aria-labelledby="tab-benchmarks" hidden>
-  <div class="panel">
-    <h2>Benchmark runs</h2>
-    <p class="note">From the harness artifacts. Reward sits beside cost on purpose: an arm
-      that saves money by failing tasks is not saving money.</p>
-    <button id="bench-refresh" class="ghost" data-testid="bench-refresh">Re-scan run directories</button>
-    <!-- What the re-scan actually found. The click handler used to discard the server's counts,
-         so a wrong path and a correct scan of an empty directory looked identical. -->
-    <p class="hint" id="bench-scan" data-testid="bench-scan" role="status" hidden></p>
-    <div id="bench-list" data-testid="bench-list"></div>
-  </div>
-</section>
-</template>
-
 <!-- ── Config ─────────────────────────────────────────────────────────────── -->
 <!-- Archive: what has moved to cold storage. The list comes from a LOCAL index, so it
      renders instantly and works even when the remote is unreachable; only opening one
@@ -913,11 +788,11 @@
 <section class="view" id="view-archive" role="tabpanel" aria-labelledby="tab-archive" hidden>
   <div class="card">
     <div class="card-head">
-      <h2>Cold storage</h2>
+      <h2>Archived sessions</h2>
       <span class="muted" id="archive-remote" data-testid="archive-remote"></span>
     </div>
-    <p class="muted small">Moved off local disk, not deleted — this index is permanent and
-      local. Opening a session fetches it back.</p>
+    <p class="muted small">Old sessions moved to cheaper storage to free disk. Nothing is
+      deleted. Open one to fetch it back.</p>
     <div id="archive-list" data-testid="archive-list" tabindex="0"></div>
   </div>
 </section>
@@ -925,15 +800,15 @@
 <!-- Setup: the copy-paste block a user needs, with their own token substituted. -->
 <section class="view" id="view-setup" role="tabpanel" aria-labelledby="tab-setup" hidden>
   <div class="card">
-    <div class="card-head"><h2>Point Claude Code at context-guru</h2></div>
+    <div class="card-head"><h2>Connect your agent to context-guru</h2></div>
     <div id="setup-token-banner" class="banner" hidden data-testid="setup-token-banner"></div>
-    <p class="muted small">Four steps, one file. Other agents are at the bottom.</p>
+    <p class="muted small">Four steps, one settings file. Instructions for other agents are at the bottom.</p>
     <div id="setup-blocks" data-testid="setup-blocks"></div>
-    <div class="card-head"><h3>Backing out</h3></div>
+    <div class="card-head"><h3>Turning it off</h3></div>
     <ul class="muted small">
-      <li>Unset the base URL to bypass context-guru entirely.</li>
-      <li>Send <code>x-context-guru-bypass: true</code> to keep the metrics and skip
-        compaction — the way to A/B a suspicion.</li>
+      <li>Remove the base URL setting to stop using context-guru.</li>
+      <li>Send the header <code>x-context-guru-bypass: true</code> to keep measuring but skip
+        removal, so you can compare with and without.</li>
     </ul>
   </div>
 </section>
@@ -941,29 +816,29 @@
 <!-- Settings: the tenant's own configuration and tokens. -->
 <section class="view" id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
   <div class="card">
-    <div class="card-head"><h2>Compaction</h2><span class="muted" id="settings-saved" data-testid="settings-saved"></span></div>
+    <div class="card-head"><h2>Compaction settings</h2><span class="muted" id="settings-saved" data-testid="settings-saved"></span></div>
     <div id="settings-form" data-testid="settings-form"></div>
   </div>
   <div class="card">
-    <div class="card-head"><h2>Tokens</h2>
+    <div class="card-head"><h2>Access tokens</h2>
       <button class="ghost" id="mint-token" data-testid="mint-token">Mint a token</button></div>
-    <p class="muted small">Stored hashed: a lost token cannot be recovered, only replaced.
-      Several may be live at once, which is how you rotate without downtime.</p>
+    <p class="muted small">A token is the secret your agent uses to sign in. A lost token cannot be shown again,
+      only replaced. You can have several at once, so you can swap one without downtime.</p>
     <div id="token-list" data-testid="token-list" tabindex="0"></div>
   </div>
   <div class="card">
     <div class="card-head"><h2>Password</h2><span class="muted" id="password-status" data-testid="password-status"></span></div>
-    <p class="muted small">Your current password is required: a stolen session cookie must
-      not be enough to take the account over.</p>
+    <p class="muted small">Enter your current password to change it.</p>
     <div id="password-form" data-testid="password-form"></div>
   </div>
   <div class="card">
-    <div class="card-head"><h2>Signed-in machines</h2></div>
-    <p class="muted small">Revoking one signs that browser out and leaves the others alone.</p>
+    <div class="card-head"><h2>Where you are signed in</h2></div>
+    <p class="muted small">Browsers and machines currently signed in. Revoking one signs only that one out.</p>
     <div id="session-list" data-testid="session-list" tabindex="0"></div>
   </div>
   <div class="card">
-    <div class="card-head"><h2>Recent configuration changes</h2></div>
+    <div class="card-head"><h2>Recent changes to your settings</h2>
+    <p class="muted small">Who changed what, newest first.</p></div>
     <div id="audit-list" data-testid="audit-list" tabindex="0"></div>
   </div>
 </section>
@@ -976,56 +851,50 @@
 <section class="view" id="view-feedback" role="tabpanel" aria-labelledby="tab-feedback" hidden>
   <div class="card">
     <div class="card-head"><h2>How is context-guru working for you?</h2></div>
-    <p class="muted small">Answers go to whoever runs this deployment. Nobody else can
-      read them.</p>
+    <p class="muted small">Your answers go only to whoever runs this deployment.</p>
     <form id="feedback-form" data-testid="feedback-form" novalidate></form>
   </div>
 
   <div class="card" id="feedback-stats" data-manager hidden>
-    <div class="card-head"><h2>Feedback statistics</h2>
+    <div class="card-head"><h2>What people said</h2>
       <span class="muted" id="feedback-count" data-testid="feedback-count"></span></div>
     <div id="feedback-tiles"></div>
     <div class="card-head"><h3>By agent</h3></div>
-    <p class="muted small">The headline numbers per agent, so the two do not average each
-      other away.</p>
+    <p class="muted small">Results split by agent, so a good score for one does not hide a bad one for another.</p>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="feedback-agents">
         <thead><tr>
-          <th>Agent</th><th class="num">Submissions</th><th>Mean overall</th>
+          <th>Agent</th><th class="num">Submissions</th><th>Average overall</th>
           <th class="num">NPS</th>
         </tr></thead>
         <tbody id="feedback-agents-body"></tbody>
       </table>
     </div>
-    <div class="card-head"><h3>Every question: mean and spread</h3></div>
-    <p class="muted small">The mean is out of five and the spread is beside it, because a
-      3.0 made of threes and a 3.0 made of ones and fives are different problems.</p>
+    <div class="card-head"><h3>Score for each question</h3></div>
+    <p class="muted small">Average out of 5, plus how much answers differ. A 3.0 made of all threes is not the same as a 3.0 made of ones and fives.</p>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="feedback-dims">
         <thead><tr>
-          <th>Question</th><th>Mean of 5</th><th>Spread</th>
+          <th>Question</th><th>Average of 5</th><th title="How far answers differ from the average">Spread</th>
           <th class="num">1★</th><th class="num">2★</th><th class="num">3★</th>
           <th class="num">4★</th><th class="num">5★</th><th class="num">Answers</th>
         </tr></thead>
         <tbody id="feedback-dims-body"></tbody>
       </table>
     </div>
-    <div class="card-head"><h3>Would they recommend it</h3></div>
-    <p class="muted small">Read as an NPS: five stars promotes, four is passive, three or
-      fewer detracts. The score is promoters minus detractors as a percentage, so it runs
-      from &minus;100 to +100.</p>
+    <div class="card-head"><h3>Would people recommend it</h3></div>
+    <p class="muted small">Five stars counts as a fan, four as neutral, three or fewer as unhappy. The score is
+      fans minus unhappy, as a percentage, from &minus;100 to +100 (this is called NPS).</p>
     <div id="feedback-nps" data-testid="feedback-nps"></div>
     <div class="card-head"><h3>Overall rating over time</h3></div>
-    <p class="muted small">Mean overall stars per UTC day, so two people reading this see
-      the same buckets.</p>
+    <p class="muted small">Average overall stars for each day (UTC).</p>
     <div id="chart-feedback" class="chart" data-testid="chart-feedback"></div>
   </div>
 
   <div class="card" id="feedback-answers-card" data-manager hidden>
-    <div class="card-head"><h2>Every answer</h2></div>
-    <p class="muted small">Newest first, with who wrote it and when. A submission marked
-      <em>not emailed</em> is stored here but never reached the mail relay — the row is
-      the record, the email is a copy.</p>
+    <div class="card-head"><h2>All answers</h2></div>
+    <p class="muted small">Newest first, with who wrote it and when. <em>Not emailed</em> means it is saved here
+      but the email copy was not sent.</p>
     <div id="feedback-answers" data-testid="feedback-answers"></div>
   </div>
 </section>
@@ -1036,7 +905,7 @@
 <template id="tpl-view-tenants">
 <section class="view" id="view-tenants" role="tabpanel" aria-labelledby="tab-tenants" hidden>
   <div class="card">
-    <div class="card-head"><h2>A/B variants</h2>
+    <div class="card-head"><h2>Comparing groups of accounts (A/B test)</h2>
       <select id="ab-range" data-testid="ab-range" aria-label="Comparison window">
         <option value="0">All time</option>
         <option value="86400000">Last 24h</option>
@@ -1048,18 +917,18 @@
     <div class="state blocked" data-testid="ab-honesty">
       <div class="state-body">
         <strong>Directional, not causal</strong>
-        <span>A manager chose who is in each variant and their workloads differ, so a
-          difference here may be a difference between the people. Read the denominators
-          next to every figure, and see the caveats below before quoting anything.</span>
+        <span>A manager chose who is in each group and their work differs, so a gap may
+          come from the people, not the setting. Check the counts beside each figure and
+          the caveats below before quoting anything.</span>
       </div>
     </div>
     <div id="ab-list" data-testid="ab-list" tabindex="0"></div>
     <div id="ab-caveats"></div>
   </div>
   <div class="card">
-    <div class="card-head"><h2>Tenants</h2><span class="muted" id="tenants-count"></span></div>
-    <p class="muted small">Metrics and configuration for every account. To read an
-      account's transcripts, pick it in the selector and open a request or session diff.</p>
+    <div class="card-head"><h2>Accounts</h2><span class="muted" id="tenants-count"></span></div>
+    <p class="muted small">Every account on this proxy (a tenant is one customer account). To read an
+      account's transcripts, pick it in the account selector and open a request or session.</p>
     <div id="tenants-list" data-testid="tenants-list" tabindex="0"></div>
   </div>
 </section>
@@ -1078,14 +947,16 @@
 <section class="view" id="view-strategies" role="tabpanel" aria-labelledby="tab-strategies" hidden>
   <div class="panel">
     <h2 id="strategy-form-title">New strategy</h2>
-    <p class="note">A durable rule: "only during Israel business hours", or a service-wide
-      policy. It forces the keep-alive on for whatever it targets, whenever a manager's
-      own account switch or a session override does not already say otherwise.</p>
+    <p class="note">A saved rule that turns keep-alive on, for example only during business hours or
+      for every account. It applies unless an account switch or a per-session setting says otherwise.</p>
+    <details class="why"><summary>Technical details</summary>
+      <p>It forces the keep-alive on for whatever it targets, whenever a manager&rsquo;s own account
+        switch or a session override does not already say otherwise.</p></details>
     <form id="strategy-form" data-testid="strategy-form" novalidate></form>
   </div>
 
   <div class="panel">
-    <div class="card-head"><h2>Strategies</h2><span class="muted" id="strategies-count"></span></div>
+    <div class="card-head"><h2>Your saved rules</h2><span class="muted" id="strategies-count"></span></div>
     <div id="strategies-list" data-testid="strategies-list" tabindex="0"></div>
   </div>
 </section>
@@ -1103,18 +974,18 @@
        process's is secondary and labelled as such. -->
   <div class="panel" id="config-account-panel" hidden>
     <h2>Your account's configuration</h2>
-    <p class="note">What actually compacts <em>your</em> traffic. This is the document the
-      Settings page writes, so a change saved there shows up here.</p>
+    <p class="note">The settings that are applied to <em>your</em> traffic. Changes saved on the Settings
+      page show up here.</p>
     <div id="config-account-body" data-testid="config-account-body"></div>
   </div>
   <div class="panel">
     <h2 id="config-server-title">Effective configuration</h2>
-    <p class="note">Resolved, not as typed: preset expanded, defaults filled, overrides
-      applied.</p>
+    <p class="note">The final values after the preset (a named bundle of settings) and defaults are applied.</p>
     <div id="config-body" data-testid="config-body"></div>
   </div>
   <div class="panel">
-    <h2>Capture pipeline health</h2>
+    <h2>Request recording health</h2>
+    <p class="note">Whether requests are being saved to the database. Dropped or error counts above 0 mean some requests are missing from this dashboard.</p>
     <div id="capture-body" data-testid="capture-body"></div>
   </div>
   <!-- Logs live in Grafana, which binds loopback on the box. Filled by renderLogsHelp()
@@ -1122,8 +993,8 @@
        who has not opened the tunnel first, and a dead link is worse than instructions. -->
   <div class="panel">
     <h2>Logs <span class="section-note">Grafana, over an SSH tunnel</span></h2>
-    <p class="note">Not exposed on the public path. Open the tunnel, then the dashboard
-      address — both are copyable below.</p>
+    <p class="note">Logs are viewed in Grafana, which is only reachable through a tunnel.
+      Run step 1, then open step 2.</p>
     <div id="logs-help" data-testid="logs-help"></div>
   </div>
 </section>

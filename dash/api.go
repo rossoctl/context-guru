@@ -651,8 +651,6 @@ func (a *API) routes() []route {
 		{"GET /api/breakdown", scopeTenant, a.breakdown},
 		{"GET /api/facets", scopeTenant, a.facets},
 		{"GET /api/config", scopeManager, a.config},
-		{"GET /api/benchmarks", scopeManager, a.benchmarks},
-		{"GET /api/benchmarks/{id}/tasks", scopeManager, a.benchmarkTasks},
 		{"GET /api/capture", scopeTenant, a.capture},
 		{"GET /api/whoami", scopePublic, a.whoamiHandler},
 		{"GET /api/archive", scopeTenant, a.archive},
@@ -1584,43 +1582,6 @@ func (a *API) config(w http.ResponseWriter, r *http.Request) {
 	}
 	body["description"] = localConfigDescription
 	writeJSON(w, body)
-}
-
-// benchmarks lists ingested harbor runs. A MANAGER view in hosted mode: the runs are
-// the operator's own eval history, not any tenant's traffic — and ?refresh=1 walks the
-// filesystem and inserts rows, which unauthenticated is a writer denial of service
-// anyone can repeat.
-func (a *API) benchmarks(w http.ResponseWriter, r *http.Request) {
-	if !a.requireManager(w, r, "benchmark runs") {
-		return
-	}
-	if r.URL.Query().Get("refresh") == "1" {
-		// The DIRS go back with the counts. Without them a re-scan of a mistyped path and a
-		// correct scan of an empty directory are the same response — and the UI reported both
-		// as "nothing happened" because it discarded the body entirely.
-		dirs := a.rec.Opts().BenchDirs
-		runs, tasks := a.db(r).IngestBenchRoots(dirs)
-		writeJSON(w, map[string]any{"ingested_runs": runs, "ingested_tasks": tasks, "dirs": dirs})
-		return
-	}
-	runs, err := a.db(r).BenchRuns()
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, map[string]any{"runs": runs})
-}
-
-func (a *API) benchmarkTasks(w http.ResponseWriter, r *http.Request) {
-	if !a.requireManager(w, r, "benchmark runs") {
-		return
-	}
-	rows, err := a.db(r).BenchTasks(atoi64(r.PathValue("id")), r.URL.Query().Get("arm"))
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, map[string]any{"tasks": rows})
 }
 
 // capture reports the capture pipeline's own health, drops included. Exposed as a

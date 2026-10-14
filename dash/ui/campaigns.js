@@ -89,15 +89,13 @@ async function loadCampaigns() {
 
 function buildCampaignsSkeleton(host) {
   host.appendChild(el('div', { class: 'panel' },
-    el('h2', {}, 'New campaign'),
+    el('h2', {}, 'Create rules for many accounts at once'),
     el('p', { class: 'note' },
-      'Bulk-create keep-alive strategies from a batch of KV-cache suggestions: fetch the ' +
-      'live per-tenant, per-hour recommendations, or upload a JSON file in the same shape ' +
-      '(GET /api/kvcache/suggest) to hand-edit one first. Only cells whose best strategy has ' +
-      'a real enforcement path on this deployment are actually activated — everything else ' +
-      'is still recorded, with a reason, never hidden. A fetched or uploaded payload can name ' +
-      'any tenant, and creating from it targets exactly the tenants it names, regardless of ' +
-      'who is uploading — there is no separate per-tenant confirmation step.'),
+      'A campaign sets up keep-alive rules in bulk. Fetch suggestions from your own history, or upload a file in the same format to edit them first. ',
+      'Each suggestion is for one ', term('cell', 'One account at one hour of the day, for example account A at 14:00 UTC.'),
+      ' and names the strategy that would have saved the most there. Only strategies this deployment can actually enforce are switched on; the rest are recorded with a reason.'),
+    el('details', { class: 'why' }, el('summary', {}, 'Technical details'),
+      el('p', {}, 'The upload format is the one returned by GET /api/kvcache/suggest. A fetched or uploaded payload can name any tenant, and creating from it targets exactly the tenants it names, regardless of who is uploading; there is no separate per-tenant confirmation step.')),
     el('div', { class: 'row-actions' },
       el('button', { class: 'ghost', 'data-testid': 'camp-fetch-live', onclick: fetchLiveSuggestions },
         'Fetch live suggestions'),
@@ -109,7 +107,7 @@ function buildCampaignsSkeleton(host) {
     el('div', { id: 'camp-preview' })));
   buildCampHoldoutPanel(host);
   host.appendChild(el('div', { class: 'panel' },
-    el('div', { class: 'card-head' }, el('h2', {}, 'Campaigns'),
+    el('div', { class: 'card-head' }, el('h2', {}, 'Campaigns you have created'),
       el('span', { class: 'muted', id: 'campaigns-count' })),
     el('div', { id: 'campaigns-list' })));
 }
@@ -147,15 +145,12 @@ function buildCampHoldoutPanel(host) {
     type: 'datetime-local', id, 'data-testid': id, value: msToLocal(ms),
   });
   host.appendChild(el('div', { class: 'panel' },
-    el('h2', {}, 'Train / test check'),
+    el('h2', {}, 'Would these predictions hold on new data?'),
     el('p', { class: 'note' },
-      'Choose each cell’s strategy on a TRAIN window, then score that same strategy on a ' +
-      'disjoint TEST window it was not chosen on. Train saving is what this page’s ' +
-      'suggestions and a campaign’s frozen prediction already show; test saving is what ' +
-      'survived. The gap between them is this deployment’s own overfitting estimate — not ' +
-      'a correction to subtract from a prediction, and not a reason to distrust the ' +
-      'mechanism, just the measurement to have before committing to one. The two windows ' +
-      'must not overlap: an arm scored on rows it was chosen on is an in-sample number.'),
+      'Picks each strategy on an earlier period (train), then scores it on a later period it has not seen (test). ',
+      'The test saving is the honest figure; the gap to the train saving shows how much the prediction was over-fitted. The two periods must not overlap.'),
+    el('details', { class: 'why' }, el('summary', {}, 'Technical details'),
+      el('p', {}, 'Train saving is what the suggestions and a campaign\u2019s frozen prediction already show; test saving is what survived. The gap is this deployment\u2019s own overfitting estimate, not a correction to subtract from a prediction. An arm scored on the rows it was chosen on is an in-sample number.')),
     el('div', { class: 'row-actions' },
       el('div', { class: 'field' }, el('label', { for: 'camp-train-from' }, 'Train from'),
         input('camp-train-from', w.trainSince)),
@@ -234,8 +229,8 @@ function renderCampHoldout(host, res) {
     return;
   }
   host.appendChild(el('p', { class: 'note' },
-    'Click a row for every candidate strategy’s train-and-test pair in that cell — which ' +
-    'answers whether the arm that won on train was anywhere near the best on test.'));
+    'One row per cell (an account at one hour). Click a row to see every candidate strategy on both periods, ' +
+    'and whether the train winner was also near the best on test.'));
   const tbl = el('table', { class: 'grid compact', 'data-testid': 'camp-holdout-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Tenant'), el('th', { class: 'num' }, 'Hour (UTC)'),
@@ -513,13 +508,10 @@ function renderSuggestPreview(host, suggest) {
     `${named.length} cell(s) across ${(suggest.users || []).length} tenant(s), baseline ` +
     `"${suggest.baseline}", weekdays ${(suggest.weekdays_included || []).join(', ') || '—'}.` +
     (unnamed ? ` ${unnamed} cell(s) with no tenant id will be excluded from the campaign.` : '') +
-    ' Which of these actually activate is decided when the campaign is created — this is ' +
-    'the raw recommendation, not yet resolved against what this deployment can enforce.'));
+    ' Which of these switch on is decided when you create the campaign.'));
   host.appendChild(el('p', { class: 'note' },
-    'Predicted saving is IN-SAMPLE: each cell’s strategy was chosen by replaying every ' +
-    'candidate over that cell’s own history and keeping the best, so the figure it wins ' +
-    'with measures fit, not forecast. Use the train/test panel below to see how much of it ' +
-    'survives on traffic the choice was not made on before committing to a large campaign.'));
+    'Predicted saving is an estimate, not a forecast: each strategy was picked because it did best on that cell\u2019s own past, so it looks better than it will on new traffic (' +
+    'in-sample). The check below shows how much holds up on data it has not seen.'));
 
   const filterHost = el('div');
   const tableHost = el('div');
@@ -546,12 +538,13 @@ function renderCampPreviewTable(host, suggest) {
     return;
   }
   const SHOWN = 200;
+  host.appendChild(el('p', { class: 'hint' }, 'One row per cell. Predicted saving is what the best strategy would have saved on past traffic.'));
   const tbl = el('table', { class: 'grid compact', 'data-testid': 'camp-preview-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Tenant'), el('th', { class: 'num' }, 'Hour (UTC)'),
       el('th', { class: 'num' }, 'Requests'), el('th', {}, 'Best strategy'),
       el('th', { class: 'num' }, 'Predicted saving'),
-      el('th', { class: 'num' }, 'Oracle ceiling'))));
+      el('th', { class: 'num' }, term('Oracle ceiling', 'The most any rule could have saved if it knew in advance when each conversation would resume. Not achievable; it is the upper bound.')))));
   const body = el('tbody');
   for (const c of shownCells.slice(0, SHOWN)) {
     body.appendChild(el('tr', {},
@@ -712,6 +705,7 @@ function renderCampaignsList(host, rows) {
     emptyState(host, 'No campaigns yet', 'Create one above.');
     return;
   }
+  host.appendChild(el('p', { class: 'hint' }, 'One row per campaign. Open Stats to see what it predicted and what actually happened.'));
   const tbl = el('table', { class: 'grid', 'data-testid': 'campaigns-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Name'), el('th', {}, 'Source'), el('th', {}, 'Created'), el('th', {}, 'State'),
@@ -810,7 +804,7 @@ async function renderCampaignOverview(body, campaignID) {
     const tbl = el('table', { class: 'grid', 'data-testid': 'camp-tenants-table' },
       el('thead', {}, el('tr', {},
         el('th', {}, 'Tenant'), el('th', { class: 'num' }, 'Predicted'),
-        el('th', { class: 'num' }, 'Oracle ceiling'),
+        el('th', { class: 'num' }, term('Oracle ceiling', 'The most any rule could have saved if it knew in advance when each conversation would resume. Not achievable; it is the upper bound.')),
         el('th', { class: 'num' }, 'Real ping cost'), el('th', { class: 'num' }, 'Real saved'),
         el('th', { class: 'num' }, 'Real net'))));
     const tbody = el('tbody');

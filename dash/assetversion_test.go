@@ -91,10 +91,12 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 		{"app.js", "campaigns.js"},
 		// The five-page home sends a signed-out visitor to the classic dashboard's sign-in.
 		{"v2.js", "index.html"},
+		// The bundled serif face, named in the stylesheet's @font-face.
+		{"style.css", "fonts/source-serif-4-latin-wght-normal.woff2"},
 	}
 	for _, rr := range runtimeRefs {
 		js := get("/dashboard/" + rr.asset).Body.String()
-		if !strings.Contains(js, "'"+rr.ref+"?v="+assetVersion+"'") {
+		if !strings.Contains(js, "'"+rr.ref+"?v="+assetVersion+"'") && !strings.Contains(js, `"`+rr.ref+"?v="+assetVersion+`"`) {
 			t.Errorf("%s still asks for an unversioned %s", rr.asset, rr.ref)
 		}
 	}

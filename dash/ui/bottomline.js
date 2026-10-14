@@ -213,8 +213,9 @@ if (typeof document !== 'undefined' && typeof el === 'function') {
 
   async function render(view) {
     try {
+      // Overview has its own savings ledger now, so it carries no banner.
+      if (view === 'overview') { for (const m of mounts.values()) m.hidden = true; return; }
       host(view); // shows this view's banner and hides the others
-      if (view === 'overview') return; // loadOverview calls overview(o) with the stats it fetched
       if (ADVANCED.has(view)) {
         const h = host(view);
         if (h && !h.firstChild) {

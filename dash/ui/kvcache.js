@@ -421,32 +421,28 @@ function kvHost(id) { return el('div', { id: id, 'data-testid': id }); }
 // 1. What is being measured, and how well. The coverage statement comes FIRST and renders
 //    unconditionally: a reader has to know whether a blank tier means "not cached" or "not
 //    recorded" before any figure below is worth reading.
-kvPanel('What happens after a request',
-  'For every historical request, how long until the same conversation came back — and what '
-  + 'that means for a cached prompt with a five-minute or a one-hour lifetime. Model, '
-  + 'conversation, agent and the time range come from the filter bar at the top of the page; '
-  + 'the four filters here are the ones it does not carry.',
+kvPanel('How long do conversations pause between requests?',
+  el('span', {}, 'The provider keeps your prompt in a ',
+    term('cache', 'A short-lived copy of the start of your conversation, so repeating it is cheap.'),
+    ' for 5 minutes (or 1 hour, at a higher price). These figures show how long your conversations actually pause, '
+    + 'so you can judge which lifetime fits. The filter bar at the top sets model, agent and dates; the four filters here are extras.'),
   kvHost('kv-coverage'), kvHost('kv-controls'), kvHost('kv-tiles'));
 
 // 2. The distribution itself: the histogram, then the same data as "has it come back yet".
-const kvDistPanel = kvPanel('How long until the next request',
-  'The idle gap between one request and the next in the same conversation. Requests with no '
-  + 'next request are not in these charts — they have no idle time.');
+const kvDistPanel = kvPanel('How long is the pause before the next request?',
+  'The idle gap between one request and the next in the same conversation. A conversation\u2019s last request has no next one, so it is not in these charts.');
 kvDistPanel.appendChild(el('h3', {}, 'Idle time, by band'));
 kvDistPanel.appendChild(el('p', { class: 'note', id: 'kv-idle-note' }));
 kvDistPanel.appendChild(kvHost('kv-idle-bands'));
 kvDistPanel.appendChild(el('h3', {}, 'Has it come back yet?'));
 kvDistPanel.appendChild(el('p', { class: 'note' },
-  'The share of requests whose conversation had returned by each elapsed time. The two rungs '
-  + 'that matter are on the curve rather than between them: five minutes is the provider’s '
-  + 'default lifetime, an hour is the long tier.'));
+  'The line shows what share of conversations had come back after each wait. Read it at 5 minutes '
+  + '(the normal cache lifetime) and at 1 hour (the long one).'));
 kvDistPanel.appendChild(el('div', { class: 'chart', id: 'kv-survival', 'data-testid': 'kv-survival' }));
 
 // 3. Grouped views. By tier first, because that is the dimension the whole page is about.
-const kvGroupPanel = kvPanel('Who waits how long',
-  'The same measurement grouped four ways. A group’s reuse percentages are over ITS OWN '
-  + 'requests that have a successor, so a group of final requests shows no percentage rather '
-  + 'than a zero.');
+const kvGroupPanel = kvPanel('Which users and models pause longest?',
+  'The same pause data grouped four ways. Each percentage counts only that group\u2019s requests that have a next request; a group with none shows a dash, not zero.');
 kvGroupPanel.appendChild(el('h3', {}, 'By observed TTL'));
 kvGroupPanel.appendChild(kvHost('kv-by-ttl'));
 kvGroupPanel.appendChild(el('h3', {}, 'By user'));
@@ -458,37 +454,34 @@ kvGroupPanel.appendChild(kvHost('kv-by-bucket'));
 
 // 4. The prices. Before the simulator, deliberately: every figure below is these rates times a
 //    token count, and a reader who has not seen them cannot judge the result.
-kvPanel('Cache prices',
-  'The rates every figure below is computed from. They come from this deployment’s own price '
-  + 'list; edit any of them to see what a different rate would do. Rates are USD per million '
-  + 'tokens, which is the unit every vendor’s price page uses.',
+kvPanel('What does caching cost?',
+  'The prices every dollar figure below uses, in USD per million tokens, taken from this deployment\u2019s price list. '
+  + 'Edit a rate to see what a different price would do.',
   kvHost('kv-pricing'));
 
 // 5. The simulator.
-const kvSimPanel = kvPanel('What a different TTL strategy would have cost',
-  'Each strategy is replayed against exactly this history. At every request it is given only '
-  + 'what was knowable at that moment — never how long the gap turned out to be — and the real '
-  + 'next-request time is used only to score the decision afterwards.',
+const kvSimPanel = kvPanel('What would a different cache lifetime have cost?',
+  el('span', {}, 'Each strategy (a row below) is replayed on exactly this history to see what it would have cost. A strategy only sees what was known at the time, never how long the pause turned out to be. ',
+    term('TTL', 'Time to live: how long the provider keeps a cached prompt before forgetting it.'),
+    ' means the cache lifetime.'),
   kvHost('kv-arms'), kvHost('kv-sim'));
-kvSimPanel.appendChild(el('h3', {}, 'What actually predicts a rescue'));
+kvSimPanel.appendChild(el('h3', {}, 'What predicts that a conversation comes back?'));
 kvSimPanel.appendChild(el('p', { class: 'note' },
-  'From an offline model fit on this deployment’s own history — see '
-  + 'docs/results/kv-ttl-predictor-arms.md. STATIC: unlike every number above, this is not '
-  + 'recomputed from the rows in this window; it is the offline study’s own measured ranking, '
-  + 'echoed here so the arm above (stop-reason-gated) can be checked against the finding that '
-  + 'justifies it.'));
+  'The signals that best predict a conversation returning soon, ranked. This is a fixed result from an offline study, '
+  + 'not recomputed from this window.'));
+kvSimPanel.appendChild(el('details', { class: 'why' }, el('summary', {}, 'Technical details'),
+  el('p', {}, 'From an offline model fit on this deployment\u2019s own history; see docs/results/kv-ttl-predictor-arms.md. '
+  + 'It is echoed here so the stop-reason-gated arm above can be checked against the finding that justifies it.')));
 kvSimPanel.appendChild(kvHost('kv-features'));
 
 // 6. The dataset itself.
-const kvTablePanel = kvPanel('Every request in the analysis',
-  'The derived dataset, one row per request, sorted and paged on the server so a sorted '
-  + 'column shows the real top rows rather than the top of one page.',
+const kvTablePanel = kvPanel('Every request behind these numbers',
+  'One row per request. Click a column to sort; sorting covers all requests, not only this page.',
   kvHost('kv-table'), kvHost('kv-pager'));
 
 // 7. The assumptions, last and always present.
-kvPanel('Formulas and assumptions',
-  'Every expression below is the one the server actually evaluated — they are sent with the '
-  + 'data rather than written into this page, so they cannot drift from the code.',
+kvPanel('How these numbers are calculated',
+  'The exact formulas and assumptions behind the figures above.',
   kvHost('kv-assumptions'));
 
 // ── controls ───────────────────────────────────────────────────────────────
@@ -595,7 +588,7 @@ function renderKVTiles() {
     tile('kv-median-idle', 'Median idle', c.with_next ? dur(c.median_idle_ms) : '—',
       c.with_next ? 'over ' + num(c.with_next) + ' gaps' : 'no gaps in this window'),
     tile('kv-mean-idle', 'Mean idle', c.with_next ? dur(c.mean_idle_ms) : '—',
-      c.with_next ? 'p90 ' + dur(c.p90_idle_ms) : 'no gaps'),
+      c.with_next ? '90% are under ' + dur(c.p90_idle_ms) : 'no gaps'),
     tile('kv-reuse-5m', 'Back within 5m', c.with_next ? pct(c.within_5m_pct) : '—',
       c.with_next ? num(c.within_5m) + ' of ' + num(c.with_next) : 'no gaps', 'accent'),
     tile('kv-reuse-1h', 'Back within 1h', c.with_next ? pct(c.within_1h_pct) : '—',
@@ -619,8 +612,8 @@ function renderKVIdleBands() {
   const bands = a.idle_bands || [];
   const total = bands.reduce((s, b) => s + b.n, 0);
   $('#kv-idle-note').textContent = total
-    ? 'Bands beyond five minutes are drawn in gray: a default cached prefix is already gone '
-      + 'by then. ' + num(total) + ' gaps.'
+    ? 'Each bar is a range of pause lengths; longer bars mean more pauses. Gray bars are beyond five minutes, when a normal cache is already gone. '
+      + num(total) + ' gaps.'
     : '';
   barRows(host, bands.map((b) => ({
     label: b.label,
@@ -762,8 +755,8 @@ function renderKVPricing() {
   host.appendChild(el('p', { class: 'hint' },
     'Costs are on this window’s own median cached prompt of ',
     el('strong', {}, compact(v.prefix_tokens) + ' tokens'),
-    '. “Hold” is a write plus ' + v.assumptions.schedule.max_pings
-    + ' keep-alive refreshes — the whole cost of carrying that prompt through one idle span.'));
+    '. “Hold” is the cost of keeping that prompt cached through one pause: one write plus ' + v.assumptions.schedule.max_pings
+    + ' keep-alive refreshes.'));
 
   const table = el('table', { class: 'tbl compact', 'data-testid': 'kv-pricing-table' },
     el('thead', {}, el('tr', {},
@@ -836,11 +829,8 @@ function renderKVPricing() {
     kvNumberInput('Max pings per span', kvc.sched.k, sched.max_pings,
       (val) => { kvc.sched.k = val; kvReload(); }, 'kv-sched-k')));
   host.appendChild(el('p', { class: 'hint' },
-    'A one-hour write rate is the one number no gateway publishes, so it is derived from the '
-    + 'multiplier above unless you type a rate for it. A keep-alive costs the same per ping at '
-    + 'either tier — it is a cache read either way — so what separates a five-minute hold from '
-    + 'a one-hour one is the write that put the entry there and how often it has to be '
-    + 'refreshed.'));
+    'Gateways do not publish a one-hour write price, so it is derived from the multiplier above unless you type one. '
+    + 'A ping costs the same on either tier; what differs is the price of the first write and how often refreshes are needed.'));
 
   // The provider semantics, which change every result and are therefore switches rather than
   // assumptions.
@@ -906,6 +896,7 @@ function renderKVArms() {
   // What is ticked: the caller's own selection, or — on first load — exactly what the server
   // ran, so the picker and the table below it never disagree about which arms are on screen.
   const on = new Set(kvc.arms || (sim ? sim.results.map((r) => r.strategy) : []));
+  host.appendChild(el('p', { class: 'hint' }, 'Tick the strategies to compare. Each one is a rule for when to keep the cache alive.'));
   host.appendChild(el('div', { class: 'kv-arms', 'data-testid': 'kv-arm-picker' },
     ...specs.map((a) => {
       const box = el('input', {
@@ -946,8 +937,7 @@ function renderKVArms() {
       'Force the long hold onto the keep-alive path instead of taking whichever of a 1h write '
       + 'and a 5m write plus refreshes is cheaper on that prefix.')));
   host.appendChild(el('p', { class: 'hint' },
-    'The three thresholds configure the ', el('strong', {}, 'custom'), ' arm. A learned '
-    + 'predictor plugs into the same arm server-side without changing anything on this page.'));
+    'These three thresholds set up the ', el('strong', {}, 'custom'), ' strategy in the table above.'));
 }
 
 /**
@@ -998,6 +988,9 @@ function renderKVSim() {
   const savings = {};
   for (const s of sim.savings) savings[s.strategy] = s;
 
+  host.appendChild(el('p', { class: 'hint' },
+    'One row per strategy. Compare the “vs baseline” column: a negative number means that strategy would have cost more than the baseline. '
+    + 'A strategy marked ceiling reads the future, so it shows the best any strategy could do, not something you can run.'));
   const table = el('table', { class: 'tbl', 'data-testid': 'kv-sim-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Strategy'),
@@ -1092,8 +1085,7 @@ function renderKVSim() {
       + 'ceiling on all of it. ' : '',
     open ? 'Up to ' + num(open) + ' pings are charged into idle spans whose end is not in this '
       + 'window; they are bounded by the window and counted apart. ' : '',
-    'The cache premium below each total is what the caching machinery itself cost: a negative '
-    + 'one means the cache paid for itself.'));
+    'The cache premium below each total is what caching itself cost; negative means the cache paid for itself.'));
 
   // The premium, and the statistics coverage, as a small second table: these are properties of
   // the simulation rather than of the comparison, and putting them in the table above would

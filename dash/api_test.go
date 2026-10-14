@@ -71,7 +71,7 @@ func TestAPIRoutesServeJSON(t *testing.T) {
 
 	for _, path := range []string{
 		"/api/stats", "/api/series?bucket=60000", "/api/requests", "/api/sessions",
-		"/api/components", "/api/facets", "/api/benchmarks", "/api/capture",
+		"/api/components", "/api/facets", "/api/capture",
 	} {
 		w, body := get(t, a, path, "127.0.0.1:1234")
 		if w.Code != http.StatusOK {
@@ -307,35 +307,20 @@ func TestUIHasTestIDsForEveryStatTile(t *testing.T) {
 	}
 	source := string(js) + string(html)
 
-	// Stat tiles get their testid as "tile-"+key from the tile() helper, so assert on
-	// the call site: tile('<key>', … . Renaming a tile then fails here, before the
-	// Playwright checks and the docs screenshots silently go stale.
-	for _, key := range []string{
-		"requests", "tokens-before", "tokens-after", "saved-gross", "saved-unique",
-		"saved-adjusted", "overcount", "cost-baseline", "cost-actual", "cost-cg",
-		"saved-usd", "total-saved-usd", "cachesplit-saved",
-		"split-requests", "split-tail-moved", "split-credited", "split-hit-rate",
-		"split-historical",
-		"cache-read", "cache-write", "fresh-input", "output",
-		"cg-latency", "upstream-latency", "expands", "reverts", "passthroughs",
-	} {
-		if !strings.Contains(source, "tile('"+key+"'") {
-			t.Errorf("stat tile %q is not rendered (expected a tile('%s', …) call); "+
-				"data-testid=tile-%s is asserted by the UI checks and the docs screenshots", key, key, key)
-		}
-	}
+	// The Overview's three savings rows carry their testids literally (see the list below). The
+	// old grid of stat tiles was removed on purpose: Overview now shows only the money saved by
+	// keep-alive, compaction and the tools and skills filter.
 	// Every other panel carries its testid literally.
 	for _, id := range []string{
-		"denominators", "waterfall", "safety-cost", "cache-miss", "uncompressed-reasons",
-		"accounting", "chart-cost", "chart-tokens", "chart-cache", "chart-latency",
+		"saved-ledger", "saved-cache", "saved-compaction", "saved-filter", "recommendations",
+		"tab-map", "overview-diagnostics", "waterfall", "chart-cost", "chart-tokens", "chart-cache", "chart-latency",
 		"chart-volume", "chart-components", "components-table", "sessions-table",
 		"requests-table", "requests-page", "requests-next", "requests-prev",
-		"bench-list", "bench-run", "bench-scatter", "bench-tasks",
 		"config-body", "capture-body", "capture-warning", "observe-banner",
 		"drawer-body", "diff-block",
 		"detail-summary", "detail-components", "live-table", "live-indicator",
 		"theme-toggle", "tab-overview", "tab-components", "tab-sessions", "tab-requests",
-		"tab-benchmarks", "tab-config", "filter-q", "filter-range", "filter-model",
+		"tab-config", "filter-q", "filter-range", "filter-model",
 		// The nav's first level. tab-overview above is the Overview group's button: that
 		// group is also a view, so it is the one that carries data-view as well, and its
 		// testid stays the way to reach the Overview view. tab-note is the one line that
@@ -360,7 +345,7 @@ func TestUIHasTestIDsForEveryStatTile(t *testing.T) {
 		"filter-from", "filter-to", "filter-range-apply",
 		// The manager's scope control, and the two things the money pass added to the page:
 		// the not-netted prefix-change diagnostic and the unfinished-amortization pill.
-		"filter-tenant", "prefix-change-cost", "in-flight",
+		"filter-tenant", "in-flight",
 	} {
 		if !strings.Contains(source, `"`+id+`"`) && !strings.Contains(source, "'"+id+"'") {
 			t.Errorf("data-testid %q is not produced by the UI; a check or screenshot depends on it", id)
@@ -380,7 +365,6 @@ func TestManagerOnlyTabsCarryTheGatingAttributes(t *testing.T) {
 	}
 	want := map[string][]string{
 		"components": {"data-manager", "data-local-ok"},
-		"benchmarks": {"data-manager", "data-local-ok"},
 		"config":     {"data-manager", "data-local-ok"},
 		"tenants":    {"data-manager"},
 	}
@@ -404,167 +388,6 @@ func TestManagerOnlyTabsCarryTheGatingAttributes(t *testing.T) {
 		if len(attrs) == 1 && strings.Contains(line, "data-local-ok") {
 			t.Errorf("tab-%s must not be data-local-ok", name)
 		}
-	}
-}
-
-// TestBenchIngestCommitsNothingForARunWithNoTasks pins the counter/table agreement.
-// IngestBenchDir used to INSERT the bench_runs row before it knew whether any rows-*
-// file parsed, then return tasks=0 — so IngestBenchRoots did not count the run but the
-// row was already committed. A real jobs root produced "runs=17" in the log and 42 rows
-// from the API, 25 of them with no arms, padding the Benchmarks tab with empty shells
-// and making the PR's own "42 runs ingested" claim wrong.
-func TestBenchIngestCommitsNothingForARunWithNoTasks(t *testing.T) {
-	dir := t.TempDir()
-	write := func(sub, name, body string) {
-		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, sub, name), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// A summary with no rows files at all: the shape of an abandoned or in-progress run.
-	write("smoke-hd", "summary.json", `{"model":"m","dataset":"d"}`)
-	// A summary whose only rows file is truncated, so nothing parses.
-	write("dbg1", "summary.json", `{"model":"m","dataset":"d"}`)
-	write("dbg1", "rows-off.json", `[{"task":"t1",`)
-	// And one good run, so this proves selectivity rather than a blanket refusal.
-	write("real", "summary.json", `{"model":"m","dataset":"d"}`)
-	write("real", "rows-off.json", `[{"task":"t1","reward":1.0,"steps":3,"agent_cost":0.1}]`)
-
-	db := openTestDB(t)
-	runs, tasks := db.IngestBenchRoots([]string{dir})
-	if runs != 1 || tasks != 1 {
-		t.Errorf("ingested %d runs / %d tasks; want 1/1 (the two contentless dirs must not count)", runs, tasks)
-	}
-
-	got, err := db.BenchRuns()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The assertion that actually failed before: the API's row count must EQUAL the
-	// counter the log reports.
-	if len(got) != runs {
-		names := make([]string, len(got))
-		for i, r := range got {
-			names[i] = r.Name
-		}
-		t.Errorf("BenchRuns returned %d rows but the ingest counted %d runs: %v", len(got), runs, names)
-	}
-	for _, r := range got {
-		if len(r.Arms) == 0 {
-			t.Errorf("run %q was committed with no arms; the UI would render an empty row", r.Name)
-		}
-	}
-}
-
-func TestBenchIngestFromRealHarnessArtifacts(t *testing.T) {
-	dir := t.TempDir()
-	run := filepath.Join(dir, "study-run")
-	if err := os.MkdirAll(run, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Exactly the shape deploy/harbor/*.py writes.
-	summary := `{"model":"aws/claude-sonnet-5","dataset":"swe-bench-verified",
-	  "price":[2e-06,1e-05,2e-07,2.5e-06],"tasks":2,
-	  "configs":[{"config":"codesmart","solved":1,"solve_rate":0.5}]}`
-	rowsOff := `[{"task":"t1","reward":1.0,"steps":20,"prompt_tokens":1000,"completion_tokens":50,
-	   "cache_read":900,"cache_write":90,"fresh_input":10,"agent_cost":0.5,"norm_cost":0.4,
-	   "wall_s":100.0,"exception":false},
-	  {"task":"t2","reward":0.0,"steps":30,"prompt_tokens":2000,"completion_tokens":60,
-	   "cache_read":1800,"cache_write":180,"fresh_input":20,"agent_cost":1.0,"norm_cost":0.8,
-	   "wall_s":200.0,"exception":true}]`
-	rowsCG := `[{"task":"t1","reward":1.0,"steps":18,"prompt_tokens":800,"completion_tokens":45,
-	   "cache_read":740,"cache_write":50,"fresh_input":10,"agent_cost":0.4,"norm_cost":0.32,
-	   "wall_s":95.0,"exception":false},
-	  {"task":"t2","reward":1.0,"steps":25,"prompt_tokens":1600,"completion_tokens":55,
-	   "cache_read":1500,"cache_write":90,"fresh_input":10,"agent_cost":0.8,"norm_cost":0.64,
-	   "wall_s":180.0,"exception":false}]`
-	write := func(name, body string) {
-		if err := os.WriteFile(filepath.Join(run, name), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("summary.json", summary)
-	write("rows-off.json", rowsOff)
-	write("rows-codesmart.json", rowsCG)
-	// A directory that is not a run must be skipped silently, since a jobs root is
-	// full of in-progress and unrelated directories.
-	if err := os.MkdirAll(filepath.Join(dir, "not-a-run"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// A truncated rows file must not abort the whole ingest.
-	write("rows-broken.json", `[{"task":"t1",`)
-
-	db := openTestDB(t)
-	runs, tasks := db.IngestBenchRoots([]string{dir})
-	if runs != 1 || tasks != 4 {
-		t.Fatalf("ingested %d runs / %d tasks; want 1/4", runs, tasks)
-	}
-
-	got, err := db.BenchRuns()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("BenchRuns = %d", len(got))
-	}
-	r := got[0]
-	if r.Model != "aws/claude-sonnet-5" || r.Dataset != "swe-bench-verified" {
-		t.Errorf("run metadata: %+v", r)
-	}
-	if len(r.Arms) != 2 {
-		t.Fatalf("arms = %d; want 2 (off, codesmart)", len(r.Arms))
-	}
-	byArm := map[string]BenchArm{}
-	for _, a := range r.Arms {
-		byArm[a.Arm] = a
-	}
-	off, cg := byArm["off"], byArm["codesmart"]
-	if off.Tasks != 2 || off.Solved != 1 || off.Exceptions != 1 {
-		t.Errorf("off arm = %+v", off)
-	}
-	// Solve rate is over SCORED trials — an exception is not a failed solve.
-	if off.Scored != 1 || off.SolveRate != 1 {
-		t.Errorf("off solve rate = %v over %d scored; an exception must not count as unsolved",
-			off.SolveRate, off.Scored)
-	}
-	if cg.Solved != 2 || cg.TotalCostUSD < 1.19 || cg.TotalCostUSD > 1.21 {
-		t.Errorf("codesmart arm = %+v", cg)
-	}
-	if cg.CacheHitRate <= 0 || cg.CacheHitRate >= 1 {
-		t.Errorf("cache hit rate = %v; want a fraction", cg.CacheHitRate)
-	}
-
-	// Per-task drill-down.
-	tasksOut, err := db.BenchTasks(r.ID, "codesmart")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tasksOut) != 2 {
-		t.Fatalf("per-task rows = %d; want 2", len(tasksOut))
-	}
-	all, err := db.BenchTasks(r.ID, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all) != 4 {
-		t.Errorf("all-arm rows = %d; want 4", len(all))
-	}
-
-	// Re-ingest must REPLACE, not duplicate — a proxy restart pointed at a jobs root
-	// would otherwise double every historical run.
-	runs2, tasks2 := db.IngestBenchRoots([]string{dir})
-	if runs2 != 1 || tasks2 != 4 {
-		t.Fatalf("re-ingest = %d runs / %d tasks", runs2, tasks2)
-	}
-	after, _ := db.BenchRuns()
-	if len(after) != 1 {
-		t.Errorf("re-ingest duplicated the run: %d runs", len(after))
-	}
-	allAfter, _ := db.BenchTasks(after[0].ID, "")
-	if len(allAfter) != 4 {
-		t.Errorf("re-ingest duplicated tasks: %d rows", len(allAfter))
 	}
 }
 
@@ -714,8 +537,8 @@ func TestUIClaimsOnlyTheCacheSavingWeMeasure(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(js)
-	if !strings.Contains(src, "o.cachesplit_saved_usd") {
-		t.Error("the overview does not render cachesplit_saved_usd, the one cache saving we claim")
+	if !strings.Contains(src, "o.keepalive_net_usd") {
+		t.Error("the overview does not render keepalive_net_usd, the cache saving we claim")
 	}
 	if strings.Contains(src, "cache_saved_protected_usd") {
 		t.Error("cache_saved_protected_usd is back on the page; it measured co-occurrence, not cause")
@@ -723,11 +546,16 @@ func TestUIClaimsOnlyTheCacheSavingWeMeasure(t *testing.T) {
 	// The provider figure may appear ONCE in the per-request drawer and ONCE in the A/B
 	// comparison (where it is the control variable, not the credit) — never in a tile.
 	for _, forbidden := range []string{
-		"tile('cache-saved'", "'Prompt-cache savings'", "o.cache_saved_usd",
+		"tile('cache-saved'", "'Prompt-cache savings'",
 	} {
 		if strings.Contains(src, forbidden) {
 			t.Errorf("the provider's cache saving is presented as ours again: %q", forbidden)
 		}
+	}
+	// renderSavedLedger reads the provider figure exactly once, to recover the input price for the
+	// keep-alive token estimate. It is never displayed; a second use would need a second look.
+	if n := strings.Count(src, "o.cache_saved_usd"); n != 2 {
+		t.Errorf("o.cache_saved_usd appears %d times in app.js, want the 2 reads inside renderSavedLedger's price recovery", n)
 	}
 }
 
@@ -998,7 +826,6 @@ func TestUINeverShowsABareCost(t *testing.T) {
 		{ComponentRow{}, "net_usd", "verdict() would have to improvise a net client-side"},
 		{SessionRow{}, "in_flight", "a young session's incomplete amortization would read as a verdict"},
 		{SessionRow{}, "tenant_id", "a manager's service-wide list would be unattributable"},
-		{Overview{}, "prefix_change_cost_usd", "the largest figure on the corpus would be invisible"},
 		// The value pass. Every one of these is the missing half of a pair that already
 		// shipped: a component dollar column populated on 6 rows of 100,579, a saving
 		// divided by a bill that is mostly output tokens, a freeze shown as a cost with no
@@ -1007,10 +834,6 @@ func TestUINeverShowsABareCost(t *testing.T) {
 		{ComponentRow{}, "saved_usd_estimated", "the components tab would show $0.00 for all history predating the column"},
 		{ComponentRow{}, "net_usd_with_estimate", "the verdict would judge a component's whole spend against six rows of its saving"},
 		{ComponentRow{}, "acted_structural", "a component whose job is cache placement would read 0% act rate forever"},
-		{Overview{}, "replay_projected_tokens", "the headroom the cache freeze forgoes would have no number"},
-		{Overview{}, "prefix_change_cost_all_usd", "the whole exposure of the failure mode would stay below the fold"},
-		{Overview{}, "split_credited_moved", "credit paid on a forgotten session would be indistinguishable from a moved snapshot"},
-		{SafetyCost{}, "frozen_write_risk_usd", "the freeze would keep being shown as a cost with no counterpart"},
 		{TierCosts{}, "addressable_usd", "savings would keep being divided by output tokens nothing can touch"},
 	} {
 		rt := reflect.TypeOf(c.v)

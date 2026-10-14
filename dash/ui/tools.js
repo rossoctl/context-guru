@@ -326,13 +326,12 @@ function renderHeadline(host, rep) {
   const used = Math.max(0, t.declared_tokens - t.unused_tokens);
   // The population a dollar figure on this page actually covers.
   const pricedSessions = Math.max(0, c.sessions - (c.unpriced_sessions || 0));
-  host.appendChild(tileGroup('What you carry that you can change, and what you use',
-    'per session, averaged over the ' + num(c.captured) + ' session'
-    + (c.captured === 1 ? '' : 's') + ' whose inventory was captured — MCP tools and skills only, '
-    + 'which are the things you can actually turn off', [
-    tile('inv-declared', 'Declared per session', num(t.declared_tokens),
+  host.appendChild(tileGroup('How much do you send that nothing ever uses?',
+    'Your add-on tools and skills are described to the model in every request. Averages per session, over the '
+    + num(c.captured) + ' session' + (c.captured === 1 ? '' : 's') + ' we could see.', [
+    tile('inv-declared', 'Sent per session', num(t.declared_tokens),
       'your MCP tool schemas and the skills listing'),
-    tile('inv-used', 'Invoked at least once', num(used),
+    tile('inv-used', 'Used at least once', num(used),
       pct(100 - t.unused_pct) + ' of what you declare', used ? 'good' : ''),
     // The number this page exists for. Deliberately the only 'bad' tile: three red tiles
     // in a row is a page shouting, and shouting is what gets a dashboard ignored.
@@ -348,7 +347,7 @@ function renderHeadline(host, rep) {
     // not of the prompt. It read "of every prompt" while the prefix panel below says in as
     // many words that the system prompt is not in that denominator — the same page naming two
     // different wholes for one ratio, and erring in the direction that inflates it.
-    tile('inv-unused', 'Never invoked', num(t.unused_tokens),
+    tile('inv-unused', 'Never used', num(t.unused_tokens),
       pct(t.unused_pct) + ' of every declaration you carry, re-read '
       + t.requests_per_session.toFixed(1)
       + '× per session — the plain mean over all ' + num(c.sessions) + ' sessions here',
@@ -425,11 +424,10 @@ function gauge(t) {
   // averaged over instead of only its unit.
   const box = el('div', { class: 'panel cg-gauge', 'data-testid': 'inv-gauge' },
     el('div', { class: 'cg-gauge-head' },
-      el('h2', {}, 'What every request carries that you could stop carrying'),
-      el('span', { class: 'section-note', text: num(t.declared_tokens)
-        + ' tokens of YOUR MCP tool and skill declarations, per request, averaged over the '
-        + 'sessions whose inventory was captured — the agent\'s own tools are excluded and are '
-        + 'shown separately' })),
+      el('h2', {}, 'How much of what you send is never used?'),
+      el('span', { class: 'section-note' }, num(t.declared_tokens) + ' tokens per request go to describing your add-on tools and skills (',
+        term('declarations', 'The short description of each tool or skill that is sent to the model on every request so it knows the tool exists.'),
+        '). The agent\'s own tools are left out and shown at the end.')),
     el('div', { class: 'cg-gauge-track' },
       el('span', {
         class: 'cg-seg cg-used', style: 'width:' + (100 - unusedPct).toFixed(2) + '%',
@@ -440,9 +438,9 @@ function gauge(t) {
       })));
   box.appendChild(el('div', { class: 'cg-gauge-legend' },
     el('span', {}, el('i', { class: 'cg-sw cg-used' }),
-      'invoked ' + num(t.declared_tokens - t.unused_tokens) + ' tok'),
+      'used ' + num(t.declared_tokens - t.unused_tokens) + ' tok'),
     el('span', {}, el('i', { class: 'cg-sw cg-unused' }),
-      'never invoked ' + num(t.unused_tokens) + ' tok (' + pct(t.unused_pct) + ')')));
+      'never used ' + num(t.unused_tokens) + ' tok (' + pct(t.unused_pct) + ')')));
   // Two different zeroes, and they must not read the same. An account that declared MCP tools and
   // skills and used all of them has nothing to remove; an account that declared NONE has nothing
   // to remove FROM, which on a plain Claude Code session is the normal state — and saying "nothing
@@ -475,7 +473,7 @@ function renderCoverage(host, rep) {
     num(c.sessions) + ' session' + (c.sessions === 1 ? '' : 's') + ' in scope, '
     + num(c.requests) + ' requests. ');
   const box = el('div', { class: 'panel cg-coverage', 'data-testid': 'inv-coverage' },
-    el('h2', {}, 'What these numbers are computed over'), p);
+    el('h2', {}, 'How many sessions are these numbers based on?'), p);
   host.appendChild(box);
   if (c.captured) {
     p.appendChild(document.createTextNode(num(c.captured) + ' carried a captured inventory '
@@ -579,14 +577,13 @@ function renderUnused(host, rep) {
   const groups = groupRemovable(rows);
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-unused-panel' },
     el('div', { class: 'section' },
-      el('h2', {}, 'Carried by every request, never once called'),
+      el('h2', {}, 'What can I remove? Tools and skills never called'),
       el('span', { class: 'section-note' }, rows.length
         ? num(groups.length) + ' thing' + (groups.length === 1 ? '' : 's') + ' to remove, '
           + num(rows.length) + ' declaration' + (rows.length === 1 ? '' : 's') + ' between them'
         : 'nothing')),
     el('p', { class: 'note' }, rows.length
-      ? 'Grouped by what ONE action removes, heaviest first. The command under each group is '
-        + 'the whole fix — copy it, run it, and that group stops being sent.'
+      ? 'Each card is one thing you can remove, heaviest first. Copy the command under it and that group stops being sent.'
       : 'Nothing here was carried without being called.'));
   host.appendChild(panel);
   if (!rows.length) {
@@ -1156,8 +1153,8 @@ function reversibilityNote() {
 function renderRealized(host) {
   const r = tools.control && tools.control.realized;
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-realized' },
-    el('div', { class: 'section' }, el('h2', {}, 'Realized by your removals'),
-      el('span', { class: 'section-note' }, 'measured on requests actually sent — not a projection')));
+    el('div', { class: 'section' }, el('h2', {}, 'What did my removals actually save?'),
+      el('span', { class: 'section-note' }, 'measured on real requests, not a forecast')));
   host.appendChild(panel);
   if (!r) {
     // A sentence, not a panel-sized empty state. The absence IS the answer here, and its only
@@ -1255,15 +1252,11 @@ function tsortable(table, keys, onSort) {
  * same reason app.js sorts Components and refuses to sort Sessions.)
  */
 function toolTable(host, rep) {
-  const panel = foldPanel('inv-tools-fold', 'Every declaration you control, one flat row each',
+  const panel = foldPanel('inv-tools-fold', 'All your tools in one table',
     num((rep.tools || []).length) + ' rows, sortable by any column');
   panel.appendChild(el('div', {},
-    el('p', { class: 'note' }, 'Your MCP tools, sorted by what it cost to carry them unused. '
-      + '"Read for nothing" is this item\'s size times the requests that re-read it in the '
-      + "sessions that never called it. Claude Code's own tools and the provider's are in their "
-      + 'own section at the end of this page, and in none of the figures above. Skills have their '
-      + 'own table below, because a skills listing can be unreadable in a way a tools array '
-      + 'cannot.')));
+    el('p', { class: 'note' }, 'Your add-on tools, costliest unused first. "Read for nothing" is how many tokens were re-sent in sessions that never called the tool. '
+      + 'Skills have their own table below; the agent\'s own tools are at the end of the page.')));
   const table = el('table', { class: 'tbl', 'data-testid': 'inv-tools-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Name'), el('th', {}, 'Kind'),
@@ -1308,11 +1301,9 @@ function toolTable(host, rep) {
  */
 function serverTable(host, rep) {
   if (!rep.servers.length) return;
-  const panel = foldPanel('inv-servers-fold', 'The same rows rolled up per MCP server',
+  const panel = foldPanel('inv-servers-fold', 'The same tools, grouped by server',
     num(rep.servers.length) + ' server' + (rep.servers.length === 1 ? '' : 's'));
-  panel.appendChild(el('p', { class: 'note' }, 'One row per server, because that is what you add '
-    + 'or remove. A server whose tools are all unused is one decision, not many — which is the '
-    + 'unit the list at the top of the page already groups by.'));
+  panel.appendChild(el('p', { class: 'note' }, 'One row per server, because you add or remove a whole server at a time.'));
   const table = el('table', { class: 'tbl', 'data-testid': 'inv-servers-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Server'), el('th', { class: 'num' }, 'Tools'),
@@ -1347,7 +1338,7 @@ function serverTable(host, rep) {
 function skillsPanel(host, rep) {
   const s = rep.skills;
   const skillPriced = Math.max(0, rep.coverage.sessions - (rep.coverage.unpriced_sessions || 0));
-  const panel = foldPanel('inv-skills', 'Skills, one row each, with the listing’s own figures',
+  const panel = foldPanel('inv-skills', 'All your skills in one table',
     num((s.skills || []).length) + ' skill' + ((s.skills || []).length === 1 ? '' : 's')
     + ' · listing ' + num(s.listing_tokens) + ' tok/request');
   host.appendChild(panel.closest('details'));
@@ -1360,9 +1351,7 @@ function skillsPanel(host, rep) {
     // NOT "in the system prompt". The listing arrives as prose in an injected system-ROLE
     // message, which is a different region of the prefix — and now that the panel above shows
     // the two as separate regions, saying otherwise here makes the page contradict itself.
-    'Skills are declared as prose in an injected system message — a separate region of the '
-    + 'prefix from your system prompt — and the listing is ONE indivisible '
-    + 'block: it is waste only in a session that invoked no skill at all.'));
+    'Skills are described in one block that cannot be split, so it only counts as waste in a session that used no skill at all.'));
   if (s.state === 'unknown') {
     panel.appendChild(el('div', { class: 'state blocked', 'data-testid': 'inv-skills-unknown' },
       el('div', { class: 'state-body' },
@@ -1522,11 +1511,10 @@ function isExcluded(t) {
  */
 function renderRemovalValue(host, rep) {
   const models = (rep.models || []).filter((m) => m.priced);
-  const panel = foldPanel('inv-removal-value', 'The per-token rates behind those figures',
-    'per 1,000 tokens dropped, per model — the derivation of the per-session numbers above');
+  const panel = foldPanel('inv-removal-value', 'How the dollar figures are worked out',
+    'price per 1,000 tokens dropped, for each model');
   host.appendChild(panel.closest('details'));
-  panel.appendChild(el('p', { class: 'note' }, 'Per 1,000 tokens of declarations dropped. Prices '
-    + 'differ per model, so this is per model rather than blended.'));
+  panel.appendChild(el('p', { class: 'note' }, 'What dropping 1,000 tokens of tool descriptions is worth. Each model has its own price.'));
   if (!models.length) {
     emptyState(panel.appendChild(el('div')), 'No priced models in this window',
       'These sessions ran on models with no known rates, so a token weight cannot be turned '
@@ -1910,9 +1898,9 @@ function renderPromptPanel(host, rep) {
   const prefix = (p.tokens || 0) + (rep.totals.declared_set_tokens || 0);
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-prompt-panel' },
     el('div', { class: 'section' },
-      el('h2', {}, 'What every request actually carries, region by region'),
+      el('h2', {}, 'What is in the start of every request?'),
       el('span', { class: 'section-note' },
-        num(prefix) + ' tokens of standing text and declarations, ahead of your conversation')));
+        num(prefix) + ' tokens of fixed text and tool descriptions sit ahead of your conversation')));
   host.appendChild(panel);
   // The third tile is rendered only when there IS a system prompt. Without one the prefix and
   // the declaration total are the same number, and two identical figures side by side under
@@ -2007,9 +1995,7 @@ function promptShareBar(host, rep, prefix) {
   const declared = rep.totals.declared_set_tokens || (mcp + provider + builtin + client + skills);
   const whole = prefix || declared + system;
 
-  host.appendChild(el('p', { class: 'note' }, 'Grouped by whether it is yours to remove. '
-    + 'Coloured groups are choices you can change; the grey one is the agent’s own equipment, '
-    + 'and removing any of it breaks the agent rather than slimming it.'));
+  host.appendChild(el('p', { class: 'note' }, 'Coloured groups are choices you can change. The grey group is the agent\'s own equipment; removing it breaks the agent.'));
   // Actionable groups first and in the fixed categorical order, so a filter that empties one does
   // not repaint the survivors — the colour of a group follows the GROUP, never its rank.
   const groups = [
@@ -2257,15 +2243,12 @@ function promptParts(r) {
 function renderSelfRemoved(host, rep) {
   const rows = rep.self_removed || [];
   if (!rows.length) return;
-  const panel = foldPanel('inv-self-removed', 'You removed these yourself',
+  const panel = foldPanel('inv-self-removed', 'What did you already remove?',
     num(rows.length) + ' declaration' + (rows.length === 1 ? '' : 's')
     + ' stopped appearing partway through this window — modelled, not measured');
   panel.appendChild(el('p', { class: 'note' }, num(rows.length) + ' declaration'
-      + (rows.length === 1 ? '' : 's') + ' stopped appearing partway through this window. The '
-      + 'tokens genuinely stopped being billed, no component of ours was involved, and the '
-      + 'reduction is credited to YOU — on the Overview tab it is the "Removed by you, not by us" '
-      + 'line, and it is inside "Total the bill came down" and deliberately outside "Total cost '
-      + 'avoided", which is the figure this product claims for itself.'));
+      + (rows.length === 1 ? '' : 's') + ' stopped being sent partway through this window. The saving is yours, not context-guru\'s '
+      + '("Removed by you, not by us" on Overview).'));
   host.appendChild(panel.closest('details'));
   // The honest limit of the method, up front rather than as a footnote under the weakest row.
   // This is the finding that decided where the figure is allowed to appear: the inference is

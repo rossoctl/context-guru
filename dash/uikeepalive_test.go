@@ -72,7 +72,7 @@ func TestTheLosingMajorityIsOnThePage(t *testing.T) {
 	}
 	// And it sits ABOVE the calculator, which is the whole information-architecture decision:
 	// a page that led with the calculator would be selling.
-	calc := strings.Index(html, "What would X and K buy me?")
+	calc := strings.Index(html, "What would other settings have earned?")
 	if calc < 0 {
 		t.Fatal("the calculator panel is gone; this check needs rewriting")
 	}

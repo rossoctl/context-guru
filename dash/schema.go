@@ -341,32 +341,6 @@ CREATE TABLE IF NOT EXISTS tenant_spend (
   PRIMARY KEY (tenant_id, month)
 );
 
--- Ingested benchmark runs (deploy/harbor's summary.json + rows-*.json).
-CREATE TABLE IF NOT EXISTS bench_runs (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  name     TEXT NOT NULL UNIQUE,   -- run directory name, so re-ingesting replaces
-  ts       INTEGER NOT NULL,
-  dataset  TEXT NOT NULL DEFAULT '',
-  model    TEXT NOT NULL DEFAULT '',
-  summary  TEXT NOT NULL DEFAULT '{}'
-);
-CREATE TABLE IF NOT EXISTS bench_tasks (
-  run_id            INTEGER NOT NULL REFERENCES bench_runs(id) ON DELETE CASCADE,
-  arm               TEXT    NOT NULL,   -- config name: off|codesmart|headroom|rtk|…
-  task              TEXT    NOT NULL,
-  reward            REAL    NOT NULL DEFAULT 0,
-  steps             INTEGER NOT NULL DEFAULT 0,
-  prompt_tokens     INTEGER NOT NULL DEFAULT 0,
-  completion_tokens INTEGER NOT NULL DEFAULT 0,
-  cache_read        INTEGER NOT NULL DEFAULT 0,
-  cache_write       INTEGER NOT NULL DEFAULT 0,
-  fresh_input       INTEGER NOT NULL DEFAULT 0,
-  cost_usd          REAL    NOT NULL DEFAULT 0,
-  norm_cost_usd     REAL    NOT NULL DEFAULT 0,
-  wall_s            REAL    NOT NULL DEFAULT 0,
-  exception         INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_bt_run ON bench_tasks(run_id, arm);
 `
 
 // additiveDDL holds tables that can be created on an EXISTING database without touching

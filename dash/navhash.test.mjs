@@ -99,8 +99,8 @@ for (const [view, group] of MOUNTED) app.GROUP_OF.set(view, group);
 const VIEWS = [...NAV.values()].flat().concat('overview');
 
 // ── 1. every view, by its bare legacy name and in canonical form ───────────
-test('all 17 views resolve from a bare #<view> and canonicalise to #/<group>/<view>', () => {
-  assert.equal(VIEWS.length, 17, 'the nav is no longer 17 views; update this table');
+test('all 16 views resolve from a bare #<view> and canonicalise to #/<group>/<view>', () => {
+  assert.equal(VIEWS.length, 16, 'the nav is no longer 16 views; update this table');
   for (const v of VIEWS) {
     assert.equal(app.at('#' + v).view, v, `#${v} must still resolve to ${v}`);
     const canon = app.roundTrip('#' + v);
