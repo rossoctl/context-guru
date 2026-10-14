@@ -22,6 +22,10 @@ cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41% │ 
   pings. Session, today (since local midnight) and lifetime are three windows of that one measure.
   `--layout=detailed` adds `spent $4.10 · $2.73/h · up 1h30m` (Claude Code's own running cost, the
   average rate once five minutes have passed, and the session's age).
+- **Subscription.** When Claude Code sends `rate_limits` (a Claude subscription), line 1 becomes
+  `5h 34% · saved 1.2M rd / 85.0k wr` instead of money: the real share of the 5-hour limit used, and
+  the tokens compaction kept out of this window, as would-be cache reads (`replay_tokens`) and
+  writes (`saved_unique`). Plain, unweighted counts, compaction only (`--layout=detailed` says so). `spent` and `ka $…` are hidden. An ended window shows nothing. API keys, Bedrock and Vertex keep the money view.
 - **Cache clock.** A live countdown to expiry, green, amber in the last minute (a fifth of the
   lifetime on the 1h tier), red with `!` in the last 15 s, then `cold 1:20` counting UP. The proxy
   keeps the clock from the end of the last response, so a long answer is counted. It ticks every
