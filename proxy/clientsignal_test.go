@@ -13,7 +13,9 @@ import (
 
 func sigPost(h *Handler, body string) int {
 	w := httptest.NewRecorder()
-	h.clientSignal(w, httptest.NewRequest(http.MethodPost, "/signal", strings.NewReader(body)))
+	r := httptest.NewRequest(http.MethodPost, "/signal", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	h.clientSignal(w, r)
 	return w.Code
 }
 
@@ -88,6 +90,40 @@ func TestCompactRetiresWithoutEndingAndPresenceIsRecordedOnly(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if fs.n() != 1 {
 		t.Errorf("%d pings, want 1 (the post-compaction entry only)", fs.n())
+	}
+}
+
+// Only the main agent compacts (/compact, auto-compact; since the thread fix the compaction call stays
+// on the main thread): a compact signal retires the main thread's entry, and an idle subagent's held
+// cache keeps its keep-alive. SessionEnd still retires every thread.
+func TestCompactRetiresOnlyTheMainThread(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
+	up := upstream{base: "http://up", path: "/v1/messages"}
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	r.Header.Set("Authorization", "Bearer sk-caller-secret")
+	hold := func(threadID string) {
+		for i := 0; i < 2; i++ {
+			k.record(&Tenancy{ID: "t1", Cache: pol}, "sess-1", threadID, clock.now().Add(time.Duration(i-1)*time.Second), []byte(kaBody), up, r,
+				bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+		}
+	}
+	held := func(threadID string) bool {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		_, ok := k.live[kaThreadKey("t1", "sess-1", threadID)]
+		return ok
+	}
+	hold("")
+	hold("a:sub1")
+	clock.advance(30 * time.Second)
+	k.signal("t1", "sess-1", "SessionStart", "compact", clock.now())
+	if held("") || !held("a:sub1") {
+		t.Errorf("compact: main held %v (want false), idle subagent held %v (want true)", held(""), held("a:sub1"))
+	}
+	k.signal("t1", "sess-1", "SessionEnd", "prompt_input_exit", clock.now())
+	if held("a:sub1") {
+		t.Errorf("SessionEnd left the subagent's entry held")
 	}
 }
 
@@ -169,6 +205,7 @@ func TestSignalNeedsTheTenantsTokenAndCannotReachAnotherTenant(t *testing.T) {
 	}
 	post := func(auth string) int {
 		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/signal", strings.NewReader(`{"session":"s1","event":"SessionEnd"}`))
+		req.Header.Set("Content-Type", "application/json")
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
 		}
@@ -226,5 +263,24 @@ func TestSignalIsMetered(t *testing.T) {
 	}
 	if c := sigPost(h, body); c != http.StatusTooManyRequests {
 		t.Errorf("second = %d, want 429", c)
+	}
+}
+
+// A cross-origin page can POST text/plain to a loopback proxy without a preflight: only JSON is taken.
+func TestSignalTakesJSONOnly(t *testing.T) {
+	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "on")
+	k, _, _ := testKeeper(t, Limits{})
+	h := &Handler{keeper: k, limiter: NewLimiter(Limits{}), static: &Tenancy{ID: "t1"}}
+	for ct, want := range map[string]int{"application/json": http.StatusNoContent, "application/json; charset=utf-8": http.StatusNoContent,
+		"text/plain": http.StatusUnsupportedMediaType, "": http.StatusUnsupportedMediaType, "application/x-www-form-urlencoded": http.StatusUnsupportedMediaType} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/signal", strings.NewReader(`{"session":"abc-1","event":"SessionEnd","kind":"other"}`))
+		if ct != "" {
+			r.Header.Set("Content-Type", ct)
+		}
+		h.clientSignal(w, r)
+		if w.Code != want {
+			t.Errorf("Content-Type %q: %d, want %d", ct, w.Code, want)
+		}
 	}
 }

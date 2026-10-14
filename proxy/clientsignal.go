@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"strings"
@@ -76,6 +77,13 @@ var lifecycleKinds = map[string]bool{"": true, "clear": true, "resume": true, "l
 func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
 	if !clientSignalEnabled() {
 		http.NotFound(w, r)
+		return
+	}
+	// JSON only. A web page can POST text/plain to a loopback proxy without a CORS preflight, and the
+	// local proxy takes no credential; application/json from another origin needs a preflight, which
+	// this route never answers.
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
+		http.Error(w, "lifecycle events are application/json", http.StatusUnsupportedMediaType)
 		return
 	}
 	tn, err := h.authenticate(r)

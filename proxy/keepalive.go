@@ -949,13 +949,15 @@ func (k *keeper) retireSession(tenantID, session string) {
 }
 
 // retireSessionStartedBefore is retireSession restricted to entries whose last request (real or
-// ping) started before cutoff; a zero cutoff retires them all.
+// ping) started before cutoff; a zero cutoff retires them all. A non-zero cutoff is the compact path,
+// and only the main agent compacts (its compaction call stays on the main thread), so it retires the
+// main thread only: an idle subagent's or teammate's held cache keeps its keep-alive.
 func (k *keeper) retireSessionStartedBefore(tenantID, session string, cutoff time.Time) {
 	base := kaKey(tenantID, session)
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	for key, e := range k.live {
-		if (key != base && !strings.HasPrefix(key, base+"\x00")) || (!cutoff.IsZero() && !e.startedAt.Before(cutoff)) {
+		if (key != base && !strings.HasPrefix(key, base+"\x00")) || (!cutoff.IsZero() && (e.thread != "" || !e.startedAt.Before(cutoff))) {
 			continue
 		}
 		k.bytes -= int64(len(e.body))
