@@ -232,7 +232,8 @@ func TestCodexSessionEndMatchesTheSessionIDHeader(t *testing.T) {
 func TestSignalValidation(t *testing.T) {
 	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "on")
 	k, _, _ := testKeeper(t, Limits{})
-	h := &Handler{keeper: k, limiter: NewLimiter(Limits{}), static: &Tenancy{ID: "t1"}}
+	h := &Handler{keeper: k, limiter: NewLimiter(Limits{})}
+	h.static.Store(&Tenancy{ID: "t1"})
 	for body, want := range map[string]int{
 		`{"session":"abc-1","event":"SessionEnd","kind":"logout"}`:                                                       http.StatusNoContent,
 		`{"session":"abc-1","event":"SessionStart","kind":"compact"}`:                                                    http.StatusNoContent,
@@ -330,7 +331,8 @@ func TestEndMarkCapIsPerTenant(t *testing.T) {
 func TestSignalIsMetered(t *testing.T) {
 	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "on")
 	k, _, _ := testKeeper(t, Limits{})
-	h := &Handler{keeper: k, limiter: NewLimiter(Limits{RequestsPerMinute: 1}), static: &Tenancy{ID: "t1"}}
+	h := &Handler{keeper: k, limiter: NewLimiter(Limits{RequestsPerMinute: 1})}
+	h.static.Store(&Tenancy{ID: "t1"})
 	body := `{"session":"abc-1","event":"SessionEnd"}`
 	if c := sigPost(h, body); c != http.StatusNoContent {
 		t.Fatalf("first = %d", c)
@@ -344,7 +346,8 @@ func TestSignalIsMetered(t *testing.T) {
 func TestSignalTakesJSONOnly(t *testing.T) {
 	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "on")
 	k, _, _ := testKeeper(t, Limits{})
-	h := &Handler{keeper: k, limiter: NewLimiter(Limits{}), static: &Tenancy{ID: "t1"}}
+	h := &Handler{keeper: k, limiter: NewLimiter(Limits{})}
+	h.static.Store(&Tenancy{ID: "t1"})
 	for ct, want := range map[string]int{"application/json": http.StatusNoContent, "application/json; charset=utf-8": http.StatusNoContent,
 		"text/plain": http.StatusUnsupportedMediaType, "": http.StatusUnsupportedMediaType, "application/x-www-form-urlencoded": http.StatusUnsupportedMediaType} {
 		w := httptest.NewRecorder()
@@ -365,7 +368,8 @@ func TestSignalTakesJSONOnly(t *testing.T) {
 func TestRawPayloadAndCodexAliasKeepSubagentsOnCompact(t *testing.T) {
 	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "")
 	k, _, clock := testKeeper(t, Limits{})
-	h := &Handler{keeper: k, limiter: NewLimiter(Limits{}), static: &Tenancy{ID: "t1"}}
+	h := &Handler{keeper: k, limiter: NewLimiter(Limits{})}
+	h.static.Store(&Tenancy{ID: "t1"})
 	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
 	up := upstream{base: "http://up", path: "/v1/messages"}
 	r := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(""))

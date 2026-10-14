@@ -33,12 +33,15 @@ func TestOwnPluginOutputIsNeverCompacted(t *testing.T) {
 			Content:         &schemas.ChatMessageContent{ContentStr: &text},
 			ChatToolMessage: &schemas.ChatToolMessage{ToolCallID: &id}})
 	}
-	call("t1", `python3 "/home/u/.claude/plugins/cache/m/context-guru/0.5.0/scripts/cg.py" adapt compaction`)
+	call("t1", `python3 "/home/u/.claude/plugins/cache/m/context-guru/0.5.0/scripts/cg.py" adapt compaction`) // Claude Code, installed
 	call("t2", `cat data.json`)
-	call("t3", `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" savings`)
-	call("t4", `python3 ../../scripts/cg.py adapt compaction --days 7`)              // Codex, relative
-	call("t5", `python3 "/tmp/my plugin dir/scripts/cg.py" revert compaction`)       // --plugin-dir, any name
-	call("t6", `python3 scripts/cg.py --help && python3 tools/scripts/build.py all`) // someone else's scripts
+	call("t3", `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" savings`)                                          // skill text, unexpanded
+	call("t4", `python3 ../../scripts/cg.py adapt compaction --days 7`)                                          // Codex, relative
+	call("t5", `python3 "/tmp/my plugin dir/scripts/tv.py" --session s1`)                                        // --plugin-dir, any name
+	call("t6", `cat /x/context-guru/notes.txt`)                                                                  // a path naming us
+	call("t7", `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/other_plugin_tool.py" run`)                               // another plugin's script
+	call("t9", `cat /home/u/work/context-guru-notes/scripts/gen.py`)                                             // a checkout of this repo
+	call("t8", `python3 "/home/u/.claude/plugins/cache/m/context-guru/0.5.0/scripts/cg.py" apply compaction c1`) // a change, not a read
 	cfg, err := config.LoadBytes([]byte("pipeline: [format]\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +52,7 @@ func TestOwnPluginOutputIsNeverCompacted(t *testing.T) {
 	}
 	rr := p.Run(req, &components.Ctx{Ctx: context.Background(), Session: "s",
 		Store: store.NewMemory(store.Options{}), MaxCachedIdx: -1})
-	for i, want := range map[int]bool{1: true, 3: false, 5: true, 7: true, 9: true, 11: false} {
+	for i, want := range map[int]bool{1: true, 3: false, 5: true, 7: true, 9: true, 11: false, 13: false, 15: false, 17: false} {
 		if same := schema.MessageText(req.Input[i]) == pretty; same != want {
 			t.Errorf("message %d unchanged = %v, want %v", i, same, want)
 		}

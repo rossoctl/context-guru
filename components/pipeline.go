@@ -254,21 +254,28 @@ func resync(snap *[]schemas.ChatMessage, live []schemas.ChatMessage, changed []i
 	}
 }
 
-// ownOutput matches a tool call that runs one of context-guru's own plugin scripts, by the script
-// and its subcommand rather than by the directory, because the directory is not ours to name: an
-// installed Claude Code plugin lives under …/context-guru/<version>/, a --plugin-dir one under
-// any name, and the Codex skills run `python3 ../../scripts/cg.py …` relative to the skill.
-// The context-guru path form is kept for scripts the subcommand list does not know yet. Matched
-// against the call's JSON arguments, so a quote may arrive escaped.
-var ownOutput = regexp.MustCompile(`(^|[\s"'/])scripts/(cg\.py(\\?["'])?\s+(adapt|apply|revert|home|savings|cache|waste|session|doctor)\b|tv\.py\b)` +
-	`|context-guru[^"'\s]*/scripts/[\w-]+\.py|CLAUDE_PLUGIN_ROOT\}?/scripts/[\w-]+\.py`)
+// ownOutput matches a tool call that runs one of context-guru's own READ commands: the plugin's
+// `scripts/cg.py <read subcommand>` or `scripts/tv.py`, matched by the script and the
+// subcommand rather than the directory, because the directory is not ours to name (an installed
+// Claude Code plugin lives under …/<version>/, a --plugin-dir one under any name, and the Codex
+// skills run `python3 ../../scripts/cg.py …` relative to the skill). Nothing else is exempt: not
+// another plugin's script, not a path that happens to contain "context-guru", and not cg.py's
+// apply/revert, which change a setting rather than report one. Matched against the call's JSON
+// arguments, so a quote may arrive escaped.
+var ownOutput = regexp.MustCompile(`(^|[\s"'/])scripts/(cg\.py(\\?["'])?\s+(adapt|home|savings|cache|waste|session|doctor)\b|tv\.py\b)`)
 
 // ownOutputs are the tool results our own plugin commands produced. They are the product's
 // answer to the user — a report, a cost table, the question it is about to ask — and the agent
 // is told to print them verbatim, so no component may change a byte of one: a compacted
 // report is a wrong report.
-func ownOutputs(req *schemas.BifrostChatRequest) map[int]bool {
-	var out map[int]bool
+func ownOutputs(req *schemas.BifrostChatRequest) (out map[int]bool) {
+	// Runs before any component, outside runOne's recover: a panic here exempts nothing rather
+	// than failing the request.
+	defer func() {
+		if recover() != nil {
+			out = nil
+		}
+	}()
 	for i, tc := range schema.ToolCalls(req) {
 		if ownOutput.MatchString(tc.Args) {
 			if out == nil {
