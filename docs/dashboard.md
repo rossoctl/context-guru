@@ -22,26 +22,28 @@ route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
     binary with `go:embed`. Charts are hand-drawn SVG — no chart library, no framework.
     The page fetches nothing off-origin, so it works in a VPC or fully air-gapped.
 
-!!! note "Screenshots"
-    The UI was recently redesigned. Updated screenshots are coming soon.
+!!! tip "New to the dashboard?"
+    [The dashboard, tab by tab](how-to/dashboard-guide.md) walks through every tab with a
+    screenshot and a plain-words explanation. This page is the reference.
 
 ## What you'll see
 
-- **Overview** — the headline numbers: tokens before/after, dollars saved, and the
-  honesty machinery behind them (gross vs. unique savings, what got frozen for cache
-  safety, what our own compaction calls cost). One view, no sub-nav.
-- **Savings** — where the money went: usage over time, per-account campaigns, and the
-  benchmark evidence behind the headline numbers.
-- **Behaviour** — what the proxy actually did to your traffic: per-component economics
-  (which ones earn their place), the [tool inventory](#tool-inventory-panel), keep-alive,
-  and [KV-cache behavior](#kv-cache-panel).
+- **Overview** — three rows of what context-guru saved (cache keep-alive, compaction, and the
+  tools and skills filter), each in dollars and tokens against what you spent. Below them
+  a ranked list of tools and skills to remove, a one-line guide to the other tabs, and a
+  closed "Detailed diagnostics" section with the plots behind the numbers. One view, no sub-nav.
+- **Savings** — where the money went: [keep-alive](how-to/cache-keepalive.md), the
+  [tool inventory](#tool-inventory-panel), and usage over time.
 - **Traffic** — per-session and per-request detail, including a git-style diff of
   exactly what was rewritten on the wire.
-- **Admin** — configuration, tenants, and the capture pipeline's own health.
+- **Admin** — configuration, strategies, tenants, setup, settings, archive and feedback
+  (some of these appear only in a [hosted service](hosted.md)).
+- **Advanced** — per-component economics (which ones earn their place),
+  [KV-cache behavior](#kv-cache-panel), and per-account cache campaigns.
 
-Each group opens on the view a manager would read first; depth is further in. Dark mode,
-small viewports, and empty states (a blank dashboard explains *why* each panel is
-blank) are all handled.
+Every tab starts with a title and one line saying what it shows. Dark mode, small
+viewports, and empty states (a blank dashboard explains *why* each panel is blank) are
+all handled.
 
 ## Honest-metrics rules
 

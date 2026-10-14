@@ -577,13 +577,13 @@ function renderUnused(host, rep) {
   const groups = groupRemovable(rows);
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-unused-panel' },
     el('div', { class: 'section' },
-      el('h2', {}, 'What can I remove? Tools and skills never called'),
+      el('h2', {}, 'Every removable group, with its evidence'),
       el('span', { class: 'section-note' }, rows.length
         ? num(groups.length) + ' thing' + (groups.length === 1 ? '' : 's') + ' to remove, '
           + num(rows.length) + ' declaration' + (rows.length === 1 ? '' : 's') + ' between them'
         : 'nothing')),
     el('p', { class: 'note' }, rows.length
-      ? 'Each card is one thing you can remove, heaviest first. Copy the command under it and that group stops being sent.'
+      ? 'One card per group, costliest first: what it costs, the sessions that carried it, and the evidence.'
       : 'Nothing here was carried without being called.'));
   host.appendChild(panel);
   if (!rows.length) {
@@ -600,34 +600,6 @@ function renderUnused(host, rep) {
       + (rep.coverage.captured === 1 ? '' : 's') + ' have been captured so far, so this is a '
       + 'small sample: a row below is evidence that nothing has called that item YET, not '
       + 'proof that nothing will. Every row states its own denominator.'));
-  }
-  // ONE block about the switches, covering both reasons they may be inert. They were two
-  // stacked `.state` panels saying overlapping things in 200 px of the reader's first screen, and
-  // both end in the same sentence: use the command or the snippet, which is the better fix anyway.
-  const gated = !SKILL_SWITCH_SAFE && rows.some((t) => t.kind === 'skill');
-  const why = (tools.controlDoc && tools.controlDoc.reason) || '';
-  if (!tools.control || gated) {
-    const box = el('div', { class: 'state', 'data-testid': 'inv-control-absent' },
-      el('div', { class: 'state-body' },
-        el('strong', {}, !tools.control
-          ? (why ? 'The one-click switches are not live in this view'
-            : 'One-click opt-out is not enabled on this proxy')
-          : 'The per-skill switches are off on purpose'),
-        !tools.control && why ? el('span', {}, why) : null,
-        // Kept on the SAME block rather than a second one, and kept visible rather than folded:
-        // a disabled control whose reason is only in a title attribute reads as a broken build,
-        // and a title does not exist on a phone, in a screen reader or in a screenshot.
-        gated ? el('span', { 'data-testid': 'inv-skill-switch-gated' }, SKILL_SWITCH_REASON) : null,
-        // No third sentence. It used to end "use the command instead, which is the better fix
-        // anyway" — which is now the block directly ABOVE this one, in full, with the snippets in
-        // it. Saying it twice cost 50 px of the reader's first screen.
-        el('span', {}, 'Nothing about the ordered list below changes.')));
-    panel.appendChild(ctaBlock(groups, rep));
-    panel.appendChild(box);
-    panel.appendChild(reversibilityNote());
-  } else {
-    panel.appendChild(ctaBlock(groups, rep));
-    panel.appendChild(reversibilityNote());
   }
   const list = el('div', { class: 'inv-groups' });
   for (const g of groups.slice(0, EXPANDED_GROUPS)) list.appendChild(removalGroup(g, rep));
@@ -865,7 +837,7 @@ function ctaBlock(groups, rep) {
   // skills listing against its own entries in `totals` (dash/toolapi.go), so a sum of rows and
   // the headline disagree by that amount. Two totals under one heading is the defect this tab
   // already has once, between its tile and its bar; the fix is the server's, not a third number.
-  wrap.appendChild(el('div', { class: 'inv-cta-head' },
+  if (false) wrap.appendChild(el('div', { class: 'inv-cta-head' },
     el('strong', { text: 'Do this' }),
     el('span', { class: 'section-note', text: num(groups.length) + ' thing'
       + (groups.length === 1 ? '' : 's') + ' to remove · ' + num(tok)
@@ -886,7 +858,7 @@ function ctaBlock(groups, rep) {
       el('span', { class: 'section-note', text: 'and ' + num(rest) + ' more below, in the same '
         + 'order — each card carries its own figure, its evidence and its command' })));
   }
-  wrap.appendChild(idx);
+  if (false) wrap.appendChild(idx);
   if (Object.keys(over).length) {
     // "all N" would be false whenever a plugin-bundled skill is removed by a `claude plugin
     // disable` command instead of a skillOverrides entry — and a reader who pastes this and finds
@@ -2306,38 +2278,124 @@ function renderTools() {
   // than trusted to garbage collection, because the list would otherwise grow by forty
   // entries on every tab switch and repaint detached nodes forever.
   promptWaiters = [];
-  renderHeadline(host, rep);
-  if (rep.coverage.captured) {
-    // The projection's OUTCOME, immediately beside the projection. Honesty rule 2 — a
-    // projection is not a saving — was right, and was executed as SIZE: 155 px at 66% page
-    // depth against a $2.16 projection in 100 pt type in the first screen. Size does not
-    // distinguish two claims, it just hides one of them, and a reader who never meets the pair
-    // cannot tell them apart at all. ADJACENCY distinguishes them. Nothing else about the rule
-    // changes: the projection is still never copied down here, and an absent realized figure
-    // still prints as absent.
-    renderRealized(host);
-    // Then the decision, which is the only thing on this page a reader can act in: the named
-    // groups, what each is worth per session and across every session, in that order, with the
-    // command that removes it and the one-time cost of running it.
-    renderUnused(host, rep);
-    // Then the evidence for it — the prefix drawn to scale and broken into the regions that own
-    // it, with no click required. This panel used to be 254 px of tiles above a closed
-    // disclosure while the panel that merely SUMMARISED the same prefix into five legend
-    // numbers had 1,005 px to itself. Those two are now one panel, and this is it.
-    renderPromptPanel(host, rep);
-    // Everything below re-answers the rows above at a different granularity — grouped, flat,
-    // per-server, per-skill — so it is derivation and it is folded (DESIGN §3.3 level 2). It
-    // was 5,436 px of four tables and 31 columns answering the same 39 declarations.
-    renderRemovalValue(host, rep);
-    toolTable(host, rep);
-    serverTable(host, rep);
-    skillsPanel(host, rep);
-    renderSelfRemoved(host, rep);
+  if (!rep.coverage.captured) {
+    renderHeadline(host, rep);
+    renderCoverage(host, rep);
+    return;
   }
-  renderCoverage(host, rep);
-  // Built-ins LAST, collapsed, behind the danger warning. Deliberately after the coverage
-  // panel: nothing above it should invite reading these as a saving.
-  if (rep.coverage.captured) renderBuiltins(host, rep);
+  const rows = removableRows(rep);
+  const groups = groupRemovable(rows);
+  renderInvTop(host, rep, rows, groups);
+  invSection(host, 'Every tool server', 'Each MCP server you have added, what it declares, and how much of it was ever called.',
+    (d) => serverTable(d, rep));
+  invSection(host, 'Every tool', 'All of your add-on tools and skills, sortable, including the ones you did use.',
+    (d) => { toolTable(d, rep); skillsPanel(d, rep); });
+  invSection(host, 'Configuration snippets', 'The same removals as one paste-able block, plus the per-group evidence behind the ranked list.',
+    (d) => {
+      if (rows.length) d.appendChild(ctaBlock(groups, rep));
+      renderUnused(d, rep);
+    });
+  invSection(host, 'Technical details', 'How these figures are measured, what removing costs once, and the parts left out on purpose.',
+    (d) => {
+      renderHeadline(d, rep);
+      if (rows.length) controlNotes(d, rows);
+      renderRealized(d);
+      renderPromptPanel(d, rep);
+      renderRemovalValue(d, rep);
+      renderSelfRemoved(d, rep);
+      renderCoverage(d, rep);
+      renderBuiltins(d, rep);
+    });
+}
+
+/** removableRows are the never-called, removable MCP tools and skills: the one ranking this tab and the Overview share. */
+function removableRows(rep) {
+  return rep.tools.concat(rep.skills.skills || [])
+    .filter((t) => !t.sessions_used && t.sessions_declared > 0 && !t.builtin && t.kind !== 'server_tool');
+}
+
+/** invSection is a collapsed `Details` block: one sentence of what it is, then the content. */
+function invSection(host, title, intro, build) {
+  const body = el('div', { class: 'inv-sec-body' }, el('p', { class: 'note', text: intro }));
+  const d = el('details', { class: 'why inv-details', 'data-testid': 'inv-sec-' + title.toLowerCase().replace(/\W+/g, '-') },
+    el('summary', {}, title), body);
+  host.appendChild(d);
+  build(body);
+  body.querySelectorAll('details.inv-fold').forEach((f) => { f.open = true; });
+}
+
+/** controlNotes keeps the explanation of why one-click switches may be inert, off the first screen. */
+function controlNotes(host, rows) {
+  const gated = !SKILL_SWITCH_SAFE && rows.some((t) => t.kind === 'skill');
+  const why = (tools.controlDoc && tools.controlDoc.reason) || '';
+  if (!tools.control || gated) {
+    host.appendChild(el('div', { class: 'state', 'data-testid': 'inv-control-absent' },
+      el('div', { class: 'state-body' },
+        el('strong', {}, !tools.control
+          ? (why ? 'The one-click switches are not live in this view'
+            : 'One-click opt-out is not enabled on this proxy')
+          : 'The per-skill switches are off on purpose'),
+        !tools.control && why ? el('span', {}, why) : null,
+        gated ? el('span', { 'data-testid': 'inv-skill-switch-gated' }, SKILL_SWITCH_REASON) : null)));
+  }
+  host.appendChild(reversibilityNote());
+}
+
+/**
+ * renderInvTop is the first screen: one sentence, one number, one ranked list of what to
+ * remove with its command. Every figure is summed from the same rows the list shows.
+ */
+function renderInvTop(host, rep, rows, groups) {
+  const tok = groups.reduce((n, g) => n + g.tokens, 0);
+  const priced = groups.filter((g) => g.priced);
+  const cost = priced.reduce((n, g) => n + g.usd, 0);
+  const sec = el('section', { class: 'inv-top', 'data-testid': 'inv-unused-panel' });
+  if (!groups.length) {
+    sec.appendChild(el('p', { class: 'inv-sentence' },
+      'Every tool and skill you carry was called at least once in this window. Nothing to remove.'));
+    host.appendChild(sec);
+    return;
+  }
+  const costTxt = priced.length ? usd(cost) : 'an unknown amount (no model here has known rates)';
+  sec.appendChild(el('p', { class: 'inv-sentence' },
+    'You carry ', el('strong', { class: 'inv-big', text: compact(tok) }),
+    ' tokens of ', term('tools and skills', 'MCP tool servers and skills you added. They are described to the model in every request.'),
+    ' that were never called; that cost about ',
+    el('strong', { class: 'inv-big bad', text: costTxt }), ' in this window.'));
+  sec.appendChild(el('p', { class: 'inv-scope', 'data-testid': 'inv-scope' },
+    'This covers all ' + num(rows.length) + ' never-called item' + (rows.length === 1 ? '' : 's')
+    + ', in ' + num(groups.length) + ' removable group' + (groups.length === 1 ? '' : 's') + '. '
+    + (groups.length > 5 && priced.length
+      ? 'The Overview shows the 5 costliest of them. ' : '')
+    + 'Cost is per-request carrying cost across the sessions that carried each one.'));
+  if (rep.coverage.captured < 5) {
+    sec.appendChild(el('p', { class: 'hint', 'data-testid': 'inv-small-sample' },
+      'Only ' + num(rep.coverage.captured) + ' session' + (rep.coverage.captured === 1 ? '' : 's')
+      + ' captured so far: "never called" means not called yet.'));
+  }
+  const list = el('ol', { class: 'inv-rank', 'data-testid': 'inv-lead' });
+  for (const g of groups) {
+    const r = g.items[0].removal || {};
+    const n = gSessions(g);
+    const kind = g.sub || ({ skill: 'Skill', mcp_tool: 'MCP tool' }[g.items[0].kind] || 'Tool');
+    const cmd = r.command && !r.danger ? r.command : '';
+    const btn = el('button', { class: 'btn small', type: 'button' }, 'Copy');
+    if (cmd) btn.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(cmd); btn.textContent = 'Copied'; }
+      catch (_) { btn.textContent = 'Select it manually'; }
+      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    });
+    list.appendChild(el('li', { class: 'inv-rank-row' },
+      el('span', { class: 'reco-kind', text: kind }),
+      el('span', { class: 'reco-name', title: g.label, text: g.label }),
+      el('span', { class: 'reco-note', text: (g.items.length > 1 ? num(g.items.length) + ' items, ' : '')
+        + compact(g.tokens) + ' tokens, never called in ' + num(n) + ' session' + (n === 1 ? '' : 's') }),
+      el('span', { class: 'reco-usd' }, money(g.usd, g.priced)),
+      cmd ? el('div', { class: 'cmd-line inv-rank-cmd' }, el('code', { text: cmd }), btn)
+        : el('span', { class: 'hint inv-rank-cmd', text: r.effect || 'No known removal command; see Details.' })));
+  }
+  sec.appendChild(list);
+  host.appendChild(sec);
 }
 
 /**

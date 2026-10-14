@@ -91,7 +91,8 @@
   <p class="tab-note" id="tab-note" data-testid="tab-note" role="status" hidden></p>
 </div>
 
-<section class="filters" aria-label="Filters">
+<section class="filters" id="filters" aria-label="Filters">
+  <button type="button" id="filters-toggle" class="ghost small" aria-expanded="false" aria-controls="filters">Filters</button>
   <input id="f-q" type="search" placeholder="Search session, model, agent…" data-testid="filter-q" aria-label="Search">
   <!-- Time range, Grafana's model: a quick relative token or an absolute pair. A popover
        rather than a <select> because "from X to Y" is two inputs and a select can only
@@ -391,15 +392,14 @@
     <!-- Two dollar figures, and they are NOT either of the token savings ratios above: this
          "Saved" is the daily counterfactual in dollars. The legend and the direct labels on
          both bars carry that; the note only has to say which is which. -->
-    <p class="note">One pair of bars per day. <strong>Spent</strong> is what you paid (the provider's bill plus
-      our own model calls). <strong>Saved</strong> is what the same work would have cost without
-      context-guru, minus what you spent; it dips below zero on days it cost more than it saved.</p>
+    <p class="note" id="daily-total" data-testid="daily-total"></p>
+    <p class="hint">One column per day, as tall as what you paid (the provider's bill plus our own model calls). Hover a column for that day's saved dollars; a day can save less than zero when it cost more than it saved.</p>
     <div id="chart-daily" class="chart" data-testid="chart-daily"></div>
   </div>
   <div class="panel">
     <h2>Where did the money go, by <select id="f-dim" data-testid="filter-dim" aria-label="Breakdown dimension"></select></h2>
-    <p class="note">The same spent and saved figures, split by the choice above. A group whose
-      price is not known shows <em>unknown</em>, not $0.</p>
+    <p class="note">The bar splits what you spent by the choice above (largest four, the rest as other). A group whose
+      price is not known shows <em>unknown</em> in the table, not $0.</p>
     <details class="why"><summary>Technical details: which split answers what</summary>
       <dl>
         <dt>model, provider, agent</dt><dd>where the money goes</dd>
@@ -408,14 +408,15 @@
       </dl>
     </details>
     <div id="chart-breakdown" class="chart" data-testid="chart-breakdown"></div>
+    <label class="more-toggle"><input type="checkbox" id="break-more"> More columns</label>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="breakdown-table">
         <thead><tr>
-          <th id="breakdown-key-head">Value</th><th class="num">Requests</th><th class="num">Tokens before</th>
-          <th class="num">Tokens after</th><th class="num">Saved (unique)</th>
-          <th class="num">Spent</th><th class="num">Saved</th>
-          <th class="num">Prefix cache</th><th class="num">Total avoided</th>
-          <th class="num">Unpriced rows</th>
+          <th id="breakdown-key-head">Value</th><th class="num">Requests</th><th class="num">Spent</th><th class="num">Saved</th>
+          <th class="num more">Tokens before</th>
+          <th class="num more">Tokens after</th><th class="num more">Saved (unique)</th>
+          <th class="num more">Prefix cache</th><th class="num more">Total avoided</th>
+          <th class="num more">Unpriced</th>
         </tr></thead>
         <tbody id="breakdown-body"></tbody>
       </table>
@@ -588,15 +589,20 @@
         distinct text did we drop". Both are shown because a single unlabelled figure here
         reads correctly right up to the session where it is wrong by a factor of 500.</p>
     </details>
+    <label class="more-toggle"><input type="checkbox" id="sess-more" data-testid="sessions-more"> More columns</label>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="sessions-table">
         <thead><tr>
-          <th>Session</th><th data-scope-col hidden>Account</th><th>Model</th><th>Agent</th><th title="The named compaction settings this session used">Preset</th>
-          <th class="num" title="Number of requests the agent sent in this session">Turns</th><th class="num" title="Tokens sent to context-guru, before any removal">Before</th>
-          <th class="num" title="Gross counts a removed span once per request it was missing from; unique counts it once.">Tokens removed<br><span class="hint">total / distinct</span></th>
-          <th class="num" title="Dollars saved after subtracting what context-guru itself cost">Net saved $</th><th class="num" title="Tokens read from / written to the provider prompt cache">Cache read / write</th>
-          <th class="num" title="Dollars gained or lost by keeping the cache warm with pings">Keep-alive net</th><th class="num" title="Times the agent asked for removed text to be restored">Restores</th>
-          <th class="num" title="Milliseconds context-guru added to the request">Added delay</th><th>Started</th><th><span class="vh">Row actions</span></th>
+          <th>Session</th><th data-scope-col hidden>Account</th><th>Started</th>
+          <th class="num" title="Number of requests the agent sent in this session">Turns</th>
+          <th class="num" title="What this session cost: the provider's bill plus our own model calls">Cost</th>
+          <th class="num" title="Dollars saved after subtracting what context-guru itself cost">Net saved $</th>
+          <th class="more">Model</th><th class="more">Agent</th><th class="more" title="The named compaction settings this session used">Preset</th>
+          <th class="num more" title="Tokens sent to context-guru, before any removal">Before</th>
+          <th class="num more" title="Gross counts a removed span once per request it was missing from; unique counts it once.">Tokens removed<br><span class="hint">total / distinct</span></th>
+          <th class="num more" title="Tokens read from / written to the provider prompt cache">Cache read / write</th>
+          <th class="num more" title="Dollars gained or lost by keeping the cache warm with pings">Keep-alive net</th><th class="num more" title="Times the agent asked for removed text to be restored">Restores</th>
+          <th class="num more" title="Milliseconds context-guru added to the request">Added delay</th><th><span class="vh">Row actions</span></th>
         </tr></thead>
         <tbody id="sessions-body"></tbody>
       </table>
@@ -613,14 +619,13 @@
      that led with the calculator would be selling. -->
 <section class="view" id="view-keepalive" role="tabpanel" aria-labelledby="tab-keepalive" hidden>
   <div class="panel">
-    <h2>Did keep-alive save you money?</h2>
-    <p class="note">Keep-alive sends a tiny request just before your <span class="term" tabindex="0">prompt cache<span class="tip" role="tooltip">The provider remembers the start of your conversation for a few minutes so it does not have to reprocess it. Reading it back is cheap; rewriting it after it was forgotten is expensive.</span></span> is forgotten, so the next turn is not charged for a full rewrite.
-      Below: what that cost and what it avoided in the selected window. Decide on the <strong>net</strong>.</p>
-    <div id="ka-coverage"></div>
+    <h2>Does keep-alive pay for itself?</h2>
+    <p class="note">Keep-alive sends a tiny request just before your <span class="term" tabindex="0">prompt cache<span class="tip" role="tooltip">The provider remembers the start of your conversation for a few minutes so it does not have to reprocess it. Reading it back is cheap; rewriting it after it was forgotten is expensive.</span></span> is forgotten, so the next turn is not charged for a full rewrite.</p>
     <!-- The reconciliation of the three verdicts this tab gives on one window, ABOVE the tiles
          and above the fold: cost belongs beside its benefit (DESIGN §3.7), not 2,900 px below
          it. Filled by renderKADecision from the ledger and the recommendation. -->
     <div id="ka-decision" data-testid="ka-decision" hidden></div>
+    <div id="ka-coverage"></div>
     <div id="ka-tiles"></div>
   </div>
 
@@ -642,10 +647,10 @@
       <table class="tbl" data-testid="ka-sessions-table">
         <thead><tr>
           <th>Session</th><th data-scope-col hidden>Account</th><th class="num">Turns</th>
-          <th class="num">Expiries</th><th class="num">Expiry cost</th>
-          <th class="num">Pings</th><th class="num">Ping cost</th>
-          <th class="num">Avoided (ceiling)</th><th class="num">Net</th>
-          <th class="num">Last prefix</th><th><span class="vh">Row actions</span></th>
+          <th class="num" title="Times the cached prompt was forgotten while the session sat idle">Cache ran out</th><th class="num" title="What those cache rewrites cost">Cost of running out</th>
+          <th class="num" title="Keep-alive requests sent to keep the cache warm">Keep-alive requests</th><th class="num" title="What the keep-alive requests cost">Their cost</th>
+          <th class="num" title="The most the keep-alive could have saved; an upper bound">Avoided (upper bound)</th><th class="num">Net</th>
+          <th class="num" title="Size of the cached start of the conversation, in tokens">Cached prompt size</th><th><span class="vh">Row actions</span></th>
         </tr></thead>
         <tbody id="ka-sessions-body"></tbody>
       </table>
@@ -668,10 +673,10 @@
       <table class="tbl" data-testid="ka-live-table">
         <thead><tr>
           <th>SESSION</th><th data-scope-col hidden>TENANT</th>
-          <th class="num">TURNS</th><th class="num">PREFIX</th>
-          <th>TTL IN FORCE</th><th class="num">LEFT</th>
-          <th class="num">ONE PING</th><th class="num">ONE LAPSE</th>
-          <th class="num">PINGS PER LAPSE</th><th class="num">REALISED</th><th></th>
+          <th class="num">TURNS</th><th class="num" title="Size of the cached start of the conversation, in tokens">CACHED PROMPT</th>
+          <th title="How long the provider keeps this cache before forgetting it">CACHE LIFETIME</th><th class="num">LEFT</th>
+          <th class="num" title="Cost of one keep-alive request">ONE KEEP-ALIVE</th><th class="num" title="Cost if the cache is forgotten and has to be rewritten">IF IT LAPSES</th>
+          <th class="num" title="Keep-alive requests that cost the same as one rewrite">REQUESTS PER REWRITE</th><th class="num">REALISED</th><th></th>
         </tr></thead>
         <tbody id="ka-live-body"></tbody>
       </table>
@@ -682,9 +687,9 @@
   <div class="panel">
     <h2>How often your cache ran out</h2>
     <p class="note">The cache lasts about five minutes. If a session sits idle longer, the next turn pays to rewrite the
-      whole prompt. Each such event is an <span class="term" tabindex="0">expiry<span class="tip" role="tooltip">The moment a session came back after its cached prompt had already been forgotten.</span></span>. Below: how often, when and how costly.</p>
-    <details class="why"><summary>Why some ttl_expiry rows are not counted here</summary>
-      <p>A <code>ttl_expiry</code> row that wrote nothing had no prefix to protect and no
+      whole prompt. Each such event is an <span class="term" tabindex="0">expiry<span class="tip" role="tooltip">The moment a session came back after its cached prompt had already been forgotten.</span></span> (the provider calls the cache lifetime its <span class="term" tabindex="0">TTL<span class="tip" role="tooltip">Time to live: how long the provider keeps a cache before forgetting it.</span></span>). Below: how often, when and how costly.</p>
+    <details class="why"><summary>Why some cache expiries are not counted here</summary>
+      <p>A <code>ttl_expiry</code> row that wrote nothing had no cached prompt to protect and no
         charge a ping could have avoided. On this service 385 of 742 were exactly that, and
         every one was an HTTP 400. They are counted apart, below the chart, so this panel's
         total and the Usage tab's <code>ttl_expiry</code> count can be reconciled.</p></details>
@@ -726,7 +731,7 @@
 
   <div class="panel">
     <h2>What would other settings have earned?</h2>
-    <p class="note">Replays your own past idle gaps with different settings; it is not a forecast.
+    <p class="note">Replays your own past idle gaps with different settings; it is not a forecast. A <span class="term" tabindex="0">ping<span class="tip" role="tooltip">A tiny request sent just before the cache would be forgotten, to keep it warm.</span></span> is one such request.
       <strong>X</strong> is how many idle seconds to wait before a ping, and <strong>K</strong> is
       the <span class="term" tabindex="0">most pings<span class="tip" role="tooltip">the cap on pings sent in a row for one idle spell</span></span> per spell. Each row below is one value of K.</p>
     <details class="why"><summary>Technical details</summary>

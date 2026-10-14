@@ -446,8 +446,6 @@ table above is unchanged and every path below returns 404.
 | `GET /api/breakdown?dim=<name>` | Requests, tokens and **spent vs saved** grouped by one dimension: `model`, `provider`, `agent`, `preset`, `mode`, `reasoning_effort`, `thinking_mode`, `stop_reason`, `tool_choice`, `cache_miss_reason`, `cache_breakpoints`, `stream`. `spent_usd` is billed cost plus context-guru's own model spend; `saved_usd` is the baseline counterfactual minus that. `incomplete_rows` counts rows the provider reported no usage for, so a group with no priced rows renders as **unknown** rather than as zero. The dimension is an **allowlist**: an unknown one is a `400` naming the valid set, never a chart of some other dimension's numbers. Defaults to `model`. Per-**day** usage bars need no route of their own — they are `/api/series?bucket=86400000`, since bucketing happens in SQL at query time. |
 | `GET /api/facets` | The distinct values present for each filter dimension, so a UI shows only what the data contains. |
 | `GET /api/config` | **This proxy process's** effective (resolved, key-allowlisted) configuration, wrapped in a scope envelope — see [below](#the-config-route-serves-the-servers-configuration-not-yours). Access-gated; **manager-only** in hosted mode. |
-| `GET /api/benchmarks` | Ingested harness runs with per-arm aggregates. `?refresh=1` re-scans the configured run directories. **Manager-only** in hosted mode — the runs are the operator's own eval history, and `?refresh=1` walks the filesystem and inserts rows. |
-| `GET /api/benchmarks/{id}/tasks` | Per-task rows for a run (`?arm=<name>` to restrict). **Manager-only** in hosted mode. |
 | `GET /api/capture` | The capture pipeline's own health, **including its drop count**. The counters are process-wide, so in hosted mode a non-manager gets `mode` alone (with a `description` that says so, rather than one describing counters that are not in the payload). |
 | `GET /api/events` | SSE stream of captured requests (summary rows only — never content). Honors `Last-Event-ID` (or `?last_event_id=`) so a reconnect backfills the gap. |
 | `GET /api/kvcache` | The KV-cache analysis: summary cards, the idle histogram, the survival curve, the grouped views (observed TTL, user, model, time-of-day band), the price list and the **coverage statement**. One payload, so every figure shares its denominator. `scanned` / `total` / `truncated` say whether the read was capped (`kvCacheMaxRows`, 200,000) — a silent cap would read as "this is your whole history". |
@@ -558,7 +556,7 @@ question — a test walks the table and asserts every route's declared scope. Th
 |---|---|
 | Public — no principal at all | `/dashboard/`, `/api/whoami` |
 | Tenant — that principal's data only, and a manager may widen with `?tenant=<id>` or `?tenant=*` | every other `/api/*` data route |
-| Manager — server-wide or process-wide facts that are nobody's tenant data | `/api/config`, `/api/benchmarks`, `/api/benchmarks/{id}/tasks`, and `/api/capture`'s counters |
+| Manager — server-wide or process-wide facts that are nobody's tenant data | `/api/config` and `/api/capture`'s counters |
 
 A manager reading another tenant sees their **metrics and their transcripts** — an
 explicit owner decision. `/api/requests/{id}`, `/api/sessions/{session}/transcript` and
@@ -964,7 +962,7 @@ The [dashboard](../dashboard.md) is **off by default**. Enabling it adds `/dashb
 | `--dashboard-lifecycle-signals` / `DASHBOARD_LIFECYCLE_SIGNALS` | `true` | Write one `request_lifecycle` row per request (and per keep-alive ping) with the signals no other column holds: gap from the previous response's end to this request's start on the same thread (proxy clock), granted cache TTL tier (`5m`/`1h`/`mixed`), incoming tool_result count, bytes and error flag, and the ping ordinal. Counts and sizes only. Thread id, previous stop reason and tool names are already `requests` columns. Set to `false` to turn it off. |
 | `--dashboard-queue` / `DASHBOARD_QUEUE` | `4096` | Capture-channel depth. A full channel **drops** events (counted, and shown in the UI) rather than delaying a request. |
 | `--dashboard-trusted-cidrs` / `DASHBOARD_TRUSTED_CIDRS` | — | Comma-separated CIDRs allowed to view per-request **content**, prompt text (tool schemas and the system prompt) and the effective config. Loopback always is; aggregates and token weights are open to everyone. |
-| `--dashboard-bench-dirs` / `DASHBOARD_BENCH_DIRS` | — | Comma-separated directories of benchmark runs (each with `summary.json` + `rows-*.json`) to ingest at startup. Re-ingesting replaces a run rather than duplicating it. |
+| `--dashboard-bench-dirs` / `DASHBOARD_BENCH_DIRS` | — | Deprecated and ignored. The Benchmarks tab and its routes were removed; the flag is accepted so existing command lines keep working. |
 
 !!! note "Retention is bounded by age AND size"
     Age alone cannot bound a burst of traffic; size alone silently erases a quiet week.

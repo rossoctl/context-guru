@@ -1602,6 +1602,16 @@ async function loadOverview(opts = {}) {
  * for the waiting time); the only arithmetic here is a ratio of two of them. A lever with
  * nothing recorded says so in words instead of printing a zero that could be an absence.
  */
+const KIND_TIP = {
+  'Estimated': 'Priced against what the removed text would have cost. It cannot be read off a bill.',
+  'Upper bound': 'The most it could have saved: another session may have kept the same cache warm.',
+};
+/** Waiting time in the unit that matches its size, so 411 ms never reads as "nothing". */
+function waitText(msv) {
+  if (msv < 1000) return (msv / 1000).toFixed(2) + ' s';
+  if (msv < 60000) return (msv / 1000).toFixed(1) + ' s';
+  return dur(msv);
+}
 function renderSavedLedger(o, ka) {
   const host = clear($('#tiles'));
   const priced = ((o.accounting && o.accounting.complete) || 0) > 0;
@@ -1622,21 +1632,21 @@ function renderSavedLedger(o, ka) {
       id: 'cache', tid: 'saved-cache', name: 'Cache keep-alive', href: '#/keepalive', more: 'Keep-alive tab',
       what: 'Pings that stop your prompt cache from expiring while you think.',
       ran: kaRan, usd: o.keepalive_net_usd, tok: kaTokens, approx: true,
-      extra: waited ? 'about ' + dur(waited) + ' of waiting avoided' : '',
-      note: 'an upper bound, after the pings cost ' + usd(o.keepalive_ping_usd),
+      extra: waited ? 'about ' + waitText(waited) + ' of waiting avoided in total' : '',
+      kind: 'Upper bound', note: 'after the pings cost ' + usd(o.keepalive_ping_usd),
     },
     {
       id: 'compaction', tid: 'saved-compaction', name: 'Compaction', href: '#/components', more: 'Components tab',
       what: 'Old tool output and repeated text removed before it reaches the model.',
       ran: o.requests > 0, usd: o.net_saved_usd, tok: o.saved_unique, of: o.tokens_before,
-      extra: '', note: 'estimated, after our own model calls',
+      extra: '', kind: 'Estimated', note: 'after our own model calls',
     },
     {
       id: 'filter', tid: 'saved-filter', name: 'Tools and skills filter', href: '#/tools', more: 'Inventory tab',
       what: 'Tool and skill definitions the model never needed, left out of the prompt.',
       ran: filterRan, usd: o.decl_filter_usd, tok: o.decl_filter_reads,
       extra: filterRan ? num(o.decl_filter_requests) + ' requests had tools filtered' : '',
-      note: 'estimated',
+      kind: 'Estimated', note: 'saved when tools are left out of the prompt',
     },
   ];
   const head = el('div', { class: 'ledger-head', 'aria-hidden': 'true' },
@@ -1655,7 +1665,8 @@ function renderSavedLedger(o, ka) {
         el('div', { class: 'lv-big' }, el('strong', { class: lv.usd < 0 ? 'neg' : '', text: usd(lv.usd) }),
           el('span', { class: 'lv-of', text: ' saved of ' + usd(spent) + ' spent' })),
         bar,
-        el('div', { class: 'lv-sub', text: (share ? pct(share, share < 10 ? 1 : 0) + ' of spend · ' : '') + lv.note }));
+        el('div', { class: 'lv-sub' }, el('span', { class: 'kind-badge ' + lv.kind.replace(' ', '-').toLowerCase(), title: KIND_TIP[lv.kind], text: lv.kind }),
+          ' ' + (share ? pct(share, share < 10 ? 1 : 0) + ' of spend · ' : '') + lv.note));
     const tokens = lv.tok === null || lv.tok === undefined || !lv.ran
       ? el('div', { class: 'lv-tokens lv-none' }, '—')
       : el('div', { class: 'lv-tokens' },
@@ -1670,9 +1681,7 @@ function renderSavedLedger(o, ka) {
   }
   const note = $('#ov-saved-note');
   if (note) {
-    note.textContent = 'Spent is what the provider billed, plus our own model calls and keep-alive pings. '
-      + 'Compaction and the filter are priced against what the removed text would have cost, so they are estimates. '
-      + 'Keep-alive is a ceiling, because another session may have kept the same cache warm.';
+    note.textContent = 'Spent = what the provider billed, plus our own model calls and keep-alive pings.';
   }
 }
 
@@ -1714,6 +1723,7 @@ async function loadOverviewTools() {
         el('span', { class: 'reco-usd', text: usd(r.usd), title: 'Estimated cost of carrying it in this window' })));
     }
     host.appendChild(list);
+    host.appendChild(el('p', { class: 'note reco-note-foot', text: 'Dollars are what carrying each one cost in the period selected above. The Tools and skills filter row is a separate, automatic saving; removing these is up to you.' }));
     const cmd = (c, why) => el('div', { class: 'cmd-line' }, el('code', { text: c }), copyButton(c), el('span', { class: 'cmd-why', text: why }));
     host.appendChild(el('div', { class: 'cmd-box' },
       el('p', { text: 'In Claude Code, run:' }),
@@ -1899,6 +1909,32 @@ const DIM_LABELS = {
   stream: 'streaming',
 };
 
+/** dailyColumns: one column per UTC day (spent), the period total in one sentence above. */
+function dailyColumns(host, totalHost, buckets) {
+  clear(host);
+  if (!buckets.length) { totalHost.textContent = ''; emptyState(host, 'No days in this window', 'Send traffic through the proxy, or widen the time range.'); return; }
+  const spent = (b) => b.cost_usd + b.cg_llm_cost_usd;
+  const sum = (f) => buckets.reduce((n, b) => n + f(b), 0);
+  const priced = buckets.some((b) => !(b.baseline_cost_usd === 0 && b.cost_usd === 0));
+  totalHost.textContent = priced
+    ? 'You spent ' + usd(sum(spent)) + ' over ' + num(buckets.length) + ' days and saved ' + usd(sum((b) => b.saved_usd)) + ' against the same work without context-guru.'
+    : 'No priced days in this window, so spend and savings are unknown.';
+  const max = Math.max(...buckets.map(spent), Number.MIN_VALUE);
+  const cols = el('div', { class: 'daycols' });
+  for (const b of buckets) {
+    const day = new Date(b.ts).toISOString().slice(0, 10);
+    cols.appendChild(el('span', {
+      class: 'daycol', tabindex: '0',
+      title: day + ': spent ' + usd(spent(b)) + ', saved ' + usd(b.saved_usd) + ', ' + num(b.requests) + ' requests',
+    }, el('i', { style: 'height:' + Math.max(2, (spent(b) / max) * 100) + '%;background:' + SERIES_SPENT })));
+  }
+  host.appendChild(cols);
+  host.appendChild(el('div', { class: 'daycols-axis' },
+    el('span', { text: new Date(buckets[0].ts).toISOString().slice(0, 10) }),
+    el('span', { text: 'tallest day ' + usd(max) }),
+    el('span', { text: new Date(buckets[buckets.length - 1].ts).toISOString().slice(0, 10) })));
+}
+
 async function loadUsage() {
   const dayHost = $('#chart-daily');
   const breakHost = $('#chart-breakdown');
@@ -1917,18 +1953,7 @@ async function loadUsage() {
       api('stats'),
     ]);
     renderCacheDetail(o);
-    pairedBars(dayHost, (buckets || []).map((b) => ({
-      label: new Date(b.ts).toISOString().slice(0, 10),
-      note: num(b.requests) + ' requests · ' + compact(b.tokens_before) + ' → ' + compact(b.tokens_after) + ' tokens',
-      a: b.cost_usd + b.cg_llm_cost_usd,
-      b: b.saved_usd,
-      aDisplay: usd(b.cost_usd + b.cg_llm_cost_usd),
-      bDisplay: usd(b.saved_usd),
-      unknown: b.baseline_cost_usd === 0 && b.cost_usd === 0,
-    })), {
-      empty: 'No days in this window',
-      emptyDetail: 'Send traffic through the proxy, or widen the time range.',
-    });
+    dailyColumns(dayHost, $('#daily-total'), buckets || []);
 
     syncDimPicker(bd.dimensions || []);
     $('#breakdown-key-head').textContent = DIM_LABELS[bd.dim] || bd.dim;
@@ -1939,31 +1964,28 @@ async function loadUsage() {
       emptyState(breakHost, 'Nothing to break down', 'No requests match the current filters.');
       return;
     }
-    pairedBars(breakHost, groups.map((g) => ({
-      label: g.key || '(not set)',
-      note: num(g.requests) + ' requests',
-      a: g.spent_usd,
-      b: g.saved_usd,
-      aDisplay: usd(g.spent_usd),
-      bDisplay: usd(g.saved_usd),
-      // Every row unpriced means the money figures for this bar are unknown, not zero.
-      unknown: g.incomplete_rows >= g.requests,
-    })));
+    // One stacked bar of spend by group (top 4, the tail folded), then the table.
+    const ranked = groups.filter((g) => g.incomplete_rows < g.requests && g.spent_usd > 0)
+      .sort((x, y) => y.spent_usd - x.spent_usd);
+    const rows = ranked.slice(0, 4).map((g) => ({ label: g.key || '(not set)', value: g.spent_usd }));
+    const tail = ranked.slice(4).reduce((n, g) => n + g.spent_usd, 0);
+    if (tail > 0) rows.push({ label: 'other', value: tail, color: 'var(--fg-faint)' });
+    stackedShare(breakHost, rows, { format: usd, empty: 'No priced spend', emptyDetail: 'Every group here is unpriced.' });
     for (const g of groups) {
       const unpriced = g.incomplete_rows >= g.requests;
       body.appendChild(el('tr', {},
         el('td', { text: g.key || '(not set)' }),
         el('td', { class: 'num', text: num(g.requests) }),
-        el('td', { class: 'num', text: compact(g.tokens_before) }),
-        el('td', { class: 'num', text: compact(g.tokens_after) }),
-        el('td', { class: 'num', text: compact(g.saved_unique) }),
         el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.spent_usd) }),
         el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.saved_usd) }),
+        el('td', { class: 'num more', text: compact(g.tokens_before) }),
+        el('td', { class: 'num more', text: compact(g.tokens_after) }),
+        el('td', { class: 'num more', text: compact(g.saved_unique) }),
         // Ours, not the provider's: this column used to carry cache_saved_usd, which made
         // every model look like a large cache saving we had nothing to do with.
-        el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.cachesplit_saved_usd) }),
-        el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.total_saved_usd) }),
-        el('td', { class: 'num', text: num(g.incomplete_rows) })));
+        el('td', { class: 'num more' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.cachesplit_saved_usd) }),
+        el('td', { class: 'num more' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.total_saved_usd) }),
+        el('td', { class: 'num more', text: num(g.incomplete_rows) })));
     }
   } catch (err) {
     if (aborted(err)) return;
@@ -2756,22 +2778,11 @@ async function loadSessions() {
                    + 'incomplete amortization, not a verdict.',
             }, 'in flight')
             : null),
-        wide ? el('td', {}, el('span', { class: 'trunc', title: s.tenant_id, text: s.tenant_id || '—' })) : null,
-        el('td', { title: s.models || '', text: s.primary_model || firstOf(s.models) }),
-        el('td', { text: firstOf(s.agents) }),
-        el('td', { text: firstOf(s.presets) }),
+        wide ? el('td', {}, el('span', { title: s.tenant_id, text: s.tenant_id ? s.tenant_id.slice(0, 6) : '—' })) : null,
+        el('td', { text: when(s.start) }),
         el('td', { class: 'num', text: num(s.turns) }),
-        el('td', { class: 'num', text: compact(s.tokens_before) }),
-        // BOTH denominators, in one cell rather than a 16th column, and in the order the
-        // <details> above the table explains them. Gross alone was the only savings figure
-        // on this row and it overstates by 27.7x overall / up to 572.9x on one session.
-        el('td', {
-          class: 'num',
-          title: 'gross ' + num(s.saved) + ' tokens: a removed span counted once per turn it '
-            + 'was absent from. unique ' + num(s.saved_unique) + ' tokens: the same text '
-            + 'counted once. Gross is the size of every request we sent; unique is how much '
-            + 'distinct text was dropped.',
-        }, compact(s.saved) + ' / ' + compact(s.saved_unique)),
+        el('td', { class: 'num' },
+          usdOrNA(s.cost_usd + s.cg_llm_cost_usd, !!s.baseline_cost_usd, 'no turn in this session reported the provider usage a cost needs')),
         // A dollar figure over a session whose turns are not all priced is a figure with
         // a different denominator from the token columns beside it: it covers the priced
         // turns only. The dagger says so rather than letting the two read as one total.
@@ -2791,12 +2802,26 @@ async function loadSessions() {
                      ' priced turns only — the token columns cover all of them.',
             }, ' †')
             : null),
-        el('td', { class: 'num', text: compact(s.cache_read) + ' / ' + compact(s.cache_write) }),
+        el('td', { class: 'more', title: s.models || '', text: s.primary_model || firstOf(s.models) }),
+        el('td', { class: 'more', text: firstOf(s.agents) }),
+        el('td', { class: 'more', text: firstOf(s.presets) }),
+        el('td', { class: 'num more', text: compact(s.tokens_before) }),
+        // BOTH denominators, in one cell rather than a 16th column, and in the order the
+        // <details> above the table explains them. Gross alone was the only savings figure
+        // on this row and it overstates by 27.7x overall / up to 572.9x on one session.
+        el('td', {
+          class: 'num more',
+          title: 'gross ' + num(s.saved) + ' tokens: a removed span counted once per turn it '
+            + 'was absent from. unique ' + num(s.saved_unique) + ' tokens: the same text '
+            + 'counted once. Gross is the size of every request we sent; unique is how much '
+            + 'distinct text was dropped.',
+        }, compact(s.saved) + ' / ' + compact(s.saved_unique)),
+        el('td', { class: 'num more', text: compact(s.cache_read) + ' / ' + compact(s.cache_write) }),
         // The keep-alive's net for this session, from its own ping rows. `n/a` rather than $0
         // where it never ran — a zero would read as "it broke even here", which it did not do —
         // and rather than the `—` that was here, which carried the reason only in a title.
         el('td', {
-          class: 'num ' + (s.keepalive_net_usd < 0 ? 'bad-text' : s.keepalive_net_usd > 0 ? 'good-text' : ''),
+          class: 'num more ' + (s.keepalive_net_usd < 0 ? 'bad-text' : s.keepalive_net_usd > 0 ? 'good-text' : ''),
           title: s.keepalive_pings || s.keepalive_saved_usd
             ? `${num(s.keepalive_pings)} pings cost ${usd(s.keepalive_ping_usd)}; `
               + `${usd(s.keepalive_saved_usd)} of re-creations avoided (a ceiling)`
@@ -2805,9 +2830,8 @@ async function loadSessions() {
           !!(s.keepalive_pings || s.keepalive_saved_usd),
           'the keep-alive did not run on this session, so it neither spent nor avoided anything '
           + 'here — this is an absence, not a break-even')),
-        el('td', { class: 'num', text: num(s.expands) }),
-        el('td', { class: 'num', text: ms(s.cg_latency_ms_avg) }),
-        el('td', { text: when(s.start) }),
+        el('td', { class: 'num more', text: num(s.expands) }),
+        el('td', { class: 'num more', text: ms(s.cg_latency_ms_avg) }),
         // stopPropagation: the row itself navigates to this session's requests, and a
         // click that does two things is a click that does the wrong one.
         el('td', {}, el('button', {
@@ -4282,36 +4306,36 @@ const GROUPS = [
  * Written for someone who has never seen this dashboard: no component names, no jargon.
  */
 const TAB_INFO = {
-  overview: { title: 'Overview', what: 'Is context-guru saving you money? The three savings it makes, in dollars and tokens, and what to remove next.' },
-  keepalive: { title: 'Keep-alive', what: 'Whether pinging your cache before it expires paid for itself, and which setting to use.',
+  overview: { short: 'Savings and what to remove', title: 'Overview', what: 'Is context-guru saving you money? The three savings it makes, in dollars and tokens, and what to remove next.' },
+  keepalive: { short: 'Does pinging the cache pay off', title: 'Keep-alive', what: 'Whether pinging your cache before it expires paid for itself, and which setting to use.',
     see: 'The verdict first, then a table of who won and lost, how long your sessions sit idle, and a calculator.' },
-  tools: { title: 'Inventory', what: 'Every tool server and skill your requests carry, and the ones that were never used.',
+  tools: { short: 'Tools and skills you never use', title: 'Inventory', what: 'Every tool server and skill your requests carry, and the ones that were never used.',
     see: 'Ranked cards with the cost of carrying each one and the command to remove it.' },
-  usage: { title: 'Usage', what: 'What you spent each day and on which models, and how much the provider cache covered.',
+  usage: { short: 'Spend by day and by model', title: 'Usage', what: 'What you spent each day and on which models, and how much the provider cache covered.',
     see: 'A day-by-day chart, a split by model or agent, and how often requests found their prompt already cached.' },
-  sessions: { title: 'Sessions', what: 'One row per working session: what it cost, how long it ran and what was saved.',
+  sessions: { short: 'One row per working session', title: 'Sessions', what: 'One row per working session: what it cost, how long it ran and what was saved.',
     see: 'A sortable table. Open a row to see its requests.' },
-  requests: { title: 'Requests', what: 'Every single request, newest first.',
+  requests: { short: 'Every single request', title: 'Requests', what: 'Every single request, newest first.',
     see: 'Open one to see what it contained, what was removed from it and what the provider billed.' },
-  components: { title: 'Components', what: 'How each compaction step performed: what it removed, what it cost and whether it paid off.',
+  components: { short: 'How each compaction step did', title: 'Components', what: 'How each compaction step performed: what it removed, what it cost and whether it paid off.',
     see: 'One row per step with its net result, plus a table of the ways it chose to do nothing.' },
-  kvcache: { title: 'KV-cache', what: 'How long your prompt cache stays warm between requests, and what other timings would cost.',
+  kvcache: { short: 'How long your cache stays warm', title: 'KV-cache', what: 'How long your prompt cache stays warm between requests, and what other timings would cost.',
     see: 'Idle-gap charts, a price table and a replay of different keep-alive rules on your own history.' },
-  campaigns: { title: 'Campaigns', what: 'Create keep-alive rules for many sessions at once, then check them on data they have not seen.',
+  campaigns: { short: 'Keep-alive rules in bulk', title: 'Campaigns', what: 'Create keep-alive rules for many sessions at once, then check them on data they have not seen.',
     see: 'A form to create rules and a table of the ones you made.' },
-  config: { title: 'Config', what: 'The settings this proxy is running with, and whether it is recording requests properly.',
+  config: { short: 'How this proxy is set up', title: 'Config', what: 'The settings this proxy is running with, and whether it is recording requests properly.',
     see: 'The effective configuration, recording health and recent log lines.' },
-  strategies: { title: 'Strategies', what: 'Saved keep-alive rules and what each has done so far.',
+  strategies: { short: 'Saved keep-alive rules', title: 'Strategies', what: 'Saved keep-alive rules and what each has done so far.',
     see: 'A form to add a rule and a table of existing ones.' },
-  tenants: { title: 'Tenants', what: 'The accounts on this proxy, and the A/B groups they are split into.',
+  tenants: { short: 'Accounts and A/B groups', title: 'Tenants', what: 'The accounts on this proxy, and the A/B groups they are split into.',
     see: 'Account list, spend per account and the A/B comparison.' },
-  setup: { title: 'Setup', what: 'How to point Claude Code or Codex at this proxy.',
+  setup: { short: 'Connect Claude Code to it', title: 'Setup', what: 'How to point Claude Code or Codex at this proxy.',
     see: 'Copy-paste settings for your token.' },
-  settings: { title: 'Settings', what: 'Your account: compaction settings, access tokens, password and machines.',
+  settings: { short: 'Your account and tokens', title: 'Settings', what: 'Your account: compaction settings, access tokens, password and machines.',
     see: 'Forms you can change, and an audit trail of past changes.' },
-  archive: { title: 'Archive', what: 'Old sessions moved to cold storage to save disk.',
+  archive: { short: 'Old sessions in storage', title: 'Archive', what: 'Old sessions moved to cold storage to save disk.',
     see: 'A list of archived sessions; open one to read it.' },
-  feedback: { title: 'Feedback', what: 'Tell us what is working and what is not.',
+  feedback: { short: 'Tell us what to fix', title: 'Feedback', what: 'Tell us what is working and what is not.',
     see: 'A short form, and for managers a summary of what people said.' },
 };
 
@@ -4338,14 +4362,20 @@ function renderTabMap() {
   const host = $('#tab-map');
   if (!host) return;
   clear(host);
-  // Walk the live nav rather than GROUPS: Inventory, KV-cache and Campaigns mount themselves.
+  // Grouped exactly like the nav, in the nav's own names. Walk the live nav rather than GROUPS:
+  // Inventory, KV-cache and Campaigns mount themselves.
+  const groups = new Map();
   for (const tab of $$('.viewtabs .tab')) {
-    const view = tab.dataset.view;
-    const info = TAB_INFO[view];
+    const info = TAB_INFO[tab.dataset.view];
     if (!info || !reachable(tab)) continue;
-    host.appendChild(el('div', { class: 'tab-map-row' },
-      el('dt', {}, el('a', { href: '#/' + view, text: info.title })),
-      el('dd', {}, el('span', { text: info.what }), info.see ? el('span', { class: 'tab-see', text: ' ' + info.see }) : null)));
+    const g = tab.closest('.viewtabs').dataset.group;
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push([tab.dataset.view, info]);
+  }
+  for (const [g, items] of groups) {
+    const label = ($(`.groups [data-group="${g}"]`) || {}).textContent || g;
+    host.appendChild(el('div', { class: 'tab-group' }, el('dt', { text: label }),
+      ...items.map(([view, info]) => el('dd', {}, el('a', { href: '#/' + view, text: info.title }), el('span', { text: info.short })))));
   }
 }
 
@@ -4751,7 +4781,8 @@ function refresh() {
   // changed with an idle proxy would leave the disclaimer out.
   if (state.view === 'overview') renderLive();
   loaders[state.view]();
-  if (window.CGBL) window.CGBL.render(state.view);
+  // The per-tab bottom-line banners are retired: each tab now opens with its own heading and intro,
+  // and a second headline above it contradicted the tab's own verdict.
   if (state.view !== 'setup' && state.view !== 'settings') loadFacets();
 }
 
@@ -5092,7 +5123,7 @@ function initTheme() {
   const label = () => {
     const cur = document.documentElement.getAttribute('data-theme') || 'auto';
     const face = cur === 'dark' ? 'Dark' : cur === 'light' ? 'Light' : 'Auto';
-    btn.textContent = face;
+    btn.textContent = 'Theme: ' + face;
     btn.setAttribute('aria-label', 'Colour theme: ' + face.toLowerCase() + '. Activate to change.');
     btn.title = btn.getAttribute('aria-label');
   };
@@ -5109,6 +5140,10 @@ function initTheme() {
 
 function init() {
   initTheme();
+  $('#filters-toggle').addEventListener('click', (ev) => {
+    const open = $('#filters').classList.toggle('open');
+    ev.currentTarget.setAttribute('aria-expanded', String(open));
+  });
   // Delegated, not one listener per tab: the three self-mounting views add their tabs
   // while this file is still being parsed, so a per-tab loop here would either miss them
   // or have to be re-run. A group button opens that group's first usable tab.
@@ -5156,6 +5191,8 @@ function init() {
     state.reqCursor = state.reqStack.pop() || 0;
     loadRequests();
   });
+  $('#break-more').addEventListener('change', (e) => $('[data-testid=breakdown-table]').classList.toggle('show-more', e.target.checked));
+  $('#sess-more').addEventListener('change', (e) => $('[data-testid=sessions-table]').classList.toggle('show-more', e.target.checked));
   $('#sess-prev').addEventListener('click', () => { state.sessOffset = Math.max(0, state.sessOffset - 25); loadSessions(); });
   $('#sess-next').addEventListener('click', () => { state.sessOffset += 25; loadSessions(); });
   $('#drawer-close').addEventListener('click', closeDrawer);
@@ -8611,46 +8648,43 @@ function renderKACoverage(o) {
 function renderKADecision(o, rec) {
   const host = clear($('#ka-decision'));
   const ledgerNet = o && o.keepalive_recorded_from ? o.net_usd : null;
-  // The three-part row: benefit, cost, signed net. A renderer that can emit one without the
-  // other is a bug, so all three come from one call.
-  const rows = [];
-  if (rec && !rec.refused && rec.lo_usd !== undefined) {
-    const mid = (rec.lo_usd + rec.hi_usd) / 2;
-    rows.push(['DECISION — expected across all your traffic',
-      usd(rec.lo_usd) + ' to ' + usd(rec.hi_usd),
-      '90% interval over ' + num(rec.n) + ' expiries in ' + num(rec.sessions) + ' sessions, at '
-      + rec.idle_seconds + 's / ' + rec.max_pings + ' pings',
-      mid < 0 ? 'bad' : 'good']);
-  } else if (rec && rec.refused) {
-    rows.push(['DECISION — expected across all your traffic',
-      rec.service_lo_usd !== undefined && rec.n
-        ? 'below zero'
-        : 'not computable',
-      rec.refused, 'bad']);
-  }
-  if (ledgerNet !== null) {
-    rows.push(['Measured on the sessions it already fired on', usd(ledgerNet),
-      num(o.sessions_touched) + ' of the sessions in this window · the saving half is a CEILING, '
-      + 'so this is an upper bound and it is not the decision',
-      '']);
-  }
-  if (!rows.length) { host.hidden = true; return; }
+  if (!rec && ledgerNet === null) { host.hidden = true; return; }
   host.hidden = false;
-  host.appendChild(el('div', { class: 'panel', 'data-testid': 'ka-decision-panel' },
-    el('h2', {}, 'Which number should I act on?'),
-    el('p', { class: 'note' },
-      'Act on the ', el('strong', {}, 'first'), ' number: it replays the keep-alive rule over ',
-      el('strong', {}, 'every'), ' session in this window. The second is what it actually did, only on the sessions it fired on, and it is an upper bound.'),
-    // Inside its own overflow-x wrapper: the third column is a sentence, and at 390 px an
-    // unwrapped 3-column table pushed the BODY sideways (DESIGN §3.1 — the page body never
-    // scrolls horizontally, the table does).
-    el('div', { class: 'tblwrap', tabindex: '0' },
-    el('table', { class: 'grid', 'data-testid': 'ka-decision-table' },
-      el('tbody', {}, ...rows.map(([label, value, note, cls]) => el('tr', {},
-        el('td', {}, el('strong', {}, label)),
-        el('td', { class: 'num ' + (cls === 'bad' ? 'bad-text' : cls === 'good' ? 'good-text' : ''),
-          style: 'font-weight:600' }, value),
-        el('td', { class: 'small' }, note))))))));
+  // One verdict, one number, one sentence, then the setting. The forecast (replay over every
+  // session in the window) decides; the measured figure is a labelled upper bound beneath it.
+  let verdict, big, cls, sentence, setting;
+  if (!rec) {
+    verdict = 'Working it out'; big = '\u2026'; cls = '';
+    sentence = 'Replaying your past idle gaps to see whether keep-alive would have paid.';
+  } else if (rec.refused) {
+    const wouldCost = rec.refused.indexOf('COST') >= 0;
+    verdict = wouldCost ? 'No, it would cost you money' : 'Too early to say';
+    big = wouldCost ? 'Below $0' : 'Not enough data';
+    cls = wouldCost ? 'bad' : '';
+    sentence = rec.refused + '.';
+    setting = wouldCost ? 'Leave keep-alive off. If you turn it on anyway, use the default: 270 s idle, 2 pings.'
+      : 'Use the default for now: 270 s idle, 2 pings.';
+  } else {
+    const mid = (rec.lo_usd + rec.hi_usd) / 2;
+    verdict = mid < 0 ? 'No, it would cost you money' : 'Yes, it should pay for itself';
+    big = usd(rec.lo_usd) + ' to ' + usd(rec.hi_usd);
+    cls = mid < 0 ? 'bad' : 'good';
+    sentence = 'Expected over a window like this one, from ' + num(rec.n) + ' times a cache ran out in '
+      + num(rec.sessions) + ' sessions (90% range).';
+    setting = mid < 0 ? 'Leave keep-alive off.'
+      : 'Setting to use: ping after ' + rec.idle_seconds + ' s idle, at most ' + rec.max_pings + ' pings in a row.';
+  }
+  host.appendChild(el('div', { class: 'ka-hero', 'data-testid': 'ka-decision-panel' },
+    el('div', { class: 'ka-kicker' }, 'Forecast for all your traffic'),
+    el('div', { class: 'ka-verdict' + (cls ? ' ' + cls : ''), 'data-testid': 'ka-verdict' }, verdict),
+    el('div', { class: 'ka-big ' + cls, 'data-testid': 'ka-forecast' }, big),
+    el('p', { class: 'ka-sentence' }, sentence),
+    setting ? el('p', { class: 'ka-setting', 'data-testid': 'ka-setting' }, setting) : null,
+    ledgerNet !== null ? el('p', { class: 'ka-measured', 'data-testid': 'ka-measured' },
+      el('strong', {}, 'Measured on the sessions where it ran: ' + usd(ledgerNet)),
+      ' on ' + num(o.sessions_touched) + ' sessions. This is an ',
+      term('upper bound', 'The most it could have saved. The provider keeps one cache per identical prompt start, so another session may have kept the same cache warm for free.'),
+      ', so it is not the number to decide on.') : null));
 }
 
 /** renderKAVerdict is panel 1: a handful of headline numbers, as tiles. Not a bar chart of four
@@ -8664,7 +8698,7 @@ function renderKAVerdict(o) {
   // it outright. The position now states which population it describes, and the judgement — the
   // --good/--bad colour — is deferred to the decision row above, which has the counterfactual.
   const position = !ran || !o.pings ? 'No pings yet' : (o.net_usd < 0 ? 'Behind' : 'Ahead');
-  host.appendChild(tileGroup(null, null, [
+  const moreTiles = tileGroup(null, null, [
     // The words are beside the colour, always: a status must never rest on hue alone.
     tile('ka-position', 'Where it stands so far', position,
       ran ? num(o.sessions_touched) + ' sessions touched — see the decision row above'
@@ -8672,24 +8706,44 @@ function renderKAVerdict(o) {
     tile('ka-net', 'Keep-alive net, measured', ran ? usd(o.net_usd) : '—',
       'avoided − spent, on the sessions it fired on — an upper bound, not the decision',
       ran ? (o.net_usd < 0 ? 'bad' : '') : ''),
-    tile('ka-pings', 'Pings sent', ran ? num(o.pings) : '—',
+    tile('ka-pings', 'Keep-alive requests sent', ran ? num(o.pings) : '—',
       ran ? usd(o.ping_usd) + ' spent on your key' : 'none'),
-    tile('ka-saved', 'Re-creations avoided', ran ? usd(o.saved_usd) : '—',
+    tile('ka-saved', 'Cache rewrites avoided (upper bound)', ran ? usd(o.saved_usd) : '—',
       ran ? num(o.misses_avoided) + ' requests rescued · a CEILING' : 'none',
       ran && o.saved_usd > 0 ? 'good' : ''),
-    tile('ka-addressable', 'Still on the table', usd(o.addressable_usd),
+    tile('ka-addressable', 'Expiries still worth acting on', usd(o.addressable_usd),
       num(o.addressable_misses) + ' cache expiries worth acting on', 'accent'),
-    tile('ka-rowgrowth', 'Ping rows on disk', o.pings_per_day > 0
+    tile('ka-rowgrowth', 'Log growth from keep-alive requests', o.pings_per_day > 0
       ? compact(o.bytes_per_day) + 'B/day' : '—',
-      o.pings_per_day > 0 ? o.pings_per_day.toFixed(0) + ' pings/day × ~400 B' : 'no pings'),
+      o.pings_per_day > 0 ? o.pings_per_day.toFixed(0) + ' requests/day × ~400 B' : 'no keep-alive requests'),
     // Absent, not zero, below the sample-size gate — kvcache.MeasureLatency's own rule: a
     // difference of two means from a handful of rows is not a measurement.
     o.latency && o.latency.known
-      ? tile('ka-latency', 'Large-context requests: cache hit vs. write',
-        Math.round(o.latency.per_miss_ms) + 'ms faster',
+      ? tile('ka-latency', 'Large requests: cache hit vs. rewrite',
+        Math.round(o.latency.per_miss_ms) + ' ms faster per request',
         `n=${num(o.latency.hit_n)} hits vs n=${num(o.latency.miss_n)} writes this window`, 'good')
       : null,
-  ]));
+  ]);
+  const rows = [];
+  const row = (label, value, note) => rows.push(el('div', { class: 'ka-fact' },
+    el('div', { class: 'ka-fl' }, label), el('div', { class: 'ka-fv' }, value), el('div', { class: 'ka-fn' }, note)));
+  if (ran) {
+    row('Keep-alive requests sent', num(o.pings) + ' for ' + usd(o.ping_usd),
+      ['Each ', term('ping', 'A tiny request sent just before the cache would be forgotten, to keep it warm.'), ' is billed to your own key.']);
+    row('Cache rewrites avoided', 'up to ' + usd(o.saved_usd),
+      [num(o.misses_avoided) + ' requests rescued from a full rewrite. An upper bound.']);
+  }
+  if (o.latency && o.latency.known) {
+    row('Time saved per avoided rewrite', 'about ' + Math.round(o.latency.per_miss_ms) + ' ms',
+      'Large requests answered from a warm cache are faster than ones that rewrite it.');
+  }
+  if (o.pings_per_day > 0) {
+    row('Disk used by keep-alive logs', 'about ' + compact(o.bytes_per_day) + 'B a day',
+      'Keep-alive requests add about ' + compact(o.bytes_per_day) + ' B of logs a day.');
+  }
+  if (rows.length) host.appendChild(el('div', { class: 'ka-facts', 'data-testid': 'ka-facts' }, ...rows));
+  host.appendChild(el('details', { class: 'why', 'data-testid': 'ka-more' },
+    el('summary', {}, 'More figures'), moreTiles));
 }
 
 /**
