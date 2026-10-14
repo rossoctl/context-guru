@@ -112,6 +112,9 @@ type gateCase struct {
 // TestEveryOffloadComponentIsHeldToTheCommitGate — which is the point: the invariant's whole
 // weakness is the caller nobody thought about.
 var gateExempt = map[string]string{
+	"extract_llm_sweep": "no longer removes anything in a request (#404): it asks at the keep-alive ping and " +
+		"holds the answer under cg:swh:, which nothing replays. The cold apply (PR C) will make it a " +
+		"remover again and must add its case here",
 	"failed_run": "needs a superseded failed RUN (a later successful invocation of the same " +
 		"command) to have anything to collapse; the shape is covered by mask, which shares " +
 		"its commit path verbatim — tryMark, commitMark, SetMessageText, freeze",
@@ -226,14 +229,6 @@ func gateCases() []gateCase {
 				userMsg("summarize the worker log"), toolResultMsg(body),
 			}}
 			return e, req, pricedCtx("gate-table", st, model)
-		}},
-		{"extract_llm_sweep", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
-			asker := &labelAsker{verdict: "drop", needed: "none"}
-			asker.cacheRead = 19595
-			e := newSweepSmall(t, "")
-			c := preExpiryCtx("gate-table-sweep", asker, st)
-			c.SelfRates = components.TokenRates{Input: 10, CacheRead: 1, CacheWrite: 12.5, Output: 50}
-			return e, sweepReqStocked(), c
 		}},
 		{"cmdfilter", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
 			c, err := newCmdfilter([]byte("min_size: 1\n"))

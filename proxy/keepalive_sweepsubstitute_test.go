@@ -1,0 +1,338 @@
+package proxy
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
+)
+
+// sweepAsker stands in for the host's PrefixAsker: it answers "drop" for every label it is shown, and
+// reports the cache read the caller gates on.
+type sweepAsker struct {
+	calls     atomic.Int64
+	lastAsk   atomic.Value
+	cacheRead int
+	err       error
+}
+
+func (a *sweepAsker) Ask(_ context.Context, _ string, ask string) (string, components.PrefixUsage, error) {
+	a.calls.Add(1)
+	a.lastAsk.Store(ask)
+	if a.err != nil {
+		return "", components.PrefixUsage{}, a.err
+	}
+	var parts []string
+	for i := 0; strings.Contains(ask, fmt.Sprintf("[%d] ", i)); i++ {
+		parts = append(parts, fmt.Sprintf(`{"i":%d,"needed_by":"none","quote":"","verdict":"drop"}`, i))
+	}
+	return "[" + strings.Join(parts, ",") + "]", components.PrefixUsage{CacheRead: a.cacheRead, Fresh: 600, Output: 300}, nil
+}
+
+func sweepToolMsg(id, text string) bschemas.ChatMessage {
+	m := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleTool}
+	schema.SetMessageText(&m, text)
+	call := id
+	m.ChatToolMessage = &bschemas.ChatToolMessage{ToolCallID: &call}
+	return m
+}
+
+// sweepConversation is a user turn and n large tool outputs with wire ids.
+func sweepConversation(n int) []bschemas.ChatMessage {
+	user := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
+	schema.SetMessageText(&user, "fix the failing tests")
+	msgs := []bschemas.ChatMessage{user}
+	for i := 0; i < n; i++ {
+		msgs = append(msgs, sweepToolMsg(fmt.Sprintf("toolu_k%d", i),
+			strings.Repeat(fmt.Sprintf("candidate %d distinct line\n", i), 900)))
+	}
+	return msgs
+}
+
+// registerSweep puts the sweep's registration for session "sess-1" in place, through the sweep's own
+// Offload, and arranges for it to be removed.
+func registerSweep(t *testing.T, st store.Store, asker components.PrefixAsker, model string, msgs []bschemas.ChatMessage) {
+	t.Helper()
+	if err := offload.RegisterSweepPingForTest("sess-1", "", st, asker, model, msgs, "min_tokens: 2000\n"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { offload.ClearKeepAliveCandidate(thread.Key("sess-1", "")) })
+}
+
+func waitSweepOutcome(t *testing.T, k *keeper, fs *fakeSender) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && k.sweepSubstituted.Load()+k.sweepAskFailed.Load()+k.sweepOverBudget.Load()+
+		int64(fs.n()) < 1 {
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// ⭐ POINT 1: the question takes the place of the ping. It is counted once as THE ping for the span,
+// no ordinary ping is sent, and the answer is held for the thread with its wait cause (point 12).
+func TestKeepAliveSendsTheSweepQuestionInPlaceOfTheNextPing(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
+
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	if n := k.sweep(clock.advance(281 * time.Second)); n != 1 {
+		t.Fatalf("the due ping did not fire (%d)", n)
+	}
+	waitSweepOutcome(t, k, fs)
+	if k.sweepSubstituted.Load() != 1 {
+		t.Fatalf("sweepSubstituted = %d, want 1 (ask failed %d, over budget %d, ordinary pings %d)",
+			k.sweepSubstituted.Load(), k.sweepAskFailed.Load(), k.sweepOverBudget.Load(), fs.n())
+	}
+	if fs.n() != 0 {
+		t.Errorf("sent %d ordinary pings: the question must replace the ping, not add to it", fs.n())
+	}
+	if got := k.pings.Load(); got != 1 {
+		t.Errorf("pings = %d, want 1: a substituted ping counts once", got)
+	}
+	if asker.calls.Load() != 1 {
+		t.Errorf("asked %d times, want 1", asker.calls.Load())
+	}
+	asked, proposed, waiting, ok := offload.HeldSweepAnswerForTest(st, thread.Key("sess-1", ""))
+	if !ok || asked != 3 || proposed != 3 {
+		t.Fatalf("held answer = (%d asked, %d proposed, ok=%v), want 3 and 3", asked, proposed, ok)
+	}
+	// recordTurn's response carried no tool_use and parsed usage, so the thread waits on the human.
+	if waiting != "human" {
+		t.Errorf("wait cause = %q, want human", waiting)
+	}
+	// The ledger the acceptance tests read.
+	s := k.Stats()
+	if s.SweepSubstituted != 1 || s.SweepHeld < 1 || s.SweepAsked < 1 {
+		t.Errorf("stats = substituted %d, held %d, asked %d", s.SweepSubstituted, s.SweepHeld, s.SweepAsked)
+	}
+}
+
+// A second ping in the same idle span is an ordinary ping: the conversation was already asked about.
+func TestKeepAliveSecondPingOfASpanIsPlain(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(2))
+
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 2)
+	if asker.calls.Load() != 1 {
+		t.Errorf("asked %d times across two pings, want 1", asker.calls.Load())
+	}
+	if fs.n() != 1 {
+		t.Errorf("sent %d ordinary pings, want 1 (the second ping of the span)", fs.n())
+	}
+}
+
+// FAIL OPEN: a question that fails is replaced by the ordinary ping. The idle span is never left
+// unpinged.
+func TestKeepAliveSweepQuestionFallsBackToAPingOnFailure(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576, err: errors.New("upstream 529")}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(2))
+
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	if fs.n() != 1 {
+		t.Fatalf("sent %d ordinary pings after the question failed, want 1", fs.n())
+	}
+	if k.sweepSubstituted.Load() != 0 || k.sweepAskFailed.Load() != 1 {
+		t.Errorf("substituted %d, failed %d, want 0 and 1", k.sweepSubstituted.Load(), k.sweepAskFailed.Load())
+	}
+	if _, _, _, ok := offload.HeldSweepAnswerForTest(st, thread.Key("sess-1", "")); ok {
+		t.Error("an answer that never arrived was held")
+	}
+}
+
+// ⭐ POINT 11 (#422): a plain ping, and the skip is counted as sweep_model_declined.
+func TestKeepAliveSendsAPlainPingWhereTheQuestionWouldBreakTheCache(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	msgs := sweepConversation(3)
+	// A thinking block before the last message, on a model that keeps only the last turn's thinking.
+	think := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleAssistant,
+		ChatAssistantMessage: &bschemas.ChatAssistantMessage{}}
+	reasoning := "working through it"
+	think.ChatAssistantMessage.Reasoning = &reasoning
+	schema.SetMessageText(&think, "looking")
+	msgs = append([]bschemas.ChatMessage{msgs[0], think}, msgs[1:]...)
+	registerSweep(t, st, asker, "claude-haiku-4-5", msgs)
+
+	before := k.Stats().SweepModelDeclined
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	if asker.calls.Load() != 0 {
+		t.Fatalf("the question was sent %d times on a model it breaks the cache of", asker.calls.Load())
+	}
+	if fs.n() != 1 {
+		t.Fatalf("sent %d ordinary pings, want 1", fs.n())
+	}
+	if got := k.Stats().SweepModelDeclined - before; got != 1 {
+		t.Errorf("sweep_model_declined moved by %d, want 1", got)
+	}
+}
+
+// The per-ping ceiling applies to the question's own projected cost: a question that would be refused
+// as a ping-with-an-answer is never sent.
+func TestKeepAliveSweepQuestionRespectsTheCostCap(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	k.h.opts.Prices = fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 20000}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
+
+	pol := kaPolicy()
+	pol.MaxUSDPerPing = 0.02 // ping ≈ $0.0076; the question ≈ $0.0836
+	tn := &Tenancy{ID: "t1", Cache: pol}
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	r.Header.Set("Authorization", "Bearer sk-caller-secret")
+	at := clock.now()
+	up := upstream{base: "http://up", path: "/v1/messages"}
+	for _, d := range []time.Duration{-time.Second, 0} {
+		k.record(tn, "sess-1", "", at.Add(d), []byte(kaBody), up, r, bschemas.Anthropic, "/v1/messages",
+			http.StatusOK, Usage{CacheRead: 20000}, true)
+	}
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	if asker.calls.Load() != 0 {
+		t.Errorf("an over-budget question was dispatched %d times", asker.calls.Load())
+	}
+	if k.sweepOverBudget.Load() != 1 || fs.n() != 1 {
+		t.Errorf("over-budget %d, ordinary pings %d, want 1 and 1", k.sweepOverBudget.Load(), fs.n())
+	}
+}
+
+// No registration, no question: the ordinary ping goes out and the reason is counted.
+func TestKeepAliveWithNoSweepRegistrationSendsAnOrdinaryPing(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	before := k.Stats().SweepNoCandidate
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	if fs.n() != 1 || k.sweepSubstituted.Load() != 0 {
+		t.Fatalf("ordinary pings %d, substituted %d, want 1 and 0", fs.n(), k.sweepSubstituted.Load())
+	}
+	if k.Stats().SweepNoCandidate-before < 1 {
+		t.Error("the missing registration was not counted")
+	}
+}
+
+// The summary goes first when it has material: it replaces the very candidates the sweep would ask
+// about (#404 point 10, which PR D makes explicit).
+func TestKeepAliveSummaryTakesThePingBeforeTheSweep(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(2))
+	model := &fakeSummaryModel{out: "<summary>explored the handler, 3 tests fail.</summary>"}
+	kaCandidate(t, "sess-1", st, model)
+
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	k.sweep(clock.advance(281 * time.Second))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) < 1 {
+		time.Sleep(time.Millisecond)
+	}
+	if k.summarySubstituted.Load() != 1 || k.sweepSubstituted.Load() != 0 || asker.calls.Load() != 0 {
+		t.Errorf("summary %d, sweep %d, sweep asks %d: the summary must take the ping",
+			k.summarySubstituted.Load(), k.sweepSubstituted.Load(), asker.calls.Load())
+	}
+}
+
+// ⭐ A2. Keep-alive off, or a prompt under the keep-alive floor (80k): the keeper never pings, so the
+// sweep is never asked. No keep-alive means no question.
+func TestNoKeepAliveNoQuestion(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pol  func() CachePolicy
+	}{
+		{"keep-alive off", func() CachePolicy { p := kaPolicy(); p.KeepAlive = false; return p }},
+		{"prompt under the 80k floor", func() CachePolicy { p := kaPolicy(); p.MinPrefixTokens = 80000; return p }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, fs, clock := testKeeper(t, Limits{})
+			st := store.NewMemory(store.Options{MaxEntries: 400})
+			asker := &sweepAsker{cacheRead: 48576}
+			registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
+			recordOne(t, k, tc.pol(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+			if n := k.sweep(clock.advance(281 * time.Second)); n != 0 {
+				t.Fatalf("a ping fired (%d) where the keeper should track nothing", n)
+			}
+			time.Sleep(20 * time.Millisecond)
+			if asker.calls.Load() != 0 || fs.n() != 0 {
+				t.Fatalf("question asks %d, pings %d, want none", asker.calls.Load(), fs.n())
+			}
+		})
+	}
+}
+
+// ⭐ A3. One candidate gives a question (TestKeepAliveSendsTheSweepQuestionInPlaceOfTheNextPing uses
+// three; the offload test uses one). Zero candidates give a plain ping.
+func TestKeepAliveWithZeroCandidatesSendsAPlainPing(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	small := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
+	schema.SetMessageText(&small, "hello")
+	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small, sweepToolMsg("toolu_s", "tiny output")})
+	before := k.Stats().SweepNoInventory
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	if asker.calls.Load() != 0 || fs.n() != 1 {
+		t.Fatalf("question asks %d, ordinary pings %d, want 0 and 1", asker.calls.Load(), fs.n())
+	}
+	if k.Stats().SweepNoInventory-before != 1 {
+		t.Error("the empty inventory was not counted")
+	}
+}
+
+// A1 (second half) AND fail open: a panic in the question leaves the ordinary ping, the keeper keeps
+// running, and the panic is counted.
+func TestKeepAliveSurvivesAPanicInTheQuestion(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	registerSweep(t, st, panicAskerProxy{}, "claude-sonnet-5", sweepConversation(3))
+	before := k.Stats().SweepPanics
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	if fs.n() != 1 {
+		t.Fatalf("sent %d ordinary pings after the panic, want 1", fs.n())
+	}
+	if k.Stats().SweepPanics-before != 1 {
+		t.Errorf("the panic was not counted (%d)", k.Stats().SweepPanics-before)
+	}
+	if k.sweepSubstituted.Load() != 0 {
+		t.Error("a panicked question was booked as the ping")
+	}
+}
+
+type panicAskerProxy struct{}
+
+func (panicAskerProxy) Ask(context.Context, string, string) (string, components.PrefixUsage, error) {
+	panic("boom in Ask")
+}

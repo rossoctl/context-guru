@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -58,50 +58,20 @@ type ExtractSweep struct {
 	minTokens int
 	// minInventory is the fewest candidates worth asking about. See defaultMinInventory.
 	minInventory int
-	// blockFallback refuses the content-copying fallback. See extractSweepConfig.BlockFallback.
-	blockFallback bool
-	// blockFallbackSet is true when the operator wrote `block_fallback` explicitly (either value).
-	// It gates the debug override in effectiveBlockFallback: an explicit value always wins, and only
-	// the UNSET case defers to the process log level.
-	blockFallbackSet bool
-	// preExpiry is how long before the prompt cache's believed expiry the sweep may fire. See
-	// sweeping() for why the window is where it is, and why its WIDTH is the one number here that
-	// no measurement settles.
-	preExpiry time.Duration
 	// evidence adds the co-reference index's record to each inventory line. See renderEvidence.
+	// ON by default (#404): the model weighs it, it never filters the candidates.
 	evidence bool
-	// econTrigger enables the SECOND trigger: fire on economics even while the cache is live. See
-	// econPays() for the break-even, and why one trigger is not a superset of the other.
-	econTrigger bool
-	// ignoreAskCost restores the econ trigger's original break-even, which charged the cache-write and
-	// never the adjudication that reads it. See extractSweepConfig.EconIgnoreAskCost.
-	ignoreAskCost bool
-	// asks is what this component's own adjudications have cost and how much of the mass it offered
-	// them came back removed, which is what lets the econ test price the QUESTION from measurement.
-	// See sweep_askcost.go.
-	asks *askLedger
+	// shadow turns the HELD ANSWER into a measurement. The sweep still asks at the keep-alive ping and
+	// holds the answer; on the next cold request it also rechecks the answer and reports what it
+	// WOULD drop. It changes no request. See extract_sweep_shadow.go.
+	shadow bool
 	// minLaterTurns is the opportunity floor for a CANDIDATE: how many model turns must follow an
 	// output before "still needed" is evidence rather than the only possible answer. See the gate in
 	// Offload and extractSweepConfig.MinLaterTurns.
 	minLaterTurns int
-	// rewardPremium is how much a removed token is believed to be worth relative to the cache read it
-	// saves. 1 = the unadjusted break-even. See extractSweepConfig.RewardPremium.
-	rewardPremium float64
-	// lastEcon carries the most recent econ decision to the ask dump, which is written one call deeper
-	// and has no other way to see it. Written ONLY when dumping is configured, so an unconfigured
-	// deployment retains nothing; atomic because one component instance serves concurrent sessions, and
-	// a torn read here would put one session's economics beside another's verdicts.
-	//
-	// It is a DIAGNOSTIC path and deliberately not load-bearing: under concurrency the dump may show a
-	// neighbouring request's terms. Anything that must be exact reads cg.sweep.econ, which carries the
-	// session id. Said plainly here because a number in a dump invites being trusted.
-	lastEcon atomic.Pointer[econDecision]
 	// keepRecheckTurns is how many model turns must pass before re-offering a candidate the adjudicator
 	// already judged still needed. 0 = off. See extractSweepConfig.KeepRecheckTurns.
 	keepRecheckTurns int
-	// minPressure is the opportunity floor for the REQUEST: the share of the model window it must
-	// occupy before this component will collect candidates at all. See the gate in Offload.
-	minPressure float64
 
 	mode markerMode
 }
@@ -124,29 +94,21 @@ type extractSweepConfig struct {
 	// naming in the inventory: each line is paid fresh, and a small output's removal cannot repay
 	// the marker it leaves behind.
 	MinTokens int `yaml:"min_tokens"`
-	// MinInventory is the fewest candidates worth asking about (0 = defaultMinInventory). Below it
-	// the sweep declines entirely rather than asking, because the model's judgement at small
-	// inventory sizes is measured poor — see the floor check in Offload for the figures.
+	// MinInventory is the fewest candidates worth asking about (0 = defaultMinInventory, which is 1:
+	// ask whenever there is a candidate). The question replaces a keep-alive ping, so the cache read
+	// is already paid for and the only extra cost is the answer (#404 review, decision 3). Raise it
+	// only to trade yield for fewer answers; see the floor check in Offload for the older figures on
+	// small inventories.
 	MinInventory int `yaml:"min_inventory"`
-	// PreExpirySeconds is the width of the pre-expiry window (0 = defaultPreExpiry).
-	PreExpirySeconds int `yaml:"pre_expiry_seconds"`
 	// Evidence adds the co-reference index's record to each candidate's inventory line, as input the
-	// model weighs rather than a filter that pre-decides. OFF by default: it changes the adjudication
-	// CONTRACT (the prompt gains a paragraph teaching how to read the counters), and the contract is
-	// the part with measurements attached to it.
-	Evidence bool `yaml:"evidence"`
-	// EconTrigger adds the economic trigger alongside the pre-expiry window. OFF by default: it
-	// deliberately invalidates a LIVE cached prefix, which is a cost the pre-expiry trigger exists to
-	// avoid, and it is only worth paying when the saving is collected over enough remaining turns.
-	EconTrigger bool `yaml:"econ_trigger"`
-	// EconIgnoreAskCost restores the econ trigger's original break-even, which weighed a cache-write
-	// against the whole candidate inventory and never charged the adjudication call that reads it.
-	//
-	// OFF by default — i.e. the ask IS charged and the inventory IS discounted — because leaving both
-	// out authorised 9 asks in 9 on the iteration 025 pre-flight, six of which removed nothing, for a
-	// net of -$0.4322. Retained as a switch so a run can ATTRIBUTE that change rather than infer it:
-	// one binary, two gates, everything else held identical. See sweep_askcost.go.
-	EconIgnoreAskCost bool `yaml:"econ_ignore_ask_cost"`
+	// model weighs rather than a filter that pre-decides. ON by default (#404 review, point 8): the
+	// cost is about 500 input tokens per question, under $0.003. It changes the adjudication CONTRACT
+	// (the prompt gains a paragraph teaching how to read the counters). Write `evidence: false` to
+	// get the old prompt.
+	Evidence *bool `yaml:"evidence"`
+	// Shadow asks, holds and rechecks, but never lets the held answer change a request: it only
+	// reports what it would drop. OFF by default and in no preset. See ExtractSweep.shadow.
+	Shadow bool `yaml:"shadow"`
 	// MinLaterTurns is the per-candidate OPPORTUNITY FLOOR: an output with fewer model turns after it
 	// than this is not offered, because it has not yet had the chance to be superseded and "still
 	// needed" is therefore the only answer the adjudicator can give.
@@ -157,15 +119,6 @@ type extractSweepConfig struct {
 	// trusting it — on a transcript whose outputs are all recent it can empty the inventory, and that
 	// is correct rather than a malfunction.
 	MinLaterTurns int `yaml:"min_later_turns"`
-	// MinPressure is the request-level opportunity floor: the fraction of the model window the request
-	// must occupy before candidates are collected. 0 (off) by default.
-	//
-	// It exists because the ECONOMIC trigger is most eager exactly where its question is least
-	// answerable — maximum projected turns, no cached prefix to rewrite, candidate mass a large share of
-	// a small transcript — so without it the ask ledger's warm-up samples come from the moment nothing
-	// has yet been superseded. Measured across 18 probe asks: 0.10 blocks the three uninformative early
-	// asks for 114 removed tokens, 0.20 blocks seven for 11,891. Prefer the low end.
-	MinPressure float64 `yaml:"min_pressure"`
 	// KeepRecheckTurns is how many model turns must pass before a candidate the adjudicator already
 	// judged STILL NEEDED is offered again. 0 (off) by default, which is the behaviour every iteration
 	// up to 027 had: every candidate is re-offered, and re-paid for, every turn.
@@ -183,46 +136,6 @@ type extractSweepConfig struct {
 	// Counted in TURNS rather than seconds deliberately: what changes whether an output is spent is the
 	// agent doing more work, and wall-clock says nothing about that.
 	KeepRecheckTurns int `yaml:"keep_recheck_turns"`
-	// RewardPremium is how much a removed token is worth relative to the cache read it saves, and it
-	// is the only term in the break-even that is a BELIEF rather than a measurement.
-	//
-	// 1 (the unadjusted arithmetic) by default, so no deployment changes behaviour without asking.
-	//
-	// WHY A VALUE ABOVE 1 IS DEFENSIBLE. The break-even prices a removal at the cache reads it saves,
-	// and on the one iteration where this component demonstrably helped, that is not what it was paid
-	// in. Iteration 024 arm B spent $20.26 on the sweep to bank $0.72 of cache savings — 28 dollars
-	// out for every dollar the arithmetic could see — while task accuracy rose from 0.486 to 0.608,
-	// 8 tasks better and 0 worse, clustered p = 0.0078. Sizing a premium to reproduce that run's
-	// firings independently lands in the same place: 0.036 as a divisor on need, i.e. a premium of
-	// about 28. 20 is the rounder, weaker claim and the curve is flat between them (53% of the run's
-	// removal value either way).
-	//
-	// WHY NOTHING SUPPORTS A VALUE BELOW 1, and why one is refused: a premium under 1 asserts that a
-	// removed token is worth LESS than the read it saves, which would silently tighten a gate that
-	// measurement says is already 5x too tight. Values above 100 are refused as typos — at that point
-	// every candidate clears and the term has stopped being a belief about value.
-	//
-	// READ IT BACK, do not assume it: `premium` is on every cg.sweep.econ row precisely so a decline
-	// can be re-priced offline instead of re-run, and so a run that fires on a premium of 20 can be
-	// told apart from one that would have fired anyway.
-	RewardPremium float64 `yaml:"reward_premium"`
-	// BlockFallback refuses the fallback path: when the prefix ask cannot read the cache, decline
-	// instead of asking again with the output content copied into the prompt.
-	//
-	// OFF by default, which is a deliberate choice between two real costs. Falling back keeps the
-	// component working on a session's FIRST turn and whenever an entry has gone — treating "no
-	// prefix" as "no verdicts" would disable it there and read, in the counters, as a model that
-	// declined to act. But the fallback pays fresh for content the cached path reads for a tenth of
-	// the price, which is where this component's predecessor lost money. Default on the side of
-	// working; switch it off where the bill matters more than the yield. Counted either way.
-	//
-	// UNSET defers to the process log level: at CG_LOG_LEVEL=debug the effective value is true, same
-	// as writing it explicitly — see ExtractSweep.effectiveBlockFallback. The provider's failure text
-	// lands in r.rec.Rejection only on the decline branch, so leaving the default fallback running
-	// under debug was exactly the mode built to show why a call did what it did, with that evidence
-	// discarded. Writing `block_fallback: false` is NOT the same as leaving it unset: an explicit
-	// value, either way, always wins over the debug default.
-	BlockFallback bool `yaml:"block_fallback"`
 	// MarkerMode is how a removed output is referenced. `full`, the default, is the only mode that
 	// keeps the removal recoverable.
 	MarkerMode string `yaml:"marker_mode"`
@@ -233,39 +146,22 @@ type extractSweepConfig struct {
 // production requests, with `below_output_floor` refusing every candidate on all 36 sweeping turns.
 const defaultSweepFloor = 1000
 
-// defaultMinInventory is the fewest candidates this component will ask about. Ten, because that is
-// where `cc1aa9f` measured the model becoming willing to act CORRECTLY: at batch 3-6 it dropped a
-// genuinely-spent output 2 times in 4, at batch 10 it dropped it 4 in 4 and cleared 100% of
-// genuinely-spent candidates. Below that the mechanism is not a timid version of itself, it is
-// answering the question the selection experiment refuted at 6% live-kept.
-const defaultMinInventory = 10
-
-// maxRewardPremium bounds the one configurable BELIEF in the break-even. 100 is not a measured limit —
-// it is a typo guard: iteration 024's own spend-to-savings ratio was 28, so a value four times that is
-// already past any evidence, and beyond it the term stops discriminating at all.
-const maxRewardPremium = 100.0
+// defaultMinInventory is the fewest candidates this component will ask about: one.
+//
+// It was ten. `cc1aa9f` measured the model becoming willing to act CORRECTLY at a batch of ten (at 3-6
+// it dropped a genuinely-spent output 2 times in 4, at 10 it dropped it 4 in 4), and the floor
+// protected against asking a question the model answers badly. #404 removed it on the argument that
+// the question now replaces a keep-alive ping: the cache read is already paid for, a small inventory
+// costs a small answer, and a held answer is rechecked before anything is dropped. A wrong keep costs
+// one turn's tokens; the recheck and the marker bound a wrong drop. Whether the small-batch answers
+// are good enough is exactly what shadow mode (shadow: true) measures. Raise `min_inventory` to bring
+// the old floor back.
+const defaultMinInventory = 1
 
 // maxAskItems bounds how many candidates one ask may carry. Not configurable: it is a property of the
 // reply budget and the model's transport limit, not of a deployment's taste, and an operator raising
 // it would be trading a partial sweep for no sweep at all. See the cap in Offload for the arithmetic.
 const maxAskItems = 12
-
-// defaultPreExpiry is the pre-expiry window's width when none is configured.
-//
-// IT IS AN ASSUMPTION, AND THE ONLY UNMEASURED NUMBER IN THIS COMPONENT. One minute is
-// apply.coldMargin, which is the single figure in this codebase with a stated purpose for clock
-// uncertainty around cache expiry: the gap between when a turn was recorded here and when the
-// provider last touched the entry. A window one margin wide therefore sits inside the interval where
-// our clock and the provider's are believed to agree to within that margin.
-//
-// What is NOT known is the yield/cost trade-off of widening it. A wider window fires on more turns
-// and invalidates prefixes with more remaining TTL; a narrower one fires rarely. Nothing measures
-// either side, so this is deliberately narrow and configurable rather than tuned.
-//
-// Aliased to components.DefaultPreExpiry rather than restated: summarize's trigger carries the same
-// window with the same justification, and two spellings of one unmeasured number is how they drift
-// apart the first time somebody tunes one of them.
-const defaultPreExpiry = components.DefaultPreExpiry
 
 // sweepBannedKeys are the compaction knobs that have no meaning for an adjudicator, and the reason
 // each one does not apply. They are refused rather than ignored: a silently accepted `rewrite: false`
@@ -307,15 +203,72 @@ var sweepBannedKeys = []struct {
 		"transcript, so its arithmetic does not describe this component"},
 }
 
+// sweepRetiredKeys are settings that tuned machinery #404 removed. Unlike sweepBannedKeys they are
+// IGNORED, not refused: a production config may still hold them, and a proxy that will not start
+// because of a setting that no longer does anything breaks fail open. Each is dropped from the block
+// before it is decoded, logged once per component build with the reason, and counted
+// (SweepPingCounters().RetiredKeys), so the sweep acts exactly as if the key were absent.
+var sweepRetiredKeys = []struct {
+	key, why string
+}{
+	{"econ_trigger", "the sweep no longer asks inside a request (#404). It asks at the keep-alive ping and " +
+		"every answer is held for a cold request, so an in-request ask would only cost money. The warm " +
+		"path is #491 and will design its own gate; remove the key"},
+	{"econ_ignore_ask_cost", "it tuned econ_trigger, which is removed (#404); remove the key"},
+	{"reward_premium", "it tuned econ_trigger, which is removed (#404); remove the key"},
+	{"min_pressure", "it gated the in-request ask, which is removed (#404); remove the key"},
+	{"block_fallback", "there is no fallback any more (#404): the question is asked at the keep-alive ping, " +
+		"which sends the ordinary ping instead of paying full price for a content-carrying completion; " +
+		"remove the key"},
+	{"pre_expiry_seconds", "the sweep no longer fires in a time window before the cache expires (#404). " +
+		"It asks its question at the keep-alive ping, in place of the ping, and holds the answer for the " +
+		"next cold request. There is no window to size; remove the key"},
+}
+
+// sweepRetiredKeyIgnored counts retired keys found in configs, by key.
+var (
+	sweepRetiredMu      sync.Mutex
+	sweepRetiredIgnored = map[string]int64{}
+)
+
+// stripRetiredKeys removes the retired keys from a component block, warning and counting each. It
+// returns raw unchanged when none is present, so a clean config is byte-for-byte what it was.
+func stripRetiredKeys(raw []byte) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	var block map[string]yaml.Node
+	if err := yaml.Unmarshal(raw, &block); err != nil || block == nil {
+		return raw
+	}
+	found := false
+	for _, r := range sweepRetiredKeys {
+		if _, present := block[r.key]; !present {
+			continue
+		}
+		found = true
+		delete(block, r.key)
+		slog.Warn("extract_llm_sweep: ignoring a retired setting", "key", r.key, "reason", r.why,
+			"gate", "sweep_retired_key_ignored")
+		sweepRetiredMu.Lock()
+		sweepRetiredIgnored[r.key]++
+		sweepRetiredMu.Unlock()
+	}
+	if !found {
+		return raw
+	}
+	out, err := yaml.Marshal(block)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
 func newExtractSweep(raw []byte) (components.Component, error) {
+	raw = stripRetiredKeys(raw)
 	// The banned keys FIRST, before components.Decode's KnownFields rejects them with a generic
 	// yaml message. The whole point is that the error names the reason.
 	//
-	// The same probe also answers whether `block_fallback` was WRITTEN at all, which
-	// extractSweepConfig.BlockFallback cannot: its zero value is indistinguishable from an operator
-	// who typed `block_fallback: false`. effectiveBlockFallback needs that distinction to let an
-	// explicit value override the debug default rather than be overridden by it.
-	blockFallbackSet := false
 	if len(raw) > 0 {
 		var probe map[string]yaml.Node
 		if err := yaml.Unmarshal(raw, &probe); err == nil {
@@ -324,7 +277,6 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 					return nil, fmt.Errorf("extract_llm_sweep: %s does not apply here: %s", b.key, b.why)
 				}
 			}
-			_, blockFallbackSet = probe["block_fallback"]
 		}
 	}
 	cfg := extractSweepConfig{}
@@ -337,297 +289,18 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 	if cfg.MinInventory <= 0 {
 		cfg.MinInventory = defaultMinInventory
 	}
-	// REFUSED, not clamped. Both directions are an operator saying something specific, and the two
-	// mistakes have opposite consequences: below 1 quietly tightens a gate the evidence says is
-	// already far too tight, and a stray extra digit authorises everything while still looking like a
-	// considered number. Neither should be corrected on the operator's behalf.
-	switch {
-	case cfg.RewardPremium == 0:
-		cfg.RewardPremium = 1 // unset
-	case cfg.RewardPremium < 1:
-		return nil, fmt.Errorf("extract_llm_sweep: reward_premium %v is below 1, which asserts a removed "+
-			"token is worth less than the cache read it saves; nothing measured supports that, and the "+
-			"break-even is already the restrictive term (use 1 for the unadjusted arithmetic)", cfg.RewardPremium)
-	case cfg.RewardPremium > maxRewardPremium:
-		return nil, fmt.Errorf("extract_llm_sweep: reward_premium %v exceeds %v; at that size every "+
-			"candidate clears and the term is no longer a claim about value (iteration 024's own "+
-			"spend-to-savings ratio was 28)", cfg.RewardPremium, maxRewardPremium)
-	}
-	pre := defaultPreExpiry
-	if cfg.PreExpirySeconds > 0 {
-		pre = time.Duration(cfg.PreExpirySeconds) * time.Second
-	}
+	// Evidence is ON unless the operator wrote `evidence: false`.
+	evidence := cfg.Evidence == nil || *cfg.Evidence
 	return &ExtractSweep{
 		minTokens: cfg.MinTokens, minInventory: cfg.MinInventory,
-		preExpiry: pre, mode: parseMarkerMode(cfg.MarkerMode),
-		blockFallback: cfg.BlockFallback, blockFallbackSet: blockFallbackSet, econTrigger: cfg.EconTrigger,
-		evidence: cfg.Evidence, ignoreAskCost: cfg.EconIgnoreAskCost,
-		minLaterTurns: cfg.MinLaterTurns, minPressure: cfg.MinPressure,
-		rewardPremium: cfg.RewardPremium, keepRecheckTurns: cfg.KeepRecheckTurns,
-		// Per component INSTANCE, which is per configured pipeline. Two pipelines running different
-		// prompts would learn different approval rates, and sharing one ledger between them would
-		// average two workloads into a number describing neither.
-		asks: &askLedger{},
+		mode:     parseMarkerMode(cfg.MarkerMode),
+		evidence: evidence, shadow: cfg.Shadow,
+		minLaterTurns: cfg.MinLaterTurns, keepRecheckTurns: cfg.KeepRecheckTurns,
 	}, nil
 }
 
 func (*ExtractSweep) Name() string                 { return "extract_llm_sweep" }
 func (*ExtractSweep) Enabled(*components.Ctx) bool { return true }
-
-// effectiveBlockFallback is the runtime answer to "decline instead of falling back?" An explicit
-// `block_fallback` (either value) always wins. Left UNSET, debug logging stands in for it: debug is
-// the mode an operator reaches for specifically to see why a call did what it did, and the
-// fallback's own provider error is recorded on the rejection ONLY when block_fallback is set (see
-// the "prefix ask failed and block_fallback is set" rejections below) — so leaving the default off
-// under debug was losing the one piece of evidence debug exists to show. See the WARN logged on
-// every failed prefix ask, below, for the other half of that fix: the error is no longer lost even
-// when this returns false.
-func (e *ExtractSweep) effectiveBlockFallback(c *components.Ctx) bool {
-	if e.blockFallbackSet {
-		return e.blockFallback
-	}
-	return logging.Debugging(c.Ctx)
-}
-
-// sweeping reports whether this turn falls in the PRE-EXPIRY WINDOW: the prompt cache still exists,
-// and it is close enough to expiring that invalidating it costs little.
-//
-// THIS IS THE RESOLUTION OF A CONTRADICTION, and it is the whole reason the trigger is not the cold
-// gate it started as. The two halves of this component want opposite cache states:
-//
-//	the ASK needs a WARM cache — a prefix ask reads an entry that must still exist, or the call pays
-//	fresh for the whole transcript, which is the cost the design exists to avoid;
-//	the REMOVAL wants a COLD cache — rewriting deep history invalidates a live prefix and forces a
-//	cache-write of the whole suffix at 1.25x fresh.
-//
-// Both are cheap in the window where the entry still exists but has little life left: the ask still
-// reads it, and what the removal invalidates is nearly worthless. So the trigger is
-// `0 < remaining <= preExpiry`, where remaining is the cache's believed lifetime minus this session's
-// idle time.
-//
-// THE TTL IS DERIVED, NOT ASSUMED, and UNKNOWN MUST NOT FIRE — a window computed from a guessed TTL
-// would invalidate live prefixes on exactly the deployments whose TTL we could not read. That is why
-// this asks for CachePhasePreExpiry EXACTLY rather than "anything but warm": components.CachePhase
-// deliberately leaves the policy on Unknown to its caller, because a size-gated compactor answers it
-// the other way (see components.CachePhase and Trigger.CacheAllows). This component's ask needs a
-// cache that provably exists, so nothing but PreExpiry will do.
-//
-// The arithmetic, the derivation of the TTL and the agreement check against apply's own ColdCache
-// verdict all live in components.CachePhase now, because summarize needs the same fact and two
-// derivations of one fact is how the cold decision and the dashboard came to disagree once already.
-func (e *ExtractSweep) sweeping(c *components.Ctx) bool {
-	return c.CachePhase(e.preExpiry) == components.CachePhasePreExpiry
-}
-
-// econPays is the SECOND trigger, and the claim this component's econ_trigger mode exists to test:
-// that deferring an output's removal to a deep sweep pays for itself even when the cached prefix is
-// still LIVE, because the removal is collected on every remaining turn while the cache-write it forces
-// is paid once.
-//
-// NEITHER TRIGGER IS A SUPERSET OF THE OTHER, which is why both are kept:
-//
-//	pre-expiry  fires on TIME and knows nothing about mass. It is nearly free — what it invalidates
-//	            is about to expire anyway — but it cannot fire at all on a session whose cache keeps
-//	            being refreshed, which is exactly the long agent run with the most to save.
-//	econ        fires on MASS and knows nothing about the clock. It reaches those sessions, and it
-//	            pays a real cache-write to do it, so it must clear S*T > 11.5*W first.
-//
-// See prefix_econ.go for the break-even itself; it is shared with coref rather than restated, because
-// two components pricing the same cache-write differently would be two answers to one question.
-//
-// S IS AN UPPER BOUND, and this is the trigger's known optimism. S is the inventory's whole token
-// mass, but the model drops only some of it, and how much is not known until after the call this test
-// is deciding whether to make. The counter-bias is in W: prefixRewriteWindow assumes the WHOLE
-// transcript is cached whenever the boundary is unknown, over-stating what the mutation rewrites. The
-// two lean opposite ways and neither is calibrated, so read a fired econ trigger as "this batch was
-// worth asking about", not as a realised saving. `prefix_rewrite_not_repaid` vs
-// `prefix_rewrite_repaid` is what makes the split observable.
-// priceBatch runs the break-even for one candidate batch and, on a decline, decides WHICH cost refused.
-// Separate from econPays because econPays needs an inventory and this needs only a mass and an index:
-// the label logic is what has been wrong twice, and a test of it should not have to construct
-// candidates whose token counts happen to land on a chosen side of the threshold — a fixture tuned to
-// the answer is a fixture that tests itself.
-//
-// It fills need/have/ok/askDeclined on d and touches nothing else.
-func (e *ExtractSweep) priceBatch(req *bschemas.BifrostChatRequest, saved, shallowest int,
-	d *econDecision, c *components.Ctx) {
-
-	pricing := rewritePricing{askUSD: d.askUSD, approval: d.approval, premium: e.rewardPremium,
-		creditRemoval: true}
-	d.need, d.have, d.ok = prefixRewritePaysWith(req, saved, shallowest, pricing, c)
-	if d.ok || e.ignoreAskCost {
-		return
-	}
-	// WHICH TERM REFUSED, established by re-running the test with the ask free rather than inferred
-	// from the shape of the numbers. "The rewrite does not repay" and "the question does not repay" are
-	// different findings about different costs, and one counter reporting both would be unreadable in
-	// exactly the way `marker_or_kept_verbatim` was.
-	//
-	// THE COUNTERFACTUAL VARIES THE ASK ALONE, which is what askDeclined is documented to mean: "the
-	// same batch, priced with a free ask, would have been authorised." It is this pricing with askUSD
-	// zeroed, NOT prefixRewritePays, which resets approval, premium and the horizon credit as well and
-	// so answered a broader question — would this clear with a free ask AND no discount AND no belief
-	// AND no credit. Under a premium above 1 that is not merely broader but useless: every decline is
-	// re-priced at a premium of 1, clears nothing, and lands on `prefix_rewrite_not_repaid` whichever
-	// cost actually refused, so the two labels stop distinguishing anything.
-	//
-	// This changes what `econ_ask_not_repaid` counts relative to iteration 025, which ran the resetting
-	// form: there, a batch refused by the APPROVAL DISCOUNT alone could be labelled as refused by the
-	// ask. Recorded in that iteration's results rather than silently re-interpreted.
-	freeAsk := pricing
-	freeAsk.askUSD = 0
-	if _, _, free := prefixRewritePaysWith(req, saved, shallowest, freeAsk, c); free {
-		d.askDeclined = true
-	}
-}
-
-func (e *ExtractSweep) econPays(req *bschemas.BifrostChatRequest, c *components.Ctx,
-	cands []sweepCand) econDecision {
-
-	if !e.econTrigger || len(cands) == 0 {
-		return econDecision{}
-	}
-	saved, shallowest := candMass(cands)
-	d := econDecision{offered: saved, approval: 1}
-	if !e.ignoreAskCost {
-		// Bucketed by the inventory this decision is about, so the estimate describes THIS regime.
-		d.askUSD, d.approval, d.measured = e.asks.estimate(askCostPrior(req, c), len(cands))
-	}
-	e.priceBatch(req, saved, shallowest, &d, c)
-	// Stashed for the ask dump, which is written inside adjudicate and cannot see this decision.
-	// Guarded so nothing is retained when dumping is off.
-	if sweepAskDumpDir() != "" {
-		e.lastEcon.Store(&d)
-	}
-	d.reqTokens, d.pressure = sweepPressure(req, c)
-	// PRESSURE ON EVERY DECISION, fire or decline. `have` already carries the horizon this trigger
-	// reasons about, but it is a projection -- and the open question about this component is whether it
-	// fires TOO EARLY, which is a question about where in the window the request actually sat. That
-	// cannot be recovered afterwards from `have` alone, and for a DECLINE there is no cg.sweep.ask row
-	// to read req_tokens off, so the only place it can be recorded is here. See issue on a pressure
-	// floor: the argument turns entirely on this distribution, and one workload's is not evidence.
-	// THROUGH THE SESSION-AWARE LOGGER, not bare slog. This row carried no `session`, while
-	// cg.sweep.ask beside it does, so econ decisions could not be grouped into a per-session
-	// trajectory — and a per-session trajectory is the only way to detect the CLIENT's compaction from
-	// our side: a clear shows up as the request SHRINKING between consecutive turns. Iteration 025
-	// could not answer "did LOCA's clearing ever fire" from 1,153 recorded decisions because of this
-	// one missing field.
-	logging.From(c.Ctx).Debug("cg.sweep.econ", "decision", d.ok, "needTurns", d.need, "haveTurns", d.have,
-		"candidates", len(cands), "offeredTokens", saved, "askUSD", d.askUSD,
-		"approval", d.approval, "estFromMeasurement", d.measured, "askDeclined", d.askDeclined,
-		// ON EVERY ROW, fire or decline, so a run's declines can be RE-PRICED offline at another
-		// premium instead of being re-run. Iteration 026 cost $65 to establish a fact that was already
-		// in its logs and unreadable for want of two fields; this is one of them.
-		"premium", e.rewardPremium,
-		"reqTokens", d.reqTokens, "ctxWindow", ctxWindowOf(c), "pressure", d.pressure,
-		// EXPLICITLY. logging.From(c.Ctx) injects route/tenant/provider/mode but NOT the session id —
-		// cg.sweep.ask carries `session` because it passes it by hand, and switching this row to the
-		// same logger was therefore not sufficient. Without it the per-session trajectory that reveals
-		// a client-side clear is still unrecoverable, which is the whole point of the field.
-		"session", c.Session)
-	return d
-}
-
-// sweepPressure is where in the model's window this request sits when a trigger is decided: the
-// request's own token mass, and that mass as a fraction of the window.
-//
-// Reported rather than acted on. A floor on it is an open question (see the enhancement issue), and the
-// reason it is only a question is that the measurement exists for exactly one workload: on LOCA at 64k
-// every ask in the iteration 025 pre-flight fired between 0.139 and 0.293, so a 0.70 floor would have
-// declined all ten and removed nothing. A long coding session against a 1M window is the case that
-// argues the other way and nothing here has measured it. Logging first is what makes that comparison
-// possible at all.
-func sweepPressure(req *bschemas.BifrostChatRequest, c *components.Ctx) (reqTokens int, pressure float64) {
-	reqTokens = schema.MessagesTokens(req)
-	if w := ctxWindowOf(c); w > 0 {
-		pressure = float64(reqTokens) / float64(w)
-	}
-	return reqTokens, pressure
-}
-
-func ctxWindowOf(c *components.Ctx) int {
-	if c == nil {
-		return 0
-	}
-	return c.CtxWindow
-}
-
-// econDecision is the econ trigger's verdict with its terms exposed. A bool cannot say which cost
-// refused, and the whole point of charging the ask is to be able to tell the two apart in a run's
-// counters.
-type econDecision struct {
-	need, have int
-	ok         bool
-	// askDeclined reports that the ask's own price is the ONLY reason this did not clear: the same
-	// batch, priced with a free ask, would have been authorised.
-	askDeclined bool
-	// offered is the candidate inventory's token mass — what was priced, and later what the realised
-	// removal is booked against. See askLedger.record.
-	offered  int
-	askUSD   float64
-	approval float64
-	measured bool
-	// reqTokens and pressure are where in the window this decision was taken. Recorded, never acted
-	// on. See sweepPressure.
-	reqTokens int
-	pressure  float64
-}
-
-// selectAffordableDrops chooses WHICH of the model's votes to actually apply.
-//
-// THE PROBLEM THIS FIXES. `min_tokens` was doing two unrelated jobs at once: deciding which outputs are
-// worth NAMING in the inventory, and standing in for whether a drop is worth its cost. Those want
-// opposite settings. Naming is nearly free -- the model reads each output from the cached prefix, so one
-// more candidate costs one inventory line, on the order of thirty tokens -- and more candidates is the
-// axis the mechanism lives on (6% live-kept shown one output, 58% at ~15). But a high floor was the only
-// thing standing between the model and an expensive drop, so it had to be set for the second job, which
-// starved the first. Measured on iteration 022: the shipped floor of 1000 named 4.5 of the 23.6 tool
-// outputs a request carried, holding the batch at 4.4 against a cap of 12.
-//
-// WHY SIZE WAS THE WRONG DISCRIMINATOR ANYWAY. A drop's real cost is not its marker -- tryMark already
-// refuses any drop whose replacement would not shrink the message, marker-inclusive. It is the
-// cache-WRITE that mutating the prefix forces, and that is charged on the span from the EARLIEST dropped
-// index to the cached boundary, once per pass. So a small output dropped after something already being
-// dropped costs its descriptor and nothing more; the same output dropped EARLIER than everything else
-// sets W for the whole batch and must repay the entire rewrite by itself. Depth relative to the rest of
-// the batch decides, not size.
-//
-// THE WALK. Votes are ordered latest-first and accumulated. Each step reaches further back, so S and W
-// both grow, and the subset maximising S*T - 11.5*W is chosen. Not the largest clearing subset: the
-// objective is not monotonic in k -- one early, tiny drop can extend W past what several later ones
-// repay -- so it is maximised rather than thresholded.
-//
-// ONLY ON THE ECON PATH, and that is not an oversight. The pre-expiry window fires precisely because the
-// cached prefix is about to expire, which makes W nearly worthless; pruning drops to protect a cache
-// entry with seconds to live would forgo real savings to preserve nothing. Under pre-expiry every vote
-// is applied, exactly as on `main`.
-func (e *ExtractSweep) selectAffordableDrops(req *bschemas.BifrostChatRequest, c *components.Ctx,
-	cands []sweepCand, drop []int) (kept []int, pruned int) {
-
-	if len(drop) < 2 || c == nil || c.CtxWindow <= 0 {
-		return drop, 0
-	}
-	ord := append([]int(nil), drop...)
-	sort.Slice(ord, func(a, b int) bool { return cands[ord[a]].i > cands[ord[b]].i }) // latest first
-	bestNet, bestK := 0.0, 0
-	saved, shallowest := 0, 0
-	for k := 1; k <= len(ord); k++ {
-		cd := cands[ord[k-1]]
-		saved += schema.TextTokens(cd.content)
-		if k == 1 || cd.i < shallowest {
-			shallowest = cd.i
-		}
-		net, _, _ := prefixRewriteNet(req, saved, shallowest, c)
-		if k == 1 || net > bestNet {
-			bestNet, bestK = net, k
-		}
-	}
-	if bestK == len(ord) {
-		return drop, 0
-	}
-	kept = append(kept, ord[:bestK]...)
-	return kept, len(ord) - bestK
-}
 
 // renderEvidence formats one output's co-reference record for the inventory line. Counts only — no
 // identifier lists — because the measured win came from comparative RANKING, not from more detail, and
@@ -678,57 +351,140 @@ var sweepUnusableSamples atomic.Int64
 // otherwise flood the log with transcript content lifted out of the replies.
 const maxSweepUnusableSamples = 5
 
-func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
-	// preExpiry is trigger one. Trigger two (econ) cannot be evaluated yet: it prices the candidate
-	// mass, and the mass is not known until the collection loop below has run. So collection runs
-	// whenever EITHER trigger could fire, and the econ decision is taken at the ask.
-	preExpiry := e.sweeping(c)
-	// THE OPPORTUNITY FLOOR AT THE REQUEST LEVEL, alongside the per-candidate one below.
-	//
-	// NOT a return, for the same reason `not_in_pre_expiry_window` is not: the frozen replays in the
-	// loop below must still run, or a saving already earned is undone the moment this fires. Only
-	// COLLECTION is suppressed, so no candidate reaches an inventory and no ask can happen.
-	//
-	// Why the request level too, when min_later_turns already guards each candidate: the failure is
-	// about which samples the ask LEDGER learns from. Measured on the iteration 026 probe, the first ask
-	// of every pass fired at 4% context pressure on a 2,621-token transcript and removed nothing — and
-	// those are the warm-up samples, so the estimator calibrated on the one moment its question cannot
-	// be answered. Chosen from the same 18 asks: a 10% floor blocks exactly those three and costs 114
-	// removed tokens, where 20% blocks seven and costs 11,891. Applies to BOTH triggers, because "the
-	// transcript is too young for anything in it to be spent" does not depend on why you were asking.
-	//
-	// 18 asks on four tasks and one seed, so 0.10 is where the measurement points and not a calibration.
-	tooEarly := false
-	if e.minPressure > 0 {
-		if _, pressure := sweepPressure(req, c); pressure > 0 && pressure < e.minPressure {
-			rep.Gate("sweep_below_min_pressure")
-			tooEarly = true
-		}
+// admit applies the per-candidate gates that decide whether one tool output is offered to the
+// adjudicator, and builds the candidate when it is. It is the part of the collection loop that is the
+// same wherever the question is asked: inside the request (the econ trigger) or at the keep-alive ping
+// (extract_sweep_ping.go). The checks before it (rewritable, marker present, kept verbatim, already
+// decided) differ by caller and stay with the caller.
+func (e *ExtractSweep) admit(c *components.Ctx, rep *components.Report, req *bschemas.BifrostChatRequest,
+	i int, content, id string) (sweepCand, bool) {
+	msg := &req.Input[i]
+	if schema.TextTokens(content) < e.minTokens {
+		rep.Gate("below_output_floor")
+		return sweepCand{}, false
 	}
-	collecting := (preExpiry || e.econTrigger) && !tooEarly
-	if !preExpiry {
-		// NOT a return. The frozen replays below still run, and they are the reason a sweep's saving
-		// survives past the turn that earned it: without them a later turn would re-send every
-		// removed output verbatim, undoing the removal AND breaking the byte-stability of the prefix
-		// the provider is caching.
-		rep.Gate("not_in_pre_expiry_window")
-	} else {
-		// TRIGGER ONE'S FIRINGS WERE INVISIBLE. Only its refusals were recorded, so a run could show
-		// `not_in_pre_expiry_window` 46 times and say nothing about the turns where the clock DID fire
-		// — and on this path the econ decision is skipped entirely, so cg.sweep.econ carries no row
-		// either. "Did the sweep fire too early" is unanswerable for a whole trigger without this.
-		rt, pressure := sweepPressure(req, c)
-		slog.Debug("cg.sweep.preexpiry", "reqTokens", rt, "ctxWindow", ctxWindowOf(c),
-			"pressure", pressure, "idleMs", c.IdleMs, "cacheTTLMs", c.CacheTTLMs,
-			"session", c.Session)
+	// NO DEPTH RESTRICTION. Candidates are the ENTIRE transcript, which is what this component
+	// is for.
+	//
+	// The tail gate exists for the WARM-turn compactor: rewriting a message inside a live cached
+	// prefix invalidates everything after it, so extract_llm must confine itself to the uncached
+	// tail. This component's premise is the opposite — it applies on a cold request, where nothing
+	// is cached to invalidate. Refusing depth here does not make the
+	// sweep conservative, it makes it pointless: the candidates would be exactly the messages the
+	// prefix ask CANNOT SEE, since the ask reads the previous turn's sent body (everything up to
+	// the cached boundary) while the tail is everything past it. Disjoint by construction.
+	//
+	// That is not hypothetical. It shipped, and live verification found the model judging outputs
+	// it had never read: one turn kept two outputs citing "Reply with the word ACK only." as the
+	// obligation for each — a real transcript string, so no fabrication counter fired — and
+	// another DROPPED an output having seen only `begins: # ledger_b` and a token count. See #122.
+	//
+	// It is also what made the inventory degenerate. Candidates confined to the tail means one
+	// candidate on an ordinary agent turn, which is the per-output shape `4ca1f13` records as
+	// refuted at 6% live-kept — reached by default, and acted on.
+	//
+	// WHY DEPTH IS NOT A COST HERE (#404). The time window that once justified reaching deep is gone.
+	// Asking does not touch the prefix: the question is appended after it, at the ping. A drop is
+	// applied only on a cold request, where the whole conversation is written anyway, so a deep drop
+	// shrinks that write instead of forcing one.
+	//
+	// Counted positively rather than as a refusal: `sweep_candidate_at_depth` says the component
+	// is genuinely reaching past the cached boundary. It going to zero is the signal that this
+	// regressed again, which a `cached_prefix` refusal counter could not distinguish from
+	// "nothing was deep this turn".
+	if !c.TailOnly(i) {
+		rep.Event("sweep_candidate_at_depth")
 	}
+	// EVERY CANDIDATE PAST THIS POINT MUST REACH THE INVENTORY, and sweep_inventory_thinned below
+	// is the tripwire for the day one does not.
+	//
+	// `4ca1f13`'s real defect was a per-candidate PRE-FILTER sitting exactly here.
+	// prefix_still_referenced removed 149,681 candidates and left about one per request, which
+	// silently turned a bulk adjudication arm into the per-output shape refuted at 6% live-kept --
+	// and the arm reported itself as bulk throughout. It was self-defeating twice over: it starved
+	// the comparison, and it meant the model only ever saw what the index had ALREADY judged spent,
+	// which destroys the veto on the index's blind spot that the mechanism exists to provide.
+	//
+	// `main` has no such thinner, so `eligible` and the inventory size are equal by construction
+	// and this counter cannot fire today. THAT IS THE POINT: PR #80 rebases onto this branch and
+	// brings index-driven candidate selection with it, and a filter added between this line and the
+	// append below trips the counter on its first request. If you are adding one, the index's
+	// verdict belongs in the prompt as EVIDENCE for the model to weigh
+	// (extract.AdjudicationItem.Evidence), never as a gate that pre-decides the answer.
+	// TOO NEW TO BE JUDGED, which is NOT the pre-filter the comment above forbids.
+	//
+	// The forbidden filter removed candidates the INDEX HAD JUDGED still-referenced. It was
+	// self-defeating twice: it starved the batch, and it left the model seeing only what the index
+	// had already condemned. This one carries no verdict at all. An output with fewer than
+	// `minLaterTurns` model turns after it has not yet HAD the opportunity to be superseded, so
+	// "still needed" is the only answer available and it says nothing about whether the output is
+	// spent. coref encodes exactly this distinction one level down — Classify returns `Open` ("too
+	// new to have been referenced") as a separate outcome from `Unreferenced` ("the cut
+	// candidate") — and corefMinLaterDefault is the same 8.
+	//
+	// WHY IT MATTERS HERE RATHER THAN ONLY BEING TIDY. The econ trigger fires most eagerly exactly
+	// where this is worst. Measured on the iteration 026 probe, the FIRST ask of every pass landed
+	// on a 2,621-token transcript: offered 2,318 of it (88% of the whole transcript was candidate
+	// output), `rewritten` about zero because nothing was cached yet, and haveTurns 70 because a
+	// tiny request projects a long future — need 21 against have 70, cleared by 3.3x at 4% context
+	// pressure. All three such asks removed nothing, correctly, because nothing had been
+	// superseded. Those are the ledger's WARM-UP samples, so the estimator's calibration is drawn
+	// by construction from the moment its question is least answerable, and a floored approval
+	// then suppresses the asks that would correct it.
+	//
+	// Starving the inventory is the INTENDED outcome when it fires: if every candidate is too new,
+	// there is nothing worth asking about and declining is right. That is the opposite of
+	// `4ca1f13`, where the removed candidates were judgeable and the batch was starved of them.
+	// Counted either way, and `sweep_inventory_thinned` below still trips if this thins silently.
+	later := laterModelTurns(req, i)
+	if e.minLaterTurns > 0 && later < e.minLaterTurns {
+		rep.Gate("sweep_candidate_too_new")
+		return sweepCand{}, false
+	}
+	// ALREADY ANSWERED. A candidate the adjudicator judged still needed is not re-offered until the
+	// conversation has moved on by keepRecheckTurns model turns — see sweep_keepcache.go for why the
+	// interval is in turns and why it must exist rather than caching the keep outright.
+	//
+	// SUPPRESSING AN OFFER IS NOT THE REFUTED PRE-FILTER, and the distinction is worth stating here
+	// because it sits at the exact line 4ca1f13's defect occupied. That filter substituted the
+	// INDEX's opinion for the model's, so the model only ever saw what the index had already judged
+	// spent. This substitutes the MODEL'S OWN PRIOR ANSWER, unchanged, and only until the state it
+	// was answering about has changed. It removes a repeated question, not a veto.
+	if held, since := sweepKeepStillHolds(c, id, later, e.keepRecheckTurns); held {
+		rep.Gate("sweep_keep_still_held")
+		_ = since
+		return sweepCand{}, false
+	}
+	// The wire's own tool-call id, which apply.normalize sets on every synthetic tool message it
+	// lifts out of an Anthropic tool_result block. Read here rather than reconstructed, because a
+	// reconstructed anchor is exactly the defect #123 records.
+	toolID := ""
+	if msg.ChatToolMessage != nil && msg.ChatToolMessage.ToolCallID != nil {
+		toolID = *msg.ChatToolMessage.ToolCallID
+	}
+	return sweepCand{i: i, content: content, id: id, toolID: toolID}, true
+}
 
+func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
+	// Attribute any spend a ping-time question deferred onto the next real request (the detail row, or
+	// the whole usage when the ping was sent after all). Idempotent: whichever component runs first
+	// takes it.
+	takeDeferredUsage(c, rep)
+	// A held answer from the last keep-alive ping is reported (shadow) and, once PR C lands, applied.
+	// Done FIRST and before any gate below can return: the answer is a fact about the conversation
+	// whatever this turn decides to collect.
+	e.shadowStep(c, req, rep)
+	// The ping-time question reads a snapshot of the conversation as this component leaves it, so it
+	// is taken last, after the replays below have spliced their markers. Deferred because this
+	// function returns from several places.
+	defer e.registerPing(c, req)
+	// In-request collection runs only for the econ trigger. The decision is taken at the ask, where
+	// the candidate mass is known.
 	val := savedTokenValue(c)
-	var cands []sweepCand
 	var keys []string
 	changed := 0
 	// Skipped is a property of the OUTCOME, not of one exit, and this function has two: the
-	// inventory floor below returns early, and every turn outside the pre-expiry window reaches
+	// inventory floor below returns early, and every turn that collects nothing reaches
 	// it with no candidates at all. Setting it only on the tail return made 29,321 of 29,372
 	// production rows report `mutated=1` for a component that had DECLINED -- because
 	// dash/event.go computes Mutated as !Reverted && !Skipped, and GateN is a no-op at n<=0, so
@@ -739,11 +495,6 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			rep.Skipped = true
 		}
 	}()
-	// eligible counts candidates that cleared every gate this component knows about. Compared with the
-	// inventory's size below, to catch a pre-filter that thinned it -- see the comment at the append
-	// site for why that is the failure worth a tripwire.
-	eligible := 0
-
 	// Phase 1 (serial): replay frozen decisions at any depth, and collect the candidates to name in
 	// the inventory.
 	for _, i := range toolIndices(req) {
@@ -814,303 +565,7 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			}
 			continue
 		}
-		if !collecting {
-			// Outside the window no NEW decision is taken; the replays above already ran, which is
-			// all such a turn has to do.
-			continue
-		}
-		metrics.RecordExtractionCacheLookup(rep.Component, false)
-		if schema.TextTokens(content) < e.minTokens {
-			rep.Gate("below_output_floor")
-			continue
-		}
-		// NO DEPTH RESTRICTION. Candidates are the ENTIRE transcript, which is what this component
-		// is for, and the sweep window is the whole justification.
-		//
-		// The tail gate exists for the WARM-turn compactor: rewriting a message inside a live cached
-		// prefix invalidates everything after it, so extract_llm must confine itself to the uncached
-		// tail. This component's premise is the opposite — it ACCEPTS that invalidation, because it
-		// only ever runs on a prefix with almost no TTL left. Refusing depth here does not make the
-		// sweep conservative, it makes it pointless: the candidates would be exactly the messages the
-		// prefix ask CANNOT SEE, since the ask reads the previous turn's sent body (everything up to
-		// the cached boundary) while the tail is everything past it. Disjoint by construction.
-		//
-		// That is not hypothetical. It shipped, and live verification found the model judging outputs
-		// it had never read: one turn kept two outputs citing "Reply with the word ACK only." as the
-		// obligation for each — a real transcript string, so no fabrication counter fired — and
-		// another DROPPED an output having seen only `begins: # ledger_b` and a token count. See #122.
-		//
-		// It is also what made the inventory degenerate. Candidates confined to the tail means one
-		// candidate on an ordinary agent turn, which is the per-output shape `4ca1f13` records as
-		// refuted at 6% live-kept — reached by default, and acted on.
-		//
-		// WHY THIS NEEDS NO MEASUREMENT OF EARLY INVALIDATION, which is the objection the previous
-		// version of this comment raised against itself. The cost of invalidating early is bounded by
-		// the window width, not by the TTL: inside the window the prefix has at most `window` left to
-		// live, so at most that much cache value is being given up, and the window is deliberately
-		// small (one minute against a 5-minute TTL by default). The trigger is what buys the
-		// permission — that is the entire reason it exists — so keying the permission on ColdCache
-		// instead of on the window withdrew it exactly where it had just been paid for.
-		//
-		// Counted positively rather than as a refusal: `sweep_candidate_at_depth` says the component
-		// is genuinely reaching past the cached boundary. It going to zero is the signal that this
-		// regressed again, which a `cached_prefix` refusal counter could not distinguish from
-		// "nothing was deep this turn".
-		if !c.TailOnly(i) {
-			rep.Event("sweep_candidate_at_depth")
-		}
-		// EVERY CANDIDATE PAST THIS POINT MUST REACH THE INVENTORY, and sweep_inventory_thinned below
-		// is the tripwire for the day one does not.
-		//
-		// `4ca1f13`'s real defect was a per-candidate PRE-FILTER sitting exactly here.
-		// prefix_still_referenced removed 149,681 candidates and left about one per request, which
-		// silently turned a bulk adjudication arm into the per-output shape refuted at 6% live-kept --
-		// and the arm reported itself as bulk throughout. It was self-defeating twice over: it starved
-		// the comparison, and it meant the model only ever saw what the index had ALREADY judged spent,
-		// which destroys the veto on the index's blind spot that the mechanism exists to provide.
-		//
-		// `main` has no such thinner, so `eligible` and the inventory size are equal by construction
-		// and this counter cannot fire today. THAT IS THE POINT: PR #80 rebases onto this branch and
-		// brings index-driven candidate selection with it, and a filter added between this line and the
-		// append below trips the counter on its first request. If you are adding one, the index's
-		// verdict belongs in the prompt as EVIDENCE for the model to weigh
-		// (extract.AdjudicationItem.Evidence), never as a gate that pre-decides the answer.
-		// TOO NEW TO BE JUDGED, which is NOT the pre-filter the comment above forbids.
-		//
-		// The forbidden filter removed candidates the INDEX HAD JUDGED still-referenced. It was
-		// self-defeating twice: it starved the batch, and it left the model seeing only what the index
-		// had already condemned. This one carries no verdict at all. An output with fewer than
-		// `minLaterTurns` model turns after it has not yet HAD the opportunity to be superseded, so
-		// "still needed" is the only answer available and it says nothing about whether the output is
-		// spent. coref encodes exactly this distinction one level down — Classify returns `Open` ("too
-		// new to have been referenced") as a separate outcome from `Unreferenced` ("the cut
-		// candidate") — and corefMinLaterDefault is the same 8.
-		//
-		// WHY IT MATTERS HERE RATHER THAN ONLY BEING TIDY. The econ trigger fires most eagerly exactly
-		// where this is worst. Measured on the iteration 026 probe, the FIRST ask of every pass landed
-		// on a 2,621-token transcript: offered 2,318 of it (88% of the whole transcript was candidate
-		// output), `rewritten` about zero because nothing was cached yet, and haveTurns 70 because a
-		// tiny request projects a long future — need 21 against have 70, cleared by 3.3x at 4% context
-		// pressure. All three such asks removed nothing, correctly, because nothing had been
-		// superseded. Those are the ledger's WARM-UP samples, so the estimator's calibration is drawn
-		// by construction from the moment its question is least answerable, and a floored approval
-		// then suppresses the asks that would correct it.
-		//
-		// Starving the inventory is the INTENDED outcome when it fires: if every candidate is too new,
-		// there is nothing worth asking about and declining is right. That is the opposite of
-		// `4ca1f13`, where the removed candidates were judgeable and the batch was starved of them.
-		// Counted either way, and `sweep_inventory_thinned` below still trips if this thins silently.
-		later := laterModelTurns(req, i)
-		if e.minLaterTurns > 0 && later < e.minLaterTurns {
-			rep.Gate("sweep_candidate_too_new")
-			continue
-		}
-		// ALREADY ANSWERED. A candidate the adjudicator judged still needed is not re-offered until the
-		// conversation has moved on by keepRecheckTurns model turns — see sweep_keepcache.go for why the
-		// interval is in turns and why it must exist rather than caching the keep outright.
-		//
-		// SUPPRESSING AN OFFER IS NOT THE REFUTED PRE-FILTER, and the distinction is worth stating here
-		// because it sits at the exact line 4ca1f13's defect occupied. That filter substituted the
-		// INDEX's opinion for the model's, so the model only ever saw what the index had already judged
-		// spent. This substitutes the MODEL'S OWN PRIOR ANSWER, unchanged, and only until the state it
-		// was answering about has changed. It removes a repeated question, not a veto.
-		if held, since := sweepKeepStillHolds(c, id, later, e.keepRecheckTurns); held {
-			rep.Gate("sweep_keep_still_held")
-			_ = since
-			continue
-		}
-		eligible++
-		// The wire's own tool-call id, which apply.normalize sets on every synthetic tool message it
-		// lifts out of an Anthropic tool_result block. Read here rather than reconstructed, because a
-		// reconstructed anchor is exactly the defect #123 records.
-		toolID := ""
-		if msg.ChatToolMessage != nil && msg.ChatToolMessage.ToolCallID != nil {
-			toolID = *msg.ChatToolMessage.ToolCallID
-		}
-		cands = append(cands, sweepCand{i: i, content: content, id: id, toolID: toolID})
 	}
-	// WHAT WAS SHOWN, counted apart from what was answered. A per-candidate loop cannot express "this
-	// many were OFFERED", and the distinction is not cosmetic: a live arm reported 2.80 verdicts per
-	// call and that was read as the batch size, when it counted what the model chose to ANSWER rather
-	// than what it was SHOWN. Without this, "the inventory is starved" and "the model answered for a
-	// third of it" are the same number.
-	// CAP THE ASK, because an uncapped one risks losing every verdict rather than some.
-	//
-	// The reply carries one verdict per candidate, each with a VERBATIM transcript quote, and the
-	// budget is PrefixAskMaxTokens (16,000). Live: a 12-candidate ask produced a 7,191-token reply —
-	// about 600 tokens per verdict once the model's reasoning is included — so roughly 26 candidates
-	// exhausts the budget. Past that the reply truncates, and truncation is ALL-OR-NOTHING: the array
-	// never closes, nothing parses, and every verdict in it is discarded. A 50-candidate transcript
-	// would therefore sweep nothing at all, having paid for the call.
-	//
-	// Twelve, and the two independent arguments agree on it, which is the only reason to trust a
-	// number here. Reply-budget arithmetic says ~26 is the ceiling and something well inside it is
-	// prudent. And `cc1aa9f` measured quote fidelity degrading with size — 4 of 37 quotes non-verbatim
-	// at 16 against 0 of 16 at 10 — so 12 was already the conservative end of the transport limit.
-	// That fidelity measurement was taken when content was copied into the prompt, which it no longer
-	// is, so it does not straightforwardly transfer; it is cited as corroboration, not as proof.
-	//
-	// LARGEST FIRST, so the cap keeps the candidates worth the most. And what is left over is
-	// COUNTED: a component that silently swept 12 of 50 while reporting success would be the same
-	// class of defect as the starved inventory this file already guards against.
-	//
-	// What this does NOT do is make a second ask to cover the remainder. That is a real coverage gap
-	// on a transcript-heavy session and it needs a measurement — whether N asks over one transcript
-	// beat one ask, and at what cost — so it is tracked rather than guessed at. See #132.
-	// Counted BEFORE the cap, and the thinning tripwire measured against this rather than against the
-	// post-cap length. The cap is a deliberate ceiling; sweep_inventory_thinned exists to catch a
-	// pre-filter quietly starving the comparison (`4ca1f13`), and letting the cap trip it would turn
-	// that alarm into noise on exactly the transcripts where it should be loudest.
-	assembled := len(cands)
-	if len(cands) > maxAskItems {
-		sort.SliceStable(cands, func(i, j int) bool {
-			return schema.TextTokens(cands[i].content) > schema.TextTokens(cands[j].content)
-		})
-		rep.GateN("sweep_over_ask_cap", len(cands)-maxAskItems)
-		cands = cands[:maxAskItems]
-	}
-	rep.EventN("sweep_offered", len(cands))
-	if eligible > assembled {
-		rep.EventN("sweep_inventory_thinned", eligible-assembled)
-	}
-	// DO NOT ASK AT ALL BELOW THE INVENTORY FLOOR. The yield of this mechanism is a property of how
-	// many candidates the model compares, and the numbers are not close:
-	//
-	//	shown 1 output    6% live-kept on haiku, 14% on sonnet — both inside the
-	//	                  drop-everything null model's error bar (8,105 recorded decisions)
-	//	shown ~15         58% live-kept, at the LOWEST cost per output
-	//	batch 3-6         dropped a genuinely-spent output 2 times in 4
-	//	batch 10          dropped it 4 in 4, and cleared 100% of genuinely-spent candidates
-	//
-	// So `cc1aa9f`'s conclusion — "small batches do not make it wrong, they make it UNWILLING TO
-	// ACT" — has a corollary this component needs: below about ten, the model is not merely timid,
-	// it is answering a question the measurements say it answers badly, and a `drop` from it is a
-	// guess. Declining is strictly better than asking, because a wrong keep costs one turn's tokens
-	// and a wrong drop costs content the agent still needs.
-	//
-	// Ten is the measured inflection above, not a round number. Configurable because a deployment
-	// whose transcripts are shorter may prefer to trade the yield away entirely rather than act on
-	// small inventories.
-	//
-	// Counted, because a component that declines is indistinguishable from one that is broken unless
-	// the decline is recorded — the failure mode that hid the `economic_gate: false` blind spot in
-	// this same component and three vacuous trim tests before it.
-	if len(cands) < e.minInventory {
-		rep.GateN("sweep_inventory_below_min", len(cands))
-		return keys, nil
-	}
-
-	// Phase 2: ONE ASK for every candidate. Not a batch and not a call per output — nothing is
-	// copied per candidate, so there is nothing to divide.
-	// Trigger two is decided HERE, where the mass exists. Only consulted when the pre-expiry window
-	// did not already fire: the two are OR'd, and pricing a rewrite the first trigger has already
-	// justified would let an unrepaid verdict veto a nearly-free removal.
-	asking := preExpiry
-	// Declared out here because the realised outcome is booked against the mass this decision PRICED —
-	// see askLedger.record after phase 3.
-	var d econDecision
-	if !asking {
-		d = e.econPays(req, c, cands)
-		if d.ok {
-			asking = true
-			rep.Event("prefix_rewrite_repaid")
-		} else if e.econTrigger {
-			// EXACTLY ONE of these, never both. `prefix_rewrite_not_repaid` keeps meaning what it has
-			// always meant — the cache-write does not earn itself back — so the two labels sum to the
-			// econ declines instead of double-counting a subset of them.
-			if d.askDeclined {
-				rep.Gate("econ_ask_not_repaid")
-			} else {
-				rep.Gate("prefix_rewrite_not_repaid")
-			}
-		}
-	}
-	if len(cands) > 0 && asking {
-		drop, call := e.adjudicate(req, c, rep, cands)
-		// Which votes are affordable is a separate question from which outputs were worth asking about.
-		// See selectAffordableDrops -- and note it runs ONLY when econ fired, because the pre-expiry
-		// window's whole premise is that the prefix it invalidates is nearly worthless.
-		if !preExpiry {
-			var pruned int
-			drop, pruned = e.selectAffordableDrops(req, c, cands, drop)
-			if pruned > 0 {
-				rep.GateN("drop_unaffordable_pruned", pruned)
-			}
-		}
-		for _, g := range call.gates {
-			rep.Gate(g)
-		}
-		for _, ev := range call.events {
-			rep.Event(ev)
-		}
-		// Phase 3 (serial): freeze + splice.
-		applied := 0
-		for _, k := range drop {
-			// THE DROP FIRST, then the decision. putResult ran ahead of applySweepDrop, and
-			// once the reserve could refuse that left a frozen cg:res: record for a drop that
-			// never happened — the same dangling-decision-then-late-splice shape as
-			// extract_llm's phase 3: the same-session replay path above reads the record,
-			// bypasses the depth gate because the bytes were "already sent", and removes the
-			// output from inside the provider's cached prefix on some later turn.
-			key, ok := applySweepDrop(c, rep, e.mode, &req.Input[cands[k].i], cands[k].content)
-			if !ok {
-				continue
-			}
-			// Freeze the decision so every later turn replays it byte-for-byte from the same-session
-			// path above, at any depth. Session-scoped only: unlike a compaction, a drop is a
-			// judgement about THIS transcript's obligations, so it must never be served to another
-			// session whose agent may still need the output.
-			putResult(c, cands[k].id, sweepDescriptor(cands[k].content), "")
-			// Booked here, where the drop is a fact. rep.Replay on the replay path above was
-			// already guarded this way; the fresh path was not.
-			//
-			// Measured against the message AS SPLICED, not against the descriptor. In markerFull
-			// the text written is descriptor + marker + recovery hint, so a descriptor-only
-			// subtraction overstates every candidate by the marker's tokens — and the comment
-			// below claims this figure is what reached the wire, which is the one thing a
-			// descriptor-only number is not.
-			saved := schema.TextTokens(cands[k].content) -
-				schema.TextTokens(schema.MessageText(req.Input[cands[k].i]))
-			if saved > 0 {
-				applied += saved
-				metrics.RecordExtractionSaving(rep.Component, saved)
-				metrics.RecordExtractionValue(rep.Component, float64(saved)*val.perToken)
-			}
-			changed++
-			if key != "" {
-				keys = append(keys, key)
-			}
-		}
-		// AFTER phase 3: rep.Calls takes a COPY of the row, and Accepted/SavedTokens are only
-		// knowable once the drops have been applied. `applied` is what reached the wire, which is
-		// the figure the ledger's own doc claims it carries.
-		if applied > 0 {
-			call.rec.Accepted = true
-			call.rec.SavedTokens = applied
-		} else if call.rec.Rejection == "" {
-			// The adjudicator named spent outputs and NONE of them could be dropped. Distinct
-			// from "nothing was spent", and it is the reserve-exhausted shape: without its own
-			// reason the row read as a plain rejection.
-			call.rec.Rejection = "adjudicated spent, but no drop could be applied"
-		}
-		// BOOK WHAT THE ASK ACTUALLY COST AND ACTUALLY BOUGHT, so the next econ decision is priced by
-		// this component's own history instead of a literal. `applied` rather than the vote count: the
-		// ratio has to map offered mass onto mass that stopped being sent, so pruning, refusals and the
-		// marker's own tokens all belong inside it.
-		//
-		// Booked on the pre-expiry path too. That path does not consult the econ test, but its ask is
-		// the same prompt to the same model, so its price and its yield are evidence about the next
-		// econ decision regardless of which trigger paid for this one.
-		offered := d.offered
-		if offered == 0 {
-			offered, _ = candMass(cands)
-		}
-		e.asks.record(call.rec.CostUSD, offered, applied, len(cands))
-		if call.rec.Component != "" {
-			rep.Calls = append(rep.Calls, call.rec)
-		}
-	}
-
 	return keys, nil
 }
 
@@ -1149,6 +604,10 @@ type sweepResult struct {
 	// series climb as the component worked better.
 	events []string
 	rec    components.ModelCall
+	// answered is true once the model's reply parsed as a verdict array, including the empty one
+	// ("keep everything"). It separates a question that was answered from one that failed, which both
+	// return no drops. The ping-time ask holds an answer only when this is set.
+	answered bool
 }
 
 func (r *sweepResult) gate(name string)  { r.gates = append(r.gates, name) }
@@ -1166,7 +625,13 @@ func (r *sweepResult) raised(name string) bool {
 	return false
 }
 
-// adjudicate makes ONE prefix ask about every candidate and returns the labels it authorised
+// askOpts is what differs between asks, kept as a type so a second caller can label its own.
+type askOpts struct {
+	// trigger and gateReason label the ask in the dump and in the per-call ledger row.
+	trigger, gateReason string
+}
+
+// adjudicateWith makes ONE prefix ask about every candidate and returns the labels it authorised
 // dropping.
 //
 // EVERY FAILURE PATH RESOLVES TOWARD KEEP -- no asker, no stashed prefix, a transport error, a cache
@@ -1179,8 +644,8 @@ func (r *sweepResult) raised(name string) bool {
 // happens after the return value has already been copied, so the fold would be silently lost on
 // exactly the error paths it exists to cover. The first result stays blank-named — only this one
 // needs the treatment, and saying so beats leaving a reader to wonder what `dropped` is for.
-func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *components.Ctx,
-	rep *components.Report, cands []sweepCand) (_ []int, r sweepResult) {
+func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *components.Ctx,
+	rep *components.Report, cands []sweepCand, opt askOpts) (_ []int, r sweepResult) {
 
 	// A SINGLE-CANDIDATE ASK IS THE REFUTED SHAPE WEARING A NEW NAME, so it is counted rather than
 	// silently accepted. Shown one output, a model simply drops it: 6% live-kept on haiku and 14% on
@@ -1281,24 +746,12 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		reply string
 		usage components.PrefixUsage
 		err   error
-		// fellBack records that the expensive path has already run, so the cache-read check below does
-		// not fire a second time for the same call. Without it a failed ask both fell back AND then
-		// reported a zero cache read, double-counting one event as two.
-		fellBack bool
-		// attemptedPrefixAsk records whether the prefix-ask leg actually ran, for foldFallback's
-		// Strategy naming below. Separate from `c.PrefixAsk != nil`, which the stale-prefix guard can
-		// now be true for while the ask itself never runs.
-		attemptedPrefixAsk bool
-		// The ask's own totals, accumulated PER LEG. An adjudication is not one model call: the
-		// prefix ask and the fallback are two, on two prompts, and either can be the only one that
-		// happens. See recordLeg.
+		// The ask's own totals. See recordLeg.
 		askMs, askCost float64
-		fbUsage        components.PrefixUsage
-		fbMs, fbCost   float64
 	)
 	// recordLeg books ONE model call this component made — its wall time and its own priced spend.
 	//
-	// PER LEG, not once per adjudication, because `fallbackAsk` is a SECOND model call on a full
+	// PER LEG, not once per adjudication, because the fallback was a SECOND model call on a full
 	// sampled transcript and it used to be accounted at $0.00 and 0 ms. The single record was built
 	// from the PREFIX ask's usage and assigned once, while two of the three fallback points fire
 	// after that assignment — so on every route without an Anthropic prefix asker (where the prefix
@@ -1315,61 +768,6 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 			int64(u.CacheWrite), int64(u.CacheRead))
 		metrics.RecordExtractionSpend(rep.Component, cost)
 		return cost
-	}
-	// runFallback runs the expensive path and books it as its own leg, at all three call sites, so a
-	// fourth one cannot be added without the accounting coming with it. It records even when the
-	// call ERRORS: a failed completion still burned wall time, and on some failures tokens.
-	runFallback := func() (string, error) {
-		out, u, ms, err := e.fallbackAsk(ctx, req, c, &r, items, cands)
-		fbUsage, fbMs = u, ms
-		fbCost = recordLeg(ms, u)
-		return out, err
-	}
-	// foldFallback adds the fallback leg's tokens, dollars and wall time into the ask's ledger row.
-	//
-	// Idempotent by construction — at most one fallback runs per adjudication and this READS the
-	// accumulators rather than adding to them — which is what lets it be deferred and also called
-	// explicitly on the happy path, where the row is built after the no-asker fallback has already
-	// run and would otherwise overwrite the fold.
-	//
-	// DEFERRED, so it also covers the three fallback ERROR paths. Each of those is
-	// `if reply, err = runFallback(); err != nil { return nil, r }`, and `runFallback` has already
-	// booked the leg into metrics via recordLeg — so /stats counted the call and its seconds while
-	// the ledger row kept only the prefix ask's LatencyMs and a Strategy naming a leg that was no
-	// longer the only one that ran. Latency rather than dollars, because on an error the sink is
-	// empty (recordUsageCache is reached only after a successful decode on both backends, and
-	// neither returns an error after billing) — but the fallback is the SLOW leg by construction, so
-	// a failed one contributes tens of seconds to avg_latency_ms against a row showing milliseconds.
-	foldFallback := func() {
-		if fbMs == 0 && fbCost == 0 && fbUsage == (components.PrefixUsage{}) {
-			return
-		}
-		// IDENTITY FIRST, and this is the half of the fix that is easy to miss. On the no-asker
-		// path the fallback runs BEFORE r.rec exists, so if it errors the row is never built at
-		// all — Component stays "" and the caller drops the whole row on the
-		// `call.rec.Component != ""` guard. /stats then reports a call the ledger has no row for.
-		// That path never built a row before either, so the row is not a regression; the recorded
-		// spend and latency are new, so the DIVERGENCE is.
-		if r.rec.Component == "" {
-			r.rec.Component = rep.Component
-			r.rec.Model = c.ModelName
-			r.rec.CandidateTokens = before
-			r.rec.GateReason = "pre-expiry window: the cache still exists and is nearly worthless"
-		}
-		r.rec.LatencyMs = askMs + fbMs
-		r.rec.PromptTokens = int64(usage.Fresh + fbUsage.Fresh)
-		r.rec.CompletionTokens = int64(usage.Output + fbUsage.Output)
-		r.rec.CacheRead = int64(usage.CacheRead + fbUsage.CacheRead)
-		r.rec.CacheWrite = int64(usage.CacheWrite + fbUsage.CacheWrite)
-		r.rec.CostUSD = askCost + fbCost
-		// Name what actually ran. On the no-asker route AND the stale-prefix route the prefix ask
-		// never happens, so calling the row "prefix_ask+fallback" would report a leg that did not
-		// exist.
-		if attemptedPrefixAsk {
-			r.rec.Strategy = "prefix_ask+fallback"
-		} else {
-			r.rec.Strategy = "fallback"
-		}
 	}
 	// STALE-PREFIX GUARD, the sweep's version of cache_aware_summarizer's own guard in
 	// cache_aware_async.go. The ask below reads this session's STASHED body (proxy's sentStash,
@@ -1416,51 +814,36 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 			}
 		}
 	}
-	// One arming point for all four exits that can carry a fallback — the three error returns and
-	// the happy path. A per-site call was what left the error paths uncovered, and a fifth site
-	// added later would have been missed the same way.
-	defer foldFallback()
 	if !usePrefixAsk || stalePrefix {
 		// No asker at all (a non-Anthropic route, or no incoming client) and a stale stash take the
-		// same fork, because both mean there is nothing SAFE to ask through — one has nothing
-		// stashed, the other has the wrong thing. Gated separately so a run showing
-		// sweep_stale_prefix, rather than sweep_no_asker, says which one happened.
+		// same fork, because both mean there is nothing SAFE to ask through: one has nothing stashed,
+		// the other has the wrong thing. Gated separately so a run showing sweep_stale_prefix, rather
+		// than sweep_no_asker, says which one happened.
+		//
+		// THERE IS NO FALLBACK (#404). The ask is made at the keep-alive ping, which has no request to
+		// pay a full-price content-carrying completion for. The ping is sent instead.
 		if stalePrefix {
 			r.gate("sweep_stale_prefix")
+			r.rec.Rejection = "stashed prefix does not cover the candidates offered"
 		} else {
 			r.gate("sweep_no_asker")
+			r.rec.Rejection = "no prefix asker on this route"
 		}
-		if e.effectiveBlockFallback(c) {
-			r.gate("sweep_fallback_blocked")
-			if stalePrefix {
-				r.rec.Rejection = "stashed prefix does not cover the candidates offered and block_fallback is set"
-			} else {
-				r.rec.Rejection = "no prefix asker on this route and block_fallback is set"
-			}
-			return nil, r
-		}
-		if reply, err = runFallback(); err != nil {
-			return nil, r
-		}
-		fellBack = true
+		return nil, r
 	} else {
-		attemptedPrefixAsk = true
 		askStart := time.Now()
 		// NAMED rather than inlined, so the dump records the prompt AS SENT. A dump that rebuilt the
 		// prompt from `items` would be a reconstruction, and the whole point of capturing it is to be
 		// able to review the text the model actually received.
-		askPrompt := extract.BuildPrefixAsk(items)
+		//
+		// Composed through extract.Ask so a second list (#490, #485) can be added by its own code
+		// without touching this function. With one list the prompt is BuildPrefixAsk's, byte for byte.
+		ask := extract.NewAsk()
+		ask.Add(extract.SpentOutputs{Items: items})
+		askPrompt := ask.Prompt()
 		if dumpDir != "" {
 			dump = newSweepAskDump(req, c.Session, c.ModelName, items, cands, askPrompt)
-			dump.Trigger = "pre_expiry"
-			if d := e.lastEcon.Load(); d != nil && d.ok {
-				dump.Trigger = "econ"
-				dump.Econ = &sweepAskDumpEcon{
-					NeedTurns: d.need, HaveTurns: d.have, Premium: e.rewardPremium,
-					Approval: d.approval, AskUSD: d.askUSD, ReqTokens: d.reqTokens,
-					Pressure: d.pressure, Offered: d.offered,
-				}
-			}
+			dump.Trigger = opt.trigger
 		}
 		// The THREAD's stashed body (#423), not whichever thread of the session spoke last.
 		reply, usage, err = c.PrefixAsk.Ask(ctx, thread.Key(c.Session, c.Thread), askPrompt)
@@ -1479,13 +862,8 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		PromptTokens: int64(usage.Fresh), CompletionTokens: int64(usage.Output),
 		CacheRead: int64(usage.CacheRead), CacheWrite: int64(usage.CacheWrite),
 		CostUSD:    askCost,
-		GateReason: "pre-expiry window: the cache still exists and is nearly worthless",
+		GateReason: opt.gateReason,
 	}
-	// The no-asker path's fallback ran BEFORE this row existed, and the assignment above just
-	// overwrote the deferred fold's work-in-progress. Re-folded here rather than relying on the
-	// defer alone because the defer's ordering relative to this assignment is what makes that
-	// reliance fragile — and folding twice is free, since foldFallback reads the accumulators.
-	foldFallback()
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			atomic.AddInt64(&llmTimeouts, 1)
@@ -1493,31 +871,20 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 			atomic.AddInt64(&llmErrors, 1)
 		}
 	}
-	if !fellBack && err != nil {
+	if err != nil {
 		// A first turn has no stashed prefix, which arrives here as an error. Counted separately from
 		// a transport failure: one is "there was nothing to read yet", which every session does once
 		// and which needs no attention, and the other is "the read failed", which does.
 		if errors.Is(err, components.ErrNoPrefix) {
 			r.gate("sweep_no_prefix")
+			r.rec.Rejection = "no stashed prefix to ask through"
 		} else {
 			r.gate("sweep_ask_failed")
-			// The provider's error text otherwise survives only in r.rec.Rejection, which is set
-			// below ONLY when block_fallback declines — on the default path the error is folded
-			// into a fresh-priced fallback and never logged anywhere. Always WARN it: this is a
-			// degrade-but-keep-serving case (we fell open to the fallback, or declined), the
-			// vocabulary this codebase's logging doc reserves for WARN.
 			logging.From(c.Ctx).Warn("cg.sweep.ask_failed", "session", c.Session,
 				"gate", "sweep_ask_failed", "err", err)
+			r.rec.Rejection = "prefix ask failed: " + err.Error()
 		}
-		if e.effectiveBlockFallback(c) {
-			r.gate("sweep_fallback_blocked")
-			r.rec.Rejection = "prefix ask failed and block_fallback is set: " + err.Error()
-			return nil, r
-		}
-		if reply, err = runFallback(); err != nil {
-			return nil, r
-		}
-		fellBack = true
+		return nil, r
 	}
 	// THE CACHE READ IS THE MECHANISM'S WHOLE JUSTIFICATION, so a read that did not happen is always
 	// COUNTED — a silent miss is what hid this class of problem before, and it looks identical to a
@@ -1544,33 +911,23 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 	// it. A partial hit is not evidence of safety: the write is the harm, at 1.25x fresh on the
 	// AGENT's model rather than a tenth of it, and it is exactly what extract_econ.go cited when
 	// it rejected prefix reuse.
-	if !fellBack && (usage.CacheRead == 0 || usage.CacheWrite > 0) {
+	if usage.CacheRead == 0 || usage.CacheWrite > 0 {
 		if usage.CacheWrite > 0 {
 			r.gate("sweep_prefix_cache_write")
 		}
 		if usage.CacheRead == 0 {
 			r.gate("sweep_prefix_cache_read_ZERO")
 		}
-		if e.effectiveBlockFallback(c) {
-			r.gate("sweep_fallback_blocked")
-			// SAY WHICH FAILURE THIS WAS. The condition above now admits a partial hit that WROTE,
-			// and on such a call "read nothing from cache" is simply false -- CacheRead can be 39,805.
-			// This string is persisted to extraction_calls.rejection, which is the column the whole
-			// rejection taxonomy is built from and which has already been mis-analysed twice, so a
-			// wrong reason here becomes a wrong finding later.
-			why := "read nothing from cache"
-			if usage.CacheWrite > 0 {
-				why = "re-created the agent's prefix instead of reading it"
-			}
-			r.rec.Rejection = "the prefix ask " + why + " and block_fallback is set; " +
-				"declining rather than paying again for a full-price transcript read"
-			return nil, r
+		// SAY WHICH FAILURE THIS WAS. The condition admits a partial hit that WROTE, and on such a
+		// call "read nothing from cache" is simply false. This string is persisted to
+		// extraction_calls.rejection, so a wrong reason here becomes a wrong finding later.
+		why := "read nothing from cache"
+		if usage.CacheWrite > 0 {
+			why = "re-created the agent's prefix instead of reading it"
 		}
-		if reply, err = runFallback(); err != nil {
-			return nil, r
-		}
-		fellBack = true
-	} else if !fellBack {
+		r.rec.Rejection = "the prefix ask " + why + "; declining rather than acting on it"
+		return nil, r
+	} else {
 		r.event("sweep_prefix_cache_read_ok")
 	}
 	// HOW THE ANSWER ARRIVED: the proxy's structured-answer tool, or reply prose. Split because
@@ -1583,18 +940,17 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 	//
 	// Only for the PREFIX ask. The fallback calls Complete(), which has no tool to declare, so
 	// counting it as prose would report a shape that was never on offer.
-	if !fellBack {
-		if usage.ViaTool {
-			r.event("sweep_answered_via_tool")
-		} else {
-			r.event("sweep_answered_via_prose")
-		}
+	if usage.ViaTool {
+		r.event("sweep_answered_via_tool")
+	} else {
+		r.event("sweep_answered_via_prose")
 	}
 	for range items {
 		r.event("sweep_adjudicated")
 	}
 
 	verdicts, parsed := extract.ParseVerdicts(reply)
+	r.answered = parsed
 	if dump != nil {
 		dump.Reply, dump.ViaTool, dump.Parsed = reply, usage.ViaTool, parsed
 	}
@@ -1630,11 +986,7 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		// "the component sometimes acts and sometimes does not", when the real variable is whether
 		// the cache read happened. It is also how the goal-ordering fix in sweepIntent gets checked
 		// against real traffic rather than argued about.
-		if fellBack {
-			r.gate("sweep_fallback_kept_everything")
-		} else {
-			r.gate("sweep_kept_everything")
-		}
+		r.gate("sweep_kept_everything")
 		r.rec.Rejection = "adjudicated: keep everything"
 		return nil, r
 	}
@@ -1811,138 +1163,12 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 			// from "the ask returned ~1k output tokens" after the fact. Those imply different fixes.
 			"cache_read", usage.CacheRead, "fresh", usage.Fresh,
 			"cache_write", usage.CacheWrite, "output", usage.Output,
-			"cost_usd", askCost+fbCost,
+			"cost_usd", askCost,
 			"session", c.Session, "max_cached_idx", c.MaxCachedIdx,
 			"req_tokens", schema.MessagesTokens(req), "messages", len(req.Input))
 	}
 	return drop, r
 }
-
-// fallbackAsk is the EXPENSIVE path: a self-contained completion carrying a bounded sample of every
-// candidate, for when the prefix ask could not read the cache.
-//
-// It goes to the REQUEST's own model, the same one the prefix ask would have addressed. Not a cheap
-// one: the measurement that chose this model is about faithful quoting, not about caching — verbatim
-// quoting degraded to 20.8% on the cheap model against 0 of 59 on the request model — and a fabricated
-// quote is the only remaining signal that the model is inventing. That reason survives the loss of the
-// cache read intact, so the fallback must not quietly downgrade the judge as well as the prompt.
-//
-// The reply budget is raised through components.Budgeter where the client supports it, for the same
-// reason the prefix ask raises it: one reply carries a verdict for every candidate.
-// It returns its OWN usage and wall time so the caller can price it. `model.Complete` reports
-// neither, so the usage is read from a per-call cheapmodel sink nested inside whatever scope already
-// wraps ctx — the same construction extract_llm uses to attribute one call. The sink also reaches
-// every ancestor, so the request's own bill does not lose these tokens.
-func (e *ExtractSweep) fallbackAsk(ctx context.Context, req *bschemas.BifrostChatRequest,
-	c *components.Ctx, r *sweepResult, items []extract.AdjudicationItem,
-	cands []sweepCand) (string, components.PrefixUsage, float64, error) {
-	model := c.Model.For("incoming")
-	if model == nil {
-		r.gate("sweep_fallback_no_model")
-		r.rec.Rejection = "the prefix ask could not read the cache and no request model is available"
-		return "", components.PrefixUsage{}, 0, errNoFallbackModel
-	}
-	if b, ok := model.(components.Budgeter); ok {
-		if m := b.WithMaxTokens(cheapmodel.PrefixAskMaxTokens); m != nil {
-			model = m
-		}
-	}
-	// The samples are attached HERE and nowhere else, which is what keeps content off the prefix-ask
-	// path by construction rather than by care.
-	withSamples := make([]extract.AdjudicationItem, len(items))
-	for i, it := range items {
-		it.Sample = extract.ClipSample(cands[it.Label].content, extract.FallbackSampleChars)
-		withSamples[i] = it
-	}
-	r.event("sweep_fallback_used")
-	ctx, sink := cheapmodel.WithCallSink(ctx)
-	start := time.Now()
-	reply, err := model.Complete(ctx, extract.BuildFallbackAsk(sweepIntent(req), withSamples))
-	ms := float64(time.Since(start).Milliseconds())
-	// Read the sink whatever happened: a completion that failed after the provider billed it still
-	// cost money, and returning zeros there is how spend goes missing.
-	_, inTok, outTok := sink.Totals()
-	cw, cr := sink.CacheTotals()
-	u := components.PrefixUsage{Fresh: int(inTok), Output: int(outTok),
-		CacheWrite: int(cw), CacheRead: int(cr)}
-	if err != nil {
-		r.gate("sweep_fallback_failed")
-		r.rec.Rejection = "fallback completion failed: " + err.Error()
-		return "", u, ms, err
-	}
-	return reply, u, ms, nil
-}
-
-// sweepIntent renders the conversation's intent for a SPENT-NESS judgement, which wants it ordered
-// differently from every other component's relevance question.
-//
-// conversationGoal joins firstUser, lastAsst, lastUser in that order, unlabelled. That is right for
-// extract_llm, which asks "is this output relevant to the task" — the opening instruction IS the
-// task. It is wrong here, and measurably so. This component asks whether an output is SPENT, and the
-// opening instruction describes what the session set out to do, which is precisely what may now be
-// finished. Leading with it makes everything look needed.
-//
-// MEASURED, on two near-identical transcripts with twelve candidates each: the prefix ask dropped
-// 12 of 12, while the fallback — same content, goal-string only — kept 12 of 12 and cited the
-// original read instruction as the obligation for every one. See #125. The fallback has no
-// transcript by construction, so it cannot see that the task closed; the goal string is the only
-// place that can tell it.
-//
-// So: same three parts, ordered current-FIRST and LABELLED, with the original instruction explicitly
-// marked as possibly already satisfied. The parts map onto the contract's own criteria — (a) the
-// current step, (b) an unfinished user instruction, (c) a next step the agent stated — rather than
-// arriving as one undifferentiated blob the model has to guess the structure of.
-//
-// The original instruction is kept rather than dropped, deliberately: criterion (b) is an unfinished
-// USER instruction, and a standing "…and summarise all of them at the end" lives in exactly that
-// message. Removing it would trade a bias toward keeping for a bias toward dropping, which is the
-// direction that loses content the agent still needs.
-func sweepIntent(req *bschemas.BifrostChatRequest) string {
-	var firstUser, lastUser, lastAsst string
-	for i := range req.Input {
-		if req.Input[i].Role == bschemas.ChatMessageRoleUser {
-			firstUser = strings.TrimSpace(schema.MessageText(req.Input[i]))
-			break
-		}
-	}
-	for i := len(req.Input) - 1; i >= 0; i-- {
-		switch req.Input[i].Role {
-		case bschemas.ChatMessageRoleUser:
-			if lastUser == "" {
-				lastUser = strings.TrimSpace(schema.MessageText(req.Input[i]))
-			}
-		case bschemas.ChatMessageRoleAssistant:
-			if lastAsst == "" {
-				lastAsst = strings.TrimSpace(schema.MessageText(req.Input[i]))
-			}
-		}
-		if lastUser != "" && lastAsst != "" {
-			break
-		}
-	}
-	var b strings.Builder
-	add := func(label, text string) {
-		if text == "" {
-			return
-		}
-		b.WriteString(label)
-		b.WriteString("\n")
-		b.WriteString(text)
-		b.WriteString("\n\n")
-	}
-	add("MOST RECENT USER TURN — this is the step the agent is on now:", lastUser)
-	add("THE AGENT'S OWN LAST STATEMENT — any next step it named is an obligation:", lastAsst)
-	// Last, and flagged. Its position in the prompt is the fix.
-	if firstUser != "" && firstUser != lastUser {
-		add("THE SESSION'S ORIGINAL INSTRUCTION — MAY ALREADY BE SATISFIED; treat it as an "+
-			"obligation only if some part of it is still outstanding:", firstUser)
-	}
-	return clipRunes(strings.TrimSpace(b.String()), goalCap)
-}
-
-// errNoFallbackModel is returned when the fallback has nowhere to go. Its own type so the caller can
-// distinguish "we chose not to" from "we could not".
-var errNoFallbackModel = errors.New("no request model for the sweep fallback")
 
 // flattenTranscript renders the agent's own text as one string, for verifying an obligation quote.
 // Every text block of every message, tool results included: an obligation can be created by a user
@@ -1964,27 +1190,16 @@ func init() {
 		{Key: "min_tokens", Type: components.FieldInt, Default: defaultSweepFloor, Min: 1,
 			Hint: "Per-output floor for naming a candidate in the inventory. NOTE this no longer has to price a drop as well: selectAffordableDrops decides which votes are worth their cache-write, on DEPTH relative to the rest of the batch rather than on size, so a low floor is safe on the econ path. Measured on iteration 022, a floor of 1000 named 4.5 of the 23.6 tool outputs a request carried and held the batch at 4.4 against a cap of 12, while a floor of 100 reaches 11.6 for 8% more mass -- candidates are nearly free (one inventory line) and are the axis the mechanism lives on. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 the shipped preset produced ZERO extractions across 3,437 production requests."},
 		{Key: "min_inventory", Type: components.FieldInt, Default: defaultMinInventory, Min: 1,
-			Hint: "Fewest candidates worth asking about; below it the sweep declines without asking. The model's judgement is a function of how many candidates it COMPARES, and the numbers are far apart: shown one output it scored 6% live-kept on haiku and 14% on sonnet, both inside the drop-everything null model's error bar, while ~15 together reached 58% at the lowest cost per output. At batch 3-6 it dropped a genuinely-spent output 2 times in 4; at 10, 4 in 4. Below the floor a removal is a guess, and a wrong removal costs content the agent still needs while a wrong keep costs one turn's tokens. Lower it only to trade that asymmetry away deliberately."},
-		{Key: "pre_expiry_seconds", Type: components.FieldInt, Default: int(defaultPreExpiry / time.Second),
-			Hint: "How long before the prompt cache's believed expiry the sweep may fire. The window is where BOTH halves are cheap: the ask still reads a live cache, and the prefix it invalidates has little life left. The TTL itself is read from the request, never assumed. This WIDTH is the component's one unmeasured number — wider fires more often and invalidates more remaining TTL, narrower fires rarely, and nothing measures either side."},
-		{Key: "block_fallback", Type: components.FieldBool,
-			Hint: "Decline instead of falling back when the prefix ask could not read the cache. Unset defers to the process log level: at CG_LOG_LEVEL=debug the effective value is true (the fallback's failure reason is otherwise only recorded when declining, which made debug lose the one piece of evidence it exists to show); below debug, unset = FALSE and the fallback asks again with a bounded sample of each output copied into the prompt, keeping the component working on a session's first turn and whenever a cache entry has gone — but paying fresh for content the cached path reads for a tenth of the price. Writing `false` explicitly is NOT the same as leaving it unset: an explicit value, either way, always wins over the debug default. Set true where the bill matters more than the removal. The miss is counted either way, and now also logged at WARN regardless of this setting."},
-		{Key: "evidence", Type: components.FieldBool,
-			Hint: "Add the co-reference index's record (novel/refs/ref_age/used_frac/later_turns and the index's own verdict) to each candidate's inventory line. Unset = FALSE. It is EVIDENCE the model weighs, never a filter over the candidates: a co-reference PRE-FILTER left about one candidate per request, which silently turned a bulk arm into the per-output shape refuted at 6% live-kept and meant the model only ever saw what the index had already judged spent — destroying the veto on the index's blind spot that the mechanism exists to provide. Enabling this also adds a paragraph to the adjudication contract teaching how to read the counters; a prompt carrying counters it never explains is worse than one carrying neither."},
-		{Key: "econ_trigger", Type: components.FieldBool,
-			Hint: "Add the ECONOMIC trigger alongside the pre-expiry window: sweep a LIVE cached prefix when the removal's saving, collected over the turns estimated to remain, exceeds the cache-write it forces (S*T > 11.5*W). Unset = FALSE, because it deliberately invalidates a prefix the provider still holds. The two triggers are OR'd and neither contains the other — pre-expiry fires on the clock and cannot reach a session whose cache keeps being refreshed, which is the long run with the most to save; econ fires on mass and cannot know how much time is left. S is the inventory's whole mass and so an upper bound on the batch's real saving; read prefix_rewrite_repaid / prefix_rewrite_not_repaid rather than assuming a fired trigger banked anything. The adjudication's own price and a measured approval rate are now BOTH terms in that test -- see econ_ignore_ask_cost for what happens without them."},
+			Hint: "Fewest candidates worth asking about; below it the sweep does not ask. Default 1: the question replaces a keep-alive ping, so the cache read is already paid for and a small inventory costs a small answer. Earlier measurement put the model's judgement at small inventories poor (shown one output it scored 6% live-kept on haiku and 14% on sonnet, inside the drop-everything null model's error bar; at batch 3-6 it dropped a genuinely-spent output 2 times in 4, at 10 4 in 4). A held answer is rechecked before anything is dropped, and shadow mode measures the real drop and false-drop rates. Raise it to bring the old floor of 10 back."},
+		{Key: "evidence", Type: components.FieldBool, Default: true,
+			Hint: "Add the co-reference index's record (novel/refs/ref_age/used_frac/later_turns and the index's own verdict) to each candidate's inventory line. Default TRUE: about 500 extra input tokens per question, under $0.003. It is EVIDENCE the model weighs, never a filter over the candidates: a co-reference PRE-FILTER left about one candidate per request, which silently turned a bulk arm into the per-output shape refuted at 6% live-kept and meant the model only ever saw what the index had already judged spent — destroying the veto on the index's blind spot that the mechanism exists to provide. Enabling this also adds a paragraph to the adjudication contract teaching how to read the counters; a prompt carrying counters it never explains is worse than one carrying neither. Write false to get the old prompt."},
+		{Key: "shadow", Type: components.FieldBool,
+			Hint: "Shadow mode. Unset = FALSE, and not in any preset. The sweep still asks at the keep-alive ping and holds the answer, and on the next COLD request it rechecks the held answer and reports what it WOULD drop: sweep_shadow_asked, sweep_shadow_proposed, sweep_shadow_valid, and sweep_shadow_dropped_<reason> events, plus a cg.sweep.shadow log line. It changes no request. Use it to measure the drop share and the false-drop rate before the cold apply is switched on."},
 		{Key: "min_later_turns", Type: components.FieldInt, Min: 0,
 			Hint: "Per-candidate OPPORTUNITY FLOOR: do not offer an output with fewer than this many model turns after it. Unset = 0 = off. Such an output has not yet had the chance to be superseded, so \"still needed\" is the only answer the adjudicator can give and it is not evidence about whether the output is spent. This is not the refuted pre-filter: it carries no verdict, it says the question is premature. 8 mirrors coref's min_later_turns, which exists for the same reason. It matters because the ECONOMIC trigger fires most eagerly exactly where the question is least answerable -- measured, the first ask of a session landed on a 2,621-token transcript with 88% of it candidate output, no cached prefix to rewrite and 70 projected turns to collect over, clearing the break-even by 3.3x at 4% context pressure, and removing nothing. Those are the ask ledger's warm-up samples. Read sweep_candidate_too_new against sweep_offered before trusting a value: on all-recent transcripts it can empty the inventory, which is correct rather than broken."},
-		{Key: "reward_premium", Type: components.FieldFloat, Min: 1,
-			Hint: "How much a REMOVED TOKEN is worth relative to the cache read it saves — the only term in the break-even that is a belief rather than a measurement. Unset = 1 = the unadjusted arithmetic. Raise it when a removal is worth more to you than the reads it avoids, and be able to say why: on iteration 024 this component spent $20.26 to bank $0.72 of cache savings, 28:1 against, while task accuracy rose 0.486 -> 0.608 with 8 tasks better and 0 worse (clustered p = 0.0078). Sizing a premium to reproduce that run's firings lands on the same 28 independently. 20 is the rounder, weaker claim and behaves the same (53% of that run's removal value either way). Values below 1 are REFUSED: they assert a removal is worth less than the read it saves, which nothing measured supports and which tightens a gate already 5x too tight — priced correctly, the shipped break-even authorises 19% of the removal value that produced iteration 024's reward result. Above 100 is refused as a typo. IT CANNOT RESCUE A ZERO HORIZON: with no turns left, ceil(need/premium) >= 1 > 0 refuses at any premium, which is why this pairs with the horizon crediting its own removal (#232). Read `premium` on cg.sweep.econ to re-price a run's declines without re-running it.",
-		},
 		{Key: "keep_recheck_turns", Type: components.FieldInt, Min: 0,
 			Hint: "How many model turns must pass before re-offering a candidate the adjudicator already judged STILL NEEDED. Unset = 0 = off, which re-offers and re-pays for every candidate every turn. Measured on one probe pass: SEVEN of ten adjudications were the same five candidates at the same 41,453 tokens, kept every time — 70% of that pass's adjudication spend buying a verdict already given, because drops are frozen and replayed through cg:res: while keeps were forgotten. DO NOT SET IT LARGE, and do not reach for \"cache the keep forever\": \"still needed\" is a judgement about the conversation's current obligations, not a property of the bytes, so suppressing the question for too long makes a candidate judged needed once unreachable for the rest of the session — which disables the component for precisely the outputs it most wants and reads in the counters as an inventory that quietly shrank rather than as a component that stopped asking. Counted in TURNS, not seconds, because what changes whether an output is spent is the agent doing more work. A transcript that got SHORTER behind an output (agent-side compaction, a rewind) invalidates the record rather than extending it. Read sweep_keep_still_held against sweep_offered.",
 		},
-		{Key: "min_pressure", Type: components.FieldFloat, Min: 0,
-			Hint: "Request-level OPPORTUNITY FLOOR: the share of the model window a request must occupy before candidates are collected at all. Unset = 0 = off. The economic trigger is most eager exactly where its question is least answerable -- maximum projected turns, nothing cached to rewrite, and candidate mass a large fraction of a small transcript -- so without a floor the ask ledger's warm-up samples are drawn from the moment nothing has been superseded yet, and a low reading there suppresses the asks that would correct it. Measured across 18 probe asks: 0.10 blocks exactly the three uninformative early asks and costs 114 removed tokens; 0.20 blocks seven and costs 11,891; 0.70 blocks seventeen. Prefer the low end, and read sweep_below_min_pressure against sweep_offered on your own workload. Applies to both triggers, because a transcript too young for anything in it to be spent is too young regardless of why the sweep woke up."},
-		{Key: "econ_ignore_ask_cost", Type: components.FieldBool,
-			Hint: "Restore the econ trigger's original break-even, which weighed the cache-write against the whole candidate inventory and never charged the model call that decides what to remove. Unset = FALSE, i.e. the ask IS charged and the inventory IS discounted by the approval rate this component has measured for itself. Leaving both out authorised 9 adjudications in 9 on the iteration 025 pre-flight, six of which removed nothing, for $0.4339 spent against $0.0017 of value -- and the worst of it landed on the branch where every candidate sits past the cached boundary, so the rewrite is free and the ask is the ONLY cost, which the old test short-circuited past unconditionally. Set true only to attribute a run's difference to this change; read econ_ask_not_repaid against prefix_rewrite_not_repaid to see which cost is declining."},
 		markerModeField(),
 	})
 }

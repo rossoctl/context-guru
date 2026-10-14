@@ -656,3 +656,26 @@ func BenchmarkObserveLargeBody(b *testing.B) {
 		tr.Observe("t", "s", "", bschemas.Anthropic, body)
 	}
 }
+
+// OpenCounts is the keep-alive's read of the same open-task state Observe writes, taken between
+// requests when no body is at hand.
+func TestOpenCountsReadsWhatObserveWrote(t *testing.T) {
+	tr := New()
+	if bg, tm := tr.OpenCounts("t", "s", ""); bg != 0 || tm != 0 {
+		t.Fatalf("a thread never observed reports (%d, %d), want (0, 0)", bg, tm)
+	}
+	var nilTracker *Tracker
+	if bg, tm := nilTracker.OpenCounts("t", "s", ""); bg != 0 || tm != 0 {
+		t.Fatalf("a nil tracker reports (%d, %d), want (0, 0)", bg, tm)
+	}
+	body := anthropicBody(userText("go") + "," + assistantToolUse("toolu_m1", "Monitor", `{"command":"tail -f x","timeout_ms":600000}`) +
+		"," + userToolResult("toolu_m1", "Monitor started (task b1abc, timeout 600000ms). You will be notified on each event."))
+	obs := tr.Observe("t", "s", "", bschemas.Anthropic, body)
+	bg, tm := tr.OpenCounts("t", "s", "")
+	if bg != obs.OpenBackground || tm != obs.OpenTeammate {
+		t.Fatalf("OpenCounts (%d, %d) disagrees with Observe (%d, %d)", bg, tm, obs.OpenBackground, obs.OpenTeammate)
+	}
+	if bg2, _ := tr.OpenCounts("t", "s", "other-thread"); bg2 != 0 {
+		t.Fatal("another thread's open tasks leaked")
+	}
+}

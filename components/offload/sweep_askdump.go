@@ -47,16 +47,7 @@ type sweepAskDump struct {
 	Seq     int64  `json:"seq"`
 	Model   string `json:"model"`
 
-	// Econ is the decision that authorised paying for this ask, carried alongside so a judgement can be
-	// read against the economics that bought it rather than in isolation.
-	//
-	// A POINTER, so it is ABSENT rather than zero-valued when there was no econ decision. The pre-expiry
-	// trigger fires on the clock and never evaluates the break-even, so on those asks there is no need,
-	// no have and no premium — and a zero-valued block would read as "the premium was 0", which is a
-	// different and wrong statement. Absent-versus-zero has produced three separate misreadings in this
-	// component's history; this is the cheap place to refuse the ambiguity.
-	Econ *sweepAskDumpEcon `json:"econ,omitempty"`
-	// Trigger names which one fired, so an absent Econ block is explained rather than merely empty.
+	// Trigger names which one fired, (the keep-alive ping).
 	Trigger string `json:"trigger"`
 
 	// AskPrompt is the text appended to the cached prefix — verbatim, as sent. The prompt under
@@ -80,17 +71,6 @@ type sweepAskDump struct {
 	// the component DID, which is not always what the model said — a self-contradictory drop leaves the
 	// output in place, and that divergence is the interesting row.
 	Verdicts []sweepAskDumpVerdict `json:"verdicts"`
-}
-
-type sweepAskDumpEcon struct {
-	NeedTurns int     `json:"need_turns"`
-	HaveTurns int     `json:"have_turns"`
-	Premium   float64 `json:"premium"`
-	Approval  float64 `json:"approval"`
-	AskUSD    float64 `json:"ask_usd"`
-	ReqTokens int     `json:"req_tokens"`
-	Pressure  float64 `json:"pressure"`
-	Offered   int     `json:"offered_tokens"`
 }
 
 type sweepAskDumpCand struct {

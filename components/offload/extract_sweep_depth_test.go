@@ -55,7 +55,7 @@ func TestSweepOffersCandidatesInsideTheCachedPrefix(t *testing.T) {
 	// The boundary the regression tripped over: a live cached prefix covering most of the transcript.
 	c.MaxCachedIdx = 8
 	rep := components.Report{}
-	if _, err := e.Offload(req, &rep, c); err != nil {
+	if _, err := askOffload(e, req, &rep, c); err != nil {
 		t.Fatalf("offload: %v", err)
 	}
 
@@ -105,7 +105,7 @@ func TestSweepDeclinesBelowTheInventoryFloor(t *testing.T) {
 			e := newSweep(t, "") // min_inventory defaults to 10
 			c := preExpiryCtx("s-floor-"+tc.name, asker, store.NewMemory(store.Options{}))
 			rep := components.Report{}
-			if _, err := e.Offload(deepCandidates(tc.n), &rep, c); err != nil {
+			if _, err := askOffload(e, deepCandidates(tc.n), &rep, c); err != nil {
 				t.Fatalf("offload: %v", err)
 			}
 			asked := atomic.LoadInt64(&asker.calls) > 0
@@ -117,11 +117,11 @@ func TestSweepDeclinesBelowTheInventoryFloor(t *testing.T) {
 			// that is broken unless it says so — the failure mode that hid this component's own
 			// economic_gate blind spot and three vacuous trim tests before it.
 			if !tc.wantAsked {
-				if got := rep.Gates["sweep_inventory_below_min"]; got != tc.n {
-					t.Errorf("sweep_inventory_below_min = %d, want %d: a silent decline is "+
-						"indistinguishable from a broken component; gates=%v", got, tc.n, rep.Gates)
+				if got := rep.Gates["ping_not_offered_below_min_inventory"]; got != 1 {
+					t.Errorf("the decline at %d candidates was not counted (%d): a silent decline is "+
+						"indistinguishable from a broken component; gates=%v", tc.n, got, rep.Gates)
 				}
-			} else if rep.Gates["sweep_inventory_below_min"] != 0 {
+			} else if rep.Gates["ping_not_offered_below_min_inventory"] != 0 {
 				t.Errorf("the floor fired at %d candidates; gates=%v", tc.n, rep.Gates)
 			}
 		})
@@ -145,7 +145,7 @@ func TestSweepShipsTheWiresToolCallIDNotTheContentKey(t *testing.T) {
 	asker := &fakeAsker{reply: `[]`, cacheRead: 19595}
 	e := newSweep(t, "")
 	rep := components.Report{}
-	if _, err := e.Offload(req, &rep,
+	if _, err := askOffload(e, req, &rep,
 		preExpiryCtx("s-anchor", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatalf("offload: %v", err)
 	}
