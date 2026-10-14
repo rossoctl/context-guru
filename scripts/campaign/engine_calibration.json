@@ -1,0 +1,7 @@
+{
+ "benefit_scale": 0.948,
+ "ping_scale": 1.346,
+ "r2_net": 0.968,
+ "n_plans": 40,
+ "fit": "replay net = benefit_scale * closed-form benefit - ping_scale * closed-form ping cost, least squares over 40 uniform plans"
+}
