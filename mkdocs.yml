@@ -109,7 +109,8 @@ nav:
           - Waste: plugin/waste.md
           - Session: plugin/session.md
           - Doctor: plugin/doctor.md
-          - Adapt: plugin/adapt.md
+          - Save more: plugin/save-more.md
+          - Remove MCP servers and skills: plugin/remove-mcp-and-skills.md
           - Terminal views: plugin/terminal-views.md
           - Status line: plugin/statusline.md
           - Configuration and troubleshooting: plugin/configuration.md

@@ -92,6 +92,12 @@
    "name": "release-notes",
    "usd": 0.2,
    "last_used_ms": null
+  },
+  {
+   "kind": "tool",
+   "name": "Read",
+   "usd": 9.9,
+   "last_used_ms": null
   }
  ],
  "recommendation": {
@@ -99,10 +105,39 @@
   "change": "filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more",
   "net_delta_usd": 31.4,
   "effective": "now",
-  "reason": "declared in 5+ sessions over 7+ days and never called"
+  "reason": "declared in 5+ sessions over 7+ days and never called",
+  "per_week_usd": 7.33,
+  "items_n": 6,
+  "ci95": [
+   6.1,
+   8.4
+  ]
  },
  "warnings": [
   "Unused means unused in this window, not that it will never be needed.",
   "Filtering changes the cached prefix, so the next request re-writes it once; that cost is not included."
+ ],
+ "to_date": {
+  "saved_usd": 4.2,
+  "since": 1789486200000,
+  "until": 1791473400000,
+  "class": "measured",
+  "items": 2
+ },
+ "removed": [
+  {
+   "kind": "mcp_server",
+   "name": "jira",
+   "since_ms": 1789486200000,
+   "saved_usd": 3.1,
+   "requests": 812
+  },
+  {
+   "kind": "skill",
+   "name": "old-release",
+   "since_ms": 1789486200000,
+   "saved_usd": 1.1,
+   "requests": 812
+  }
  ]
 }

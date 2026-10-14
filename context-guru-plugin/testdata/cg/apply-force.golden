@@ -1,2 +1,2 @@
 Applied: The plan is live although the go-live check did not pass (takes effect now).
-Undo: /context-guru:adapt apply cache default@77b0c2e1
+Undo: /context-guru:save-more apply cache default@77b0c2e1

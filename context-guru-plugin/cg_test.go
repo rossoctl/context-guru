@@ -66,6 +66,10 @@ func cgProxyStub(t *testing.T, cache string) string {
 	mux.HandleFunc("POST /api/adapt/compaction/apply", func(w http.ResponseWriter, r *http.Request) {
 		var b struct{ Option, Basis string }
 		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
+		if b.Option == "medium" && b.Basis == "a1b2c3d4" {
+			w.Write([]byte(`{"ok":true,"kind":"compaction","applied":"medium","previous":"current","effective":"now","note":"preset set to medium","undo":{"option":"revert"}}`))
+			return
+		}
 		if b.Option != "revert" || b.Basis != "" {
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(`{"error":"want a bare revert"}`))
@@ -143,7 +147,7 @@ func runCGCode(t *testing.T, base string, env []string, args ...string) (string,
 		"--now", "2026-10-08T15:30:00Z", "--tz-offset-min", "0")...)...)
 	cfg := t.TempDir()
 	os.WriteFile(filepath.Join(cfg, "settings.json"), []byte(`{"statusLine":{"type":"command","command":"python3 x/statusline.py","refreshInterval":5}}`), 0o644) //nolint:errcheck
-	cmd.Env = append(os.Environ(), "NO_COLOR=1", "CLAUDE_CONFIG_DIR="+cfg, "CLAUDE_CODE_SESSION_ID=session-A",
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "COLUMNS=100", "CG_ASCII=", "CLAUDE_CONFIG_DIR="+cfg, "CLAUDE_CODE_SESSION_ID=session-A",
 		"ANTHROPIC_BASE_URL="+base+"/anthropic", "TZ=UTC")
 	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()
@@ -189,25 +193,30 @@ func TestCGGoldens(t *testing.T) {
 		{"waste", warm, []string{"waste"}, 0},
 		{"session", warm, []string{"session"}, 0},
 		{"doctor", warm, []string{"doctor"}, 0},
-		{"adapt", warm, []string{"adapt"}, 0},
-		{"adapt-cache", warm, []string{"adapt", "cache"}, 0},
-		{"adapt-cache-details", warm, []string{"adapt", "cache", "details"}, 0},
-		{"adapt-tools", warm, []string{"adapt", "tools"}, 0},
-		{"adapt-apply", warm, []string{"apply", "cache", "adaptive@3f9a1c"}, 0},
-		{"adapt-apply-stale", warm, []string{"apply", "cache", "adaptive@000000"}, 1},
-		{"adapt-apply-async", warm, []string{"apply", "tools", "remove-sufficient@8c21e0d4"}, 0},
-		{"adapt-apply-under-adapt", warm, []string{"adapt", "cache", "apply", "adaptive@3f9a1c"}, 1},
-		{"adapt-revert-under-adapt", warm, []string{"adapt", "revert", "compaction"}, 1},
-		{"adapt-revert-kind-first", warm, []string{"compaction", "revert"}, 1},
-		{"adapt-revert-under-cache", warm, []string{"cache", "revert"}, 1},
-		{"adapt-compaction", warm, []string{"adapt", "compaction"}, 0},
-		{"adapt-compaction-details", warm, []string{"adapt", "compaction", "details"}, 0},
-		{"adapt-revert", warm, []string{"revert", "compaction"}, 0},
-		{"adapt-revert-nothing", warm, []string{"revert", "tools"}, 1},
-		{"adapt-apply-gate", warm, []string{"apply", "cache", "by-segment@3f9a1c"}, 1},
-		{"adapt-apply-force", warm, []string{"apply", "cache", "by-segment@3f9a1c", "--force"}, 0},
-		{"adapt-apply-any-order", warm, []string{"apply", "adaptive@3f9a1c", "cache"}, 0},
-		{"adapt-apply-unknown", warm, []string{"apply", "cache", "nonsense"}, 1},
+		{"save-more", warm, []string{"save-more"}, 0},
+		{"save-more-config", warm, []string{"save-more", "config"}, 0},
+		{"save-more-config-details", warm, []string{"save-more", "config", "details"}, 0},
+		{"save-more-cache", warm, []string{"save-more", "cache"}, 0},
+		{"save-more-cache-details", warm, []string{"save-more", "cache", "details"}, 0},
+		{"remove-mcp-and-skills", warm, []string{"remove-mcp-and-skills"}, 0},
+		{"remove-mcp-and-skills-details", warm, []string{"remove-mcp-and-skills", "details"}, 0},
+		{"adapt-redirect", warm, []string{"adapt", "tools"}, 0},
+		{"apply-config", warm, []string{"apply", "config", "medium@a1b2c3d4"}, 0},
+		{"apply-cache", warm, []string{"apply", "cache", "adaptive@3f9a1c"}, 0},
+		{"apply-stale", warm, []string{"apply", "cache", "adaptive@000000"}, 1},
+		{"apply-tools-async", warm, []string{"apply", "tools", "remove-sufficient@8c21e0d4"}, 0},
+		{"apply-under-read", warm, []string{"save-more", "cache", "apply", "adaptive@3f9a1c"}, 1},
+		{"revert-under-read", warm, []string{"save-more", "revert", "config"}, 1},
+		{"revert-kind-first", warm, []string{"config", "revert"}, 1},
+		{"revert-under-cache", warm, []string{"cache", "revert"}, 1},
+		{"revert-under-remove", warm, []string{"remove-mcp-and-skills", "revert"}, 1},
+		{"revert-config", warm, []string{"revert", "config"}, 0},
+		{"revert-old-name", warm, []string{"revert", "compaction"}, 0},
+		{"revert-nothing", warm, []string{"revert", "tools"}, 1},
+		{"apply-gate", warm, []string{"apply", "cache", "by-segment@3f9a1c"}, 1},
+		{"apply-force", warm, []string{"apply", "cache", "by-segment@3f9a1c", "--force"}, 0},
+		{"apply-any-order", warm, []string{"apply", "adaptive@3f9a1c", "cache"}, 0},
+		{"apply-unknown", warm, []string{"apply", "cache", "nonsense"}, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			out, code := runCGCode(t, c.base, nil, c.args...)
@@ -241,15 +250,19 @@ func TestCGNoProxy(t *testing.T) {
 	}
 }
 
-// The adapt skill pre-approves only the read. The write is a separate top-level command, so Claude Code asks
-// the user for permission to run it: a second gate behind the skill's own yes/no question.
+// The save-more, remove-mcp-and-skills and adapt skills pre-approve only their read. A change is a separate
+// top-level command, so Claude Code asks the user for permission to run it: a second gate behind the skill's
+// own yes/no question. No read command writes, whatever words follow it.
 func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
-	body := readFileString(t, filepath.Join("skills", "adapt", "SKILL.md"))
-	if !strings.Contains(body, "allowed-tools: Bash(python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/cg.py\" adapt:*)\n") {
-		t.Error("adapt must pre-approve exactly `cg.py adapt:*`, not every cg.py command")
+	for _, c := range []string{"save-more", "remove-mcp-and-skills", "adapt"} {
+		body := readFileString(t, filepath.Join("skills", c, "SKILL.md"))
+		if !strings.Contains(body, "allowed-tools: Bash(python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/cg.py\" "+c+":*)\n") {
+			t.Errorf("%s must pre-approve exactly its own read, `cg.py %s:*`", c, c)
+		}
 	}
 	base := cgProxyStub(t, "cachestate_warm")
-	for _, args := range [][]string{{"adapt", "cache", "apply", "adaptive@3f9a1c"}, {"adapt", "apply", "cache", "adaptive@3f9a1c"}} {
+	for _, args := range [][]string{{"adapt", "cache", "apply", "adaptive@3f9a1c"}, {"save-more", "apply", "cache", "adaptive@3f9a1c"},
+		{"save-more", "revert", "config"}, {"remove-mcp-and-skills", "apply", "tools", "remove-sufficient@8c21e0d4"}} {
 		if out, code := runCGCode(t, base, nil, args...); code == 0 || strings.Contains(out, "Applied") {
 			t.Errorf("%v must not write (it is inside the pre-approved prefix): exit %d\n%s", args, code, out)
 		}
@@ -261,7 +274,7 @@ func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
 // `cg.py apply` and `cg.py revert` while that skill is active, and skip the harness's permission prompt.
 // Codex skills pre-approve nothing, and every write they run asks for escalation.
 func TestNoSkillPreApprovesAChange(t *testing.T) {
-	reads := map[string]bool{"adapt": true, "cache-campaign": true}
+	reads := map[string]bool{"adapt": true, "save-more": true, "remove-mcp-and-skills": true, "cache-campaign": true}
 	for _, c := range []string{"home", "savings", "cache", "waste", "session", "doctor"} {
 		reads[c] = true
 	}
@@ -338,7 +351,7 @@ func TestAdaptSendsTheTokenOnlyOnAdapt(t *testing.T) {
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go srv.Serve(ln) //nolint:errcheck
 	t.Cleanup(func() { srv.Close() })
-	for _, args := range [][]string{{"adapt", "tools"}, {"savings"}} {
+	for _, args := range [][]string{{"remove-mcp-and-skills"}, {"savings"}} {
 		cmd := exec.Command("python3", append([]string{filepath.Join("scripts", "cg.py")}, args...)...)
 		cmd.Env = append(os.Environ(), "CG_URL=http://"+ln.Addr().String(), "ANTHROPIC_BASE_URL=", "CG_TOKEN=", "ANTHROPIC_AUTH_TOKEN=cg_live_test")
 		cmd.CombinedOutput() //nolint:errcheck
@@ -348,6 +361,38 @@ func TestAdaptSendsTheTokenOnlyOnAdapt(t *testing.T) {
 	}
 	if v, ok := got["/api/stats"]; ok && v != "" {
 		t.Errorf("a read screen sent the token %q", v)
+	}
+}
+
+// The save-more screens fit an 80-column terminal in ASCII, and colour only repeats what the glyphs say:
+// with the escapes stripped, a coloured screen is the plain one. The lines meant to be run are never wrapped.
+func TestSaveMoreWidthASCIIAndColour(t *testing.T) {
+	base := cgProxyStub(t, "cachestate_warm")
+	for _, c := range []string{"save-more", "remove-mcp-and-skills"} {
+		out, _ := runCGCode(t, base, []string{"CG_ASCII=1", "COLUMNS=80"}, c)
+		if c == "save-more" {
+			cgGolden(t, "save-more-ascii-80", out)
+		}
+		for _, ln := range strings.Split(out, "\n") {
+			run := strings.Contains(ln, "/context-guru:")
+			if !run && len([]rune(ln)) > 79 {
+				t.Errorf("%s: line wider than 80 columns: %q", c, ln)
+			}
+			for _, r := range ln {
+				if r > 127 {
+					t.Errorf("%s: non-ASCII %q in ASCII mode: %q", c, r, ln)
+					break
+				}
+			}
+		}
+		plain, _ := runCGCode(t, base, nil, c)
+		colour, _ := runCGCode(t, base, []string{"NO_COLOR=", "FORCE_COLOR=1"}, c)
+		if !strings.Contains(colour, "\x1b[") {
+			t.Errorf("%s: FORCE_COLOR gave no colour", c)
+		}
+		if got := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(colour, ""); got != plain {
+			t.Errorf("%s: colour changes the text, not only its colour", c)
+		}
 	}
 }
 
@@ -372,7 +417,9 @@ func TestDocsExamplesAreTheGoldens(t *testing.T) {
 	for golden, page := range map[string]string{
 		"home": "status", "savings": "savings", "cache-warm": "cache", "cache-cold": "cache",
 		"waste": "waste", "session": "session", "doctor": "doctor",
-		"adapt": "adapt", "adapt-cache": "adapt", "adapt-tools": "adapt", "adapt-apply": "adapt", "adapt-apply-stale": "adapt", "adapt-apply-async": "adapt",
+		"save-more": "save-more", "save-more-ascii-80": "save-more", "apply-config": "save-more", "revert-config": "save-more",
+		"apply-gate": "save-more",
+		"remove-mcp-and-skills": "remove-mcp-and-skills", "apply-tools-async": "remove-mcp-and-skills",
 	} {
 		g := strings.TrimRight(string(cgRead(t, "cg", golden+".golden")), "\n")
 		b, err := os.ReadFile(filepath.Join("..", "docs", "plugin", page+".md"))

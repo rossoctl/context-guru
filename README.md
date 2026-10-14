@@ -95,30 +95,42 @@ Each command opens with one line that answers its question, then a small picture
 | `/context-guru:waste` | What do I carry and never use? | 6 things you carry were never used: $37.70 in 7 days, about $161.57 a month. |
 | `/context-guru:session` | What happened in this session? | In the last 4 hours of this session (9h20m long), cache misses cost you about $4.20 of the $13.50 billed (2 misses in 31 messages). |
 | `/context-guru:doctor` | Is it set up right? | All 7 checks pass. |
-| `/context-guru:adapt` | Which setting would have cost least on my history? | The best single change would have saved $12.40 over the last 30 days. |
+| `/context-guru:save-more` | Which config and keep-alive strategy would have cost least on my history? | So far: your current config saved $9.40 in 30 days (observed). |
+| `/context-guru:remove-mcp-and-skills` | Which MCP servers and skills do I never use? | So far: the 2 items you already removed saved $4.20 (measured, since 2026-09-15). |
 
-### Adapt the settings to how you work
+### Save more, from your own history
 
-`/context-guru:adapt` replays your own past sessions under each setting, shows the current, default and best
-side by side (saved, spent and net dollars), and offers one change, which it makes only after you say yes:
+`/context-guru:save-more` replays your past sessions under every config Context Guru ships and every keep-alive
+strategy, says in plain words what your current setting saved so far and what the best change would add, and
+applies it only after you say yes. `/context-guru:remove-mcp-and-skills` does the same for MCP servers and skills
+you carry and never use (built-in tools are never listed).
 
-| Subcommand | Tunes |
+| Command | Does |
 |---|---|
-| `/context-guru:adapt cache` | the cache keep-alive strategy |
-| `/context-guru:adapt compaction` | the tail-compaction configuration |
-| `/context-guru:adapt tools` | MCP servers, skills and tools you carry but never use |
-| `/context-guru:adapt revert <kind>` | undo the last change `adapt` made for that kind |
+| `/context-guru:save-more` | config and cache together, one question at the end |
+| `/context-guru:save-more config` | every shipped preset; `--custom` also searches component combinations |
+| `/context-guru:save-more cache` | every keep-alive strategy, with a day-by-hour view |
+| `/context-guru:remove-mcp-and-skills` | unused MCP servers, MCP tools and skills, and what earlier removals saved |
+| `... revert <config\|cache\|tools>` | undo the last change made there |
 
 ```
-Cache: switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
+╭─ Save more: cache ──────────────────────────────────────────────────────────────────────────────╮
+│ So far: your current keep-alive strategy saved $31.10 in 30 days (observed).                    │
+│ Change: cache strategy 5-min-ping -> adaptive would add about $2.89 a week (likely $0.72 to     │
+│ $4.90).                                                                                         │
+│ Before -> after: $300.00 billed on these sessions, $287.00 with the change.                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
+  best vs default +$12.40 (likely $3.10 to $21.00)  ·  best vs current +$12.40 (likely $3.10 to
+  $21.00)
 
-                           saved  spent     net
-  ▸  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░  current, default
-  ★  Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████  best
-     No pings                 $0     $0      $0  ░░░░░░░░░░░░
+      option                            saved  spent     net
+  ★   adaptive    Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████
+  ▸◦  5-min-ping  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░
 ```
 
-(Illustrative numbers.) Codex: `$context-guru-adapt cache`. Reference: [docs/plugin/adapt.md](docs/plugin/adapt.md).
+(Illustrative numbers.) Codex: `$context-guru-save-more`, `$context-guru-remove-mcp-and-skills`. Reference:
+[docs/plugin/save-more.md](docs/plugin/save-more.md). `/context-guru:adapt` from 0.6 still works for one release.
 
 Five more views draw in the terminal (`watch`, `timeline`, `chart`, `heatmap`, `fill`).
 

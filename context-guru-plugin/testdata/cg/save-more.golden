@@ -1,0 +1,69 @@
+╭─ Save more: config ─────────────────────────────────────────────────────────────────────────╮
+│ So far: your current config saved $9.40 in 30 days (observed).                              │
+│ Change: preset conservative -> medium would add about $1.49 a week (likely $0.40 to $2.70). │
+╰─────────────────────────────────────────────────────────────────────────────────────────────╯
+medium would have saved $6.40 more than your current conservative preset on the requests that could
+be replayed.
+
+     option                                       saved  spent      net
+  ★  medium        + cheap-model relevance pass  $17.90  $2.10  ≈$15.80  ████████████
+     high          + summary near a full window  $18.40  $3.50  ≈$14.90  ███████████░
+  ▸  current       Your config (conservative)     $9.60  $0.20    $9.40  ███████░░░░░
+  ◦  conservative  Trim obvious waste             $9.60  $0.20    $9.40  ███████░░░░░
+     off           No compaction                     $0     $0       $0  ░░░░░░░░░░░░
+  ★ recommended   ▸ yours now   ◦ the default   ≈ partly estimated
+  1 more not evaluated: too few cold turns in the window to replay
+  saved: what it avoided paying · spent: what it paid itself · net = saved - spent, on your past
+  sessions
+
+  counterfactual · every shipped preset replayed on your stored requests · 2026-09-08..2026-10-08 ·
+  40 sessions, 3,100 requests
+  ! The replay covers 14% of requests; on the rest the presets were not compared.
+  ! medium and high include model components whose output is estimated, not re-run.
+
+Recommended: preset conservative -> medium (takes effect now).
+Why: highest net on your own sessions, after its own model spend
+Apply it? Say yes, or run: /context-guru:save-more apply config medium@a1b2c3d4
+
+╭─ Save more: cache ──────────────────────────────────────────────────────────────────────────────╮
+│ So far: your current keep-alive strategy saved $31.10 in 30 days (observed).                    │
+│ Change: cache strategy 5-min-ping -> adaptive would add about $2.89 a week (likely $0.72 to     │
+│ $4.90).                                                                                         │
+│ Before -> after: $300.00 billed on these sessions, $287.00 with the change.                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
+  best vs default +$12.40 (likely $3.10 to $21.00)  ·  best vs current +$12.40 (likely $3.10 to
+  $21.00)
+
+      option                            saved  spent     net
+  ★   adaptive    Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████
+  ▸◦  5-min-ping  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░
+      none        No pings                 $0     $0      $0  ░░░░░░░░░░░░
+  ★ recommended   ▸ yours now   ◦ the default
+  1 more not evaluated: too little history: 13 held-out sessions (need 20)
+  saved: what it avoided paying · spent: what it paid itself · net = saved - spent, on your past
+  sessions
+
+  What adaptive keep-alive adds over the default, by hour (UTC)
+        0     6     12    18   23
+  Mon   ░░░ ░░ ░░▒░░▒█░░▓█▓░░ ░░
+  Tue   ░░░░░░░░▓░░░▓▒▒▓▒▒█░░░░░
+  Wed   ░░░░░░░░░▓█▓█▒▓▓▓▒█░░░ ░
+  Thu   ░░░░░░ ░░░░█░▒▒█░▒▓░░░░░
+  Fri   ░░░░░░░░▓▒ ▒▒▓█▓▓▓▓ ░░░░
+  Sat   ░░░░  ░░░  ░░░ ░░░░░░░░░
+  Sun   ░░░░░░░░ ░░░░ ░░░░░░░░░░
+        ░ little   █ most (up to $0.38 in one hour slot)
+
+  counterfactual · replay of past sessions · 2026-09-08..2026-10-08 · 412 sessions, 18,301 requests
+  ! 31 sessions ended inside the window; their last gap is censored.
+
+Recommended: cache strategy 5-min-ping -> adaptive (takes effect at the next proxy restart).
+Why: it had the highest net on your own sessions
+Apply it? Say yes, or run: /context-guru:save-more apply cache adaptive@3f9a1c
+
+╭─ Save more: both ────────────────────────────────────────────────────────╮
+│ config  saved so far    $9.40   recommended change adds about $1.49/week │
+│ cache   saved so far   $31.10   recommended change adds about $2.89/week │
+╰──────────────────────────────────────────────────────────────────────────╯
+Question: apply both, only one of them, or neither?

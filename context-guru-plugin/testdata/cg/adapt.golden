@@ -1,8 +1,0 @@
-The best single change would have saved $31.40 over the last 30 days.
-
-  (each row is a separate change measured on its own; do not add them)
-  cache       $12.40  cache strategy 5-min-ping -> adaptive
-  compaction          no change recommended
-  tools       $31.40  filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more
-
-See one, and apply it: /context-guru:adapt cache | compaction | tools

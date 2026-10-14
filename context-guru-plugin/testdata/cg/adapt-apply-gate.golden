@@ -1,2 +1,0 @@
-Not applied: The go-live check did not pass, so it runs in shadow and changes nothing.
-Apply anyway, although that check failed: /context-guru:adapt apply cache by-segment@3f9a1c --force
