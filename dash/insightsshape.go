@@ -158,6 +158,11 @@ type InsightsDoc struct {
 	RemovableTokens int     `json:"removable_tokens"`
 	RemovableUSD    float64 `json:"removable_usd"`
 	Basis           string  `json:"basis"`
+	// Project is the folder this document describes, or "" for every project pooled. Echoed back
+	// rather than left to the caller to remember: every figure below means something different
+	// depending on it, and a narrowed document that looks identical to a pooled one is the
+	// misreading this surface must not invite.
+	Project string `json:"project,omitempty"`
 	// Timeline is the per-item picture, present only when the caller asked for it. Attached rather
 	// than merged into Items because the two series are aligned to ONE shared bucket list: a copy
 	// of the axis on every row would be the same array sixty-eight times.
@@ -175,13 +180,24 @@ type InsightsOptions struct {
 	// Descriptions maps an item name to what it does, read from its own SKILL.md. Absent is
 	// absent: a description this layer invented would be indistinguishable from one it read.
 	Descriptions map[string]string
+	// Project is the folder being reported on, or "" for every project pooled. It changes the
+	// BASIS rather than any arithmetic — the rows are already scoped by the caller's filter — so
+	// that a narrowed document says so instead of looking like an all-projects one.
+	Project string
 }
 
 // ShapeInsights turns an inventory into the document a page renders.
 func ShapeInsights(rep *ToolReport, opt InsightsOptions) *InsightsDoc {
 	now := time.Now().UnixMilli()
 	doc := &InsightsDoc{Items: []InsightsItem{}, Owners: []InsightsOwner{},
-		Basis: "measured over the window"}
+		Basis: "measured over the window", Project: opt.Project}
+	if opt.Project != "" {
+		// SAID OUT LOUD, because per-project evidence is thinner than pooled evidence and the
+		// reader has to know which they are reading. A verdict here rests on this folder's
+		// sessions alone, so an item used daily in another project can legitimately appear
+		// unused in this one — true, and dangerously misleading if the scope is not stated.
+		doc.Basis = "measured over the window, in this project only"
+	}
 	if rep == nil {
 		return doc
 	}

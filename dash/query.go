@@ -1237,6 +1237,10 @@ var facetQueries = map[string]string{
 	"effort":      "reasoning_effort",
 	"thinking":    "thinking_mode",
 	"stop_reason": "stop_reason",
+	// The projects seen in the window, so a picker populates itself and a folder the user starts
+	// working in appears without a UI change. Facets already exclude '' — the unattributed rows
+	// are the UI's own option with its own wording, not a folder named "".
+	"project": "project",
 }
 
 // selfBlanked returns f with ONE dimension's own value cleared.
@@ -1275,6 +1279,11 @@ func selfBlanked(f Filter, dim string) Filter {
 		f.Thinking = ""
 	case "stop_reason":
 		f.StopReason = ""
+	case "project":
+		// Without this the project list is scoped by the project already chosen, so it would
+		// contain exactly one entry — the one selected — and switching projects would be
+		// impossible. A one-way door, which is what this whole function exists to prevent.
+		f.Project = ""
 	}
 	return f
 }

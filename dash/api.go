@@ -1068,6 +1068,7 @@ func filterFrom(r *http.Request) Filter {
 		Effort:     q.Get("effort"),
 		Thinking:   q.Get("thinking"),
 		StopReason: q.Get("stop_reason"),
+		Project:    q.Get("project"),
 		Q:          q.Get("q"),
 	}
 	f.Since = atoi64(q.Get("since"))
