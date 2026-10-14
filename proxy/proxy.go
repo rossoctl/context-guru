@@ -1281,8 +1281,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// Skipped on a bypassed request too, and this one DOES cost cache sometimes. The
 			// earlier claim here — that a bypassed request is a compaction whose prefix is its
 			// own, so skipping is free — is true for a real compaction and false for a false
-			// positive, and isAgentCompaction has a reachable one: it fires on any last message
-			// with role "user" containing a compaction phrase (agentcompaction.go:71-77), and in
+			// positive, and isAgentCompaction has a reachable one: it fires on any last turn
+			// with role "user" containing a compaction phrase (see isAgentCompaction), and in
 			// the Anthropic dialect a tool_result IS a user-role message. So a tool output that
 			// quotes one of those phrases — a session reading the docs page, or reading this
 			// file — makes an ordinary mid-conversation turn bypass, lose the expand tool, and

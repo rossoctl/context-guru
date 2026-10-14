@@ -117,6 +117,10 @@ type threadState struct {
 	// tools is whether the thread's last request declared tools: the metadata that tells the
 	// main agent from an auxiliary request (see newID).
 	tools bool
+	// model is the model the thread's last request named. A TIE-BREAKER only (see preferOnTie):
+	// one thread can change model — `/model`, Opus plan mode, a fallback on overload — so a
+	// different model never keeps a request out of a thread.
+	model string
 	// compacting marks a thread whose last request was the agent's own compaction request. The
 	// agent's next request starts from a summary, so it matches no thread by prefix; it is still
 	// the same thread, and it inherits this id.
@@ -174,6 +178,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	}
 	sums, mass, ok := fingerprint(body)
 	hasTools := gjson.GetBytes(body, "tools.#").Int() > 0
+	model := gjson.GetBytes(body, "model").String()
 	now := t.now()
 
 	t.mu.Lock()
@@ -188,9 +193,28 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	}
 	s.last = now
 
-	var match *threadState
+	var match, compacted *threadState
 	if ok {
 		match = s.longestPrefix(sums)
+	}
+	// The agent's own compaction request need not EXTEND the thread it summarizes. Claude Code
+	// 2.1.296 adds its prompt as an extra text block inside the last user message (#518), so the
+	// request shares every message but that one and matches no thread. It is still that
+	// thread's request, and it must stay there: newID hands the compacting thread's id to the
+	// post-compaction request, so a compaction that got a new id here would move the main
+	// thread onto that new id for the rest of the session.
+	//
+	// The same holds for an ordinary main-agent turn whose tail Claude Code rewrote instead of
+	// extending: seen on a live session (#518), a turn start that changed the last user message or
+	// dropped the trailing system message, while the provider cache still read 99.8% of the
+	// prefix. Such a request shares every message of a tools thread's last request except the last
+	// one or two, and it is that thread's next turn. A header-less fork shares less than that.
+	switch {
+	case !ok || match != nil:
+	case agentCompaction:
+		compacted = s.compactionParent(sums, model)
+	case hasTools && agentID == "":
+		compacted = s.rewrittenTailParent(sums, model)
 	}
 
 	var res Result
@@ -229,8 +253,10 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 		sideParent = match
 	case match != nil:
 		res = Result{ID: match.id, Source: SourcePrefix}
+	case compacted != nil:
+		res = Result{ID: compacted.id, Source: SourcePrefix}
 	default:
-		res = Result{ID: s.newID(sums, hasTools), Source: SourcePrefix}
+		res = Result{ID: s.newID(sums, hasTools, model), Source: SourcePrefix}
 	}
 	if !ok {
 		// A header thread with no message list: keep its id, record nothing to match on.
@@ -258,6 +284,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	// side branch); if a LATER request on this same id does declare tools, it matches as this
 	// thread's own continuation (the "match != nil" branch above) and sets th.tools true then.
 	th.tools = th.tools || hasTools
+	th.model = model
 	// A side thread cannot be a compaction continuation: compaction is the main agent's own act.
 	th.compacting = sideParent == nil && agentCompaction && res.Source == SourcePrefix
 	return res
@@ -273,7 +300,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 // monitor, a title) declares none. So a tool-less thread holds the primary id only until the first
 // thread with tools arrives; it then gets its own id. A client that never declares tools keeps
 // its first thread as the primary, exactly as before.
-func (s *sessionState) newID(sums []uint64, hasTools bool) string {
+func (s *sessionState) newID(sums []uint64, hasTools bool, model string) string {
 	holder := s.find(Primary)
 	switch {
 	case holder == nil && !s.hasPrefixThread():
@@ -285,9 +312,16 @@ func (s *sessionState) newID(sums []uint64, hasTools bool) string {
 	// The MOST RECENT compacting thread: the agent sends the post-compaction request right after
 	// its compaction request, so if two threads are compacting at once, the later one is the one
 	// whose summary this is. Slice order would be arbitrary.
+	// Only a request of the same kind succeeds a compacting thread: tools for a thread that
+	// declares tools, none for one that does not (#518). Claude Code sends a tool-less side
+	// request between its compaction request and its next turn, and that request must not take
+	// the main agent's id. The other way round matters too: Claude Code's auto-mode classifier
+	// sends the session transcript, which can quote the compaction prompt, so its tool-less thread
+	// can be marked compacting by mistake, and the main agent must not move onto it. Between two
+	// candidates, preferOnTie.
 	var succ *threadState
 	for _, th := range s.threads {
-		if th.compacting && (succ == nil || th.last.After(succ.last)) {
+		if th.compacting && hasTools == th.tools && (succ == nil || preferOnTie(th, succ, model)) {
 			succ = th
 		}
 	}
@@ -333,6 +367,78 @@ func (s *sessionState) mostShared(sums []uint64, mass []int) *threadState {
 		return nil
 	}
 	return best
+}
+
+// compactionParent returns the thread an agent compaction request summarizes when it extends no
+// thread: the one sharing the longest run of leading messages with it, among the threads no agent
+// header named. A thread that declares tools wins over one that does not, because compaction is the main agent's act and a side
+// request can share the same leading run; then preferOnTie decides. nil when no thread shares
+// even the first message.
+func (s *sessionState) compactionParent(sums []uint64, model string) *threadState {
+	var best *threadState
+	bestLCP := 0
+	for _, th := range s.threads {
+		if headerThread(th) {
+			continue
+		}
+		lcp := 0
+		for lcp < len(th.sums) && lcp < len(sums) && th.sums[lcp] == sums[lcp] {
+			lcp++
+		}
+		if lcp == 0 {
+			continue
+		}
+		switch {
+		case best == nil,
+			th.tools && !best.tools,
+			th.tools == best.tools && lcp > bestLCP,
+			th.tools == best.tools && lcp == bestLCP && preferOnTie(th, best, model):
+			best, bestLCP = th, lcp
+		}
+	}
+	return best
+}
+
+// rewrittenTailParent returns the tools thread whose last request this request repeats except for
+// its last one or two messages: the same conversation with its tail rewritten in place (see
+// Resolve). The longest shared run wins, then preferOnTie. nil when no tools thread qualifies.
+func (s *sessionState) rewrittenTailParent(sums []uint64, model string) *threadState {
+	var best *threadState
+	bestLCP := 0
+	for _, th := range s.threads {
+		if !th.tools || th.n == 0 || headerThread(th) {
+			continue
+		}
+		lcp := 0
+		for lcp < len(th.sums) && lcp < len(sums) && th.sums[lcp] == sums[lcp] {
+			lcp++
+		}
+		// All but the last one or two messages, and more than half of them, so a short thread is
+		// not joined by a request that shares only its first message.
+		if lcp < th.n-2 || 2*lcp <= th.n {
+			continue
+		}
+		if best == nil || lcp > bestLCP || (lcp == bestLCP && preferOnTie(th, best, model)) {
+			best, bestLCP = th, lcp
+		}
+	}
+	return best
+}
+
+// headerThread reports whether the agent named this thread with its header. Both parent searches
+// above run only for a request WITHOUT that header, and such a request is never a named thread's:
+// a forked subagent carries its parent's messages plus its own, so it shares the same leading run
+// as the main thread and could otherwise win the search (#519 review).
+func headerThread(th *threadState) bool { return strings.HasPrefix(th.id, "a:") }
+
+// preferOnTie reports whether a beats b when the stronger evidence ties: the thread whose last
+// request named this request's model first, then the most recent.
+func preferOnTie(a, b *threadState, model string) bool {
+	am, bm := model != "" && a.model == model, model != "" && b.model == model
+	if am != bm {
+		return am
+	}
+	return a.last.After(b.last)
 }
 
 // hasPrefixThread reports whether the session has a thread not named by a header. Header threads
