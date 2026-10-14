@@ -3,7 +3,7 @@
 money saved (against the same request uncompacted, net of context-guru's own
 spend) next to money spent (measured), the prompt-cache state (warm / expiring / cold, the proxy's
 server-side truth overriding Claude Code's own guess), context fill against the window actually
-served, and at most one actionable hint. See skills/statusline/SKILL.md for flags and mockups.
+served, and a weekly tip line. See skills/statusline/SKILL.md for flags and mockups.
 
 Why Python, not another shell script like the hooks: this reads JSON off stdin and makes one
 timeout-bounded HTTP call, and that is what Python's stdlib (`json`, `urllib.request`) does
@@ -541,6 +541,66 @@ def _update_check_state_dir() -> str:
     return os.path.join(base, "context-guru")
 
 
+def _tips_file() -> str:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "context-guru", "statusline-tips")
+
+
+def _tips_off() -> bool:
+    """`statusline.py --set-tips=off` turns the tip off for good (`--hide=tip` does it per command)."""
+    try:
+        with open(_tips_file(), encoding="utf-8") as fh:
+            return fh.read(8).strip() == "off"
+    except OSError:
+        return False
+
+
+def _set_tips(value: str) -> str:
+    if value not in ("on", "off"):
+        return "usage: statusline.py --set-tips=on|off"
+    path = _tips_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(value)
+    return f"status line tip: {value}"
+
+
+def _tip_segment(now: float | None = None) -> str | None:
+    """`Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-skills for over
+    a week — worth a shot.`, shown only when none of them ran in the last TIP_DAYS, and naming only
+    the ones this plugin actually has (a skills/<name>/SKILL.md). Local files only, no network: the commands write
+    their last run time to `<state dir>/last-run.json` ({"save-more": epoch, ...}), and this keeps
+    the first time it saw the install in `<state dir>/statusline-first-seen`. A command that never
+    ran counts from that first sighting, so a new install sees no tip for TIP_DAYS: the text says
+    "for over a week", and before then that is not yet true."""
+    now = _now_s() if now is None else now
+    state = _update_check_state_dir()
+    try:
+        with open(os.path.join(state, "last-run.json"), encoding="utf-8") as fh:
+            runs = json.loads(fh.read(4096))
+    except (OSError, ValueError):
+        runs = {}
+    runs = runs if isinstance(runs, dict) else {}
+    seen_path = os.path.join(state, "statusline-first-seen")
+    try:
+        with open(seen_path, encoding="ascii") as fh:
+            first = float(fh.read(32).strip())
+    except (OSError, ValueError):
+        first = now
+        try:
+            os.makedirs(state, exist_ok=True)
+            with open(seen_path, "w", encoding="ascii") as fh:
+                fh.write(str(int(now)))
+        except OSError:
+            pass
+    skills = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills")
+    have = [c for c in TIP_COMMANDS if os.path.isfile(os.path.join(skills, c, "SKILL.md"))]
+    if not have or any(now - max(_num(runs, c) or 0.0, first) <= TIP_DAYS * 86400 for c in have):
+        return None  # one of them ran this week (or the install is younger than that): no nudge
+    names = " or ".join(f"/context-guru:{c}" for c in have)
+    return f"{DIM}Tip: you haven't run {names} for over a week — worth a shot.{RESET}"
+
+
 def _update_available_segment() -> str | None:
     """A small, always-visible fallback for the SessionStart release notice.
 
@@ -597,20 +657,20 @@ def _keepalive_segment(stats: dict) -> str | None:
 # in a fixed order. Everything below is display logic over three inputs: Claude Code's stdin, the
 # proxy's lean /api/stats (this session) and /api/cachestate (server cache truth).
 LAYOUTS = {
-    "minimal": ("save", "cache", "hint"),
-    "balanced": ("update", "save", "cache", "agents", "ctx", "ka", "hint"),
-    "detailed": ("update", "save", "spend", "cache", "agents", "ctx", "ka", "latency", "tools", "hint"),
+    "minimal": ("save", "cache"),
+    "balanced": ("update", "save", "cache", "agents", "ctx", "ka", "tip"),
+    "detailed": ("update", "save", "spend", "cache", "agents", "ctx", "ka", "latency", "tools", "tip"),
     # The terminal views as one glanceable line (row 0) over the cache clock (row 1).
-    "spark": ("spark", "cache", "hint"),   # saved today + 14 days of saving
-    "strip": ("strip", "cache", "hint"),   # the last 20 requests as hit / partial / miss
-    "heat": ("heat", "cache", "hint"),     # today's cache misses by hour
-    "fill": ("fill", "cache", "hint"),     # context: always loaded vs conversation, time to full
-    "watch": ("save", "clock0", "wagents", "hint"),  # saved, main clock, a mini-bar per sub-agent
+    "spark": ("spark", "cache"),   # saved today + 14 days of saving
+    "strip": ("strip", "cache"),   # the last 20 requests as hit / partial / miss
+    "heat": ("heat", "cache"),     # today's cache misses by hour
+    "fill": ("fill", "cache"),     # context: always loaded vs conversation, time to full
+    "watch": ("save", "clock0", "wagents"),  # saved, main clock, a mini-bar per sub-agent
 }
 ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka"}
-# Dropped/shrunk first to last when the line is wider than the terminal. The hint is never in this
-# list: it is the one thing worth the space, and is truncated instead.
-DEGRADE = (("tools", None), ("latency", None), ("ka", None), ("spend", None), ("update", None), ("hint", 1),
+# Dropped/shrunk first to last when a line is wider than the terminal. The tip goes first: it is
+# the least urgent thing on the line.
+DEGRADE = (("tip", None), ("tools", None), ("latency", None), ("ka", None), ("spend", None), ("update", None),
            ("spark", 1), ("strip", 1), ("heat", 1), ("fill", 1), ("wagents", 1),
            ("agents", 1), ("agents", 2), ("save", 1), ("ctx", 1), ("save", 2), ("cache", 1), ("agents", None), ("ctx", None),
            ("save", None))
@@ -619,9 +679,9 @@ ROUTE_MEMO_SECONDS = 60
 EXPIRING_SECONDS = 60
 CRITICAL_SECONDS = 15  # the last stretch: red, and a "!" so it is not colour alone
 SPEND_RATE_MIN_SECONDS = 300  # a $/h figure over less than five minutes of wall clock is noise
-HINT_COLD_MIN_TOKENS = 100_000  # a cold cache under this is cheap enough not to nag about
-HINT_FULL_FRACTION = 0.85
-HINT_EXPIRING_MIN_USD = 0.50  # below this a rewrite is not worth a line of anyone's attention
+HINT_FULL_FRACTION = 0.85  # the context bar's `⚠ rewrite near` from here
+TIP_DAYS = 7  # a command not run for this long is named in the tip
+TIP_COMMANDS = ("save-more", "remove-mcp-and-skills")
 CACHESTATE_TTL_SECONDS = 2.0
 DAY_TTL_SECONDS = 60.0
 CACHE_BAR_CELLS = 6
@@ -632,8 +692,7 @@ REQUESTS_TTL_SECONDS = 4.0
 STRIP_REQUESTS = 20
 # Which line each element sits on in a two-line layout. `minimal` ignores this: it is one line.
 ROW = {"spark": 0, "strip": 0, "heat": 0, "fill": 0, "clock0": 0, "wagents": 1,
-       "update": 0, "save": 0, "spend": 0, "cache": 1, "agents": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1,
-       "hint": 1}
+       "update": 0, "save": 0, "spend": 0, "cache": 1, "agents": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1, "tip": 2}
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
@@ -1131,22 +1190,6 @@ def _spend_segment(payload: dict, level: int | None = 0) -> str | None:
     return out
 
 
-_MODEL_RE = re.compile(r"(opus|sonnet|haiku|fable)[-_ ]?(\d+(?:[-_.]\d{1,2}(?!\d))?)|(\d+(?:[-_.]\d{1,2}(?!\d))?)[-_ ](opus|sonnet|haiku)")
-
-
-def _model_key(model: object) -> tuple[str, str] | None:
-    """(family, version) from a model id in any of the spellings the gateway and Claude Code use
-    (`claude-sonnet-5-5`, `aws/claude-sonnet-5-5[1m]`, `claude-3-5-sonnet-20241022`); None when it
-    cannot be read, which means NO warning rather than a guess."""
-    if not isinstance(model, str):
-        return None
-    m = _MODEL_RE.search(model.lower())
-    if not m:
-        return None
-    fam, ver = (m.group(1), m.group(2)) if m.group(1) else (m.group(4), m.group(3))
-    return fam, re.sub(r"[-_]", ".", ver)
-
-
 def _ctx_numbers(payload: dict, cs: dict | None, cs_age: float) -> tuple[float, float] | None:
     """(used tokens, served window). Both prefer the proxy's own figures when it answered just
     now: the window when it is a MEASURED one for the model actually served, and the tokens of the
@@ -1194,7 +1237,7 @@ def _save_segment(stats: dict | None, money: dict | None, level: int | None = 0,
     /api/cachestate's money (dash.threadMoney): $y is what those requests would have cost without
     context-guru, at the gateway's prices; $x is the saving against it, net of context-guru's own
     model calls and keep-alive pings, so $x <= $y. A saving is a COUNTERFACTUAL, shown plainly as
-    money already saved; only avoidable-spend figures in the hint carry `≈`. The subagents figure
+    money already saved. The subagents figure
     appears once a thread other than the main one exists. A figure whose fields are missing is
     left out, never shown as $0.00. An older proxy with no money block gets the bare `saved $x`
     from /api/stats."""
@@ -1228,37 +1271,6 @@ def _fresh_session(payload: dict) -> bool:
     cost, cw = payload.get("cost"), payload.get("context_window")
     usd, i, o = _num(cost, "total_cost_usd"), _num(cw, "total_input_tokens"), _num(cw, "total_output_tokens")
     return usd is None or i is None or o is None or (usd == 0 and i == 0 and o == 0)
-
-
-def _hint(payload: dict, view: dict, ctx: tuple[float, float] | None) -> tuple[str, str] | None:
-    """At most ONE actionable line (long, short form), most expensive first."""
-    rem, tokens = view["remaining"], view["tokens"]
-    if rem is not None and rem <= 0 and tokens and tokens >= HINT_COLD_MIN_TOKENS:
-        price = f"≈${view['usd']:.2f}" if view["usd"] is not None else "a full re-send"
-        msg = f"{RED}your next message costs {price} extra{RESET}"
-        return msg, msg
-    if rem is not None and rem > 0 and view["usd"] is not None and view["usd"] >= HINT_EXPIRING_MIN_USD:
-        now_m, cache_m = _model_key((payload.get("model") or {}).get("id") if isinstance(payload.get("model"), dict) else None), \
-            _model_key(view.get("model"))
-        if now_m and cache_m and now_m != cache_m:
-            msg = f"{YELLOW}model changed: your next message costs ≈${view['usd']:.2f} extra{RESET}"
-            return msg, msg
-    if (rem is not None and 0 < rem <= EXPIRING_SECONDS and not view.get("ping") and view.get("held") is None
-            and view["usd"] is not None and view["usd"] >= HINT_EXPIRING_MIN_USD):
-        msg = f"{YELLOW}a pause now costs ≈${view['usd']:.2f} extra{RESET}"
-        return msg, msg
-    if ctx and ctx[0] / ctx[1] >= HINT_FULL_FRACTION:
-        full = f"{RED}context {min(ctx[0] / ctx[1], 1.0) * 100:.0f}% full — /compact{RESET}"
-        return full, full
-    pc = payload.get("prompt_cache") if isinstance(payload.get("prompt_cache"), dict) else {}
-    at, cause = _num(pc, "last_miss_at"), pc.get("last_miss_cause")
-    causes = cause.get("causes") if isinstance(cause, dict) else None
-    if at is not None and time.time() - at < 120 and isinstance(causes, list) and causes:
-        added, removed = _num(cause, "tools_added") or 0, _num(cause, "tools_removed") or 0
-        what = f"tools changed (+{int(added)} −{int(removed)})" if added or removed else ",".join(str(c) for c in causes[:2])
-        miss = f"{YELLOW}{what}: add tools at session start{RESET}"
-        return miss, miss
-    return None
 
 
 def _truncate(s: str, width: int) -> str:
@@ -1436,7 +1448,7 @@ def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
     three fresh makes no network call at all."""
     out: dict = {}
     jobs = {"stats": lambda: _fetch_stats(port, session_id)}
-    if session_id and on & {"save", "cache", "agents", "ctx", "hint", "fill", "clock0", "wagents"}:
+    if session_id and on & {"save", "cache", "agents", "ctx", "fill", "clock0", "wagents"}:
         jobs["cs"] = lambda: _fetch_json(
             port, "/api/cachestate?session=" + _quote(session_id),
             "cs-" + session_id, CACHESTATE_TTL_SECONDS)
@@ -1524,24 +1536,22 @@ def main() -> None:
         "ka": lambda lv: (_keepalive_segment(stats) if stats and lv == 0 else None),
         "latency": lambda lv: _latency_segment(stats) if lv == 0 else None,
         "tools": lambda lv: _recommend_segment(payload) if lv == 0 else None,
+        "tip": lambda lv: tip if lv == 0 else None,
     }
     order = [e for e in ("update", "save", "spend", "spark", "strip", "heat", "fill", "clock0", "wagents", "cache",
-                         "agents", "ctx", "ka", "latency", "tools") if e in on]
+                         "agents", "ctx", "ka", "latency", "tools", "tip") if e in on]
     level: dict[str, int | None] = {e: 0 for e in order}
-    hint = _hint(payload, view, ctx) if "hint" in on else None
+    tip = _tip_segment() if "tip" in on and not _tips_off() else None
     if layout in ("minimal", "watch"):
         level["save"] = 1  # minimal: `saved $0.31 of $4.10`, the main thread only
-    hint_level = 0
     two_rows = layout != "minimal"
 
     def build() -> list[str]:
-        rows: list[list[str]] = [[], []]
+        rows: list[list[str]] = [[], [], []]
         for e in order:
             seg = shown[e](level[e])
             if seg:
                 rows[ROW[e] if two_rows else 0].append(seg)
-        if hint:
-            rows[1 if two_rows else 0].append(f"{DIM}▸{RESET} {hint[hint_level]}")
         return [" │ ".join(r) for r in rows if r]
 
     def widest() -> int:
@@ -1550,8 +1560,7 @@ def main() -> None:
     def too_wide_rows() -> set[int]:
         if not two_rows:
             return {0} if widest() > width else set()
-        rows = [" │ ".join(filter(None, (shown[e](level[e]) for e in order if ROW[e] == i))) for i in (0, 1)]
-        rows[1] = " │ ".join(filter(None, [rows[1], f"▸ {hint[hint_level]}" if hint else ""]))
+        rows = [" │ ".join(filter(None, (shown[e](level[e]) for e in order if ROW[e] == i))) for i in (0, 1, 2)]
         return {i for i, r in enumerate(rows) if _vlen(r) > width}
 
     for element, lv in DEGRADE:
@@ -1560,13 +1569,13 @@ def main() -> None:
             break
         if (ROW[element] if two_rows else 0) not in bad:
             continue  # only shrink what sits on a line that is actually too wide
-        if element == "hint":
-            hint_level = lv
-        elif element in level and (level[element] or 0) < (lv or 9):
+        if element in level and (level[element] or 0) < (lv or 9):
             level[element] = lv
     sep = f" {DIM}│{RESET} "
     lines = [_truncate(r.replace(" │ ", sep), width) for r in build()]
-    if stale and lines:
+    if stale and lines and shown["tip"](level.get("tip")) and len(lines) > 1:
+        lines[-2] += f" {DIM}⏳{RESET}"  # on the numbers, not on the tip
+    elif stale and lines:
         # A small, honest marker that every number is from the last successful fetch rather than
         # this render - never withheld, never dressed up as fresh.
         lines[-1] += f" {DIM}⏳{RESET}"
@@ -1576,6 +1585,9 @@ def main() -> None:
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1].startswith("--set-layout="):
         print(_set_layout(sys.argv[1].split("=", 1)[1]))
+        sys.exit(0)
+    if len(sys.argv) == 2 and sys.argv[1].startswith("--set-tips="):
+        print(_set_tips(sys.argv[1].split("=", 1)[1]))
         sys.exit(0)
     if len(sys.argv) == 5 and sys.argv[1] == "--refresh":
         try:

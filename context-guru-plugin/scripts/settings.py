@@ -40,6 +40,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 KEY = "ANTHROPIC_BASE_URL"
 # The second key, written only when the proxy has to chain behind an existing gateway. It lives in
@@ -715,6 +716,30 @@ def state_dir() -> str:
         return override
     base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
     return os.path.join(base, "context-guru")
+
+
+RECORDED_COMMANDS = ("save-more", "remove-mcp-and-skills")
+
+
+def cmd_record_run(args: argparse.Namespace) -> int:
+    """Record that one of the commands the status line's weekly tip names just ran: its epoch
+    seconds under its name in `<state dir>/last-run.json`, merged into what is there and replaced
+    atomically. The status line only reads the file (statusline.py _tip_segment)."""
+    path = os.path.join(state_dir(), "last-run.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            runs = json.load(fh)
+    except (OSError, ValueError):
+        runs = {}
+    runs = runs if isinstance(runs, dict) else {}
+    runs[args.name] = int(time.time())
+    os.makedirs(state_dir(), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(runs, fh)
+    os.replace(tmp, path)
+    emit(result="recorded", name=args.name, file=path)
+    return 0
 
 
 def user_scope_files() -> list[str]:
@@ -4036,6 +4061,9 @@ def main() -> int:
 
     # The proxy-binary release-notice surface: separate from `strategy`/`preset` because it is
     # machine-wide (one binary on PATH) rather than per-port or per-project.
+    rr = sub.add_parser("record-run", help="note that a command the status line tip names just ran")
+    rr.add_argument("name", choices=RECORDED_COMMANDS)
+
     uc = sub.add_parser("update-check")
     uc.add_argument("op", choices=("show", "stamp", "notify", "answer"))
     uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp`")
@@ -4062,7 +4090,7 @@ def main() -> int:
           "strategy": cmd_strategy, "preset": cmd_preset, "port": cmd_port,
           "owner-token": cmd_owner_token,
           "check-url": cmd_check_url, "update-check": cmd_update_check,
-          "gitignore-ensure": cmd_gitignore_ensure}[args.cmd](args)
+          "gitignore-ensure": cmd_gitignore_ensure, "record-run": cmd_record_run}[args.cmd](args)
 
     # The hatch facts are printed HERE rather than from inside save(), so the `result=` line the
     # caller keys on stays first, and so every writing path reports them without six call sites
