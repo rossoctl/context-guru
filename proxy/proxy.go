@@ -437,6 +437,9 @@ func (h *Handler) Mux() *http.ServeMux {
 	if h.api != nil {
 		h.api.Mount(m)
 	}
+	if h.opts.Dashboard != nil {
+		h.mountAdapt(m)
+	}
 	// Control plane: registration, sign-in, settings, tokens, the manager's roster.
 	// Mounted after the dashboard so both live under /api/, and only in hosted mode.
 	h.MountControl(m)
