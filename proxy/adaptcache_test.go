@@ -796,3 +796,23 @@ func TestAdaptOptionsShowLocalHours(t *testing.T) {
 		t.Errorf("the apply note's plan shows as %q", got)
 	}
 }
+
+// A busy process answers 503 with Retry-After and spends none of the account's hourly report budget.
+func TestAdaptCacheBusyAnswers503WithoutSpendingTheBudget(t *testing.T) {
+	f, _ := newCampaignFixture(t, "ship", "parity.model.json")
+	jar, tid := f.signUpJar(t, "user@ibm.com")
+	f.record(t, tid, "s1", &dash.Event{TS: time.Now().Add(-time.Hour).UnixMilli(), Model: "m1", Status: 200, CacheRead: 90000, UpstreamMs: 1000, CostUSD: 0.03})
+	adaptCacheMu.Lock()
+	for i := 0; i < adaptReportBurst+3; i++ {
+		if w, _ := f.do(t, http.MethodGet, "/api/adapt/cache?days=1", "", jar); w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") == "" {
+			adaptCacheMu.Unlock()
+			t.Fatalf("busy report = %d (Retry-After %q), want 503 with Retry-After", w.Code, w.Header().Get("Retry-After"))
+		}
+	}
+	adaptCacheMu.Unlock()
+	for i := 0; i < adaptReportBurst; i++ {
+		if w, _ := f.do(t, http.MethodGet, "/api/adapt/cache?days=1", "", jar); w.Code != http.StatusOK {
+			t.Fatalf("report %d after the busy answers = %d: the busy answers spent the budget", i+1, w.Code)
+		}
+	}
+}
