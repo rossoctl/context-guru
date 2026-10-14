@@ -2378,7 +2378,8 @@ function renderInvTop(host, rep, rows, groups) {
     const r = g.items[0].removal || {};
     const n = gSessions(g);
     const kind = g.sub || ({ skill: 'Skill', mcp_tool: 'MCP tool' }[g.items[0].kind] || 'Tool');
-    const cmd = r.command && !r.danger ? r.command : '';
+    // No direct removal command (a hand-added skill, a risky one): the plugin command walks through it.
+    const cmd = r.command && !r.danger ? r.command : '/context-guru:remove-mcp-and-skills';
     const btn = el('button', { class: 'btn small', type: 'button' }, 'Copy');
     if (cmd) btn.addEventListener('click', async () => {
       try { await navigator.clipboard.writeText(cmd); btn.textContent = 'Copied'; }

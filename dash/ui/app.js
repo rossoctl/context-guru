@@ -1504,28 +1504,7 @@ function renderDistribution(hostSel, map, labels, detail) {
 }
 
 function renderWaterfall(o) {
-  const host = clear($('#waterfall'));
-  // Only the three savings this page is about. The server also sends prefix-split, "removed by
-  // you" and subtotal steps; they are not shown here (the API is unchanged).
-  const keep = new Set(['baseline', 'compaction', 'cg_llm', 'net', 'keepalive_ping', 'keepalive_saved', 'decl_filter_saved', 'total_saved']);
-  const steps = (o.waterfall || []).filter((s) => keep.has(s.key));
-  if (!steps.length || !o.baseline_cost_usd) {
-    emptyState(host, 'No priced requests yet',
-      'This plot needs provider usage data (all four token tiers) and a known model price.');
-    return;
-  }
-  const max = Math.max(...steps.map((s) => Math.abs(s.delta_usd)), 0.0001);
-  const wrap = el('div', { class: 'bars' });
-  for (const s of steps) {
-    const color = s.total ? SERIES[0] : s.delta_usd < 0 ? 'var(--good)' : 'var(--bad)';
-    wrap.appendChild(el('div', { class: 'bar-row', title: s.description || '' },
-      el('div', { class: 'bar-label', text: s.label }),
-      el('div', { class: 'bar-track' }, el('div', {
-        class: 'bar-fill', style: `width:${(Math.abs(s.delta_usd) / max) * 100}%;background:${color}`,
-      })),
-      el('div', { class: 'bar-val', text: (s.delta_usd < 0 ? '−' : s.total ? '' : '+') + usd(Math.abs(s.delta_usd)) })));
-  }
-  host.appendChild(wrap);
+  CGCharts.savingsBars($('#waterfall'), o);
 }
 
 function renderLive() {
@@ -1621,7 +1600,8 @@ function renderSavedLedger(o, ka) {
   // dollars only, so this is the dollar figure divided by the per-token price gap, with the input
   // price recovered from the provider-cache line (cache_saved = reads x 0.9 x input price) and
   // the write premium taken as 1.15x input (1.25 write less 0.10 read). Labelled "about".
-  const inPrice = o.cache_read > 0 && o.cache_saved_usd > 0 ? o.cache_saved_usd / (0.9 * o.cache_read) : 0;
+  const providerSaved = o.cache_saved_usd || 0;
+  const inPrice = o.cache_read > 0 && providerSaved > 0 ? providerSaved / (0.9 * o.cache_read) : 0;
   const kaTokens = inPrice > 0 && o.keepalive_saved_usd > 0 ? o.keepalive_saved_usd / (1.15 * inPrice) : null;
   const waited = ka && ka.latency && ka.latency.known && o.keepalive_misses_avoided > 0
     ? ka.latency.per_miss_ms * o.keepalive_misses_avoided : null;
@@ -1632,8 +1612,11 @@ function renderSavedLedger(o, ka) {
       id: 'cache', tid: 'saved-cache', name: 'Cache keep-alive', href: '#/keepalive', more: 'Keep-alive tab',
       what: 'Pings that stop your prompt cache from expiring while you think.',
       ran: kaRan, usd: o.keepalive_net_usd, tok: kaTokens, approx: true,
-      extra: waited ? 'about ' + waitText(waited) + ' of waiting avoided in total' : '',
+      extra: waited ? 'about ' + waitText(waited) + ' of waiting avoided over ' + num(o.keepalive_misses_avoided) + ' rewrites' : '',
       kind: 'Upper bound', note: 'after the pings cost ' + usd(o.keepalive_ping_usd),
+      // The Keep-alive tab replays your own idle gaps to say whether to turn it on; the figure on this
+      // row is what already ran. Say so here, so the two cannot be read as a contradiction.
+      forecast: 'Whether to keep it on is a forecast from your own history. See the Keep-alive tab.',
     },
     {
       id: 'compaction', tid: 'saved-compaction', name: 'Compaction', href: '#/components', more: 'Components tab',
@@ -1644,7 +1627,7 @@ function renderSavedLedger(o, ka) {
     {
       id: 'filter', tid: 'saved-filter', name: 'Tools and skills filter', href: '#/tools', more: 'Inventory tab',
       what: 'Tool and skill definitions the model never needed, left out of the prompt.',
-      ran: filterRan, usd: o.decl_filter_usd, tok: o.decl_filter_reads,
+      ran: filterRan, usd: o.decl_filter_usd, tok: o.decl_filter_reads, idle: 'Starts when tools and skills are left out of the prompt. The list below is how.',
       extra: filterRan ? num(o.decl_filter_requests) + ' requests had tools filtered' : '',
       kind: 'Estimated', note: 'saved when tools are left out of the prompt',
     },
@@ -1660,13 +1643,14 @@ function renderSavedLedger(o, ka) {
     bar.firstChild.style.width = Math.max(share, share > 0 ? 1.5 : 0) + '%';
     const ofTok = lv.of || input;
     const money = !lv.ran || !priced
-      ? el('div', { class: 'lv-money lv-none' }, lv.ran ? 'Not priced yet' : 'Nothing recorded yet')
+      ? el('div', { class: 'lv-money lv-none' }, lv.ran ? 'Not priced yet' : (lv.idle || 'Nothing recorded yet'))
       : el('div', { class: 'lv-money' },
         el('div', { class: 'lv-big' }, el('strong', { class: lv.usd < 0 ? 'neg' : '', text: usd(lv.usd) }),
           el('span', { class: 'lv-of', text: ' saved of ' + usd(spent) + ' spent' })),
         bar,
         el('div', { class: 'lv-sub' }, el('span', { class: 'kind-badge ' + lv.kind.replace(' ', '-').toLowerCase(), title: KIND_TIP[lv.kind], text: lv.kind }),
-          ' ' + (share ? pct(share, share < 10 ? 1 : 0) + ' of spend · ' : '') + lv.note));
+          ' ' + (share ? pct(share, share < 10 ? 1 : 0) + ' of spend · ' : '') + lv.note),
+        lv.forecast ? el('div', { class: 'lv-sub' }, lv.forecast) : null);
     const tokens = lv.tok === null || lv.tok === undefined || !lv.ran
       ? el('div', { class: 'lv-tokens lv-none' }, '—')
       : el('div', { class: 'lv-tokens' },
@@ -1681,7 +1665,8 @@ function renderSavedLedger(o, ka) {
   }
   const note = $('#ov-saved-note');
   if (note) {
-    note.textContent = 'Spent = what the provider billed, plus our own model calls and keep-alive pings.';
+    note.textContent = 'Spent = what the provider billed, plus our own model calls and keep-alive pings.'
+      + (providerSaved > 0 ? ' Not counted: the provider\u2019s own cache discount (' + usd(providerSaved) + '), which you get with or without us.' : '');
   }
 }
 
@@ -1750,59 +1735,24 @@ function renderSeries(buckets) {
     }
     return;
   }
-  // Cumulative NET SAVING, not the two cost lines it is the difference of.
-  //
-  // This used to draw baseline and actual and tell the reader "the area between the lines is
-  // the money". On real traffic those lines are 0.28% apart, so there was no visible area and
-  // the caption described something the chart could not show. The saving itself is the series
-  // worth plotting: it starts at zero, so its own scale is the scale of the money, and it
-  // crosses below zero exactly when our own spend overtakes what compaction avoided — which is
-  // the one event this chart should make impossible to miss. The two cost totals are still on
-  // the page, as tiles, where a number that differs in the third decimal belongs.
-  let cumBase = 0, cumAct = 0;
-  const saved = [];
-  for (const b of buckets) {
-    cumBase += b.baseline_cost_usd;
-    cumAct += b.cost_usd + b.cg_llm_cost_usd;
-    saved.push([b.ts, cumBase - cumAct]);
-  }
-  const anyCost = cumBase > 0 || cumAct > 0;
-  if (anyCost) {
-    lineChart($('#chart-cost'), [
-      { name: 'Cumulative net saving (baseline − billed − our own spend)',
-        color: SERIES[0], points: saved, area: true },
-    ], { yFmt: usd, tipFmt: usd,
-      label: 'cumulative net saving; below zero means context-guru cost more than it saved' });
-  } else {
-    emptyState($('#chart-cost'), 'No priced requests yet',
-      'Cost needs provider usage data (all four token tiers) and a known model price. Token charts below still work.');
-  }
-
-  // Hue assignment is by ENTITY and holds across all five charts: blue is always the
-  // with-context-guru / primary measure, orange always the baseline it is compared
-  // against, aqua always the third measure.
-  lineChart($('#chart-tokens'), [
-    { name: 'Tokens before', color: SERIES[1], points: buckets.map((b) => [b.ts, b.tokens_before]) },
-    { name: 'Tokens after', color: SERIES[0], points: buckets.map((b) => [b.ts, b.tokens_after]), area: true },
-    { name: 'Saved (unique)', color: SERIES[2], points: buckets.map((b) => [b.ts, b.saved_unique]) },
-  ], { label: 'content tokens over time' });
-
-  lineChart($('#chart-cache'), [
-    { name: 'Cache reads', color: SERIES[0], points: buckets.map((b) => [b.ts, b.cache_read]), area: true },
-    { name: 'Cache writes', color: SERIES[1], points: buckets.map((b) => [b.ts, b.cache_write]) },
-    { name: 'Fresh input', color: SERIES[2], points: buckets.map((b) => [b.ts, b.fresh_input]) },
-  ], { label: 'cache reads versus writes over time' });
-
-  lineChart($('#chart-latency'), [
-    { name: 'context-guru added (avg)', color: SERIES[0], points: buckets.map((b) => [b.ts, b.cg_latency_ms_avg]) },
-    { name: 'Upstream round-trip (avg)', color: SERIES[1], points: buckets.map((b) => [b.ts, b.upstream_ms_avg]), dashed: true },
-  ], { yFmt: ms, tipFmt: ms, label: 'latency over time' });
-
-  lineChart($('#chart-volume'), [
-    { name: 'Requests', color: SERIES[0], points: buckets.map((b) => [b.ts, b.requests]), area: true },
-    { name: 'Restorations (expands)', color: SERIES[1], points: buckets.map((b) => [b.ts, b.expands]) },
-    { name: 'Cache misses', color: SERIES[2], points: buckets.map((b) => [b.ts, b.cache_misses]) },
-  ], { yFmt: num, label: 'request volume and restorations' });
+  // The five plots live in charts.js (CGCharts): one idea each, labelled on the plot, exact figures on hover.
+  CGCharts.netSaving($('#chart-cost'), buckets);
+  CGCharts.columns($('#chart-tokens'), buckets, {
+    key: 'saved_unique', sum: ['saved_unique'], color: SERIES[0], fmt: compact, empty: 'No tokens were removed in this window',
+    label: 'Tokens removed per period',
+    rows: (bins) => (i) => [['Tokens removed', compact(bins[i].saved_unique), SERIES[0]]],
+  });
+  CGCharts.cacheShare($('#chart-cache'), buckets);
+  const lat = clear($('#chart-latency'));
+  const a = el('div'), b = el('div');
+  lat.append(el('p', { class: 'plot-sub', text: 'Added by context-guru' }), a, el('p', { class: 'plot-sub', text: 'Taken by the provider' }), b);
+  CGCharts.trend(a, buckets, { key: 'cg_latency_ms_avg', color: SERIES[0], fmt: ms, name: 'Added by context-guru', label: 'Time context-guru added to each request' });
+  CGCharts.trend(b, buckets, { key: 'upstream_ms_avg', color: SERIES[1], fmt: ms, name: 'Provider round trip', label: 'Time the provider took per request' });
+  CGCharts.columns($('#chart-volume'), buckets, {
+    key: 'requests', sum: ['requests', 'cache_misses', 'expands'], part: 'cache_misses', color: SERIES[0], partColor: SERIES[1],
+    fmt: num, label: 'Requests per period, and how many missed the cache',
+    rows: (bins) => (i) => [['Requests', num(bins[i].requests), SERIES[0]], ['Missed the cache', num(bins[i].cache_misses), SERIES[1]], ['Text restored on request', num(bins[i].expands)]],
+  });
 }
 
 // ── components ─────────────────────────────────────────────────────────────
@@ -2754,7 +2704,7 @@ async function loadSessions() {
   const cols = wide ? 15 : 14;
   loadingRows(body, cols);
   try {
-    const { sessions, total } = await api('sessions', { limit: 25, offset: state.sessOffset });
+    const { sessions, total } = await api('sessions', { limit: 25, offset: state.sessOffset, sort: state.sessSort === 'cost' ? 'cost' : '' });
     clear(body);
     if (!sessions.length) {
       if (activeFilters().length) renderNoMatch(body, cols, 'sessions');
@@ -4832,10 +4782,13 @@ function navPath(view) {
  * written is one segment, including the two the SERVER writes (dash/kvcache.go:510-511),
  * so that branch is not a compatibility shim to be removed later — it is half the traffic.
  */
+const FIVE_PAGE_ALIAS = { home: 'overview', cache: 'keepalive' }; // #savings already opens the Savings group
 function resolveNav(path) {
   const seg = String(path || '').split('/').filter(Boolean);
   const view = seg[seg.length - 1] || '';
   if (GROUP_OF.has(view)) return view;
+  // Links to the short-lived five-page home (#home, #cache; #savings, #tools and #sessions already resolve) land on the nearest tab.
+  if (seg.length === 1 && FIVE_PAGE_ALIAS[seg[0]]) return FIVE_PAGE_ALIAS[seg[0]];
   // Only a group name survived (`#/admin`, or `#/savings/typo`): open its first tab.
   const g = GROUPS.find(([n]) => n === seg[0]);
   return (g && firstView(g[0])) || 'overview';
@@ -5193,6 +5146,7 @@ function init() {
   });
   $('#break-more').addEventListener('change', (e) => $('[data-testid=breakdown-table]').classList.toggle('show-more', e.target.checked));
   $('#sess-more').addEventListener('change', (e) => $('[data-testid=sessions-table]').classList.toggle('show-more', e.target.checked));
+  $('#sess-sort').addEventListener('change', (ev) => { state.sessSort = ev.target.value; state.sessOffset = 0; loadSessions(); });
   $('#sess-prev').addEventListener('click', () => { state.sessOffset = Math.max(0, state.sessOffset - 25); loadSessions(); });
   $('#sess-next').addEventListener('click', () => { state.sessOffset += 25; loadSessions(); });
   $('#drawer-close').addEventListener('click', closeDrawer);

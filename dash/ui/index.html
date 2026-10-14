@@ -339,30 +339,30 @@
       </div>
 
       <div class="plot-wide">
-        <h3>From baseline to net</h3>
-        <p class="note">What the window would have cost, each reduction, each penalty, and what is left. A negative net is shown, not hidden.</p>
+        <h3>Money saved and money added</h3>
+        <p class="note">Each bar is one thing that changed what you paid. Green is money saved, red is money context-guru added. An outlined bar is an upper bound, not a measurement.</p>
         <div id="waterfall" data-testid="waterfall"></div>
       </div>
 
       <div class="plot-grid">
         <div>
-          <h3>Tokens over time</h3>
-          <p class="note">Input tokens before and after compaction.</p>
+          <h3>Tokens removed</h3>
+          <p class="note">Input tokens context-guru took out before they reached the model.</p>
           <div id="chart-tokens" class="chart" data-testid="chart-tokens"></div>
         </div>
         <div>
-          <h3>Cache reads and writes</h3>
-          <p class="note">Reads are cheap. Writes are what you pay when the provider has to store a prompt again.</p>
+          <h3>Where your input tokens went</h3>
+          <p class="note">Reads from the cache are cheap. Writes are what you pay when the provider has to store a prompt again.</p>
           <div id="chart-cache" class="chart" data-testid="chart-cache"></div>
         </div>
         <div>
-          <h3>Latency</h3>
-          <p class="note">Time context-guru added to each request, next to time spent waiting on the provider.</p>
+          <h3>Time added to each request</h3>
+          <p class="note">Two scales on purpose: what context-guru added is thousands of times smaller than the provider's own time.</p>
           <div id="chart-latency" class="chart" data-testid="chart-latency"></div>
         </div>
         <div>
-          <h3>Requests and restorations</h3>
-          <p class="note">How many requests came through, and how often the model asked for removed text back.</p>
+          <h3>Requests, and how many missed the cache</h3>
+          <p class="note">Each column is requests in a period; the darker part missed the cache and was billed in full.</p>
           <div id="chart-volume" class="chart" data-testid="chart-volume"></div>
         </div>
       </div>
@@ -590,6 +590,7 @@
         reads correctly right up to the session where it is wrong by a factor of 500.</p>
     </details>
     <label class="more-toggle"><input type="checkbox" id="sess-more" data-testid="sessions-more"> More columns</label>
+    <label class="more-toggle">Order <select id="sess-sort" data-testid="sessions-sort"><option value="">Newest first</option><option value="cost">Costliest first</option></select></label>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="sessions-table">
         <thead><tr>
@@ -1022,9 +1023,9 @@
 <div id="scrim" class="scrim" hidden></div>
 
 <script defer src="app.js"></script>
+<script defer src="charts.js"></script>
 <!-- The Inventory view mounts itself: its tab, its section, its stylesheet and its loader
      registration all live in tools.js, so this feature is one line in the shared page. -->
-<script defer src="bottomline.js"></script>
 <script defer src="tools.js"></script>
 <!-- The KV-cache TTL view mounts itself the same way, from kvcache.js. -->
 <script defer src="kvcache.js"></script>

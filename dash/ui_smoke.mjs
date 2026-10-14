@@ -61,7 +61,7 @@ for (const v of [...DATA_VIEWS, ...SHELL_VIEWS]) {
       if (!(await page.$(`[data-testid="${id}"]`))) failures.push(`overview: missing the ${id} row`);
     }
     if (!(await page.$('#overview-diagnostics:not([open])'))) failures.push('overview: Detailed diagnostics must exist and start closed');
-    const rows = await page.$$('#tab-map .tab-map-row');
+    const rows = await page.$$('#tab-map dd');
     if (rows.length < 5) failures.push(`overview: About the other tabs lists ${rows.length} tabs`);
     // Section titles and row labels must be gone; the four metric names must not appear anywhere.
     for (const re of REMOVED_OVERVIEW_TEXT) {
@@ -86,6 +86,17 @@ await page.waitForTimeout(500);
 if (await page.$('[data-testid="tab-benchmarks"], #view-benchmarks, #tpl-tab-benchmarks')) failures.push('benchmarks: the tab is still in the page');
 const res = await page.evaluate(async () => (await fetch('/api/benchmarks')).status);
 if (res !== 404) failures.push(`benchmarks: /api/benchmarks answered ${res}, want 404`);
+
+// Links to the retired five-page home still land somewhere useful.
+for (const [hash, view] of [['#home', 'overview'], ['#cache', 'keepalive'], ['#sessions', 'sessions'], ['#tools', 'tools']]) {
+  await page.goto(`${base}/dashboard/${hash}`);
+  await page.reload();
+  await page.waitForTimeout(500);
+  const open = await page.evaluate(() => [...document.querySelectorAll('.view')].find((v) => !v.hidden)?.id);
+  if (open !== 'view-' + view) failures.push(`${hash} opened ${open}, want view-${view}`);
+}
+const moved = await page.evaluate(async () => (await fetch('/dashboard/home.html')).url);
+if (!moved.endsWith('/dashboard/index.html')) failures.push(`/dashboard/home.html resolved to ${moved}, want the dashboard`);
 
 await browser.close();
 if (failures.length) { console.error(failures.join('\n')); process.exit(1); }
