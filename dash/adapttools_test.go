@@ -434,4 +434,14 @@ func TestAdaptToolsSavedItemsAndTotalAgree(t *testing.T) {
 	if len(gap.Items) != 2 || gap.Items[1].Kind != "unattributed" || math.Abs(gap.Items[1].USD-50*(0.1+2.0)) > 1e-9 {
 		t.Fatalf("filter %+v, want an unattributed row of the gap", gap)
 	}
+	// One basis: the rows, unattributed included, always add up to the total.
+	for _, p := range []AdaptToolsSavedPart{same, gap} {
+		sum := 0.0
+		for _, it := range p.Items {
+			sum += it.USD
+		}
+		if math.Abs(sum-p.USD) > 1e-9 || math.Abs(p.USD-150*(0.1+2.0)) > 1e-9 && p.USD != want {
+			t.Fatalf("rows sum to $%v, total $%v", sum, p.USD)
+		}
+	}
 }
