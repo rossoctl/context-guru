@@ -403,20 +403,27 @@ func TestSaveMoreSkillsRecordTheirRuns(t *testing.T) {
 	for _, c := range []string{"save-more", "remove-mcp-and-skills"} {
 		body := readFileString(t, filepath.Join("skills", c, "SKILL.md"))
 		call := "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py\" record-run " + c
-		if !strings.Contains(body, "```bash\n"+call+"\n```") {
-			t.Errorf("%s: no %q block", c, call)
+		// One command, so a model cannot skip it or run it after a failure: && runs it only on exit 0.
+		if !strings.Contains(body, "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/cg.py\" "+c+" $ARGUMENTS && "+call+"\n") {
+			t.Errorf("%s: the read must be chained `... && %s`", c, call)
 		}
 		if !strings.Contains(body, "Bash("+call+")") {
 			t.Errorf("%s: the run record must be pre-approved as exactly %q", c, call)
 		}
-		for _, rule := range []string{"Skip that for a failed or refused run", "never run it for an apply or a revert"} {
-			if !strings.Contains(body, rule) {
-				t.Errorf("%s: missing the rule %q", c, rule)
-			}
+		if strings.Count(body, "record-run "+c) != 2 { // the chain and its pre-approval; never on the apply/revert line
+			t.Errorf("%s: record-run appears %d times, want the read chain and its pre-approval only", c, strings.Count(body, "record-run "+c))
 		}
-		if i, j := strings.Index(body, "cg.py\" "+c+" $ARGUMENTS"), strings.LastIndex(body, call); i < 0 || j < i {
-			t.Errorf("%s: the run is recorded before the read runs", c)
+	}
+	// The chain is only as good as the exit code: every failure or refusal of a read exits non-zero.
+	for _, args := range [][]string{{"save-more", "revert", "config"}, {"remove-mcp-and-skills", "nonsense"}} {
+		if _, code := runCGCode(t, cgProxyStub(t, "cachestate_warm"), nil, args...); code == 0 {
+			t.Errorf("%v exited 0, so the run would be recorded", args)
 		}
+	}
+	cmd := exec.Command("python3", filepath.Join("scripts", "cg.py"), "save-more")
+	cmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL=https://api.anthropic.com", "CG_URL=", "ANTHROPIC_AUTH_TOKEN=", "CG_TOKEN=")
+	if err := cmd.Run(); err == nil {
+		t.Error("save-more with no proxy exited 0, so the run would be recorded")
 	}
 }
 

@@ -8,22 +8,16 @@ allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" remove-mcp-and
 Run this with a Bash timeout of 420000 ms and print its output exactly as it is in one code block:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" remove-mcp-and-skills $ARGUMENTS
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" remove-mcp-and-skills $ARGUMENTS && python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" record-run remove-mcp-and-skills
 ```
+
+Run it exactly as one command: the second half records the run for the status line, and runs only when the
+read printed a report (the read exits non-zero on any failure or refusal). Say nothing about it.
 
 (Exception: if the arguments start with `apply` or `revert`, the user typed the change themselves, which is their
 yes: run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" $ARGUMENTS` instead and print its output.)
 
-Only if that read printed a report (it did not start with an error line such as `The proxy`, `This proxy`,
-`No Context Guru proxy`, `Usage:` or `Run this instead`), record the run for the status line, once:
-
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" record-run remove-mcp-and-skills
-```
-
-Skip that for a failed or refused run, and never run it for an apply or a revert. Say nothing about it.
-
-Only the read and that run record are pre-approved. A change is the separate command `cg.py apply` or `cg.py revert`, so Claude Code
+Only the read and that run record are pre-approved; never record a run for an apply or a revert. A change is the separate command `cg.py apply` or `cg.py revert`, so Claude Code
 also asks the user for permission to run it: that second prompt is expected, do not work around it.
 
 If the output has no `Question:` line, stop there. Add nothing.

@@ -951,7 +951,7 @@ def main(argv: list[str] | None = None) -> int:
         base = proxy_base(a.port) or (hosted_base() if adapt else None)
         if not base:
             print(NO_PROXY)
-            return 0
+            return 1 if adapt else 0  # a read that showed no report must not count as run (the skills chain on it)
         api = Api(base, token=cg_token() if adapt else None)
     if a.cmd in (*READS, *WRITES):
         return adapt_main(api, a.cmd, opts)
