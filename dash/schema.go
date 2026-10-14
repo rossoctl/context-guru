@@ -65,6 +65,14 @@ CREATE TABLE IF NOT EXISTS requests (
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)
+  -- The directory the agent was started in, which is what a user means by "project". Read from
+  -- the request body (schema.WorkingDirOf) and sanitized before it gets here (ProjectPath),
+  -- because it is a client-chosen string that could be named after a credential.
+  --
+  -- '' means UNATTRIBUTED, not "no project": every row written before this column existed reads
+  -- as '', and so does every request from a client that does not state a working directory. The
+  -- dashboard reports that as its own group rather than folding it into any real folder.
+  project            TEXT    NOT NULL DEFAULT '',
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -656,6 +664,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// #240's correction factor. Additive with a default of 0, which doubles as the marker for
 	// "written before the correction existed" — see the column comment in ddl above.
 	{"requests", "billed_token_factor", "REAL NOT NULL DEFAULT 0"},
+	// The project dimension. Additive with a '' default, which doubles as "unattributed": a row
+	// that predates the column cannot be back-filled, because the body it came from is long gone.
+	{"requests", "project", "TEXT NOT NULL DEFAULT ''"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},

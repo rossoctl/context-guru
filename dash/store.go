@@ -345,9 +345,9 @@ func (d *DB) insertBatch(evs []*Event) error {
 		reasoning_effort, thinking_mode, thinking_budget, temperature, top_p, max_tokens, stream,
 		tool_choice, tools, system_blocks,
 		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
-		keepalive_strategy_id, billed_token_factor
+		keepalive_strategy_id, billed_token_factor, project
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -402,6 +402,10 @@ func (d *DB) insertBatch(evs []*Event) error {
 			boolInt(e.Stream), e.ToolChoice, e.Tools, e.SystemBlocks,
 			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.StopReason,
 			strategyID, e.BilledTokenFactor,
+			// Sanitized HERE, at the write, rather than trusted from the caller: this is the last
+			// point before the value is on disk and on the SSE feed, and a path is a
+			// client-chosen string that could be named after a credential.
+			ProjectPath(e.Project),
 		)
 		if err != nil {
 			return err

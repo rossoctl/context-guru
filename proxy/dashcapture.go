@@ -32,6 +32,7 @@ type capture struct {
 	provider  string
 	model     string
 	agent     string
+	project   string
 	start     time.Time
 	cgMs      float64
 	upstream  float64
@@ -147,6 +148,16 @@ func (c *capture) noteTrace(tr apply.Trace) {
 func (c *capture) noteMeta(m dash.Meta) {
 	if c != nil {
 		c.meta = m
+	}
+}
+
+// noteProject records the directory the agent was started in. Called once, from the chat handler,
+// with the PRISTINE inbound body — for the same reason noteMeta is: the pipeline may compact the
+// environment block out of the transcript it forwards, and reading the project from the rewritten
+// body would record "unattributed" on exactly the requests the pipeline acted on.
+func (c *capture) noteProject(p string) {
+	if c != nil {
+		c.project = p
 	}
 }
 
@@ -341,6 +352,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		Status:   c.status,
 	}
 	e.Agent = dash.AgentFor(c.agent)
+	e.Project = c.project
 	e.Meta = c.meta
 	e.FromTrace(c.trace, c.unique)
 	// The provider's terminal reason, off the same response bytes the token tiers came

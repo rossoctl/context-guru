@@ -41,8 +41,11 @@ type Filter struct {
 	Model      string
 	Provider   string
 	Agent      string
-	Preset     string
-	Mode       string
+	// Project scopes to one launch directory. Unset means EVERY project, which is the view the
+	// dashboard opens on — not "the unattributed ones", since absence is not a value.
+	Project string
+	Preset  string
+	Mode    string
 	// Component selects requests on which this component RAN.
 	Component string
 	// Reason selects requests by their uncompressed reason bucket; the sentinel
@@ -98,7 +101,7 @@ func (f Filter) where() (string, []any) {
 	}
 	for col, v := range map[string]string{
 		"r.session_id": f.Session, "r.model": f.Model, "r.provider": f.Provider,
-		"r.agent": f.Agent, "r.preset": f.Preset, "r.mode": f.Mode,
+		"r.agent": f.Agent, "r.preset": f.Preset, "r.mode": f.Mode, "r.project": f.Project,
 		"r.token_accounting": f.Accounting,
 		"r.reasoning_effort": f.Effort, "r.thinking_mode": f.Thinking,
 		"r.stop_reason": f.StopReason,
@@ -152,7 +155,8 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.token_accounting, r.cache_miss_reason, r.uncompressed_reason,
 	r.reasoning_effort, r.thinking_mode, r.thinking_budget, r.temperature, r.top_p,
 	r.max_tokens, r.stream, r.tool_choice, r.tools, r.system_blocks,
-	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason`
+	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason,
+	r.project`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -168,7 +172,8 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.TokenAccounting, &e.CacheMissReason, &e.UncompressedReason,
 		&e.ReasoningEffort, &e.ThinkingMode, &e.ThinkingBudget, &temp, &topP,
 		&e.MaxTokens, &stream, &e.ToolChoice, &e.Tools, &e.SystemBlocks,
-		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason)
+		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason,
+		&e.Project)
 	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
 	e.KeepAlive = keepAlive != 0
 	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one

@@ -71,6 +71,41 @@ func metaEnum(s string) string {
 	return s
 }
 
+// projectPathShape is the shape a stored project key has to fit: an absolute POSIX path, no
+// interior whitespace, no control characters.
+//
+// A shape check rather than an allowlist, and here that is forced rather than chosen — nobody can
+// enumerate the directories a user may work in. It is also why the check has to be structural: the
+// one thing we can say about a legitimate value is what it looks like.
+var projectPathShape = regexp.MustCompile(`^/[^\s\x00-\x1f]{0,511}$`)
+
+// ProjectPath sanitizes an agent's launch directory for storage.
+//
+// THE TRUST BOUNDARY FOR THE PROJECT DIMENSION. A launch directory is a value the CLIENT chose, so
+// it is attacker-influenced in exactly the way Meta.redact() describes: a request whose working
+// directory happens to be named after a token would otherwise write that token into the requests
+// table and onto the SSE feed, permanently and unredactably.
+//
+// Same composition as metaEnum — scan for credential shapes, then insist on a shape — against a
+// different shape, since a path is neither short nor an identifier and so cannot reuse
+// metaEnumShape. The order matters and is the same as there: RedactContent first, because a
+// credential embedded in an otherwise path-shaped string must be caught before the shape test
+// passes it.
+//
+// Returns Redacted rather than "" for a value it refuses. "" already means "this request did not
+// state a project", and a refusal silently collapsing into that would be indistinguishable from
+// the dimension not working — the same reasoning metaEnumShape's comment gives for preferring a
+// visible placeholder.
+func ProjectPath(s string) string {
+	if s == "" {
+		return ""
+	}
+	if RedactContent(s, 0) != s || !projectPathShape.MatchString(s) {
+		return Redacted
+	}
+	return s
+}
+
 // configAllowlist names the effective-config keys the /api/config view may
 // render. Everything else in the resolved configuration is withheld, because a
 // component's config block is free-form YAML and could carry an endpoint

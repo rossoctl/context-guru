@@ -101,10 +101,15 @@ type Event struct {
 	BilledTokenFactorMeasured bool   `json:"billed_token_factor_measured"`
 	Provider                  string `json:"provider"`
 	Agent                     string `json:"agent"`
-	Preset                    string `json:"preset"`
-	Mode                      string `json:"mode"`
-	Route                     string `json:"route"`
-	Status                    int    `json:"status"`
+	// Project is the directory the agent was started in — what a user means by "project". Read
+	// from the request body, since nothing else in a request identifies one: the session id is a
+	// hash of the conversation head, and one session can span directories (measured: 8 of 48 do).
+	// "" means unattributed, which is what a client that does not state a working directory gets.
+	Project string `json:"project,omitempty"`
+	Preset  string `json:"preset"`
+	Mode    string `json:"mode"`
+	Route   string `json:"route"`
+	Status  int    `json:"status"`
 
 	Bypassed   bool `json:"bypassed"`
 	CacheAware bool `json:"cache_aware"`
