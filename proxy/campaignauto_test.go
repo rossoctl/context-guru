@@ -147,7 +147,7 @@ func refreshFixture(t *testing.T, gap int64, mode string) (f *mgrFixture, tid, b
 	f, dir := newCampaignFixture(t, "ship", "parity.model.json")
 	_, tid = f.signUpJar(t, "user@ibm.com")
 	t0 := time.Now().Add(-20 * 24 * time.Hour).UnixMilli()
-	n := 0
+	var evs []*dash.Event
 	for _, tc := range []struct {
 		tenant string
 		gap    int64
@@ -155,31 +155,15 @@ func refreshFixture(t *testing.T, gap int64, mode string) (f *mgrFixture, tid, b
 		for s := 0; s < 80; s++ {
 			ts := t0 + int64(s)*3*3600e3
 			for i := 0; i < 30; i++ {
-				for st := f.rec.Stats(); st.Queued > st.QueueCap/2; st = f.rec.Stats() {
-					time.Sleep(time.Millisecond) // the recorder drops rather than blocks when its queue is full
-				}
-				f.rec.Record(&dash.Event{TenantID: tc.tenant, SessionID: fmt.Sprintf("s%d", s), TS: ts, Model: "m1", Status: 200, Mode: dash.ModeActive,
+				evs = append(evs, &dash.Event{TenantID: tc.tenant, SessionID: fmt.Sprintf("s%d", s), TS: ts, Model: "m1", Status: 200, Mode: dash.ModeActive,
 					TokenAccounting: dash.AccountingComplete, CacheRead: 50000, UpstreamMs: 1000})
 				ts += 1000 + tc.gap
-				n++
 			}
 		}
 	}
-	// the deadline moves with progress: under -race on a loaded host the writer is slow, not stuck
-	last := int64(-1)
-	for end := time.Now().Add(20 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		st := f.rec.Stats()
-		if st.Written >= int64(n) {
-			break
-		} else if st.Dropped > 0 {
-			t.Fatalf("the recorder dropped %d rows", st.Dropped)
-		}
-		if st.Written > last {
-			last, end = st.Written, time.Now().Add(20*time.Second)
-		}
-		if time.Now().After(end) {
-			t.Fatalf("the recorder wrote nothing for 20 s (%d of %d rows)", st.Written, n)
-		}
+	// straight to the store in one transaction: through the recorder's queue this fixture took most of a minute under -race
+	if err := f.h.opts.Dashboard.DB().InsertEvents(evs); err != nil {
+		t.Fatal(err)
 	}
 	id := "cmp-0123456789ab"
 	base = filepath.Join(dir, id)
