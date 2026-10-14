@@ -720,7 +720,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// The eligible (attempted) denominator: what age/supersession offloaders were
 	// allowed to touch. Everything before MaxCachedIdx is frozen for cache safety —
 	// the cost of that mechanism, reported next to its benefit.
-	tr.AttemptedTokens = attemptedTokens(norm, c)
+	if !bypass { // a bypassed request is not compacted, and counting its text is the slow part (see Pipeline.Run)
+		tr.AttemptedTokens = attemptedTokens(norm, c)
+	}
 
 	// From here on, everything this request logs carries the RESOLVED session. The
 	// caller (the proxy) already put tenant and route on the context logger; the session

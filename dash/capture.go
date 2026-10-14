@@ -433,6 +433,15 @@ func (r *Recorder) run() {
 			if e.LifecycleFn != nil {
 				e.Lifecycle = e.LifecycleFn()
 			}
+			if e.BypassTokens != nil {
+				n := e.BypassTokens()
+				e.TokensBefore, e.TokensAfter = n, n
+				// Price() ran on the request path while the count was still zero and labelled the
+				// row "missing"; with a count it is "partial", exactly as before the count moved.
+				if n > 0 && e.TokenAccounting == AccountingMissing {
+					e.TokenAccounting = AccountingPartial
+				}
+			}
 			e.Redact()
 		}
 		if err := r.db.insertBatch(batch); err != nil {

@@ -1117,8 +1117,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		if api == "responses" {
 			wire = "responses"
 		}
-		var tr apply.Trace  // hoisted: the lifecycle log line below reads it
-		var threadID string // hoisted with it: serve hands it to the keeper
+		var tr apply.Trace      // hoisted: the lifecycle log line below reads it
+		var added time.Duration // hoisted with tr: the lifecycle log line reads both
+		var threadID string     // hoisted with it: serve hands it to the keeper
 		// preBody is what the pipeline's own components are about to receive as req.Input, BEFORE
 		// any of them — cache_aware_summarizer and extract_llm_sweep included — runs. Captured here,
 		// read by h.serve below, and stashed alongside the body actually forwarded: see the
@@ -1177,7 +1178,6 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					anchor = &expand.Anchor{At: at, Fp: fp}
 				}
 			}
-			var added time.Duration
 			// Captured BEFORE the pipeline runs — see ClearStaleKeepAliveCandidate's own comment
 			// on why this request's "did I register fresh keep-alive material" test has to be a
 			// timestamp comparison rather than clearing by call order: tr.Session (the key a
@@ -1350,7 +1350,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// emits it in a defer once the response is finished, so a request produces exactly
 		// one lifecycle line whichever way it ends — and the attrs are built here, once,
 		// rather than on the response path.
-		slg := lifecycleLogger(lg, tr, bypassed)
+		slg := lifecycleLogger(lg, tr, bypassed, added)
 		if threadID != thread.Primary {
 			slg = slg.With("thread", threadID)
 		}
@@ -1373,13 +1373,18 @@ func tenantLabel(id string) string {
 // lifecycleLogger returns the request logger with this request's pipeline outcome
 // attached: the resolved session (so every line of this request correlates, including
 // the ones apply wrote), and the token accounting.
-func lifecycleLogger(lg *slog.Logger, tr apply.Trace, bypassed bool) *slog.Logger {
+func lifecycleLogger(lg *slog.Logger, tr apply.Trace, bypassed bool, added time.Duration) *slog.Logger {
 	lg = lg.With("session", tr.Session, "messages", tr.Messages, "bypassed", bypassed,
 		"cache_aware", tr.CacheAware, "frozen_tokens", tr.FrozenTokens)
 	if tr.Run != nil {
 		lg = lg.With("tokens_before", tr.Run.TokensBefore, "tokens_after", tr.Run.TokensAfter,
-			"saved", tr.Run.Saved(), "cg_ms", tr.Run.DurationMs)
+			"saved", tr.Run.Saved(), "components_ms", tr.Run.DurationMs)
 	}
+	// cg_ms is everything this proxy did before forwarding (normalizing, counting, the
+	// components): the figure the dashboard's cg_latency_ms and /stats already carry. It used to
+	// be the sum of the components' own durations, which leaves out the counting and so read
+	// 0.4 ms on a request that took 600 ms to reach the upstream.
+	lg = lg.With("cg_ms", float64(added.Microseconds())/1000.0)
 	if tr.Restored > 0 {
 		// Inserted after the pipeline, so tokens_after above does not include them.
 		lg = lg.With("expand_restored", tr.Restored, "expand_restored_tokens", tr.RestoredTokens)
