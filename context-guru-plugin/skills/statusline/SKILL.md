@@ -44,10 +44,11 @@ Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-ski
   The main clock and the context bar follow the main thread, not whichever agent spoke last.
 - **Context.** Bar and percent against the model's context limit: the proxy's when it is a
   measured figure for the model, else Claude Code's.
-- **Weekly tip** (balanced and detailed, its own last line, on by default): shown only when none of
-  `/context-guru:save-more` and `/context-guru:remove-mcp-and-skills` ran in the last 7 days
-  (read from `<state dir>/last-run.json`, never over the network), naming only the ones installed;
-  a new install waits a week. `statusline.py --set-tips=off` turns it off, `--hide=tip` per command.
+- **Weekly tip** (balanced and detailed, its own last line, on by default): names each of
+  `/context-guru:save-more` and `/context-guru:remove-mcp-and-skills` (the ones installed) not run
+  in the last 7 days, read from `<state dir>/last-run.json`, never over the network; a new install
+  waits a week. A narrow terminal gets `Tip: try /context-guru:save-more (not run for 7+ days)`
+  first. `statusline.py --set-tips=off` turns it off, `--hide=tip` per command.
   The status line gives no other advice: that comes from those commands and the automatic sweep.
 - A pending proxy update (`▲ update v0.3.2`) comes first so it cannot scroll off.
 

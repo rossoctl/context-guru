@@ -774,10 +774,11 @@ print("cache:", render())
 	}
 }
 
-// TestStatuslineGoldenWeeklyTip pins the weekly tip. It shows only when none of the commands it
-// names ran in the last 7 days, names only the ones this plugin has, waits a week on a new install
-// (a never-run command counts from the first time the status line saw the install), can be turned
-// off, and is the first thing a narrow terminal drops. It reads local files only.
+// TestStatuslineGoldenWeeklyTip pins the weekly tip. It names every command (of the ones this
+// plugin has) not run in the last 7 days, and shows nothing when all ran this week. It waits a week
+// on a new install (a never-run command counts from the first time the status line saw the
+// install), reads local files only, treats an unreadable history as no tip, can be turned off, and
+// is the first thing a narrow terminal shortens (to the command stale longest), then drops.
 func TestStatuslineGoldenWeeklyTip(t *testing.T) {
 	const now = 1_800_000_000 // seconds
 	const day = 86400
@@ -825,7 +826,13 @@ func TestStatuslineGoldenWeeklyTip(t *testing.T) {
 		width                 int
 		want                  string
 	}{
-		{"one-ran-recently", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-2*day, now-20*day), 30, nil, false, 200, lines},
+		{"both-ran-recently", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-2*day, now-6*day), 30, nil, false, 200, lines},
+		{"one-stale", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-2*day, now-20*day), 30, nil, false, 200,
+			lines + "\nTip: you haven't run /context-guru:remove-mcp-and-skills for over a week — worth a shot."},
+		{"exactly-7-days", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-7*day, now-7*day), 30, nil, false, 200, lines},
+		{"7-days-and-a-second", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-7*day-1, now-2*day), 30, nil, false, 200,
+			lines + "\nTip: you haven't run /context-guru:save-more for over a week — worth a shot."},
+		{"unreadable-history", both, `{not json`, 30, nil, false, 200, lines},
 		{"both-ran-8-days-ago", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-8*day, now-8*day), 30, nil, false, 200,
 			lines + "\n" + tipBoth},
 		{"never-run-week-old-install", both, "", 8, nil, false, 200, lines + "\n" + tipBoth},
@@ -836,7 +843,13 @@ func TestStatuslineGoldenWeeklyTip(t *testing.T) {
 		{"no-command-installed", plugin(), "", 30, nil, false, 200, lines},
 		{"tips-off", both, "", 30, nil, true, 200, lines},
 		{"hidden", both, "", 30, []string{"--hide=tip"}, false, 200, lines},
-		{"narrow-drops-the-tip-first", both, "", 30, nil, false, 60, lines},
+		// Narrow: the short form first, naming the command stale longest, then no tip at all.
+		{"narrow-short-form", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-8*day, now-20*day), 30, nil, false, 80,
+			lines + "\nTip: try /context-guru:remove-mcp-and-skills (not run for 7+ days) (+1)"},
+		{"narrow-one-stale-short-form", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-8*day, now-2*day), 30, nil, false, 60,
+			lines + "\nTip: try /context-guru:save-more (not run for 7+ days)"},
+		{"narrower-drops-the-tip", both, "", 30, nil, false, 45,
+			"saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -887,6 +900,23 @@ func TestStatuslineGoldenWeeklyTip(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTipCommandsRecordTheirRuns: the tip is only honest if each command it names records its runs.
+// Every TIP_COMMANDS skill this plugin ships must call `settings.py record-run <its name>`.
+func TestTipCommandsRecordTheirRuns(t *testing.T) {
+	for _, name := range []string{"save-more", "remove-mcp-and-skills"} {
+		b, err := os.ReadFile(filepath.Join(scriptsDir(t), "..", "skills", name, "SKILL.md"))
+		if os.IsNotExist(err) {
+			continue // not shipped yet: the tip does not name it either
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "record-run "+name) {
+			t.Errorf("skills/%s/SKILL.md never runs `settings.py record-run %s`, so the weekly tip would name it as unused", name, name)
+		}
 	}
 }
 

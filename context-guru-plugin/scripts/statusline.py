@@ -565,22 +565,31 @@ def _set_tips(value: str) -> str:
     return f"status line tip: {value}"
 
 
-def _tip_segment(now: float | None = None) -> str | None:
-    """`Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-skills for over
-    a week — worth a shot.`, shown only when none of them ran in the last TIP_DAYS, and naming only
-    the ones this plugin actually has (a skills/<name>/SKILL.md). Local files only, no network: the commands write
-    their last run time to `<state dir>/last-run.json` ({"save-more": epoch, ...}), and this keeps
-    the first time it saw the install in `<state dir>/statusline-first-seen`. A command that never
-    ran counts from that first sighting, so a new install sees no tip for TIP_DAYS: the text says
-    "for over a week", and before then that is not yet true."""
+def _tip_segment(level: int | None = 0, now: float | None = None) -> str | None:
+    """`Tip: you haven't run /context-guru:save-more for over a week — worth a shot.`, naming every
+    command (of the ones this plugin actually has, a skills/<name>/SKILL.md) not run in the last
+    TIP_DAYS; nothing when all ran this week. Level 1 is the short form for a narrow terminal, the
+    one stale longest: `Tip: try /context-guru:save-more (not run for 7+ days) (+1)`.
+
+    Local files only, no network: the commands record a run with `settings.py record-run <name>`
+    into `<state dir>/last-run.json`, and this keeps the first time it saw the install in
+    `<state dir>/statusline-first-seen`. A command that never ran counts from that first sighting,
+    so a new install sees no tip for TIP_DAYS: the text says "for over a week", and before then
+    that is not yet true. A last-run.json that cannot be read means no tip: an unknown history is
+    not a stale one."""
+    if level is None:
+        return None
     now = _now_s() if now is None else now
     state = _update_check_state_dir()
     try:
         with open(os.path.join(state, "last-run.json"), encoding="utf-8") as fh:
             runs = json.loads(fh.read(4096))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         runs = {}
-    runs = runs if isinstance(runs, dict) else {}
+    except (OSError, ValueError):
+        return None
+    if not isinstance(runs, dict):
+        return None
     seen_path = os.path.join(state, "statusline-first-seen")
     try:
         with open(seen_path, encoding="ascii") as fh:
@@ -594,10 +603,15 @@ def _tip_segment(now: float | None = None) -> str | None:
         except OSError:
             pass
     skills = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills")
-    have = [c for c in TIP_COMMANDS if os.path.isfile(os.path.join(skills, c, "SKILL.md"))]
-    if not have or any(now - max(_num(runs, c) or 0.0, first) <= TIP_DAYS * 86400 for c in have):
-        return None  # one of them ran this week (or the install is younger than that): no nudge
-    names = " or ".join(f"/context-guru:{c}" for c in have)
+    idle = {c: now - max(_num(runs, c) or 0.0, first) for c in TIP_COMMANDS
+            if os.path.isfile(os.path.join(skills, c, "SKILL.md"))}
+    stale = sorted((c for c, age in idle.items() if age > TIP_DAYS * 86400), key=lambda c: -idle[c])
+    if not stale:
+        return None
+    if level == 1:
+        more = f" (+{len(stale) - 1})" if len(stale) > 1 else ""
+        return f"{DIM}Tip: try /context-guru:{stale[0]} (not run for {TIP_DAYS}+ days){more}{RESET}"
+    names = " or ".join(f"/context-guru:{c}" for c in TIP_COMMANDS if c in stale)
     return f"{DIM}Tip: you haven't run {names} for over a week — worth a shot.{RESET}"
 
 
@@ -668,9 +682,9 @@ LAYOUTS = {
     "watch": ("save", "clock0", "wagents"),  # saved, main clock, a mini-bar per sub-agent
 }
 ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka"}
-# Dropped/shrunk first to last when a line is wider than the terminal. The tip goes first: it is
-# the least urgent thing on the line.
-DEGRADE = (("tip", None), ("tools", None), ("latency", None), ("ka", None), ("spend", None), ("update", None),
+# Dropped/shrunk first to last when a line is wider than the terminal. The tip goes first (its short
+# form, then the line): it is the least urgent thing on the line.
+DEGRADE = (("tip", 1), ("tip", None), ("tools", None), ("latency", None), ("ka", None), ("spend", None), ("update", None),
            ("spark", 1), ("strip", 1), ("heat", 1), ("fill", 1), ("wagents", 1),
            ("agents", 1), ("agents", 2), ("save", 1), ("ctx", 1), ("save", 2), ("cache", 1), ("agents", None), ("ctx", None),
            ("save", None))
@@ -1536,12 +1550,12 @@ def main() -> None:
         "ka": lambda lv: (_keepalive_segment(stats) if stats and lv == 0 else None),
         "latency": lambda lv: _latency_segment(stats) if lv == 0 else None,
         "tools": lambda lv: _recommend_segment(payload) if lv == 0 else None,
-        "tip": lambda lv: tip if lv == 0 else None,
+        "tip": lambda lv: tips.get(lv),
     }
     order = [e for e in ("update", "save", "spend", "spark", "strip", "heat", "fill", "clock0", "wagents", "cache",
                          "agents", "ctx", "ka", "latency", "tools", "tip") if e in on]
     level: dict[str, int | None] = {e: 0 for e in order}
-    tip = _tip_segment() if "tip" in on and not _tips_off() else None
+    tips = {lv: _tip_segment(lv) for lv in (0, 1)} if "tip" in on and not _tips_off() else {}
     if layout in ("minimal", "watch"):
         level["save"] = 1  # minimal: `saved $0.31 of $4.10`, the main thread only
     two_rows = layout != "minimal"

@@ -103,7 +103,13 @@ The unlabelled form: one running sub-agent, then several, then five.
 Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-skills for over a week — worth a shot.
 ```
 
-On by default in `balanced` and `detailed`, as its own last line. It appears only when none of those commands has run in the last 7 days, and it names only the ones your plugin has. The commands record when they last ran in `last-run.json` in the plugin's state directory, and the status line only reads that file, so the tip costs no network call. A command that has never run counts from the first time the status line saw the install, so a new install sees no tip in its first week. It is the first thing dropped when the terminal is too narrow for it.
+On by default in `balanced` and `detailed`, as its own last line. It names each of those commands (of the ones your plugin has) that has not run in the last 7 days, and shows nothing when all of them ran this week. `save-more config` and `save-more cache` count as running `save-more`. The commands record when they last ran in `last-run.json` in the plugin's state directory, and the status line only reads that file, so the tip costs no network call; if that file cannot be read, there is no tip. A command that has never run counts from the first time the status line saw the install, so a new install sees no tip in its first week.
+
+A narrow terminal gets the short form first, naming the command stale longest (`(+1)` when another is stale too), and drops the tip only when even that does not fit:
+
+```text
+Tip: try /context-guru:save-more (not run for 7+ days) (+1)
+```
 
 Turn it off for good with `python3 "<plugin dir>/scripts/statusline.py" --set-tips=off` (`--set-tips=on` brings it back), or per installed command with `--hide=tip`.
 
