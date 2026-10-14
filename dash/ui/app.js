@@ -8707,7 +8707,11 @@ function buildStrategyForm(form) {
       }
       fieldError(windowsField, '');
       strategyForm.windows.push({
-        days, start: winStart.value, end: winEnd.value, tz: winTZ.value.trim() || 'Asia/Jerusalem',
+        // A time input tops out at 23:59, and the server's window end is exclusive, so a window
+        // ending 23:59 would leave that last minute of the day uncovered. Send the end-of-day
+        // spelling instead.
+        days, start: winStart.value, end: winEnd.value === '23:59' ? '24:00' : winEnd.value,
+        tz: winTZ.value.trim() || 'Asia/Jerusalem',
       });
       // Days are per-window, not sticky across additions — a manager building "9-12
       // weekdays" and "14-18 weekends" would otherwise have the second Add silently
