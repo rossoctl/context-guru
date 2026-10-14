@@ -10,15 +10,15 @@ context-guru-proxy --preset general --dashboard
 # open http://localhost:4000/dashboard/
 ```
 
-`/dashboard/` opens the five-page home: Home, Savings, Cache, Tools & context and Sessions, each with a
-bottom line first. The full dashboard described below (every view, settings, admin) is at
-`/dashboard/index.html`, and old links such as `/dashboard/#/savings/usage` open it there.
+`/dashboard/` opens the **Overview**. The older links `/dashboard/#home` and `/dashboard/#cache` open
+Overview and Keep-alive, and `/dashboard/home.html` redirects to the dashboard.
 
 It is **off by default**. Turning it on adds `/dashboard/` and `/api/*`; every existing
 route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
 
 !!! info "No CDN, no build step, no network"
-    The whole UI is three files (`index.html`, `style.css`, `app.js`) embedded in the
+    The whole UI is a handful of static files (`index.html`, `style.css`, `app.js`, `charts.js`,
+    `tools.js`, `kvcache.js`, `campaigns.js` and one bundled font) embedded in the
     binary with `go:embed`. Charts are hand-drawn SVG — no chart library, no framework.
     The page fetches nothing off-origin, so it works in a VPC or fully air-gapped.
 
@@ -28,18 +28,23 @@ route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
 
 ## What you'll see
 
-- **Overview** — three rows of what context-guru saved (cache keep-alive, compaction, and the
-  tools and skills filter), each in dollars and tokens against what you spent. Below them
-  a ranked list of tools and skills to remove, a one-line guide to the other tabs, and a
-  closed "Detailed diagnostics" section with the plots behind the numbers. One view, no sub-nav.
-- **Savings** — where the money went: [keep-alive](how-to/cache-keepalive.md), the
-  [tool inventory](#tool-inventory-panel), and usage over time.
-- **Traffic** — per-session and per-request detail, including a git-style diff of
-  exactly what was rewritten on the wire.
-- **Admin** — configuration, strategies, tenants, setup, settings, archive and feedback
+- **Overview** — "What context-guru saved": three rows (cache keep-alive, compaction, tools and
+  skills filter), each in dollars and tokens against what you spent, with an *Estimated* or
+  *Upper bound* badge. The keep-alive row notes that whether to keep it on is a forecast (see
+  Keep-alive), and a note says the provider's own cache discount is not counted. Below: "Tools and
+  skills to remove" (a ranked list, with `/context-guru:remove-mcp-and-skills` and
+  `/context-guru:insights tools`), "About the other tabs", and one closed "Detailed diagnostics"
+  section with five plots (net saving over time; money saved and added, where an outlined bar is an
+  upper bound; tokens removed; where input tokens went, as 100% columns of cache read, cache write
+  and fresh; time added per request and requests with cache misses) and a live requests table.
+  Every plot shows exact figures on hover.
+- **Savings** — Keep-alive, Inventory (the [tool inventory](#tool-inventory-panel)) and Usage over time.
+- **Traffic** — Sessions (newest or costliest first; six columns, more with a checkbox) and
+  Requests, including a git-style diff of exactly what was rewritten on the wire.
+- **Admin** — Config, Strategies, Tenants, Setup, Settings, Archive and Feedback
   (some of these appear only in a [hosted service](hosted.md)).
-- **Advanced** — per-component economics (which ones earn their place),
-  [KV-cache behavior](#kv-cache-panel), and per-account cache campaigns.
+- **Advanced** — Components (per-component economics), [KV-cache behavior](#kv-cache-panel),
+  and Campaigns (per-account keep-alive rules).
 
 Every tab starts with a title and one line saying what it shows. Dark mode, small
 viewports, and empty states (a blank dashboard explains *why* each panel is blank) are

@@ -4,7 +4,7 @@ A plain guide to every tab of the context-guru dashboard. Each section says in o
 tab shows, then explains its blocks in a few words. For the technical reference see
 [Dashboard](../dashboard.md).
 
-The dashboard opens at `http://localhost:4000/dashboard/index.html` (use your own host and port).
+The dashboard opens at `http://localhost:4000/dashboard/` (use your own host and port). Old links such as `#home` and `#cache` open Overview and Keep-alive.
 The tabs sit in five groups along the top: **Overview**, **Savings**, **Traffic**, **Admin** and
 **Advanced**. The row of filters under them (time range, model, agent, account) applies to every
 tab. Pick a range first; all the numbers below follow it.
@@ -24,21 +24,17 @@ tab's title says so. The sample data on these screenshots is invented. Dark them
 
     ![The Overview tab, dark theme](../img/dashboard/overview-dark.png)
 
-**What context-guru saved.** Three rows: Cache keep-alive, Compaction, and Tools and skills filter. Each shows money and tokens saved, set against what you spent in the selected range. An "Estimated" or "Upper bound" badge tells you how firm the number is. The keep-alive row also shows the waiting time it avoided.
+**What context-guru saved.** Three rows: Cache keep-alive, Compaction, and Tools and skills filter. Each shows money and tokens saved, set against what you spent in the selected range. An "Estimated" or "Upper bound" badge tells you how firm the number is. The keep-alive row also shows the waiting time it avoided, and says that whether to keep it on is a forecast from your own history: see the Keep-alive tab. A note under the rows explains that "spent" includes our own model calls and pings, and that the provider's own cache discount is not counted as our saving.
 
-**Tools and skills to remove.** A ranked list of the tools and skills your agent carries but never uses, with what carrying each one cost in this range. Two commands you can copy, `/context-guru:remove-mcp-and-skills` and `/context-guru:insights tools`, remove them or show the details. A link opens the Inventory tab.
+**Tools and skills to remove.** A ranked list of the tools and skills your agent carries but never uses, with what carrying each one cost in the selected range. Two commands you can copy, `/context-guru:remove-mcp-and-skills` and `/context-guru:insights tools`, remove them or show the details. A link opens the Inventory tab.
 
 **About the other tabs.** One short line per tab, grouped like the navigation bar.
 
-**Detailed diagnostics.** Closed by default. Open it for the plots behind the numbers: net saving over time, baseline to net, tokens, cache reads and writes, latency, requests, and live requests.
+**Detailed diagnostics.** Closed by default. Open it for the plots behind the numbers. Every plot shows exact figures when you hover it. There are five: net saving over time (a line); money saved and money added (bars above and below the zero line; an outlined bar is an upper bound, not a firm figure); tokens removed (columns); where your input tokens went (columns that each fill to 100%: read from cache, written to cache, sent fresh); and time added to each request (two small lines, each on its own scale) together with the number of requests and how many missed the cache. Below them is a live table of requests as they arrive.
 
 Detailed diagnostics, opened:
 
 ![The Overview with Detailed diagnostics open](../img/dashboard/overview-diagnostics-light.png)
-
-On a phone the same page stacks into one column:
-
-![The Overview tab at phone width](../img/dashboard/overview-phone.png){ width=260 }
 
 
 ## Keep-alive
@@ -114,7 +110,7 @@ On a phone the same page stacks into one column:
 
     ![The Sessions tab, dark theme](../img/dashboard/sessions-dark.png)
 
-**All sessions.** A sortable table with a few columns by default. Pick more columns from the menu. Click a row to open the session and see its requests. The filter bar narrows the list by model, agent or account.
+**All sessions.** A sortable table showing six columns by default; tick "More columns" to see the rest. Order it newest first or costliest first. Click a row to open the session and see its requests. The filter bar narrows the list by model, agent or account.
 
 
 ## Requests
@@ -286,3 +282,11 @@ On a phone the same page stacks into one column:
 **Would these predictions hold on new data?.** Picks a rule on an earlier period and scores it on a later one. If it only works on the earlier period, the check says so.
 
 **Campaigns you have created.** The list of campaigns and what each did.
+
+
+## On a phone
+
+At phone width every tab stacks into one column and tables scroll sideways inside their own box. Overview and Sessions:
+
+![The Overview tab at phone width](../img/dashboard/phone/overview-phone.png){ width=260 }
+![The Sessions tab at phone width](../img/dashboard/phone/sessions-phone.png){ width=260 }
