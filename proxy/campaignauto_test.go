@@ -290,8 +290,14 @@ func TestAutoDatasetReadsTheTenantsOwnRowsPastTheFleetCap(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		f.record(t, "other-tenant", fmt.Sprintf("s%d", i), &dash.Event{TS: t0 + 3600e3 + int64(i)*60e3, Model: "m1", Status: 200, CacheRead: 50000, UpstreamMs: 1000})
 	}
-	defer dash.SetKVCacheMaxRows(6)()
 	since, until := t0-60e3, time.Now().UnixMilli()
+	// under the default cap the fleet read already holds the tenant's rows: the tenant read must not add them twice
+	if d, err := f.h.autoDataset([]string{tid}, since, until); err != nil {
+		t.Fatal(err)
+	} else if len(d.reqs) != 10 || d.fleetMatched != d.fleetRead {
+		t.Fatalf("uncapped: %d rows; want 10, each once", len(d.reqs))
+	}
+	defer dash.SetKVCacheMaxRows(6)()
 	d, err := f.h.autoDataset([]string{tid}, since, until)
 	if err != nil {
 		t.Fatal(err)

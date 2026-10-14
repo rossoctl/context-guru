@@ -289,6 +289,8 @@ type autoData struct {
 	ownTruncated            []string // tenants whose own rows exceeded the cap
 }
 
+// ponytail: memory is the fleet read plus one capped read per tenant (each up to the dashboard's row cap) held at once; stream per tenant if
+// a refresh pass over many live campaigns ever shows up in RSS.
 func (h *Handler) autoDataset(tenants []string, since, until int64) (*autoData, error) {
 	db := h.opts.Dashboard.DB()
 	fleet, total, err := db.KVCacheDataset(dash.Filter{TenantAll: true, Since: since, Until: until}, dash.KVCacheOptions{})
