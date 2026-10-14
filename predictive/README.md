@@ -170,6 +170,8 @@ Dollars are closed-form units calibrated to an offline replay engine (`scripts/c
 A plan chooser, not a predictor, and no Python: `predictive/autotune.go` picks the tenant's plan from the menu "ping k times, 270 s apart", k = 0..6, and
 `proxy/campaignauto.go` wraps it in a campaign (spec kind `rules`, one segment, the chosen plan).
 
+* Data: the fleet's rows (for the prior) come from one read capped at the dashboard's newest-rows limit; the tenant's own rows are read on
+  their own, so a busy fleet never pushes them out. The spec's `evidence.data` and `caveats` say when either read was truncated.
 * Every row of every tenant in the window is scored in closed form for each plan (the same arithmetic as the shadow score). With `"session_end":true` a
   session's last response sends no ping (the keeper does this when the client's SessionEnd hook is installed).
 * The tenant's score for plan k is `(S_u[k] + kappa * g[k]) / (N_u + kappa)`: its own recency-weighted rows plus `kappa` pseudo-rows of the fleet mean `g`.
