@@ -194,6 +194,26 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	}
 
 	var res Result
+	// sideParent is set when this request is a SIDE request: tool-less, yet it extends a
+	// tools-declaring (main-agent) thread's prefix. Claude Code's title suggestion, quota check
+	// and end-of-turn note all do this — they share the main thread's prefix and append their
+	// own extra message. Matching such a request to the main thread, and then recording its
+	// extra message as the thread's new tail, is the #426 bug: the next REAL turn extends the
+	// ORIGINAL conversation, not the side request's, so it no longer matches and the main thread
+	// wrongly splits into a new id. The side request must therefore get a thread of its OWN,
+	// chained to the main thread by Inherits, so the main thread's tail, timestamp and every
+	// structure keyed by its id (keep-alive, the prefix-ask stash, wait-cause state) are left
+	// exactly as its own last request put them.
+	//
+	// agentCompaction is excluded on purpose: the agent's own compaction request can itself be
+	// tool-less (its prompt tells the model not to call any), and it is NOT a side request — it
+	// is the main thread asking for its own summary. newID's succ lookup below finds a thread by
+	// its `compacting` flag, which only a request matched to the main thread (not diverted into
+	// a side thread of its own) can set. Diverting it here would leave the main thread never
+	// marked compacting, so the post-compaction request — which matches no prefix, by design —
+	// would get yet another new id instead of the main thread's, splitting the thread on every
+	// compaction.
+	var sideParent *threadState
 	switch {
 	case agentID != "":
 		res = Result{ID: "a:" + agentID, Source: SourceHeader}
@@ -204,6 +224,9 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 		// No message list to match on (a server-held Responses history, an unparseable body).
 		// Today's behaviour: the session itself.
 		return Result{ID: Primary, Source: SourceSession}
+	case match != nil && match.tools && !hasTools && !agentCompaction:
+		res = Result{ID: fingerprintID(sums[len(sums)-1]), Source: SourcePrefix}
+		sideParent = match
 	case match != nil:
 		res = Result{ID: match.id, Source: SourcePrefix}
 	default:
@@ -215,17 +238,28 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	}
 	th := s.find(res.ID)
 	if th == nil {
-		if from := s.mostShared(sums, mass); from != nil {
-			res.Inherits, res.inherits = from.id, true
+		switch {
+		case sideParent != nil:
+			res.Inherits, res.inherits = sideParent.id, true
+		default:
+			if from := s.mostShared(sums, mass); from != nil {
+				res.Inherits, res.inherits = from.id, true
+			}
 		}
 		th = &threadState{id: res.ID}
 		s.add(th)
 	}
+	// Record THIS thread's own tail — the side thread's, when sideParent != nil, never the main
+	// thread's: sideParent is a different *threadState than th, left untouched above.
 	th.n, th.sum, th.sums, th.last = len(sums), sums[len(sums)-1], sums, now
-	// Sticky: once a thread has declared tools it stays the main-agent candidate, so one tool-less
-	// request from the main agent cannot let a later thread take "" in the middle of its life.
+	// Sticky: once a thread has declared tools it stays the main-agent candidate, so one
+	// tool-less request from the main agent cannot let a later thread take "" in the middle of
+	// its life. hasTools is always false here when sideParent != nil (that is what put it in the
+	// side branch); if a LATER request on this same id does declare tools, it matches as this
+	// thread's own continuation (the "match != nil" branch above) and sets th.tools true then.
 	th.tools = th.tools || hasTools
-	th.compacting = agentCompaction && res.Source == SourcePrefix
+	// A side thread cannot be a compaction continuation: compaction is the main agent's own act.
+	th.compacting = sideParent == nil && agentCompaction && res.Source == SourcePrefix
 	return res
 }
 
@@ -377,6 +411,11 @@ func (t *Tracker) pruneLocked(now time.Time) {
 //     identity, and a client may drop them from earlier turns.
 //   - the CONTENT of a tool result, kept by its call id only: Claude Code clears old tool results
 //     ("microcompact") without starting a new thread.
+//   - a message's `content` sent as a plain string versus as a one-element
+//     `[{"type":"text","text":...}]` array: Claude Code sends the newest turn in the array
+//     form (to carry a cache_control breakpoint) and the SAME message as a plain string once
+//     a later turn displaces it. The provider normalizes both to one text block and its
+//     cache still hits, so this package hashes them the same way too (see canon).
 //
 // The system prompt and the tools are left out on purpose. A thread whose system prompt changes
 // is still the same thread — that change is a prefix change, and it must be labelled as one.
@@ -449,7 +488,22 @@ func canon(h hash.Hash64, v gjson.Result) {
 			}
 			h.Write([]byte(k.Str))
 			h.Write([]byte(":"))
-			canon(h, val)
+			if k.Str == "content" && val.Type == gjson.String {
+				// Claude Code sends the newest user turn's content as a one-element block
+				// array (so it can carry a cache_control breakpoint); once that turn is no
+				// longer the newest, it resends the SAME message as a plain string. The
+				// provider normalizes both to one text block and its cache still hits, so
+				// this package must agree: hash the string exactly as it would hash
+				// [{"type":"text","text":<the string>}] — val.Raw is already the properly
+				// quoted/escaped JSON string literal, so splicing it in produces byte-for-
+				// byte the same canon() output a genuine one-text-block array would. Scoped
+				// to the "content" key only, and only this one direction (string ->
+				// canonical array shape): a content array is left exactly as canon already
+				// handles it, whether it holds one block or many.
+				canon(h, gjson.Parse(`[{"type":"text","text":`+val.Raw+`}]`))
+			} else {
+				canon(h, val)
+			}
 			h.Write([]byte(","))
 			return true
 		})

@@ -15,11 +15,15 @@ import (
 //
 // Numbers and enum labels only - no content - so it is scopeTenant like the keep-alive reads.
 type CacheState struct {
-	Session    string `json:"session"`
-	Model      string `json:"model"`
-	LastTS     int64  `json:"last_ts"` // epoch ms of the last request that touched the cache
-	NowMS      int64  `json:"now_ms"`  // server clock, so a client with skew can still count down
-	TTLSeconds int64  `json:"ttl_s"`   // 3600 if the last cache write was billed at the 1h tier, else 300
+	Session string `json:"session"`
+	Model   string `json:"model"`
+	LastTS  int64  `json:"last_ts"` // epoch ms of the last request that touched the cache (its START)
+	// EndTS is when that request finished (LastTS + the upstream time). The provider's TTL clock
+	// runs from the response, not from the send, so a long answer keeps the cache warm longer
+	// than LastTS+TTL says. Equal to LastTS when the duration is unknown.
+	EndTS      int64 `json:"end_ts"`
+	NowMS      int64 `json:"now_ms"` // server clock, so a client with skew can still count down
+	TTLSeconds int64 `json:"ttl_s"`  // 3600 if the last cache write was billed at the 1h tier, else 300
 	// PrefixTokens is what the last request sent: fresh + cache_read + cache_write. If the cache
 	// is cold, this is what the next send rewrites.
 	PrefixTokens int64 `json:"prefix_tokens"`
@@ -33,6 +37,64 @@ type CacheState struct {
 	// Window is the served context window for Model, Exact=false when it is a guess.
 	Window      int  `json:"window"`
 	WindowExact bool `json:"window_exact"`
+	// Threads is the session's cache entries, one per thread (the main agent and each subagent
+	// have separate provider caches), most recently used first. Only threads that touched the
+	// cache within the last two hours are listed: older ones are finished work.
+	Threads []ThreadCache `json:"threads,omitempty"`
+}
+
+// ThreadCache is one thread's cache entry. Main is the session's primary thread.
+type ThreadCache struct {
+	ID           string  `json:"id"`
+	Main         bool    `json:"main"`
+	Model        string  `json:"model"`
+	LastTS       int64   `json:"last_ts"`
+	EndTS        int64   `json:"end_ts"`
+	TTLSeconds   int64   `json:"ttl_s"`
+	PrefixTokens int64   `json:"prefix_tokens"`
+	RewriteUSD   float64 `json:"rewrite_usd"`
+	Priced       bool    `json:"priced"`
+}
+
+// maxDurationMS bounds the upstream time trusted for EndTS: a bogus value must not hold a dead
+// cache "warm" for hours.
+const maxDurationMS = 15 * 60 * 1000
+
+func endTS(ts int64, upstreamMS float64) int64 {
+	if upstreamMS <= 0 || upstreamMS > maxDurationMS {
+		return ts
+	}
+	return ts + int64(upstreamMS)
+}
+
+// ThreadsFor lists the session's per-thread cache entries touched since sinceMS.
+func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, error) {
+	cond, args := withKeepAlive(f).where()
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.thread_id, MAX(r.ts), r.upstream_ms, r.model,
+		r.fresh_input + r.cache_read + r.cache_write,
+		COALESCE((SELECT CASE WHEN w.cache_write_1h > 0 THEN 3600 ELSE 300 END FROM requests w
+			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.thread_id = r.thread_id
+			AND w.cache_write > 0 ORDER BY w.ts DESC LIMIT 1), 300)
+		FROM requests r WHERE `+cond+` AND r.status BETWEEN 200 AND 299
+		AND r.cache_read + r.cache_write > 0 AND r.ts >= ?
+		GROUP BY r.thread_id ORDER BY MAX(r.ts) DESC LIMIT 16`, append(args, sinceMS)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ThreadCache
+	for rows.Next() {
+		var (
+			t  ThreadCache
+			ms float64
+		)
+		if err := rows.Scan(&t.ID, &t.LastTS, &ms, &t.Model, &t.PrefixTokens, &t.TTLSeconds); err != nil {
+			return nil, err
+		}
+		t.Main, t.EndTS = t.ID == "", endTS(t.LastTS, ms)
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // CacheStateFor reads the session's most recent cache-touching request. nil, nil = none yet.
@@ -42,21 +104,22 @@ func (d *DB) CacheStateFor(f Filter) (*CacheState, error) {
 		s     CacheState
 		fresh int64
 		kaI   int
+		upMS  float64
 	)
-	err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.ts, r.model, r.fresh_input, r.cache_read, r.cache_write, r.keepalive,
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.ts, r.upstream_ms, r.model, r.fresh_input, r.cache_read, r.cache_write, r.keepalive,
 		COALESCE((SELECT CASE WHEN w.cache_write_1h > 0 THEN 3600 ELSE 300 END FROM requests w
 			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.cache_write > 0
 			ORDER BY w.ts DESC LIMIT 1), 300)
 		FROM requests r WHERE `+cond+` AND r.status BETWEEN 200 AND 299
 		AND r.cache_read + r.cache_write > 0 ORDER BY r.ts DESC LIMIT 1`, args...).Scan(
-		&s.LastTS, &s.Model, &fresh, &s.CacheRead, &s.CacheWrite, &kaI, &s.TTLSeconds)
+		&s.LastTS, &upMS, &s.Model, &fresh, &s.CacheRead, &s.CacheWrite, &kaI, &s.TTLSeconds)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	s.Session, s.KeepAlive = f.Session, kaI == 1
+	s.Session, s.KeepAlive, s.EndTS = f.Session, kaI == 1, endTS(s.LastTS, upMS)
 	s.PrefixTokens = fresh + s.CacheRead + s.CacheWrite
 	return &s, nil
 }
@@ -85,15 +148,26 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.NowMS = time.Now().UnixMilli()
-	if pf := a.priceFn(r); pf != nil {
-		if p, ok := pf(s.Model); ok {
-			s.Priced = true
-			if s.TTLSeconds == 3600 { // 1h write = 2.0x input; same derivation as CostWithCacheWrite1h
-				s.RewriteUSD = float64(s.PrefixTokens) * p.Input * 2.0
-			} else {
-				s.RewriteUSD = float64(s.PrefixTokens) * p.CacheWrite
-			}
+	pf := a.priceFn(r)
+	rewrite := func(model string, tokens, ttl int64) (usd float64, ok bool) {
+		if pf == nil {
+			return 0, false
 		}
+		p, ok := pf(model)
+		if !ok {
+			return 0, false
+		}
+		if ttl == 3600 { // 1h write = 2.0x input; same derivation as CostWithCacheWrite1h
+			return float64(tokens) * p.Input * 2.0, true
+		}
+		return float64(tokens) * p.CacheWrite, true
+	}
+	s.RewriteUSD, s.Priced = rewrite(s.Model, s.PrefixTokens, s.TTLSeconds)
+	if ths, err := a.db(r).ThreadsFor(f, s.NowMS-2*3600*1000); err == nil {
+		for i := range ths {
+			ths[i].RewriteUSD, ths[i].Priced = rewrite(ths[i].Model, ths[i].PrefixTokens, ths[i].TTLSeconds)
+		}
+		s.Threads = ths
 	}
 	s.Window, s.WindowExact, _ = modelinfo.Exact(a.windows, r.Context(), s.Model)
 	writeJSON(w, s)

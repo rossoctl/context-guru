@@ -318,6 +318,7 @@ func NewKeepAliveBudget(cfg Config) BudgetPolicy {
 		Interval:  cfg.PingIdle,
 		MaxK:      ReuseModelV1.MaxK,
 		Semantics: cfg.Semantics,
+		memo:      &budgetMemo{},
 	}
 }
 

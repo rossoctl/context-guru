@@ -126,7 +126,7 @@ func settingsInDir(t *testing.T, state, home, dir string, args ...string) (map[s
 func sandboxEnv(t *testing.T, extra ...string) []string {
 	t.Helper()
 	sandboxed := map[string]bool{
-		"HOME": true, "XDG_STATE_HOME": true, "CONTEXT_GURU_STATE": true, "CLAUDE_CONFIG_DIR": true,
+		"HOME": true, "XDG_STATE_HOME": true, "XDG_CONFIG_HOME": true, "CONTEXT_GURU_STATE": true, "CLAUDE_CONFIG_DIR": true,
 		"CONTEXT_GURU_BIN": true, "ANTHROPIC_BASE_URL": true, "ANTHROPIC_UPSTREAM": true,
 		"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true, "ANTHROPIC_CUSTOM_HEADERS": true,
 	}
@@ -148,6 +148,7 @@ func sandboxEnv(t *testing.T, extra ...string) []string {
 	env = append(env,
 		"HOME="+root,
 		"XDG_STATE_HOME="+filepath.Join(root, "xdg-state"),
+		"XDG_CONFIG_HOME="+filepath.Join(root, "xdg-config"),
 	)
 	return append(env, extra...)
 }
@@ -2271,7 +2272,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 
 	// Priming call: the stub is still answering, so this both renders the live figure and
 	// writes it to this script's own on-disk /api/stats cache.
-	if got := run(); !strings.Contains(got, "saved ≈$0.03") {
+	if got := run(); !strings.Contains(got, "saved $0.03") {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
@@ -2287,7 +2288,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 
 	stall() // same port, same cache key — now it accepts and never answers
 	got := run()
-	if !strings.Contains(got, "saved ≈$0.03") {
+	if !strings.Contains(got, "saved $0.03") {
 		t.Errorf("got %q; want the cached savings figure still rendered from the earlier fetch", got)
 	}
 	if !strings.Contains(got, "⏳") {
@@ -2327,7 +2328,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 		return strings.TrimSpace(string(out))
 	}
 
-	if got := run(); !strings.Contains(got, "saved ≈$0.03") {
+	if got := run(); !strings.Contains(got, "saved $0.03") {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
@@ -2416,8 +2417,8 @@ func TestStatuslineNeverFailsOnAConnectionRefusal(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d; must never fail a render", code)
 	}
-	if strings.TrimSpace(out) != "cg!" {
-		t.Errorf("got %q, want %q", strings.TrimSpace(out), "cg!")
+	if strings.TrimSpace(out) != "cg ✕ proxy offline" {
+		t.Errorf("got %q, want %q", strings.TrimSpace(out), "cg ✕ proxy offline")
 	}
 }
 
@@ -2451,7 +2452,7 @@ func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d; must never fail a render", code)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(out), "● warm 1m") {
+	if !strings.HasPrefix(strings.TrimSpace(out), "cache ● ██") || !strings.Contains(out, " 1:") {
 		t.Errorf("got %q; the cache stopper must still render off a malformed /api/stats body", out)
 	}
 	if strings.Contains(out, " of $") {
@@ -2465,14 +2466,13 @@ func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 // flaky by construction, not a property of the script.
 func parseCacheSeconds(t *testing.T, seg string) int {
 	t.Helper()
-	m, sec := 0, 0
-	if _, err := fmt.Sscanf(seg, "◐ %ds left", &sec); err == nil {
-		return sec
-	}
-	if _, err := fmt.Sscanf(seg, "● warm %dm", &m); err != nil {
+	var bar string
+	var m, sec int
+	// `● ██████ 4:48` (warm) or `◐ ░░░░░░ 0:42` (last minute): a six-cell draining bar, then M:SS.
+	if _, err := fmt.Sscanf(seg, "%s %s %s %d:%d", new(string), new(string), &bar, &m, &sec); err != nil {
 		t.Fatalf("%q does not parse as a cache countdown: %v", seg, err)
 	}
-	return m * 60
+	return m*60 + sec
 }
 
 // TestStatuslineCacheCountdownMath is the boundary table for the TTL "stopper" — the single most
@@ -2502,12 +2502,12 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 			}
 			got := strings.SplitN(strings.TrimSpace(out), " │ ", 2)[0]
 			if c.wantCold {
-				if got != "○ cold" {
-					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "○ cold")
+				if got != "cache ○ ░░░░░░ cold" {
+					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache ○ ░░░░░░ cold")
 				}
 				return
 			}
-			if got == "○ cold" {
+			if got == "cache ○ ░░░░░░ cold" {
 				t.Fatalf("remaining=%.0fs: reported cold while still positive", c.remainingSec)
 			}
 			gotSec := parseCacheSeconds(t, got)
@@ -2557,7 +2557,7 @@ print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 		t.Fatalf("running the boundary check: %v\n%s", err, out)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	want := []string{"○ cold", "◐ 0s left", "○ cold"}
+	want := []string{"cache ○ ░░░░░░ cold", "cache ◐ ░░░░░░ 0:00!", "cache ○ ░░░░░░ cold"}
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
 	}
@@ -2632,7 +2632,7 @@ func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 	got := strings.TrimSpace(out)
-	if !strings.HasPrefix(got, "saved ≈$0.03") {
+	if !strings.HasPrefix(got, "saved $0.03") {
 		t.Errorf("got %q, want the labelled, estimated saving first", got)
 	}
 	if strings.Contains(got, "ka ") || strings.Contains(got, "proxy:") {
@@ -2676,7 +2676,7 @@ func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "● warm 1m") {
+	if !strings.Contains(out, "cache ● ██") || !strings.Contains(out, " 1:") {
 		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
 	}
 	// The keep-alive segment now shows the NET dollar figure and the misses it prevented, not the
@@ -2684,7 +2684,7 @@ func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 	if !strings.Contains(out, "ka ≤4miss $0.07") {
 		t.Errorf("got %q, want %q with --keepalive passed", out, "ka ≤4miss $0.07")
 	}
-	if !strings.Contains(out, "saved ≈$0.03") {
+	if !strings.Contains(out, "saved $0.03") {
 		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
 	}
 }
@@ -2701,7 +2701,7 @@ func TestStatuslineShowsANegativeNetHonestly(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "saved ≈-$0.05") {
+	if !strings.Contains(out, "saved -$0.05") {
 		t.Errorf("got %q, want a segment showing the negative net, not an omission", out)
 	}
 }
@@ -2812,7 +2812,7 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 			w.Write([]byte(`{"total_saved_usd": 0.01, "saved_unique": 100}`))
 		case "lean=1&session=sess-b":
 			w.Write([]byte(`{"total_saved_usd": 9.99, "saved_unique": 9000}`))
-		case "lean=1&since=" + r.URL.Query().Get("since"): // the unscoped "day" read
+		case "lean=1&since=" + r.URL.Query().Get("since"): // the unscoped "day" and lifetime (since=0) reads
 			w.Write([]byte(`{"total_saved_usd": 0}`))
 		default:
 			t.Errorf("unexpected query %q", r.URL.RawQuery)
@@ -2839,11 +2839,11 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 	}
 	a := run("sess-a")
 	b := run("sess-b")
-	if !strings.Contains(a, "saved ≈$0.01") {
-		t.Errorf("session a: got %q, want its own saved ≈$0.01", a)
+	if !strings.Contains(a, "saved $0.01") {
+		t.Errorf("session a: got %q, want its own saved $0.01", a)
 	}
-	if !strings.Contains(b, "saved ≈$9.99") {
-		t.Errorf("session b: got %q, want its own saved ≈$9.99 — not session a's cached figure", b)
+	if !strings.Contains(b, "saved $9.99") {
+		t.Errorf("session b: got %q, want its own saved $9.99 — not session a's cached figure", b)
 	}
 }
 
@@ -2858,7 +2858,7 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(r.URL.RawQuery, "since=") { // the day read has its own 60s cache
+		if !strings.Contains(r.URL.RawQuery, "since=") { // the day and lifetime reads have their own caches
 			atomic.AddInt64(&hits, 1)
 		}
 		w.Header().Set("Content-Type", "application/json")

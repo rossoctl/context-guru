@@ -19,7 +19,9 @@ import (
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
 	"gopkg.in/yaml.v3"
 )
@@ -155,7 +157,9 @@ type ExtractLLM struct {
 	pricing cheapmodel.Pricing
 	// ratios learns this workload's real compression ratio instead of assuming one.
 	ratios ratioTracker
-	// prevTokens tracks per-session request size so growth rate is measurable (#28 E).
+	// prevTokens tracks each thread's request size so growth rate is measurable (#28 E).
+	// Keyed by thread.Key, not the session: the threads of one session interleave, and each
+	// would read the other's size as growth or shrink (#484).
 	prevTokens map[string]int
 	// modelName identifies the extraction model in the global cache key, so switching
 	// models misses rather than serving another model's extraction (#28 C).
@@ -488,13 +492,23 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	}, nil
 }
 
-// noteRequestSize records this request's size for the session and returns the previous
-// one, so the trigger can measure context growth rate (#28 E).
-func (e *ExtractLLM) noteRequestSize(session string, tokens int) int {
+// noteRequestSize records this request's size for the request's thread and returns the
+// previous one, so the trigger can measure context growth rate (#28 E).
+func (e *ExtractLLM) noteRequestSize(c *components.Ctx, tokens int) int {
+	key := thread.Key(c.Session, c.Thread)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	prev := e.prevTokens[session]
-	e.prevTokens[session] = tokens
+	prev, ok := e.prevTokens[key]
+	if !ok && len(e.prevTokens) >= modes.DefaultMaxKeys {
+		// Bounded like the tracker, because there is one entry per thread and side request.
+		// ponytail: arbitrary eviction. A lost entry reads as no previous size, so growth is 0
+		// and the growth trigger does not fire: one missed model call, never a wrong rewrite.
+		for k := range e.prevTokens {
+			delete(e.prevTokens, k)
+			break
+		}
+	}
+	e.prevTokens[key] = tokens
 	return prev
 }
 
@@ -709,7 +723,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// Derived trigger (#28 E): context pressure + growth rate replace a hand-tuned
 	// threshold. When min_tokens/trigger is set explicitly the operator's value governs.
 	reqTokens := schema.MessagesTokens(req)
-	prevTokens := e.noteRequestSize(c.Session, reqTokens)
+	prevTokens := e.noteRequestSize(c, reqTokens)
 	pressure := contextPressure(reqTokens, c.CtxWindow)
 	growth := growthRate(reqTokens, prevTokens)
 	pressureFires, triggerReason := shouldFire(pressure, growth, e.minTokensSet, e.fireOnSize)

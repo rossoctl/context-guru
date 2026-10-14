@@ -3,6 +3,7 @@ package dash
 import (
 	"database/sql"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"math"
 	"math/rand"
 	"sort"
@@ -236,19 +237,29 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	// The SAVING half and the coverage, over agent traffic only — the credit lives on the real
 	// request that benefited, never on the ping.
 	cond, args := f.where()
-	var from sql.NullInt64
-	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
+	kaCond, kaArgs := withKeepAlive(f).where()
+	aCond, aArgs := addressable(f)
+	// Six independent reads, three of them a pass over every request (the saving, the per-session
+	// saving, the addressable CTE). They ran back to back; each goroutine fills its own fields.
+	var (
+		saved, spent map[string]float64
+		from         sql.NullInt64
+		lat          kvcache.Latency
+		days         float64
+	)
+	var g errgroup.Group
+	g.Go(func() error {
+		return d.sql.QueryRowContext(d.readCtx(), `SELECT
 		COALESCE(SUM(`+kaSaved("r.")+`),0),
 		COALESCE(SUM(CASE WHEN `+kaSaved("r.")+` > 0 THEN 1 ELSE 0 END),0),
 		COUNT(*)
 		FROM requests r WHERE `+cond, args...).Scan(
-		&o.SavedUSD, &o.MissesAvoided, &o.Requests); err != nil {
-		return nil, err
-	}
+			&o.SavedUSD, &o.MissesAvoided, &o.Requests)
+	})
 	// The COST half, with ping rows included. A second query and not a CASE: one predicate,
 	// one meaning.
-	kaCond, kaArgs := withKeepAlive(f).where()
-	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
+	g.Go(func() error {
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
 		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.keepalive = 1 AND r.cache_read = 0 THEN 1 ELSE 0 END),0),
@@ -256,28 +267,45 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 		MIN(CASE WHEN r.keepalive = 1 OR r.keepalive_pings > 0 OR r.keepalive_saved_usd > 0
 			THEN r.ts END)
 		FROM requests r WHERE `+kaCond, kaArgs...).Scan(
-		&o.Pings, &o.PingUSD, &o.PingsThatReadNothing, &o.PingsThatWrote, &from); err != nil {
-		return nil, err
-	}
-	o.NetUSD = o.SavedUSD - o.PingUSD
-	o.RecordedFrom = from.Int64
-	if o.RecordedFrom > 0 {
-		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+` AND r.ts >= ?`,
-			append(append([]any(nil), args...), o.RecordedFrom)...).Scan(&o.RecordedRows); err != nil {
-			return nil, err
+			&o.Pings, &o.PingUSD, &o.PingsThatReadNothing, &o.PingsThatWrote, &from); err != nil {
+			return err
 		}
-	}
+		o.RecordedFrom = from.Int64
+		if o.RecordedFrom > 0 {
+			return d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+` AND r.ts >= ?`,
+				append(append([]any(nil), args...), o.RecordedFrom)...).Scan(&o.RecordedRows)
+		}
+		return nil
+	})
 	// The winner/loser split, per session, over the sessions the mechanism touched. Two
 	// grouped queries joined in Go for the same reason as above: the credit is on agent rows
 	// and the cost is on ping rows, and one aggregate cannot honestly see both.
-	saved, err := d.sumBySession(cond, args, kaSaved("r."), "r.keepalive_saved_usd > 0")
-	if err != nil {
+	g.Go(func() error {
+		var err error
+		saved, err = d.sumBySession(cond, args, kaSaved("r."), "r.keepalive_saved_usd > 0")
+		return err
+	})
+	g.Go(func() error {
+		var err error
+		spent, err = d.sumBySession(kaCond, kaArgs, "r.cost_usd", "r.keepalive = 1")
+		return err
+	})
+	// What is still on the table: the addressable expiries in this window, and their bill.
+	g.Go(func() error {
+		return d.sql.QueryRowContext(d.readCtx(), aCond+`
+		SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM addressable`, aArgs...).Scan(
+			&o.Addressable, &o.AddressableUSD)
+	})
+	g.Go(func() error {
+		days = d.windowDays(kaCond, kaArgs)
+		var err error
+		lat, err = d.KeepAliveLatencyDiagnostic(f)
+		return err
+	})
+	if err := g.Wait(); err != nil {
 		return nil, err
 	}
-	spent, err := d.sumBySession(kaCond, kaArgs, "r.cost_usd", "r.keepalive = 1")
-	if err != nil {
-		return nil, err
-	}
+	o.NetUSD = o.SavedUSD - o.PingUSD
 	nets := map[string]float64{}
 	for s, v := range saved {
 		nets[s] += v
@@ -297,22 +325,11 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 			o.WorstNetUSD, o.WorstSession = net, s
 		}
 	}
-	// What is still on the table: the addressable expiries in this window, and their bill.
-	aCond, aArgs := addressable(f)
-	if err := d.sql.QueryRowContext(d.readCtx(), aCond+`
-		SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM addressable`, aArgs...).Scan(
-		&o.Addressable, &o.AddressableUSD); err != nil {
-		return nil, err
-	}
 	// Ping rate and its footprint on disk, over the window's own span. Nothing here stores
 	// text: for contrast a sibling feature put 264.7 MB on disk in a day by duplicating it.
-	if days := d.windowDays(kaCond, kaArgs); days > 0 {
+	if days > 0 {
 		o.PingsPerDay = float64(o.Pings) / days
 		o.BytesPerDay = o.PingsPerDay * bytesPerPingRow
-	}
-	lat, err := d.KeepAliveLatencyDiagnostic(f)
-	if err != nil {
-		return nil, err
 	}
 	o.Latency = lat
 	return &o, nil
@@ -552,46 +569,146 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	aCond, aArgs := addressable(f)
 	cond, args := f.where()
 
-	// 3a: per day, and the SHARE of that day's whole bill, because a count with no
-	// denominator cannot be sized.
-	all := map[string]struct {
+	// The five reads below are independent of each other, and four of them are each a full pass
+	// over the `addressable` CTE (a LAG over every request, ~1.2 s at 187k rows). They used to run
+	// back to back, and the per-account median ran the CTE AGAIN once per account (4 more passes).
+	// Now they run together and the median is one read of every account's gaps, grouped here.
+	type dayAll struct {
 		n   int64
 		usd float64
-	}{}
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT date(r.ts/1000,'unixepoch'), COUNT(*), COALESCE(SUM(r.cost_usd),0)
+	}
+	type addrRow struct {
+		gap, prefix, usd float64
+		hour             int
+	}
+	var (
+		all       = map[string]dayAll{}
+		daily     []DayPoint
+		addr      []addrRow
+		gapsByAcc []AccountGaps
+		hoursBy   = map[string][]float64{}
+		cov       *KeepAliveCoverage
+	)
+	var g errgroup.Group
+	// 3a: per day, and the SHARE of that day's whole bill, because a count with no
+	// denominator cannot be sized.
+	g.Go(func() error {
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT date(r.ts/1000,'unixepoch'), COUNT(*), COALESCE(SUM(r.cost_usd),0)
 		FROM requests r WHERE `+cond+` GROUP BY 1`, args...)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var day string
-		var n int64
-		var usd float64
-		if err := rows.Scan(&day, &n, &usd); err != nil {
-			rows.Close()
-			return nil, err
+		if err != nil {
+			return err
 		}
-		all[day] = struct {
-			n   int64
-			usd float64
-		}{n, usd}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	rows, err = d.sql.QueryContext(d.readCtx(), aCond+`
+		defer rows.Close()
+		for rows.Next() {
+			var day string
+			var n int64
+			var usd float64
+			if err := rows.Scan(&day, &n, &usd); err != nil {
+				return err
+			}
+			all[day] = dayAll{n, usd}
+		}
+		return rows.Err()
+	})
+	g.Go(func() error {
+		rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
 		SELECT date(ts/1000,'unixepoch'), MIN(ts), COUNT(*), COALESCE(SUM(cost_usd),0)
 		FROM addressable GROUP BY 1 ORDER BY 1`, aArgs...)
-	if err != nil {
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p DayPoint
+			if err := rows.Scan(&p.Day, &p.TS, &p.Misses, &p.USD); err != nil {
+				return err
+			}
+			daily = append(daily, p)
+		}
+		return rows.Err()
+	})
+	// 3b/3e: the two band histograms and the 24 hour bins, from one pass over `addressable`.
+	// Percentiles come from the same read, so the bands and the p50 beside them cannot
+	// disagree.
+	g.Go(func() error {
+		rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
+		SELECT gap_s, COALESCE(prev_prefix,0), cost_usd,
+		       CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER)
+		FROM addressable`, aArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var x addrRow
+			if err := rows.Scan(&x.gap, &x.prefix, &x.usd, &x.hour); err != nil {
+				return err
+			}
+			addr = append(addr, x)
+		}
+		return rows.Err()
+	})
+	// 3d: gaps BETWEEN expiries, per account.
+	g.Go(func() error {
+		rows, err := d.sql.QueryContext(d.readCtx(), aCond+`, e AS (
+		SELECT tenant_id, (ts - LAG(ts) OVER (PARTITION BY tenant_id ORDER BY ts)) / 3600000.0 AS h
+		FROM addressable)
+		SELECT tenant_id, COUNT(h), AVG(h), MAX(h) FROM e WHERE h IS NOT NULL GROUP BY 1
+		ORDER BY 2 DESC`, aArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var g AccountGaps
+			var n int64
+			var mean, max sql.NullFloat64
+			if err := rows.Scan(&g.Tenant, &n, &mean, &max); err != nil {
+				return err
+			}
+			g.N, g.MeanHrs, g.MaxHrs, g.Coverage = n, mean.Float64, max.Float64, n > 0
+			gapsByAcc = append(gapsByAcc, g)
+		}
+		return rows.Err()
+	})
+	// The median per account. Exact rather than interpolated, for the reason DB.percentile is:
+	// sorting a few hundred floats is free and an estimate here would be a number nobody can
+	// reproduce.
+	g.Go(func() error {
+		rows, err := d.sql.QueryContext(d.readCtx(), aCond+`, e AS (
+			SELECT tenant_id, (ts - LAG(ts) OVER (PARTITION BY tenant_id ORDER BY ts)) / 3600000.0 AS h
+			FROM addressable)
+			SELECT tenant_id, h FROM e WHERE h IS NOT NULL`, aArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var t string
+			var h float64
+			if err := rows.Scan(&t, &h); err != nil {
+				return err
+			}
+			hoursBy[t] = append(hoursBy[t], h)
+		}
+		return rows.Err()
+	})
+	g.Go(func() error {
+		var err error
+		cov, err = d.keepAliveCoverage(f)
+		return err
+	})
+	// The phantoms, named rather than silently dropped: a reader comparing this panel with the
+	// cache-miss breakdown on Usage will see two different `ttl_expiry` counts, and the
+	// difference has to be explicable.
+	g.Go(func() error {
+		return d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+`
+		AND r.cache_miss_reason = 'ttl_expiry' AND r.cache_write = 0`, args...).Scan(&out.Phantom)
+	})
+	if err := g.Wait(); err != nil {
 		return nil, err
 	}
-	for rows.Next() {
-		var p DayPoint
-		if err := rows.Scan(&p.Day, &p.TS, &p.Misses, &p.USD); err != nil {
-			rows.Close()
-			return nil, err
-		}
+	for _, p := range daily {
 		if a, ok := all[p.Day]; ok {
 			p.Requests, p.AllUSD = a.n, a.usd
 			if a.usd > 0 {
@@ -603,14 +720,6 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 		}
 		out.Daily = append(out.Daily, p)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	// 3b/3e: the two band histograms and the 24 hour bins, from one pass over `addressable`.
-	// Percentiles come from the same read, so the bands and the p50 beside them cannot
-	// disagree.
 	gapN := make([]int64, len(gapEdges))
 	gapUSD := make([]float64, len(gapEdges))
 	preN := make([]int64, len(prefixEdges))
@@ -618,41 +727,29 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	hourN := make([]int64, 24)
 	hourUSD := make([]float64, 24)
 	var gaps, prefixes []float64
-	rows, err = d.sql.QueryContext(d.readCtx(), aCond+`
-		SELECT gap_s, COALESCE(prev_prefix,0), cost_usd,
-		       CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER)
-		FROM addressable`, aArgs...)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var gap, prefix, usd float64
-		var hour int
-		if err := rows.Scan(&gap, &prefix, &usd, &hour); err != nil {
-			rows.Close()
-			return nil, err
-		}
+	for _, x := range addr {
 		out.Addressable++
-		gi := bandOf(gapEdges, gap)
+		gi := bandOf(gapEdges, x.gap)
 		gapN[gi]++
-		gapUSD[gi] += usd
-		pi := bandOf(prefixEdges, prefix)
+		gapUSD[gi] += x.usd
+		pi := bandOf(prefixEdges, x.prefix)
 		preN[pi]++
-		preUSD[pi] += usd
-		if hour >= 0 && hour < 24 {
-			hourN[hour]++
-			hourUSD[hour] += usd
+		preUSD[pi] += x.usd
+		if x.hour >= 0 && x.hour < 24 {
+			hourN[x.hour]++
+			hourUSD[x.hour] += x.usd
 		}
-		gaps = append(gaps, gap)
-		prefixes = append(prefixes, prefix)
-		if prefix >= 20000 {
+		gaps = append(gaps, x.gap)
+		prefixes = append(prefixes, x.prefix)
+		if x.prefix >= 20000 {
 			out.AboveTwentyK++
 		}
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
+	for i := range gapsByAcc {
+		gapsByAcc[i].MedHrs = pctlF(hoursBy[gapsByAcc[i].Tenant], 0.50)
 	}
+	out.Gaps = append(out.Gaps, gapsByAcc...)
+	out.KeepAliveCoverage = *cov
 	// Axis labels are read by a person, so they are ROUNDED. %g on 580/60 renders
 	// "9.666666666666666m", which is what the first live render of this panel showed.
 	secs := func(v float64) string {
@@ -687,73 +784,6 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	out.PrefixP50 = int64(pctlF(prefixes, 0.50))
 	out.PrefixP90 = int64(pctlF(prefixes, 0.90))
 
-	// The phantoms, named rather than silently dropped: a reader comparing this panel with the
-	// cache-miss breakdown on Usage will see two different `ttl_expiry` counts, and the
-	// difference has to be explicable.
-	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+`
-		AND r.cache_miss_reason = 'ttl_expiry' AND r.cache_write = 0`, args...).Scan(
-		&out.Phantom); err != nil {
-		return nil, err
-	}
-
-	// 3d: gaps BETWEEN expiries, per account.
-	rows, err = d.sql.QueryContext(d.readCtx(), aCond+`, e AS (
-		SELECT tenant_id, (ts - LAG(ts) OVER (PARTITION BY tenant_id ORDER BY ts)) / 3600000.0 AS h
-		FROM addressable)
-		SELECT tenant_id, COUNT(h), AVG(h), MAX(h) FROM e WHERE h IS NOT NULL GROUP BY 1
-		ORDER BY 2 DESC`, aArgs...)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var g AccountGaps
-		var n int64
-		var mean, max sql.NullFloat64
-		if err := rows.Scan(&g.Tenant, &n, &mean, &max); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		g.N, g.MeanHrs, g.MaxHrs, g.Coverage = n, mean.Float64, max.Float64, n > 0
-		out.Gaps = append(out.Gaps, g)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// The median per account, in a second pass. Exact rather than interpolated, for the reason
-	// DB.percentile is: sorting a few hundred floats is free and an estimate here would be a
-	// number nobody can reproduce.
-	for i := range out.Gaps {
-		g := &out.Gaps[i]
-		var hs []float64
-		r2, err := d.sql.QueryContext(d.readCtx(), aCond+`, e AS (
-			SELECT tenant_id, (ts - LAG(ts) OVER (PARTITION BY tenant_id ORDER BY ts)) / 3600000.0 AS h
-			FROM addressable)
-			SELECT h FROM e WHERE h IS NOT NULL AND tenant_id = ?`,
-			append(append([]any(nil), aArgs...), g.Tenant)...)
-		if err != nil {
-			return nil, err
-		}
-		for r2.Next() {
-			var h float64
-			if err := r2.Scan(&h); err != nil {
-				r2.Close()
-				return nil, err
-			}
-			hs = append(hs, h)
-		}
-		r2.Close()
-		if err := r2.Err(); err != nil {
-			return nil, err
-		}
-		g.MedHrs = pctlF(hs, 0.50)
-	}
-
-	cov, err := d.keepAliveCoverage(f)
-	if err != nil {
-		return nil, err
-	}
-	out.KeepAliveCoverage = *cov
 	return out, nil
 }
 
@@ -1022,13 +1052,19 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		       MAX(CASE WHEN r.cache_write > 0 THEN r.ts ELSE 0 END) OVER w2 AS last_write_ts,
 		       MAX(CASE WHEN r.cache_write_1h > 0 THEN r.ts ELSE 0 END) OVER w2 AS last_1h_ts
 		FROM requests r WHERE `+cond+` AND r.session_id <> ''
+		  AND r.session_id IN (SELECT r.session_id FROM requests r WHERE `+cond+` AND r.ts >= ?)
 		WINDOW w AS (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts DESC, r.id DESC),
 		       w2 AS (PARTITION BY r.tenant_id, r.session_id))
 		SELECT session_id, tenant_id, model, turns, ts, prefix,
 		       CASE WHEN last_1h_ts > 0 AND last_1h_ts = last_write_ts THEN 1 ELSE 0 END
 		FROM t WHERE rn = 1 AND ts >= ?
 		ORDER BY prefix DESC, session_id`,
-		append(args, now-ttlTTL1h.Milliseconds())...)
+		// The window is computed only for sessions with a request inside the hour (the subquery),
+		// because the outer filter keeps nothing else: it is a per-session answer, so leaving the
+		// other sessions out changes no row, and it is the difference between ranking 187k
+		// requests and ranking the few hundred that belong to a live session.
+		append(append(append(append([]any(nil), args...), args...), now-ttlTTL1h.Milliseconds()),
+			now-ttlTTL1h.Milliseconds())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1298,36 +1334,50 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 			p, out.Priced = pr, true
 		}
 	}
-	// The account's own spans and its own addressable gaps, one read each.
+	// The account's own spans and its own addressable gaps, one read each, and the coverage count:
+	// three independent reads, run together (the first two are each a pass over every request).
 	aCond, aArgs := addressable(f)
 	var gaps []float64
 	var usd []float64
-	rows, err := d.sql.QueryContext(d.readCtx(), aCond+` SELECT gap_s, cost_usd FROM addressable`, aArgs...)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var g, u float64
-		if err := rows.Scan(&g, &u); err != nil {
-			rows.Close()
-			return nil, err
+	var spans []pingSpan
+	var cov *KeepAliveCoverage
+	var g errgroup.Group
+	g.Go(func() error {
+		rows, err := d.sql.QueryContext(d.readCtx(), aCond+` SELECT gap_s, cost_usd FROM addressable`, aArgs...)
+		if err != nil {
+			return err
 		}
-		gaps = append(gaps, g)
-		usd = append(usd, u)
-		out.Addressable++
-		out.AddressableUSD += u
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
+		defer rows.Close()
+		for rows.Next() {
+			var g, u float64
+			if err := rows.Scan(&g, &u); err != nil {
+				return err
+			}
+			gaps = append(gaps, g)
+			usd = append(usd, u)
+		}
+		return rows.Err()
+	})
 	// EVERY idle span the gate admits, not only the ones that expired: the ping cost is paid on
 	// all of them, and counting only the spans that paid off is how a calculator flatters its own
 	// feature. Session-final spans included — see pingSpans, and see the PINGS column's own note
 	// on the panel, which says which pings are counted.
-	spans, err := d.pingSpans(f, kaGateMinPrefix)
-	if err != nil {
+	g.Go(func() error {
+		var err error
+		spans, err = d.pingSpans(f, kaGateMinPrefix)
+		return err
+	})
+	g.Go(func() error {
+		var err error
+		cov, err = d.keepAliveCoverage(f)
+		return err
+	})
+	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+	for _, u := range usd {
+		out.Addressable++
+		out.AddressableUSD += u
 	}
 	if out.Priced {
 		out.PingUSDEach = float64(prefix)*p.CacheRead + p.Output
@@ -1354,10 +1404,6 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 			row.NetUSD = row.SavedUSD - row.PingUSD
 		}
 		out.Rows = append(out.Rows, row)
-	}
-	cov, err := d.keepAliveCoverage(f)
-	if err != nil {
-		return nil, err
 	}
 	out.KeepAliveCoverage = *cov
 	return out, nil
@@ -1500,37 +1546,65 @@ const (
 // KeepAliveRecommend answers "what should I set?" — or refuses.
 func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 	out := &KeepAliveRecommendation{ServiceLoUSD: serviceLoUSD, ServiceHiUSD: serviceHiUSD}
-	cov, err := d.keepAliveCoverage(f)
-	if err != nil {
+	// The four reads below are independent and three of them are a pass over every request, so they
+	// run together; the refusals further down still decide what is reported, just after the reads
+	// rather than between them.
+	type miss struct {
+		gap, usd float64
+	}
+	var (
+		cov       *KeepAliveCoverage
+		pingUSD   float64
+		spans     []pingSpan
+		bySession = map[string][]miss{}
+	)
+	aCond, aArgs := addressable(f)
+	var g errgroup.Group
+	g.Go(func() error {
+		var err error
+		cov, err = d.keepAliveCoverage(f)
+		return err
+	})
+	// The account's own addressable expiries, grouped by session — the resampling unit.
+	g.Go(func() error {
+		rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
+		SELECT session_id, gap_s, cost_usd FROM addressable`, aArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var s string
+			var m miss
+			if err := rows.Scan(&s, &m.gap, &m.usd); err != nil {
+				return err
+			}
+			bySession[s] = append(bySession[s], m)
+		}
+		return rows.Err()
+	})
+	// The per-session ping cost of the SAME policy, so the resample scores a net and not a
+	// saving. Ping cost is derived from the account's own median back-derived input rate,
+	// applied to the prefix that lapsed — the same simplification the adjudicated per-account
+	// bootstrap used, and it measures the SPREAD rather than competing with the shipped
+	// replay's own figure.
+	g.Go(func() error {
+		var err error
+		pingUSD, err = d.medianPingUSD(f)
+		return err
+	})
+	g.Go(func() error {
+		var err error
+		spans, err = d.pingSpans(f, kaGateMinPrefix)
+		return err
+	})
+	if err := g.Wait(); err != nil {
 		return nil, err
 	}
 	out.KeepAliveCoverage = *cov
 	out.Requests = cov.Requests
-
-	// The account's own addressable expiries, grouped by session — the resampling unit.
-	aCond, aArgs := addressable(f)
-	rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
-		SELECT session_id, gap_s, cost_usd FROM addressable`, aArgs...)
-	if err != nil {
-		return nil, err
-	}
-	type miss struct {
-		gap, usd float64
-	}
-	bySession := map[string][]miss{}
-	for rows.Next() {
-		var s string
-		var m miss
-		if err := rows.Scan(&s, &m.gap, &m.usd); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		bySession[s] = append(bySession[s], m)
-		out.N++
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
+	for _, ms := range bySession {
+		out.N += int64(len(ms))
 	}
 	out.Sessions = int64(len(bySession))
 
@@ -1545,19 +1619,6 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 		return out, nil
 	}
 
-	// The per-session ping cost of the SAME policy, so the resample scores a net and not a
-	// saving. Ping cost is derived from the account's own median back-derived input rate,
-	// applied to the prefix that lapsed — the same simplification the adjudicated per-account
-	// bootstrap used, and it measures the SPREAD rather than competing with the shipped
-	// replay's own figure.
-	pingUSD, err := d.medianPingUSD(f)
-	if err != nil {
-		return nil, err
-	}
-	spans, err := d.pingSpans(f, kaGateMinPrefix)
-	if err != nil {
-		return nil, err
-	}
 	bySpan := map[string][]pingSpan{}
 	for _, sp := range spans {
 		bySpan[sp.session] = append(bySpan[sp.session], sp)

@@ -73,6 +73,41 @@ func TestFingerprintIgnoresWhatAnAgentRewritesInPlace(t *testing.T) {
 	}
 }
 
+// #426's real second cause (confirmed against a real request-pair capture, not a hypothesis):
+// Claude Code sends the NEWEST user turn's content as a one-element block array, carrying the
+// cache_control breakpoint. Once a later turn displaces it, it resends the SAME message as a
+// plain string. The provider normalizes both to one text block and its cache still hits — this
+// package must agree, or every second request of a new turn splits the thread.
+func TestFingerprintTreatsAStringAndAOneTextBlockArrayAsTheSameContent(t *testing.T) {
+	tr := testTracker()
+	turn1 := []byte(`{"tools":[{"name":"Bash","input_schema":{"type":"object"}}],"messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"fix the bug","cache_control":{"type":"ephemeral"}}]}]}`)
+	if id := tr.Resolve("t\x00s", "", turn1, false).ID; id != Primary {
+		t.Fatalf("precondition: turn 1 got %q, want primary", id)
+	}
+	// Turn 2's first request: the same first message, now a plain string (no longer the
+	// newest turn, so no cache_control to carry), plus the real new turn's own messages.
+	turn2 := []byte(`{"tools":[{"name":"Bash","input_schema":{"type":"object"}}],"messages":[` +
+		`{"role":"user","content":"fix the bug"},` +
+		`{"role":"assistant","content":[{"type":"text","text":"done"}]},` +
+		`{"role":"user","content":[{"type":"text","text":"now add tests",` +
+		`"cache_control":{"type":"ephemeral"}}]}]}`)
+	if id := tr.Resolve("t\x00s", "", turn2, false).ID; id != Primary {
+		t.Fatalf("turn 2 got %q, want primary (the string/array content difference split the thread)", id)
+	}
+	// Positive control, at the Fingerprint level: the string and array forms of a DIFFERENT
+	// text must still differ.
+	asString, _ := Fingerprint([]byte(`{"messages":[{"role":"user","content":"go"}]}`))
+	asArray, _ := Fingerprint([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"go"}]}]}`))
+	otherString, _ := Fingerprint([]byte(`{"messages":[{"role":"user","content":"stop"}]}`))
+	if asString[0] != asArray[0] {
+		t.Error("a string and its equivalent one-text-block array must hash the same")
+	}
+	if asString[0] == otherString[0] {
+		t.Error("the equivalence swallowed a real content difference")
+	}
+}
+
 func TestFingerprintHasNoMessageListToMatch(t *testing.T) {
 	for name, body := range map[string]string{
 		"server-held history": `{"previous_response_id":"resp_1","input":[{"role":"user","content":"hi"}]}`,
@@ -381,6 +416,94 @@ func TestTwoCompactingThreadsTheLaterOneIsTheSuccessor(t *testing.T) {
 	tr.Resolve("t\x00s", "", conv("second conversation", "a", "u", "summarize"), true)
 	if id := tr.Resolve("t\x00s", "", conv("summary of the second", "go on"), false).ID; id != second {
 		t.Fatalf("post-compaction request got %q, want %q, the thread that compacted last", id, second)
+	}
+}
+
+// #426: a tool-less side request (Claude Code's title suggestion, quota check, end-of-turn note)
+// shares the main thread's prefix and appends its OWN extra message. It must not move the main
+// thread's recorded tail: the next real turn extends the ORIGINAL conversation, not the side
+// request's, so if the tail moved, the real turn's prefix no longer matches it and the main
+// thread wrongly splits into a new "p:" id instead of staying "".
+func TestASideRequestDoesNotMoveTheMainThreadsTail(t *testing.T) {
+	tr := testTracker()
+	if id := tr.Resolve("t\x00s", "", withTools(conv("fix the bug")), false).ID; id != Primary {
+		t.Fatalf("precondition: main agent's first turn got %q, want primary", id)
+	}
+	if id := tr.Resolve("t\x00s", "", withTools(conv("fix the bug", "a1", "u2")), false).ID; id != Primary {
+		t.Fatalf("precondition: main agent's second turn got %q, want primary", id)
+	}
+	// A side request: same prefix as the main thread's last request, plus its own extra message,
+	// no tools declared. It must get its OWN thread — never the main thread's id, which every
+	// other structure keyed by that id (keep-alive, the prefix-ask stash, wait-cause state) is
+	// still relying on reading exactly as the main thread's own traffic left it — and that
+	// thread must say it inherits from the main thread.
+	side := tr.Resolve("t\x00s", "", conv("fix the bug", "a1", "u2", "generate a title"), false)
+	if side.ID == Primary || strings.HasPrefix(side.ID, "a:") {
+		t.Fatalf("side request got %q, want its own thread, not the main thread's", side.ID)
+	}
+	if from, ok := side.InheritsFrom(); !ok || from != Primary {
+		t.Fatalf("side request Inherits = %q, %v, want the main thread", from, ok)
+	}
+	// The real next turn extends the conversation BEFORE the side request, not the side
+	// request's own tail, and must still be the main thread.
+	if id := tr.Resolve("t\x00s", "", withTools(conv("fix the bug", "a1", "u2", "a3", "u4")), false).ID; id != Primary {
+		t.Fatalf("main agent's third turn got %q, want primary (the side request split the thread)", id)
+	}
+}
+
+// A side request's own thread must never take the primary id "" — Primary is reserved for the
+// main agent, told by metadata (declaring tools), and a side request never does.
+func TestASideRequestNeverTakesThePrimaryID(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withTools(conv("fix the bug")), false)
+	side := tr.Resolve("t\x00s", "", conv("fix the bug", "generate a title"), false)
+	if side.ID == Primary {
+		t.Fatal("a side request took the primary id")
+	}
+}
+
+// Edge case: if the main agent itself ever sends one genuinely tool-less request — not a side
+// request, but its own next turn, continued afterwards by a tools-declaring request — the
+// tracker cannot tell the two apart by content alone (both are "tool-less, extends a
+// tools-declaring thread's prefix"). It resolves the same way a side request does: its own new
+// thread, chained to the main thread by Inherits. The REAL point of this test is that the chain
+// does not break: the FOLLOWING tools-declaring request, which extends THIS tool-less request's
+// own tail, continues THAT thread (the longest matching prefix), not a third, unrelated one, and
+// not the stale main thread. Attribution (which reads Inherits) still sees one continuous
+// conversation; it is only the literal "" label that does not survive.
+func TestAGenuineToolLessMainTurnStillChainsForward(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withTools(conv("fix the bug")), false)
+	mid := tr.Resolve("t\x00s", "", conv("fix the bug", "a1", "u2"), false)
+	if mid.ID == Primary {
+		t.Fatal("precondition: the tool-less turn took the primary id (would mean no fix is needed)")
+	}
+	cont := tr.Resolve("t\x00s", "", withTools(conv("fix the bug", "a1", "u2", "a3", "u4")), false)
+	if cont.ID != mid.ID {
+		t.Fatalf("the next turn continued %q, want %q (the tool-less turn's own thread)", cont.ID, mid.ID)
+	}
+}
+
+// A tool-less AGENT COMPACTION request is not a side request, even though it is tool-less and
+// extends a tools-declaring thread's prefix exactly like one — its prompt tells the model not
+// to call any tools, so it can arrive with no tools declared. It must still match the main
+// thread and set its `compacting` flag, or the post-compaction request (which matches no
+// prefix, by design — it starts from a summary) gets a brand-new id on every compaction instead
+// of the main thread's.
+func TestAToolLessAgentCompactionDoesNotSplitTheMainThread(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withTools(conv("fix the bug")), false)
+	tr.Resolve("t\x00s", "", withTools(conv("fix the bug", "a1", "u2")), false)
+	// The compaction request: tool-less, extends the main thread's prefix, agentCompaction=true.
+	compact := tr.Resolve("t\x00s", "", conv("fix the bug", "a1", "u2", "summarize this conversation"), true)
+	if compact.ID != Primary {
+		t.Fatalf("compaction request got %q, want primary", compact.ID)
+	}
+	// The post-compaction request starts from a summary: it matches no thread by prefix, and
+	// must inherit the main thread's id via the `compacting` flag the request above set.
+	post := tr.Resolve("t\x00s", "", conv("summary of everything", "continue"), false)
+	if post.ID != Primary {
+		t.Fatalf("post-compaction request got %q, want primary (the compaction request's thread)", post.ID)
 	}
 }
 

@@ -1,0 +1,614 @@
+{
+ "assumptions": {
+  "formulas": [
+   {
+    "formula": "input_tokens × input_rate",
+    "name": "Uncached input",
+    "note": "A prompt with no cache_control at all: every token billed once, at the fresh rate."
+   },
+   {
+    "formula": "cache_read_tokens × cache_read_rate",
+    "name": "Cache read",
+    "note": "A hit. The read rate defaults to 0.1× input, and a read refreshes the entry's lifetime for no extra charge."
+   },
+   {
+    "formula": "written_tokens × write_5m_rate",
+    "name": "Cache write, 5-minute TTL",
+    "note": "Creating an entry that lives five minutes. Defaults to 1.25× input."
+   },
+   {
+    "formula": "written_tokens × write_1h_rate",
+    "name": "Cache write, 1-hour TTL",
+    "note": "Creating an entry that lives an hour. Defaults to 2.0× input — no gateway publishes this rate, so it is derived from the multiplier and editable above."
+   },
+   {
+    "formula": "cached_tokens × cache_read_rate + ping_input × input_rate + ping_output × output_rate",
+    "name": "Keep-alive ping",
+    "note": "One refresh. It is a cache READ, so a five-minute and a one-hour keep-alive cost the same per ping; what differs is the creation tier that put the entry there and how often a ping is needed."
+   },
+   {
+    "formula": "cached_tokens × write_rate(tier) + ping_input × input_rate + ping_output × output_rate",
+    "name": "Keep-alive that arrived late",
+    "note": "A ping that fires after the entry lapsed re-creates it, at 12.5× a read for the 5-minute tier and 20× for the 1-hour one. Counted as pings_that_rewrote."
+   },
+   {
+    "formula": "uncached_input + cache_read + cache_write + output",
+    "name": "Request cost",
+    "note": "One request's whole bill under a simulated strategy."
+   },
+   {
+    "formula": "Σ request_cost + Σ ping_cost",
+    "name": "Total cost",
+    "note": "One strategy's whole bill."
+   },
+   {
+    "formula": "total_cost − uncached_cost",
+    "name": "Incremental cache premium",
+    "note": "What the caching machinery itself cost, separate from the bill it sits inside. NEGATIVE means the cache paid for itself."
+   },
+   {
+    "formula": "baseline_cost − strategy_cost",
+    "name": "Absolute savings",
+    "note": "Negative where the strategy costs more, and shown that way — never clamped to zero."
+   },
+   {
+    "formula": "absolute_savings ÷ baseline_cost × 100",
+    "name": "Percentage savings",
+    "note": "Undefined, not 0%, when the baseline is zero."
+   },
+   {
+    "formula": "write_1h_usd − write_5m_usd",
+    "name": "Raising the TTL from five minutes to an hour",
+    "note": "What the longer hold costs, on the SAME write — the price of the extra 45 minutes of coverage, before anything it might save is counted."
+   },
+   {
+    "formula": "late_5m_usd − keep_alive_usd",
+    "name": "Saved per prevented miss",
+    "note": "What one five-minute miss costs beyond what a hit at the same tier would have. The ping overhead is in both terms and cancels, leaving the write-versus-read gap."
+   },
+   {
+    "formula": "late_5m_usd − write_1h_usd",
+    "name": "One 5m miss vs one 1h write",
+    "note": "SIGNED. Negative means paying for the 1-hour tier up front costs more than eating the one five-minute miss it would have prevented."
+   },
+   {
+    "formula": "⌈raise_5m_to_1h_usd ÷ saved_per_miss_usd⌉",
+    "name": "Prevented misses to break even",
+    "note": "How many five-minute misses raising the TTL has to prevent before it pays for itself. Undefined, not zero, when saved_per_miss_usd is not positive."
+   }
+  ],
+  "horizon_1h_seconds": 3600,
+  "horizon_5m_seconds": 300,
+  "multipliers": {
+   "cache_read": 0.1,
+   "write_1h": 2,
+   "write_5m": 1.25
+  },
+  "notes": [
+   "Every timestamp, hour and time-of-day band on this page is UTC. The store carries no per-user timezone, so a local one would be invented.",
+   "A conversation is (account, session, model). The account is in the key because a session id is client-supplied and can collide between accounts; the MODEL is in it because a cache entry does not transfer between models, so a request on one model cannot read another model's entry and the two are not each other's successor.",
+   "A request with no next request in the same conversation has NO idle time. It is counted separately and excluded from every average, never treated as a zero gap.",
+   "Keep-alive ping rows written by context-guru itself are excluded from this dataset: counted, they would split one real idle gap into two short ones.",
+   "A cache miss recorded as prefix_change or cold_start cannot be rescued by any TTL. Those rows force a miss in every simulated arm and are reported as forced_misses.",
+   "Requests whose token accounting was incomplete have an UNKNOWN cost and contribute nothing to any dollar figure. They are counted, never valued at zero.",
+   "The one-hour write rate is derived from a multiplier because no gateway publishes one. Both the multiplier and the resulting rate are editable above.",
+   "A ping cannot generate nothing on a provider that requires max_tokens ≥ 1, so its minimum output is priced and stated rather than rounded away.",
+   "Latency avoided is derived from THIS window's own means: the mean upstream time of requests that really missed, minus that of requests that really hit. It is absent where either population is under 20 rows."
+  ],
+  "schedule": {
+   "idle_seconds": 280,
+   "idle_seconds_1h": 3360,
+   "max_pings": 2
+  },
+  "semantics": {
+   "hit_refreshes_ttl": true,
+   "ping_refreshes_ttl": true,
+   "zero_generation": false
+  },
+  "time_unit": "milliseconds",
+  "time_zone": "UTC"
+ },
+ "by_bucket": [
+  {
+   "conversations": 14,
+   "cost_unknown": 0,
+   "cost_usd": 0.6020000000000004,
+   "final_requests": 14,
+   "hit_rate_pct": 63.28125,
+   "hits": 81,
+   "key": "night",
+   "mean_idle_ms": 603157.8947368421,
+   "median_idle_ms": 260000,
+   "requests": 128,
+   "source": "unknown",
+   "with_next": 114,
+   "within_1h_pct": 100,
+   "within_5m_pct": 58.771929824561404
+  },
+  {
+   "conversations": 15,
+   "cost_unknown": 0,
+   "cost_usd": 0.7280000000000005,
+   "final_requests": 15,
+   "hit_rate_pct": 65.359477124183,
+   "hits": 100,
+   "key": "morning",
+   "mean_idle_ms": 593043.4782608696,
+   "median_idle_ms": 260000,
+   "requests": 153,
+   "source": "unknown",
+   "with_next": 138,
+   "within_1h_pct": 100,
+   "within_5m_pct": 61.594202898550726
+  },
+  {
+   "conversations": 16,
+   "cost_unknown": 0,
+   "cost_usd": 0.7700000000000006,
+   "final_requests": 16,
+   "hit_rate_pct": 66.25766871165644,
+   "hits": 108,
+   "key": "afternoon",
+   "mean_idle_ms": 596054.4217687075,
+   "median_idle_ms": 260000,
+   "requests": 163,
+   "source": "unknown",
+   "with_next": 147,
+   "within_1h_pct": 100,
+   "within_5m_pct": 62.585034013605444
+  },
+  {
+   "conversations": 15,
+   "cost_unknown": 0,
+   "cost_usd": 0.6940000000000005,
+   "final_requests": 15,
+   "hit_rate_pct": 66.66666666666667,
+   "hits": 98,
+   "key": "evening",
+   "mean_idle_ms": 563636.3636363636,
+   "median_idle_ms": 220000,
+   "requests": 147,
+   "source": "unknown",
+   "with_next": 132,
+   "within_1h_pct": 100,
+   "within_5m_pct": 62.878787878787875
+  }
+ ],
+ "by_model": [
+  {
+   "conversations": 20,
+   "cost_unknown": 0,
+   "cost_usd": 1.0400000000000007,
+   "final_requests": 20,
+   "hit_rate_pct": 65.43778801843318,
+   "hits": 142,
+   "key": "m-unpriced",
+   "mean_idle_ms": 576852.7918781727,
+   "median_idle_ms": 260000,
+   "requests": 217,
+   "source": "unknown",
+   "with_next": 197,
+   "within_1h_pct": 100,
+   "within_5m_pct": 61.92893401015228
+  },
+  {
+   "conversations": 20,
+   "cost_unknown": 0,
+   "cost_usd": 0.9180000000000007,
+   "final_requests": 20,
+   "hit_rate_pct": 64.46700507614213,
+   "hits": 127,
+   "key": "m-opus",
+   "mean_idle_ms": 618079.0960451977,
+   "median_idle_ms": 260000,
+   "requests": 197,
+   "source": "unknown",
+   "with_next": 177,
+   "within_1h_pct": 100,
+   "within_5m_pct": 60.451977401129945
+  },
+  {
+   "conversations": 20,
+   "cost_unknown": 0,
+   "cost_usd": 0.8360000000000006,
+   "final_requests": 20,
+   "hit_rate_pct": 66.66666666666667,
+   "hits": 118,
+   "key": "m-sonnet",
+   "mean_idle_ms": 570573.2484076433,
+   "median_idle_ms": 260000,
+   "requests": 177,
+   "source": "unknown",
+   "with_next": 157,
+   "within_1h_pct": 100,
+   "within_5m_pct": 62.4203821656051
+  }
+ ],
+ "by_ttl": [
+  {
+   "conversations": 60,
+   "cost_unknown": 0,
+   "cost_usd": 2.7939999999999827,
+   "final_requests": 60,
+   "hit_rate_pct": 65.48223350253807,
+   "hits": 387,
+   "key": "unrecorded",
+   "mean_idle_ms": 588738.2297551789,
+   "median_idle_ms": 260000,
+   "requests": 591,
+   "source": "unknown",
+   "with_next": 531,
+   "within_1h_pct": 100,
+   "within_5m_pct": 61.5819209039548
+  }
+ ],
+ "by_user": [
+  {
+   "conversations": 30,
+   "cost_unknown": 0,
+   "cost_usd": 1.404000000000001,
+   "final_requests": 30,
+   "hit_rate_pct": 66.32996632996633,
+   "hits": 197,
+   "key": "t2",
+   "mean_idle_ms": 586591.7602996255,
+   "median_idle_ms": 260000,
+   "requests": 297,
+   "source": "unknown",
+   "with_next": 267,
+   "within_1h_pct": 100,
+   "within_5m_pct": 62.546816479400746
+  },
+  {
+   "conversations": 30,
+   "cost_unknown": 0,
+   "cost_usd": 1.390000000000001,
+   "final_requests": 30,
+   "hit_rate_pct": 64.62585034013605,
+   "hits": 190,
+   "key": "t1",
+   "mean_idle_ms": 590909.0909090908,
+   "median_idle_ms": 260000,
+   "requests": 294,
+   "source": "unknown",
+   "with_next": 264,
+   "within_1h_pct": 100,
+   "within_5m_pct": 60.60606060606061
+  }
+ ],
+ "cards": {
+  "cached_context_p50": 34035,
+  "conversations": 60,
+  "cost_unknown": 0,
+  "cost_usd": 2.7939999999999827,
+  "final_requests": 60,
+  "hit_rate_pct": 65.48223350253807,
+  "hits": 387,
+  "mean_idle_ms": 588738.2297551789,
+  "median_idle_ms": 260000,
+  "models": 3,
+  "p90_idle_ms": 2400000,
+  "requests": 591,
+  "scanned": 591,
+  "users": 2,
+  "with_next": 531,
+  "within_1h": 531,
+  "within_1h_pct": 100,
+  "within_5m": 327,
+  "within_5m_pct": 61.5819209039548
+ },
+ "coverage": {
+  "cost_unknown": 0,
+  "keepalive_rows": 15,
+  "single_request_conversations": 0,
+  "ttl_configured": 0,
+  "ttl_observed": 0,
+  "ttl_unknown": 591
+ },
+ "first_ts": 1767603620000,
+ "hour_bins": [
+  {
+   "label": "00",
+   "n": 23,
+   "usd": 0.10800000000000004
+  },
+  {
+   "label": "01",
+   "n": 33,
+   "usd": 0.15600000000000008
+  },
+  {
+   "label": "02",
+   "n": 9,
+   "usd": 0.04000000000000001
+  },
+  {
+   "label": "03",
+   "n": 29,
+   "usd": 0.13400000000000006
+  },
+  {
+   "label": "04",
+   "n": 29,
+   "usd": 0.13600000000000007
+  },
+  {
+   "label": "05",
+   "n": 5,
+   "usd": 0.028
+  },
+  {
+   "label": "06",
+   "n": 25,
+   "usd": 0.11800000000000005
+  },
+  {
+   "label": "07",
+   "n": 40,
+   "usd": 0.1880000000000001
+  },
+  {
+   "label": "08",
+   "n": 5,
+   "usd": 0.028
+  },
+  {
+   "label": "09",
+   "n": 33,
+   "usd": 0.15800000000000008
+  },
+  {
+   "label": "10",
+   "n": 36,
+   "usd": 0.1680000000000001
+  },
+  {
+   "label": "11",
+   "n": 14,
+   "usd": 0.068
+  },
+  {
+   "label": "12",
+   "n": 33,
+   "usd": 0.15400000000000008
+  },
+  {
+   "label": "13",
+   "n": 33,
+   "usd": 0.15000000000000008
+  },
+  {
+   "label": "14",
+   "n": 16,
+   "usd": 0.08200000000000002
+  },
+  {
+   "label": "15",
+   "n": 29,
+   "usd": 0.13800000000000007
+  },
+  {
+   "label": "16",
+   "n": 40,
+   "usd": 0.1900000000000001
+  },
+  {
+   "label": "17",
+   "n": 12,
+   "usd": 0.05600000000000001
+  },
+  {
+   "label": "18",
+   "n": 31,
+   "usd": 0.15200000000000008
+  },
+  {
+   "label": "19",
+   "n": 40,
+   "usd": 0.1800000000000001
+  },
+  {
+   "label": "20",
+   "n": 9,
+   "usd": 0.04800000000000001
+  },
+  {
+   "label": "21",
+   "n": 27,
+   "usd": 0.13200000000000006
+  },
+  {
+   "label": "22",
+   "n": 33,
+   "usd": 0.14400000000000007
+  },
+  {
+   "label": "23",
+   "n": 7,
+   "usd": 0.038000000000000006
+  }
+ ],
+ "idle_bands": [
+  {
+   "label": "0s–10s",
+   "n": 0,
+   "usd": 0
+  },
+  {
+   "label": "10s–30s",
+   "n": 58,
+   "usd": 0.2780000000000002
+  },
+  {
+   "label": "30s–1m",
+   "n": 0,
+   "usd": 0
+  },
+  {
+   "label": "1m–5m",
+   "n": 232,
+   "usd": 1.0140000000000007
+  },
+  {
+   "beyond": true,
+   "label": "5m–15m",
+   "n": 149,
+   "usd": 0.6640000000000005
+  },
+  {
+   "beyond": true,
+   "label": "15m–1h",
+   "n": 92,
+   "usd": 0.5440000000000004
+  },
+  {
+   "beyond": true,
+   "label": "1h–6h",
+   "n": 0,
+   "usd": 0
+  },
+  {
+   "beyond": true,
+   "label": "\u003e 6h",
+   "n": 0,
+   "usd": 0
+  }
+ ],
+ "last_ts": 1768249460000,
+ "pricing": {
+  "models": [
+   {
+    "cache_read": 0.0000015,
+    "input": 0.000015,
+    "known": true,
+    "model": "m-opus",
+    "output": 0.000075,
+    "ping_input_tokens": 1,
+    "ping_output_tokens": 1,
+    "source": "price_list",
+    "write_1h": 0.00003,
+    "write_5m": 0.00001875
+   },
+   {
+    "cache_read": 3e-7,
+    "input": 0.000003,
+    "known": true,
+    "model": "m-sonnet",
+    "output": 0.000015,
+    "ping_input_tokens": 1,
+    "ping_output_tokens": 1,
+    "source": "price_list",
+    "write_1h": 0.000006,
+    "write_5m": 0.00000375
+   },
+   {
+    "cache_read": 0,
+    "input": 0,
+    "known": false,
+    "model": "m-unpriced",
+    "output": 0,
+    "ping_input_tokens": 1,
+    "ping_output_tokens": 1,
+    "source": "",
+    "write_1h": 0,
+    "write_5m": 0
+   }
+  ],
+  "multipliers": {
+   "cache_read": 0.1,
+   "write_1h": 2,
+   "write_5m": 1.25
+  }
+ },
+ "scanned": 591,
+ "survival": [
+  {
+   "arrived": 0,
+   "arrived_pct": 0,
+   "label": "5s",
+   "n": 531,
+   "seconds": 5
+  },
+  {
+   "arrived": 0,
+   "arrived_pct": 0,
+   "label": "10s",
+   "n": 531,
+   "seconds": 10
+  },
+  {
+   "arrived": 58,
+   "arrived_pct": 10.922787193973635,
+   "label": "30s",
+   "n": 531,
+   "seconds": 30
+  },
+  {
+   "arrived": 97,
+   "arrived_pct": 18.267419962335218,
+   "label": "1m",
+   "n": 531,
+   "seconds": 60
+  },
+  {
+   "arrived": 136,
+   "arrived_pct": 25.6120527306968,
+   "label": "2m",
+   "n": 531,
+   "seconds": 120
+  },
+  {
+   "arrived": 327,
+   "arrived_pct": 61.5819209039548,
+   "label": "5m",
+   "n": 531,
+   "seconds": 300,
+   "ttl": "5m"
+  },
+  {
+   "arrived": 439,
+   "arrived_pct": 82.67419962335217,
+   "label": "10m",
+   "n": 531,
+   "seconds": 600
+  },
+  {
+   "arrived": 439,
+   "arrived_pct": 82.67419962335217,
+   "label": "30m",
+   "n": 531,
+   "seconds": 1800
+  },
+  {
+   "arrived": 531,
+   "arrived_pct": 100,
+   "label": "1h",
+   "n": 531,
+   "seconds": 3600,
+   "ttl": "1h"
+  },
+  {
+   "arrived": 531,
+   "arrived_pct": 100,
+   "label": "2h",
+   "n": 531,
+   "seconds": 7200
+  },
+  {
+   "arrived": 531,
+   "arrived_pct": 100,
+   "label": "6h",
+   "n": 531,
+   "seconds": 21600
+  },
+  {
+   "arrived": 531,
+   "arrived_pct": 100,
+   "label": "1d",
+   "n": 531,
+   "seconds": 86400
+  }
+ ],
+ "total": 591,
+ "truncated": false
+}

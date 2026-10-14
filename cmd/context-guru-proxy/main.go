@@ -121,7 +121,7 @@ func main() {
 			"capture before/after message text for the diff view; stores arbitrary agent output on disk (scrubbed of known credential shapes and size-capped first), so it is opt-in")
 		dashContentCap = flag.Int("dashboard-content-cap", envInt("DASHBOARD_CONTENT_CAP", 16<<10),
 			"maximum bytes stored per captured before/after blob")
-		dashLifecycle = flag.Bool("dashboard-lifecycle-signals", envBool("DASHBOARD_LIFECYCLE_SIGNALS", false),
+		dashLifecycle = flag.Bool("dashboard-lifecycle-signals", envBool("DASHBOARD_LIFECYCLE_SIGNALS", true),
 			"record into request_lifecycle the signals no other column holds: gap since the previous response ended, granted cache TTL tier, tool_result count/bytes/error flag, keep-alive ping ordinal (counts and sizes only)")
 		dashQueue = flag.Int("dashboard-queue", envInt("DASHBOARD_QUEUE", 4096),
 			"capture channel depth; a full channel DROPS events (counted, and shown in the UI) rather than delaying a request")
