@@ -237,28 +237,28 @@ The same harness on the status line before this work:
 
 The slow-proxy case went from about 680 ms to about 390 ms. Healthy renders are about 10 ms slower than before, from the extra elements (agents, spend).
 
-Per-agent names, the keep-alive plan and the session-only total (which removed the lifetime read) cost nothing measurable. Interleaved runs of the previous release ("before") and this one ("after") against the same server, with three named sub-agents on disk, 50 runs each, median / 95th percentile / maximum in milliseconds:
+Per-agent names, the keep-alive plan and the session and subagents money (which removed the lifetime read) cost nothing measurable. Interleaved runs of the previous release ("before") and this one ("after") against the same server, with three named sub-agents on disk, 50 runs each, median / 95th percentile / maximum in milliseconds:
 
 | layout | scenario | before | after |
 |---|---|---|---|
-| minimal | warm | 56 / 71 / 75 | 57 / 75 / 86 |
-| minimal | cold | 94 / 112 / 140 | 88 / 101 / 118 |
-| minimal | slow | 396 / 433 / 530 | 395 / 415 / 444 |
-| minimal | down | 93 / 141 / 171 | 84 / 103 / 144 |
-| balanced | warm | 56 / 62 / 65 | 55 / 69 / 75 |
-| balanced | cold | 95 / 151 / 438 | 95 / 119 / 160 |
-| balanced | slow | 390 / 407 / 420 | 391 / 401 / 402 |
-| balanced | down | 90 / 105 / 176 | 85 / 110 / 154 |
-| detailed | warm | 58 / 71 / 87 | 62 / 72 / 76 |
-| detailed | cold | 87 / 99 / 107 | 90 / 102 / 116 |
-| detailed | slow | 390 / 398 / 406 | 389 / 398 / 460 |
-| detailed | down | 89 / 97 / 104 | 83 / 93 / 101 |
-| watch | warm | 56 / 64 / 72 | 56 / 64 / 67 |
-| watch | cold | 87 / 96 / 104 | 85 / 95 / 102 |
-| watch | slow | 393 / 410 / 485 | 392 / 401 / 414 |
-| watch | down | 88 / 109 / 166 | 83 / 92 / 177 |
+| minimal | warm | 50 / 56 / 61 | 50 / 56 / 62 |
+| minimal | cold | 79 / 86 / 95 | 80 / 89 / 100 |
+| minimal | slow | 386 / 391 / 394 | 388 / 392 / 397 |
+| minimal | down | 87 / 96 / 106 | 82 / 94 / 159 |
+| balanced | warm | 52 / 56 / 59 | 52 / 56 / 58 |
+| balanced | cold | 84 / 102 / 238 | 83 / 100 / 174 |
+| balanced | slow | 387 / 393 / 407 | 387 / 396 / 417 |
+| balanced | down | 84 / 91 / 94 | 79 / 85 / 94 |
+| detailed | warm | 50 / 57 / 62 | 53 / 59 / 60 |
+| detailed | cold | 83 / 88 / 90 | 86 / 93 / 95 |
+| detailed | slow | 387 / 396 / 425 | 388 / 396 / 413 |
+| detailed | down | 88 / 96 / 106 | 84 / 95 / 102 |
+| watch | warm | 53 / 63 / 65 | 54 / 61 / 78 |
+| watch | cold | 86 / 95 / 104 | 85 / 94 / 102 |
+| watch | slow | 386 / 391 / 398 | 387 / 398 / 405 |
+| watch | down | 88 / 99 / 103 | 82 / 92 / 105 |
 
-Reading the names is one directory listing and a few small files, about 0.1 ms.
+Reading the names opens only the files of the agents the proxy lists (at most 24, 4 KB each). With 5,000 agent files in the session the render takes under 0.1 s.
 
 ## Colour and plain terminals
 
