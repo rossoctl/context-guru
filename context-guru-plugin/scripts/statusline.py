@@ -612,7 +612,7 @@ ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka"}
 # list: it is the one thing worth the space, and is truncated instead.
 DEGRADE = (("tools", None), ("latency", None), ("ka", None), ("spend", None), ("update", None), ("hint", 1),
            ("spark", 1), ("strip", 1), ("heat", 1), ("fill", 1), ("wagents", 1),
-           ("agents", 1), ("save", 1), ("ctx", 1), ("save", 2), ("cache", 1), ("agents", None), ("ctx", None),
+           ("agents", 1), ("agents", 2), ("save", 1), ("ctx", 1), ("save", 2), ("cache", 1), ("agents", None), ("ctx", None),
            ("save", None))
 DEFAULT_WIDTH = 100
 ROUTE_MEMO_SECONDS = 60
@@ -981,7 +981,8 @@ def _agent_rows(cs: dict | None, cs_age: float, names: dict[str, str] | None = N
         last = max(_num(t, "last_ts") or 0, _num(t, "end_ts") or 0)
         out.append({"id": tid, "name": (names or {}).get(tid, ""), "rem": rem, "ttl": float(t["ttl_s"]),
                     "held": held_seconds(t, cs.get("now_ms"), cs_age),
-                    "ago": (_num(cs, "now_ms") - last) / 1000 + cs_age})  # remaining_seconds needs now_ms too
+                    "ago": (_num(cs, "now_ms") - last) / 1000 + cs_age,  # remaining_seconds needs now_ms too
+                    "saved": _num(t, "saved_usd"), "baseline": _num(t, "baseline_usd")})
     out.sort(key=lambda r: r["id"])
     seen: dict[str, int] = {}
     for r in out:  # two `Explore` agents read `Explore` and `Explore 2`, fixed by id order
@@ -1077,11 +1078,13 @@ _AGENT_STYLE = {"cold": (RED, "○"), "critical": (RED, "◐"), "expiring": (YEL
 def _agents_segment(rows: list[dict], level: int | None = 0) -> str | None:
     """Every sub-agent's cache under the name Claude Code's agents list shows, so the agent selected
     there is found by name (the status line is not told which one is selected): `agents reviewer
-    active ● 4:58 · tester ◐ 0:52 ↻ · +2 more · 1 cold`. Warm ones, most recently used first, at
-    most AGENT_ROWS; `active` marks a request in the last ACTIVE_SECONDS; each clock is the time
-    until cold, `↻` when pings hold it; cold ones are counted. Agents with no name on disk (not
+    active ● 4:58 saved $1.20 of $6.00 · tester ◐ 0:52 ↻ · +2 more · 1 cold`. Warm ones, most
+    recently used first, at most AGENT_ROWS; `active` marks a request in the last ACTIVE_SECONDS;
+    each clock is the time until cold, `↻` when pings hold it, then the agent's own `saved $z of
+    $q` (see _money_pair) when the proxy priced it; cold ones are counted. Agents with no name on disk (not
     Claude Code, or an older one) keep the unlabelled form, `agents 2 · soonest ◐ 0:50`, because a
-    list of clocks without names cannot say which agent is which. Level 1 is the counts alone."""
+    list of clocks without names cannot say which agent is which. Level 1 drops the per-agent money,
+    level 2 is the counts alone."""
     if level is None or not rows:
         return None
     warm = _warm(rows)
@@ -1094,7 +1097,7 @@ def _agents_segment(rows: list[dict], level: int | None = 0) -> str | None:
         colour, glyph = _AGENT_STYLE[entry_state(left, r["ttl"])]
         return f"{colour}{glyph} {_clock(left)}{' ↻' if left > r['rem'] else ''}{RESET}"
 
-    if level == 1:
+    if level == 2:
         return f"{DIM}agents{RESET} " + sep.join(([str(len(warm))] if warm else []) + tail)
     named = sorted((r for r in warm if r["name"]), key=lambda r: r["ago"])
     if not named:
@@ -1108,7 +1111,8 @@ def _agents_segment(rows: list[dict], level: int | None = 0) -> str | None:
     for r in named[:AGENT_ROWS]:
         name = r["name"] if len(r["name"]) <= 14 else r["name"][:13] + "…"
         active = f" {GREEN}active{RESET}" if r["ago"] <= ACTIVE_SECONDS else ""
-        parts.append(f"{name}{active} {clock(r)}")
+        pair = _money_pair(r["saved"], r["baseline"]) if level == 0 else None
+        parts.append(f"{name}{active} {clock(r)}" + (f" {pair}" if pair else ""))
     if len(warm) > len(parts):
         parts.append(f"{DIM}+{len(warm) - len(parts)} more{RESET}")
     return f"{DIM}agents{RESET} " + sep.join(parts + tail)
@@ -1175,6 +1179,14 @@ def _ctx_segment(used: float, window: float, level: int | None = 0) -> str | Non
     return f"{DIM}ctx{RESET} {bar} {colour}{fraction * 100:.0f}%{RESET}{near}"
 
 
+def _money_pair(x: float | None, y: float | None) -> str | None:
+    """`saved $x of $y`, or None when either half is missing from the response (unknown is not
+    $0.00) or nothing is priced yet (no whole to be part of)."""
+    if x is None or y is None or y < 0.005:
+        return None
+    return f"saved {_money(x)} {DIM}of{RESET} {_money(y)}"
+
+
 def _save_segment(stats: dict | None, money: dict | None, level: int | None = 0, fresh: bool = False) -> str | None:
     """`saved $0.42 of $3.10 session · saved $0.10 of $0.50 subagents`. session is the main
     thread, subagents every other thread of the session together (sub-agents, teammates, and side
@@ -1183,8 +1195,9 @@ def _save_segment(stats: dict | None, money: dict | None, level: int | None = 0,
     context-guru, at the gateway's prices; $x is the saving against it, net of context-guru's own
     model calls and keep-alive pings, so $x <= $y. A saving is a COUNTERFACTUAL, shown plainly as
     money already saved; only avoidable-spend figures in the hint carry `≈`. The subagents figure
-    appears once a thread other than the main one exists. An older proxy with no money block gets
-    the bare `saved $x` from /api/stats."""
+    appears once a thread other than the main one exists. A figure whose fields are missing is
+    left out, never shown as $0.00. An older proxy with no money block gets the bare `saved $x`
+    from /api/stats."""
     if level is None or fresh:
         return None
     main = money.get("main") if isinstance(money, dict) else None
@@ -1193,19 +1206,19 @@ def _save_segment(stats: dict | None, money: dict | None, level: int | None = 0,
         if sess is None:
             return None
         return _money(sess) if level == 2 else f"saved {_money(sess)}"
-    x, y = _num(main, "saved_usd") or 0.0, _num(main, "baseline_usd") or 0.0
-    if y < 0.005:
-        return None  # nothing priced yet: no part, no whole
+    x, y = _num(main, "saved_usd"), _num(main, "baseline_usd")
+    head = _money_pair(x, y)
+    if head is None:
+        return None
     if level == 2:
         return _money(x)
-    head = f"saved {_money(x)} {DIM}of{RESET} {_money(y)}"
     if level == 1:
         return head
     out = f"{head} {DIM}session{RESET}"
     others = money.get("others")
-    ox, oy = _num(others, "saved_usd") or 0.0, _num(others, "baseline_usd") or 0.0
-    if (_num(others, "threads") or 0) > 0 and oy >= 0.005:
-        out += f" {DIM}·{RESET} saved {_money(ox)} {DIM}of{RESET} {_money(oy)} {DIM}subagents{RESET}"
+    pair = _money_pair(_num(others, "saved_usd"), _num(others, "baseline_usd"))
+    if (_num(others, "threads") or 0) > 0 and pair:
+        out += f" {DIM}·{RESET} {pair} {DIM}subagents{RESET}"
     return out
 
 

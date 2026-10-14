@@ -184,3 +184,48 @@ func TestCacheThreadsQueryIsIndexed(t *testing.T) {
 	assertNoWholeTableScan(t, "cache threads", plan)
 	assertSessionOrTimeIndexed(t, "cache threads", plan)
 }
+
+// TestCacheThreadsTakesItsCacheFieldsFromTheLatestTouch pins the one-MAX bare-column rule
+// cacheThreadsQuery relies on. The thread has two pings, an older and a newer cache-touching
+// request with different models and prefixes, and a later request that touched no cache. The
+// cache fields must come from the newer touching row, and the money must sum every row: a
+// second MAX (on the ping cost, say) would make SQLite's bare columns ambiguous and the ping sum
+// one ping's cost.
+func TestCacheThreadsTakesItsCacheFieldsFromTheLatestTouch(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	row := func(ago int64, model string, read int64) *Event {
+		e := mkEvent(now-ago, "s1", model, 1000, 1000)
+		e.Status, e.ThreadID, e.FreshInput, e.CacheRead, e.CacheWrite = 200, "a:T", 0, read, 0
+		e.CostUSD, e.BaselineCostUSD = 0.10, 0.10
+		return e
+	}
+	ping := func(ago int64) *Event {
+		e := row(ago, "m-ping", 7000)
+		e.KeepAlive, e.CostUSD, e.BaselineCostUSD = true, 0.01, 0
+		return e
+	}
+	seed(t, rec, row(100_000, "m-old", 1000), ping(90_000), ping(80_000), row(50_000, "m-new", 3000), row(10_000, "m-none", 0))
+
+	_, body := get(t, a, "/api/cachestate?session=s1", "")
+	var th map[string]any
+	for _, x := range body["threads"].([]any) {
+		if x.(map[string]any)["id"] == "a:T" {
+			th = x.(map[string]any)
+		}
+	}
+	if th == nil {
+		t.Fatalf("thread a:T not listed: %v", body["threads"])
+	}
+	if th["model"] != "m-new" || th["prefix_tokens"] != 3000.0 || th["last_ts"] != float64(now-50_000) {
+		t.Errorf("cache fields = model %v prefix %v last_ts %v, want the latest touching row (m-new, 3000, %d)",
+			th["model"], th["prefix_tokens"], th["last_ts"], now-50_000)
+	}
+	// y = 0.30 (three agent rows); x = y - 0.30 paid - 0.02 for BOTH pings.
+	if got := th["saved_usd"].(float64); math.Abs(got-(-0.02)) > 1e-9 {
+		t.Errorf("saved_usd = %v, want -0.02 (both pings deducted)", got)
+	}
+	if got := th["baseline_usd"].(float64); math.Abs(got-0.30) > 1e-9 {
+		t.Errorf("baseline_usd = %v, want 0.30", got)
+	}
+}

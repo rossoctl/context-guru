@@ -9,10 +9,10 @@ The first line is money, the second is the cache clock, the sub-agents, the cont
 
 ```text
 saved $0.31 of $4.41 session · saved $0.12 of $0.90 subagents
-cache ● █████░ 13:40 ↻ │ agents reviewer ● 4:21 · Explore ◐ 0:51 · 1 cold │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
+cache ● █████░ 13:40 ↻ │ agents reviewer active ● 4:58 saved $0.08 of $0.40 · Explore ◐ 0:51 saved $0.02 of $0.20 │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
 ```
 
-Only savings recorded with each request count: the compaction saving (against the same request uncompacted), the cache split and the keep-alive. Two credits that the dashboard prices when it is read are left out: the estimate for requests recorded before the cache split was measured, and the declaration filter's saving. The dashboard shows both. The figures are not Claude Code's own `cost` (its estimate at list prices), which `detailed` shows as `spent`.
+Only savings recorded with each request count: the compaction saving (against the same request uncompacted), the cache split, and the keep-alive credit, which a request gets only when a ping that read the cache kept it warm. Two credits that the dashboard prices when it is read are left out: the estimate for requests recorded before the cache split was measured, and the tool (declaration) filter's saving. So the line can read lower than the dashboard, which adds both. A figure the proxy did not report is left out, never shown as `$0.00`. The figures are not Claude Code's own `cost` (its estimate at list prices), which `detailed` shows as `spent`.
 
 Every number is about this session. There is no today or lifetime total on the line; the dashboard and `/context-guru:savings` cover longer windows.
 
@@ -24,7 +24,7 @@ Every number is about this session. There is no today or lifetime total on the l
 | `saved $0.12 of $0.90 subagents` | The same, summed over every other request of the session: sub-agents, teammates, and Claude Code's side requests (the auto-mode classifier, titles), which cost money even though they are not listed as agents. Shown once the session has a request outside the main agent. A narrow terminal drops it first. |
 | `cache ● █████░ 3:57` | A bar that drains as the prompt cache approaches expiry, and the clock. Time is measured from the end of the last response. |
 | `13:40 ↻` | The proxy is holding this cache warm with keep-alive pings. The clock is then the time until the cache goes cold if you send nothing: the last planned ping plus the cache lifetime. The bar still drains over the current cache entry, so each ping refills it. `↻` alone, with the normal clock, means the last touch was a ping and none is planned. |
-| `agents reviewer active ● 4:58 · Explore ◐ 0:51 · 1 cold` | Each sub-agent's cache, under the name Claude Code's agents list shows (`←` / `↓` in Claude Code), most recently used first, up to five, then `+N more`. `active` marks an agent that made a request in the last 10 seconds. Each clock is that agent's time until cold, with `↻` when pings hold it. Cold ones are counted. See [Sub-agents](#sub-agents-and-the-selected-agent). |
+| `agents reviewer active ● 4:58 saved $1.20 of $6.00 · Explore ◐ 0:51 · 1 cold` | Each sub-agent's cache, under the name Claude Code's agents list shows (`←` / `↓` in Claude Code), most recently used first, up to five, then `+N more`. `active` marks an agent that made a request in the last 10 seconds. Each clock is that agent's time until cold, with `↻` when pings hold it, followed by that agent's own `saved $z of $q` on the same basis as the session figure. Side requests are not listed; they count only in the subagents total. Cold ones are counted. A narrow terminal drops the per-agent money first. See [Sub-agents](#sub-agents-and-the-selected-agent). |
 | `ctx ███░░░░░ 41%` | How full you are, as a share of the model's context limit. |
 | `ka 3 pings $0.04` | Keep-alive pings the proxy sent in this session, and what they cost. Shown after the first ping. |
 | `▸ hint` | At most one thing worth acting on, dollars first. |
@@ -79,11 +79,11 @@ The bar rescales to the tier's lifetime.
 
 **Limitation: the status line cannot follow the agent you select.** Claude Code does not tell the status line command which agent is selected in its agents list; the command receives the same input whichever agent you are viewing (checked against Claude Code 2.1.296). So the line always shows the main agent's cache on the left, and every sub-agent's cache by name, the same name the agents list shows. Select `reviewer` in the list and read the `reviewer` clock.
 
-Agent-team teammates that run in their own terminal pane (`teammateMode: tmux`) are separate Claude Code sessions with their own status line. That line shows the teammate's own cache, keep-alive and money, and the lead's line does not list them. Teammates that run inside the lead's process are listed on the lead's line like any sub-agent.
+Agent-team teammates that run in their own terminal pane (`teammateMode: tmux`) are separate Claude Code sessions with their own status line. That line shows the teammate's own cache, keep-alive and money, its money as `session`, and the lead's line does not list them. Teammates that run inside the lead's process are listed on the lead's line like any sub-agent.
 
 The names come from the session's own files next to its transcript (`<session>/subagents/agent-*.meta.json`). The proxy tells the agents apart by the `x-claude-code-agent-id` header Claude Code sends on every sub-agent and agent-team teammate request. A request the proxy grouped by its prompt instead (Claude Code's side requests, such as the auto-mode classifier) is not an agent and is not listed. A sub-agent with no name on disk keeps the unlabelled form, `agents 2 · soonest ◐ 0:51`.
 
-Named agents: `reviewer` just made a request (`active`), it and the main cache are held warm by keep-alive pings, and one finished agent is counted as cold:
+Named agents, each with its own `saved $z of $q`: `reviewer` just made a request (`active`), it and the main cache are held warm by keep-alive pings, and one finished agent is counted as cold:
 
 ![Named sub-agents](../statusline-live/agents-named-dark.svg#only-dark)
 ![Named sub-agents](../statusline-live/agents-named-light.svg#only-light)

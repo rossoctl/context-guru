@@ -288,6 +288,93 @@ func TestStatuslineGoldenAgentsAndKeepAlive(t *testing.T) {
 	}
 }
 
+// TestStatuslineGoldenMoney pins the money elements: the session (main thread) and subagents (every
+// other thread, side requests included) figures, each listed agent's own `saved $z of $q` next to its
+// clock, a side (p:) thread counted in the total but never listed, a main-only session, the
+// narrow-width degrade, and a missing money field rendering nothing rather than $0.00.
+func TestStatuslineGoldenMoney(t *testing.T) {
+	const now = 1_800_000_000_000
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sess-m", "subagents")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"agent-areviewer-8808ee2f0c216961.meta.json": `{"name":"reviewer","teamName":"t"}`,
+		"agent-ad9ba182bf3e760e6.meta.json":          `{"agentType":"Explore"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(sub, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	th := func(id string, ago int, money string) string {
+		return fmt.Sprintf(`{"id":%q,"main":%t,"model":"m","last_ts":%d,"end_ts":%d,"ttl_s":300,`+
+			`"prefix_tokens":52000,"priced":true,"rewrite_usd":0.03%s}`, id, id == "", now-ago*1000, now-ago*1000, money)
+	}
+	pair := func(x, y string) string { return `,"saved_usd":` + x + `,"baseline_usd":` + y }
+	cache := func(money string, threads ...string) string {
+		return fmt.Sprintf(`{"session":"s","model":"m",%s"last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,`+
+			`"priced":true,"rewrite_usd":0.30,"window":1000000,"window_exact":true,"threads":[%s]}`,
+			money, now-60_000, now, strings.Join(threads, ","))
+	}
+	both := `"money":{"main":{"saved_usd":50.32,"baseline_usd":250,"threads":1},"others":{"saved_usd":60.03,"baseline_usd":300,"threads":3}},`
+	stdin := `{"session_id":"sess-m","transcript_path":"` + filepath.Join(dir, "sess-m.jsonl") + `",` +
+		`"cost":{"total_cost_usd":4.1},"context_window":{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000}}`
+	agents := []string{th("", 60, pair("50.32", "250")), th("a:reviewer@t", 5, pair("1.20", "6.00")),
+		th("a:ad9ba182bf3e760e6", 250, pair("0.30", "2.10")), th("p:0123456789ab", 20, pair("58.53", "291.90"))}
+	for _, c := range []struct {
+		name, cache string
+		width       int
+		want        string
+	}{
+		{"main-only", cache(`"money":{"main":{"saved_usd":0.31,"baseline_usd":2.64,"threads":1},"others":{"saved_usd":0,"baseline_usd":0,"threads":0}},`,
+			th("", 60, pair("0.31", "2.64"))), 200,
+			"saved $0.31 of $2.64 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+		// Two named agents with their own figures; the p: side thread is in the total only.
+		{"agents-and-a-side-thread", cache(both, agents...), 220,
+			"saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents\n" +
+				"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 saved $1.20 of $6.00 · Explore ◐ 0:50 saved $0.30 of $2.10 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+		// Narrow: the per-agent money goes first, then the subagents total, before the names.
+		{"narrow", cache(both, agents...), 90,
+			"saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents\n" +
+				"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 · Explore ◐ 0:50 │ ctx ░░░░░░░░ 5%"},
+		// A missing field is unknown, not $0.00: that figure is left out.
+		{"missing-fields", cache(`"money":{"main":{"saved_usd":0.31,"threads":1},"others":{"baseline_usd":0.9,"threads":2}},`,
+			th("", 60, ""), th("a:reviewer@t", 5, `,"saved_usd":1.2`)), 200,
+			"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+		{"missing-subagents-figure", cache(`"money":{"main":{"saved_usd":0.31,"baseline_usd":2.64,"threads":1},"others":{"baseline_usd":0.9,"threads":2}},`,
+			th("", 60, "")), 200,
+			"saved $0.31 of $2.64 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
+				w.Write([]byte(`{"total_saved_usd": 9, "keepalive_pings": 3, "keepalive_ping_usd": 0.04}`))
+			})
+			mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(c.cache)) })
+			srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+			go srv.Serve(ln) //nolint:errcheck
+			t.Cleanup(func() { srv.Close() })
+			env := routedEnv(fmt.Sprint(ln.Addr().(*net.TCPAddr).Port))
+			env["CG_STATUSLINE_COLUMNS"] = fmt.Sprint(c.width)
+			out, code, elapsed := runStatusline(t, env, stdin, "--layout=balanced")
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			if got := strings.TrimRight(out, "\n"); got != c.want {
+				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
+			}
+			if elapsed > 500*time.Millisecond {
+				t.Errorf("render took %v; the budget is 0.5 s", elapsed)
+			}
+		})
+	}
+}
+
 // TestStatuslineAgentNamesAreBounded: the names come from the session's subagents/ files, and a
 // long session can hold thousands. A render opens only the files of the agents the proxy lists
 // (directly by id for a sub-agent, by a name-prefix match in a capped directory listing for a
