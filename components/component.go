@@ -164,6 +164,10 @@ type PrefixUsage struct {
 // non-Anthropic route, or the feature switched off. A caller must decide for itself what nil means;
 // see extract_llm_sweep, which DECLINES rather than falling back, because the fallback is the cost the
 // mechanism exists to avoid.
+//
+// session is the THREAD key, thread.Key(Ctx.Session, Ctx.Thread) (#423): the host stashes each
+// thread's last body apart, because each thread is its own conversation. Pass Ctx.Session alone
+// and a subagent's question is answered against the main thread's transcript.
 type PrefixAsker interface {
 	Ask(ctx context.Context, session, ask string) (reply string, usage PrefixUsage, err error)
 }
@@ -173,14 +177,52 @@ type PrefixAsker interface {
 // Exported so a PrefixCoverage implementation living outside this package (the host's own
 // stash) can compute the identical hash a components/offload caller computes over its own
 // span, without either package importing the other.
+//
+// Hashes each message with its per-block cache_control stripped first (see
+// stripCacheControl): cache_control marks WHERE a client wants the provider's prompt cache to
+// break, not anything the model reads, and a client that moves the marker to a different
+// message every turn (Claude Code does, to keep it on the last message) must not change this
+// hash — otherwise SpanHash reports two slices of the identical conversation as different
+// spans purely because the cache breakpoint moved, which is exactly the false mismatch that
+// sent cache_aware_summarizer's stale-prefix guard into declining every commission at small
+// keep_last_turns values (PR #402 re-review).
 func SpanHash(msgs []schemas.ChatMessage) string {
 	h := sha256.New()
 	for i := range msgs {
-		b, _ := json.Marshal(msgs[i])
+		b, _ := json.Marshal(stripCacheControl(msgs[i]))
 		h.Write(b)
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:24]
+}
+
+// stripCacheControl returns a shallow copy of m with every content block's CacheControl
+// cleared, so SpanHash does not depend on where a cache breakpoint happens to sit. It copies
+// rather than mutates: m may be a live request's own message, about to be forwarded or
+// compacted the moment the caller gets control back, and clearing the field in place would
+// delete the real breakpoint from the request itself.
+func stripCacheControl(m schemas.ChatMessage) schemas.ChatMessage {
+	if m.Content == nil || len(m.Content.ContentBlocks) == 0 {
+		return m
+	}
+	marked := false
+	for i := range m.Content.ContentBlocks {
+		if m.Content.ContentBlocks[i].CacheControl != nil {
+			marked = true
+			break
+		}
+	}
+	if !marked {
+		return m
+	}
+	content := *m.Content
+	content.ContentBlocks = make([]schemas.ChatContentBlock, len(m.Content.ContentBlocks))
+	copy(content.ContentBlocks, m.Content.ContentBlocks)
+	for i := range content.ContentBlocks {
+		content.ContentBlocks[i].CacheControl = nil
+	}
+	m.Content = &content
+	return m
 }
 
 // PrefixCoverage, when a PrefixAsker also implements it, answers whether the body it would
@@ -353,7 +395,25 @@ func ParseMode(s string) (Mode, error) {
 type Ctx struct {
 	Ctx     context.Context
 	Session string
-	Store   store.Store
+	// Thread is the thread of the session this request belongs to (main agent, a subagent, a
+	// fork): "" for the primary thread. A component that keeps per-CONVERSATION state between
+	// requests, outside the Store's session keys, keys it by thread.Key(Session, Thread) — each
+	// thread is its own conversation with its own provider cache entry. See internal/thread.
+	Thread string
+	// ThreadInherits says this request starts a NEW thread that continues another thread's prefix
+	// (a Claude Code side request, a fork), and ThreadParent names that thread: "" with
+	// ThreadInherits true means the parent is the primary (main) thread. internal/thread sets it
+	// only on the FIRST request of a new thread, the one request whose own per-thread state is
+	// still empty, so a component may fall back to thread.Key(Session, ThreadParent) there and
+	// nowhere else. apply's cached boundary does exactly that (modes.Tracker.TurnFrom).
+	ThreadParent   string
+	ThreadInherits bool
+	// DeclaresTools says the request declares tools: the metadata internal/thread uses to tell the
+	// main agent (and a fork of it) from a tool-less side request (a title, a quota check, an
+	// end-of-turn note). cache_aware_summarizer and summarize use it to decide whether a new
+	// inheriting thread keeps a copy of its parent's checkpoint (see offload.adoptParentCheckpoint).
+	DeclaresTools bool
+	Store         store.Store
 	// DisallowCountChange prevents transcript-restructuring components from
 	// running when a host cannot safely write their output back to its wire shape.
 	DisallowCountChange bool
@@ -495,6 +555,48 @@ type Ctx struct {
 	// -1 = unknown/first turn/cache off ⇒ no tail restriction. Only meaningful when
 	// CacheAware is true.
 	MaxCachedIdx int
+	// RawInput is the normalized message array AS APPLY HANDED IT TO THE PIPELINE, before any
+	// component — including the first one configured — ran. apply sets it once, from a shallow
+	// copy taken before Pipeline.Run starts, so a later component's in-place rewrite (SetMessageText
+	// replaces the Content pointer; it never mutates a message this slice still points at) cannot
+	// change what RawInput reports.
+	//
+	// It exists for a stale-prefix guard that must hash the SAME span the host's prefix stash
+	// recorded (proxy's sentStash.preBody, via components.PrefixCoverage.CoversSpan). That stash is
+	// keyed on apply's own pre-pipeline body, in RAW coordinates — MaxCachedIdx is in those same
+	// coordinates. req.Input, read at a component's OWN position in the pipeline, is for every
+	// component but the first already the OUTPUT of every earlier one: a prior Reformat/Offload
+	// (textclean, format, dedup, cmdfilter, …) can rewrite a message inside the cached span on
+	// every turn, so hashing req.Input there and comparing against the raw stash disagrees even
+	// though the stash is exactly right (PR #431 round 1 review). Hash RawInput[:n], never
+	// req.Input[:n], for any guard whose other side is a pre-pipeline stash.
+	//
+	// apply sets it on every route (Messages and Responses). It is nil only for a Ctx built
+	// directly, as most component unit tests do. A guard then falls back to req.Input
+	// (offload.rawSpanForHash), which is correct only when no component runs before the guarded
+	// one. So every host path that builds a Ctx for a real request must set this field.
+	//
+	// A component BEFORE the guarded one that changes the MESSAGE COUNT (summarize, a
+	// count-changing extract path) shifts req.Input's indices out of RawInput's coordinates even
+	// though both are non-nil; a guard must therefore also decline whenever len(req.Input) at its
+	// own position differs from len(RawInput), rather than hash the wrong span under a matching
+	// nil-ness check alone.
+	RawInput []schemas.ChatMessage
+	// WireGroup names, for each req.Input index, the ORIGINAL wire message it came from (#457).
+	// On Anthropic traffic several normalized messages can share one wire message — a
+	// tool_result's synthetic role=tool message and a sibling text block beside it (mid-turn
+	// user text, a system reminder, a task/teammate notification) — and a span boundary that
+	// landed between them would ask the count-changing rebuild to keep half of one wire message
+	// and summarize the other half, which it cannot represent. summarizeSpan's groups parameter
+	// uses this to push a boundary candidate out to the nearest WIRE-message edge instead.
+	//
+	// Nil (OpenAI-shaped traffic, and a Ctx built directly as most component unit tests do) means
+	// every normalized message already is its own wire message, so no boundary can ever split
+	// one — summarizeSpan treats a nil/length-mismatched groups slice as "nothing to align".
+	// apply sets it in the SAME coordinates as RawInput (pre-pipeline), for the same reason: a
+	// value computed against req.Input at a later component's own position would already be
+	// shifted by any earlier count-changing component.
+	WireGroup []int
 	// PrefixAsk, when non-nil, lets a component put a question to the request's own model with the
 	// previous turn's SENT body as the prefix, so the provider reads its prompt cache instead of
 	// being re-sent the transcript. See PrefixAsker for why that body and not the incoming one.
@@ -925,11 +1027,14 @@ func (NopEmitter) Run(RunReport)    {}
 // §5 implies, that doc is the one to correct, not this.
 type KeepAliveReport struct {
 	Tenant, Session, Model, Provider, Route string
-	Pings                                   int
-	CacheRead, CacheWrite, Output           int64
-	CostUSD                                 float64
-	Status                                  int
-	DurationMs                              float64
+	// Thread is the session thread the ping kept warm ("" = the primary thread), so a ping row
+	// says WHICH cache entry it protected. See internal/thread.
+	Thread                        string
+	Pings                         int
+	CacheRead, CacheWrite, Output int64
+	CostUSD                       float64
+	Status                        int
+	DurationMs                    float64
 	// TS is when this ping was recorded (the keeper's own clock, which production reads from
 	// time.Now but a replay/test may inject), in epoch milliseconds — not derivable from
 	// anything else here, and a sink that timestamps its own row from wall-clock-at-receipt

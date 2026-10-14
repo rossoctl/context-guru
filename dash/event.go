@@ -75,6 +75,14 @@ const (
 	ModeObserve = "observe"
 )
 
+// WaitCauseResult is issue #424's RECORD half's output for one request — see Event.WaitCause,
+// which runs the computation that fills this, off the request path.
+type WaitCauseResult struct {
+	WaitingFor, WaitTool, WakeCause string
+	OpenBackground, OpenTeammate    int
+	MonitorExpiryMs                 int64
+}
+
 // Event is one captured request, as handed to the capture channel. It is built on
 // the request goroutine from values the request path already computed (no extra
 // token counting, no extra allocation of the transcript) and is then owned
@@ -85,7 +93,59 @@ type Event struct {
 	// TenantID owns this row; "" in single-tenant deployments.
 	TenantID  string `json:"tenant_id"`
 	SessionID string `json:"session_id"`
-	Model     string `json:"model"`
+	// ThreadID names the thread of the session this request belongs to: "" for the session's
+	// primary thread — the main agent, told apart as the first thread without an agent header
+	// that declares tools (see internal/thread) — "a:<agent id>" for a subagent that named itself
+	// in a header, and "p:<fingerprint>" for a thread told apart by prefix continuity. Each thread
+	// has its own provider cache entry, so recency and miss attribution are per thread; reporting
+	// stays per session. See internal/thread and issue #423.
+	//
+	// A row keeps the id it was written with. A tool-less request that spoke before the main agent
+	// held "" at the time, so its row reads "" although the tracker later moved that thread to a
+	// "p:" id.
+	ThreadID string `json:"thread_id"`
+	// Issue #424's RECORD half: why this thread is about to wait, and why it woke up — read
+	// from the request body and the response's own tool calls/stop reason, by string match
+	// and structural tool_use reads, no LLM. See internal/waitcause, which defines every
+	// value and never guesses: a signal this proxy's client (Claude Code) does not send, or
+	// another agent/provider entirely, reads "unknown" rather than a label chosen for it.
+	// This package NEVER reads these columns to choose a keep-alive ping budget or change
+	// compaction behaviour — it only writes them, so a later change can.
+	//
+	// WaitingFor is set on the row whose OWN response ends a turn with nothing more to do
+	// right now (own_tool|human|background|teammate|retry|unknown); WaitTool is the LAST
+	// tool_use name on that response, filled only when WaitingFor is "own_tool". WakeCause
+	// is set on the row that ENDS a wait (tool_result|background|teammate|human|system|
+	// retry|unknown), read off its own last message. OpenBackground/OpenTeammate are the
+	// open-task/open-teammate counts as of THIS request's body (the "waiting_on" detail);
+	// MonitorExpiryMs is the latest known absolute Monitor expiry (epoch ms) among them, 0
+	// when none is open or none stated one. All six are "" / 0 on a row written before this
+	// column existed (see dash/schema.go's additiveColumns: nullable, no default, so an old
+	// row reads SQL NULL rather than a value this package never computed for it).
+	WaitingFor      string `json:"waiting_for"`
+	WaitTool        string `json:"wait_tool"`
+	WakeCause       string `json:"wake_cause"`
+	OpenBackground  int    `json:"open_background"`
+	OpenTeammate    int    `json:"open_teammate"`
+	MonitorExpiryMs int64  `json:"monitor_expiry_ms"`
+	// WaitCause, when set, is invoked by the WRITER goroutine (Recorder.run's write(),
+	// right beside e.Redact() and for the identical reason) to fill the six fields above —
+	// never on the request path. The actual body rescan this runs
+	// (waitcause.Tracker.Observe) measured ~11ms on a 783 KB body; called from finish()
+	// (which runs on the handler's own defer, BEFORE the handler returns) that delayed the
+	// NEXT request on a keep-alive connection by the same amount, which is exactly what
+	// this repo's own TestDashboardAddsNoRequestLatencyWithContentCapture-style tests exist
+	// to catch. nil on any row this does not apply to — a keep-alive ping's row never sets
+	// it at all, which is also how a ping is guaranteed to carry no wait-cause label (issue
+	// #424 requirement). Never serialized (there is nothing to marshal); the SIX FIELDS it
+	// fills are what reaches JSON and the database.
+	WaitCause func() WaitCauseResult `json:"-"`
+	// Lifecycle is the opt-in lifecycle-signals row (dash/lifecycle.go), nil when the flag is
+	// off; LifecycleFn fills it on the writer goroutine, for the same reason WaitCause runs
+	// there (it rescans the request body). Neither is part of the JSON event.
+	Lifecycle   *LifecycleRow        `json:"-"`
+	LifecycleFn func() *LifecycleRow `json:"-"`
+	Model       string               `json:"model"`
 	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
 	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
 	// tokens.BilledDeltaFactor(Model), resolved once in Price.

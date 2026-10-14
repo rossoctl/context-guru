@@ -111,12 +111,13 @@ PRESET_PIPELINES: dict[str, tuple[str, ...]] = {
                  "extract_llm_sweep", "extract", "cachesplit", "toolfilter"),
     "conservative": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract",
                       "cachesplit", "toolfilter"),
-    "medium": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm",
-               "extract", "cachesplit", "toolfilter"),
-    "high": ("summarize", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean",
+    "medium": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold",
+               "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"),
+    "high": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean",
               "extract_llm", "extract", "cachesplit", "toolfilter"),
-    "xhigh": ("summarize", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean",
-              "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"),
+    "xhigh": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold",
+              "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit",
+              "toolfilter"),
 }
 
 # What each component this plugin can turn on actually does, in one line a developer can act on,
@@ -159,6 +160,9 @@ COMPONENTS: dict[str, dict[str, str]] = {
     "extract_llm_sweep": {"what": "a periodic second pass of extract_llm over older turns",
                           "counterfactual": "related"},
     "summarize":  {"what": "a compaction model rewrites the transcript", "counterfactual": "related"},
+    "cache_aware_summarizer": {"what": "a compaction model rewrites the transcript, reusing the "
+                                      "cached prefix instead of paying full price for it",
+                               "counterfactual": "related"},
     "smartcrush": {"what": "structure-aware compression of large outputs", "counterfactual": "none"},
     "agentdiet":  {"what": "the published AgentDiet baseline, for A/B only", "counterfactual": "none"},
     "cachesplit": {"what": "moves the cache breakpoint off the volatile tail so the prefix stays "
@@ -1354,8 +1358,9 @@ def collect_components(f: Fetcher, rep: Report, window: Window, preset: str) -> 
               "from traffic they never saw. Simulating them means replaying every request, which "
               "is a benchmark, not a report.",
             "/plugin configure context-guru -> preset: conservative adds `extract` "
-            "deterministically; `medium` adds a cheap-model relevance pass; `high`/`xhigh` add a "
-            "summarizer and spend on their own. /context-guru:preset-picker explains the trade "
+            "deterministically; `medium` adds a cheap-model relevance pass and a summary kept in "
+            "reserve for a cold return; `high`/`xhigh` use that summary while you work and spend "
+            "on their own. /context-guru:preset-picker explains the trade "
             "in each.",
             "measured size of the problem, NOT a projected saving"))
     elif related:

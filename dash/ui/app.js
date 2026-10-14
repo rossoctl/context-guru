@@ -1544,7 +1544,9 @@ function renderTiles(o) {
   // second number, or the distinguisher between two tiles that would otherwise read the
   // same ("gross" vs "unique"). Anything that only restated the label is gone — "Tokens
   // before / content tokens in" was a caption explaining a caption.
-  host.appendChild(tileGroup(null, null, [
+  // The bottom line (bottomline.js) is the one honest net; these competing figures are its
+  // detail, one click down, so three "saved" numbers no longer sit side by side as the answer.
+  const headline = tileGroup(null, null, [
     // Our two savings, added: compaction's and the prefix components'. Both are ours and
     // the token sets are disjoint. The provider's own cache saving is much larger and is
     // NOT in here — it was, under the label "compaction + provider cache", and a headline
@@ -1577,7 +1579,9 @@ function renderTiles(o) {
       costNote(o, num(o.prefix_change_requests_all) + ' turns re-billed · not netted'),
       o.prefix_change_cost_all_usd > 0 ? 'bad' : ''),
     tile('requests', 'Requests', num(o.requests), num(o.sessions) + ' sessions'),
-  ], 'headline dense'));
+  ], 'headline dense');
+  host.appendChild(el('details', { class: 'bl-more', 'data-testid': 'headline-figures' },
+    el('summary', { text: 'Every savings figure, side by side' }), headline));
 
   // Count up to the headline dollar/token figures instead of painting them already
   // settled — pure polish, skipped entirely for anyone who asked the OS not to animate.
@@ -2125,6 +2129,7 @@ async function loadOverview(opts = {}) {
       $('#refresh-now').classList.remove('has-new');
     }
     renderTiles(o);
+    if (window.CGBL) window.CGBL.overview(o);
     renderDenominators(o);
     renderWaterfall(o);
     renderSafety(o);
@@ -5383,10 +5388,11 @@ const loaders = {
  */
 const GROUPS = [
   ['overview', ['overview']],
-  ['savings', ['usage', 'benchmarks']],
-  ['behaviour', ['components', 'keepalive']],
+  ['savings', ['keepalive', 'usage']],
   ['traffic', ['sessions', 'requests']],
   ['admin', ['config', 'strategies', 'tenants', 'setup', 'settings', 'archive', 'feedback']],
+  // Operator and research views: real, and not what a user opens this page for.
+  ['advanced', ['components', 'benchmarks']],
 ];
 /** GROUP_OF maps a view onto its group. mountTab adds to it, which is how a self-mounted
  *  view gets a group without this file naming it. */
@@ -5787,6 +5793,7 @@ function refresh() {
   // changed with an idle proxy would leave the disclaimer out.
   if (state.view === 'overview') renderLive();
   loaders[state.view]();
+  if (window.CGBL) window.CGBL.render(state.view);
   if (state.view !== 'setup' && state.view !== 'settings') loadFacets();
 }
 
@@ -7260,7 +7267,7 @@ function loadSettings() {
           'Keep my prompt cache warm while I am away')),
       el('p', { class: 'hint' },
         'Spends a small amount to avoid a much larger cache-recreation charge. After '
-        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 280)) + 's idle, up to '
+        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 270)) + 's idle, up to '
         + (((cfg.cache && cfg.cache.keepalive_max_pings) || 2)) + ' minimal requests re-read '
         + 'your cached prompt so the provider refreshes its 5-minute lifetime for free. '
         + 'Only on sessions with a large enough cached prompt to be worth it, and never on a '
@@ -8613,9 +8620,9 @@ function buildStrategyForm(form) {
   $('#strategy-form-title').textContent = 'New strategy';
 
   const name = el('input', { type: 'text', id: 'sf-name', maxlength: '64', required: 'required' });
-  const idle = el('input', { type: 'number', id: 'sf-idle', value: '280', min: '1' });
+  const idle = el('input', { type: 'number', id: 'sf-idle', value: '270', min: '1' });
   const pings = el('input', { type: 'number', id: 'sf-pings', value: '1', min: '1' });
-  const prefix = el('input', { type: 'number', id: 'sf-prefix', value: '20000', min: '0' });
+  const prefix = el('input', { type: 'number', id: 'sf-prefix', value: '80000', min: '0' });
   const usdCap = el('input', { type: 'number', id: 'sf-usd', value: '0', min: '0', step: '0.01' });
   const active = el('input', { type: 'checkbox', id: 'sf-active', checked: 'checked' });
 
@@ -10334,7 +10341,7 @@ async function loadKARecommend() {
       el('div', { class: 'small' },
         `For scale: measured over 357 cache expiries across this whole service, the 90% `
         + `interval on this policy is ${usd(rec.service_lo_usd)} to ${usd(rec.service_hi_usd)}. `
-        + 'Use the default (280 s idle, 2 pings) or arm a single session above and read your '
+        + 'Use the default (270 s idle, 2 pings) or arm a single session above and read your '
         + 'own ledger.')));
     return;
   }

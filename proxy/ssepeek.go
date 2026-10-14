@@ -111,12 +111,14 @@ import (
 type sseSplicer struct {
 	w        http.ResponseWriter
 	flush    http.Flusher
-	headers  bool      // response headers and status are on the wire
-	msgStart bool      // the client has its message_start
-	ended    bool      // a message_stop has gone out: the client's turn is closed
-	blocks   int       // content blocks the client holds
-	base     int       // index offset applied to the round being forwarded
-	first    time.Time // when the client got its first byte
+	headers  bool        // response headers and status are on the wire
+	msgStart bool        // the client has its message_start
+	ended    bool        // a message_stop has gone out: the client's turn is closed
+	blocks   int         // content blocks the client holds
+	base     int         // index offset applied to the round being forwarded
+	first    time.Time   // when the client got its first byte
+	thinking bool        // the client holds a thinking block from an earlier round
+	remap    map[int]int // this round's block index -> the client's index; -1 = withheld
 }
 
 func newSSESplicer(w http.ResponseWriter) *sseSplicer {
@@ -129,6 +131,7 @@ func newSSESplicer(w http.ResponseWriter) *sseSplicer {
 // continuation answers, the response is long open.
 func (sp *sseSplicer) round(resp *http.Response) {
 	sp.base = sp.blocks
+	sp.remap = nil
 	if sp.headers {
 		return
 	}
@@ -291,7 +294,43 @@ func (sp *sseSplicer) rewrite(ev []byte) ([]byte, bool) {
 	case "message_stop":
 		sp.ended = true
 	case "content_block_start", "content_block_delta", "content_block_stop":
-		idx := int(p.Get("index").Int()) + sp.base
+		local := int(p.Get("index").Int())
+		if sp.base > 0 && sp.thinking {
+			// The API refuses an assistant turn that carries thinking blocks from two
+			// responses ("cannot be modified"), and the client now holds round 0's. So a
+			// continuation's own thinking never reaches it.
+			if p.Get("type").String() == "content_block_start" {
+				if sp.remap == nil {
+					sp.remap = map[int]int{}
+				}
+				if t := p.Get("content_block.type").String(); t == "thinking" || t == "redacted_thinking" {
+					sp.remap[local] = -1
+				} else {
+					sp.remap[local] = sp.blocks
+				}
+			}
+			c, ok := sp.remap[local]
+			if !ok {
+				return ev, true // fail open: an index we never saw start goes as it came
+			}
+			if c < 0 {
+				return nil, false
+			}
+			if c >= sp.blocks {
+				sp.blocks = c + 1
+			}
+			np, err := sjson.Set(payload, "index", c)
+			if err != nil {
+				break
+			}
+			return bytes.Replace(ev, []byte(payload), []byte(np), 1), true
+		}
+		if p.Get("type").String() == "content_block_start" {
+			if t := p.Get("content_block.type").String(); t == "thinking" || t == "redacted_thinking" {
+				sp.thinking = true
+			}
+		}
+		idx := local + sp.base
 		if idx >= sp.blocks {
 			sp.blocks = idx + 1
 		}

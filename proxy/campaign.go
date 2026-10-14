@@ -44,7 +44,17 @@ import (
 // config.DefaultKeepAliveMaxUSDPerPing. Never left at the zero value: MinPrefixTokens 0
 // on a strategy means NO floor at all — pingable() pings every session that clears
 // turn >= 1 — which is 20000x looser than the account default, not equal to it.
-const campaignDefaultMinPrefixTokens = 20000
+const campaignDefaultMinPrefixTokens = 80000
+
+// campaignLegacyMinPrefixTokens is the pre-#435 floor. The 80k evidence (analysis B-policy-r2)
+// is for K=2 ping-everyone at 270 s; the K=1 (keepalive-5m-once), stop-reason-gated and 1h-tier
+// arms have no separate evidence for it, so they keep the old 20k floor.
+const campaignLegacyMinPrefixTokens = 20000
+
+// campaignKeepAlive5mIdle mirrors config.DefaultKeepAliveIdle for the keepalive-5m arm only.
+// The once and stop-reason-gated arms stay at 280: the 270 s evidence (analysis B-policy-r2,
+// K>=2 under the response-end clock) does not cover K=1 (which prefers 280) or the gate.
+const campaignKeepAlive5mIdle = 270
 
 // campaignDefaultMaxPings mirrors config.DefaultKeepAliveMaxPings.
 const campaignDefaultMaxPings = 2
@@ -98,6 +108,7 @@ type campaignArm struct {
 	predictorThreshold float64
 	headTTL1h          bool
 	headTTLMinTokens   int
+	minPrefixTokens    int
 }
 
 // campaignArmFor is the single source of truth the create flow consults. idleSeconds/
@@ -110,21 +121,26 @@ func campaignArmFor(arm string) campaignArm {
 	case kvcache.StrategyNoCache, kvcache.StrategyFixed5m, kvcache.StrategyFixed1h:
 		return campaignArm{activatable: true, baseline: true}
 	case kvcache.StrategyKeepAlive5m:
-		return campaignArm{activatable: true, idleSeconds: 280, maxPings: campaignDefaultMaxPings}
+		return campaignArm{activatable: true, idleSeconds: campaignKeepAlive5mIdle, maxPings: campaignDefaultMaxPings,
+			minPrefixTokens: campaignDefaultMinPrefixTokens}
 	case kvcache.StrategyKeepAlive5mOnce:
-		return campaignArm{activatable: true, idleSeconds: 280, maxPings: 1}
+		return campaignArm{activatable: true, idleSeconds: 280, maxPings: 1,
+			minPrefixTokens: campaignLegacyMinPrefixTokens}
 	case kvcache.StrategyStopReasonGated:
 		return campaignArm{activatable: true, idleSeconds: 280, maxPings: campaignDefaultMaxPings,
-			predictorID: "stop-reason-gated", predictorThreshold: campaignDefaultPredictorThreshold}
+			predictorID: "stop-reason-gated", predictorThreshold: campaignDefaultPredictorThreshold,
+			minPrefixTokens: campaignLegacyMinPrefixTokens}
 	case kvcache.StrategyKeepAlive1h:
 		// 3360s = kvcache.DefaultPingIdle1h — "the same margin against the one-hour
 		// lifetime" the simulator itself ships as this arm's default cadence.
 		return campaignArm{activatable: true, needsModelHonoring: true, headTTL1h: true,
 			idleSeconds: 3360, maxPings: campaignDefaultMaxPings,
-			headTTLMinTokens: campaignDefaultHeadTTLMinTokens}
+			headTTLMinTokens: campaignDefaultHeadTTLMinTokens,
+			minPrefixTokens:  campaignLegacyMinPrefixTokens}
 	case kvcache.StrategyKeepAlive1hOnce:
 		return campaignArm{activatable: true, needsModelHonoring: true, headTTL1h: true,
-			idleSeconds: 3360, maxPings: 1, headTTLMinTokens: campaignDefaultHeadTTLMinTokens}
+			idleSeconds: 3360, maxPings: 1, headTTLMinTokens: campaignDefaultHeadTTLMinTokens,
+			minPrefixTokens: campaignLegacyMinPrefixTokens}
 	}
 	return campaignArm{reason: fmt.Sprintf(
 		"%q has no live enforcement path yet — it is a simulation-only arm", arm)}
@@ -341,6 +357,7 @@ func tileHours(hours []int, days []time.Weekday) []tenant.Window {
 		endStr := fmt.Sprintf("%02d:00", end+1)
 		out = append(out, tenant.Window{
 			Days: days, Start: fmt.Sprintf("%02d:00", start), End: endStr,
+			TZ: "UTC", // cells are UTC hours on UTC weekdays; unset would resolve to Asia/Jerusalem
 		})
 	}
 	return out
@@ -432,7 +449,7 @@ func strategyForGroup(campaignName string, g *campaignGroup, days []time.Weekday
 		Target:             tenant.Target{Mode: tenant.TargetList, TenantIDs: g.tenantIDs},
 		IdleSeconds:        g.config.idleSeconds,
 		MaxPings:           g.config.maxPings,
-		MinPrefixTokens:    campaignDefaultMinPrefixTokens,
+		MinPrefixTokens:    g.config.minPrefixTokens,
 		PredictorID:        g.config.predictorID,
 		PredictorThreshold: g.config.predictorThreshold,
 		HeadTTL1h:          g.config.headTTL1h,

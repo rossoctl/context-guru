@@ -96,6 +96,16 @@ def is_ours(data: dict, url: str) -> bool:
     return False
 
 
+# Re-run the status line this often (seconds), on top of Claude Code's own event-driven redraws,
+# so the cache countdown keeps draining while nothing is happening. Claude Code 2.1.296 honours
+# `refreshInterval` (minimum 1); an older one ignores the key and only redraws on events.
+STATUSLINE_REFRESH_SECONDS = 1
+
+
+def _statusline_value(command: str) -> dict:
+    return {"type": "command", "command": command, "refreshInterval": STATUSLINE_REFRESH_SECONDS}
+
+
 def is_ours_statusline(data: dict, current: object) -> bool:
     """Did WE write the CURRENT statusLine value? Same shape as is_ours() above and for the same
     reason: answered from a record of what we wrote, never from guessing at the value's shape —
@@ -104,7 +114,10 @@ def is_ours_statusline(data: dict, current: object) -> bool:
     """
     meta = data.get(META)
     if isinstance(meta, dict) and meta.get(STATUSLINE_META):
-        return current == {"type": "command", "command": meta[STATUSLINE_META]}
+        # Ours whatever refreshInterval says: older installs wrote none, and a user may tune it.
+        return (isinstance(current, dict) and current.get("type") == "command"
+                and current.get("command") == meta[STATUSLINE_META]
+                and set(current) <= {"type", "command", "refreshInterval"})
     return False
 
 
@@ -116,8 +129,10 @@ def apply_statusline(data: dict, command: str) -> None:
     """
     if not command:
         return
-    desired = {"type": "command", "command": command}
+    desired = _statusline_value(command)
     current = data.get(STATUSLINE_KEY)
+    if is_ours_statusline(data, current) and isinstance(current, dict) and "refreshInterval" in current:
+        desired["refreshInterval"] = current["refreshInterval"]  # keep a value the user tuned
     if current == desired:
         return
     meta = data.setdefault(META, {})
@@ -134,7 +149,7 @@ def remove_statusline_only(data: dict) -> tuple[bool, str]:
     """
     meta = data.get(META)
     recorded = meta.get(STATUSLINE_META) if isinstance(meta, dict) else None
-    if not recorded or data.get(STATUSLINE_KEY) != {"type": "command", "command": recorded}:
+    if not recorded or not is_ours_statusline(data, data.get(STATUSLINE_KEY)):
         return False, ""
     restored = ""
     del data[STATUSLINE_KEY]
@@ -2699,7 +2714,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     # the WHOLE call, including the base_url side, rather than writing half an install and
     # reporting success. It is a TOP-LEVEL key (see apply_statusline), so it cannot join
     # `desired`/`env` above; this is its own gate.
-    sl_desired = {"type": "command", "command": sl_command} if sl_command else None
+    sl_desired = _statusline_value(sl_command) if sl_command else None
     if sl_command:
         existing_sl = data.get(STATUSLINE_KEY)
         if existing_sl is not None and not is_ours_statusline(data, existing_sl) and not args.force:
@@ -3024,7 +3039,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
     if isinstance(_meta, dict):
         recorded_sl = _meta.get(STATUSLINE_META) or ""
     restored_sl = ""
-    if recorded_sl and data.get(STATUSLINE_KEY) == {"type": "command", "command": recorded_sl}:
+    if recorded_sl and is_ours_statusline(data, data.get(STATUSLINE_KEY)):
         del data[STATUSLINE_KEY]
         if isinstance(_meta, dict) and _meta.get(STATUSLINE_PREV_META):
             data[STATUSLINE_KEY] = _meta[STATUSLINE_PREV_META]
@@ -3227,14 +3242,14 @@ STRATEGIES: dict[str, dict] = {
         # cannot silently re-tune an already-armed install.
         "cache": {
             "keepalive": True,
-            "keepalive_idle_seconds": 280,
+            "keepalive_idle_seconds": 270,
             "keepalive_max_pings": 2,
-            "keepalive_max_usd_per_ping": 0.25,
-            "keepalive_min_prefix_tokens": 20000,
+            "keepalive_max_usd_per_ping": 0.50,
+            "keepalive_min_prefix_tokens": 80000,
         },
         "spends": True,
-        "desc": "an idle ping just under the provider's 5-minute TTL (280s, at most 2 per "
-                "idle span, >=20k-token prefix, <=$0.25/ping). SPENDS THE CALLER'S CREDENTIAL "
+        "desc": "an idle ping just under the provider's 5-minute TTL (270s, at most 2 per "
+                "idle span, >=80k-token prefix, <=$0.50/ping). SPENDS THE CALLER'S CREDENTIAL "
                 "while nobody is at the keyboard.",
     },
     "1-hour-head": {
@@ -3599,8 +3614,9 @@ PRESETS: dict[str, str] = {
     "conservative": "trims obvious waste from tool output (repeats, dead runs) — deterministic, "
                      "no model calls, the safe first step into carrying less",
     "medium": "conservative plus a cheap model that keeps only what looks relevant in recent "
-              "tool output — the first tier that can spend on its own",
-    "high": "medium plus a summarizer that compacts older turns once the context window is "
+              "tool output, and a summary prepared in the background that is used only if you "
+              "come back after the cache expired — the first tier that can spend on its own",
+    "high": "medium, but the summary of older turns is used as soon as the context window is "
             "nearly full",
     "xhigh": "high plus a periodic deep-adjudication sweep over turns whose prompt cache has "
              "already gone cold — the deepest cut this picker offers",

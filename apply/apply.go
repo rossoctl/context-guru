@@ -35,6 +35,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
@@ -168,6 +169,19 @@ const (
 	// Anthropic tool_result block; a change rewrites only that block's `content`
 	// string field, which is byte-lossless for the rest of the message.
 	anthropicToolText
+	// anthropicSiblingText: norm message is a synthetic role=user message holding a
+	// top-level TEXT block that shares an Anthropic user message with a tool_result —
+	// mid-turn text the user typed while a tool ran, a system reminder, a task or
+	// teammate notification (#457). It exists so components that read the normalized
+	// view (summarizers, the stale-prefix guard, wake-cause) see this text instead of
+	// losing it to the "body carries the rest verbatim" shortcut below.
+	//
+	// Read-only: unlike anthropicToolText, there is no single field a change could
+	// splice into — several of these can share one message alongside tool_result
+	// blocks, and the combination has no byte-lossless partial-write shape. A
+	// component that changes one has that change silently discarded rather than
+	// risking a corrupt body; see the write-back switch below and rebuildCountChanged.
+	anthropicSiblingText
 )
 
 // slot records how one normalized message writes back to the raw body.
@@ -198,10 +212,13 @@ func (s slot) lossless() bool { return jsonEqual([]byte(s.raw), s.pre) }
 // input — the same material CONTEXT_GURU_DUMP writes to a file, handed to a
 // caller instead. Purely observational: nothing on it affects the rewrite.
 type Trace struct {
-	Session      string
-	Bypassed     bool
-	CacheAware   bool
-	MaxCachedIdx int
+	Session string
+	// Thread is the request's thread, from Opts.ThreadOf; ThreadResolved says ThreadOf ran.
+	Thread         thread.Result
+	ThreadResolved bool
+	Bypassed       bool
+	CacheAware     bool
+	MaxCachedIdx   int
 	// Messages is the normalized message count this request carried.
 	Messages int
 	// AttemptedTokens is the token count of the messages age/supersession
@@ -466,6 +483,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Via the same function the response path reaches through SessionIDFor, so observe mode's
 	// billed-input record and this pipeline's checkpoints cannot key on different ids.
 	sessionID := sessionIDFrom(o.Tenant, o.Session, body, norm)
+	o.resolveThread(tr, sessionID)
 	var restore restorePlan
 	if !bypass {
 		restore = planRestore(pipe, st, sessionID, string(provider), client,
@@ -483,6 +501,17 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	ttlMs := int64(0)
 	ttlMinimum := false
 	maxCachedIdx := -1
+	// The record that sets the boundary and the idle clock is the THREAD's, not the session's:
+	// each thread has its own provider cache (#423, #426). Keyed by session alone, a subagent's
+	// requests kept an idle main thread reading warm, and a subagent's message count became the
+	// main thread's boundary, so a component could rewrite messages the main thread had cached
+	// (#484). The primary thread keys by the bare session, so single-thread traffic is unchanged.
+	turnKey := thread.Key(sessionID, tr.Thread.ID)
+	// parentKey is set on the FIRST request of a thread that continues another thread's prefix
+	// (a side request or a fork). The provider already holds that prefix, so the new thread reads
+	// the parent's boundary and clock instead of starting at -1. See modes.Tracker.TurnFrom.
+	threadParent, threadInherits := tr.Thread.InheritsFrom()
+	parentKey := inheritKey(sessionID, threadParent, threadInherits)
 	if cacheAware && !bypass {
 		// Messages present on the previous turn of this session are already committed
 		// to the provider cache; only the new tail is being cache-written this turn.
@@ -503,7 +532,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// post-compaction one.
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnAt(sessionID, len(norm), nowMs)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs)
 			maxCachedIdx--
 			// The idle clock is per SESSION ID; the provider's prompt cache is keyed on
 			// CONTENT. When those disagree the clock can go stale while the provider's entry
@@ -550,7 +579,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
 			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
 			if lifetimeKind == CacheLifetimeExact {
-				ttl = sessionTTL(st, sessionID, ttl)
+				// Per thread too: another thread's 1h tier says nothing about this thread's cache.
+				ttl = sessionTTL(st, turnKey, ttl)
+				if p := peekTTL(st, parentKey); p > ttl { // read only: the parent's record is its own
+					ttl = p
+				}
 				if a := sessionTTL(st, alias, ttl); a > ttl {
 					ttl = a
 				}
@@ -574,8 +607,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				idleMs = nowMs - prevAt
 			}
 		} else {
-			maxCachedIdx = modes.Boundary(prevLen(st, sessionID), len(norm)) - 1
-			defer putLen(st, sessionID, len(norm))
+			maxCachedIdx = storeBoundary(st, turnKey, parentKey, len(norm)) - 1
+			defer putLen(st, turnKey, len(norm))
 		}
 	} else if cacheAware && bypass {
 		// A bypassed turn still has to RECORD its length, even though it reads no
@@ -604,19 +637,33 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// session that had been bypassing for ten minutes look ten minutes IDLE, and a
 			// cold sweep would then rewrite a prefix the provider had just cached: the 1.25x
 			// suffix re-write this whole design exists to avoid.
-			o.Tracker.TurnAt(sessionID, len(norm), nowMs)
+			o.Tracker.TurnAt(turnKey, len(norm), nowMs)
 		} else {
-			defer putLen(st, sessionID, len(norm))
+			defer putLen(st, turnKey, len(norm))
 		}
 	}
 	// Counted ONCE and used twice: the pipeline needs the total to respect the
 	// provider's cap, and the dashboard records the per-location split. Two calls would
 	// be two scans of the body on the request path for one fact.
 	bps := CountBreakpoints(body)
+	// Snapshotted HERE, immediately before the pipeline runs, so it is "as apply handed it to the
+	// pipeline" and not "as the client originally sent it" (repairExpandErrors, AnswerStrayCalls and
+	// the force-model rewrite already ran above norm's own construction). A plain slice copy is
+	// enough: every component that rewrites a message's text does so via schema.SetMessageText,
+	// which replaces the Content POINTER rather than mutating the ChatMessageContent this snapshot
+	// still points at (see components.Ctx.RawInput).
+	rawInput := make([]bschemas.ChatMessage, len(norm))
+	copy(rawInput, norm)
 	c := &components.Ctx{
 		Ctx:            ctx,
 		Session:        sessionID,
+		Thread:         tr.Thread.ID,
+		ThreadParent:   threadParent,
+		ThreadInherits: threadInherits,
+		DeclaresTools:  gjson.GetBytes(body, "tools.#").Int() > 0,
 		Store:          st,
+		RawInput:       rawInput,
+		WireGroup:      wireGroups(slots),
 		Model:          models,
 		Bypass:         bypass,
 		CtxWindow:      o.Window,
@@ -763,6 +810,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	for i := range chat.Input {
 		s := slots[i]
 		switch s.kind {
+		case anthropicSiblingText:
+			// Read-only (#457): whatever a component did to this synthetic sibling
+			// message, the body's tool_result/text blocks it was extracted from are left
+			// exactly as they arrived. Never written back, so never counted as a change.
+			continue
 		case anthropicToolText:
 			newText := schema.MessageText(chat.Input[i])
 			if newText == s.preText {
@@ -1163,6 +1215,40 @@ func putLen(st store.Store, session string, n int) {
 	st.Put("cg:len:"+session, []byte(strconv.Itoa(n)))
 }
 
+// storeBoundary is the store-backed twin of modes.Tracker.TurnFrom, for callers without a
+// tracker: the key's own record through modes.Boundary, else the parent's (read only), capped at
+// n. It reads only; the caller records the key's own length.
+func storeBoundary(st store.Store, key, parent string, n int) int {
+	if _, ok := st.Get("cg:len:" + key); ok || parent == "" {
+		return modes.Boundary(prevLen(st, key), n)
+	}
+	return min(prevLen(st, parent), n)
+}
+
+// inheritKey is the tracker key of the parent thread (thread.Result.InheritsFrom), or "" when the
+// request inherits from none. Inherits is set only on a thread's first request, which is the one
+// request whose own key has no record yet. The same two values go on Ctx.ThreadParent and
+// Ctx.ThreadInherits, so components and this fallback agree on the parent.
+func inheritKey(session, parent string, inherits bool) string {
+	if inherits {
+		return thread.Key(session, parent)
+	}
+	return ""
+}
+
+// peekTTL reads a TTL record without writing it, 0 when there is none.
+func peekTTL(st store.Store, key string) time.Duration {
+	if st == nil || key == "" {
+		return 0
+	}
+	if b, ok := st.Get(store.TTLPrefix + key); ok {
+		if d, err := time.ParseDuration(string(b)); err == nil {
+			return d
+		}
+	}
+	return 0
+}
+
 // messagesArray is the ONE gate on a body's message array: it must exist and be an array. An
 // invalid Result means "no messages", which every caller must treat as a request with nothing to
 // derive from.
@@ -1404,10 +1490,15 @@ func dumpChanges(session string, changes []Change) {
 // normalize builds the message slice the pipeline runs on plus a write-back slot
 // per message. For OpenAI (and any non-Anthropic dialect) every message maps
 // 1:1 to a whole-message slot — the request is already in the shape components
-// expect. For Anthropic, each user-message `tool_result` block with string
-// content becomes a synthetic role=tool message with a text-field write-back
-// slot; the block's siblings and every other message are left for the raw body
-// to carry verbatim.
+// expect. For Anthropic, a user message that holds a `tool_result` block is
+// walked block by block: each `tool_result` with string content becomes a
+// synthetic role=tool message with a text-field write-back slot, and each
+// sibling top-level TEXT block (mid-turn user text, a system reminder, a task
+// or teammate notification, …) becomes a synthetic read-only role=user message
+// — both in the SAME order they appear in the body (#457). Any other sibling
+// block kind (image, …) is skipped and left for the raw body to carry verbatim,
+// as before. A user message with no `tool_result` at all is untouched by any of
+// this and falls through to the ordinary whole-message slot below.
 func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bschemas.ChatMessage, slots []slot) {
 	for i, m := range arr {
 		if provider == bschemas.Anthropic &&
@@ -1423,42 +1514,77 @@ func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bsch
 			if blocks.IsArray() {
 				blks = blocks.Array()
 			}
-			for b, blk := range blks {
-				if blk.Get("type").String() != "tool_result" {
-					continue
+			// A plain text (or text-array) user message, with no tool_result anywhere in
+			// it, is untouched by any of this and falls through to the ordinary
+			// whole-message slot below — exactly as before #457. Checked up front, rather
+			// than inferred from `handled` after the fact, so a sibling TEXT block never
+			// gets a slot of its own unless this message actually earns the special
+			// handling by also carrying a tool_result (the thing #457 is about).
+			hasToolResult := false
+			for _, blk := range blks {
+				if blk.Get("type").String() == "tool_result" {
+					hasToolResult = true
+					break
 				}
-				add := func(text, path string) {
-					handled = true
-					tm := toolMessage(text, blk.Get("tool_use_id").String())
-					pre, _ := json.Marshal(tm)
-					norm = append(norm, tm)
-					slots = append(slots, slot{
-						kind: anthropicToolText, path: path, preText: text, pre: pre, raw: m.Raw,
-					})
-				}
-				base := "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".content"
-				content := blk.Get("content")
-				if content.Type == gjson.String {
-					add(content.String(), base)
-					continue
-				}
-				// The Messages API also permits an ARRAY of content blocks, and many clients
-				// emit that shape. Extract each TEXT block as its own synthetic tool message
-				// with a write-back slot one level deeper — otherwise the whole message fell
-				// to the whole-message slot, which bifrost cannot model, and 100% of that
-				// request's tool output was silently uncompactable. Non-text blocks (images,
-				// …) are skipped and left in the body untouched: never lose one.
-				if content.IsArray() {
-					for k, cb := range content.Array() {
-						if cb.Get("type").String() != "text" || cb.Get("text").Type != gjson.String {
+			}
+			addSibling := func(text string, b int) {
+				handled = true
+				sm := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
+				schema.SetMessageText(&sm, text)
+				pre, _ := json.Marshal(sm)
+				norm = append(norm, sm)
+				slots = append(slots, slot{
+					kind:    anthropicSiblingText,
+					path:    "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".text",
+					preText: text, pre: pre, raw: m.Raw,
+				})
+			}
+			if hasToolResult {
+				for b, blk := range blks {
+					switch blk.Get("type").String() {
+					case "tool_result":
+						add := func(text, path string) {
+							handled = true
+							tm := toolMessage(text, blk.Get("tool_use_id").String())
+							pre, _ := json.Marshal(tm)
+							norm = append(norm, tm)
+							slots = append(slots, slot{
+								kind: anthropicToolText, path: path, preText: text, pre: pre, raw: m.Raw,
+							})
+						}
+						base := "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".content"
+						content := blk.Get("content")
+						if content.Type == gjson.String {
+							add(content.String(), base)
 							continue
 						}
-						add(cb.Get("text").String(), base+"."+strconv.Itoa(k)+".text")
+						// The Messages API also permits an ARRAY of content blocks, and many clients
+						// emit that shape. Extract each TEXT block as its own synthetic tool message
+						// with a write-back slot one level deeper — otherwise the whole message fell
+						// to the whole-message slot, which bifrost cannot model, and 100% of that
+						// request's tool output was silently uncompactable. Non-text blocks (images,
+						// …) are skipped and left in the body untouched: never lose one.
+						if content.IsArray() {
+							for k, cb := range content.Array() {
+								if cb.Get("type").String() != "text" || cb.Get("text").Type != gjson.String {
+									continue
+								}
+								add(cb.Get("text").String(), base+"."+strconv.Itoa(k)+".text")
+							}
+						}
+					case "text":
+						// A sibling of the tool_result(s) above or below it in this same message
+						// (#457): the mid-turn text Claude Code appends next to a tool_result block.
+						if txt := blk.Get("text"); txt.Type == gjson.String {
+							addSibling(txt.String(), b)
+						}
+					default:
+						// images and other block kinds: left in the body untouched, as before.
 					}
 				}
 			}
 			if handled {
-				continue // this user message contributed its tool_result blocks; body carries the rest
+				continue // this user message contributed its tool_result/sibling blocks; body carries the rest
 			}
 		}
 		// Default: whole-message slot. Unmarshal via bifrost, keeping the raw bytes for
@@ -1752,6 +1878,25 @@ func splitSlotPath(path string) (idx int, rel string, ok bool) {
 		return 0, "", false
 	}
 	return i, rel, true
+}
+
+// wireGroups builds components.Ctx.WireGroup (#457): for each slot, the wire (body) message
+// index its path names — i.e. the thing that must never be split by a span boundary. A
+// wholeMessage slot's path is always "messages.<i>" for a DISTINCT i (one wholeMessage slot per
+// body message), so it is automatically its own group; an anthropicToolText or
+// anthropicSiblingText slot's path names the SHARED body message several of them were
+// extracted from, which is exactly the grouping summarizeSpan needs. Returns nil (meaning "no
+// grouping, nothing to align") if any slot's path doesn't parse — fail open, never guess.
+func wireGroups(slots []slot) []int {
+	groups := make([]int, len(slots))
+	for i, s := range slots {
+		bi, _, ok := splitSlotPath(s.path)
+		if !ok {
+			return nil
+		}
+		groups[i] = bi
+	}
+	return groups
 }
 
 // spliceMessages rebuilds body with each edited message's bytes swapped in at that

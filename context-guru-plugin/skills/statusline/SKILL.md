@@ -1,6 +1,6 @@
 ---
 name: statusline
-description: Enable or disable the context-guru status line — a terminal status line showing the context-window bar, this session's running savings against its own running cost/tokens, the proxy/upstream latency split, and a least-used-tool hint, for whichever project is routed through the local proxy. Use when the user asks to show savings in the status line, add a status line for context-guru, see cache/keep-alive status in the terminal, or turn any of it off.
+description: Enable or disable the context-guru status line — a terminal status line showing money saved (estimate) next to money spent, the prompt-cache state (warm/expiring/cold) from the proxy's own view, context fill against the served window, and one actionable hint, for whichever project is routed through the local proxy. Use when the user asks to show savings in the status line, add a status line for context-guru, see cache/keep-alive status in the terminal, or turn any of it off.
 ---
 
 # context-guru status line
@@ -9,53 +9,68 @@ Wires `context-guru-plugin/scripts/statusline.py` into Claude Code's `statusLine
 `settings.py` — the same deterministic, conservative script that installs routing, extended to
 manage this one additional top-level key (never a second settings editor, never a hand-edit).
 
-**What it shows by default, once enabled and this project is routed:**
+**What it shows, once enabled and this project is routed** (default layout `balanced`):
 
 ```
-████····  100/200.0k 50% | $0.03 of $0.41 (-12k) | proxy: 3ms · upstream: 340ms | ◇ github 1% remove
+saved $0.31 session · $4.20 today · ★ $212.40 lifetime
+cache ● █████░ 3:57 │ agents ◐ 0:51 ● 4:21 │ ctx ███░░░░░ 41%
+cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41% │ ▸ your next message costs ≈$0.78 extra
 ```
 
-Five segments, each independently optional — a segment whose numbers are not available just does
-not print:
+- **Money.** `saved $0.31` is money already saved: what the same requests would have cost
+  uncompacted, at the gateway's prices, net of context-guru's own model spend and keep-alive
+  pings. Session, today (since local midnight) and lifetime are three windows of that one measure.
+  `--layout=detailed` adds `spent $4.10 · $2.73/h · up 1h30m` (Claude Code's own running cost, the
+  average rate once five minutes have passed, and the session's age).
+- **Cache clock.** A live countdown to expiry, green, amber in the last minute (a fifth of the
+  lifetime on the 1h tier), red with `!` in the last 15 s, then `cold 1:20` counting UP. The proxy
+  keeps the clock from the end of the last response, so a long answer is counted. It ticks every
+  second (`refreshInterval: 1`, which `settings.py` writes; a value you tuned is kept). `↻` means
+  the last touch was a keep-alive ping.
+- **Sub-agents.** Each running sub-agent has its own cache: one shows its clock (`agent ● 4:21`),
+  several show the count and the one expiring soonest (`agents 5 · soonest ◐ 0:52`). Finished
+  (cold) ones are not shown.
+  The main clock and the context bar follow the main thread, not whichever agent spoke last.
+- **Context.** Bar and percent against the model's context limit: the proxy's when it is a
+  measured figure for the model, else Claude Code's.
+- **One hint**, only when it matters, dollars first: cold with >=100k tokens, a model switch while
+  warm (it rewrites the cache), a pause about to cost >=$0.50, context >=85% full, or a
+  Claude Code-reported miss cause under two minutes old (`tool set changed (+2 −0)`).
+- A pending proxy update (`▲ update v0.3.2`) comes first so it cannot scroll off.
 
-- **A pending proxy update, if one exists and hasn't been declined** — `▲ update v0.3.2` in
-  green, shown FIRST so it cannot scroll off a long line. This is a fallback for the SessionStart
-  hook's own release note: that note only reaches you if the model actually relays it, which it
-  is not guaranteed to do (a hook can print text, it cannot force a question). This segment reads
-  the same local record, never fetches, and stays visible even if the hook's note was never
-  mentioned — until you explicitly answer it (`/context-guru:update`, or
-  `update-check answer --answer skip|always|never`), at which point it goes away or changes to
-  `▲ v0.3.2 auto` if you chose automatic updates.
-- **The context bar** — tokens used against the model's real context window, coloured green
-  under 50%, yellow under 70%, red above. Read straight off Claude Code's own statusLine payload
-  (`context_window.total_input_tokens` / `.context_window_size` / `.used_percentage`); no extra
-  network call.
-- **What THIS session saved, against what it has spent so far** — `$0.03 of $0.41 (-12k)`.
-  The first figure is this session's own saving (`total_saved_usd`, scoped to this one
-  session_id — see the script's own `_fetch_stats`); the second is this session's own running
-  cost, read straight off Claude Code's own statusLine payload (`cost.total_cost_usd`). The
-  bracket is the tokens context-guru removed over the session (`saved_unique`, each distinct
-  item counted once). It has no "of": the context bar already shows the current window size,
-  and that is a snapshot, not a running total to compare a running sum against. Omitted, not shown as zeroes, before this session has
-  spent anything at all — a real $0 saved once there IS a total to compare it to still prints.
-- **The proxy/upstream latency split** — `proxy: 3ms · upstream: 340ms`, ContextGuru's own added
-  latency next to what the upstream provider took, each labelled. Both are `/api/stats`' own
-  `cg_latency_ms_avg` / `upstream_ms_avg`; nothing here is derived.
-- **The least-used MCP server or skill this session** — `◇ github 1% remove` (at 1% or under of
-  this session's tool/skill uses) or `◇ some-skill 8% move` (at 20% or under, i.e. move it to
-  project scope rather than global). Checked against every MCP server named in
-  `~/.claude/settings.json` and every skill this plugin ships — not a system-prompt enumeration
-  (nothing exposes that), so this is what the session's own transcript tail shows was actually
-  called, not a claim about what any one session's prompt loaded.
+**Layouts and toggles.** `statusline.py --set-layout=detailed` (or `minimal`, `balanced`, `auto`) remembers a
+layout across renders without editing settings; bind it to an alias or a command. A remembered
+layout outranks the installed command's flag until `auto`. Otherwise
+`--layout=minimal|balanced|detailed` (or env `CG_STATUSLINE_LAYOUT`):
+
+| layout | elements |
+|---|---|
+| minimal | saved, cache, hint (`saved $0.31 │ cache ● ████░░ 3:57`) |
+| balanced | update, saved, cache, agents, ctx, hint |
+| detailed | balanced + `spent` + `upstream slow: 7.0s` (only when slow) + least-used tool/skill (`◇ github 1% remove`) |
+| spark | `saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇` over the cache clock |
+| strip | the last 20 requests as hit `■` / partial `▨` / miss `✖`, and the dollars misses cost today |
+| heat | today's cache misses per hour (0h to 24h, darker = more) and the dollars they cost today |
+| fill | context as a stacked bar (`▒` always loaded, `█` conversation), percent and time to full |
+| watch | the main cache clock over a mini-bar and clock per sub-agent (`agent caches (2) ████ 4:22  █░░░ 0:52`, with the saving beside the clock) |
+
+The last five are one-line versions of the terminal views (`/context-guru:*`), drawn with `tvlib.py`;
+`CG_ASCII=1` swaps their glyphs for plain characters.
+
+`--hide=a,b` / `--show=a,b` toggle single elements (`update save spend cache agents ctx hint latency tools ka`;
+env `CG_STATUSLINE_HIDE` / `_SHOW`). `--cache` and `--keepalive` still work (`ka` = keep-alive net
+saving). `NO_COLOR=1` (or `TERM=dumb`) removes colour. Width comes from the terminal (`--width=N`
+or `CG_STATUSLINE_COLUMNS` override); a line wider than that drops tools, latency, the update marker,
+the long hint form, the `saved` label and the context bar, in that order, and truncates the hint last.
+
+**Failure states.** Proxy refused: `cg ✕ proxy offline`. Slow: `cg: stats loading…`, then the last numbers with
+`⏳`. Hung for ten minutes: `cg? not responding`. Cost: each render is a disk-cached read (2 s for
+session/cache state, 60 s for day) with one 0.6 s deadline; typical render is ~40 ms.
 
 **In every project that is NOT routed through context-guru, it renders nothing at all** — the
 script self-gates exactly like the plugin's two hooks. That makes it *safe to render* regardless
 of scope, but it is not a reason to default the *write* to user scope — see "Where to install it"
 below.
-
-**Two more extras are off by default.** The prompt-cache TTL countdown (`cache 4:12` / `cache
-cold`) and the keep-alive savings counter (`ka ≤2miss $0.07`) are extras, each behind its own flag
-on the installed command — see "Turn an extra on" below. Neither is shown until you ask for it.
 
 **It never sends a keep-alive ping, and never will.** It only reads. Turning the keep-alive
 mechanism on is a separate, explicit action — see `/context-guru:cache-strategy-picker`.
@@ -133,30 +148,19 @@ line render. Nothing to see yet is normal before the first response of a session
 track — that is when this session's own total first becomes nonzero (see `_default_segment` in
 `statusline.py`), not a broken feature.
 
-## Turn an extra on
+## Change the layout or toggle an element
 
-The toggle is the command string itself — re-run the same install call from step 2 with a flag
-appended. `settings.py` already recognises this as ours (it wrote the previous command) and
-updates it in place, no `--force` needed:
+The toggle is the command string itself - re-run the same install call from step 2 with flags
+appended. `settings.py` recognises it as ours (it wrote the previous command) and updates it in
+place, no `--force` needed:
 
 ```bash
-# cache TTL countdown
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add --file "$FILE" \
-  --statusline "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\" --cache"
-
-# keep-alive net saving + misses prevented
-"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add --file "$FILE" \
-  --statusline "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\" --keepalive"
-
-# both
-"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add --file "$FILE" \
-  --statusline "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\" --cache --keepalive"
+  --statusline "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\" --layout=detailed --hide=tools"
 ```
 
-## Turn an extra back off
-
-Re-run step 2's bare command (no flags) to return to savings-only. New session to see it take
-effect, same as turning one on.
+Re-run step 2's bare command (no flags) to return to the `balanced` default. New session to see it
+take effect.
 
 ## 4. Turn it off entirely
 

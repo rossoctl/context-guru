@@ -35,9 +35,9 @@
   <nav class="groups tabs" role="tablist" aria-label="Sections">
     <button role="tab" class="tab" id="tab-overview" data-group="overview" data-view="overview" data-testid="tab-overview" aria-controls="view-overview" aria-selected="true">Overview</button>
     <button role="tab" class="tab" id="grp-savings" data-group="savings" data-testid="group-savings" aria-controls="grp-savings-panel" aria-selected="false" tabindex="-1">Savings</button>
-    <button role="tab" class="tab" id="grp-behaviour" data-group="behaviour" data-testid="group-behaviour" aria-controls="grp-behaviour-panel" aria-selected="false" tabindex="-1">Behaviour</button>
     <button role="tab" class="tab" id="grp-traffic" data-group="traffic" data-testid="group-traffic" aria-controls="grp-traffic-panel" aria-selected="false" tabindex="-1">Traffic</button>
     <button role="tab" class="tab" id="grp-admin" data-group="admin" data-testid="group-admin" aria-controls="grp-admin-panel" aria-selected="false" tabindex="-1">Admin</button>
+    <button role="tab" class="tab" id="grp-advanced" data-group="advanced" data-testid="group-advanced" aria-controls="grp-advanced-panel" aria-selected="false" tabindex="-1">Advanced</button>
   </nav>
   <div class="topbar-right">
     <span class="live" data-testid="live-indicator" title="Live event stream"><i class="dot"></i><span id="live-label">connecting…</span></span>
@@ -60,14 +60,14 @@
 <div id="subnav" hidden>
   <div class="grouppanel" role="tabpanel" id="grp-savings-panel" data-group="savings" aria-labelledby="grp-savings" hidden>
     <div class="viewtabs" role="tablist" data-group="savings" aria-label="Savings views">
+      <button role="tab" class="tab" id="tab-keepalive" data-view="keepalive" data-testid="tab-keepalive" aria-controls="view-keepalive" aria-selected="false" tabindex="-1">Keep-alive</button>
       <button role="tab" class="tab" id="tab-usage" data-view="usage" data-testid="tab-usage" aria-controls="view-usage" aria-selected="false" tabindex="-1">Usage</button>
-      <template id="tpl-tab-benchmarks"><button role="tab" class="tab" id="tab-benchmarks" data-view="benchmarks" data-testid="tab-benchmarks" aria-controls="view-benchmarks" aria-selected="false" tabindex="-1" data-manager data-local-ok>Benchmarks</button></template>
     </div>
   </div>
-  <div class="grouppanel" role="tabpanel" id="grp-behaviour-panel" data-group="behaviour" aria-labelledby="grp-behaviour" hidden>
-    <div class="viewtabs" role="tablist" data-group="behaviour" aria-label="Behaviour views">
+  <div class="grouppanel" role="tabpanel" id="grp-advanced-panel" data-group="advanced" aria-labelledby="grp-advanced" hidden>
+    <div class="viewtabs" role="tablist" data-group="advanced" aria-label="Advanced views">
       <template id="tpl-tab-components"><button role="tab" class="tab" id="tab-components" data-view="components" data-testid="tab-components" aria-controls="view-components" aria-selected="false" tabindex="-1" data-manager data-local-ok>Components</button></template>
-      <button role="tab" class="tab" id="tab-keepalive" data-view="keepalive" data-testid="tab-keepalive" aria-controls="view-keepalive" aria-selected="false" tabindex="-1">Keep-alive</button>
+      <template id="tpl-tab-benchmarks"><button role="tab" class="tab" id="tab-benchmarks" data-view="benchmarks" data-testid="tab-benchmarks" aria-controls="view-benchmarks" aria-selected="false" tabindex="-1" data-manager data-local-ok>Benchmarks</button></template>
     </div>
   </div>
   <div class="grouppanel" role="tabpanel" id="grp-traffic-panel" data-group="traffic" aria-labelledby="grp-traffic" hidden>
@@ -1148,6 +1148,7 @@
 <script defer src="app.js"></script>
 <!-- The Inventory view mounts itself: its tab, its section, its stylesheet and its loader
      registration all live in tools.js, so this feature is one line in the shared page. -->
+<script defer src="bottomline.js"></script>
 <script defer src="tools.js"></script>
 <!-- The KV-cache TTL view mounts itself the same way, from kvcache.js. -->
 <script defer src="kvcache.js"></script>

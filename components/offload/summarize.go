@@ -348,7 +348,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	msgs := req.Input
 	// Keep msg0 (system/first) + the last keepLast; summarize the span between — with both
 	// boundaries aligned so neither cuts inside a tool exchange. See summarizeSpan.
-	headCount, start, end := summarizeSpan(msgs, s.keepFirst, s.keepLast)
+	headCount, start, end := summarizeSpan(msgs, s.keepFirst, s.keepLast, c.WireGroup)
 
 	// THE GATES DECIDE WHETHER TO PAY FOR A *NEW* SUMMARY. THEY DO NOT DECIDE WHETHER THE SUMMARY
 	// THIS SESSION ALREADY MADE STAYS IN THE BODY WE FORWARD. Those were one decision until the
@@ -370,6 +370,19 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// turn. First thing, and unconditionally: the money was spent whatever this turn decides, and
 	// the compaction-episode panel charges it as a debit. See takeDeferredUsage.
 	takeDeferredUsage(c, rep)
+	adoptParentCheckpoint(c)
+	// A non-nil WireGroup that no longer lines up with msgs means wire groups DO exist on this
+	// request (Anthropic traffic normalized at least one shared message) but an earlier
+	// component changed the message count, so their current positions are unknown. The
+	// headCount/start/end just computed above are UNALIGNED in that case (summarizeSpan's own
+	// defensive check collapsed WireGroup to nil, same as "no groups ever existed" — e.g.
+	// OpenAI-shaped traffic). Decline rather than risk splitting a wire message that is really
+	// there, just not where WireGroup says. See wireGroupsStale.
+	if wireGroupsStale(c, msgs) {
+		rep.Gate("wire_groups_stale")
+		rep.Skipped = true
+		return nil, nil
+	}
 	if end > start && c.AllowSummarySpan != nil && !c.AllowSummarySpan(start, end) {
 		rep.Gate("wire_span_unsafe")
 		rep.Skipped = true
@@ -454,8 +467,8 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// Above the gates' effect, because a turn that lands mid-flight is usually a turn the gates
 	// DECLINE (the cache is warm again by then) and it is exactly the turn that most needs the
 	// result: without it, it forwards the full transcript at 1.25xF.
-	if _, running := inFlight.peek(c.Session); running {
-		waited, landed := inFlight.waitFor(c.Ctx, c.Session, s.summaryWait())
+	if _, running := inFlight.peek(convKey(c)); running {
+		waited, landed := inFlight.waitFor(c.Ctx, convKey(c), s.summaryWait())
 		atomic.AddInt64(&summarizeWaitedMs, waited.Milliseconds())
 		if landed {
 			// Re-read: the checkpoint the background call just wrote is the thing we waited for.
@@ -479,11 +492,16 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		}
 	}
 
-	// No new summary this turn — gated, or nothing to summarize with. Fall back to the most
-	// cache-stable shape available, which is the standing checkpoint when there is one. Both
-	// reasons take the same path because they have the same remedy; the gates above already
-	// recorded WHICH it was.
-	if !fires || model == nil {
+	// A side request replays its parent's checkpoint but never commissions one. See sideRequest.
+	side := sideRequest(c)
+	if side {
+		rep.Gate("side_request_read_only")
+	}
+	// No new summary this turn — gated, a side request, or nothing to summarize with. Fall back to
+	// the most cache-stable shape available, which is the standing checkpoint when there is one.
+	// All take the same path because they have the same remedy; the gates above already recorded
+	// WHICH it was.
+	if !fires || model == nil || side {
 		if stale {
 			return s.replayStale(c, rep, req, msgs, headCount, start, EventGatedReplayedCheckpoint)
 		}
@@ -574,8 +592,8 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// the worst case.
 	// A SESSIONLESS REQUEST IS SUMMARIZED INLINE, and that is not a concession — it is the only
 	// thing that can work. The whole async design rests on handing the result to a LATER TURN OF
-	// THE SAME SESSION: the checkpoint is keyed by session id (store.SumPrefix+session) and the
-	// single-flight registry is keyed the same way. With no session id there is no key to save
+	// THE SAME THREAD: the checkpoint is keyed by the thread of the session (sumKey(convKey(c))) and
+	// the single-flight registry is keyed the same way. With no session id there is no key to save
 	// under, nothing to single-flight on, and no later turn that could ever find it — so going
 	// async would spend a model call and discard the result, every turn, forever.
 	//
@@ -683,7 +701,7 @@ func (s *Summarize) replayStale(c *components.Ctx, rep *components.Report, req *
 			commitRefresh(c, rep, markerFull, cp.Key, string(b))
 		}
 	}
-	out, keys := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	out, keys := s.emitCheckpoint(cp, msgs, headCount, boundary, c.WireGroup)
 	if len(keys) == 0 {
 		rep.Irreversible = true
 	}
@@ -722,17 +740,19 @@ func (s *Summarize) replayStale(c *components.Ctx, rep *components.Report, req *
 // tryReuse and the refusal fallback so a replayed checkpoint is byte-identical whichever path
 // emits it — a difference between them would itself be a cache flip.
 func (s *Summarize) emitCheckpoint(cp sumCheckpoint, msgs []bschemas.ChatMessage,
-	headCount, boundary int) ([]bschemas.ChatMessage, []string) {
+	headCount, boundary int, groups []int) ([]bschemas.ChatMessage, []string) {
 	// USER for the same reason as the fresh-summary path: a system role at index 1 is rejected
 	// by the provider. The replayed checkpoint must match that shape exactly, or a replayed
 	// turn would emit different bytes from the turn that created it.
 	summaryMsg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&summaryMsg, cp.SummaryMsg)
-	// The replayed boundary must respect exchange atomicity exactly as the fresh path does,
-	// or a replayed turn emits different bytes from the turn that created it.
-	for boundary < len(msgs) && msgs[boundary].Role == bschemas.ChatMessageRoleTool {
-		boundary++
-	}
+	// The replayed boundary must respect exchange AND wire-message atomicity exactly as the
+	// fresh path does (advanceSpanBoundary — #457 round 2), or a replayed turn emits different
+	// bytes from the turn that created it. This used to be its own copy of just the role==tool
+	// half of that rule, which is exactly the shape of gap summarizeSpan had before #457: a
+	// sibling-first group lets the tail begin on the sibling (role=user) while its tool_result
+	// orphans a tool_use one slot earlier.
+	boundary = advanceSpanBoundary(msgs, groups, boundary)
 	out := make([]bschemas.ChatMessage, 0, 2+(len(msgs)-boundary))
 	out = append(out, msgs[:headCount]...)
 	out = append(out, summaryMsg)
@@ -839,7 +859,7 @@ func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []b
 			commitRefresh(c, rep, markerFull, cp.Key, string(b))
 		}
 	}
-	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary, c.WireGroup)
 	return emitted, ks, true, false
 }
 

@@ -1,0 +1,28 @@
+{
+ "agent": [
+  "bob",
+  "claude-code"
+ ],
+ "component": [
+  "cacheinject",
+  "extract"
+ ],
+ "effort": null,
+ "mode": [
+  "active"
+ ],
+ "model": [
+  "m-opus",
+  "m-sonnet",
+  "m-unpriced"
+ ],
+ "preset": [
+  "codesmart"
+ ],
+ "provider": [
+  "anthropic"
+ ],
+ "reason": null,
+ "stop_reason": null,
+ "thinking": null
+}

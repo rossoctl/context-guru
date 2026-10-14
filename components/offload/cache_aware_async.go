@@ -17,7 +17,7 @@ import (
 )
 
 // The detached summarization path, mirroring summarize_async.go and REUSING its machinery:
-// the same per-session flight registry (inFlight), the same global concurrency bound
+// the same per-thread flight registry (inFlight), the same global concurrency bound
 // (summarySlots), the same deferred-usage accounting, the same panic discipline.
 //
 // WHY THE CALL CANNOT BE SYNCHRONOUS. A summary here covers most of the transcript, so the call
@@ -123,7 +123,8 @@ func cacheAwareSummaryIncomplete(raw string) bool {
 // on a struct the request owns, which is the shape a review already caught once in summarize.
 func (s *CacheAwareSummarizer) startAsyncSummary(c *components.Ctx, call summaryCaller, path, trigger string,
 	reserved bool, span []bschemas.ChatMessage, coveredCount int) string {
-	j, ok := inFlight.begin(c.Session)
+	conv := convKey(c)
+	j, ok := inFlight.begin(conv)
 	if !ok {
 		return "summary_already_in_flight"
 	}
@@ -133,7 +134,7 @@ func (s *CacheAwareSummarizer) startAsyncSummary(c *components.Ctx, call summary
 	select {
 	case summarySlots <- struct{}{}:
 	default:
-		inFlight.finish(c.Session, j)
+		inFlight.finish(conv, j)
 		atomic.AddInt64(&cacheAwareAsyncRefused, 1)
 		return "summary_concurrency_full"
 	}
@@ -151,7 +152,7 @@ func (s *CacheAwareSummarizer) startAsyncSummary(c *components.Ctx, call summary
 	baseCtx := context.WithoutCancel(c.Ctx)
 
 	go func() {
-		defer inFlight.finish(session, j)
+		defer inFlight.finish(conv, j)
 		defer func() {
 			<-summarySlots
 			logging.From(baseCtx).Info("cache_aware_summarizer: detached summary resolved",
@@ -196,7 +197,7 @@ func (s *CacheAwareSummarizer) startAsyncSummary(c *components.Ctx, call summary
 				"session", session)
 			return
 		}
-		s.commitAsyncSummary(mode, session, st, spanCopy, out, coveredCount, reserved)
+		s.commitAsyncSummary(mode, conv, st, spanCopy, out, coveredCount, reserved)
 	}()
 	return ""
 }
@@ -220,7 +221,7 @@ func recordCacheAwareCacheTokens(sink *cheapmodel.Sink) {
 // false for a commission summarize ever makes (it shares this store key namespace but never
 // reserves) and for cache_aware_summarizer's own cache_state: any (which has no reserve concept
 // at all — a fresh checkpoint there is live the moment it is committed, exactly as before).
-func (s *CacheAwareSummarizer) commitAsyncSummary(mode markerMode, session string, st store.Store,
+func (s *CacheAwareSummarizer) commitAsyncSummary(mode markerMode, conv string, st store.Store,
 	span []bschemas.ChatMessage, raw string, coveredCount int, reserved bool) {
 	// The reply is UNTRUSTED. The whole trajectory reached the summarizer, so planted text in any
 	// tool output had a long run at it — strip forged expand markers (both spellings), the summary
@@ -243,7 +244,7 @@ func (s *CacheAwareSummarizer) commitAsyncSummary(mode markerMode, session strin
 		SummaryMsg: summaryText, CoveredCount: coveredCount,
 		CoveredHash: spanHash(span), Key: key, Reserved: reserved,
 	}); err == nil {
-		st.Put(store.SumPrefix+session, b)
+		st.Put(sumKey(conv), b)
 		atomic.AddInt64(&cacheAwareAsyncCommitted, 1)
 	}
 }
@@ -285,11 +286,12 @@ type KeepAliveSummaryResult struct {
 // write the same checkpoint twice.
 func (s *CacheAwareSummarizer) commissionSync(c *components.Ctx, call summaryCaller, path string,
 	reserved bool, span []bschemas.ChatMessage, coveredCount int, timeout time.Duration) KeepAliveSummaryResult {
-	j, ok := inFlight.begin(c.Session)
+	conv := convKey(c)
+	j, ok := inFlight.begin(conv)
 	if !ok {
 		return KeepAliveSummaryResult{Reason: KeepAliveReasonInFlight}
 	}
-	defer inFlight.finish(c.Session, j)
+	defer inFlight.finish(conv, j)
 	select {
 	case summarySlots <- struct{}{}:
 	default:
@@ -316,17 +318,29 @@ func (s *CacheAwareSummarizer) commissionSync(c *components.Ctx, call summaryCal
 	callStart := time.Now()
 	out, err := call(ctx)
 	callMs := float64(time.Since(callStart).Milliseconds())
-	// Deferred BEFORE the error check, and READ before being deferred: a call that timed out may
-	// still have been billed for its input, and the result the keeper books is the same figures
-	// deferUsage is about to replay onto this session's next real turn — the keeper's ping ledger
-	// and the ordinary LLM-cost ledger are two different books of the SAME spend, not two spends.
+	// READ BEFORE the error check: a call that timed out may still have been billed for its input.
+	//
+	// WHO BOOKS THIS CALL (#455). The dashboard adds requests.cost_usd and
+	// requests.cg_llm_cost_usd together, so the call must land in exactly one of them:
+	//   - COMMITTED: the keeper books it on the keep-alive ping row it replaces
+	//     (recordSummarySubstitute, cost_usd). Only a detail row is deferred (deferDetailOnly), so
+	//     extraction_calls still lists it and cg_llm_cost_usd does not count it again.
+	//   - NOT committed (error, empty, cut off, or the commit refused): the keeper sends an
+	//     ordinary ping instead and never books this call, so it is deferred onto the next real
+	//     turn as before (deferUsage) — otherwise a paid call would be booked nowhere.
 	_, in, outTok := callSink.Totals()
 	cw, cr := callSink.CacheTotals()
 	res := KeepAliveSummaryResult{Model: callSink.Model(),
 		FreshInput: int(in), Output: int(outTok), CacheWrite: int(cw), CacheRead: int(cr),
 		CacheWrite1h: int(callSink.CacheWrite1h())}
 	recordCacheAwareCacheTokens(callSink)
-	deferUsage(st, session, "cache_aware_summarizer", path, "keepalive_substitute", callMs, callSink)
+	defer func() {
+		if res.Committed {
+			deferDetailOnly(st, session, "cache_aware_summarizer", path, "keepalive_substitute_billed", callMs, callSink)
+		} else {
+			deferUsage(st, session, "cache_aware_summarizer", path, "keepalive_substitute", callMs, callSink)
+		}
+	}()
 	if err != nil {
 		classifyCallErr(ctx, session, err)
 		return res
@@ -341,7 +355,7 @@ func (s *CacheAwareSummarizer) commissionSync(c *components.Ctx, call summaryCal
 		return res
 	}
 	committedBefore := atomic.LoadInt64(&cacheAwareAsyncCommitted)
-	s.commitAsyncSummary(mode, session, st, span, out, coveredCount, reserved)
+	s.commitAsyncSummary(mode, conv, st, span, out, coveredCount, reserved)
 	res.Committed = atomic.LoadInt64(&cacheAwareAsyncCommitted) != committedBefore
 	return res
 }

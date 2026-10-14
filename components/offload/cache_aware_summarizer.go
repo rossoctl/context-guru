@@ -14,6 +14,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/logging"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"gopkg.in/yaml.v3"
@@ -500,6 +501,19 @@ func init() {
 //     predict: see cache_aware_cold.go, which defers the side call until the forwarded request's
 //     own usage confirms the cache it just rewrote, so the side call always reads warm.
 //
+// The 0.9 floor is also what makes `any`'s WARM splice pay. A summary committed while the cache
+// is still warm throws that cache away: the next request re-writes the whole post-summary prefix
+// at the cache-write rate instead of reading it at the cache-read rate. That one-time rewrite is
+// repaid only by the tokens the summary removes from every later request, and nothing at commit
+// time checks that it will be. At 0.9 of C the summarized span is nearly the whole conversation
+// (everything but the head and KeepLastTurns), so the per-request saving dwarfs the rewrite and
+// repays it within about a turn. Lower the floor (min_request_frac near 0, or a small
+// min_request_tokens) and that stops holding: a live run with min_request_frac 0 and
+// min_request_tokens 3000 summarized a ~1.4k-token span, re-wrote a ~170k-token warm cache, and
+// paid $0.44 for a request that cost ~$0.14 unsummarized. A deployment that wants an early
+// trigger should pair it with cache_state `pre_expiry`, which applies only a summary reserved
+// for a cache about to expire.
+//
 // `pre_expiry` stays reachable and still restricts for a deployment that wants the stronger
 // guarantee of only ever reusing a cache the component KNOWS is still alive (never Unknown either
 // — see Trigger.CacheAllows' Unknown-with-pre_expiry clause, which this component's defaults do
@@ -641,7 +655,18 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// Attribute any spend a DETACHED summarizer call incurred since this session's last turn.
 	// First thing, and unconditionally: the money was spent whatever this turn decides.
 	takeDeferredUsage(c, rep)
-	headCount, start, end := summarizeSpan(msgs, 1, s.keepLastTurns)
+	adoptParentCheckpoint(c)
+	headCount, start, end := summarizeSpan(msgs, 1, s.keepLastTurns, c.WireGroup)
+	// A non-nil WireGroup that no longer lines up with msgs means wire groups DO exist on this
+	// request but an earlier component changed the message count, so headCount/start/end just
+	// computed above are UNALIGNED (summarizeSpan's own defensive check collapsed WireGroup to
+	// nil, same as "no groups ever existed"). Decline rather than risk splitting a wire message
+	// that is really there, just not where WireGroup says. See wireGroupsStale.
+	if wireGroupsStale(c, msgs) {
+		rep.Gate("wire_groups_stale")
+		rep.Skipped = true
+		return nil, nil
+	}
 	if end <= start {
 		rep.Skipped = true
 		return nil, nil
@@ -704,6 +729,12 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		}
 		rep.Skipped = true
 		return nil, nil
+	}
+	// A side request splices its parent's checkpoint and stops there: no commission, no cold
+	// deferral, no keep-alive candidate. See sideRequest.
+	if sideRequest(c) {
+		rep.Gate("side_request_read_only")
+		return declineButReplayStale()
 	}
 
 	// THE GATES DECIDE WHETHER TO PAY FOR A FRESH SUMMARY. `sized`/`resolvable` ask "is this
@@ -826,7 +857,8 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	if usePrefixAsk {
 		path = "prefix_ask"
 		atomic.AddInt64(&cacheAwarePrefixAskUsed, 1)
-		asker, session, instructionText := c.PrefixAsk, c.Session, schema.MessageText(instruction)
+		// The stash key is the THREAD's (#423): the host stashes each thread's last body apart.
+		asker, session, instructionText := c.PrefixAsk, thread.Key(c.Session, c.Thread), schema.MessageText(instruction)
 		// requiredCount/requiredHash freeze THIS turn's own idea of what span the eventual call
 		// must cover — computed now, synchronously, while msgs is still exactly what this turn
 		// saw. The call itself runs later: detached (startAsyncSummary) or substituted for an
@@ -838,7 +870,19 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		// what the previous turn's stash held, not only the stale one. By the time the call
 		// actually runs, the host has had the chance to stash at least this turn's own
 		// forwarded body.
-		requiredCount, requiredHash := end, spanHash(msgs[:end])
+		// rawSpan/rawOK, not spanHash(msgs[:end]): CoversSpan compares against the host's
+		// PRE-pipeline stash, and msgs is req.Input AT THIS COMPONENT'S OWN PIPELINE POSITION —
+		// for a summarizer that is not first, already whatever ran before it. rawSpanForHash
+		// falls back to msgs itself when c.RawInput is nil (a Ctx built directly, as the unit
+		// tests in this package still do), and reports !rawOK when an earlier component changed
+		// the message count, which leaves no span of either slice safe to compare. See
+		// rawSpanForHash's own comment and PR #431 round 1.
+		requiredCount := end
+		rawSpan, rawOK := rawSpanForHash(c, req, requiredCount)
+		var requiredHash string
+		if rawOK {
+			requiredHash = spanHash(rawSpan)
+		}
 		call = func(ctx context.Context) (string, error) {
 			// STALE-PREFIX GUARD. The PrefixAsk path answers from whatever body the host's
 			// stash holds for this session, which this component never built and cannot
@@ -852,7 +896,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 			// implement it is trusted as before — this guard exists to catch a NEW failure
 			// mode, not to narrow who may answer.
 			if pc, ok := asker.(components.PrefixCoverage); ok &&
-				!pc.CoversSpan(session, requiredCount, requiredHash) {
+				(!rawOK || !pc.CoversSpan(session, requiredCount, requiredHash)) {
 				return "", components.ErrStalePrefix
 			}
 			reply, _, err := asker.Ask(ctx, session, instructionText)
@@ -946,8 +990,11 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	if gate := s.startAsyncSummary(c, call, path, "turn", reserved, span, end-start); gate != "" {
 		rep.Gate(gate)
 	}
-	rep.Skipped = true
-	return nil, nil
+	// A fresh summary is now on its way (or already was), but THIS turn still has the stale one:
+	// send it. Returning the full transcript here was the same cache flip replayStale exists to
+	// prevent, and it hit every turn whose new tail exceeded resummarize_tokens — so with large
+	// tool outputs, every turn paid for a new summary and no summary was ever applied.
+	return declineButReplayStale()
 }
 
 // splice builds [head, summary, tail] and repairs orphans already present in the inbound
@@ -973,7 +1020,7 @@ func (s *CacheAwareSummarizer) splice(msgs []bschemas.ChatMessage, headCount, bo
 // is identical to the one the previous turn forwarded — which is the property that keeps the
 // provider's prefix alive past the head.
 //
-// ⚠️ The checkpoint namespace is shared with `summarize` (store.SumPrefix + session). Safe
+// ⚠️ The checkpoint namespace is shared with `summarize` (sumKey(convKey(c)), per thread). Safe
 // because both components restructure the message list and therefore must run ALONE, so they
 // cannot both be in one pipeline; and CoveredHash rejects a checkpoint whose covered prefix does
 // not match, so a preset switch mid-session degrades to a fresh summary rather than reusing a

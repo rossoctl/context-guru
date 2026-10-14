@@ -32,6 +32,43 @@ reference — port its *logic*, re-implement its transport in Go.
   line. Conventional-commit titles.
 - Observability follows OpenTelemetry **GenAI semantic conventions** (`gen_ai.*`).
 
+## Eval boxes
+
+Go is not installed on the developer laptops. Builds and tests run on a shared Linux box, through
+`~/cgssh2 '<command>'`.
+
+- **Run remote builds and tests in the foreground by default.** Use a long Bash timeout (up to
+  10 minutes) and one package set per call. `./proxy/...` takes about 7.5 minutes and `./dash/...`
+  about 6 minutes with `-race`, so run them as separate calls.
+- **A subagent runs remote work in the foreground only.** It is not woken by its own
+  `run_in_background` task once it ends its turn, so it must never end the turn to wait.
+- **A detached remote run is for main sessions only,** and only when the run takes more than
+  10 minutes. Start ONE local poller with `run_in_background: true` that waits for the run's done
+  marker, with a timeout inside it. Then make no tool calls until its notification arrives. A job
+  on the box by itself is not a task the local harness tracks, so without the poller nothing
+  wakes you.
+- **Write the done marker on ANY exit,** with the exit code:
+  `trap 'echo "DONE rc=$?" >> ~/<run>.out' EXIT`. A marker written only at the end of a `set -e`
+  script is never written when a test fails, so a failure looks like a timeout.
+- **Never spin-wait.** Do not call `true`, `echo` or `sleep` to pass time. Each call is a paid model
+  request on the whole context.
+- **Never re-sync code to the box while a run is in progress there.** It mixes two versions of the
+  code within one test run.
+- **Commit a WIP before any long run.**
+- **`go` is not on the non-interactive PATH.** Use `/usr/local/go/bin/go`. `cgo` is needed for
+  `-race` (`CGO_ENABLED=1`).
+- **Sync with tar, not rsync, into an EMPTY directory:**
+  `~/cgssh2 "rm -rf ~/<branch-dir> && mkdir -p ~/<branch-dir>"`, then
+  `tar czf - --exclude .git . | ~/cgssh2 "tar xzf - -C ~/<branch-dir>"`. `tar` adds and overwrites
+  files but never deletes one. A file you removed locally (a test, for example) stays on the box
+  and keeps running against the old behaviour.
+- **The box is shared** with other engineers and sessions, as the same Unix user. Kill only by
+  pid. Never `pkill` or `killall`. Never assume the box is idle.
+- **Two tests fail on the box itself**, not on your change: `TestInstallRefusesAnUnverifiedDownload`
+  and `TestInstallReportsPATHFromTheSourceFallbackToo` (the box has a root-owned
+  `/usr/local/bin/context-guru-proxy`). Before you believe a failure is yours, run the same test on
+  an unmodified `origin/main` on the box.
+
 ## Layout
 
 See [docs/design.md](docs/design.md) for package layout.

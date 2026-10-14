@@ -36,6 +36,8 @@ import (
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
@@ -255,6 +257,17 @@ type Handler struct {
 	// BETWEEN requests, when no request is in flight and no component can run. Always
 	// present; it does nothing at all until a tenant opts in. See keepalive.go.
 	keeper *keeper
+	// threads tells the threads of one session apart (main agent, subagents, forks), so the
+	// keeper and the dashboard's miss attribution can key on session + thread. See
+	// internal/thread and threadFor.
+	threads *thread.Tracker
+	// waits records, per thread, why it waits and why it woke up (issue #424's RECORD half —
+	// it never chooses a keep-alive ping budget and never changes keep-alive or compaction
+	// behaviour). The actual body scan runs on the DASHBOARD'S OWN writer goroutine, via a
+	// closure finish() builds and hands to dash.Event.WaitCause — off the request path
+	// entirely, not merely off the upstream forward. See internal/waitcause,
+	// noteWaitBody/finish in dashcapture.go, and dash/capture.go's write().
+	waits *waitcause.Tracker
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
 	promCache promCache
@@ -324,6 +337,8 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	h.limiter = NewLimiter(opts.Limits)
 	h.keeper = newKeeper(h)
 	h.keeper.start()
+	h.threads = thread.New()
+	h.waits = waitcause.New()
 	h.regLim = newAnonLimiter(Limits{RequestsPerMinute: registrationsPerMinute})
 	h.authLim = newAnonLimiter(Limits{RequestsPerMinute: authFailuresPerMinute})
 	h.pwLim = newAnonLimiter(Limits{RequestsPerMinute: passwordAttemptsPerMinute})
@@ -1068,7 +1083,10 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// (see isAgentCompaction). Counted as a gate on a `bypass` pseudo-component so
 		// /stats shows components.bypass.gates.agent_compaction — a silent bypass is
 		// indistinguishable from a broken pipeline.
-		if !bypassed && isAgentCompaction(body) {
+		// Kept for thread identification too: the agent's own compaction request ends one
+		// prefix of a thread and the next request starts another (see thread.Tracker).
+		agentCompaction := isAgentCompaction(body)
+		if !bypassed && agentCompaction {
 			bypassed = true
 			if h.agg != nil {
 				rep := components.Report{Component: "bypass", Skipped: true, Mode: tn.Mode}
@@ -1098,7 +1116,16 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		if api == "responses" {
 			wire = "responses"
 		}
-		var tr apply.Trace // hoisted: the lifecycle log line below reads it
+		var tr apply.Trace  // hoisted: the lifecycle log line below reads it
+		var threadID string // hoisted with it: serve hands it to the keeper
+		// preBody is what the pipeline's own components are about to receive as req.Input, BEFORE
+		// any of them — cache_aware_summarizer and extract_llm_sweep included — runs. Captured here,
+		// read by h.serve below, and stashed alongside the body actually forwarded: see the
+		// STALE-PREFIX GUARD comment on sentEntry in prefixask.go for why the two can diverge (PR
+		// #414's review of this follow-up, and PR #431's round 1) and why a caller checking coverage
+		// must compare against THIS, never against what a later component in the pipeline went on to
+		// rewrite.
+		var preBody []byte
 		// Where an expand answered in band on this turn is restored from the next turn on, when
 		// the config asks for fixed restore (#407). Read off the transcript apply is about to see,
 		// in the same coordinates the anchor is checked against on every later turn.
@@ -1157,6 +1184,19 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// runs, so an unconditional clear placed after it deletes the very candidate this
 			// request's own run just wrote.
 			pipelineStartedAt := time.Now()
+			// The thread is resolved INSIDE apply, once the session id is known and before the
+			// pipeline runs, so components see it on Ctx.Thread (cache_aware_summarizer keys its
+			// keep-alive candidate by it). Read off `orig`, the request as the agent sent it.
+			threadOf := func(sess string) thread.Result {
+				return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
+			}
+			// Snapshot the exact bytes the pipeline is about to normalize into req.Input for
+			// EVERY component, cache_aware_summarizer and extract_llm_sweep included — this is "as
+			// the pipeline received them", not "as the client originally sent them"
+			// (repairExpandErrors, AnswerStrayCalls and the force-model rewrite above may already
+			// have touched body), which is what makes it the right thing for a later component's
+			// own hash to agree with.
+			preBody = body
 			body, added, tr = h.applyMode(&reqInfo{
 				// cp.llmCtx: context-guru's OWN compaction-model spend under this context
 				// is charged to this request's row, and to no other tenant's.
@@ -1175,6 +1215,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				compactionPointSource: string(cpoint.Source),
 				rates:                 h.selfRates(r.Context(), gjson.GetBytes(body, "model").String()),
 				tn:                    tn,
+				threadOf:              threadOf,
 			})
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
@@ -1185,14 +1226,35 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// the pings during the idle span it just ended actually did. Both facts are
 			// needed BEFORE the row is priced — the ping count and the tokens the last ping
 			// refreshed are inputs to a dollar figure, not just a label.
-			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session)
+			//
+			// Per THREAD of the session (#423): the main agent, each subagent and each fork
+			// have their own cache entry, and only this request's thread was refreshed. Read
+			// off `orig`, the request as the agent sent it — the pipeline's own rewrite would
+			// break the prefix the fallback matches on.
+			th := tr.Thread
+			if !tr.ThreadResolved {
+				// apply returned before resolving the session's thread (no message list, an
+				// observe-mode or bypassed request): resolve it here, as before.
+				th = h.threadFor(r, tn.ID, tr.Session, orig, agentCompaction, lg)
+			}
+			threadID = th.ID
+			cp.noteThread(th)
+			// Issue #424's RECORD half: stash the PRISTINE body (as the agent sent it, same
+			// reason threadFor reads `orig` rather than the pipeline's rewrite) for finish()
+			// to scan AFTER this request has gone upstream — see noteWaitBody's own comment,
+			// and dashcapture.go's finish() for where the actual scan (waitcause.Tracker.
+			// Observe) now runs. This line itself costs one slice-header copy, not a scan.
+			cp.noteWaitBody(orig)
+			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
 			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
 			// Drop any cache_aware_summarizer keep-alive substitute registered off an EARLIER
 			// turn's conversation — but never the one this request's own pipeline run (above)
 			// may just have written: an unconditional clear here used to delete that candidate
 			// in the same call it was created, which is why keep-alive substitution could never
 			// actually fire. See ClearStaleKeepAliveCandidate's own comment.
-			offload.ClearStaleKeepAliveCandidate(tr.Session, pipelineStartedAt)
+			// Per THREAD (#423): the registry is keyed by session + thread, so another thread's
+			// request can never clear this thread's candidate.
+			offload.ClearStaleKeepAliveCandidate(thread.Key(tr.Session, threadID), pipelineStartedAt)
 			h.setLastSession(tr.Session)
 			if h.agg != nil && !bypassed {
 				h.agg.RecordAddedLatency(addedMs)
@@ -1284,7 +1346,11 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// emits it in a defer once the response is finished, so a request produces exactly
 		// one lifecycle line whichever way it ends — and the attrs are built here, once,
 		// rather than on the response path.
-		h.serve(w, r, provider, up, body, bypassed, cp, tn, tr.Session, anchor, lifecycleLogger(lg, tr, bypassed))
+		slg := lifecycleLogger(lg, tr, bypassed)
+		if threadID != thread.Primary {
+			slg = slg.With("thread", threadID)
+		}
+		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, anchor, slg)
 	}
 }
 
@@ -1462,7 +1528,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy, session string, anchor *expand.Anchor, lg *slog.Logger) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, anchor *expand.Anchor, lg *slog.Logger) {
 	wire := string(provider)
 	if up.path == "/v1/responses" {
 		wire = "responses"
@@ -1526,14 +1592,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// actually went upstream on the final round (an expand round rewrites it) and the
 		// prefix a ping would replay is the one the provider just hashed. Costs nothing when
 		// no tenant has opted in.
-		h.keeper.record(tn, session, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
+		h.keeper.record(tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache
 		// was COLD: this request has now either rewritten that prefix or failed trying to, and
 		// either way the deferral must resolve rather than wait indefinitely for a signal that
 		// may never come (see offload.ResolveDeferredCacheAwareSummary's own comment on why a
 		// failed forward still resolves it). Harmless, and nearly free, on the overwhelming
 		// majority of sessions that never deferred anything.
-		offload.ResolveDeferredCacheAwareSummary(session)
+		offload.ResolveDeferredCacheAwareSummary(session, threadID)
 		if sse {
 			// The same two facts to both sinks. The aggregator keeps the process-lifetime
 			// average; the dashboard row keeps the per-request pair, so "which model, which
@@ -1607,7 +1673,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// KEYED BY THE SCOPED SESSION ID, which is what serve receives (tr.Session) and what a
 			// component reads as Ctx.Session. Keying it by the raw header instead would make every
 			// Ask miss while the mechanism looked switched on.
-			h.sent.put(session, provider, body)
+			// Per THREAD (#423): a prefix ask reads the last body of ITS thread's conversation.
+			// Both bodies (#414/#431): preBody for CoversSpan, body for Ask's own append.
+			h.sent.put(thread.Key(session, threadID), provider, preBody, body)
 		}
 		if err != nil {
 			// LOG it, and record it on the captured row. An upstream failure used to be

@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +15,9 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -151,10 +155,10 @@ func TestKeepAliveSubstituteRespectsTheCostCapAndFallsBackToAPing(t *testing.T) 
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 	r.Header.Set("Authorization", "Bearer sk-caller-secret")
 	at := clock.now()
-	k.record(tn, "sess-1", at.Add(-time.Second), []byte(kaBody),
+	k.record(tn, "sess-1", "", at.Add(-time.Second), []byte(kaBody),
 		upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages",
 		http.StatusOK, Usage{CacheRead: 20000, CacheWrite: 0}, true)
-	k.record(tn, "sess-1", at, []byte(kaBody),
+	k.record(tn, "sess-1", "", at, []byte(kaBody),
 		upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages",
 		http.StatusOK, Usage{CacheRead: 20000, CacheWrite: 0}, true)
 	if k.Stats().Live != 1 {
@@ -459,5 +463,193 @@ func TestKeepAliveSummaryCallCountsAsOnePingWithThreeMaxPings(t *testing.T) {
 	}
 	if got := k.pings.Load(); got != 3 {
 		t.Errorf("pings = %d, want 3 total — one summary call plus two plain pings", got)
+	}
+}
+
+// #423 × #402: the summarizer's keep-alive candidate is one THREAD's conversation, so the
+// registry is keyed by session + thread. Each thread's ping uses its own candidate; another
+// thread's registration cannot replace it and another thread's request cannot clear it — including
+// the PR #426 review's race, a subagent request that started before the main thread registered.
+func TestKeepAliveSubstituteIsPerThread(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	mainModel := &fakeSummaryModel{out: "<summary>main thread so far.</summary>"}
+	subModel := &fakeSummaryModel{out: "<summary>subagent so far.</summary>"}
+	const sess = "sess-thread-cand"
+	register := func(th string, m *fakeSummaryModel) {
+		msg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
+		schema.SetMessageText(&msg, "conversation of thread "+th)
+		span := []bschemas.ChatMessage{msg}
+		call := func(ctx context.Context) (string, error) { return m.CompleteMessages(ctx, "", span) }
+		offload.RegisterThreadKeepAliveCandidateForTest(sess, th, st, call, "messages", span, 1, "", 0)
+		t.Cleanup(func() { offload.ClearKeepAliveCandidate(thread.Key(sess, th)) })
+	}
+	has := func(th string) bool {
+		_, _, _, ok := offload.KeepAliveSubstitute(thread.Key(sess, th))
+		return ok
+	}
+
+	// The review's race: the subagent's request starts, the main thread registers, then the
+	// subagent's request ends and clears stale candidates for ITS thread.
+	subStart := time.Now()
+	time.Sleep(2 * time.Millisecond)
+	register("", mainModel)
+	offload.ClearStaleKeepAliveCandidate(thread.Key(sess, "a:S"), subStart)
+	if !has("") {
+		t.Fatal("a subagent's request cleared the main thread's candidate")
+	}
+	// The subagent registers LATER; the main thread's candidate must survive it.
+	register("a:S", subModel)
+	if !has("") || !has("a:S") {
+		t.Fatalf("candidates after both registered: main %v, subagent %v", has(""), has("a:S"))
+	}
+
+	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	up := upstream{base: "http://up", path: "/v1/messages"}
+	rec := func(th string, at time.Time) {
+		for i := 0; i < 2; i++ {
+			k.record(tn, sess, th, at.Add(time.Duration(i)*time.Second), []byte(kaBody), up, r,
+				bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+		}
+	}
+	// The subagent goes idle first, so its ping comes due ALONE: it must run the SUBAGENT's call.
+	t0 := clock.now()
+	rec("a:S", t0.Add(-60*time.Second))
+	rec("", t0)
+	if n := k.sweep(t0.Add(-60*time.Second + 282*time.Second)); n != 1 {
+		t.Fatalf("first sweep fired %d pings, want 1 (the subagent's)", n)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && k.summarySubstituted.Load()+int64(fs.n()) < 1 {
+		time.Sleep(time.Millisecond)
+	}
+	if subModel.calls.Load() != 1 || mainModel.calls.Load() != 0 {
+		t.Fatalf("subagent's ping: subagent calls %d, main calls %d; want 1 and 0",
+			subModel.calls.Load(), mainModel.calls.Load())
+	}
+	// The main thread's ping later runs the MAIN thread's own call. Before #430 it fell back to a
+	// plain ping: the checkpoint was per session, so the subagent's commit read as "this thread
+	// already has a summary".
+	if n := k.sweep(t0.Add(282 * time.Second)); n != 1 {
+		t.Fatalf("second sweep fired %d pings, want 1 (the main thread's)", n)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && k.summarySubstituted.Load()+int64(fs.n()) < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	if subModel.calls.Load() != 1 {
+		t.Errorf("the main thread's ping ran the subagent's summary call (subagent calls %d)", subModel.calls.Load())
+	}
+	if mainModel.calls.Load() != 1 {
+		t.Errorf("the main thread's ping did not run the main thread's summary call (main calls %d): "+
+			"the subagent's checkpoint took its substitute away", mainModel.calls.Load())
+	}
+}
+
+// usageSummaryModel is a summary model that BILLS, through the ambient usage sink, as a real
+// client does. fakeSummaryModel records nothing, so a test built on it cannot see a double bill.
+type usageSummaryModel struct{ calls atomic.Int64 }
+
+func (m *usageSummaryModel) Complete(ctx context.Context, _ string) (string, error) {
+	return m.CompleteMessages(ctx, "", nil)
+}
+func (m *usageSummaryModel) CompleteMessages(ctx context.Context, _ string, _ []bschemas.ChatMessage) (string, error) {
+	m.calls.Add(1)
+	cheapmodel.ReplayUsage(ctx, "claude-sonnet-5", 281, 683, 0, 43400)
+	return "<summary>explored the handler, 3 tests fail.</summary>", nil
+}
+
+// #455: a keep-alive summary call is booked EXACTLY ONCE, on every path.
+//   - Committed: the keeper books it on the ping row it replaces (cost_usd, here the keeper's
+//     spend). Only a detail row is deferred, with zero ledger tokens, so the next turn's
+//     cg_llm_cost_usd does not count it again.
+//   - Not committed (cut-off reply): the keeper sends an ordinary ping and never books the call,
+//     so the call is deferred onto the next turn as before. Booking it nowhere would hide spend
+//     (#458 review, finding 1).
+func readDeferred(t *testing.T, st store.Store, session string) (ledgerIn int, calls []map[string]any) {
+	t.Helper()
+	b, ok := st.Get(store.UsagePrefix + session)
+	if !ok || len(b) == 0 {
+		return 0, nil
+	}
+	var u struct {
+		In    int              `json:"in"`
+		Calls []map[string]any `json:"calls"`
+	}
+	if err := json.Unmarshal(b, &u); err != nil {
+		t.Fatal(err)
+	}
+	return u.In, u.Calls
+}
+
+func TestKeepAliveSummaryCallIsBookedOnceOnThePingRow(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	price := modelinfo.Price{Input: 2e-6, CacheRead: 2e-7, CacheWrite: 2.5e-6, Output: 1e-5}
+	k.h.opts.Prices = fixedPrice{price}
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	model := &usageSummaryModel{}
+	kaCandidate(t, "sess-1", st, model)
+
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	spentBefore := math.Float64frombits(k.spentUSD.Load())
+	if n := k.sweep(clock.advance(281 * time.Second)); n != 1 {
+		t.Fatalf("the due ping did not fire (%d)", n)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if k.summarySubstituted.Load() != 1 || model.calls.Load() != 1 || fs.n() != 0 {
+		t.Fatalf("substituted=%d calls=%d ordinary=%d, want 1, 1, 0 — the path under test never ran",
+			k.summarySubstituted.Load(), model.calls.Load(), fs.n())
+	}
+	// Booked once on the ping side: the keeper's spend grew by exactly the priced call.
+	want := price.CostWithCacheWrite1h(281, 43400, 0, 683, 0)
+	if got := math.Float64frombits(k.spentUSD.Load()) - spentBefore; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("ping-row cost = %v, want the priced call %v", got, want)
+	}
+	// Not booked again on the next turn, but still listed as a detail row.
+	in, calls := readDeferred(t, st, "sess-1")
+	if in != 0 {
+		t.Fatalf("the committed call's tokens were also deferred (in=%d): it would be billed twice", in)
+	}
+	if len(calls) != 1 || calls[0]["billed_elsewhere"] != true || calls[0]["trigger"] != "keepalive_substitute_billed" {
+		t.Fatalf("want one billed_elsewhere detail row for extraction_calls, got %v", calls)
+	}
+}
+
+// truncSummaryModel bills like a real client but returns a cut-off summary (no </summary>), so
+// the call is paid and never commits. From the #458 review's probe.
+type truncSummaryModel struct{ calls atomic.Int64 }
+
+func (m *truncSummaryModel) Complete(ctx context.Context, _ string) (string, error) {
+	return m.CompleteMessages(ctx, "", nil)
+}
+func (m *truncSummaryModel) CompleteMessages(ctx context.Context, _ string, _ []bschemas.ChatMessage) (string, error) {
+	m.calls.Add(1)
+	cheapmodel.ReplayUsage(ctx, "claude-sonnet-5", 281, 4096, 0, 43400)
+	return "<summary>explored the handler, 3 tests fa", nil
+}
+
+func TestKeepAliveSummaryCallThatDoesNotCommitIsDeferred(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	model := &truncSummaryModel{}
+	kaCandidate(t, "sess-1", st, model)
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	k.sweep(clock.advance(281 * time.Second))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && fs.n() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if model.calls.Load() != 1 || k.summarySubstituted.Load() != 0 || fs.n() != 1 {
+		t.Fatalf("calls=%d substituted=%d ordinary=%d, want 1, 0, 1 — the path under test never ran",
+			model.calls.Load(), k.summarySubstituted.Load(), fs.n())
+	}
+	in, calls := readDeferred(t, st, "sess-1")
+	if in != 281 || len(calls) != 1 || calls[0]["billed_elsewhere"] == true {
+		t.Fatalf("the paid, uncommitted call must be deferred onto the next turn with its tokens "+
+			"(in=281, one ordinary detail row); got in=%d calls=%v", in, calls)
 	}
 }
