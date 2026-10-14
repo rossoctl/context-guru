@@ -15,8 +15,11 @@ For the calling account, over its own history in the dashboard DB:
    - `K1`, `K2`, `K3`: ping-everyone blankets, for comparison;
    - adapted: `auto` (one plan for the account, shrunk toward the fleet: the auto campaign builder) and one plan per segment of
      `by_dow`, `by_hour`, `by_prefix`, `by_model`, `by_client`, `by_stop_reason` (shrunk toward the fleet the same way);
-3. what the keep-alive actually did (`observed`: real pings, their cost, the misses they avoided, from the dashboard's ledger);
-4. a choice: keep the default, or enforce an adapted option through the campaign builder.
+3. for `/context-guru:save-more cache`: what the current keep-alive saved so far (`to_date`, observed), the gain of the change on offer
+   on the held-out basis (`gain`, against the default and the current setting, per held-out week too), and a Monday..Sunday x 00..23 UTC grid
+   of that gain (`heatmap`, one per option under `option_heatmaps`);
+4. what the keep-alive actually did (`observed`: real pings, their cost, the misses they avoided, from the dashboard's ledger);
+5. a choice: keep the default, or enforce an adapted option through the campaign builder.
 
 ## Replay
 
@@ -45,7 +48,7 @@ SessionEnd is scored as always delivered at once, also an upper bound.
 - in-sample (`in_sample` of every option): the whole window, plans fitted on the same rows; optimistic for adapted plans.
 - the builder gate, per adapted option (`held_out.builder_gate`): `shipGate`, the function the builder itself uses, on the same rows and units:
   net > 0 and a paired interval above zero against the default, blanket K3 and the fleet plan.
-- `recommendation` is set only for an adapted option that passes the gate; otherwise `summary` says plainly that nothing beats the default, or
+- `recommendation` (with `ci95` and `per_week_usd`) is set only for an adapted option that passes the gate; otherwise `summary` says plainly that nothing beats the default, or
   what the leading option fails against, and to keep the default. `disagreement` is one line when money and the gate disagree on the leader.
 
 ## Enforcement
@@ -68,7 +71,8 @@ cancelling pings after the session's last response in any model, and successors 
 Mounted beside `/api/*` when the dashboard is on. Scope: the caller's own account (`adaptPrincipal`): hosted, the dashboard cookie (a manager may
 pass `?tenant=`) or the account's own proxy token; single-tenant, direct loopback only (no forwarding headers), as `/stats`.
 
-- `GET /api/adapt/cache?since=&until=` (or `days=N`; `session_end=0`) -> `kind`, `version`, `summary`, `relative`, `class`, `method`, `basis_id`,
+- `GET /api/adapt/cache?since=&until=` (or `days=N`; `session_end=0`) -> `kind`, `version`, `summary`, `relative`, `gain`, `to_date`,
+  `heatmap`, `option_heatmaps`, `class`, `method`, `basis_id`,
   `window`, `current`, `default`, `best`, `options[]`, `recommendation`, `disagreement`, `warnings`, `upper_bound`, `calibration`, `observed`,
   `population`, `assumptions`, `held_out`.
 - `POST /api/adapt/cache/apply {"option", "basis", "force"}` -> `ok`, `applied`, `previous`, `effective`, `note`, `undo`, `campaign_id`,
@@ -81,3 +85,8 @@ One report or apply runs at a time per process (429 otherwise).
 - Segment crosses (account x daypart, hour-of-week): finer segments lose most on held-out data; one feature at a time only.
 - Account time zones: segments are UTC.
 - Manager time-window strategies and per-session overrides are not replayed in `current`; a model campaign is reported as not replayable.
+
+## Release note
+
+The keep-alive builder and this report start every account's plan from a shared prior: aggregate keep-alive outcomes (request timing, token
+counts, cache hits) of all accounts on the same service, shrunk toward the account's own history. No account's content is read.

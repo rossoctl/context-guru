@@ -264,6 +264,35 @@ func TestAdaptReportGateMatchesTheBuilder(t *testing.T) {
 	if r, _ := rep["recommendation"].(map[string]any); r == nil || r["option"] != "by_stop_reason" {
 		t.Errorf("recommendation %v, want by_stop_reason", rep["recommendation"])
 	}
+	// the save-more fields: savings to date (observed), the gain on the held-out basis, a Mon..Sun x 00..23 grid that adds up to that gain
+	if r, _ := rep["recommendation"].(map[string]any); r != nil && (r["per_week_usd"] == nil || r["ci95"] == nil) {
+		t.Errorf("recommendation without per_week_usd / ci95: %v", r)
+	}
+	if td, _ := rep["to_date"].(map[string]any); td == nil || td["class"] != "observed" || td["saved_usd"] == nil {
+		t.Errorf("to_date %v", rep["to_date"])
+	}
+	gain, _ := rep["gain"].(map[string]any)
+	hm, _ := rep["heatmap"].(map[string]any)
+	if gain == nil || hm == nil || gain["option"] != "by_stop_reason" || hm["option"] != "by_stop_reason" {
+		t.Fatalf("gain %v / heatmap option %v", gain, hm["option"])
+	}
+	grid := hm["values"].([]any)
+	total := 0.0
+	for _, row := range grid {
+		cells := row.([]any)
+		if len(cells) != 24 {
+			t.Fatalf("a heatmap row has %d hours", len(cells))
+		}
+		for _, c := range cells {
+			total += c.(float64)
+		}
+	}
+	if want := gain["vs_default"].(map[string]any)["usd"].(float64); len(grid) != 7 || math.Abs(total-want) > 0.01*24*7 {
+		t.Errorf("the grid sums to %.2f, the gain vs the default is %.2f", total, want)
+	}
+	if _, ok := rep["option_heatmaps"].(map[string]any)["K3"]; !ok {
+		t.Error("no per-option heatmap for K3")
+	}
 	for _, opt := range []string{"auto", "by_stop_reason"} {
 		w, rep = f.do(t, http.MethodGet, "/api/adapt/cache?days=30", "", jar)
 		w, out := f.do(t, http.MethodPost, "/api/adapt/cache/apply", `{"option":"`+opt+`","basis":"`+rep["basis_id"].(string)+`"}`, jar)

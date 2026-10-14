@@ -444,6 +444,39 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		ci := c["ci95"].([2]float64)
 		summary += fmt.Sprintf(" Your current setting is $%.2f [%.2f, %.2f] against the default on the same decisions.", c["usd"], ci[0], ci[1])
 	}
+	// Per held-out week, for the plugin's "a week" line: the held-out slice spans from the cut to the window end.
+	weeks := float64(until-evals[""].cut) / (7 * 86400e3)
+	perWeek := func(usd float64) any {
+		if weeks <= 0 {
+			return nil
+		}
+		return r2(usd / weeks)
+	}
+	if rec, ok := recommendation.(map[string]any); ok {
+		rec["ci95"], rec["per_week_usd"] = gateCI, perWeek(gateDiff)
+	}
+	// The gain of the change on offer (the recommendation, else the held-out leader), against the default and against the current setting:
+	// held-out, paired by session, the same replay for both, so it is always on the same basis as the table.
+	gainID := bestID
+	if rec, ok := recommendation.(map[string]any); ok {
+		gainID = rec["option"].(string)
+	}
+	var gain any
+	if vd := pair(gainID, "default"); vd != nil {
+		gain = map[string]any{"option": gainID, "recommended": recommendation != nil, "vs_default": vd, "vs_current": pair(gainID, "current"),
+			"per_week_vs_default_usd": perWeek(vd["usd"].(float64)), "class": "counterfactual", "held_out": true, "upper_bound": true}
+	}
+	heatmaps := map[string]any{}
+	for id, hp := range heldPer {
+		if id != "default" {
+			heatmaps[id] = adaptHeatmap(facts, test, hp, defHeld)
+		}
+	}
+	var heatmap any
+	if hm, ok := heatmaps[gainID]; ok {
+		heatmap = map[string]any{"metric": "net_usd", "option": gainID, "tz": "UTC", "rows": "Mon..Sun", "cols": "00..23",
+			"label": "what " + gainID + " adds over the default, by day of week and hour of the request (held-out, upper bound)", "values": hm}
+	}
 	current := "current"
 	if !curOK {
 		current = ""
@@ -489,7 +522,12 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		"observed": map[string]any{"class": "observed", "bill_usd": r2(bill + led.PingUSD), "pings": led.Pings, "ping_usd": r2(led.PingUSD), "misses_avoided": led.MissesAvoided,
 			"saved_usd_ceiling": r2(led.SavedUSD), "net_usd": r2(led.NetUSD),
 			"note": "what the keep-alive actually did in this window (the dashboard's ledger); saved is a ceiling: another session with the same prefix could have kept the entry warm"},
-		"relative":     relative,
+		"relative": relative,
+		"gain":     gain,
+		"heatmap":  heatmap, "option_heatmaps": heatmaps,
+		"to_date": map[string]any{"class": "observed", "since": since, "until": until, "saved_usd": r2(led.NetUSD), "saved_ceiling_usd": r2(led.SavedUSD),
+			"ping_usd": r2(led.PingUSD), "pings": led.Pings,
+			"label": "what your current keep-alive saved so far: the rewrites its pings avoided (a ceiling) minus what the pings cost, as billed"},
 		"disagreement": strings.Join(disagree, ""), // one line, or "" when gateway dollars and the gate agree
 		"calibration": map[string]any{
 			"observed_ping_usd_mean": meanOr(led.PingUSD, float64(led.Pings)), "replay_ping_usd_mean": meanOr(curPingUSD, curPings),
@@ -793,4 +831,18 @@ func (h *Handler) managedCampaign(pc *predCampaign, who adaptWho) bool {
 	// A writer whose account no longer exists reads as unmanaged: a deleted manager no longer holds the account's campaign.
 	t, err := reg.Get(by)
 	return err == nil && t.IsManager()
+}
+
+// adaptHeatmap is an option's held-out net minus the default's, summed by the request's day of week (Monday first) and hour, UTC.
+func adaptHeatmap(facts []rowFacts, idx []int, per, def []float64) [7][24]float64 {
+	var m [7][24]float64
+	for j, i := range idx {
+		m[(facts[i].dow+6)%7][facts[i].hour] += per[j] - def[j]
+	}
+	for d := range m {
+		for h := range m[d] {
+			m[d][h] = r2(m[d][h])
+		}
+	}
+	return m
 }
