@@ -278,3 +278,48 @@ func TestTheChartAndTheTablesSpeakOneColourLanguage(t *testing.T) {
 		}
 	}
 }
+
+// TestTheChartDoesNotHideTheWasteItIsAboout guards against the tautology that shipped: the chart
+// drew a row only for a capability invoked at least once, and an invoked capability is `keep` by
+// definition -- so every drawn row was grey, every time, whatever the palette said. Reported as
+// "why all come grey".
+//
+// Worse than monochrome: the rows it dropped were exactly the ones this page exists to show. On
+// the measured store, 15 ever-invoked rows were drawn and 43 never-invoked ones -- the actual
+// waste -- were filtered out, so the chart showed what the reader USES and hid what they are
+// paying for and never touch.
+//
+// Asserted on the source because there is no DOM here. The rule: insRollup must not drop a row
+// for having no invocations.
+func TestTheChartDoesNotHideTheWasteItIsAbout(t *testing.T) {
+	js := stripJSComments(readUI(t, "ui/insights.js"))
+
+	i := strings.Index(js, "function insRollup")
+	if i < 0 {
+		t.Fatal("insRollup is gone; it is the function that builds the chart's rows")
+	}
+	end := strings.Index(js[i:], "\n}")
+	if end < 0 {
+		t.Fatal("cannot find the end of insRollup")
+	}
+	body := js[i : i+end]
+
+	// The filter that caused it. Any form of "skip this row when it was never called".
+	for _, bad := range []string{
+		"if (!calls.some((v) => v > 0)) continue",
+		"if (!calls.some(v => v > 0)) continue",
+	} {
+		if strings.Contains(body, bad) {
+			t.Errorf("insRollup still drops never-invoked rows (%s).\nThose rows ARE the waste: "+
+				"a capability carried on every request and never called is the finding this page "+
+				"reports. Dropping them leaves only `keep` rows, so the chart is grey by "+
+				"construction and the money is invisible.", bad)
+		}
+	}
+	// And it must still draw a row that was only ever CARRIED, which is the positive form of the
+	// same rule -- a mutation that drops the rows some other way has to fail too.
+	if !strings.Contains(body, "carried") {
+		t.Error("insRollup no longer reads the carried series, so a carried-but-never-invoked " +
+			"capability cannot appear in the chart at all")
+	}
+}

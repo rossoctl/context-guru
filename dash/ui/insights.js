@@ -844,12 +844,58 @@ function insRollup(tl) {
   for (const name in tl.items) {
     const it = tl.items[name];
     const calls = roll(it.calls);
-    if (!calls.some((v) => v > 0)) continue;
-    rows.push({ name, calls, carried: roll(it.carried), firstUsed: it.first_used_ts || 0 });
+    const carried = roll(it.carried);
+    /* EVERY CARRIED ROW, invoked or not.
+     *
+     * This filtered to `calls.some(v => v > 0)` — drawn only if it was ever invoked — and that
+     * was a tautology once hue carried the verdict: an invoked capability is `keep` by
+     * definition, so every drawn row came out grey, every time, whatever the palette said.
+     * Reported as "why all come grey".
+     *
+     * The worse half is which rows it dropped. On the measured store it drew the 15 capabilities
+     * the reader USES and hid the 43 they carry on every request and never call — the waste this
+     * whole page reports. A row with carriage and no calls is not an empty row; it is the
+     * finding. */
+    if (!calls.some((v) => v > 0) && !carried.some((v) => v > 0)) continue;
+    rows.push({ name, calls, carried, firstUsed: it.first_used_ts || 0,
+      used: calls.reduce((x, y) => x + y, 0) });
   }
-  rows.sort((a, b) => (a.firstUsed - b.firstUsed) ||
-    (b.calls.reduce((x, y) => x + y, 0) - a.calls.reduce((x, y) => x + y, 0)));
-  return { cols, rows, width, days: n };
+  /* WASTE FIRST, then the progression.
+   *
+   * Never-invoked rows sort to the top, heaviest carriage first, because they are the answer to
+   * "what am I paying for and not using". Below them the invoked rows keep their first-use order,
+   * which is what produces the diagonal that shows a phase change.
+   *
+   * Ordering by first use alone would bury the waste: a never-invoked capability has no first
+   * use, so it would sort to one end as an accident of a missing timestamp rather than as a
+   * deliberate statement about what matters. */
+  rows.sort((a, b) => {
+    if (!a.used !== !b.used) return a.used ? 1 : -1;          // unused rows first
+    if (!a.used) {
+      return b.carried.reduce((x, y) => x + y, 0) - a.carried.reduce((x, y) => x + y, 0);
+    }
+    return (a.firstUsed - b.firstUsed) || (b.used - a.used);
+  });
+  /* Capped — but with a GUARANTEED SHARE OF EACH KIND, which a plain head of the list does not
+   * give. Sorting waste first and taking the top 28 produced a chart of nothing but waste: the
+   * capabilities actually in use were all below the cut, so the reader lost the baseline that
+   * makes the waste legible. "Everything is amber" is as uninformative as "everything is grey".
+   *
+   * So the cap is split: most of it goes to the worst waste, and a reserved slice keeps the most
+   * active in-use rows, which is the comparison the picture is for. Both groups keep their own
+   * ordering, and the used rows stay at the bottom so the first-use diagonal still reads. */
+  const unused = rows.filter((r) => !r.used);
+  const inUse = rows.filter((r) => r.used);
+  const keepUsed = Math.min(inUse.length, Math.max(4, Math.round(INS_MAX_ROWS * 0.3)));
+  const keepUnused = Math.min(unused.length, INS_MAX_ROWS - keepUsed);
+  /* The most ACTIVE in-use rows, not the earliest, since the slice is about showing live traffic
+   * next to the dead weight. Re-sorted back to first-use order afterwards for the diagonal. */
+  const shownUsed = inUse.slice().sort((a, b) => b.used - a.used).slice(0, keepUsed)
+    .sort((a, b) => (a.firstUsed - b.firstUsed) || (b.used - a.used));
+  const shown = unused.slice(0, keepUnused).concat(shownUsed);
+  const hidden = Math.max(0, rows.length - shown.length);
+  return { cols, rows: shown, width, days: n, hidden, total: rows.length,
+    shownUnused: keepUnused, totalUnused: unused.length };
 }
 
 
@@ -888,6 +934,12 @@ function insRollup(tl) {
 const INS_MAX_COLS = 60;
 const INS_ROW_PX = 26;
 const INS_CHART_MIN_H = 240;
+/* The most rows the chart will draw. Showing every carried capability made the chart 2,174px tall
+ * on a real store — taller than the window, so the reader scrolled past the picture to reach the
+ * tables it is meant to explain, and the diagonal that tells the story was spread over two
+ * screens. Rows are already sorted worst-waste-first, so a cap keeps the finding and drops the
+ * tail; the tables stay complete, and the count of what is not shown is reported. */
+const INS_MAX_ROWS = 28;
 
 /* The instance, kept so a re-render resizes rather than leaks: ECharts holds a canvas/SVG root
  * and its own event listeners, and dropping the DOM node without dispose() keeps both alive. */
@@ -925,8 +977,8 @@ function insChart() {
   if (!tl || !tl.buckets.length) return null;
   const g = insRollup(tl);
   if (!g.rows.length) {
-    return el('p', { class: 'empty', text: 'No capability was invoked in this range, so there is ' +
-      'nothing to chart. The tables below still list what you were carrying.' });
+    return el('p', { class: 'empty', text: 'Nothing was carried in this range, so there is ' +
+      'nothing to chart. The tables below still list your inventory.' });
   }
 
   const host = el('div', { class: 'ins-echart' });
@@ -936,7 +988,16 @@ function insChart() {
   /* Rendered after the node is in the document, because ECharts measures its container and a
    * detached div has no width. */
   setTimeout(() => insDrawChart(host, g, tl), 0);
-  return host;
+  if (!g.hidden) return host;
+
+  /* The chart is capped, so it SAYS it is capped. Rows are sorted worst-waste-first, so what is
+   * cut is the quietest tail — but a reader who counts 28 rows against a table of 79 needs to
+   * know which they are looking at, or the picture reads as the whole inventory. */
+  return el('div', {}, host,
+    el('p', { class: 'hint', text: 'Showing ' + g.shownUnused + ' of ' + g.totalUnused +
+      ' never-invoked capabilities, heaviest first, alongside the most active ones you do use — ' +
+      'so the waste has something to be read against. ' + g.hidden + ' lighter rows are not ' +
+      'charted; all ' + g.total + ' are in the tables below.' }));
 }
 
 function insDrawChart(host, g, tl) {
@@ -1016,7 +1077,22 @@ function insDrawChart(host, g, tl) {
         if (live) byVd[vd].push({ value: [x, ri, v], itemStyle: { opacity: insOpacityFor(v, peak) } });
         else usedOut.push([x, ri, v]);
       } else if (r.carried[ci] > 0) {
-        (live ? idle : idleOut).push([x, ri, 0]);
+        if (!live) { idleOut.push([x, ri, 0]); return; }
+        /* CARRIED, NOT CALLED — and this is where the money is.
+         *
+         * A day like this was billed: the declaration went up in the system prompt and nothing
+         * reached for it. So when the row's verdict says that carriage is removable, the cell
+         * takes the VERDICT colour at a low opacity rather than the neutral wash: a faint grey
+         * everywhere was why the chart looked monochrome and why the waste was invisible in it.
+         *
+         * Low opacity, not full: the strong mark is reserved for a real invocation, and a solid
+         * red block on a row that was never called would overstate a single day's share of the
+         * cost. It is a tint of the finding, which is what it is. */
+        if (vd === 'remove' || vd === 'stale' || vd === 'consider') {
+          byVd[vd].push({ value: [x, ri, 0], itemStyle: { opacity: 0.3 } });
+        } else {
+          idle.push([x, ri, 0]);
+        }
       }
     });
   });
