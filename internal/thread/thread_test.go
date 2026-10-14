@@ -639,13 +639,13 @@ func withModel(body []byte, model string) []byte {
 }
 
 // When two threads tie on shared messages and on tools, a compaction request joins the one on
-// its own model, even when the other spoke last. Here a fork on another model is the more recent.
-// The fork names itself with the agent header, as Claude Code's forks do.
+// its own model, even when the other spoke last. Here a second conversation on another model,
+// which shares only the first two messages, is the more recent.
 func TestACompactionTieGoesToTheThreadOnTheSameModel(t *testing.T) {
 	tr := testTracker()
-	tr.Resolve("t\x00s", "", withModel(withTools(conv("task", "a1", "u2")), "opus"), false)
-	if id := tr.Resolve("t\x00s", "fork", withModel(withTools(conv("task", "a1", "a fork")), "sonnet"), false).ID; id == Primary {
-		t.Fatal("precondition: the fork took the main thread's id")
+	tr.Resolve("t\x00s", "", withModel(withTools(conv("task", "a1", "u2", "a2", "u3", "a3")), "opus"), false)
+	if id := tr.Resolve("t\x00s", "", withModel(withTools(conv("task", "a1", "other", "b2", "v3", "b3")), "sonnet"), false).ID; id == Primary {
+		t.Fatal("precondition: the second conversation took the main thread's id")
 	}
 	compact := withModel(withTools(conv("task", "a1", "u2 + Your task is to create a detailed summary of this conversation.")), "opus")
 	if id := tr.Resolve("t\x00s", "", compact, true).ID; id != Primary {
@@ -726,5 +726,70 @@ func TestAToolLessCompactingThreadDoesNotTakeTheMainAgent(t *testing.T) {
 	}
 	if id := tr.Resolve("t\x00s", "", ccBody(true, ccTurn{"user", []string{"a new conversation"}}, ccTurn{"system", []string{"x"}}), false).ID; id == classifier {
 		t.Fatalf("a main-agent request took the tool-less classifier thread %q", id)
+	}
+}
+
+// texts builds n message texts m0..m(n-1).
+func texts(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("m%d", i)
+	}
+	return out
+}
+
+func with(prefix []string, more ...string) []string {
+	return append(append([]string{}, prefix...), more...)
+}
+
+// #519 review: a forked subagent names itself with the agent header and carries its parent's
+// messages plus its own. A header-less main turn whose tail was rewritten shares as much with the
+// fork as with the main thread, and must still stay on the main thread.
+func TestARewrittenTailDoesNotJoinAHeaderThread(t *testing.T) {
+	tr := testTracker()
+	main := texts(10)
+	tr.Resolve("t\x00s", "", withTools(conv(main...)), false)
+	if id := tr.Resolve("t\x00s", "f1", withTools(conv(with(main, "directive")...)), false).ID; id != "a:f1" {
+		t.Fatalf("precondition: fork got %q", id)
+	}
+	if id := tr.Resolve("t\x00s", "", withTools(conv(with(main[:9], "m9 rewritten", "x")...)), false).ID; id != Primary {
+		t.Fatalf("main turn with a rewritten tail got %q, want the main thread's id", id)
+	}
+}
+
+// The same for a compaction: it must not mark the fork compacting, or the post-compaction request
+// takes the fork's id.
+func TestACompactionDoesNotMarkAHeaderThread(t *testing.T) {
+	tr := testTracker()
+	main := texts(8)
+	tr.Resolve("t\x00s", "", withTools(conv(main...)), false)
+	tr.Resolve("t\x00s", "f1", withTools(conv(with(main, "directive")...)), false)
+	if id := tr.Resolve("t\x00s", "", withTools(conv(with(main[:7], "m7 + the compaction prompt")...)), true).ID; id != Primary {
+		t.Fatalf("compaction request got %q, want the main thread's id", id)
+	}
+	if id := tr.Resolve("t\x00s", "", withTools(conv("This session is being continued", "ok", "go")), false).ID; id != Primary {
+		t.Fatalf("post-compaction request got %q, want the main thread's id", id)
+	}
+}
+
+// The rewritten-tail rule is for the main agent only: a tool-less request that repeats the main
+// thread's last request with a changed last message is a side request, not the main thread's turn.
+func TestAToolLessRewrittenTailDoesNotJoinTheMainThread(t *testing.T) {
+	tr := testTracker()
+	main := texts(6)
+	tr.Resolve("t\x00s", "", withTools(conv(main...)), false)
+	if id := tr.Resolve("t\x00s", "", conv(with(main[:5], "a side task")...), false).ID; id == Primary {
+		t.Fatal("a tool-less request joined the main thread through the rewritten-tail rule")
+	}
+}
+
+// "All but the last one or two messages" is the bound: a request that shares all but three is not
+// the same conversation, even when it shares more than half.
+func TestARequestSharingAllButThreeMessagesIsANewThread(t *testing.T) {
+	tr := testTracker()
+	main := texts(8)
+	tr.Resolve("t\x00s", "", withTools(conv(main...)), false)
+	if id := tr.Resolve("t\x00s", "", withTools(conv(with(main[:5], "x5", "x6", "x7")...)), false).ID; id == Primary {
+		t.Fatal("a request sharing 5 of 8 messages joined the main thread")
 	}
 }

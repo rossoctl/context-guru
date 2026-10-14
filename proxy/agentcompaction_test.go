@@ -89,6 +89,13 @@ func TestAgentCompactionIsBypassed(t *testing.T) {
 			wantBypass: true,
 		},
 		{
+			// The OpenAI dialect's equivalent of a trailing system message.
+			name:       "compact before a trailing developer message",
+			lastMsg:    map[string]any{"role": "user", "content": ccThisConversationPrompt},
+			after:      []map[string]any{{"role": "developer", "content": "be brief"}},
+			wantBypass: true,
+		},
+		{
 			// Skipping trailing system messages must not reach past an assistant turn.
 			name:       "agent prompt before an assistant turn and a system message",
 			before:     []map[string]any{{"role": "user", "content": ccCompactPrompt}},

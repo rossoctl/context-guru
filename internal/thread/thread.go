@@ -370,14 +370,17 @@ func (s *sessionState) mostShared(sums []uint64, mass []int) *threadState {
 }
 
 // compactionParent returns the thread an agent compaction request summarizes when it extends no
-// thread: the one sharing the longest run of leading messages with it. A thread that declares
-// tools wins over one that does not, because compaction is the main agent's act and a side
+// thread: the one sharing the longest run of leading messages with it, among the threads no agent
+// header named. A thread that declares tools wins over one that does not, because compaction is the main agent's act and a side
 // request can share the same leading run; then preferOnTie decides. nil when no thread shares
 // even the first message.
 func (s *sessionState) compactionParent(sums []uint64, model string) *threadState {
 	var best *threadState
 	bestLCP := 0
 	for _, th := range s.threads {
+		if headerThread(th) {
+			continue
+		}
 		lcp := 0
 		for lcp < len(th.sums) && lcp < len(sums) && th.sums[lcp] == sums[lcp] {
 			lcp++
@@ -403,7 +406,7 @@ func (s *sessionState) rewrittenTailParent(sums []uint64, model string) *threadS
 	var best *threadState
 	bestLCP := 0
 	for _, th := range s.threads {
-		if !th.tools || th.n == 0 {
+		if !th.tools || th.n == 0 || headerThread(th) {
 			continue
 		}
 		lcp := 0
@@ -421,6 +424,12 @@ func (s *sessionState) rewrittenTailParent(sums []uint64, model string) *threadS
 	}
 	return best
 }
+
+// headerThread reports whether the agent named this thread with its header. Both parent searches
+// above run only for a request WITHOUT that header, and such a request is never a named thread's:
+// a forked subagent carries its parent's messages plus its own, so it shares the same leading run
+// as the main thread and could otherwise win the search (#519 review).
+func headerThread(th *threadState) bool { return strings.HasPrefix(th.id, "a:") }
 
 // preferOnTie reports whether a beats b when the stronger evidence ties: the thread whose last
 // request named this request's model first, then the most recent.
