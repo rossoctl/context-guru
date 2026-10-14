@@ -223,9 +223,6 @@
   background: var(--bg-raised); color: var(--fg); max-width: 34ch;
 }
 .ins-proj .hint { margin: 0; }
-/* One project recorded: stated as prose. A one-entry dropdown is a control whose only possible
-   outcome is no change. */
-.ins-proj-one { margin: 0 0 var(--sp-3); }
 
 /* ── the chart host and the range banner ──────────────────────────────────
  * ECharts draws into .ins-echart and owns everything inside it, including the dataZoom slider

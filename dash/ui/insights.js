@@ -1379,13 +1379,17 @@ function insSelectedCols(g, since, until) {
  * "not enough evidence yet" rather than "remove".
  */
 function insProjectPicker() {
-  /* Nothing to choose between: one project, or none recorded. Drawn as a line of prose rather
-   * than a one-entry dropdown, which would be a control whose only outcome is no change. */
-  if (!insProjects || insProjects.length < 2) {
-    if (!insProjects || !insProjects.length) return el('span', {});
-    return el('p', { class: 'hint ins-proj-one', text: 'Every request recorded so far came from ' +
-      insProjects[0] + '.' });
-  }
+  /* ONE FOLDER IS STILL A CHOICE, because the UNATTRIBUTED requests are the other side of it.
+   *
+   * This stood down whenever fewer than two folders were recorded, reasoning that a one-entry
+   * dropdown is a control whose only outcome is no change. That was wrong and it shipped: on the
+   * real store there was one folder and 2,985 unattributed rows — every request written before
+   * the column existed — so there were two scopes worth comparing and no control to compare them
+   * with. It also printed "Every request recorded so far came from X", which was false for 2,985
+   * of 2,987 rows.
+   *
+   * The only honest stand-down is when nothing has been recorded at all. */
+  if (!insProjects || !insProjects.length) return el('span', {});
 
   const sel = el('select', {
     'data-testid': 'insights-project',
@@ -1411,11 +1415,18 @@ function insProjectPicker() {
     if (v === insProject) o.setAttribute('selected', 'selected');
     sel.appendChild(o);
   }
+  /* The hint names the EVIDENCE each scope rests on, which is the thing a reader cannot see for
+   * themselves. `unattributed` needs its own wording: those requests predate the project column,
+   * so they cannot be attributed later and the option is not going to empty itself. */
+  let note = 'Every project pooled, which is the strongest evidence.';
+  if (insProject === 'none') {
+    note = 'Requests recorded before projects were tracked. They cannot be attributed now.';
+  } else if (insProject) {
+    note = 'Verdicts below use this project\u2019s sessions only.';
+  }
   return el('div', { class: 'ins-proj' },
     el('label', {}, 'Project ', sel),
-    el('span', { class: 'hint', text: insProject
-      ? 'Verdicts below use this project\u2019s sessions only.'
-      : 'Every project pooled, which is the strongest evidence.' }));
+    el('span', { class: 'hint', text: note }));
 }
 
 /* insShortProject labels an option with the folder's own name, keeping the full path as the

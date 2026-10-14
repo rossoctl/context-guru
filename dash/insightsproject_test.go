@@ -76,3 +76,37 @@ func TestAllProjectsIsTheDefaultAndStaysSelectable(t *testing.T) {
 		t.Error("insights.js still carries a NUL sentinel; it cannot survive a URL round trip")
 	}
 }
+
+// ONE PROJECT IS STILL A CHOICE, because the unattributed rows are the other side of it.
+//
+// The picker hid itself whenever fewer than two project FOLDERS were recorded, on the reasoning
+// that a one-entry dropdown is a control whose only outcome is no change. That reasoning was
+// wrong, and it shipped: on the real store there is one folder and 2,985 unattributed rows —
+// every request written before the column existed — so there were two scopes worth comparing and
+// no control to compare them with. It also printed "Every request recorded so far came from X",
+// which was false for 2,985 of 2,987 rows.
+//
+// So the test is about the GUARD, not the wording: the picker may only stand down when there is
+// genuinely nothing to choose between.
+func TestThePickerAppearsWhenThereIsAnythingToChooseBetween(t *testing.T) {
+	code := stripJSComments(readUI(t, "ui/insights.js"))
+	at := strings.Index(code, "function insProjectPicker")
+	if at < 0 {
+		t.Fatal("insProjectPicker is gone")
+	}
+	end := strings.Index(code[at:], "\n}")
+	body := code[at : at+end]
+
+	// The old guard counted folders alone. Nothing may stand down on that count by itself.
+	if strings.Contains(body, "insProjects.length < 2") {
+		t.Error("the picker hides itself whenever fewer than two FOLDERS are recorded, which " +
+			"ignores the unattributed requests — on a store with one folder and thousands of " +
+			"unattributed rows there are two scopes to compare and no control to compare them")
+	}
+	// And the claim that every request came from one folder must be gone with it: it is only
+	// true when nothing is unattributed, which the picker cannot know from the folder list.
+	if strings.Contains(code, "Every request recorded so far came from") {
+		t.Error("insights.js still claims every request came from one folder; that is false " +
+			"whenever any request was recorded before the project column existed")
+	}
+}
