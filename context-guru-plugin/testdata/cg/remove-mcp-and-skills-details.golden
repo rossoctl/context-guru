@@ -1,7 +1,7 @@
 ╭─ Remove MCP servers and skills ─────────────────────────────────────────────────────────────────╮
-│ So far: the 2 items you already removed saved $4.20 (measured, since 2026-09-15).               │
+│ So far: the 2 items you already removed saved $4.50 (measured, since 2026-09-15).               │
 │ Change: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more would add about $7.33 │
-│ a week (likely $6.10 to $8.40).                                                                 │
+│ a week (range $6.10 to $8.40).                                                                  │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
 9 declared items were never used; filtering the 6 with enough evidence would have saved $31.40.
 
@@ -25,8 +25,12 @@ Never used in this window:
   skill       release-notes           $0.20  ░░░░░░░░░░
 
 Removed earlier, measured since:
-  MCP server  jira         2026-09-15  $3.10
-  skill       old-release  2026-09-15  $1.10
+  MCP server   jira                                        2026-09-15  $3.10
+  skill        old-release                                 2026-09-15  $1.10
+  not matched  not matched to an item on the current list  2026-09-15  $0.30
+
+Estimated (removed in the client, not measured by the proxy):
+  MCP server  linear  2026-09-15  $0.90
 
   counterfactual · unused declarations priced on the requests that carried them ·
   2026-09-08..2026-10-08 · 64 sessions, 5,210 requests
@@ -38,4 +42,4 @@ Recommended: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more (
 Why: declared in 5+ sessions over 7+ days and never called
 Apply it? Say yes, or run: /context-guru:remove-mcp-and-skills apply tools remove-sufficient@8c21e0d4
 
-Question: Remove these 6 items, saving ≈$7.33/week?
+Question: Remove these 6 items, saving ≈$7.33/week? It pays back in about 2 weeks.

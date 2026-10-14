@@ -256,7 +256,7 @@ func TestCGNoProxy(t *testing.T) {
 func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
 	for _, c := range []string{"save-more", "remove-mcp-and-skills", "adapt"} {
 		body := readFileString(t, filepath.Join("skills", c, "SKILL.md"))
-		if !strings.Contains(body, "allowed-tools: Bash(python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/cg.py\" "+c+":*)\n") {
+		if !regexp.MustCompile(`(?m)^allowed-tools: Bash\(python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/cg\.py" ` + c + `:\*\)(, Bash\(python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/settings\.py" record-run ` + c + `\))?$`).MatchString(body) {
 			t.Errorf("%s must pre-approve exactly its own read, `cg.py %s:*`", c, c)
 		}
 	}
@@ -374,7 +374,7 @@ func TestSaveMoreWidthASCIIAndColour(t *testing.T) {
 			cgGolden(t, "save-more-ascii-80", out)
 		}
 		for _, ln := range strings.Split(out, "\n") {
-			run := strings.Contains(ln, "/context-guru:")
+			run := strings.Contains(ln, "/context-guru:") || strings.HasPrefix(ln, "Question:") // copied as it is: never wrapped
 			if !run && len([]rune(ln)) > 79 {
 				t.Errorf("%s: line wider than 80 columns: %q", c, ln)
 			}
@@ -392,6 +392,30 @@ func TestSaveMoreWidthASCIIAndColour(t *testing.T) {
 		}
 		if got := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(colour, ""); got != plain {
 			t.Errorf("%s: colour changes the text, not only its colour", c)
+		}
+	}
+}
+
+// The status line's weekly tip reads when each command last ran. Each skill records a run with settings.py
+// record-run under its own name, pre-approved as exactly that command, and only after a read that printed a
+// report: never for a failed or refused run, never for an apply or revert.
+func TestSaveMoreSkillsRecordTheirRuns(t *testing.T) {
+	for _, c := range []string{"save-more", "remove-mcp-and-skills"} {
+		body := readFileString(t, filepath.Join("skills", c, "SKILL.md"))
+		call := "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py\" record-run " + c
+		if !strings.Contains(body, "```bash\n"+call+"\n```") {
+			t.Errorf("%s: no %q block", c, call)
+		}
+		if !strings.Contains(body, "Bash("+call+")") {
+			t.Errorf("%s: the run record must be pre-approved as exactly %q", c, call)
+		}
+		for _, rule := range []string{"Skip that for a failed or refused run", "never run it for an apply or a revert"} {
+			if !strings.Contains(body, rule) {
+				t.Errorf("%s: missing the rule %q", c, rule)
+			}
+		}
+		if i, j := strings.Index(body, "cg.py\" "+c+" $ARGUMENTS"), strings.LastIndex(body, call); i < 0 || j < i {
+			t.Errorf("%s: the run is recorded before the read runs", c)
 		}
 	}
 }
@@ -418,7 +442,7 @@ func TestDocsExamplesAreTheGoldens(t *testing.T) {
 		"home": "status", "savings": "savings", "cache-warm": "cache", "cache-cold": "cache",
 		"waste": "waste", "session": "session", "doctor": "doctor",
 		"save-more": "save-more", "save-more-ascii-80": "save-more", "apply-config": "save-more", "revert-config": "save-more",
-		"apply-gate": "save-more",
+		"apply-gate":            "save-more",
 		"remove-mcp-and-skills": "remove-mcp-and-skills", "apply-tools-async": "remove-mcp-and-skills",
 	} {
 		g := strings.TrimRight(string(cgRead(t, "cg", golden+".golden")), "\n")

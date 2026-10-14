@@ -73,12 +73,13 @@
   "change": "preset conservative -> medium",
   "net_delta_usd": 6.4,
   "per_week_usd": 1.49,
-  "ci95": [
-   0.4,
-   2.7
-  ],
   "effective": "now",
-  "reason": "highest net on your own sessions, after its own model spend"
+  "reason": "highest net on your own sessions, after its own model spend",
+  "gain_usd": 6.4,
+  "gain_range_usd": [
+   1.7,
+   11.6
+  ]
  },
  "warnings": [
   "The replay covers 14% of requests; on the rest the presets were not compared.",

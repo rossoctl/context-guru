@@ -512,8 +512,8 @@ def signed(x: float | None) -> str:
 
 
 def ci(r) -> str:
-    """A 95% range in words-light form, or nothing when the report has none."""
-    return f"(likely {money(r[0])} to {money(r[1])})" if isinstance(r, (list, tuple)) and len(r) == 2 else ""
+    """A 95% confidence interval, named as one, or nothing when the report has none."""
+    return f"(95% CI {money(r[0])} to {money(r[1])})" if isinstance(r, (list, tuple)) and len(r) == 2 else ""
 
 
 def adapt_error(api: Api, kind: str, status: int, doc: dict | None, applying: bool = False) -> str:
@@ -576,14 +576,18 @@ def apply_line(kind: str, token: str, o: dict, force: bool = False) -> str:
 
 
 def week_range(rec: dict, w: dict) -> str:
-    """The weekly figure's range, in the words its kind deserves: a 95% interval is "likely", bounds are "between"."""
-    if isinstance(rec.get("ci95"), (list, tuple)) and len(rec["ci95"]) == 2:
-        lo, hi = rec["ci95"] if rec.get("per_week_usd") is not None else [x / days_of(w) * 7 for x in rec["ci95"]]
-        return f" (likely {money(lo)} to {money(hi)})"
-    for key, scale in (("range_per_week_usd", 1.0), ("gain_range_usd", 7 / days_of(w))):
+    """The weekly figure's range, named for what it is: a 95% CI is a "95% CI", a bound is a "range". Never one
+    for the other. A window figure is scaled by the same factor that turned the change into its weekly figure."""
+    pw = per_week(rec, w)
+    for key, name, total in (("ci95", "95% CI", rec.get("net_delta_usd")), ("range_per_week_usd", "range", None),
+                             ("gain_range_usd", "range", rec.get("gain_usd", rec.get("net_delta_usd")))):
         r = rec.get(key)
-        if isinstance(r, (list, tuple)) and len(r) == 2 and any(r):
-            return f" (between {money(r[0] * scale)} and {money(r[1] * scale)})"
+        if not (isinstance(r, (list, tuple)) and len(r) == 2 and any(r)):
+            continue
+        k = 1.0 if total is None else (pw / total if pw is not None and total else None)
+        if k is None:
+            continue
+        return f" ({name} {money(r[0] * k)} to {money(r[1] * k)})"
     return ""
 
 
@@ -628,7 +632,7 @@ def heatmap(hm: dict, e) -> list[str]:
     top = max([v for r in vals for v in r if v is not None] + [0.0])
     ramp = e.g["ramp"]
     names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    label, tz = hm.get("label") or "Saved by hour", hm.get("tz", "UTC")
+    label, tz = hm.get("label") or "Saved by hour", hm.get("tz") or "UTC"
     out = [f"  {label}" + ("" if tz in label else f" ({tz})"),
            "        0     6     12    18   23"]
     for name, r in zip(names, vals):
@@ -741,9 +745,16 @@ def render_kind(kind: str, rep: dict, o: dict, e) -> list[str]:
                                          bar((i.get("usd") or 0) / top, 10, e)] for i in shown], "llrl")]
     removed = rep.get("removed") or []
     if removed and o["details"]:
-        L += ["", "Removed earlier, measured since:"] + ["  " + r for r in T.cols(
-            [[ITEM_KINDS.get(i.get("kind"), i.get("kind", "")), i["name"], day(i["since_ms"], o) if i.get("since_ms") else "",
-              money(i.get("saved_usd"))] for i in removed], "lllr")]
+        # Measured (the proxy's filter) and estimated (removed in the client) stay apart and are never added
+        # together. The "unattributed" row is the measured gap not matched to one item: kept, so the rows add up.
+        row = lambda i: [ITEM_KINDS.get(i.get("kind"), "not matched" if i.get("kind") == "unattributed" else i.get("kind", "")),  # noqa: E731
+                         i["name"], day(i["since_ms"], o) if i.get("since_ms") else "", money(i.get("saved_usd"))]
+        meas = [i for i in removed if i.get("class", "observed") != "estimated"]
+        est = [i for i in removed if i.get("class") == "estimated"]
+        if meas:
+            L += ["", "Removed earlier, measured since:"] + ["  " + r for r in T.cols([row(i) for i in meas], "lllr")]
+        if est:
+            L += ["", "Estimated (removed in the client, not measured by the proxy):"] + ["  " + r for r in T.cols([row(i) for i in est], "lllr")]
     if o["details"]:
         held = [x for x in rep.get("options") or [] if isinstance(x.get("held_out"), dict) and x["held_out"].get("vs_default_usd") is not None]
         if held:
@@ -751,7 +762,9 @@ def render_kind(kind: str, rep: dict, o: dict, e) -> list[str]:
             L += ["  " + r for r in T.cols([[x["id"], signed(x["held_out"]["vs_default_usd"]), ci(x["held_out"].get("vs_default_ci95")),
                                              {True: "passes the go-live check", False: "fails the go-live check"}.get(
                                                  (x["held_out"].get("builder_gate") or {}).get("pass"), "")] for x in held], "lrll")]
-        notes = [f"  {x['id']}: {x['detail']}" for x in rep.get("options") or [] if x.get("detail")]
+        notes = []
+        for x in rep.get("options") or []:
+            notes += ([f"  {x['id']}: {x['detail']}"] if x.get("detail") else []) + ([f"  {x['id']} plan: {x['plan']}"] if x.get("plan") else [])
         L += [""] + notes if notes else []
     w = rep.get("window") or {}
     if w.get("since"):
@@ -777,7 +790,9 @@ def tools_question(rep: dict, e) -> str | None:
     if not rec:
         return None
     n = rec.get("items_n") or len([i for i in rep.get("items") or [] if i.get("kind") in ITEM_KINDS])
-    return f"Question: Remove these {n} items, saving {approx(e)}{money(per_week(rec, rep.get('window') or {}))}/week?"
+    pb = rec.get("payback_weeks", rep.get("payback_weeks"))
+    back = f" It pays back in about {round(pb)} weeks." if isinstance(pb, (int, float)) and pb > 1 else ""
+    return f"Question: Remove these {n} items, saving {approx(e)}{money(per_week(rec, rep.get('window') or {}))}/week?{back}"
 
 
 # --- changes ----------------------------------------------------------------------------------

@@ -24,10 +24,10 @@ Codex: `$context-guru-save-more`, with the same words.
 Each report opens with a card that answers two questions in plain words: what your **current** setting saved so far, and what the **recommended** change would add, per week, with its likely range. Then a ranked table of every option, and the caveats.
 
 ```text
-╭─ Save more: config ─────────────────────────────────────────────────────────────────────────╮
-│ So far: your current config saved $9.40 in 30 days (observed).                              │
-│ Change: preset conservative -> medium would add about $1.49 a week (likely $0.40 to $2.70). │
-╰─────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Save more: config ────────────────────────────────────────────────────────────────────────╮
+│ So far: your current config saved $9.40 in 30 days (observed).                             │
+│ Change: preset conservative -> medium would add about $1.49 a week (range $0.40 to $2.70). │
+╰────────────────────────────────────────────────────────────────────────────────────────────╯
 medium would have saved $6.40 more than your current conservative preset on the requests that could
 be replayed.
 
@@ -53,12 +53,12 @@ Apply it? Say yes, or run: /context-guru:save-more apply config medium@a1b2c3d4
 
 ╭─ Save more: cache ──────────────────────────────────────────────────────────────────────────────╮
 │ So far: your current keep-alive strategy saved $31.10 in 30 days (observed).                    │
-│ Change: cache strategy 5-min-ping -> adaptive would add about $2.89 a week (likely $0.72 to     │
-│ $4.90).                                                                                         │
+│ Change: cache strategy 5-min-ping -> adaptive would add about $2.89 a week (95% CI $0.72 to     │
+│ $4.89).                                                                                         │
 │ Before -> after: $300.00 billed on these sessions, $287.00 with the change.                     │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
 switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
-  best vs default +$12.40 (likely $3.10 to $21.00)  ·  best vs current +$12.40 (likely $3.10 to
+  best vs default +$12.40 (95% CI $3.10 to $21.00)  ·  best vs current +$12.40 (95% CI $3.10 to
   $21.00)
 
       option                            saved  spent     net
@@ -70,7 +70,7 @@ switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
   saved: what it avoided paying · spent: what it paid itself · net = saved - spent, on your past
   sessions
 
-  What adaptive keep-alive adds over the default, by hour (UTC)
+  What adaptive keep-alive adds over the default, by hour (Europe/Amsterdam)
         0     6     12    18   23
   Mon   ░░░ ░░ ░░▒░░▒█░░▓█▓░░ ░░
   Tue   ░░░░░░░░▓░░░▓▒▒▓▒▒█░░░░░
@@ -105,7 +105,7 @@ It reads the same at 80 columns and without Unicode or colour (`CG_ASCII=1`, `NO
 ```text
 +- Save more: config ---------------------------------------------------------+
 | So far: your current config saved $9.40 in 30 days (observed).              |
-| Change: preset conservative -> medium would add about $1.49 a week (likely  |
+| Change: preset conservative -> medium would add about $1.49 a week (range   |
 | $0.40 to $2.70).                                                            |
 +-----------------------------------------------------------------------------+
 medium would have saved $6.40 more than your current conservative preset on the
@@ -137,12 +137,12 @@ Apply it? Say yes, or run: /context-guru:save-more apply config medium@a1b2c3d4
 | So far: your current keep-alive strategy saved $31.10 in 30 days            |
 | (observed).                                                                 |
 | Change: cache strategy 5-min-ping -> adaptive would add about $2.89 a week  |
-| (likely $0.72 to $4.90).                                                    |
+| (95% CI $0.72 to $4.89).                                                    |
 | Before -> after: $300.00 billed on these sessions, $287.00 with the change. |
 +-----------------------------------------------------------------------------+
 switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
-  best vs default +$12.40 (likely $3.10 to $21.00)  |  best vs current +$12.40
-  (likely $3.10 to $21.00)
+  best vs default +$12.40 (95% CI $3.10 to $21.00)  |  best vs current +$12.40
+  (95% CI $3.10 to $21.00)
 
       option                            saved  spent     net
   *   adaptive    Adaptive keep-alive  $51.20  $7.70  $43.50  ############
@@ -153,7 +153,7 @@ switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
   saved: what it avoided paying | spent: what it paid itself | net = saved -
   spent, on your past sessions
 
-  What adaptive keep-alive adds over the default, by hour (UTC)
+  What adaptive keep-alive adds over the default, by hour (Europe/Amsterdam)
         0     6     12    18   23
   Mon   ... .. ..:..:#..*#*.. ..
   Tue   ........*...*::*::#.....
@@ -277,7 +277,7 @@ The report:
 - `saved_usd` is gross (versus no lever at all), `spend_usd` is what the option itself spends, `net_usd = saved_usd - spend_usd`.
 - `recommendation` is `null` when the current setting is already the best, or when there is too little data to say; `summary` then says which.
 - Optional extras the screen shows when present: `relative` (paired differences such as `best_vs_default`, each `{usd, ci95}`, printed right under the summary), `disagreement` (one line, shown under the summary), per-option `held_out` (`vs_default_usd`, `vs_default_ci95`, `builder_gate.pass`; shown under `details`), `unavailable` (an option that could not be evaluated: `net_usd` is `null`, never 0), and `calibration`.
-- `to_date` is what the current setting saved so far (for tools: what earlier removals saved), the first line of the card; missing means not measured, never 0. `per_week_usd` and `ci95` give the card's second line. `heatmap` (cache) and `removed` (tools) are drawn when present. `custom=1` (config) adds searched combinations to the shipped presets.
+- `to_date` is what the current setting saved so far (for tools: what earlier removals saved), the first line of the card; missing means not measured, never 0. `per_week_usd` gives the card's second line, with its spread: `ci95` is a 95% confidence interval and is shown as one; `range_per_week_usd`, `gain_range_usd` and per-option `range_usd` are bounds and are shown as a range, never as a confidence interval. `payback_weeks` above 1 is said in the tools question. `heatmap` (cache) and `removed` (tools) are drawn when present. `custom=1` (config) adds searched combinations to the shipped presets.
 - `items` is used by `tools` only, and never lists a built-in tool; the screen drops any item whose kind is not `mcp_server`, `mcp_tool` or `skill`. `sessions_helped`, `sessions_hurt`, `detail`, `per_month_usd` and `reason` are optional.
 
 The apply answer is `{"ok": true, "applied": "<id>", "previous": "<id>", "effective": "...", "note": "one line", "undo": {"option": "<id>", "basis": "<basis_id>"}}`. A body of `{"option": "revert"}` (no basis) undoes the last change made through this route; its answer has the same shape. `"force": true` is sent only after the user said yes a second time, when an earlier answer had `"ok": false` with `"force_available": true`. Errors are a non-2xx status with `{"error": "a sentence"}`: 400 for an unknown option, 409 when `basis` no longer matches the current report, 401 or 403 when the caller is not allowed to change the setting, 429 when too many reports or changes run at once. `basis` is required (400 without it). The command always sends one: for an option typed without one it reads the current report first and sends that report's `basis_id`. `undo` may carry its own `basis` (the report after the write), which the `Undo:` line includes. 501 means the proxy has no configuration it can write; its `error` says what to do instead.

@@ -116,12 +116,12 @@ you carry and never use (built-in tools are never listed).
 ```
 ╭─ Save more: cache ──────────────────────────────────────────────────────────────────────────────╮
 │ So far: your current keep-alive strategy saved $31.10 in 30 days (observed).                    │
-│ Change: cache strategy 5-min-ping -> adaptive would add about $2.89 a week (likely $0.72 to     │
-│ $4.90).                                                                                         │
+│ Change: cache strategy 5-min-ping -> adaptive would add about $2.89 a week (95% CI $0.72 to     │
+│ $4.89).                                                                                         │
 │ Before -> after: $300.00 billed on these sessions, $287.00 with the change.                     │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
 switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
-  best vs default +$12.40 (likely $3.10 to $21.00)  ·  best vs current +$12.40 (likely $3.10 to
+  best vs default +$12.40 (95% CI $3.10 to $21.00)  ·  best vs current +$12.40 (95% CI $3.10 to
   $21.00)
 
       option                            saved  spent     net

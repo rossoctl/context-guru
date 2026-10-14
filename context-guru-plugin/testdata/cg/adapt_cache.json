@@ -32,7 +32,8 @@
    "billed_usd": 287,
    "saved_usd": 51.2,
    "spend_usd": 7.7,
-   "net_usd": 43.5
+   "net_usd": 43.5,
+   "plan": "09:00-18:00 weekdays: 2 pings; otherwise: none"
   },
   {
    "id": "none",
@@ -57,8 +58,8 @@
   "reason": "it had the highest net on your own sessions",
   "per_week_usd": 2.89,
   "ci95": [
-   0.72,
-   4.9
+   3.1,
+   21.0
   ]
  },
  "warnings": [
@@ -100,7 +101,7 @@
   "metric": "net_usd",
   "label": "What adaptive keep-alive adds over the default, by hour",
   "option": "adaptive",
-  "tz": "UTC",
+  "tz": "Europe/Amsterdam",
   "values": [
    [
     0.02,
