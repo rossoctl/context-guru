@@ -200,7 +200,8 @@ func TestAdaptToolsEnvelope(t *testing.T) {
 		doc.Options[1].SpendUSD != 1 || doc.Options[1].NetUSD != 2 || doc.Items[0].LastUsedMS != nil ||
 		doc.WouldAddUSD != 2 || doc.Recommendation.SavedToDateUSD != 3 || doc.Recommendation.RewriteUSD != 1 ||
 		math.Abs(doc.Recommendation.SavedPerWeekUSD-0.7) > 1e-9 ||
-		doc.Recommendation.Question != "Remove a? It would save about $0.70 a week ($3.00 since 2026-06-01), after a one-off cache rewrite of about $1.00." {
+		doc.Recommendation.Question != "Remove 1 item (a), saving about $0.70 a week? The one-off cache rewrite costs about $1.00, so it pays back in about 2 weeks." ||
+		doc.PaybackWeeks == nil || math.Abs(*doc.PaybackWeeks-1/0.7) > 1e-9 || doc.Recommendation.ItemsN != 1 {
 		t.Fatalf("doc %+v rec %+v", doc, doc.Recommendation)
 	}
 	remove := map[string]string{}
@@ -322,7 +323,30 @@ func TestAdaptToolsMeasuresWhatARemovalSaved(t *testing.T) {
 		sv.Items[0].RemoveAs != "mcp__srv" || math.Abs(sv.Items[0].USD-want) > 1e-9 || sv.Items[0].Requests != 2 {
 		t.Fatalf("saved so far %+v, want $%v on 2 requests for mcp__srv", doc.SavedSoFar, want)
 	}
+	if td := doc.ToDate; td == nil || td.Class != "observed" || td.Items != 1 || math.Abs(td.SavedUSD-want) > 1e-9 ||
+		len(doc.Removed) != 1 || doc.Removed[0].Name != "srv" || doc.Removed[0].Requests != 2 || doc.Removed[0].SinceMS != day(0) {
+		t.Fatalf("to_date %+v removed %+v", doc.ToDate, doc.Removed)
+	}
 	if math.Abs(doc.SavedSoFar.TotalUSD-want) > 1e-9 || len(doc.Items) != 0 || doc.WouldAddUSD != 0 {
 		t.Fatalf("doc %+v", doc)
+	}
+}
+
+// Payback: a rewrite under a week of saving goes unmentioned; one beyond the whole window means
+// keep as is, and the payback is still reported.
+func TestAdaptToolsPayback(t *testing.T) {
+	item := func(usd float64) []AdaptToolsItem {
+		return []AdaptToolsItem{{Name: "a", RemoveAs: "mcp__a", USD: usd, Sufficient: true}}
+	}
+	quick := &AdaptToolsDoc{RewriteUSD: 0.1, Window: AdaptToolsWindow{Since: day(0), Until: day(28)}, Items: item(4)} // $1/week
+	quick.finish(ToolFilterState{})
+	if quick.Recommendation == nil || strings.Contains(quick.Recommendation.Question, "pays back") ||
+		math.Abs(*quick.PaybackWeeks-0.1) > 1e-9 {
+		t.Fatalf("quick payback: %+v", quick.Recommendation)
+	}
+	slow := &AdaptToolsDoc{RewriteUSD: 5, Window: AdaptToolsWindow{Since: day(0), Until: day(28)}, Items: item(4)} // 5 weeks > 4
+	slow.finish(ToolFilterState{})
+	if slow.Recommendation != nil || slow.Best != "keep" || math.Abs(*slow.PaybackWeeks-5) > 1e-9 {
+		t.Fatalf("payback beyond the window must keep as is: best %s rec %+v", slow.Best, slow.Recommendation)
 	}
 }

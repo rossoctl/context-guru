@@ -21,6 +21,7 @@ package dash
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"net/http"
 	"regexp"
 	"sort"
@@ -109,6 +110,13 @@ type AdaptToolsRecommendation struct {
 	SavedToDateUSD  float64  `json:"saved_to_date_usd"`
 	SavedPerWeekUSD float64  `json:"saved_per_week_usd"`
 	RewriteUSD      float64  `json:"rewrite_usd"`
+	// For the shared renderer: ItemsN is len(Remove); PerWeekUSD the steady weekly saving (an
+	// estimate, the same figure as SavedPerWeekUSD); RangePerWeekUSD its low/high bounds when the
+	// declaration sets of older requests were inferred (bounds, not a confidence interval).
+	ItemsN          int       `json:"items_n"`
+	PerWeekUSD      float64   `json:"per_week_usd"`
+	RangePerWeekUSD []float64 `json:"range_per_week_usd,omitempty"`
+	PaybackWeeks    *float64  `json:"payback_weeks"`
 }
 
 // AdaptToolsSaved is what removals ALREADY made have saved, measured from the request rows rather
@@ -118,6 +126,25 @@ type AdaptToolsSaved struct {
 	Filter   AdaptToolsSavedPart `json:"filter"`
 	Client   AdaptToolsSavedPart `json:"client"`
 	Method   string              `json:"method"`
+}
+
+// AdaptToolsToDate is what earlier removals saved, measured (class observed).
+type AdaptToolsToDate struct {
+	SavedUSD float64 `json:"saved_usd"`
+	Since    int64   `json:"since"`
+	Until    int64   `json:"until"`
+	Class    string  `json:"class"`
+	Items    int     `json:"items"`
+	Label    string  `json:"label"`
+}
+
+// AdaptToolsRemovedRow is one earlier removal's measured saving.
+type AdaptToolsRemovedRow struct {
+	Kind     string  `json:"kind"`
+	Name     string  `json:"name"`
+	SinceMS  int64   `json:"since_ms"`
+	SavedUSD float64 `json:"saved_usd"`
+	Requests int     `json:"requests"`
 }
 
 // AdaptToolsSavedPart is one route a removal took: the proxy filter, or the client itself.
@@ -168,6 +195,12 @@ type AdaptToolsDoc struct {
 	// recommended change would add on top of it (estimated, net of its one-off rewrite).
 	SavedSoFar  AdaptToolsSaved `json:"saved_so_far"`
 	WouldAddUSD float64         `json:"would_add_usd"`
+	// PaybackWeeks is how many weeks of saving the recommended-set removal's one-off cache rewrite
+	// costs; null when there is no such set or no week of history to rate it by.
+	PaybackWeeks *float64 `json:"payback_weeks"`
+	// ToDate and Removed are SavedSoFar in the shared renderer's shape.
+	ToDate  *AdaptToolsToDate      `json:"to_date"`
+	Removed []AdaptToolsRemovedRow `json:"removed"`
 	// RewriteUSD is the one-off cost of removing anything: the next request re-writes the
 	// cached prefix instead of reading it. Priced on the latest priced request in scope (its
 	// whole prompt, at write minus read), which is the most it can cost a session.
@@ -660,6 +693,7 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 	if out.SavedSoFar, err = d.adaptToolsSaved(f, price, state.Removed); err != nil {
 		return nil, err
 	}
+	out.ToDate, out.Removed = adaptToolsToDate(out.SavedSoFar)
 	out.Coverage, out.RewriteUSD = scan.Coverage, scan.RewriteUSD
 	if f.Since == 0 {
 		out.Window.Since = scan.Since
@@ -668,6 +702,7 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 		out.Window.Until = scan.Until
 	}
 	out.Window.Sessions, out.Window.Requests = scan.Coverage.Sessions, scan.Coverage.Requests
+	out.ToDate.Until = out.Window.Until
 	for key, c := range scan.Items {
 		it := *meta[key]
 		it.Tokens, it.Sessions, it.Requests, it.FirstTS, it.LastTS = c.Tokens, c.Sessions, c.Requests, c.FirstTS, c.LastTS
@@ -697,7 +732,7 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 // recommended change, the basis id an apply must match, and the caveats.
 func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 	var all, enough []string
-	var allUSD, enoughUSD float64
+	var allUSD, enoughUSD, enoughLow, enoughHigh float64
 	from := time.UnixMilli(out.Window.Since).UTC().Format("2006-01-02")
 	to := time.UnixMilli(out.Window.Until).UTC().Format("2006-01-02")
 	for i := range out.Items {
@@ -707,6 +742,7 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 		all, allUSD = append(all, it.RemoveAs), allUSD+it.USD
 		if it.Sufficient {
 			enough, enoughUSD = append(enough, it.RemoveAs), enoughUSD+it.USD
+			enoughLow, enoughHigh = enoughLow+it.USDLow, enoughHigh+it.USDHigh
 		}
 	}
 	out.Current, out.Default, out.Best = "keep", "keep", "keep"
@@ -737,6 +773,12 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 	// Only items that meet the filter's own evidence bar are recommended: "unused in this
 	// window" is hindsight, and an item seen in a handful of sessions says little about the next.
 	days := float64(out.Window.Until-out.Window.Since) / float64(24*time.Hour/time.Millisecond)
+	// Payback: how many weeks of the saving the one-off cache rewrite costs. Beyond the history
+	// window (the rewrite costs more than the whole window saved) the answer is to keep as is.
+	if len(enough) > 0 && days >= 1 && enoughUSD > 0 {
+		w := out.RewriteUSD / (enoughUSD / days * 7)
+		out.PaybackWeeks = &w
+	}
 	switch {
 	case len(all) == 0:
 		out.Summary = "Every MCP server, MCP tool and skill you declared was used in this window."
@@ -762,7 +804,11 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 			rec.SavedPerWeekUSD = enoughUSD / days * 7
 		}
 		rec.Remove, rec.SavedToDateUSD, rec.RewriteUSD = enough, enoughUSD, out.RewriteUSD
-		rec.Question = adaptToolsQuestion(enough, rec.SavedPerWeekUSD, enoughUSD, from, out.RewriteUSD, days >= 1)
+		rec.ItemsN, rec.PerWeekUSD, rec.PaybackWeeks = len(enough), rec.SavedPerWeekUSD, out.PaybackWeeks
+		if days >= 1 && enoughHigh-enoughLow >= 0.005 {
+			rec.RangePerWeekUSD = []float64{enoughLow / days * 7, enoughHigh / days * 7}
+		}
+		rec.Question = adaptToolsQuestion(enough, rec.SavedPerWeekUSD, enoughUSD, from, out.RewriteUSD, out.PaybackWeeks)
 		out.Recommendation = rec
 		out.WouldAddUSD = rec.NetDeltaUSD
 	}
@@ -786,8 +832,9 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 	}
 }
 
-// adaptToolsQuestion is the recommendation as one question: the set, the saving, the one-off.
-func adaptToolsQuestion(remove []string, perWeek, toDate float64, since string, rewrite float64, weekly bool) string {
+// adaptToolsQuestion is the recommendation as one question: the set, the weekly saving, and the
+// one-off rewrite, saying plainly when it takes more than a week to pay back.
+func adaptToolsQuestion(remove []string, perWeek, toDate float64, since string, rewrite float64, payback *float64) string {
 	names := make([]string, 0, 3)
 	for _, n := range head(remove, 3) {
 		names = append(names, strings.TrimPrefix(strings.TrimPrefix(n, skills.RemovePrefix), "mcp__"))
@@ -796,11 +843,19 @@ func adaptToolsQuestion(remove []string, perWeek, toDate float64, since string, 
 	if len(remove) > 3 {
 		what += fmt.Sprintf(" and %d more", len(remove)-3)
 	}
-	saving := usdText(toDate) + " since " + since
-	if weekly {
-		saving = "about " + usdText(perWeek) + " a week (" + saving + ")"
+	n := fmt.Sprintf("%d items", len(remove))
+	if len(remove) == 1 {
+		n = "1 item"
 	}
-	return fmt.Sprintf("Remove %s? It would save %s, after a one-off cache rewrite of about %s.", what, saving, usdText(rewrite))
+	q := fmt.Sprintf("Remove %s (%s), saving about %s a week? ", n, what, usdText(perWeek))
+	if payback == nil {
+		q = fmt.Sprintf("Remove %s (%s), saving %s since %s? ", n, what, usdText(toDate), since)
+	}
+	q += "The one-off cache rewrite costs about " + usdText(rewrite)
+	if payback != nil && *payback > 1 {
+		q += fmt.Sprintf(", so it pays back in about %.0f weeks", math.Ceil(*payback))
+	}
+	return q + "."
 }
 
 const adaptToolsSavedMethod = "Filter: every request the proxy filter acted on, the removed declarations' " +
@@ -879,6 +934,28 @@ func (d *DB) adaptToolsSaved(f Filter, price func(string) (modelinfo.Price, bool
 	}
 	out.TotalUSD = out.Filter.USD + out.Client.USD
 	return out, nil
+}
+
+// adaptToolsToDate is SavedSoFar in the shared renderer's shape: one measured total and a row
+// per earlier removal.
+func adaptToolsToDate(sv AdaptToolsSaved) (*AdaptToolsToDate, []AdaptToolsRemovedRow) {
+	td := &AdaptToolsToDate{SavedUSD: sv.TotalUSD, Class: "observed",
+		Label: "what your earlier removals saved so far", Since: sv.Filter.Since}
+	rows := []AdaptToolsRemovedRow{}
+	for _, it := range sv.Filter.Items {
+		rows = append(rows, AdaptToolsRemovedRow{Kind: it.Kind, Name: it.Name, SinceMS: it.Since,
+			SavedUSD: it.USD, Requests: it.Requests})
+	}
+	for _, it := range sv.Client.Items {
+		rows = append(rows, AdaptToolsRemovedRow{Kind: it.Kind, Name: it.Name, SinceMS: it.Since, SavedUSD: it.USD})
+	}
+	for _, r := range rows {
+		if r.SinceMS > 0 && (td.Since == 0 || r.SinceMS < td.Since) {
+			td.Since = r.SinceMS
+		}
+	}
+	td.Items = len(rows)
+	return td, rows
 }
 
 func usdText(x float64) string {

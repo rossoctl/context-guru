@@ -589,9 +589,12 @@ saving anything.
 
 `recommendation` carries the best option as one question to ask (`question`), with the set it removes,
 what it would have saved over the window and per week, and the one-off cache rewrite it costs.
-`would_add_usd` is that saving net of the rewrite.
+`would_add_usd` is that saving net of the rewrite. `payback_weeks` is how many weeks of that saving the
+rewrite costs; the question says "pays back in about N weeks" when it is more than one, and when it is
+longer than the history window the recommendation is to keep everything as is.
 
-`saved_so_far` is what removals already made have saved, measured rather than estimated:
+`saved_so_far` (and, in the shared adapt shape, `to_date` and one `removed` row per item) is what removals
+already made have saved, measured rather than estimated:
 
 - **Filter.** The inventory is read from the request body before the filter runs, so every request the
   filter acted on records both the declaration set the client sent (`decl_digest`) and the tokens the
