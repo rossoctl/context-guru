@@ -278,43 +278,59 @@ func TestAutoRefreshSwapRechecksTheModeUnderTheLock(t *testing.T) {
 	}
 }
 
-// The auto builder's tenant rows do not ride on the capped fleet read: an account with 4 requests, older than other tenants' 6 that fill a cap of
-// 6, still gets all 4 of its own rows, and the build says the fleet read was truncated.
-func TestAutoDatasetReadsTheTenantsOwnRowsPastTheFleetCap(t *testing.T) {
+// The auto builder's tenant rows do not ride on the capped fleet read: accounts with 4 and 3 requests, older than another tenant's 6 that fill a
+// cap of 6, each get all their own rows; a row in both reads counts once; one tenant's rows never leak into another's build (each tenant's
+// read is dropped before the next); and the build says the fleet read was truncated.
+func TestAutoRowsForReadsTheTenantsOwnRowsPastTheFleetCap(t *testing.T) {
 	f, _ := newCampaignFixture(t, "ship", "parity.model.json")
 	_, tid := f.signUpJar(t, "user@ibm.com")
-	t0 := time.Now().Add(-3 * time.Hour).UnixMilli()
+	t0 := time.Now().Add(-5 * time.Hour).UnixMilli()
 	for i := 0; i < 4; i++ {
-		f.record(t, tid, "mine", &dash.Event{TS: t0 + int64(i)*60e3, Model: "m1", Status: 200, CacheRead: 50000, UpstreamMs: 1000})
+		f.record(t, tid, "mine", &dash.Event{TS: t0 + int64(i)*60e3, Model: "m1", Status: 200, CacheRead: 50000, UpstreamMs: 1000, CostUSD: 0.01})
+	}
+	for i := 0; i < 3; i++ {
+		f.record(t, "second-tenant", "theirs", &dash.Event{TS: t0 + 600e3 + int64(i)*60e3, Model: "m1", Status: 200, CacheRead: 50000, UpstreamMs: 1000, CostUSD: 0.01})
 	}
 	for i := 0; i < 6; i++ {
-		f.record(t, "other-tenant", fmt.Sprintf("s%d", i), &dash.Event{TS: t0 + 3600e3 + int64(i)*60e3, Model: "m1", Status: 200, CacheRead: 50000, UpstreamMs: 1000})
+		f.record(t, "other-tenant", fmt.Sprintf("s%d", i), &dash.Event{TS: t0 + 3600e3 + int64(i)*60e3, Model: "m1", Status: 200, CacheRead: 50000, UpstreamMs: 1000, CostUSD: 0.01})
 	}
 	since, until := t0-60e3, time.Now().UnixMilli()
-	// under the default cap the fleet read already holds the tenant's rows: the tenant read must not add them twice
-	if d, err := f.h.autoDataset([]string{tid}, since, until); err != nil {
-		t.Fatal(err)
-	} else if len(d.reqs) != 10 || d.fleetMatched != d.fleetRead {
-		t.Fatalf("uncapped: %d rows; want 10, each once", len(d.reqs))
+	count := func(rows []predictive.AutoRow) map[string]int {
+		n := map[string]int{}
+		for _, r := range rows {
+			n[r.Scope]++
+		}
+		return n
 	}
-	defer dash.SetKVCacheMaxRows(6)()
-	d, err := f.h.autoDataset([]string{tid}, since, until)
+	// under the default cap the fleet read already holds the tenant's rows: they must count once, not twice
+	d, err := f.h.autoFleet(since, until)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mine := 0
-	for _, r := range d.reqs {
-		if r.User == tid {
-			mine++
-		}
+	rows, cut, err := f.h.autoRowsFor(d, tid, flatPrice, false, until)
+	if err != nil || cut {
+		t.Fatal(err, cut)
 	}
-	if mine != 4 || len(d.reqs) != 10 {
-		t.Fatalf("own rows %d (want 4), all rows %d (want 10)", mine, len(d.reqs))
+	if n := count(rows); n[tid] != 4 || n["second-tenant"] != 3 || n["other-tenant"] != 6 {
+		t.Fatalf("uncapped rows by tenant %v; want 4 / 3 / 6, each counted once", n)
+	}
+	defer dash.SetKVCacheMaxRows(6)()
+	if d, err = f.h.autoFleet(since, until); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _, err = f.h.autoRowsFor(d, "second-tenant", flatPrice, false, until); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _, err = f.h.autoRowsFor(d, tid, flatPrice, false, until); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(rows); n[tid] != 4 || n["second-tenant"] != 0 || n["other-tenant"] != 6 {
+		t.Fatalf("capped rows by tenant %v; want the tenant's 4 plus the fleet read's 6, and none of the tenant read before it", n)
 	}
 	spec := map[string]any{"evidence": map[string]any{}}
-	d.note(spec, tid)
-	if data := spec["evidence"].(map[string]any)["data"].(map[string]any); data["fleet_truncated"] != true || data["fleet_rows_in_window"] != int64(10) || data["tenant_truncated"] != false {
-		t.Errorf("evidence.data = %v; want the fleet read reported as truncated (6 of 10), the tenant's not", data)
+	d.note(spec, false)
+	if data := spec["evidence"].(map[string]any)["data"].(map[string]any); data["fleet_truncated"] != true || data["fleet_rows_in_window"] != int64(13) {
+		t.Errorf("evidence.data = %v; want the fleet read reported as truncated (6 of 13)", data)
 	}
 	if cv, _ := spec["caveats"].([]string); len(cv) != 1 {
 		t.Errorf("caveats %v; want one saying the fleet prior was cut", cv)

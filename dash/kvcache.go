@@ -61,7 +61,7 @@ import (
 // is a branch no test reaches.
 var kvCacheMaxRows = 200_000
 
-// SetKVCacheMaxRows lowers the row cap for a test in another package and returns the restore. It is a package variable: not for parallel tests.
+// SetKVCacheMaxRows lowers the row cap for a test in another package and returns the restore. It changes a global: not for parallel tests.
 func SetKVCacheMaxRows(n int) (restore func()) {
 	old := kvCacheMaxRows
 	kvCacheMaxRows = n
