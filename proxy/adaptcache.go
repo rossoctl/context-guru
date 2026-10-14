@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -299,7 +300,16 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		adapted           bool
 		unavailable       string
 		fleet             func() int // an adapted option's fleet plan (tuned before the cut)
+		plan              string     // an adapted option's plan per segment, for display (in the account's timezone)
 	}
+	// Everything shown is in the account's strategy timezone, so a day x hour cell and an option's hours are the same span as a keep-alive window
+	// the user would write. Only display: the by_dow / by_hour rules run live on UTC days and hours.
+	tz := h.keeper.strategyTZFor(tenant)
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		tz, loc = "UTC", time.UTC
+	}
+	ref := time.UnixMilli(until)
 	cur, curLabel, curOK := h.currentPlan(tn, facts)
 	// default before current: on a tie (a current setting that is the default) the default is named best
 	strats := []strat{{id: "never", in: fixed(0, se)}, {id: "default", in: defPlan}, {id: "current", label: "Your current setting", detail: curLabel, in: cur},
@@ -311,9 +321,12 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		e := evals[s]
 		st := strat{id: "auto", adapted: true}
 		if s != "" {
-			what := map[string]string{"dow": "day of the week (UTC)", "hour": "hour of the day (UTC)", "prefix": "prompt size band", "model": "model", "client": "client",
+			what := map[string]string{"dow": "day of the week", "hour": "hour of the day", "prefix": "prompt size band", "model": "model", "client": "client",
 				"stop_reason": "stop reason"}[s]
 			st.id, st.label, st.detail = "by_"+s, "Adapted: a plan per "+what, "a ping count per "+what+", each learned from your history and shrunk toward everyone's"
+			if s == "dow" || s == "hour" {
+				st.detail += "; shown in " + tz + " (the rule runs on UTC " + map[string]string{"dow": "days", "hour": "hours"}[s] + ", so across a daylight-saving change the shown span moves by an hour)"
+			}
 		}
 		if e.insufficient != "" {
 			st.unavailable = "too little history: " + e.insufficient
@@ -321,6 +334,9 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 			st.in = func(i int) (int, float64, bool) { return e.inPlan(i), autoX, se }
 			st.held = func(i int) (int, float64, bool) { return e.heldPlan(i), autoX, se }
 			st.fleet = func() int { return e.fit.FleetPlan }
+			if s != "" {
+				st.plan = segPlanDisplay(s, facts, tenant, rows, func(key string) int { return e.final.PlanFor(tenant + "\x1f" + key) }, loc, ref)
+			}
 		}
 		strats = append(strats, st)
 	}
@@ -328,6 +344,7 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 	// The never-ping bill: what was billed, minus the pings actually sent, plus the rewrites they avoided (the ledger's ceiling).
 	neverBill := bill + led.PingUSD - led.NetUSD
 	var options []any
+	labelOf := map[string]string{}
 	heldPer := map[string][]float64{}
 	bestID, bestNet := "", math.Inf(-1)
 	var bestCI [2]float64
@@ -346,6 +363,10 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 			label, detail = l[0], l[1]
 		}
 		row := map[string]any{"id": s.id, "label": label, "detail": detail, "enforceable": s.id == "default" || (s.adapted && s.unavailable == "")}
+		if s.plan != "" {
+			row["plan"] = s.plan
+		}
+		labelOf[s.id] = label
 		if s.unavailable != "" {
 			row["unavailable"] = s.unavailable
 			options = append(options, row)
@@ -412,7 +433,7 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 	case gateID != "":
 		summary = fmt.Sprintf("%s beats the default by $%.2f [%.2f, %.2f] on your last 30%% of decisions (plan tuned only on what came before) and passes the campaign builder's gate (it also beats blanket K3 and the fleet plan).",
 			gateID, gateDiff, gateCI[0], gateCI[1])
-		recommendation = map[string]any{"option": gateID, "change": "keep-alive: default -> " + gateID, "net_delta_usd": r2(gateDiff), "effective": "now",
+		recommendation = map[string]any{"option": gateID, "change": "keep-alive: default -> " + labelOf[gateID] + " (" + gateID + ")", "net_delta_usd": r2(gateDiff), "effective": "now",
 			"reason": "it beat the default, blanket K3 and the fleet plan on held-out data"}
 	case beats && failID == bestID:
 		summary = fmt.Sprintf("%s is $%.2f [%.2f, %.2f] ahead of the default on your last 30%% of decisions, but it does not pass the campaign builder's gate (in the builder's calibrated dollars: %s), so applying it would only run it in shadow. Keep the default.",
@@ -465,12 +486,6 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 	if vd := pair(gainID, "default"); vd != nil {
 		gain = map[string]any{"option": gainID, "recommended": recommendation != nil, "vs_default": vd, "vs_current": pair(gainID, "current"),
 			"per_week_vs_default_usd": perWeek(vd["usd"].(float64)), "class": "counterfactual", "held_out": true, "upper_bound": true}
-	}
-	// The grid is in the account's strategy timezone, so a day x hour cell is the same span as a keep-alive window the user would write.
-	tz := h.keeper.strategyTZFor(tenant)
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		tz, loc = "UTC", time.UTC
 	}
 	heatmaps := map[string]any{}
 	for id, hp := range heldPer {
@@ -528,9 +543,10 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		"observed": map[string]any{"class": "observed", "bill_usd": r2(bill + led.PingUSD), "pings": led.Pings, "ping_usd": r2(led.PingUSD), "misses_avoided": led.MissesAvoided,
 			"saved_usd_ceiling": r2(led.SavedUSD), "net_usd": r2(led.NetUSD),
 			"note": "what the keep-alive actually did in this window (the dashboard's ledger); saved is a ceiling: another session with the same prefix could have kept the entry warm"},
-		"relative": relative,
-		"gain":     gain,
-		"heatmap":  heatmap, "option_heatmaps": heatmaps, "heatmap_tz": tz,
+		"relative":   relative,
+		"gain":       gain,
+		"display_tz": tz,
+		"heatmap":    heatmap, "option_heatmaps": heatmaps, "heatmap_tz": tz,
 		"to_date": map[string]any{"class": "observed", "since": since, "until": until, "saved_usd": r2(led.NetUSD), "saved_ceiling_usd": r2(led.SavedUSD),
 			"ping_usd": r2(led.PingUSD), "pings": led.Pings,
 			"label": "what your current keep-alive saved so far: the rewrites its pings avoided (a ceiling) minus what the pings cost, as billed"},
@@ -751,11 +767,13 @@ func (h *Handler) adaptCacheApply(w http.ResponseWriter, r *http.Request) {
 		var spec map[string]any
 		_ = readJSONFile(filepath.Join(h.campaignDir(), id, "spec.json"), &spec)
 		res["note"] = fmt.Sprintf("Applied anyway, as asked: the builder's held-out gate did NOT pass, but campaign %s is live with the plan you chose (%v). "+
-			"It is not rebuilt daily: the daily rebuild changes a live campaign only on a passing gate.", id, spec["own_plan"])
+			"It is not rebuilt daily: the daily rebuild changes a live campaign only on a passing gate.", id, h.planForDisplay(spec, tn.ID))
 	case in.Force && rec == "baseline":
 		res["applied"], res["note"] = "none", "The chosen plan could not be installed, so nothing changed."
 	case mode == campaignModeActive:
-		res["note"] = "The builder's held-out gate passed: campaign " + id + " is live and decides the ping count for your sessions."
+		var spec map[string]any
+		_ = readJSONFile(filepath.Join(h.campaignDir(), id, "spec.json"), &spec)
+		res["note"] = "The builder's held-out gate passed: campaign " + id + " is live and decides the ping count for your sessions: " + h.planForDisplay(spec, tn.ID) + "."
 	default:
 		res["applied"], res["note"] = "shadow", "The builder's held-out gate did not pass (the plan did not beat the default, blanket K3 and the fleet plan on held-out data), so it was not switched on. Campaign "+
 			id+" runs in shadow: it decides on live traffic and changes nothing; your own keep-alive setting stays in force."
@@ -852,4 +870,91 @@ func adaptHeatmap(facts []rowFacts, idx []int, per, def []float64, loc *time.Loc
 		}
 	}
 	return m
+}
+
+// segLabel is how one segment of a by_dow / by_hour plan reads in loc: the UTC hour or day it runs on, shown as the local span it covers
+// around ref. Other features read as they are.
+func segLabel(segBy, key string, loc *time.Location, ref time.Time) string {
+	ref = ref.UTC()
+	switch segBy {
+	case "hour":
+		var hr int
+		if _, err := fmt.Sscanf(key, "%02d", &hr); err != nil {
+			return key
+		}
+		t := time.Date(ref.Year(), ref.Month(), ref.Day(), hr, 0, 0, 0, time.UTC).In(loc)
+		return t.Format("15:04") + "-" + t.Add(time.Hour).Format("15:04")
+	case "dow":
+		for d := 0; d < 7; d++ {
+			day := time.Date(ref.Year(), ref.Month(), ref.Day()+d, 0, 0, 0, 0, time.UTC)
+			if day.Weekday().String() == key {
+				a, b := day.In(loc), day.Add(24*time.Hour).In(loc)
+				return a.Format("Mon 15:04") + " - " + b.Format("Mon 15:04")
+			}
+		}
+	}
+	return key
+}
+
+// segPlanDisplay is "segment: plan" for every segment value the account's rows have, in the account's timezone, in UTC order.
+func segPlanDisplay(segBy string, facts []rowFacts, tenant string, rows []predictive.AutoRow, planOf func(key string) int, loc *time.Location, ref time.Time) string {
+	seen := map[string]bool{}
+	var keys []string
+	for i, r := range rows {
+		if r.Scope != tenant {
+			continue
+		}
+		k, _ := segFeatures[segBy](&facts[i])
+		if !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = segLabel(segBy, k, loc, ref) + ": " + planName(planOf(k))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// policyDisplay is a campaign policy's segments as the account reads them (segLabel), for an apply's note.
+func policyDisplay(policy any, loc *time.Location, ref time.Time) string {
+	pm, _ := policy.(map[string]any)
+	segs, _ := pm["segments"].([]any)
+	var parts []string
+	for _, sg := range segs {
+		m, _ := sg.(map[string]any)
+		id, _ := m["id"].(string)
+		segBy, key, ok := strings.Cut(id, ":")
+		if !ok {
+			continue
+		}
+		rule, _ := m["rule"].(map[string]any)
+		plan := "none"
+		if p, _ := rule["plan"].(string); p != "" {
+			plan = p
+		}
+		parts = append(parts, segLabel(segBy, key, loc, ref)+": "+plan)
+	}
+	if fb, _ := pm["fallback"].(map[string]any); fb != nil && len(parts) > 0 {
+		plan := "none"
+		if p, _ := fb["plan"].(string); p != "" {
+			plan = p
+		}
+		parts = append(parts, "otherwise "+plan)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// planForDisplay is a built campaign's own plan as the account reads it: segments in its strategy timezone, or the single plan's name.
+func (h *Handler) planForDisplay(spec map[string]any, tenantID string) string {
+	loc, err := time.LoadLocation(h.keeper.strategyTZFor(tenantID))
+	if err != nil {
+		loc = time.UTC
+	}
+	if d := policyDisplay(spec["own_policy"], loc, time.Now()); d != "" {
+		return d + " (" + loc.String() + ")"
+	}
+	return fmt.Sprint(spec["own_plan"])
 }

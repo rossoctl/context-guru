@@ -277,6 +277,18 @@ func TestAdaptReportGateMatchesTheBuilder(t *testing.T) {
 	if gain == nil || hm == nil || gain["option"] != "by_stop_reason" || hm["option"] != "by_stop_reason" {
 		t.Fatalf("gain %v / heatmap option %v", gain, hm["option"])
 	}
+	if rep["display_tz"] != tenant.DefaultStrategyTZ {
+		t.Errorf("display_tz %v", rep["display_tz"])
+	}
+	for _, o := range rep["options"].([]any) {
+		o := o.(map[string]any)
+		if o["id"] == "by_hour" && (o["plan"] == nil || strings.Contains(fmt.Sprint(o["label"], o["plan"]), "UTC:")) {
+			t.Errorf("by_hour shown as %v / %v", o["label"], o["plan"])
+		}
+	}
+	if r, _ := rep["recommendation"].(map[string]any); r != nil && !strings.Contains(r["change"].(string), "plan per stop reason") {
+		t.Errorf("the change line names the id, not the option: %v", r["change"])
+	}
 	if hm["tz"] != tenant.DefaultStrategyTZ || rep["heatmap_tz"] != tenant.DefaultStrategyTZ {
 		t.Errorf("heatmap tz %v / %v, want the account's strategy zone %s", hm["tz"], rep["heatmap_tz"], tenant.DefaultStrategyTZ)
 	}
@@ -756,5 +768,31 @@ func TestAdaptHeatmapIsInTheStrategyTimezone(t *testing.T) {
 	}
 	if tz := k.strategyTZFor("other"); tz != tenant.DefaultStrategyTZ {
 		t.Errorf("another account's strategy set this one's zone: %s", tz)
+	}
+}
+
+// A by_hour / by_dow option runs on UTC hours and days, but the user reads it in the account's timezone: a 22:00 UTC segment shows as
+// 01:00-02:00 in Asia/Jerusalem in August, a Tuesday (UTC) as Tuesday 03:00 to Wednesday 03:00.
+func TestAdaptOptionsShowLocalHours(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Jerusalem")
+	if err != nil {
+		t.Skip("no tz database: ", err)
+	}
+	ref := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	if got := segLabel("hour", "22 UTC", loc, ref); got != "01:00-02:00" {
+		t.Errorf("22 UTC shows as %q", got)
+	}
+	if got := segLabel("dow", "Tuesday", loc, ref); got != "Tue 03:00 - Wed 03:00" {
+		t.Errorf("Tuesday (UTC) shows as %q", got)
+	}
+	facts := []rowFacts{{hour: 22, dow: 2}}
+	rows := []predictive.AutoRow{{Scope: "me"}}
+	if got := segPlanDisplay("hour", facts, "me", rows, func(string) int { return 3 }, loc, ref); got != "01:00-02:00: K3" {
+		t.Errorf("by_hour plan shows as %q", got)
+	}
+	policy := map[string]any{"segments": []any{map[string]any{"id": "hour:22 UTC", "rule": map[string]any{"kind": "plan", "plan": "K2"}}},
+		"fallback": map[string]any{"kind": "plan", "plan": "K3"}}
+	if got := policyDisplay(policy, loc, ref); got != "01:00-02:00: K2; otherwise K3" {
+		t.Errorf("the apply note's plan shows as %q", got)
 	}
 }
