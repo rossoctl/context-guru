@@ -217,7 +217,7 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 			defer h.Close()
 			pol := kaPolicy()
 			pol.MinPrefixTokens = 1000 // fakeUpstream bills a 10.5k prefix
-			h.static.Cache = pol
+			h.static.Load().Cache = pol
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()
 
@@ -283,7 +283,7 @@ func TestApplyModeResolvesTheThreadBeforeThePipeline(t *testing.T) {
 	defer h.Close()
 	calls := 0
 	_, _, tr := h.applyMode(&reqInfo{
-		ctx: context.Background(), provider: bschemas.Anthropic, body: threadBody("fix the bug"), tn: h.static,
+		ctx: context.Background(), provider: bschemas.Anthropic, body: threadBody("fix the bug"), tn: h.static.Load(),
 		threadOf: func(string) thread.Result {
 			calls++
 			return thread.Result{ID: "a:wired", Source: thread.SourceHeader}

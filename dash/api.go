@@ -39,6 +39,10 @@ type API struct {
 	// compaction configuration, owned, validated and audited by the control plane, and a
 	// copy here would be a second answer to "what is this proxy actually sending".
 	toolFilterFn func(tenantID string) ToolFilterState
+	// adaptCompactionConfigFn reads a tenant's stored config for /api/adapt/compaction. nil = no accounts.
+	adaptCompactionConfigFn AdaptCompactionConfigFunc
+	// offers are the latest /api/adapt/* report's options per account, for the apply routes.
+	offers adaptOffers
 	// tenantCapture reports whether ONE tenant consented to transcript capture. nil =
 	// single-tenant: there is no consent layer, so the operator's flag is the whole
 	// decision. Supplied by the host in hosted mode.
@@ -673,6 +677,7 @@ func (a *API) routes() []route {
 	// The Components tab's compaction-episode measurement, declared beside its handler in
 	// compactepisode.go and appended here for the same reason as the rest: this table is what
 	// the scoping tests walk.
+	rs = append(rs, a.adaptRoutes()...)
 	return append(rs, a.compactEpisodeRoutes()...)
 }
 
@@ -751,6 +756,9 @@ var routeBounds = map[string]time.Duration{
 	// trustedness too; that is a change to a content gate and does not belong in an outage fix, so
 	// it waits, and meanwhile it simply gets long enough to finish.
 	"GET /api/prompt": dashHeavyTimeout,
+	// A replay of the account's stored requests under dozens of configurations: minutes on a
+	// large account, and the plugin waits for it.
+	"GET /api/adapt/compaction": 5 * time.Minute,
 	// The routes behind cachedRoute: the first reader after a restart or a lapsed cache waits for the
 	// real computation, so it gets the heavy bound rather than the 10 s that is right for a read that
 	// is normally already in the cache.

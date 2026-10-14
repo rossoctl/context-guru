@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"reflect"
+	"regexp"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/schema"
@@ -83,11 +84,12 @@ func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
 	// path's CPU on real 600 KB Claude Code requests, and all but a handful of its
 	// messages were re-cloned unchanged six times over.
 	snap := schema.CloneMessages(req.Input)
+	own := ownOutputs(req)
 	for _, comp := range p.comps {
 		if !comp.Enabled(c) {
 			continue
 		}
-		rep := p.runOne(comp, req, c, &snap)
+		rep := p.runOne(comp, req, c, &snap, own)
 		rr.Components = append(rr.Components, rep)
 		rr.DurationMs += rep.DurationMs
 		safeEmit(func() { p.emitter.Component(rep) })
@@ -111,7 +113,7 @@ func safeEmit(fn func()) {
 // snap is the run's live snapshot: on entry it holds an independent deep copy of
 // req.Input, and runOne leaves it holding one of req.Input on exit (re-cloning only
 // what changed, or the lot after a revert or a count change).
-func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx, snap *[]schemas.ChatMessage) (rep Report) {
+func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx, snap *[]schemas.ChatMessage, own map[int]bool) (rep Report) {
 	rep = Report{Component: comp.Name(), Mode: c.effMode()}
 	before := *snap
 	// revert installs the snapshot and re-establishes an independent one, because
@@ -187,11 +189,14 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		rep.Reverted = true
 		rep.TokensBefore, rep.TokensAfter = baseline, baseline
 	default:
-		rep.TokensBefore, rep.TokensAfter = baseline, after
 		// Only a change that SURVIVED can be discarded by the writeback layer. Recording
 		// it in the revert branches above would charge a rolled-back component for a
 		// discard it never caused.
 		rep.ChangedIdx = changedIdx(before, req.Input)
+		if restoreOwn(&rep, before, req.Input, own) {
+			after = tokensOf(req.Input)
+		}
+		rep.TokensBefore, rep.TokensAfter = baseline, after
 		if rep.Kind == "reformat" {
 			rep.CacheKeys = reformatKeys(before, rep.ChangedIdx)
 		}
@@ -247,6 +252,55 @@ func resync(snap *[]schemas.ChatMessage, live []schemas.ChatMessage, changed []i
 	for _, i := range changed {
 		(*snap)[i] = schema.CloneMessages(live[i : i+1])[0]
 	}
+}
+
+// ownOutput matches a tool call that runs one of context-guru's own plugin scripts, by the script
+// and its subcommand rather than by the directory, because the directory is not ours to name: an
+// installed Claude Code plugin lives under …/context-guru/<version>/, a --plugin-dir one under
+// any name, and the Codex skills run `python3 ../../scripts/cg.py …` relative to the skill.
+// The context-guru path form is kept for scripts the subcommand list does not know yet. Matched
+// against the call's JSON arguments, so a quote may arrive escaped.
+var ownOutput = regexp.MustCompile(`(^|[\s"'/])scripts/(cg\.py(\\?["'])?\s+(adapt|apply|revert|home|savings|cache|waste|session|doctor)\b|tv\.py\b)` +
+	`|context-guru[^"'\s]*/scripts/[\w-]+\.py|CLAUDE_PLUGIN_ROOT\}?/scripts/[\w-]+\.py`)
+
+// ownOutputs are the tool results our own plugin commands produced. They are the product's
+// answer to the user — a report, a cost table, the question it is about to ask — and the agent
+// is told to print them verbatim, so no component may change a byte of one: a compacted
+// report is a wrong report.
+func ownOutputs(req *schemas.BifrostChatRequest) map[int]bool {
+	var out map[int]bool
+	for i, tc := range schema.ToolCalls(req) {
+		if ownOutput.MatchString(tc.Args) {
+			if out == nil {
+				out = map[int]bool{}
+			}
+			out[i] = true
+		}
+	}
+	return out
+}
+
+// restoreOwn puts back any of our own outputs a component changed, so the rest of its work
+// stands. It reports whether it restored anything. A count change (a summarizer) has no
+// per-message diff to restore and is left alone.
+func restoreOwn(rep *Report, before, live []schemas.ChatMessage, own map[int]bool) bool {
+	if len(own) == 0 || len(before) != len(live) {
+		return false
+	}
+	kept, restored := rep.ChangedIdx[:0], false
+	for _, i := range rep.ChangedIdx {
+		if own[i] {
+			live[i] = schema.CloneMessages(before[i : i+1])[0]
+			restored = true
+			continue
+		}
+		kept = append(kept, i)
+	}
+	if restored {
+		rep.ChangedIdx = kept
+		rep.Gate("own_output")
+	}
+	return restored
 }
 
 func tokensOf(msgs []schemas.ChatMessage) int {
