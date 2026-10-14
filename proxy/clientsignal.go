@@ -41,10 +41,19 @@ import (
 // A signal is also scoped to its own tenant and session (the key is tenant-prefixed by
 // session.Scoped), so one tenant cannot silence another's keep-alive.
 //
-// Off by default: CONTEXT_GURU_CLIENT_SIGNALS=on enables the route and the effects.
+// On whenever the keep-alive runs: CONTEXT_GURU_CLIENT_SIGNALS=off turns the route and the effects off,
+// and so does the keep-alive kill switch (CONTEXT_GURU_KEEPALIVE=off), which leaves nothing to retire.
+//
+// # Wire shapes
+//
+// The body is either the plugin's own {session, event, kind}, or a Claude Code / Codex hook payload
+// posted as it is (session_id, hook_event_name, reason | source | notification_type), which is what a
+// one-line `curl --data-binary @-` hook sends. Only those fields are read; every other field of the
+// payload (cwd, transcript_path, model) is discarded by the decoder, never logged or stored.
 
 const (
-	maxLifecycleBody = 1024
+	// maxLifecycleBody fits a raw hook payload (its cwd and transcript path are the bulk of it).
+	maxLifecycleBody = 4096
 	// lifecycleTTL is how long a SessionEnd mark is remembered: past it the mark is dead weight.
 	lifecycleTTL = 12 * time.Hour
 	// maxEndedPerTenant bounds one tenant's end marks. The cap is per tenant, not global, so
@@ -60,8 +69,37 @@ const (
 const compactRaceMargin = 2 * time.Second
 
 func clientSignalEnabled() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("CONTEXT_GURU_CLIENT_SIGNALS")))
-	return v == "on" || v == "1" || v == "true"
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CONTEXT_GURU_CLIENT_SIGNALS"))) {
+	case "off", "0", "false":
+		return false
+	}
+	return !keepAliveDisabled()
+}
+
+// clientSessionAlias is the tenant-scoped id a client's hooks name this session by, when the proxy
+// keys the session by something else. Codex sends its session id in a session-id header (equal to
+// the hook payload's session_id and to prompt_cache_key, verified on codex-cli 0.162.1) but no id
+// the session resolver reads, so its requests key by content hash. "" when there is no usable alias.
+func clientSessionAlias(tenantID, sessionKey string, r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	sid := strings.TrimSpace(r.Header.Get("session-id"))
+	scoped, ok := scopedClientID(tenantID, sid)
+	if !ok || scoped == sessionKey {
+		return ""
+	}
+	return scoped
+}
+
+// scopedClientID scopes a client-named session id to its tenant, refusing an id Scoped would not use
+// as given (it falls back to a content hash on an unusable id).
+func scopedClientID(tenantID, sid string) (string, bool) {
+	scoped := session.Scoped(tenantID, sid, "", "")
+	if sid == "" || (tenantID != "" && scoped != tenantID+":"+sid) || (tenantID == "" && scoped != sid) {
+		return "", false
+	}
+	return scoped, true
 }
 
 // lifecycleEvents is the closed set of accepted events; anything else is refused, so a client
@@ -100,21 +138,32 @@ func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
 		Session string `json:"session"`
 		Event   string `json:"event"`
 		Kind    string `json:"kind"`
+		// The raw hook payload's names for the same three fields.
+		SessionID        string `json:"session_id"`
+		HookEventName    string `json:"hook_event_name"`
+		Reason           string `json:"reason"`
+		Source           string `json:"source"`
+		NotificationType string `json:"notification_type"`
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLifecycleBody))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&in); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLifecycleBody)).Decode(&in); err != nil {
 		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
 		return
 	}
-	sid := strings.TrimSpace(in.Session)
-	// Scoped falls back to a content hash on an unusable id; here that means refuse.
-	if scoped := session.Scoped(tn.ID, sid, "", ""); sid == "" || !lifecycleEvents[in.Event] || !lifecycleKinds[in.Kind] ||
-		(tn.ID != "" && scoped != tn.ID+":"+sid) || (tn.ID == "" && scoped != sid) {
+	if in.Session == "" && in.Event == "" && in.Kind == "" {
+		in.Session, in.Event = in.SessionID, in.HookEventName
+		in.Kind = map[string]string{"SessionEnd": in.Reason, "SessionStart": in.Source, "Notification": in.NotificationType}[in.Event]
+	}
+	// A SessionEnd reason a newer client adds still means the session ended; read it as "other"
+	// rather than refuse the event and silently lose the feature.
+	if in.Event == "SessionEnd" && !lifecycleKinds[in.Kind] {
+		in.Kind = "other"
+	}
+	scoped, ok := scopedClientID(tn.ID, strings.TrimSpace(in.Session))
+	if !ok || !lifecycleEvents[in.Event] || !lifecycleKinds[in.Kind] {
 		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
 		return
 	}
-	h.keeper.signal(tn.ID, session.Scoped(tn.ID, sid, "", ""), in.Event, in.Kind, h.keeper.now())
+	h.keeper.signal(tn.ID, scoped, in.Event, in.Kind, h.keeper.now())
 	w.WriteHeader(http.StatusNoContent)
 }
 

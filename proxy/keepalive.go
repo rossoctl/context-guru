@@ -232,6 +232,10 @@ const (
 // main thread's cache expire.
 type kaEntry struct {
 	tenant, session string
+	// client is the tenant-scoped id the client itself names the session by when the proxy keys it
+	// differently (Codex: the session-id header, which its hooks report, while the proxy derives the
+	// key from content). "" when there is none. A client signal matches on either.
+	client string
 	// thread is the session thread this entry keeps warm; "" is the primary thread.
 	thread string
 	// startedAt is when the last upstream request on this session STARTED — a real request
@@ -712,7 +716,8 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		return
 	}
 	key := kaThreadKey(tn.ID, session, threadID)
-	if clientSignalEnabled() && k.endedAfter(tn.ID, session, startedAt) {
+	client := clientSessionAlias(tn.ID, session, r)
+	if clientSignalEnabled() && (k.endedAfter(tn.ID, session, startedAt) || (client != "" && k.endedAfter(tn.ID, client, startedAt))) {
 		k.retire(key)
 		return
 	}
@@ -817,7 +822,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	prefix := u.CacheRead + u.CacheWrite
 	hdr, auth := pingHeaders(r, up)
 	e := &kaEntry{
-		tenant: tn.ID, session: session, thread: threadID, startedAt: startedAt, body: owned, up: up,
+		tenant: tn.ID, session: session, client: client, thread: threadID, startedAt: startedAt, body: owned, up: up,
 		st:       tn.Store,
 		emitter:  tn.Pipe.Emitter(),
 		provider: provider, model: model, route: route, preset: tn.Preset,
@@ -963,7 +968,8 @@ func (k *keeper) retireSessionStartedBefore(tenantID, session string, cutoff tim
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	for key, e := range k.live {
-		if (key != base && !strings.HasPrefix(key, base+"\x00")) || (!cutoff.IsZero() && (e.thread != "" || !e.startedAt.Before(cutoff))) {
+		own := key == base || strings.HasPrefix(key, base+"\x00") || (e.client != "" && e.tenant == tenantID && e.client == session)
+		if !own || (!cutoff.IsZero() && (e.thread != "" || !e.startedAt.Before(cutoff))) {
 			continue
 		}
 		k.bytes -= int64(len(e.body))

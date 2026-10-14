@@ -153,6 +153,26 @@ plane is what is broken. `/stats` publishes `keepalive` with `pings`, `skipped`,
 `wrote_instead_of_read` and `spend_usd`; `wrote_instead_of_read` above zero is a bug, not an
 expense.
 
+## Client lifecycle signals
+
+The proxy cannot see a user leave: a session that ended looks like one that is idle. Clients
+that run hooks tell it, on `POST /signal`, with a content-free event: the plugins and the hosted
+setup snippet send only the session id, the event name and its reason (the hook picks those out
+of Claude Code's payload, which also holds the working directory and the transcript path). This is on whenever the keep-alive runs; `CONTEXT_GURU_CLIENT_SIGNALS=off` turns it off.
+
+| event | sent when | what the keep-alive does |
+|---|---|---|
+| `SessionEnd` | `/exit`, Ctrl-C twice, Ctrl-D, closing the terminal, `/clear`, logout | releases the session's held entries; no further pings |
+| `SessionStart compact` | after `/compact` or auto-compaction | releases the entries that cache the pre-compaction prefix |
+| `SessionStart resume` / `clear`, `Notification` | | recorded only |
+
+A resumed session (`claude --resume`, same id) is tracked again from its first request after the
+end; the provider's cache entry is not touched by any signal, so a prompt resume still reads it.
+Every effect only removes spend: a lost or late event leaves the keep-alive as it is without
+signals. The Claude Code plugin sends these by default to its own local proxy and to a hosted
+service (`client_signals` option: `auto`, `on`, `off`); the hosted setup page includes the hooks;
+the Codex plugin sends `SessionEnd` and `SessionStart` once you trust its hooks (`/hooks`).
+
 ## What is held in memory, and for how long
 
 To ping a session the proxy keeps that session's last request body, and — where the upstream
