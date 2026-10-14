@@ -376,6 +376,9 @@ func TestSaveMoreAppliesAPresetAndRevertsIt(t *testing.T) {
 		t.Fatalf("apply = %d %s", w.Code, w.Body)
 	}
 	form, doc := storedForm(t, f, jar)
+	if want, _ := dash.AdaptPresetDoc(start, "safe"); doc != want {
+		t.Fatalf("stored %q, the report priced %q", doc, want)
+	}
 	if !strings.Contains(doc, "preset: safe") || strings.Contains(doc, "pipeline:") || !strings.Contains(doc, "mode: sync") {
 		t.Fatalf("stored document:\n%s", doc)
 	}

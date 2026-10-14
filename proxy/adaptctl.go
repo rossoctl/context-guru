@@ -14,8 +14,6 @@ import (
 	"net/http"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 )
@@ -92,9 +90,16 @@ func (h *Handler) adaptConfigApply(w http.ResponseWriter, r *http.Request, kind 
 			return "", statusError{http.StatusConflict, "your configuration changed since the report was made; run it again"}
 		}
 		if choice.Preset != "" {
-			next, pipe, err := adaptPresetDoc(doc, choice.Preset)
-			pipeline = pipe
-			return next, err
+			next, err := dash.AdaptPresetDoc(doc, choice.Preset)
+			if err != nil {
+				return "", statusError{http.StatusBadRequest, err.Error()}
+			}
+			cfg, err := config.LoadBytes([]byte(next))
+			if err != nil {
+				return "", statusError{http.StatusBadRequest, err.Error()}
+			}
+			pipeline = cfg.Pipeline
+			return next, nil
 		}
 		next, pipe, err := adaptCompactionDoc(doc, choice)
 		pipeline = pipe
@@ -150,28 +155,4 @@ func adaptCompactionDoc(doc string, choice dash.AdaptCompactionChoice) (string, 
 		return "", nil, statusError{http.StatusBadRequest, err.Error()}
 	}
 	return next, f.Pipeline, nil
-}
-
-// adaptPresetDoc is doc switched to a shipped preset: `preset: name` with no explicit pipeline,
-// so the preset decides what runs; every other key of the document is kept. Component blocks
-// the account had stay too, and win over the preset's own, which is what a stated block means.
-func adaptPresetDoc(doc, name string) (string, []string, error) {
-	m := map[string]any{}
-	if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
-		return "", nil, statusError{http.StatusConflict, "your stored configuration does not parse"}
-	}
-	if m == nil {
-		m = map[string]any{}
-	}
-	m["preset"] = name
-	delete(m, "pipeline")
-	out, err := yaml.Marshal(m)
-	if err != nil {
-		return "", nil, err
-	}
-	cfg, err := config.LoadBytes(out)
-	if err != nil {
-		return "", nil, statusError{http.StatusBadRequest, err.Error()}
-	}
-	return string(out), cfg.Pipeline, nil
 }

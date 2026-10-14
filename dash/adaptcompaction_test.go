@@ -755,3 +755,36 @@ func TestSaveMoreCustomSearchOrder(t *testing.T) {
 		}
 	}
 }
+
+// The priced preset option is the applied one: an account's own component blocks win over the
+// preset's when the preset is applied, so they must win in the replay too.
+func TestSaveMorePricesThePresetDocumentApplyStores(t *testing.T) {
+	cur := "pipeline: [format, extract, cachesplit]\ncomponents:\n  extract:\n    min_tokens: 9999\n"
+	rep, err := formattedHistory(t, 1).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
+		staticTable{"m": bigPrice}, cur, defaultAdaptDocForTest, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := AdaptPresetDoc(cur, "house")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadBytes([]byte(applied))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var block struct {
+		MinTokens int `yaml:"min_tokens"`
+	}
+	node := cfg.Components["extract"]
+	if err := node.Decode(&block); err != nil || block.MinTokens != 9999 {
+		t.Fatalf("applied document's extract block: %+v %v", block, err)
+	}
+	o := adaptOpt(t, rep, "house")
+	if o.spec.base != applied || o.spec.settings["extract"]["min_tokens"] != 9999 {
+		t.Fatalf("priced %q / %v, applies %q", o.spec.base, o.spec.settings, applied)
+	}
+	if want, _ := config.PresetPipeline("house"); !slices.Equal(cfg.Pipeline, want) {
+		t.Fatalf("applied pipeline %v, want the preset's %v", cfg.Pipeline, want)
+	}
+}

@@ -324,6 +324,30 @@ type AdaptCompactionChoice struct {
 	ConfigHash string
 }
 
+// AdaptPresetDoc is doc switched to a shipped preset: `preset: name` with no explicit pipeline, so
+// the preset decides what runs; every other key is kept. Component blocks the account had stay
+// and win over the preset's own, which is what a stated block means — and why the report prices
+// a preset option on THIS document rather than on the bare preset.
+func AdaptPresetDoc(doc, name string) (string, error) {
+	m := map[string]any{}
+	if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
+		return "", fmt.Errorf("your stored configuration does not parse: %w", err)
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	m["preset"] = name
+	delete(m, "pipeline")
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		return "", err
+	}
+	if _, err := config.LoadBytes(out); err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
 // AdaptConfigHash identifies a configuration document; an apply against a document that has
 // changed since the report is refused, because the recommendation was for one that is gone.
 func AdaptConfigHash(doc string) string {
@@ -1437,7 +1461,13 @@ func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, 
 	}
 	{
 		for _, name := range config.PresetNames() {
-			ps, _, err := adaptSpecFromDoc("preset: " + name + "\n")
+			// The document applying it would store — the account's own, switched to the preset —
+			// so the account's component blocks, which win over the preset's, are priced too.
+			doc, err := AdaptPresetDoc(curDoc, name)
+			if err != nil {
+				continue
+			}
+			ps, _, err := adaptSpecFromDoc(doc)
 			if err != nil {
 				continue // a preset that does not load is not an option
 			}
