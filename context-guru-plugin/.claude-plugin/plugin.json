@@ -49,6 +49,12 @@
       "type": "string",
       "default": "",
       "description": "Forward to this Anthropic-compatible base URL instead of api.anthropic.com. Set it when something else is already the gateway — a hosted agent pod, a corporate gateway — so the proxy CHAINS behind it rather than replacing it. That gateway keeps holding the credential and, on at least one pod, rewriting model names: bypassing it sends model ids the real API has never heard of and every request fails. Empty means go straight to Anthropic."
+    },
+    "client_signals": {
+      "type": "string",
+      "title": "Client signals",
+      "description": "`on` sends the proxy a content-free event (session id, event name, reason) when you exit a session or Claude is waiting on you, so it stops spending on a cache you will not come back to. Off by default; needs a proxy started with CONTEXT_GURU_CLIENT_SIGNALS=on.",
+      "default": "off"
     }
   }
 }

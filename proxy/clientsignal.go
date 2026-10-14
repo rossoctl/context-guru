@@ -1,0 +1,196 @@
+package proxy
+
+import (
+	"encoding/json"
+	"log/slog"
+	"mime"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/rossoctl/context-guru/session"
+)
+
+// Client lifecycle signals for the keep-alive.
+//
+// A client that runs Claude Code hooks can tell the proxy things the proxy cannot see in
+// the request stream: that the user left (SessionEnd), that the conversation was compacted so its
+// old cached prefix is dead (SessionStart source=compact), that the user is back (SessionStart
+// resume / clear / startup / fork), that the session is blocked on a human (Notification:
+// permission_prompt / elicitation_dialog / idle_prompt). The event carries no content: a session
+// id, an event name, a closed set of reason strings and a timestamp.
+//
+//	event         kind                                         action
+//	SessionEnd    clear, resume, logout, prompt_input_exit, ""  retire the session, mark it ended
+//	              other
+//	SessionStart  compact                                      retire the session (no mark: it goes on)
+//	SessionStart  startup, resume, clear, fork                 recorded only
+//	Notification  permission_prompt, elicitation_dialog,       recorded only
+//	              idle_prompt
+//
+// "Recorded only" is deliberate, not a placeholder: in offline replay, holding a returning user's
+// entry until their first request earned little, and pinging on through a permission prompt lost
+// money. Both would also make a signal ADD spend.
+//
+// # Failure safety
+//
+// Every signal only ever REMOVES spend: it retires a held entry or lowers a ping budget. None
+// extends a hold or arms a ping. A lost, late or forged event therefore costs at most the
+// pings the no-signal policy would also have sent, and a missing event is the no-signal policy.
+// A signal is also scoped to its own tenant and session (the key is tenant-prefixed by
+// session.Scoped), so one tenant cannot silence another's keep-alive.
+//
+// Off by default: CONTEXT_GURU_CLIENT_SIGNALS=on enables the route and the effects.
+
+const (
+	maxLifecycleBody = 1024
+	// lifecycleTTL is how long a SessionEnd mark is remembered: past it the mark is dead weight.
+	lifecycleTTL = 12 * time.Hour
+	// maxEndedPerTenant bounds one tenant's end marks. The cap is per tenant, not global, so
+	// one tenant's churn cannot evict another tenant's marks.
+	maxEndedPerTenant = 2000
+)
+
+// compactRaceMargin bounds how late a SessionStart compact event may arrive after the request that
+// follows the compaction started. Measured hook-to-proxy delivery is 0.2-0.8 s; the old prefix's last
+// request (the compaction call itself) started tens of seconds earlier. Known limitation: a ping also
+// moves startedAt, so an old-prefix entry pinged within the margin is not retired by the event and is
+// pinged at most once more before its next idle check stops it.
+const compactRaceMargin = 2 * time.Second
+
+func clientSignalEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("CONTEXT_GURU_CLIENT_SIGNALS")))
+	return v == "on" || v == "1" || v == "true"
+}
+
+// lifecycleEvents is the closed set of accepted events; anything else is refused, so a client
+// cannot smuggle a free-text field through this route.
+var lifecycleEvents = map[string]bool{"SessionEnd": true, "SessionStart": true, "Notification": true}
+
+// lifecycleKinds is the closed set of accepted reason / notification types.
+var lifecycleKinds = map[string]bool{"": true, "clear": true, "resume": true, "logout": true, "prompt_input_exit": true, "other": true,
+	"startup": true, "compact": true, "fork": true, "permission_prompt": true, "elicitation_dialog": true, "idle_prompt": true}
+
+// lifecycle receives one event. 204 on accept (including "accepted and ignored"), so the client
+// cannot tell, and does not need to, whether it changed anything.
+func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
+	if !clientSignalEnabled() {
+		http.NotFound(w, r)
+		return
+	}
+	// JSON only. A web page can POST text/plain to a loopback proxy without a CORS preflight, and the
+	// local proxy takes no credential; application/json from another origin needs a preflight, which
+	// this route never answers.
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
+		http.Error(w, "lifecycle events are application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	tn, err := h.authenticate(r)
+	if err != nil {
+		h.refuse(w, r, err)
+		return
+	}
+	release, ok := h.meter(w, r, tn)
+	defer release()
+	if !ok {
+		return
+	}
+	var in struct {
+		Session string `json:"session"`
+		Event   string `json:"event"`
+		Kind    string `json:"kind"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLifecycleBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
+		return
+	}
+	sid := strings.TrimSpace(in.Session)
+	// Scoped falls back to a content hash on an unusable id; here that means refuse.
+	if scoped := session.Scoped(tn.ID, sid, "", ""); sid == "" || !lifecycleEvents[in.Event] || !lifecycleKinds[in.Kind] ||
+		(tn.ID != "" && scoped != tn.ID+":"+sid) || (tn.ID == "" && scoped != sid) {
+		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
+		return
+	}
+	h.keeper.signal(tn.ID, session.Scoped(tn.ID, sid, "", ""), in.Event, in.Kind, h.keeper.now())
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// signal applies one event. Returns whether it changed anything.
+func (k *keeper) signal(tenantID, scoped, event, kind string, now time.Time) bool {
+	if k == nil {
+		return false
+	}
+	switch event {
+	case "SessionEnd":
+		// Every end reason (even clear / resume) retires the id the event names: that id will not
+		// send its next request from this process. If it does (a resumed session) the request
+		// starts after the mark and is tracked normally; see endedAfter.
+		before := k.Stats().Live
+		k.retireSession(tenantID, scoped)
+		slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "retired", before-k.Stats().Live)
+		k.mu.Lock()
+		k.markEndedLocked(tenantID, kaKey(tenantID, scoped), now)
+		k.mu.Unlock()
+		k.signalApplied.Add(1)
+		return true
+	case "SessionStart":
+		if kind != "compact" {
+			break
+		}
+		// Compaction replaced the conversation: every entry held for this session caches the old
+		// prefix, which no later request will send. The session itself goes on, so there is no end
+		// mark, and the post-compaction request is tracked as usual. The hook sends in the background,
+		// so the event can arrive after that request started (even after it was recorded): only
+		// entries whose last request started compactRaceMargin before the arrival are the old prefix.
+		before := k.Stats().Live
+		k.retireSessionStartedBefore(tenantID, scoped, now.Add(-compactRaceMargin))
+		slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "retired", before-k.Stats().Live)
+		k.signalApplied.Add(1)
+		return true
+	}
+	// Everything else is accepted and recorded, never acted on. Notification: offline, the pings
+	// sent on tool-wait rows that outlast 60 s (the nearest proxy for "blocked on a human") net
+	// positive, so a rule that stops them would lose money. SessionStart presence: see the table above.
+	slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "applied", false)
+	return false
+}
+
+// endedAfter reports whether the session was ended by a client signal at or after startedAt, i.e. the
+// request that started at startedAt was in flight when the user left. Its cache entry is not worth
+// holding. A request that starts after the mark is a resumed session and is tracked.
+func (k *keeper) endedAfter(tenantID, scoped string, startedAt time.Time) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	t, ok := k.ended[tenantID][kaKey(tenantID, scoped)]
+	return ok && !startedAt.After(t)
+}
+
+// markEndedLocked records an end mark under the tenant's own bucket. At the cap it first drops
+// marks older than lifecycleTTL, then the oldest, and only ever from this tenant's bucket.
+func (k *keeper) markEndedLocked(tenantID, key string, now time.Time) {
+	if k.ended == nil {
+		k.ended = map[string]map[string]time.Time{}
+	}
+	b := k.ended[tenantID]
+	if b == nil {
+		b = map[string]time.Time{}
+		k.ended[tenantID] = b
+	}
+	if _, ok := b[key]; !ok && len(b) >= maxEndedPerTenant {
+		oldK, oldT := "", now
+		for kk, t := range b {
+			if now.Sub(t) > lifecycleTTL {
+				delete(b, kk)
+			} else if oldK == "" || t.Before(oldT) {
+				oldK, oldT = kk, t
+			}
+		}
+		if len(b) >= maxEndedPerTenant {
+			delete(b, oldK)
+		}
+	}
+	b[key] = now
+}
