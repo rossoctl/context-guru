@@ -513,9 +513,11 @@ type keeper struct {
 	// ended is when a client lifecycle signal last ended each session, keyed like live. See clientsignal.go.
 	ended         map[string]map[string]time.Time
 	signalApplied atomic.Int64
-	// inflight counts each session's real requests between arrive and record, keyed like
-	// kaKey. A due ping waits while it is non-zero: the session is active, and a long call
-	// (a /compact) is often about to replace the very prefix the ping would refresh.
+	// inflight counts each THREAD's real requests between arrive and record, keyed like live
+	// (kaThreadKey). A due ping waits while its own thread has one open: two requests of one
+	// thread can overlap, and the first one's fresh hold must not be pinged under the second.
+	// Per thread, not per session: a subagent's slow request must not let the main thread's
+	// cache expire (since the compaction call stays on the main thread, no case needs more).
 	inflight map[string]int
 	// routeFails counts consecutive failed pings per upstream route (kaRouteKey); at
 	// routeFailLimit the route is tripped until routeTripped[key] and holds nothing.
@@ -720,7 +722,7 @@ func (k *keeper) arrive(tenant, session, threadID string) (pings int, refreshed 
 	if k.inflight == nil {
 		k.inflight = map[string]int{}
 	}
-	k.inflight[kaKey(tenant, session)]++
+	k.inflight[key]++
 	e, ok := k.live[key]
 	if !ok {
 		return 0, 0, ""
@@ -742,7 +744,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool) {
 	if k != nil && tn != nil && session != "" {
-		defer k.departed(tn.ID, session) // last: the request is over once its hold (if any) is stored
+		defer k.departed(kaThreadKey(tn.ID, session, threadID)) // last: the request is over once its hold (if any) is stored
 	}
 	if k == nil || tn == nil || session == "" || len(body) == 0 || startedAt.IsZero() {
 		return
@@ -1126,7 +1128,7 @@ func (k *keeper) sweep(now time.Time) int {
 			}
 			continue
 		}
-		if !e.due(now) || k.inflight[kaKey(e.tenant, e.session)] > 0 {
+		if !e.due(now) || k.inflight[key] > 0 {
 			continue
 		}
 		if t, ok := k.routeTripped[kaRouteKey(e.tenant, e.up, e.model)]; ok && now.Before(t) {
@@ -1591,11 +1593,10 @@ func (k *keeper) credIsDeadLocked(cred, model string, now time.Time) bool {
 	return false
 }
 
-// departed is arrive's other half: a real request of the session has finished.
-func (k *keeper) departed(tenant, session string) {
+// departed is arrive's other half: a real request of the thread (kaThreadKey) has finished.
+func (k *keeper) departed(key string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	key := kaKey(tenant, session)
 	if k.inflight[key] <= 1 {
 		delete(k.inflight, key)
 		return

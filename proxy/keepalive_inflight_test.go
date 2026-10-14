@@ -19,9 +19,9 @@ import (
 	"github.com/rossoctl/context-guru/store"
 )
 
-// A slow request of the session (a long /compact call) is in flight: the held entry of its other
-// thread is due, but no ping goes out until that request has finished.
-func TestNoPingWhileARequestOfTheSessionIsInFlight(t *testing.T) {
+// A subagent's request is in flight for longer than the main thread's remaining cache lifetime: the
+// main thread's ping still goes out on time (a session-wide pause would let its cache expire).
+func TestASlowSubagentRequestDoesNotDelayTheMainThreadsPing(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
@@ -65,22 +65,23 @@ func TestNoPingWhileARequestOfTheSessionIsInFlight(t *testing.T) {
 	defer unblock() // runs before the servers close: a failing run must not leave the upstream handler blocked
 
 	sess := "inflight-" + strconv.FormatInt(time.Now().UnixNano(), 36) // process-wide thread state outlives one run
-	post := func(tools bool, texts ...string) {
+	post := func(agent string, texts ...string) {
 		var msgs []any
 		for i, s := range texts {
 			msgs = append(msgs, map[string]any{"role": []string{"user", "assistant"}[i%2], "content": s})
 		}
 		m := map[string]any{"model": "aws/claude-sonnet-5", "max_tokens": 64, "messages": msgs,
 			"system": []any{map[string]any{"type": "text", "text": "you are claude code", "cache_control": map[string]any{"type": "ephemeral"}}}}
-		if tools {
-			m["tools"] = []any{map[string]any{"name": "Bash", "description": "run", "input_schema": map[string]any{"type": "object"}}}
-		}
+		m["tools"] = []any{map[string]any{"name": "Bash", "description": "run", "input_schema": map[string]any{"type": "object"}}}
 		body, _ := json.Marshal(m)
 		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("x-context-guru-session", sess)
 		req.Header.Set("x-api-key", "sk-test")
 		req.Header.Set("anthropic-version", "2023-06-01")
+		if agent != "" {
+			req.Header.Set(agentIDHeader, agent)
+		}
 		resp, err := srv.Client().Do(req)
 		if err != nil {
 			t.Error(err)
@@ -95,24 +96,24 @@ func TestNoPingWhileARequestOfTheSessionIsInFlight(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
-	post(true, "fix the bug")
+	post("", "fix the bug")
 	settled()
-	post(true, "fix the bug", "done", "thanks")
+	post("", "fix the bug", "done", "thanks")
 	settled()
 	if h.keeper.Stats().Live != 1 {
 		t.Fatalf("setup: %d live, want 1 (%+v)", h.keeper.Stats().Live, h.keeper.Stats())
 	}
 	done := make(chan struct{})
-	go func() { post(false, "fix the bug", "done", "thanks", "ok", "SUMMARIZE the conversation"); close(done) }()
+	go func() { post("sub1", "SUMMARIZE the module for the main agent"); close(done) }()
 	for deadline := time.Now().Add(5 * time.Second); h.keeper.inflightCount("", sess) == 0; {
 		if time.Now().After(deadline) {
 			t.Fatal("the slow request never arrived")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	h.keeper.sweep(clock.advance(90 * time.Second)) // due, but a request of the session is in flight
-	if n := pings.Load(); n != 0 {
-		t.Errorf("%d pings while the session's slow request was in flight", n)
+	h.keeper.sweep(clock.advance(61 * time.Second)) // the main thread is due; the subagent's call is still open
+	if n := pings.Load(); n != 1 {
+		t.Errorf("%d main-thread pings while a subagent request was in flight, want 1 (on time)", n)
 	}
 	unblock()
 	select {
@@ -120,10 +121,28 @@ func TestNoPingWhileARequestOfTheSessionIsInFlight(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the slow request never finished")
 	}
-	settled()
-	h.keeper.sweep(clock.advance(time.Second))
-	if n := pings.Load(); n != 1 {
-		t.Errorf("%d pings after the slow request finished, want 1", n)
+}
+
+// Two requests of ONE thread overlap: the first one's fresh hold is not pinged while the second is
+// still open, and is pinged once that one has finished.
+func TestAnOpenRequestOnTheSameThreadPausesItsPing(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
+	up := upstream{base: "http://up", path: "/v1/messages"}
+	recordOne(t, k, pol, kaBody, clock.now(), up)  // an earlier turn: the gate needs turn >= 1
+	k.arrive("t1", "sess-1", "")                   // request A
+	k.arrive("t1", "sess-1", "")                   // request B, overlapping
+	recordTurn(t, k, pol, kaBody, clock.now(), up) // A finishes and holds
+	k.sweep(clock.advance(290 * time.Second))
+	time.Sleep(30 * time.Millisecond)
+	if fs.n() != 0 {
+		t.Errorf("%d pings while another request of the same thread was open", fs.n())
+	}
+	k.departed(kaThreadKey("t1", "sess-1", "")) // B ends without a hold (a failed request)
+	k.sweep(clock.advance(time.Second))
+	time.Sleep(30 * time.Millisecond)
+	if fs.n() != 1 {
+		t.Errorf("%d pings after the thread's last request ended, want 1", fs.n())
 	}
 }
 
@@ -334,10 +353,17 @@ func TestOverloadedPingsDoNotTripTheRoute(t *testing.T) {
 	}
 }
 
+// inflightCount is every open request of the session, all threads.
 func (k *keeper) inflightCount(tenant, session string) int {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.inflight[kaKey(tenant, session)]
+	n, base := 0, kaKey(tenant, session)
+	for key, c := range k.inflight {
+		if key == base || strings.HasPrefix(key, base+"\x00") {
+			n += c
+		}
+	}
+	return n
 }
 
 // A non-retryable 4xx (not an auth refusal) counts toward the breaker; forget clears an account's trip; an OpenAI ping that
