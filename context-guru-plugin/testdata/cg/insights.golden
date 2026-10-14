@@ -1,0 +1,43 @@
+── Savings ────────────────────────────────────────────────────────────────────────────────────────
+Saved $41.20 in 7 days, net of Context Guru's own spend (4.6% of the $898.05 the same work would have cost).
+
+✓ Saved   (vs the same requests without Context Guru, at gateway prices)  ▇▁▁█▇▇█
+  Compaction                      $33.90  ████████████
+  Keep-alive pings                 $6.30  ██░░░░░░░░░░
+  Tool filtering                   $7.85  ███░░░░░░░░░
+  Context Guru's own model spend  -$4.10  ░░░░░░░░░░░░
+
+≈ Estimated   (spend you could still avoid; rows overlap, do not add them)
+  You paused longer than the cache lasts, 214 times  $107.79  measured
+  Settings or tools changed mid-session               $23.31  measured
+
+── Cache ──────────────────────────────────────────────────────────────────────────────────────────
+Cache is warm for 2:41 more. If it lapses, the next message costs $1.91 extra.
+
+● ███████████░░░░░░░░░ 2:41 of 5:00   ping planned ↻
+
+Cache misses in 7 days: 377 costing $145.67 extra   (measured)
+  You paused longer than the cache lasts     214x  $107.79  ███████░░░
+  Settings or tools changed mid-session       23x   $14.57  █░░░░░░░░░
+  A new session started                       96x   $14.57  █░░░░░░░░░
+  A helper agent started                      41x    $7.28  ░░░░░░░░░░
+  The conversation was rewound or compacted    3x    $1.46  ░░░░░░░░░░
+
+The cache keeps your conversation cheap to reuse for a few minutes after each message.
+
+── Tools ──────────────────────────────────────────────────────────────────────────────────────────
+6 things you carry were never used: $37.70 in 7 days, about $161.57 a month.
+
+Top 5 of 6:
+  MCP server     playwright    $18.40  ██████████
+  MCP server     sentry         $7.10  ████░░░░░░
+  MCP server     figma          $6.20  ███░░░░░░░
+  built-in tool  NotebookEdit   $3.30  ██░░░░░░░░
+  skill          brand-voice    $1.60  █░░░░░░░░░
+
+Remove the first:
+  claude mcp remove playwright
+
+Measured carry; the monthly figure is an estimate that assumes your usage stays the same.
+
+More: /context-guru:insights savings | cache | tools, each with details

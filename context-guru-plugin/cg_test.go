@@ -193,6 +193,12 @@ func TestCGGoldens(t *testing.T) {
 		{"waste", warm, []string{"waste"}, 0},
 		{"session", warm, []string{"session"}, 0},
 		{"doctor", warm, []string{"doctor"}, 0},
+		{"insights", warm, []string{"insights"}, 0},
+		{"insights-savings", warm, []string{"insights", "savings"}, 0},
+		{"insights-cache", warm, []string{"insights", "cache"}, 0},
+		{"insights-tools", warm, []string{"insights", "tools"}, 0},
+		{"insights-tools-details", warm, []string{"insights", "tools", "details"}, 0},
+		{"waste-redirect", warm, []string{"waste"}, 0},
 		{"save-more", warm, []string{"save-more"}, 0},
 		{"save-more-config", warm, []string{"save-more", "config"}, 0},
 		{"save-more-config-details", warm, []string{"save-more", "config", "details"}, 0},
@@ -277,7 +283,7 @@ func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
 // `cg.py apply` and `cg.py revert` while that skill is active, and skip the harness's permission prompt.
 // Codex skills pre-approve nothing, and every write they run asks for escalation.
 func TestNoSkillPreApprovesAChange(t *testing.T) {
-	reads := map[string]bool{"adapt": true, "save-more": true, "remove-mcp-and-skills": true, "cache-campaign": true}
+	reads := map[string]bool{"adapt": true, "save-more": true, "remove-mcp-and-skills": true, "cache-campaign": true, "insights": true}
 	for _, c := range []string{"home", "savings", "cache", "waste", "session", "doctor"} {
 		reads[c] = true
 	}
@@ -453,7 +459,7 @@ func TestDocsExamplesAreTheGoldens(t *testing.T) {
 		"waste": "waste", "session": "session", "doctor": "doctor",
 		"save-more": "save-more", "save-more-ascii-80": "save-more", "apply-config": "save-more", "revert-config": "save-more",
 		"apply-gate":            "save-more",
-		"remove-mcp-and-skills": "remove-mcp-and-skills", "apply-tools-async": "remove-mcp-and-skills",
+		"remove-mcp-and-skills": "remove-mcp-and-skills", "apply-tools-async": "remove-mcp-and-skills", "insights": "insights",
 	} {
 		g := strings.TrimRight(string(cgRead(t, "cg", golden+".golden")), "\n")
 		b, err := os.ReadFile(filepath.Join("..", "docs", "plugin", page+".md"))

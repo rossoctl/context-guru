@@ -5,7 +5,7 @@
     home      what is my situation, what should I do next
     savings   how much did Context Guru save me                  (saved and estimated kept apart)
     cache     is my cache about to cost me
-    waste     what do I carry and never use
+    insights  savings, cache and tools (what you carry and never use) in one place; `waste` is `insights tools`
     session   what happened in this session
     doctor    is it set up right
     save-more              which config and keep-alive strategy would have cost least on my own history
@@ -223,7 +223,7 @@ def cmd_home(api: Api, o: dict) -> list[str]:
         L.append(f"  {i}. {dollars(r['usd']):>8}  {r['short']}: {r['do']}")
     if not recs:
         L.append("  Nothing worth acting on right now.")
-    L += ["", "/context-guru:savings  /context-guru:cache  /context-guru:waste  /context-guru:session  /context-guru:doctor",
+    L += ["", "/context-guru:insights  /context-guru:session  /context-guru:doctor  /context-guru:save-more  /context-guru:remove-mcp-and-skills",
           "/context-guru:watch  /context-guru:timeline  /context-guru:chart  /context-guru:heatmap  /context-guru:fill"]
     return L
 
@@ -926,14 +926,36 @@ def adapt_main(api: Api, cmd: str, opts: dict) -> int:
     return rc
 
 
-CMDS = {"home": cmd_home, "savings": cmd_savings, "cache": cmd_cache, "waste": cmd_waste, "session": cmd_session, "doctor": cmd_doctor}
+# ---------------------------------------------------------------------------------------------
+# /context-guru:insights: savings, cache and tools (the old `waste`) under one name. Naming and grouping only:
+# each screen is the same function as before.
+
+INSIGHTS = {"savings": cmd_savings, "cache": cmd_cache, "tools": cmd_waste}
+INSIGHT_NAME = {"savings": "insights savings", "cache": "insights cache", "waste": "insights tools"}  # the old names
+
+
+def cmd_insights(api: Api, o: dict) -> list[str]:
+    sub = next((a for a in o["args"] if a in INSIGHTS), None)
+    if sub:
+        L = INSIGHTS[sub](api, o)
+        return L + ([] if o["details"] else ["", f"More: /context-guru:insights {sub} details"])
+    e = T.Env()
+    L = []
+    for name, fn in INSIGHTS.items():  # one after another, each under a rule as wide as the terminal
+        title = f" {name.capitalize()} "
+        L += [("-" if e.ascii else "─") * 2 + title + ("-" if e.ascii else "─") * max(0, e.width - len(title) - 3), *fn(api, o), ""]
+    return L + ["More: /context-guru:insights savings | cache | tools, each with details"]
+
+
+CMDS = {"home": cmd_home, "insights": cmd_insights, "savings": cmd_savings, "cache": cmd_cache, "waste": cmd_waste,
+        "session": cmd_session, "doctor": cmd_doctor}
 
 
 def run(cmd: str, api: Api, opts: dict) -> str:
     o = {"now": int(time.time() * 1000), "tz_min": 0, "days": 0, "details": False, "session": None, "args": [], **opts}
     L = CMDS[cmd](api, o)
-    if not o["details"] and cmd not in ("doctor", "home"):
-        L += ["", f"More: /context-guru:{cmd} details"]
+    if not o["details"] and cmd not in ("doctor", "home", "insights"):
+        L += ["", f"More: /context-guru:{INSIGHT_NAME.get(cmd, cmd)} details"]
     return "\n".join(L)
 
 
