@@ -341,14 +341,14 @@ func TestSentStashSurvivesASideRequest(t *testing.T) {
 	if main.ID != thread.Primary {
 		t.Fatalf("precondition: main thread got %q, want primary", main.ID)
 	}
-	s.put(thread.Key("sess", main.ID), bschemas.Anthropic, mainBody, mainBody)
+	s.put(thread.Key("sess", main.ID), bschemas.Anthropic, mainBody, mainBody, "")
 
 	sideBody := threadBody("fix the bug", "generate a title")
 	side := tr.Resolve(scope, "", sideBody, false)
 	if side.ID == main.ID {
 		t.Fatal("precondition: the side request got the main thread's id")
 	}
-	s.put(thread.Key("sess", side.ID), bschemas.Anthropic, sideBody, sideBody)
+	s.put(thread.Key("sess", side.ID), bschemas.Anthropic, sideBody, sideBody, "")
 
 	if got := s.get(thread.Key("sess", main.ID)); string(got) != string(mainBody) {
 		t.Fatalf("the side request's own stash entry replaced the main thread's: got %.80q", got)
