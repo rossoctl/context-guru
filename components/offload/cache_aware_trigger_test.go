@@ -316,7 +316,7 @@ func TestCacheAwareDefersTheSideCallOnACacheState_Cold(t *testing.T) {
 	}
 	// Now the proxy's hook fires, as it would right after the forwarded request's own usage is
 	// observed.
-	ResolveDeferredCacheAwareSummary(ctx.Session)
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the deferred summary never resolved")
 	}

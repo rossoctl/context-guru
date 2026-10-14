@@ -528,8 +528,9 @@ func TestKeepAliveSubstituteIsPerThread(t *testing.T) {
 		t.Fatalf("subagent's ping: subagent calls %d, main calls %d; want 1 and 0",
 			subModel.calls.Load(), mainModel.calls.Load())
 	}
-	// The main thread's ping later may use only the MAIN thread's call. (It may also fall back to
-	// a plain ping: the summarizer's checkpoint is still per session, see the follow-up issue.)
+	// The main thread's ping later runs the MAIN thread's own call. Before #430 it fell back to a
+	// plain ping: the checkpoint was per session, so the subagent's commit read as "this thread
+	// already has a summary".
 	if n := k.sweep(t0.Add(282 * time.Second)); n != 1 {
 		t.Fatalf("second sweep fired %d pings, want 1 (the main thread's)", n)
 	}
@@ -539,6 +540,10 @@ func TestKeepAliveSubstituteIsPerThread(t *testing.T) {
 	}
 	if subModel.calls.Load() != 1 {
 		t.Errorf("the main thread's ping ran the subagent's summary call (subagent calls %d)", subModel.calls.Load())
+	}
+	if mainModel.calls.Load() != 1 {
+		t.Errorf("the main thread's ping did not run the main thread's summary call (main calls %d): "+
+			"the subagent's checkpoint took its substitute away", mainModel.calls.Load())
 	}
 }
 

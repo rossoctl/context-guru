@@ -874,87 +874,24 @@ func TestJSONModeIsTheSameDocument(t *testing.T) {
 // The skills
 // ---------------------------------------------------------------------------
 
-// TestEveryInsightSkillRunsTheScriptAndClaimsOnlyWhatItCan.
-//
-// The skills are where a careful script gets undone: the numbers arrive correct and a sentence of
-// prose turns a range into a figure. So each one has to (a) actually run the collector rather than
-// reimplement a curl, (b) be allowed to run only that, and (c) carry the two rules that the
-// collector cannot enforce from its side — quote both ends of an interval, and never present a
-// `related`-tier figure as a saving.
-func TestEveryInsightSkillRunsTheScriptAndClaimsOnlyWhatItCan(t *testing.T) {
-	names := []string{"insights", "insights-capabilities", "insights-idle", "insights-components"}
-	for _, name := range names {
+// The four insights skills are redirects now. Each tells the user where the command moved and runs
+// the new one through cg.py, with nothing else it may run and no option read of its own.
+func TestInsightSkillsAreRedirects(t *testing.T) {
+	moved := map[string]string{"insights": "status", "insights-capabilities": "waste", "insights-idle": "cache", "insights-components": "savings",
+		"cost-today": "status", "cost-unused": "waste", "cost-cold": "cache", "cost-compact": "cache", "cost-trends": "savings"}
+	for name, to := range moved {
 		t.Run(name, func(t *testing.T) {
 			body := readFileString(t, filepath.Join("skills", name, "SKILL.md"))
-			if !strings.Contains(body, "scripts/insights.py") {
-				t.Error("does not run scripts/insights.py. A skill that hand-rolls its own curl " +
-					"against /api/ computes its own dollar figures in prose, which is the exact " +
-					"thing the collector exists to prevent")
+			if !strings.Contains(body, "moved to `/context-guru:"+to+"`") {
+				t.Errorf("does not say it moved to /context-guru:%s", to)
 			}
-			if !strings.Contains(body, "allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/insights.py)") {
-				t.Error("does not restrict allowed-tools to the collector. This surface reads a " +
-					"live configuration and must not be able to write one")
+			if !strings.Contains(body, "allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py:*)") {
+				t.Error("must be allowed to run only cg.py")
 			}
-			// The one instruction that cannot be enforced from the script: it emits lo/hi and has
-			// no midpoint field, and prose is the only place a midpoint can appear.
-			if strings.Contains(body, "usd_lo") || strings.Contains(body, "recommend_lo_usd") {
-				if !strings.Contains(body, "Never average") && !strings.Contains(body, "never average") {
-					t.Error("names the interval fields without forbidding an average of them. " +
-						"The endpoint has no point-estimate field precisely so none can be " +
-						"rendered; prose is the last place that guarantee can be lost")
-				}
-			}
-			// settings.py's per-option fallback prose is required of any skill that reads the
-			// options itself (TestEverySkillStatesThePerOptionFallback). These deliberately do not:
-			// the collector resolves them. Assert that, so nobody "helpfully" adds a defaulted
-			// port to a skill body and reintroduces the defect in prose.
 			if strings.Contains(body, "CLAUDE_PLUGIN_OPTION_") {
-				t.Error("mentions CLAUDE_PLUGIN_OPTION_; these skills must not resolve options " +
-					"at all — insights.py does it, from disk")
+				t.Error("must not resolve plugin options; cg.py takes the proxy from the session")
 			}
 		})
-	}
-}
-
-// TestTheUmbrellaSkillNamesTheNoInstallRefusal: the script can now answer "there is no port to
-// report", and that answer is only useful if the skill reading it knows not to substitute one. The
-// original defect was not that the script lacked the information — `port_source=(default)` was
-// printed all along — but that no finding was raised and no skill named the field, so a model
-// narrated a report about somebody else's proxy in the user's own voice.
-func TestTheUmbrellaSkillNamesTheNoInstallRefusal(t *testing.T) {
-	body := readFileString(t, filepath.Join("skills", "insights", "SKILL.md"))
-	for _, want := range []string{"no-install", "port_source", "unavailable=port"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("skills/insights/SKILL.md never mentions %q, so the one state where this "+
-				"command must refuse outright has no instructions attached to it", want)
-		}
-	}
-}
-
-// TestTheUmbrellaSkillDocumentsEveryBasisTheScriptEmits. `basis` is the field that stops a forecast
-// being read as a bill, and the umbrella skill translates each value into what the model may say.
-// A basis the script emits and the skill does not document is a value that gets narrated by guess.
-func TestTheUmbrellaSkillDocumentsEveryBasisTheScriptEmits(t *testing.T) {
-	body := readFileString(t, filepath.Join("skills", "insights", "SKILL.md"))
-	script := readFileString(t, filepath.Join(scriptsDir(t), "insights.py"))
-	for _, basis := range []string{
-		"measured over the window",
-		"configuration, not a measurement",
-		"no measurement yet",
-		"refused: insufficient observation",
-		"deliberately withheld: insufficient observation",
-		"measured size of the problem, NOT a projected saving",
-		"90% interval over a window like this one",
-	} {
-		if !strings.Contains(script, basis) {
-			t.Errorf("this test expects insights.py to emit basis %q and it no longer does; "+
-				"re-anchor the list", basis)
-			continue
-		}
-		if !strings.Contains(body, basis) {
-			t.Errorf("skills/insights/SKILL.md does not document basis %q, so a model reading it "+
-				"has to guess what that qualifier permits it to claim", basis)
-		}
 	}
 }
 

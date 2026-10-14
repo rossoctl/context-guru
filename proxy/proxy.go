@@ -1599,7 +1599,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// may never come (see offload.ResolveDeferredCacheAwareSummary's own comment on why a
 		// failed forward still resolves it). Harmless, and nearly free, on the overwhelming
 		// majority of sessions that never deferred anything.
-		offload.ResolveDeferredCacheAwareSummary(session)
+		offload.ResolveDeferredCacheAwareSummary(session, threadID)
 		if sse {
 			// The same two facts to both sinks. The aggregator keeps the process-lifetime
 			// average; the dashboard row keeps the per-request pair, so "which model, which

@@ -141,6 +141,117 @@ func TestTrackerStaysBounded(t *testing.T) {
 	}
 }
 
+// At its bound the tracker evicts the least recently used key, so the threads of a busy session
+// keep their record while new subagents arrive (#484). Each round adds one new key and then
+// touches the 10 hot ones; every hot key must still be there. The old random eviction picked a hot
+// key with probability 10/11 per round, so over 100 rounds it fails every time.
+func TestTrackerEvictsLeastRecentlyUsed(t *testing.T) {
+	const hot = 10
+	tr := NewTracker(hot + 1)
+	now := int64(1_700_000_000_000)
+	for i := 0; i < hot; i++ {
+		tr.TurnAt("hot"+strconv.Itoa(i), 5, now)
+	}
+	for round := 0; round < 100; round++ {
+		now++
+		tr.TurnAt("new"+strconv.Itoa(round), 5, now)
+		for i := 0; i < hot; i++ {
+			if prevLen, prevAt := tr.TurnAt("hot"+strconv.Itoa(i), 5, now); prevAt == 0 || prevLen != 5 {
+				t.Fatalf("round %d: hot key %d was evicted while still in use", round, i)
+			}
+		}
+	}
+	if n := tr.Sessions(); n != hot+1 {
+		t.Fatalf("tracker holds %d keys, want its bound %d", n, hot+1)
+	}
+}
+
+// A new key that continues a parent's prefix reads the parent's record: its boundary (capped at
+// its own length) and its clock. The parent's record is not written.
+func TestTurnFromInheritsTheParentRecordReadOnly(t *testing.T) {
+	tr := NewTracker(0)
+	t0 := int64(1_700_000_000_000)
+	tr.TurnAt("main", 8, t0)
+	before := CompactionResets()
+
+	if n, at := tr.TurnFrom("side", "main", 9, t0+1000); n != 8 || at != t0 {
+		t.Fatalf("side request: (%d, %d), want the parent's (8, %d)", n, at, t0)
+	}
+	// A fork shorter than its parent diverged inside the parent's prefix: freeze all of it.
+	if n, _ := tr.TurnFrom("fork", "main", 5, t0+2000); n != 5 {
+		t.Fatalf("short fork: boundary %d, want its own length 5", n)
+	}
+	if got := CompactionResets() - before; got != 0 {
+		t.Fatalf("an inherited read counted %d compaction resets", got)
+	}
+	// Read only: main's next turn is measured against its own 8 and its own time.
+	if n, at := tr.TurnAt("main", 10, t0+3000); n != 8 || at != t0 {
+		t.Fatalf("main after its children: (%d, %d), want (8, %d)", n, at, t0)
+	}
+	// Once the key has its own record, the parent no longer counts.
+	if n, _ := tr.TurnFrom("side", "main", 12, t0+4000); n != 9 {
+		t.Fatalf("side's second request: boundary %d, want its own 9", n)
+	}
+	// An unknown parent, or none, is a plain new key.
+	if n, at := tr.TurnFrom("orphan", "nobody", 4, t0); n != 0 || at != 0 {
+		t.Fatalf("orphan: (%d, %d), want (0, 0)", n, at)
+	}
+}
+
+// A key the tracker evicted may still be cached at the provider. Its next request must read as
+// "all cached" (boundary = its length), not 0, which would let every component rewrite it.
+func TestDroppedKeyReadsAsAllCached(t *testing.T) {
+	tr := NewTracker(1)
+	t0 := int64(1_700_000_000_000)
+	tr.TurnAt("a", 5, t0)
+	tr.TurnAt("b", 3, t0+1) // evicts a
+	if n, at := tr.TurnAt("a", 7, t0+2); n != 7 || at != 0 {
+		t.Fatalf("evicted key came back as (%d, %d), want (7, 0): all cached, idle unknown", n, at)
+	}
+	// It has a real record again, so the turn after is normal.
+	tr.TurnAt("c", 1, t0+3) // evicts the LRU, b
+	if n, _ := tr.TurnAt("c", 2, t0+4); n != 1 {
+		t.Fatalf("c: boundary %d, want 1", n)
+	}
+}
+
+// A new thread whose parent was evicted reads as all cached too: the provider may still hold the
+// parent's prefix that this request reads. The peek does not forget the parent's drop, so the
+// parent's own next request is still all cached.
+func TestNewKeyOfADroppedParentReadsAsAllCached(t *testing.T) {
+	tr := NewTracker(1)
+	t0 := int64(1_700_000_000_000)
+	tr.TurnAt("main", 8, t0)
+	tr.TurnAt("other", 3, t0+1) // evicts main
+	if n, at := tr.TurnFrom("side", "main", 9, t0+2); n != 9 || at != 0 {
+		t.Fatalf("side of an evicted parent: (%d, %d), want (9, 0): all cached, idle unknown", n, at)
+	}
+	if n, _ := tr.TurnAt("main", 10, t0+3); n != 10 {
+		t.Fatalf("evicted parent's own next request: boundary %d, want 10 (all cached)", n)
+	}
+}
+
+// At the bound, keys idle past StaleAfter expire first, all at once, before a live key is evicted.
+// Here b was used AFTER a, so least-recently-used alone would evict a, the live one.
+func TestStaleKeysExpireBeforeLiveOnes(t *testing.T) {
+	tr := NewTracker(3)
+	now := int64(1_700_000_000_000) + StaleAfter.Milliseconds()*2
+	stale := now - StaleAfter.Milliseconds() - 1
+	tr.TurnAt("a", 4, now)
+	tr.TurnAt("b", 4, stale)
+	tr.TurnAt("c", 4, stale)
+	tr.TurnAt("d", 4, now+1) // the tracker is full: b and c expire
+	if n := tr.Sessions(); n != 2 {
+		t.Fatalf("tracker holds %d keys, want 2 (both stale keys expired)", n)
+	}
+	if n, at := tr.TurnAt("a", 5, now+2); n != 4 || at != now {
+		t.Fatalf("live key a was dropped: (%d, %d)", n, at)
+	}
+	if n, _ := tr.TurnAt("b", 6, now+3); n != 6 {
+		t.Fatalf("expired key b: boundary %d, want 6 (all cached), not 0", n)
+	}
+}
+
 // --- Pool -------------------------------------------------------------------
 
 func TestPoolRunsJobs(t *testing.T) {

@@ -1,0 +1,246 @@
+{
+ "accounting": {
+  "complete": 591
+ },
+ "attempted_requests": 591,
+ "attempted_tokens": 20900053,
+ "baseline_cost_usd": 3.0431815,
+ "billed_input_rows": 591,
+ "billed_input_tokens": 20923693,
+ "breakpoints": {
+  "blocks": 0,
+  "messages": 0,
+  "modal": "system=0, tools=0, messages=0, blocks=0",
+  "modal_requests": 591,
+  "requests": 0,
+  "system": 0,
+  "tools": 0
+ },
+ "cache_miss": {
+  "hit": 387,
+  "ttl_expiry": 204
+ },
+ "cache_read": 13095933,
+ "cache_saved_usd": 0,
+ "cache_ttl": {
+  "": 591
+ },
+ "cache_ttl_recorded": 0,
+ "cache_write": 7804120,
+ "cache_write_1h": 0,
+ "cachesplit_historical": {
+  "models": 0,
+  "requests": 0,
+  "uncovered": 60,
+  "usd": 0
+ },
+ "cachesplit_saved_usd": 0,
+ "cg_latency_ms_avg": 3.7766497461928936,
+ "cg_latency_ms_p95": 6,
+ "cg_llm_cost_usd": 0,
+ "compaction_resets": 0,
+ "corrected_saving_rows": 0,
+ "cost_usd": 2.794,
+ "decl_credit_priced": false,
+ "decl_filter_reads": 0,
+ "decl_filter_requests": 0,
+ "decl_filter_usd": 0,
+ "denominators": [
+  {
+   "available": true,
+   "denominator": 20900053,
+   "description": "GROSS savings ÷ the tokens compaction was ALLOWED to touch this turn (the uncached tail when cache-aware). Both sides are per-turn quantities — the denominator is re-counted every turn, so the numerator is too — and both are summed over the SAME requests: only the ones that recorded a denominator at all, so a request whose attempted_tokens predates that column cannot contribute a saving to a ratio it has no divisor for. Answers 'are we good when we have something to work with?' Excludes the frozen prefix we deliberately never touched.",
+   "key": "attempted",
+   "label": "gross, of what we tried to compact",
+   "numerator": 498363,
+   "percent": 2.3845059148893064
+  },
+  {
+   "available": true,
+   "denominator": 8326123,
+   "description": "Unique savings ÷ (fresh input + cache writes + what we removed). The most honest economic ratio: it does not recount transcript history that the provider served from cache and never re-billed. Unavailable when the provider reports no usage data — reported as n/a, never as 100%.",
+   "key": "new_input",
+   "label": "of new provider-billed input",
+   "numerator": 498363,
+   "percent": 5.9855349242378475
+  },
+  {
+   "available": true,
+   "denominator": 20900053,
+   "description": "Gross savings ÷ every content token in every request. Kept for transparency, but a long session re-sends its history each turn, so this denominator grows quadratically and the ratio trends to ~0% however well compaction works.",
+   "key": "whole_request",
+   "label": "of the whole request (diluted)",
+   "numerator": 498363,
+   "percent": 2.3845059148893064
+  },
+  {
+   "available": true,
+   "denominator": 20900053,
+   "description": "Unique savings over the same diluted denominator: the most conservative number this dashboard can produce.",
+   "key": "unique_whole",
+   "label": "unique, of the whole request",
+   "numerator": 498363,
+   "percent": 2.3845059148893064
+  }
+ ],
+ "estimator_divergence": 1.001123848055743,
+ "estimator_divergence_compacted": 1.0011973896904747,
+ "estimator_divergence_compacted_rows": 197,
+ "estimator_divergence_rows": 394,
+ "expand_rate": 0,
+ "expand_tokens": 0,
+ "expands": 0,
+ "fresh_input": 23640,
+ "frozen_tokens": 0,
+ "invalid_config_recent": 0,
+ "invalid_config_requests": 0,
+ "keepalive_misses_avoided": 0,
+ "keepalive_net_usd": -0.006,
+ "keepalive_ping_usd": 0.006,
+ "keepalive_pings": 15,
+ "keepalive_saved_usd": 0,
+ "net_saved_usd": 0.24918150000000017,
+ "output_tokens": 29550,
+ "overcount_ratio": 1,
+ "passthroughs": 0,
+ "pre_correction_saved_usd": 0.2491815,
+ "pre_correction_saving_rows": 197,
+ "prefix_change_cost_all_usd": 0,
+ "prefix_change_cost_usd": 0,
+ "prefix_change_requests": 0,
+ "prefix_change_requests_all": 0,
+ "replay_projected_tokens": 2352805,
+ "replay_realized_pct": 0,
+ "replay_tokens": 0,
+ "requests": 591,
+ "reverts": 0,
+ "safety_cost": {
+  "cg_latency_ms_total": 2232,
+  "cg_llm_cost_usd": 0,
+  "description": "What context-guru's own protective mechanisms cost, shown beside what they bought: cache-aware freezing forgoes compaction on the already-cached prefix (its benefit is the cache reads it preserved), restored tokens are offloads the model asked back for, reverted runs are the never-worse guard firing, and the LLM cost is context-guru's own model spend. A LOW frozen figure is not evidence the provider's cache is cold: zero means our own prefix tracker was reset, not that the provider dropped anything — measured, 3,092 such requests still hit cache for 404.4M read tokens.",
+  "frozen_read_usd": 0,
+  "frozen_tokens": 0,
+  "frozen_write_risk_usd": 0,
+  "priced": false,
+  "restored_tokens": 0,
+  "reverted_runs": 0
+ },
+ "saved_adjusted": 498363,
+ "saved_gross": 498363,
+ "saved_gross_attempted": 498363,
+ "saved_unique": 498363,
+ "self_removed_items": 0,
+ "self_removed_overlap": 0,
+ "self_removed_reads": 0,
+ "self_removed_usd": 0,
+ "sessions": 60,
+ "since": 0,
+ "split_credited": 0,
+ "split_credited_moved": 0,
+ "split_requests": 0,
+ "split_tail_moved": 0,
+ "sse_buffered": 0,
+ "sse_buffered_pct": 0,
+ "sse_recorded": 0,
+ "sse_stream_rows": 0,
+ "sse_streamed": 0,
+ "tokens_after": 20401690,
+ "tokens_before": 20900053,
+ "tokens_before_billed": 20900053,
+ "total_ms_avg_buffered": 0,
+ "total_reduced_usd": 0.24318150000000016,
+ "total_saved_usd": 0.24318150000000016,
+ "ttfb_ms_avg_streamed": 0,
+ "uncompressed": {
+  "": 591
+ },
+ "until": 0,
+ "upstream_ms_avg": 410.5566835871404,
+ "upstream_ms_p95": 514,
+ "waterfall": [
+  {
+   "delta_usd": 3.0431815,
+   "description": "What this window's requests would have cost with nothing removed: the billed cost, plus the UNIQUE removed tokens priced at the cache-WRITE rate they would have entered as, plus the re-sent remainder priced at the rate each request ACTUALLY paid — the cache-read rate where its cache hit, the cache-creation rate where it had expired and the whole prompt was re-billed.",
+   "key": "baseline",
+   "label": "Baseline cost (no context-guru)",
+   "total": true
+  },
+  {
+   "delta_usd": -0.24918150000000017,
+   "description": "Cost avoided because content never reached the provider. Only the UNIQUE saving earns the cache-write rate (12.5x a read on a prompt-caching backend); the re-sent remainder earns whatever the request itself was billed at, which is the read rate on a warm turn and the creation rate on a turn whose cache had expired. Pricing gross savings as writes is how a dashboard overstates itself by its own overcount_ratio; pricing an expired turn's removals as reads was how this one understated the turns that matter most.",
+   "key": "compaction",
+   "label": "Compaction savings",
+   "total": false
+  },
+  {
+   "delta_usd": 0,
+   "description": "What context-guru's own model calls (extract_llm, summarize) cost. Paid out of the savings above; a component whose spend exceeds its saving is underwater and the per-component view says so.",
+   "key": "cg_llm",
+   "label": "context-guru's own LLM cost",
+   "total": false
+  },
+  {
+   "delta_usd": 2.794,
+   "description": "Billed cost plus context-guru's own spend — what you actually paid.",
+   "key": "net",
+   "label": "Net cost with context-guru",
+   "total": true
+  },
+  {
+   "delta_usd": 0.24918150000000017,
+   "description": "Baseline minus net. Negative means context-guru cost more than it saved in this window, which is a real outcome the dashboard will not hide.",
+   "key": "net_saved",
+   "label": "Net savings",
+   "total": true
+  },
+  {
+   "delta_usd": -0,
+   "description": "A SECOND saving, outside the walk above, and the only cache figure we claim. Claude Code ends its big system block with a live environment snapshot, so the block's own breakpoint hashes the churn and the prefix never matches across sessions; cachesplit moves the breakpoint onto the stable half. Counted only where the component rewrote the prefix, the provider then read it from cache, AND the snapshot had MOVED since this session's previous request — the turn that would otherwise have missed. A turn whose snapshot did not move would have hit whether or not we ever split, so it is not ours. Priced against a cache MISS, which is what the counterfactual actually is: those tokens carry cache_control, so a miss bills them as creation at 1.25x fresh, not at 1x. A floor — a stable prefix serves a whole session and this counts one request of it.",
+   "key": "cachesplit_saved",
+   "label": "Prefix-cache savings",
+   "total": false
+  },
+  {
+   "delta_usd": 0.006,
+   "description": "What the idle keep-alive SPENT: one minimal request per idle span, re-reading a session's cached prefix so the provider refreshes its 5-minute lifetime for free. This is the caller's own money, spent while nobody was at the keyboard, which is why it is a line of its own and why the mechanism is opt-in. Every ping is a row, priced from its own usage — no estimate.",
+   "key": "keepalive_ping",
+   "label": "Keep-alive pings",
+   "total": false
+  },
+  {
+   "delta_usd": -0,
+   "description": "The prefix re-creations those pings avoided. Counted only on a request that resumed after a gap wider than the provider's lifetime, was served from cache anyway, read more than it wrote, and had a ping of ours during the gap; credited at most the tokens that ping actually refreshed. Priced against a cache MISS, because those tokens carry cache_control and a miss bills them as creation at 1.25x rather than 1x. A ceiling rather than a floor, and the one figure here that is: the provider's cache is keyed on content, so another session sending the same prefix would have refreshed it for nothing.",
+   "key": "keepalive_saved",
+   "label": "Keep-alive savings",
+   "total": false
+  },
+  {
+   "delta_usd": -0,
+   "description": "Tool and MCP schemas, and skill listing entries, that the declaration filter stopped sending — measured on requests that were really sent, from the count the filter itself wrote on each one, priced at the tier that request paid. It is a THIRD saving outside the compaction walk above and for a mechanical reason: that walk is built on tokens_before, which counts message text only, and a tool declaration lives in the top-level `tools` array. So this reduction moved no figure in it and appeared in no total on this page at all, even though 82.7% of a declared catalogue is never invoked and it is the largest lever measured in this project.",
+   "key": "decl_filter_saved",
+   "label": "Declarations no longer sent",
+   "total": false
+  },
+  {
+   "delta_usd": 0.24318150000000016,
+   "description": "Net compaction savings, plus prefix-cache savings, plus the idle keep-alive's NET — its savings minus what its pings cost — plus the declarations the removal filter stopped sending. FOUR disjoint token sets, all ours, so nothing is counted twice: compaction's removals never reached the provider, the split moved a breakpoint over tokens that did, the keep-alive refreshed entries that already existed, and the filter's declarations were dropped before the compaction baseline was even measured — so they are absent from the first line rather than counted in it. The keep-alive enters as a net because the pings' own spend is not in the billed-cost line above — ping rows are excluded from agent traffic — so this is the only place both halves are comparable, and its saving half is a CEILING (see Keep-alive savings). It is not the cost of a fully uncached world: the provider's own cache saved far more than this on the same traffic (cache_saved_usd, reported by the API as a diagnostic), and none of that is credited here.",
+   "key": "total_saved",
+   "label": "Total cost avoided",
+   "total": true
+  },
+  {
+   "delta_usd": -0,
+   "description": "Declarations this ACCOUNT stopped carrying on its own — an MCP server you removed, a skill you switched off. The tokens genuinely were not billed, and no component of ours was involved, so this is deliberately OUTSIDE the total above and inside the one below. It is also MODELLED rather than measured: the evidence is that the inventory is a time series and a name is in its early part and not its late part, which cannot tell a removal from a session that ran in a different environment — on the production snapshot the largest candidate is the editor integration, which is simply absent outside the IDE. Every row and its own evidence is on the Inventory tab; rows the filter is already credited for are excluded here rather than counted twice.",
+   "key": "self_removed",
+   "label": "Removed by you, not by us",
+   "total": false
+  },
+  {
+   "delta_usd": 0.24318150000000016,
+   "description": "Everything above, ours and yours: the total cost avoided plus what you removed yourself. It answers 'how much smaller did this bill get', where the total above answers 'how much of that did context-guru do'. Both are worth knowing and they are not the same number, so neither is printed under the other's label.",
+   "key": "total_reduced",
+   "label": "Total the bill came down",
+   "total": true
+  }
+ ]
+}

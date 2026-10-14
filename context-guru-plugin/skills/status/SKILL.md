@@ -1,6 +1,6 @@
 ---
 name: status
-description: Report whether the local context-guru proxy is running, whether this project is routed through it, and what it has actually saved — reading /stats and explaining the numbers honestly. Use when the user asks about context-guru status, savings, cache hit rate, cost, tokens saved, or whether the proxy is working. Accepts --stats to print the raw /stats JSON verbatim instead of the interpreted report.
+description: Home screen. Whether the local context-guru proxy is running and this project is routed through it, then dollars saved, today against yesterday, and the top three things to do next. Use when the user asks how context-guru is doing, about its status, or whether the proxy is working. Accepts --stats to print the raw /stats JSON verbatim instead of the interpreted report.
 
 ---
 
@@ -83,31 +83,17 @@ Report the combinations plainly, because they mean different things:
   `/context-guru:uninstall`.
 - **Set to a base URL that is not ours** — say so and stop. Something else owns their routing.
 
-## 2. What it saved
+## 2. How it is doing
 
 ```bash
-curl -fsS "http://127.0.0.1:${PORT}/stats"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" home
 ```
 
-Lead with the **billed token tiers** (`cache_read`, `cache_creation`, input, output). Those come
-from the provider's own usage block, so they are the numbers the user can check against their own
-bill or usage page. Under the default preset (`off`), the whole story is the keep-alive block: a
-ping moves tokens from the premium cache-creation tier to the discounted cache-read tier by
-refreshing the cache before it expires, and that shift *is* the saving.
-
-Then, if they are non-zero: `requests`, `saved_tokens`, `savings_pct`, and the keep-alive block
-(`pings`, `spend_usd`, `wrote_instead_of_read`) — that block is the in-memory ping ledger, always
-present, cheap, and reset on restart.
-
-If `--dashboard` is enabled, `/stats` also carries a `savings` object with up to three scopes —
-`current` (the session that most recently sent a real request), `live` (every session the keeper
-still considers active, summed), and `all` (process lifetime). Each scope reports the SAME
-reconciled figure the dashboard does — `keepalive_net_usd` (did the pings pay for themselves) and
-`total_saved_usd` (every mechanism combined) — computed once in `dash` and shared, so `/stats` and
-the dashboard can never disagree. A scope is *absent*, not zeroed, when there is nothing to report
-yet (fresh proxy: no `current`; no `--dashboard`: no `savings` at all).
-
-The dashboard shows the same numbers over time, plus a UI: `http://127.0.0.1:<port>/dashboard/`.
+Print its output exactly as it is, in one code block. It opens with the dollars saved, then today
+against yesterday, then the top three things to do. Saved dollars (`✓ Saved`) and spend you could
+still avoid (`≈ Estimated`) are different things: never add them or call an estimate a saving.
+The other questions have their own commands: `/context-guru:savings`, `/context-guru:cache`,
+`/context-guru:waste`, `/context-guru:session`, `/context-guru:doctor`.
 
 ## Be honest about the numbers
 

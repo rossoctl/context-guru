@@ -34,7 +34,7 @@ func TestCacheAwareAsksUnderTheThreadKey(t *testing.T) {
 	if _, err := s.Offload(req, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
-	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
+	if !WaitForSummaryForTest(convKey(ctx), 5*time.Second) {
 		t.Fatal("the commissioned summary never resolved")
 	}
 	if atomic.LoadInt64(&asker.calls) == 0 {

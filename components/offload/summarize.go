@@ -370,6 +370,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// turn. First thing, and unconditionally: the money was spent whatever this turn decides, and
 	// the compaction-episode panel charges it as a debit. See takeDeferredUsage.
 	takeDeferredUsage(c, rep)
+	adoptParentCheckpoint(c)
 	// A non-nil WireGroup that no longer lines up with msgs means wire groups DO exist on this
 	// request (Anthropic traffic normalized at least one shared message) but an earlier
 	// component changed the message count, so their current positions are unknown. The
@@ -466,8 +467,8 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// Above the gates' effect, because a turn that lands mid-flight is usually a turn the gates
 	// DECLINE (the cache is warm again by then) and it is exactly the turn that most needs the
 	// result: without it, it forwards the full transcript at 1.25xF.
-	if _, running := inFlight.peek(c.Session); running {
-		waited, landed := inFlight.waitFor(c.Ctx, c.Session, s.summaryWait())
+	if _, running := inFlight.peek(convKey(c)); running {
+		waited, landed := inFlight.waitFor(c.Ctx, convKey(c), s.summaryWait())
 		atomic.AddInt64(&summarizeWaitedMs, waited.Milliseconds())
 		if landed {
 			// Re-read: the checkpoint the background call just wrote is the thing we waited for.
@@ -491,11 +492,16 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		}
 	}
 
-	// No new summary this turn — gated, or nothing to summarize with. Fall back to the most
-	// cache-stable shape available, which is the standing checkpoint when there is one. Both
-	// reasons take the same path because they have the same remedy; the gates above already
-	// recorded WHICH it was.
-	if !fires || model == nil {
+	// A side request replays its parent's checkpoint but never commissions one. See sideRequest.
+	side := sideRequest(c)
+	if side {
+		rep.Gate("side_request_read_only")
+	}
+	// No new summary this turn — gated, a side request, or nothing to summarize with. Fall back to
+	// the most cache-stable shape available, which is the standing checkpoint when there is one.
+	// All take the same path because they have the same remedy; the gates above already recorded
+	// WHICH it was.
+	if !fires || model == nil || side {
 		if stale {
 			return s.replayStale(c, rep, req, msgs, headCount, start, EventGatedReplayedCheckpoint)
 		}
@@ -586,8 +592,8 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// the worst case.
 	// A SESSIONLESS REQUEST IS SUMMARIZED INLINE, and that is not a concession — it is the only
 	// thing that can work. The whole async design rests on handing the result to a LATER TURN OF
-	// THE SAME SESSION: the checkpoint is keyed by session id (store.SumPrefix+session) and the
-	// single-flight registry is keyed the same way. With no session id there is no key to save
+	// THE SAME THREAD: the checkpoint is keyed by the thread of the session (sumKey(convKey(c))) and
+	// the single-flight registry is keyed the same way. With no session id there is no key to save
 	// under, nothing to single-flight on, and no later turn that could ever find it — so going
 	// async would spend a model call and discard the result, every turn, forever.
 	//

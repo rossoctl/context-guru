@@ -36,6 +36,11 @@ type DB struct {
 	// tests, for a value only the HTTP layer can supply. The struct is two fields and holds no
 	// lock, so copying it is safe; `go vet` would say otherwise if it did.
 	ctx context.Context
+	// sizeSpread is CachesplitSizeSpread's own TTL cache (dash/cachehistory.go) — a POINTER, not
+	// an inline mutex, so WithContext's shallow copy above stays lock-free and copies the
+	// pointer, sharing one cache across every handle this *DB produces rather than giving each
+	// shallow copy its own, independently-stale one.
+	sizeSpread *cachesplitSizeSpreadCache
 }
 
 // WithContext returns a handle whose reads are cancellable, for a caller that has one.
@@ -231,8 +236,13 @@ func dsn(path string) string {
 	// SQLite can only set auto_vacuum on an EMPTY database, so this takes effect for
 	// files created from here on. An existing file keeps auto_vacuum=NONE and falls
 	// back to the full VACUUM path in Prune, which is what it did before.
-	return "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
-		"&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=auto_vacuum(2)"
+	//
+	// busy_timeout is FIRST. The driver runs these in order on every new connection, and the
+	// journal_mode statement needs a lock: with the timeout set after it, a connection opened while
+	// another held the WAL (a checkpoint, a commit) failed at once with SQLITE_BUSY instead of
+	// waiting, and a burst of concurrent reads opens a burst of connections.
+	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(1)&_pragma=auto_vacuum(2)"
 }
 
 func openDSN(d, path string) (*DB, error) {
@@ -267,7 +277,7 @@ func openDSN(d, path string) (*DB, error) {
 		sdb.Close()
 		return nil, err
 	}
-	return &DB{sql: sdb, path: path}, nil
+	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
 }
 
 // sanitizeVersion keeps a version string safe to embed in a filename.
