@@ -338,6 +338,11 @@ func TestStatuslineGoldenMoney(t *testing.T) {
 		{"narrow", cache(both, agents...), 90,
 			"saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents\n" +
 				"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 · Explore ◐ 0:50 │ ctx ░░░░░░░░ 5%"},
+		// An agent with no money in its row shows no figure; the other keeps its own.
+		{"agent-without-money", cache(both, th("", 60, pair("50.32", "250")), th("a:reviewer@t", 5, pair("1.20", "6.00")),
+			th("a:ad9ba182bf3e760e6", 250, "")), 220,
+			"saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents\n" +
+				"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 saved $1.20 of $6.00 · Explore ◐ 0:50 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		// A missing field is unknown, not $0.00: that figure is left out.
 		{"missing-fields", cache(`"money":{"main":{"saved_usd":0.31,"threads":1},"others":{"baseline_usd":0.9,"threads":2}},`,
 			th("", 60, ""), th("a:reviewer@t", 5, `,"saved_usd":1.2`)), 200,
