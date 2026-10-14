@@ -16,6 +16,11 @@ import (
 //     /compact, and the "RECENT portion" partial-compact bodies) begins the same way,
 //     so the shared opening is the match. It asks for "full code snippets" and for
 //     security-relevant instructions to be "preserved verbatim".
+//   - Claude Code 2.1.296 (#518) — two prompt variants, chosen per session: "…summary of
+//     the conversation so far" and "…summary of this conversation". The phrase therefore
+//     stops at "summary of ". The prompt is no longer a message of its own: it is an extra
+//     text block inside the last USER message, and a `system` message (`<total_tokens>…`)
+//     still follows it. So the match skips trailing system messages (see lastTurn).
 //   - Bob Shell 1.0.6 (Gemini-CLI fork) — the compression call appends exactly this one
 //     fixed user turn, with the summarizer prompt in `systemInstruction`.
 //
@@ -42,7 +47,7 @@ import (
 // content-block array both work, and Go's HTML-escaping would otherwise rewrite the
 // needle on the wire. Bob's full sentence ends in "<state_snapshot>." — cut there.
 var agentCompactionPhrases = []string{
-	"Your task is to create a detailed summary of the ",
+	"Your task is to create a detailed summary of ",
 	"First, reason in your scratchpad. Then, generate the ",
 }
 
@@ -55,20 +60,16 @@ var agentCompactionPhrases = []string{
 // loss is permanent and expansion cannot recover it. Compacting the compactor is the one
 // case where the pipeline makes a request strictly worse than no proxy at all.
 //
-// The match is scoped to the LAST message's raw JSON (the phrases contain no characters
+// The match is scoped to the last TURN's raw JSON (the phrases contain no characters
 // JSON escapes, so string and content-block shapes both work) and to user-role messages,
-// which is where every known agent puts it. See agentCompactionPhrases.
+// which is where every known agent puts it. See agentCompactionPhrases and lastTurn.
 func isAgentCompaction(body []byte) bool {
 	msgs := gjson.GetBytes(body, "messages")
 	if !msgs.IsArray() {
 		return false
 	}
-	arr := msgs.Array()
-	if len(arr) == 0 {
-		return false
-	}
-	last := arr[len(arr)-1]
-	if last.Get("role").String() != "user" {
+	last, ok := lastTurn(msgs.Array())
+	if !ok || last.Get("role").String() != "user" {
 		return false
 	}
 	for _, p := range agentCompactionPhrases {
@@ -77,4 +78,19 @@ func isAgentCompaction(body []byte) bool {
 		}
 	}
 	return false
+}
+
+// lastTurn is the last message that is not a system or developer message. Claude Code 2.1.296
+// ends a request with a `system` message carrying its token budget, after the user turn that
+// holds the compaction prompt. Skipping only those keeps the anti-latch rule above: an earlier
+// USER or assistant turn is never looked at.
+func lastTurn(arr []gjson.Result) (gjson.Result, bool) {
+	for i := len(arr) - 1; i >= 0; i-- {
+		switch arr[i].Get("role").String() {
+		case "system", "developer":
+			continue
+		}
+		return arr[i], true
+	}
+	return gjson.Result{}, false
 }

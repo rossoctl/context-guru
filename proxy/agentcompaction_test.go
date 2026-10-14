@@ -25,7 +25,14 @@ const (
 	ccPartialCompactPrompt = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n" +
 		"Your task is to create a detailed summary of the RECENT portion of the conversation"
 	bobCompressPrompt = "First, reason in your scratchpad. Then, generate the <state_snapshot>."
+	// Claude Code 2.1.296's second variant (#518): "of this conversation", not "of the".
+	ccThisConversationPrompt = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n" +
+		"Your task is to create a detailed summary of this conversation. This summary will be " +
+		"placed at the start of a continuing session"
 )
+
+// ccTokensLeft is the system message Claude Code 2.1.296 puts after the last user turn.
+var ccTokensLeft = map[string]any{"role": "system", "content": "<total_tokens>15000000 tokens left</total_tokens>"}
 
 // TestAgentCompactionIsBypassed: the agent's own summarization request must reach the
 // upstream BYTE-IDENTICAL, while ordinary traffic is still compacted. Compacting a
@@ -42,6 +49,7 @@ func TestAgentCompactionIsBypassed(t *testing.T) {
 		name       string
 		lastMsg    map[string]any
 		before     []map[string]any // extra turns spliced before the dup tool output
+		after      []map[string]any // extra turns after lastMsg
 		wantBypass bool
 	}{
 		{
@@ -62,6 +70,44 @@ func TestAgentCompactionIsBypassed(t *testing.T) {
 				{"type": "text", "text": ccCompactPrompt},
 			}},
 			wantBypass: true,
+		},
+		{
+			// Claude Code 2.1.296: the prompt is a second text block of the last user turn,
+			// and a system message follows that turn.
+			name: "claude code 2.1.296 compact before a trailing system message",
+			lastMsg: map[string]any{"role": "user", "content": []map[string]any{
+				{"type": "text", "text": "name 1 command"},
+				{"type": "text", "text": ccCompactPrompt},
+			}},
+			after:      []map[string]any{ccTokensLeft},
+			wantBypass: true,
+		},
+		{
+			name:       "claude code 2.1.296 this-conversation variant",
+			lastMsg:    map[string]any{"role": "user", "content": ccThisConversationPrompt},
+			after:      []map[string]any{ccTokensLeft},
+			wantBypass: true,
+		},
+		{
+			// The OpenAI dialect's equivalent of a trailing system message.
+			name:       "compact before a trailing developer message",
+			lastMsg:    map[string]any{"role": "user", "content": ccThisConversationPrompt},
+			after:      []map[string]any{{"role": "developer", "content": "be brief"}},
+			wantBypass: true,
+		},
+		{
+			// Skipping trailing system messages must not reach past an assistant turn.
+			name:       "agent prompt before an assistant turn and a system message",
+			before:     []map[string]any{{"role": "user", "content": ccCompactPrompt}},
+			lastMsg:    map[string]any{"role": "assistant", "content": "done"},
+			after:      []map[string]any{ccTokensLeft},
+			wantBypass: false,
+		},
+		{
+			name:       "ordinary request before a trailing system message",
+			lastMsg:    map[string]any{"role": "user", "content": "fix the failing test"},
+			after:      []map[string]any{ccTokensLeft},
+			wantBypass: false,
 		},
 		{
 			name:       "bob shell compression",
@@ -116,6 +162,8 @@ func TestAgentCompactionIsBypassed(t *testing.T) {
 				map[string]any{"role": "tool", "tool_call_id": "b", "content": dump},
 				tc.lastMsg,
 			)
+			dup := len(msgs) - 2 // the second duplicate tool output
+			msgs = append(msgs, tc.after...)
 			body, err := json.Marshal(map[string]any{"model": "gpt-x", "messages": msgs})
 			if err != nil {
 				t.Fatal(err)
@@ -138,7 +186,7 @@ func TestAgentCompactionIsBypassed(t *testing.T) {
 			}
 			// And specifically compacted, not merely re-serialized: dedup collapsed the
 			// duplicate tool output.
-			second := gjson.GetBytes(got, "messages."+strconv.Itoa(len(msgs)-2)+".content").String()
+			second := gjson.GetBytes(got, "messages."+strconv.Itoa(dup)+".content").String()
 			if !strings.Contains(second, "repeat of") {
 				t.Fatalf("dedup did not run: %s", got)
 			}
