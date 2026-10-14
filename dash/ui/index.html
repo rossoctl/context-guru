@@ -447,8 +447,8 @@
 <section class="view" id="view-components" role="tabpanel" aria-labelledby="tab-components" hidden>
   <div class="panel">
     <h2>Did each step pay for itself?</h2>
-    <p class="note">Each row is one step that trims your prompt. <strong>Net $</strong> is what it saved minus what it cost to run.
-      Click a row to see its requests.</p>
+    <p class="note">Each row is one step that trims your prompt. <strong>Net</strong> is what it saved minus what it cost to run.
+      Click a row to see its requests. Tick <em>More columns</em> for the rest.</p>
     <details class="why"><summary>Technical details: what the columns mean</summary>
       <dl>
         <dt>Unique saved</dt><dd>each distinct compaction counted once</dd>
@@ -472,18 +472,31 @@
         <dt>Verdict</dt><dd>those unique savings weighed against that cost. For a component that makes LLM calls it is stated in dollars: what its calls removed, valued at the rate those tokens would have been billed at, minus what the calls cost</dd>
       </dl>
     </details>
+    <label class="more-toggle"><input type="checkbox" id="comp-more" data-testid="components-more"> More columns</label>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="components-table">
         <thead><tr>
-          <th>Component</th><th>Kind</th><th class="num">Runs</th><th class="num">Acted</th>
-          <th class="num">Structural</th>
-          <th class="num">Act rate</th><th>Why / what happened</th><th class="num">Reverted</th>
-          <th class="num">Unique saved</th><th class="num">Gross saved</th><th class="num">Overcount</th>
-          <th class="num">Own latency</th><th class="num">Avg ms</th>
-          <th class="num">LLM calls</th><th class="num">LLM cost</th>
-          <th class="num">Saved $</th><th class="num">Net $</th>
-          <th class="num">Net $ (counted once)</th><th class="num">Replay ×</th>
-          <th class="num">Errors</th><th>Verdict</th>
+          <th title="What the step does. Hover a row's name for the internal id.">Step</th>
+          <th class="num" title="Dollars the step's removals were worth, counting every turn they stayed removed">Saved</th>
+          <th class="num" title="What the step itself spent on model calls">Cost</th>
+          <th class="num" title="Saved minus Cost, counting every turn">Net</th>
+          <th class="more" title="Where the step runs: what kind of step it is">Type</th>
+          <th class="num more" title="Requests the step looked at">Runs</th>
+          <th class="num more" title="Runs where the step removed text">Removed text</th>
+          <th class="num more" title="Runs that rearranged the prompt (cache placement, markers) instead of removing text. Not a failure to act.">Rearranged</th>
+          <th class="num more" title="How often the step actually removed something: removed runs divided by runs">Hit rate</th>
+          <th class="more" title="What the step did, and why it skipped the rest. Hover for the internal codes.">What happened</th>
+          <th class="num more" title="How often its result was thrown away because it was not worth keeping">Undone</th>
+          <th class="num more" title="Tokens removed, each piece of text counted once">Tokens removed (once)</th>
+          <th class="num more" title="Tokens removed, re-counted every turn the agent re-sent the transcript">Tokens removed (every turn)</th>
+          <th class="num more" title="Every-turn count divided by the once count: how inflated the every-turn figure is. For example 2x means each removal was counted twice.">Inflation</th>
+          <th class="num more" title="Total time the step added to requests">Time added</th>
+          <th class="num more" title="Average time per run">Avg time</th>
+          <th class="num more" title="Model calls the step made itself">Model calls</th>
+          <th class="num more" title="Saved minus Cost, crediting each piece of text only once. This is what the proxy's /stats reports; it can have the opposite sign to Net.">Net (once)</th>
+          <th class="num more" title="How many times larger the every-turn saving is than the once-only saving">Repeat factor</th>
+          <th class="num more" title="Runs that failed, and the share of all runs">Errors</th>
+          <th class="more" title="Saved weighed against Cost, in words">Verdict</th>
         </tr></thead>
         <tbody id="components-body"></tbody>
       </table>
@@ -594,7 +607,7 @@
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="sessions-table">
         <thead><tr>
-          <th>Session</th><th data-scope-col hidden>Account</th><th>Started</th>
+          <th>Session</th><th data-scope-col hidden class="narrow-hide">Account</th><th class="narrow-hide">Started</th>
           <th class="num" title="Number of requests the agent sent in this session">Turns</th>
           <th class="num" title="What this session cost: the provider's bill plus our own model calls">Cost</th>
           <th class="num" title="Dollars saved after subtracting what context-guru itself cost">Net saved $</th>
@@ -768,13 +781,14 @@
     <h2>All requests</h2>
     <p class="note">Each row is one call an agent made to the AI provider, newest first.
       Click a row for what it contained and what it cost.</p>
+    <label class="more-toggle"><input type="checkbox" id="req-more" data-testid="requests-more"> More columns</label>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="requests-table">
         <thead><tr>
-          <th>ID</th><th>Time</th><th>Session</th><th data-scope-col hidden>Account</th><th>Model</th><th title="How context-guru handled this request">Mode</th>
-          <th class="num" title="Tokens before removal">Before</th><th class="num" title="Tokens actually sent to the provider">After</th><th class="num" title="Tokens removed, counted for this request alone">Removed</th>
-          <th class="num" title="Tokens read from / written to the provider prompt cache">Cache read / write</th><th class="num" title="Cost in dollars">$</th><th class="num" title="Milliseconds context-guru added">Added delay</th>
-          <th title="Whether the provider cache was hit">Cache</th><th title="Whether the provider reported full token counts for this request">Usage data</th>
+          <th>ID</th><th>Time</th><th>Session</th><th data-scope-col hidden>Account</th><th class="more">Model</th><th title="How context-guru handled this request">Mode</th>
+          <th class="num more" title="Tokens before removal">Before</th><th class="num" title="Tokens actually sent to the provider">After</th><th class="num more" title="Tokens removed, counted for this request alone">Removed</th>
+          <th class="num more" title="Tokens read from / written to the provider prompt cache">Cache read / write</th><th class="num" title="Cost in dollars">$</th><th class="num more" title="Milliseconds context-guru added">Added delay</th>
+          <th title="Whether the provider cache was hit">Cache</th><th class="more" title="Whether the provider reported full token counts for this request">Usage data</th>
         </tr></thead>
         <tbody id="requests-body"></tbody>
       </table>
@@ -972,6 +986,7 @@
      a plain hosted account's browser never builds this panel at all, not just hides it. -->
 <template id="tpl-view-config">
 <section class="view" id="view-config" role="tabpanel" aria-labelledby="tab-config" hidden>
+  <p class="note"><strong>What to check here:</strong> that requests are being recorded. Look at the numbers under "Request recording health" below; Dropped and Save errors should be 0.</p>
   <!-- YOUR configuration first. The complaint this answers: a change saved on the Settings
        page never appeared here, because this tab only ever rendered the PROXY PROCESS's
        startup-resolved config while Settings writes the ACCOUNT's document — two different

@@ -418,31 +418,36 @@ function kvPanel(title, note, ...kids) {
 /** kvHost is an empty div with an id and a test id. */
 function kvHost(id) { return el('div', { id: id, 'data-testid': id }); }
 
-// 1. What is being measured, and how well. The coverage statement comes FIRST and renders
-//    unconditionally: a reader has to know whether a blank tier means "not cached" or "not
-//    recorded" before any figure below is worth reading.
-kvPanel('How long do conversations pause between requests?',
-  el('span', {}, 'The provider keeps your prompt in a ',
-    term('cache', 'A short-lived copy of the start of your conversation, so repeating it is cheap.'),
-    ' for 5 minutes (or 1 hour, at a higher price). These figures show how long your conversations actually pause, '
-    + 'so you can judge which lifetime fits. The filter bar at the top sets model, agent and dates; the four filters here are extras.'),
-  kvHost('kv-coverage'), kvHost('kv-controls'), kvHost('kv-tiles'));
+/** kvDetails is a collapsed section: a plain title, one sentence on what it holds, then the hosts. */
+function kvDetails(title, holds, ...kids) {
+  const d = el('details', { class: 'why kv-more' }, el('summary', {}, title), el('p', {}, holds));
+  for (const k of kids) if (k) d.appendChild(k);
+  kvView.appendChild(d);
+  return d;
+}
 
-// 2. The distribution itself: the histogram, then the same data as "has it come back yet".
-const kvDistPanel = kvPanel('How long is the pause before the next request?',
-  'The idle gap between one request and the next in the same conversation. A conversation\u2019s last request has no next one, so it is not in these charts.');
+// 1. The answer first: one sentence and one number. The coverage banners render unconditionally
+//    right under it, because a reader has to know whether a blank tier means "not cached" or
+//    "not recorded" before any figure below is worth reading.
+kvPanel('Does your cache stay warm between requests?', null, kvHost('kv-hero'), kvHost('kv-coverage'));
+
+// 2. The two visuals: the histogram, then the same data as "has it come back yet".
+const kvDistPanel = kvPanel('How long do conversations pause?', null);
 kvDistPanel.appendChild(el('h3', {}, 'Idle time, by band'));
 kvDistPanel.appendChild(el('p', { class: 'note', id: 'kv-idle-note' }));
 kvDistPanel.appendChild(kvHost('kv-idle-bands'));
 kvDistPanel.appendChild(el('h3', {}, 'Has it come back yet?'));
 kvDistPanel.appendChild(el('p', { class: 'note' },
-  'The line shows what share of conversations had come back after each wait. Read it at 5 minutes '
-  + '(the normal cache lifetime) and at 1 hour (the long one).'));
+  'The line shows the share of conversations that had returned after each wait. Read it at 5 minutes and at 1 hour.'));
 kvDistPanel.appendChild(el('div', { class: 'chart', id: 'kv-survival', 'data-testid': 'kv-survival' }));
 
-// 3. Grouped views. By tier first, because that is the dimension the whole page is about.
-const kvGroupPanel = kvPanel('Which users and models pause longest?',
-  'The same pause data grouped four ways. Each percentage counts only that group\u2019s requests that have a next request; a group with none shows a dash, not zero.');
+// 3. Everything else, collapsed.
+kvDetails('Summary numbers and filters',
+  'Request counts, median and mean idle time, hit rate and billed cost. The four filters here add to the filter bar at the top.',
+  kvHost('kv-controls'), kvHost('kv-tiles'));
+
+const kvGroupPanel = kvDetails('Which users and models pause longest?',
+  'The same pause data grouped four ways. A group with no next request shows a dash, not zero.');
 kvGroupPanel.appendChild(el('h3', {}, 'By observed TTL'));
 kvGroupPanel.appendChild(kvHost('kv-by-ttl'));
 kvGroupPanel.appendChild(el('h3', {}, 'By user'));
@@ -452,35 +457,26 @@ kvGroupPanel.appendChild(kvHost('kv-by-model'));
 kvGroupPanel.appendChild(el('h3', {}, 'By time of day (UTC)'));
 kvGroupPanel.appendChild(kvHost('kv-by-bucket'));
 
-// 4. The prices. Before the simulator, deliberately: every figure below is these rates times a
-//    token count, and a reader who has not seen them cannot judge the result.
-kvPanel('What does caching cost?',
-  'The prices every dollar figure below uses, in USD per million tokens, taken from this deployment\u2019s price list. '
-  + 'Edit a rate to see what a different price would do.',
+// The prices come before the simulator: every simulated figure is these rates times a token count.
+kvDetails('Prices used for every dollar figure',
+  'Rates in USD per million tokens from this deployment\u2019s price list. Edit a rate to see what a different price would do.',
   kvHost('kv-pricing'));
 
-// 5. The simulator.
-const kvSimPanel = kvPanel('What would a different cache lifetime have cost?',
-  el('span', {}, 'Each strategy (a row below) is replayed on exactly this history to see what it would have cost. A strategy only sees what was known at the time, never how long the pause turned out to be. ',
-    term('TTL', 'Time to live: how long the provider keeps a cached prompt before forgetting it.'),
-    ' means the cache lifetime.'),
+const kvSimPanel = kvDetails('What would a different cache lifetime have cost?',
+  'Each strategy (a rule for how long to keep the cache) is replayed on this history and priced. A strategy sees only what was known at the time.',
   kvHost('kv-arms'), kvHost('kv-sim'));
 kvSimPanel.appendChild(el('h3', {}, 'What predicts that a conversation comes back?'));
 kvSimPanel.appendChild(el('p', { class: 'note' },
-  'The signals that best predict a conversation returning soon, ranked. This is a fixed result from an offline study, '
-  + 'not recomputed from this window.'));
-kvSimPanel.appendChild(el('details', { class: 'why' }, el('summary', {}, 'Technical details'),
-  el('p', {}, 'From an offline model fit on this deployment\u2019s own history; see docs/results/kv-ttl-predictor-arms.md. '
-  + 'It is echoed here so the stop-reason-gated arm above can be checked against the finding that justifies it.')));
+  'The signals that best predict a quick return, ranked. A fixed result from an offline study, not recomputed from this window.'));
+kvSimPanel.appendChild(el('p', { class: 'note' },
+  'Fit on this deployment\u2019s own history; see docs/results/kv-ttl-predictor-arms.md. Echoed so the stop-reason-gated strategy can be checked against the finding behind it.'));
 kvSimPanel.appendChild(kvHost('kv-features'));
 
-// 6. The dataset itself.
-const kvTablePanel = kvPanel('Every request behind these numbers',
+const kvTablePanel = kvDetails('Every request behind these numbers',
   'One row per request. Click a column to sort; sorting covers all requests, not only this page.',
   kvHost('kv-table'), kvHost('kv-pager'));
 
-// 7. The assumptions, last and always present.
-kvPanel('How these numbers are calculated',
+kvDetails('How these numbers are calculated',
   'The exact formulas and assumptions behind the figures above.',
   kvHost('kv-assumptions'));
 
@@ -573,6 +569,30 @@ function renderKVCoverage() {
   }
 }
 
+/** renderKVHero is the first screen: one sentence, one number, the basis. */
+function renderKVHero() {
+  const host = clear($('#kv-hero'));
+  const c = kvc.analysis && kvc.analysis.cards;
+  if (!c || !c.with_next) {
+    host.appendChild(el('p', { class: 'kv-verdict' }, 'No request in this window is followed by another in the same conversation, so there is nothing to judge yet.'));
+    return;
+  }
+  const p = c.within_5m_pct;
+  const verdict = p >= 80 ? 'Yes: most conversations come back before the cache expires.'
+    : p >= 50 ? 'Partly: about half of the conversations come back before the cache expires.'
+    : 'No: most conversations pause longer than the cache lasts.';
+  host.appendChild(el('p', { class: 'kv-verdict' }, verdict));
+  host.appendChild(el('div', { class: 'kv-bignum' },
+    el('strong', { 'data-testid': 'kv-hero-pct' }, pct(p)),
+    el('span', {}, 'of requests were followed by another within 5 minutes, the normal ',
+      term('cache', 'A short-lived copy of the start of your conversation, so repeating it is cheap.'),
+      ' lifetime (',
+      term('TTL', 'Time to live: how long the provider keeps a cached prompt before forgetting it.'),
+      '). ' + pct(c.within_1h_pct) + ' came back within 1 hour.')));
+  host.appendChild(el('p', { class: 'note' }, 'Basis: ' + num(c.within_5m) + ' of ' + num(c.with_next)
+    + ' requests that have a next request in the same conversation; a conversation\u2019s last request is left out. Observed, not simulated.'));
+}
+
 /** renderKVTiles is the summary band. */
 function renderKVTiles() {
   const host = clear($('#kv-tiles'));
@@ -612,7 +632,7 @@ function renderKVIdleBands() {
   const bands = a.idle_bands || [];
   const total = bands.reduce((s, b) => s + b.n, 0);
   $('#kv-idle-note').textContent = total
-    ? 'Each bar is a range of pause lengths; longer bars mean more pauses. Gray bars are beyond five minutes, when a normal cache is already gone. '
+    ? 'Each bar is a range of idle gap (the pause between two requests); longer bars mean more pauses. Gray bars are past five minutes, when a normal cache is gone. '
       + num(total) + ' gaps.'
     : '';
   barRows(host, bands.map((b) => ({
@@ -1395,11 +1415,12 @@ async function kvLoadAnalysis() {
     kvc.analysis = await kvFetch('kvcache');
   } catch (err) {
     if (aborted(err)) return;
-    errorState(clear($('#kv-tiles')), 'Could not read the KV-cache analysis', err);
+    errorState(clear($('#kv-hero')), 'Could not read the KV-cache analysis', err);
     return;
   }
   renderKVCoverage();
   renderKVControls();
+  renderKVHero();
   renderKVTiles();
   renderKVIdleBands();
   renderKVSurvival();

@@ -1778,3 +1778,29 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 @keyframes plot-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
 @keyframes plot-grow { from { transform: scaleY(0); } to { transform: none; } }
 @media (prefers-reduced-motion: reduce) { .plot-line, .plot-col { animation: none; } .dv-bar { transition: none; } }
+
+/* an upper bound is drawn as a possibility, not as money in the bank */
+.lv-big strong.bound { color: var(--warn); }
+.lv-bar.bound i { background: transparent; border: 1px dashed var(--warn); box-sizing: border-box; }
+
+/* ═══ components ═══ */
+[data-testid=components-table] td:first-child .hint { margin: 0; max-width: 34ch; white-space: normal; }
+[data-testid=components-table] td:first-child strong { font-weight: 600; }
+
+/* ═══ fixes ═══ */
+/* Config: nested config blocks are few; content-visibility left them blank until scrolled to. */
+#config-body .diff, #config-account-body .diff { content-visibility: visible; }
+/* Phone: the numbers that matter (cost, saved) stay on screen; account and start time fold into "More columns". */
+@media (max-width: 600px) { .tbl:not(.show-more) .narrow-hide { display: none; } }
+/* Usage: faint top gridline with the max value at its left. */
+.daycols { position: relative; }
+.daycols-max {
+  position: absolute; left: 0; right: 0; top: 0; border-top: 1px dashed var(--hairline, var(--border));
+  font-size: var(--t-micro, 11px); color: var(--fg-muted); line-height: 1; padding-top: 2px; pointer-events: none;
+}
+/* Strategies: flat form like the other tabs. */
+#strategy-form fieldset.field { border: 0; padding: 0; margin: var(--sp-5) 0; min-inline-size: 0; }
+#strategy-form fieldset.field > legend { padding: 0; margin-bottom: var(--sp-2); font-size: var(--t-small); color: var(--fg-muted); font-weight: 600; }
+#strategy-form fieldset.field > label { display: block; margin-top: var(--sp-2); }
+#strategy-form #sf-target-ids { height: auto; max-width: 28rem; }
+#strategy-form fieldset.field > label:last-of-type { display: flex; flex-direction: column; gap: var(--sp-2); }

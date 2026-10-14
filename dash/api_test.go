@@ -863,7 +863,7 @@ func TestUINeverShowsABareCost(t *testing.T) {
 		t.Error("verdict() does not read c.net_usd")
 	}
 	// The Saved $ / Net $ columns are static markup, so their absence is a markup fact.
-	for _, th := range []string{`<th class="num">Saved $</th>`, `<th class="num">Net $</th>`} {
+	for _, th := range []string{`>Saved</th>`, `>Net</th>`} {
 		if !strings.Contains(string(html), th) {
 			t.Errorf("the components table has no %s column header", th)
 		}

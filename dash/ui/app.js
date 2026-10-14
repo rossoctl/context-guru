@@ -141,6 +141,13 @@ function ms(v) {
 // Timestamps are epoch ms on the wire and formatted here, in the VIEWER's locale.
 // The server never stores or sends a formatted date — a locale string cannot be
 // range-queried, sorted, or bucketed.
+// One short form for table cells: today shows the time, older rows "Oct 13 11:21".
+function whenShort(tsMs) {
+  if (!tsMs) return '—';
+  const d = new Date(tsMs);
+  if (d.toDateString() === new Date().toDateString()) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+}
 function when(tsMs) {
   if (!tsMs) return '—';
   const d = new Date(tsMs);
@@ -557,7 +564,7 @@ function barRows(host, rows, opts = {}) {
       class: 'bar-row' + (r.onclick ? ' clickable' : ''), title: r.title || null,
       onclick: r.onclick || null,
     },
-      el('div', { class: 'bar-label', text: r.label }),
+      el('div', { class: 'bar-label' }, r.term ? term(r.label, r.term) : r.label),
       // `ratio` drops the fill: a figure over 100% is not a share, and this track is a 100%
       // scale, so any bar drawn for it is a bar that disagrees with its own label. The empty
       // track keeps the three-column grid intact.
@@ -1546,22 +1553,29 @@ async function loadOverview(opts = {}) {
     // Snapshotted BEFORE the fetch: an event that lands while the request is in flight is about
     // data this response does not contain, so clearing the flag afterwards would drop it.
     const wasDirty = state.dirty;
-    const [o, s] = await Promise.all([api('stats'), api('series', { bucket: bucketFor() })]);
-    state.overview = o;
+    // Two reads of the same endpoint. ?lean=1 answers the figures the three savings rows need at
+    // full precision without the slow parts of the full read, so the rows paint first; the full
+    // read follows and fills in the tools and skills filter row and the plots. No number differs.
+    const lean = await api('stats', { lean: 1 });
+    state.overview = lean;
+    state.overviewFull = false;
     state.loadedAt = Date.now();
     if (state.dirty === wasDirty) {
       state.dirty = false;
       $('#refresh-now').classList.remove('has-new');
     }
-    renderSavedLedger(o, state.keepAliveLedger);
-    renderWaterfall(o);
-    renderSeries(s.buckets || []);
-    state.overviewBuckets = s.buckets || [];
+    renderSavedLedger(lean, state.keepAliveLedger, true);
     paintFreshness();
     // Not awaited, each on its own failure path: a slow or failed read must never blank the
     // savings above it.
     loadOverviewKeepAlive();
     loadOverviewTools();
+    const o = await api('stats');
+    state.overview = o;
+    state.overviewFull = true;
+    renderSavedLedger(o, state.keepAliveLedger, false);
+    if ($('#overview-diagnostics').open) renderDiagnostics();
+    else state.diagStale = true;
     if (!first && window.scrollY !== scroll) window.scrollTo({ top: scroll });
   } catch (err) {
     if (aborted(err)) return;
@@ -1571,6 +1585,22 @@ async function loadOverview(opts = {}) {
   } finally {
     state.loadingOverview = false;
     state.lastTryAt = Date.now();
+  }
+}
+
+/** The plots are inside a fold that starts closed, so their data (the time series, one of the larger
+ *  reads) is fetched only when the reader opens it, and again on a refresh while it stays open. */
+async function renderDiagnostics() {
+  state.diagStale = false;
+  const o = state.overview;
+  if (!o || !state.overviewFull) { state.diagStale = true; return; }
+  try {
+    const s = await api('series', { bucket: bucketFor() });
+    renderWaterfall(o);
+    renderSeries(s.buckets || []);
+    state.overviewBuckets = s.buckets || [];
+  } catch (err) {
+    if (!aborted(err)) for (const id of ['#chart-cost', '#waterfall', '#chart-tokens', '#chart-cache', '#chart-latency', '#chart-volume']) errorState($(id), 'Could not load this plot', err);
   }
 }
 
@@ -1591,7 +1621,7 @@ function waitText(msv) {
   if (msv < 60000) return (msv / 1000).toFixed(1) + ' s';
   return dur(msv);
 }
-function renderSavedLedger(o, ka) {
+function renderSavedLedger(o, ka, partial) {
   const host = clear($('#tiles'));
   const priced = ((o.accounting && o.accounting.complete) || 0) > 0;
   const spent = (o.cost_usd || 0) + (o.cg_llm_cost_usd || 0) + (o.keepalive_ping_usd || 0);
@@ -1627,7 +1657,7 @@ function renderSavedLedger(o, ka) {
     {
       id: 'filter', tid: 'saved-filter', name: 'Tools and skills filter', href: '#/tools', more: 'Inventory tab',
       what: 'Tool and skill definitions the model never needed, left out of the prompt.',
-      ran: filterRan, usd: o.decl_filter_usd, tok: o.decl_filter_reads, idle: 'Starts when tools and skills are left out of the prompt. The list below is how.',
+      ran: filterRan, usd: o.decl_filter_usd, tok: o.decl_filter_reads, idle: partial ? 'Checking…' : 'Starts when tools and skills are left out of the prompt. The list below is how.',
       extra: filterRan ? num(o.decl_filter_requests) + ' requests had tools filtered' : '',
       kind: 'Estimated', note: 'saved when tools are left out of the prompt',
     },
@@ -1637,7 +1667,7 @@ function renderSavedLedger(o, ka) {
   host.appendChild(head);
   for (const lv of levers) {
     const share = priced && spent > 0 && lv.usd > 0 ? (100 * lv.usd) / spent : 0;
-    const bar = el('span', { class: 'lv-bar', role: 'img',
+    const bar = el('span', { class: 'lv-bar' + (lv.kind === 'Upper bound' ? ' bound' : ''), role: 'img',
       'aria-label': share ? pct(share, share < 10 ? 1 : 0) + ' of spend' : 'nothing saved yet' }, el('i'));
     // A style ATTRIBUTE would be blocked by the page's CSP; the CSSOM is not.
     bar.firstChild.style.width = Math.max(share, share > 0 ? 1.5 : 0) + '%';
@@ -1645,8 +1675,12 @@ function renderSavedLedger(o, ka) {
     const money = !lv.ran || !priced
       ? el('div', { class: 'lv-money lv-none' }, lv.ran ? 'Not priced yet' : (lv.idle || 'Nothing recorded yet'))
       : el('div', { class: 'lv-money' },
-        el('div', { class: 'lv-big' }, el('strong', { class: lv.usd < 0 ? 'neg' : '', text: usd(lv.usd) }),
-          el('span', { class: 'lv-of', text: ' saved of ' + usd(spent) + ' spent' })),
+        // The keep-alive figure is the ledger's credit: the rewrites its pings may have avoided, minus what the
+        // pings cost. Other sessions can keep the same cache warm, so it is a ceiling and not a measured saving.
+        // It is said that way and drawn in the warning colour, not the savings green.
+        el('div', { class: 'lv-big' }, el('strong', { class: (lv.usd < 0 ? 'neg ' : '') + (lv.kind === 'Upper bound' ? 'bound' : ''),
+          text: (lv.kind === 'Upper bound' ? 'up to ' : '') + usd(lv.usd) }),
+          el('span', { class: 'lv-of', text: (lv.kind === 'Upper bound' ? ' possible, of ' : ' saved of ') + usd(spent) + ' spent' })),
         bar,
         el('div', { class: 'lv-sub' }, el('span', { class: 'kind-badge ' + lv.kind.replace(' ', '-').toLowerCase(), title: KIND_TIP[lv.kind], text: lv.kind }),
           ' ' + (share ? pct(share, share < 10 ? 1 : 0) + ' of spend · ' : '') + lv.note),
@@ -1674,7 +1708,7 @@ function renderSavedLedger(o, ka) {
 async function loadOverviewKeepAlive() {
   try {
     state.keepAliveLedger = await api('keepalive');
-    if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger);
+    if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger, !state.overviewFull);
   } catch (e) { /* the savings are already on screen without the waiting time */ }
 }
 
@@ -1870,7 +1904,7 @@ function dailyColumns(host, totalHost, buckets) {
     ? 'You spent ' + usd(sum(spent)) + ' over ' + num(buckets.length) + ' days and saved ' + usd(sum((b) => b.saved_usd)) + ' against the same work without context-guru.'
     : 'No priced days in this window, so spend and savings are unknown.';
   const max = Math.max(...buckets.map(spent), Number.MIN_VALUE);
-  const cols = el('div', { class: 'daycols' });
+  const cols = el('div', { class: 'daycols' }, el('span', { class: 'daycols-max', text: usd(max) }));
   for (const b of buckets) {
     const day = new Date(b.ts).toISOString().slice(0, 10);
     cols.appendChild(el('span', {
@@ -1980,16 +2014,16 @@ function activitySummary(gates, events) {
     if (!m) return;
     const all = Object.entries(m).sort((a, b) => b[1] - a[1]);
     if (!all.length) return;
-    const shown = all.slice(0, 2).map(([k, v]) => k + ' ' + num(v)).join(' · ');
+    const shown = all.slice(0, 2).map(([k, v]) => reasonText(k) + ' ' + num(v)).join(' · ');
     const rest = all.length > 2 ? ' +' + (all.length - 2) : '';
     parts.push(el('div', {
       class: cls,
-      title: label + '\n' + all.map(([k, v]) => k + ' ' + num(v)).join('\n'),
+      title: label + '\n' + all.map(([k, v]) => reasonText(k) + ' ' + num(v) + ' (' + k + ')').join('\n'),
       text: shown + rest,
     }));
   };
   add('did', events, 'did');
-  add('declined', gates, 's');
+  add('skipped', gates, 's');
   // Absent BOTH maps means the row predates the columns — "unknown", not "nothing happened". An
   // empty pair means the component genuinely recorded neither, which is a dash. Conflating those
   // two is the mistake the gates column's own comment records having made once.
@@ -2001,13 +2035,60 @@ function activitySummary(gates, events) {
 }
 
 /**
+ * STEP_INFO: plain name and one-clause job per component; the raw name stays in a title.
+ * REASON_TEXT: plain phrases for gate/event codes. An unknown code prints with spaces, never dropped.
+ */
+const STEP_INFO = {
+  cachesplit: ['Cache placement', 'moves the cache breakpoint so more of the prompt is reused'],
+  cacheinject: ['Cache marker', 'adds cache markers to the request'],
+  cmdfilter: ['Command output trimmer', 'cuts noise out of shell command output'],
+  dedup: ['Duplicate remover', 'drops text the prompt already contains'],
+  extract: ['Content extractor', 'keeps the relevant part of long tool output'],
+  extract_llm: ['Model-based extractor', 'asks a cheap model to keep only what matters in long output'],
+  extract_llm_sweep: ['Old-output sweep', 'has a cheap model shrink old outputs after the cache has gone cold'],
+  failed_run: ['Failed-run trimmer', 'shortens output from commands that failed'],
+  format: ['Format compactor', 'rewrites JSON and similar text in a shorter form'],
+  linecap: ['Line limiter', 'caps very long lines and outputs'],
+  searchfold: ['Search folder', 'folds repeated search results into one'],
+  summarize: ['Chat summarizer', 'replaces old turns with a summary'],
+  textclean: ['Text cleaner', 'removes blank space, colour codes and other clutter'],
+  toolfilter: ['Tool list filter', 'drops tool definitions the agent is unlikely to use'],
+  toolschema: ['Tool schema trimmer', 'shortens tool definitions'],
+  toon: ['Compact data format', 'rewrites tabular JSON in a denser format'],
+  agent_compaction: ['Agent compaction', "the agent's own compaction of its transcript"],
+};
+function stepInfo(name) {
+  return STEP_INFO[name] || [String(name).replace(/_/g, ' '), 'no description recorded'];
+}
+const REASON_TEXT = {
+  below_min_size: 'text too short to bother', below_min_tokens: 'text too short to bother',
+  below_max_tokens: 'prompt still small enough', below_output_floor: 'output too short to bother',
+  below_request_trigger: 'prompt not big enough yet', request_trigger_not_fired: 'trigger not reached',
+  not_frozen: 'was not in the cached part', already_set: 'already set',
+  already_clean: 'already clean', already_compact: 'already compact', already_dense: 'already dense',
+  offloaded: 'moved out to storage', break_even: 'would not pay for itself',
+  economic_gate: 'not worth the cost', economic_gate_advisory: 'not worth the cost',
+  no_filter_match: 'no rule matched', filter_matched_no_change: 'rule matched, nothing to cut',
+  no_model: 'no model known', not_json_shaped: 'not JSON', marker_present: 'already marked',
+  empty: 'nothing there', cached_prefix: 'inside the cached part', reapplied_same_session: 'applied again in the same session',
+  sweep_dropped: 'old output dropped', sweep_kept: 'old output kept', sweep_offered: 'offered for removal',
+  sweep_adjudicated: 'judged by the model', char_window: 'cut to a character window',
+  over_per_request_cap: 'over the per-request limit', over_per_session_cap: 'over the per-session limit',
+  non_text_blocks: 'not plain text', no_repeated_prefix: 'no repeated start',
+};
+function reasonText(k) {
+  return REASON_TEXT[k] || String(k).replace(/_/g, ' ');
+}
+
+/**
  * COMPONENT_SORT is one field per column of the components table, in column order. null is
  * a column with nothing orderable in it (the gate summary, the verdict prose).
  */
-const COMPONENT_SORT = ['component', 'kind', 'runs', 'acted_tokens', 'acted_structural',
+const COMPONENT_SORT = ['component', 'saved_usd', 'llm_cost_usd', 'net_usd_with_estimate',
+  'kind', 'runs', 'acted_tokens', 'acted_structural',
   'act_rate', null, 'reverted',
   'saved_unique', 'saved_gross', 'overcount_ratio', 'duration_ms_total', 'duration_ms_avg',
-  'llm_calls', 'llm_cost_usd', 'saved_usd', 'net_usd_with_estimate',
+  'llm_calls',
   'net_usd_first_removal', 'replay_multiple', 'errors', null];
 
 /**
@@ -2062,19 +2143,19 @@ function renderNetReconcile(components) {
     { label: 'Counting each removal once', value: first, max: Math.max(decomp, 0.0001),
       display: usd(first),
       formula: 'minus ' + usd(llm) + ' of our own LLM spend = ' + usd(first - llm) + ' net',
-      desc: 'Each piece of removed content valued ONCE, at the cache-write rate it would have '
+      term: 'Each piece of removed content valued ONCE, at the cache-write rate it would have '
         + 'entered the prompt at. This answers "did the work of removing it pay for itself?" '
         + "It is the figure the proxy's own /stats endpoint reports, and it is the "
         + 'conservative one.' },
     { label: 'Counting every turn it stayed removed', value: decomp, max: Math.max(decomp, 0.0001),
       color: SERIES_SAVED, display: usd(decomp),
       formula: 'minus ' + usd(llm) + ' of our own LLM spend = ' + usd(decomp - llm) + ' net',
-      desc: 'The same removals, plus ' + usd(replay) + ' for every later turn they were still '
+      term: 'The same removals, plus ' + usd(replay) + ' for every later turn they were still '
         + 'absent from. The agent re-sends its whole transcript each turn, so content removed '
         + 'at turn 5 is genuinely still absent at turns 6, 7, 8… and each of those turns was '
         + 'billed less because of it. This answers "has this component paid for itself across '
         + 'the sessions it ran in?" It is the figure the tiles on this page show.' },
-  ], { descSummary: 'Technical details: what this counts' });
+  ]);
 
   if (unkeyedUSD > 0) {
     tech.appendChild(el('div', { class: 'state blocked', 'data-testid': 'net-unkeyed' },
@@ -2320,7 +2401,7 @@ function renderUnpricedNote(components) {
       el('strong', {}, structural.map((c) => c.component).join(', ')
         + (structural.length === 1 ? ' removes' : ' remove') + ' no content'),
       ' — ' + (structural.length === 1 ? 'its' : 'their') + ' work is where the cache breakpoint '
-      + 'goes, which this table measures in the Structural column and cannot value in dollars. '
+      + 'goes, which this table measures in the Rearranged column and cannot value in dollars. '
       + 'The saving is recorded per request and appears on Overview as the prefix-cache figure.'));
   }
 }
@@ -2344,8 +2425,43 @@ async function loadComponents() {
     }
     for (const c of components) {
       const [vtext, vcls] = verdict(c);
-      body.appendChild(el('tr', { class: 'click', onclick: () => { setFilter('component', c.component, { quiet: true }); go('requests'); } },
-        el('td', {}, el('code', { text: c.component })),
+      const tr = el('tr', { class: 'click', onclick: () => { setFilter('component', c.component, { quiet: true }); go('requests'); } },
+        el('td', { title: c.component }, el('strong', { text: stepInfo(c.component)[0] }),
+          el('div', { class: 'hint', text: stepInfo(c.component)[1] })),
+        // A cost never travels alone. saved_usd is what this component's removals were
+        // worth over the window — summed per turn, so a frozen reduction replaying across a
+        // session is already amortized into it — and net_usd is the verdict. Both from the
+        // server, priced at the model this deployment actually bills.
+        // saved_usd is stored per request; saved_usd_estimated is the same arithmetic applied
+        // on READ to the rows written before that column existed. Without the second half this
+        // column showed $0.00 for every component over all history predating the last restart
+        // — 6 populated rows out of 100,579 on production — and the most-read tab in the
+        // dashboard therefore said the product was worthless. The dagger says how much of the
+        // figure is valued rather than recorded; it is never silently merged.
+        el('td', { class: 'num', title: savedKnown(c) ? savedTitle(c) : '' },
+          usdOrNA(compSaved(c), savedKnown(c), savedNAReason(c)),
+          savedKnown(c) && c.saved_usd_estimated ? '†' : null),
+        // ONE price for our own model calls, on every tab. This cell used to show the
+        // component's self-reported figure while Overview showed the proxy's gateway-priced
+        // one — 31.6% apart on measured traffic, with nothing saying which to believe. The
+        // gateway figure is what the invoice is denominated in, so it is what shows, and the
+        // gap is named in the tooltip rather than hidden by the choice.
+        el('td', {
+          class: 'num',
+          title: !c.llm_calls ? 'this component makes no model calls of its own' : llmCostTitle(c),
+        }, c.llm_calls ? usd(c.llm_cost_usd) + (llmCostGap(c) ? '‡' : '') : '—'),
+        // A net whose benefit half is unknown is unknown too: subtracting a real cost from an
+        // unpriceable saving produced `$0` for searchfold and `-$0.00` for anything with a
+        // sliver of LLM cost, both of which read as measurements.
+        el('td', {
+          class: 'num' + (savedKnown(c) && c.net_usd_with_estimate < 0 ? ' warn-text' : ''),
+          title: !savedKnown(c) ? '' : 'AMORTIZED verdict: saved ' + usd(compSaved(c))
+            + ' across every turn those removals stayed removed for, − own LLM cost '
+            + usd(c.llm_cost_usd || 0)
+            + '. The per-turn column beside this one is the same verdict without the repeat '
+            + 'business, and it can have the opposite sign.',
+        }, usdOrNA(c.net_usd_with_estimate, savedKnown(c),
+          'the saving half of this net is not a number — ' + savedNAReason(c))),
         el('td', { text: c.kind || '—' }),
         el('td', { class: 'num', text: num(c.runs) }),
         // Two columns, because "acted" meant "removed tokens" and a component whose whole job
@@ -2381,40 +2497,6 @@ async function loadComponents() {
         el('td', { class: 'num', text: dur(c.duration_ms_total) }),
         el('td', { class: 'num', text: ms(c.duration_ms_avg) }),
         el('td', { class: 'num', text: c.llm_calls ? num(c.llm_calls) : '—' }),
-        // ONE price for our own model calls, on every tab. This cell used to show the
-        // component's self-reported figure while Overview showed the proxy's gateway-priced
-        // one — 31.6% apart on measured traffic, with nothing saying which to believe. The
-        // gateway figure is what the invoice is denominated in, so it is what shows, and the
-        // gap is named in the tooltip rather than hidden by the choice.
-        el('td', {
-          class: 'num',
-          title: !c.llm_calls ? 'this component makes no model calls of its own' : llmCostTitle(c),
-        }, c.llm_calls ? usd(c.llm_cost_usd) + (llmCostGap(c) ? '‡' : '') : '—'),
-        // A cost never travels alone. saved_usd is what this component's removals were
-        // worth over the window — summed per turn, so a frozen reduction replaying across a
-        // session is already amortized into it — and net_usd is the verdict. Both from the
-        // server, priced at the model this deployment actually bills.
-        // saved_usd is stored per request; saved_usd_estimated is the same arithmetic applied
-        // on READ to the rows written before that column existed. Without the second half this
-        // column showed $0.00 for every component over all history predating the last restart
-        // — 6 populated rows out of 100,579 on production — and the most-read tab in the
-        // dashboard therefore said the product was worthless. The dagger says how much of the
-        // figure is valued rather than recorded; it is never silently merged.
-        el('td', { class: 'num', title: savedKnown(c) ? savedTitle(c) : '' },
-          usdOrNA(compSaved(c), savedKnown(c), savedNAReason(c)),
-          savedKnown(c) && c.saved_usd_estimated ? '†' : null),
-        // A net whose benefit half is unknown is unknown too: subtracting a real cost from an
-        // unpriceable saving produced `$0` for searchfold and `-$0.00` for anything with a
-        // sliver of LLM cost, both of which read as measurements.
-        el('td', {
-          class: 'num' + (savedKnown(c) && c.net_usd_with_estimate < 0 ? ' warn-text' : ''),
-          title: !savedKnown(c) ? '' : 'AMORTIZED verdict: saved ' + usd(compSaved(c))
-            + ' across every turn those removals stayed removed for, − own LLM cost '
-            + usd(c.llm_cost_usd || 0)
-            + '. The per-turn column beside this one is the same verdict without the repeat '
-            + 'business, and it can have the opposite sign.',
-        }, usdOrNA(c.net_usd_with_estimate, savedKnown(c),
-          'the saving half of this net is not a number — ' + savedNAReason(c))),
         // The same verdict with replay excluded — the number /stats reports. It is here
         // BESIDE the amortized one, not instead of it, because the two answer different
         // questions and a component can be genuinely positive on one and negative on the
@@ -2453,7 +2535,9 @@ async function loadComponents() {
               + 'errors only above ' + pct(ERROR_RATE_BAD * 100, 0) + '.'
             : 'no run of this component failed in this window',
         }, c.errors ? num(c.errors) + ' (' + pct(errRate(c) * 100, 2) + ')' : '0'),
-        el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext }))));
+        el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext })));
+      [...tr.children].slice(4).forEach((td) => td.classList.add('more'));
+      body.appendChild(tr);
     }
     renderUnpricedNote(components);
     renderNetReconcile(components);
@@ -2462,12 +2546,12 @@ async function loadComponents() {
     // different series and repainted them all whenever a filter changed the order.
     const top = components.filter((c) => c.saved_unique > 0).slice(0, 12);
     barRows($('#chart-comp'), top.map((c) => ({
-      label: c.component, value: c.saved_unique, display: compact(c.saved_unique) + ' tok',
+      label: stepInfo(c.component)[0], value: c.saved_unique, display: compact(c.saved_unique) + ' tok',
       // Figures, not prose, so they go in the always-visible slot rather than behind a
       // disclosure: eight collapsed glyphs would each hide four numbers and cost a line to
       // do it.
-      formula: `${num(c.runs)} runs · acted ${pct(c.act_rate * 100, 1)} · own latency ${dur(c.duration_ms_total)} · ` +
-            `overcount ${c.overcount_ratio ? c.overcount_ratio.toFixed(1) + '×' : 'n/a'}`,
+      formula: `${num(c.runs)} runs · removed text in ${pct(c.act_rate * 100, 1)} · time added ${dur(c.duration_ms_total)} · ` +
+            `${c.overcount_ratio ? c.overcount_ratio.toFixed(1) + '× recounted' : ''}`,
     })), { emptyDetail: 'No component saved any content tokens in this window.' });
   } catch (err) {
     if (aborted(err)) return;
@@ -2728,8 +2812,8 @@ async function loadSessions() {
                    + 'incomplete amortization, not a verdict.',
             }, 'in flight')
             : null),
-        wide ? el('td', {}, el('span', { title: s.tenant_id, text: s.tenant_id ? s.tenant_id.slice(0, 6) : '—' })) : null,
-        el('td', { text: when(s.start) }),
+        wide ? el('td', { class: 'narrow-hide' }, el('span', { title: s.tenant_id, text: s.tenant_id ? s.tenant_id.slice(0, 6) : '—' })) : null,
+        el('td', { class: 'narrow-hide', text: whenShort(s.start) }),
         el('td', { class: 'num', text: num(s.turns) }),
         el('td', { class: 'num' },
           usdOrNA(s.cost_usd + s.cg_llm_cost_usd, !!s.baseline_cost_usd, 'no turn in this session reported the provider usage a cost needs')),
@@ -2814,17 +2898,17 @@ async function loadRequests() {
     for (const e of page.requests) {
       body.appendChild(el('tr', { class: 'click', 'data-testid': 'request-row', onclick: () => openRequest(e.id) },
         el('td', { text: e.id }),
-        el('td', { text: when(e.ts) }),
+        el('td', { text: whenShort(e.ts) }),
         el('td', {}, el('span', { class: 'trunc', title: e.session_id, text: e.session_id || '—' })),
-        wide ? el('td', {}, el('span', { class: 'trunc', title: e.tenant_id, text: e.tenant_id || '—' })) : null,
-        el('td', { text: e.model || '—' }),
+        wide ? el('td', {}, el('span', { title: e.tenant_id, text: e.tenant_id ? e.tenant_id.slice(0, 6) : '—' })) : null,
+        el('td', { class: 'more', text: e.model || '—' }),
         el('td', {}, el('span', { class: 'pill neutral', text: modeLabel(e.mode) })),
-        el('td', { class: 'num', text: compact(e.tokens_before) }),
+        el('td', { class: 'num more', text: compact(e.tokens_before) }),
         el('td', { class: 'num', text: compact(e.tokens_after) }),
-        el('td', { class: 'num', text: compact(e.tokens_before - e.tokens_after) }),
-        el('td', { class: 'num', text: compact(e.cache_read) + ' / ' + compact(e.cache_write) }),
+        el('td', { class: 'num more', text: compact(e.tokens_before - e.tokens_after) }),
+        el('td', { class: 'num more', text: compact(e.cache_read) + ' / ' + compact(e.cache_write) }),
         el('td', { class: 'num', text: e.token_accounting === 'complete' ? usd(e.cost_usd) : '—' }),
-        el('td', { class: 'num', text: ms(e.cg_latency_ms) }),
+        el('td', { class: 'num more', text: ms(e.cg_latency_ms) }),
         // A keep-alive ping is not agent traffic, and the consent copy promises it is
         // identifiable here. Without the badge the row reads as a mysterious one-token request
         // the user did not make, which is worse than not showing it at all.
@@ -2832,7 +2916,7 @@ async function loadRequests() {
           ? el('span', { class: 'pill neutral', title: 'a keep-alive ping context-guru sent to '
               + 'refresh this session\u2019s cached prompt', text: 'keep-alive' })
           : el('span', { class: 'pill ' + (e.cache_miss_reason || 'neutral'), text: e.cache_miss_reason || '—' })),
-        el('td', {}, el('span', { class: 'pill ' + e.token_accounting, text: e.token_accounting }))));
+        el('td', { class: 'more' }, el('span', { class: 'pill ' + e.token_accounting, text: e.token_accounting }))));
     }
     $('#req-page').textContent = `${num(page.requests.length)} shown of ${num(page.total)} matching`;
     $('#req-next').disabled = !page.next_cursor;
@@ -4141,7 +4225,9 @@ async function loadConfig() {
         ? ". These are not your account's settings; yours are in the panel above."
         : ', which on this single-account setup is also what every request used.') }));
     if (cfg.description) host.appendChild(whyBlock('Technical details: why the two can differ', cfg.description));
-    host.appendChild(renderTree(cfg.config || cfg));
+    const tree = cfg.config || cfg;
+    if (!tree || !Object.keys(tree).length) emptyState(host, 'No settings reported', 'The proxy returned an empty configuration.');
+    else host.appendChild(renderTree(tree));
   } catch (err) {
     if (aborted(err)) return;
     emptyState(host, err.status === 403 ? 'Configuration is not visible from this address'
@@ -4163,7 +4249,7 @@ async function loadConfig() {
       kv(term('Waiting', 'Requests waiting to be saved / the most the queue can hold.'), c.queued + ' / ' + c.queue_cap),
       kv(term('Live viewers', 'Browsers currently receiving live updates from this proxy.'), num(c.sse_clients)),
       kv('Database', c.db_path || '(in memory — history is lost on restart)'),
-      kv('Database size', compact(c.db_bytes) + ' B')));
+      kv('Database size', compact(c.db_bytes).replace(/(\d)([KMGT]?)$/, (_, n, u) => n + ' ' + u + 'B'))));
     // A non-zero drop count is the one thing worth saying out loud here, because it means
     // every number on the Overview under-reports. The definitions fold.
     if (c.dropped > 0) {
@@ -4662,7 +4748,7 @@ function sortable(tableSel, keys) {
     if (!th || !key) return;
     const label = th.textContent;
     clear(th).appendChild(el('button', {
-      class: 'sort', title: 'Sort by ' + label, onclick: () => toggleSort(key),
+      class: 'sort', title: 'Sort by ' + label + (th.title ? '. ' + th.title : ''), onclick: () => toggleSort(key),
     }, label));
   });
   syncSortHeads(tableSel, keys);
@@ -5093,6 +5179,7 @@ function initTheme() {
 
 function init() {
   initTheme();
+  $('#overview-diagnostics').addEventListener('toggle', (ev) => { if (ev.target.open && (state.diagStale || !state.diagDrawn)) { state.diagDrawn = true; renderDiagnostics(); } });
   $('#filters-toggle').addEventListener('click', (ev) => {
     const open = $('#filters').classList.toggle('open');
     ev.currentTarget.setAttribute('aria-expanded', String(open));
@@ -5145,6 +5232,8 @@ function init() {
     loadRequests();
   });
   $('#break-more').addEventListener('change', (e) => $('[data-testid=breakdown-table]').classList.toggle('show-more', e.target.checked));
+  document.addEventListener('change', (e) => { if (e.target.id === 'comp-more') $('[data-testid=components-table]').classList.toggle('show-more', e.target.checked); });
+  $('#req-more').addEventListener('change', (e) => $('[data-testid=requests-table]').classList.toggle('show-more', e.target.checked));
   $('#sess-more').addEventListener('change', (e) => $('[data-testid=sessions-table]').classList.toggle('show-more', e.target.checked));
   $('#sess-sort').addEventListener('change', (ev) => { state.sessSort = ev.target.value; state.sessOffset = 0; loadSessions(); });
   $('#sess-prev').addEventListener('click', () => { state.sessOffset = Math.max(0, state.sessOffset - 25); loadSessions(); });
@@ -7611,7 +7700,7 @@ function buildStrategyForm(form) {
   const targetAll = el('input', { type: 'radio', name: 'sf-target-mode', value: 'all', checked: 'checked' });
   const targetList = el('input', { type: 'radio', name: 'sf-target-mode', value: 'list' });
   const targetIDs = el('select', {
-    id: 'sf-target-ids', 'data-testid': 'sf-target-ids', multiple: 'multiple', size: '5', disabled: 'disabled',
+    id: 'sf-target-ids', 'data-testid': 'sf-target-ids', multiple: 'multiple', size: '3', disabled: 'disabled',
   }, ...strategyForm.tenants.map((t) => el('option', { value: t.id }, t.label ? `${t.email} · ${t.label}` : t.email)));
   const syncTargetDisabled = () => { targetIDs.disabled = !targetList.checked; };
   targetAll.addEventListener('change', syncTargetDisabled);
