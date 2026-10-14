@@ -12,6 +12,17 @@ const (
 	OpenAIDefaultKeepAliveIdle = OpenAIMinimumCacheTTL - 2*time.Minute
 )
 
+// The Anthropic one-hour tier. This is the ONE place the one-hour ping time lives: 59 minutes
+// after the previous request STARTED, one minute inside the lifetime, and one ping. Tune it here.
+// The five-minute pair (270 s, 2 pings) stays in config.
+const (
+	AnthropicDefaultKeepAliveIdle1h     = 59 * time.Minute
+	AnthropicDefaultKeepAliveMaxPings1h = 1
+	// AnthropicMaxKeepAliveMaxPings1h caps K for a 1-hour thread. The credential hold is
+	// (K+1) x 59 min, so 3 bounds it at 236 min; it matches the manager-strategy band.
+	AnthropicMaxKeepAliveMaxPings1h = 3
+)
+
 // OpenAI30MinuteCache is the shared provider/model gate for the GPT-5.6+
 // automatic-cache guarantee. Route-specific callers may impose further limits.
 func OpenAI30MinuteCache(provider, model string) bool {

@@ -7281,7 +7281,8 @@ function loadSettings() {
         + 'cost, and the Overview ledger shows pings, ping cost, misses avoided and the net. '
         + 'It also RETAINS, in memory only, your provider key and that session\u2019s last '
         + 'request \u2014 which includes its conversation content \u2014 for the length of the '
-        + 'idle gap, up to about 14 minutes, because a request sent between your requests has '
+        + 'idle gap: up to about 14 minutes on a 5-minute cache, and about 2 hours (at most 4 hours) '
+        + 'on a 1-hour cache, because a request sent between your requests has '
         + 'nothing else to authenticate or replay. That is separate from the transcript-storage '
         + 'consent below, which is about writing content to DISK; this is held in memory, '
         + 'masked, overwritten on release, and never persisted. '
@@ -9860,12 +9861,16 @@ function renderKASessions() {
 async function armSession(s) {
   // The credential hold is stated BEFORE the act, not after it. (K+1)×X is arithmetic on the two
   // integers the reader just chose — not money, so computing it here breaks no rule — and it is
-  // the number the Settings copy promises ("up to about 14 minutes"), which an override changes.
+  // the number the Settings copy promises ("up to about 14 minutes" on a 5-minute cache), which an
+  // override changes. A 1-hour thread follows the account's 1-hour schedule instead; see below.
   // The worst-case SPEND comes back from the server, which owns every dollar on this page.
   const hold = ((kaState.k + 1) * kaState.x) / 60;
   const hours = prompt('Keep this session warm for how many hours?\n\n'
     + `For Anthropic, ${kaState.x}s idle and ${kaState.k} pings can hold your credential for `
-    + `up to ${hold.toFixed(0)} minutes at a time ((K+1) × X). For GPT-5.6+ Responses, `
+    + `up to ${hold.toFixed(0)} minutes at a time ((K+1) × X) on a 5-minute cache; a session on a `
+    + `1-hour cache is pinged 59 minutes apart, at most ${Math.min(kaState.k, 3)} time(s) (your ping count, capped at 3), `
+    + `so it is held for up to ${(Math.min(kaState.k, 3) + 1) * 59} minutes. `
+    + 'For GPT-5.6+ Responses, '
     + 'the account OpenAI cadence applies (at most 28 minutes), pings are capped to keep ' +
       'credential hold within 60 minutes. Between 0.25 and 12 hours, and it '
     + 'is cleared if the service restarts.', '1');
@@ -10052,7 +10057,9 @@ async function loadKAArmed() {
   kaState.armed = out.armed || [];
   host.appendChild(el('p', { class: 'hint' },
     `At most ${out.max_hours} hours per session, and ${out.max_hold_minutes} minutes is the `
-    + 'ceiling on how long your credential may be held between pings. ',
+    + 'ceiling on how long your credential may be held between pings on a 5-minute cache. '
+    + `A 1-hour cache keeps the account's 59-minute timing; the override's ping count applies to it `
+    + `(at most 3), so it is held for up to ${out.max_hold_minutes_1h} minutes. `,
     el('strong', {}, 'Armed sessions are cleared if the service restarts'),
     ' — an authorization to spend that silently outlived a restart would be worse than one '
     + 'that does not. The arm itself is in your audit log permanently.'));

@@ -178,7 +178,7 @@ Read the proxy's own request log (`grep cg.request`) rather than trusting a summ
 
 ## Step 5 — verify keep-alive for real (the part that's easy to get wrong)
 
-The 5-min-ping cache strategy isn't exercised by the standalone binary unless you hand it the same
+The `auto` cache strategy isn't exercised by the standalone binary unless you hand it the same
 kind of config the plugin would otherwise generate:
 
 ```sh
@@ -237,7 +237,7 @@ env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
   CONTEXT_GURU_PORT_BASE=8920 \
   CLAUDE_CONFIG_DIR="$SANDBOX/claude-home" \
   bash context-guru-plugin/scripts/install.sh --route --scope project \
-    --cache-strategy 5-min-ping --upstream https://api.anthropic.com \
+    --cache-strategy auto --upstream https://api.anthropic.com \
     --i-consent-to-traffic-interception
 ```
 

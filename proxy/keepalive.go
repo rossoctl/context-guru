@@ -157,6 +157,12 @@ type CachePolicy struct {
 	OpenAIIdle time.Duration
 	// MaxPings is K: the most pings one idle span may send. Zero disables.
 	MaxPings int
+	// Idle1h and MaxPings1h are X and K for a thread whose cache the provider billed at the
+	// one-hour tier. Idle and MaxPings above stay the five-minute schedule. record swaps the pair
+	// in per entry (see resolveTier), so each session follows the TTL it was actually granted.
+	// Zero means the shipped default (modelinfo.AnthropicDefaultKeepAliveIdle1h and MaxPings1h).
+	Idle1h     time.Duration
+	MaxPings1h int
 	// MaxUSDPerPing refuses a ping whose projected cost exceeds this. PER PING, because ping
 	// cost is bimodal (p50 $0.0004, p99 $0.2275, max $0.3780) while a per-SESSION budget
 	// truncates exactly the long large-prefix sessions holding the value — capping the
@@ -188,6 +194,52 @@ func (p CachePolicy) on() bool {
 	return p.KeepAlive && p.Idle > 0 && p.MaxPings > 0
 }
 
+// forOneHour swaps in the one-hour schedule. The zero values resolve to the shipped defaults, the
+// same way config.CacheConfig.Resolved does for the config-file path (strategies and overrides
+// build a CachePolicy without going through it).
+//
+// MaxPings is capped at modelinfo.AnthropicMaxKeepAliveMaxPings1h whatever the source, so the
+// credential hold of a 1-hour thread never exceeds maxKeepAliveHold1h. An armed session override
+// does not change a 1-hour thread's schedule (its 60-290 s band cannot express one hour); it still
+// enables the session and sets its prefix floor.
+func (p CachePolicy) forOneHour() CachePolicy {
+	p.Idle, p.MaxPings = p.Idle1h, p.MaxPings1h
+	if p.Idle <= 0 {
+		p.Idle = modelinfo.AnthropicDefaultKeepAliveIdle1h
+	}
+	if p.MaxPings <= 0 {
+		p.MaxPings = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
+	}
+	p.MaxPings = min(p.MaxPings, modelinfo.AnthropicMaxKeepAliveMaxPings1h)
+	return p
+}
+
+// maxKeepAliveHold1h is the longest a 1-hour thread can hold the caller's credential and
+// conversation: (cap + 1) x 59 min = 236 min. The default (1 ping) holds 118 min.
+const maxKeepAliveHold1h = (modelinfo.AnthropicMaxKeepAliveMaxPings1h + 1) * modelinfo.AnthropicDefaultKeepAliveIdle1h
+
+// resolveTier decides whether the thread's cache is a one-hour cache, from the traffic.
+//
+// The BILLED tier is the source of truth, not the request: a gateway can downgrade a requested
+// 1h to 5m (#330) and still answer 200. One-hour needs both halves:
+//
+//   - the request asks 1h on EVERY breakpoint. A mixed ask (the proxy's own 1h head over a 5m
+//     tail) leaves a tail that expires in five minutes, and a 59-minute ping would refresh only
+//     the head.
+//   - the response billed the one-hour tier for everything it wrote. A turn that only READS the
+//     cache (cache_write 0) bills no tier, so it inherits the thread's last billed one (prev).
+//
+// Anything else is five minutes, which is the schedule the proxy always ran.
+func resolveTier(body []byte, u Usage, usageOK, prev bool) bool {
+	if !usageOK || !apply.AllBreakpointsAskExtendedTTL(body) {
+		return false
+	}
+	if u.CacheWrite > 0 {
+		return u.CacheWrite1h >= u.CacheWrite
+	}
+	return prev
+}
+
 // Keeper bounds. Both are memory bounds and both are needed: a few enormous sessions and a
 // great many small ones are different ways to exhaust the same 8 GiB.
 const (
@@ -195,7 +247,7 @@ const (
 	// one session holds one entry per thread that passed the gates (main agent, each subagent).
 	// The name is kept so the bound stays greppable from its history. 512 still holds: an entry
 	// exists only for a thread past its first request with a prefix over the floor, a finished
-	// thread's entry ends at the hard deadline ((K+1) x Idle, about 14 min at the defaults), and
+	// thread's entry ends at the hard deadline ((K+1) x Idle: about 14 min on a 5-minute thread, 118 min on a 1-hour thread at the defaults), and
 	// the body bound below binds first. evictLocked has no per-session fairness on purpose: it
 	// drops the entry whose ping is least imminent, whichever session it belongs to.
 	maxKeepAliveSessions = 512
@@ -307,6 +359,10 @@ type kaEntry struct {
 	// refreshed is what the last ping read from cache. It is the ceiling on what the next
 	// real request may credit to this mechanism — see dash.Event.keepaliveSavedUSD.
 	refreshed int64
+	// ttl1h is the cache lifetime this thread was GRANTED: true when the provider billed the
+	// one-hour tier, false for five minutes. Set once at record time by resolveTier, which also
+	// swaps pol.Idle and pol.MaxPings to the one-hour schedule.
+	ttl1h bool
 	// stopped means this session will not be pinged again: a ping wrote instead of reading,
 	// or the upstream refused in a way that repeating cannot fix.
 	stopped bool
@@ -322,6 +378,13 @@ type kaEntry struct {
 	// look, and coupling a security bound to a liveness loop is how a hold silently becomes
 	// unbounded. time.AfterFunc fires regardless.
 	timer *time.Timer
+}
+
+// hold is how long this entry may keep the caller's credential and conversation: (K+1) x X, the
+// hard deadline. 14 min for a 5-minute thread at the defaults, 118 min for a 1-hour thread, and
+// never more than maxKeepAliveHold1h (236 min) for one.
+func (e *kaEntry) hold() time.Duration {
+	return time.Duration(e.pol.MaxPings+1) * e.pol.Idle
 }
 
 // due reports whether this TRACKED entry should be pinged now. Timing, K and the stop flag
@@ -352,12 +415,12 @@ func (e *kaEntry) due(now time.Time) bool {
 //
 // Deliberately NOT Ctx.CachePhase itself: that function also handles CacheTTLMinimum and an
 // unknown idle time, neither of which arises here — a live kaEntry always knows its own idle
-// time exactly (now - prevStartedAt, never "unknown"), and the keeper derives the TTL tier from
-// the one policy field that controls it (pol.HeadTTL1h) rather than reading it off a request. A
+// time exactly (now - prevStartedAt, never "unknown"), and the keeper holds the TTL tier the provider
+// billed for this thread (kaEntry.ttl1h, or the proxy's own pol.HeadTTL1h ask). A
 // narrower function is simpler and cannot drift from a case this call site never reaches.
-func cachePhaseAt(prevStartedAt, now time.Time, headTTL1h bool, preExpiry time.Duration) components.CachePhase {
+func cachePhaseAt(prevStartedAt, now time.Time, ttl1h bool, preExpiry time.Duration) components.CachePhase {
 	ttl := 5 * time.Minute
-	if headTTL1h {
+	if ttl1h {
 		ttl = time.Hour
 	}
 	remaining := ttl - now.Sub(prevStartedAt)
@@ -469,6 +532,10 @@ type keeper struct {
 	mu    sync.Mutex
 	live  map[string]*kaEntry
 	bytes int64
+	// tier1h remembers, per THREAD (keyed like live), that its last billed write was one-hour.
+	// A turn that only READS the cache bills no write, so it carries no tier of its own and
+	// inherits this. Bounded and reset together with turns.
+	tier1h map[string]bool
 	// turns counts requests seen per THREAD (keyed like live), so the first-request gate
 	// survives the entry's own lifecycle: an entry is dropped the moment the next request arrives, and retired by
 	// policy a few minutes later, while "has this session sent a request before?" has to
@@ -559,7 +626,7 @@ func keepAliveDisabled() bool {
 
 func newKeeper(h *Handler) *keeper {
 	k := &keeper{h: h, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{},
 		overrides: map[string]sessionOverride{}, now: time.Now}
 	k.send = k.sendPing
 	k.dispatch = func(j pingJob) { go k.fire(j) }
@@ -616,6 +683,7 @@ func (k *keeper) Stop() {
 	}
 	k.bytes = 0
 	k.turns = map[string]int{}
+	k.tier1h = map[string]bool{}
 	// The overrides go with everything else: they are authorizations to spend, and the process
 	// they authorized is ending.
 	k.overrides = map[string]sessionOverride{}
@@ -766,6 +834,15 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		k.skipped.Add(1)
 		return
 	}
+	// Read here, written below beside turns: tier1h must be bounded and reset exactly as turns is,
+	// and a request the paths above refuse must not grow it.
+	k.mu.Lock()
+	prev1h := k.tier1h[key]
+	k.mu.Unlock()
+	ttl1h := resolveTier(body, u, usageOK, prev1h)
+	if ttl1h && provider != bschemas.OpenAI {
+		pol = pol.forOneHour()
+	}
 	// Nothing to keep alive unless the provider honours explicit breakpoints and this
 	// request actually established or read an entry. A request that wrote and read nothing
 	// has no prefix worth a ping.
@@ -809,7 +886,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		st:       tn.Store,
 		emitter:  tn.Pipe.Emitter(),
 		provider: provider, model: model, route: route, preset: tn.Preset,
-		agent: r.UserAgent(), pol: pol, prefix: prefix, stopReason: u.StopReason,
+		agent: r.UserAgent(), pol: pol, ttl1h: ttl1h, prefix: prefix, stopReason: u.StopReason,
 		pingUSD: k.projectedPingUSD(model, prefix, route),
 		hdr:     hdr, auth: auth, appliedStrategy: applied,
 	}
@@ -820,8 +897,18 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// what lets a session's second request be recognised as such.
 	k.turns[key]++
 	e.turn = k.turns[key] - 1
+	// A write bills a tier; a read-only turn bills none and leaves the remembered one alone.
+	if usageOK && (u.CacheWrite > 0 || ttl1h) {
+		k.tier1h[key] = ttl1h
+	}
 	if len(k.turns) > maxKeepAliveTurnKeys {
+		// Reset both, keeping the current thread: dropping its tier here would send its next
+		// read-only turn back to the 5-minute schedule.
 		k.turns = map[string]int{key: k.turns[key]}
+		k.tier1h = map[string]bool{}
+		if usageOK && (u.CacheWrite > 0 || ttl1h) {
+			k.tier1h[key] = ttl1h
+		}
 	}
 	// Drop any previous entry either way: it is stale now, and if the gate refuses this request
 	// its body and credential must not be left behind.
@@ -841,7 +928,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// entry: K pings each restarting the clock, plus one final Idle to notice the last one
 	// bought nothing. After that there is no legitimate use, so the material goes whether or not
 	// anything else in this process is awake.
-	e.timer = time.AfterFunc(time.Duration(e.pol.MaxPings+1)*e.pol.Idle, func() { k.retire(key) })
+	e.timer = time.AfterFunc(e.hold(), func() { k.retire(key) })
 	k.evictLocked()
 }
 
@@ -980,6 +1067,7 @@ func (k *keeper) forget(tenantID string) {
 		e.clear()
 		delete(k.live, key)
 		delete(k.turns, key)
+		delete(k.tier1h, key)
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}
 	// Per-session overrides go too. This is the path a Settings save takes, so unticking the
@@ -1235,9 +1323,9 @@ func (k *keeper) fireSummarySubstitute(j pingJob) bool {
 	}
 	e := j.e
 	k.mu.Lock()
-	model, prefix, ceiling, headTTL1h := e.model, e.prefix, e.pol.Ceiling(), e.pol.HeadTTL1h
+	model, prefix, ceiling, ttl1h := e.model, e.prefix, e.pol.Ceiling(), e.ttl1h || e.pol.HeadTTL1h
 	k.mu.Unlock()
-	phase := cachePhaseAt(j.prevStartedAt, k.now(), headTTL1h, preExpiryFor(info.PreExpirySeconds))
+	phase := cachePhaseAt(j.prevStartedAt, k.now(), ttl1h, preExpiryFor(info.PreExpirySeconds))
 	// A `pre_expiry` candidate asked to spend only when ITS OWN notion of the pre-expiry window
 	// is live, not merely whenever the keeper happens to be sending a ping — the two can diverge
 	// (a manager strategy's K>1 schedule, or a component configured with a narrower

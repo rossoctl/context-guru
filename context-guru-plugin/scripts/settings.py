@@ -3191,7 +3191,30 @@ def cmd_config(args: argparse.Namespace) -> int:
 STRATEGY_MARKER_PREFIX = "# context-guru:"
 STRATEGY_MARKER_TAIL = "written by"
 
-DEFAULT_STRATEGY = "5-min-ping"
+# Strategies are named by PING COUNT, never by minutes: the proxy reads each session's cache lifetime
+# (5 minutes or 1 hour) from the traffic, so a name that says "5-min" would be wrong for half the
+# sessions it governs. The proxy picks the timing; the strategy picks how many pings.
+#
+#   strategy   5-minute cache                   1-hour cache
+#   auto       2 pings, first at 270 s          1 ping at 59 min
+#   1-ping     1 ping, at 270 s                 1 ping at 59 min
+#   2-ping     2 pings, first at 270 s          2 pings, 59 min apart
+#
+# `auto` is the default and is the per-TTL table: a 5-minute session behaves exactly as `5-min-ping`
+# always did. The 1-hour numbers are config.DefaultKeepAliveIdle1h / DefaultKeepAliveMaxPings1h in
+# the proxy; they are written out below so the file says what it does.
+DEFAULT_STRATEGY = "auto"
+
+# Names that existed before the rename. They keep working everywhere a name is read: `strategy set`
+# and `--cache-strategy` store the new name, and `strategy sync` rewrites an old marker under the
+# new one, so an existing install or settings file does not break. `5-min-ping` was the default.
+STRATEGY_ALIASES = {"5-min-ping": "auto"}
+
+
+def canonical_strategy(name: str) -> str:
+    """The current name for `name`: itself, or what an alias maps to."""
+    return STRATEGY_ALIASES.get(name, name)
+
 
 # The default PRESET, in the one place that decides it. It is `off` - the passthrough pipeline, no
 # components at all - and that is a deliberate product claim rather than a conservative guess:
@@ -3246,11 +3269,44 @@ STRATEGIES: dict[str, dict] = {
             "keepalive_max_pings": 2,
             "keepalive_max_usd_per_ping": 0.50,
             "keepalive_min_prefix_tokens": 80000,
+            "keepalive_idle_seconds_1h": 3540,
+            "keepalive_max_pings_1h": 1,
         },
         "spends": True,
-        "desc": "an idle ping just under the provider's 5-minute TTL (270s, at most 2 per "
-                "idle span, >=80k-token prefix, <=$0.50/ping). SPENDS THE CALLER'S CREDENTIAL "
-                "while nobody is at the keyboard.",
+        "desc": "idle pings that follow the cache lifetime each session was billed at. 5-minute "
+                "cache: first ping at 270s, at most 2. 1-hour cache: 1 ping at 59 minutes. "
+                ">=80k-token prefix, <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody "
+                "is at the keyboard.",
+    },
+    "1-ping": {
+        "cache": {
+            "keepalive": True,
+            "keepalive_idle_seconds": 270,
+            "keepalive_max_pings": 1,
+            "keepalive_max_usd_per_ping": 0.50,
+            "keepalive_min_prefix_tokens": 80000,
+            "keepalive_idle_seconds_1h": 3540,
+            "keepalive_max_pings_1h": 1,
+        },
+        "spends": True,
+        "desc": "at most 1 idle ping per idle span, whichever cache lifetime the session was "
+                "billed at (270s into a 5-minute cache, 59 minutes into a 1-hour cache). SPENDS "
+                "THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+    },
+    "2-ping": {
+        "cache": {
+            "keepalive": True,
+            "keepalive_idle_seconds": 270,
+            "keepalive_max_pings": 2,
+            "keepalive_max_usd_per_ping": 0.50,
+            "keepalive_min_prefix_tokens": 80000,
+            "keepalive_idle_seconds_1h": 3540,
+            "keepalive_max_pings_1h": 2,
+        },
+        "spends": True,
+        "desc": "at most 2 idle pings per idle span, whichever cache lifetime the session was "
+                "billed at (a 1-hour cache is pinged at 59 minutes and again 59 minutes later). "
+                "SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
     },
     "1-hour-head": {
         "cache": {"head_ttl_1h": True, "head_ttl_min_tokens": 50000},
@@ -3293,7 +3349,37 @@ def _strategy_name_in(text: str) -> str:
     return m.group(1) if m else ""
 
 
-def _render_strategy(name: str, preset: str) -> str:
+# What the proxy does for a 1-hour cache when the `_1h` keys are absent (config.DefaultKeepAliveIdle1h
+# and DefaultKeepAliveMaxPings1h). A key equal to its default is NOT written, and that is load-bearing:
+# the plugin and the proxy binary ship separately, and an OLD binary's strict loader rejects an
+# unknown key and exits. Omitting the defaults keeps `auto` and `1-ping` loadable by every binary;
+# only a non-default value (`2-ping`) writes a `_1h` key.
+ONE_HOUR_DEFAULTS = {"keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 1}
+
+# A file re-rendered for a binary that rejected the `_1h` keys carries this line. `strategy sync` sees
+# it and keeps omitting them, so a later session start does not fail and recover again. A deliberate
+# `strategy set` renders afresh without it, and so does the next one after a proxy update.
+#
+# The marker records the proxy version it was written for. `strategy sync` keeps the keys out only
+# while the installed version is still that one: after a proxy update the keys go back in, and an old
+# binary that is still installed simply rejects them once more and takes the recovery path again.
+LEGACY_BINARY_MARKER_PREFIX = "# context-guru: 1h-keys-omitted for proxy "
+
+
+def _installed_proxy_version() -> str:
+    """The version install.sh recorded for the proxy binary, or "" when none is recorded."""
+    try:
+        with open(os.path.join(state_dir(), "proxy-version"), encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except OSError:
+        return ""
+
+
+def _legacy_marker() -> str:
+    return LEGACY_BINARY_MARKER_PREFIX + _installed_proxy_version()
+
+
+def _render_strategy(name: str, preset: str, legacy: bool = False) -> str:
     spec = STRATEGIES[name]
     lines = [
         f"{STRATEGY_MARKER_PREFIX} strategy={name} {STRATEGY_MARKER_TAIL} "
@@ -3311,7 +3397,10 @@ def _render_strategy(name: str, preset: str) -> str:
         "# recorded here when the strategy was first armed - indefinitely, and with no way to tell.",
         f"preset: {preset}",
     ]
-    cache = spec["cache"]
+    cache = {k: v for k, v in spec["cache"].items()
+             if not k.endswith("_1h") or (not legacy and ONE_HOUR_DEFAULTS.get(k) != v)}
+    if legacy:
+        lines.insert(1, _legacy_marker())
     if cache:
         lines.append("cache:")
         for k, v in cache.items():
@@ -3413,7 +3502,8 @@ def cmd_strategy(args) -> int:
         # `names=` is the machine-readable list. The per-strategy keys below mangle `-` to `_` to be
         # valid fact keys, so they cannot be parsed back into names — install.sh needs to validate a
         # `--cache-strategy` value BEFORE it downloads a binary, and this is what it reads.
-        emit(result="ok", default=DEFAULT_STRATEGY, names=",".join(STRATEGIES))
+        emit(result="ok", default=DEFAULT_STRATEGY, names=",".join(STRATEGIES),
+             aliases=",".join(f"{old}:{new}" for old, new in STRATEGY_ALIASES.items()))
         for name, spec in STRATEGIES.items():
             emit(**{f"strategy_{name.replace('-', '_')}": spec["desc"],
                     f"spends_{name.replace('-', '_')}": "true" if spec["spends"] else "false"})
@@ -3437,7 +3527,7 @@ def cmd_strategy(args) -> int:
             emit(result="ok", strategy="(foreign)", file=path, port=port,
                  note="a config exists at our path that we did not write; left alone")
             return 0
-        name = _strategy_name_in(text)
+        name = canonical_strategy(_strategy_name_in(text))
         # A name we do not recognise is reported AS RECORDED, with a note saying so. Two wrong
         # answers were available here and both were worse: mapping it to a current name would claim
         # the file does something it does not, and reporting "(unnamed)" would hide that the file
@@ -3490,7 +3580,7 @@ def cmd_strategy(args) -> int:
             emit(result="skipped", reason="not_ours", file=path,
                  note="a config we did not write is at this path; its preset is its owner's business")
             return 0
-        name = _strategy_name_in(text)
+        name = canonical_strategy(_strategy_name_in(text))
         if not name:
             emit(result="skipped", reason="unnamed", file=path,
                  note="written before strategies had names, so there is no name to re-render from; "
@@ -3508,7 +3598,8 @@ def cmd_strategy(args) -> int:
                  note="this config names `none`, which is expressed as no config at all; "
                       "`strategy set --name none` removes it")
             return 0
-        want = _render_strategy(name, args.preset)
+        want = _render_strategy(name, args.preset,
+                                legacy=args.legacy_binary or _legacy_marker() in text.splitlines())
         if want == text:
             emit(result="unchanged", strategy=name, file=path, port=port, preset=args.preset)
             return 0
@@ -3556,9 +3647,9 @@ def cmd_strategy(args) -> int:
         return 0
 
     # op == "set"
-    name = args.name
+    name = canonical_strategy(args.name)
     if name not in STRATEGIES:
-        emit(result="error", reason="unknown_strategy", requested=name,
+        emit(result="error", reason="unknown_strategy", requested=args.name,
              known=",".join(STRATEGIES))
         return 2
     # `none` writes NO FILE, so it reaches `clear` and never touches the preset - checking the preset
@@ -3976,6 +4067,9 @@ def main() -> int:
     st.add_argument("--preset", default="",
                     help="the preset to state in the file. Required for `set` and `sync`, because "
                          "--config REPLACES --preset rather than layering over it.")
+
+    st.add_argument("--legacy-binary", action="store_true",
+                    help="`sync` only: omit the `_1h` keys, for a proxy binary that rejected them")
 
     pr = sub.add_parser("preset")
     pr.add_argument("op", choices=("list", "show", "set"))

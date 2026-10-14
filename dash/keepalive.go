@@ -142,6 +142,11 @@ func addressable(f Filter) (string, []any) {
 // session id rather than treating map presence as "credited". Narrowing the filter would move the
 // EXISTS into the WHERE, once per row IN SCOPE instead of once per credited row: the 61.9s one.
 //
+// The window follows the returning row's tier: a row that asked the one-hour tier (cache_ttl
+// ephemeral_1h) is reachable from a ping up to an hour earlier, not five minutes. A 1-hour thread
+// is pinged at 59 minutes, so with the 5-minute window every rescue of one was zeroed here while
+// the ping's cost still counted - and insights would then recommend switching the strategy off.
+//
 // Two deliberate looseness's, both stated rather than hidden. `kp.ts <= r.ts` rather than `<`,
 // because a ping and the request it rescued can land in the same millisecond and the tie is
 // harmless — kp.keepalive = 1 makes a row matching itself impossible. And ts is the row's
@@ -167,7 +172,9 @@ func kaSaved(alias string) string {
 			  AND kp.tenant_id = ` + alias + `tenant_id AND kp.session_id = ` + alias + `session_id
 			  AND kp.ts <= ` + alias + `ts
 			  AND kp.ts + (CASE WHEN kp.provider = 'openai' THEN ` +
-		strconv.FormatInt(apply.OpenAIMinimumCacheTTL.Milliseconds(), 10) + ` ELSE ` +
+		strconv.FormatInt(apply.OpenAIMinimumCacheTTL.Milliseconds(), 10) +
+		` WHEN ` + alias + `cache_ttl = '` + apply.TTLEphemeral1h + `' THEN ` +
+		strconv.FormatInt(providerCacheTTL1hMs, 10) + ` ELSE ` +
 		strconv.FormatInt(providerCacheTTLMs, 10) + ` END) >= ` + alias + `ts)
 		THEN ` + col + ` ELSE 0 END)`
 }

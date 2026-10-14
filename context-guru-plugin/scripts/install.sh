@@ -222,7 +222,7 @@ route_resolve_options() {
   R_PRESET=$(kv "$cfg" option_preset);        : "${R_PRESET:=off}"
   R_IDLE=$(kv "$cfg" option_idle_exit);       : "${R_IDLE:=24h}"
   [ -z "$R_STRATEGY" ] && R_STRATEGY=$(kv "$cfg" option_cache_strategy)
-  : "${R_STRATEGY:=5-min-ping}"
+  : "${R_STRATEGY:=auto}"
   [ -z "$R_UPSTREAM" ] && R_UPSTREAM=$(kv "$cfg" option_upstream)
 }
 
@@ -697,6 +697,13 @@ $R_STRATEGY was not checked and cache_strategy= in this report may be wrong too.
 plugin install rather than a bad argument: check python3 and $(route_here)/settings.py. Nothing was \
 installed, started or written."
   fi
+  # A name from before the ping-count rename (`5-min-ping`) is accepted and mapped to its new name, so a
+  # saved option or a remembered command still installs. `aliases=` is old:new pairs.
+  local aliases pair
+  aliases=$(printf '%s\n' "$slist" | sed -n 's/^aliases=//p')
+  for pair in ${aliases//,/ }; do
+    [ "${pair%%:*}" = "$R_STRATEGY" ] && R_STRATEGY=${pair#*:}
+  done
   case ",${names}," in
     *",${R_STRATEGY},"*) : ;;
     *) route_needs "unknown_strategy" "--cache-strategy $R_STRATEGY is not a strategy. Known: \

@@ -896,7 +896,7 @@ func (e *Event) keepaliveSavedUSD(p modelinfo.Price) float64 {
 	if e.KeepAlive || e.KeepAlivePings <= 0 || e.CacheRead <= 0 {
 		return 0 // a ping never credits itself
 	}
-	if e.SinceLastMs <= keepaliveCreditFloorMs(e.Provider, e.Model) {
+	if e.SinceLastMs <= keepaliveCreditFloorMs(e.Provider, e.Model, e.CacheTTL) {
 		return 0
 	}
 	if e.CacheWrite >= e.CacheRead {
@@ -917,12 +917,20 @@ func (e *Event) keepaliveSavedUSD(p modelinfo.Price) float64 {
 	return float64(n) * delta
 }
 
-func keepaliveCreditFloorMs(provider, model string) int64 {
+// keepaliveCreditFloorMs is how long a gap must be before a ping can take credit for the return:
+// the cache lifetime of the thread. cacheTTL is the tier the returning request ASKED for, which
+// for a given client is constant across a session (Claude Code asks 1h on a subscription for every
+// request). A 1-hour thread is pinged at 59 min, so crediting any gap over 5 minutes would claim
+// returns the entry survived on its own.
+func keepaliveCreditFloorMs(provider, model, cacheTTL string) int64 {
 	if provider == string(bschemas.OpenAI) {
 		if !modelinfo.GPT56OrLater(model) {
 			return 1<<63 - 1 // no known lifetime means no defensible credit
 		}
 		return apply.OpenAIMinimumCacheTTL.Milliseconds()
+	}
+	if cacheTTL == apply.TTLEphemeral1h {
+		return providerCacheTTL1hMs
 	}
 	return providerCacheTTLMs
 }
@@ -931,22 +939,13 @@ func keepaliveCreditFloorMs(provider, model string) int64 {
 // keep-alive. It comes from apply's lifetime source; OpenAI's minimum must not
 // be used as proof that an entry has expired.
 //
-// IT IS NOT THE ONLY TIER, and keepaliveSavedUSD's use of it above is wrong for the other one.
-// A row that wrote at the ONE-HOUR tier (requests.cache_write_1h) keeps its entry for an hour, so
-// a nine-minute gap did not outlive anything and the entry survived without help — but the gate
-// reads `SinceLastMs <= providerCacheTTLMs` and credits it. Inert today: 0 of 105 credited rows on
-// a 133,064-row production corpus have cache_write_1h > 0, and the gateway grants 1h on
-// aws/claude-haiku-4-5 while refusing it on aws/claude-sonnet-5.
-//
-// Not fixed here because the predicate does not exist yet. The 1h tier is recorded on the row
-// that WROTE the entry, not on the row being credited, and the grant can change mid-session — so
-// "is this a 1h entry" is a walk back through the session to whichever row created the prefix,
-// not a column. Anything written before that walk exists encodes a guess about which row's tier
-// counts, and a test on invented rows would certify the guess rather than check it. This is a
-// sign saying the floor is missing, not a fix.
-//
-// dash.kaSaved corrects a different defect in the same credit and does not touch this one.
+// The one-hour tier has its own constant, providerCacheTTL1hMs: a thread whose requests ask the 1h
+// tier is pinged at 59 minutes, so both the write-side floor above and kaSaved's reachability window
+// in keepalive.go use it for rows whose cache_ttl is ephemeral_1h.
 const providerCacheTTLMs int64 = int64(apply.AnthropicDefaultCacheTTL / time.Millisecond)
+
+// providerCacheTTL1hMs is the one-hour tier's lifetime.
+const providerCacheTTL1hMs int64 = int64(time.Hour / time.Millisecond)
 
 // baselineDeltaUSD is what the removed content would have cost had it been sent:
 // the unique part as new input (cache-write rate), the re-sent remainder as a

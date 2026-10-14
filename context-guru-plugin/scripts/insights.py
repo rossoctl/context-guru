@@ -514,7 +514,7 @@ def collect_env(f: Fetcher, rep: Report, stats: object) -> None:
         rep.fact(f"options_file.{key}", opt_sources[key])
 
     preset = str(opts.get("preset") or settings.DEFAULT_PRESET)
-    strategy = str(opts.get("cache_strategy") or settings.DEFAULT_STRATEGY)
+    strategy = settings.canonical_strategy(str(opts.get("cache_strategy") or settings.DEFAULT_STRATEGY))
     rep.fact("preset", preset)
     rep.fact("preset_configured", "preset" in opts)
     rep.fact("cache_strategy", strategy)
@@ -1113,7 +1113,7 @@ def collect_idle(f: Fetcher, rep: Report, window: Window, strategy: str) -> None
             f"{_usd(_num(_get_in(rec, 'service_lo_usd')))} and "
             f"{_usd(_num(_get_in(rec, 'service_hi_usd')))} over a comparable window — that is "
             f"scale, not your figure.",
-            "Nothing to fix. The default `5-min-ping` strategy is already the shipped policy; "
+            "Nothing to fix. The default `auto` strategy is already the shipped policy; "
             "re-run this once there is more idle history.",
             "refused: insufficient observation"))
     else:
@@ -1141,7 +1141,7 @@ def collect_idle(f: Fetcher, rep: Report, window: Window, strategy: str) -> None
                 f"{int(_num(_get_in(rec, 'n')))} expiries in "
                 f"{int(_num(_get_in(rec, 'sessions')))} sessions). There is deliberately no single "
                 f"number: the interval is too wide for one to mean anything.",
-                "/plugin configure context-guru -> cache strategy: 5-min-ping. It SPENDS your own "
+                "/plugin configure context-guru -> cache strategy: auto. It SPENDS your own "
                 "credential on the pings; the range above is already net of that. "
                 "/context-guru:cache-strategy-picker explains the alternatives.",
                 "90% interval over a window like this one", usd_lo=lo, usd_hi=hi))
@@ -1410,7 +1410,7 @@ def main() -> int:
     window = Window(stats)
     opts, _ = _configured_options()
     preset = str(opts.get("preset") or settings.DEFAULT_PRESET)
-    strategy = str(opts.get("cache_strategy") or settings.DEFAULT_STRATEGY)
+    strategy = settings.canonical_strategy(str(opts.get("cache_strategy") or settings.DEFAULT_STRATEGY))
 
     # Nothing below has anything to say about an account with no retained requests, and each
     # collector would say it separately: measured against an empty store they produce
