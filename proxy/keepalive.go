@@ -18,6 +18,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/store"
@@ -307,6 +308,10 @@ type kaEntry struct {
 	// refreshed is what the last ping read from cache. It is the ceiling on what the next
 	// real request may credit to this mechanism — see dash.Event.keepaliveSavedUSD.
 	refreshed int64
+	// refreshedAt is when the provider's entry was last known refreshed: the real request's start,
+	// then each ping that READ the cache. Unlike startedAt, which the sweep advances before a ping
+	// is sent, a refused or failed ping does not move it. Read by KeepAlivePlans.
+	refreshedAt time.Time
 	// stopped means this session will not be pinged again: a ping wrote instead of reading,
 	// or the upstream refused in a way that repeating cannot fix.
 	stopped bool
@@ -820,6 +825,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		pingUSD: k.projectedPingUSD(model, prefix, route),
 		hdr:     hdr, auth: auth, appliedStrategy: applied,
 	}
+	e.refreshedAt = startedAt // the real request refreshed the provider's entry
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	// The turn count outlives the entry, which is dropped on the next request's arrival. It is
@@ -1359,6 +1365,9 @@ func (k *keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
+	if u.CacheRead > 0 {
+		e.refreshedAt = startedAt
+	}
 	k.mu.Unlock()
 	for {
 		old := k.spentUSD.Load()
@@ -1467,6 +1476,9 @@ func (k *keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
+	if u.CacheRead > 0 {
+		e.refreshedAt = startedAt
+	}
 	k.mu.Unlock()
 	for {
 		old := k.spentUSD.Load()
@@ -1764,6 +1776,32 @@ func (k *keeper) Stats() KeepAliveStats {
 		SummarySubstituteRefreshPaid:       k.summarySubstituteRefreshPaid.Load(),
 		SummarySubstituteRefreshNotWorthIt: k.summarySubstituteRefreshNotWorthIt.Load(),
 	}
+}
+
+// KeepAlivePlans is the keeper's ping plan for one session's threads, keyed by thread id, for the
+// status line's "held warm until" (dash.API.SetKeepAlivePlans). Only an entry that will still be
+// pinged has a plan: the same conditions as pendingPings, plus pingable. allTenants matches the
+// session in any tenant, for a single-tenant or service-wide scope.
+func (h *Handler) KeepAlivePlans(tenantID string, allTenants bool, session string) map[string]dash.KeepAlivePlan {
+	if h == nil || h.keeper == nil || session == "" {
+		return nil
+	}
+	k := h.keeper
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	out := map[string]dash.KeepAlivePlan{}
+	for _, e := range k.live {
+		if e.session != session || (!allTenants && e.tenant != tenantID) {
+			continue
+		}
+		if e.stopped || !e.pol.on() || e.pings >= e.pol.MaxPings || !e.pingable() {
+			continue
+		}
+		out[e.thread] = dash.KeepAlivePlan{RefreshedMS: e.refreshedAt.UnixMilli(),
+			NextPingMS: e.startedAt.Add(e.pol.Idle).UnixMilli(), PingsLeft: e.pol.MaxPings - e.pings,
+			IdleMS: e.pol.Idle.Milliseconds()}
+	}
+	return out
 }
 
 // LiveSessionKeys returns the session ids the keeper currently considers live — a copy,

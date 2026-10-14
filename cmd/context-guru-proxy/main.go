@@ -616,6 +616,8 @@ func main() {
 		// through modelinfo.Exact on the dash side, which is what keeps the last-resort
 		// substring table's 200,000-for-every-Opus out of a span measurement.
 		h.API().SetWindows(windows)
+		// The keeper's ping plan, so /api/cachestate can say how long a cache is held warm.
+		h.API().SetKeepAlivePlans(h.KeepAlivePlans)
 	}
 
 	// One identity resolver for both halves of the dashboard: the read routes (dash)
