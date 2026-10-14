@@ -44,8 +44,14 @@ type Filter struct {
 	// Project scopes to one launch directory. Unset means EVERY project, which is the view the
 	// dashboard opens on — not "the unattributed ones", since absence is not a value.
 	Project string
-	Preset  string
-	Mode    string
+	// ProjectNone selects the rows that state NO project. Separate from an empty Project for the
+	// same reason TenantAll is separate from an empty Tenant: "" is a legitimate stored value
+	// here (it is what every pre-migration row and every client that does not state a directory
+	// records), so absence could not also mean "only those" without making one of the two
+	// meanings unreachable.
+	ProjectNone bool
+	Preset      string
+	Mode        string
 	// Component selects requests on which this component RAN.
 	Component string
 	// Reason selects requests by their uncompressed reason bucket; the sentinel
@@ -128,6 +134,12 @@ func (f Filter) where() (string, []any) {
 	}
 	if f.Component != "" {
 		add("EXISTS (SELECT 1 FROM request_components c WHERE c.request_id = r.id AND c.component = ?)", f.Component)
+	}
+	// The rows that state no project. A predicate of its own rather than a value in the map
+	// above, because the value it matches is "" — which in the map would be indistinguishable
+	// from the field being unset, and so would silently mean "every project".
+	if f.ProjectNone {
+		add("r.project = ''")
 	}
 	if f.Q != "" {
 		like := "%" + f.Q + "%"

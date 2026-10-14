@@ -55,6 +55,18 @@ let insUntil = 0;
  * from 6 columns to 2. The axis therefore comes from the UNWINDOWED load and survives every
  * narrowing after it; only the tables follow the selection. */
 let insFullTimeline = null;
+/* insProject is the folder being reported on, or '' for every project pooled.
+ *
+ * A VIEW, NOT A FILTER, and so deliberately outside the shared filter state and outside the URL —
+ * the same call state.dim makes for the Usage breakdown. Registering it as a filter dimension
+ * would also break the nav contract, which asserts the dimension list is exactly fourteen.
+ *
+ * '' is "all projects" and is the resting state, so nothing a reader has today is taken away by
+ * this feature: the view opens on the same pooled numbers it always showed. */
+let insProject = '';
+/* The projects the server has seen, filled from the facets endpoint. Held so a re-render does not
+ * re-fetch a list that changes about as often as the reader starts a new project. */
+let insProjects = null;
 
 const INS_SCOPE_ITEM = 'item';
 const INS_WINDOWS = [0, 1, 3, 5, 10, 25];
@@ -531,12 +543,15 @@ function insRender() {
    * rather than guessed — a brush on a blank frame would make the reader supply the knowledge
    * this view was supposed to give them. */
   const chartPanel = el('div', { class: 'panel' },
-    el('h2', { text: 'How your usage changed' }),
-    el('p', { class: 'hint', text: 'One row per capability you have actually invoked, ordered by '
-      + 'when you first used it — so the diagonal is your own progression. A darker cell means '
-      + 'more invocations in that period; the faintest means you were carrying it and never '
-      + 'reached for it. The bars above are your overall activity, so a flat stretch reads as '
-      + 'time off rather than as a change of habit.' }));
+    el('h2', { text: 'What you carry, and whether you use it' }),
+    /* Rewritten with the colour change: this described a blue magnitude ramp and a volume strip
+     * above the heatmap, and neither exists any more. A hint that explains an older version of
+     * the picture is worse than none, because the reader trusts it. */
+    el('p', { class: 'hint', text: 'One row per capability, worst waste first, with the ones you '
+      + 'actually use below so there is something to read the waste against. Red or amber means '
+      + 'the weight is removable; grey means it is in use or built in, and the faintest cells are '
+      + 'days you carried something and never reached for it. Colours match the tables below.' }));
+  chartPanel.appendChild(insProjectPicker());
   const chart = insChart();
   if (chart) chartPanel.appendChild(chart);
   chartPanel.appendChild(insScopeLine());
@@ -705,10 +720,27 @@ async function loadInsights() {
     const q = { timeline: 1 };
     if (insSince) q.since = Math.round(insSince);
     if (insUntil) q.until = Math.round(insUntil);
+    /* Scoped server-side, not filtered here: the verdicts, the observation floor and the owner
+     * rollups are all computed over the filter's window, so narrowing in JS would leave the
+     * verdicts describing every project while the rows described one. */
+    if (insProject) q.project = insProject;
     insDoc = await api('insights', q);
     insVerdictMap = null;        // the verdicts moved with the document
     /* Captured only when nothing is selected, which is the one response that covers everything. */
     if (!insSince && !insUntil && insDoc.timeline) insFullTimeline = insDoc.timeline;
+    /* The project list, fetched once. Its own request rather than the shared loadFacets, because
+     * this is a VIEW-LOCAL control: adding it to FACET_DIMS would put it in the shared filter bar
+     * and in the nav's dimension contract, which asserts that list is exactly fourteen long. */
+    if (insProjects === null) {
+      insProjects = [];
+      try {
+        const f = await api('facets');
+        if (f && Array.isArray(f.project)) insProjects = f.project.filter(Boolean).sort();
+      } catch (_) {
+        /* A picker that cannot list projects is a missing control, not a broken page: the
+         * pooled view below is still correct, which is what the reader came for. */
+      }
+    }
   } catch (e) {
     if (root) {
       clear(root);
@@ -1334,6 +1366,68 @@ function insSelectedCols(g, since, until) {
 
 /* insColEnd is the timestamp one bucket PAST the last column, which is the final edge: the axis
  * needs n+1 boundaries for n columns, and the last one is where the last column stops. */
+/* ── the project picker ────────────────────────────────────────────────────
+ *
+ * A `claude` agent is started in a folder, and that folder is what the user means by a project.
+ * Several of them route through one proxy, so every figure on this page is a blend across them
+ * until one is chosen.
+ *
+ * ALL PROJECTS IS THE DEFAULT, deliberately: it is what this view showed before the dimension
+ * existed, and it carries the thickest evidence. A single project is the narrower truth, and the
+ * banner and the basis both say so, because per-project evidence is thin — one to five sessions
+ * against a floor of five sessions and seven days — so most verdicts there will honestly read
+ * "not enough evidence yet" rather than "remove".
+ */
+function insProjectPicker() {
+  /* Nothing to choose between: one project, or none recorded. Drawn as a line of prose rather
+   * than a one-entry dropdown, which would be a control whose only outcome is no change. */
+  if (!insProjects || insProjects.length < 2) {
+    if (!insProjects || !insProjects.length) return el('span', {});
+    return el('p', { class: 'hint ins-proj-one', text: 'Every request recorded so far came from ' +
+      insProjects[0] + '.' });
+  }
+
+  const sel = el('select', {
+    'data-testid': 'insights-project',
+    'aria-label': 'Project folder',
+    onchange: (ev) => {
+      insProject = ev.currentTarget.value;
+      /* Re-QUERY rather than re-render: scoping is a server-side decision, and insRender would
+       * also collapse every open fold. loadInsights ends in a render of its own. */
+      loadInsights();
+    },
+  });
+  /* The pooled view first and selected by default. */
+  const opts = [['', 'all projects']];
+  for (const p of insProjects) opts.push([p, insShortProject(p)]);
+  /* `none` is a RESERVED WORD, not a sentinel character. The first version used '\u0000unattributed'
+   * and a browser check caught it still in the served file: a NUL in a query string survives
+   * neither a URL nor a bookmark, and the server would have matched it against nothing while the
+   * page looked scoped. The word is also why filterFrom clears f.Project when it sees it — "none"
+   * must never be taken for a folder of that name. */
+  opts.push(['none', 'unattributed requests']);
+  for (const [v, label] of opts) {
+    const o = el('option', { value: v, title: v || 'every project pooled together' }, label);
+    if (v === insProject) o.setAttribute('selected', 'selected');
+    sel.appendChild(o);
+  }
+  return el('div', { class: 'ins-proj' },
+    el('label', {}, 'Project ', sel),
+    el('span', { class: 'hint', text: insProject
+      ? 'Verdicts below use this project\u2019s sessions only.'
+      : 'Every project pooled, which is the strongest evidence.' }));
+}
+
+/* insShortProject labels an option with the folder's own name, keeping the full path as the
+ * title: `/Users/vitalyz/OpenSource/context-guru` does not fit in a select, and the last segment
+ * is what the reader calls the project. The parent is kept too, because `notes` and
+ * `notes/server` are different projects whose last segments alone would not distinguish them. */
+function insShortProject(path) {
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length <= 2) return path;
+  return parts.slice(-2).join('/');
+}
+
 /* insVerdictOf is the chart's join back to the advice. The timeline names a capability; the
  * document's items[] carries the verdict for it. Built once per render rather than scanned per
  * cell, which would be O(rows x cols x items). */

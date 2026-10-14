@@ -74,6 +74,52 @@ func TestTheInsightsDocumentIsScopedToOneProject(t *testing.T) {
 	}
 }
 
+// `project=none` selects the UNATTRIBUTED rows — every row written before the column existed, and
+// every request from a client that states no directory.
+//
+// It needs its own predicate because the value it matches is "", which as a filter FIELD means
+// "unset" and therefore "every project". That is exactly how this shipped broken: the flag was
+// parsed into the Filter and never read in where(), so `project=none` was a filter that silently
+// did nothing and returned the pooled view under a scoped label. An inert filter is the dangerous
+// kind, because the page still looks narrowed.
+func TestUnattributedRequestsAreSelectableAndActuallyScope(t *testing.T) {
+	db := openTestDB(t)
+	if err := db.insertBatch([]*Event{
+		{TS: 1000, SessionID: "s1", Model: "m", Project: "/Users/v/alpha", TokensBefore: 10},
+		{TS: 2000, SessionID: "s2", Model: "m", Project: "/Users/v/alpha", TokensBefore: 10},
+		{TS: 3000, SessionID: "s3", Model: "m", TokensBefore: 10}, // unattributed
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := db.Requests(Filter{ProjectNone: true}, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Requests) != 1 {
+		t.Fatalf("ProjectNone returned %d requests; want the 1 unattributed row. If this is 3, "+
+			"the flag is parsed but never reaches the WHERE clause and the filter does nothing",
+			len(page.Requests))
+	}
+	if got := page.Requests[0].SessionID; got != "s3" {
+		t.Errorf("ProjectNone returned session %q; want the unattributed s3", got)
+	}
+
+	// And through the handler, which is where the reserved word is translated.
+	mux := projectAPI(t, db)
+	none := insightsFor(t, mux, "?project=none")
+	all := insightsFor(t, mux, "")
+	if none.Basis == all.Basis {
+		t.Errorf("the unattributed view reports the pooled basis (%q); a reader cannot tell it "+
+			"is scoped", none.Basis)
+	}
+	// `none` is a reserved word, not a folder, so it must not be echoed as one.
+	if none.Project == "none" {
+		t.Error(`the document reports project="none"; that is the reserved word for "no project", ` +
+			"not a directory anybody works in")
+	}
+}
+
 // An unknown project is an empty view, not an error and not a silent widening to everything. A
 // widening is the dangerous one: it would report every project's spend under one project's name.
 func TestAnUnknownProjectIsEmptyRatherThanEverything(t *testing.T) {

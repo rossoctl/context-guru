@@ -202,6 +202,31 @@
    by insChartTheme(), which is why they stay in the stylesheet — declared once for both themes so
    dark mode re-steps against its own surface instead of being inverted at paint time. */
 
+/* ── the project picker ───────────────────────────────────────────────────
+ * A claude agent starts in a folder, and that folder is the project. Several route through one
+ * proxy, so every figure on this page is a blend across them until one is chosen.
+ *
+ * Above the chart, because it scopes the chart as well as the tables: a control sitting below
+ * what it governs reads as belonging to the next section down.
+ */
+.ins-proj {
+  display: flex; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap;
+  margin: 0 0 var(--sp-3);
+}
+.ins-proj label {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  font-family: var(--mono); font-size: var(--t-small); color: var(--fg-muted);
+}
+.ins-proj select {
+  font-family: var(--mono); font-size: var(--t-small);
+  padding: 3px 6px; border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--bg-raised); color: var(--fg); max-width: 34ch;
+}
+.ins-proj .hint { margin: 0; }
+/* One project recorded: stated as prose. A one-entry dropdown is a control whose only possible
+   outcome is no change. */
+.ins-proj-one { margin: 0 0 var(--sp-3); }
+
 /* ── the chart host and the range banner ──────────────────────────────────
  * ECharts draws into .ins-echart and owns everything inside it, including the dataZoom slider
  * and its handles — the affordance two hand-built versions got wrong. Nothing here styles the

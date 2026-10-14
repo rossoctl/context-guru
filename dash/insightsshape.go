@@ -184,6 +184,11 @@ type InsightsOptions struct {
 	// BASIS rather than any arithmetic — the rows are already scoped by the caller's filter — so
 	// that a narrowed document says so instead of looking like an all-projects one.
 	Project string
+	// ProjectNone says the rows are the UNATTRIBUTED ones — requests that stated no directory,
+	// plus every row written before the column existed. A separate flag for the same reason the
+	// Filter needs one: the project being reported on is "", which as a value is indistinguishable
+	// from "every project pooled", and the two need different wording.
+	ProjectNone bool
 }
 
 // ShapeInsights turns an inventory into the document a page renders.
@@ -191,11 +196,14 @@ func ShapeInsights(rep *ToolReport, opt InsightsOptions) *InsightsDoc {
 	now := time.Now().UnixMilli()
 	doc := &InsightsDoc{Items: []InsightsItem{}, Owners: []InsightsOwner{},
 		Basis: "measured over the window", Project: opt.Project}
-	if opt.Project != "" {
-		// SAID OUT LOUD, because per-project evidence is thinner than pooled evidence and the
-		// reader has to know which they are reading. A verdict here rests on this folder's
-		// sessions alone, so an item used daily in another project can legitimately appear
-		// unused in this one — true, and dangerously misleading if the scope is not stated.
+	// SAID OUT LOUD, because per-project evidence is thinner than pooled evidence and the reader
+	// has to know which they are reading. A verdict in one project rests on that folder's sessions
+	// alone, so an item used daily elsewhere can legitimately appear unused here — true, and
+	// dangerously misleading if the scope is not stated.
+	switch {
+	case opt.ProjectNone:
+		doc.Basis = "measured over the window, across requests that named no project"
+	case opt.Project != "":
 		doc.Basis = "measured over the window, in this project only"
 	}
 	if rep == nil {

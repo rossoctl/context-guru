@@ -1069,7 +1069,14 @@ func filterFrom(r *http.Request) Filter {
 		Thinking:   q.Get("thinking"),
 		StopReason: q.Get("stop_reason"),
 		Project:    q.Get("project"),
-		Q:          q.Get("q"),
+		// `project=none` selects the UNATTRIBUTED rows, which cannot be expressed as a value
+		// because "" is what they actually store. A reserved word rather than a sentinel
+		// character: it survives a URL, a bookmark and a copy-paste.
+		ProjectNone: q.Get("project") == "none",
+		Q:           q.Get("q"),
+	}
+	if f.ProjectNone {
+		f.Project = "" // the reserved word is not a folder name
 	}
 	f.Since = atoi64(q.Get("since"))
 	f.Until = atoi64(q.Get("until"))

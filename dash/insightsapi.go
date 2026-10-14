@@ -80,10 +80,11 @@ func (a *API) insights(w http.ResponseWriter, r *http.Request) {
 		doc := ShapeInsights(rep, InsightsOptions{
 			Qualified:    qualified,
 			Descriptions: skillDescriptions(""),
-			// The scope, echoed into the document. f.Project came from ?project= through
-			// filterFrom, so the ROWS are already narrowed by SQL; this is what makes the
+			// The scope, echoed into the document. These came from ?project= through filterFrom,
+			// so the ROWS are already narrowed by SQL; passing them here is what makes the
 			// document state which narrowing produced them.
-			Project: f.Project,
+			Project:     f.Project,
+			ProjectNone: f.ProjectNone,
 		})
 
 		// The per-item timeline, when asked for. Opt-in because it is two int arrays per item over
