@@ -293,6 +293,7 @@ func TestSignalNeedsTheTenantsTokenAndCannotReachAnotherTenant(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/signal",
 		strings.NewReader(`{"session_id":"s1","transcript_path":"/h/t.jsonl","cwd":"/h","hook_event_name":"SessionEnd","reason":"other"}`))
 	req.Header.Set(TokenHeader, tok)
+	req.Header.Set("Content-Type", "application/json")
 	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != http.StatusNoContent {
 		t.Errorf("hosted snippet: %v %v, want 204", err, resp)
 	} else {
@@ -355,5 +356,46 @@ func TestSignalTakesJSONOnly(t *testing.T) {
 		if w.Code != want {
 			t.Errorf("Content-Type %q: %d, want %d", ct, w.Code, want)
 		}
+	}
+}
+
+// The raw hook payload and the Codex session-id alias reach the same retire as the plugin shape: a
+// compact retires the main thread only (an idle subagent keeps its keep-alive), a SessionEnd every
+// thread.
+func TestRawPayloadAndCodexAliasKeepSubagentsOnCompact(t *testing.T) {
+	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "")
+	k, _, clock := testKeeper(t, Limits{})
+	h := &Handler{keeper: k, limiter: NewLimiter(Limits{}), static: &Tenancy{ID: "t1"}}
+	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
+	up := upstream{base: "http://up", path: "/v1/messages"}
+	r := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(""))
+	r.Header.Set("Authorization", "Bearer sk-caller-secret")
+	r.Header.Set("session-id", "codex-thread-9")
+	hold := func(threadID string) {
+		for i := 0; i < 2; i++ {
+			k.record(&Tenancy{ID: "t1", Cache: pol}, "t1:sha-of-content", threadID, clock.now().Add(time.Duration(i-1)*time.Second), []byte(kaBody),
+				up, r, bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+		}
+	}
+	held := func(threadID string) bool {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		_, ok := k.live[kaThreadKey("t1", "t1:sha-of-content", threadID)]
+		return ok
+	}
+	hold("")
+	hold("a:sub1")
+	clock.advance(30 * time.Second)
+	if c := sigPost(h, `{"session_id":"codex-thread-9","hook_event_name":"SessionStart","source":"compact","cwd":"/x"}`); c != http.StatusNoContent {
+		t.Fatalf("raw compact: %d", c)
+	}
+	if held("") || !held("a:sub1") {
+		t.Errorf("raw compact via the alias: main held %v (want false), subagent held %v (want true)", held(""), held("a:sub1"))
+	}
+	if c := sigPost(h, `{"session_id":"codex-thread-9","hook_event_name":"SessionEnd","reason":"other"}`); c != http.StatusNoContent {
+		t.Fatalf("raw end: %d", c)
+	}
+	if held("a:sub1") {
+		t.Errorf("raw SessionEnd via the alias left the subagent held")
 	}
 }
