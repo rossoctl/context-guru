@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 )
@@ -39,6 +41,16 @@ func (h *Handler) DashAdaptConfig() dash.AdaptCompactionConfigFunc {
 // adaptCompactionApply serves POST /api/adapt/compaction/apply {"option", "basis"}. "revert"
 // (no basis) undoes the last change.
 func (h *Handler) adaptCompactionApply(w http.ResponseWriter, r *http.Request) {
+	h.adaptConfigApply(w, r, "compaction")
+}
+
+// saveMoreConfigApply serves POST /api/save-more/config/apply: the same, for /context-guru:save-more
+// config's options, which include switching to a shipped preset.
+func (h *Handler) saveMoreConfigApply(w http.ResponseWriter, r *http.Request) {
+	h.adaptConfigApply(w, r, "compaction") // one report, one set of offers, under either name
+}
+
+func (h *Handler) adaptConfigApply(w http.ResponseWriter, r *http.Request, kind string) {
 	who, err := h.adaptPrincipal(r)
 	if err != nil {
 		code, msg := statusOf(err)
@@ -54,13 +66,13 @@ func (h *Handler) adaptCompactionApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Option == "revert" {
-		if _, err := h.adaptRevert(who, "compaction"); err != nil {
+		if _, err := h.adaptRevert(who, kind); err != nil {
 			code, msg := statusOf(err)
 			ctlErr(w, code, msg)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": "revert", "previous": "current",
-			"kind": "compaction", "effective": "now",
+			"kind": kind, "effective": "now",
 			"note": "restored the configuration from before the last change to it, whichever setting that change was"})
 		return
 	}
@@ -68,16 +80,21 @@ func (h *Handler) adaptCompactionApply(w http.ResponseWriter, r *http.Request) {
 		ctlErr(w, http.StatusBadRequest, "basis is required: the basis_id of the report the option is from")
 		return
 	}
-	v, ok := h.API().AdaptOffer("compaction", who.TenantID, in.Basis, in.Option)
+	v, ok := h.API().AdaptOffer(kind, who.TenantID, in.Basis, in.Option)
 	choice, _ := v.(dash.AdaptCompactionChoice)
 	if !ok {
 		ctlErr(w, http.StatusConflict, "that option is not in a current report; run the report again")
 		return
 	}
 	var pipeline []string
-	_, _, err = h.adaptWrite(who, "compaction", in.Option, func(doc string) (string, error) {
+	_, _, err = h.adaptWrite(who, kind, in.Option, func(doc string) (string, error) {
 		if dash.AdaptConfigHash(doc) != choice.ConfigHash {
 			return "", statusError{http.StatusConflict, "your configuration changed since the report was made; run it again"}
+		}
+		if choice.Preset != "" {
+			next, pipe, err := adaptPresetDoc(doc, choice.Preset)
+			pipeline = pipe
+			return next, err
 		}
 		next, pipe, err := adaptCompactionDoc(doc, choice)
 		pipeline = pipe
@@ -133,4 +150,28 @@ func adaptCompactionDoc(doc string, choice dash.AdaptCompactionChoice) (string, 
 		return "", nil, statusError{http.StatusBadRequest, err.Error()}
 	}
 	return next, f.Pipeline, nil
+}
+
+// adaptPresetDoc is doc switched to a shipped preset: `preset: name` with no explicit pipeline,
+// so the preset decides what runs; every other key of the document is kept. Component blocks
+// the account had stay too, and win over the preset's own, which is what a stated block means.
+func adaptPresetDoc(doc, name string) (string, []string, error) {
+	m := map[string]any{}
+	if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
+		return "", nil, statusError{http.StatusConflict, "your stored configuration does not parse"}
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	m["preset"] = name
+	delete(m, "pipeline")
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		return "", nil, err
+	}
+	cfg, err := config.LoadBytes(out)
+	if err != nil {
+		return "", nil, statusError{http.StatusBadRequest, err.Error()}
+	}
+	return string(out), cfg.Pipeline, nil
 }

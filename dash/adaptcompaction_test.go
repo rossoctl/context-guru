@@ -2,8 +2,13 @@ package dash
 
 import (
 	"context"
+
 	"encoding/json"
 	"fmt"
+	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/store"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +38,7 @@ type adaptFixtureReq struct {
 	ts                         int64
 	fresh, read, write, write1 int64
 	blocks                     map[string]string // path -> before text
+	sent                       int               // after_tokens for every block; 0 = as before
 }
 
 func adaptFixtureDB(t *testing.T, tenant string, sessions map[string][]adaptFixtureReq) *DB {
@@ -58,9 +64,13 @@ func adaptFixtureDB(t *testing.T, tenant string, sessions map[string][]adaptFixt
 				if strings.Contains(text, "…[+") {
 					tok += 500 // a clipped capture: the stored count is the full string's
 				}
+				after := tok
+				if r.sent > 0 {
+					after = r.sent
+				}
 				if _, err := db.sql.Exec(`INSERT INTO request_content(request_id, seq, path,
 					before_tokens, after_tokens, before_gz, components) VALUES (?,?,?,?,?,?,?)`,
-					id, seq, path, tok, tok, gzipText(text), "dedup"); err != nil {
+					id, seq, path, tok, after, gzipText(text), "dedup"); err != nil {
 					t.Fatal(err)
 				}
 				seq++
@@ -241,7 +251,7 @@ func TestAdaptCompactionRecommendsWhatSaves(t *testing.T) {
 	// Rates x1000 so the saving clears the recommendation floor on a two-request fixture.
 	p := modelinfo.Price{Input: 1e-3, CacheRead: 0.1e-3, CacheWrite: 1.25e-3, Output: 5e-3}
 	rep, err := db.AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
-		staticTable{"m": p}, "pipeline: [cachesplit]\n", defaultAdaptDocForTest)
+		staticTable{"m": p}, "pipeline: [cachesplit]\n", defaultAdaptDocForTest, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,8 +272,8 @@ func TestAdaptCompactionRecommendsWhatSaves(t *testing.T) {
 		t.Fatalf("net %g saved %g spend %g", *best.NetUSD, best.SavedUSD, best.SpendUSD)
 	}
 	ch := rep.choices[best.ID]
-	if !strings.HasPrefix(best.ID, "c") || !reflect.DeepEqual(ch.Candidates, best.spec.comps) ||
-		ch.ConfigHash != AdaptConfigHash("pipeline: [cachesplit]\n") {
+	maps := ch.Preset == best.Preset && (ch.Preset != "" || reflect.DeepEqual(ch.Candidates, best.spec.comps))
+	if !maps || ch.ConfigHash != AdaptConfigHash("pipeline: [cachesplit]\n") {
 		t.Fatalf("option %q maps to %+v", best.ID, ch)
 	}
 }
@@ -336,7 +346,7 @@ func TestAdaptChargesDroppingAComponentForTheSavingTheReplayCannotSee(t *testing
 		t.Fatal(err)
 	}
 	rep, err := db.AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
-		staticTable{"m": adaptTestPrice}, "pipeline: [format, dedup, cachesplit]\n", defaultAdaptDocForTest)
+		staticTable{"m": adaptTestPrice}, "pipeline: [format, dedup, cachesplit]\n", defaultAdaptDocForTest, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,28 +394,48 @@ func TestAdaptRouteIsOneAccountAgainstItsOwnConfig(t *testing.T) {
 		asked = append(asked, id)
 		return "pipeline: [cachesplit]\n", defaultAdaptDocForTest, true, ""
 	})
-	for _, tc := range []struct {
-		who, query, wantID string
-		covered            int
-	}{{"t1", "", "t1", 1}, {"boss", "", "boss", 0}, {"boss", "&tenant=t1", "t1", 1}} {
-		asked = nil
+	// Both report routes: the adapt command's and save-more config's (presets and custom).
+	for _, route := range []struct {
+		path, kind string
+		h          http.HandlerFunc
+	}{{"/api/adapt/compaction", "compaction", api.adaptCompaction},
+		{"/api/save-more/config", "compaction", api.saveMoreConfig},
+		{"/api/adapt/compaction?custom=1", "compaction", api.adaptCompaction}} {
+		sep := "?"
+		if strings.Contains(route.path, "?") {
+			sep = "&"
+		}
+		for _, tc := range []struct {
+			who, query, wantID string
+			covered            int
+		}{{"t1", "", "t1", 1}, {"boss", "", "boss", 0}, {"boss", "&tenant=t1", "t1", 1}} {
+			asked = nil
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", route.path+sep+"since=1"+tc.query, nil)
+			req.Header.Set("X-Who", tc.who)
+			route.h(rr, req)
+			var rep AdaptCompactionReport
+			if rr.Code != 200 || json.Unmarshal(rr.Body.Bytes(), &rep) != nil {
+				t.Fatalf("%s %s%s: %d %s", route.path, tc.who, tc.query, rr.Code, rr.Body)
+			}
+			if len(asked) != 1 || asked[0] != tc.wantID || rep.Coverage.CoveredRequests != tc.covered || rep.Kind != route.kind {
+				t.Errorf("%s %s%s: config of %v, %d covered, kind %q; want %q, %d", route.path, tc.who, tc.query,
+					asked, rep.Coverage.CoveredRequests, rep.Kind, tc.wantID, tc.covered)
+			}
+			// The offers are the account's and the kind's: another account, or the other kind,
+			// cannot apply them.
+			if _, ok := api.AdaptOffer(route.kind, tc.wantID, rep.BasisID, "current"); !ok {
+				t.Errorf("%s: the report's own offer is missing", route.path)
+			}
+			if _, ok := api.AdaptOffer(route.kind, "someone-else", rep.BasisID, "current"); ok {
+				t.Errorf("%s: another account can apply this report", route.path)
+			}
+		}
 		rr := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "/api/adapt/compaction?since=1"+tc.query, nil)
-		req.Header.Set("X-Who", tc.who)
-		api.adaptCompaction(rr, req)
-		var rep AdaptCompactionReport
-		if rr.Code != 200 || json.Unmarshal(rr.Body.Bytes(), &rep) != nil {
-			t.Fatalf("%s%s: %d %s", tc.who, tc.query, rr.Code, rr.Body)
+		route.h(rr, httptest.NewRequest("GET", route.path, nil))
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("%s no principal: %d", route.path, rr.Code)
 		}
-		if len(asked) != 1 || asked[0] != tc.wantID || rep.Coverage.CoveredRequests != tc.covered {
-			t.Errorf("%s%s: config of %v, %d covered; want %q, %d", tc.who, tc.query, asked,
-				rep.Coverage.CoveredRequests, tc.wantID, tc.covered)
-		}
-	}
-	rr := httptest.NewRecorder()
-	api.adaptCompaction(rr, httptest.NewRequest("GET", "/api/adapt/compaction", nil))
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("no principal: %d", rr.Code)
 	}
 	for _, rt := range api.adaptRoutes() {
 		if rt.class != scopeTenant {
@@ -477,7 +507,7 @@ func TestAdaptReplayStopsWhenTheClientGoesAway(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := db.AdaptCompaction(ctx, Filter{Tenant: "acct"}, staticTable{"m": adaptTestPrice},
-		"pipeline: [format]\n", defaultAdaptDocForTest); err == nil {
+		"pipeline: [format]\n", defaultAdaptDocForTest, true); err == nil {
 		t.Fatal("a cancelled report returned numbers")
 	}
 }
@@ -524,7 +554,7 @@ func TestAdaptReportIsDeterministicOnTies(t *testing.T) {
 	var first string
 	for i := 0; i < 4; i++ {
 		rep, err := db.AdaptCompaction(context.Background(), Filter{Tenant: "acct"}, staticTable{"m": p},
-			"pipeline: [dedup, cachesplit]\n", defaultAdaptDocForTest)
+			"pipeline: [dedup, cachesplit]\n", defaultAdaptDocForTest, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -539,8 +569,8 @@ func TestAdaptReportIsDeterministicOnTies(t *testing.T) {
 			t.Fatalf("run %d differs:\n%s\n%s", i, first, b.String())
 		}
 	}
-	if !strings.HasPrefix(first, "c") {
-		t.Fatalf("expected a searched option to win on this history: %s", first)
+	if strings.HasPrefix(first, "current|") {
+		t.Fatalf("expected another option to win on this history: %s", first)
 	}
 }
 
@@ -582,5 +612,146 @@ func TestAdaptReplayCancelledMidwayIsAnError(t *testing.T) {
 	}
 	if _, err := replayAdapt(&flipCtx{Context: context.Background()}, adaptSpec{comps: []string{"format"}}, sessions, 0); err == nil {
 		t.Fatal("a replay cut short after dispatch returned numbers")
+	}
+}
+
+// formatTokens is what the shipped `format` makes of text, so a fixture's history can say it
+// ran format.
+func formatTokens(t *testing.T, text string) int {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte("pipeline: [format]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := cfg.Build(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, name, args := "t1", "Bash", `{"command":"cat x.json"}`
+	tx := text
+	req := &schemas.BifrostChatRequest{Provider: schemas.Anthropic, Input: []schemas.ChatMessage{
+		{Role: schemas.ChatMessageRoleAssistant, ChatAssistantMessage: &schemas.ChatAssistantMessage{
+			ToolCalls: []schemas.ChatAssistantMessageToolCall{{ID: &id,
+				Function: schemas.ChatAssistantMessageToolCallFunction{Name: &name, Arguments: args}}}}},
+		{Role: schemas.ChatMessageRoleTool, Content: &schemas.ChatMessageContent{ContentStr: &tx},
+			ChatToolMessage: &schemas.ChatToolMessage{ToolCallID: &id}}}}
+	p.Run(req, &components.Ctx{Ctx: context.Background(), Session: "s", Store: store.NewMemory(store.Options{}), MaxCachedIdx: -1})
+	return schema.TextTokens(schema.MessageText(req.Input[1]))
+}
+
+// A history that ran `format`: blocks sent formatted, and format's booked saving on each turn.
+func formattedHistory(t *testing.T, bookScale int64) *DB {
+	t.Helper()
+	text := prettyJSON()
+	before, after := schema.TextTokens(text), formatTokens(t, text)
+	if after >= before {
+		t.Fatalf("format did not shrink the fixture: %d -> %d", before, after)
+	}
+	blocks := map[string]string{"messages.1.content.0.content": text}
+	db := adaptFixtureDB(t, "acct", map[string][]adaptFixtureReq{"s1": {
+		{ts: 1_000_000, fresh: 10, write: 5000, blocks: blocks, sent: after},
+		{ts: 1_060_000, fresh: 10, read: 5000, write: 50, blocks: blocks, sent: after},
+	}})
+	d := int64(before-after) * bookScale
+	if _, err := db.sql.Exec(`INSERT INTO request_components(request_id, component, saved_gross, saved_unique)
+		SELECT id, 'format', ?, CASE WHEN ts = 1000000 THEN ? ELSE 0 END FROM requests`, d, d); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+var bigPrice = modelinfo.Price{Input: 1e-3, CacheRead: 0.1e-3, CacheWrite: 1.25e-3, Output: 5e-3}
+
+// The accuracy check: the replay of the current configuration reproduces what the rows booked
+// for it, and a recommendation is only made when it does.
+func TestSaveMoreReproductionGatesTheRecommendation(t *testing.T) {
+	ok, err := formattedHistory(t, 1).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
+		staticTable{"m": bigPrice}, "pipeline: [format, cachesplit]\n", defaultAdaptDocForTest, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok.Reproduction.OK || ok.Reproduction.ErrorPct > 1 || ok.Reproduction.ObservedUSD <= 0 {
+		t.Fatalf("a faithful history did not reproduce: %+v", ok.Reproduction)
+	}
+	if ok.Observed.USD <= 0 || ok.Observed.Requests != 2 {
+		t.Fatalf("savings to date: %+v", ok.Observed)
+	}
+	// The same history, booked at ten times what format did: the replay cannot match it.
+	bad, err := formattedHistory(t, 10).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
+		staticTable{"m": bigPrice}, "pipeline: [format, cachesplit]\n", defaultAdaptDocForTest, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bad.Reproduction.OK || bad.Recommendation != nil || !strings.HasPrefix(bad.Summary, "No recommendation") {
+		t.Fatalf("an unreproduced history was trusted: %+v %+v %q", bad.Reproduction, bad.Recommendation, bad.Summary)
+	}
+}
+
+// One row per shipped preset, each priced on the same history, its model components named and
+// excluded, and its range bracketing its figure.
+func TestSaveMorePricesEveryShippedPreset(t *testing.T) {
+	rep, err := formattedHistory(t, 1).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
+		staticTable{"m": bigPrice}, "pipeline: [cachesplit]\n", defaultAdaptDocForTest, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range config.PresetNames() {
+		t.Run(name, func(t *testing.T) {
+			o := adaptOpt(t, rep, name)
+			pipe, _ := config.PresetPipeline(name)
+			if o.NetUSD == nil || o.RangeUSD[0] != *o.NetUSD || o.RangeUSD[1] < o.RangeUSD[0] || o.Preset != name ||
+				(o.Class == "estimate") != (len(o.NotReplayed) > 0) {
+				t.Fatalf("%+v", o)
+			}
+			if c := rep.choices[o.ID]; c.Preset != name {
+				t.Fatalf("applying it would not switch to the preset: %+v", c)
+			}
+			for _, c := range pipe {
+				llm := strings.Contains(c, "llm") || strings.Contains(c, "summar")
+				if llm != slices.Contains(o.NotReplayed, c) {
+					t.Errorf("%s: not_replayed %v", c, o.NotReplayed)
+				}
+			}
+			// The fixture's content is pretty JSON: any preset that runs format saves on it, any
+			// preset with nothing replayable saves exactly nothing.
+			replayable := slices.ContainsFunc(pipe, isAdaptReplayable)
+			switch {
+			case slices.Contains(pipe, "format") && o.SavedUSD <= 0:
+				t.Errorf("runs format but saved %g", o.SavedUSD)
+			case !replayable && o.SavedUSD != 0:
+				t.Errorf("replays nothing but saved %g", o.SavedUSD)
+			}
+		})
+	}
+}
+
+// Custom mode moves only the deterministic candidates, and tries their ORDER as well as their
+// set: a swap of two neighbouring candidates is a move, a swap across a component the account
+// runs that is not a candidate is not.
+func TestSaveMoreCustomSearchOrder(t *testing.T) {
+	s := adaptSpec{comps: []string{"format", "dedup", "mask", "extract"}, settings: map[string]map[string]int{}}
+	var swaps []string
+	for _, n := range s.neighbours() {
+		if len(n.comps) == len(s.comps) && !slices.Equal(n.comps, s.comps) && slices.Equal(slices.Sorted(slices.Values(n.comps)), slices.Sorted(slices.Values(s.comps))) {
+			swaps = append(swaps, strings.Join(n.comps, ","))
+		}
+	}
+	if !slices.Equal(swaps, []string{"dedup,format,mask,extract"}) {
+		t.Fatalf("order moves %v", swaps)
+	}
+	rep, err := formattedHistory(t, 1).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
+		staticTable{"m": bigPrice}, "pipeline: [dedup, format, cachesplit]\n", defaultAdaptDocForTest, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Current != "current" || rep.Coverage.ArmsEvaluated < 2 {
+		t.Fatalf("custom search: %+v", rep.Coverage)
+	}
+	// custom adds the search to the presets; it does not replace them.
+	adaptOpt(t, rep, "house")
+	for _, o := range rep.Options {
+		if o.Preset == "" && o.ID != "current" && slices.Contains(o.Pipeline, "mask") {
+			t.Errorf("custom search added a non-candidate: %v", o.Pipeline)
+		}
 	}
 }

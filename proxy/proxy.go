@@ -443,6 +443,7 @@ func (h *Handler) Mux() *http.ServeMux {
 	// Both deployments: adaptPrincipal decides who may (adaptapply.go).
 	if h.api != nil {
 		m.HandleFunc("POST /api/adapt/compaction/apply", h.adaptCompactionApply)
+		m.HandleFunc("POST /api/save-more/config/apply", h.saveMoreConfigApply)
 	}
 	// Bob (BobShell) gateway. Bob is OpenAI-compatible but calls Bob-specific
 	// paths: its model call is POST /inference/v1/chat/completions (reduced like

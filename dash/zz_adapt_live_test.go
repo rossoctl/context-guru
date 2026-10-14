@@ -40,7 +40,7 @@ func TestAdaptLive(t *testing.T) {
 	since, _ := strconv.ParseInt(os.Getenv("CG_ADAPT_SINCE"), 10, 64)
 	until, _ := strconv.ParseInt(os.Getenv("CG_ADAPT_UNTIL"), 10, 64)
 	rep, err := db.AdaptCompaction(context.Background(), Filter{Tenant: tenant, Since: since, Until: until},
-		p, string(doc), defaultAdaptDocForTest)
+		p, string(doc), defaultAdaptDocForTest, os.Getenv("CG_ADAPT_CUSTOM") == "1")
 	if err != nil {
 		t.Fatal(err)
 	}

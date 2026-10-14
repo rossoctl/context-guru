@@ -356,3 +356,45 @@ func withCookies(r *http.Request, cs []*http.Cookie) *http.Request {
 	}
 	return r
 }
+
+// save-more config: switching to a shipped preset stores `preset: <name>` with no explicit
+// pipeline, keeps the rest of the document, and is undone by its own kind's revert only.
+func TestSaveMoreAppliesAPresetAndRevertsIt(t *testing.T) {
+	f := adaptHostedFixture(t)
+	bw, _ := f.signUp(t, "boss@ibm.com", "l")
+	w, verify := f.signUp(t, "user@ibm.com", "u")
+	jar := w.Result().Cookies()
+	id := verify["tenant"].(map[string]any)["id"].(string)
+	start := "pipeline: [format, dedup, cachesplit]\nmode: sync\n"
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, `{"config_yaml":"pipeline: [format, dedup, cachesplit]\nmode: sync\n"}`, bw.Result().Cookies()); w.Code != http.StatusOK {
+		t.Fatalf("manager edit = %d %s", w.Code, w.Body)
+	}
+	basis := f.h.API().OfferAdapt("compaction", id, map[string]any{"safe": dash.AdaptCompactionChoice{
+		Preset: "safe", ConfigHash: dash.AdaptConfigHash(start)}})
+	w, out := f.do(t, "POST", "/api/save-more/config/apply", `{"option":"safe","basis":"`+basis+`"}`, jar)
+	if w.Code != http.StatusOK || out["ok"] != true {
+		t.Fatalf("apply = %d %s", w.Code, w.Body)
+	}
+	form, doc := storedForm(t, f, jar)
+	if !strings.Contains(doc, "preset: safe") || strings.Contains(doc, "pipeline:") || !strings.Contains(doc, "mode: sync") {
+		t.Fatalf("stored document:\n%s", doc)
+	}
+	want, _ := config.PresetPipeline("safe")
+	if strings.Join(form.Pipeline, ",") != strings.Join(want, ",") {
+		t.Fatalf("pipeline %v, want the preset's %v", form.Pipeline, want)
+	}
+	who, err := f.h.adaptPrincipal(withCookies(httptest.NewRequest("GET", "/", nil), jar))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.adaptRevert(who, "tools"); err == nil {
+		t.Error("a tools revert undid a config apply")
+	}
+	// Either route's revert: one report, one kind.
+	if w, _ := f.do(t, "POST", "/api/adapt/compaction/apply", `{"option":"revert"}`, jar); w.Code != http.StatusOK {
+		t.Fatalf("revert = %d %s", w.Code, w.Body)
+	}
+	if form, _ = storedForm(t, f, jar); strings.Join(form.Pipeline, ",") != "format,dedup,cachesplit" {
+		t.Fatalf("revert left %v", form.Pipeline)
+	}
+}
