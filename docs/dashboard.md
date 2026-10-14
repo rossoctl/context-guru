@@ -104,7 +104,12 @@ returns when each tool or skill was last called (names and times only).
 Two more serve the status line. `GET /api/stats?lean=1&session=<id>` is one session's totals from a
 single indexed read, including `keepalive_pings` and `keepalive_ping_usd`; `lean=1` with no session
 and no `since`/`until` is answered by the full handler. `GET /api/cachestate?session=<id>` is the
-session's live cache state per thread (`threads[]`, `a:<agent id>` for a sub-agent). A thread the
+session's live cache state per thread (`threads[]`, `a:<agent id>` for a sub-agent), and its money
+in one read: `money.main` for the main thread and `money.others` summed over every other thread,
+each `saved_usd` of `baseline_usd`. `baseline_usd` is what those requests would have cost without
+context-guru (the uncompacted baseline plus the cache-split and keep-alive savings); `saved_usd` is
+that minus what was paid, context-guru's own model calls and pings included, so it never exceeds
+`baseline_usd`. Each listed thread carries its own pair. A thread the
 keep-alive still plans to ping also carries `pings_left` and `held_until_ms`: when its cache goes
 cold if nothing else is sent (the last planned ping's start plus the cache lifetime).
 

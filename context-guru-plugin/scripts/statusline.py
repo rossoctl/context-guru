@@ -453,6 +453,19 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     visibility into or control over. `lean=1` is therefore a reduction in how much work piles up
     behind that fix, not a workaround for it; it is not a substitute for the proxy-side fix.
     """
+    if not session_id:
+        # No session to scope to: the only unscoped read is the whole proxy's total (the full
+        # handler since #510), which is no session's number and the dearest read there is. Ask
+        # only whether the proxy is there, so the offline notices still work.
+        try:
+            _http_get(port, "/healthz")
+        except (socket.timeout, TimeoutError):
+            return None, STATS_TIMEOUT
+        except _HTTPError:
+            return None, STATS_EMPTY
+        except OSError:
+            return None, STATS_DOWN
+        return {}, STATS_OK
     cache_path = _stats_cache_path(port, session_id)
     cached, cached_age = None, None
     try:
@@ -465,9 +478,7 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     except (OSError, ValueError):
         cached, cached_age = None, None  # no usable cache; fetch for real
 
-    url = "/api/stats?lean=1"
-    if session_id:
-        url += "&session=" + _quote(session_id)
+    url = "/api/stats?lean=1&session=" + _quote(session_id)
     try:
         body = _http_get(port, url)
     except (socket.timeout, TimeoutError):
@@ -879,36 +890,73 @@ def held_seconds(entry: dict | None, now_ms: object, age: float) -> float | None
     return None if held is None or now is None else (held - now) / 1000 - age
 
 
-def _agent_names(payload: dict) -> dict[str, str]:
-    """Thread id -> the name Claude Code's agents list shows, from this session's own sub-agent
-    files (`<transcript minus .jsonl>/subagents/agent-<id>.jsonl` and its `.meta.json`). An agent
-    answers to two ids, because Claude Code names it two ways on the wire: the file id (a plain
-    sub-agent's x-claude-code-agent-id) and `<name>@<team>` (an agent-team teammate's)."""
-    tp = payload.get("transcript_path")
-    if not isinstance(tp, str) or not tp.endswith(".jsonl"):
-        return {}
-    names: dict[str, str] = {}
+AGENT_META_BYTES = 4096  # a .meta.json is ~350 bytes; a longer one is not ours to parse
+AGENT_META_SCAN = 20000  # directory entries looked at, at most, for teammate files (names only: ~7 ms)
+AGENT_META_OPENS = 24  # meta files opened per render, at most (the proxy lists at most 16 threads)
+
+
+def _read_meta(path: str) -> dict | None:
     try:
-        files = os.scandir(os.path.join(tp[:-6], "subagents"))
-    except OSError:
+        with open(path, encoding="utf-8") as fh:
+            meta = json.loads(fh.read(AGENT_META_BYTES))
+    except (OSError, ValueError):
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def _meta_label(meta: dict | None) -> str:
+    return next((v for v in (meta.get("name"), meta.get("agentType")) if isinstance(v, str) and v), "") \
+        if meta else ""
+
+
+def _agent_names(payload: dict, ids: list[str]) -> dict[str, str]:
+    """Thread id -> the name Claude Code's agents list shows, for the `a:` ids the proxy listed,
+    from this session's own sub-agent files (`<transcript minus .jsonl>/subagents/`). Claude Code
+    names an agent two ways on the wire. A plain sub-agent's header is its file id, so its
+    `agent-<id>.meta.json` is opened directly. A teammate's is `<name>@<team>`, and its file is
+    `agent-a<name>-<hex>.meta.json`, so the directory is listed (names only, at most
+    AGENT_META_SCAN entries) and only files with that prefix are opened, then checked against the
+    team. At most AGENT_META_OPENS files are opened and AGENT_META_BYTES read from each, so a
+    session with thousands of agents costs a render no more than one with a few."""
+    tp = payload.get("transcript_path")
+    if not isinstance(tp, str) or not tp.endswith(".jsonl") or not ids:
+        return {}
+    sub = os.path.join(tp[:-6], "subagents")
+    names: dict[str, str] = {}
+    opens = 0
+    teammates: dict[str, list[str]] = {}  # file prefix -> the ids (name@team) it may be
+    for tid in ids:
+        aid = tid[2:]
+        if not aid or "/" in aid or aid.startswith("."):
+            continue
+        if "@" in aid:
+            name = aid.split("@", 1)[0]
+            teammates.setdefault(f"agent-a{name}-", []).append(tid)
+        elif opens < AGENT_META_OPENS:
+            opens += 1
+            label = _meta_label(_read_meta(os.path.join(sub, f"agent-{aid}.meta.json")))
+            if label:
+                names[tid] = label
+    if not teammates:
         return names
-    with files:
-        for f in files:
-            if not (f.name.startswith("agent-") and f.name.endswith(".meta.json")):
-                continue
-            try:
-                with open(f.path, encoding="utf-8") as fh:
-                    meta = json.loads(fh.read(8192))
-            except (OSError, ValueError):
-                continue
-            if not isinstance(meta, dict):
-                continue
-            label = next((v for v in (meta.get("name"), meta.get("agentType")) if isinstance(v, str) and v), "")
-            if not label:
-                continue
-            names["a:" + f.name[len("agent-"):-len(".meta.json")]] = label
-            if isinstance(meta.get("name"), str) and isinstance(meta.get("teamName"), str):
-                names[f"a:{meta['name']}@{meta['teamName']}"] = label
+    try:
+        with os.scandir(sub) as it:
+            for n, f in enumerate(it):
+                if n >= AGENT_META_SCAN or opens >= AGENT_META_OPENS:
+                    break
+                if not f.name.endswith(".meta.json"):
+                    continue
+                prefix = next((p for p in teammates if f.name.startswith(p)), None)
+                if prefix is None:
+                    continue
+                opens += 1
+                meta = _read_meta(f.path)
+                team = meta.get("teamName") if meta else None
+                for tid in teammates[prefix]:
+                    if isinstance(team, str) and tid.endswith("@" + team) and _meta_label(meta):
+                        names[tid] = _meta_label(meta)
+    except OSError:
+        pass
     return names
 
 
@@ -934,7 +982,14 @@ def _agent_rows(cs: dict | None, cs_age: float, names: dict[str, str] | None = N
         out.append({"id": tid, "name": (names or {}).get(tid, ""), "rem": rem, "ttl": float(t["ttl_s"]),
                     "held": held_seconds(t, cs.get("now_ms"), cs_age),
                     "ago": (_num(cs, "now_ms") - last) / 1000 + cs_age})  # remaining_seconds needs now_ms too
-    return sorted(out, key=lambda r: r["id"])
+    out.sort(key=lambda r: r["id"])
+    seen: dict[str, int] = {}
+    for r in out:  # two `Explore` agents read `Explore` and `Explore 2`, fixed by id order
+        if r["name"]:
+            seen[r["name"]] = seen.get(r["name"], 0) + 1
+            if seen[r["name"]] > 1:
+                r["name"] = f"{r['name']} {seen[r['name']]}"
+    return out
 
 
 def _until_cold(rem: float, held: float | None) -> float:
@@ -944,9 +999,11 @@ def _until_cold(rem: float, held: float | None) -> float:
     return held if held is not None and rem > 0 and held > rem else rem
 
 
-def _has_agents(cs: dict | None) -> bool:
+def _agent_ids(cs: dict | None) -> list[str]:
+    """The `a:` thread ids the proxy listed (at most 16): the only names a render needs."""
     threads = cs.get("threads") if isinstance(cs, dict) else None
-    return isinstance(threads, list) and any(isinstance(t, dict) and str(t.get("id", "")).startswith("a:") for t in threads)
+    return [str(t["id"]) for t in threads if isinstance(t, dict) and str(t.get("id", "")).startswith("a:")] \
+        if isinstance(threads, list) else []
 
 
 def _warm(rows: list[dict]) -> list[dict]:
@@ -1118,22 +1175,38 @@ def _ctx_segment(used: float, window: float, level: int | None = 0) -> str | Non
     return f"{DIM}ctx{RESET} {bar} {colour}{fraction * 100:.0f}%{RESET}{near}"
 
 
-def _save_segment(stats: dict | None, level: int | None = 0, fresh: bool = False) -> str | None:
-    """`saved $0.42 of $3.10`: this session's saving out of what this session cost. Saved is a
-    COUNTERFACTUAL (vs the same request uncompacted, at gateway prices, net of CG's own model spend
-    and keep-alive pings), so it is shown plainly, as money already saved; only avoidable-spend
-    figures in the hint carry `≈`. The total is the proxy's own spend for the session on the SAME
-    pricing basis (agent requests + CG's model calls + pings), not Claude Code's `cost`, which is
-    its own list-price estimate; `of $y` is left out while the proxy has priced nothing."""
-    sess = _num(stats, "total_saved_usd")
-    if level is None or fresh or sess is None:
+def _save_segment(stats: dict | None, money: dict | None, level: int | None = 0, fresh: bool = False) -> str | None:
+    """`saved $0.42 of $3.10 session · saved $0.10 of $0.50 subagents`. session is the main
+    thread, subagents every other thread of the session together (sub-agents, teammates, and side
+    requests such as the auto-mode classifier, which cost money too). Both use one basis, from
+    /api/cachestate's money (dash.threadMoney): $y is what those requests would have cost without
+    context-guru, at the gateway's prices; $x is the saving against it, net of context-guru's own
+    model calls and keep-alive pings, so $x <= $y. A saving is a COUNTERFACTUAL, shown plainly as
+    money already saved; only avoidable-spend figures in the hint carry `≈`. The subagents figure
+    appears once a thread other than the main one exists. An older proxy with no money block gets
+    the bare `saved $x` from /api/stats."""
+    if level is None or fresh:
         return None
+    main = money.get("main") if isinstance(money, dict) else None
+    if not isinstance(main, dict):
+        sess = _num(stats, "total_saved_usd")
+        if sess is None:
+            return None
+        return _money(sess) if level == 2 else f"saved {_money(sess)}"
+    x, y = _num(main, "saved_usd") or 0.0, _num(main, "baseline_usd") or 0.0
+    if y < 0.005:
+        return None  # nothing priced yet: no part, no whole
     if level == 2:
-        return _money(sess)
+        return _money(x)
+    head = f"saved {_money(x)} {DIM}of{RESET} {_money(y)}"
     if level == 1:
-        return f"saved {_money(sess)}"
-    total = sum(_num(stats, k) or 0.0 for k in ("cost_usd", "cg_llm_cost_usd", "keepalive_ping_usd"))
-    return f"saved {_money(sess)}" + (f" {DIM}of{RESET} {_money(total)}" if total >= 0.005 else "")
+        return head
+    out = f"{head} {DIM}session{RESET}"
+    others = money.get("others")
+    ox, oy = _num(others, "saved_usd") or 0.0, _num(others, "baseline_usd") or 0.0
+    if (_num(others, "threads") or 0) > 0 and oy >= 0.005:
+        out += f" {DIM}·{RESET} saved {_money(ox)} {DIM}of{RESET} {_money(oy)} {DIM}subagents{RESET}"
+    return out
 
 
 def _fresh_session(payload: dict) -> bool:
@@ -1350,7 +1423,7 @@ def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
     three fresh makes no network call at all."""
     out: dict = {}
     jobs = {"stats": lambda: _fetch_stats(port, session_id)}
-    if session_id and on & {"cache", "agents", "ctx", "hint", "fill", "clock0", "wagents"}:
+    if session_id and on & {"save", "cache", "agents", "ctx", "hint", "fill", "clock0", "wagents"}:
         jobs["cs"] = lambda: _fetch_json(
             port, "/api/cachestate?session=" + _quote(session_id),
             "cs-" + session_id, CACHESTATE_TTL_SECONDS)
@@ -1417,13 +1490,14 @@ def main() -> None:
 
     cs, cs_age = got.get("cs", (None, 0.0))
     day, _ = got.get("day", (None, 0.0))
-    agent_rows = _agent_rows(cs, cs_age, _agent_names(payload) if on & {"agents", "wagents"} and _has_agents(cs) else None)
+    agent_ids = _agent_ids(cs) if on & {"agents", "wagents"} else []
+    agent_rows = _agent_rows(cs, cs_age, _agent_names(payload, agent_ids) if agent_ids else None)
     cs = _main_cs(cs)
     view = _cache_view(payload, cs, cs_age)
     ctx = _ctx_numbers(payload, cs, cs_age)
     shown = {
         "update": lambda lv: update_seg if lv == 0 else None,
-        "save": lambda lv: _save_segment(stats, lv, _fresh_session(payload)),
+        "save": lambda lv: _save_segment(stats, (cs or {}).get("money"), lv, _fresh_session(payload)),
         "cache": lambda lv: _cache_segment(view, lv),
         "agents": lambda lv: _agents_segment(agent_rows, lv),
         "spark": lambda lv: _spark_row(day, got.get("series", (None,))[0], lv, *_tv(width)),
@@ -1443,7 +1517,7 @@ def main() -> None:
     level: dict[str, int | None] = {e: 0 for e in order}
     hint = _hint(payload, view, ctx) if "hint" in on else None
     if layout in ("minimal", "watch"):
-        level["save"] = 1  # minimal: `saved $0.31`, no total
+        level["save"] = 1  # minimal: `saved $0.31 of $4.10`, the main thread only
     hint_level = 0
     two_rows = layout != "minimal"
 

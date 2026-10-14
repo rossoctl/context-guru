@@ -48,7 +48,7 @@ func cgStub(t *testing.T, cache string, extra ...func(*http.ServeMux)) (port str
 func TestStatuslineGoldenOutput(t *testing.T) {
 	const now = 1_800_000_000_000
 	cs := func(agoSec, ttl, prefix int, usd string) string {
-		return fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"now_ms":%d,"ttl_s":%d,`+
+		return fmt.Sprintf(`{"session":"s","model":"m","money":{"main":{"saved_usd":0.31,"baseline_usd":2.10,"threads":1},"others":{"saved_usd":0,"baseline_usd":0,"threads":0}},"last_ts":%d,"now_ms":%d,"ttl_s":%d,`+
 			`"prefix_tokens":%d,"priced":true,"rewrite_usd":%s,"window":1000000,"window_exact":true}`,
 			now-agoSec*1000, now, ttl, prefix, usd)
 	}
@@ -58,13 +58,13 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 		`{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":200000}}`
 	small := strings.Replace(payload, "412000", "52000", 1)
 	full := strings.Replace(payload, "412000", "900000", 1)
-	sess := "saved $0.31 of $0.41"
+	sess := "saved $0.31 of $2.10 session"
 	for _, c := range []struct {
 		name, cache, stdin, layout string
 		width                      int
 		want                       string
 	}{
-		{"warm/minimal", cs(60, 300, 52000, "0.30"), small, "minimal", 200, "saved $0.31 │ cache ● █████░ 4:00"},
+		{"warm/minimal", cs(60, 300, 52000, "0.30"), small, "minimal", 200, "saved $0.31 of $2.10 │ cache ● █████░ 4:00"},
 		{"warm/balanced", cs(60, 300, 52000, "0.30"), small, "balanced", 200,
 			sess + "\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 		{"warm/ping", ping(cs(60, 300, 52000, "0.30")), small, "balanced", 200,
@@ -82,11 +82,11 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 		{"cold/balanced", cs(400, 300, 412000, "1.20"), payload, "balanced", 200,
 			sess + "\ncache ○ ░░░░░░ cold 1:40 │ ctx ███░░░░░ 41% │ ▸ your next message costs ≈$1.20 extra"},
 		{"cold/minimal", cs(400, 300, 412000, "1.20"), payload, "minimal", 200,
-			"saved $0.31 │ cache ○ ░░░░░░ cold 1:40 │ ▸ your next message costs ≈$1.20 extra"},
+			"saved $0.31 of $2.10 │ cache ○ ░░░░░░ cold 1:40 │ ▸ your next message costs ≈$1.20 extra"},
 		{"cold/narrow", cs(400, 300, 412000, "1.20"), payload, "balanced", 60,
 			sess + "\ncache ○ cold 1:40 │ ▸ your next message costs ≈$1.20 extra"},
 		{"warm/narrow", cs(60, 300, 52000, "0.30"), small, "balanced", 40,
-			"saved $0.31 of $0.41\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
+			"saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 		{"first-run", `{"session":"s","none":true,"now_ms":1}`, `{"session_id":"sess-gold"}`, "balanced", 200,
 			"◌ no cache yet"}, // a brand-new session claims no saving yet
 	} {
@@ -138,11 +138,11 @@ func TestStatuslineGoldenLive(t *testing.T) {
 			`"context_window":{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":200000}}`
 	}
 	body := func(model string, lastAgo int, threads ...string) string {
-		return fmt.Sprintf(`{"session":"s","model":%q,"last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":412000,`+
+		return fmt.Sprintf(`{"session":"s","model":%q,"money":{"main":{"saved_usd":0.31,"baseline_usd":2.10,"threads":1},"others":{"saved_usd":0,"baseline_usd":0,"threads":0}},"last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":412000,`+
 			`"priced":true,"rewrite_usd":1.20,"window":1000000,"window_exact":true,"threads":[%s]}`,
 			model, now-lastAgo*1000, now, strings.Join(threads, ","))
 	}
-	sess := "saved $0.31 of $0.41"
+	sess := "saved $0.31 of $2.10 session"
 	m := "claude-sonnet-5-5"
 	for _, c := range []struct {
 		name, cache, stdin, layout string
@@ -167,7 +167,7 @@ func TestStatuslineGoldenLive(t *testing.T) {
 			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ agents 1 cold │ ctx ███░░░░░ 41%"},
 		{"agents-narrow", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("a:2", 250, 300, 9000, "0.03"),
 			th("a:3", 100, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")), ctxPay(m), "balanced", 36,
-			"saved $0.31 of $0.41\ncache ● 3:20 │ agents 3 │ ctx 41%"},
+			"saved $0.31 of $2.10 session\ncache ● 3:20 │ agents 3 │ ctx 41%"},
 		{"model-switch", body(m, 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-opus-5-5"), "balanced", 200,
 			sess + "\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41% │ ▸ model changed: your next message costs ≈$1.20 extra"},
 		{"same-model-other-spelling", body("aws/claude-sonnet-5-5", 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-sonnet-5-5[1m]"), "balanced", 200,
@@ -224,7 +224,8 @@ func TestStatuslineGoldenAgentsAndKeepAlive(t *testing.T) {
 	}
 	held := func(sec int) string { return fmt.Sprintf(`,"pings_left":2,"held_until_ms":%d`, now+sec*1000) }
 	cache := func(threads ...string) string {
-		return fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,`+
+		return fmt.Sprintf(`{"session":"s","model":"m","money":{"main":{"saved_usd":0.31,"baseline_usd":2.64,"threads":1},`+
+			`"others":{"saved_usd":0.12,"baseline_usd":0.90,"threads":4}},"last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,`+
 			`"priced":true,"rewrite_usd":0.30,"window":1000000,"window_exact":true,"threads":[%s]}`,
 			now-60_000, now, strings.Join(threads, ","))
 	}
@@ -255,18 +256,18 @@ func TestStatuslineGoldenAgentsAndKeepAlive(t *testing.T) {
 	}{
 		{"named-agents", cache(th("", 60, ""), th("a:ad9ba182bf3e760e6", 10, ""), th("a:reviewer@session-ab47f1d6", 250, held(700)),
 			th("a:finished", 900, ""), th("p:0123456789ab", 10, "")), 200, // p: is a side request, not an agent
-			"saved $0.31 of $2.64\ncache ● █████░ 4:00 │ agents Explore active ● 4:50 · reviewer ● 11:40 ↻ · 1 cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 4:00 │ agents Explore active ● 4:50 · reviewer ● 11:40 ↻ · 1 cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		// Most recently used first, at most five, then `+N more`; `active` within the last 10 s.
 		{"many-agents-capped", cache(th("", 60, ""), th("a:w1@t", 200, ""), th("a:w2@t", 5, ""), th("a:w3@t", 100, ""),
 			th("a:w4@t", 30, ""), th("a:w5@t", 250, ""), th("a:w6@t", 60, ""), th("a:w7@t", 150, "")), 300,
-			"saved $0.31 of $2.64\ncache ● █████░ 4:00 │ agents w2 active ● 4:55 · w4 ● 4:30 · w6 ● 4:00 · w3 ● 3:20 · w7 ● 2:30 · +2 more │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 4:00 │ agents w2 active ● 4:55 · w4 ● 4:30 · w6 ● 4:00 · w3 ● 3:20 · w7 ● 2:30 · +2 more │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		{"main-held-warm", cache(th("", 60, held(820))), 200,
-			"saved $0.31 of $2.64\ncache ● █████░ 13:40 ↻ │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 13:40 ↻ │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		// A plan cannot revive an expired entry (the ping failed or never came): cold is cold.
 		{"plan-cannot-revive-a-cold-cache", cache(th("", 320, held(500))), 200,
-			"saved $0.31 of $2.64\ncache ○ ░░░░░░ cold 0:20 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ○ ░░░░░░ cold 0:20 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		{"narrow-drops-ka-first", cache(th("", 60, held(820)), th("a:ad9ba182bf3e760e6", 10, "")), 60,
-			"saved $0.31 of $2.64\ncache ● █████░ 13:40 ↻ │ agents 1 │ ctx ░░░░░░░░ 5%"},
+			"saved $0.31 of $2.64\ncache ● █████░ 13:40 ↻ │ agents 1 │ ctx ░░░░░░░░ 5%"}, // narrow: the main thread's figure only,
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(stub(c.cache))
@@ -284,6 +285,59 @@ func TestStatuslineGoldenAgentsAndKeepAlive(t *testing.T) {
 		if strings.Contains(q, "since=") || !strings.Contains(q, "session=sess-gold") {
 			t.Errorf("/api/stats?%s: the status line reads this session's totals only (#510)", q)
 		}
+	}
+}
+
+// TestStatuslineAgentNamesAreBounded: the names come from the session's subagents/ files, and a
+// long session can hold thousands. A render opens only the files of the agents the proxy lists
+// (directly by id for a sub-agent, by a name-prefix match in a capped directory listing for a
+// teammate) and reads at most 4 KB of each, so 5,000 files, a 2 MB file and 16 listed agents
+// still render inside the budget. Two agents of one type read `Explore` and `Explore 2`.
+func TestStatuslineAgentNamesAreBounded(t *testing.T) {
+	const now = 1_800_000_000_000
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sess-big", "subagents")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(sub, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 5000; i++ {
+		write(fmt.Sprintf("agent-a%016x.meta.json", i), `{"agentType":"Explore"}`)
+	}
+	write("agent-areviewer-8808ee2f0c216961.meta.json", `{"name":"reviewer","teamName":"t","agentType":"reviewer"}`)
+	write("agent-ahuge.meta.json", `{"agentType":"`+strings.Repeat("x", 2<<20)+`"}`)
+	var threads []string
+	th := func(id string, ago int) {
+		threads = append(threads, fmt.Sprintf(`{"id":%q,"main":%t,"model":"m","last_ts":%d,"end_ts":%d,"ttl_s":300,`+
+			`"prefix_tokens":9000,"priced":true,"rewrite_usd":0.03}`, id, id == "", now-ago*1000, now-ago*1000))
+	}
+	th("", 60)
+	th("a:a0000000000000001", 20)
+	th("a:a0000000000000002", 21)
+	th("a:huge", 22)
+	th("a:reviewer@t", 23)
+	for i := 0; i < 12; i++ { // more listed teammates whose files do not exist
+		th(fmt.Sprintf("a:ghost%d@t", i), 200+i)
+	}
+	cache := fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,`+
+		`"priced":true,"rewrite_usd":0.30,"window":1000000,"window_exact":true,"threads":[%s]}`, now-60_000, now, strings.Join(threads, ","))
+	env := routedEnv(cgStub(t, cache))
+	env["CG_STATUSLINE_COLUMNS"] = "300"
+	stdin := `{"session_id":"sess-big","transcript_path":"` + filepath.Join(dir, "sess-big.jsonl") + `"}`
+	out, code, elapsed := runStatusline(t, env, stdin, "--layout=balanced")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	want := "agents Explore ● 4:40 · Explore 2 ● 4:39 · reviewer ● 4:37 · +13 more"
+	if !strings.Contains(out, want) {
+		t.Errorf("got %q, want it to contain %q (the 2 MB file's agent unlabelled, counted in +N more)", out, want)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("render took %v with 5,000 agent files; the budget is 0.5 s", elapsed)
 	}
 }
 

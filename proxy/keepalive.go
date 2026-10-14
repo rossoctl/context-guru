@@ -810,8 +810,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	prefix := u.CacheRead + u.CacheWrite
 	hdr, auth := pingHeaders(r, up)
 	e := &kaEntry{
-		tenant: tn.ID, session: session, thread: threadID, startedAt: startedAt, refreshedAt: startedAt,
-		body: owned, up: up,
+		tenant: tn.ID, session: session, thread: threadID, startedAt: startedAt, body: owned, up: up,
 		st:       tn.Store,
 		emitter:  tn.Pipe.Emitter(),
 		provider: provider, model: model, route: route, preset: tn.Preset,
@@ -819,6 +818,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		pingUSD: k.projectedPingUSD(model, prefix, route),
 		hdr:     hdr, auth: auth, appliedStrategy: applied,
 	}
+	e.refreshedAt = startedAt // the real request refreshed the provider's entry
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	// The turn count outlives the entry, which is dropped on the next request's arrival. It is

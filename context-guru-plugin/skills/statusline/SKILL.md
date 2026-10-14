@@ -12,15 +12,17 @@ manage this one additional top-level key (never a second settings editor, never 
 **What it shows, once enabled and this project is routed** (default layout `balanced`):
 
 ```
-saved $0.31 of $4.10
+saved $0.31 of $4.41 session · saved $0.12 of $0.90 subagents
 cache ● █████░ 13:40 ↻ │ agents reviewer ● 4:21 · Explore ◐ 0:51 │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
 cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41% │ ▸ your next message costs ≈$0.78 extra
 ```
 
-- **Money.** `saved $0.31` is money already saved: what the same requests would have cost
-  uncompacted, at the gateway's prices, net of context-guru's own model spend and keep-alive
-  pings. `of $4.10` is what this session cost through the proxy at the same prices (requests,
-  context-guru's own model calls, pings). Session only: no today or lifetime total.
+- **Money.** `saved $0.31 of $4.41 session`: `$4.41` is what the main agent's requests would
+  have cost without context-guru, at the gateway's prices; `$0.31` is the saving against it, net
+  of context-guru's own model calls and keep-alive pings, so it is always part of the total.
+  `saved $0.12 of $0.90 subagents` is the same over every other request of the session
+  (sub-agents, teammates, Claude Code's side requests), once there is one. Only savings recorded
+  per request count. Session only: no today or lifetime total.
   `--layout=detailed` adds `spent $4.10 · $2.73/h · up 1h30m` (Claude Code's own running cost, the
   average rate once five minutes have passed, and the session's age).
 - **Cache clock.** A live countdown to expiry, green, amber in the last minute (a fifth of the
@@ -52,7 +54,7 @@ layout outranks the installed command's flag until `auto`. Otherwise
 
 | layout | elements |
 |---|---|
-| minimal | saved, cache, hint (`saved $0.31 │ cache ● ████░░ 3:57`) |
+| minimal | saved, cache, hint (`saved $0.31 of $4.41 │ cache ● ████░░ 3:57`) |
 | balanced | update, saved, cache, agents, ctx, ka, hint |
 | detailed | balanced + `spent` + `upstream slow: 7.0s` (only when slow) + least-used tool/skill (`◇ github 1% remove`) |
 | spark | `saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇` over the cache clock |

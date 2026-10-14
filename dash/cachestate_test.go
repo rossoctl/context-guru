@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -114,4 +115,68 @@ func TestHeldUntilStartsFromTheLastRealRefresh(t *testing.T) {
 			t.Errorf("%s: heldUntil = %d, want %d", c.name, got, c.want)
 		}
 	}
+}
+
+// TestCacheStateSplitsTheSessionsMoney: `saved $x of $y` for the main thread and for every other
+// thread together, on one basis. y is the cost without context-guru (the baseline plus the split
+// and keep-alive savings); x is y minus what was paid, so context-guru's own model calls and its
+// pings lower x and never raise y. A side thread (p:) and a thread with no cache touch still count.
+func TestCacheStateSplitsTheSessionsMoney(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	row := func(ago int64, thread string, cost, base, cgllm, split float64) *Event {
+		e := mkEvent(now-ago, "s1", "aws/claude-sonnet-5", 1000, 800)
+		e.Status, e.ThreadID, e.CacheRead = 200, thread, 5000
+		e.CostUSD, e.BaselineCostUSD, e.CGLLMCostUSD, e.CachesplitSavedUSD = cost, base, cgllm, split
+		return e
+	}
+	ping := row(30_000, "", 0.05, 0, 0, 0)
+	ping.KeepAlive = true
+	noTouch := row(10_000, "a:fresh", 0.20, 0.30, 0, 0)
+	noTouch.CacheRead, noTouch.CacheWrite = 0, 0
+	seed(t, rec,
+		row(100_000, "", 1.00, 9.00, 0.10, 0.50), ping, // main: y = 9.50, x = 9.50 - 1.00 - 0.10 - 0.05
+		row(60_000, "a:X", 0.40, 1.00, 0, 0),
+		row(50_000, "p:side", 0.10, 0.10, 0, 0), noTouch)
+
+	_, body := get(t, a, "/api/cachestate?session=s1", "")
+	money, _ := body["money"].(map[string]any)
+	if money == nil {
+		t.Fatalf("no money in %v", body)
+	}
+	check := func(name string, want map[string]float64) {
+		m := money[name].(map[string]any)
+		for k, v := range want {
+			if got, _ := m[k].(float64); math.Abs(got-v) > 1e-9 {
+				t.Errorf("%s.%s = %v, want %v", name, k, m[k], v)
+			}
+		}
+		if m["saved_usd"].(float64) > m["baseline_usd"].(float64) {
+			t.Errorf("%s: saved %v exceeds its baseline %v", name, m["saved_usd"], m["baseline_usd"])
+		}
+	}
+	check("main", map[string]float64{"saved_usd": 8.35, "baseline_usd": 9.50, "threads": 1})
+	check("others", map[string]float64{"saved_usd": 0.70, "baseline_usd": 1.40, "threads": 3})
+	// The listed cache entries are unchanged: the no-touch thread is money only.
+	for _, th := range body["threads"].([]any) {
+		if th.(map[string]any)["id"] == "a:fresh" {
+			t.Errorf("a thread with no cache touch must not be listed as a cache entry: %v", th)
+		}
+	}
+	// A session whose only rows touched no cache still reports its money on the `none` answer.
+	seed(t, rec, func() *Event { e := row(1_000, "", 0.10, 0.20, 0, 0); e.SessionID, e.CacheRead, e.CacheWrite = "s2", 0, 0; return e }())
+	_, b2 := get(t, a, "/api/cachestate?session=s2", "")
+	if b2["none"] != true || b2["money"] == nil {
+		t.Errorf("s2 = %v, want none with money", b2)
+	}
+}
+
+// TestCacheThreadsQueryIsIndexed: the per-thread money is one indexed read of the session.
+func TestCacheThreadsQueryIsIndexed(t *testing.T) {
+	db := openTestDB(t)
+	seedLeanFixture(t, db)
+	q, args := cacheThreadsQuery(Filter{Session: "s-target"})
+	plan := explainPlan(t, db, q, args)
+	assertNoWholeTableScan(t, "cache threads", plan)
+	assertSessionOrTimeIndexed(t, "cache threads", plan)
 }

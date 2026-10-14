@@ -3,6 +3,7 @@ package dash
 import (
 	"database/sql"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -40,6 +41,8 @@ type CacheState struct {
 	// PingsLeft and HeldUntilMS are the main thread's keep-alive plan (see ThreadCache).
 	PingsLeft   int   `json:"pings_left,omitempty"`
 	HeldUntilMS int64 `json:"held_until_ms,omitempty"`
+	// Money is the session's `saved $x of $y`, main thread and the rest, over the whole session.
+	Money *SessionMoney `json:"money,omitempty"`
 	// Threads is the session's cache entries, one per thread (the main agent and each subagent
 	// have separate provider caches), most recently used first. Only threads that touched the
 	// cache within the last two hours are listed: older ones are finished work.
@@ -62,6 +65,9 @@ type ThreadCache struct {
 	// ping's start plus the TTL. Both omitted when no ping is planned.
 	PingsLeft   int   `json:"pings_left,omitempty"`
 	HeldUntilMS int64 `json:"held_until_ms,omitempty"`
+	// SavedUSD and BaselineUSD are this thread's `saved $x of $y` (see threadMoney).
+	SavedUSD    float64 `json:"saved_usd"`
+	BaselineUSD float64 `json:"baseline_usd"`
 }
 
 // KeepAlivePlan is one thread's scheduled keep-alive, as the proxy's keeper holds it in memory.
@@ -104,34 +110,107 @@ func endTS(ts int64, upstreamMS float64) int64 {
 	return ts + int64(upstreamMS)
 }
 
-// ThreadsFor lists the session's per-thread cache entries touched since sinceMS.
-func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, error) {
-	cond, args := withKeepAlive(f).where()
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.thread_id, MAX(r.ts), r.upstream_ms, r.model,
-		r.fresh_input + r.cache_read + r.cache_write,
-		COALESCE((SELECT CASE WHEN w.cache_write_1h > 0 THEN 3600 ELSE 300 END FROM requests w
-			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.thread_id = r.thread_id
-			AND w.cache_write > 0 ORDER BY w.ts DESC LIMIT 1), 300)
-		FROM requests r WHERE `+cond+` AND r.status BETWEEN 200 AND 299
-		AND r.cache_read + r.cache_write > 0 AND r.ts >= ?
-		GROUP BY r.thread_id ORDER BY MAX(r.ts) DESC LIMIT 16`, append(args, sinceMS)...)
+// ThreadsFor lists the session's per-thread cache entries touched since sinceMS (at most 16, most
+// recent first) and the session's money split into the main thread and every other one. One
+// indexed read of the session's rows (cacheThreadsQuery), whatever the number of threads.
+func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, error) {
+	q, args := cacheThreadsQuery(f)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
-	var out []ThreadCache
+	var (
+		out   []ThreadCache
+		money SessionMoney
+	)
 	for rows.Next() {
 		var (
-			t  ThreadCache
-			ms float64
+			t                                    ThreadCache
+			last                                 sql.NullInt64
+			ms                                   sql.NullFloat64
+			model                                sql.NullString
+			prefix                               sql.NullInt64
+			base, cost, cgllm, split, kaSv, ping float64
 		)
-		if err := rows.Scan(&t.ID, &t.LastTS, &ms, &t.Model, &t.PrefixTokens, &t.TTLSeconds); err != nil {
-			return nil, err
+		if err := rows.Scan(&t.ID, &last, &ms, &model, &prefix, &t.TTLSeconds,
+			&base, &cost, &cgllm, &split, &kaSv, &ping); err != nil {
+			return nil, nil, err
 		}
-		t.Main, t.EndTS = t.ID == "", endTS(t.LastTS, ms)
+		t.SavedUSD, t.BaselineUSD = threadMoney(base, cost, cgllm, split, kaSv, ping)
+		m := &money.Others
+		if t.ID == "" {
+			m = &money.Main
+		}
+		m.SavedUSD, m.BaselineUSD, m.Threads = m.SavedUSD+t.SavedUSD, m.BaselineUSD+t.BaselineUSD, m.Threads+1
+		if !last.Valid || last.Int64 < sinceMS {
+			continue // no cache touch in the window: money only
+		}
+		t.LastTS, t.Model, t.PrefixTokens = last.Int64, model.String, prefix.Int64
+		t.Main, t.EndTS = t.ID == "", endTS(t.LastTS, ms.Float64)
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].LastTS > out[j].LastTS })
+	if len(out) > maxCacheThreads {
+		out = out[:maxCacheThreads]
+	}
+	return out, &money, nil
+}
+
+// maxCacheThreads bounds the cache entries one /api/cachestate lists.
+const maxCacheThreads = 16
+
+// cacheThreadsQuery is ThreadsFor's one statement, pulled out for the EXPLAIN-plan test. GROUP BY
+// thread over every row of the session (agent rows and pings, any status): the money columns sum
+// all of them, while the cache columns come from the thread's latest successful cache-touching
+// row. That works because the select has exactly one MAX(), and SQLite then takes the bare
+// columns (upstream_ms, model, the prefix and the TTL subquery's inputs) from the row that holds
+// it. A thread with no such row has a NULL MAX and is reported for its money only.
+func cacheThreadsQuery(f Filter) (string, []any) {
+	cond, args := withKeepAlive(f).where()
+	const agent = "r.keepalive = 0"
+	return `SELECT r.thread_id,
+		MAX(CASE WHEN r.status BETWEEN 200 AND 299 AND r.cache_read + r.cache_write > 0 THEN r.ts END),
+		r.upstream_ms, r.model, r.fresh_input + r.cache_read + r.cache_write,
+		COALESCE((SELECT CASE WHEN w.cache_write_1h > 0 THEN 3600 ELSE 300 END FROM requests w
+			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.thread_id = r.thread_id
+			AND w.cache_write > 0 ORDER BY w.ts DESC LIMIT 1), 300),
+		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.baseline_cost_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cost_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cg_llm_cost_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cachesplit_saved_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN ` + agent + ` THEN ` + kaSaved("r.") + ` ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
+		FROM requests r WHERE ` + cond + ` GROUP BY r.thread_id`, args
+}
+
+// threadMoney is one thread's `saved $x of $y` on one basis. y is what its requests would have cost
+// without context-guru, at the same prices: the baseline (the requests uncompacted) plus the
+// cache-split and keep-alive savings, which the baseline does not contain. x is y minus what was
+// actually paid: the requests, context-guru's own model calls and its keep-alive pings. So x <= y,
+// and x is the same net as savingsArithmetic's total. Only savings written per request are in it;
+// the two credits priced on read (CachesplitHistoricalUSD, an estimate, and DeclFilterSavings,
+// which needs Go-side pricing per row) are not.
+func threadMoney(baseline, cost, cgllm, split, kaSv, ping float64) (saved, base float64) {
+	_, _, saved = savingsArithmetic(cost, baseline, cgllm, split, kaSv, ping)
+	return saved, baseline + split + kaSv
+}
+
+// SessionMoney is a session's `saved $x of $y` split into the main thread and the sum of every
+// other thread (sub-agents, teammates, and side requests such as Claude Code's classifier).
+type SessionMoney struct {
+	Main   ThreadMoney `json:"main"`
+	Others ThreadMoney `json:"others"`
+}
+
+// ThreadMoney is `saved $x of $y` for one or more threads; see threadMoney. Threads counts them.
+type ThreadMoney struct {
+	SavedUSD    float64 `json:"saved_usd"`
+	BaselineUSD float64 `json:"baseline_usd"`
+	Threads     int     `json:"threads"`
 }
 
 // CacheStateFor reads the session's most recent cache-touching request. nil, nil = none yet.
@@ -181,7 +260,12 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s == nil {
-		writeJSON(w, map[string]any{"session": f.Session, "none": true, "now_ms": time.Now().UnixMilli()})
+		// No cache touch yet, but the session may already have cost (and saved) money.
+		body := map[string]any{"session": f.Session, "none": true, "now_ms": time.Now().UnixMilli()}
+		if _, money, err := a.db(r).ThreadsFor(f, 0); err == nil && money.Main.Threads+money.Others.Threads > 0 {
+			body["money"] = money
+		}
+		writeJSON(w, body)
 		return
 	}
 	s.NowMS = time.Now().UnixMilli()
@@ -200,7 +284,8 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 		return float64(tokens) * p.CacheWrite, true
 	}
 	s.RewriteUSD, s.Priced = rewrite(s.Model, s.PrefixTokens, s.TTLSeconds)
-	if ths, err := a.db(r).ThreadsFor(f, s.NowMS-2*3600*1000); err == nil {
+	if ths, money, err := a.db(r).ThreadsFor(f, s.NowMS-2*3600*1000); err == nil {
+		s.Money = money
 		for i := range ths {
 			ths[i].RewriteUSD, ths[i].Priced = rewrite(ths[i].Model, ths[i].PrefixTokens, ths[i].TTLSeconds)
 		}

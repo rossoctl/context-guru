@@ -2726,11 +2726,10 @@ func TestStatuslineScopesStatsToItsOwnSession(t *testing.T) {
 	}
 }
 
-// TestStatuslineAlwaysRequestsTheLeanPath proves ?lean=1 is sent even with no session_id to
-// scope to — the fast path (dash/api.go's statsLean) answers from Overview() alone, skipping
-// the three priced aggregates that measured 38-45s on a production-sized dashboard DB and were
-// the actual cause of this script's timeouts, and there is no reason this script would ever
-// want the slow, full response: it reads nothing those three aggregates add.
+// TestStatuslineAlwaysRequestsTheLeanPath: with no session_id to scope to, the status line makes
+// no /api/stats read at all. The only unscoped read is the whole proxy's total, which the full
+// handler answers since #510: no session's number, and the dearest read there is. It probes
+// /healthz instead, so the offline notices still work.
 func TestStatuslineAlwaysRequestsTheLeanPath(t *testing.T) {
 	var gotQuery string
 	port := statsStubCapturingQuery(t, `{"total_saved_usd": 0.01, "saved_unique": 1}`, &gotQuery)
@@ -2740,8 +2739,8 @@ func TestStatuslineAlwaysRequestsTheLeanPath(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if gotQuery != "lean=1" {
-		t.Errorf("got query %q, want %q", gotQuery, "lean=1")
+	if gotQuery != "" {
+		t.Errorf("got /api/stats?%s, want no stats read without a session to scope it to", gotQuery)
 	}
 }
 
@@ -2789,9 +2788,8 @@ func TestStatuslineRejectsAMalformedSessionId(t *testing.T) {
 	if strings.Contains(gotQuery, "someone-elses-session") {
 		t.Fatalf("got query %q — an unsanitised session_id reached the request", gotQuery)
 	}
-	if gotQuery != "lean=1" {
-		t.Errorf("got query %q, want an unscoped request (just lean=1, no &session=) for a "+
-			"session_id this script does not trust", gotQuery)
+	if gotQuery != "" {
+		t.Errorf("got /api/stats?%s, want no stats read for a session_id this script does not trust", gotQuery)
 	}
 }
 
@@ -2881,7 +2879,7 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 			"CLAUDE_PLUGIN_OPTION_PORT="+port)
-		cmd.Stdin = strings.NewReader("{}")
+		cmd.Stdin = strings.NewReader(`{"session_id":"sess-cache"}`)
 		b, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("statusline.py: %v (%s)", err, b)

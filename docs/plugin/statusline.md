@@ -8,9 +8,11 @@ The status line sits under the prompt and answers two questions all the time: **
 The first line is money, the second is the cache clock, the sub-agents, the context bar, the session's keep-alive pings and at most one hint:
 
 ```text
-saved $0.31 of $4.10
+saved $0.31 of $4.41 session · saved $0.12 of $0.90 subagents
 cache ● █████░ 13:40 ↻ │ agents reviewer ● 4:21 · Explore ◐ 0:51 · 1 cold │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
 ```
+
+Only savings recorded with each request count: the compaction saving (against the same request uncompacted), the cache split and the keep-alive. Two credits that the dashboard prices when it is read are left out: the estimate for requests recorded before the cache split was measured, and the declaration filter's saving. The dashboard shows both. The figures are not Claude Code's own `cost` (its estimate at list prices), which `detailed` shows as `spent`.
 
 Every number is about this session. There is no today or lifetime total on the line; the dashboard and `/context-guru:savings` cover longer windows.
 
@@ -18,8 +20,8 @@ Every number is about this session. There is no today or lifetime total on the l
 
 | Piece | Meaning |
 |---|---|
-| `saved $0.31` | Saved this session: modelled against the same requests without the proxy, at your gateway's prices, net of the proxy's own spend. |
-| `of $4.10` | What this session cost through the proxy, on the same prices: the agent's requests, the proxy's own model calls and its keep-alive pings. Left out until the proxy has priced a request. This is not Claude Code's own `cost` (its estimate at list prices), which `detailed` shows as `spent`. |
+| `saved $0.31 of $4.41 session` | The main agent's requests. `$4.41` is what they would have cost without context-guru, at your gateway's prices. `$0.31` is the saving against that: the same `$4.41` minus what was actually paid, including context-guru's own model calls and keep-alive pings. So the saving is always part of the total, never more. |
+| `saved $0.12 of $0.90 subagents` | The same, summed over every other request of the session: sub-agents, teammates, and Claude Code's side requests (the auto-mode classifier, titles), which cost money even though they are not listed as agents. Shown once the session has a request outside the main agent. A narrow terminal drops it first. |
 | `cache ● █████░ 3:57` | A bar that drains as the prompt cache approaches expiry, and the clock. Time is measured from the end of the last response. |
 | `13:40 ↻` | The proxy is holding this cache warm with keep-alive pings. The clock is then the time until the cache goes cold if you send nothing: the last planned ping plus the cache lifetime. The bar still drains over the current cache entry, so each ping refills it. `↻` alone, with the normal clock, means the last touch was a ping and none is planned. |
 | `agents reviewer active ● 4:58 · Explore ◐ 0:51 · 1 cold` | Each sub-agent's cache, under the name Claude Code's agents list shows (`←` / `↓` in Claude Code), most recently used first, up to five, then `+N more`. `active` marks an agent that made a request in the last 10 seconds. Each clock is that agent's time until cold, with `↻` when pings hold it. Cold ones are counted. See [Sub-agents](#sub-agents-and-the-selected-agent). |
