@@ -706,6 +706,7 @@ async function loadInsights() {
     if (insSince) q.since = Math.round(insSince);
     if (insUntil) q.until = Math.round(insUntil);
     insDoc = await api('insights', q);
+    insVerdictMap = null;        // the verdicts moved with the document
     /* Captured only when nothing is selected, which is the one response that covers everything. */
     if (!insSince && !insUntil && insDoc.timeline) insFullTimeline = insDoc.timeline;
   } catch (e) {
@@ -898,7 +899,14 @@ function insChartTheme() {
   return {
     /* The ramp comes from the stylesheet, so it is declared once for both themes and dark mode
      * re-steps against its own surface instead of inverting. */
-    ramp: [1, 2, 3, 4, 5].map((i) => v('--ins-s' + i, '#89b3e7')),
+    /* The VERDICT hues, read from the stylesheet rather than restated here, so a cell and the
+     * table pill under it cannot disagree — they had, in three different colours for one item. */
+    vd: {
+      remove: v('--ins-vd-remove', '#b02a1e'),
+      stale: v('--ins-vd-remove', '#b02a1e'),
+      consider: v('--ins-vd-consider', '#8a5800'),
+      keep: v('--ins-vd-keep', '#566072'),
+    },
     ink: v('--fg', '#1b1f1c'),
     muted: v('--fg-muted', '#5c635d'),
     faint: v('--fg-faint', '#8b918b'),
@@ -960,12 +968,22 @@ function insDrawChart(host, g, tl) {
   const rows = g.rows.map((r) => insShortName(r.name));
   const peak = Math.max(1, ...g.rows.flatMap((r) => r.calls));
 
-  /* FOUR SERIES OVER ONE GRID, split two ways: used vs merely carried, and inside the selection
-   * vs outside it.
+  /* HUE IS THE VERDICT. OPACITY IS THE MAGNITUDE. POSITION IS THE OWNER.
    *
-   * Invocations carry the ramp; carriage-without-use gets a neutral tint, because "you were
-   * paying for this and never reached for it" is the finding, and the ramp's lightest step would
-   * read as a small amount of use — the opposite claim.
+   * The cell used to sit on a blue sequential ramp, which encoded invocation count in a hue that
+   * appeared nowhere in the tables — so the same item read green in its table pill, red if it was
+   * a built-in, and blue in the chart. Three colours, one item, and no way to check the picture
+   * against the table beneath it.
+   *
+   * Hue now carries the VERDICT, read from the same stylesheet tokens the pills use, so red means
+   * removable waste in both places. That spends the one channel a reader actually looks at on the
+   * one fact they act on.
+   *
+   * Magnitude moves to OPACITY within the verdict hue — "how much" stays legible without a second
+   * meaning in the same channel. Owner identity moves to row GROUPING rather than hue: a
+   * per-plugin palette would need ~15 distinct colours where 8 are validated, and the rule is
+   * never to cycle a categorical scale. Grouped rows let a wasteful owner read as a solid red
+   * block, which is the thing worth seeing.
    *
    * THE SELECTION IS ENCODED IN THE CELLS, NOT DRAWN OVER THEM. The first version shaded the
    * excluded range with a markArea band, and it looked broken: a band runs to a category
@@ -976,19 +994,30 @@ function insDrawChart(host, g, tl) {
    * has colour. */
   const sel = insSelectedCols(g, insSince, insUntil);
   const inSel = (ci) => !sel || (ci >= sel[0] && ci <= sel[1]);
-  const used = [];
-  const usedOut = [];
+  /* One bucket per verdict, plus the two that fall outside the selection. A row whose verdict the
+   * document does not carry — this plugin's own skills, held out of the tables — charts as `keep`,
+   * which is the honest default: it is present, and nothing is being recommended about it. */
+  const byVd = { remove: [], stale: [], consider: [], keep: [] };
   const idle = [];
+  const usedOut = [];
   const idleOut = [];
   g.rows.forEach((r, ri) => {
+    const vd = byVd[insVerdictOf(r.name)] ? insVerdictOf(r.name) : 'keep';
     r.calls.forEach((v, ci) => {
       const live = inSel(ci);
       /* ci + 0.5 puts the cell in the GAP between edge ci and edge ci+1, which is the span it
        * actually describes. An integer would centre it on the edge and leave the first cell
        * hanging half off the plot. */
       const x = ci + 0.5;
-      if (v > 0) (live ? used : usedOut).push([x, ri, v]);
-      else if (r.carried[ci] > 0) (live ? idle : idleOut).push([x, ri, 0]);
+      if (v > 0) {
+        /* Opacity carries the count, floored so one invocation is still clearly a mark rather
+         * than a smudge, and capped at the row's own peak so a quiet capability is readable
+         * beside a noisy one. */
+        if (live) byVd[vd].push({ value: [x, ri, v], itemStyle: { opacity: insOpacityFor(v, peak) } });
+        else usedOut.push([x, ri, v]);
+      } else if (r.carried[ci] > 0) {
+        (live ? idle : idleOut).push([x, ri, 0]);
+      }
     });
   });
 
@@ -1040,13 +1069,22 @@ function insDrawChart(host, g, tl) {
       axisTick: { show: false },
     },
     /* The colour legend, which the library draws and we would otherwise have to. */
-    visualMap: {
-      min: 1, max: peak, calculable: false, orient: 'horizontal',
-      left: 'center', bottom: 34, itemHeight: 90, itemWidth: 11,
+    /* A VERDICT legend, not a magnitude ramp. The old visualMap explained a blue scale that meant
+     * nothing in the tables; this names the three states a reader acts on, in the colours the
+     * table pills use. Non-interactive: clicking a legend entry to hide a series would let
+     * somebody hide their own waste by accident. */
+    legend: {
+      bottom: 30, left: 'center', orient: 'horizontal',
+      itemWidth: 11, itemHeight: 11, itemGap: 16, icon: 'roundRect',
+      selectedMode: false,
       textStyle: { color: t.muted, fontSize: 10 },
-      inRange: { color: t.ramp },
-      text: ['more', 'fewer'],
-      seriesIndex: 0,
+      /* ONLY THE STATES PRESENT. A legend entry with no cells behind it reads as a colour the
+       * reader should go looking for, and they will not find it: the chart draws a row only for a
+       * capability that was invoked at least once, and anything invoked is `keep` by definition —
+       * so on a store where nothing has yet cleared the evidence floor, `removable waste` and
+       * `below the floor` are honestly empty. Advertising them anyway makes a correct chart look
+       * broken. The faint wash is always listed, because carriage-without-use is the finding. */
+      data: insLegendFor(byVd, idle, idleOut, usedOut),
     },
     /* THE RANGE CONTROL — a SELECTOR, not a zoom.
      *
@@ -1089,12 +1127,30 @@ function insDrawChart(host, g, tl) {
         labelFormatter: (i) => cols[Math.round(i)] || '' },
     ],
     series: [
-      /* Series 0 is the only one the visualMap paints, so only the SELECTED invocations get the
-       * ramp. Everything else is explicitly styled below. */
-      { name: 'invocations', type: 'heatmap', data: used,
-        itemStyle: { borderRadius: 2, borderWidth: 2, borderColor: 'transparent' },
+      /* ONE SERIES PER VERDICT, each in that verdict's own hue, so the cell and its table pill
+       * agree. `remove` and `stale` share a colour because they are the same instruction with
+       * different evidence — both legend entries would say "removable waste", so they are one
+       * entry and two series. */
+      { name: 'removable waste', type: 'heatmap', data: byVd.remove,
+        itemStyle: { color: t.vd.remove, borderRadius: 2, borderWidth: 2,
+          borderColor: 'transparent' },
         emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
-      { name: 'carried, unused', type: 'heatmap', data: idle,
+      { name: 'removable waste', type: 'heatmap', data: byVd.stale,
+        itemStyle: { color: t.vd.remove, borderRadius: 2, borderWidth: 2,
+          borderColor: 'transparent' },
+        emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
+      { name: 'below the evidence floor', type: 'heatmap', data: byVd.consider,
+        itemStyle: { color: t.vd.consider, borderRadius: 2, borderWidth: 2,
+          borderColor: 'transparent' },
+        emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
+      { name: 'in use / built in', type: 'heatmap', data: byVd.keep,
+        itemStyle: { color: t.vd.keep, borderRadius: 2, borderWidth: 2,
+          borderColor: 'transparent' },
+        emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
+      /* Carried and never invoked: neutral rather than any verdict hue, because this is the
+       * ABSENCE of a call on that day, not a judgement about the capability. The row's verdict is
+       * already shown wherever it WAS called. */
+      { name: 'carried, never used', type: 'heatmap', data: idle,
         itemStyle: { color: t.faint, opacity: 0.13, borderRadius: 2,
           borderWidth: 2, borderColor: 'transparent' } },
       /* OUTSIDE THE SELECTION. Grey, and still visible: the reader is deciding whether their
@@ -1104,7 +1160,7 @@ function insDrawChart(host, g, tl) {
       { name: 'outside the range', type: 'heatmap', data: usedOut,
         itemStyle: { color: t.faint, opacity: 0.5, borderRadius: 2,
           borderWidth: 2, borderColor: 'transparent' } },
-      { name: 'carried, outside the range', type: 'heatmap', data: idleOut,
+      { name: 'outside the range', type: 'heatmap', data: idleOut,
         itemStyle: { color: t.faint, opacity: 0.08, borderRadius: 2,
           borderWidth: 2, borderColor: 'transparent' } },
     ],
@@ -1202,6 +1258,39 @@ function insSelectedCols(g, since, until) {
 
 /* insColEnd is the timestamp one bucket PAST the last column, which is the final edge: the axis
  * needs n+1 boundaries for n columns, and the last one is where the last column stops. */
+/* insVerdictOf is the chart's join back to the advice. The timeline names a capability; the
+ * document's items[] carries the verdict for it. Built once per render rather than scanned per
+ * cell, which would be O(rows x cols x items). */
+let insVerdictMap = null;
+function insVerdictOf(name) {
+  if (!insVerdictMap) {
+    insVerdictMap = {};
+    for (const it of (insDoc && insDoc.items) || []) insVerdictMap[it.name] = it.verdict;
+  }
+  return insVerdictMap[name] || 'keep';
+}
+
+/* insOpacityFor turns an invocation count into an opacity inside the verdict's own hue.
+ *
+ * Floored at 0.35 because the question a cell answers first is "was this used at all", and a
+ * single invocation rendered at 1/1136th opacity answers it wrong — it reads as empty. Scaled
+ * against the grid's peak rather than per row, so two rows are comparable. */
+function insOpacityFor(v, peak) {
+  if (v <= 0) return 0;
+  return Math.min(1, 0.35 + 0.65 * (v / Math.max(1, peak)));
+}
+
+/* insLegendFor names only the states this chart actually drew. */
+function insLegendFor(byVd, idle, idleOut, usedOut) {
+  const out = [];
+  if (byVd.remove.length || byVd.stale.length) out.push('removable waste');
+  if (byVd.consider.length) out.push('below the evidence floor');
+  if (byVd.keep.length) out.push('in use / built in');
+  if (idle.length) out.push('carried, never used');
+  if (usedOut.length || idleOut.length) out.push('outside the range');
+  return out;
+}
+
 function insColEnd(g, tl) {
   const last = g.cols[g.cols.length - 1];
   const dayMs = 24 * 3600 * 1000;

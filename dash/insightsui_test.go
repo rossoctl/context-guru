@@ -119,3 +119,162 @@ func TestASelectionChangeDoesNotRebuildTheView(t *testing.T) {
 			"or steal it")
 	}
 }
+
+// TestRemovableWasteReadsAsTheProblemAndKeepDoesNot pins the direction of the verdict palette,
+// which was inverted and shipped that way.
+//
+// `remove` was GREEN and `keep` was RED, so the one line in the report a reader is meant to act on
+// — money being spent on a capability nothing invokes — was coloured as good news, while a
+// built-in they cannot remove and should not worry about was coloured as an alarm. Reported from
+// use: "tools that can be removed should be in red even if its waste money".
+//
+// Asserted on the stylesheet because that is where the decision lives, and because the pull to
+// re-green it is strong: "removable" does feel like good news from the perspective of the saving.
+// It is not the perspective the reader has. They are looking for what to fix.
+func TestRemovableWasteReadsAsTheProblemAndKeepDoesNot(t *testing.T) {
+	css := readUI(t, "ui/insights.css")
+
+	// The three verdict colours are declared as tokens, because the CHART reads these same
+	// values out of the stylesheet so a cell and its table pill cannot disagree. Assert the
+	// token's DEFINITION rather than its use site: a rule that says var(--ins-vd-remove) tells
+	// you nothing about which hue that is.
+	root := cssRuleFor(t, css, ":root")
+	for _, want := range []struct{ token, hue, why string }{
+		{"--ins-vd-remove", "var(--bad)",
+			"removable waste is what the reader came to find, so it carries the alarm colour"},
+		{"--ins-vd-consider", "var(--warn)",
+			"unused but under the evidence floor is a question, not a finding"},
+	} {
+		if !strings.Contains(root, want.token+":") {
+			t.Fatalf("%s is no longer declared in :root; the chart reads it from here", want.token)
+		}
+		decl := want.token + ":"
+		at := strings.Index(root, decl)
+		line := root[at : at+min(len(root)-at, 80)]
+		if cut := strings.Index(line, ";"); cut > 0 {
+			line = line[:cut]
+		}
+		if !strings.Contains(line, want.hue) {
+			t.Errorf("%s = %q; want %s — %s", want.token, line, want.hue, want.why)
+		}
+		if strings.Contains(line, "var(--good)") {
+			t.Errorf("%s is green (%q). This is the inversion that shipped: the saving is good "+
+				"news, the SPEND is not, and the reader is looking at the spend.", want.token, line)
+		}
+	}
+	// `stale` is the same instruction as `remove` with better evidence, so it is the same colour.
+	for _, vd := range []string{"remove", "stale"} {
+		line := cssRuleFor(t, css, ".ins-vd."+vd)
+		if !strings.Contains(line, "var(--ins-vd-remove)") {
+			t.Errorf(".ins-vd.%s does not use --ins-vd-remove: %q", vd, line)
+		}
+	}
+
+	// And the verdict that means "you cannot remove this" must not be the alarm, or the alarm
+	// means nothing: built-ins are the largest group in the inventory.
+	//
+	// Checked at the TOKEN, not at the rule. Asserting that `.ins-vd.keep` does not mention
+	// var(--bad) proved nothing once the rule started going through var(--ins-vd-keep): a
+	// mutation setting the token itself to --bad survived the test. Found by mutation testing,
+	// which is the only reason this line reads the way it does.
+	keepTok := strings.Index(root, "--ins-vd-keep:")
+	if keepTok < 0 {
+		t.Fatal("--ins-vd-keep is no longer declared in :root")
+	}
+	keepLine := root[keepTok:]
+	if cut := strings.Index(keepLine, ";"); cut > 0 {
+		keepLine = keepLine[:cut]
+	}
+	if strings.Contains(keepLine, "var(--bad)") {
+		t.Errorf("--ins-vd-keep is the alarm colour (%q)\nA built-in is not a problem — it is "+
+			"weight the agent needs. Colouring the largest group in the inventory red trains the "+
+			"reader to ignore red.", keepLine)
+	}
+	if keep := cssRuleFor(t, css, ".ins-vd.keep"); strings.Contains(keep, "var(--bad)") {
+		t.Errorf(".ins-vd.keep uses --bad directly: %q", keep)
+	}
+	// Same for the owner block, which tinted an entire keep-group red.
+	own := cssRuleFor(t, css, ".ins-own.keep .ins-head")
+	if strings.Contains(own, "var(--bad-soft)") {
+		t.Errorf(".ins-own.keep .ins-head still washes the whole block in --bad-soft: %q", own)
+	}
+}
+
+// cssRuleFor returns the first rule body for a selector, so an assertion reads one declaration
+// block rather than the whole stylesheet.
+func cssRuleFor(t *testing.T, css, selector string) string {
+	t.Helper()
+	i := strings.Index(css, selector)
+	if i < 0 {
+		t.Fatalf("selector %q is not in the stylesheet", selector)
+	}
+	open := strings.Index(css[i:], "{")
+	end := strings.Index(css[i:], "}")
+	if open < 0 || end < 0 || end < open {
+		t.Fatalf("selector %q has no declaration block", selector)
+	}
+	return css[i+open : i+end]
+}
+
+// TestTheChartAndTheTablesSpeakOneColourLanguage is the test that stops the two surfaces drifting.
+//
+// They had drifted: a built-in read red in the tables and neutral-faint in the chart; a removable
+// item read green in the tables and sat on a blue magnitude ramp in the chart. Same item, three
+// different colours, so the picture could not be checked against the table beneath it --
+// "if i see build in tools in red in tables in chart it should be same color".
+//
+// The fix is structural rather than a matched pair of literals: the chart reads the SAME custom
+// properties the table pills are painted with, so there is one definition and nothing to keep in
+// sync. This asserts that structure, because a test comparing two hard-coded hues would pass
+// while both were wrong.
+func TestTheChartAndTheTablesSpeakOneColourLanguage(t *testing.T) {
+	css := readUI(t, "ui/insights.css")
+	js := readUI(t, "ui/insights.js")
+
+	// Every verdict colour is declared once, in the stylesheet, and READ by the chart rather than
+	// copied into it.
+	for _, tok := range []string{"--ins-vd-remove", "--ins-vd-consider", "--ins-vd-keep"} {
+		if !strings.Contains(css, tok+":") {
+			t.Errorf("%s is not declared in insights.css; the chart has nowhere to read it from",
+				tok)
+		}
+		// READ, not merely mentioned. `strings.Contains(js, tok)` is not enough: a chart that
+		// hardcodes '#b02a1e' still mentions the token in its fallback argument, and that mutant
+		// survived this test — the exact drift it exists to catch, since the stylesheet could
+		// then change while the chart kept the old hue. So require the lookup form.
+		if !strings.Contains(stripJSComments(js), "v('"+tok+"'") {
+			t.Errorf("insights.js does not LOOK UP %s (expected v('%s', …)); the chart is "+
+				"painting that verdict with a colour of its own, which is how the chart and the "+
+				"tables came to disagree in the first place", tok, tok)
+		}
+	}
+
+	// Read CODE, not prose. These assertions are about what the chart is configured to do, and
+	// the file explains its own history at length — an earlier version of this test failed on the
+	// comment that says why the visualMap was REMOVED, which is the opposite of the finding.
+	code := stripJSComments(js)
+
+	// The blue magnitude ramp must be gone from the cells: it encoded "how many invocations" in a
+	// hue that meant nothing in the tables, and that is the channel the verdict now needs.
+	if strings.Contains(code, "visualMap") {
+		t.Error("insights.js still configures a visualMap. The cell hue now carries the VERDICT, " +
+			"so a magnitude ramp would put two unrelated meanings in one channel")
+	}
+
+	// Every verdict the shaping layer can emit must have somewhere to be painted, or its rows
+	// fall back to a default and silently read as something else. Checked as a BUCKET rather than
+	// a quoted literal, because the verdict names reach the chart as object keys.
+	for _, vd := range []string{"remove", "stale", "consider", "keep"} {
+		if !strings.Contains(code, "byVd."+vd) && !strings.Contains(code, vd+": [") {
+			t.Errorf("the chart has no bucket for the %q verdict; rows carrying it will be "+
+				"painted as something else", vd)
+		}
+	}
+	// And each bucket is actually drawn, with a colour taken from the theme.
+	for _, vd := range []string{"remove", "consider", "keep"} {
+		if !strings.Contains(code, "t.vd."+vd) {
+			t.Errorf("no series paints the %q bucket with t.vd.%s, so its cells are not carrying "+
+				"the verdict colour the tables use", vd, vd)
+		}
+	}
+}

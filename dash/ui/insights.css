@@ -28,13 +28,13 @@
  * a separate "select this whole plugin" line below offered a choice that does not exist.
  */
 .ins-own { border: 1px solid var(--border); border-radius: var(--r); margin-bottom: var(--sp-3); overflow: hidden; }
-.ins-own.keep { border-color: color-mix(in srgb, var(--bad) 34%, var(--border)); }
+.ins-own.keep { border-color: var(--border); }
 .ins-head {
   display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
   padding: var(--sp-2) var(--sp-3);
   background: var(--bg-sunken); border-bottom: 1px solid var(--border-soft);
 }
-.ins-own.keep .ins-head { background: var(--bad-soft); }
+.ins-own.keep .ins-head { background: var(--bg-sunken); }
 .ins-head input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; margin: 0; flex: none; }
 .ins-type { font-family: var(--mono); font-size: var(--t-micro); letter-spacing: .09em; text-transform: uppercase; color: var(--fg-faint); }
 .ins-name { font-family: var(--mono); font-weight: 600; font-size: var(--t-body); }
@@ -90,12 +90,34 @@
   white-space: nowrap; border: 1px solid transparent;
 }
 .ins-vd::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
-.ins-vd.remove   { background: var(--good-soft); color: var(--good); border-color: var(--good); }
-.ins-vd.consider { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
-/* Stale is green like `remove`, because it is the same instruction with better evidence: this one
-   was used, so the reader remembers it, and the date proves it is finished with. */
-.ins-vd.stale    { background: var(--good-soft); color: var(--good); border-color: var(--good); }
-.ins-vd.keep     { background: var(--bad-soft);  color: var(--bad);  border-color: var(--bad); }
+/* ── the verdict palette, and which way round it goes ─────────────────────
+ *
+ * RED IS REMOVABLE WASTE. This was inverted and shipped that way: `remove` was green and `keep`
+ * was red, so the one line a reader is meant to act on — money spent every request on something
+ * nothing invokes — was coloured as good news, while a built-in they cannot remove and need not
+ * worry about was coloured as an alarm.
+ *
+ * The pull to re-green it is strong, because "removable" IS good news from the perspective of the
+ * saving. That is not the perspective the reader has: they opened this page to find what to fix,
+ * so the colour has to mark the problem, not the opportunity. Pinned by
+ * TestRemovableWasteReadsAsTheProblemAndKeepDoesNot.
+ *
+ * Declared as tokens first, because the CHART reads these same three values out of the stylesheet
+ * (insChartTheme) so a cell and its table pill cannot disagree — which they did, the table saying
+ * one thing in red and the chart saying another on a blue magnitude ramp. */
+:root {
+  --ins-vd-remove:   var(--bad);
+  --ins-vd-consider: var(--warn);
+  --ins-vd-keep:     var(--fg-muted);
+}
+.ins-vd.remove   { background: var(--bad-soft);  color: var(--ins-vd-remove);   border-color: var(--ins-vd-remove); }
+.ins-vd.consider { background: var(--warn-soft); color: var(--ins-vd-consider); border-color: var(--ins-vd-consider); }
+/* Stale carries the SAME instruction as `remove` and better evidence for it — this one was used,
+   so the reader remembers it, and the date proves it is finished with. Same colour, therefore. */
+.ins-vd.stale    { background: var(--bad-soft);  color: var(--ins-vd-remove);   border-color: var(--ins-vd-remove); }
+/* Keep is quiet, not alarming. Built-ins are the largest group in the inventory, and colouring
+   the largest group red teaches the reader to ignore red. */
+.ins-vd.keep     { background: var(--bg-sunken); color: var(--ins-vd-keep);     border-color: transparent; }
 .ins-vd.unknown  { background: var(--bg-sunken); color: var(--fg-faint); }
 .ins-why { display: block; color: var(--fg-muted); font-size: var(--t-small); line-height: 1.35; margin-top: 3px; max-width: 46ch; }
 
