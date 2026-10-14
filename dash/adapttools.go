@@ -101,6 +101,42 @@ type AdaptToolsRecommendation struct {
 	PerMonthUSD float64 `json:"per_month_usd"`
 	Effective   string  `json:"effective"`
 	Reason      string  `json:"reason"`
+	// Question is the recommendation as one yes/no question, ready to ask as it stands.
+	Question string `json:"question"`
+	// Remove is the set the option removes; SavedToDateUSD what removing it would have saved over
+	// the window, SavedPerWeekUSD the same per week; RewriteUSD the one-off cache rewrite it costs.
+	Remove          []string `json:"remove"`
+	SavedToDateUSD  float64  `json:"saved_to_date_usd"`
+	SavedPerWeekUSD float64  `json:"saved_per_week_usd"`
+	RewriteUSD      float64  `json:"rewrite_usd"`
+}
+
+// AdaptToolsSaved is what removals ALREADY made have saved, measured from the request rows rather
+// than estimated. See adaptToolsSaved for the method.
+type AdaptToolsSaved struct {
+	TotalUSD float64             `json:"total_usd"`
+	Filter   AdaptToolsSavedPart `json:"filter"`
+	Client   AdaptToolsSavedPart `json:"client"`
+	Method   string              `json:"method"`
+}
+
+// AdaptToolsSavedPart is one route a removal took: the proxy filter, or the client itself.
+type AdaptToolsSavedPart struct {
+	USD      float64               `json:"usd"`
+	Requests int                   `json:"requests,omitempty"`
+	Since    int64                 `json:"since,omitempty"`
+	Items    []AdaptToolsSavedItem `json:"items"`
+}
+
+// AdaptToolsSavedItem is one removed declaration's measured saving.
+type AdaptToolsSavedItem struct {
+	Kind          string  `json:"kind"`
+	Name          string  `json:"name"`
+	RemoveAs      string  `json:"remove_as,omitempty"`
+	USD           float64 `json:"usd"`
+	Requests      int     `json:"requests,omitempty"`
+	SessionsAfter int     `json:"sessions_after,omitempty"`
+	Since         int64   `json:"since,omitempty"`
 }
 
 // AdaptToolsWindow is the span the report covers.
@@ -128,6 +164,10 @@ type AdaptToolsDoc struct {
 	Recommendation *AdaptToolsRecommendation `json:"recommendation"`
 	Warnings       []string                  `json:"warnings"`
 	Coverage       AdaptToolsCoverage        `json:"coverage"`
+	// SavedSoFar is what removals already made have saved (measured); WouldAddUSD what the
+	// recommended change would add on top of it (estimated, net of its one-off rewrite).
+	SavedSoFar  AdaptToolsSaved `json:"saved_so_far"`
+	WouldAddUSD float64         `json:"would_add_usd"`
 	// RewriteUSD is the one-off cost of removing anything: the next request re-writes the
 	// cached prefix instead of reading it. Priced on the latest priced request in scope (its
 	// whole prompt, at write minus read), which is the most it can cost a session.
@@ -227,9 +267,15 @@ type carriedScan struct {
 // not use it) or per scope (/api/adapt/tools bills only items never used anywhere). Each request
 // is priced at its own model and tier: cache read when its prefix was read, cache write when it
 // was rewritten (2x input for a one-hour write), input when uncached.
+//
+// onlyFiltered restricts it to requests the declaration filter acted on: what it stripped from
+// the declarations the client sent, priced the same way.
 func (d *DB) carriedCost(f Filter, price func(string) (modelinfo.Price, bool),
-	keyOf func(session, kind, name, server string) string) (*carriedScan, error) {
+	keyOf func(session, kind, name, server string) string, onlyFiltered bool) (*carriedScan, error) {
 	where, args := f.where()
+	if onlyFiltered {
+		where += ` AND r.filtered_decl_tokens > 0`
+	}
 	out := &carriedScan{Items: map[string]*carried{}}
 	reqs := map[string][]adaptToolsReq{} // tenant\x00session -> requests, oldest first
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.ts, r.model,
@@ -607,8 +653,11 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			metaMu.Unlock()
 		}
 		return key
-	})
+	}, false)
 	if err != nil {
+		return nil, err
+	}
+	if out.SavedSoFar, err = d.adaptToolsSaved(f, price, state.Removed); err != nil {
 		return nil, err
 	}
 	out.Coverage, out.RewriteUSD = scan.Coverage, scan.RewriteUSD
@@ -710,8 +759,12 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 		}
 		if days >= 1 {
 			rec.PerMonthUSD = enoughUSD / days * 30 // steady state: the rewrite is paid once
+			rec.SavedPerWeekUSD = enoughUSD / days * 7
 		}
+		rec.Remove, rec.SavedToDateUSD, rec.RewriteUSD = enough, enoughUSD, out.RewriteUSD
+		rec.Question = adaptToolsQuestion(enough, rec.SavedPerWeekUSD, enoughUSD, from, out.RewriteUSD, days >= 1)
 		out.Recommendation = rec
+		out.WouldAddUSD = rec.NetDeltaUSD
 	}
 	c := out.Coverage
 	if n := c.Sessions - c.SessionsCaptured; n > 0 {
@@ -731,6 +784,101 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 		out.Warnings = append(out.Warnings, "Unused means unused in this window, not that it will never be needed.",
 			fmt.Sprintf("Removing changes the cached prefix, so the next request re-writes it once: about %s, counted as the option's spend.", usdText(out.RewriteUSD)))
 	}
+}
+
+// adaptToolsQuestion is the recommendation as one question: the set, the saving, the one-off.
+func adaptToolsQuestion(remove []string, perWeek, toDate float64, since string, rewrite float64, weekly bool) string {
+	names := make([]string, 0, 3)
+	for _, n := range head(remove, 3) {
+		names = append(names, strings.TrimPrefix(strings.TrimPrefix(n, skills.RemovePrefix), "mcp__"))
+	}
+	what := strings.Join(names, ", ")
+	if len(remove) > 3 {
+		what += fmt.Sprintf(" and %d more", len(remove)-3)
+	}
+	saving := usdText(toDate) + " since " + since
+	if weekly {
+		saving = "about " + usdText(perWeek) + " a week (" + saving + ")"
+	}
+	return fmt.Sprintf("Remove %s? It would save %s, after a one-off cache rewrite of about %s.", what, saving, usdText(rewrite))
+}
+
+const adaptToolsSavedMethod = "Filter: every request the proxy filter acted on, the removed declarations' " +
+	"tokens in the set the client sent (requests.decl_digest), priced at that request's model and tier; " +
+	"the total is the filter's own count of tokens not sent (requests.filtered_decl_tokens) priced the " +
+	"same way. Client: declarations that stopped appearing in later sessions that still carried MCP " +
+	"tools or skills, priced on those sessions (the Inventory's self-removal credit). Items on both " +
+	"routes are counted once, under the filter."
+
+// adaptToolsSaved measures what removals already made have saved.
+//
+// The proxy filter's saving is OBSERVED: on every request it acted on, the request row records the
+// set the client sent (decl_digest; the inventory reads the body before the filter) and the tokens
+// the filter did not forward (filtered_decl_tokens). So each removed item is priced on exactly the
+// requests it was stripped from, at that request's model and tier, and the total is the filter's
+// own count. A client-side removal leaves no row of its own: it is credited from the sessions that
+// ran without it (SelfRemovals), and an item also on the filter list is left to the filter.
+func (d *DB) adaptToolsSaved(f Filter, price func(string) (modelinfo.Price, bool), removedList []string) (AdaptToolsSaved, error) {
+	out := AdaptToolsSaved{Method: adaptToolsSavedMethod,
+		Filter: AdaptToolsSavedPart{Items: []AdaptToolsSavedItem{}}, Client: AdaptToolsSavedPart{Items: []AdaptToolsSavedItem{}}}
+	if real, err := d.DeclFilterSavings(f, price); err != nil {
+		return out, err
+	} else if real.Requests > 0 {
+		out.Filter.USD, out.Filter.Requests, out.Filter.Since = real.USD, real.Requests, real.Since
+	}
+	if len(removedList) > 0 && out.Filter.Requests > 0 {
+		removed := map[string]bool{}
+		for _, n := range removedList {
+			removed[n] = true
+		}
+		scan, err := d.carriedCost(f, price, func(_, kind, name, server string) string {
+			switch {
+			case kind == KindMCPTool && removed["mcp__"+server]:
+				return "mcp__" + server
+			case kind == KindMCPTool && removed[name]:
+				return name
+			case kind == KindSkill && removed[skills.RemovePrefix+name]:
+				return skills.RemovePrefix + name
+			}
+			return ""
+		}, true)
+		if err != nil {
+			return out, err
+		}
+		for removeAs, c := range scan.Items {
+			kind, name := KindMCPTool, removeAs
+			switch {
+			case strings.HasPrefix(removeAs, skills.RemovePrefix):
+				kind, name = KindSkill, strings.TrimPrefix(removeAs, skills.RemovePrefix)
+			case !strings.Contains(strings.TrimPrefix(removeAs, "mcp__"), "__"):
+				kind, name = KindMCPServer, strings.TrimPrefix(removeAs, "mcp__")
+			}
+			out.Filter.Items = append(out.Filter.Items, AdaptToolsSavedItem{Kind: kind, Name: name,
+				RemoveAs: removeAs, USD: c.USD(), Requests: c.Requests, Since: c.FirstTS})
+		}
+	}
+	self, err := d.SelfRemovals(f, price, removedList)
+	if err != nil {
+		return out, err
+	}
+	for _, r := range self {
+		if r.Overlap || adaptToolsOwn.MatchString(r.Name) || adaptToolsOwn.MatchString(r.Server) {
+			continue
+		}
+		out.Client.USD += r.AvoidedUSD
+		out.Client.Items = append(out.Client.Items, AdaptToolsSavedItem{Kind: r.Kind, Name: r.Name,
+			USD: r.AvoidedUSD, SessionsAfter: r.SessionsAfter, Since: r.LastSeen})
+	}
+	for _, p := range []*AdaptToolsSavedPart{&out.Filter, &out.Client} {
+		sort.Slice(p.Items, func(i, j int) bool {
+			if p.Items[i].USD != p.Items[j].USD {
+				return p.Items[i].USD > p.Items[j].USD
+			}
+			return p.Items[i].Name < p.Items[j].Name
+		})
+	}
+	out.TotalUSD = out.Filter.USD + out.Client.USD
+	return out, nil
 }
 
 func usdText(x float64) string {

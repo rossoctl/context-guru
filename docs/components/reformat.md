@@ -584,6 +584,23 @@ client-side change that stops sending it (`claude mcp remove`, a `permissions.de
 `skillOverrides`, or disabling the plugin). Each request records the digest of the declaration set
 it carried; rows written before that are matched by tool count, and `usd_low`/`usd_high` bound the
 guess. Context Guru's own tools and skills are never listed.
+Claude Code's and Codex's built-in tools are never listed either: removing one breaks the agent rather than
+saving anything.
+
+`recommendation` carries the best option as one question to ask (`question`), with the set it removes,
+what it would have saved over the window and per week, and the one-off cache rewrite it costs.
+`would_add_usd` is that saving net of the rewrite.
+
+`saved_so_far` is what removals already made have saved, measured rather than estimated:
+
+- **Filter.** The inventory is read from the request body before the filter runs, so every request the
+  filter acted on records both the declaration set the client sent (`decl_digest`) and the tokens the
+  filter did not forward (`filtered_decl_tokens`). Each removed item is priced on exactly the requests it
+  was stripped from, at that request's model and cache tier (read, write, input), and the total is the
+  filter's own count priced the same way. Requests from before the removal count for nothing.
+- **Client.** A declaration removed in the client (`claude mcp remove`, `skillOverrides`) leaves no row of
+  its own; it is credited from the later sessions that still carried MCP tools or skills and no longer
+  carried it. An item that is also on the filter list is counted once, under the filter.
 `POST /api/adapt/tools/apply {"option", "basis"}` writes one option of a report fetched in the last
 30 minutes into the removal list; `restore` takes those entries out, and `revert` undoes the last tools
 apply (never another adapt command's change). It shares identity, rate limit, audit and the single-tenant override file with every
