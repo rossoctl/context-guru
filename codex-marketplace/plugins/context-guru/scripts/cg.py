@@ -575,6 +575,18 @@ def apply_line(kind: str, token: str, o: dict, force: bool = False) -> str:
     return f"{SLASH[kind]} apply {kind} {shlex.quote(token)}{days}" + (" --force" if force else "")
 
 
+def week_range(rec: dict, w: dict) -> str:
+    """The weekly figure's range, in the words its kind deserves: a 95% interval is "likely", bounds are "between"."""
+    if isinstance(rec.get("ci95"), (list, tuple)) and len(rec["ci95"]) == 2:
+        lo, hi = rec["ci95"] if rec.get("per_week_usd") is not None else [x / days_of(w) * 7 for x in rec["ci95"]]
+        return f" (likely {money(lo)} to {money(hi)})"
+    for key, scale in (("range_per_week_usd", 1.0), ("gain_range_usd", 7 / days_of(w))):
+        r = rec.get(key)
+        if isinstance(r, (list, tuple)) and len(r) == 2 and any(r):
+            return f" (between {money(r[0] * scale)} and {money(r[1] * scale)})"
+    return ""
+
+
 def per_week(rec: dict, w: dict) -> float | None:
     if rec.get("per_week_usd") is not None:
         return rec["per_week_usd"]
@@ -616,7 +628,8 @@ def heatmap(hm: dict, e) -> list[str]:
     top = max([v for r in vals for v in r if v is not None] + [0.0])
     ramp = e.g["ramp"]
     names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    out = [f"  {hm.get('label') or 'Saved by hour'} ({hm.get('tz', 'UTC')})",
+    label, tz = hm.get("label") or "Saved by hour", hm.get("tz", "UTC")
+    out = [f"  {label}" + ("" if tz in label else f" ({tz})"),
            "        0     6     12    18   23"]
     for name, r in zip(names, vals):
         cells_ = ""
@@ -694,12 +707,9 @@ def plain_words(kind: str, rep: dict, o: dict) -> list[str]:
         a = f"So far: what your current {NOUN[kind]} saved is not measured on this proxy yet."
     rec = rep.get("recommendation")
     if rec:
-        pw = per_week(rec, w)
-        rng = rec.get("ci95")
-        b = (f"Change: {rec['change']} would add about {money(pw)} a week"
-             + (f" {ci([x / days_of(w) * 7 for x in rng])}" if rng and rec.get("per_week_usd") is None else f" {ci(rng)}" if rng else "") + ".")
+        b = f"Change: {rec['change']} would add about {money(per_week(rec, w))} a week{week_range(rec, w)}."
     else:
-        b = "Change: none recommended. " + (rep.get("summary") or "")
+        b = "Change: none recommended (the reason is just below)."
     by = {x["id"]: x for x in rep.get("options") or []}
     now_, then = by.get(rep.get("current"), {}).get("billed_usd"), by.get((rec or {}).get("option"), {}).get("billed_usd")
     if now_ is not None and then is not None:  # before -> after, on the same past sessions
