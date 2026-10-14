@@ -15,6 +15,7 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
+	"github.com/rossoctl/context-guru/tenant"
 )
 
 func TestRowFactsDefaultGates(t *testing.T) {
@@ -275,6 +276,9 @@ func TestAdaptReportGateMatchesTheBuilder(t *testing.T) {
 	hm, _ := rep["heatmap"].(map[string]any)
 	if gain == nil || hm == nil || gain["option"] != "by_stop_reason" || hm["option"] != "by_stop_reason" {
 		t.Fatalf("gain %v / heatmap option %v", gain, hm["option"])
+	}
+	if hm["tz"] != tenant.DefaultStrategyTZ || rep["heatmap_tz"] != tenant.DefaultStrategyTZ {
+		t.Errorf("heatmap tz %v / %v, want the account's strategy zone %s", hm["tz"], rep["heatmap_tz"], tenant.DefaultStrategyTZ)
 	}
 	grid := hm["values"].([]any)
 	total := 0.0
@@ -721,5 +725,36 @@ func TestAdaptCacheReportsAreRateLimitedPerAccount(t *testing.T) {
 	}
 	if w, _ := f.do(t, http.MethodGet, "/api/adapt/cache?days=1", "", otherJar); w.Code == http.StatusTooManyRequests {
 		t.Error("one account's reports spent another's budget")
+	}
+}
+
+// The heatmap is in the account's strategy timezone (tenant.DefaultStrategyTZ unless a strategy that targets the account says otherwise): a
+// request at 22:30 UTC on a Tuesday in August is Wednesday 01:30 in Asia/Jerusalem.
+func TestAdaptHeatmapIsInTheStrategyTimezone(t *testing.T) {
+	var k *keeper
+	if tz := k.strategyTZFor("t"); tz != tenant.DefaultStrategyTZ {
+		t.Fatalf("no strategies: %s, want %s", tz, tenant.DefaultStrategyTZ)
+	}
+	loc, err := time.LoadLocation(tenant.DefaultStrategyTZ)
+	if err != nil {
+		t.Skip("no tz database: ", err)
+	}
+	ts := time.Date(2026, 8, 11, 22, 30, 0, 0, time.UTC) // a Tuesday
+	facts := []rowFacts{{startMs: ts.UnixMilli()}}
+	m := adaptHeatmap(facts, []int{0}, []float64{1.5}, []float64{0.5}, loc)
+	if m[2][1] != 1 { // Mon=0, so Wednesday is row 2; 01:xx is column 1
+		t.Errorf("Wednesday 01:00 cell = %v; grid %v", m[2][1], m)
+	}
+	if utc := adaptHeatmap(facts, []int{0}, []float64{1.5}, []float64{0.5}, time.UTC); utc[1][22] != 1 {
+		t.Errorf("in UTC the request is Tuesday 22:00: %v", utc[1][22])
+	}
+	// a strategy that targets the account sets the zone
+	k = &keeper{strategies: []tenant.Strategy{{Active: true, Target: tenant.Target{Mode: tenant.TargetList, TenantIDs: []string{"t"}},
+		Windows: []tenant.Window{{Start: "09:00", End: "17:00", TZ: "Europe/Berlin"}}}}}
+	if tz := k.strategyTZFor("t"); tz != "Europe/Berlin" {
+		t.Errorf("a strategy's zone: %s", tz)
+	}
+	if tz := k.strategyTZFor("other"); tz != tenant.DefaultStrategyTZ {
+		t.Errorf("another account's strategy set this one's zone: %s", tz)
 	}
 }

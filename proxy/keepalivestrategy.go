@@ -89,6 +89,28 @@ func (k *keeper) bestStrategyFor(tenantID string, now time.Time) *tenant.Strateg
 	return best
 }
 
+// strategyTZFor is the timezone an account's keep-alive windows are written in: the first window of the highest-priority active strategy that
+// targets it (at any time of day), else tenant.DefaultStrategyTZ. Reports that show time of day use it, so a cell matches a window the user sets.
+func (k *keeper) strategyTZFor(tenantID string) string {
+	if k == nil {
+		return tenant.DefaultStrategyTZ
+	}
+	k.mu.Lock()
+	strategies := k.strategies
+	k.mu.Unlock()
+	var best *tenant.Strategy
+	for i := range strategies {
+		s := &strategies[i]
+		if s.Active && s.Target.Covers(tenantID) && len(s.Windows) > 0 && (best == nil || betterStrategy(s, best)) {
+			best = s
+		}
+	}
+	if best == nil {
+		return tenant.DefaultStrategyTZ
+	}
+	return best.Windows[0].Zone()
+}
+
 // applyStrategy resolves the highest-priority ACTIVE strategy matching tenantID at
 // `now`, if any, and returns the policy with its fields replaced plus the matched
 // strategy's id ("" when none matched).

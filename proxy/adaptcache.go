@@ -466,16 +466,22 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		gain = map[string]any{"option": gainID, "recommended": recommendation != nil, "vs_default": vd, "vs_current": pair(gainID, "current"),
 			"per_week_vs_default_usd": perWeek(vd["usd"].(float64)), "class": "counterfactual", "held_out": true, "upper_bound": true}
 	}
+	// The grid is in the account's strategy timezone, so a day x hour cell is the same span as a keep-alive window the user would write.
+	tz := h.keeper.strategyTZFor(tenant)
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		tz, loc = "UTC", time.UTC
+	}
 	heatmaps := map[string]any{}
 	for id, hp := range heldPer {
 		if id != "default" {
-			heatmaps[id] = adaptHeatmap(facts, test, hp, defHeld)
+			heatmaps[id] = adaptHeatmap(facts, test, hp, defHeld, loc)
 		}
 	}
 	var heatmap any
 	if hm, ok := heatmaps[gainID]; ok {
-		heatmap = map[string]any{"metric": "net_usd", "option": gainID, "tz": "UTC", "rows": "Mon..Sun", "cols": "00..23",
-			"label": "what " + gainID + " adds over the default, by day of week and hour of the request (held-out, upper bound)", "values": hm}
+		heatmap = map[string]any{"metric": "net_usd", "option": gainID, "tz": tz, "rows": "Mon..Sun", "cols": "00..23",
+			"label": "what " + gainID + " adds over the default, by day of week and hour of the request in " + tz + " (held-out, upper bound)", "values": hm}
 	}
 	current := "current"
 	if !curOK {
@@ -524,7 +530,7 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 			"note": "what the keep-alive actually did in this window (the dashboard's ledger); saved is a ceiling: another session with the same prefix could have kept the entry warm"},
 		"relative": relative,
 		"gain":     gain,
-		"heatmap":  heatmap, "option_heatmaps": heatmaps,
+		"heatmap":  heatmap, "option_heatmaps": heatmaps, "heatmap_tz": tz,
 		"to_date": map[string]any{"class": "observed", "since": since, "until": until, "saved_usd": r2(led.NetUSD), "saved_ceiling_usd": r2(led.SavedUSD),
 			"ping_usd": r2(led.PingUSD), "pings": led.Pings,
 			"label": "what your current keep-alive saved so far: the rewrites its pings avoided (a ceiling) minus what the pings cost, as billed"},
@@ -833,11 +839,12 @@ func (h *Handler) managedCampaign(pc *predCampaign, who adaptWho) bool {
 	return err == nil && t.IsManager()
 }
 
-// adaptHeatmap is an option's held-out net minus the default's, summed by the request's day of week (Monday first) and hour, UTC.
-func adaptHeatmap(facts []rowFacts, idx []int, per, def []float64) [7][24]float64 {
+// adaptHeatmap is an option's held-out net minus the default's, summed by the day of week (Monday first) and hour of the request start in loc.
+func adaptHeatmap(facts []rowFacts, idx []int, per, def []float64, loc *time.Location) [7][24]float64 {
 	var m [7][24]float64
 	for j, i := range idx {
-		m[(facts[i].dow+6)%7][facts[i].hour] += per[j] - def[j]
+		t := time.UnixMilli(facts[i].startMs).In(loc)
+		m[(int(t.Weekday())+6)%7][t.Hour()] += per[j] - def[j]
 	}
 	for d := range m {
 		for h := range m[d] {

@@ -73,6 +73,7 @@ type rowFacts struct {
 	turn               int     // requests of the conversation before this one
 	prefix             int64
 	hour, dow          int // request start, UTC
+	startMs            int64
 	model, agent, stop string
 	pRead, pWrite      float64 // gateway rates of the row's model
 	nextPrefix         int64   // the next request's cached prefix (0 = none or unknown)
@@ -134,7 +135,7 @@ func autoRowsX(reqs []*kvcache.Request, price func(model string) (pIn, pOut, pRe
 		f := rowFacts{u: r.UpstreamMs / 1000, returned: r.HasNext, toEnd: float64(max(0, lastEnd[key]-end)) / 1000,
 			stake: float64(r.CachedContext) * (pWrite - pRead), ping: (&predictive.Response{Prefix: r.CachedContext, PIn: pIn, POut: pOut, PRead: pRead}).PingCost(),
 			turn: sort.Search(len(byThr[tk]), func(i int) bool { return byThr[tk][i] >= r.TS }), prefix: r.CachedContext,
-			hour: st.Hour(), dow: int(st.Weekday()), model: r.Model, agent: r.Agent, stop: r.StopReason, pRead: pRead, pWrite: pWrite}
+			hour: st.Hour(), dow: int(st.Weekday()), startMs: r.TS, model: r.Model, agent: r.Agent, stop: r.StopReason, pRead: pRead, pWrite: pWrite}
 		f.span = math.Inf(1)
 		if ss := byThr[tk]; true {
 			if j := sort.Search(len(ss), func(i int) bool { return ss[i] > r.TS }); j < len(ss) {

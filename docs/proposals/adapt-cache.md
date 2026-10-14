@@ -16,8 +16,9 @@ For the calling account, over its own history in the dashboard DB:
    - adapted: `auto` (one plan for the account, shrunk toward the fleet: the auto campaign builder) and one plan per segment of
      `by_dow`, `by_hour`, `by_prefix`, `by_model`, `by_client`, `by_stop_reason` (shrunk toward the fleet the same way);
 3. for `/context-guru:save-more cache`: what the current keep-alive saved so far (`to_date`, observed), the gain of the change on offer
-   on the held-out basis (`gain`, against the default and the current setting, per held-out week too), and a Monday..Sunday x 00..23 UTC grid
-   of that gain (`heatmap`, one per option under `option_heatmaps`);
+   on the held-out basis (`gain`, against the default and the current setting, per held-out week too), and a Monday..Sunday x 00..23 grid
+   of that gain (`heatmap`, one per option under `option_heatmaps`) in the account's strategy timezone (`heatmap_tz`: the zone of the
+   account's keep-alive strategy windows, `tenant.DefaultStrategyTZ` when it has none), so a cell is the span of a window the user would set;
 4. what the keep-alive actually did (`observed`: real pings, their cost, the misses they avoided, from the dashboard's ledger);
 5. a choice: keep the default, or enforce an adapted option through the campaign builder.
 
