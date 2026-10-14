@@ -58,6 +58,10 @@ type campaignMeta struct {
 	Mode      string `json:"mode"`
 	CreatedAt int64  `json:"created_at"`
 	Actor     string `json:"actor"`
+	// ModeBy is who last changed the mode; Via is "adapt" for a campaign /api/adapt/cache built. A non-manager may not override a campaign a
+	// manager last set, and an adapt revert undoes only the caller's own adapt campaign.
+	ModeBy string `json:"mode_by,omitempty"`
+	Via    string `json:"via,omitempty"`
 }
 
 // shadowStats is the running score of a campaign's decisions on live traffic. Dollars are CLOSED-FORM ESTIMATES of the same kind as the build's
@@ -184,7 +188,7 @@ func (rt *predRuntime) load(id string) error {
 	}
 	if cur := rt.byTenant[m.Tenant]; cur != nil && cur.meta.ID == id {
 		cur.mu.Lock()
-		cur.meta.Mode = m.Mode
+		cur.meta.Mode, cur.meta.ModeBy = m.Mode, m.ModeBy
 		cur.mu.Unlock()
 		if m.Mode == campaignModeOff {
 			delete(rt.byTenant, m.Tenant)
@@ -372,7 +376,9 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	}
 	pc.tr.Ended(a, resp)
 	pingCost := resp.PingCost()
-	facts := predictive.Facts{Family: familyOf(model), StopReason: u.StopReason, Model: model, Agent: resp.Agent, PrefixTok: float64(resp.Prefix), PingCost: pingCost}
+	st := startedAt.UTC()
+	facts := predictive.Facts{Family: familyOf(model), StopReason: u.StopReason, Model: model, Agent: resp.Agent, PrefixTok: float64(resp.Prefix), PingCost: pingCost,
+		HourUTC: float64(st.Hour()), DowUTC: float64(st.Weekday())}
 	pc.mu.Lock()
 	spec := pc.spec // an auto campaign's refresh swaps it (refreshAutoCampaigns)
 	pc.mu.Unlock()

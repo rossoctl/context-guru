@@ -130,6 +130,8 @@ type Facts struct {
 	Family, StopReason, Model, Agent string
 	PrefixTok, PingCost              float64
 	SessionTurn                      float64
+	// HourUTC (0-23) and DowUTC (0 = Sunday) are the request's start, UTC: per-time segments test them.
+	HourUTC, DowUTC float64
 }
 
 func (f *Facts) get(name string) (str string, num float64, isNum bool, ok bool) {
@@ -146,6 +148,10 @@ func (f *Facts) get(name string) (str string, num float64, isNum bool, ok bool) 
 		return "", f.PrefixTok, true, true
 	case "ping_cost":
 		return "", f.PingCost, true, true
+	case "hour_utc":
+		return "", f.HourUTC, true, true
+	case "dow_utc":
+		return "", f.DowUTC, true, true
 	}
 	return "", 0, false, false
 }
