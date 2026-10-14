@@ -164,7 +164,11 @@ func TestCacheStateSplitsTheSessionsMoney(t *testing.T) {
 		}
 	}
 	// A session whose only rows touched no cache still reports its money on the `none` answer.
-	seed(t, rec, func() *Event { e := row(1_000, "", 0.10, 0.20, 0, 0); e.SessionID, e.CacheRead, e.CacheWrite = "s2", 0, 0; return e }())
+	seed(t, rec, func() *Event {
+		e := row(1_000, "", 0.10, 0.20, 0, 0)
+		e.SessionID, e.CacheRead, e.CacheWrite = "s2", 0, 0
+		return e
+	}())
 	_, b2 := get(t, a, "/api/cachestate?session=s2", "")
 	if b2["none"] != true || b2["money"] == nil {
 		t.Errorf("s2 = %v, want none with money", b2)
