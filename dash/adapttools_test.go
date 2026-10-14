@@ -350,3 +350,50 @@ func TestAdaptToolsPayback(t *testing.T) {
 		t.Fatalf("payback beyond the window must keep as is: best %s rec %+v", slow.Best, slow.Recommendation)
 	}
 }
+
+// A declaration removed in the client is priced per later request that still carried MCP tools,
+// at that request's rate, and reported as an estimate apart from the measured saving.
+func TestAdaptToolsEstimatesAClientSideRemovalPerRequest(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	add := func(session, digest string, ts int64, n, tools int) {
+		for i := 0; i < n; i++ {
+			e := mkEvent(ts+int64(i), session, "opus", 100, 100)
+			e.TenantID, e.Tools, e.CacheRead, e.CacheWrite, e.DeclDigest = "t1", tools, 1000, 0, digest
+			evs = append(evs, e)
+		}
+	}
+	add("before", "both", day(0), 2, 2)
+	for i, sess := range []string{"after1", "after2", "after3"} { // detection needs 3 later sessions
+		add(sess, "b-only", day(1+i), 1+i%2, 1)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	a := Decl{Kind: KindMCPTool, Name: "mcp__a__x", Server: "a", Tokens: 200}
+	b := Decl{Kind: KindMCPTool, Name: "mcp__b__y", Server: "b", Tokens: 50}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{
+		{tenant: "t1", session: "before", ts: day(0), inv: &Inventory{Digest: "both", UseFingerprint: 1, Decls: []Decl{a, b}}},
+		{tenant: "t1", session: "after1", ts: day(1), inv: &Inventory{Digest: "b-only", UseFingerprint: 2, Decls: []Decl{b}}},
+		{tenant: "t1", session: "after2", ts: day(2), inv: &Inventory{Digest: "b-only", UseFingerprint: 3, Decls: []Decl{b}}},
+		{tenant: "t1", session: "after3", ts: day(3), inv: &Inventory{Digest: "b-only", UseFingerprint: 4, Decls: []Decl{b}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := db.AdaptTools(Filter{Tenant: "t1"}, adaptPrice, ToolFilterState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := doc.SavedSoFar.Client
+	want := 4 * 200 * 0.1 // four requests in later sessions that still carried MCP tools, cache read at opus's rate
+	if cl.Class != "estimated" || cl.Label != "estimated (removed in the client)" || len(cl.Items) != 1 ||
+		cl.Items[0].Name != "mcp__a__x" || cl.Items[0].Requests != 4 || math.Abs(cl.Items[0].USD-want) > 1e-9 {
+		t.Fatalf("client %+v, want mcp__a__x at $%v over 4 requests", cl, want)
+	}
+	// Never summed into the measured figure.
+	if doc.SavedSoFar.TotalUSD != 0 || doc.ToDate.SavedUSD != 0 || doc.ToDate.Items != 0 ||
+		len(doc.Removed) != 1 || doc.Removed[0].Class != "estimated" {
+		t.Fatalf("measured %v, to_date %+v, removed %+v", doc.SavedSoFar.TotalUSD, doc.ToDate, doc.Removed)
+	}
+}

@@ -601,9 +601,12 @@ already made have saved, measured rather than estimated:
   filter did not forward (`filtered_decl_tokens`). Each removed item is priced on exactly the requests it
   was stripped from, at that request's model and cache tier (read, write, input), and the total is the
   filter's own count priced the same way. Requests from before the removal count for nothing.
-- **Client.** A declaration removed in the client (`claude mcp remove`, `skillOverrides`) leaves no row of
-  its own; it is credited from the later sessions that still carried MCP tools or skills and no longer
-  carried it. An item that is also on the filter list is counted once, under the filter.
+- **Client — an estimate, shown apart.** A declaration removed in the client (`claude mcp remove`,
+  `skillOverrides`) leaves no row of its own. It is detected when it stops appearing in at least three later
+  sessions that still carried MCP tools (or skills), and priced at its tokens on each request of those later
+  sessions whose set still carried them, at that request's model and tier. It is labelled
+  "estimated (removed in the client)" and never added to the measured total. An item that is also on the
+  filter list is counted once, under the filter.
 `POST /api/adapt/tools/apply {"option", "basis"}` writes one option of a report fetched in the last
 30 minutes into the removal list; `restore` takes those entries out, and `revert` undoes the last tools
 apply (never another adapt command's change). It shares identity, rate limit, audit and the single-tenant override file with every

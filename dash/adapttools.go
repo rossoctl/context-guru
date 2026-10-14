@@ -140,6 +140,8 @@ type AdaptToolsToDate struct {
 
 // AdaptToolsRemovedRow is one earlier removal's measured saving.
 type AdaptToolsRemovedRow struct {
+	// Class is "observed" (filtered by the proxy, measured) or "estimated" (removed in the client).
+	Class    string  `json:"class"`
 	Kind     string  `json:"kind"`
 	Name     string  `json:"name"`
 	SinceMS  int64   `json:"since_ms"`
@@ -149,6 +151,10 @@ type AdaptToolsRemovedRow struct {
 
 // AdaptToolsSavedPart is one route a removal took: the proxy filter, or the client itself.
 type AdaptToolsSavedPart struct {
+	// Class is "observed" for the filter and "estimated" for client-side removals; Label says so
+	// in words a page can print.
+	Class    string                `json:"class"`
+	Label    string                `json:"label"`
 	USD      float64               `json:"usd"`
 	Requests int                   `json:"requests,omitempty"`
 	Since    int64                 `json:"since,omitempty"`
@@ -291,6 +297,19 @@ type carriedScan struct {
 	Items        map[string]*carried
 	RewriteUSD   float64 // the latest priced request's whole prompt at write minus read
 	rewriteTS    int64
+	// Requests is every mapped, priced request, when asked for (carriedOpts.perRequest).
+	Requests     []carriedRequest
+	keepRequests bool
+}
+
+type carriedOpts struct{ onlyFiltered, perRequest bool }
+
+// carriedRequest is one priced request: when, the per-token rate its declarations were billed
+// at, and the keys its set carried.
+type carriedRequest struct {
+	TS, SessionStart int64
+	Rate             float64
+	Keys             map[string]bool
 }
 
 // carriedCost prices declarations on exactly the requests that carried them.
@@ -301,15 +320,16 @@ type carriedScan struct {
 // is priced at its own model and tier: cache read when its prefix was read, cache write when it
 // was rewritten (2x input for a one-hour write), input when uncached.
 //
-// onlyFiltered restricts it to requests the declaration filter acted on: what it stripped from
-// the declarations the client sent, priced the same way.
+// opt.onlyFiltered restricts it to requests the declaration filter acted on: what it stripped
+// from the declarations the client sent, priced the same way. opt.perRequest also keeps every
+// priced request's time, rate and keys, for a caller that prices something per request itself.
 func (d *DB) carriedCost(f Filter, price func(string) (modelinfo.Price, bool),
-	keyOf func(session, kind, name, server string) string, onlyFiltered bool) (*carriedScan, error) {
+	keyOf func(session, kind, name, server string) string, opt carriedOpts) (*carriedScan, error) {
 	where, args := f.where()
-	if onlyFiltered {
+	if opt.onlyFiltered {
 		where += ` AND r.filtered_decl_tokens > 0`
 	}
-	out := &carriedScan{Items: map[string]*carried{}}
+	out := &carriedScan{Items: map[string]*carried{}, keepRequests: opt.perRequest}
 	reqs := map[string][]adaptToolsReq{} // tenant\x00session -> requests, oldest first
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.ts, r.model,
 		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write, r.cache_write_1h, r.fresh_input
@@ -348,7 +368,7 @@ func (d *DB) carriedCost(f Filter, price func(string) (modelinfo.Price, bool),
 	}
 	byID := make([]*carried, len(keys))
 	for _, sess := range sets {
-		priceCarriedSession(out, byID, reqs[sess.key], sess.sets, price)
+		priceCarriedSession(out, byID, keys, reqs[sess.key], sess.sets, price)
 	}
 	for id, c := range byID {
 		if c != nil {
@@ -359,7 +379,7 @@ func (d *DB) carriedCost(f Filter, price func(string) (modelinfo.Price, bool),
 }
 
 // priceCarriedSession prices one session's requests against its declaration sets.
-func priceCarriedSession(out *carriedScan, byID []*carried, list []adaptToolsReq, sess map[string]*adaptToolsSet,
+func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list []adaptToolsReq, sess map[string]*adaptToolsSet,
 	price func(string) (modelinfo.Price, bool)) {
 	out.Coverage.SessionsCaptured++
 	sums := make(map[*adaptToolsSet]map[int32][2]int, len(sess))
@@ -458,6 +478,13 @@ func priceCarriedSession(out *carriedScan, byID []*carried, list []adaptToolsReq
 		if ok && r.ts >= out.rewriteTS {
 			out.rewriteTS = r.ts
 			out.RewriteUSD = float64(r.cacheRead+r.cacheWrite+r.fresh) * (p.CacheWrite - p.CacheRead)
+		}
+		if ok && out.keepRequests {
+			cr := carriedRequest{TS: r.ts, SessionStart: list[0].ts, Rate: rate, Keys: make(map[string]bool, len(m))}
+			for key := range m {
+				cr.Keys[keys[key]] = true
+			}
+			out.Requests = append(out.Requests, cr)
 		}
 		for key, v := range m {
 			c := byID[key]
@@ -686,7 +713,7 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			metaMu.Unlock()
 		}
 		return key
-	}, false)
+	}, carriedOpts{})
 	if err != nil {
 		return nil, err
 	}
@@ -858,12 +885,12 @@ func adaptToolsQuestion(remove []string, perWeek, toDate float64, since string, 
 	return q + "."
 }
 
-const adaptToolsSavedMethod = "Filter: every request the proxy filter acted on, the removed declarations' " +
-	"tokens in the set the client sent (requests.decl_digest), priced at that request's model and tier; " +
-	"the total is the filter's own count of tokens not sent (requests.filtered_decl_tokens) priced the " +
-	"same way. Client: declarations that stopped appearing in later sessions that still carried MCP " +
-	"tools or skills, priced on those sessions (the Inventory's self-removal credit). Items on both " +
-	"routes are counted once, under the filter."
+const adaptToolsSavedMethod = "Filter (measured): every request the proxy filter acted on, the removed " +
+	"declarations' tokens in the set the client sent (requests.decl_digest), priced at that request's " +
+	"model and tier; the total is the filter's own count of tokens not sent (requests.filtered_decl_tokens) " +
+	"priced the same way. Client (an estimate, never added to the measured total): a declaration that " +
+	"stopped appearing in later sessions that still carried MCP tools or skills is priced at its tokens on " +
+	"each such later request, at that request's model and tier. Items on both routes count once, under the filter."
 
 // adaptToolsSaved measures what removals already made have saved.
 //
@@ -875,7 +902,8 @@ const adaptToolsSavedMethod = "Filter: every request the proxy filter acted on, 
 // ran without it (SelfRemovals), and an item also on the filter list is left to the filter.
 func (d *DB) adaptToolsSaved(f Filter, price func(string) (modelinfo.Price, bool), removedList []string) (AdaptToolsSaved, error) {
 	out := AdaptToolsSaved{Method: adaptToolsSavedMethod,
-		Filter: AdaptToolsSavedPart{Items: []AdaptToolsSavedItem{}}, Client: AdaptToolsSavedPart{Items: []AdaptToolsSavedItem{}}}
+		Filter: AdaptToolsSavedPart{Class: "observed", Label: "measured (filtered by the proxy)", Items: []AdaptToolsSavedItem{}},
+		Client: AdaptToolsSavedPart{Class: "estimated", Label: "estimated (removed in the client)", Items: []AdaptToolsSavedItem{}}}
 	if real, err := d.DeclFilterSavings(f, price); err != nil {
 		return out, err
 	} else if real.Requests > 0 {
@@ -896,7 +924,7 @@ func (d *DB) adaptToolsSaved(f Filter, price func(string) (modelinfo.Price, bool
 				return skills.RemovePrefix + name
 			}
 			return ""
-		}, true)
+		}, carriedOpts{onlyFiltered: true})
 		if err != nil {
 			return out, err
 		}
@@ -912,17 +940,54 @@ func (d *DB) adaptToolsSaved(f Filter, price func(string) (modelinfo.Price, bool
 				RemoveAs: removeAs, USD: c.USD(), Requests: c.Requests, Since: c.FirstTS})
 		}
 	}
+	// Client-side removals: SelfRemovals only DETECTS them (a name that stopped appearing in later
+	// sessions that still carried MCP tools or skills). The figure is priced here, per request:
+	// the removed declaration's tokens on each later request whose set still carried MCP tools (for
+	// an MCP item) or skills (for a skill), at that request's own model and tier. It is an
+	// ESTIMATE of what carrying it would have cost, not a measurement, so it is reported apart and
+	// never added to the filter's measured total.
 	self, err := d.SelfRemovals(f, price, removedList)
 	if err != nil {
 		return out, err
 	}
+	var client []SelfRemoval
 	for _, r := range self {
-		if r.Overlap || adaptToolsOwn.MatchString(r.Name) || adaptToolsOwn.MatchString(r.Server) {
-			continue
+		if !r.Overlap && !adaptToolsOwn.MatchString(r.Name) && !adaptToolsOwn.MatchString(r.Server) {
+			client = append(client, r)
 		}
-		out.Client.USD += r.AvoidedUSD
-		out.Client.Items = append(out.Client.Items, AdaptToolsSavedItem{Kind: r.Kind, Name: r.Name,
-			USD: r.AvoidedUSD, SessionsAfter: r.SessionsAfter, Since: r.LastSeen})
+	}
+	if len(client) > 0 {
+		const mcp, skill = "\x00mcp", "\x00skills"
+		scan, err := d.carriedCost(f, price, func(_, kind, _, _ string) string {
+			switch kind {
+			case KindMCPTool:
+				return mcp
+			case KindSkill, KindSkillListing:
+				return skill
+			}
+			return ""
+		}, carriedOpts{perRequest: true})
+		if err != nil {
+			return out, err
+		}
+		for _, r := range client {
+			cohort := mcp
+			if r.Kind == KindSkill {
+				cohort = skill
+			}
+			it := AdaptToolsSavedItem{Kind: r.Kind, Name: r.Name, SessionsAfter: r.SessionsAfter, Since: r.LastSeen}
+			for _, q := range scan.Requests {
+				// The same rule SelfRemovals detects by: only sessions that STARTED after the last
+				// one that carried it, and only requests whose set still carried the cohort.
+				if q.SessionStart > r.LastSeen && q.Keys[cohort] {
+					it.USD += float64(r.Tokens) * q.Rate
+					it.Requests++
+				}
+			}
+			out.Client.USD += it.USD
+			out.Client.Requests += it.Requests
+			out.Client.Items = append(out.Client.Items, it)
+		}
 	}
 	for _, p := range []*AdaptToolsSavedPart{&out.Filter, &out.Client} {
 		sort.Slice(p.Items, func(i, j int) bool {
@@ -932,7 +997,7 @@ func (d *DB) adaptToolsSaved(f Filter, price func(string) (modelinfo.Price, bool
 			return p.Items[i].Name < p.Items[j].Name
 		})
 	}
-	out.TotalUSD = out.Filter.USD + out.Client.USD
+	out.TotalUSD = out.Filter.USD // measured only; the client estimate stays apart
 	return out, nil
 }
 
@@ -943,18 +1008,19 @@ func adaptToolsToDate(sv AdaptToolsSaved) (*AdaptToolsToDate, []AdaptToolsRemove
 		Label: "what your earlier removals saved so far", Since: sv.Filter.Since}
 	rows := []AdaptToolsRemovedRow{}
 	for _, it := range sv.Filter.Items {
-		rows = append(rows, AdaptToolsRemovedRow{Kind: it.Kind, Name: it.Name, SinceMS: it.Since,
+		rows = append(rows, AdaptToolsRemovedRow{Class: "observed", Kind: it.Kind, Name: it.Name, SinceMS: it.Since,
 			SavedUSD: it.USD, Requests: it.Requests})
-	}
-	for _, it := range sv.Client.Items {
-		rows = append(rows, AdaptToolsRemovedRow{Kind: it.Kind, Name: it.Name, SinceMS: it.Since, SavedUSD: it.USD})
-	}
-	for _, r := range rows {
-		if r.SinceMS > 0 && (td.Since == 0 || r.SinceMS < td.Since) {
-			td.Since = r.SinceMS
+		if it.Since > 0 && (td.Since == 0 || it.Since < td.Since) {
+			td.Since = it.Since
 		}
 	}
+	// to_date is the measured figure, so it counts the filter's items only; the client estimates
+	// are rows of their own class.
 	td.Items = len(rows)
+	for _, it := range sv.Client.Items {
+		rows = append(rows, AdaptToolsRemovedRow{Class: "estimated", Kind: it.Kind, Name: it.Name, SinceMS: it.Since,
+			SavedUSD: it.USD, Requests: it.Requests})
+	}
 	return td, rows
 }
 

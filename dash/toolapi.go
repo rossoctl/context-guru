@@ -445,7 +445,7 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 	var g errgroup.Group
 	g.Go(func() error {
 		var err error
-		carriedRes, err = d.carriedCost(f, price, unusedKeyOf(usedBySession(uses)), false)
+		carriedRes, err = d.carriedCost(f, price, unusedKeyOf(usedBySession(uses)), carriedOpts{})
 		return err
 	})
 	var decls []declRow
