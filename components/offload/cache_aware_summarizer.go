@@ -213,15 +213,8 @@ type summarizerProfiles struct {
 // that can re-grant `system` to every unmatched model at once is the opposite of an allow-list,
 // so an unmatched model is now unconditionally `user`.
 func (p *summarizerProfiles) roleFor(modelID string) (role bschemas.ChatMessageRole, matched bool) {
-	id := strings.ToLower(strings.TrimSpace(modelID))
-	if id != "" {
-		for _, m := range p.SystemModels {
-			if m != "" && strings.Contains(id, strings.ToLower(strings.TrimSpace(m))) {
-				return bschemas.ChatMessageRoleSystem, true
-			}
-		}
-	}
-	return bschemas.ChatMessageRoleUser, false
+	a := resolveAsk(p.SystemModels, modelID, askViaMessages)
+	return a.Role, a.SystemAllowed
 }
 
 // thinkingLastTurnOnly reports whether modelID is one documented to keep only the LAST turn's
@@ -245,16 +238,7 @@ func (p *summarizerProfiles) roleFor(modelID string) (role bschemas.ChatMessageR
 // summarizer_model_profiles.yaml's thinking_last_turn_models) also names Claude 3.7 Sonnet,
 // bare Opus 4 and Opus 4.1, and bare Sonnet 4 and Sonnet 4.5, per the same doc page's cutoffs.
 func (p *summarizerProfiles) thinkingLastTurnOnly(modelID string) bool {
-	id := strings.ToLower(strings.TrimSpace(modelID))
-	if id == "" {
-		return false
-	}
-	for _, m := range p.ThinkingLastTurnModels {
-		if m != "" && strings.Contains(id, strings.ToLower(strings.TrimSpace(m))) {
-			return true
-		}
-	}
-	return false
+	return matchesModelList(p.ThinkingLastTurnModels, modelID)
 }
 
 // prompt returns the instruction text for a role. The two differ by more than tone: the user
@@ -622,34 +606,6 @@ func (s *CacheAwareSummarizer) InstructionRole() string { return string(s.instru
 // built as [the whole conversation] + [instruction], and is REUSED across turns until the tail
 // grows past resummarize_tokens — without that reuse the forwarded prefix would change every
 // turn and this component would invalidate the cache it exists to protect.
-// hasThinkingBlock reports whether an assistant message carries a thinking block — plain
-// (`Reasoning`/a `reasoning.text` detail, bifrost's normalized form of Anthropic's `thinking`)
-// or encrypted (`reasoning.encrypted`, bifrost's form of `redacted_thinking`). Either shape is
-// what Anthropic's own preservation rule keys on; this component does not need to tell them
-// apart; strips/keeps the whole block together.
-func hasThinkingBlock(m bschemas.ChatMessage) bool {
-	return m.ChatAssistantMessage != nil &&
-		(m.Reasoning != nil || len(m.ReasoningDetails) > 0)
-}
-
-// thinkingWouldBeStripped reports whether appending a non-tool-result message to msgs would,
-// on a last-turn-only model, strip every thinking block before the LAST message from the
-// backend's own cached context — see summarizerProfiles.thinkingLastTurnOnly for the citation
-// and the live-measured gap this check exists to close. The last message itself is excluded:
-// appending AFTER it is exactly the turn whose thinking (if any) survives on either kind of
-// model, so it carries no risk of its own.
-func thinkingWouldBeStripped(msgs []bschemas.ChatMessage) bool {
-	if len(msgs) == 0 {
-		return false
-	}
-	for _, m := range msgs[:len(msgs)-1] {
-		if hasThinkingBlock(m) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	msgs := req.Input
 	// Attribute any spend a DETACHED summarizer call incurred since this session's last turn.
@@ -805,7 +761,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// the dashboard's own numbers would suggest — silently, which is worse than not compacting
 	// at all. c.ModelName is the ACTUAL model this request targets, not s.modelID (the
 	// operator's pinned model for the system-role check below, a different question).
-	if profiles.thinkingLastTurnOnly(c.ModelName) && thinkingWouldBeStripped(msgs) {
+	if askStripsThinking(profiles.ThinkingLastTurnModels, c.ModelName, msgs) {
 		atomic.AddInt64(&cacheAwareThinkingWouldStrip, 1)
 		rep.Gate("thinking_would_be_stripped")
 		logging.From(c.Ctx).Debug("cg.cache_aware_summarizer.thinking_would_be_stripped",
@@ -838,7 +794,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		// Overridden HERE rather than at `role`'s own resolution above, because that resolution
 		// also has to stay correct for a deployment that later gets a MessagesModel on the same
 		// config.
-		role = bschemas.ChatMessageRoleUser
+		role = resolveAsk(profiles.SystemModels, s.modelID, askViaPrefix).Role
 	}
 	instruction := bschemas.ChatMessage{Role: role}
 	schema.SetMessageText(&instruction, profiles.prompt(role))

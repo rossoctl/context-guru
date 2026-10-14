@@ -143,7 +143,10 @@ func renderEvidence(e map[string]any) string {
 	return strings.TrimSpace(b.String())
 }
 
-// buildAsk assembles the inventory question — the SHIPPED prompt, via extract.BuildPrefixAsk.
+// buildAsk assembles the inventory question — the SHIPPED prompt BODY, via extract.BuildPrefixAsk.
+// Production sends the shared opening line (offload.askOpeningLine) in front of this body. This tool
+// does not, so arm results differ from production by that one line (about 20 tokens), identically
+// in every arm.
 //
 // This used to return the ask CONCATENATED ONTO the flattened transcript, as one user message, and that
 // was a different question from the one production asks. Live, the transcript is the request's own
@@ -172,7 +175,7 @@ func buildAsk(b batch, arm string) (string, error) {
 			Evidence:   renderEvidence(c.Evidence),
 		})
 	}
-	ask := extract.BuildPrefixAsk(items) // THE SHIPPED PROMPT
+	ask := extract.BuildPrefixAsk(items) // THE SHIPPED PROMPT BODY, without the opening line
 	if arm == "B" {
 		if !strings.Contains(ask, clauseBefore) {
 			return "", fmt.Errorf("arm B: the clause under test is not in the shipped contract any more.\n"+
