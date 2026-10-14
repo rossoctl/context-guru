@@ -2,8 +2,8 @@
 
 ╭─ Remove MCP servers and skills ─────────────────────────────────────────────────────────────────╮
 │ So far: the 2 items you already removed saved $4.50 (measured, since 2026-09-15).               │
-│ Change: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more would add about $7.33 │
-│ a week (range $6.10 to $8.40).                                                                  │
+│ Change: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more. Over the last 30     │
+│ days it would have saved about $7.33 a week (range $6.10 to $8.40).                             │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
 9 declared items were never used; filtering the 6 with enough evidence would have saved $31.40.
 
@@ -35,4 +35,4 @@ Recommended: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more (
 Why: declared in 5+ sessions over 7+ days and never called
 Apply it? Say yes, or run: /context-guru:remove-mcp-and-skills apply tools remove-sufficient@8c21e0d4
 
-Question: Remove these 6 items, saving ≈$7.33/week? It pays back in about 2 weeks.
+Question: Remove these 6 items? Over the last 30 days they would have saved about $7.33 a week (pays back in about 2 weeks).

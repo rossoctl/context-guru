@@ -5,7 +5,7 @@ argument-hint: "[details] [--days N]  |  apply tools <option>@<basis>  |  revert
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" remove-mcp-and-skills:*), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" record-run remove-mcp-and-skills)
 ---
 
-Run this with a Bash timeout of 420000 ms and print its output exactly as it is in one code block:
+Run this now, with a Bash timeout of 420000 ms, and print its output exactly as it is in one code block:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" remove-mcp-and-skills $ARGUMENTS && python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" record-run remove-mcp-and-skills

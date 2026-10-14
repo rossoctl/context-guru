@@ -112,7 +112,7 @@
    6.1,
    8.4
   ],
-  "payback_weeks": 1.6
+  "payback_weeks": 1.2
  },
  "warnings": [
   "Unused means unused in this window, not that it will never be needed.",

@@ -21,13 +21,14 @@ Codex: `$context-guru-save-more`, with the same words.
 ![/context-guru:save-more](img/save-more-dark.svg#only-dark)
 ![/context-guru:save-more](img/save-more-light.svg#only-light)
 
-Each report opens with a card that answers two questions in plain words: what your **current** setting saved so far, and what the **recommended** change would add, per week, with its likely range. Then a ranked table of every option, and the caveats.
+Each report opens with a card that answers two questions in plain words: what your **current** setting saved so far, and what the **recommended** change would have saved per week over the same past sessions, with its range. Then a ranked table of every option, and the caveats.
 
 ```text
-╭─ Save more: config ────────────────────────────────────────────────────────────────────────╮
-│ So far: your current config saved $9.40 in 30 days (observed).                             │
-│ Change: preset conservative -> medium would add about $1.49 a week (range $0.40 to $2.70). │
-╰────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Save more: config ─────────────────────────────────────────────────────────────────────────────╮
+│ So far: your current config saved $9.40 in 30 days (observed).                                  │
+│ Change: preset conservative -> medium. Over the last 30 days it would have saved about $1.49 a  │
+│ week (range $0.40 to $2.70).                                                                    │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
 medium would have saved $6.40 more than your current conservative preset on the requests that could
 be replayed.
 
@@ -53,8 +54,8 @@ Apply it? Say yes, or run: /context-guru:save-more apply config medium@a1b2c3d4
 
 ╭─ Save more: cache ──────────────────────────────────────────────────────────────────────────────╮
 │ So far: your current keep-alive strategy saved $31.10 in 30 days (observed).                    │
-│ Change: cache strategy 5-min-ping -> adaptive would add about $2.89 a week (95% CI $0.72 to     │
-│ $4.89).                                                                                         │
+│ Change: cache strategy 5-min-ping -> adaptive. Over the last 30 days it would have saved about  │
+│ $2.89 a week (95% CI $0.72 to $4.89).                                                           │
 │ Before -> after: $300.00 billed on these sessions, $287.00 with the change.                     │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
 switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
@@ -88,10 +89,10 @@ Recommended: cache strategy 5-min-ping -> adaptive (takes effect at the next pro
 Why: it had the highest net on your own sessions
 Apply it? Say yes, or run: /context-guru:save-more apply cache adaptive@3f9a1c
 
-╭─ Save more: both ────────────────────────────────────────────────────────╮
-│ config  saved so far    $9.40   recommended change adds about $1.49/week │
-│ cache   saved so far   $31.10   recommended change adds about $2.89/week │
-╰──────────────────────────────────────────────────────────────────────────╯
+╭─ Save more: both ──────────────────────────────────────────────────────────────────────────╮
+│ config  saved so far    $9.40   the recommended change would have saved about $1.49 a week │
+│ cache   saved so far   $31.10   the recommended change would have saved about $2.89 a week │
+╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Question: apply both, only one of them, or neither?
 ```
 
@@ -105,8 +106,8 @@ It reads the same at 80 columns and without Unicode or colour (`CG_ASCII=1`, `NO
 ```text
 +- Save more: config ---------------------------------------------------------+
 | So far: your current config saved $9.40 in 30 days (observed).              |
-| Change: preset conservative -> medium would add about $1.49 a week (range   |
-| $0.40 to $2.70).                                                            |
+| Change: preset conservative -> medium. Over the last 30 days it would have  |
+| saved about $1.49 a week (range $0.40 to $2.70).                            |
 +-----------------------------------------------------------------------------+
 medium would have saved $6.40 more than your current conservative preset on the
 requests that could be replayed.
@@ -136,8 +137,8 @@ Apply it? Say yes, or run: /context-guru:save-more apply config medium@a1b2c3d4
 +- Save more: cache ----------------------------------------------------------+
 | So far: your current keep-alive strategy saved $31.10 in 30 days            |
 | (observed).                                                                 |
-| Change: cache strategy 5-min-ping -> adaptive would add about $2.89 a week  |
-| (95% CI $0.72 to $4.89).                                                    |
+| Change: cache strategy 5-min-ping -> adaptive. Over the last 30 days it     |
+| would have saved about $2.89 a week (95% CI $0.72 to $4.89).                |
 | Before -> after: $300.00 billed on these sessions, $287.00 with the change. |
 +-----------------------------------------------------------------------------+
 switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
@@ -173,10 +174,12 @@ proxy restart).
 Why: it had the highest net on your own sessions
 Apply it? Say yes, or run: /context-guru:save-more apply cache adaptive@3f9a1c
 
-+- Save more: both --------------------------------------------------------+
-| config  saved so far    $9.40   recommended change adds about $1.49/week |
-| cache   saved so far   $31.10   recommended change adds about $2.89/week |
-+--------------------------------------------------------------------------+
++- Save more: both -----------------------------------------------------------+
+| config  saved so far    $9.40   the recommended change would have saved     |
+| about $1.49 a week                                                          |
+| cache   saved so far   $31.10   the recommended change would have saved     |
+| about $2.89 a week                                                          |
++-----------------------------------------------------------------------------+
 Question: apply both, only one of them, or neither?
 ```
 

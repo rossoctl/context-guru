@@ -10,8 +10,8 @@
 ```text
 ╭─ Remove MCP servers and skills ─────────────────────────────────────────────────────────────────╮
 │ So far: the 2 items you already removed saved $4.50 (measured, since 2026-09-15).               │
-│ Change: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more would add about $7.33 │
-│ a week (range $6.10 to $8.40).                                                                  │
+│ Change: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more. Over the last 30     │
+│ days it would have saved about $7.33 a week (range $6.10 to $8.40).                             │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
 9 declared items were never used; filtering the 6 with enough evidence would have saved $31.40.
 
@@ -43,14 +43,14 @@ Recommended: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more (
 Why: declared in 5+ sessions over 7+ days and never called
 Apply it? Say yes, or run: /context-guru:remove-mcp-and-skills apply tools remove-sufficient@8c21e0d4
 
-Question: Remove these 6 items, saving ≈$7.33/week? It pays back in about 2 weeks.
+Question: Remove these 6 items? Over the last 30 days they would have saved about $7.33 a week (pays back in about 2 weeks).
 ```
 
-- The card: what earlier removals saved so far (measured, not estimated), and what the recommendation would add per week, with its likely range.
+- The card: what earlier removals saved so far (measured, not estimated), and what the recommendation would have saved per week over the same window, with its range.
 - The recommendation covers only items seen in enough sessions over enough days; `remove-all` is shown for comparison.
 - `details` lists every item and each earlier removal with its measured saving.
 
-The question is exactly the last line: "Remove these N items, saving ≈$X/week?". On yes the proxy filters them from the next request on:
+The question is exactly the last line: "Remove these N items? Over the last D days they would have saved about $X a week", with "(pays back in about W weeks)" when the one-off cache rewrite takes more than a week to earn back. It is hindsight, not a promise. On yes the proxy filters them from the next request on:
 
 ![the question in Claude Code](img/cc-remove-1-question-dark.svg#only-dark)
 ![the question in Claude Code](img/cc-remove-1-question-light.svg#only-light)

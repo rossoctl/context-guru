@@ -23,6 +23,7 @@ import argparse
 import concurrent.futures
 import datetime as dt
 import json
+import math
 import os
 import re
 import shlex
@@ -436,7 +437,7 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
 
 KINDS = ("config", "cache", "tools")
 ROUTE = {"config": "compaction", "cache": "cache", "tools": "tools"}  # the backend keeps its /api/adapt/* paths
-ALIAS = {"compaction": "config"}  # the 0.6 name, still understood
+ALIAS = {"compaction": "config", "waste": "tools"}  # older names, still understood
 WRITES = ("apply", "revert")  # top-level commands; no read command ever writes, so a skill may pre-approve it
 READS = ("save-more", "remove-mcp-and-skills", "adapt")
 SLASH = {"config": "/context-guru:save-more", "cache": "/context-guru:save-more", "tools": "/context-guru:remove-mcp-and-skills"}
@@ -701,8 +702,10 @@ def plain_words(kind: str, rep: dict, o: dict) -> list[str]:
     w = rep.get("window") or {}
     td = rep.get("to_date") or {}
     if kind == "tools":
-        a = (f"So far: the {td.get('items', 0)} item{'s' * (td.get('items', 0) != 1)} you already removed saved {dollars(td['saved_usd'])} "
-             f"({td.get('class', 'measured')}, since {day(td['since'], o)})." if td.get("saved_usd") is not None and td.get("items")
+        n_, saved = td.get("items") or 0, td.get("saved_usd")
+        since = f", since {day(td['since'], o)}" if td.get("since") else ""
+        a = (f"So far: the {n_} item{'s' * (n_ != 1)} you already removed saved {dollars(saved)} ({td.get('class', 'measured')}{since})." if saved is not None and n_
+             else f"So far: earlier removals saved {dollars(saved)} ({td.get('class', 'measured')}{since})." if saved
              else "So far: nothing removed yet, so nothing saved by removing yet.")
     elif td.get("saved_usd") is not None:
         a = (f"So far: your current {NOUN[kind]} saved {dollars(td['saved_usd'])} in {days_of({'since': td.get('since'), 'until': td.get('until')})} days"
@@ -711,7 +714,9 @@ def plain_words(kind: str, rep: dict, o: dict) -> list[str]:
         a = f"So far: what your current {NOUN[kind]} saved is not measured on this proxy yet."
     rec = rep.get("recommendation")
     if rec:
-        b = f"Change: {rec['change']} would add about {money(per_week(rec, w))} a week{week_range(rec, w)}."
+        pw = per_week(rec, w)
+        b = f"Change: {rec['change']}." + (f" Over the last {days_of(w)} days it would have saved about {dollars(pw)} a week"
+                                           f"{week_range(rec, w)}." if pw is not None else "")
     else:
         b = "Change: none recommended (the reason is just below)."
     by = {x["id"]: x for x in rep.get("options") or []}
@@ -784,15 +789,27 @@ def render_kind(kind: str, rep: dict, o: dict, e) -> list[str]:
     return T.fit(L, e) + act
 
 
+def weeks(n: float) -> str:
+    """A payback, rounded up: a change that takes 1.2 weeks to pay back has not paid back in 1."""
+    k = max(1, math.ceil(n - 1e-9))
+    return f"{k} week" + ("s" if k > 1 else "")
+
+
 def tools_question(rep: dict, e) -> str | None:
-    """The one question remove-mcp-and-skills asks, led by the recommendation."""
+    """The one question remove-mcp-and-skills asks, led by the recommendation, in hindsight: what the items
+    would have saved, not a promise of what removing them will."""
     rec = rep.get("recommendation")
     if not rec:
         return None
+    w = rep.get("window") or {}
     n = rec.get("items_n") or len([i for i in rep.get("items") or [] if i.get("kind") in ITEM_KINDS])
-    pb = rec.get("payback_weeks", rep.get("payback_weeks"))
-    back = f" It pays back in about {round(pb)} weeks." if isinstance(pb, (int, float)) and pb > 1 else ""
-    return f"Question: Remove these {n} items, saving {approx(e)}{money(per_week(rec, rep.get('window') or {}))}/week?{back}"
+    q = f"Question: Remove these {n} items?"
+    pw = per_week(rec, w)
+    if pw is not None:
+        q += f" Over the last {days_of(w)} days they would have saved about {dollars(pw)} a week"
+        pb = rec.get("payback_weeks", rep.get("payback_weeks"))
+        q += (f" (pays back in about {weeks(pb)})." if isinstance(pb, (int, float)) and pb > 1 else ".")
+    return q
 
 
 # --- changes ----------------------------------------------------------------------------------
@@ -872,7 +889,8 @@ def cmd_save(api: Api, o: dict, kinds: list[str], e) -> tuple[list[str], int, li
             for k, rep in ok:
                 rec, td = rep.get("recommendation"), rep.get("to_date") or {}
                 lines.append(f"{k:<7} saved so far {money(td.get('saved_usd')):>8}   "
-                             + (f"recommended change adds about {money(per_week(rec, rep.get('window') or {}))}/week" if rec else "no change recommended"))
+                             + ((f"the recommended change would have saved about {dollars(pw)} a week" if (pw := per_week(rec, rep.get("window") or {})) is not None
+                                 else "a change is recommended") if rec else "no change recommended"))
             L += card("Save more: both", lines, e)
         if len(recs) > 1:
             L.append("Question: apply both, only one of them, or neither?")

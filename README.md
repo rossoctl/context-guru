@@ -101,7 +101,7 @@ Each command opens with one line that answers its question, then a small picture
 ### Save more, from your own history
 
 `/context-guru:save-more` replays your past sessions under every config Context Guru ships and every keep-alive
-strategy, says in plain words what your current setting saved so far and what the best change would add, and
+strategy, says in plain words what your current setting saved so far and what the best change would have saved, and
 applies it only after you say yes. `/context-guru:remove-mcp-and-skills` does the same for MCP servers and skills
 you carry and never use (built-in tools are never listed).
 
@@ -116,8 +116,8 @@ you carry and never use (built-in tools are never listed).
 ```
 ╭─ Save more: cache ──────────────────────────────────────────────────────────────────────────────╮
 │ So far: your current keep-alive strategy saved $31.10 in 30 days (observed).                    │
-│ Change: cache strategy 5-min-ping -> adaptive would add about $2.89 a week (95% CI $0.72 to     │
-│ $4.89).                                                                                         │
+│ Change: cache strategy 5-min-ping -> adaptive. Over the last 30 days it would have saved about  │
+│ $2.89 a week (95% CI $0.72 to $4.89).                                                           │
 │ Before -> after: $300.00 billed on these sessions, $287.00 with the change.                     │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
 switch to adaptive keep-alive to save about $12.40 more over the last 30 days.

@@ -1,0 +1,35 @@
+╭─ Remove MCP servers and skills ────────────────────────────────────────────╮
+│ So far: earlier removals saved $2.00 (observed, since 2026-09-15).         │
+│ Change: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more. │
+╰────────────────────────────────────────────────────────────────────────────╯
+9 declared items were never used; filtering the 6 with enough evidence would have saved $31.40.
+
+      option                                                     saved  spent     net
+      remove-all         Filter all 9 unused items              $33.90     $0  $33.90  ████████████
+  ★   remove-sufficient  Filter the 6 unused items seen in 5+…  $31.40     $0  $31.40  ███████████░
+  ▸◦  keep               Keep everything                            $0     $0      $0  ░░░░░░░░░░░░
+  ★ recommended   ▸ yours now   ◦ the default
+  saved: what it avoided paying · spent: what it paid itself · net = saved - spent, on your past
+  sessions
+
+Never used in this window (8 of 9):
+  MCP server  playwright             $18.40  ██████████
+  MCP server  figma                   $6.20  ███░░░░░░░
+  skill       brand-voice             $3.10  ██░░░░░░░░
+  MCP tool    sentry__list_releases   $2.20  █░░░░░░░░░
+  skill       slides                    n/a  ░░░░░░░░░░
+  skill       pdf-export              $1.10  █░░░░░░░░░
+  MCP tool    sentry__get_event       $0.80  ░░░░░░░░░░
+  skill       changelog               $0.40  ░░░░░░░░░░
+
+  counterfactual · unused declarations priced on the requests that carried them ·
+  2026-09-08..2026-10-08 · 64 sessions, 5,210 requests
+  ! Unused means unused in this window, not that it will never be needed.
+  ! Filtering changes the cached prefix, so the next request re-writes it once; that cost is not
+  included.
+
+Recommended: filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more (takes effect now).
+Why: declared in 5+ sessions over 7+ days and never called
+Apply it? Say yes, or run: /context-guru:remove-mcp-and-skills apply tools remove-sufficient@8c21e0d4
+
+Question: Remove these 6 items?

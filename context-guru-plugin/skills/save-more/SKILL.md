@@ -28,7 +28,8 @@ Then ask ONE question with AskUserQuestion, after the output is printed, never b
   `Recommended:` lines; options "Apply both", "Only config", "Only cache", "Neither".
 - One `Apply it?` line: the question is its `Recommended:` line, verbatim (it may say that applying drops some of
   the user's own settings; that must be said before they answer), plus the card's weekly figure, e.g.
-  "Apply: preset conservative -> medium? (about $1.49 a week more)"; options "Yes, apply it", "No, leave it".
+  "Apply: preset conservative -> medium? Over the last 30 days it would have saved about $1.49 a week."; options
+  "Yes, apply it", "No, leave it". Say it in hindsight (would have saved), never as a promise.
 - No `Apply it?` line: stop. Add nothing.
 
 For each change the user chose, run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py"` followed by every word after
