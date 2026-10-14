@@ -262,7 +262,10 @@ func resync(snap *[]schemas.ChatMessage, live []schemas.ChatMessage, changed []i
 // another plugin's script, not a path that happens to contain "context-guru", and not cg.py's
 // apply/revert, which change a setting rather than report one. Matched against the call's JSON
 // arguments, so a quote may arrive escaped.
-var ownOutput = regexp.MustCompile(`(^|[\s"'/])scripts/(cg\.py(\\?["'])?\s+(adapt|home|savings|cache|waste|session|doctor)\b|tv\.py\b)`)
+var ownOutput = regexp.MustCompile(`(^|[\s"'/])scripts/(cg\.py(\\?["'])?\s+(adapt|home|savings|cache|waste|session|doctor)(\s|\\?["']|$)|tv\.py\b)`)
+
+// toolCallsOf is schema.ToolCalls, a variable so a test can make it panic.
+var toolCallsOf = schema.ToolCalls
 
 // ownOutputs are the tool results our own plugin commands produced. They are the product's
 // answer to the user — a report, a cost table, the question it is about to ask — and the agent
@@ -276,7 +279,7 @@ func ownOutputs(req *schemas.BifrostChatRequest) (out map[int]bool) {
 			out = nil
 		}
 	}()
-	for i, tc := range schema.ToolCalls(req) {
+	for i, tc := range toolCallsOf(req) {
 		if ownOutput.MatchString(tc.Args) {
 			if out == nil {
 				out = map[int]bool{}

@@ -41,6 +41,7 @@ func TestOwnPluginOutputIsNeverCompacted(t *testing.T) {
 	call("t6", `cat /x/context-guru/notes.txt`)                                                                  // a path naming us
 	call("t7", `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/other_plugin_tool.py" run`)                               // another plugin's script
 	call("t9", `cat /home/u/work/context-guru-notes/scripts/gen.py`)                                             // a checkout of this repo
+	call("t10", `python3 ../../scripts/cg.py cache-campaign build`)                                              // a change, despite the "cache" prefix
 	call("t8", `python3 "/home/u/.claude/plugins/cache/m/context-guru/0.5.0/scripts/cg.py" apply compaction c1`) // a change, not a read
 	cfg, err := config.LoadBytes([]byte("pipeline: [format]\n"))
 	if err != nil {
@@ -52,7 +53,7 @@ func TestOwnPluginOutputIsNeverCompacted(t *testing.T) {
 	}
 	rr := p.Run(req, &components.Ctx{Ctx: context.Background(), Session: "s",
 		Store: store.NewMemory(store.Options{}), MaxCachedIdx: -1})
-	for i, want := range map[int]bool{1: true, 3: false, 5: true, 7: true, 9: true, 11: false, 13: false, 15: false, 17: false} {
+	for i, want := range map[int]bool{1: true, 3: false, 5: true, 7: true, 9: true, 11: false, 13: false, 15: false, 17: false, 19: false} {
 		if same := schema.MessageText(req.Input[i]) == pretty; same != want {
 			t.Errorf("message %d unchanged = %v, want %v", i, same, want)
 		}
