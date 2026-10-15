@@ -178,3 +178,33 @@ func TestTwoDaysThatCostDifferentAmountsLookDifferent(t *testing.T) {
 			"makes a lower floor safe again")
 	}
 }
+
+// SHADE AND POSITION MUST MEASURE THE SAME THING.
+//
+// They did not, and the contradiction was visible: "Why superpower is darker then others if it
+// from left to right logically it should be lighter". Position came from a column's total cost,
+// so superpowers sat mid-left at $1.31 — while the shade came from the raw CARRIAGE COUNT, and a
+// 15-skill plugin sums 15 carriages per request, so it was the darkest column on the chart.
+//
+// Worse than inconsistent, the count made single-item columns indistinguishable: every one of
+// them is carried on exactly the same requests, so all 601-per-day, so all one shade whatever
+// they cost. The chart was spending its strongest visual channel on how many requests a day had,
+// which the reader can already see in the day rows.
+//
+// So a cell's shade is its COST that day, on the same scale the column total and the left-to-right
+// order use. One quantity, three encodings that agree.
+func TestACellsShadeMeasuresCostLikeEverythingElse(t *testing.T) {
+	code := stripJSComments(readUI(t, "ui/insights.js"))
+
+	// The shade reads the per-day TOKEN total, which is carriage already multiplied by weight —
+	// not the bare carriage count.
+	if strings.Contains(code, "insDayShade(r.carried[ci]") {
+		t.Error("the shade is computed from the raw carriage count, so a 15-skill plugin is the " +
+			"darkest column whatever it costs, and every single-item column shades identically " +
+			"because they are all carried on the same requests")
+	}
+	if !strings.Contains(code, "insDayShade(r.dayTok[ci]") {
+		t.Error("the shade does not come from the day's token total; cost is what the column " +
+			"header and the left-to-right order both measure, and the shade has to agree")
+	}
+}

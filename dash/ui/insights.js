@@ -1233,7 +1233,12 @@ function insShadedColour(colour, shade, surface) {
  * asking "how much more". */
 function insShadeRanks(rows) {
   const seen = {};
-  for (const r of rows) for (const c of r.carried) if (c > 0) seen[c] = true;
+  /* Over the day's TOKEN totals, which is carriage already multiplied by weight — the same
+   * quantity the column header and the left-to-right order measure. Ranked over the bare
+   * carriage count instead, a 15-skill plugin was the darkest column on the chart whatever it
+   * cost, and every single-item column shaded identically because they are all carried on
+   * exactly the same requests. */
+  for (const r of rows) for (const c of r.dayTok) if (c > 0) seen[c] = true;
   const vals = Object.keys(seen).map(Number).sort((a, b) => a - b);
   const ranks = {};
   vals.forEach((v, i) => { ranks[v] = vals.length > 1 ? i / (vals.length - 1) : 1; });
@@ -1438,11 +1443,13 @@ function insDrawChart(host, g) {
     data: rows.map((r) => ({
       value: 1,
       itemStyle: {
+        /* `carried` still decides WHETHER a day is drawn — it is the presence test — while
+         * `dayTok` decides how dark it is. Presence and magnitude are different questions. */
         color: !r.carried[ci] ? t.surface
           : insShadedColour(
             r.baseline ? (r.used[ci] ? t.baseline : t.wasted)
               : (r.used[ci] ? t.used : t.wasted),
-            insDayShade(r.carried[ci], r.ranks), t.surface),
+            insDayShade(r.dayTok[ci], r.ranks), t.surface),
         /* The shade is baked INTO the colour, not set as opacity.
          *
          * `opacity` on a stacked bar's data point does not survive: ECharts recomputes it, and
