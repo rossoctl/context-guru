@@ -1,11 +1,13 @@
 # Waste
 
+`/context-guru:insights tools` (was `/context-guru:waste`, which still works for one release). `/context-guru:insights` shows it together with the other two.
+
 **Question: what do I carry and never use?**
 
 Every MCP server, skill and tool you declare is sent with every request, whether or not you ever call it. This screen lists the ones you never called, what carrying them cost, and the command that removes each.
 
-![/context-guru:waste](img/waste-dark.svg#only-dark)
-![/context-guru:waste](img/waste-light.svg#only-light)
+![/context-guru:insights tools](img/waste-dark.svg#only-dark)
+![/context-guru:insights tools](img/waste-light.svg#only-light)
 
 ```text
 6 things you carry were never used: $37.70 in 7 days, about $161.57 a month.
@@ -22,7 +24,7 @@ Remove the first:
 
 Measured carry; the monthly figure is an estimate that assumes your usage stays the same.
 
-More: /context-guru:waste details
+More: /context-guru:insights tools details
 ```
 
 ## Reading it

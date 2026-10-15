@@ -25,9 +25,10 @@ One command per question. Each opens with one line that answers it, then a small
 | Command | The question it answers | Page |
 |---|---|---|
 | `/context-guru:status` | Is it working, how am I doing, what next? | [Home and status](status.md) |
-| `/context-guru:savings` | How much did it save? | [Savings](savings.md) |
-| `/context-guru:cache` | Is my cache about to cost me? | [Cache](cache.md) |
-| `/context-guru:waste` | What do I carry and never use? | [Waste](waste.md) |
+| `/context-guru:insights` | Savings, cache and tools, one after another | [Insights](insights.md) |
+| `/context-guru:insights savings` | How much did it save? | [Savings](savings.md) |
+| `/context-guru:insights cache` | Is my cache about to cost me? | [Cache](cache.md) |
+| `/context-guru:insights tools` | What do I carry and never use? | [Tools](waste.md) |
 | `/context-guru:session` | What happened in this session? | [Session](session.md) |
 | `/context-guru:doctor` | Is it set up right? | [Doctor](doctor.md) |
 | `/context-guru:save-more` | Which config and keep-alive strategy would have cost least on my history? Change them, after a yes. | [Save more](save-more.md) |
@@ -41,14 +42,14 @@ The old names keep working for one release. Each says where it moved and runs th
 
 | Old | New |
 |---|---|
-| `/context-guru:insights` | `/context-guru:status` |
-| `/context-guru:insights-capabilities` | `/context-guru:waste` |
-| `/context-guru:insights-idle` | `/context-guru:cache` |
-| `/context-guru:insights-components` | `/context-guru:savings` |
+| `/context-guru:savings`, `/context-guru:cache`, `/context-guru:waste` | `/context-guru:insights savings`, `insights cache`, `insights tools` |
+| `/context-guru:insights-capabilities` | `/context-guru:insights tools` |
+| `/context-guru:insights-idle` | `/context-guru:insights cache` |
+| `/context-guru:insights-components` | `/context-guru:insights savings` |
 | `/context-guru:cost-today` | `/context-guru:status` |
-| `/context-guru:cost-unused` | `/context-guru:waste` |
-| `/context-guru:cost-cold`, `/context-guru:cost-compact` | `/context-guru:cache` |
-| `/context-guru:cost-trends` | `/context-guru:savings` |
+| `/context-guru:cost-unused` | `/context-guru:insights tools` |
+| `/context-guru:cost-cold`, `/context-guru:cost-compact` | `/context-guru:insights cache` |
+| `/context-guru:cost-trends` | `/context-guru:insights savings` |
 | `/context-guru:adapt` | `/context-guru:save-more`, and `/context-guru:remove-mcp-and-skills` for `adapt tools` |
 
 `/context-guru:statusline` still installs, changes and removes the status line; `/context-guru:doctor` checks that it is there.
@@ -57,7 +58,7 @@ The old names keep working for one release. Each says where it moved and runs th
 
 - **Dollars first.** Every screen opens with a dollar figure, never a token count (ask for `details` if you want sizes).
 - **Saved and Estimated are different things.** `✓ Saved` is what the proxy saved you, compared with the same requests without it, at your gateway's prices, net of its own spend. `≈ Estimated` is spend you could still avoid; those rows overlap, so they are not added together. Plain facts, straight from the provider's usage, are labelled `measured`.
-- **Plain text for the six commands; colour for the views.** `status`, `savings`, `cache`, `waste`, `session` and `doctor` print plain Unicode with no colour codes, so they read the same on a light and a dark terminal. The five [terminal views](terminal-views.md) use colour (with `--theme light|dark`), and fall back to plain when output is not a terminal or `NO_COLOR` is set. The status line uses the basic terminal colours.
+- **Plain text for the six commands; colour for the views.** `status`, `insights`, `session` and `doctor` print plain Unicode with no colour codes, so they read the same on a light and a dark terminal. The five [terminal views](terminal-views.md) use colour (with `--theme light|dark`), and fall back to plain when output is not a terminal or `NO_COLOR` is set. The status line uses the basic terminal colours.
 
 ## Update
 
@@ -74,13 +75,13 @@ The proxy is released separately; updating the plugin does not update it. Detail
 
 ## Codex (experimental)
 
-Codex has the same skills under the same names, invoked by name: `$context-guru-status`, `$context-guru-savings`, `$context-guru-cache`, `$context-guru-waste`, `$context-guru-session`, `$context-guru-save-more`, `$context-guru-remove-mcp-and-skills`. They run the same scripts. Install, update and removal are in the [Codex plugin guide](https://github.com/rossoctl/context-guru/blob/main/codex-marketplace/plugins/context-guru/README.md).
+Codex has the same skills under the same names, invoked by name: `$context-guru-status`, `$context-guru-insights`, `$context-guru-session`, `$context-guru-save-more`, `$context-guru-remove-mcp-and-skills`. They run the same scripts. Install, update and removal are in the [Codex plugin guide](https://github.com/rossoctl/context-guru/blob/main/codex-marketplace/plugins/context-guru/README.md).
 
 | Capability | Claude Code | Codex |
 |---|---|---|
 | Commands | `/context-guru:*` | skills, by name |
 | Status line from a command | yes (`statusLine` with `refreshInterval`) | no: `/statusline` only picks from built-in items such as context used and rate limits |
-| Live cache clock and savings badge | yes | not available; ask `$context-guru-cache` instead |
+| Live cache clock and savings badge | yes | not available; ask `$context-guru-insights cache` instead |
 
 ## Next
 

@@ -1,15 +1,14 @@
 ---
 name: cache
-description: Is the prompt cache about to cost money: a countdown to expiry, what a miss would cost, recent misses by cause. Use when asked about the cache, TTL, idle time, misses, or why a turn was expensive.
+description: Moved to /context-guru:insights cache (is the cache about to cost money). Kept for one release so existing habits still work.
 argument-hint: "[details]"
-allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" cache:*)
+allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" insights:*)
 ---
 
-Run this, then print its output exactly as it is in one code block. Add nothing before or after it.
+This command moved to `/context-guru:insights cache`. Tell the user that in one line, then run the new command:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" cache $ARGUMENTS
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" insights cache $ARGUMENTS
 ```
 
-If the output ends with a `More:` line and the user wants the detail, run the same command with `details`.
-Do not turn dollars into tokens or add advice that the output does not contain.
+Print its output exactly as it is in one code block.

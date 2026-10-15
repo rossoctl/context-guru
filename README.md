@@ -90,9 +90,10 @@ Each command opens with one line that answers its question, then a small picture
 | Command | The question | Example first line |
 |---|---|---|
 | `/context-guru:status` | Is it working, how am I doing, what next? | Saved $41.20 in 7 days (4.6% of what the same work would have cost). |
-| `/context-guru:savings` | How much did it save? | Saved $41.20 in 7 days, net of Context Guru's own spend (4.6% of the $898.05 the same work would have cost). |
-| `/context-guru:cache` | Is my cache about to cost me? | Cache is warm for 2:41 more. If it lapses, the next message costs $1.91 extra. |
-| `/context-guru:waste` | What do I carry and never use? | 6 things you carry were never used: $37.70 in 7 days, about $161.57 a month. |
+| `/context-guru:insights` | Savings, cache and tools, one after another | |
+| `/context-guru:insights savings` | How much did it save? | Saved $41.20 in 7 days, net of Context Guru's own spend (4.6% of the $898.05 the same work would have cost). |
+| `/context-guru:insights cache` | Is my cache about to cost me? | Cache is warm for 2:41 more. If it lapses, the next message costs $1.91 extra. |
+| `/context-guru:insights tools` | What do I carry and never use? | 6 things you carry were never used: $37.70 in 7 days, about $161.57 a month. |
 | `/context-guru:session` | What happened in this session? | In the last 4 hours of this session (9h20m long), cache misses cost you about $4.20 of the $13.50 billed (2 misses in 31 messages). |
 | `/context-guru:doctor` | Is it set up right? | All 7 checks pass. |
 | `/context-guru:save-more` | Which config and keep-alive strategy would have cost least on my history? | So far: your current config saved $9.40 in 30 days (observed). |

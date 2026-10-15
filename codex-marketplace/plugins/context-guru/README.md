@@ -47,17 +47,17 @@ separately after verifying the routed setup.
 
 Use `$context-guru-preset-picker` to inspect or change the reduction level, and
 `$context-guru-cache-strategy-picker` to inspect or change OpenAI cache keep-alive. Both preserve
-the other setting and restart the owned proxy. `$context-guru-insights` produces a deterministic,
-ranked report from measured proxy data; its cost arithmetic and exact fix commands come from code,
-not model estimation.
+the other setting and restart the owned proxy. `$context-guru-insights` shows savings, cache and tools
+(what you carry and never use) one after another, from measured proxy data; ask for `savings`, `cache` or
+`tools` for one.
 
 `$context-guru-save-more` replays your own history under every shipped config and keep-alive strategy and
 applies the recommended change only after you answer yes; `$context-guru-remove-mcp-and-skills` does the same for
 MCP servers and skills you never use. See [docs/plugin/save-more.md](../../../docs/plugin/save-more.md).
 `$context-guru-adapt` still works for one release and points to them.
 
-For a narrower report, use `$context-guru-insights-capabilities`,
-`$context-guru-insights-components`, or `$context-guru-insights-idle`.
+The older `$context-guru-savings`, `$context-guru-cache`, `$context-guru-waste` and
+`$context-guru-insights-capabilities`/`-components`/`-idle` still work for one release and point to `$context-guru-insights`.
 
 During setup, the plugin downloads the latest `context-guru-proxy` release for the current platform,
 verifies it against the release's SHA-256 checksums, and installs it into its private state directory.

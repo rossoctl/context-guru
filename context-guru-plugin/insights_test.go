@@ -878,8 +878,9 @@ func TestJSONModeIsTheSameDocument(t *testing.T) {
 // The four insights skills are redirects now. Each tells the user where the command moved and runs
 // the new one through cg.py, with nothing else it may run and no option read of its own.
 func TestInsightSkillsAreRedirects(t *testing.T) {
-	moved := map[string]string{"insights": "status", "insights-capabilities": "waste", "insights-idle": "cache", "insights-components": "savings",
-		"cost-today": "status", "cost-unused": "waste", "cost-cold": "cache", "cost-compact": "cache", "cost-trends": "savings"}
+	moved := map[string]string{"insights-capabilities": "insights tools", "insights-idle": "insights cache", "insights-components": "insights savings",
+		"cost-today": "status", "cost-unused": "insights tools", "cost-cold": "insights cache", "cost-compact": "insights cache",
+		"cost-trends": "insights savings", "savings": "insights savings", "cache": "insights cache", "waste": "insights tools"}
 	for name, to := range moved {
 		t.Run(name, func(t *testing.T) {
 			body := readFileString(t, filepath.Join("skills", name, "SKILL.md"))

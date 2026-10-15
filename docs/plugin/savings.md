@@ -1,9 +1,11 @@
 # Savings
 
+`/context-guru:insights savings` (was `/context-guru:savings`, which still works for one release). `/context-guru:insights` shows it together with the other two.
+
 **Question: how much did it save?**
 
-![/context-guru:savings](img/savings-dark.svg#only-dark)
-![/context-guru:savings](img/savings-light.svg#only-light)
+![/context-guru:insights savings](img/savings-dark.svg#only-dark)
+![/context-guru:insights savings](img/savings-light.svg#only-light)
 
 ```text
 Saved $41.20 in 7 days, net of Context Guru's own spend (4.6% of the $898.05 the same work would have cost).
@@ -18,7 +20,7 @@ Saved $41.20 in 7 days, net of Context Guru's own spend (4.6% of the $898.05 the
   You paused longer than the cache lasts, 214 times  $107.79  measured
   Settings or tools changed mid-session               $23.31  measured
 
-More: /context-guru:savings details
+More: /context-guru:insights savings details
 ```
 
 ## Reading it
