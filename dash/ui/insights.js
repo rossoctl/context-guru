@@ -552,7 +552,9 @@ function insRender() {
       + 'it. A bar that is all red is pure waste. A bar that turns red partway is something you '
       + 'stopped using — which is usually the easiest thing to remove. A plugin appears as one '
       + 'bar because the plugin is the only unit you can disable; its individual skills are in '
-      + 'the tables below.' }));
+      + 'the tables below. Bars marked "(built in)" are Claude Code\u2019s own tools \u2014 shown '
+      + 'in a paler green so you can see what real usage looks like, but they cannot be removed '
+      + 'and so never appear in the tables.' }));
   chartPanel.appendChild(insProjectPicker());
   chartPanel.appendChild(insRangePicker());
   const chart = insChart();
@@ -1080,7 +1082,10 @@ function insUsageBars(tl) {
     cols.forEach((c, ci) => {
       for (let i = c.fromIdx; i <= c.toIdx; i++) {
         if ((s.calls[i] || 0) > 0) row.used[ci] = 1;
-        if ((s.carried[i] || 0) > 0) row.carried[ci] = 1;
+        /* SUMMED, not flagged. This set `carried[ci] = 1`, which threw the amount away: a day
+         * with 860 requests rendered exactly like one with 206, and every day of a bar looked
+         * identical however much it had actually cost. The count is what the shade needs. */
+        row.carried[ci] += s.carried[i] || 0;
       }
     });
   }
@@ -1088,6 +1093,11 @@ function insUsageBars(tl) {
   /* Worst first: the bar with the most wasted buckets, then by money. A reader scans from the top,
    * so the top is where the answer goes. */
   const all = Object.keys(groups).map((k) => groups[k]);
+  /* The busiest day anywhere on the chart, so every bar is shaded on one scale and two bars can
+   * be compared. Per-bar scaling would make a cheap capability's worst day look as dark as an
+   * expensive one's. */
+  const peak = all.reduce((m, r) => Math.max(m, ...r.carried), 0);
+  all.forEach((r) => { r.peak = peak; });
   const wastedCount = (r) => r.carried.reduce((n, c, i) => n + (c && !r.used[i] ? 1 : 0), 0);
   const rank = (a, b) => wastedCount(b) - wastedCount(a) || (b.usd || 0) - (a.usd || 0);
   /* Two blocks, not one ordering: everything you can act on, worst first, then the baseline
@@ -1099,6 +1109,32 @@ function insUsageBars(tl) {
     .sort((a, b) => b.used.reduce((n, u) => n + u, 0) - a.used.reduce((n, u) => n + u, 0))
     .slice(0, 5);
   return { rows: act.concat(base), cols, width, actionable: act.length, baseline: base.length };
+}
+
+/* The lightest a carried day may be drawn.
+ *
+ * Without a floor a cheap day fades into the surface and reads as a day the capability was not
+ * carried at all — which is the one distinction this chart turns on.
+ *
+ * 0.62, raised from 0.35 after looking at it: the lower floor spread the shades nicely and left
+ * the whole chart washed out, so red stopped reading as red. A narrower band costs some
+ * resolution between a quiet day and a middling one, and buys back the thing the colour is for —
+ * telling waste from use at a glance. The exact figure for any day is in the tooltip. */
+const INS_SHADE_FLOOR = 0.62;
+
+/* insDayShade turns a day's carriage count into an opacity within that day's own colour.
+ *
+ * SCALED AGAINST THE BUSIEST DAY ON THE CHART, not linearly from zero. Measured on the real
+ * store: per-day counts run from 1 to 601 with a median of 358, so a linear ramp from zero would
+ * put nearly every day in the top two shades and show nothing at all. Dividing by the peak
+ * spreads the days that actually occur across the whole range.
+ *
+ * The square root rather than the raw ratio, because the distribution is top-heavy: without it
+ * the many mid-volume days bunch together and only the single busiest looks different. */
+function insDayShade(count, peak) {
+  if (count <= 0) return 0;
+  const frac = Math.sqrt(count / Math.max(1, peak));
+  return INS_SHADE_FLOOR + (1 - INS_SHADE_FLOOR) * Math.min(1, frac);
 }
 
 /* insRangePicker chooses the window in weeks and months rather than by date. */
@@ -1210,6 +1246,10 @@ function insDrawChart(host, g) {
         color: !r.carried[ci] ? t.surface
           : r.baseline ? (r.used[ci] ? t.baseline : t.wasted)
             : (r.used[ci] ? t.used : t.wasted),
+        /* The SHADE is how much that day cost; the HUE is still whether it was used. So a deep
+         * red is an expensive wasted day and a pale red a cheap one, and the two questions stay
+         * on separate channels. */
+        opacity: r.carried[ci] ? insDayShade(r.carried[ci], r.peak) : 1,
         /* NO border. At one day per segment a 1px rule is as wide as the line it separates, so
          * it ate the colour it was meant to delimit — the bar became mostly surface. A run of
          * same-coloured days reading as one block is correct here: that IS the finding. */
@@ -1239,11 +1279,18 @@ function insDrawChart(host, g) {
           (g.width > 1 ? ' + ' + (g.width - 1) + ' day(s)' : '');
         const state = !r.carried[ci] ? 'not carried'
           : (r.used[ci] ? 'invoked — earning its weight' : 'carried, never invoked');
+        /* The exact figure for THAT day, because the shade is a comparison and this is the
+         * number. Carriage count times the per-request weight is what that day actually cost. */
+        const dayTok = r.carried[ci] * (r.tokens || 0);
+        const dayLine = r.carried[ci]
+          ? '<br>' + r.carried[ci].toLocaleString() + ' request(s) carried it that day · ' +
+            dayTok.toLocaleString() + ' tok'
+          : '';
         const inside = r.members.length > 1
           ? '<br><span style="opacity:.75">' + r.members.length + ' items inside; see the ' +
             'tables below</span>'
           : '';
-        return '<strong>' + r.label + '</strong><br>' + when + ': ' + state + '<br>' +
+        return '<strong>' + r.label + '</strong><br>' + when + ': ' + state + dayLine + '<br>' +
           (r.usd ? usd(r.usd) + ' wasted · ' : '') +
           (r.tokens || 0).toLocaleString() + ' tok/request' + inside;
       },
@@ -1266,7 +1313,18 @@ function insDrawChart(host, g) {
      * across a page each is roughly 40px, and `claude-md-management` is not going to fit
      * horizontally. Rotated beats truncated — a name missing its end reads as a different tool. */
     xAxis: { type: 'category',
-      data: rows.map((r) => r.label),
+      /* A BASELINE BAR SAYS SO IN ITS OWN LABEL.
+       *
+       * `Skill` is one of Claude Code's own built-in TOOLS — the one the agent calls to invoke a
+       * skill — not a skill you installed. It is in the chart because the built-ins supply the
+       * only green on this store, and absent from the tables because the tables list what can be
+       * removed. Both are right, and the reader still had to ask what it was: "What is Skill
+       * that appears in my Chart i don't see such skill bellow in detailed view".
+       *
+       * So the label carries the distinction rather than relying on a colour the eye has to
+       * decode. The suffix is deliberately plain words, not a symbol: a glyph needs its own
+       * legend and this needs none. */
+      data: rows.map((r) => (r.baseline ? r.label + ' (built in)' : r.label)),
       axisLabel: { color: t.muted, rotate: 45, interval: 0, fontSize: 10 },
       axisLine: { lineStyle: { color: t.border } },
       axisTick: { show: false } },

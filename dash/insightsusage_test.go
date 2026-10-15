@@ -103,3 +103,38 @@ func TestASegmentsColourSaysWhetherItWasEarningItsKeep(t *testing.T) {
 			"piece of good news on this page", used)
 	}
 }
+
+// A DAY'S SHADE CARRIES WHAT IT COST, which is the question "why is every day the same?" answered.
+//
+// The chart collapsed each day's carriage to a boolean — was this carried, yes or no — so a day
+// with 860 requests rendered identically to one with 206, and the reader spotted it: "How it
+// possible that i spent same amount of money Wasted on same plugin each day ? if every day i
+// doind different amount of requests is should be different wast amount".
+//
+// The per-day counts were always in the timeline (138, 601, 358, 403, 326, 359 for one skill,
+// tracking request volume); the chart threw them away. Now the shade within the day's own colour
+// carries the amount, so a heavy day is a deeper red.
+//
+// SCALED AGAINST THE BUSIEST DAY, not linearly from zero. Measured on the real store: counts run
+// from 1 to 601 with a median of 358, so a linear ramp would put almost every day in the top two
+// shades and show nothing. The floor matters as much: a day that cost a little must still be
+// clearly coloured rather than fading into the surface, or "cheap" becomes indistinguishable from
+// "not carried at all" — the distinction the whole chart turns on.
+func TestADaysShadeCarriesWhatItCostThatDay(t *testing.T) {
+	code := stripJSComments(readUI(t, "ui/insights.js"))
+
+	if !strings.Contains(code, "insDayShade") {
+		t.Error("no insDayShade: a day's cost must reach its colour, or every day of a bar looks " +
+			"the same however much it actually cost")
+	}
+	// The boolean collapse must be gone: carried has to keep its COUNT.
+	if strings.Contains(code, "row.carried[ci] = 1") {
+		t.Error("carried is still collapsed to 1, so the per-day amount is discarded before it " +
+			"can reach the chart")
+	}
+	// A floor, so a cheap day is still visibly carried rather than invisible.
+	if !strings.Contains(code, "INS_SHADE_FLOOR") {
+		t.Error("no INS_SHADE_FLOOR: without a minimum opacity a cheap day fades into the " +
+			"surface and reads as a day the capability was not carried at all")
+	}
+}
