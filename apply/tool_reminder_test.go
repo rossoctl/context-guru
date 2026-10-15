@@ -7,15 +7,19 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 )
 
-// ccReminder is the block Claude Code appends to every tool_result (#556). The counter changes
-// on every call, so two runs of one command never give identical text.
+// ccReminder is the block Claude Code 2.1.241 appended to every tool_result (#556). The counter
+// changes on every call, so two runs of one command never give identical text. This is the
+// 2.1.241 shape only: 2.1.290 to 2.1.299 send the counter as a separate role:"system" message.
 func ccReminder(left int) string {
 	return fmt.Sprintf("\n\n<system-reminder>\n<total_tokens>%d tokens left</total_tokens>\n</system-reminder>", left)
 }
@@ -134,4 +138,89 @@ func clipTail(s string) string {
 		return "…" + s[len(s)-160:]
 	}
 	return s
+}
+
+// TestTrailingReminderSurvivesCountChange: the count-changed rebuild is the other writeback
+// path, and the one that produced live 400s. summarize changes the message count and extract_llm
+// rewrites a tool output summarize kept. Each kept tool_result must end with its own reminder,
+// once, and none may reach the wire as role=tool.
+func TestTrailingReminderSurvivesCountChange(t *testing.T) {
+	// Indented JSON, so extract_llm's deterministic strategy really rewrites it.
+	log := func(n int) string {
+		recs := make([]map[string]any, n)
+		for i := range recs {
+			recs[i] = map[string]any{"ts": "2024-01-01T00:00:00Z", "path": "src/api/users.py",
+				"level": "INFO", "msg": "request served", "seq": i, "detail": strings.Repeat("verbose detail text ", 6)}
+		}
+		b, _ := json.MarshalIndent(recs, "", "  ")
+		return string(b)
+	}
+
+	msgs := []map[string]any{{"role": "user", "content": "audit the request log"}}
+	want := map[string]string{} // tool_use_id -> the original output, reminder included
+	for i := 0; i < 6; i++ {
+		id := fmt.Sprintf("call_%c", 'a'+i)
+		want[id] = log(40) + ccReminder(14989288-i*1000)
+		msgs = append(msgs,
+			map[string]any{"role": "assistant", "content": []map[string]any{
+				{"type": "text", "text": "reading the log"},
+				{"type": "tool_use", "id": id, "name": "Read", "input": map[string]any{}},
+			}},
+			map[string]any{"role": "user", "content": []map[string]any{
+				{"type": "tool_result", "tool_use_id": id, "content": want[id]},
+			}},
+		)
+	}
+	msgs = append(msgs, map[string]any{"role": "user", "content": "what failed?"})
+	body, _ := json.Marshal(map[string]any{"model": "claude-x", "messages": msgs})
+
+	const yaml = "pipeline: [summarize, extract_llm, cachesplit]\n" +
+		"components:\n" +
+		"  summarize: {keep_last: 3, start_from_message: 0, min_tokens: 1, trigger: {min_request_frac: 0}}\n" +
+		"  extract_llm: {strategy: deterministic, min_tokens: 1, economic_gate: false, " +
+		"allow_on_caching_backend: true}\n"
+	p, _ := pipe(t, yaml).Build(nil)
+	// Two passes over one Store: the first commissions the summary, the second splices it.
+	st := store.NewMemory(store.Options{})
+	models := components.ModelSpec{Incoming: stubModel{resp: "essential facts"}}
+	apply.BodyWithModel(context.Background(), p, st, bschemas.Anthropic, body, "", false, models)
+	offload.WaitForAllSummariesForTest(5 * time.Second)
+	out, changed := apply.BodyWithModel(context.Background(), p, st, bschemas.Anthropic, body, "", false, models)
+	if !changed {
+		t.Fatal("no component acted, so the rebuild never ran")
+	}
+	arr := gjson.GetBytes(out, "messages").Array()
+	if len(arr) == len(msgs) {
+		t.Fatalf("message count unchanged (%d), so the count-change rebuild never ran", len(arr))
+	}
+
+	var kept, rewritten int
+	for k, m := range arr {
+		if m.Get("role").String() == "tool" {
+			t.Errorf("message %d reached the wire with role=tool", k)
+		}
+		m.Get("content").ForEach(func(_, blk gjson.Result) bool {
+			if blk.Get("type").String() != "tool_result" {
+				return true
+			}
+			kept++
+			id, got := blk.Get("tool_use_id").String(), blk.Get("content").String()
+			orig := want[id]
+			r := orig[strings.LastIndex(orig, "\n\n<system-reminder>"):]
+			if !strings.HasSuffix(got, r) {
+				t.Errorf("%s must end with its own reminder: %q", id, clipTail(got))
+			}
+			if n := strings.Count(got, "<system-reminder>"); n != 1 {
+				t.Errorf("%s carries %d reminders, want 1", id, n)
+			}
+			if got != orig {
+				rewritten++
+			}
+			return true
+		})
+	}
+	if kept == 0 || rewritten == 0 {
+		t.Fatalf("want a kept tool_result that a component rewrote (kept=%d rewritten=%d): the "+
+			"assertions above prove nothing otherwise", kept, rewritten)
+	}
 }
