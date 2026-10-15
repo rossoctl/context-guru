@@ -267,11 +267,31 @@ type PrefixUsage struct {
 // message is prefix and any edit to it costs the cache read this method exists for. `stream` is the
 // one exception: the caller wants a single JSON answer, and a streamed response is not that.
 func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask string) (string, PrefixUsage, error) {
+	return a.CompletePrefixedAs(ctx, prefixBody, ask, "user")
+}
+
+type betaKey struct{}
+
+// WithBeta carries the session's own anthropic-beta header value to CompletePrefixed*, which sends
+// it unchanged: a beta can change the route or the cache namespace (and a long-context beta is
+// required for prefixes over the base window), so an ask without it may not read the session's cache.
+func WithBeta(ctx context.Context, beta string) context.Context {
+	if beta == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, betaKey{}, beta)
+}
+
+// CompletePrefixedAs is CompletePrefixed with the ask's role chosen by the caller: "user" (the
+// default) or "system", a mid-conversation system message. "system" is only honoured when the
+// prefix ends on a user message -- the one position Anthropic accepts it in -- and is otherwise
+// sent as a user turn, so a role the body cannot carry never turns into a 400.
+func (a Anthropic) CompletePrefixedAs(ctx context.Context, prefixBody []byte, ask, role string) (string, PrefixUsage, error) {
 	var u PrefixUsage
 	if !gjson.GetBytes(prefixBody, "messages").IsArray() {
 		return "", u, fmt.Errorf("cheapmodel: prefix body has no messages array")
 	}
-	body, err := insertAskMessage(prefixBody, ask)
+	body, err := insertAskMessageAs(prefixBody, ask, role)
 	if err != nil {
 		return "", u, err
 	}
@@ -306,6 +326,9 @@ func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask 
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
+	if b, _ := ctx.Value(betaKey{}).(string); b != "" {
+		req.Header.Set("anthropic-beta", b)
+	}
 	// The caller's own credential and scheme, exactly as Complete sends it — the prefix belongs to
 	// this caller's cache namespace, so presenting a different credential would read nothing.
 	if a.AuthScheme == "bearer" {
@@ -489,10 +512,23 @@ func thinkingAdjustedMaxTokens(body []byte, reply int) (want int, capped bool) {
 // thinking.type: "enabled" before it can be called settled either way — see the PR for the
 // current status of that measurement.
 func insertAskMessage(prefixBody []byte, ask string) ([]byte, error) {
+	return insertAskMessageAs(prefixBody, ask, "user")
+}
+
+// insertAskMessageAs appends the ask with the given role; see CompletePrefixedAs.
+func insertAskMessageAs(prefixBody []byte, ask, role string) ([]byte, error) {
 	msgs := gjson.GetBytes(prefixBody, "messages").Array()
 	parts := make([]string, 0, len(msgs)+2)
 	for _, m := range msgs {
 		parts = append(parts, m.Raw)
+	}
+	if role == "system" && len(msgs) > 0 && msgs[len(msgs)-1].Get("role").String() == "user" {
+		sysJSON, err := json.Marshal(map[string]any{"role": "system", "content": ask})
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, string(sysJSON))
+		return sjson.SetRawBytes(prefixBody, "messages", []byte("["+strings.Join(parts, ",")+"]"))
 	}
 	if len(msgs) > 0 && msgs[len(msgs)-1].Get("role").String() == "system" {
 		understoodJSON, err := json.Marshal(map[string]any{"role": "assistant", "content": "Understood."})

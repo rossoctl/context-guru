@@ -235,6 +235,11 @@ func gateCases() []gateCase {
 			c.SelfRates = components.TokenRates{Input: 10, CacheRead: 1, CacheWrite: 12.5, Output: 50}
 			return e, sweepReqStocked(), c
 		}},
+		{"extract_llm_ride", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
+			asker := &rideAsker{script: map[int]string{0: `"action":"park"`, 1: `"action":"park"`}}
+			asker.cacheRead = 30000
+			return newRideForGate(t), rideReq(4), rideCtx("gate-table-ride", asker, st)
+		}},
 		{"cmdfilter", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
 			c, err := newCmdfilter([]byte("min_size: 1\n"))
 			if err != nil {

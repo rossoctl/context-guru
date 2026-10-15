@@ -172,6 +172,13 @@ type PrefixAsker interface {
 	Ask(ctx context.Context, session, ask string) (reply string, usage PrefixUsage, err error)
 }
 
+// RolePrefixAsker is an optional capability of a PrefixAsker: AskAs sends the ask under the given
+// role ("user" or "system", a mid-conversation system message). A role the stored body cannot
+// carry is sent as a user turn. Callers fall back to Ask when the asker does not implement it.
+type RolePrefixAsker interface {
+	AskAs(ctx context.Context, session, ask, role string) (reply string, usage PrefixUsage, err error)
+}
+
 // SpanHash is a stable content hash of a normalized message span, shared by every caller that
 // needs to tell whether two slices of a transcript are byte-for-byte the same conversation.
 // Exported so a PrefixCoverage implementation living outside this package (the host's own
@@ -498,6 +505,16 @@ type Ctx struct {
 	// (model.source: incoming, the default for the LLM components) can say WHICH model it
 	// called instead of recording an empty string.
 	ModelName string
+	// ToolsHash identifies the request's declared tool set (a hash of the raw `tools` array, empty when there is none). A change between two requests of a thread rewrites the cache from the tools on, so a component may treat it as a moment when a rewrite is free.
+	ToolsHash string
+	// LastMarkTTL is the TTL tier ("5m" or "1h") of the last cache_control mark in prompt order (tools,
+	// system, messages) on the raw request, "" when it has none. A mark a component adds must not have a
+	// shorter TTL than any mark after it, since the provider rejects a 1h mark that follows a 5m one.
+	LastMarkTTL string
+	// MessageMarkTiers summarises the TTL tiers of the cache_control marks inside the raw `messages`:
+	// "" (none), "5m", "1h", or "mixed" (both). A mark a component adds among the messages must be at
+	// least as long as every mark after it and no longer than any before it, which "mixed" cannot satisfy.
+	MessageMarkTiers string
 	// SelfRates are the per-token rates for the model a component would call itself — the
 	// incoming model's, since that is what `source: incoming` uses. Zero when unknown.
 	SelfRates TokenRates

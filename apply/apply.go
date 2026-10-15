@@ -20,6 +20,8 @@ package apply
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"maps"
@@ -464,7 +466,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// splitTailHash identifies the volatile half, so a later turn can tell whether the
 	// snapshot MOVED. Only on such a turn would the unsplit block have been re-created.
 	var splitTailHash uint64
-	if !bypass && pipe != nil && (pipe.Has("cachesplit") || pipe.Has("cacheinject")) {
+	// The ride's anchor breakpoint needs the fourth slot, which the split would take on a system block
+	// with a volatile tail: the pipeline that carries extract_llm_ride keeps the slot for the anchor.
+	if !bypass && pipe != nil && (pipe.Has("cachesplit") || pipe.Has("cacheinject")) && !pipe.Has("extract_llm_ride") {
 		body, systemSplit, shiftAt, shift, splitStableTokens, splitTailHash =
 			splitVolatileTail(body, provider)
 	}
@@ -675,14 +679,17 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// Read under the SAME sessionID the host will write back under (Trace.Session), which
 		// is what keeps the fraction gate from reading a permanent zero. See
 		// RecordBilledInput.
-		PrevBilledInput: prevBilledInput(st, sessionID),
-		ModelName:       gjson.GetBytes(body, "model").String(),
-		SelfRates:       o.SelfRates,
-		RatesFor:        o.RatesFor,
-		CacheAware:      cacheAware,
-		ColdCache:       coldCache,
-		IdleMs:          idleMs,
-		MaxCachedIdx:    maxCachedIdx,
+		PrevBilledInput:  prevBilledInput(st, sessionID),
+		ModelName:        gjson.GetBytes(body, "model").String(),
+		ToolsHash:        toolsHash(body),
+		LastMarkTTL:      lastMarkTTL(body),
+		MessageMarkTiers: messageMarkTiers(body),
+		SelfRates:        o.SelfRates,
+		RatesFor:         o.RatesFor,
+		CacheAware:       cacheAware,
+		ColdCache:        coldCache,
+		IdleMs:           idleMs,
+		MaxCachedIdx:     maxCachedIdx,
 		// Every breakpoint already on the wire — including the ones no component can
 		// see (`system`, `tools`, and the marks our own normalize drops). The
 		// provider's cap of four counts them all (issue #32, defect 2).
@@ -1961,4 +1968,71 @@ func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, c
 	res.Body, res.Changed = nb, true
 	res.Restored, res.RestoredTokens = len(plan), tokens
 	return res
+}
+
+// toolsHash is a short hash of the raw `tools` array of an Anthropic-shaped body, or "" when absent.
+func toolsHash(body []byte) string {
+	t := gjson.GetBytes(body, "tools")
+	if !t.Exists() {
+		return ""
+	}
+	h := sha256.Sum256([]byte(t.Raw))
+	return hex.EncodeToString(h[:6])
+}
+
+// lastMarkTTL returns the TTL tier of the last cache_control mark in prompt order (tools, system,
+// messages) of an Anthropic-shaped body: "1h", "5m" (no ttl field), or "" when there is none.
+func lastMarkTTL(body []byte) string {
+	tier := func(m gjson.Result) string {
+		if m.Get("ttl").String() == "1h" {
+			return "1h"
+		}
+		return "5m"
+	}
+	msgs := gjson.GetBytes(body, "messages").Array()
+	for i := len(msgs) - 1; i >= 0; i-- {
+		blocks := msgs[i].Get("content").Array()
+		for j := len(blocks) - 1; j >= 0; j-- {
+			if m := blocks[j].Get("cache_control"); m.Exists() {
+				return tier(m)
+			}
+		}
+	}
+	for _, key := range []string{"system", "tools"} {
+		items := gjson.GetBytes(body, key).Array()
+		for i := len(items) - 1; i >= 0; i-- {
+			if m := items[i].Get("cache_control"); m.Exists() {
+				return tier(m)
+			}
+		}
+	}
+	return ""
+}
+
+// messageMarkTiers summarises the TTL tiers of the cache_control marks inside `messages`: "", "5m",
+// "1h" or "mixed".
+func messageMarkTiers(body []byte) string {
+	has5, has1 := false, false
+	for _, m := range gjson.GetBytes(body, "messages").Array() {
+		for _, b := range m.Get("content").Array() {
+			cc := b.Get("cache_control")
+			if !cc.Exists() {
+				continue
+			}
+			if cc.Get("ttl").String() == "1h" {
+				has1 = true
+			} else {
+				has5 = true
+			}
+		}
+	}
+	switch {
+	case has1 && has5:
+		return "mixed"
+	case has1:
+		return "1h"
+	case has5:
+		return "5m"
+	}
+	return ""
 }

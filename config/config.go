@@ -504,6 +504,8 @@ var presets = map[string][]string{
 	// deterministic lever", which is what the gross number reads as.
 	"house":    {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"housellm": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	// house_ride: house plus extract_llm_ride, the batched triage that rides the session's cache.
+	"house_ride": {"format", "dedup", "cmdfilter", "searchfold", "textclean", "extract_llm_ride", "extract", "cachesplit", "toolfilter"},
 
 	// conservative/medium/high/xhigh: the effort ladder the Claude Code plugin's preset picker
 	// offers (context-guru-plugin/skills/preset-picker), replacing the old off/cache/house/
@@ -612,6 +614,12 @@ components:
 components:
   extract:
     min_tokens: 400`,
+	// house_ride: house plus extract_llm_ride (one cache-riding triage call per firing turn).
+	"house_ride": `pipeline: [format, dedup, cmdfilter, searchfold, textclean, extract_llm_ride, extract, cachesplit, toolfilter]
+components:
+  extract:
+    min_tokens: 400
+  extract_llm_ride: {}`,
 	// housellm: house plus the compaction-model pass, as measured on this service.
 	//
 	// WHAT THIS COMPONENT ACTUALLY DOES HERE, measured on production traffic rather than

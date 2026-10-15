@@ -9,6 +9,59 @@ requirements) that the deterministic components in
 
 ---
 
+## extract_llm_ride
+
+One batched call per firing turn that asks the **session's own model**, over the **session's own cached
+prefix**, what to do with each candidate tool output: `keep`, `extract` (a shorter version made of lines
+copied verbatim from the output) or `park` (set aside behind a handle). The question is appended to the
+body the session last sent upstream, so the transcript is a cache read and the call pays only for the
+instruction, the inventory and the answer. It is a sibling of `extract_llm_sweep` that differs in what
+triggers it and in the answer shape.
+
+- Every removal is stashed behind a marker the expand tool restores. Decisions are frozen in the session
+  store and replayed byte-identically on later turns, so the session's own cache is rewritten at most once
+  per decision.
+- An extract is accepted only when it is at most `extract_max_ratio` of the original's tokens and at least
+  `min_verbatim` of its lines occur verbatim in the original.
+- Triggers, any one of which fires (then `min_turns_between` limits the rate): `trigger_size_tokens`
+  (pending candidate tokens), `trigger_pending` (pending candidate count), `trigger_fill_min` /
+  `trigger_fill_max` (share of the model window), `trigger_pre_expiry` (the pre-expiry window). With no
+  size/pending/fill key set, 4,000 tokens or 3 candidates apply.
+- `apply_mode: cold` splits asking from applying. The ask is made while the prefix is warm (a cache read);
+  the answer is stored per thread and applied only on a request that rewrites the cache anyway (the entry
+  expired, or the client compacted the transcript), or earlier when the removal is expected to repay one
+  rewrite (`early_apply`, default on). Held decisions are never re-asked. `calibrated_horizon: true`
+  credits a removal for the expected remaining requests (22 - t/2, between 11 and 22, fitted on SWE-bench
+  Claude Code sessions) instead of `horizon_turns`. Default `apply_mode` is `immediate`.
+- `anchor: true` (with `apply_mode: cold`): when decisions are applied on a warm request, a cache breakpoint
+  is placed on the assistant turn just before the first edited tool result. It looks back one block, finds
+  the entry the previous request wrote at its last message, and reads the prefix up to it, so only the tail
+  is rewritten. It needs a free slot (the provider cap is 4 breakpoints per request, counting the client's),
+  an earlier request that ended exactly at the preceding message, and no edit applied at or before that
+  message since. Without any of these it is not placed. It also lets the early-apply test pick the best
+  latest-first subset of the held decisions.
+- `econ: true` (default) tests the ask before it is made: a share of the pending mass (`expected_removal`,
+  0.6) is credited for at most `horizon_turns` turns, against one write of the whole conversation that
+  remains (an edit anywhere in history leaves only the system prompt readable when the client marks only the
+  last message) and the ask's own price. After the answer the same test is applied to the removals actually
+  chosen; all or none are applied. Skipped in the pre-expiry window.
+- `measured_removal: true` replaces the fixed `expected_removal` in the pre-ask test by a running estimate of the
+  share of offered mass the model really removes (prior `removal_prior`, worth 20,000 offered tokens), and
+  `gate_margin` asks only when the expected net exceeds (1 + margin) times the ask's own price. Off by default.
+- `instruction_role: auto` sends the instruction as a mid-conversation system message on models whose
+  route accepted it in testing, and as a final user turn otherwise. `user` and `system` force a channel; a
+  system message is only sent when the stored body ends on a user message.
+- A call whose cache read is below 80% of its prompt is recorded, paid for, and discarded; the session
+  backs off 15 turns (other failures keep the ordinary cooldown). There is no content-copying fallback.
+- The ask replays the session request's `anthropic-beta` header, so a session on a beta (for example a
+  long-context beta) asks under the same route and cache namespace.
+- Each call is one `extraction_calls` row: cache read and write, fresh (instruction and inventory) and
+  output tokens, cost, latency, acceptance and rejection; `strategy` is `ride_user` or `ride_system` and
+  `gate_reason` carries the trigger, item count and instruction tokens.
+
+Preset: `house_ride` (`house` without `toon`, plus `extract_llm_ride`). Gates are prefixed `ride_`.
+Runs only where a prefix asker exists (Anthropic Messages and OpenAI Responses requests).
+
 ## extract_llm_sweep
 
 **Kind:** Offload. **Reversible:** yes (`marker_mode: full`, the default). **In presets:** `housellm`.
