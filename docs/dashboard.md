@@ -11,7 +11,9 @@ context-guru-proxy --preset general --dashboard
 ```
 
 `/dashboard/` opens the **Overview**. The older links `/dashboard/#home` and `/dashboard/#cache` open
-Overview and Keep-alive, and `/dashboard/home.html` redirects to the dashboard.
+Overview and Cache strategy, and `/dashboard/home.html` redirects to the dashboard.
+
+The dashboard uses the words *preset* and *cache strategy*. The older names, compaction and keep-alive, mean the same things.
 
 It is **off by default**. Turning it on adds `/dashboard/` and `/api/*`; every existing
 route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
@@ -28,23 +30,23 @@ route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
 
 ## What you'll see
 
-- **Overview** — "What context-guru saved": three rows (cache keep-alive, compaction, tools and
+- **Overview** — "What context-guru saved": three rows (Cache strategy, Your preset, Tools and
   skills filter), each in dollars and tokens against what you spent, with an *Estimated* or
-  *Upper bound* badge. The keep-alive row notes that whether to keep it on is a forecast (see
-  Keep-alive), and a note says the provider's own cache discount is not counted. Below: "Tools and
+  *Upper bound* badge. The cache strategy row notes that whether to keep it on is a forecast (see
+  the Cache strategy tab), and a note says the provider's own cache discount is not counted. Below: "Tools and
   skills to remove" (a ranked list, with `/context-guru:remove-mcp-and-skills` and
   `/context-guru:insights tools`), "About the other tabs", and one closed "Detailed diagnostics"
   section with five plots (net saving over time; money saved and added, where an outlined bar is an
   upper bound; tokens removed; where input tokens went, as 100% columns of cache read, cache write
   and fresh; time added per request and requests with cache misses) and a live requests table.
   Every plot shows exact figures on hover.
-- **Savings** — Keep-alive, Inventory (the [tool inventory](#tool-inventory-panel)) and Usage over time.
+- **Savings** — Cache strategy (also called keep-alive), Inventory (the [tool inventory](#tool-inventory-panel)) and Usage over time.
 - **Traffic** — Sessions (newest or costliest first; six columns, more with a checkbox) and
   Requests, including a git-style diff of exactly what was rewritten on the wire.
-- **Admin** — Config, Strategies, Tenants, Setup, Settings, Archive and Feedback
+- **Admin** — Config, Cache strategies, Tenants, Setup, Settings, Archive and Feedback
   (some of these appear only in a [hosted service](hosted.md)).
-- **Advanced** — Components (per-component economics), [KV-cache behavior](#kv-cache-panel),
-  and Campaigns (per-account keep-alive rules).
+- **Advanced** — Preset steps (per-component economics), [KV-cache behavior](#kv-cache-panel),
+  and Strategy campaigns (per-account cache strategies).
 
 Every tab starts with a title and one line saying what it shows. Dark mode, small
 viewports, and empty states (a blank dashboard explains *why* each panel is blank) are
@@ -157,7 +159,7 @@ still works; only the text is withheld.
 at that idle profile, and what a different TTL policy would have cost on the same
 history.*
 
-The tab sits next to **Keep-alive** — both answer "what is the prompt cache doing to my
+The tab sits next to **Cache strategy** — both answer "what is the prompt cache doing to my
 bill." It respects the shared filter bar (time range, model, agent, account), plus
 three narrowings that exist only here because they're derived rather than stored
 columns: time-of-day band, observed TTL tier, and whether a request has a successor at

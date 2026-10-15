@@ -348,7 +348,7 @@ message text) is the size gate.
 
 ## Measuring what it earned
 
-The Components tab carries a **What each summary earned** panel, which follows every summary for
+The Preset steps tab (Components) carries a **What each summary earned** panel, which follows every summary for
 **10% more of the model's context window** and reports what happened over that span:
 
 | Column | What it is |
