@@ -808,6 +808,18 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Exact attribution for the diff view: which components rewrote each message, in
 	// order. Built once from the run report the pipeline already produced.
 	touched := touchedBy(rr)
+	// A message no surviving component changed re-marshals to exactly its normalized form, so the
+	// comparison below can skip it: changedIdx (reflect.DeepEqual before/after, per component) is
+	// what says "changed". It is only trusted when nothing was reverted, because a revert installs
+	// a clone of the snapshot, which is equal in content but not proven equal in bytes.
+	trustTouched := rr != nil
+	if rr != nil {
+		for _, rep := range rr.Components {
+			if rep.Reverted {
+				trustTouched = false
+			}
+		}
+	}
 	// Per-message count of changes this writeback threw away, attributed back to the
 	// components that made them once the loop is done.
 	discarded := map[int]int{}
@@ -853,6 +865,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			changed = true
 			changes = append(changes, mkChange(s.path, s.preText, newText, touched[i]))
 		default: // wholeMessage
+			if _, was := touched[i]; trustTouched && !was {
+				continue // no component changed it: keep the original bytes verbatim (I1)
+			}
 			post, err := json.Marshal(chat.Input[i])
 			if err != nil {
 				res.Body = body
@@ -1176,6 +1191,13 @@ func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration
 // wrongly restrict offloaders to the tail on a non-caching backend). A key inside a
 // JSON string value never matches these paths.
 func hasCacheBreakpoint(body []byte) bool {
+	// Every path below ends in a key spelled cache_control or cachePoint, so a body with neither
+	// "cache" nor a \u escape anywhere in it (a key could be spelled with one) cannot match, and
+	// five full structural walks of a large body are skipped. Exact, unlike a prefilter that
+	// assumes keys are never escaped.
+	if !bytes.Contains(body, []byte("cache")) && !bytes.Contains(body, []byte(`\u`)) {
+		return false
+	}
 	paths := []string{
 		"messages.#.content.#.cache_control",
 		"messages.#.cache_control",
