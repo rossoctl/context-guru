@@ -147,6 +147,7 @@ nav:
       - Config & routes reference: reference/reference.md
       - Settings form & field descriptors: how-to/settings-form.md
   - Dashboard: dashboard.md
+  - "The dashboard, tab by tab": how-to/dashboard-guide.md
   - Hosted service: hosted.md
   - Results:
       - Overview: RESULTS.md

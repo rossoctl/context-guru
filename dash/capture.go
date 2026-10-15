@@ -50,9 +50,6 @@ type Options struct {
 	// /api/config. It is redacted before serving; nothing sensitive should be in
 	// here in the first place.
 	Effective map[string]any
-	// BenchDirs are directories scanned for harbor benchmark runs (summary.json +
-	// rows-*.json) at startup and on demand.
-	BenchDirs []string
 
 	// DiskHighWatermark is the fraction of the FILESYSTEM in use at which the
 	// janitor starts evicting the oldest sessions; DiskLowWatermark is where it

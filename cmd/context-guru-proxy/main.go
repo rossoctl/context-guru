@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -206,11 +205,15 @@ func main() {
 			"hosted mode: max in-flight requests per tenant (0 = unlimited)")
 		cheapConcurrent = flag.Int("cheap-model-concurrent", envInt("CHEAP_MODEL_CONCURRENT", 4),
 			"process-wide cap on concurrent compaction-model calls, so one tenant's extract_llm cannot stall everyone's agents (0 = unlimited)")
-
-		dashBench = flag.String("dashboard-bench-dirs", envOr("DASHBOARD_BENCH_DIRS", ""),
-			"comma-separated directories of benchmark runs (each with summary.json + rows-*.json) to ingest")
+		// The Benchmarks tab is gone. The flag stays as a no-op so an existing unit file or
+		// environment that still passes it starts instead of exiting on an unknown flag.
+		dashBenchIgnored = flag.String("dashboard-bench-dirs", envOr("DASHBOARD_BENCH_DIRS", ""),
+			"deprecated and ignored: the dashboard no longer has a Benchmarks tab")
 	)
 	flag.Parse()
+	if *dashBenchIgnored != "" {
+		slog.Warn("--dashboard-bench-dirs / DASHBOARD_BENCH_DIRS is ignored: the dashboard no longer has a Benchmarks tab")
+	}
 
 	// --version before anything else: an installer asks a binary what it is, and it must be
 	// able to ask without starting a server or needing a config. buildinfo.Version was already
@@ -327,7 +330,6 @@ func main() {
 			QueueSize:        *dashQueue,
 			LifecycleSignals: *dashLifecycle,
 			TrustedCIDRs:     splitComma(*dashCIDRs),
-			BenchDirs:        splitComma(*dashBench),
 
 			DiskHighWatermark: *dashDiskHigh,
 			DiskLowWatermark:  *dashDiskLow,
@@ -378,31 +380,6 @@ func main() {
 				"session will be reported as a cold start", "err", err)
 		} else {
 			slog.Info("dashboard: recovered session recency across the restart", "sessions", n)
-		}
-		if runs, tasks := rec.DB().IngestBenchRoots(opts.BenchDirs); runs > 0 {
-			slog.Info("dashboard: ingested benchmark runs", "runs", runs, "tasks", tasks)
-		} else if len(opts.BenchDirs) > 0 {
-			// Asked to ingest and found nothing. Say so: ingestion runs ONCE at startup,
-			// so a silent zero means the Benchmarks tab stays empty forever with no clue
-			// why, and the most likely cause is invisible from inside the process.
-			//
-			// That cause is PrivateTmp. The shipped unit sets PrivateTmp=true, so the
-			// service gets its OWN empty /tmp — a directory that plainly exists in the
-			// operator's shell is simply not there for this process. Pointing
-			// DASHBOARD_BENCH_DIRS at /tmp/<anything> therefore looks correct, changes
-			// nothing, and reports nothing. Naming the path we actually looked at is what
-			// makes that diagnosable in one glance at the log.
-			hint := ""
-			for _, d := range opts.BenchDirs {
-				if strings.HasPrefix(filepath.Clean(d), "/tmp/") {
-					hint = "a /tmp path is NOT visible to this process when the unit sets " +
-						"PrivateTmp=true; copy the run directory somewhere readable " +
-						"(e.g. under the state dir) and point DASHBOARD_BENCH_DIRS there"
-					break
-				}
-			}
-			slog.Warn("dashboard: no benchmark runs ingested; the Benchmarks tab will be empty",
-				"dirs", strings.Join(opts.BenchDirs, ","), "hint", hint)
 		}
 		slog.Info("dashboard enabled", "url", "http://"+addr+"/dashboard/", "db", rec.DB().Path(),
 			"content_capture", *dashContent)

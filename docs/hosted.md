@@ -801,7 +801,7 @@ is what `per_output: false` used to mean.
 
 **Then check what it did**, before turning on anything else. Requests tab → open a request →
 **Compaction model calls**: one row per call with its cost, its saving, its latency, whether
-the result was accepted, and why not when it was not. The Components tab now carries an
+the result was accepted, and why not when it was not. The Preset steps tab (Components) now carries an
 `LLM cost` column and states the verdict in dollars. What to look for:
 
 | reading | meaning |
