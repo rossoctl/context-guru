@@ -1162,9 +1162,9 @@ const compactEpisodeSelect = `SELECT r.tenant_id, r.session_id, r.model, r.ts, r
 
 // summarizeSessionsOnly narrows the dataset to sessions in which summarize ever acted. The
 // ledger needs no others, and it runs on the stats path, which must not load every request.
-const summarizeSessionsOnly = ` AND EXISTS (SELECT 1 FROM request_components c2 JOIN requests r2 ON r2.id = c2.request_id
-	WHERE c2.component = 'summarize' AND c2.acted = 1
-	AND r2.session_id = r.session_id AND r2.tenant_id = r.tenant_id)`
+const summarizeSessionsOnly = ` AND (r.tenant_id, r.session_id) IN (
+	SELECT r2.tenant_id, r2.session_id FROM request_components c2 JOIN requests r2 ON r2.id = c2.request_id
+	WHERE c2.component = 'summarize' AND c2.acted = 1)`
 
 // rePriceFn resolves a model's rates for the read-time pricing of a stored row.
 type rePriceFn func(model string) (modelinfo.Price, bool)

@@ -1239,8 +1239,9 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, err
 			}
-			// Bounded for a session only: the ledger reads that session's rows in order.
-			if f.Session != "" && a.pricer != nil && a.windows != nil {
+			// The ledger reads only the sessions in which summarize ever acted, so its cost follows
+			// their rows, not the window or the table. The status line then agrees with the dashboard.
+			if a.pricer != nil && a.windows != nil {
 				if l, lerr := db.SummarizeLedgerFor(f, a.windows, a.pricer); lerr == nil {
 					o.ApplySummarizeLedger(l)
 					o.Waterfall = o.waterfall()
