@@ -19,6 +19,10 @@ type Builtin struct{ windows map[string]int }
 // in testdata lists it.
 var builtinWindows = map[string]int{
 	"claude-fable-5":    1000000,
+	"claude-fable-5-1":  1000000,
+	"claude-opus-5-5":   1000000,
+	"claude-sonnet-5-5": 1000000,
+	"claude-haiku-5-5":  1000000,
 	"claude-haiku-4-5":  200000,
 	"claude-opus-5":     1000000,
 	"claude-sonnet-5":   1000000,
