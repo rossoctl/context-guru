@@ -15,6 +15,7 @@ func TestHasCacheBreakpointPrefilterIsExact(t *testing.T) {
 		{"system mark", `{"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],"messages":[]}`, true},
 		{"tools mark", `{"tools":[{"name":"t","cache_control":{"type":"ephemeral"}}],"messages":[]}`, true},
 		{"bedrock mark", `{"messages":[{"role":"user","content":[{"cachePoint":{"type":"default"}}]}]}`, true},
+		{"no role, plain key", `{"messages":[{"content":[{"cache_control":{"type":"ephemeral"}}]}]}`, true},
 		{"escaped key", `{"messages":[{"role":"user","content":[{"type":"text","text":"hi","c\u0061che_control":{"type":"ephemeral"}}]}]}`, true},
 		{"only mentioned in text", `{"messages":[{"role":"user","content":"the cache_control field"}]}`, false},
 	}
