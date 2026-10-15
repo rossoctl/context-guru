@@ -281,6 +281,10 @@ type Keeper struct {
 	credDead     map[string]time.Time
 	// routeTrips counts how many times routeFailedLocked has tripped a route, for Stats.
 	routeTrips atomic.Int64
+	// inflight counts open requests per THREAD (keyed like live): Arrive increments, Record and
+	// Depart decrement. A due entry whose own thread has one or more open requests is skipped by
+	// Sweep — another thread's open request never pauses it. Port of main's `inflight` field.
+	inflight map[string]int
 	// turns counts requests seen per THREAD (keyed like live), so the first-request gate
 	// survives the entry's own lifecycle: an entry is dropped the moment the next request arrives, and retired by
 	// policy a few minutes later, while "has this session sent a request before?" has to
@@ -356,7 +360,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -485,6 +489,7 @@ func (k *Keeper) Arrive(key Key) (pings int, refreshed int64, tag string) {
 	id := key.id()
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	k.inflight[id]++
 	e, ok := k.live[id]
 	if !ok {
 		return 0, 0, ""
@@ -495,6 +500,28 @@ func (k *Keeper) Arrive(key Key) (pings int, refreshed int64, tag string) {
 	e.clear()
 	delete(k.live, id)
 	return pings, refreshed, tag
+}
+
+// Depart ends one open request on key's thread. Record calls it for its own key, so a host calls
+// it only for a request that ends without a Record (e.g. an error path that never reaches it).
+// On a thread with nothing open it does nothing. Nil-safe and a no-op on an empty session, like
+// Arrive. Port of main's `departed`.
+func (k *Keeper) Depart(key Key) {
+	if k == nil || key.Session == "" {
+		return
+	}
+	k.mu.Lock()
+	k.departLocked(key.id())
+	k.mu.Unlock()
+}
+
+// departLocked is Depart's body, for callers that already hold k.mu. k.mu must be held.
+func (k *Keeper) departLocked(id string) {
+	if k.inflight[id] <= 1 {
+		delete(k.inflight, id)
+		return
+	}
+	k.inflight[id]--
 }
 
 // Record hands the keeper what it needs to ping this thread, once the request that
@@ -509,6 +536,12 @@ func (k *Keeper) Record(r Record) {
 	if k == nil || session == "" || len(body) == 0 || startedAt.IsZero() {
 		return
 	}
+	// Ends the request's own open count on this thread, on every return path below — the host's
+	// Arrive opened it, and Record is how it closes for the ordinary case. Must run AFTER Record
+	// has released k.mu: Depart takes the lock itself, and this defer, registered first, runs
+	// LAST (LIFO), after every k.mu.Unlock() registered further down. Port of main's deferred
+	// `departed` (43d0fe9e): departing after the hold is stored, not before.
+	defer k.Depart(r.Key)
 	// Only a request the provider ACCEPTED left a cache entry behind. Tracking a 4xx or a
 	// failed forward would hold a body and a credential in order to ping a prefix that was
 	// never cached — cost with no possible benefit.
@@ -821,6 +854,11 @@ func (k *Keeper) Forget(tenantID string) {
 			delete(k.credDead, c)
 		}
 	}
+	for id := range k.inflight {
+		if strings.HasPrefix(id, prefix) {
+			delete(k.inflight, id)
+		}
+	}
 }
 
 // evictLocked enforces both bounds by dropping the entries whose deadline is furthest away
@@ -878,7 +916,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 			}
 			continue
 		}
-		if !e.due(now) {
+		if !e.due(now) || k.inflight[key] > 0 {
 			continue
 		}
 		// The route breaker and the dead-credential mark can trip or land WHILE an entry is
