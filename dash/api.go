@@ -1501,15 +1501,18 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 		// The replay cap streams the whole scope; start it beside the component read, not after.
 		var repLedger *ReplayLedger
 		var repErr error
+		repCtx, repCancel := context.WithCancel(db.readCtx())
+		defer repCancel()
 		repDone := make(chan struct{})
 		go func() {
 			defer close(repDone)
 			if a.pricer != nil {
-				repLedger, repErr = db.ReplayLedgerFor(f, a.windows, a.pricer)
+				repLedger, repErr = db.ReplayLedgerForCtx(repCtx, f, a.windows, a.pricer)
 			}
 		}()
 		rows, groups, err := db.components(f)
 		if err != nil {
+			repCancel()
 			<-repDone
 			return nil, err
 		}
@@ -1522,6 +1525,8 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 			// halves so the two opposite-signed verdicts can be shown together. Both are
 			// re-groupings of what was just read, so neither touches the database.
 			if err := decomposeFromGroups(groups, a.pricer, rows); err != nil {
+				repCancel()
+				<-repDone
 				return nil, err
 			}
 			if err := estimateFromGroups(groups, a.pricer, rows); err != nil {

@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"context"
 	"database/sql"
 	"math"
 	"strings"
@@ -65,9 +66,32 @@ type ComponentLedger struct {
 	WindowAssumedUSD float64 `json:"window_assumed_usd"`
 }
 
-// assumedWindow stands in for a model whose context window is not exactly known: 200k, the
-// smallest window of the families seen here, so the assumed ceiling is never later than the real one.
+// assumedWindow stands in for a model whose context window is not exactly known: 200k, the smallest
+// window of the Claude families seen here. A family with smaller windows has its own floor
+// (familyWindowFloor), and a known but unpublished window below both wins. It is an assumption, not a
+// bound: a model of an unlisted family with a smaller window still over-credits, and is labelled.
 const assumedWindow = 200_000
+
+var familyWindowFloor = []struct {
+	substr string
+	window int
+}{{"gpt-4", 128_000}, {"llama", 128_000}, {"mistral", 32_000}}
+
+// assumedWindowFor is the smallest of the resolver's (inexact) window, the model family's floor and
+// assumedWindow.
+func assumedWindowFor(model string, known int) int {
+	w := assumedWindow
+	if known > 0 && known < w {
+		w = known
+	}
+	m := strings.ToLower(model)
+	for _, f := range familyWindowFloor {
+		if strings.Contains(m, f.substr) && f.window < w {
+			w = f.window
+		}
+	}
+	return w
+}
 
 // DeltaUSD is the correction to apply to a figure built from the stored credit.
 func (l *ComponentLedger) DeltaUSD() float64 { return -l.PastCapUSD }
@@ -214,12 +238,11 @@ func walkCapConversation(conv []capRow, window windowFn, bypassTS []int64, out *
 	assumed := false
 	if !exact || w <= 0 {
 		// No exact window. Leaving the credit uncapped is the one path that over-credits, so a
-		// conservative window stands in: the smaller of what is known and assumedWindow.
+		// conservative window stands in: the smallest of what is known, the floor of the model's
+		// provider family, and assumedWindow.
 		assumed = true
 		out.WindowUnknownCovered++
-		if w <= 0 || w > assumedWindow {
-			w = assumedWindow
-		}
+		w = assumedWindowFor(model, w)
 	}
 	ceil := compactionpoint.For(model).Frac
 	out.CeilingFrac[model] = ceil
@@ -307,10 +330,15 @@ func firstShare(ev *Event, p modelinfo.Price, priced bool, comp string, gross, u
 // Memory is bounded by the largest single session in the scope (about 120 bytes per request plus
 // its credit rows), not by the scope: the ledger itself is a few counters per component.
 func (d *DB) ReplayLedgerFor(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer) (*ReplayLedger, error) {
+	return d.ReplayLedgerForCtx(d.readCtx(), f, windows, p)
+}
+
+// ReplayLedgerForCtx is ReplayLedgerFor under a caller's context, so a caller that no longer needs
+// the answer can stop the scan.
+func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo.Resolver, p modelinfo.Pricer) (*ReplayLedger, error) {
 	if d == nil || windows == nil {
 		return newReplayLedger(), nil
 	}
-	ctx := d.readCtx()
 	cond, args := f.where()
 	rs, err := d.sql.QueryContext(ctx, strings.Replace(capSelect, "%s", cond, 1), args...)
 	if err != nil {

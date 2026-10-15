@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -308,5 +309,59 @@ func TestReplayCapRequiresTheDropToPersist(t *testing.T) {
 	}
 	if l := walkReplayCap(mk(40_000), fixedWindow(1_000_000)); l.ClosedClientCompaction != 1 {
 		t.Errorf("a persistent drop after the compaction request was missed")
+	}
+}
+
+// request_components has no UNIQUE: two rows for one (request, component) count once, at the larger.
+func TestReplayLedgerKeepsTheLargerOfDuplicateRows(t *testing.T) {
+	db := openTestDB(t)
+	e := mkEvent(DayMs+1, "s", "m1", 300_000, 200_000)
+	e.TenantID = "t1"
+	e.TokenAccounting = AccountingComplete
+	e.Components = []CompRow{
+		{Component: "extract_llm", Acted: true, SavedGross: 100_000, SavedUSD: 0.25},
+		{Component: "extract_llm", Acted: true, SavedGross: 100_000, SavedUSD: 0.75},
+		{Component: "extract_llm", Acted: true, SavedGross: 100_000, SavedUSD: 0.5},
+	}
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := db.ReplayLedgerFor(Filter{TenantAll: true}, testWindows{}, handPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nearEq(t, "stored", l.ByComponent["extract_llm"].StoredUSD, 0.75)
+	if l.ByComponent["extract_llm"].Rows != 1 {
+		t.Errorf("rows = %d, want 1", l.ByComponent["extract_llm"].Rows)
+	}
+}
+
+// A cancelled caller stops the scan.
+func TestReplayLedgerStopsWhenItsContextIsCancelled(t *testing.T) {
+	db := openTestDB(t)
+	if err := db.insertBatch([]*Event{mkEvent(DayMs+1, "s", "m1", 1000, 900)}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := db.ReplayLedgerForCtx(ctx, Filter{TenantAll: true}, testWindows{}, handPrice); err == nil {
+		t.Error("a cancelled context did not stop the scan")
+	}
+}
+
+// The assumed window is the smallest of the known window, the family floor and 200k.
+func TestAssumedWindowIsTheSmallestOfKnownFamilyAndDefault(t *testing.T) {
+	for _, tc := range []struct {
+		model string
+		known int
+		want  int
+	}{
+		{"claude-x", 0, 200_000}, {"claude-x", 1_000_000, 200_000}, {"claude-x", 100_000, 100_000},
+		{"gpt-4o-mini", 0, 128_000}, {"gpt-4o-mini", 1_000_000, 128_000}, {"mistral-large", 0, 32_000},
+		{"Llama-3", 0, 128_000},
+	} {
+		if got := assumedWindowFor(tc.model, tc.known); got != tc.want {
+			t.Errorf("assumedWindowFor(%q, %d) = %d, want %d", tc.model, tc.known, got, tc.want)
+		}
 	}
 }
