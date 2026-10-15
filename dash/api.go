@@ -1498,8 +1498,19 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 	}
 	a.serveJSON(w, r, &a.componentsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
 		// ONE pass over request_components feeds the rows and both valuations below (components).
+		// The replay cap streams the whole scope; start it beside the component read, not after.
+		var repLedger *ReplayLedger
+		var repErr error
+		repDone := make(chan struct{})
+		go func() {
+			defer close(repDone)
+			if a.pricer != nil {
+				repLedger, repErr = db.ReplayLedgerFor(f, a.windows, a.pricer)
+			}
+		}()
 		rows, groups, err := db.components(f)
 		if err != nil {
+			<-repDone
 			return nil, err
 		}
 		// Value the rows whose saved_usd predates the column, into their own field. Without this
@@ -1529,11 +1540,12 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			// Every other replaying component, capped at the counterfactual client compaction.
-			if l, err := db.ReplayLedgerFor(f, a.windows, a.pricer); err != nil {
-				slog.Warn("context-guru: replay cap failed; components read their stored credit", "err", err)
+			<-repDone
+			if repErr != nil {
+				slog.Warn("context-guru: replay cap failed; components read their stored credit", "err", repErr)
 			} else {
 				for _, c := range rows {
-					applyReplayLedgerToRow(c, l)
+					applyReplayLedgerToRow(c, repLedger)
 				}
 			}
 		}

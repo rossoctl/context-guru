@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"database/sql"
 	"math"
 	"strings"
 
@@ -125,10 +126,6 @@ func sameConv(a, b *capRow) bool {
 	return a.Tenant == b.Tenant && a.Session == b.Session && a.Model == b.Model
 }
 
-// sessionKey names a session across models: a compaction request and the turn it shrinks need
-// not share a model.
-type sessionKey struct{ tenant, session string }
-
 // walkReplayCap runs the rule over rows ordered by (tenant, session, model, ts, id).
 //
 // A drop in tokens_before is a client compaction only when the agent's compaction request went
@@ -137,12 +134,29 @@ type sessionKey struct{ tenant, session string }
 // the session and the model, its transcript is smaller, and the turns interleave. On the
 // large real dataset most drops were that, not a compaction.
 func walkReplayCap(rows []capRow, window windowFn) *ReplayLedger {
-	out := &ReplayLedger{ByComponent: map[string]*ComponentLedger{}, CeilingFrac: map[string]float64{}}
-	bypass := map[sessionKey][]int64{}
+	out := newReplayLedger()
+	for start := 0; start < len(rows); {
+		end := start + 1
+		for end < len(rows) && rows[end].Tenant == rows[start].Tenant && rows[end].Session == rows[start].Session {
+			end++
+		}
+		walkCapSession(rows[start:end], window, out)
+		start = end
+	}
+	return out
+}
+
+func newReplayLedger() *ReplayLedger {
+	return &ReplayLedger{ByComponent: map[string]*ComponentLedger{}, CeilingFrac: map[string]float64{}}
+}
+
+// walkCapSession runs the rule over one session's rows, ordered by (model, ts, id). The session is
+// the unit because a compaction request and the turn it shrinks need not share a model.
+func walkCapSession(rows []capRow, window windowFn, out *ReplayLedger) {
+	var bypass []int64
 	for _, r := range rows {
 		if r.Bypassed {
-			k := sessionKey{r.Tenant, r.Session}
-			bypass[k] = append(bypass[k], r.TS)
+			bypass = append(bypass, r.TS)
 		}
 	}
 	for start := 0; start < len(rows); {
@@ -150,10 +164,9 @@ func walkReplayCap(rows []capRow, window windowFn) *ReplayLedger {
 		for end < len(rows) && sameConv(&rows[start], &rows[end]) {
 			end++
 		}
-		walkCapConversation(rows[start:end], window, bypass[sessionKey{rows[start].Tenant, rows[start].Session}], out)
+		walkCapConversation(rows[start:end], window, bypass, out)
 		start = end
 	}
-	return out
 }
 
 // bypassBetween reports whether any of the (unsorted) timestamps lies in [from, to].
@@ -168,8 +181,8 @@ func bypassBetween(ts []int64, from, to int64) bool {
 
 // recoveryLookahead is how many turns after a drop may bring the transcript back before the drop
 // stops being a compaction. A subagent or auxiliary turn is followed by the main thread's, which
-// is as large as before; a compaction is not. On a large real dataset 37% of drops of 100k or more
-// recovered, and a compaction request in between did not rule them out.
+// is as large as before; a compaction is not. A compaction request in between does not rule an
+// interleaved turn out on its own.
 const recoveryLookahead = 3
 
 func recovers(next []capRow, prev int64) bool {
@@ -241,16 +254,18 @@ func walkCapConversation(conv []capRow, window windowFn, bypassTS []int64, out *
 
 // --- SQL ---------------------------------------------------------------------
 
-const capRequestSelect = `SELECT r.id, r.tenant_id, r.session_id, r.model, r.ts, r.bypassed, r.tokens_before,
+// capSelect streams every request of the scope with its credit rows (one output row per credit,
+// or one with NULLs). summarize has its own ledger. The join is by request id, so a session-scoped
+// call touches only that session's component rows.
+const capSelect = `SELECT r.id, r.tenant_id, r.session_id, r.model, r.ts, r.bypassed, r.tokens_before,
 		r.tokens_after, r.fresh_input + r.cache_read + r.cache_write,
-		r.cache_miss_reason, r.fresh_input, r.cache_read, r.cache_write
-	FROM requests r WHERE %s
+		r.cache_miss_reason, r.fresh_input, r.cache_read, r.cache_write,
+		c.component, c.saved_gross, c.saved_unique, c.saved_usd
+	FROM requests r
+	LEFT JOIN request_components c ON c.request_id = r.id AND c.component <> 'summarize'
+		AND c.saved_usd <> 0 AND c.saved_gross > 0
+	WHERE %s
 	ORDER BY r.tenant_id, r.session_id, r.model, r.ts, r.id`
-
-// capCreditSelect: every credit row of a component the cap governs. summarize has its own ledger.
-const capCreditSelect = `SELECT c.request_id, c.component, c.saved_gross, c.saved_unique, c.saved_usd
-	FROM request_components c JOIN requests r ON r.id = c.request_id
-	WHERE %s AND c.component <> 'summarize' AND c.saved_usd <> 0 AND c.saved_gross > 0`
 
 // firstShare is the fraction of a row's credit that is a first removal: the unique part priced
 // through Event.ComponentSavedUSD against the whole, so the split follows the same pricing path
@@ -271,79 +286,105 @@ func firstShare(ev *Event, p modelinfo.Price, priced bool, comp string, gross, u
 	return float64(unique) / float64(gross)
 }
 
-// ReplayLedgerFor reads the rows one filter selects and runs the cap over them. A model whose
-// window is not exactly known keeps its stored credit.
+// ReplayLedgerFor streams the rows one filter selects and runs the cap session by session. A model
+// whose window is not exactly known keeps its stored credit.
+//
+// Memory is bounded by the largest single session in the scope (about 120 bytes per request plus
+// its credit rows), not by the scope: the ledger itself is a few counters per component.
 func (d *DB) ReplayLedgerFor(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer) (*ReplayLedger, error) {
 	if d == nil || windows == nil {
-		return &ReplayLedger{ByComponent: map[string]*ComponentLedger{}}, nil
+		return newReplayLedger(), nil
 	}
 	ctx := d.readCtx()
 	cond, args := f.where()
-	rows, evs, err := d.capRequests(cond, args)
+	rs, err := d.sql.QueryContext(ctx, strings.Replace(capSelect, "%s", cond, 1), args...)
 	if err != nil {
 		return nil, err
-	}
-	if err := d.capCredits(cond, args, rows, evs, pricerFn(ctx, p)); err != nil {
-		return nil, err
-	}
-	return walkReplayCap(rows, func(model string) (int, bool) {
-		w, exact, ok := modelinfo.Exact(windows, ctx, model)
-		return w, exact && ok
-	}), nil
-}
-
-func (d *DB) capRequests(cond string, args []any) ([]capRow, map[int64]int, error) {
-	rs, err := d.sql.QueryContext(d.readCtx(), strings.Replace(capRequestSelect, "%s", cond, 1), args...)
-	if err != nil {
-		return nil, nil, err
 	}
 	defer rs.Close()
-	var rows []capRow
-	idx := map[int64]int{}
+	window := func(model string) (int, bool) {
+		w, exact, ok := modelinfo.Exact(windows, ctx, model)
+		return w, exact && ok
+	}
+	price := pricerFn(ctx, p)
+	out := newReplayLedger()
+	var buf []capRow
+	var lastID int64 = -1
+	flush := func() {
+		for i := range buf {
+			r := &buf[i]
+			if len(r.Credits) == 0 {
+				continue
+			}
+			ev := Event{Model: r.Model, CacheMissReason: r.reason, FreshInput: r.fresh, CacheRead: r.read, CacheWrite: r.write}
+			ev.BilledTokenFactor, _ = tokens.BilledDeltaFactor(r.Model)
+			var pr modelinfo.Price
+			priced := false
+			if price != nil {
+				pr, priced = price(r.Model)
+			}
+			for j := range r.Credits {
+				c := &r.Credits[j]
+				c.FirstUSD = c.USD * firstShare(&ev, pr, priced, c.Component, c.Gross, c.Unique)
+			}
+		}
+		walkCapSession(buf, window, out)
+		buf = buf[:0]
+	}
 	for rs.Next() {
 		var id int64
 		var r capRow
 		var bypassed int
+		var comp sql.NullString
+		var gross, unique sql.NullInt64
+		var usd sql.NullFloat64
 		if err := rs.Scan(&id, &r.Tenant, &r.Session, &r.Model, &r.TS, &bypassed, &r.TokensBefore,
-			&r.TokensAfter, &r.Billed, &r.reason, &r.fresh, &r.read, &r.write); err != nil {
-			return nil, nil, err
+			&r.TokensAfter, &r.Billed, &r.reason, &r.fresh, &r.read, &r.write,
+			&comp, &gross, &unique, &usd); err != nil {
+			return nil, err
 		}
-		r.Bypassed = bypassed != 0
-		idx[id] = len(rows)
-		rows = append(rows, r)
-	}
-	return rows, idx, rs.Err()
-}
-
-// capCredits attaches the credit rows to their requests, pricing the first-removal split.
-func (d *DB) capCredits(cond string, args []any, rows []capRow, idx map[int64]int, price rePriceFn) error {
-	cs, err := d.sql.QueryContext(d.readCtx(), strings.Replace(capCreditSelect, "%s", cond, 1), args...)
-	if err != nil {
-		return err
-	}
-	defer cs.Close()
-	for cs.Next() {
-		var id int64
-		var c compCredit
-		if err := cs.Scan(&id, &c.Component, &c.Gross, &c.Unique, &c.USD); err != nil {
-			return err
+		if id != lastID {
+			if n := len(buf); n > 0 && (buf[n-1].Tenant != r.Tenant || buf[n-1].Session != r.Session) {
+				flush()
+			}
+			if n := len(buf); n > 0 { // share the strings of the previous row
+				if buf[n-1].Tenant == r.Tenant {
+					r.Tenant = buf[n-1].Tenant
+				}
+				if buf[n-1].Session == r.Session {
+					r.Session = buf[n-1].Session
+				}
+				if buf[n-1].Model == r.Model {
+					r.Model = buf[n-1].Model
+				}
+			}
+			r.Bypassed = bypassed != 0
+			buf = append(buf, r)
+			lastID = id
 		}
-		i, ok := idx[id]
-		if !ok {
+		if !comp.Valid {
 			continue
 		}
-		r := &rows[i]
-		ev := Event{Model: r.Model, CacheMissReason: r.reason, FreshInput: r.fresh, CacheRead: r.read, CacheWrite: r.write}
-		ev.BilledTokenFactor, _ = tokens.BilledDeltaFactor(r.Model)
-		var pr modelinfo.Price
-		priced := false
-		if price != nil {
-			pr, priced = price(r.Model)
+		cur := &buf[len(buf)-1]
+		c := compCredit{Component: comp.String, Gross: gross.Int64, Unique: unique.Int64, USD: usd.Float64}
+		dup := false
+		for i := range cur.Credits { // request_components has no UNIQUE: keep the larger of duplicates
+			if cur.Credits[i].Component == c.Component {
+				dup = true
+				if c.USD > cur.Credits[i].USD {
+					cur.Credits[i] = c
+				}
+			}
 		}
-		c.FirstUSD = c.USD * firstShare(&ev, pr, priced, c.Component, c.Gross, c.Unique)
-		r.Credits = append(r.Credits, c)
+		if !dup {
+			cur.Credits = append(cur.Credits, c)
+		}
 	}
-	return cs.Err()
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	flush()
+	return out, nil
 }
 
 // ApplyReplayLedger corrects the headline for the capped components' credit.
