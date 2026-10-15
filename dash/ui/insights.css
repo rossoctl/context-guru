@@ -263,6 +263,25 @@
    by insChartTheme(), which is why they stay in the stylesheet — declared once for both themes so
    dark mode re-steps against its own surface instead of being inverted at paint time. */
 
+/* ── the two chart tabs ───────────────────────────────────────────────────
+ * What you installed, and what Claude Code ships. Two charts rather than one because they are
+ * two questions and only the first has an action attached — mixed together they crowded each
+ * other at 53 columns across a page, and the actionable set got no more room than the set the
+ * reader cannot touch.
+ */
+.ins-tabs {
+  display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap;
+  margin: 0 0 var(--sp-3);
+}
+/* The selected tab reads as pressed: a border and the page's own accent, so it is legible
+   without colour alone carrying it. */
+.ins-tabs button.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.ins-tabs .hint { margin: 0; flex: 1 1 22ch; min-width: 0; }
+
 /* ── the project picker ───────────────────────────────────────────────────
  * A claude agent starts in a folder, and that folder is the project. Several route through one
  * proxy, so every figure on this page is a blend across them until one is chosen.

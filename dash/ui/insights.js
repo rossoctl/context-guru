@@ -557,6 +557,7 @@ function insRender() {
       + 'and so never appear in the tables.' }));
   chartPanel.appendChild(insProjectPicker());
   chartPanel.appendChild(insRangePicker());
+  chartPanel.appendChild(insChartTabs());
   const chart = insChart();
   if (chart) chartPanel.appendChild(chart);
   chartPanel.appendChild(insScopeLine());
@@ -975,6 +976,18 @@ let insEChart = null;
  * more precision than that needs and more clicks to express. */
 let insWindowDays = 0;
 
+/* Which chart is on screen: the capabilities YOU installed, or the ones Claude Code ships.
+ *
+ * TWO CHARTS RATHER THAN ONE, because they are two different questions and only one of them has
+ * an action attached. Mixed together they crowded each other — 53 columns across a page, with
+ * "(built in)" repeated on half the labels to keep them apart — and the actionable set, which is
+ * the whole point of the page, got no more room than the set you cannot touch.
+ *
+ * The built-ins still earn a chart: measured, they cost more than the installed ones here
+ * ($3.17 for SendMessage alone), and a reader who wants to know where the weight goes deserves
+ * that answer even when the answer is "you cannot remove it". */
+let insChartTab = 'installed';
+
 function insChartTheme() {
   const cs = getComputedStyle(document.documentElement);
   const v = (n, f) => cs.getPropertyValue(n).trim() || f;
@@ -1099,17 +1112,28 @@ function insUsageBars(tl) {
    * cheap capability's worst day look as dark as an expensive one's. */
   const ranks = insShadeRanks(all);
   all.forEach((r) => { r.ranks = ranks; });
-  const wastedCount = (r) => r.carried.reduce((n, c, i) => n + (c && !r.used[i] ? 1 : 0), 0);
-  const rank = (a, b) => wastedCount(b) - wastedCount(a) || (b.usd || 0) - (a.usd || 0);
+  /* ASCENDING by total, so the columns climb left to right and the most expensive thing sits at
+   * the right-hand end where the eye finishes. Falls back to per-request weight for anything
+   * unpriced, which would otherwise sort as if it were free. */
+  const rank = (a, b) => (a.usd || 0) - (b.usd || 0) || (a.tokens || 0) - (b.tokens || 0);
   /* Two blocks, not one ordering: everything you can act on, worst first, then the baseline
    * underneath. Interleaving them by waste would put an unremovable built-in at the top of a
    * chart about what to remove. The baseline keeps only the most-used few — it is there for
    * contrast, not for completeness, and twenty built-ins would crowd out the subject. */
+  /* ONE TAB'S WORTH. The other chart's rows are not drawn faintly or scrolled past; they are a
+   * different chart, reached by a button. */
   const act = all.filter((r) => !r.baseline).sort(rank);
-  const base = all.filter((r) => r.baseline)
-    .sort((a, b) => b.used.reduce((n, u) => n + u, 0) - a.used.reduce((n, u) => n + u, 0))
-    .slice(0, 5);
-  return { rows: act.concat(base), cols, width, actionable: act.length, baseline: base.length };
+  /* EVERY BASELINE ITEM, not a sample.
+   *
+   * This kept the five most-used built-ins, on the reasoning that they were context rather than
+   * subject. That silently dropped twenty items — SendMessage at $3.17, EnterWorktree at $2.23,
+   * CronCreate at $2.32 — and the reader found them missing: "Some items are missed -
+   * SendMessage for example". A chart that omits the second most expensive thing on the page is
+   * worse than a crowded one, and the cost figures make them subject matter whether or not they
+   * can be removed. Sorted by cost, since that is why they are worth seeing. */
+  const base = all.filter((r) => r.baseline).sort(rank);
+  const rows = insChartTab === 'builtin' ? base : act;
+  return { rows, cols, width, actionable: act.length, baseline: base.length };
 }
 
 /* The lightest a carried day may be drawn.
@@ -1137,6 +1161,28 @@ function insDayShade(count, ranks) {
   if (count <= 0) return 0;
   const r = ranks[count];
   return INS_SHADE_FLOOR + (1 - INS_SHADE_FLOOR) * (r === undefined ? 1 : r);
+}
+
+/* insColumnTotal is the figure printed above a column: what that capability cost over the whole
+ * window.
+ *
+ * Money where the model has a published rate, per-request weight where it does not — never a
+ * blend, and never a bare $0 for something unpriced, which would read as free when it means
+ * "we could not look up the rate". */
+function insColumnTotal(r) {
+  if (!r) return '';
+  /* A BUILT-IN GETS ITS REAL FIGURE TOO. It briefly printed the word "built in" instead, which
+   * hid the number: SendMessage costs $3.17 a window and EnterWorktree $2.23, and those are real
+   * money whether or not they can be switched off. The "(built in)" suffix on the axis label
+   * already says it is not actionable, so the total does not need to repeat it. */
+  if (r.usd > 0) return usd(r.usd);
+  if (r.tokens) return compact(r.tokens) + ' tok';
+  /* NO FIGURE BECAUSE THERE IS NO WASTE. An invoked capability carries no cost columns at all,
+   * by design: every figure on this page means "spent for nothing", and a capability that was
+   * used earned its weight. Printed as a word, because a blank where every neighbour has a
+   * number reads as missing data — which is exactly how it looked on the built-in tab, where
+   * fifteen genuinely-used tools showed nothing at all. */
+  return 'in use';
 }
 
 /* insShadedColour mixes a colour toward the page surface by `shade`, 0..1.
@@ -1172,6 +1218,73 @@ function insShadeRanks(rows) {
   const ranks = {};
   vals.forEach((v, i) => { ranks[v] = vals.length > 1 ? i / (vals.length - 1) : 1; });
   return ranks;
+}
+
+/* insChartTabs switches between the two charts. Buttons rather than a <select>: there are two
+ * options, both always available, and a dropdown hides one of them behind a click. */
+function insChartTabs() {
+  const counts = insTabCounts();
+  const mk = (id, label, n) => el('button', {
+    type: 'button',
+    class: 'ghost small' + (insChartTab === id ? ' on' : ''),
+    'data-testid': 'insights-tab-' + id,
+    'aria-pressed': String(insChartTab === id),
+    onclick: () => {
+      if (insChartTab === id) return;
+      insChartTab = id;
+      /* THE CHART HOST IS REPLACED IN PLACE, not the whole view.
+       *
+       * insRender() rebuilds #insights-body, which collapses every open <details> and steals
+       * focus — reported twice, and capped at three call sites by a test for exactly that
+       * reason. Switching tabs must not cost the reader their place in the tables below, so this
+       * swaps the chart and re-stamps the two buttons and nothing else. No re-query either: both
+       * charts are built from the document already in hand. */
+      insSwapChart();
+    },
+  }, label + (n ? ' (' + n + ')' : ''));
+  return el('div', { class: 'ins-tabs' },
+    mk('installed', 'What you installed', counts.installed),
+    mk('builtin', 'Built in to Claude Code', counts.builtin),
+    el('span', { class: 'hint', text: insChartTab === 'installed'
+      ? 'Capabilities you added, and can switch off.'
+      : 'Claude Code\u2019s own tools. Real weight, but removing one takes away something the '
+        + 'model is expected to have \u2014 shown so you can see where the rest goes.' }));
+}
+
+/* insSwapChart redraws just the chart and its tab buttons, leaving the tables untouched. */
+function insSwapChart() {
+  const panel = document.querySelector('.ins-tabs');
+  if (!panel || !panel.parentNode) return;
+  const host = panel.parentNode;
+  const old = host.querySelector('.ins-echart');
+  const fresh = insChart();
+  if (old && fresh) {
+    /* Dispose before dropping the node: ECharts holds a root and its own listeners, and a
+     * detached instance keeps both alive. insDrawChart disposes insEChart on the way in, so the
+     * replacement is clean either way; this is the belt to that braces. */
+    host.replaceChild(fresh, old);
+  } else if (fresh) {
+    host.insertBefore(fresh, panel.nextSibling);
+  }
+  /* Re-stamp the buttons so the pressed one follows the state. */
+  const tabs = insChartTabs();
+  host.replaceChild(tabs, panel);
+}
+
+/* insTabCounts is how many bars each tab holds, so a tab says its own size before you click it. */
+function insTabCounts() {
+  let installed = 0;
+  let builtin = 0;
+  const seen = {};
+  for (const it of (insDoc && insDoc.items) || []) {
+    const base = insIsBaseline(it);
+    const key = (base ? 'b:' : '') + (it.plugin || it.server || it.name);
+    if (seen[key]) continue;
+    seen[key] = true;
+    if (base) builtin++;
+    else installed++;
+  }
+  return { installed, builtin };
 }
 
 /* insRangePicker chooses the window in weeks and months rather than by date. */
@@ -1240,10 +1353,35 @@ function insDrawChart(host, g) {
   /* One series per bucket, stacked: that is how a bar gets divided along time. Each series holds
    * one segment for every bar, coloured per bar by whether THAT capability was used in THAT
    * period — so the colour varies within a series, which is why it is set per data point. */
+  const lastCol = g.cols.length - 1;
   const series = g.cols.map((c, ci) => ({
     type: 'bar',
     stack: 'time',
     name: insColLabel(c.from, g.width),
+    /* THE COLUMN TOTAL, ABOVE THE COLUMN.
+     *
+     * Asked for as a summariser rather than something to hunt for in a tooltip: the whole point
+     * of ranking capabilities side by side is comparing what each one costs, and a figure you
+     * can only reach by hovering is a figure you cannot compare.
+     *
+     * Attached to the TOP series of the stack only, which is the one whose label can sit above
+     * the whole bar — a label on every series would print the same total once per day. Rotated
+     * 90° because a column is about 40px wide and `$7.20` is ~34px of text: horizontal, adjacent
+     * totals would overlap; vertical, each sits in its own column's width. */
+    label: ci === lastCol ? {
+      show: true,
+      position: 'top',
+      rotate: 90,
+      align: 'left',
+      verticalAlign: 'middle',
+      /* A real gap, so the figure reads as a column SUMMARY and not as the top cell's own value.
+       * At 6px it sat on the cell and was read that way — "it's not correct to write totals per
+       * cell". The grid's `top` reserves the band it now occupies. */
+      distance: 16,
+      color: t.muted,
+      fontSize: 10,
+      formatter: (pp) => insColumnTotal(rows[pp.dataIndex]),
+    } : { show: false },
     /* ADJACENT BARS. `barCategoryGap: 0` removes the space between capabilities so the chart
      * reads as one continuous field, and barWidth '100%' lets each bar fill its slot. A gap
      * between bars is space spent on nothing when there are 33 of them. */
@@ -1309,7 +1447,9 @@ function insDrawChart(host, g) {
     textStyle: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11 },
     /* The bottom gutter holds the rotated labels; the left holds nothing but a little air. */
     /* The left gutter holds the date labels now, the bottom holds the rotated capability names. */
-    grid: { left: 62, right: 24, top: 12, bottom: insUsageGutter(rows), containLabel: false },
+    /* `top` reserves the band the rotated column totals occupy. Explicit rather than measured:
+     * every total is a short money string, so the widest is predictable. */
+    grid: { left: 62, right: 24, top: 74, bottom: insUsageGutter(rows), containLabel: false },
     tooltip: {
       trigger: 'item',
       /* Pinned and instant. A tooltip that re-anchors per segment flickers while the pointer
@@ -1346,11 +1486,13 @@ function insDrawChart(host, g) {
           ? '<br><span style="opacity:.75">' + r.members.length + ' items inside; see the ' +
             'tables below</span>'
           : '';
-        /* The window total is still shown, but LABELLED as the total and placed after the day's
-         * own figure, so the two can never be read for each other again. */
+        /* NO WINDOW TOTAL HERE. It is printed above the column, which is where a figure you
+         * want to compare across capabilities belongs — and showing it in both places is what
+         * made it misread as the day's own cost in the first place. The tooltip answers "what
+         * about THIS day"; the column header answers "what about this capability". */
         return '<strong>' + r.label + '</strong><br>' + when + ': ' + state + dayLine +
-          '<br><span style="opacity:.75">' + (r.usd ? usd(r.usd) + ' wasted in total · ' : '') +
-          (r.tokens || 0).toLocaleString() + ' tok on every request</span>' + inside;
+          '<br><span style="opacity:.75">' + (r.tokens || 0).toLocaleString() +
+          ' tok on every request</span>' + inside;
       },
     },
     legend: {
@@ -1382,7 +1524,9 @@ function insDrawChart(host, g) {
        * So the label carries the distinction rather than relying on a colour the eye has to
        * decode. The suffix is deliberately plain words, not a symbol: a glyph needs its own
        * legend and this needs none. */
-      data: rows.map((r) => (r.baseline ? r.label + ' (built in)' : r.label)),
+      /* No "(built in)" suffix: the tab the reader is looking at already says which set this is,
+       * and repeating it on every label cost a third of the width of every column. */
+      data: rows.map((r) => r.label),
       axisLabel: { color: t.muted, rotate: 45, interval: 0, fontSize: 10 },
       axisLine: { lineStyle: { color: t.border } },
       axisTick: { show: false } },

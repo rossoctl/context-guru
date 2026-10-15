@@ -94,11 +94,15 @@ func TestASelectionChangeDoesNotRebuildTheView(t *testing.T) {
 	js := readUI(t, "ui/insights.js")
 
 	// insRender is the only thing allowed to replace the DOM, and only the loader may call it.
-	// Two of the three matches are its own definition and the comment explaining this rule.
-	if n := strings.Count(js, "insRender()"); n > 3 {
-		t.Errorf("insRender() appears %d times. It clears #insights-body, so anything on the "+
-			"selection path that calls it collapses every open fold and moves focus — route the "+
-			"change through insSyncSelection instead", n)
+	//
+	// Counted in CODE, not in prose. The raw count included every comment that names the function
+	// while explaining this very rule — so adding a comment about why something avoids
+	// insRender() failed the test for avoiding it, which is the wrong way round. One definition
+	// plus one call from loadInsights is the budget.
+	if n := strings.Count(stripJSComments(js), "insRender()"); n > 2 {
+		t.Errorf("insRender() is called %d times in code. It clears #insights-body, so anything "+
+			"on the selection path that calls it collapses every open fold and moves focus — "+
+			"route the change through insSyncSelection, or swap just the node you own", n)
 	}
 	// The selection path goes through the in-place sync.
 	if !strings.Contains(js, "function insSetMany(names, on) {") ||
