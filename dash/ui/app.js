@@ -848,19 +848,19 @@ const TILE_INFO = {
   'total-saved-usd': {
     what: 'The money context-guru avoided in total, after paying for itself. This is the '
       + 'one number to look at if you only look at one.',
-    how: 'Four savings added together. First, what compaction avoided: what this traffic '
+    how: 'Four savings added together. First, what your preset avoided: what this traffic '
       + 'would have cost had we removed nothing, minus what it actually cost, minus what '
       + "context-guru's own model calls cost. Second, what the prefix-cache split avoided. "
-      + 'Third, the idle keep-alive\u2019s NET \u2014 what it avoided minus what its pings cost. '
+      + 'Third, your cache strategy\u2019s NET \u2014 what it avoided minus what its pings cost. '
       + 'Fourth, the tool, MCP and skill declarations the removal filter stopped sending, counted '
       + 'from what the filter itself recorded on each request it acted on. The four touch '
       + 'different tokens, so adding them does not count anything twice.',
     catch: 'It can be NEGATIVE, and it is shown in red when it is \u2014 that means context-guru '
       + 'spent more on its own model calls than it saved you. Nothing here is hidden when '
-      + 'the answer is unflattering. The keep-alive contributes its NET, not its saving: the '
+      + 'the answer is unflattering. Your cache strategy contributes its NET, not its saving: the '
       + 'pings it sent are real spend on your key, that spend is inside this figure, and it is '
       + 'NOT in the billed-cost line above \u2014 a ping is not traffic your agent produced, so '
-      + 'it is excluded from the request count and every average. And the keep-alive\u2019s '
+      + 'it is excluded from the request count and every average. And the cache strategy\u2019s '
       + 'saving half is a CEILING: the provider\u2019s cache is keyed on content, so another '
       + 'session sending a byte-identical prompt would have refreshed the same entry for free. '
       + 'What is NOT in here is anything YOU removed by hand \u2014 an MCP server you dropped, a '
@@ -871,7 +871,7 @@ const TILE_INFO = {
   // Every one of these carries the same two disclosures: the saving is a CEILING, and a zero
   // may be an absence rather than a measurement.
   'ka-position': {
-    what: 'Whether the idle keep-alive is ahead or behind on YOUR traffic over this window.',
+    what: 'Whether your cache strategy is ahead or behind on YOUR traffic over this window.',
     how: 'Your own net: what the pings this service sent on your behalf cost, subtracted from '
       + 'the prefix re-creations they avoided. "No pings yet" means it has not run for you, '
       + 'which is different from having broken even.',
@@ -881,7 +881,7 @@ const TILE_INFO = {
       + 'that spread, not a promise about your next session.',
   },
   'ka-net': {
-    what: 'What the keep-alive has actually earned you: the re-creations it avoided, minus the '
+    what: 'What your cache strategy has actually earned you: the re-creations it avoided, minus the '
       + 'pings that bought them.',
     how: 'Both halves come from real rows. Every ping is its own dashboard row priced from its '
       + 'own usage; every credit sits on the real request that resumed from a cache that would '
@@ -896,7 +896,7 @@ const TILE_INFO = {
     what: 'How many minimal requests this service sent on your behalf while you were away, and '
       + 'what they cost.',
     how: 'One row per ping, in your own request log, billed to your own credential and priced '
-      + 'from the usage the provider reported. Filter the Requests tab by keep-alive to read '
+      + 'from the usage the provider reported. Filter the Requests tab by cache strategy to read '
       + 'them one at a time.',
     catch: 'This is money spent while nobody was at the keyboard, which is why the mechanism is '
       + 'opt-in and why this figure is beside the saving rather than behind it. Ping cost is '
@@ -973,8 +973,8 @@ const TILE_INFO = {
   },
   'estimator-divergence-compacted': {
     what: 'The same over-the-provider ratio as the tile beside it, but measured on the '
-      + 'requests where compaction actually removed something.',
-    how: 'Median of (provider-billed input ÷ our own token count) over compacted requests.',
+      + 'requests where your preset actually removed something.',
+    how: 'Median of (provider-billed input ÷ our own token count) over requests your preset trimmed.',
     catch: 'This is a LEVEL, not a correction factor for the savings. A level carries the '
       + 'system prompt, the tool declarations and the JSON envelope, none of which any '
       + 'component removes — so it is 3-4x while the correction the savings actually need is '
@@ -994,8 +994,8 @@ const TILE_INFO = {
       + 'overstatement.',
   },
   'saved-usd': {
-    what: 'What compaction alone avoided, after paying for the model calls context-guru '
-      + 'made to do the compacting.',
+    what: 'What your preset alone avoided, after paying for the model calls context-guru '
+      + 'made to trim your prompts.',
     how: 'Baseline cost − actual cost − our own LLM cost. The baseline is what the very '
       + 'same requests would have been billed if context-guru had removed nothing.',
     catch: 'It differs from "Total dollars avoided" only by the prefix-cache saving, which '
@@ -1077,7 +1077,7 @@ const TILE_INFO = {
       + 'paid. But a ratio of exactly 1.0 does NOT mean every removal was new content: it also '
       + 'happens when a component reports no content fingerprint at all, in which case there '
       + 'is nothing to deduplicate against and the figure is not a measurement. Every '
-      + 'reformatter is currently in that position — the Components tab marks them.',
+      + 'reformatter is currently in that position — the Preset steps tab marks them.',
   },
 
   'billed-input': {
@@ -1104,7 +1104,7 @@ const TILE_INFO = {
       + "unaffected — they come from the provider's own reported usage, not from this counter.",
   },
   'attempted-tokens': {
-    what: 'The part of each conversation compaction was actually allowed to rewrite.',
+    what: 'The part of each conversation your preset was actually allowed to rewrite.',
     how: 'The uncached tail of the request when running cache-aware; the whole request when '
       + 'there is no cache to protect.',
     catch: 'This is the denominator of the headline savings percentage, and it had no tile '
@@ -1157,8 +1157,8 @@ const TILE_INFO = {
       + 'them as a like-for-like pair would be wrong. What IS comparable is the experience — '
       + 'on measured traffic a buffered response leaves the user staring at nothing for about '
       + '21 seconds longer, on roughly a third of responses. That is far more user-visible '
-      + 'delay than compaction itself adds, though it is a property of how the response is '
-      + 'handled rather than of compaction.',
+      + 'delay than your preset itself adds, though it is a property of how the response is '
+      + 'handled rather than of your preset.',
   },
 
   // ── amortization ──────────────────────────────────────────────────────────
@@ -1214,13 +1214,13 @@ const TILE_INFO = {
       + 'cannot price. A row can be in either, or both.',
   },
   'cost-cg': {
-    what: "What context-guru's own model calls cost you. Compacting with an LLM is not "
+    what: "What context-guru's own model calls cost you. Trimming with an LLM is not "
       + 'free, and this is the bill for it.',
     how: 'The cost of every extraction and summarisation call context-guru made, priced '
       + 'from the gateway’s own rates.',
     catch: 'This is already subtracted from every net and total on this page. On some '
-      + 'component configurations it EXCEEDS what the compaction saved — check the '
-      + "Components tab, which shows each component's net separately.",
+      + 'component configurations it EXCEEDS what the preset saved — check the '
+      + "Preset steps tab, which shows each component's net separately.",
   },
   'total-reduced-usd': {
     what: 'How much smaller this bill got in total \u2014 what context-guru avoided PLUS what you '
@@ -1300,7 +1300,7 @@ const TILE_INFO = {
     what: "What the model's replies cost. Nothing context-guru does can reduce this.",
     how: 'Output tokens at today’s rate for each model.',
     catch: 'Shown precisely so the percentages on this page can be read in proportion: if '
-      + 'this is most of your bill, even perfect compaction is a small percentage of it.',
+      + 'this is most of your bill, even a perfect preset is a small percentage of it.',
   },
   'tier-reconcile': {
     what: 'A consistency check between the four-tier breakdown above and the bill.',
@@ -1316,7 +1316,7 @@ const TILE_INFO = {
     what: 'Requests where the prompt actually got split into a stable and a volatile half.',
     how: 'Counted from the requests where the split component changed something.',
     catch: 'This component MOVES tokens out of the expensive cache-creation tier rather than '
-      + 'removing any, so on the Components tab it correctly reports zero "acted" (which counts '
+      + 'removing any, so on the Preset steps tab it correctly reports zero "acted" (which counts '
       + 'removed tokens) alongside a large "structural" count. That is not a broken component '
       + 'and not a component doing nothing — the structural column is its real fire count. '
       + 'Separately, zero HERE with a large run count means these prompts carry no volatile '
@@ -1504,7 +1504,7 @@ function renderDistribution(hostSel, map, labels, detail) {
   entries.sort((a, b) => b[1] - a[1]);
   const total = entries.reduce((n, [, v]) => n + v, 0);
   barRows(host, entries.map(([k, v]) => ({
-    label: (labels && labels[k]) || (k === '' ? 'compacted' : k),
+    label: (labels && labels[k]) || (k === '' ? 'trimmed' : k),
     value: v, max: total,
     display: num(v) + '  (' + pct((v / total) * 100, 0) + ')',
   })));
@@ -1570,6 +1570,7 @@ async function loadOverview(opts = {}) {
     // savings above it.
     loadOverviewKeepAlive();
     loadOverviewTools();
+    loadOverviewIdentity();
     const o = await api('stats');
     state.overview = o;
     state.overviewFull = true;
@@ -1622,6 +1623,30 @@ async function renderDiagnostics() {
  * for the waiting time); the only arithmetic here is a ratio of two of them. A lever with
  * nothing recorded says so in words instead of printing a zero that could be an absence.
  */
+/** The names a reader knows their setup by. The preset is the one the window's requests mostly ran under; the
+ *  cache strategy is read from the signed-in account's own configuration, and is not guessed for a manager looking
+ *  at everyone. Both stay empty until known, and the row title then reads without a name. */
+function presetName() {
+  const g = (state.identity && state.identity.presets) || [];
+  const live = g.filter((x) => x.key).sort((a, b) => b.requests - a.requests);
+  if (!live.length) return '';
+  const total = live.reduce((n, x) => n + x.requests, 0);
+  return live[0].requests / total >= 0.9 || live.length === 1 ? live[0].key : 'mostly ' + live[0].key;
+}
+function strategyName() {
+  const t = account && account.tenant;
+  if (!t || t.role === 'manager') return '';
+  const c = (t.effective_config && t.effective_config.cache) || {};
+  return c.keepalive ? 'warm after ' + (c.keepalive_idle_seconds || 270) + ' s idle' : 'off';
+}
+async function loadOverviewIdentity() {
+  try {
+    const r = await api('breakdown', { dim: 'preset' });
+    state.identity = { presets: r.groups || [] };
+    if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger, !state.overviewFull);
+  } catch (e) { /* the rows read fine without the name */ }
+}
+
 const KIND_TIP = {
   'Estimated': 'Priced against what the removed text would have cost. It cannot be read off a bill.',
   'Upper bound': 'The most it could have saved: another session may have kept the same cache warm.',
@@ -1651,20 +1676,20 @@ function renderSavedLedger(o, ka, partial) {
   const parts = savedParts(o);
   const levers = [
     {
-      id: 'cache', tid: 'saved-cache', name: 'Cache keep-alive', href: '#/keepalive', more: 'Keep-alive tab',
-      what: 'Pings that stop your prompt cache from expiring while you think.',
+      id: 'cache', tid: 'saved-cache', name: 'Cache strategy', named: strategyName, href: '#/keepalive', more: 'Cache strategy tab',
+      what: 'Keeps your prompt cache warm while you think, so the next turn is not billed in full.',
       ran: kaRan || parts.reorder !== 0, usd: parts.cache, tok: kaTokens, approx: true,
       // The cache row is keep-alive plus the cache-reorder credit; both are shown so the row can be checked.
-      parts: parts.reorder !== 0 ? [['keep-alive', parts.keepalive, true], ['cache reorder', parts.reorder, false]] : null,
+      parts: parts.reorder !== 0 ? [['cache strategy', parts.keepalive, true], ['cache reorder', parts.reorder, false]] : null,
       extra: waited ? 'about ' + waitText(waited) + ' of waiting avoided over ' + num(o.keepalive_misses_avoided) + ' rewrites' : '',
-      kind: 'Upper bound', note: 'after the pings cost ' + usd(o.keepalive_ping_usd),
+      kind: 'Upper bound', note: 'after its warm-up requests cost ' + usd(o.keepalive_ping_usd),
       // The Keep-alive tab replays your own idle gaps to say whether to turn it on; the figure on this
       // row is what already ran. Say so here, so the two cannot be read as a contradiction.
-      forecast: 'Whether to keep it on is a forecast from your own history. See the Keep-alive tab.',
+      forecast: 'Whether a cache strategy pays off is a forecast from your own history. See the Cache strategy tab.',
     },
     {
-      id: 'compaction', tid: 'saved-compaction', name: 'Compaction', href: '#/components', more: 'Components tab',
-      what: 'Old tool output and repeated text removed before it reaches the model.',
+      id: 'compaction', tid: 'saved-compaction', name: 'Your preset', named: presetName, href: '#/components', more: 'Preset steps tab',
+      what: 'Old tool output and repeated text your preset removes before it reaches the model.',
       ran: o.requests > 0, usd: parts.compaction, tok: o.saved_unique, of: o.tokens_before,
       extra: '', kind: 'Estimated', note: 'after our own model calls',
     },
@@ -1709,7 +1734,7 @@ function renderSavedLedger(o, ka, partial) {
         lv.extra ? el('div', { class: 'lv-sub', text: lv.extra }) : null);
     host.appendChild(el('div', { class: 'ledger-row', 'data-lever': lv.id, 'data-testid': lv.tid },
       el('div', { class: 'lv-name' },
-        el('h3', {}, el('a', { href: lv.href, title: 'Open the ' + lv.more }, lv.name)),
+        el('h3', {}, el('a', { href: lv.href, title: 'Open the ' + lv.more }, lv.name), lv.named && lv.named() ? el('span', { class: 'lv-id', text: ' (' + lv.named() + ')' }) : null),
         el('p', { text: lv.what })),
       money, tokens));
   }
@@ -1718,11 +1743,11 @@ function renderSavedLedger(o, ka, partial) {
   if (!partial && priced) {
     host.appendChild(el('div', { class: 'ledger-total', 'data-testid': 'saved-total' },
       el('span', { text: 'All three together' }), el('strong', { text: usd(parts.total) }),
-      el('span', { class: 'lv-of', text: 'of ' + usd(spent) + ' spent; the keep-alive part is an upper bound' })));
+      el('span', { class: 'lv-of', text: 'of ' + usd(spent) + ' spent; the cache strategy part is an upper bound' })));
   }
   const note = $('#ov-saved-note');
   if (note) {
-    note.textContent = 'Spent = what the provider billed, plus our own model calls and keep-alive pings.'
+    note.textContent = 'Spent = what the provider billed, plus our own model calls and cache-strategy requests.'
       + (providerSaved > 0 ? ' Not counted: the provider\u2019s own cache discount (' + usd(providerSaved) + '), which you get with or without us.' : '');
   }
 }
@@ -2623,7 +2648,7 @@ async function loadCompactionEpisodes() {
     const groups = out.by_provenance || [];
     clear(body);
     if (!groups.length) {
-      tableMessage(body, EPISODE_COLS, 'No compaction episodes yet',
+      tableMessage(body, EPISODE_COLS, 'No preset-step episodes yet',
         'An episode needs a summary followed by 10% more of the window being spent. Nothing in '
         + 'this time range has both.');
     }
@@ -2677,7 +2702,7 @@ async function loadCompactionEpisodes() {
     cov.hidden = true;
     asm.hidden = true;
     $('#episodes-exposure').hidden = true;
-    tableMessage(body, EPISODE_COLS, 'Could not load compaction episodes',
+    tableMessage(body, EPISODE_COLS, 'Could not load preset-step episodes',
       String(err.message || err), { error: true });
   }
 }
@@ -2716,7 +2741,7 @@ function renderEpisodeExposure(node, groups) {
       + num(openTurns) + ' turn(s), currently '));
     parts.push(el('strong', { class: openUSD >= 0 ? 'good-text' : 'bad-text' }, usd(openUSD)));
     parts.push(document.createTextNode('. That is money committed whose payoff is still arriving, '
-      + 'not a loss: the compaction turn pays a model call and a cache write up front while the '
+      + 'not a loss: the summary turn pays a model call and a cache write up front while the '
       + 'saving accrues turn by turn afterwards'));
   }
   if (voided) {
@@ -2895,7 +2920,7 @@ async function loadSessions() {
             : '',
         }, usdOrNA(s.keepalive_net_usd,
           !!(s.keepalive_pings || s.keepalive_saved_usd),
-          'the keep-alive did not run on this session, so it neither spent nor avoided anything '
+          'your cache strategy did not run on this session, so it neither spent nor avoided anything '
           + 'here — this is an absence, not a break-even')),
         el('td', { class: 'num more', text: num(s.expands) }),
         el('td', { class: 'num more', text: ms(s.cg_latency_ms_avg) }),
@@ -2946,8 +2971,8 @@ async function loadRequests() {
         // identifiable here. Without the badge the row reads as a mysterious one-token request
         // the user did not make, which is worse than not showing it at all.
         el('td', {}, e.keepalive
-          ? el('span', { class: 'pill neutral', title: 'a keep-alive ping context-guru sent to '
-              + 'refresh this session\u2019s cached prompt', text: 'keep-alive' })
+          ? el('span', { class: 'pill neutral', title: 'a ping your cache strategy sent to '
+              + 'refresh this session\u2019s cached prompt', text: 'cache strategy' })
           : el('span', { class: 'pill ' + (e.cache_miss_reason || 'neutral'), text: e.cache_miss_reason || '—' })),
         el('td', { class: 'more' }, el('span', { class: 'pill ' + e.token_accounting, text: e.token_accounting }))));
     }
@@ -3087,8 +3112,8 @@ function renderOneSide(host, rows, side) {
 function renderSide(host, rows) {
   const grid = el('div', { class: 'side', 'data-testid': 'side-grid' });
   // Headers are the grid's first row so they sit above their own column.
-  grid.appendChild(el('div', { class: 'side-h side-l', text: 'Before compaction' }));
-  grid.appendChild(el('div', { class: 'side-h side-r', text: 'After compaction' }));
+  grid.appendChild(el('div', { class: 'side-h side-l', text: 'Before your preset' }));
+  grid.appendChild(el('div', { class: 'side-h side-r', text: 'After your preset' }));
   let dels = [], adds = [];
   const cell = (side, cls, text) => el('div', { class: 'side-' + side + ' sl ' + cls, text: text });
   const pair = (l, r) => { grid.appendChild(l); grid.appendChild(r); };
@@ -3498,7 +3523,7 @@ async function openRequest(id, fromURL) {
       kv('Model', e.model || '—'),
       kv('Provider', e.provider || '—'),
       kv('Agent', e.agent || '—'),
-      kv(term('Preset', 'A named bundle of compaction settings.'), e.preset || '—'),
+      kv(term('Preset', 'A named bundle of settings for your preset steps.'), e.preset || '—'),
       kv(term('Mode', 'How context-guru handled this request: changed it, passed it through, or only measured it.'), modeLabel(e.mode)),
       kv(term('Upstream status', 'The HTTP status the AI provider returned.'), e.status || '—'),
       kv('Messages', num(e.messages))));
@@ -3531,7 +3556,7 @@ async function openRequest(id, fromURL) {
       kv(term('Restores', 'Times the agent asked for removed text to be put back.'), num(e.expands) + ' (' + compact(e.expand_tokens) + ' tok)'),
       kv(term('Reverts', 'Times a change was undone and the original request sent.'), num(e.reverts)),
       kv(term('Cache result', 'Why the provider cache did or did not hit.'), e.cache_miss_reason || '—'),
-      kv(term('Why not compacted', 'The reason nothing was removed, or "compacted" if something was.'), e.uncompressed_reason || 'compacted')));
+      kv(term('Why your preset left it alone', 'The reason nothing was removed, or "trimmed" if something was.'), e.uncompressed_reason || 'trimmed')));
 
     // The request's own metadata: what the client ASKED for. Separate from the bands above,
     // which are what happened to it. kvMaybe() prints an absent value as "unset" and a zero
@@ -3606,7 +3631,7 @@ async function openRequest(id, fromURL) {
     // table has no dollars at all, so an expensive component could never be shown to be
     // underwater on a particular KIND of call.
     if (e.extractions && e.extractions.length) {
-      body.appendChild(el('h2', { text: 'Compaction model calls' }));
+      body.appendChild(el('h2', { text: 'Preset model calls' }));
       const perTok = savedPerTok(e);
       const net = perTok === null ? null
         : e.extractions.reduce((a, x) => a + netUSD(x, perTok), 0);
@@ -3719,7 +3744,7 @@ async function openRequest(id, fromURL) {
  *  compacted: the change happened, only its text is missing. */
 function compactedAnywayNote() {
   return el('span', { class: 'warn-text', text:
-    'This request was compacted all the same — the component rows above are what ran and ' +
+    'This request was trimmed all the same — the component rows above are what ran and ' +
     'what each one removed. What is missing here is the stored before/after text, not the ' +
     'change itself.' });
 }
@@ -3890,7 +3915,7 @@ async function openSessionDiff(session, fetchCold, fromURL, page) {
   if (diffPager.session !== session) diffPager = { session, pages: [{ cursor: '', offset: 0 }], page: 0 };
   if (page != null) diffPager.page = page;
   const at = diffPager.pages[diffPager.page] || diffPager.pages[0];
-  const body = openDrawer('Compaction diff · ' + (session || '(no session id)'), null);
+  const body = openDrawer('Preset diff · ' + (session || '(no session id)'), null);
   loadingState(body, 5);
   let out;
   try {
@@ -4052,7 +4077,7 @@ function renderSessionDiff(body, session, out, offset = 0) {
   const withContent = reqs.filter((e) => (e.content || []).length);
   if (!withContent.length) {
     if (st === 'hot' || st === 'fetched' || st === 'nothing_changed') {
-      body.appendChild(el('h2', { text: 'What compaction changed' }));
+      body.appendChild(el('h2', { text: 'What your preset changed' }));
       // Same rule as the single request: only the component rows may say "nothing was
       // rewritten". With no stored text and turns that WERE rewritten, the honest answer
       // is about storage.
@@ -4061,7 +4086,7 @@ function renderSessionDiff(body, session, out, offset = 0) {
         // Own box: emptyState clears its host, and given `body` it wiped the session
         // summary and the component table above it.
         emptyState(body.appendChild(el('div')), 'Nothing was rewritten in this session',
-          'Every turn passed through unchanged. The per-request rows say why under "compaction outcome".');
+          'Every turn passed through unchanged. The per-request rows say why under "preset outcome".');
       }
     }
     return;
@@ -4081,7 +4106,7 @@ function renderSessionDiff(body, session, out, offset = 0) {
           'their metrics and component rows are complete either way.' }))));
   }
 
-  body.appendChild(el('h2', { text: 'What compaction changed, oldest turn first' }));
+  body.appendChild(el('h2', { text: 'What your preset changed, oldest turn first' }));
   body.appendChild(el('p', { class: 'note', text:
     'Each block is one message context-guru rewrote. This is the set of spans we touched — ' +
     'not a reconstructed transcript: the messages we left alone were never captured, so ' +
@@ -4315,7 +4340,7 @@ async function checkCapture() {
       const q = c.observe_queue;
       let text = 'You are currently in OBSERVE mode. context-guru did not modify any request: ' +
         'every request above was forwarded to the provider untouched, and the pipeline ran ' +
-        'off-path on a copy. Savings shown here are what compaction WOULD have achieved, ' +
+        'off-path on a copy. Savings shown here are what your preset WOULD have achieved, ' +
         'not what it did.';
       if (q) {
         text += ` Off-path queue: ${num(q.processed)} measured, ${num(q.pending)} in flight`;
@@ -4376,8 +4401,8 @@ const GROUPS = [
  */
 const TAB_INFO = {
   overview: { short: 'Savings and what to remove', title: 'Overview', what: 'Is context-guru saving you money? The three savings it makes, in dollars and tokens, and what to remove next.' },
-  keepalive: { short: 'Does pinging the cache pay off', title: 'Keep-alive', what: 'Whether pinging your cache before it expires paid for itself, and which setting to use.',
-    see: 'The verdict first, then a table of who won and lost, how long your sessions sit idle, and a calculator.' },
+  keepalive: { short: 'Does your cache strategy pay off', title: 'Cache strategy', what: 'Whether your cache strategy (keeping the prompt cache warm while you think) paid for itself, and which one to use.',
+    see: 'The verdict first, then who gained and who lost, how long your sessions sit idle, and a calculator. (Also called keep-alive.)' },
   tools: { short: 'Tools and skills you never use', title: 'Inventory', what: 'Every tool server and skill your requests carry, and the ones that were never used.',
     see: 'Ranked cards with the cost of carrying each one and the command to remove it.' },
   usage: { short: 'Spend by day and by model', title: 'Usage', what: 'What you spent each day and on which models, and how much the provider cache covered.',
@@ -4386,15 +4411,15 @@ const TAB_INFO = {
     see: 'A sortable table. Open a row to see its requests.' },
   requests: { short: 'Every single request', title: 'Requests', what: 'Every single request, newest first.',
     see: 'Open one to see what it contained, what was removed from it and what the provider billed.' },
-  components: { short: 'How each compaction step did', title: 'Components', what: 'How each compaction step performed: what it removed, what it cost and whether it paid off.',
+  components: { short: 'How each step of your preset did', title: 'Preset steps', what: 'How each step of your preset performed: what it removed, what it cost and whether it paid off.',
     see: 'One row per step with its net result, plus a table of the ways it chose to do nothing.' },
   kvcache: { short: 'How long your cache stays warm', title: 'KV-cache', what: 'How long your prompt cache stays warm between requests, and what other timings would cost.',
-    see: 'Idle-gap charts, a price table and a replay of different keep-alive rules on your own history.' },
-  campaigns: { short: 'Keep-alive rules in bulk', title: 'Campaigns', what: 'Create keep-alive rules for many sessions at once, then check them on data they have not seen.',
+    see: 'Idle-gap charts, a price table and a replay of different cache strategies on your own history.' },
+  campaigns: { short: 'Cache strategies in bulk', title: 'Strategy campaigns', what: 'Create cache strategies for many sessions at once, then check them on data they have not seen.',
     see: 'A form to create rules and a table of the ones you made.' },
   config: { short: 'How this proxy is set up', title: 'Config', what: 'The settings this proxy is running with, and whether it is recording requests properly.',
     see: 'The effective configuration, recording health and recent log lines.' },
-  strategies: { short: 'Saved keep-alive rules', title: 'Strategies', what: 'Saved keep-alive rules and what each has done so far.',
+  strategies: { short: 'Saved cache strategies', title: 'Cache strategies', what: 'The cache strategies you saved and what each has done so far.',
     see: 'A form to add a rule and a table of existing ones.' },
   tenants: { short: 'Accounts and A/B groups', title: 'Tenants', what: 'The accounts on this proxy, and the A/B groups they are split into.',
     see: 'Account list, spend per account and the A/B comparison.' },
@@ -6069,7 +6094,7 @@ function loadSetup() {
       el('p', { class: 'hint' },
         'Already have an "env" or "hooks" block? Add just these entries inside it. Leave '
         + 'every other key alone. The hooks tell us when a session ends or is compacted, so '
-        + 'the cache keep-alive stops; they send only the session id, the event name and its '
+        + 'your cache strategy stops; they send only the session id, the event name and its '
         + 'reason. Remove the "hooks" block to opt out.')),
     step(3, 'Keep your own key where it is',
       el('p', { class: 'hint' },
@@ -6253,7 +6278,7 @@ function loadSettings() {
     if (!mgr) {
       host.appendChild(el('div', { class: 'cfg-state', 'data-testid': 'cfg-state-managed' },
         el('div', {},
-          el('strong', {}, 'Your manager sets the compaction.'),
+          el('strong', {}, 'Your manager sets your preset.'),
           ' Ask them for a change; everything else on this page is yours.')));
     }
 
@@ -6290,7 +6315,7 @@ function loadSettings() {
     // The option text names the value a captured request will SHOW, because these are the
     // same dimension under two names: the config says sync, the request rows say active.
     const modeSel = el('select', { id: 'set-mode', 'data-testid': 'set-mode' },
-      el('option', { value: 'sync' }, 'sync — compaction is applied (requests show Mode "active")'),
+      el('option', { value: 'sync' }, 'sync — your preset is applied (requests show Mode "active")'),
       el('option', { value: 'observe' }, 'observe — measure only, requests untouched (Mode "observe")'));
     modeSel.value = cfg.mode === 'observe' ? 'observe' : 'sync';
     modeSel.disabled = inherited;
@@ -6325,21 +6350,21 @@ function loadSettings() {
       // fields editable — and unticking it is what clears them on save.
       cb.addEventListener('change', () => drawComps());
       const warn = name === 'extract_llm'
-        ? ' — calls a compaction model on the request path (+117ms typical, up to ~945ms on file reads) and bills to the shared credential'
+        ? ' — calls a preset model on the request path (+117ms typical, up to ~945ms on file reads) and bills to the shared credential'
         : '';
       grid.appendChild(el('label', { class: 'comp', for: id }, cb,
         el('span', { class: 'comp-name' }, name),
         warn ? el('span', { class: 'comp-warn' }, warn) : null));
     }
     if (mgr) host.appendChild(el('div', { class: 'field' },
-      el('label', {}, term('Compaction steps', 'Each step removes one kind of waste from requests. Tick the ones you want.')), grid,
+      el('label', {}, term('Preset steps', 'Each step removes one kind of waste from requests. Tick the ones you want.')), grid,
       el('p', { class: 'hint' }, 'Ticked steps run in the order shown.'),
       whyBlock('What saving changes',
         'A newly enabled component is appended at the end of the pipeline. Ticking one here ' +
         'is what makes its fields below editable, and unticking one CLEARS the keys it has ' +
         'in your document — a block is configuration, not enablement, so leaving a block ' +
         'behind for a component that does not run is the state nobody can read back. ' +
-        'Saving rebuilds your pipeline and discards frozen compaction decisions, so the ' +
+        'Saving rebuilds your pipeline and discards frozen preset decisions, so the ' +
         'next turn will not be cache-warm.')));
 
     // Idle keep-alive consent. Its own consent control, beside the transcript one, for the
@@ -6369,7 +6394,7 @@ function loadSettings() {
         + 'ping buys back about 11.5 of itself. On this service\u2019s traffic, requests that '
         + 'resumed after the 5-minute window cost 8.5x a request that hit, and they were 23.6% '
         + 'of all spend. It is off by default because it is your money and nobody asked for it '
-        + 'to be spent. Every ping is a row on your Requests tab marked keep-alive with its own '
+        + 'to be spent. Every ping is a row on your Requests tab marked cache strategy with its own '
         + 'cost, and the Overview ledger shows pings, ping cost, misses avoided and the net. '
         + 'It also RETAINS, in memory only, your provider key and that session\u2019s last '
         + 'request \u2014 which includes its conversation content \u2014 for the length of the '
@@ -6396,12 +6421,12 @@ function loadSettings() {
           'This is ', el('strong', {}, 'on'), ' for your account, set by a manager, and it '
           + 'spends your own key while you are away. You can switch it off here — turning '
           + 'it back on is a manager’s change, because the setting lives in the '
-          + 'configuration document. See the Keep-alive tab for what it has cost and avoided '
+          + 'configuration document. See the Cache strategy tab for what it has cost and avoided '
           + 'on your traffic.'),
         el('div', { class: 'actions' }, el('button', {
           class: 'ghost', 'data-testid': 'set-keepalive-off',
           onclick: async () => {
-            if (!confirm('Switch the keep-alive off for your account? Every armed session is '
+            if (!confirm('Switch your cache strategy off for your account? Every armed session is '
               + 'disarmed and anything held for you is released immediately.')) return;
             try {
               await ctl('/api/me/keepalive', { method: 'DELETE' });
@@ -6409,7 +6434,7 @@ function loadSettings() {
               loadSettings();
             } catch (e) { alert(e.message); }
           },
-        }, 'Turn keep-alive off'))));
+        }, 'Turn your cache strategy off'))));
     }
 
     // Content capture consent.
@@ -6465,7 +6490,7 @@ function loadSettings() {
           + 'and the result is built once before it is stored, so a value that would not work '
           + 'is a refusal naming the field rather than a surprise on your next turn. A key you '
           + 'leave empty is REMOVED from the document and the component\u2019s own default '
-          + 'takes over. Saving rebuilds your pipeline and discards frozen compaction '
+          + 'takes over. Saving rebuilds your pipeline and discards frozen preset '
           + 'decisions, so the next turn will not be cache-warm.')));
       host.appendChild(compHost);
       drawComps();
@@ -6494,7 +6519,7 @@ function loadSettings() {
     host.appendChild(el('div', { class: 'actions' },
       el('button', { class: 'primary', 'data-testid': 'settings-save', onclick: saveSettings }, 'Save')));
     // What a save DOES to the document, beside the button that does it. The page already warns
-    // that saving discards frozen compaction decisions; this is the other half, and it is here
+    // that saving discards frozen preset decisions; this is the other half, and it is here
     // because an operator lost 36 comment lines to a save and had no way to know they would.
     // Comment and key-order preservation is deliberately not built — it means rewriting the
     // exact code whose two previous rewrites each shipped a data-loss bug — so the honest
@@ -6829,7 +6854,7 @@ function renderComponentFields(name, fields, values, disabled, ctx) {
     const noStatic = fd.key === 'model.source' && opts && opts.compaction_model === false;
     return field(fd, sel, noStatic
       ? el('p', { class: 'hint warn-text' },
-        'THIS DEPLOYMENT HAS NO CONFIGURED COMPACTION MODEL — it deliberately does not spend '
+        'THIS DEPLOYMENT HAS NO CONFIGURED PRESET MODEL — it deliberately does not spend '
         + 'the operator’s credential on your traffic. So "config" here means the '
         + 'component has no model and never makes a call, however else it is configured.')
       : null);
@@ -7294,7 +7319,7 @@ function renderTenantEditor(host, t) {
     el('p', { class: 'hint' }, 'Pipeline, per-component settings and mode. Validated on '
       + 'save by the same loader the proxy builds with, so a typo is a refusal naming the '
       + 'key rather than a surprise at request time. Saving rebuilds their pipeline, which '
-      + 'discards their frozen compaction decisions — their next turn will not be cache-warm.')));
+      + 'discards their frozen preset decisions — their next turn will not be cache-warm.')));
 
   fields.appendChild(el('div', { class: 'actions' },
     el('button', {
@@ -7925,7 +7950,7 @@ async function openStrategyLedger(s) {
     body.appendChild(el('p', { class: 'note' },
       'Saved is only the credit THIS strategy’s own pings earned — a request rescued by a ' +
       'different strategy, or by account config or a session override with no strategy at ' +
-      'all, is not counted here. This ledger is ALL TIME — unlike Overview or the Keep-Alive ' +
+      'all, is not counted here. This ledger is ALL TIME — unlike Overview or the Cache strategy ' +
       'tab, it ignores whatever date range the dashboard is set to, so a lower or higher ' +
       'number here than those pages show is not a discrepancy.'));
     // Pings > 0 with Saved stuck at exactly $0 is not a broken calculation — it is what a
@@ -7977,7 +8002,7 @@ function renderStrategiesList(host, rows) {
   }
   host.appendChild(el('p', { class: 'hint' },
     'One row per rule. Open “Stats” on a row to see what it spent and saved. ' +
-    'These do not add up to the Overview or Keep-alive totals, because pings sent under plain account ' +
+    'These do not add up to the Overview or Cache strategy totals, because pings sent under plain account ' +
     'settings or a per-session override belong to no rule.'));
   const tbl = el('table', { class: 'grid' },
     el('thead', {}, el('tr', {},
@@ -8666,7 +8691,7 @@ async function loadKeepAlive() {
   } catch (e) {
     rest();
     if (aborted(e)) return;
-    errorState(host, 'Could not read the keep-alive ledger', e);
+    errorState(host, 'Could not read the cache strategy ledger', e);
   }
 }
 
@@ -8682,7 +8707,7 @@ function renderKACoverage(o) {
   const host = clear($('#ka-coverage'));
   if (!o.keepalive_recorded_from) {
     host.appendChild(el('div', { class: 'banner', 'data-testid': 'ka-never-ran' },
-      el('strong', {}, 'The keep-alive has not run on this account in this window. '),
+      el('strong', {}, 'Your cache strategy has not run on this account in this window. '),
       'The figures below are what it would have had to work with, not a measurement of it. ' +
       'Nothing here is a $0 saving — it is an absence.'));
     return;
@@ -8691,7 +8716,7 @@ function renderKACoverage(o) {
     host.appendChild(el('div', { class: 'banner warn', 'data-testid': 'ka-partial' },
       `Recorded on ${num(o.keepalive_recorded_rows)} of ${num(o.requests)} requests in this ` +
       `window — it started running ${when(o.keepalive_recorded_from)}. Rows before that carry ` +
-      'no keep-alive columns at all, so they are absent from these figures rather than zero.'));
+      'no cache-strategy columns at all, so they are absent from these figures rather than zero.'));
   }
 }
 
@@ -8733,14 +8758,14 @@ function renderKADecision(o, rec) {
   let verdict, big, cls, sentence, setting;
   if (!rec) {
     verdict = 'Working it out'; big = '\u2026'; cls = '';
-    sentence = 'Replaying your past idle gaps to see whether keep-alive would have paid.';
+    sentence = 'Replaying your past idle gaps to see whether a cache strategy would have paid.';
   } else if (rec.refused) {
     const wouldCost = rec.refused.indexOf('COST') >= 0;
     verdict = wouldCost ? 'No, it would cost you money' : 'Too early to say';
     big = wouldCost ? 'Below $0' : 'Not enough data';
     cls = wouldCost ? 'bad' : '';
     sentence = rec.refused + '.';
-    setting = wouldCost ? 'Leave keep-alive off. If you turn it on anyway, use the default: 270 s idle, 2 pings.'
+    setting = wouldCost ? 'Leave your cache strategy off. If you turn one on anyway, use the default: 270 s idle, 2 pings.'
       : 'Use the default for now: 270 s idle, 2 pings.';
   } else {
     const mid = (rec.lo_usd + rec.hi_usd) / 2;
@@ -8749,7 +8774,7 @@ function renderKADecision(o, rec) {
     cls = mid < 0 ? 'bad' : 'good';
     sentence = 'Expected over a window like this one, from ' + num(rec.n) + ' times a cache ran out in '
       + num(rec.sessions) + ' sessions (90% range).';
-    setting = mid < 0 ? 'Leave keep-alive off.'
+    setting = mid < 0 ? 'Leave your cache strategy off.'
       : 'Setting to use: ping after ' + rec.idle_seconds + ' s idle, at most ' + rec.max_pings + ' pings in a row.';
   }
   host.appendChild(el('div', { class: 'ka-hero', 'data-testid': 'ka-decision-panel' },
@@ -8781,19 +8806,19 @@ function renderKAVerdict(o) {
     tile('ka-position', 'Where it stands so far', position,
       ran ? num(o.sessions_touched) + ' sessions touched — see the decision row above'
         : 'nothing to judge yet', ran ? 'accent' : ''),
-    tile('ka-net', 'Keep-alive net, measured', ran ? usd(o.net_usd) : '—',
+    tile('ka-net', 'Cache strategy net, measured', ran ? usd(o.net_usd) : '—',
       'avoided − spent, on the sessions it fired on — an upper bound, not the decision',
       ran ? (o.net_usd < 0 ? 'bad' : '') : ''),
-    tile('ka-pings', 'Keep-alive requests sent', ran ? num(o.pings) : '—',
+    tile('ka-pings', 'Cache-strategy requests sent', ran ? num(o.pings) : '—',
       ran ? usd(o.ping_usd) + ' spent on your key' : 'none'),
     tile('ka-saved', 'Cache rewrites avoided (upper bound)', ran ? usd(o.saved_usd) : '—',
       ran ? num(o.misses_avoided) + ' requests rescued · a CEILING' : 'none',
       ran && o.saved_usd > 0 ? 'good' : ''),
     tile('ka-addressable', 'Expiries still worth acting on', usd(o.addressable_usd),
       num(o.addressable_misses) + ' cache expiries worth acting on', 'accent'),
-    tile('ka-rowgrowth', 'Log growth from keep-alive requests', o.pings_per_day > 0
+    tile('ka-rowgrowth', 'Log growth from cache-strategy requests', o.pings_per_day > 0
       ? compact(o.bytes_per_day) + 'B/day' : '—',
-      o.pings_per_day > 0 ? o.pings_per_day.toFixed(0) + ' requests/day × ~400 B' : 'no keep-alive requests'),
+      o.pings_per_day > 0 ? o.pings_per_day.toFixed(0) + ' requests/day × ~400 B' : 'no cache-strategy requests'),
     // Absent, not zero, below the sample-size gate — kvcache.MeasureLatency's own rule: a
     // difference of two means from a handful of rows is not a measurement.
     o.latency && o.latency.known
@@ -8806,7 +8831,7 @@ function renderKAVerdict(o) {
   const row = (label, value, note) => rows.push(el('div', { class: 'ka-fact' },
     el('div', { class: 'ka-fl' }, label), el('div', { class: 'ka-fv' }, value), el('div', { class: 'ka-fn' }, note)));
   if (ran) {
-    row('Keep-alive requests sent', num(o.pings) + ' for ' + usd(o.ping_usd),
+    row('Cache-strategy requests sent', num(o.pings) + ' for ' + usd(o.ping_usd),
       ['Each ', term('ping', 'A tiny request sent just before the cache would be forgotten, to keep it warm.'), ' is billed to your own key.']);
     row('Cache rewrites avoided', 'up to ' + usd(o.saved_usd),
       [num(o.misses_avoided) + ' requests rescued from a full rewrite. An upper bound.']);
@@ -8816,8 +8841,8 @@ function renderKAVerdict(o) {
       'Large requests answered from a warm cache are faster than ones that rewrite it.');
   }
   if (o.pings_per_day > 0) {
-    row('Disk used by keep-alive logs', 'about ' + compact(o.bytes_per_day) + 'B a day',
-      'Keep-alive requests add about ' + compact(o.bytes_per_day) + ' B of logs a day.');
+    row('Disk used by cache-strategy logs', 'about ' + compact(o.bytes_per_day) + 'B a day',
+      'Cache-strategy requests add about ' + compact(o.bytes_per_day) + ' B of logs a day.');
   }
   if (rows.length) host.appendChild(el('div', { class: 'ka-facts', 'data-testid': 'ka-facts' }, ...rows));
   host.appendChild(el('details', { class: 'why', 'data-testid': 'ka-more' },
@@ -8871,7 +8896,7 @@ function renderKADownside(o) {
       el('button', {
         class: 'ghost small', 'data-testid': 'ka-turn-off-btn',
         onclick: async () => {
-          if (!confirm('Switch the keep-alive off for this account? Every armed session is ' +
+          if (!confirm('Switch your cache strategy off for this account? Every armed session is ' +
             'disarmed and anything held for you is released immediately.')) return;
           try {
             await ctl('/api/me/keepalive', { method: 'DELETE' });
@@ -8879,7 +8904,7 @@ function renderKADownside(o) {
             loadKeepAlive();
           } catch (e) { alert(e.message); }
         },
-      }, 'Turn keep-alive off')));
+      }, 'Turn your cache strategy off')));
   }
 }
 

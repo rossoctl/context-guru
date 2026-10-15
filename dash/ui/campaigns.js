@@ -23,7 +23,7 @@
 // mountTab (app.js) is the single place that knows the nav's DOM shape; it returns the
 // section, already appended to #main and wired as this tab's tabpanel.
 const campView = mountTab({
-  group: 'advanced', after: 'kvcache', view: 'campaigns', label: 'Campaigns',
+  group: 'advanced', after: 'kvcache', view: 'campaigns', label: 'Strategy campaigns',
   manager: true,
 });
 
@@ -91,7 +91,7 @@ function buildCampaignsSkeleton(host) {
   host.appendChild(el('div', { class: 'panel' },
     el('h2', {}, 'Create rules for many accounts at once'),
     el('p', { class: 'note' },
-      'A campaign sets up keep-alive rules in bulk. Fetch suggestions from your own history, or upload a file in the same format to edit them first. ',
+      'A campaign sets up cache strategies in bulk. Fetch suggestions from your own history, or upload a file in the same format to edit them first. ',
       'Each suggestion is for one ', term('cell', 'One account at one hour of the day, for example account A at 14:00 UTC.'),
       ' and names the strategy that would have saved the most there. Only strategies this deployment can actually enforce are switched on; the rest are recorded with a reason.'),
     el('details', { class: 'why' }, el('summary', {}, 'Technical details'),

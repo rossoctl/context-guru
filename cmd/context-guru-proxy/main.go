@@ -207,10 +207,13 @@ func main() {
 			"process-wide cap on concurrent compaction-model calls, so one tenant's extract_llm cannot stall everyone's agents (0 = unlimited)")
 		// The Benchmarks tab is gone. The flag stays as a no-op so an existing unit file or
 		// environment that still passes it starts instead of exiting on an unknown flag.
-		_ = flag.String("dashboard-bench-dirs", envOr("DASHBOARD_BENCH_DIRS", ""),
+		dashBenchIgnored = flag.String("dashboard-bench-dirs", envOr("DASHBOARD_BENCH_DIRS", ""),
 			"deprecated and ignored: the dashboard no longer has a Benchmarks tab")
 	)
 	flag.Parse()
+	if *dashBenchIgnored != "" {
+		slog.Warn("--dashboard-bench-dirs / DASHBOARD_BENCH_DIRS is ignored: the dashboard no longer has a Benchmarks tab")
+	}
 
 	// --version before anything else: an installer asks a binary what it is, and it must be
 	// able to ask without starting a server or needing a config. buildinfo.Version was already

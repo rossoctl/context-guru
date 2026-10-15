@@ -1809,3 +1809,5 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 .lv-parts { margin-top: 2px; }
 .ledger-total { display: flex; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-3) 0 0; margin-top: var(--sp-1); border-top: 1px solid var(--border); }
 .ledger-total strong { font-family: var(--serif); font-size: 22px; font-variant-numeric: tabular-nums; }
+
+.lv-id { font-weight: 400; color: var(--fg-muted); font-size: 14px; }

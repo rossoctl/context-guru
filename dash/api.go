@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -333,7 +334,10 @@ func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, ke
 	// Detaching it means the result is always cached even if nobody is left to receive it, so the
 	// next reader gets a hit rather than starting again. Each caller still gets its own deadline
 	// from the handler timeout, which is what bounds THEIR wait; this bounds the WORK.
-	v, err, _ := a.jsonInflight.Do(key, func() (any, error) {
+	// The flight key names the CACHE as well as the entry: /api/stats and /api/tools, for one account and
+	// the same filters, have the same entry key, and two concurrent requests for them collapsed onto one
+	// computation, so /api/stats answered with the tools report.
+	v, err, _ := a.jsonInflight.Do(fmt.Sprintf("%p\x00%s", c, key), func() (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), dashComputeTimeout)
 		defer cancel()
 		body, err := compute(a.rec.DB().WithContext(ctx))

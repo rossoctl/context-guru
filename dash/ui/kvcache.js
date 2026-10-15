@@ -123,7 +123,7 @@ const KV_COLS = ['ts', 'user', 'conversation', 'model', 'input', 'output', 'read
 Object.assign(TILE_INFO, {
   'kv-requests': {
     what: 'How many requests are in this analysis.',
-    how: 'Every request matching the filters above, EXCLUDING keep-alive pings that '
+    how: 'Every request matching the filters above, EXCLUDING cache-strategy pings that '
       + 'context-guru sent on your behalf.',
     catch: 'Pings are excluded deliberately: counted, one of them would split a real idle '
       + 'gap into two short ones and make every reuse figure on this page look better than '
@@ -776,7 +776,7 @@ function renderKVPricing() {
     'Costs are on this window’s own median cached prompt of ',
     el('strong', {}, compact(v.prefix_tokens) + ' tokens'),
     '. “Hold” is the cost of keeping that prompt cached through one pause: one write plus ' + v.assumptions.schedule.max_pings
-    + ' keep-alive refreshes.'));
+    + ' cache-strategy refreshes.'));
 
   const table = el('table', { class: 'tbl compact', 'data-testid': 'kv-pricing-table' },
     el('thead', {}, el('tr', {},
@@ -813,7 +813,7 @@ function renderKVPricing() {
       el('td', { class: 'num' }, kvMoney(c.write_5m_usd, m.known)),
       el('td', { class: 'num' }, kvMoney(c.write_1h_usd, m.known)),
       el('td', { class: 'num' }, kvMoney(c.keep_alive_usd, m.known)),
-      el('td', { class: 'num', title: 'A keep-alive that arrived after the entry lapsed: it '
+      el('td', { class: 'num', title: 'A cache-strategy ping that arrived after the entry lapsed: it '
         + 're-creates the prefix, so it is billed as a write.' },
       kvMoney(c.late_5m_usd, m.known)),
       el('td', { class: 'num' }, kvMoney(c.hold_5m_usd, m.known)),
@@ -860,9 +860,9 @@ function renderKVPricing() {
       (on) => { kvc.sem.hit = on; kvReload(); }, 'kv-sem-hit',
       'Anthropic documents this: using a cached prefix refreshes it for no extra cost. Turn it '
       + 'off for a provider where a hit does not extend the deadline.'),
-    kvCheck('A keep-alive refreshes the lifetime', sem.ping_refreshes_ttl,
+    kvCheck('A ping refreshes the lifetime', sem.ping_refreshes_ttl,
       (on) => { kvc.sem.ping = on; kvReload(); }, 'kv-sem-ping',
-      'A keep-alive is just a use of the cache, so it refreshes the entry for its own tier’s '
+      'A ping is just a use of the cache, so it refreshes the entry for its own tier’s '
       + 'lifetime.'),
     kvCheck('Zero-generation pings allowed', sem.zero_generation,
       (on) => { kvc.sem.zero = on; kvReload(); }, 'kv-sem-zero',
@@ -954,7 +954,7 @@ function renderKVArms() {
       (v) => { kvc.custom.min = v; kvLoadSim(); }, 'kv-custom-min'),
     kvCheck('Custom arm always pings', kvc.custom.always,
       (on2) => { kvc.custom.always = on2; kvLoadSim(); }, 'kv-custom-always',
-      'Force the long hold onto the keep-alive path instead of taking whichever of a 1h write '
+      'Force the long hold onto the ping path instead of taking whichever of a 1h write '
       + 'and a 5m write plus refreshes is cheaper on that prefix.')));
   host.appendChild(el('p', { class: 'hint' },
     'These three thresholds set up the ', el('strong', {}, 'custom'), ' strategy in the table above.'));

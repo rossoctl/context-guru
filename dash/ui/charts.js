@@ -213,10 +213,10 @@ const CGCharts = (() => {
     if (!w.baseline || !o.baseline_cost_usd) return emptyState(host, 'No priced requests yet', 'This needs provider usage data and a known model price.');
     // delta_usd is negative for a saving. flip so that saved is positive.
     const rows = [
-      ['Compaction', -(w.compaction ? w.compaction.delta_usd : 0), false],
+      ['Your preset', -(w.compaction ? w.compaction.delta_usd : 0), false],
       ['Our own model calls', -(w.cg_llm ? w.cg_llm.delta_usd : 0), false],
-      ['Keep-alive pings', -(w.keepalive_ping ? w.keepalive_ping.delta_usd : 0), false],
-      ['Keep-alive: rewrites avoided', -(w.keepalive_saved ? w.keepalive_saved.delta_usd : 0), true],
+      ['Cache strategy pings', -(w.keepalive_ping ? w.keepalive_ping.delta_usd : 0), false],
+      ['Cache strategy: rewrites avoided', -(w.keepalive_saved ? w.keepalive_saved.delta_usd : 0), true],
       ['Tools and skills filter', -(w.decl_filter_saved ? w.decl_filter_saved.delta_usd : 0), false],
     ];
     const max = Math.max(...rows.map((r) => Math.abs(r[1])), 0.01);
