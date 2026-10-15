@@ -19,12 +19,16 @@ package dash
 // same-count choice would have given.
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/skills"
@@ -169,26 +173,64 @@ type adaptToolsReq struct {
 	cacheWrite1h, fresh   int64
 }
 
+// adaptToolsSet is one declaration set: its tool count, when it was first seen, and the billed
+// keys it carries (interned ids, so a fleet of sets stays small).
 type adaptToolsSet struct {
 	first  int64
 	ntools int
-	carry  map[string]int // item key -> tokens in this set
-	mcpN   map[string]int // server -> tools of it in this set
+	items  []setItem // one per declaration row; a key may repeat (an MCP server's tools)
 }
 
-// AdaptTools builds the document for one scope.
-func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), state ToolFilterState) (*AdaptToolsDoc, error) {
-	where, args := f.where()
-	out := &AdaptToolsDoc{
-		Kind: "tools", Version: 1, Class: "counterfactual",
-		Method: "unused declarations priced on the requests that carried them", MethodDetail: adaptToolsMethod,
-		Window: AdaptToolsWindow{Since: f.Since, Until: f.Until}, Warnings: []string{},
-		Items: []AdaptToolsItem{},
-		Excluded: []string{"Context Guru's own tools and skills", "built-in and other non-MCP tools",
-			"server tools", "anything already in the removal list"},
-		Filter: AdaptToolsFilter{Enabled: state.Enabled, Removed: append([]string{}, state.Removed...), Reason: state.Reason},
-	}
+type setItem struct{ key, tok int32 }
 
+// sum folds a set's rows to one weight and one row count per key.
+func (st *adaptToolsSet) sum() map[int32][2]int {
+	out := make(map[int32][2]int, len(st.items))
+	for _, it := range st.items {
+		v := out[it.key]
+		out[it.key] = [2]int{v[0] + int(it.tok), v[1] + 1}
+	}
+	return out
+}
+
+// carried is one key's cost on the requests that carried it: the shared pricing behind
+// /api/adapt/tools and the Inventory tab.
+type carried struct {
+	USDCacheRead, USDCacheWrite, USDInput float64
+	// USDLow/USDHigh bound the total over every same-count set a request without a recorded
+	// digest could have carried.
+	USDLow, USDHigh float64
+	// Reads is tokens x carrying requests and Requests those requests (complete accounting only).
+	Reads           int64
+	Requests        int
+	Tokens, Rows    int // heaviest set
+	Sessions        int
+	FirstTS, LastTS int64
+	Unpriced        bool // some carrying request's model had no known rates
+}
+
+func (c *carried) USD() float64 { return c.USDCacheRead + c.USDCacheWrite + c.USDInput }
+
+// carriedScan is the result of one carriedCost pass.
+type carriedScan struct {
+	Coverage     AdaptToolsCoverage
+	Since, Until int64 // first and last tools>0 request in scope
+	Items        map[string]*carried
+	RewriteUSD   float64 // the latest priced request's whole prompt at write minus read
+	rewriteTS    int64
+}
+
+// carriedCost prices declarations on exactly the requests that carried them.
+//
+// keyOf names what a declaration row is billed to ("" = not billed): it gets the row's session id,
+// so a caller can decide per session (the Inventory tab bills an item only in sessions that did
+// not use it) or per scope (/api/adapt/tools bills only items never used anywhere). Each request
+// is priced at its own model and tier: cache read when its prefix was read, cache write when it
+// was rewritten (2x input for a one-hour write), input when uncached.
+func (d *DB) carriedCost(f Filter, price func(string) (modelinfo.Price, bool),
+	keyOf func(session, kind, name, server string) string) (*carriedScan, error) {
+	where, args := f.where()
+	out := &carriedScan{Items: map[string]*carried{}}
 	reqs := map[string][]adaptToolsReq{} // tenant\x00session -> requests, oldest first
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.ts, r.model,
 		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write, r.cache_write_1h, r.fresh_input
@@ -205,11 +247,11 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 		}
 		reqs[t+"\x00"+s] = append(reqs[t+"\x00"+s], q)
 		out.Coverage.Requests++
-		if out.Window.Since == 0 || q.ts < out.Window.Since {
-			out.Window.Since = q.ts
+		if out.Since == 0 || q.ts < out.Since {
+			out.Since = q.ts
 		}
-		if q.ts > out.Window.Until {
-			out.Window.Until = q.ts
+		if q.ts > out.Until {
+			out.Until = q.ts
 		}
 	}
 	rows.Close()
@@ -217,18 +259,324 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 		return nil, err
 	}
 	out.Coverage.Sessions = len(reqs)
-	if f.Since > 0 {
-		out.Window.Since = f.Since
-	}
-	if f.Until > 0 {
-		out.Window.Until = f.Until
-	}
-	out.Window.Sessions, out.Window.Requests = len(reqs), out.Coverage.Requests
 	if len(reqs) == 0 {
-		out.finish(state)
 		return out, nil
 	}
 
+	sets, keys, err := d.carriedSets(f, reqs, keyOf)
+	if err != nil {
+		return nil, err
+	}
+	byID := make([]*carried, len(keys))
+	for _, sess := range sets {
+		priceCarriedSession(out, byID, reqs[sess.key], sess.sets, price)
+	}
+	for id, c := range byID {
+		if c != nil {
+			out.Items[keys[id]] = c
+		}
+	}
+	return out, nil
+}
+
+// priceCarriedSession prices one session's requests against its declaration sets.
+func priceCarriedSession(out *carriedScan, byID []*carried, list []adaptToolsReq, sess map[string]*adaptToolsSet,
+	price func(string) (modelinfo.Price, bool)) {
+	out.Coverage.SessionsCaptured++
+	sums := make(map[*adaptToolsSet]map[int32][2]int, len(sess))
+	seen := map[int32]bool{}
+	for _, st := range sess {
+		m := st.sum()
+		sums[st] = m
+		for key, v := range m {
+			c := byID[key]
+			if c == nil {
+				c = &carried{FirstTS: st.first, LastTS: st.first}
+				byID[key] = c
+			}
+			if st.first < c.FirstTS {
+				c.FirstTS = st.first
+			}
+			c.LastTS = max64(c.LastTS, st.first)
+			// Per-request weight and row count are per set, so the heaviest set.
+			c.Tokens, c.Rows = max(c.Tokens, v[0]), max(c.Rows, v[1])
+			if !seen[key] {
+				seen[key] = true
+				c.Sessions++
+			}
+		}
+	}
+	byCount := map[int][]*adaptToolsSet{}
+	for _, st := range sess {
+		byCount[st.ntools] = append(byCount[st.ntools], st)
+	}
+	for _, c := range byCount {
+		sort.Slice(c, func(i, j int) bool { return c[i].first < c[j].first })
+	}
+	// The bounds per tool count: per key, the least and most it weighs over that count's
+	// candidate sets (0 where a candidate lacks it). The same for every request of the session
+	// with that count, so computed once.
+	type bound struct{ lo, hi int }
+	bounds := map[int]map[int32]bound{}
+	boundsFor := func(n int, cands []*adaptToolsSet) map[int32]bound {
+		if b, ok := bounds[n]; ok {
+			return b
+		}
+		b := map[int32]bound{}
+		for _, c := range cands {
+			for key, v := range sums[c] {
+				x := b[key]
+				x.hi = max(x.hi, v[0])
+				b[key] = x
+			}
+		}
+		for key, x := range b {
+			x.lo = x.hi
+			for _, c := range cands {
+				x.lo = min(x.lo, sums[c][key][0])
+			}
+			b[key] = x
+		}
+		bounds[n] = b
+		return b
+	}
+	for _, r := range list {
+		st, cands := sess[r.digest], []*adaptToolsSet(nil)
+		if st != nil {
+			out.Coverage.RequestsExact++
+		} else {
+			cands = byCount[r.tools]
+			st = adaptToolsPick(cands, r.ts)
+			if len(cands) > 1 {
+				out.Coverage.RequestsGuessed++
+			}
+		}
+		if st == nil {
+			continue
+		}
+		out.Coverage.RequestsMapped++
+		if r.accounting != AccountingComplete {
+			out.Coverage.RequestsUnpriced++
+			continue
+		}
+		m := sums[st]
+		p, ok := modelinfo.Price{}, false
+		if price != nil && r.model != "" {
+			p, ok = price(r.model)
+		}
+		rate := p.Input
+		switch {
+		case r.cacheRead > 0:
+			rate = p.CacheRead
+		case r.cacheWrite > 0:
+			rate = p.CacheWrite
+			// A one-hour breakpoint precedes every 5-minute one, so when the request wrote any
+			// 1h tokens the declarations at the head were among them: 2x input, not 1.25x.
+			if r.cacheWrite1h > 0 {
+				rate = 2 * p.Input
+			}
+		}
+		if ok && r.ts >= out.rewriteTS {
+			out.rewriteTS = r.ts
+			out.RewriteUSD = float64(r.cacheRead+r.cacheWrite+r.fresh) * (p.CacheWrite - p.CacheRead)
+		}
+		for key, v := range m {
+			c := byID[key]
+			c.Requests++
+			c.Reads += int64(v[0])
+			if !ok {
+				c.Unpriced = true
+				continue
+			}
+			x := float64(v[0]) * rate
+			switch {
+			case r.cacheRead > 0:
+				c.USDCacheRead += x
+			case r.cacheWrite > 0:
+				c.USDCacheWrite += x
+			default:
+				c.USDInput += x
+			}
+			if len(cands) < 2 {
+				c.USDLow += x
+				c.USDHigh += x
+			}
+		}
+		if ok && len(cands) >= 2 {
+			for key, b := range boundsFor(r.tools, cands) {
+				byID[key].USDLow += float64(b.lo) * rate
+				byID[key].USDHigh += float64(b.hi) * rate
+			}
+		}
+	}
+}
+
+// carriedShards is how many rowid slices carriedSets reads at once.
+const carriedShards = 16
+
+// carriedSlot bounds carriedSets to one pass across the process, whatever the scope.
+var carriedSlot = make(chan struct{}, 1)
+
+// carriedSession is one in-scope session's declaration sets, by digest.
+type carriedSession struct {
+	key  string // tenant\x00session
+	sets map[string]*adaptToolsSet
+}
+
+// carriedSets reads the in-scope declaration sets, and returns them with the key names their
+// interned ids stand for. Read the way scanDecls reads (declfacts.go): concurrent rowid slices
+// with no ORDER BY, grouped in Go, because sorting the table costs seconds that a sequential
+// stream does not. Each slice groups into its own maps and the slices are merged at the end (a
+// set can straddle two), so keyOf is called concurrently and must be safe for that.
+func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
+	keyOf func(session, kind, name, server string) string) ([]carriedSession, []string, error) {
+	// One pass at a time, process-wide: each is carriedShards concurrent readers, and on a cold
+	// fleet view it already runs beside scanDecls' own.
+	// An abandoned request stops waiting for the slot.
+	select {
+	case carriedSlot <- struct{}{}:
+	case <-d.readCtx().Done():
+		return nil, nil, d.readCtx().Err()
+	}
+	defer func() { <-carriedSlot }()
+	var lo, hi sql.NullInt64
+	if err := d.sql.QueryRowContext(d.readCtx(),
+		`SELECT MIN(rowid), MAX(rowid) FROM tool_declarations`).Scan(&lo, &hi); err != nil {
+		return nil, nil, err
+	}
+	if !lo.Valid {
+		return nil, nil, nil
+	}
+	type part struct {
+		sets map[string]map[string]*adaptToolsSet
+		keys []string
+	}
+	// A narrow scope reads in one query: every slice is a new connection, and a handful of
+	// sessions does not pay for sixteen (the same threshold scanDecls is used above).
+	shards := carriedShards
+	if len(reqs) < declScanMinSessions {
+		shards = 1
+	}
+	parts := make([]part, shards)
+	step := (hi.Int64-lo.Int64)/int64(shards) + 1
+	var g errgroup.Group
+	for k := 0; k < shards; k++ {
+		k := k
+		g.Go(func() error {
+			q := `SELECT tenant_id, session_id, digest, kind, name, server, tokens, ts FROM tool_declarations
+				WHERE rowid >= ? AND rowid < ? AND kind IN ('tool', 'mcp_tool', 'server_tool', 'skill', 'skill_listing')`
+			args := []any{lo.Int64 + int64(k)*step, lo.Int64 + int64(k+1)*step}
+			if !f.TenantAll {
+				q += ` AND tenant_id = ?`
+				args = append(args, f.Tenant)
+			}
+			rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			sets, ids := map[string]map[string]*adaptToolsSet{}, map[string]int32{}
+			var keys []string
+			for rows.Next() {
+				var t, s, dg, kind, name, server string
+				var tok int
+				var ts int64
+				if err := rows.Scan(&t, &s, &dg, &kind, &name, &server, &tok, &ts); err != nil {
+					return err
+				}
+				sk := t + "\x00" + s
+				if reqs[sk] == nil {
+					continue // not in scope; reqs is only read here
+				}
+				sess := sets[sk]
+				if sess == nil {
+					sess = map[string]*adaptToolsSet{}
+					sets[sk] = sess
+				}
+				st := sess[dg]
+				if st == nil {
+					st = &adaptToolsSet{first: ts}
+					sess[dg] = st
+				}
+				if ts < st.first {
+					st.first = ts
+				}
+				if kind != KindSkill && kind != KindSkillListing {
+					st.ntools++
+				}
+				if key := keyOf(s, kind, name, server); key != "" {
+					id, ok := ids[key]
+					if !ok {
+						id = int32(len(keys))
+						ids[key] = id
+						keys = append(keys, key)
+					}
+					st.items = append(st.items, setItem{id, int32(tok)})
+				}
+			}
+			parts[k] = part{sets, keys}
+			return rows.Err()
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, nil, err
+	}
+	// Merge: one id space, and a set that straddled two slices becomes one.
+	ids := map[string]int32{}
+	var keys []string
+	merged := map[string]map[string]*adaptToolsSet{}
+	for _, p := range parts {
+		remap := make([]int32, len(p.keys))
+		for i, key := range p.keys {
+			id, ok := ids[key]
+			if !ok {
+				id = int32(len(keys))
+				ids[key] = id
+				keys = append(keys, key)
+			}
+			remap[i] = id
+		}
+		for sk, sess := range p.sets {
+			dst := merged[sk]
+			if dst == nil {
+				dst = map[string]*adaptToolsSet{}
+				merged[sk] = dst
+			}
+			for dg, st := range sess {
+				for i := range st.items {
+					st.items[i].key = remap[st.items[i].key]
+				}
+				if d := dst[dg]; d != nil {
+					d.ntools += st.ntools
+					if st.first < d.first {
+						d.first = st.first
+					}
+					d.items = append(d.items, st.items...)
+				} else {
+					dst[dg] = st
+				}
+			}
+		}
+	}
+	out := make([]carriedSession, 0, len(merged))
+	for sk, sets := range merged {
+		out = append(out, carriedSession{sk, sets})
+	}
+	return out, keys, nil
+}
+
+// AdaptTools builds the document for one scope.
+func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), state ToolFilterState) (*AdaptToolsDoc, error) {
+	where, args := f.where()
+	out := &AdaptToolsDoc{
+		Kind: "tools", Version: 1, Class: "counterfactual",
+		Method: "unused declarations priced on the requests that carried them", MethodDetail: adaptToolsMethod,
+		Window: AdaptToolsWindow{Since: f.Since, Until: f.Until}, Warnings: []string{},
+		Items: []AdaptToolsItem{},
+		Excluded: []string{"Context Guru's own tools and skills", "built-in and other non-MCP tools",
+			"server tools", "anything already in the removal list"},
+		Filter: AdaptToolsFilter{Enabled: state.Enabled, Removed: append([]string{}, state.Removed...), Reason: state.Reason},
+	}
 	uses, err := d.scopedUses(f, where, args)
 	if err != nil {
 		return nil, err
@@ -247,207 +595,44 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 	for _, n := range state.Removed {
 		removed[n] = true
 	}
-
-	// Declarations: one set per (tenant, session, digest), read one session at a time so only that
-	// session's sets are in memory. Only the candidate items are kept.
-	q := `SELECT d.tenant_id, d.session_id, d.digest, d.kind, d.name, d.server, d.tokens, d.ts
-		FROM tool_declarations d WHERE d.kind IN ('tool', 'mcp_tool', 'server_tool', 'skill')`
-	var da []any
-	if !f.TenantAll {
-		q += ` AND d.tenant_id = ?`
-		da = append(da, f.Tenant)
-	}
-	drows, err := d.sql.QueryContext(d.readCtx(), q+` ORDER BY d.tenant_id, d.session_id`, da...)
+	meta := map[string]*AdaptToolsItem{}
+	var metaMu sync.Mutex // keyOf runs on several goroutines
+	scan, err := d.carriedCost(f, price, func(_, kind, name, server string) string {
+		key, it := adaptToolsCandidate(kind, name, server, usedTool, usedServer, usedSkill, removed)
+		if it != nil {
+			metaMu.Lock()
+			if meta[key] == nil {
+				meta[key] = it
+			}
+			metaMu.Unlock()
+		}
+		return key
+	})
 	if err != nil {
 		return nil, err
 	}
-	items := map[string]*AdaptToolsItem{}
-	// priceSession prices one session's requests against its sets.
-	priceSession := func(list []adaptToolsReq, sess map[string]*adaptToolsSet) {
-		out.Coverage.SessionsCaptured++
-		seen := map[string]bool{}
-		for _, st := range sess {
-			for key := range st.carry {
-				if !seen[key] {
-					seen[key] = true
-					items[key].Sessions++
-				}
-			}
-		}
-		byCount := map[int][]*adaptToolsSet{}
-		for _, st := range sess {
-			byCount[st.ntools] = append(byCount[st.ntools], st)
-		}
-		for _, c := range byCount {
-			sort.Slice(c, func(i, j int) bool { return c[i].first < c[j].first })
-		}
-		for _, r := range list {
-			st, cands := sess[r.digest], []*adaptToolsSet(nil)
-			if st != nil {
-				out.Coverage.RequestsExact++
-			} else {
-				cands = byCount[r.tools]
-				st = adaptToolsPick(cands, r.ts)
-				if len(cands) > 1 {
-					out.Coverage.RequestsGuessed++
-				}
-			}
-			if st == nil {
-				continue
-			}
-			out.Coverage.RequestsMapped++
-			if r.accounting != AccountingComplete {
-				out.Coverage.RequestsUnpriced++
-				continue
-			}
-			p, ok := modelinfo.Price{}, false
-			if price != nil && r.model != "" {
-				p, ok = price(r.model)
-			}
-			if ok && r.ts >= out.rewriteTS {
-				out.rewriteTS = r.ts
-				out.RewriteUSD = float64(r.cacheRead+r.cacheWrite+r.fresh) * (p.CacheWrite - p.CacheRead)
-			}
-			rate := p.Input
-			switch {
-			case r.cacheRead > 0:
-				rate = p.CacheRead
-			case r.cacheWrite > 0:
-				rate = p.CacheWrite
-				// A one-hour breakpoint precedes every 5-minute one, so when the request wrote any
-				// 1h tokens the declarations at the head were among them: 2x input, not 1.25x.
-				if r.cacheWrite1h > 0 {
-					rate = 2 * p.Input
-				}
-			}
-			for key, tok := range st.carry {
-				it := items[key]
-				it.Requests++
-				if !ok {
-					it.Priced = false
-					continue
-				}
-				x := float64(tok) * rate
-				switch {
-				case r.cacheRead > 0:
-					it.USDCacheRead += x
-				case r.cacheWrite > 0:
-					it.USDCacheWrite += x
-				default:
-					it.USDInput += x
-				}
-			}
-			if !ok {
-				continue
-			}
-			// The bounds: per item, the least and most it weighs in any candidate set. An item
-			// missing from one candidate weighs 0 there.
-			if len(cands) < 2 {
-				for key, tok := range st.carry {
-					items[key].USDLow += float64(tok) * rate
-					items[key].USDHigh += float64(tok) * rate
-				}
-				continue
-			}
-			lo, hi := map[string]int{}, map[string]int{}
-			for _, c := range cands {
-				for key, tok := range c.carry {
-					if tok > hi[key] {
-						hi[key] = tok
-					}
-				}
-			}
-			for key := range hi {
-				lo[key] = hi[key]
-				for _, c := range cands {
-					if c.carry[key] < lo[key] {
-						lo[key] = c.carry[key]
-					}
-				}
-				items[key].USDLow += float64(lo[key]) * rate
-				items[key].USDHigh += float64(hi[key]) * rate
-			}
-		}
-		// Per-request weight and tool count are per set, so take the heaviest set.
-		for _, st := range sess {
-			for key, tok := range st.carry {
-				it := items[key]
-				if tok > it.Tokens {
-					it.Tokens = tok
-				}
-				if n := st.mcpN[it.Name]; it.Kind == KindMCPServer && n > it.Tools {
-					it.Tools = n
-				}
-			}
-		}
+	out.Coverage, out.RewriteUSD = scan.Coverage, scan.RewriteUSD
+	if f.Since == 0 {
+		out.Window.Since = scan.Since
 	}
-	cur, sess := "", map[string]*adaptToolsSet{}
-	for drows.Next() {
-		var t, s, dg, kind, name, server string
-		var tok int
-		var ts int64
-		if err := drows.Scan(&t, &s, &dg, &kind, &name, &server, &tok, &ts); err != nil {
-			drows.Close()
-			return nil, err
-		}
-		sk := t + "\x00" + s
-		if reqs[sk] == nil {
-			continue // not in scope
-		}
-		if sk != cur {
-			if cur != "" {
-				priceSession(reqs[cur], sess)
-			}
-			cur, sess = sk, map[string]*adaptToolsSet{}
-		}
-		st := sess[dg]
-		if st == nil {
-			st = &adaptToolsSet{first: ts, carry: map[string]int{}, mcpN: map[string]int{}}
-			sess[dg] = st
-		}
-		if ts < st.first {
-			st.first = ts
-		}
-		if kind != KindSkill {
-			st.ntools++
-		}
-		key, it := adaptToolsCandidate(kind, name, server, usedTool, usedServer, usedSkill, removed)
-		if it == nil {
-			continue
-		}
-		st.carry[key] += tok
+	if f.Until == 0 {
+		out.Window.Until = scan.Until
+	}
+	out.Window.Sessions, out.Window.Requests = scan.Coverage.Sessions, scan.Coverage.Requests
+	for key, c := range scan.Items {
+		it := *meta[key]
+		it.Tokens, it.Sessions, it.Requests, it.FirstTS, it.LastTS = c.Tokens, c.Sessions, c.Requests, c.FirstTS, c.LastTS
 		if it.Kind == KindMCPServer {
-			st.mcpN[it.Name]++
+			it.Tools = c.Rows
 		}
-		ex := items[key]
-		if ex == nil {
-			ex = it
-			ex.Priced, ex.FirstTS = true, ts
-			items[key] = ex
-		}
-		if ts < ex.FirstTS {
-			ex.FirstTS = ts
-		}
-		if ts > ex.LastTS {
-			ex.LastTS = ts
-		}
-	}
-	drows.Close()
-	if err := drows.Err(); err != nil {
-		return nil, err
-	}
-	if cur != "" {
-		priceSession(reqs[cur], sess)
-	}
-
-	for _, it := range items {
-		it.USD = it.USDCacheRead + it.USDCacheWrite + it.USDInput
+		it.USDCacheRead, it.USDCacheWrite, it.USDInput = c.USDCacheRead, c.USDCacheWrite, c.USDInput
+		it.USD, it.USDLow, it.USDHigh, it.Priced = c.USD(), c.USDLow, c.USDHigh, !c.Unpriced
 		it.Sufficient = it.Sessions >= suggestMinSessions &&
 			time.Duration(it.LastTS-it.FirstTS)*time.Millisecond >= suggestMinSpan
 		out.TotalUSD += it.USD
 		out.TotalLow += it.USDLow
 		out.TotalHi += it.USDHigh
-		out.Items = append(out.Items, *it)
+		out.Items = append(out.Items, it)
 	}
 	sort.Slice(out.Items, func(i, j int) bool {
 		if out.Items[i].USD != out.Items[j].USD {

@@ -49,7 +49,11 @@ type ToolStat struct {
 	// Omitted (with Priced=false) when the model's rates are unknown — an unpriced number
 	// must not read as "this cost nothing".
 	UnusedUSD float64 `json:"unused_usd"`
-	Priced    bool    `json:"priced"`
+	// UnusedUSDLow/High bound UnusedUSD over the declaration sets a request without a recorded
+	// one could have carried; equal to it when every request recorded its set.
+	UnusedUSDLow  float64 `json:"unused_usd_low"`
+	UnusedUSDHigh float64 `json:"unused_usd_high"`
+	Priced        bool    `json:"priced"`
 	// Builtin marks one of Claude Code's OWN tools. Derived on read from a name allowlist
 	// (see IsBuiltinTool), because the stored taxonomy cannot tell them from a user's own
 	// client-side tools — both are KindTool. It exists so the UI can put them in their own
@@ -200,7 +204,10 @@ type ToolTotals struct {
 	// spent carrying never-invoked declarations, and their price.
 	UnusedReads int64   `json:"unused_reads"`
 	UnusedUSD   float64 `json:"unused_usd"`
-	Priced      bool    `json:"priced"`
+	// UnusedUSDLow/High bound UnusedUSD; see ToolStat.
+	UnusedUSDLow  float64 `json:"unused_usd_low"`
+	UnusedUSDHigh float64 `json:"unused_usd_high"`
+	Priced        bool    `json:"priced"`
 	// AsideTokens is the per-session mean weight of the declarations kept OUT of every figure
 	// above: Claude Code's own tools, another agent's client tools, the provider's. Reported so
 	// the page can state what it left out and how large it is, instead of leaving a reader to
@@ -290,6 +297,9 @@ type ToolReport struct {
 	SelfRemoved []SelfRemoval `json:"self_removed,omitempty"`
 	// Prompt is the system prompt's weight and how much of the prefix can be shown as text.
 	Prompt PromptStat `json:"prompt"`
+	// Carried is how the unused figures were priced: requests matched to the declaration set they
+	// carried, by recorded digest or by tool count, and how many of those matches were ambiguous.
+	Carried *AdaptToolsCoverage `json:"carried,omitempty"`
 }
 
 // sessionLengths is the per-session request count over the CAPTURED sessions only, which is
@@ -425,6 +435,19 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 		return rep, nil
 	}
 
+	uses, err := d.scopedUses(f, where, args)
+	if err != nil {
+		return nil, err
+	}
+	// The per-request pricing reads the table its own way, so it runs beside the inventory read
+	// rather than after it: the page waits for the slower of the two, not their sum.
+	var carriedRes *carriedScan
+	var g errgroup.Group
+	g.Go(func() error {
+		var err error
+		carriedRes, err = d.carriedCost(f, price, unusedKeyOf(usedBySession(uses)))
+		return err
+	})
 	var decls []declRow
 	if len(sessions) >= declScanMinSessions {
 		// Broad scope: one concurrent pass over the table instead of a probe per session (declfacts.go).
@@ -432,14 +455,81 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 	} else {
 		decls, err = d.scopedDecls(f, where, args)
 	}
+	if werr := g.Wait(); err == nil {
+		err = werr
+	}
 	if err != nil {
 		return nil, err
 	}
-	uses, err := d.scopedUses(f, where, args)
-	if err != nil {
-		return nil, err
+	rep = buildToolReport(sessions, decls, uses)
+	repriceCarried(rep, carriedRes)
+	return rep, nil
+}
+
+// repriceCarried replaces the report's unused-carry figures with the per-request pricing
+// /api/adapt/tools uses (carriedCost). buildToolReport's own figures bill a declaration on EVERY
+// request of a session that declared it, at the session's first model; a session holds several
+// declaration sets (a subagent with a narrower tool list, a server added mid-session) and often
+// two models, so that overstated what was carried, on real traffic several times over for
+// skills, which a subagent's set usually does not carry. Here each request is priced on the set
+// it carried, at its own model and tier, and a request without a recorded set gets bounds
+// (UnusedUSDLow/High) rather than a guess shown as a fact. "Unused" keeps its per-session
+// meaning: an item is billed in a session that did not use it.
+func repriceCarried(rep *ToolReport, scan *carriedScan) {
+	set := func(rows []ToolStat) {
+		for i := range rows {
+			st := &rows[i]
+			st.UnusedReads, st.UnusedUSD, st.UnusedUSDLow, st.UnusedUSDHigh = 0, 0, 0, 0
+			if c := scan.Items[st.Kind+"\x00"+st.Name]; c != nil {
+				st.UnusedReads, st.UnusedUSD, st.UnusedUSDLow, st.UnusedUSDHigh = c.Reads, c.USD(), c.USDLow, c.USDHigh
+				st.Priced = !c.Unpriced
+			}
+		}
 	}
-	return buildToolReport(sessions, decls, uses), nil
+	set(rep.Tools)
+	set(rep.Aside)
+	set(rep.Skills.Skills)
+	t := &rep.Totals
+	rep.Skills.UnusedListingReads, rep.Skills.UnusedListingUSD = 0, 0
+	t.UnusedReads, t.UnusedUSD, t.UnusedUSDLow, t.UnusedUSDHigh = 0, 0, 0, 0
+	if c := scan.Items[carriedListing]; c != nil {
+		rep.Skills.UnusedListingReads, rep.Skills.UnusedListingUSD = c.Reads, c.USD()
+		t.UnusedReads, t.UnusedUSD, t.UnusedUSDLow, t.UnusedUSDHigh = c.Reads, c.USD(), c.USDLow, c.USDHigh
+	}
+	// Totals over the controllable set, as buildToolReport defines them: tools, not the skill
+	// entries (slices of the listing, counted once above) and not the aside group.
+	for _, st := range rep.Tools {
+		t.UnusedReads += st.UnusedReads
+		t.UnusedUSD += st.UnusedUSD
+		t.UnusedUSDLow += st.UnusedUSDLow
+		t.UnusedUSDHigh += st.UnusedUSDHigh
+	}
+	rep.Servers = serverRollup(rep.Tools)
+	sortStats(rep.Tools)
+	sortStats(rep.Skills.Skills)
+	sortStats(rep.Aside)
+	rep.Carried = &scan.Coverage
+}
+
+// carriedListing is the skills listing's key: one block of prose, billed whole.
+const carriedListing = "\x00listing"
+
+// unusedKeyOf bills a declaration in a session that did not use it, which is what the Inventory
+// tab's "unused" means; the listing is waste only in a session that invoked no skill. Read-only
+// on usedIn, so safe for carriedSets' concurrent calls.
+func unusedKeyOf(usedIn map[string]map[statKey]int) func(session, kind, name, server string) string {
+	return func(s, kind, name, _ string) string {
+		if kind == KindSkillListing {
+			if usedSkill(usedIn[s]) == 0 {
+				return carriedListing
+			}
+			return ""
+		}
+		if usedIn[s][statKey{kind, name}] > 0 {
+			return ""
+		}
+		return kind + "\x00" + name
+	}
 }
 
 // declRow / useRow are the scoped raw rows, one per session and name.
@@ -515,16 +605,9 @@ func (d *DB) scopedUses(f Filter, where string, args []any) ([]useRow, error) {
 	return out, rows.Err()
 }
 
-// statKey identifies one declared capability across sessions.
-type statKey struct{ kind, name string }
-
-// buildToolReport does the declared-vs-used diff and the pricing. Split out from the
-// queries so the arithmetic — which is the part that can be wrong in an expensive
-// direction — is testable without a database.
-func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []useRow) *ToolReport {
-	rep := &ToolReport{}
-	// Which capabilities each session invoked. A skill counts as used under its own name,
-	// and the Skill tool counts as used by any skill call.
+// usedBySession is which capabilities each session invoked. A skill counts as used under its
+// own name, and the Skill tool counts as used by any skill call.
+func usedBySession(uses []useRow) map[string]map[statKey]int {
 	usedIn := map[string]map[statKey]int{}
 	for _, u := range uses {
 		m := usedIn[u.session]
@@ -542,6 +625,18 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 			m[statKey{KindSkill, u.skill}] += u.calls
 		}
 	}
+	return usedIn
+}
+
+// statKey identifies one declared capability across sessions.
+type statKey struct{ kind, name string }
+
+// buildToolReport does the declared-vs-used diff and the pricing. Split out from the
+// queries so the arithmetic — which is the part that can be wrong in an expensive
+// direction — is testable without a database.
+func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []useRow) *ToolReport {
+	rep := &ToolReport{}
+	usedIn := usedBySession(uses)
 
 	stats := map[statKey]*ToolStat{}
 	captured := map[string]bool{}

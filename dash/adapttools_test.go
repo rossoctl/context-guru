@@ -1,10 +1,13 @@
 package dash
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -237,5 +240,24 @@ func TestAdaptToolsPricesAFiveMinuteWriteAtTheWriteRate(t *testing.T) {
 	}
 	if len(doc.Items) != 1 || math.Abs(doc.Items[0].USDCacheWrite-100*1.25) > 1e-9 {
 		t.Fatalf("items %+v", doc.Items)
+	}
+}
+
+// A request waiting for the carried-pricing slot gives up when it is cancelled, instead of
+// queueing behind whatever pass holds the slot.
+func TestCarriedSetsStopsWaitingWhenCancelled(t *testing.T) {
+	db := openTestDB(t)
+	carriedSlot <- struct{}{} // another pass holds the slot
+	defer func() { <-carriedSlot }()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	_, _, err := db.WithContext(ctx).carriedSets(Filter{TenantAll: true},
+		map[string][]adaptToolsReq{"x": nil}, func(string, string, string, string) string { return "" })
+	if !errors.Is(err, context.Canceled) || time.Since(start) > time.Second {
+		t.Fatalf("err %v after %v; want context.Canceled within 1 s", err, time.Since(start))
+	}
+	if len(carriedSlot) != 1 {
+		t.Fatal("the cancelled request took or released the slot")
 	}
 }

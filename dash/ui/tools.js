@@ -373,6 +373,15 @@ function renderHeadline(host, rep) {
         ? 'if none of it had been carried' + (c.unpriced_sessions
           ? ' — over the ' + num(pricedSessions) + ' of ' + num(c.sessions)
             + ' sessions that ran on a priced model' : '')
+          // Older requests recorded no declaration set, so the set is inferred; say how far
+          // the figure could be off instead of presenting the guess as exact.
+          + (t.unused_usd_high - t.unused_usd_low >= 0.005
+            ? ' — between ' + usd(t.unused_usd_low) + ' and ' + usd(t.unused_usd_high)
+              + ' (older requests did not record which tools they carried)' : '')
+          // Requests matched to no stored set are in neither figure; say how many.
+          + (rep.carried && rep.carried.requests > rep.carried.requests_mapped
+            ? ' — ' + num(rep.carried.requests - rep.carried.requests_mapped) + ' requests not matched to a declaration set, not counted'
+            : '')
         : 'no dollar: no model in this window has known rates'),
   ], 'headline'));
   host.appendChild(gauge(t));
