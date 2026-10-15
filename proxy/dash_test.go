@@ -411,6 +411,39 @@ func manyToolResultsRequest(model string, results int) []byte {
 // maxAddedLatency is the most the dashboard may add per request, whatever the runner's own speed.
 const maxAddedLatency = 30 * time.Millisecond
 
+// latencyBudget is the most the dashboard may add per request on a runner whose own request median is off:
+// 20% of it, never under 5 ms and never over maxAddedLatency. The cap is what keeps a slow runner from
+// hiding the regression this guards (about 53 ms); the paired differences cancel shared load, so a fixed
+// ceiling does not flake. If a runner's paired noise ever nears the cap, raise it rather than removing it.
+func latencyBudget(off time.Duration) time.Duration {
+	budget := 5 * time.Millisecond
+	if rel := off / 5; rel > budget {
+		budget = rel
+	}
+	if budget > maxAddedLatency {
+		budget = maxAddedLatency
+	}
+	return budget
+}
+
+// The regression this file guards is content redaction moved onto the request goroutine, about 53 ms a
+// request. It has to exceed the budget at every baseline, including the 571 ms a loaded CI runner showed.
+func TestLatencyBudgetStillCatchesTheRedactionRegression(t *testing.T) {
+	const regression = 53 * time.Millisecond
+	for _, off := range []time.Duration{time.Millisecond, 2 * time.Millisecond, 50 * time.Millisecond,
+		100 * time.Millisecond, 331 * time.Millisecond, 571 * time.Millisecond, 5 * time.Second} {
+		if b := latencyBudget(off); regression <= b {
+			t.Errorf("at a %v baseline the budget is %v and a %v regression would pass", off, b, regression)
+		}
+	}
+	if got := latencyBudget(2 * time.Millisecond); got != 5*time.Millisecond {
+		t.Errorf("floor: got %v, want 5ms", got)
+	}
+	if got := latencyBudget(100 * time.Millisecond); got != 20*time.Millisecond {
+		t.Errorf("relative part: got %v, want 20ms", got)
+	}
+}
+
 func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 	up := fakeUpstream(t)
 	defer up.Close()
@@ -518,16 +551,7 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 	// is one sample with no averaging, so under load it tracks whichever handler caught
 	// a lucky scheduling moment. In the same run that produced this comment, the paired
 	// medians differed by 1.27 ms while the paired minima differed by 8.13 ms.
-	budget := 5 * time.Millisecond
-	if rel := off / 5; rel > budget {
-		budget = rel
-	}
-	// Capped: a relative budget alone grows with a slow runner until it would let the regression this guards
-	// (about 53 ms) through. The paired differences cancel shared load, so a fixed ceiling does not flake;
-	// if a runner's paired noise ever nears it, raise the cap rather than removing it.
-	if budget > maxAddedLatency {
-		budget = maxAddedLatency
-	}
+	budget := latencyBudget(off)
 	t.Logf("median per-request latency over %d paired requests: dashboard off %v, on with "+
 		"content ON %v (added %v, budget %v); minima for reference: off %v, on %v",
 		iters, off, on, added, budget, slices.Min(offs), slices.Min(ons))
