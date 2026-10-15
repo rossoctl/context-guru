@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"testing"
@@ -40,16 +41,24 @@ func TestJanitorPassCheckpointsWAL(t *testing.T) {
 
 	// Build up a non-trivial WAL directly against the store, bypassing the async
 	// writer so the test controls exactly how much has accumulated before checking.
-	if _, err := rec.db.sql.Exec(`PRAGMA wal_autocheckpoint=0`); err != nil {
+	// One pooled connection for the pragma and every insert: wal_autocheckpoint is a per-
+	// connection setting, so on a pool the inserts could land on a connection that still
+	// auto-checkpoints and the bloat would vary from run to run.
+	ctx := context.Background()
+	conn, err := rec.db.sql.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA wal_autocheckpoint=0`); err != nil {
 		t.Fatal(err)
 	}
 	blob := make([]byte, 4096)
 	for b := 0; b < 40; b++ {
-		tx, err := rec.db.sql.Begin()
+		tx, err := conn.BeginTx(ctx, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		stmt, err := tx.Prepare(`INSERT INTO requests(ts, tenant_id, session_id, model) VALUES (?,?,?,?)`)
+		stmt, err := tx.PrepareContext(ctx, `INSERT INTO requests(ts, tenant_id, session_id, model) VALUES (?,?,?,?)`)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -63,9 +72,10 @@ func TestJanitorPassCheckpointsWAL(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := rec.db.sql.Exec(`PRAGMA wal_autocheckpoint=1000`); err != nil {
+	if _, err := conn.ExecContext(ctx, `PRAGMA wal_autocheckpoint=1000`); err != nil {
 		t.Fatal(err)
 	}
+	conn.Close() // back to the pool
 
 	before, err := os.Stat(path + "-wal")
 	if err != nil {
