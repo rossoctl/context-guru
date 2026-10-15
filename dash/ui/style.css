@@ -1804,3 +1804,8 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 #strategy-form fieldset.field > label { display: block; margin-top: var(--sp-2); }
 #strategy-form #sf-target-ids { height: auto; max-width: 28rem; }
 #strategy-form fieldset.field > label:last-of-type { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+/* the cache row's parts and the section total */
+.lv-parts { margin-top: 2px; }
+.ledger-total { display: flex; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-3) 0 0; margin-top: var(--sp-1); border-top: 1px solid var(--border); }
+.ledger-total strong { font-family: var(--serif); font-size: 22px; font-variant-numeric: tabular-nums; }

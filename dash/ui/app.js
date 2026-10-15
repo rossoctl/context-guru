@@ -1590,8 +1590,19 @@ async function loadOverview(opts = {}) {
 
 /** The plots are inside a fold that starts closed, so their data (the time series, one of the larger
  *  reads) is fetched only when the reader opens it, and again on a refresh while it stays open. */
+function loadScriptOnce(src) {
+  if (!loadScriptOnce.p) loadScriptOnce.p = {};
+  return loadScriptOnce.p[src] ||= new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = resolve; s.onerror = () => { loadScriptOnce.p[src] = null; reject(new Error('Could not load ' + src)); };
+    document.head.appendChild(s);
+  });
+}
+
 async function renderDiagnostics() {
   state.diagStale = false;
+  // The plots' code is fetched with the fold, not with the page.
+  try { await loadScriptOnce('charts.js'); } catch (e) { for (const id of ['#chart-cost', '#waterfall', '#chart-tokens', '#chart-cache', '#chart-latency', '#chart-volume']) errorState($(id), 'Could not load this plot', e); return; }
   const o = state.overview;
   if (!o || !state.overviewFull) { state.diagStale = true; return; }
   try {
@@ -1637,11 +1648,14 @@ function renderSavedLedger(o, ka, partial) {
     ? ka.latency.per_miss_ms * o.keepalive_misses_avoided : null;
   const kaRan = o.keepalive_pings > 0 || o.keepalive_net_usd;
   const filterRan = o.decl_filter_requests > 0;
+  const parts = savedParts(o);
   const levers = [
     {
       id: 'cache', tid: 'saved-cache', name: 'Cache keep-alive', href: '#/keepalive', more: 'Keep-alive tab',
       what: 'Pings that stop your prompt cache from expiring while you think.',
-      ran: kaRan, usd: o.keepalive_net_usd, tok: kaTokens, approx: true,
+      ran: kaRan || parts.reorder !== 0, usd: parts.cache, tok: kaTokens, approx: true,
+      // The cache row is keep-alive plus the cache-reorder credit; both are shown so the row can be checked.
+      parts: parts.reorder !== 0 ? [['keep-alive', parts.keepalive, true], ['cache reorder', parts.reorder, false]] : null,
       extra: waited ? 'about ' + waitText(waited) + ' of waiting avoided over ' + num(o.keepalive_misses_avoided) + ' rewrites' : '',
       kind: 'Upper bound', note: 'after the pings cost ' + usd(o.keepalive_ping_usd),
       // The Keep-alive tab replays your own idle gaps to say whether to turn it on; the figure on this
@@ -1651,13 +1665,13 @@ function renderSavedLedger(o, ka, partial) {
     {
       id: 'compaction', tid: 'saved-compaction', name: 'Compaction', href: '#/components', more: 'Components tab',
       what: 'Old tool output and repeated text removed before it reaches the model.',
-      ran: o.requests > 0, usd: o.net_saved_usd, tok: o.saved_unique, of: o.tokens_before,
+      ran: o.requests > 0, usd: parts.compaction, tok: o.saved_unique, of: o.tokens_before,
       extra: '', kind: 'Estimated', note: 'after our own model calls',
     },
     {
       id: 'filter', tid: 'saved-filter', name: 'Tools and skills filter', href: '#/tools', more: 'Inventory tab',
       what: 'Tool and skill definitions the model never needed, left out of the prompt.',
-      ran: filterRan, usd: o.decl_filter_usd, tok: o.decl_filter_reads, idle: partial ? 'Checking…' : 'Starts when tools and skills are left out of the prompt. The list below is how.',
+      ran: filterRan, usd: parts.filter, tok: o.decl_filter_reads, idle: partial ? 'Checking…' : 'Starts when tools and skills are left out of the prompt. The list below is how.',
       extra: filterRan ? num(o.decl_filter_requests) + ' requests had tools filtered' : '',
       kind: 'Estimated', note: 'saved when tools are left out of the prompt',
     },
@@ -1684,11 +1698,13 @@ function renderSavedLedger(o, ka, partial) {
         bar,
         el('div', { class: 'lv-sub' }, el('span', { class: 'kind-badge ' + lv.kind.replace(' ', '-').toLowerCase(), title: KIND_TIP[lv.kind], text: lv.kind }),
           ' ' + (share ? pct(share, share < 10 ? 1 : 0) + ' of spend · ' : '') + lv.note),
+        lv.parts ? el('div', { class: 'lv-sub lv-parts' }, lv.parts.filter((p) => p[1] !== 0 || p[2]).map((p, i) => el('span', {},
+          (i ? ' · ' : 'of which ') + p[0] + ' ' + usd(p[1]) + (p[2] ? ' (upper bound)' : ''))) ) : null,
         lv.forecast ? el('div', { class: 'lv-sub' }, lv.forecast) : null);
     const tokens = lv.tok === null || lv.tok === undefined || !lv.ran
       ? el('div', { class: 'lv-tokens lv-none' }, '—')
       : el('div', { class: 'lv-tokens' },
-        el('div', { class: 'lv-big' }, el('strong', { text: (lv.approx ? '≈ ' : '') + compact(lv.tok) }),
+        el('div', { class: 'lv-big', title: lv.approx ? 'Estimated from the dollar figure at this window\'s average prices, assuming 5-minute cache writes. 1-hour writes make it an overestimate.' : null }, el('strong', { text: (lv.approx ? '≈ ' : '') + compact(lv.tok) }),
           el('span', { class: 'lv-of', text: ' tokens of ' + compact(ofTok) })),
         lv.extra ? el('div', { class: 'lv-sub', text: lv.extra }) : null);
     host.appendChild(el('div', { class: 'ledger-row', 'data-lever': lv.id, 'data-testid': lv.tid },
@@ -1696,6 +1712,13 @@ function renderSavedLedger(o, ka, partial) {
         el('h3', {}, el('a', { href: lv.href, title: 'Open the ' + lv.more }, lv.name)),
         el('p', { text: lv.what })),
       money, tokens));
+  }
+  // The three rows together; this equals the server's total_saved_usd (dash/savings.test.mjs). Held back
+  // until the full read lands, because the lean read does not carry the tools and skills filter.
+  if (!partial && priced) {
+    host.appendChild(el('div', { class: 'ledger-total', 'data-testid': 'saved-total' },
+      el('span', { text: 'All three together' }), el('strong', { text: usd(parts.total) }),
+      el('span', { class: 'lv-of', text: 'of ' + usd(spent) + ' spent; the keep-alive part is an upper bound' })));
   }
   const note = $('#ov-saved-note');
   if (note) {
@@ -1705,9 +1728,19 @@ function renderSavedLedger(o, ka, partial) {
 }
 
 /** Keep-alive's waiting-time figure comes from the keep-alive ledger. Best-effort and separate. */
+/** The keep-alive ledger is read by both the Overview and the Keep-alive tab. Share one request for a
+ *  few seconds, so opening the tab right after the Overview does not ask the server for it twice. */
+function keepAliveLedger() {
+  const now = Date.now();
+  if (!state.kaLedgerP || now - state.kaLedgerAt > 15000) {
+    state.kaLedgerAt = now;
+    state.kaLedgerP = api('keepalive').catch((e) => { state.kaLedgerP = null; throw e; });
+  }
+  return state.kaLedgerP;
+}
 async function loadOverviewKeepAlive() {
   try {
-    state.keepAliveLedger = await api('keepalive');
+    state.keepAliveLedger = await keepAliveLedger();
     if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger, !state.overviewFull);
   } catch (e) { /* the savings are already on screen without the waiting time */ }
 }
@@ -8613,20 +8646,17 @@ async function loadKeepAlive() {
   // "is this costing me money".
   const host = clear($('#ka-tiles'));
   loadingState(host, 2);
-  // Every read starts now, the ledger first. The other panels used to start only after the ledger
-  // had come back, which put the slowest one (the recommendation, about nine seconds) behind it on
-  // the critical path; an earlier banner started it in parallel by accident and its removal made the
-  // tab four seconds slower. Each panel still fills from its own request, so one slow query never
-  // blanks another.
-  const ledger = api('keepalive');
-  loadKASessions();
-  loadKALive();
-  loadKABehaviour();
-  loadKACalc();
-  loadKAArmed();
+  // The ledger and the recommendation start together; the other panels start as soon as the ledger is
+  // back. The recommendation (about nine seconds) used to wait behind the ledger, which put it on the
+  // critical path; starting EVERYTHING at once was measured worse still, because six heavy reads
+  // contending for the database slowed every one of them (the ledger took twice as long). Each panel
+  // still fills from its own request, so one slow query never blanks another.
+  const ledger = keepAliveLedger();
   loadKARecommend();
+  const rest = () => { loadKASessions(); loadKALive(); loadKABehaviour(); loadKACalc(); loadKAArmed(); };
   try {
     kaState.ledger = await ledger;
+    rest();
     renderKAVerdict(kaState.ledger);
     // The decision row paints immediately with the ledger half, and again when the
     // counterfactual lands. The ledger must not wait on a window function; the row must not
@@ -8634,6 +8664,7 @@ async function loadKeepAlive() {
     renderKADecision(kaState.ledger, kaState.recommend);
     renderKADownside(kaState.ledger);
   } catch (e) {
+    rest();
     if (aborted(e)) return;
     errorState(host, 'Could not read the keep-alive ledger', e);
   }
