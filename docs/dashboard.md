@@ -45,7 +45,7 @@ route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
   Requests, including a git-style diff of exactly what was rewritten on the wire.
 - **Admin** — Config, Cache strategies, Tenants, Setup, Settings, Archive and Feedback
   (some of these appear only in a [hosted service](hosted.md)).
-- **Advanced** — Preset steps (per-component economics), [KV-cache behavior](#kv-cache-panel),
+- **Advanced** — Preset steps (per-component economics), [Cache detail](#kv-cache-panel) (the KV-cache view),
   and Strategy campaigns (per-account cache strategies).
 
 Every tab starts with a title and one line saying what it shows. Dark mode, small

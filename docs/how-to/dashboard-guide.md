@@ -249,13 +249,13 @@ Detailed diagnostics, opened:
 **Did summarizing a long chat pay off?** The result of the summarizing step on its own.
 
 
-## KV-cache
+## Cache detail
 
 **How long your prompt cache stays warm between requests, and what other timings would cost.**
 
 === "Light"
 
-    ![The KV-cache tab, light theme](../img/dashboard/kvcache-light.png)
+    ![The Cache detail tab, light theme](../img/dashboard/kvcache-light.png)
 
 **How long do conversations pause?** Counts how often a request is followed by another and how soon. Requests with no follow-up are left out of averages.
 

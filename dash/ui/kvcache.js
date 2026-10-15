@@ -37,7 +37,7 @@ document.head.appendChild(el('link', { rel: 'stylesheet', href: 'kvcache.css' })
 // is the single place that knows the nav's DOM shape; it returns the section, already
 // appended to #main and wired as this tab's tabpanel.
 const kvView = mountTab({
-  group: 'advanced', after: 'components', view: 'kvcache', label: 'KV-cache',
+  group: 'advanced', after: 'components', view: 'kvcache', label: 'Cache detail',
 });
 
 // ── local state ────────────────────────────────────────────────────────────
@@ -1415,7 +1415,7 @@ async function kvLoadAnalysis() {
     kvc.analysis = await kvFetch('kvcache');
   } catch (err) {
     if (aborted(err)) return;
-    errorState(clear($('#kv-hero')), 'Could not read the KV-cache analysis', err);
+    errorState(clear($('#kv-hero')), 'Could not read the cache analysis', err);
     return;
   }
   renderKVCoverage();

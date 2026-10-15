@@ -2475,6 +2475,24 @@ function renderUnpricedNote(components) {
   }
 }
 
+/** The fold for steps this page has no description for, kept next to the Preset steps table. */
+function renderUndescribedSteps(rows) {
+  const table = $('[data-testid=components-table]');
+  if (!table) return;
+  const wrap = table.closest('.tblwrap') || table;
+  let host = $('#components-undescribed');
+  if (!host) {
+    host = el('details', { class: 'why', id: 'components-undescribed', 'data-testid': 'components-undescribed' });
+    wrap.after(host);
+  }
+  clear(host);
+  host.hidden = !rows.length;
+  if (!rows.length) return;
+  host.appendChild(el('summary', { text: 'Other steps in the history (' + rows.length + '), without a description here' }));
+  host.appendChild(el('ul', { class: 'plain-list' }, rows.map((c) => el('li', {},
+    el('strong', { text: String(c.component).replace(/_/g, ' ') }), ' ran ' + num(c.runs) + ' times and removed ' + compact(c.saved_unique) + ' tokens'))));
+}
+
 async function loadComponents() {
   const body = clear($('#components-body'));
   loadingRows(body, COMPONENT_SORT.length);
@@ -2482,7 +2500,13 @@ async function loadComponents() {
     const { components: raw } = await api('components');
     // /api/components has no LIMIT — every component that ran in the window is in this
     // array — so sorting it here IS a global sort, not a sort of one page.
-    const components = state.sort ? sortRows(raw, state.sort, state.dir) : raw;
+    const all = state.sort ? sortRows(raw, state.sort, state.dir) : raw;
+    // Steps the page can describe are listed; any other name in the history (a step that has since left the
+    // product, say) goes into a fold under the table so no recorded figure is dropped, and the table is not
+    // padded with rows nobody can explain.
+    const components = all.filter((c) => STEP_INFO[c.component]);
+    const undescribed = all.filter((c) => !STEP_INFO[c.component]);
+    renderUndescribedSteps(undescribed);
     syncSortHeads('[data-testid=components-table]', COMPONENT_SORT);
     clear(body);
     if (!components.length) {
@@ -4424,7 +4448,7 @@ const TAB_INFO = {
     see: 'Open one to see what it contained, what was removed from it and what the provider billed.' },
   components: { short: 'How each step of your preset did', title: 'Preset steps', what: 'How each step of your preset performed: what it removed, what it cost and whether it paid off.',
     see: 'One row per step with its net result, plus a table of the ways it chose to do nothing.' },
-  kvcache: { short: 'How long your cache stays warm', title: 'KV-cache', what: 'How long your prompt cache stays warm between requests, and what other timings would cost.',
+  kvcache: { short: 'How long your cache stays warm', title: 'Cache detail', what: 'How long your prompt cache stays warm between requests, and what other timings would cost. (Also called the KV-cache view.)',
     see: 'Idle-gap charts, a price table and a replay of different cache strategies on your own history.' },
   campaigns: { short: 'Cache strategies in bulk', title: 'Strategy campaigns', what: 'Create cache strategies for many sessions at once, then check them on data they have not seen.',
     see: 'A form to create rules and a table of the ones you made.' },
