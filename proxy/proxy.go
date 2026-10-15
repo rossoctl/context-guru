@@ -1269,8 +1269,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// and dashcapture.go's finish() for where the actual scan (waitcause.Tracker.
 			// Observe) now runs. This line itself costs one slice-header copy, not a scan.
 			cp.noteWaitBody(orig)
-			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
-			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
+			cp.noteKeepAlive(h.keeper.arriveAt(tn.ID, tr.Session, threadID))
 			if cp != nil {
 				cp.predArrival = h.predRT().arrive(tn.ID, tr.Session, threadID, time.Now())
 			}

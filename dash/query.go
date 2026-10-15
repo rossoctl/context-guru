@@ -762,9 +762,13 @@ type ComponentRow struct {
 	// component, which is the point: only the components that SPEND can be net-negative,
 	// and until now the components view had no dollars in it at all, so it judged an
 	// expensive component on tokens and latency and could never say "underwater".
-	LLMCalls     int64 `json:"llm_calls"`
-	LLMCallsCold int64 `json:"llm_calls_cold"`
-	LLMCallsAcc  int64 `json:"llm_calls_accepted"`
+	LLMCalls int64 `json:"llm_calls"`
+	// SummarizeCreditPastSpanUSD / SummarizeCreditPrefixChangeUSD are stored summarize credit the
+	// attribution ledger took out of SavedUSD (see SummarizeLedger). Set on the summarize row only.
+	SummarizeCreditPastSpanUSD     float64 `json:"summarize_credit_past_span_usd,omitempty"`
+	SummarizeCreditPrefixChangeUSD float64 `json:"summarize_credit_prefix_change_usd,omitempty"`
+	LLMCallsCold                   int64   `json:"llm_calls_cold"`
+	LLMCallsAcc                    int64   `json:"llm_calls_accepted"`
 	// LLMCostUSD is the figure every verdict on this row is computed from, and it is the
 	// GATEWAY-priced one — see the query for why the dashboard used to carry two.
 	// LLMCostGatewayUSD and LLMCostReportedUSD are the two sources kept separable so the UI
@@ -980,6 +984,21 @@ func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup,
 	}
 	if err := irows.Err(); err != nil {
 		return nil, nil, err
+	}
+	// A summarizer's own spend. It records no extraction_calls rows, so the loops above left it at
+	// zero calls and zero dollars while its cost sat unowned in requests.cg_llm_cost_usd.
+	for _, name := range SummarizerComponents {
+		sc, ok := byName[name]
+		if !ok {
+			continue
+		}
+		calls, usd, err := d.summarizerOwnCost(cond, args, name)
+		if err != nil {
+			return nil, nil, err
+		}
+		sc.LLMCalls += calls
+		sc.LLMCostUSD += usd
+		sc.LLMCostGatewayUSD += usd
 	}
 	// The verdict, once both halves are in. A deterministic component spends nothing, so its
 	// net is just its saving; only a component that calls a model can come out negative.

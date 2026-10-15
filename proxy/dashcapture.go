@@ -86,6 +86,8 @@ type capture struct {
 	kaPings     int
 	kaRefreshed int64
 	kaStrategy  string
+	// kaRefreshedAt is when the provider's entry was last known refreshed (see kaArrival).
+	kaRefreshedAt time.Time
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
 	// weights) plus the tool calls of its last tool-using turn — nil when the request
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
@@ -334,9 +336,10 @@ func (c *capture) noteUpstream(ms float64, status int) {
 }
 
 // noteKeepAlive records what the idle keep-alive did during the span this request ended.
-func (c *capture) noteKeepAlive(pings int, refreshed int64, strategyID string) {
+func (c *capture) noteKeepAlive(ka kaArrival) {
 	if c != nil {
-		c.kaPings, c.kaRefreshed, c.kaStrategy = pings, refreshed, strategyID
+		c.kaPings, c.kaRefreshed, c.kaStrategy = ka.pings, ka.refreshed, ka.strategyID
+		c.kaRefreshedAt = ka.refreshedAt
 	}
 }
 
@@ -500,7 +503,11 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		e.TenantID, e.SessionID, e.ThreadID, e.Model, e.TS, e.SplitTailHash)
 	// Only a known expiry can establish ttl_expiry. OpenAI's 30m is a
 	// minimum guarantee, so a later miss cannot be attributed to expiry alone.
-	e.AttributeCache(seenSession, seenModel, sinceMs,
+	//
+	// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
+	// measured from the last real request, so without this a 297 s gap with a ping at 289 s
+	// reads as an expiry on a turn that came 8 s after the refresh.
+	e.AttributeCache(seenSession, seenModel, entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt),
 		cacheAttributionTTLMs(e.Provider, e.Model), e.CacheWrite > 0)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
@@ -572,6 +579,18 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent)
 	c.rec.Record(e)
+}
+
+// entryAgeMs is how old the provider's cache entry was when the request arrived: the gap since
+// the last real request, cut short by a ping that refreshed the entry later than that request.
+func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
+	if refreshedAt.IsZero() || sinceMs <= 0 {
+		return sinceMs
+	}
+	if age := tsMs - refreshedAt.UnixMilli(); age >= 0 && age < sinceMs {
+		return age
+	}
+	return sinceMs
 }
 
 func cacheAttributionTTLMs(provider, model string) int64 {
