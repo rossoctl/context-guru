@@ -124,7 +124,12 @@
      use); it is a different KIND of statement from a verdict, being an observation about one day
      rather than a recommendation about a capability. From the validated categorical palette,
      where it is a distinct hue in both themes. */
-  --ins-carried:     var(--pal-violet);
+  /* LIGHTENED against the surface rather than swapped for a different hue. Full-strength
+     --pal-violet is dark in the light theme, and on a grid where this is the most common cell it
+     read as a heavy slab — reported as needing to be lighter. Mixed with the page's own
+     background so it keeps the same hue, stays a token, and re-lightens against the dark surface
+     automatically instead of needing a second hand-picked value. */
+  --ins-carried:     color-mix(in srgb, var(--pal-violet) 42%, var(--bg-raised));
 }
 .ins-vd.remove   { background: var(--bad-soft);  color: var(--ins-vd-remove);   border-color: var(--ins-vd-remove); }
 .ins-vd.consider { background: var(--warn-soft); color: var(--ins-vd-consider); border-color: var(--ins-vd-consider); }

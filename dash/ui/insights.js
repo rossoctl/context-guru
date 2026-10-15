@@ -1000,7 +1000,7 @@ function insChartTheme() {
       keep: v('--ins-vd-keep', '#008300'),
     },
     /* Carried-but-never-invoked, declared beside the verdicts so the legend can name it. */
-    carried: v('--ins-carried', '#4a3aa7'),
+    carried: v('--ins-carried', '#a79fd4'),
     ink: v('--fg', '#1b1f1c'),
     muted: v('--fg-muted', '#5c635d'),
     faint: v('--fg-faint', '#8b918b'),
@@ -1276,7 +1276,7 @@ function insDrawChart(host, g, tl) {
        * it is the BACKGROUND the coloured states read against — but it is one colour with one
        * legend entry, not a gradient. */
       { name: 'carried, never used', type: 'heatmap', data: idle,
-        itemStyle: { color: t.carried, opacity: 0.55, borderRadius: 2,
+        itemStyle: { color: t.carried, opacity: 1, borderRadius: 2,
           borderWidth: 2, borderColor: 'transparent' } },
       /* OUTSIDE THE SELECTION. Grey, and still visible: the reader is deciding whether their
        * range is the right one, which they cannot do if the rest of the history is blank. Kept
@@ -1424,12 +1424,10 @@ function insProjectPicker() {
   /* The pooled view first and selected by default. */
   const opts = [['', 'all projects']];
   for (const p of insProjects) opts.push([p, insShortProject(p)]);
-  /* `none` is a RESERVED WORD, not a sentinel character. The first version used '\u0000unattributed'
-   * and a browser check caught it still in the served file: a NUL in a query string survives
-   * neither a URL nor a bookmark, and the server would have matched it against nothing while the
-   * page looked scoped. The word is also why filterFrom clears f.Project when it sees it — "none"
-   * must never be taken for a folder of that name. */
-  opts.push(['none', 'unattributed requests']);
+  /* PROJECTS ONLY. No `unattributed` entry: the rows written before this column existed carry no
+   * tool inventory to shape a report from, so selecting them produced a document with zero items
+   * under a scoped heading — an empty page that reads as a broken one. Those rows are still in
+   * `all projects`, which is where a figure nobody can attribute belongs. */
   for (const [v, label] of opts) {
     const o = el('option', { value: v, title: v || 'every project pooled together' }, label);
     if (v === insProject) o.setAttribute('selected', 'selected');
@@ -1438,12 +1436,9 @@ function insProjectPicker() {
   /* The hint names the EVIDENCE each scope rests on, which is the thing a reader cannot see for
    * themselves. `unattributed` needs its own wording: those requests predate the project column,
    * so they cannot be attributed later and the option is not going to empty itself. */
-  let note = 'Every project pooled, which is the strongest evidence.';
-  if (insProject === 'none') {
-    note = 'Requests recorded before projects were tracked. They cannot be attributed now.';
-  } else if (insProject) {
-    note = 'Verdicts below use this project\u2019s sessions only.';
-  }
+  const note = insProject
+    ? 'Verdicts below use this project\u2019s sessions only.'
+    : 'Every project pooled, which is the strongest evidence.';
   return el('div', { class: 'ins-proj' },
     el('label', {}, 'Project ', sel),
     el('span', { class: 'hint', text: note }));

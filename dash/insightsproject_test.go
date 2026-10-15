@@ -59,18 +59,19 @@ func TestAllProjectsIsTheDefaultAndStaysSelectable(t *testing.T) {
 		t.Error("the picker offers no `all projects` option; a reader who narrows could not get " +
 			"back to the pooled view the rest of the dashboard reports")
 	}
-	// The unattributed rows are offered as their own option, named by a reserved word rather than
-	// an empty value: "" already means "every project", so it cannot also mean "those with none".
+	// THE PICKER OFFERS PROJECTS, AND ONLY PROJECTS.
 	//
-	// Asserted on the OPTION, not on the bare string 'none'. The looser form passed while the
-	// served file still carried a '\u0000unattributed' sentinel — the word appears elsewhere in
-	// the file, so the test matched a different occurrence and a browser check found the real
-	// value. A NUL in a query string survives neither a URL nor a bookmark, and the server would
-	// have matched it against nothing while the page looked scoped.
-	if !strings.Contains(code, "opts.push(['none'") {
-		t.Error("the picker's unattributed option is not the reserved word `none`; that is where " +
-			"every row written before the project column existed now lives, and a sentinel " +
-			"character would not survive the query string")
+	// It briefly offered an `unattributed requests` entry for the rows written before the project
+	// column existed. Selecting it produced an empty page: those rows carry no tool inventory to
+	// shape a report from, so the document came back with zero items under a scoped heading, which
+	// reads as a broken view rather than as an empty one. Reported as "failed on selection of
+	// 'anatributed requests', it shouldn't be there at all, just projects".
+	//
+	// The rows are not lost — they are in `all projects`, which is where a figure nobody can
+	// attribute belongs. There is simply nothing a per-project REPORT can say about them.
+	if strings.Contains(code, "opts.push(['none'") {
+		t.Error("the picker still offers the unattributed rows as a scope. Selecting it yields a " +
+			"document with no items, which reads as broken; those rows belong in `all projects`")
 	}
 	if strings.Contains(code, "\\u0000") {
 		t.Error("insights.js still carries a NUL sentinel; it cannot survive a URL round trip")
