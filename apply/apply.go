@@ -190,6 +190,11 @@ type slot struct {
 	path    string // sjson path: "messages.<i>" (whole) or "messages.<i>.content.<b>.content" (tool text)
 	pre     []byte // canonical marshal of the original (normalized) message
 	preText string // anthropicToolText: original tool-output text (change detection)
+	// tail is the run of trailing <system-reminder> blocks split off an anthropicToolText
+	// output before the components saw it (#556). preText still holds the WHOLE original, and
+	// writeback appends tail to whatever the components left, so preText == text+tail means
+	// unchanged.
+	tail string
 	// raw is the BODY message's original bytes — for a tool-text slot, the whole user
 	// message the tool_result block lives in, so several slots can share one raw.
 	//
@@ -830,7 +835,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// exactly as they arrived. Never written back, so never counted as a change.
 			continue
 		case anthropicToolText:
-			newText := schema.MessageText(chat.Input[i])
+			newText := schema.MessageText(chat.Input[i]) + s.tail
 			if newText == s.preText {
 				continue
 			}
@@ -1559,11 +1564,12 @@ func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bsch
 					case "tool_result":
 						add := func(text, path string) {
 							handled = true
-							tm := toolMessage(text, blk.Get("tool_use_id").String())
+							out, tail := splitTrailingReminders(text)
+							tm := toolMessage(out, blk.Get("tool_use_id").String())
 							pre, _ := json.Marshal(tm)
 							norm = append(norm, tm)
 							slots = append(slots, slot{
-								kind: anthropicToolText, path: path, preText: text, pre: pre, raw: m.Raw,
+								kind: anthropicToolText, path: path, preText: text, tail: tail, pre: pre, raw: m.Raw,
 							})
 						}
 						base := "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".content"
@@ -1860,7 +1866,7 @@ func writeBackToolText(body []byte, orig []gjson.Result, slots []slot,
 		if !ok {
 			continue
 		}
-		txt := schema.MessageText(out[i])
+		txt := schema.MessageText(out[i]) + slots[k].tail
 		if txt == slots[k].preText {
 			continue // unchanged; the original bytes already carry it
 		}
