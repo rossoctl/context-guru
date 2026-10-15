@@ -1,0 +1,93 @@
+package dash
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// A body older than the 30 s freshness window but inside the stale cap is served at once, labelled
+// stale, with its real age, and exactly one refresh runs behind it. Before the cap was widened a
+// reader who came back after a minute found nothing to serve and paid the whole query.
+func TestServeJSONServesAStaleBodyWithItsAge(t *testing.T) {
+	a, _ := newTestAPI(t, Options{})
+	c := &jsonCache{entries: map[string]jsonCacheEntry{
+		"k": {at: time.Now().Add(-5 * time.Minute), body: []byte(`{"gen":0}`)},
+	}}
+	var computes int32
+	refreshed := make(chan struct{})
+	compute := func(*DB) ([]byte, error) {
+		atomic.AddInt32(&computes, 1)
+		close(refreshed)
+		return []byte(`{"gen":1}`), nil
+	}
+	w := httptest.NewRecorder()
+	a.serveJSON(w, httptest.NewRequest(http.MethodGet, "/api/stats", nil), c, "k", compute)
+
+	if got := w.Header().Get("X-Cache"); got != "stale" {
+		t.Fatalf("X-Cache = %q, want stale: a 5-minute-old body is inside the cap and must be served, not recomputed", got)
+	}
+	if w.Body.String() != `{"gen":0}` {
+		t.Errorf("body = %q, want the cached one", w.Body.String())
+	}
+	age, err := strconv.Atoi(w.Header().Get("Age"))
+	if err != nil || age < 299 || age > 305 {
+		t.Errorf("Age = %q, want about 300 seconds", w.Header().Get("Age"))
+	}
+	select {
+	case <-refreshed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no refresh was started behind the stale answer")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if body, fresh := c.load("k"); fresh && string(body) == `{"gen":1}` {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the refreshed body never replaced the stale one")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if n := atomic.LoadInt32(&computes); n != 1 {
+		t.Errorf("compute ran %d times, want 1", n)
+	}
+}
+
+// Past the cap nothing is served: the reader waits for current figures, and the answer says Age 0.
+func TestServeJSONComputesWhenPastTheCap(t *testing.T) {
+	a, _ := newTestAPI(t, Options{})
+	c := &jsonCache{entries: map[string]jsonCacheEntry{
+		"k": {at: time.Now().Add(-(dashCacheTTL + dashCacheStale + time.Minute)), body: []byte(`{"gen":0}`)},
+	}}
+	w := httptest.NewRecorder()
+	a.serveJSON(w, httptest.NewRequest(http.MethodGet, "/api/stats", nil), c, "k",
+		func(*DB) ([]byte, error) { return []byte(`{"gen":2}`), nil })
+	if w.Body.String() != `{"gen":2}` || w.Header().Get("X-Cache") != "miss" || w.Header().Get("Age") != "0" {
+		t.Errorf("got %q X-Cache=%q Age=%q, want a fresh compute labelled miss with Age 0",
+			w.Body.String(), w.Header().Get("X-Cache"), w.Header().Get("Age"))
+	}
+}
+
+// The page must show the age of the data. These are source checks like the neighbouring UI tests:
+// the Age header is read into state.ageMs and Overview subtracts it from "Updated N ago".
+func TestOverviewFreshnessUsesTheAgeOfTheData(t *testing.T) {
+	js, err := os.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(js)
+	for _, want := range []string{
+		"res.headers.get('Age')",
+		"state.loadedAt = Date.now() - dataAge",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("app.js no longer contains %q; \"Updated N ago\" would claim fresher data than it shows", want)
+		}
+	}
+}

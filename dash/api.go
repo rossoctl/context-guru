@@ -107,13 +107,16 @@ const dashCacheTTL = 30 * time.Second
 // dashCacheStale is how far PAST the TTL a body may still be served while its replacement is being
 // computed. Beyond it a reader waits for fresh numbers instead.
 //
-// The cap is what keeps stale-while-revalidate honest. Without one, a deployment that goes quiet
-// serves the last body it ever built, indefinitely, and the page reports it as current — the
-// dashboard's freshness line is stamped when the BROWSER fetched, so it cannot see server-side
-// staleness. 30s past a 30s TTL bounds the worst case at one minute, which is smaller than the
-// client's own refresh interval, so no reader can be shown anything older than they would have
-// been shown anyway by not clicking refresh.
-const dashCacheStale = 30 * time.Second
+// This is the cap that keeps stale-while-revalidate honest, and it was 30s, which was SHORTER THAN
+// THE WORK AGAIN: an all-time stats read takes about 6s warm and 35s on a cold process on a 3.6 GB
+// database, so a reader who came back after a minute found nothing to serve and paid the whole
+// query, every time. Ten minutes covers the gap between two looks at a dashboard.
+//
+// The honesty that the old comment asked of the cap now comes from the response instead of from a
+// short cap: every cached body carries an Age header (seconds since it was computed), the page
+// subtracts it from "Updated N ago", and the reader sees the age of the data rather than the age of
+// the request. Nothing is served older than this, and nothing is shown as newer than it is.
+const dashCacheStale = 10 * time.Minute
 
 // dashHandlerTimeout bounds every dashboard read except the four in unboundedRoutes. It used to
 // bound three of them, named by hand at their route entries — see Mount, which now applies it by
@@ -181,6 +184,17 @@ type jsonCache struct {
 type jsonCacheEntry struct {
 	at   time.Time
 	body []byte
+}
+
+// age is how long ago the entry for key was computed; 0 when there is none.
+func (c *jsonCache) age(key string) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return 0
+	}
+	return time.Since(e.at)
 }
 
 func (c *jsonCache) get(key string) ([]byte, bool) {
@@ -267,16 +281,19 @@ func (c *jsonCache) set(key string, body []byte) {
 // able to tell the two apart.
 func serveCached(w http.ResponseWriter, c *jsonCache, key string) bool {
 	if body, ok := c.get(key); ok {
-		writeCachedJSON(w, body, "hit")
+		writeCachedJSON(w, body, "hit", c.age(key))
 		return true
 	}
 	w.Header().Set("X-Cache", "miss")
 	return false
 }
 
-func writeCachedJSON(w http.ResponseWriter, body []byte, state string) {
+func writeCachedJSON(w http.ResponseWriter, body []byte, state string, age time.Duration) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", state)
+	// Age (RFC 9111) is how old the body is, so the UI can say how old the figures are. 0 for a body
+	// computed for this request.
+	w.Header().Set("Age", strconv.FormatInt(int64(age/time.Second), 10))
 	_, _ = w.Write(body)
 }
 
@@ -306,7 +323,7 @@ func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, ke
 	compute func(db *DB) ([]byte, error)) {
 	if body, fresh := c.load(key); body != nil {
 		if fresh {
-			writeCachedJSON(w, body, "hit")
+			writeCachedJSON(w, body, "hit", c.age(key))
 			return
 		}
 		// Only the first stale reader for this key starts a refresh; every other concurrent
@@ -319,10 +336,11 @@ func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, ke
 		if c.beginRefresh(key) {
 			go a.refreshJSON(c, key, compute)
 		}
-		writeCachedJSON(w, body, "stale")
+		writeCachedJSON(w, body, "stale", c.age(key))
 		return
 	}
 	w.Header().Set("X-Cache", "miss")
+	w.Header().Set("Age", "0")
 	// The shared computation is DETACHED from every caller, and that is deliberate rather than
 	// careless. Bound to the leader's r.Context() it inherits the leader's deadline and the leader's
 	// abandonment: when the leader timed out, compute failed with a cancelled context and
