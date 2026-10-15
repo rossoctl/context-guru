@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -74,17 +75,17 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 		{"expiring/cheap", cs(258, 300, 52000, "0.30"), small, "balanced", 200,
 			sess + "\ncache ◐ █░░░░░ 0:42 │ ctx ░░░░░░░░ 5%"},
 		{"expiring/costly", cs(258, 300, 412000, "1.20"), payload, "balanced", 200,
-			sess + "\ncache ◐ █░░░░░ 0:42 │ ctx ███░░░░░ 41% │ ▸ a pause now costs ≈$1.20 extra"},
+			sess + "\ncache ◐ █░░░░░ 0:42 │ ctx ███░░░░░ 41%"},
 		{"expiring/ping-covers-it", ping(cs(258, 300, 412000, "1.20")), payload, "balanced", 200,
 			sess + "\ncache ◐ █░░░░░ 0:42 ↻ │ ctx ███░░░░░ 41%"},
 		{"warm/rewrite-near", cs(60, 300, 900000, "2.70"), full, "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 │ ctx ███████░ 90% ⚠ rewrite near │ ▸ context 90% full — /compact"},
+			sess + "\ncache ● █████░ 4:00 │ ctx ███████░ 90% ⚠ rewrite near"},
 		{"cold/balanced", cs(400, 300, 412000, "1.20"), payload, "balanced", 200,
-			sess + "\ncache ○ ░░░░░░ cold 1:40 │ ctx ███░░░░░ 41% │ ▸ your next message costs ≈$1.20 extra"},
+			sess + "\ncache ○ ░░░░░░ cold 1:40 │ ctx ███░░░░░ 41%"},
 		{"cold/minimal", cs(400, 300, 412000, "1.20"), payload, "minimal", 200,
-			"saved $0.31 of $2.10 │ cache ○ ░░░░░░ cold 1:40 │ ▸ your next message costs ≈$1.20 extra"},
+			"saved $0.31 of $2.10 │ cache ○ ░░░░░░ cold 1:40"},
 		{"cold/narrow", cs(400, 300, 412000, "1.20"), payload, "balanced", 60,
-			sess + "\ncache ○ cold 1:40 │ ▸ your next message costs ≈$1.20 extra"},
+			sess + "\ncache ○ ░░░░░░ cold 1:40 │ ctx ███░░░░░ 41%"},
 		{"warm/narrow", cs(60, 300, 52000, "0.30"), small, "balanced", 40,
 			"saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 		{"first-run", `{"session":"s","none":true,"now_ms":1}`, `{"session_id":"sess-gold"}`, "balanced", 200,
@@ -150,11 +151,11 @@ func TestStatuslineGoldenLive(t *testing.T) {
 		want                       string
 	}{
 		{"critical", body(m, 290, th("", 290, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
-			sess + "\ncache ◐ ░░░░░░ 0:10! │ ctx ███░░░░░ 41% │ ▸ a pause now costs ≈$1.20 extra"},
+			sess + "\ncache ◐ ░░░░░░ 0:10! │ ctx ███░░░░░ 41%"},
 		{"cold-counts-up", body(m, 375, th("", 375, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
-			sess + "\ncache ○ ░░░░░░ cold 1:15 │ ctx ███░░░░░ 41% │ ▸ your next message costs ≈$1.20 extra"},
+			sess + "\ncache ○ ░░░░░░ cold 1:15 │ ctx ███░░░░░ 41%"},
 		{"cold-long", body(m, 3900, th("", 3900, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
-			sess + "\ncache ○ ░░░░░░ cold 1h00m │ ctx ███░░░░░ 41% │ ▸ your next message costs ≈$1.20 extra"},
+			sess + "\ncache ○ ░░░░░░ cold 1h00m │ ctx ███░░░░░ 41%"},
 		// The latest request of the session was a sub-agent's; the main cache must still count down on its own.
 		{"main-not-reset-by-subagent", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("", 200, 300, 412000, "1.20")),
 			ctxPay(m), "balanced", 200, sess + "\ncache ● ██░░░░ 1:40 │ agent ● 4:55 │ ctx ███░░░░░ 41%"},
@@ -169,7 +170,7 @@ func TestStatuslineGoldenLive(t *testing.T) {
 			th("a:3", 100, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")), ctxPay(m), "balanced", 36,
 			"saved $0.31 of $2.10 session\ncache ● 3:20 │ agents 3 │ ctx 41%"},
 		{"model-switch", body(m, 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-opus-5-5"), "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41% │ ▸ model changed: your next message costs ≈$1.20 extra"},
+			sess + "\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41%"},
 		{"same-model-other-spelling", body("aws/claude-sonnet-5-5", 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-sonnet-5-5[1m]"), "balanced", 200,
 			sess + "\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41%"},
 		{"spend-detailed", body(m, 60, th("", 60, 300, 412000, "1.20")), ctxPay(m), "detailed", 200,
@@ -770,5 +771,181 @@ print("cache:", render())
 	rest := strings.Join(lines[1:], "\n")
 	if strings.Contains(rest, "loading") || !strings.Contains(rest, "$2.50") || !strings.Contains(rest, "⏳") {
 		t.Errorf("with a cache the stale numbers must show, marked ⏳, never loading: %q", rest)
+	}
+}
+
+// TestStatuslineGoldenWeeklyTip pins the weekly tip. It names every command (of the ones this
+// plugin has) not run in the last 7 days, and shows nothing when all ran this week. It waits a week
+// on a new install (a never-run command counts from the first time the status line saw the
+// install), reads local files only, treats an unreadable history as no tip, can be turned off, and
+// is the first thing a narrow terminal shortens (to the command stale longest), then drops.
+func TestStatuslineGoldenWeeklyTip(t *testing.T) {
+	const now = 1_800_000_000 // seconds
+	const day = 86400
+	// The script runs from a copy whose skills/ directory says which commands exist.
+	plugin := func(skills ...string) string {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{"statusline.py", "settings.py", "tvlib.py"} {
+			b, err := os.ReadFile(filepath.Join(scriptsDir(t), f))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "scripts", f), b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, s := range skills {
+			if err := os.MkdirAll(filepath.Join(dir, "skills", s), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "skills", s, "SKILL.md"), []byte("---\nname: "+s+"\n---\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return filepath.Join(dir, "scripts", "statusline.py")
+	}
+	both := plugin("save-more", "remove-mcp-and-skills")
+	cache := fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"now_ms":%d,"ttl_s":300,"prefix_tokens":52000,`+
+		`"priced":true,"rewrite_usd":0.30,"window":1000000,"window_exact":true,`+
+		`"money":{"main":{"saved_usd":0.31,"baseline_usd":2.10,"threads":1},"others":{"saved_usd":0,"baseline_usd":0,"threads":0}}}`,
+		(now-60)*1000, now*1000)
+	port := cgStub(t, cache)
+	stdin := `{"session_id":"sess-tip","cost":{"total_cost_usd":0.41},` +
+		`"context_window":{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000}}`
+	const lines = "saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"
+	tipBoth := "Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-skills for over a week — worth a shot."
+	py := requireTool(t, "python3")
+	for _, c := range []struct {
+		name, script, lastRun string
+		firstSeen             int // days ago; -1 = no file (a brand-new install)
+		args                  []string
+		tipsOff               bool
+		width                 int
+		want                  string
+	}{
+		{"both-ran-recently", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-2*day, now-6*day), 30, nil, false, 200, lines},
+		{"one-stale", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-2*day, now-20*day), 30, nil, false, 200,
+			lines + "\nTip: you haven't run /context-guru:remove-mcp-and-skills for over a week — worth a shot."},
+		{"exactly-7-days", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-7*day, now-7*day), 30, nil, false, 200, lines},
+		{"7-days-and-a-second", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-7*day-1, now-2*day), 30, nil, false, 200,
+			lines + "\nTip: you haven't run /context-guru:save-more for over a week — worth a shot."},
+		{"unreadable-history", both, `{not json`, 30, nil, false, 200, lines},
+		{"both-ran-8-days-ago", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-8*day, now-8*day), 30, nil, false, 200,
+			lines + "\n" + tipBoth},
+		{"never-run-week-old-install", both, "", 8, nil, false, 200, lines + "\n" + tipBoth},
+		{"never-run-new-install", both, "", -1, nil, false, 200, lines},
+		{"never-run-2-day-install", both, "", 2, nil, false, 200, lines},
+		{"only-one-command-installed", plugin("save-more"), "", 30, nil, false, 200,
+			lines + "\nTip: you haven't run /context-guru:save-more for over a week — worth a shot."},
+		{"no-command-installed", plugin(), "", 30, nil, false, 200, lines},
+		{"tips-off", both, "", 30, nil, true, 200, lines},
+		{"hidden", both, "", 30, []string{"--hide=tip"}, false, 200, lines},
+		// Narrow: the short form first, naming the command stale longest, then no tip at all.
+		{"narrow-short-form", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-8*day, now-20*day), 30, nil, false, 80,
+			lines + "\nTip: try /context-guru:remove-mcp-and-skills (not run for 7+ days) (+1)"},
+		{"narrow-one-stale-short-form", both, fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-8*day, now-2*day), 30, nil, false, 60,
+			lines + "\nTip: try /context-guru:save-more (not run for 7+ days)"},
+		{"narrower-drops-the-tip", both, "", 30, nil, false, 45,
+			"saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			home := t.TempDir()
+			state := filepath.Join(home, "state")
+			if err := os.MkdirAll(state, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if c.lastRun != "" {
+				if err := os.WriteFile(filepath.Join(state, "last-run.json"), []byte(c.lastRun), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if c.firstSeen >= 0 {
+				seen := fmt.Sprint(now - c.firstSeen*day)
+				if err := os.WriteFile(filepath.Join(state, "statusline-first-seen"), []byte(seen), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env := append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "NO_COLOR=1", "CONTEXT_GURU_STATE="+state,
+				"XDG_CONFIG_HOME="+filepath.Join(home, "cfg"), fmt.Sprintf("CG_STATUSLINE_NOW=%d", now),
+				fmt.Sprintf("CG_STATUSLINE_COLUMNS=%d", c.width))
+			for k, v := range routedEnv(port) {
+				env = append(env, k+"="+v)
+			}
+			if c.tipsOff {
+				off := exec.Command(py, c.script, "--set-tips=off")
+				off.Env = env
+				if b, err := off.CombinedOutput(); err != nil || !strings.Contains(string(b), "off") {
+					t.Fatalf("--set-tips=off: %v %s", err, b)
+				}
+			}
+			cmd := exec.Command(py, append([]string{c.script, "--layout=balanced"}, c.args...)...)
+			cmd.Env, cmd.Stdin = env, strings.NewReader(stdin)
+			start := time.Now()
+			b, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("statusline.py: %v (%s)", err, b)
+			}
+			if got := strings.TrimRight(string(b), "\n"); got != c.want {
+				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
+			}
+			if d := time.Since(start); d > 500*time.Millisecond {
+				t.Errorf("render took %v; the budget is 0.5 s", d)
+			}
+			if c.firstSeen < 0 {
+				if _, err := os.Stat(filepath.Join(state, "statusline-first-seen")); err != nil {
+					t.Errorf("a new install must record when the status line first saw it: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestTipCommandsRecordTheirRuns: the tip is only honest if each command it names records its runs.
+// Every TIP_COMMANDS skill this plugin ships must call `settings.py record-run <its name>`.
+func TestTipCommandsRecordTheirRuns(t *testing.T) {
+	for _, name := range []string{"save-more", "remove-mcp-and-skills"} {
+		b, err := os.ReadFile(filepath.Join(scriptsDir(t), "..", "skills", name, "SKILL.md"))
+		if os.IsNotExist(err) {
+			continue // not shipped yet: the tip does not name it either
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "record-run "+name) {
+			t.Errorf("skills/%s/SKILL.md never runs `settings.py record-run %s`, so the weekly tip would name it as unused", name, name)
+		}
+	}
+}
+
+// TestRecordRunFeedsTheWeeklyTip: `settings.py record-run <command>` is how the commands note a
+// run. It prints nothing on success (the skills chain it after their report), merges its key into
+// last-run.json, and refuses a name the tip does not know.
+func TestRecordRunFeedsTheWeeklyTip(t *testing.T) {
+	py := requireTool(t, "python3")
+	state := t.TempDir()
+	if err := os.WriteFile(filepath.Join(state, "last-run.json"), []byte(`{"remove-mcp-and-skills": 5}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(name string) ([]byte, error) {
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "record-run", name)
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state)
+		return cmd.Output() // stdout only: it lands in the command's report
+	}
+	if b, err := run("save-more"); err != nil || len(b) != 0 {
+		t.Fatalf("record-run save-more: err %v, stdout %q; want silent success", err, b)
+	}
+	var runs map[string]float64
+	b, _ := os.ReadFile(filepath.Join(state, "last-run.json"))
+	if err := json.Unmarshal(b, &runs); err != nil {
+		t.Fatal(err)
+	}
+	if runs["remove-mcp-and-skills"] != 5 || time.Since(time.Unix(int64(runs["save-more"]), 0)) > time.Minute {
+		t.Errorf("last-run.json = %s, want the old key kept and save-more stamped now", b)
+	}
+	if _, err := run("something-else"); err == nil {
+		t.Error("record-run accepted a command the tip does not name")
 	}
 }
