@@ -1,0 +1,446 @@
+# A per-tenant cap beats every predictor we've built — including the calibrated one built for this page
+
+Extends [kv-ttl-predictor-arms.md](kv-ttl-predictor-arms.md) (the `stop_reason`-gated rule,
+9-day capture), [kv-cache-keepalive-reusemodel.md](kv-cache-keepalive-reusemodel.md)
+(`ReuseModelV1`'s 13 features), and [kv-ttl-predictor-features.md](kv-ttl-predictor-features.md)
+(the feature availability matrix). Measured on a 41.4-day snapshot (2026-08-18→09-28,
+264,163 requests, 18 tenants with traffic — 4.1x the rows and 4.6x the days of the prior page's
+capture), read-only. Tenant ids pseudonymized `t01`..`t18`, **sorted by raw tenant id** — the
+convention this page adopts and recommends over a volume-ranked alternative that was tried in
+parallel during this study and produced a spurious cross-check discrepancy purely from
+relabelling (see "A labelling lesson" below).
+
+## The short version
+
+**The headline, for a reader who stops here: a two-parameter non-learned policy beats every
+predictor we built, including a well-calibrated one built specifically to try to beat it.** That
+number is **modelled** (a replay against one 41.4-day snapshot, not a live measurement), and the
+one piece of work that would move it from modelled to measured — a live randomized holdout — is
+the single largest thing this page does not contain. Everything below is detail in support of
+that sentence, not a build-up to it.
+
+- **A per-tenant-tuned `max_pings` cap with an off-switch (no model at all) beats every
+  predictor in this whole line of work.** Better than the shipped `stop-reason-gated` rule,
+  better than the prior page's `logreg-v1`, better than a calibrated hybrid model built
+  specifically for this page. It also **harms zero tenants**, where every flat setting
+  (including today's) harms several. **It is also more ROBUST than a learned or uncapped
+  alternative, independent of its net-dollar edge**: a hard cap bounds any one span's ping
+  spend regardless of the true gap length, so it is structurally insulated from data defects
+  a predictor or an uncapped policy is exposed to in full — see "A robustness argument" below,
+  found only after this study was already largely finished, which is itself worth knowing.
+- **A single fleet-wide `max_pings=2` is the right fallback if per-tenant config isn't built
+  yet — `max_pings=6` is not.** An earlier back-of-envelope estimate favoured 6; once a real,
+  per-conversation, per-model-priced replay is run (this page's method, not aggregate
+  fresh-equivalent arithmetic), 2 wins and 6 harms one more tenant for barely more money.
+- **A calibrated model was built and is recommended AGAINST shipping.** `hybrid2` — isotonic
+  calibration, no tenant-identity feature (so it can score a tenant it never trained on),
+  per-tenant-tuned threshold — beats the shipped rule (+4.90% vs +3.41%) and is well-calibrated
+  (ECE 0.0035) and generalizes across held-out tenants and models without collapsing. It still
+  loses to both no-model policies above on net dollars, the primary objective. This is reported
+  as the paper-worthy negative result it is, not softened into a partial win.
+- **The target is gap magnitude, not arrival.** Cost scales with `⌈gap/TTL⌉` pings, not with a
+  binary "will they come back" — a model with excellent AUC that can't tell 12 minutes from
+  3 hours loses money. The correctly-specified decision rule (compare *expected dollars*, not a
+  probability against a threshold) already exists in this codebase
+  (`kv_ttl_cost_model.policy_expected_cost`) and, scored honestly, buys almost nothing over
+  doing nothing (+0.06%) — confirming the target reframing mattered more than any model.
+- **The realized-vs-modelled gap converged, from two directions.** Two independently-built cost
+  models (this page's, and the orchestrating session's, corrected four times as bugs were
+  found) land within 2% of each other on the raw gap: **1.94–1.97x**. Applying the REAL
+  strategy config (actual tenant targeting, actual narrow weekday/hour windows, the real
+  `min_prefix` gate) — this page's own contribution — closes most of that, to **1.4–1.8x**.
+  The residual is bounded, not further closed, and said so plainly.
+- **A cross-check discrepancy that looked like a modelling disagreement turned out to be a
+  labelling collision** — see "A labelling lesson" below. Kept in this page because it is a
+  cheap, memorable, and general lesson, not because the disagreement itself matters anymore.
+
+## The decision problem, restated correctly
+
+Not `P(return within 5 minutes)` — the prior page's own ML arms already showed that label buys
+nothing (92.5% of gaps close inside 5 minutes, so the answer is almost always "yes" and there is
+no decision left for a probability to improve). The right target:
+
+```
+P(next request arrives within the interval AND with a compatible prefix | information known now)
+```
+
+at every horizon a ping schedule can reach, because **the cost of a miss scales with the number
+of pings needed to bridge the gap**, not with a single yes/no. Being wrong about "10 minutes"
+costs ~3 pings; being wrong about ">2 hours" costs ~167. Action set (six, not three — the extra
+three are not redundant): `expire`, `write_5m`, `write_1h`, `ping_5m`, `ping_1h`, and
+`write_5m_ping_1h` (write cheap, escalate to a 1-hour write only if the entry survives to its
+first keep-alive due date — measured here as the **worst-performing non-1h-tier action on the
+page**, +29.70% vs. doing nothing, unexpected and not diagnosed further this round).
+
+Break-even, per ping: `r/(w-r) = 0.10/1.15 = 8.70%` (myopic), falling to ~7.4% once the option
+value of preserving a *later* ping's chance is counted (backward induction,
+`deploy/harbor/kv_ttl_keepalive_policy.py`, not re-derived here). Objective throughout: net
+dollars, unclamped. AUC/Brier/log-loss are diagnostics; where a model wins on AUC and loses on
+net-$ (§"Baselines" below), this page says so rather than reporting the AUC as the headline.
+
+## Baselines and oracle, full-snapshot single split
+
+`deploy/harbor/kv_ttl_cost_model.py`'s own `main()`, unmodified, `min_prefix=20000`,
+`max_pings=2`, split 0.6/0.4, on the full 41.4-day snapshot (test window: 73,487 requests,
+1,185 conversations):
+
+| policy | Δ vs. fixed-5m | % | pings | writes_1h |
+|---|---:|---:|---:|---:|
+| no-cache | +$31,613.16 | +295.08% | 0 | 0 |
+| fixed-5m ("never-ping") | — | — | 0 | 0 |
+| fixed-1h | +$1,248.91 | +11.66% | 0 | 59,616 |
+| **keepalive-5m ("always-ping", capped)** | **−$619.42** | **−5.78%** | 6,259 | 0 |
+| keepalive-1h | +$1,109.04 | +10.35% | 2,436 | 59,604 |
+| write_5m_ping_1h ("escalate if quiet") | +$3,182.13 | +29.70% | 5,035 | 59,610 |
+| observed-policy (client-declared tier, replayed) | $0.00 | 0.00% | 0 | 59,778 |
+| predictor (survival-model threshold ladder) | +$49.80 | +0.46% | 0 | 7,436 |
+| expected-cost (correctly-specified $ rule) | +$6.42 | +0.06% | 0 | 0 |
+| **optimal — ORACLE, hindsight, unreachable** | **−$1,700.49** | **−15.87%** | 367 | 1,640 |
+
+The oracle's own edge is concentrated (367 pings + 1,640 one-hour writes out of 73,487
+requests), not distributed — consistent with "a rare-event problem" rather than "raise the ping
+rate everywhere," and it's why a predictor buys so little once a cap already bounds the
+catastrophic tail (below).
+
+## Arms, rolling-origin 3-fold replay, session- and tenant-level bootstrap CIs
+
+Same train/fold split as the prior page's `run_all` (train_frac 0.6, 3 folds), 400-rep
+bootstrap, seed 0. Four arms reused from that page's own run without refitting
+(`historical-probability-tenant-tuned`, `stop-reason-x-hour`, `stop-reason-gated`,
+`logreg-v1`); the rest are new to this page.
+
+| arm | Δ vs. floored fixed-5m | % | 95% CI, session-level | 95% CI, tenant-level |
+|---|---:|---:|---|---|
+| historical-probability-tenant-tuned | −$8.59 | −0.08% | [−12.27, −5.29] (harmful) | not computed |
+| age-turn≤3 | +$2.13 | +0.02% | [−2.50, +8.18] (≈zero) | [−4.84, +11.32] |
+| clock-unconditional (no `stop_reason`) | $0.00 | 0.00% | exactly zero | exactly zero |
+| stop-reason-x-hour | +$337.36 | +3.15% | [+154.42, +555.56] | not computed |
+| stop-reason-gated (SHIPPED) | +$365.68 | +3.41% | [+159.23, +621.67] | not computed |
+| logreg-v1 (one-hot `user_id`) | +$418.17 | +3.90% | [+210.04, +686.85] | not computed |
+| **hybrid2** (calibrated, no tenant one-hot, tenant-tuned threshold) | +$525.10 | +4.90% | [+283.02, +855.73] | [+164.42, +971.31] |
+| flat-cap-6 | +$517.73 | +4.83% | [+229.76, +860.65] | [+125.12, +960.76] |
+| flat-cap-1 | +$541.58 | +5.05% | [+301.64, +831.53] | [+199.31, +924.30] |
+| **flat-cap-2** | **+$619.77** | **+5.78%** | **[+349.98, +940.08]** | **[+212.42, +1,057.79]** |
+
+**A pure clock rule carries no signal at all** — no UTC hour clears the break-even bar
+unconditionally. The entire value of `stop-reason-x-hour` is its `stop_reason` conditioning,
+not the hour. **Tenant-level CIs run 1.5–2.7x wider than session-level for every arm** — both
+are reported because they answer different robustness questions (session non-independence vs.
+tenant-mix sensitivity); a pooled session-level-only number would have overstated confidence.
+
+## Generalization
+
+**Calibration** (`hybrid2`, pooled test folds, n=72,302): Brier 0.0325, log-loss 0.134, AUC
+0.782, ECE (10-bin quantile) 0.0035. Top decile — where the ping threshold sits — predicts
+0.174, observes 0.173: well-calibrated exactly where it matters, not just on average.
+
+**Leave-one-tenant-out** (`hybrid2` has no tenant-identity feature by construction, so this is a
+genuinely blind test, not a one-hot-degrades-to-intercept fallback):
+
+| held-out tenant | n (test) | AUC excl. tenant |
+|---|---:|---:|
+| t14 (largest) | 12,633 | 0.888 |
+| t12 | 13,122 | 0.825 |
+| t01 | 6,480 | 0.767 |
+| t06 | 7,736 | 0.766 |
+| t08 | 6,584 | 0.690 |
+
+No catastrophic collapse on any held-out tenant; three of five score at or above the pooled
+figure.
+
+**Leave-one-model-out**: AUC excluding a model ranges 0.640 (bare `claude-sonnet-5` — the same
+population the #324 pricing defect hit; whether that's the same underlying cause or a
+coincidence was not investigated) to 0.877 (`claude-opus-5`).
+
+**Per-tenant harm, `flat-cap-2` and `hybrid2`, held-out test folds** (all tenants clearing a
+20-event floor): worst case for either arm is −0.51% (a 73-event cell, the noisiest reported).
+**Materially safer than the shipped `stop-reason-gated` rule**, which loses −1.99% on one tenant
+and −0.13% on another on this same corpus (prior page's own finding).
+
+## The per-tenant cap + off-switch: a RANKING claim, not a magnitude — the dollar figure is unresolved across five rows, and there are TWO separate, differently-explained gaps
+
+**Second correction, this time from the orchestrating session itself, on top of REV's** (kept
+visible rather than smoothed into a clean final version, per this whole line of work's own
+convention): the orchestrating session has WITHDRAWN the $395/$515/$571/$753/$768 table
+entirely. It was never this page's own number (REV's finding, above) and it turns out it also
+was not a stable number on its own terms — after REV's review, the orchestrator found two
+further errors in their own withdrawn model (omitting session-final ping cost, the "how a
+calculator flatters its own feature" trap `dash/keepalive.go:1316` documents by name; and
+over-crediting the avoided write at the full 1.25x rather than the marginal write-minus-read
+1.15x), moving their own estimate to ≈$373 — 5 confirmed bugs in total, out of 7 candidate mechanisms tested for that model's own gap from reality (the other 2: REV's own addressableCTE-width hypothesis, tested and refuted; one further mechanism sized at ~5%, immaterial).
+
+**A separate model, the shipped `dash.KeepAliveCalc`, entered the picture via KA-dash's real
+partition-key fix** (the same `(tenant,session)`-missing-`model` defect this study's own engine
+has never had — see "Why this engine needed none of the other model's corrections" below),
+which moved that engine's own whole-deployment optimum from +$262.86 at K=2 (pre-fix, wrong
+partition) to −$0.86 at K=1 (post-fix). **This −$0.86 figure is superseded as THE ANSWER but is
+NOT dropped as a DATA POINT — it is the single most heavily-verified figure in this whole
+comparison.** REV rebuilt both branches into separate binaries, ran each against its own
+scratch copy of the read-only snapshot, and hit the real HTTP API end to end: 2,721 misses,
+$4,123.20, K=1 net −$0.86 — reproduced to the cent. It remains correct **as the output of the
+MEDIAN-prefix method**: one representative prefix+model per tenant, applied to every
+ping/miss. **A second, distinct method — pricing each event from its own actual prefix+model
+instead of a tenant-wide median — gives a different, not-yet-independently-verified number**:
+fleet-wide flat K=1 goes from −$127.54 (median) to +$274.66 (event-level), K=2 from −$408.53 to
++$328.35, per-tenant-best+off to ≈+$566.60, with 9 of 16 tenants individually crossing zero
+between the two methods. Checked and refuted as the cause: #324's pricing defect (a 2×2 of
+median/event-level × unpatched/patched price table) explains ~0% of this swing. **These are two
+methods, not one correcting the other — presented as two separate rows below, because
+collapsing them into one "current best" number would hide the finding itself**, which is that
+collapsing a tenant's whole traffic to one representative prefix+model on a bimodal per-event
+cost distribution (this corpus's own p50 $0.0004 vs. p99 $0.2275) can flip the sign of a
+policy's net value, not just its magnitude — the same family of error as pricing a skewed
+subpopulation at a uniform rate (`PHASE2.md` P2-8b), one level more granular, and a genuinely
+transplantable lesson for anyone pricing a policy over a skewed population.
+
+**So the honest headline is a RANKING, not a magnitude**: a per-tenant `max_pings ∈ {off, 1, 2, 6}`
+policy, tuned per tenant with an off-switch where every setting loses money, **beats every
+predictor built in this whole line of work — the shipped `stop-reason-gated` rule, the prior
+round's `logreg-v1`, and a calibrated hybrid built for this study (ECE 0.0035) — on policy
+ranking and on per-tenant harm.** That ranking claim is what REV independently reconstructed
+and confirmed from this page's own committed engine, and it does not depend on any of the
+disputed dollar figures below.
+
+**The absolute dollar value of a per-tenant cap+off-switch policy is UNRESOLVED, across five
+rows from four models/methods, and this page says so rather than picking one:**
+
+| model / method | scope | per-tenant cap+off value | verification |
+|---|---|---:|---|
+| orchestrator's ad-hoc SQL | ungated, full window | ≈$373 (was $515–768) | **WITHDRAWN by its own author** — 5 confirmed bugs, 7 mechanisms tested |
+| `kv_ttl_cost_model` (this page) | ungated, test window | +$641.95 | reproduced by REV (`kv_ttl_per_tenant_cap.py`) |
+| `kv_ttl_cost_model` (this page) | ungated, full window | +$1,669.44 | reproduced by REV |
+| `dash.KeepAliveCalc`, **median-prefix** | gated, the shipped engine | **−$0.86** (flat K=2: −$408.53) | **REV-verified end-to-end, to the cent, then extended to all 18 real tenants** |
+| `dash.KeepAliveCalc`, **event-level** | gated, the shipped engine | ≈+$566.60 (flat K=2: +$328.35) | **NOT yet independently re-derived** |
+
+**No number in this table should be quoted as THE value of this policy.** The ranking claim
+above is what survives; the dollar figure does not, yet.
+
+### There are TWO independent, differently-explained gaps here, not one
+
+**Gap 1 — median-prefix vs. event-level, inside the shipped engine: EXPLAINED, pure
+granularity.** The rows above disagree by design, not by defect — collapsing a tenant's traffic
+to one representative prefix+model on a bimodal cost distribution changes the answer, #324 is
+refuted as the driver, and the gap IS the finding, not a mystery to solve further.
+
+**Gap 2 — this page's engine vs. the shipped engine (either method): UNEXPLAINED, and it is not
+either engine's known bugs.** This page's own engine was checked, not assumed, against both bug
+classes the withdrawn ad-hoc model had (the session-final-ping omission and the over-credited
+avoided-write formula — see the methods note below) and has neither. So even after removing
+every defect found anywhere in this comparison and fully explaining Gap 1, an order-of-magnitude
+divergence remains between two engines with **no known defect in either one**. **One candidate
+explanation is now WEAKER than it looked**: an earlier draft of this section pointed at
+`addressable`/`addressableCTE`'s population definition as the likely locus. REV has since checked
+the analogous question in the orchestrator's own model (the released reviewer's final task
+before standing down) and found the opposite of a narrowness defect — **29.4% addressable is
+correct, deliberate scoping**, not an under-coverage bug. That specific finding was about the
+withdrawn model's own gap, not a direct test of this page's engine against `dash.KeepAliveCalc`
+— but it removes the one concrete hypothesis this page had for Gap 2, rather than confirming it.
+**Gap 2 remains genuinely open, with no candidate mechanism currently identified**, not "likely
+explained by X." REV has been released from further re-derivation work on this thread (with 7
+mechanisms enumerated for the withdrawn model's own gap, an eighth was judged not worth
+chasing) — nothing further is expected from that direction. The honest, most useful thing this
+page can say about its own headline number's absolute value is that it survives a real
+adversarial audit qualitatively and does NOT yet reconcile quantitatively, on two different axes
+that must not be conflated with each other.
+
+This two-gap structure — one explained, one not, and neither one a simple "my number vs. yours"
+disagreement — is a stronger and more precise result than a single table alone, and it only
+became visible because this page's engine was audited against the SPECIFIC bugs found elsewhere
+rather than assumed clean by default.
+
+### The "roughly a third of tenants harmed" claim — reverted to unresolved, no exact count
+
+An earlier version of this page (and `PHASE2.md` P2-10/P2-11) claimed the "6 vs. 3 tenants
+harmed" disagreement between the orchestrator and FIX-price was "settled in favour of 6." That
+claim was reached by taking a message at face value rather than running committed code, and it
+does not survive the further corrections above. **The safe claim, under all the models above:
+roughly a third of tenants are harmed by today's flat setting.** No exact count is asserted.
+This page's own reproducible script gives 3 (test-window scope) or 6 (full-window scope, an
+honest window-SENSITIVITY finding in its own right — some tenants are only harmed over the whole
+window, not the last 40% of it) — both real numbers from committed code, at two different
+scopes, neither claimed as THE count.
+
+### A methods note: the anti-flattery discipline, and why this page's engine was checked against it
+
+`dash/keepalive.go:1316`'s own comment names the exact trap the orchestrator's withdrawn model
+fell into: a calculator that only counts the spans where a ping paid off, and omits the spans
+where a ping fired and the session simply ended (pure cost, zero possible benefit — 15,064 such
+spans on this deployment, ≈$135 at K=2, per the orchestrator's own follow-up measurement),
+flatters itself. **Checked, not assumed, whether this page's own `kv_ttl_cost_model.evaluate()`
+has the same defect**: it does not. `evaluate()` explicitly bills "the OPEN spans, priced at the
+last request's own model and counted apart" for every trajectory whose last action still pings
+when the observation window ends (`pings_on_open_spans`, a field reported separately in every
+`Cost` this page cites) — the exact case the shipped engine's comment warns about, already
+priced with no possible credited benefit, because there IS no next request in the window to
+turn into a cheap read. This page's engine also never uses a "credit" formula at all (the 1.25x-
+vs-1.15x error class) — every ping and every real request is priced individually as the read or
+write it actually is, so there is no separate avoided-cost approximation to get wrong. **The
+general lesson for anyone modelling this mechanism**: enumerate the cost cases where the benefit
+is structurally zero — a session-final ping being the canonical one — before trusting any net
+figure a model produces, and prefer per-event pricing (what actually happened, billed at what it
+actually cost) over a net-credit formula (what you believe should have been avoided) wherever the
+underlying engine already supports it.
+
+### A robustness argument for the cap, found only after this study was largely finished
+
+The per-tenant cap's case is not only that it scores best on this snapshot — it is **structurally
+more robust to a data defect nobody knew about when this comparison was designed.** A different
+reviewer, checking the same corpus independently, found that client-supplied `session_id`s are
+sometimes reused across genuinely disjoint conversations (reproduced on this page's own data:
+205 of 246,484 decision points, 0.083%, show a gap over 24 hours, up to 501.8 hours — plainly not
+real idle time). **Any policy that pings unconditionally in proportion to gap length, or any
+predictor that scores such a span as "still worth pinging," is exposed to this defect in full**:
+an uncapped policy would pay for hundreds of pings across a fake multi-day "gap." **A
+`max_pings`-capped policy is not** — the cap bounds the spend on any one span regardless of how
+long the true or artifactual gap is, so the worst this defect can do to a capped arm is waste at
+most `max_pings` pings on 205 events (a few dollars, not a material fraction of any figure on
+this page). This is a property of the RECOMMENDATION, not just a number in a threats-to-validity
+list: a policy that is robust to a defect discovered after the fact is a stronger recommendation
+than one that merely scored better on the data as first understood.
+
+**Realized-vs-modelled gap**: real, measured keep-alive net is $200.86. An UNGATED model (no
+tenant targeting, no real windows, no real prefix gate — every model in the disputed table
+above is ungated in this sense) puts the raw N=1 figure well above the real number, by a factor
+that has moved with each successive correction to the models producing it (most recently ≈$373
+from the orchestrator's own, now-withdrawn model; this page's own ungated engine gives $541.55
+at the SAME test-window scope) — **stated as "well above," not as a specific multiple, given the
+absolute value itself is unresolved per the table above.** Replaying the REAL control-plane
+config instead (30 active strategies, all
+single-tenant campaigns, narrow weekday/hour windows in each strategy's own timezone — empty
+`Window.TZ` resolves to `Asia/Jerusalem`, `tenant/keepalivestrategy.go:44-45` — plus the real
+`min_prefix_tokens=20000` gate) closes most of the remaining gap: **1.4–1.8x**. Of decision
+points with a gap over the 280-second idle threshold, 99.6% belong to a tenant targeted by SOME
+active strategy, but only 24.8% fall inside that tenant's actual window at the moment — window
+narrowness, not tenant targeting, is the dominant remaining cause, sized exactly from the real
+strategy rows rather than assumed. The residual 1.4–1.8x is attributed to (a) 5 of the 30
+strategies additionally gating on `stop_reason` — not modelled in this specific replay — and
+(b) ping-success optimism (every simulated ping assumed to succeed); neither is sizeable further
+from this snapshot alone.
+
+## A labelling lesson
+
+During this study, an independent per-tenant model built by a different reviewer appeared to
+disagree with this page's own per-tenant harm findings — three tenants flagged as harmed by that
+model showed up as clearly profitable here, and vice versa. Both engines were re-checked line by
+line; neither had a bug. **The two scripts had assigned pseudonymized tenant ids by different
+rules** — one by decision-point volume descending, this page's by sorted raw tenant id — so
+"T09" in one meant a different real tenant than "t09" in the other. Once relabelled, every
+flagged tenant-IDENTITY disagreement dissolved exactly (the SEPARATE question of how many
+tenants are harmed and by how much is not settled by this relabelling alone — see "reverted to
+unresolved" above, added after two further corrections to the model being compared against).
+**Recorded here as a general, cheap, memorable lesson**: two independently-correct
+analyses can appear to contradict each other purely through labelling, and it can take as little
+as one query to dissolve what looked like a real disagreement. This page adopts sorted-raw-id as
+the one pseudonymization rule (stable under any filter, unlike a volume rank that silently
+relabels every tenant when the window changes) and recommends it as the project's convention
+going forward.
+
+**A related, sharper lesson**: the independent model above was corrected downward SIX
+successive times over one working session (an early flat-N=6 estimate moved $1,252 → $898 →
+$768 → $571, then two further errors — omitted session-final ping cost, an over-credited
+avoided-write formula — moved its per-tenant-cap+off figure to ≈$373, at which point its own
+author withdrew the table entirely rather than issue a seventh correction), each correction
+caught by a different independent check, every one in the same direction. Individually each was
+a plausible bug, caught properly. Collectively it is a systematic optimism that no amount of
+self-review from inside one modelling frame caught alone — the strongest argument this study can
+offer for why the still-open live randomized holdout (below) is worth more than further
+modelling. **The model was eventually withdrawn by its own author rather than corrected a
+seventh time — itself worth stating as the honest endpoint of that pattern**, and a healthier
+outcome than a seventh number nobody fully trusted.
+
+**A third lesson, about methodology rather than about this study's numbers**: this page's own
+cost engine was never exposed to either of two bugs that hit the two from-scratch
+reimplementations built for the cross-check above. `kv_ttl_cost_model.Request.key` has keyed on
+`(tenant, session, model)` — not `(tenant, session)` alone — since before this study started,
+because a cache entry cannot transfer between models. Both the independent model above AND a
+third, separately-built reimplementation initially keyed on session alone and had to discover
+and fix the same bug (588 of 14,343 sessions switch models mid-session, 71% of the corpus by
+request count is inside such a session). **The analysis built on production's own tested
+machinery inherited a correctness property that both from-scratch reimplementations had to
+rediscover the hard way.** That generalises past this one bug: reusing an already-tested engine
+is not just less work, it is a real reduction in the surface area for this exact class of error,
+and it is the concrete reason this page's `evaluate()`-based numbers needed none of the six
+downward corrections (nor the eventual withdrawal) the independently-built model went through.
+
+## Feature availability, condensed (full table: KA-predictor's own report, cited below)
+
+Re-verified directly against this snapshot's schema, not cited from an older capture:
+`stop_cluster` remains the single most load-bearing feature (#1/#2 in every arm that uses it);
+no request-level tool-to-decision linkage exists (`tool_uses` is a 10,422-row session-level
+aggregate with no `request_id`); no subagent parent/child hierarchy exists anywhere in the
+schema (checked directly: zero of 264,163 `session_id`s show a nested pattern); no
+`tenants.tz` column exists (checked `cg-control.db` schema directly — the only timezone signal
+on this deployment is each strategy's own `windows_json[].tz`, an admin schedule choice, not a
+verified tenant-residency fact).
+
+## What this page recommends, and what it explicitly does not
+
+1. **Build the per-tenant `max_pings` cap with an off-switch.** No model required — a per-tenant
+   constant refit periodically, the same way this codebase's own `tune_historical_probability`
+   already refits per-tenant thresholds, with the same cold-start floor. **This needs a
+   precondition checked before it ships**: gateway ping-rate/capacity headroom for raising any
+   tenant's cap was not measured in this study, and raising `max_pings` fleet-wide without
+   knowing that headroom is the one way this recommendation could cause real harm.
+2. **If only a single fleet-wide value can ship**, use `max_pings=2`, not 6.
+3. **Do not ship `hybrid2`, or any new predictor model, as a strategy control on this evidence.**
+   It is a genuinely good model by every diagnostic this page ran, and it still loses to both
+   no-model policies above on the primary objective (net dollars). If a predictor ships anyway
+   for an unrelated operational reason (e.g. a per-tenant cap alone hits the gateway capacity
+   ceiling above), `hybrid2` is the one to ship, not `logreg-v1` — it wins on net $, is
+   calibrated, and generalizes to unseen tenants and models without collapsing.
+4. **Not run, stated plainly rather than assumed away**: `ReuseModelV1` + `stop_cluster`
+   (issue #326) — every other arm in this whole line of work finds `stop_cluster` its #1/#2
+   feature, and `ReuseModelV1` currently has none that touch it; this is the single most
+   concretely-motivated next experiment nobody has run. A live randomized holdout — the only way
+   to move `keepalive_saved_usd` from "modelled" to "measured" — still has not been run; it needs
+   a multi-day window this study did not have.
+
+## Reproduction
+
+```
+# kv_ttl_per_tenant_cap.py -- the per-tenant best-of-{off,N} table above, reproducibly, from
+# kv_ttl_cost_model.py's own by_user breakdown (no hand-combined JSON, per REV's review)
+deploy/harbor/kv_ttl_per_tenant_cap.py --db <cg.db> --prices <prices.yaml>
+
+# kv_ttl_ka_arms.py -- new arms, calibration, LOTO/LOMO, tenant-level bootstrap
+deploy/harbor/kv_ttl_ka_arms.py --db <cg.db> --prices <prices.yaml> \
+  --train-frac 0.6 --folds 3 --bootstrap 400 --seed 0 --out result.json
+
+# kv_ttl_keepalive_coverage.py -- the real-strategy-config coverage/gate decomposition
+deploy/harbor/kv_ttl_keepalive_coverage.py --db <cg.db> --control-db <cg-control.db> \
+  --prices <prices.yaml>
+
+# the full-snapshot single-split oracle/baseline sweep (existing script, unmodified)
+deploy/harbor/kv_ttl_cost_model.py --db <cg.db> --prices <prices.yaml> \
+  --baseline fixed-5m --split 0.6 --min-prefix 20000 --max-pings 2 --json out.json
+```
+
+Both new scripts read the store `mode=ro` only and take no dependency beyond what
+`kv_ttl_predictor_arms.py`/`kv_ttl_cost_model.py` already require (numpy, pandas,
+scikit-learn). Neither writes to `cg.db`, `cg-control.db`, or any live path.
+
+## A corpus bootstrap-period caveat
+
+Found independently by two other agents from two directions: 2026-08-17→08-19, this snapshot's
+first ~60 hours, carries its own distinct billing behavior (a `claude-sonnet-5` implied rate of
+2.11849 that week vs. exactly 2.28000 every week since) that coincides with an unrelated
+`saved_usd`-attribution defect whose entire 1,696-row population also falls in that same window.
+347 of 46,028 rows (0.754%), moving the aggregate implied rate by ~0.054% — immaterial to every
+figure on this page, which reports full-window aggregates rather than a per-week/time-series
+trend that this window's step-change could manufacture spuriously. Flagged because this page's
+full-window replays (the coverage/gate decomposition, the per-tenant reconciliation) DO include
+those three days; a future time-series extension of this work should exclude or dual-report that
+window rather than inherit the caveat silently.
+
+## Not reached
+
+- `ReuseModelV1` + `stop_cluster` (issue #326).
+- A live randomized keep-alive holdout (session-stable assignment on real `session_id`,
+  measured/estimated/modelled tiers per the Headroom design this project's own literature
+  review extracted) — needs a multi-day window.
+- Gateway ping-rate/capacity implications of raising `max_pings` on any tenant — a stated
+  precondition on recommendation 1 above, not measured here.
+- Prefix-size-weighted (dollar-weighted) AUC for `hybrid2` — this page's AUC figures are
+  unweighted, and this project's own budget-model finding (pooled AUC 0.93 vs. 0.57 on the
+  largest, most expensive prefixes) is a direct warning that an unweighted AUC can look much
+  better than it performs where the money actually is.
