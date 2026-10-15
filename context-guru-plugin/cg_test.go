@@ -199,6 +199,7 @@ func TestCGGoldens(t *testing.T) {
 		{"insights-tools", warm, []string{"insights", "tools"}, 0},
 		{"insights-tools-details", warm, []string{"insights", "tools", "details"}, 0},
 		{"waste-redirect", warm, []string{"waste"}, 0},
+		{"insights-unknown", warm, []string{"insights", "nonsense"}, 0},
 		{"apply-under-insights", warm, []string{"insights", "tools", "apply", "remove-sufficient@8c21e0d4"}, 1},
 		{"save-more", warm, []string{"save-more"}, 0},
 		{"save-more-config", warm, []string{"save-more", "config"}, 0},

@@ -935,6 +935,9 @@ INSIGHT_NAME = {"savings": "insights savings", "cache": "insights cache", "waste
 
 
 def cmd_insights(api: Api, o: dict) -> list[str]:
+    unknown = [a for a in o["args"] if a not in INSIGHTS]
+    if unknown:  # its own usage, not another command's
+        return [f"Unknown subcommand {unknown[0]!r}. Usage: /context-guru:insights [savings|cache|tools] [details]"]
     sub = next((a for a in o["args"] if a in INSIGHTS), None)
     if sub:
         L = INSIGHTS[sub](api, o)
