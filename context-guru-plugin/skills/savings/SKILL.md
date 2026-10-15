@@ -1,15 +1,14 @@
 ---
 name: savings
-description: How much context-guru saved: by lever, with a trend; saved dollars and estimated opportunity kept separate. Use when asked how much was saved, what the proxy is worth, or for a cost report.
+description: Moved to /context-guru:insights savings (how much Context Guru saved). Kept for one release so existing habits still work.
 argument-hint: "[details]"
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py:*)
+allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" insights:*)
 ---
 
-Run this, then print its output exactly as it is in one code block. Add nothing before or after it.
+This command moved to `/context-guru:insights savings`. Tell the user that in one line, then run the new command:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" savings $ARGUMENTS
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" insights savings $ARGUMENTS
 ```
 
-If the output ends with a `More:` line and the user wants the detail, run the same command with `details`.
-Do not turn dollars into tokens or add advice that the output does not contain.
+Print its output exactly as it is in one code block.

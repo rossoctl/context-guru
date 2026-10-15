@@ -263,6 +263,34 @@ esac
 # install-time path, where routing does not exist yet by definition and 8787 is the plugin.json
 # default a bare invocation means; without --force there is nothing to serve and nothing to gate
 # against, so decline the same way an unrouted project does.
+# --- (0b) keep the status line on the running plugin version (#551) -------------------------------
+# install.sh writes the status line command with the absolute, versioned path of the plugin that ran
+# the install, and the old version stays in the plugin cache. Nothing moved it on update, so the
+# status line silently kept running the old script. This runs before the routing gate on purpose: a
+# user-scope status line renders in projects this plugin does not route.
+#
+# Cheap by construction, because this hook runs at every session start in every project. A grep over
+# the three settings files decides whether python3 is worth starting at all: it must find our
+# ownership record, naming a plugin-cache path, that is not already this plugin's own script. The
+# fork happens only on a stale line (once per update); python3 then makes the real decision. Fails
+# open: every error is swallowed and the exit status is ignored.
+if [ "$FORCE" != 1 ] && [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
+  for sl_file_ in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" \
+                  "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.json" \
+                  "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.local.json"; do
+    sl_line_=$(grep -hs '"installed_statusline"' "$sl_file_" 2>/dev/null) || sl_line_=""
+    case "$sl_line_" in
+      *plugins/cache*)
+        case "$sl_line_" in
+          *"$HERE/statusline.py"*) ;;
+          *) python3 "$HERE/settings.py" statusline-repoint 2>/dev/null \
+               | head -1 || true
+             break ;;
+        esac ;;
+    esac
+  done
+fi
+
 if [ -z "$PORT" ]; then
   if [ "$FORCE" = 1 ]; then
     PORT="8787"

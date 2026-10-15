@@ -489,7 +489,7 @@ certificate, which `install.sh nginx` will print a one-liner for and which is a 
 convenience, not a deployment. Whatever you pick, `fullchain.pem` must still carry the
 intermediate, and `tls-smoke.sh` with `CG_HOST` and `CG_CA` set is still the check.
 
-**The firewall exception.** The IBM deployment is reachable from `9.0.0.0/8` only, with an
+**The firewall exception.** The IBM deployment is reachable from the corporate network only, with an
 inbound exception for **TCP/443 and nothing else**. Port 80 is not requested and
 [not served](#2b-tls-front-end). Reproduce both properties: a public deployment that opens 80
 "for the redirect" leaks a token per mistyped URL. Keep `LISTEN_ADDR` on loopback so the only

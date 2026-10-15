@@ -6818,14 +6818,38 @@ async function loadOptions() {
 // line that silently cannot work.
 const TOKEN_SLOT = 'cg_live_YOUR_TOKEN_HERE';
 
-/** claudeSettings is the WHOLE env block a Claude Code user ends up with — not a diff.
- *  A beginner cannot apply a diff, and the two keys are the entire change. */
+/** claudeSettings is the WHOLE settings a Claude Code user ends up with — not a diff.
+ *  A beginner cannot apply a diff. The env block is the routing; the hooks tell the
+ *  keep-alive when a session ends (exit, Ctrl-C, closing the terminal, /clear, logout) or is
+ *  compacted, so it stops pinging a cache nobody will read. The hook sends only the session
+ *  id, event and reason, and a failed post changes nothing. */
 function claudeSettings(base, tok) {
+  // Only the session id, event name and reason/source leave the machine: the hook picks them out
+  // of Claude Code's payload (restricted to id characters, so nothing else can ride along) instead
+  // of forwarding it, which also holds the working directory and the transcript path. The token
+  // never reaches an argv (/proc/<pid>/cmdline is world-readable): printf is a shell builtin, and
+  // sed and curl read it on stdin as curl config lines.
+  const signal = String.raw`P=$(cat); f() { printf '%s' "$P" | tr -d '\n' | sed -n "s/.*\"$1\" *: *\"\([A-Za-z0-9._:-]*\)\".*/\1/p"; }; `
+    + String.raw`printf '%s\n' "$ANTHROPIC_CUSTOM_HEADERS" | sed 's/^/header = "/; s/$/"/' `
+    + String.raw`| curl -s -o /dev/null -m 2 -K - -H 'Content-Type: application/json' `
+    + String.raw`--data "{\"session_id\":\"$(f session_id)\",\"hook_event_name\":\"$(f hook_event_name)\",\"reason\":\"$(f reason)\",\"source\":\"$(f source)\"}" `
+    + `${base}/signal || true`;
+  const hook = (matcher) => [
+    `      { ${matcher}"hooks": [ { "type": "command", "command": ${JSON.stringify(signal)}, "timeout": 5 } ] }`,
+  ];
   return [
     '{',
     '  "env": {',
     `    "ANTHROPIC_BASE_URL": "${base}/anthropic",`,
     `    "ANTHROPIC_CUSTOM_HEADERS": "x-context-guru-token: ${tok}"`,
+    '  },',
+    '  "hooks": {',
+    '    "SessionEnd": [',
+    ...hook(''),
+    '    ],',
+    '    "SessionStart": [',
+    ...hook('"matcher": "compact", '),
+    '    ]',
     '  }',
     '}',
   ];
@@ -6975,8 +6999,10 @@ function loadSetup() {
         'Your token is already filled in.'), copyButton(settings.join('\n'))),
       el('pre', { class: 'code', 'data-testid': 'setup-claude' }, settings.join('\n')),
       el('p', { class: 'hint' },
-        'Already have an "env" block? Add just those two lines inside it. Leave every '
-        + 'other key alone.')),
+        'Already have an "env" or "hooks" block? Add just these entries inside it. Leave '
+        + 'every other key alone. The hooks tell us when a session ends or is compacted, so '
+        + 'the cache keep-alive stops; they send only the session id, the event name and its '
+        + 'reason. Remove the "hooks" block to opt out.')),
     step(3, 'Keep your own key where it is',
       el('p', { class: 'hint' },
         'ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN stays yours: we forward it, so your '
@@ -8681,7 +8707,11 @@ function buildStrategyForm(form) {
       }
       fieldError(windowsField, '');
       strategyForm.windows.push({
-        days, start: winStart.value, end: winEnd.value, tz: winTZ.value.trim() || 'Asia/Jerusalem',
+        // A time input tops out at 23:59, and the server's window end is exclusive, so a window
+        // ending 23:59 would leave that last minute of the day uncovered. Send the end-of-day
+        // spelling instead.
+        days, start: winStart.value, end: winEnd.value === '23:59' ? '24:00' : winEnd.value,
+        tz: winTZ.value.trim() || 'Asia/Jerusalem',
       });
       // Days are per-window, not sticky across additions — a manager building "9-12
       // weekdays" and "14-18 weekends" would otherwise have the second Add silently

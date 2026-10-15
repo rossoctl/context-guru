@@ -25,8 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cgenv  # base URLs and credentials for both the hosted and the local deployment
 
-CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
-HB = Path("/home/vpcuser/projects/context-engineering/harbor")
+CG = Path(__file__).resolve().parents[2]   # this checkout
+HB = Path(os.environ.get("HARBOR_DIR", CG.parent / "harbor"))
 BIN = "/tmp/cg-runs/cg-proxy-d1"
 # Overridable: 4000 is NOT free on a box that also runs the hosted service
 # (deploy/service/ binds 127.0.0.1:4000 permanently). A clash killed the benchmark proxy

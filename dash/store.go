@@ -311,6 +311,9 @@ func (d *DB) Path() string { return d.path }
 // gzPair is one blob's before/after compression, precomputed outside the transaction.
 type gzPair struct{ before, after []byte }
 
+// InsertEvents writes events straight to the store in one transaction, without the recorder's queue. For test fixtures in other packages.
+func (d *DB) InsertEvents(evs []*Event) error { return d.insertBatch(evs) }
+
 // insertBatch writes a batch of captured events in ONE transaction — the whole
 // point of batching: a per-request fsync would make the writer the bottleneck
 // under agent traffic. A failed batch is logged and dropped; observability never
@@ -348,7 +351,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 		messages, tokens_before, tokens_after, attempted_tokens, frozen_tokens, saved_unique,
 		fresh_input, cache_read, cache_write, output_tokens,
 		cost_usd, baseline_cost_usd, cg_llm_cost_usd, cache_saved_usd, cachesplit_saved_usd,
-		split_stable_tokens, split_tail_hash, filtered_decl_tokens,
+		split_stable_tokens, split_tail_hash, filtered_decl_tokens, decl_digest,
 		cache_ttl, sse_buffered, ttfb_ms,
 		cache_write_1h, keepalive, keepalive_pings, keepalive_saved_usd, cg_latency_ms, upstream_ms,
 		expands, expand_tokens, reverts, token_accounting, cache_miss_reason, uncompressed_reason,
@@ -359,7 +362,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -413,7 +416,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.Messages, e.TokensBefore, e.TokensAfter, e.AttemptedTokens, e.FrozenTokens, e.SavedUnique,
 			e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens,
 			e.CostUSD, e.BaselineCostUSD, e.CGLLMCostUSD, e.CacheSavedUSD, e.CachesplitSavedUSD,
-			e.SplitStableTokens, int64(e.SplitTailHash), e.FilteredDeclTokens,
+			e.SplitStableTokens, int64(e.SplitTailHash), e.FilteredDeclTokens, e.DeclDigest,
 			e.CacheTTL, boolInt(e.SSEBuffered), e.TTFBMs,
 			e.CacheWrite1h, boolInt(e.KeepAlive), e.KeepAlivePings, e.KeepAliveSavedUSD,
 			e.CGLatencyMs, e.UpstreamMs,

@@ -1,12 +1,12 @@
 ---
 name: context-guru-insights-idle
-description: Moved to the cache skill. Kept for one release so existing habits still work.
+description: Moved to the insights skill (`cache`). Kept for one release so existing habits still work.
 ---
 
-This command moved to `context-guru-cache`. Say so in one line, then run the new one from this skill directory and print its output exactly as it is in one code block:
+This command moved to `context-guru-insights` (`cache`). Say so in one line, then run the new one from this skill directory and print its output exactly as it is in one code block:
 
 ```bash
-python3 ../../scripts/cg.py cache
+python3 ../../scripts/cg.py insights cache
 ```
 
 If loopback access is blocked, retry the same read-only command with `sandbox_permissions="require_escalated"`.

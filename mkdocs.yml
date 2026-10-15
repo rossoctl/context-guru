@@ -104,11 +104,14 @@ nav:
       - Claude Code plugin:
           - Overview and install: plugin/index.md
           - Home and status: plugin/status.md
-          - Savings: plugin/savings.md
-          - Cache: plugin/cache.md
-          - Waste: plugin/waste.md
+          - Insights: plugin/insights.md
+          - Insights savings: plugin/savings.md
+          - Insights cache: plugin/cache.md
+          - Insights tools: plugin/waste.md
           - Session: plugin/session.md
           - Doctor: plugin/doctor.md
+          - Save more: plugin/save-more.md
+          - Remove MCP servers and skills: plugin/remove-mcp-and-skills.md
           - Terminal views: plugin/terminal-views.md
           - Status line: plugin/statusline.md
           - Configuration and troubleshooting: plugin/configuration.md

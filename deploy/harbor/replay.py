@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cgenv  # base URLs and credentials for both the hosted and the local deployment
 
-CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
+CG = Path(__file__).resolve().parents[2]   # this checkout
 BIN = "/tmp/cg-runs/cg-proxy-d1"
 PORT = 4020
 

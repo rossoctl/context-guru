@@ -901,6 +901,8 @@ func (a *API) toolRoutes() []route {
 		// The prompt TEXT behind those weights — the one route here that serves content, and
 		// so the one gated on transcript-capture consent as well as on scope. See promptapi.go.
 		{"GET /api/prompt", scopeTenant, a.prompt},
+		// What the caller declared and never used, priced per carrying request (adapttools.go).
+		{"GET /api/adapt/tools", scopeTenant, a.adaptTools},
 	}
 }
 

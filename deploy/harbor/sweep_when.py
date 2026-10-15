@@ -110,5 +110,5 @@ def main(paths):
 if __name__ == "__main__":
     args = sys.argv[1:]
     paths = [p for a in args for p in glob.glob(a)] or glob.glob(
-        "/home/vpcuser/cg-loca/i022log-*.jsonl")
+        os.path.expanduser("~/cg-loca/i022log-*.jsonl"))
     sys.exit(main(paths))

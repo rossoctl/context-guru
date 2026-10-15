@@ -364,7 +364,7 @@ local DB at the time of writing), else the best available fallback,
 NEXT real row instead** — a column the Go proxy writes once, on whichever
 real request a ping run ends with. That misses every ping whose session
 never sent another real request: a production cross-check (PR #425,
-comment on `contextguru2`) found 351 real ping rows in 75 sessions where
+comment on the eval box) found 351 real ping rows in 75 sessions where
 the old method surfaced only 28. Reading ping rows directly, and pricing
 each one from its own `cost_usd` rather than a `0.1x` estimate, fixes
 both: `ping_rows_summary()` reports every ping row in the DB regardless of

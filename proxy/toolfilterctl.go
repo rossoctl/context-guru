@@ -40,8 +40,13 @@ func (h *Handler) DashToolFilter() func(string) dash.ToolFilterState {
 	return func(id string) dash.ToolFilterState {
 		reg := h.registry()
 		if reg == nil {
-			return dash.ToolFilterState{Reason: "this proxy has no accounts, so the removal " +
-				"list is whatever its own config file sets"}
+			// No switch to offer (POST /api/toolfilter needs accounts), but the list the running
+			// pipeline filters is known: its configuration's, including what /context-guru:adapt
+			// applied (adaptapply.go keeps that as the effective document).
+			doc, _ := h.adaptConfig(adaptWho{Local: true})
+			names, _, _ := removedFrom(doc)
+			return dash.ToolFilterState{Removed: names, Reason: "this proxy has no accounts: its removal " +
+				"list is its configuration's, including what /context-guru:adapt tools applied"}
 		}
 		t, err := reg.Get(id)
 		if err != nil {
@@ -131,16 +136,42 @@ func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
 			"agent rather than saving you anything, so a manager has to make that change")
 		return
 	}
-	reg := h.registry()
-	current := reg.Config(t)
-	f, perr := config.ParseForm(current)
-	if perr != nil || f.ParseError != "" {
-		ctlErr(w, http.StatusConflict, "your stored configuration does not load, so it cannot "+
-			"be edited as fields; a manager must repair it on the account page")
+	if code, msg := h.updateRemoved(t, func(names []string) []string {
+		return withDecl(names, name, exclude)
+	}); code != 0 {
+		ctlErr(w, code, msg)
 		return
 	}
+	h.writeToolFilterDoc(w, r, t.ID)
+}
+
+// updateRemoved rewrites the caller's removal list through edit, with the same validation and
+// audited registry Update for every writer. A non-zero code is the failure to report.
+func (h *Handler) updateRemoved(t *tenant.Tenant, edit func([]string) []string) (int, string) {
+	reg := h.registry()
+	doc, err := editRemoved(reg.Config(t), edit)
+	if err != nil {
+		return statusOf(err)
+	}
+	if err := reg.Update(t, t.ID, tenant.Patch{ConfigYAML: &doc}); err != nil {
+		if errors.Is(err, tenant.ErrForbidden) {
+			return http.StatusForbidden, "not permitted"
+		}
+		return http.StatusBadRequest, err.Error()
+	}
+	return 0, ""
+}
+
+// editRemoved is a configuration document with its toolfilter removal list rewritten by edit:
+// the one place that edit is made, for the Inventory switch and for /context-guru:adapt tools.
+func editRemoved(current string, edit func([]string) []string) (string, error) {
+	f, perr := config.ParseForm(current)
+	if perr != nil || f.ParseError != "" {
+		return "", statusError{http.StatusConflict, "your stored configuration does not load, so it cannot " +
+			"be edited as fields; a manager must repair it on the account page"}
+	}
 	names, _, _ := removedFrom(current)
-	names = withDecl(names, name, exclude)
+	names = edit(names)
 	if f.Components == nil {
 		f.Components = map[string]map[string]any{}
 	}
@@ -167,18 +198,9 @@ func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
 	doc, err := config.ApplyForm(current, f)
 	if err != nil {
 		// The message names the offending value; showing it beats "invalid".
-		ctlErr(w, http.StatusBadRequest, err.Error())
-		return
+		return "", statusError{http.StatusBadRequest, err.Error()}
 	}
-	if err := reg.Update(t, t.ID, tenant.Patch{ConfigYAML: &doc}); err != nil {
-		if errors.Is(err, tenant.ErrForbidden) {
-			ctlErr(w, http.StatusForbidden, "not permitted")
-			return
-		}
-		ctlErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	h.writeToolFilterDoc(w, r, t.ID)
+	return doc, nil
 }
 
 // writeToolFilterDoc answers with the read route's document, so one shape serves both.
@@ -260,7 +282,16 @@ func withDecl(names []string, name string, add bool) []string {
 }
 
 // withComponent ensures a component is present (appended last) or absent from a pipeline.
+// A present component keeps its position: pipeline order decides what the components produce
+// and so what is cached, and adding a name to the list must not reorder anything.
 func withComponent(pipeline []string, name string, want bool) []string {
+	if want {
+		for _, n := range pipeline {
+			if strings.TrimSpace(n) == name {
+				return pipeline
+			}
+		}
+	}
 	out := make([]string, 0, len(pipeline)+1)
 	for _, n := range pipeline {
 		if strings.TrimSpace(n) != name {

@@ -1,15 +1,14 @@
 ---
 name: waste
-description: MCP servers, skills and tools you carry but never use, what they cost, and the command that removes each. Use when asked what is wasting money or tokens, or what to remove.
+description: Moved to /context-guru:insights tools (what you carry and never use). Kept for one release so existing habits still work.
 argument-hint: "[details]"
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py:*)
+allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" insights:*)
 ---
 
-Run this, then print its output exactly as it is in one code block. Add nothing before or after it.
+This command moved to `/context-guru:insights tools`. Tell the user that in one line, then run the new command:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" waste $ARGUMENTS
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" insights tools $ARGUMENTS
 ```
 
-If the output ends with a `More:` line and the user wants the detail, run the same command with `details`.
-Do not turn dollars into tokens or add advice that the output does not contain.
+Print its output exactly as it is in one code block.

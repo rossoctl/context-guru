@@ -80,7 +80,7 @@ set -a; . "$HOME/.cg-bench/env"; set +a
 #   CG_SWEEP_ASK_DUMP=$HOME/cg-loca/askdump-$NAME bash run027.sh probe
 export ANTHROPIC_CUSTOM_HEADERS=          # benchmark traffic must NOT go through Context Guru
 export UV_CONSTRAINT="$H/uv-constraints.txt"   # mcp<2 : 2.1.1 removed Server.list_tools
-export PATH="$H/bin:$H/.venv/bin:/home/vpcuser/.nvm/versions/node/v22.23.2/bin:$PATH"
+export PATH="$H/bin:$H/.venv/bin:$HOME/.nvm/versions/node/v22.23.2/bin:$PATH"
 command -v npx >/dev/null || { echo "NPX_MISSING -- filesystem MCP tools would silently vanish"; exit 1; }
 # CHEAP MODEL RATES, in dollars per MILLION tokens. Restored after being lost in a rig sync: without
 # these, PricingConfigured() is false, and extract_llm's economic gate then falls back to built-in LIST
