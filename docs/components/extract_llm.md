@@ -274,7 +274,7 @@ visible, but no code change can rescue an operator from switching the brake off 
 
 ## Accuracy of the code leg, measured (August 2026)
 
-Basis: **40 real tool outputs** captured from Claude Code traffic (`/home/vpcuser/cg-research/bench`
+Basis: **40 real tool outputs** captured from Claude Code traffic (a local capture bench
 + SWE-bench proxy captures, 563–15,473 tokens each), replayed through the code leg alone —
 `strategy: code`, no deterministic fallback, `rewrite: true`, `aggressiveness: medium`,
 compactor `claude-haiku-4-5`, real gateway. Reproduce with

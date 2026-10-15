@@ -36,8 +36,8 @@ package apply
 // is known to leave a coherent instruction. This code therefore takes the conservative half
 // of "strip a declaration and its prose together, or neither": a declaration whose name
 // appears in the prose is KEPT, whatever the configuration says. proseReferenced is that
-// gate. Measured over the four interactive captures on this box
-// (cg-research/bench/{short,long,mixed,cold}.jsonl, 70 requests, one session each): the real
+// gate. Measured over four interactive captures
+// (bench/{short,long,mixed,cold}.jsonl, 70 requests, one session each): the real
 // Claude Code catalogue is 31 tools and the gate keeps 6 of them — Agent, Bash, Edit, Read,
 // Skill, Write — clearing the other 25, including every one of the never-used items that
 // carries real weight. On the harness corpora (/tmp/cg-runs/capture-{tb,swebench}.jsonl,
@@ -64,7 +64,7 @@ package apply
 //     it only holds when the session id is DERIVED, and Claude Code sends an explicit one
 //     (metadata.user_id), which wins in explicitSession, so the region could move while the
 //     session id did not. MEASURED on a real 35-request Claude Code session
-//     (cg-research/bench/long.jsonl): `messages.0` changed twice — the agent's own
+//     (bench/long.jsonl): `messages.0` changed twice — the agent's own
 //     auto-compaction rewrites the first user message into a conversation SUMMARY, taking
 //     the region from 32,512 to 53,752 bytes — and `system[0]` changed once (its
 //     x-anthropic-billing-header cc_version). A summary is MODEL-WRITTEN prose that names

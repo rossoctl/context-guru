@@ -13,7 +13,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
-// ibmSonnet is the rate ete-litellm actually bills for aws/claude-sonnet-5 — half the
+// ibmSonnet is the rate litellm-gateway actually bills for aws/claude-sonnet-5 — half the
 // public API's, which is why the operator price list exists at all.
 var ibmSonnet = modelinfo.Price{Input: 1.52e-6, Output: 7.6e-6, CacheRead: 1.52e-7, CacheWrite: 1.9e-6}
 
