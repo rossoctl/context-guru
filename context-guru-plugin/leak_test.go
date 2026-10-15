@@ -61,17 +61,8 @@ func markedProcs(test string) []markedProc {
 		if pid == os.Getpid() {
 			continue
 		}
-		env, err := os.ReadFile(filepath.Join(d, "environ"))
-		if err != nil || !bytes.Contains(env, []byte(leakRunVar+"="+leakRun)) {
-			continue
-		}
-		name := ""
-		for _, kv := range bytes.Split(env, []byte{0}) {
-			if v, ok := bytes.CutPrefix(kv, []byte(leakTestVar+"=")); ok {
-				name = string(v)
-			}
-		}
-		if test != "" && name != test {
+		run, name, ok := procMarks(pid)
+		if !ok || run != leakRun || (test != "" && name != test) {
 			continue
 		}
 		if st, err := os.ReadFile(filepath.Join(d, "stat")); err == nil && strings.Contains(string(st), ") Z ") {
@@ -83,11 +74,33 @@ func markedProcs(test string) []markedProc {
 	return out
 }
 
+// procMarks reads a process's two marks, each a whole NUL-separated entry of its environment.
+func procMarks(pid int) (run, name string, ok bool) {
+	env, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	if err != nil {
+		return "", "", false
+	}
+	for _, kv := range bytes.Split(env, []byte{0}) {
+		if v, found := bytes.CutPrefix(kv, []byte(leakRunVar+"=")); found {
+			run, ok = string(v), true
+		}
+		if v, found := bytes.CutPrefix(kv, []byte(leakTestVar+"=")); found {
+			name = string(v)
+		}
+	}
+	return run, name, ok
+}
+
 // killProcs stops each process and the process group it leads or belongs to (the scripts start
 // proxies with setsid, so a fake's children share its group), never this test binary's own group.
 func killProcs(ps []markedProc) {
 	own := syscall.Getpgrp()
 	for _, p := range ps {
+		// Re-read the marks right before the signal: a pid that exited and was reused since the scan
+		// belongs to something else now.
+		if run, name, ok := procMarks(p.pid); !ok || run != leakRun || name != p.test {
+			continue
+		}
 		if g, err := syscall.Getpgid(p.pid); err == nil && g != own && g > 1 {
 			syscall.Kill(-g, syscall.SIGKILL) //nolint:errcheck
 		}
@@ -104,6 +117,9 @@ func leakMark(t *testing.T) string {
 	if _, seen := leakCleanups.LoadOrStore(t, struct{}{}); !seen {
 		name := t.Name()
 		t.Cleanup(func() {
+			killProcs(markedProcs(name))
+			// A child caught mid-execve reads an empty environ, so the first scan can miss it: look again.
+			time.Sleep(20 * time.Millisecond)
 			killProcs(markedProcs(name))
 			leakCleanups.Delete(t)
 		})
@@ -124,9 +140,12 @@ func TestLeakGuardStopsWhatATestStarted(t *testing.T) {
 			t.Skip("setsid unavailable: ", err)
 		}
 		pid = cmd.Process.Pid
-		go cmd.Wait() //nolint:errcheck
-		if len(markedProcs(t.Name())) == 0 {
-			t.Fatal("the started process does not carry the test's mark")
+		go cmd.Wait()                                      //nolint:errcheck
+		for i := 0; len(markedProcs(t.Name())) == 0; i++ { // its environ reads empty until execve is done
+			if i == 50 {
+				t.Fatal("the started process does not carry the test's mark")
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
 	})
 	for i := 0; i < 50; i++ {
