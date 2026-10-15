@@ -924,15 +924,19 @@ TMP_LEFTOVER_SECONDS = 60
 
 
 def _sweep_tmp(path: str) -> None:
-    """Remove `path`'s .tmp files older than TMP_LEFTOVER_SECONDS. A render's read runs on a daemon
-    thread, and the process can exit in the middle of its write, which leaves a partial .tmp that
-    nothing else removes. Only the detached refresher sweeps: it has no render budget to spend."""
+    """Remove `path`'s own .tmp and lock files older than TMP_LEFTOVER_SECONDS. A render's read runs
+    on a daemon thread, and the process can exit in the middle of its write, which leaves a partial
+    .tmp that nothing else removes. _take_refresh_slot removes only the previous window's lock, so a
+    pause longer than one window leaves older ones. A lock that old belongs to a past window (all
+    windows are shorter), so it no longer elects anything. Only the detached refresher sweeps: it
+    has no render budget to spend."""
     d, prefix = os.path.split(path)
     prefix += "."
     try:
         with os.scandir(d or ".") as it:
             for e in it:
-                if e.name.startswith(prefix) and e.name.endswith(".tmp"):
+                rest = e.name[len(prefix):] if e.name.startswith(prefix) else ""
+                if (rest.endswith(".tmp") and rest[:-4].isdigit()) or (rest.startswith("lock.") and rest[5:].isdigit()):
                     try:
                         if time.time() - e.stat().st_mtime > TMP_LEFTOVER_SECONDS:
                             os.unlink(e.path)

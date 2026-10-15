@@ -200,8 +200,10 @@ func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 // (agent rows and pings, any status), with the TTL taken as a bare column from the row that holds
 // the one MAX(ts), so from the thread's latest write. It replaces a correlated subquery per
 // thread, which walked the session's rows once for each thread: 1.6 s for 300 threads (#570).
+// Like that subquery, it reads every write of the session: the request's other filters (a time
+// window, a model) do not change which tier the provider's cache entry is on.
 func cacheTTLQuery(f Filter) (string, []any) {
-	cond, args := withKeepAlive(f).where()
+	cond, args := withKeepAlive(Filter{Tenant: f.Tenant, TenantAll: f.TenantAll, Session: f.Session}).where()
 	return `SELECT r.thread_id, MAX(r.ts), CASE WHEN r.cache_write_1h > 0 THEN 3600 ELSE 300 END
 		FROM requests r WHERE ` + cond + ` AND r.cache_write > 0 GROUP BY r.thread_id`, args
 }

@@ -954,8 +954,8 @@ func TestRecordRunFeedsTheWeeklyTip(t *testing.T) {
 // threads made /api/cachestate slower than the render budget, so every render's read failed, the
 // last copy aged out after ten minutes, and the line fell back to a bare `saved $x`. The read now
 // starts a detached refresher when it misses the budget, so the slow answer still reaches the disk
-// cache and a later render shows the money line. The refresher also removes a partial .tmp left by
-// an earlier render, and only an old one.
+// cache and a later render shows the money line. The refresher also removes its own key's old
+// partial .tmp and old lock files, and nothing of another key's or a fresh one.
 func TestStatuslineMoneyShowsWhenCachestateIsSlowerThanTheRender(t *testing.T) {
 	const now = 1_800_000_000_000
 	cache := fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,`+
@@ -983,14 +983,19 @@ func TestStatuslineMoneyShowsWhenCachestateIsSlowerThanTheRender(t *testing.T) {
 	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
 	tmp := t.TempDir()
 	key := filepath.Join(tmp, "context-guru-statusline-"+port+"-cs-sess-big.json")
-	oldTmp, newTmp := key+".111.tmp", key+".222.tmp"
-	for _, f := range []string{oldTmp, newTmp} {
+	other := filepath.Join(tmp, "context-guru-statusline-"+port+"-cs-sess-other.json")
+	oldTmp, newTmp, oldLock := key+".111.tmp", key+".222.tmp", key+".lock.12"
+	otherTmp, otherLock := other+".333.tmp", other+".lock.12"
+	for _, f := range []string{oldTmp, newTmp, oldLock, otherTmp, otherLock} {
 		if err := os.WriteFile(f, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := os.Chtimes(oldTmp, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)); err != nil {
-		t.Fatal(err)
+		if f == newTmp {
+			continue
+		}
+		if err := os.Chtimes(f, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	env := routedEnv(port)
 	env["TMPDIR"] = tmp
@@ -1019,7 +1024,56 @@ func TestStatuslineMoneyShowsWhenCachestateIsSlowerThanTheRender(t *testing.T) {
 	if _, err := os.Stat(oldTmp); !os.IsNotExist(err) {
 		t.Errorf("an hour-old partial .tmp must be removed by the refresher: %v", err)
 	}
+	if _, err := os.Stat(oldLock); !os.IsNotExist(err) {
+		t.Errorf("an hour-old lock of a past window must be removed by the refresher: %v", err)
+	}
 	if _, err := os.Stat(newTmp); err != nil {
 		t.Errorf("a fresh .tmp may belong to a write in progress and must stay: %v", err)
+	}
+	for _, f := range []string{otherTmp, otherLock} {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("another session's file %s is not this refresher's to remove: %v", filepath.Base(f), err)
+		}
+	}
+}
+
+// TestStatuslineCachestateRefreshIsOnePerWindow: a cachestate read that misses the budget starts
+// a detached refresher, but N renders at once start exactly one, and the next one starts only in
+// the next CACHESTATE_REFRESH_WINDOW_SECONDS window (5 s, not _bg_json's 30 s).
+func TestStatuslineCachestateRefreshIsOnePerWindow(t *testing.T) {
+	py := requireTool(t, "python3")
+	script := `
+import importlib.util, sys, threading, os, tempfile
+spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+tmp = tempfile.mkdtemp(); m._tmpdir = lambda: tmp
+spawned = []
+class P:  # stands in for the detached refresher
+    def __init__(self, *a, **k): spawned.append(1)
+m.subprocess.Popen = P
+m._http_get = lambda *a, **k: (_ for _ in ()).throw(TimeoutError("slow"))  # every inline read misses the budget
+w = m.CACHESTATE_REFRESH_WINDOW_SECONDS
+base = 30 * 1000000 + 1.0  # 1 s into a window of both lengths
+clock = [base]; m.time.time = lambda: clock[0]
+def burst(n):
+    spawned.clear(); bar = threading.Barrier(n)
+    def go():
+        bar.wait(); m._fetch_json("1", "/api/cachestate?session=s", "cs-s", 2.0, w)
+    ts = [threading.Thread(target=go) for _ in range(n)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    return len(spawned)
+print("window", w)
+print("burst", burst(16))              # exactly one
+print("same window", burst(4))         # none
+clock[0] = base + w + 0.5              # the next 5 s window, still inside the same 30 s one
+print("next window", burst(4))         # one
+`
+	out, err := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	want := "window 5.0\nburst 1\nsame window 0\nnext window 1"
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
 }

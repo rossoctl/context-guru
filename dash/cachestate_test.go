@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -231,6 +232,16 @@ func TestCacheThreadsTakesEachThreadsTTLFromItsLatestWrite(t *testing.T) {
 		if got[id] != w {
 			t.Errorf("thread %q ttl_s = %v, want %v (all: %v)", id, got[id], w, got)
 		}
+	}
+	// A time window on the request does not hide a:H's 1h write: the tier is the cache entry's.
+	_, body = get(t, a, fmt.Sprintf("/api/cachestate?session=s1&since=%d", now-30_000), "")
+	for _, x := range body["threads"].([]any) {
+		if th := x.(map[string]any); th["id"] == "a:H" && th["ttl_s"] != 3600.0 {
+			t.Errorf("with since=, a:H ttl_s = %v, want 3600 from its write before the window", th["ttl_s"])
+		}
+	}
+	if !strings.Contains(fmt.Sprint(body["threads"]), "a:H") {
+		t.Errorf("a:H (last touch 15 s ago) must be listed with since=30 s ago: %v", body["threads"])
 	}
 }
 
