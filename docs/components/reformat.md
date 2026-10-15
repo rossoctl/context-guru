@@ -576,7 +576,7 @@ A candidate is only suggested once it was declared in at least 5 distinct captur
 7+ days, and invoked in none of them — the count guards against a fluke, the span against "one
 afternoon's task didn't need it."
 
-`GET /api/adapt/tools` (what `/context-guru:adapt tools` reads) is the full list behind that: every
+`GET /api/adapt/tools` (what `/context-guru:remove-mcp-and-skills` reads) is the full list behind that: every
 MCP server, MCP tool and skill the account declared and never used, whether or not it meets the
 5-session bar (`sufficient` says which). Each item is priced on exactly the requests that carried
 it, at that request's own model and cache tier, and comes with its `remove_as` filter entry and the

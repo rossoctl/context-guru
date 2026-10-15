@@ -48,7 +48,7 @@ switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
 ```
 
 (Illustrative numbers.) Codex: `$context-guru-save-more`, `$context-guru-remove-mcp-and-skills`. Reference:
-[Save more](save-more.md). `/context-guru:adapt` from 0.6 still works for one release.
+[Save more](save-more.md).
 
 Five more views draw in the terminal (`watch`, `timeline`, `chart`, `heatmap`, `fill`). They are on
 [Terminal views](terminal-views.md).

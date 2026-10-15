@@ -54,7 +54,6 @@ the other setting and restart the owned proxy. `$context-guru-insights` shows sa
 `$context-guru-save-more` replays your own history under every shipped config and keep-alive strategy and
 applies the recommended change only after you answer yes; `$context-guru-remove-mcp-and-skills` does the same for
 MCP servers and skills you never use. See [docs/plugin/save-more.md](../../../docs/plugin/save-more.md).
-`$context-guru-adapt` still works for one release and points to them.
 
 The older `$context-guru-savings`, `$context-guru-cache`, `$context-guru-waste` and
 `$context-guru-insights-capabilities`/`-components`/`-idle` still work for one release and point to `$context-guru-insights`.
