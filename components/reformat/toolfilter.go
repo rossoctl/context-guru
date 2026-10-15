@@ -12,11 +12,10 @@ import (
 
 func init() { components.Register("toolfilter", newToolfilter) }
 
-// toolfilterConfig is the account's opt-in list, and it is the WHOLE of the component's
-// authority: nothing is ever removed that is not named here. There is deliberately no
-// `auto`, no threshold and no "remove what looked unused" mode — the inventory can only ever
-// show that a declaration was not used in the sessions it captured, and an unused tool is
-// not the same thing as an unwanted one.
+// toolfilterConfig is the account's opt-in list. Nothing is removed that is not named here,
+// except under the explicit, default-off `auto_remove` switch (apply/toolauto.go), which adds
+// history-derived candidates behind a session-fixed set and a restore tool — because an unused
+// tool is not the same thing as an unwanted one.
 type toolfilterConfig struct {
 	// Remove names the declarations to stop sending, in three shapes, all of them exact and
 	// none of them a pattern:
@@ -27,6 +26,11 @@ type toolfilterConfig struct {
 	//
 	// An empty list is a no-op, which is what the shipped default is.
 	Remove []string `yaml:"remove"`
+	// Auto turns on history-driven removal (apply/toolauto.go): tools declared in >= 5 sessions
+	// over >= 7 days with no call are dropped at session start or a proven-cold turn, the set is
+	// fixed for the session, and a `context_guru_tools` stub restores any of them on request.
+	// Off by default. It is additive to Remove, never a replacement for it.
+	Auto bool `yaml:"auto_remove"`
 }
 
 // Toolfilter is a marker component holding the opt-in list: `tools` is a top-level body
@@ -37,7 +41,10 @@ type toolfilterConfig struct {
 // The skills half lives there too, for a different reason: the listing IS in `messages`, but it
 // sits in the cached prefix, and every rewrite of the prefix has to happen before any byte offset
 // into the body is taken. Same place, same list, same counters. See apply.filterSkillListing.
-type Toolfilter struct{ remove []string }
+type Toolfilter struct {
+	remove []string
+	auto   bool
+}
 
 func newToolfilter(raw []byte) (components.Component, error) {
 	var cfg toolfilterConfig
@@ -66,7 +73,7 @@ func newToolfilter(raw []byte) (components.Component, error) {
 	// Sorted so the stored list, the audit entry and the settings page agree on an order,
 	// and so no map iteration can leak into anything a reader compares.
 	sort.Strings(out)
-	return Toolfilter{remove: out}, nil
+	return Toolfilter{remove: out, auto: cfg.Auto}, nil
 }
 
 // validDeclName accepts the charset a tool, MCP or skill name is drawn from, plus the two
@@ -98,6 +105,9 @@ func (Toolfilter) Enabled(*components.Ctx) bool { return true }
 // Removed is the opt-in list, sorted. apply calls it; nothing else should.
 func (t Toolfilter) Removed() []string { return t.remove }
 
+// Auto reports whether history-driven removal is on for this account.
+func (t Toolfilter) Auto() bool { return t.auto }
+
 // Reformat is a no-op: the rewrite already happened in apply, which reports it here through
 // Ctx.FilteredDecls so this component does not read "declined" on the requests where it just
 // acted — the mistake cachesplit's doc records.
@@ -118,6 +128,8 @@ func (Toolfilter) Reformat(_ *schemas.BifrostChatRequest, rep *components.Report
 
 func init() {
 	components.RegisterFields("toolfilter", toolfilterConfig{}, []components.Field{
+		{Key: "auto_remove", Type: components.FieldBool,
+			Hint: "also drop tools the account's own history shows were declared in >= 5 sessions over >= 7 days and never called; applied at session start or a cold turn, fixed for the session, restorable by the model through context_guru_tools"},
 		{Key: "remove", Type: components.FieldStrings,
 			Hint: "declaration names to stop sending: a tool name, `mcp__<server>` for a whole MCP " +
 				"server, or `skill__<skill>` for one skill's listing entry; a name still described " +

@@ -221,6 +221,10 @@ type Trace struct {
 	MaxCachedIdx   int
 	// Messages is the normalized message count this request carried.
 	Messages int
+	// ColdCache is the pipeline's proven-cold verdict for this request (cacheIsCold on a known
+	// prior touch). False when unknown. Toolfilter auto mode reads it: a cold turn rewrites the
+	// prefix anyway.
+	ColdCache bool
 	// AttemptedTokens is the token count of the messages age/supersession
 	// offloaders were ALLOWED to touch (the uncached tail when cache-aware, the
 	// whole request otherwise). It is the honest denominator for
@@ -701,6 +705,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		Restored:      restore.restored(),
 	}
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
+	tr.ColdCache = coldCache
 	tr.Breakpoints = bps
 	// The cache TTL TIER this request asked for. cacheTTL() has always computed it — it is an
 	// input to cold-cache attribution — and then discarded it, so the dashboard could not say

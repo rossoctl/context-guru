@@ -179,6 +179,10 @@ const (
 	// against LRU pressure from a busy proxy.
 	TTLPrefix  = "cg:ttl:"  // longest cache lifetime this session has ever asked for
 	SeenPrefix = "cg:seen:" // last activity under a content-derived session id
+	// AutoToolPrefix holds toolfilter auto mode's per-session decision (the fixed removed set and
+	// the original declarations). Losing it flips the session's `tools` array, a whole-prefix
+	// rewrite, so it is pinned.
+	AutoToolPrefix = "cg:tfauto:"
 	// SumPrefix is summarize's per-session checkpoint: the exact summary text, the span it
 	// covers, and that span's hash.
 	//
@@ -236,7 +240,7 @@ const (
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
-var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
+var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, AutoToolPrefix, SumPrefix,
 	BilledPrefix, UsagePrefix, RestorePrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
