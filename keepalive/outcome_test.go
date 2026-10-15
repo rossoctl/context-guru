@@ -99,8 +99,7 @@ func TestATransportErrorIsNotAFailure(t *testing.T) {
 	if e, ok := k.Entry(key); !ok || e.Stopped {
 		t.Fatal("a transport error must not stop the entry")
 	}
-	// restored in Task 2
-	// if s := k.Stats(); s.RouteTrips != 0 {
-	// 	t.Fatalf("a transport error must not count toward the breaker: %+v", s)
-	// }
+	if s := k.Stats(); s.RouteTrips != 0 {
+		t.Fatalf("a transport error must not count toward the breaker: %+v", s)
+	}
 }

@@ -34,6 +34,10 @@ type kaEntry struct {
 	// Dispatcher's Release.
 	key             Key
 	tenant, session string
+	// cred is Record.Cred as it stood when this entry was created — the opaque credential id
+	// the host computed for the request, "" meaning a server-held key. Read by the route
+	// breaker's gate (see breaker.go) at Record and at Sweep time.
+	cred string
 	// thread is the session thread this entry keeps warm; "" is the primary thread.
 	thread string
 	// startedAt is when the last upstream request on this session STARTED — a real request
@@ -224,14 +228,18 @@ type Record struct {
 	Route     string // upstream path
 	Status    int
 	Usage     Usage
-	UsageOK   bool
-	Policy    Policy // resolved by the host
-	Tag       string // host label returned by Arrive (proxy: the applied strategy id)
-	Agent     string
-	Preset    string
-	Header    http.Header // the request's headers; only PingHeaders' allow-list is read
-	Store     store.Store
-	Emitter   components.Emitter // nil: components.NopEmitter{}
+	// Cred is an opaque, tenant-free credential id the host computes for the request's
+	// provider key; "" means a server-held key (never subject to the dead-credential mark,
+	// only ever the route breaker). The proxy host fills this from main's HMAC credKey.
+	Cred    string
+	UsageOK bool
+	Policy  Policy // resolved by the host
+	Tag     string // host label returned by Arrive (proxy: the applied strategy id)
+	Agent   string
+	Preset  string
+	Header  http.Header // the request's headers; only PingHeaders' allow-list is read
+	Store   store.Store
+	Emitter components.Emitter // nil: components.NopEmitter{}
 	// Hold is called once, under the keeper lock, only if the entry is tracked. The host captures
 	// the request's credential and returns the Ref it issued for it; the keeper releases it exactly
 	// once.
@@ -265,6 +273,14 @@ type Keeper struct {
 	mu    sync.Mutex
 	live  map[string]*kaEntry
 	bytes int64
+	// routeFails, routeTripped and credDead are the route breaker and the dead-credential
+	// marks (main #527) — see breaker.go. Keyed with the tenant first, so one tenant can
+	// never switch off another's pings.
+	routeFails   map[string]int
+	routeTripped map[string]time.Time
+	credDead     map[string]time.Time
+	// routeTrips counts how many times routeFailedLocked has tripped a route, for Stats.
+	routeTrips atomic.Int64
 	// turns counts requests seen per THREAD (keyed like live), so the first-request gate
 	// survives the entry's own lifecycle: an entry is dropped the moment the next request arrives, and retired by
 	// policy a few minutes later, while "has this session sent a request before?" has to
@@ -340,7 +356,8 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}}
+		live: map[string]*kaEntry{}, turns: map[string]int{},
+		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
 // now is the clock, injected for the same reason.
@@ -517,6 +534,23 @@ func (k *Keeper) Record(r Record) {
 		k.retire(key)
 		return
 	}
+	// The route breaker and the dead-credential mark (main #527, see breaker.go) refuse a
+	// NEW hold outright: a route failing in a row, or a credential already marked dead on
+	// this model, must not accumulate another body and another held credential while it
+	// waits out its hour. Any OLDER entry for this thread is dropped too, same as every
+	// other refusal path above.
+	now := k.now()
+	k.mu.Lock()
+	tripped := k.routeIsTrippedLocked(routeKey(r.Key.Tenant, r.Endpoint, model), now) ||
+		k.credIsDeadLocked(r.Key.Tenant, r.Cred, model, now)
+	if tripped {
+		k.retireLocked(key)
+	}
+	k.mu.Unlock()
+	if tripped {
+		k.skipped.Add(1)
+		return
+	}
 	if len(body) > MaxBodyBytes {
 		k.retire(key)
 		k.skipped.Add(1)
@@ -566,6 +600,7 @@ func (k *Keeper) Record(r Record) {
 	}
 	e := &kaEntry{
 		key: r.Key, tenant: r.Key.Tenant, session: session, thread: threadID, startedAt: startedAt,
+		cred: r.Cred,
 		body: owned, endpoint: r.Endpoint,
 		st:       r.Store,
 		emitter:  emitter,
@@ -687,6 +722,12 @@ func (k *Keeper) expectedRefreshSavingUSD(model, endpoint string, prefix int64, 
 func (k *Keeper) retire(key string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	k.retireLocked(key)
+}
+
+// retireLocked is retire's body, for callers that already hold k.mu (the route breaker's gate
+// in Record). k.mu must be held.
+func (k *Keeper) retireLocked(key string) {
 	e, ok := k.live[key]
 	if !ok {
 		return
@@ -756,6 +797,23 @@ func (k *Keeper) Forget(tenantID string) {
 		delete(k.turns, key)
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}
+	// The route breaker and dead-credential marks are also keyed with the tenant first (see
+	// breaker.go), so they are cleared the same way: nothing of this tenant's survives Forget.
+	for r := range k.routeFails {
+		if strings.HasPrefix(r, prefix) {
+			delete(k.routeFails, r)
+		}
+	}
+	for r := range k.routeTripped {
+		if strings.HasPrefix(r, prefix) {
+			delete(k.routeTripped, r)
+		}
+	}
+	for c := range k.credDead {
+		if strings.HasPrefix(c, prefix) {
+			delete(k.credDead, c)
+		}
+	}
 }
 
 // evictLocked enforces both bounds by dropping the entries whose deadline is furthest away
@@ -814,6 +872,14 @@ func (k *Keeper) Sweep(now time.Time) int {
 			continue
 		}
 		if !e.due(now) {
+			continue
+		}
+		// The route breaker and the dead-credential mark can trip or land WHILE an entry is
+		// sitting idle waiting for its next ping, not only at Record time — so this is
+		// checked again here, right before a ping would be sent.
+		if k.routeIsTrippedLocked(routeKey(e.tenant, e.endpoint, e.model), now) ||
+			k.credIsDeadLocked(e.tenant, e.cred, e.model, now) {
+			e.stopped = true
 			continue
 		}
 		// Everything the ping needs, taken HERE under the lock. Nothing outside it may read the
@@ -993,6 +1059,19 @@ const (
 
 // noteOutcome classifies a ping's answer and applies it to the entry and the counters.
 func (k *Keeper) noteOutcome(j pingJob, status int, u Usage) outcome {
+	// A 401 or 403 against a credential the host could identify (j.e.cred != "") is the
+	// credential's own fault, not the route's: mark IT dead rather than tripping the breaker,
+	// so another credential on the same route keeps pinging. "" (a server-held key) falls
+	// through to the ordinary status >= 400 branch below, which feeds the route breaker instead
+	// — see TestEmptyTenantAndCredUseTheRouteBreaker.
+	if (status == http.StatusUnauthorized || status == http.StatusForbidden) && j.e.cred != "" {
+		k.failed.Add(1)
+		k.markStopped(j.e)
+		k.mu.Lock()
+		k.markCredDeadLocked(j.tenant, j.e.cred, j.e.model, status, k.now())
+		k.mu.Unlock()
+		return outcomeFailed
+	}
 	switch {
 	case status == http.StatusTooManyRequests || status >= 500:
 		k.skipped.Add(1)
@@ -1000,12 +1079,21 @@ func (k *Keeper) noteOutcome(j pingJob, status int, u Usage) outcome {
 	case status >= 400:
 		k.failed.Add(1)
 		k.markStopped(j.e)
+		k.mu.Lock()
+		k.routeFailedLocked(routeKey(j.tenant, j.e.endpoint, j.e.model), k.now())
+		k.mu.Unlock()
 		return outcomeFailed
 	case u.FreshInput == 0 && u.CacheRead == 0 && u.CacheWrite == 0:
 		k.failed.Add(1)
 		k.markStopped(j.e)
+		k.mu.Lock()
+		k.routeFailedLocked(routeKey(j.tenant, j.e.endpoint, j.e.model), k.now())
+		k.mu.Unlock()
 		return outcomeFailedRecorded
 	}
+	k.mu.Lock()
+	k.routeOKLocked(routeKey(j.tenant, j.e.endpoint, j.e.model))
+	k.mu.Unlock()
 	if u.CacheRead == 0 && k.notePingMiss(j.e) {
 		k.missed.Add(1)
 		return outcomeMissed
@@ -1155,6 +1243,10 @@ type Stats struct {
 	// Wrote can both be 1 for the same session (TestASecondMissInARowStops).
 	Missed   int64   `json:"missed"`
 	SpentUSD float64 `json:"spend_usd"`
+	// RouteTrips counts how many times the route breaker has tripped (main #527, see
+	// breaker.go) — a route failing routeFailLimit times in a row. Climbing here, unlike
+	// Failed, says the SAME route keeps failing rather than scattered one-off failures.
+	RouteTrips int64 `json:"route_trips"`
 	// SummarySubstituted, SummarySubstituteFailed and SummarySubstituteOverBudget are
 	// cache_aware_summarizer's share of Pings — see fireSummarySubstitute. A deployment running
 	// that component should see SummarySubstituted climb instead of a flat Pings/Wrote pair; a
@@ -1212,6 +1304,7 @@ func (k *Keeper) Stats() Stats {
 	k.mu.Unlock()
 	return Stats{Live: live, Pings: k.pings.Load(), Skipped: k.skipped.Load(),
 		Failed: k.failed.Load(), Wrote: k.wrote.Load(), Missed: k.missed.Load(),
+		RouteTrips:                         k.routeTrips.Load(),
 		SpentUSD:                           math.Float64frombits(k.spentUSD.Load()),
 		SummarySubstituted:                 k.summarySubstituted.Load(),
 		SummarySubstituteFailed:            k.summarySubstituteFailed.Load(),
