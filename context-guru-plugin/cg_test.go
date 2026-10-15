@@ -473,3 +473,65 @@ func TestDocsExamplesAreTheGoldens(t *testing.T) {
 		}
 	}
 }
+
+// levers runs cg.levers() on a stats document and returns the rows by name.
+func cgLevers(t *testing.T, st map[string]any) map[string]float64 {
+	t.Helper()
+	py := requireTool(t, "python3")
+	in, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := "import sys, json; sys.path.insert(0, sys.argv[1]); import cg; " +
+		"print(json.dumps(dict(cg.levers(json.loads(sys.argv[2])))))"
+	out, err := exec.Command(py, "-c", code, scriptsDir(t), string(in)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("cg.levers: %v\n%s", err, out)
+	}
+	rows := map[string]float64{}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("cg.levers output %q: %v", out, err)
+	}
+	return rows
+}
+
+func cgWaterfall(total float64, deltas map[string]float64) map[string]any {
+	var steps []map[string]any
+	for k, v := range deltas {
+		steps = append(steps, map[string]any{"key": k, "delta_usd": v})
+	}
+	return map[string]any{"total_saved_usd": total, "waterfall": steps}
+}
+
+// Sign convention of /api/stats (dash/overview.go, waterfall()): a saving is a NEGATIVE delta_usd, a
+// cost is positive. #582: keepalive_saved was read as if positive, so a saving showed as a loss.
+// The lever rows must add up to total_saved_usd, which is compaction + cache split + the keep-alive's
+// net + tool filtering - own spend, and does NOT include self_removed (the account's own doing).
+func TestInsightsLeversAddUpToTotalSaved(t *testing.T) {
+	st := cgWaterfall(80+20+(120-60)+15-6, map[string]float64{
+		"baseline": 1000, "compaction": -80, "cachesplit_saved": -20, "keepalive_saved": -120,
+		"keepalive_ping": 60, "decl_filter_saved": -15, "self_removed": -30, "cg_llm": 6,
+	})
+	rows := cgLevers(t, st)
+	var sum float64
+	for _, v := range rows {
+		sum += v
+	}
+	if want := st["total_saved_usd"].(float64); sum < want-0.005 || sum > want+0.005 {
+		t.Errorf("rows add up to %.2f, total_saved is %.2f: %v", sum, want, rows)
+	}
+	for name, want := range map[string]float64{"Compaction": 80, "Cache split": 20, "Keep-alive pings": 60,
+		"Tool filtering": 15, "Context Guru's own model spend": -6} {
+		if got := rows[name]; got < want-0.005 || got > want+0.005 {
+			t.Errorf("%s = %.2f, want %.2f", name, got, want)
+		}
+	}
+}
+
+// A keep-alive whose pings cost more than they saved is a real loss and must stay one.
+func TestInsightsKeepAliveLossStaysNegative(t *testing.T) {
+	rows := cgLevers(t, cgWaterfall(0, map[string]float64{"keepalive_saved": -10, "keepalive_ping": 40}))
+	if got := rows["Keep-alive pings"]; got < -30.005 || got > -29.995 {
+		t.Errorf("Keep-alive pings = %.2f, want -30.00 (saved 10, spent 40)", got)
+	}
+}

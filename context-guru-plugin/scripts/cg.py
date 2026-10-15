@@ -149,12 +149,19 @@ def stats(api: Api, since: int, until: int | None = None, session: str | None = 
 
 
 def levers(st: dict) -> list[tuple[str, float]]:
-    """Saved dollars by lever, from the stats waterfall. Own spend is subtracted, not hidden."""
+    """Saved dollars by lever, from the stats waterfall. Own spend is subtracted, not hidden.
+
+    Sign convention of `delta_usd` (dash/overview.go, waterfall()): a saving is NEGATIVE (money not
+    spent), a cost is POSITIVE. So the saving keys are negated here, and the cost keys are read as
+    they are. A key that really is a net loss then shows as negative. `self_removed` is left out on
+    purpose: the waterfall keeps it OUTSIDE total_saved (it is the account's own doing, not ours),
+    so with it the rows could not add up to the headline.
+    """
     w = {x["key"]: x["delta_usd"] for x in st.get("waterfall", [])}
-    rows = [("Compaction", -w.get("compaction", 0.0)), ("Cache split", w.get("cachesplit_saved", 0.0)),
-            ("Keep-alive pings", w.get("keepalive_saved", 0.0) - abs(w.get("keepalive_ping", 0.0))),
-            ("Tool filtering", w.get("decl_filter_saved", 0.0)), ("Self-removed content", w.get("self_removed", 0.0)),
-            ("Context Guru's own model spend", -abs(w.get("cg_llm", 0.0)))]
+    rows = [("Compaction", -w.get("compaction", 0.0)), ("Cache split", -w.get("cachesplit_saved", 0.0)),
+            ("Keep-alive pings", -w.get("keepalive_saved", 0.0) - w.get("keepalive_ping", 0.0)),
+            ("Tool filtering", -w.get("decl_filter_saved", 0.0)),
+            ("Context Guru's own model spend", -w.get("cg_llm", 0.0))]
     return [(n, v) for n, v in rows if abs(v) >= 0.005]
 
 
