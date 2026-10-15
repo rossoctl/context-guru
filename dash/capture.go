@@ -339,18 +339,18 @@ func (r *Recorder) Close() error {
 // Stats reports the capture pipeline's own health — including its drops, which is
 // the number that keeps every other number honest.
 type Stats struct {
-	Captured int64  `json:"captured"`
-	Written  int64  `json:"written"`
-	Dropped  int64  `json:"dropped"`
+	Captured int64 `json:"captured"`
+	Written  int64 `json:"written"`
+	Dropped  int64 `json:"dropped"`
 	// CountsDropped is the number of bypassed requests whose token count was skipped because the
 	// count worker's queue was full; their rows keep tokens_before 0.
-	CountsDropped int64 `json:"counts_dropped"`
-	Errors   int64  `json:"errors"`
-	Queued   int    `json:"queued"`
-	QueueCap int    `json:"queue_cap"`
-	Clients  int    `json:"sse_clients"`
-	DBPath   string `json:"db_path"`
-	DBBytes  int64  `json:"db_bytes"`
+	CountsDropped int64  `json:"counts_dropped"`
+	Errors        int64  `json:"errors"`
+	Queued        int    `json:"queued"`
+	QueueCap      int    `json:"queue_cap"`
+	Clients       int    `json:"sse_clients"`
+	DBPath        string `json:"db_path"`
+	DBBytes       int64  `json:"db_bytes"`
 	// Mode is the proxy's operating mode ("active" | "observe"). The UI renders an
 	// unmissable banner in observe mode: every request was forwarded UNTOUCHED, so a
 	// reader who mistakes these figures for enforced savings has drawn exactly the wrong
