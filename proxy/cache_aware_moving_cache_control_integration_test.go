@@ -172,8 +172,10 @@ func TestCacheAwareClaudeCodeStyleMovingCacheControlIsNotStale(t *testing.T) {
 // cacheAwareStalePrefix (ErrStalePrefix): the stale-prefix hash comparison this test originally
 // exercised never runs, because there is no entry to compare against at all. Both counters guard
 // the identical outcome — no ask answered from a transcript that disagrees with what was actually
-// stashed — so this test checks that outcome (zero ask calls) and that ONE of the two decline
-// counters moved, not which one.
+// stashed — so this test checks that outcome: no ask over a transcript that is not turn 3's own,
+// and, when nothing was asked, that ONE of the two decline counters moved, not which one. (A
+// third outcome is also correct: the detached call can run after the host stashed turn 3's own
+// body, and then it asks over that consistent transcript. See the comment at the check.)
 func TestCacheAwareRealContentChangeInsideSpanStillDeclines(t *testing.T) {
 	var mu sync.Mutex
 	var bodies []string
@@ -287,9 +289,24 @@ func TestCacheAwareRealContentChangeInsideSpanStillDeclines(t *testing.T) {
 			asked = append(asked, b)
 		}
 	}
+	// THREE outcomes are correct, and which one happens is a race this test does not control. The
+	// commissioned call runs detached, and turn 3's OWN body is stashed by the host only after the
+	// pipeline returns:
+	//   - the call runs before that: the thread (new, since the edit breaks prefix continuity) has
+	//     nothing stashed, and it declines (ErrNoPrefix) or compares against turn 2's stash and
+	//     declines (ErrStalePrefix);
+	//   - the call runs after it: the stash is turn 3's own body, the span hash matches by
+	//     construction, and the ask is made over turn 3's own, self-consistent transcript.
+	// What must never happen is an ask answered from a transcript that disagrees with what the
+	// span claims: turn 2's text ("making progress") under turn 3's span. So any ask that was made
+	// must carry turn 3's edited message and none of turn 2's version of it.
+	for _, b := range asked {
+		if !strings.Contains(b, "MARK-T2: EDITED") || strings.Contains(b, "making progress") {
+			t.Fatalf("an ask was made over a transcript that is not turn 3's own: %q", b)
+		}
+	}
 	if len(asked) != 0 {
-		t.Fatalf("got %d ask calls; a real content change inside the span must decline BEFORE "+
-			"paying for a call that would answer from the wrong transcript: %q", len(asked), asked)
+		return // answered from turn 3's own stash: consistent, nothing was declined
 	}
 	// See the test's own doc comment: #423's thread detection can intercept this case earlier
 	// (ErrNoPrefix, a new unstashed thread) than the stale-prefix hash check (ErrStalePrefix) ever
