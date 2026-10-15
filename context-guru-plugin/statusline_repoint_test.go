@@ -128,7 +128,9 @@ func statusLineOf(t *testing.T, file string) (command string, refresh any, recor
 	return command, sl["refreshInterval"], recorded
 }
 
-func quoted(scripts string) string { return `python3 "` + filepath.Join(scripts, "statusline.py") + `"` }
+func quoted(scripts string) string {
+	return `python3 "` + filepath.Join(scripts, "statusline.py") + `"`
+}
 
 func TestUpdateRepointsTheStatusLine(t *testing.T) {
 	e := newRepointEnv(t)
