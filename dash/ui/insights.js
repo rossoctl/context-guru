@@ -994,13 +994,15 @@ function insChartTheme() {
     /* The VERDICT hues, read from the stylesheet rather than restated here, so a cell and the
      * table pill under it cannot disagree — they had, in three different colours for one item. */
     vd: {
-      remove: v('--ins-vd-remove', '#b02a1e'),
-      stale: v('--ins-vd-remove', '#b02a1e'),
-      consider: v('--ins-vd-consider', '#8a5800'),
-      keep: v('--ins-vd-keep', '#008300'),
+      /* The CELL variants: same hues as the table pills, softened for a large flat block. See
+       * the scheme comment in insights.css — one scheme, two densities. */
+      remove: v('--ins-cell-remove', '#cc6b60'),
+      stale: v('--ins-cell-remove', '#cc6b60'),
+      consider: v('--ins-cell-consider', '#c49a4d'),
+      keep: v('--ins-cell-keep', '#9aa2ae'),
     },
     /* Carried-but-never-invoked, declared beside the verdicts so the legend can name it. */
-    carried: v('--ins-carried', '#a79fd4'),
+    carried: v('--ins-carried', '#b0a9dc'),
     ink: v('--fg', '#1b1f1c'),
     muted: v('--fg-muted', '#5c635d'),
     faint: v('--fg-faint', '#8b918b'),
@@ -1255,19 +1257,31 @@ function insDrawChart(host, g, tl) {
       { name: 'removable waste', type: 'heatmap', data: byVd.remove,
         itemStyle: { color: t.vd.remove, borderRadius: 2, borderWidth: 2,
           borderColor: 'transparent' },
-        emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
+        /* focus 'self': only the hovered CELL, never its whole series. The default is
+         * 'series', which highlighted all 160 cells of a colour at once and read as the chart
+         * blinking. */
+        emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
       { name: 'removable waste', type: 'heatmap', data: byVd.stale,
         itemStyle: { color: t.vd.remove, borderRadius: 2, borderWidth: 2,
           borderColor: 'transparent' },
-        emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
+        /* focus 'self': only the hovered CELL, never its whole series. The default is
+         * 'series', which highlighted all 160 cells of a colour at once and read as the chart
+         * blinking. */
+        emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
       { name: 'below the evidence floor', type: 'heatmap', data: byVd.consider,
         itemStyle: { color: t.vd.consider, borderRadius: 2, borderWidth: 2,
           borderColor: 'transparent' },
-        emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
+        /* focus 'self': only the hovered CELL, never its whole series. The default is
+         * 'series', which highlighted all 160 cells of a colour at once and read as the chart
+         * blinking. */
+        emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
       { name: 'in use / built in', type: 'heatmap', data: byVd.keep,
         itemStyle: { color: t.vd.keep, borderRadius: 2, borderWidth: 2,
           borderColor: 'transparent' },
-        emphasis: { itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
+        /* focus 'self': only the hovered CELL, never its whole series. The default is
+         * 'series', which highlighted all 160 cells of a colour at once and read as the chart
+         * blinking. */
+        emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
       /* Carried and never invoked: neutral rather than any verdict hue, because this is the
        * ABSENCE of a call on that day, not a judgement about the capability. The row's verdict is
        * already shown wherever it WAS called. */
@@ -1277,7 +1291,8 @@ function insDrawChart(host, g, tl) {
        * legend entry, not a gradient. */
       { name: 'carried, never used', type: 'heatmap', data: idle,
         itemStyle: { color: t.carried, opacity: 1, borderRadius: 2,
-          borderWidth: 2, borderColor: 'transparent' } },
+          borderWidth: 2, borderColor: 'transparent' },
+        emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
       /* OUTSIDE THE SELECTION. Grey, and still visible: the reader is deciding whether their
        * range is the right one, which they cannot do if the rest of the history is blank. Kept
        * darker than the carried-only tint so a real invocation outside the range still reads as
@@ -1285,12 +1300,17 @@ function insDrawChart(host, g, tl) {
       /* Outside the selected range. ONE colour for both, because the distinction between an
        * invocation and mere carriage is not what this series is saying — it is saying "not
        * counted in the figures below". Two shades of it would be two unexplained greys again. */
+      /* focus 'self' here too. These are empty until a range is selected, so they cannot blink
+       * today — but an emphasis default that depends on a series happening to be empty is the
+       * kind of thing that comes back. */
       { name: 'outside the range', type: 'heatmap', data: usedOut,
         itemStyle: { color: t.carried, opacity: 0.45, borderRadius: 2,
-          borderWidth: 2, borderColor: 'transparent' } },
+          borderWidth: 2, borderColor: 'transparent' },
+        emphasis: { focus: 'self' } },
       { name: 'outside the range', type: 'heatmap', data: idleOut,
         itemStyle: { color: t.carried, opacity: 0.45, borderRadius: 2,
-          borderWidth: 2, borderColor: 'transparent' } },
+          borderWidth: 2, borderColor: 'transparent' },
+        emphasis: { focus: 'self' } },
     ],
   });
 

@@ -216,6 +216,31 @@ func cssRuleFor(t *testing.T, css, selector string) string {
 	return css[i+open : i+end]
 }
 
+// TestHoveringOneCellHighlightsOnlyThatCell.
+//
+// Reported from use: "when o hover mouse on light violed cells all cell start blinking".
+//
+// ECharts defaults a heatmap's emphasis to the whole SERIES, so hovering any one cell highlights
+// every cell that shares its colour — 160 of them on a real grid, which reads as the chart
+// flashing. `focus: 'self'` narrows it to the cell under the pointer, which is the only one the
+// tooltip is describing anyway.
+//
+// Asserted per series rather than once, because an emphasis block without a focus is the default
+// that caused this: adding a series and copying its neighbour's emphasis is how it comes back.
+func TestHoveringOneCellHighlightsOnlyThatCell(t *testing.T) {
+	code := stripJSComments(readUI(t, "ui/insights.js"))
+	emph := strings.Count(code, "emphasis: {")
+	focus := strings.Count(code, "focus: 'self'")
+	if emph == 0 {
+		t.Fatal("no series declares an emphasis style; hovering a cell would give no feedback")
+	}
+	if focus < emph {
+		t.Errorf("%d series declare emphasis but only %d set focus: 'self'. Without it ECharts "+
+			"highlights the whole SERIES, so hovering one cell flashes every cell of that "+
+			"colour — 160 of them on a real grid", emph, focus)
+	}
+}
+
 // TestEveryColourTheChartPaintsIsNamedInItsLegend.
 //
 // Reported from use: "All colors used in project should be in Legend. Currently i have colors that
@@ -242,8 +267,10 @@ func TestEveryColourTheChartPaintsIsNamedInItsLegend(t *testing.T) {
 			"legend entry into a dozen shades on screen, and a legend cannot name a gradient")
 	}
 	// Each data series takes a flat colour from the theme, and the two states that were grey-on-
-	// grey must now be genuinely different hues rather than the same ink at two opacities.
-	for _, tok := range []string{"--ins-vd-keep", "--ins-carried"} {
+	// grey must now be genuinely different hues rather than the same ink at two opacities. The
+	// chart reads the softened `--ins-cell-*` variants; see the derivation check in
+	// TestTheChartAndTheTablesSpeakOneColourLanguage for why those exist.
+	for _, tok := range []string{"--ins-cell-keep", "--ins-carried"} {
 		if !strings.Contains(code, "v('"+tok+"'") {
 			t.Errorf("the chart does not look up %s; the states that were two near-identical "+
 				"greys need distinct, separately-declared hues", tok)
@@ -290,19 +317,32 @@ func TestTheChartAndTheTablesSpeakOneColourLanguage(t *testing.T) {
 
 	// Every verdict colour is declared once, in the stylesheet, and READ by the chart rather than
 	// copied into it.
+	//
+	// The chart reads the `--ins-cell-*` variants rather than the pill tokens: a table pill is
+	// small text on a soft background and needs the full-strength hue, while a chart cell is a
+	// large flat block where that same hue is a slab. They are DERIVED from the pill tokens with
+	// color-mix, so there is still one scheme — which is what this test protects — at two
+	// densities. A cell token that stopped deriving from its pill token is the drift to catch.
 	for _, tok := range []string{"--ins-vd-remove", "--ins-vd-consider", "--ins-vd-keep"} {
 		if !strings.Contains(css, tok+":") {
 			t.Errorf("%s is not declared in insights.css; the chart has nowhere to read it from",
 				tok)
 		}
+		cell := strings.Replace(tok, "--ins-vd-", "--ins-cell-", 1)
+		val := cssTokenValue(t, css, cell)
+		if !strings.Contains(val, "var("+tok+")") {
+			t.Errorf("%s = %q, which does not derive from %s. The chart paints the cell variant, "+
+				"so a cell colour that stops tracking its pill colour is exactly how the chart "+
+				"and the tables drift apart again", cell, val, tok)
+		}
 		// READ, not merely mentioned. `strings.Contains(js, tok)` is not enough: a chart that
 		// hardcodes '#b02a1e' still mentions the token in its fallback argument, and that mutant
 		// survived this test — the exact drift it exists to catch, since the stylesheet could
 		// then change while the chart kept the old hue. So require the lookup form.
-		if !strings.Contains(stripJSComments(js), "v('"+tok+"'") {
+		if !strings.Contains(stripJSComments(js), "v('"+cell+"'") {
 			t.Errorf("insights.js does not LOOK UP %s (expected v('%s', …)); the chart is "+
 				"painting that verdict with a colour of its own, which is how the chart and the "+
-				"tables came to disagree in the first place", tok, tok)
+				"tables came to disagree in the first place", cell, cell)
 		}
 	}
 
