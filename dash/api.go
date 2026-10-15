@@ -1265,6 +1265,8 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 			}
 			// The ledger reads only the sessions in which summarize ever acted, so its cost follows
 			// their rows, not the window or the table. The status line then agrees with the dashboard.
+			// Without a price table or a window resolver there is nothing to cap against: say so.
+			o.ReplayCapNotApplied = a.pricer == nil || a.windows == nil
 			if a.pricer != nil && a.windows != nil {
 				if l, lerr := db.SummarizeLedgerFor(f, a.windows, a.pricer); lerr == nil {
 					o.ApplySummarizeLedger(l)
@@ -1368,7 +1370,7 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		// Before the additions below: they add to the totals this corrects.
 		o.ApplySummarizeLedger(sumLedger)
 		o.ApplyReplayLedger(repLedger)
-		o.ReplayCapNotApplied = repFailed
+		o.ReplayCapNotApplied = repFailed || a.pricer == nil || a.windows == nil
 		if cachesplitHist != nil {
 			o.CachesplitHistorical = cachesplitHist
 			// Folded into the running total here, not inside Overview() itself, because

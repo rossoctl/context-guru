@@ -567,3 +567,30 @@ func replayCapAPI(t *testing.T) (replayCapHarness, int64) {
 	api.Mount(mux)
 	return replayCapHarness{a: api, mux: mux}, DayMs + 10
 }
+
+// With no price table or no window resolver the cap cannot run, and the headline says so.
+func TestHeadlineSaysCapNotAppliedWithoutAPriceTable(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		pricer, window bool
+	}{{"no pricer", false, true}, {"no windows", true, false}, {"neither", false, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, until := replayCapAPI(t)
+			if !tc.pricer {
+				api.a.pricer = nil
+			}
+			if !tc.window {
+				api.a.windows = nil
+			}
+			for _, path := range []string{fmt.Sprintf("/api/stats?since=0&until=%d", until), fmt.Sprintf("/api/stats?lean=1&since=0&until=%d", until)} {
+				var b struct {
+					NotApplied bool `json:"replay_cap_not_applied"`
+				}
+				api.get(t, path, &b)
+				if !b.NotApplied {
+					t.Errorf("%s: replay_cap_not_applied is false with the cap unable to run", path)
+				}
+			}
+		})
+	}
+}
