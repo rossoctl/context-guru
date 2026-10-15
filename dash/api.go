@@ -759,6 +759,7 @@ var routeBounds = map[string]time.Duration{
 	// A replay of the account's stored requests under dozens of configurations: minutes on a
 	// large account, and the plugin waits for it.
 	"GET /api/adapt/compaction": 5 * time.Minute,
+	"GET /api/save-more/config": 5 * time.Minute,
 	// The routes behind cachedRoute: the first reader after a restart or a lapsed cache waits for the
 	// real computation, so it gets the heavy bound rather than the 10 s that is right for a read that
 	// is normally already in the cache.

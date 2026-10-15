@@ -87,6 +87,42 @@ func AdaptCompactionKnobAllowed(comp, key string, v int) bool {
 	return false
 }
 
+// isAdaptReplayable says the replay can run name: it acts on messages and calls no model. The
+// model-calling components (extract_llm, its sweep, the summarizers) would need the account's
+// model to replay, and the envelope components (cachesplit, toolfilter, cacheinject,
+// toolschema) never touch a message, so neither changes a replayed block.
+func isAdaptReplayable(name string) bool {
+	if strings.Contains(name, "llm") || strings.Contains(name, "summar") {
+		return false
+	}
+	switch name {
+	case "cachesplit", "toolfilter", "cacheinject", "toolschema":
+		return false
+	}
+	return true
+}
+
+// fullPipeline is the pipeline applying the arm would store: a preset's own, or the account's
+// with the candidates replaced (AdaptCompactionMerge).
+func (s adaptSpec) fullPipeline(curPipe []string) []string {
+	if s.preset != "" {
+		p, _ := config.PresetPipeline(s.preset)
+		return p
+	}
+	return AdaptCompactionMerge(curPipe, adaptCandidatesOf(s.comps))
+}
+
+// adaptCandidatesOf keeps the components the search may move.
+func adaptCandidatesOf(comps []string) []string {
+	var out []string
+	for _, c := range comps {
+		if isAdaptCandidate(c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func isAdaptCandidate(name string) bool {
 	for _, c := range AdaptCompactionCandidates {
 		if c == name {
@@ -133,6 +169,21 @@ type AdaptCompactionOption struct {
 	UnseenUSD float64 `json:"unseen_usd"`
 	// Busts counts covered requests on which this option rewrote content it had already sent.
 	Busts int `json:"busts"`
+	// Preset names the shipped preset this option is, or is empty.
+	Preset string `json:"preset,omitempty"`
+	// RangeUSD brackets NetUSD where the replay is uncertain: the low end is NetUSD itself (every
+	// conservative assumption kept), the high end credits what the replay is known to miss — the
+	// charge for unseen savings refunded, and any gain over the current configuration scaled up
+	// by the share of the current configuration's booked savings the replay reproduces.
+	RangeUSD [2]float64 `json:"range_usd"`
+	// NotReplayed are the option's model-calling components: excluded from its figure, which is
+	// then Class "estimate" rather than "counterfactual", and Detail says what was left out.
+	NotReplayed []string `json:"not_replayed,omitempty"`
+	Class       string   `json:"class"`
+	// DropsOverrides are the account's own component settings applying this option removes.
+	DropsOverrides []string `json:"drops_overrides,omitempty"`
+	// ExpandUSD is the expand round trips this option avoids (negative) by carrying no offloader.
+	ExpandUSD float64 `json:"expand_usd,omitempty"`
 
 	spec adaptSpec
 	cost float64
@@ -144,8 +195,45 @@ type AdaptCompactionRecommendation struct {
 	Change      string  `json:"change"`
 	NetDeltaUSD float64 `json:"net_delta_usd"`
 	PerMonthUSD float64 `json:"per_month_usd"`
+	PerWeekUSD  float64 `json:"per_week_usd"`
 	Effective   string  `json:"effective"`
 	Reason      string  `json:"reason"`
+	// GainUSD is NetDeltaUSD's basis restated: the covered requests, the options' own pricing.
+	// GainWindowUSDEst scales it to the whole window by the share of the observed savings those
+	// requests carry — an estimate, and labelled one.
+	GainUSD          float64    `json:"gain_usd"`
+	GainWindowUSDEst float64    `json:"gain_window_usd_est"`
+	GainRangeUSD     [2]float64 `json:"gain_range_usd"`
+}
+
+// AdaptReproduction is the accuracy check every recommendation stands on: the replay of the
+// CURRENT configuration against what the account's own rows booked for it, on the same covered
+// requests and the same pricing. A replay that does not reproduce the history is not trusted.
+type AdaptReproduction struct {
+	ReplayedUSD  float64 `json:"replayed_usd"`
+	ObservedUSD  float64 `json:"observed_usd"`
+	ErrorPct     float64 `json:"error_pct"`
+	TolerancePct float64 `json:"tolerance_pct"`
+	OK           bool    `json:"ok"`
+	Requests     int     `json:"requests"`
+	Note         string  `json:"note"`
+}
+
+// AdaptToDate is the plugin's one-line "what your current config saved so far".
+type AdaptToDate struct {
+	SavedUSD float64 `json:"saved_usd"`
+	Since    int64   `json:"since"`
+	Until    int64   `json:"until"`
+	Class    string  `json:"class"`
+	Label    string  `json:"label"`
+}
+
+// AdaptObserved is the savings to date with the configuration the account ran.
+type AdaptObserved struct {
+	USD         float64                   `json:"usd"`
+	Requests    int                       `json:"requests"`
+	ByComponent []AdaptCompactionMeasured `json:"by_component"`
+	Basis       string                    `json:"basis"`
 }
 
 // AdaptCompactionCoverage says how much of the window the dollar figures stand on.
@@ -173,7 +261,13 @@ type AdaptCompactionCoverage struct {
 	FidelityBlocks     int   `json:"fidelity_blocks"`
 	FidelityReproduced int   `json:"fidelity_reproduced"`
 	ArmsEvaluated      int   `json:"arms_evaluated"`
-	DurationMs         int64 `json:"duration_ms"`
+	// ObservedUSD is the savings to date with the configuration the account ran: every priced
+	// request in the window (stored content or not), each component's booked token counts
+	// re-priced at the replay's rates. ObservedRequests is how many requests that is.
+	ObservedUSD         float64            `json:"observed_usd"`
+	ObservedRequests    int                `json:"observed_requests"`
+	ObservedByComponent map[string]float64 `json:"observed_by_component,omitempty"`
+	DurationMs          int64              `json:"duration_ms"`
 }
 
 // AdaptCompactionMeasured is one current component's saving, measured and replayed.
@@ -205,6 +299,9 @@ type AdaptCompactionReport struct {
 	Best           string                         `json:"best"`
 	Options        []AdaptCompactionOption        `json:"options"`
 	Recommendation *AdaptCompactionRecommendation `json:"recommendation"`
+	Observed       AdaptObserved                  `json:"observed"`
+	ToDate         AdaptToDate                    `json:"to_date"`
+	Reproduction   AdaptReproduction              `json:"reproduction"`
 	Warnings       []string                       `json:"warnings"`
 	Coverage       AdaptCompactionCoverage        `json:"coverage"`
 	Pricing        string                         `json:"pricing"`
@@ -220,11 +317,93 @@ type AdaptCompactionReport struct {
 // searched settings. The report hands these out under short ids, and the apply route takes only
 // an id from a report the same account just fetched (see API.AdaptOffer).
 type AdaptCompactionChoice struct {
-	Candidates []string
-	Settings   map[string]map[string]int
-	Label      string
+	// Preset, when set, is a shipped preset to switch to; Candidates and Settings are then unused.
+	// DropOverrides lists the account's own blocks the switch removes ("<preset> without your
+	// overrides").
+	Preset        string
+	DropOverrides []string
+	Candidates    []string
+	Settings      map[string]map[string]int
+	Label         string
 	// ConfigHash is AdaptConfigHash of the document the report was computed against.
 	ConfigHash string
+}
+
+// AdaptPresetDoc is doc switched to a shipped preset: `preset: name` with no explicit pipeline, so
+// the preset decides what runs; every other key is kept. Component blocks the account had stay
+// and win over the preset's own, which is what a stated block means — and why the report prices
+// a preset option on THIS document rather than on the bare preset.
+func AdaptPresetDoc(doc, name string) (string, error) {
+	out, _, err := AdaptPresetDocWith(doc, name, false)
+	return out, err
+}
+
+// AdaptPresetDocWith is AdaptPresetDoc, optionally WITHOUT the account's overrides: its own
+// blocks for the preset's compaction components are dropped, so the preset's tuning decides.
+// overrides names the blocks that differ from the preset — the ones dropOverrides removes, and
+// the ones whose presence makes the two documents price differently. Blocks for anything else
+// (the tool removal list, a model component, a component the preset does not run) are kept
+// either way: they are not the preset's to decide.
+func AdaptPresetDocWith(doc, name string, dropOverrides bool) (string, []string, error) {
+	m := map[string]any{}
+	if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
+		return "", nil, fmt.Errorf("your stored configuration does not parse: %w", err)
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	m["preset"] = name
+	delete(m, "pipeline")
+	pipe, _ := config.PresetPipeline(name)
+	bare, err := config.LoadBytes([]byte("preset: " + name + "\n"))
+	if err != nil {
+		return "", nil, err
+	}
+	var overrides []string
+	if comps, _ := m["components"].(map[string]any); comps != nil {
+		for _, c := range slices.Sorted(maps.Keys(comps)) {
+			if !slices.Contains(pipe, c) || !isAdaptReplayable(c) {
+				continue
+			}
+			var own, preset any
+			raw, _ := yaml.Marshal(comps[c])
+			_ = yaml.Unmarshal(raw, &own)
+			if node, ok := bare.Components[c]; ok {
+				_ = node.Decode(&preset)
+			}
+			if adaptOverrides(own, preset) {
+				overrides = append(overrides, c)
+				if dropOverrides {
+					delete(comps, c)
+				}
+			}
+		}
+		if len(comps) == 0 {
+			delete(m, "components")
+		}
+	}
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err := config.LoadBytes(out); err != nil {
+		return "", nil, err
+	}
+	return string(out), overrides, nil
+}
+
+// adaptOverrides says whether an account's block own changes the preset's block preset: a key
+// the account states with a value the preset does not have.
+func adaptOverrides(own, preset any) bool {
+	om, _ := own.(map[string]any)
+	pm, _ := preset.(map[string]any)
+	for k, v := range om {
+		pv, ok := pm[k]
+		if !ok || fmt.Sprint(pv) != fmt.Sprint(v) {
+			return true
+		}
+	}
+	return false
 }
 
 // AdaptConfigHash identifies a configuration document; an apply against a document that has
@@ -263,6 +442,9 @@ type adaptReq struct {
 	observed                            map[string]float64 // candidate -> its booked saving here, re-priced
 	// inWindow is false on a session's lead-in: replayed for its state, never priced or counted.
 	inWindow bool
+	// expandTok is what expand restored on this request: originals an offloader parked and the
+	// agent asked back for, re-sent as tool output (requests.expand_tokens).
+	expandTok int64
 }
 
 type adaptSession struct {
@@ -275,6 +457,14 @@ type adaptSession struct {
 type adaptSpec struct {
 	comps    []string
 	settings map[string]map[string]int
+	// base is the configuration document the arm's other component settings come from: the
+	// account's own for a custom arm, `preset: X` for a shipped preset, "" for none.
+	base string
+	// preset names the shipped preset this arm is; "" for a custom arm.
+	preset string
+	// dropOverrides, on a preset arm, are the account's own blocks it drops: the preset as it
+	// ships rather than as the account's settings would tune it.
+	dropOverrides []string
 }
 
 func (s adaptSpec) key() string {
@@ -282,6 +472,12 @@ func (s adaptSpec) key() string {
 		return "none"
 	}
 	var b strings.Builder
+	if s.preset != "" {
+		b.WriteString("preset:" + s.preset + "|")
+		if len(s.dropOverrides) > 0 {
+			b.WriteString("pure|")
+		}
+	}
 	b.WriteString(strings.Join(s.comps, "+"))
 	for _, c := range slices.Sorted(maps.Keys(s.settings)) {
 		if !s.has(c) {
@@ -291,6 +487,7 @@ func (s adaptSpec) key() string {
 			fmt.Fprintf(&b, ";%s.%s=%d", c, k, s.settings[c][k])
 		}
 	}
+	b.WriteString("@" + AdaptConfigHash(s.base)[:4])
 	return b.String()
 }
 
@@ -338,7 +535,8 @@ func (s adaptSpec) moves(c adaptSpec) int {
 }
 
 func (s adaptSpec) clone() adaptSpec {
-	out := adaptSpec{comps: append([]string(nil), s.comps...), settings: map[string]map[string]int{}}
+	out := adaptSpec{comps: append([]string(nil), s.comps...), settings: map[string]map[string]int{},
+		base: s.base, preset: s.preset, dropOverrides: s.dropOverrides}
 	for c, m := range s.settings {
 		out.settings[c] = map[string]int{}
 		for k, v := range m {
@@ -357,18 +555,36 @@ func (s adaptSpec) has(c string) bool {
 	return false
 }
 
-// pipeline builds the replay pipeline: candidate components only.
+// pipeline builds the replay pipeline: the arm's replayable components, in its order, with the
+// rest of its base document's settings (a preset's tuned blocks, the account's own) and the
+// searched knobs on top.
 func (s adaptSpec) pipeline() (*components.Pipeline, error) {
-	doc := map[string]any{"pipeline": s.comps}
-	if len(s.settings) > 0 {
-		comps := map[string]any{}
-		for c, m := range s.settings {
-			if s.has(c) && len(m) > 0 {
-				comps[c] = m
-			}
+	doc := map[string]any{}
+	if s.base != "" {
+		if err := yaml.Unmarshal([]byte(s.base), &doc); err != nil {
+			return nil, err
 		}
-		if len(comps) > 0 {
+		if doc == nil {
+			doc = map[string]any{}
+		}
+	}
+	doc["pipeline"] = s.comps
+	for c, m := range s.settings {
+		if !s.has(c) || len(m) == 0 {
+			continue
+		}
+		comps, _ := doc["components"].(map[string]any)
+		if comps == nil {
+			comps = map[string]any{}
 			doc["components"] = comps
+		}
+		block, _ := comps[c].(map[string]any)
+		if block == nil {
+			block = map[string]any{}
+			comps[c] = block
+		}
+		for k, v := range m {
+			block[k] = v
 		}
 	}
 	raw, err := yaml.Marshal(doc)
@@ -392,9 +608,9 @@ func adaptSpecFromDoc(doc string) (adaptSpec, []string, error) {
 	if f.ParseError != "" {
 		return adaptSpec{}, nil, fmt.Errorf("config does not load: %s", f.ParseError)
 	}
-	s := adaptSpec{settings: map[string]map[string]int{}}
+	s := adaptSpec{settings: map[string]map[string]int{}, base: doc}
 	for _, c := range f.Pipeline {
-		if isAdaptCandidate(c) {
+		if isAdaptReplayable(c) {
 			s.comps = append(s.comps, c)
 		}
 	}
@@ -466,7 +682,7 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 	args = append(args, winArgs...)
 	rows, err := d.sql.QueryContext(ctx, `SELECT r.id, r.session_id, r.model, r.ts, r.fresh_input,
 		r.cache_read, r.cache_write, r.cache_write_1h, r.output_tokens, r.cost_usd, r.token_accounting,
-		EXISTS(SELECT 1 FROM request_content c WHERE c.request_id = r.id)
+		r.expand_tokens, EXISTS(SELECT 1 FROM request_content c WHERE c.request_id = r.id)
 		FROM requests r WHERE `+cond+` ORDER BY r.session_id, r.ts, r.id`, args...)
 	if err != nil {
 		return nil, err
@@ -479,6 +695,7 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 	}
 	prices := map[string]pf{}
 	byID := map[int64]*adaptReq{}
+	all := map[int64]*adaptReq{}
 	var sessions []*adaptSession
 	seenSess, contentSess := map[string]bool{}, map[string]bool{}
 	for rows.Next() {
@@ -486,7 +703,7 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 		var sess, acct string
 		var has int
 		if err := rows.Scan(&r.id, &sess, &r.model, &r.ts, &r.fresh, &r.read, &r.write, &r.write1h,
-			&r.output, &r.cost, &acct, &has); err != nil {
+			&r.output, &r.cost, &acct, &r.expandTok, &has); err != nil {
 			return nil, err
 		}
 		r.inWindow = r.ts >= f.Since
@@ -496,6 +713,20 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 			if !seenSess[sess] {
 				seenSess[sess] = true
 				cov.Sessions++
+			}
+		}
+		pr, ok := prices[r.model]
+		if !ok {
+			pr.p, pr.ok = p.Price(ctx, r.model)
+			pr.ok = pr.ok && !pr.p.Zero()
+			pr.factor, _ = tokens.BilledDeltaFactor(r.model)
+			prices[r.model] = pr
+		}
+		priced := pr.ok && acct == AccountingComplete
+		if priced {
+			r.price, r.factor = pr.p, pr.factor
+			if r.inWindow {
+				all[r.id] = r // savings to date are over every priced request, content or not
 			}
 		}
 		if has == 0 {
@@ -508,17 +739,9 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 				cov.SessionsWithContent++
 			}
 		}
-		pr, ok := prices[r.model]
-		if !ok {
-			pr.p, pr.ok = p.Price(ctx, r.model)
-			pr.ok = pr.ok && !pr.p.Zero()
-			pr.factor, _ = tokens.BilledDeltaFactor(r.model)
-			prices[r.model] = pr
-		}
-		if !pr.ok || acct != AccountingComplete {
+		if !priced {
 			continue
 		}
-		r.price, r.factor = pr.p, pr.factor
 		if n := len(sessions); n == 0 || sessions[n-1].id != sess {
 			sessions = append(sessions, &adaptSession{id: sess})
 		}
@@ -597,7 +820,7 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 			if strings.Contains(text[max(0, len(text)-40):], "…[+") || absInt(tok-bt) > max(2, bt/50) {
 				canon.text, canon.tokens, canon.modelled = "", bt, true
 				for _, c := range strings.Split(touched, ",") {
-					if isAdaptCandidate(c) {
+					if isAdaptReplayable(c) {
 						canon.touched = append(canon.touched, c)
 					}
 				}
@@ -640,6 +863,22 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 		if err := orow.Scan(&id, &comp, &gross, &unique); err != nil {
 			return nil, err
 		}
+		// Savings to date: every priced request in the window, whether or not its content is stored.
+		if ar := all[id]; ar != nil {
+			u := unique
+			if u < 0 {
+				u = 0
+			} else if u > gross {
+				u = gross
+			}
+			tail, repeat, _ := adaptRates(ar)
+			v := (float64(u)*tail + float64(gross-u)*repeat) * ar.factor
+			cov.ObservedUSD += v
+			if cov.ObservedByComponent == nil {
+				cov.ObservedByComponent = map[string]float64{}
+			}
+			cov.ObservedByComponent[comp] += v
+		}
 		if r := byID[id]; r != nil && r.inWindow {
 			if r.observed == nil {
 				r.observed = map[string]float64{}
@@ -656,6 +895,7 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 	if err := orow.Err(); err != nil {
 		return nil, err
 	}
+	cov.ObservedRequests = len(all)
 	for _, n := range perReq {
 		if n >= defaultContentPerReq {
 			cov.RequestsOverCap++
@@ -801,8 +1041,9 @@ func adaptRates(r *adaptReq) (tail, repeat, write float64) {
 
 // adaptEval is one arm's replay over a population.
 type adaptEval struct {
-	deltaUSD   float64 // vs what was actually sent, unseenUSD and declUSD included
+	deltaUSD   float64 // vs what was actually sent, unseenUSD, declUSD and expandUSD included
 	unseenUSD  float64
+	expandUSD  float64
 	declUSD    float64 // the expand declaration's part, relative to the account's own pipeline
 	busts      int
 	reproduced int // blocks whose replayed size equals the stored sent size
@@ -1037,6 +1278,10 @@ func (s adaptSpec) neighbours() []adaptSpec {
 		out = append(out, n)
 	}
 	for i := 0; i+1 < len(s.comps); i++ {
+		// Only candidates move: any other component keeps its place in the stored pipeline.
+		if !isAdaptCandidate(s.comps[i]) || !isAdaptCandidate(s.comps[i+1]) {
+			continue
+		}
 		n := s.clone()
 		n.comps[i], n.comps[i+1] = n.comps[i+1], n.comps[i]
 		out = append(out, n)
@@ -1171,6 +1416,21 @@ func adaptDeclUSD(sessions []*adaptSession, decl int) float64 {
 	return usd
 }
 
+// adaptExpandUSD is what the expand round trips on sessions cost: the restored originals,
+// re-sent as tool output and priced as a repeat.
+func adaptExpandUSD(sessions []*adaptSession) float64 {
+	var usd float64
+	for _, s := range sessions {
+		for _, r := range s.reqs {
+			if r.inWindow && r.expandTok > 0 {
+				_, repeat, _ := adaptRates(r)
+				usd += float64(r.expandTok) * repeat * r.factor
+			}
+		}
+	}
+	return usd
+}
+
 // eval prices spec on pop: the replay, the declaration change, and the unseen saving of every
 // current component spec drops.
 func (run *adaptRun) eval(pop *adaptPop, spec adaptSpec) (adaptEval, error) {
@@ -1178,7 +1438,8 @@ func (run *adaptRun) eval(pop *adaptPop, spec adaptSpec) (adaptEval, error) {
 		return e, nil
 	}
 	decl := 0
-	switch has := adaptHasOffload(AdaptCompactionMerge(run.curPipe, spec.comps)); {
+	has := adaptHasOffload(spec.fullPipeline(run.curPipe))
+	switch {
 	case has && !run.curOffload:
 		decl = run.declTok
 	case !has && run.curOffload:
@@ -1192,6 +1453,12 @@ func (run *adaptRun) eval(pop *adaptPop, spec adaptSpec) (adaptEval, error) {
 		e.declUSD = adaptDeclUSD(pop.sessions, decl)
 		e.deltaUSD += e.declUSD
 	}
+	// Expand round trips, where the rows know them: an arm with no offloader parks nothing, so
+	// the originals the agent asked back for are not re-sent.
+	if !has && run.curOffload {
+		e.expandUSD = -adaptExpandUSD(pop.sessions)
+		e.deltaUSD += e.expandUSD
+	}
 	for _, c := range run.cur.comps {
 		if !spec.has(c) {
 			e.unseenUSD += math.Max(0, pop.observed[c]-pop.seenLoss[c])
@@ -1202,18 +1469,43 @@ func (run *adaptRun) eval(pop *adaptPop, spec adaptSpec) (adaptEval, error) {
 	return e, nil
 }
 
+// adaptChange is the recommendation's one line: what applying best does, in plain words,
+// including any of the account's own settings it removes.
+func adaptChange(best, cur AdaptCompactionOption) string {
+	c := "run " + best.Label + " instead of " + cur.Label
+	if d := best.spec.dropOverrides; len(d) > 0 {
+		c = "switch to preset " + best.Preset + " as it ships, which removes your own settings for " +
+			strings.Join(d, ", ")
+	}
+	return c
+}
+
+// adaptReproTolerance is how far the replay of the current configuration may sit from what the
+// rows booked for it before no recommendation is trusted: a relative error, with a dollar floor
+// below which the two are too small to tell apart.
+const (
+	adaptReproTolerancePct = 15.0
+	adaptReproFloorUSD     = 0.05
+)
+
 // AdaptCompaction builds the report for one tenant. curDoc is the account's stored config,
-// defDoc the service default.
-func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, curDoc, defDoc string) (*AdaptCompactionReport, error) {
+// defDoc the service default. custom=false prices every shipped preset; custom=true searches
+// which deterministic components run, their order and two thresholds.
+func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, curDoc, defDoc string, custom bool) (*AdaptCompactionReport, error) {
 	start := time.Now()
-	rep := &AdaptCompactionReport{Kind: "compaction", Version: 1, Class: "counterfactual",
-		Method: "the deterministic compaction components replayed on your stored requests, " +
-			"searched over which run, their order and two thresholds",
+	rep := &AdaptCompactionReport{Kind: "compaction", Version: 2, Class: "counterfactual",
+		Method: "every shipped preset replayed on your stored requests",
 		Pricing: "deployed gateway rates; gross over every covered request: fresh input, cache writes " +
 			"(5m and 1h tiers as billed), cache reads and output; a block's change priced at its " +
 			"first appearance as the uncached tail and at each later request as a read (hit), a write " +
 			"(full-prefix rewrite) or fresh; rewriting already-sent content re-bills that request's " +
-			"cache read as a write; offloading options carry the expand tool declaration"}
+			"cache read as a write; sessions the window cuts into are read from their start; " +
+			"offloading options carry the expand tool declaration, and an option with no offloader " +
+			"avoids the expand round trips the rows recorded"}
+	if custom {
+		rep.Method = "every shipped preset, and a search over which deterministic components run, " +
+			"their order and two thresholds, replayed on your stored requests"
+	}
 	rep.Window.Since, rep.Window.Until = f.Since, f.Until
 	if p == nil {
 		return nil, fmt.Errorf("no pricer: this proxy has no rate card")
@@ -1235,7 +1527,252 @@ func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, 
 	run := &adaptRun{ctx: ctx, cur: cur, curPipe: curPipe, declTok: expandDeclTokens(),
 		curOffload: adaptHasOffload(curPipe)}
 
-	// The search population: the most recent sessions up to adaptSearchRequests.
+	// The arms to price on everything covered. Custom: the search's few best, found on a
+	// recent-sessions sample. Presets: every one we ship.
+	var arms []adaptSpec
+	whole, err := run.population(sessions)
+	if err != nil {
+		return nil, err
+	}
+	{
+		for _, name := range config.PresetNames() {
+			// The document applying it would store — the account's own, switched to the preset —
+			// so the account's component blocks, which win over the preset's, are priced too.
+			doc, overrides, err := AdaptPresetDocWith(curDoc, name, false)
+			if err != nil {
+				continue
+			}
+			ps, _, err := adaptSpecFromDoc(doc)
+			if err != nil {
+				continue // a preset that does not load is not an option
+			}
+			ps.preset = name
+			arms = append(arms, ps)
+			// The account's own blocks change this preset: the pure preset is a second option,
+			// or a tuned account could never see or reach it.
+			if len(overrides) > 0 {
+				pure, _, err := AdaptPresetDocWith(curDoc, name, true)
+				if err != nil {
+					continue
+				}
+				pp, _, err := adaptSpecFromDoc(pure)
+				if err != nil {
+					continue
+				}
+				pp.preset, pp.dropOverrides = name, overrides
+				arms = append(arms, pp)
+			}
+		}
+	}
+	if custom {
+		found, err := run.search(sessions, rep, def, whole)
+		if err != nil {
+			return nil, err
+		}
+		arms = append(arms, found...)
+	}
+	option := func(s adaptSpec) (AdaptCompactionOption, adaptEval, error) {
+		e, err := run.eval(whole, s)
+		if err != nil {
+			return AdaptCompactionOption{}, e, err
+		}
+		cost := rep.Coverage.CoveredBilledUSD + e.deltaUSD
+		full := s.fullPipeline(curPipe)
+		o := AdaptCompactionOption{ID: s.key(), Label: adaptLabel(s), BilledUSD: cost, Pipeline: full,
+			UnseenUSD: e.unseenUSD, Busts: e.busts, SpendUSD: e.declUSD, ExpandUSD: e.expandUSD,
+			Preset: s.preset, spec: s, cost: cost}
+		for _, c := range full {
+			if !isAdaptReplayable(c) && (strings.Contains(c, "llm") || strings.Contains(c, "summar")) {
+				o.NotReplayed = append(o.NotReplayed, c)
+			}
+		}
+		o.Class = "counterfactual"
+		if len(o.NotReplayed) > 0 {
+			o.Class = "estimate"
+		}
+		return o, e, nil
+	}
+	none, _, err := option(adaptSpec{})
+	if err != nil {
+		return nil, err
+	}
+	curOpt, curEval, err := option(cur)
+	if err != nil {
+		return nil, err
+	}
+	rep.Coverage.FidelityBlocks, rep.Coverage.FidelityReproduced = curEval.compared, curEval.reproduced
+	for _, c := range cur.comps {
+		rep.Measured = append(rep.Measured, AdaptCompactionMeasured{Component: c,
+			MeasuredUSD: whole.observed[c], ReplayedUSD: whole.seenLoss[c]})
+	}
+
+	// (a) Savings to date, observed. (b) The reproduction check: the replay of the current
+	// configuration against what was booked for it on the same covered requests — the raw replay,
+	// before any unseen-saving charge, which would make the two agree by construction.
+	rep.Observed = AdaptObserved{USD: rep.Coverage.ObservedUSD, Requests: rep.Coverage.ObservedRequests,
+		Basis: "each component's booked token counts on every priced request in the window, re-priced at " +
+			"the gateway rates the replay uses"}
+	for _, c := range slices.Sorted(maps.Keys(rep.Coverage.ObservedByComponent)) {
+		rep.Observed.ByComponent = append(rep.Observed.ByComponent, AdaptCompactionMeasured{Component: c,
+			MeasuredUSD: rep.Coverage.ObservedByComponent[c]})
+	}
+	rep.ToDate = AdaptToDate{SavedUSD: rep.Observed.USD, Since: f.Since, Until: f.Until, Class: "observed",
+		Label: "what your current config saved so far"}
+	rawNone, _ := run.replay(whole, adaptSpec{})
+	rawCur, _ := run.replay(whole, cur)
+	repro := AdaptReproduction{ReplayedUSD: rawNone.deltaUSD - rawCur.deltaUSD,
+		TolerancePct: adaptReproTolerancePct, Requests: rep.Coverage.CoveredRequests}
+	for _, c := range cur.comps {
+		repro.ObservedUSD += whole.observed[c]
+	}
+	diff := math.Abs(repro.ReplayedUSD - repro.ObservedUSD)
+	if repro.ObservedUSD > 0 {
+		repro.ErrorPct = 100 * diff / repro.ObservedUSD
+	}
+	repro.OK = rep.Coverage.CoveredRequests > 0 && (diff <= adaptReproFloorUSD || repro.ErrorPct <= adaptReproTolerancePct)
+	switch {
+	case rep.Coverage.CoveredRequests == 0:
+		repro.Note = "nothing to replay"
+	case repro.OK:
+		repro.Note = fmt.Sprintf("the replay of your configuration reproduces what it saved on these requests "+
+			"within %.1f%% ($%.2f)", repro.ErrorPct, diff)
+	default:
+		repro.Note = fmt.Sprintf("the replay of your configuration is %.1f%% ($%.2f) away from what it saved "+
+			"on these requests, more than %.0f%%: its figures are shown but nothing is recommended",
+			repro.ErrorPct, diff, adaptReproTolerancePct)
+	}
+	rep.Reproduction = repro
+	// The share of the current configuration's booked savings the replay sees: the scale for
+	// the high end of every range. Clamped so a near-blind replay cannot claim a tenfold upside.
+	seenFrac := 1.0
+	if repro.ObservedUSD > 0 {
+		seenFrac = math.Max(0.2, math.Min(1, repro.ReplayedUSD/repro.ObservedUSD))
+	}
+
+	rep.choices = map[string]AdaptCompactionChoice{}
+	idOf := map[string]string{} // spec key -> short id
+	confHash := AdaptConfigHash(curDoc)
+	curNet := none.cost - curOpt.cost
+	add := func(o AdaptCompactionOption, id, detail string, searched bool) string {
+		if have, ok := idOf[o.ID]; ok && o.Preset == "" {
+			return have
+		}
+		// A searched option that costs what one already listed costs tells the reader nothing
+		// new: most are reorderings of components that act on none of the stored content.
+		if searched {
+			for _, x := range rep.Options {
+				if math.Abs(x.cost-o.cost) < 0.001 {
+					return ""
+				}
+			}
+		}
+		idOf[o.ID] = id
+		rep.choices[id] = AdaptCompactionChoice{Preset: o.Preset, DropOverrides: o.spec.dropOverrides,
+			Candidates: adaptCandidatesOf(o.spec.comps),
+			Settings:   o.spec.settings, Label: o.Label, ConfigHash: confHash}
+		o.ID, o.Detail = id, detail
+		if detail == "" {
+			o.Detail = strings.Join(o.Pipeline, ", ")
+		}
+		if len(o.NotReplayed) > 0 {
+			o.Detail += "; not replayed (calls a model): " + strings.Join(o.NotReplayed, ", ")
+		}
+		if d := o.spec.dropOverrides; len(d) > 0 {
+			o.Detail = "the preset as it ships: applying it DROPS your own settings for " +
+				strings.Join(d, ", ") + "; " + o.Detail
+			o.DropsOverrides = d
+		}
+		o.SpendUSD -= none.SpendUSD
+		if rep.Coverage.CoveredRequests == 0 {
+			o.Unavailable = "no stored request content in this window"
+		} else {
+			net := none.cost - o.cost
+			o.NetUSD, o.SavedUSD = &net, net+o.SpendUSD
+			hi := net + o.UnseenUSD
+			if g := net - curNet; g > 0 {
+				hi += g * (1/seenFrac - 1)
+			}
+			o.RangeUSD = [2]float64{net, hi}
+		}
+		rep.Options = append(rep.Options, o)
+		return id
+	}
+	rep.Current = add(curOpt, "current", "your configuration", false)
+	defOpt, _, err := option(def)
+	if err != nil {
+		return nil, err
+	}
+	rep.Default = add(defOpt, "default", "the service default", false)
+	add(none, "none", "no deterministic compaction, for reference", false)
+	shown := 0
+	for _, s := range arms {
+		o, _, err := option(s)
+		if err != nil {
+			return nil, err
+		}
+		id := s.preset // preset names are shell-safe ids; none is "current", "default" or "none"
+		if len(s.dropOverrides) > 0 {
+			id = s.preset + "-without-overrides"
+		}
+		if s.preset == "" {
+			id = "c" + strconv.Itoa(shown+1)
+		}
+		if add(o, id, "", s.preset == "") == id && s.preset == "" {
+			shown++
+		}
+	}
+	// A tenth of a cent is noise from reordering components that do nothing; ties stay current.
+	// Among options within that of each other, the one closest to the current configuration
+	// wins, so the recommendation does not flip between equal reorderings from run to run.
+	// Ties then go to fewer components, then the option's own spelling: a total order, so the
+	// same data always gives the same best.
+	bestOpt := rep.Options[0]
+	for _, o := range rep.Options {
+		if o.cost < bestOpt.cost-0.001 || (math.Abs(o.cost-bestOpt.cost) <= 0.001 && adaptTieLess(o.spec, bestOpt.spec, cur)) {
+			bestOpt = o
+		}
+	}
+	rep.Best = bestOpt.ID
+	gain := curOpt.cost - bestOpt.cost
+	threshold := math.Max(0.01, 0.005*curOpt.cost)
+	switch {
+	case rep.Coverage.CoveredRequests == 0:
+		rep.Summary = "No stored request content in this window, so nothing could be replayed."
+	case !repro.OK:
+		rep.Summary = "No recommendation: " + repro.Note + "."
+	case bestOpt.ID == curOpt.ID || gain < threshold:
+		rep.Summary = fmt.Sprintf("Your configuration is already the best one found: no "+
+			"option would have saved $%.2f or more on the %d replayed requests.", threshold,
+			rep.Coverage.CoveredRequests)
+	default:
+		days := float64(f.Until-f.Since) / float64(24*time.Hour/time.Millisecond)
+		if f.Until == 0 {
+			days = float64(time.Now().UnixMilli()-f.Since) / float64(24*time.Hour/time.Millisecond)
+		}
+		rec := &AdaptCompactionRecommendation{Option: bestOpt.ID, NetDeltaUSD: gain, GainUSD: gain,
+			Effective: "now", Change: adaptChange(bestOpt, curOpt),
+			Reason: fmt.Sprintf("%.1f%% less on the %d requests whose content is stored; savings on the "+
+				"others are not claimed", 100*gain/curOpt.cost, rep.Coverage.CoveredRequests)}
+		rec.GainRangeUSD = [2]float64{gain, gain + (bestOpt.RangeUSD[1] - bestOpt.RangeUSD[0])}
+		if repro.ObservedUSD > 0 {
+			rec.GainWindowUSDEst = gain * rep.Coverage.ObservedUSD / repro.ObservedUSD
+		}
+		if days >= 1 {
+			rec.PerMonthUSD, rec.PerWeekUSD = gain*30/days, gain*7/days
+		}
+		rep.Recommendation = rec
+		rep.Summary = fmt.Sprintf("%s would have cost $%.2f less than your configuration on %d replayed requests.",
+			bestOpt.Label, gain, rep.Coverage.CoveredRequests)
+	}
+	rep.Warnings = adaptNotes(rep, curPipe, whole.observed)
+	rep.Coverage.DurationMs = time.Since(start).Milliseconds()
+	return rep, nil
+}
+
+// search is the custom mode: greedy over add/drop/swap/knob moves from the current, default and
+// lossless-trio seeds, on a recent-sessions sample, bounded by adaptMaxArms. It returns the
+// few best distinct arms to re-price on everything covered.
+func (run *adaptRun) search(sessions []*adaptSession, rep *AdaptCompactionReport, def adaptSpec, whole *adaptPop) ([]adaptSpec, error) {
 	var sample []*adaptSession
 	n := 0
 	for _, s := range sessions {
@@ -1245,16 +1782,19 @@ func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, 
 		sample = append(sample, s)
 		n += len(s.reqs)
 	}
-	if n >= rep.Coverage.CoveredRequests*4/5 {
-		// Close enough to everything that a second population would cost more than it tells.
-		sample, n = sessions, rep.Coverage.CoveredRequests
+	pop := whole
+	if n < rep.Coverage.CoveredRequests*4/5 {
+		var err error
+		if pop, err = run.population(sample); err != nil {
+			return nil, err
+		}
+	} else {
+		n = rep.Coverage.CoveredRequests // close enough to everything: no second population
 	}
 	rep.Coverage.SearchRequests = n
-	pop, err := run.population(sample)
-	if err != nil {
-		return nil, err
-	}
-	safe := adaptSpec{comps: []string{"format", "searchfold", "textclean"}, settings: map[string]map[string]int{}}
+	cur := run.cur
+	safe := adaptSpec{comps: []string{"format", "searchfold", "textclean"}, settings: map[string]map[string]int{},
+		base: cur.base}
 	best, bestV := cur, math.Inf(1)
 	for _, seed := range []adaptSpec{cur, def, safe} {
 		e, err := run.eval(pop, seed)
@@ -1284,15 +1824,12 @@ func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, 
 		}
 	}
 	rep.Coverage.ArmsEvaluated = len(pop.memo)
-
-	// The reported arms, re-priced on the whole covered population: current, default, and the
-	// search's eight best.
 	ranked := make([]adaptSpec, 0, len(pop.specs))
 	for _, sp := range pop.specs {
 		ranked = append(ranked, sp)
 	}
-	// Cheapest first; equal to a tenth of a cent, fewest moves from current, then by name, so
-	// the same history always yields the same list.
+	// Cheapest first; equal to a tenth of a cent, by adaptTieLess, so the same history always
+	// yields the same list.
 	sort.Slice(ranked, func(i, j int) bool {
 		a, b := pop.memo[ranked[i].key()].deltaUSD, pop.memo[ranked[j].key()].deltaUSD
 		if math.Abs(a-b) > 0.001 {
@@ -1300,81 +1837,12 @@ func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, 
 		}
 		return adaptTieLess(ranked[i], ranked[j], cur)
 	})
-	whole := pop
-	if len(sample) != len(sessions) {
-		if whole, err = run.population(sessions); err != nil {
-			return nil, err
-		}
-	}
-	option := func(s adaptSpec) (AdaptCompactionOption, adaptEval, error) {
-		e, err := run.eval(whole, s)
-		if err != nil {
-			return AdaptCompactionOption{}, e, err
-		}
-		cost := rep.Coverage.CoveredBilledUSD + e.deltaUSD
-		return AdaptCompactionOption{ID: s.key(), Label: adaptLabel(s), BilledUSD: cost,
-			Pipeline: AdaptCompactionMerge(curPipe, s.comps), UnseenUSD: e.unseenUSD, Busts: e.busts,
-			SpendUSD: e.declUSD, spec: s, cost: cost}, e, nil
-	}
-	none, _, err := option(adaptSpec{})
-	if err != nil {
-		return nil, err
-	}
-	curOpt, curEval, err := option(cur)
-	if err != nil {
-		return nil, err
-	}
-	rep.Coverage.FidelityBlocks, rep.Coverage.FidelityReproduced = curEval.compared, curEval.reproduced
-	for _, c := range cur.comps {
-		rep.Measured = append(rep.Measured, AdaptCompactionMeasured{Component: c,
-			MeasuredUSD: whole.observed[c], ReplayedUSD: whole.seenLoss[c]})
-	}
-	rep.choices = map[string]AdaptCompactionChoice{}
-	idOf := map[string]string{} // spec key -> short id
-	confHash := AdaptConfigHash(curDoc)
-	add := func(o AdaptCompactionOption, id, detail string, searched bool) string {
-		if have, ok := idOf[o.ID]; ok {
-			return have
-		}
-		// An option that costs what one already listed costs tells the reader nothing new: most
-		// are reorderings of components that act on none of the stored content.
-		if searched {
-			for _, x := range rep.Options {
-				if math.Abs(x.cost-o.cost) < 0.001 {
-					return ""
-				}
-			}
-		}
-		idOf[o.ID] = id
-		rep.choices[id] = AdaptCompactionChoice{Candidates: o.spec.comps, Settings: o.spec.settings,
-			Label: o.Label, ConfigHash: confHash}
-		o.ID, o.Detail = id, detail
-		if detail == "" {
-			o.Detail = strings.Join(o.Pipeline, ", ")
-		}
-		o.SpendUSD -= none.SpendUSD
-		if rep.Coverage.CoveredRequests == 0 {
-			o.Unavailable = "no stored request content in this window"
-		} else {
-			net := none.cost - o.cost
-			o.NetUSD, o.SavedUSD = &net, net+o.SpendUSD
-		}
-		rep.Options = append(rep.Options, o)
-		return id
-	}
-	rep.Current = add(curOpt, "current", "your configuration", false)
-	defOpt, _, err := option(def)
-	if err != nil {
-		return nil, err
-	}
-	rep.Default = add(defOpt, "default", "the service default", false)
-	add(none, "none", "no deterministic compaction, for reference", false)
-	// The search's best few, re-priced on everything covered. Ties are dropped on the SEARCH
-	// score, before the re-pricing, because each re-priced option is a full replay.
+	// Ties are dropped on the SEARCH score, before the re-pricing, because each re-priced option
+	// is a full replay.
+	var out []adaptSpec
 	var picked []float64
-	shown := 0
 	for _, s := range ranked {
-		if len(picked) >= adaptShownOptions {
+		if len(out) >= adaptShownOptions {
 			break
 		}
 		v := pop.memo[s.key()].deltaUSD
@@ -1382,57 +1850,18 @@ func (d *DB) AdaptCompaction(ctx context.Context, f Filter, p modelinfo.Pricer, 
 			continue
 		}
 		picked = append(picked, v)
-		o, _, err := option(s)
-		if err != nil {
-			return nil, err
-		}
-		if add(o, "c"+strconv.Itoa(shown+1), "", true) == "c"+strconv.Itoa(shown+1) {
-			shown++
-		}
+		out = append(out, s)
 	}
-	// A tenth of a cent is noise from reordering components that do nothing; ties stay current.
-	// Among options within that of each other, the one closest to the current configuration
-	// wins, so the recommendation does not flip between equal reorderings from run to run.
-	// Ties then go to fewer components, then the option's own spelling: a total order, so the
-	// same data always gives the same best.
-	bestOpt := rep.Options[0]
-	for _, o := range rep.Options {
-		if o.cost < bestOpt.cost-0.001 || (math.Abs(o.cost-bestOpt.cost) <= 0.001 && adaptTieLess(o.spec, bestOpt.spec, cur)) {
-			bestOpt = o
-		}
-	}
-	rep.Best = bestOpt.ID
-	gain := curOpt.cost - bestOpt.cost
-	threshold := math.Max(0.01, 0.005*curOpt.cost)
-	switch {
-	case rep.Coverage.CoveredRequests == 0:
-		rep.Summary = "No stored request content in this window, so nothing could be replayed."
-	case bestOpt.ID == curOpt.ID || gain < threshold:
-		rep.Summary = fmt.Sprintf("Your compaction configuration is already the best one found: no "+
-			"option would have saved $%.2f or more on the %d replayed requests.", threshold,
-			rep.Coverage.CoveredRequests)
-	default:
-		days := float64(f.Until-f.Since) / float64(24*time.Hour/time.Millisecond)
-		if f.Until == 0 {
-			days = float64(time.Now().UnixMilli()-f.Since) / float64(24*time.Hour/time.Millisecond)
-		}
-		rec := &AdaptCompactionRecommendation{Option: bestOpt.ID, NetDeltaUSD: gain, Effective: "now",
-			Change: "run " + bestOpt.Label + " instead of " + curOpt.Label,
-			Reason: fmt.Sprintf("%.1f%% less on the %d requests whose content is stored; savings on the "+
-				"others are not claimed", 100*gain/curOpt.cost, rep.Coverage.CoveredRequests)}
-		if days >= 1 {
-			rec.PerMonthUSD = gain * 30 / days
-		}
-		rep.Recommendation = rec
-		rep.Summary = fmt.Sprintf("%s would have cost $%.2f less than your configuration on %d replayed requests.",
-			bestOpt.Label, gain, rep.Coverage.CoveredRequests)
-	}
-	rep.Warnings = adaptNotes(rep, curPipe, whole.observed)
-	rep.Coverage.DurationMs = time.Since(start).Milliseconds()
-	return rep, nil
+	return out, nil
 }
 
 func adaptLabel(s adaptSpec) string {
+	if s.preset != "" && len(s.dropOverrides) > 0 {
+		return "preset " + s.preset + " without your overrides"
+	}
+	if s.preset != "" {
+		return "preset " + s.preset
+	}
 	if len(s.comps) == 0 {
 		return "no deterministic compaction"
 	}
@@ -1592,12 +2021,25 @@ type AdaptCompactionConfigFunc func(tenantID string) (current, def string, ok bo
 func (a *API) SetAdaptCompactionConfig(fn AdaptCompactionConfigFunc) { a.adaptCompactionConfigFn = fn }
 
 func (a *API) adaptRoutes() []route {
-	return []route{{"GET /api/adapt/compaction", scopeTenant, a.adaptCompaction}}
+	return []route{
+		// /context-guru:save-more config: every shipped preset, plus (custom=1) the search.
+		{"GET /api/adapt/compaction", scopeTenant, a.adaptCompaction},
+		{"GET /api/save-more/config", scopeTenant, a.saveMoreConfig},
+	}
+}
+
+// Both routes serve one report and one set of offers: the plugin's /context-guru:save-more config
+// reads /api/adapt/compaction; /api/save-more/config is the same under the command's name.
+func (a *API) saveMoreConfig(w http.ResponseWriter, r *http.Request) { a.adaptCompaction(w, r) }
+
+func (a *API) adaptCompaction(w http.ResponseWriter, r *http.Request) {
+	a.adaptReport(w, r, "compaction", r.URL.Query().Get("custom") == "1")
 }
 
 const adaptDefaultWindow = 14 * 24 * time.Hour
 
-func (a *API) adaptCompaction(w http.ResponseWriter, r *http.Request) {
+// adaptReport serves one report kind: kind keys its offers and its rate limit.
+func (a *API) adaptReport(w http.ResponseWriter, r *http.Request, kind string, custom bool) {
 	f, pr, ok := a.scope(r)
 	if !ok {
 		a.unauthorized(w)
@@ -1638,14 +2080,14 @@ func (a *API) adaptCompaction(w http.ResponseWriter, r *http.Request) {
 	defer releaseKVCache()
 	// A report is minutes of replay, and an account's proxy token can ask for one: at most one
 	// at a time per account and adaptReportBurst per hour.
-	done, ok := a.adaptReportSlot("compaction|" + id)
+	done, ok := a.adaptReportSlot("compaction|" + id) // one budget for both kinds: one engine
 	if !ok {
 		httpErr(w, http.StatusTooManyRequests, "a report is already running for this account, or "+
 			"too many were asked for in the last hour; wait and try again")
 		return
 	}
 	defer done()
-	out, err := a.db(r).AdaptCompaction(r.Context(), f, a.pricer, cur, def)
+	out, err := a.db(r).AdaptCompaction(r.Context(), f, a.pricer, cur, def, custom)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1654,6 +2096,7 @@ func (a *API) adaptCompaction(w http.ResponseWriter, r *http.Request) {
 	for id, c := range out.choices {
 		opts[id] = c
 	}
-	out.BasisID = a.OfferAdapt("compaction", id, opts)
+	out.Kind = kind
+	out.BasisID = a.OfferAdapt(kind, id, opts)
 	writeJSON(w, out)
 }

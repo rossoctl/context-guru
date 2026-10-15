@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -355,4 +356,75 @@ func withCookies(r *http.Request, cs []*http.Cookie) *http.Request {
 		r.AddCookie(c)
 	}
 	return r
+}
+
+// save-more config: switching to a shipped preset stores `preset: <name>` with no explicit
+// pipeline, keeps the rest of the document, and is undone by its own kind's revert only.
+func TestSaveMoreAppliesAPresetAndRevertsIt(t *testing.T) {
+	f := adaptHostedFixture(t)
+	bw, _ := f.signUp(t, "boss@ibm.com", "l")
+	w, verify := f.signUp(t, "user@ibm.com", "u")
+	jar := w.Result().Cookies()
+	id := verify["tenant"].(map[string]any)["id"].(string)
+	start := "pipeline: [format, dedup, cachesplit]\nmode: sync\n"
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, `{"config_yaml":"pipeline: [format, dedup, cachesplit]\nmode: sync\n"}`, bw.Result().Cookies()); w.Code != http.StatusOK {
+		t.Fatalf("manager edit = %d %s", w.Code, w.Body)
+	}
+	basis := f.h.API().OfferAdapt("compaction", id, map[string]any{"safe": dash.AdaptCompactionChoice{
+		Preset: "safe", ConfigHash: dash.AdaptConfigHash(start)}})
+	w, out := f.do(t, "POST", "/api/save-more/config/apply", `{"option":"safe","basis":"`+basis+`"}`, jar)
+	if w.Code != http.StatusOK || out["ok"] != true {
+		t.Fatalf("apply = %d %s", w.Code, w.Body)
+	}
+	form, doc := storedForm(t, f, jar)
+	if want, _ := dash.AdaptPresetDoc(start, "safe"); doc != want {
+		t.Fatalf("stored %q, the report priced %q", doc, want)
+	}
+	if !strings.Contains(doc, "preset: safe") || strings.Contains(doc, "pipeline:") || !strings.Contains(doc, "mode: sync") {
+		t.Fatalf("stored document:\n%s", doc)
+	}
+	want, _ := config.PresetPipeline("safe")
+	if strings.Join(form.Pipeline, ",") != strings.Join(want, ",") {
+		t.Fatalf("pipeline %v, want the preset's %v", form.Pipeline, want)
+	}
+	who, err := f.h.adaptPrincipal(withCookies(httptest.NewRequest("GET", "/", nil), jar))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.adaptRevert(who, "tools"); err == nil {
+		t.Error("a tools revert undid a config apply")
+	}
+	// Either route's revert: one report, one kind.
+	if w, _ := f.do(t, "POST", "/api/adapt/compaction/apply", `{"option":"revert"}`, jar); w.Code != http.StatusOK {
+		t.Fatalf("revert = %d %s", w.Code, w.Body)
+	}
+	if form, _ = storedForm(t, f, jar); strings.Join(form.Pipeline, ",") != "format,dedup,cachesplit" {
+		t.Fatalf("revert left %v", form.Pipeline)
+	}
+}
+
+// "<preset> without your overrides": applying it writes exactly the pure document the report
+// priced, without the account's own block for the preset's component.
+func TestSaveMoreAppliesThePresetWithoutOverrides(t *testing.T) {
+	f := adaptHostedFixture(t)
+	bw, _ := f.signUp(t, "boss@ibm.com", "l")
+	w, verify := f.signUp(t, "user@ibm.com", "u")
+	jar := w.Result().Cookies()
+	id := verify["tenant"].(map[string]any)["id"].(string)
+	start := "components:\n    format:\n        min_tokens: 999999\npipeline:\n    - cachesplit\n"
+	body, _ := json.Marshal(map[string]string{"config_yaml": start})
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, string(body), bw.Result().Cookies()); w.Code != http.StatusOK {
+		t.Fatalf("manager edit = %d %s", w.Code, w.Body)
+	}
+	_, stored := storedForm(t, f, jar)
+	basis := f.h.API().OfferAdapt("compaction", id, map[string]any{"safe-without-overrides": dash.AdaptCompactionChoice{
+		Preset: "safe", DropOverrides: []string{"format"}, ConfigHash: dash.AdaptConfigHash(stored)}})
+	if w, _ := f.do(t, "POST", "/api/adapt/compaction/apply", `{"option":"safe-without-overrides","basis":"`+basis+`"}`, jar); w.Code != http.StatusOK {
+		t.Fatalf("apply = %d %s", w.Code, w.Body)
+	}
+	_, doc := storedForm(t, f, jar)
+	want, _, _ := dash.AdaptPresetDocWith(stored, "safe", true)
+	if doc != want || strings.Contains(doc, "999999") {
+		t.Fatalf("stored %q, priced %q", doc, want)
+	}
 }
