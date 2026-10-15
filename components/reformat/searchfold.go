@@ -151,14 +151,30 @@ func FoldSearchOutput(s string) string {
 }
 
 // adopt is the verify-then-adopt harness: run a fold, then require that its inverse
-// reproduces the input byte for byte AND that the fold shrank it. It is what makes
-// the transform lossless by construction — a fold whose heading rule collides with
-// the payload (a content line that reads as a path, output already grouped by file,
-// a basename ending in `/`) is silently declined instead of corrupting the output,
-// and no case analysis has to be right for that to hold.
+// reproduces the input byte for byte AND that the fold shrank it — in BOTH bytes and
+// tokens. It is what makes the transform lossless by construction — a fold whose
+// heading rule collides with the payload (a content line that reads as a path,
+// output already grouped by file, a basename ending in `/`) is silently declined
+// instead of corrupting the output, and no case analysis has to be right for that to
+// hold.
+//
+// The token check exists because the never-worse guard downstream (components/pipeline.go)
+// counts tokens, not bytes, and the two do not move together: a heading line plus its
+// tab-indented rows can be fewer BYTES than the repeated inline prefix it replaces while
+// tokenizing to MORE tokens — the new line break and tab are BPE boundaries the original
+// text's merges didn't have, and it costs the most on a heading with only one row beneath
+// it, where there is nothing to amortize the heading against. Measured against the
+// production corpus: byte-only adoption let 3,690 of 258,701 real fold attempts land a net
+// token INCREASE (up to +35 tokens on one recurring shape), and every one of searchfold's
+// 384 pipeline-level reverts is this same mismatch surfacing one level up, where the
+// never-worse guard has to reject the WHOLE component run because adopt() already accepted
+// a token-losing fold as a byte-shaped win.
 func adopt(in string, fold, inverse func(string) string) (string, bool) {
 	out := fold(in)
 	if len(out) >= len(in) {
+		return in, false
+	}
+	if schema.TextTokens(out) >= schema.TextTokens(in) {
 		return in, false
 	}
 	if inverse(out) != in {
