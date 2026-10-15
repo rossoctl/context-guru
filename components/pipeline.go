@@ -192,7 +192,11 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		// it in the revert branches above would charge a rolled-back component for a
 		// discard it never caused.
 		rep.ChangedIdx = changedIdx(before, req.Input)
-		if rep.Kind == "reformat" {
+		// A Reformat stashes nothing, and neither does an Offload that dropped content on purpose
+		// (rep.Irreversible: marker_mode summary/off). Without a key, every consumer of CacheKeys
+		// counts the run's saving as new content on every turn it is re-applied, so derive the
+		// keys from the content instead. An Offload that stashed keeps its own: they are store keys.
+		if rep.Kind == "reformat" || (rep.Irreversible && len(rep.CacheKeys) == 0) {
 			rep.CacheKeys = reformatKeys(before, rep.ChangedIdx)
 		}
 		resync(snap, req.Input, rep.ChangedIdx)

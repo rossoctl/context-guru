@@ -745,7 +745,9 @@ type Report struct {
 	// Reformat stashes nothing, so the PIPELINE fills them from the pre-fold text of each
 	// message it rewrote — without that, every Reformat took metrics' keyless fallback and
 	// reported SavedUnique == Saved by construction (overcount_ratio 1.0 for
-	// format/textclean/toon/searchfold, against a measured token replay of 10x-95x).
+	// format/textclean/toon/searchfold, against a measured token replay of 10x-95x). The
+	// pipeline does the same for an Irreversible Offload that returned no keys (marker_mode
+	// summary/off), whose keys are then dedup keys only, not store keys.
 	CacheKeys    []string
 	Skipped      bool // component ran but chose not to act
 	Reverted     bool // pipeline reverted it (error/panic/never-worse)
