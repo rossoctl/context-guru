@@ -12,7 +12,11 @@ import "strings"
 // declined), made two runs of one command differ in the counter (dedup declined), and broke the
 // parser extract_llm's code strategy writes. So normalize splits trailing blocks off before the
 // pipeline runs and the writeback puts them back unchanged: the model still reads them, and no
-// component ever sees them.
+// component sees them in a tool output.
+//
+// Only a tool_result's own text is split. A reminder in a separate text block beside the
+// tool_result, or in a plain user message, stays where it is and the components see it. Those
+// texts are never written back, so nothing there can be lost or doubled.
 const (
 	reminderOpen  = "<system-reminder>"
 	reminderClose = "</system-reminder>"
