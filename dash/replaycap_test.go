@@ -1,6 +1,9 @@
 package dash
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -195,4 +198,77 @@ func TestReplayLedgerThroughSQLMovesTheHeadlineAndTheRow(t *testing.T) {
 	if other.SavedUSD != 1 {
 		t.Errorf("summarize row moved by the replay ledger: %v", other.SavedUSD)
 	}
+}
+
+// The three read paths agree: the headline (full and session-scoped lean), /api/components and the
+// episode view all read the one ledger.
+func TestReplayCapReachesEveryReadPath(t *testing.T) {
+	db := openTestDB(t)
+	mk := func(ts int64, before, after int, fresh, read int64) *Event {
+		e := mkEvent(ts, "s", "aws/claude-sonnet-5", before, after)
+		e.TenantID = "t1"
+		e.FreshInput, e.CacheRead, e.CacheWrite = fresh, read, 0
+		e.TokenAccounting = AccountingComplete
+		e.Components = []CompRow{{Component: "extract_llm", Kind: "offload", Acted: true, Mutated: true,
+			SavedGross: before - after, SavedUnique: 0, SavedUSD: 1}}
+		return e
+	}
+	if err := db.insertBatch([]*Event{
+		mk(DayMs+1, 300_000, 200_000, 1_000, 300_000), // cf 300k + 1.69*100k: open
+		// 700k - 100k removed = 600k * 1.6857 = 1.01M on top of 450k: the world without us compacted.
+		mk(DayMs+2, 700_000, 100_000, 1_000, 449_000),
+		mk(DayMs+3, 710_000, 100_000, 1_000, 450_000),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := &Recorder{db: db, hub: NewHub(), done: make(chan struct{})}
+	t.Cleanup(func() { rec.Close() })
+	api := NewAPI(rec)
+	api.SetPricer(staticPricer{ibmSonnet})
+	api.SetWindows(testWindows{})
+	mux := http.NewServeMux()
+	api.Mount(mux)
+	get := func(path string, v any) {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s: %d %s", path, w.Code, w.Body)
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), v); err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+	}
+	type stats struct {
+		Correction float64 `json:"replay_cap_correction_usd"`
+		TotalSaved float64 `json:"total_saved_usd"`
+	}
+	var full, lean stats
+	get("/api/stats?session=s", &full)
+	get("/api/stats?lean=1&session=s", &lean)
+	nearEq(t, "full correction", full.Correction, -2)
+	nearEq(t, "lean correction", lean.Correction, -2)
+	nearEq(t, "full and lean agree", full.TotalSaved, lean.TotalSaved)
+
+	var comps struct {
+		Components []ComponentRow `json:"components"`
+	}
+	get("/api/components?session=s", &comps)
+	var row *ComponentRow
+	for i := range comps.Components {
+		if comps.Components[i].Component == "extract_llm" {
+			row = &comps.Components[i]
+		}
+	}
+	if row == nil {
+		t.Fatal("no extract_llm row")
+	}
+	nearEq(t, "row saved", row.SavedUSD, 1)
+	nearEq(t, "row past cap", row.ReplayCreditPastCapUSD, 2)
+
+	var eps CompactionEpisodes
+	get("/api/components/compaction-episodes?session=s", &eps)
+	if eps.ReplayLedger == nil {
+		t.Fatal("the episode view carries no replay ledger")
+	}
+	nearEq(t, "episode view past cap", eps.ReplayLedger.ByComponent["extract_llm"].PastCapUSD, 2)
 }

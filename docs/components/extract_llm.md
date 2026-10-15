@@ -777,6 +777,29 @@ and strictly-smaller; `rewrite: false` gives the full deletion-only (character-s
 guarantee. The one-line SUMMARY spliced next to the marker is clipped to 120 runes, because an
 over-long one used to abandon the whole reduction rather than truncate.
 
+## How the dashboard caps its credit { #credit-cap }
+
+A removal is replayed: every later turn that re-sends the shortened transcript earns the credit
+again. Left alone that credit has no end. The dashboard ends it where the world without
+context-guru would have stopped carrying the content:
+
+- **Counterfactual compaction.** On each turn the counterfactual transcript is what the provider
+  billed plus what the pipeline removed (`tokens_before - tokens_after`, scaled to billed tokens
+  by the measured tokenizer factor). When it reaches the client's compaction ceiling (the same
+  ceiling `summarize`'s span uses), the client of that world compacts and the credit stops.
+- **Real client compaction.** A drop in `tokens_before` after the agent's own compaction request
+  went by ends it too: both worlds carry a summarized transcript from there on.
+
+The cap does not read the real compaction to place the counterfactual one. Removals only make
+the real transcript smaller, so a rule that waited for the real client to compact would credit
+exactly the turns the removals pushed past the ceiling. The same rule caps every replaying
+component (`searchfold`, `dedup`, `extract`, ...), and one ledger feeds the headline,
+`/api/components` and the episode view (`replay_ledger`). `summarize` keeps its own span.
+
+`extract_llm` keeps the stored price of a first removal (the cache-write rate), not the
+cache-read rate `summarize` gets: it fires on cold turns, where the uncompacted prefix would have
+been re-written. Credit after a close is not reopened by a later epoch, which is conservative.
+
 ## Configuration
 
 | Key | Default | Meaning |
