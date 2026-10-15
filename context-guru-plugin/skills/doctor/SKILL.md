@@ -1,7 +1,7 @@
 ---
 name: doctor
 description: Check the setup (routing, proxy, prices, status line) and say what to fix.
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py:*)
+allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" doctor:*)
 ---
 
 Run this, then print its output exactly as it is in one code block. Add nothing before or after it.

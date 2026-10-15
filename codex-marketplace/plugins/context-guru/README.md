@@ -51,6 +51,11 @@ the other setting and restart the owned proxy. `$context-guru-insights` produces
 ranked report from measured proxy data; its cost arithmetic and exact fix commands come from code,
 not model estimation.
 
+`$context-guru-save-more` replays your own history under every shipped config and keep-alive strategy and
+applies the recommended change only after you answer yes; `$context-guru-remove-mcp-and-skills` does the same for
+MCP servers and skills you never use. See [docs/plugin/save-more.md](../../../docs/plugin/save-more.md).
+`$context-guru-adapt` still works for one release and points to them.
+
 For a narrower report, use `$context-guru-insights-capabilities`,
 `$context-guru-insights-components`, or `$context-guru-insights-idle`.
 

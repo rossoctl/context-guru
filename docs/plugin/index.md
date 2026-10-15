@@ -30,6 +30,8 @@ One command per question. Each opens with one line that answers it, then a small
 | `/context-guru:waste` | What do I carry and never use? | [Waste](waste.md) |
 | `/context-guru:session` | What happened in this session? | [Session](session.md) |
 | `/context-guru:doctor` | Is it set up right? | [Doctor](doctor.md) |
+| `/context-guru:save-more` | Which config and keep-alive strategy would have cost least on my history? Change them, after a yes. | [Save more](save-more.md) |
+| `/context-guru:remove-mcp-and-skills` | Which MCP servers and skills do I never use, and what does removing them save? | [Remove MCP servers and skills](remove-mcp-and-skills.md) |
 
 Five more views draw in the terminal: `/context-guru:watch`, `timeline`, `chart`, `heatmap` and `fill`. They are on [Terminal views](terminal-views.md).
 
@@ -47,6 +49,7 @@ The old names keep working for one release. Each says where it moved and runs th
 | `/context-guru:cost-unused` | `/context-guru:waste` |
 | `/context-guru:cost-cold`, `/context-guru:cost-compact` | `/context-guru:cache` |
 | `/context-guru:cost-trends` | `/context-guru:savings` |
+| `/context-guru:adapt` | `/context-guru:save-more`, and `/context-guru:remove-mcp-and-skills` for `adapt tools` |
 
 `/context-guru:statusline` still installs, changes and removes the status line; `/context-guru:doctor` checks that it is there.
 
@@ -71,7 +74,7 @@ The proxy is released separately; updating the plugin does not update it. Detail
 
 ## Codex (experimental)
 
-Codex has the same skills under the same names, invoked by name: `$context-guru-status`, `$context-guru-savings`, `$context-guru-cache`, `$context-guru-waste`, `$context-guru-session`. They run the same scripts. Install, update and removal are in the [Codex plugin guide](https://github.com/rossoctl/context-guru/blob/main/codex-marketplace/plugins/context-guru/README.md).
+Codex has the same skills under the same names, invoked by name: `$context-guru-status`, `$context-guru-savings`, `$context-guru-cache`, `$context-guru-waste`, `$context-guru-session`, `$context-guru-save-more`, `$context-guru-remove-mcp-and-skills`. They run the same scripts. Install, update and removal are in the [Codex plugin guide](https://github.com/rossoctl/context-guru/blob/main/codex-marketplace/plugins/context-guru/README.md).
 
 | Capability | Claude Code | Codex |
 |---|---|---|
