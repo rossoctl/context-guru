@@ -1,12 +1,18 @@
 package apply
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestSplitTrailingReminders pins which text counts as a trailing reminder (#556): only a run
 // of complete <system-reminder> blocks at the very end, and never the whole text.
 func TestSplitTrailingReminders(t *testing.T) {
 	const r1 = "<system-reminder>\n<total_tokens>14989288 tokens left</total_tokens>\n</system-reminder>"
 	const r2 = "<system-reminder>\nThe file changed.\n</system-reminder>"
+	const hdr = "HEADER"
+	big := strings.Repeat("x", 50<<10)
+	atCap := reminderOpen + strings.Repeat("y", maxReminderBytes-len(reminderOpen)-len(reminderClose)) + reminderClose
 	cases := []struct {
 		name, in, body, tail string
 	}{
@@ -20,6 +26,15 @@ func TestSplitTrailingReminders(t *testing.T) {
 		{"unclosed tag", "out\n<system-reminder>\nno end", "out\n<system-reminder>\nno end", ""},
 		{"stray end tag", "out\n</system-reminder>", "out\n</system-reminder>", ""},
 		{"nested open in body", "a <system-reminder> b\n\n" + r1, "a <system-reminder> b", "\n\n" + r1},
+		// A stray close tag at the end, after output that quotes an open tag: the "block" holds the
+		// output, so nothing is split.
+		{"stray end tag after a quoted block", hdr + "\n" + r2 + big + "\n</system-reminder>",
+			hdr + "\n" + r2 + big + "\n</system-reminder>", ""},
+		{"stray end tag after a short quoted block", "out\n" + r2 + "\nmore output\n</system-reminder>",
+			"out\n" + r2 + "\nmore output\n</system-reminder>", ""},
+		{"block over the cap", "out\n\n<system-reminder>" + big + "</system-reminder>",
+			"out\n\n<system-reminder>" + big + "</system-reminder>", ""},
+		{"block at the cap", "out\n\n" + atCap, "out", "\n\n" + atCap},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

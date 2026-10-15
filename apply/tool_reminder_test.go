@@ -17,8 +17,9 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// ccReminder is the block Claude Code appends to every tool_result (#556). The counter changes
-// on every call, so two runs of one command never give identical text.
+// ccReminder is the block Claude Code 2.1.241 appended to every tool_result (#556). The counter
+// changes on every call, so two runs of one command never give identical text. This is the
+// 2.1.241 shape only: 2.1.290 to 2.1.299 send the counter as a separate role:"system" message.
 func ccReminder(left int) string {
 	return fmt.Sprintf("\n\n<system-reminder>\n<total_tokens>%d tokens left</total_tokens>\n</system-reminder>", left)
 }
