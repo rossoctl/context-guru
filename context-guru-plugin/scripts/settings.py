@@ -142,6 +142,52 @@ def apply_statusline(data: dict, command: str) -> None:
     meta[STATUSLINE_META] = command
 
 
+# The path of a plugin's statusline.py inside Claude Code's plugin cache: `.../plugins/cache/
+# <marketplace>/<plugin>/<version>/scripts/statusline.py`, inside the double quotes install.sh wraps
+# around it. Anything else (a dev checkout, a hand-written path) does not match and is left alone.
+_CACHED_STATUSLINE = re.compile(
+    r'"(?P<path>[^"]*/plugins/cache/[^/"]+/(?P<plugin>[^/"]+)/(?P<version>[^/"]+)/scripts/statusline\.py)"')
+
+
+def _version_tuple(text: str) -> tuple | None:
+    """`0.5.1` -> (0, 5, 1). None for anything that is not dotted digits: a version we cannot order
+    is a version we do not move a status line away from."""
+    parts = text.split(".")
+    if not parts or not all(p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+def repoint_statusline(data: dict, running: str) -> bool:
+    """Move OUR statusLine to the running plugin's `statusline.py`, in place. True if it changed.
+
+    install.sh writes the absolute, versioned path of the plugin that ran the install (a settings
+    file cannot use ${CLAUDE_PLUGIN_ROOT}), and the old version stays in the cache, so after a
+    plugin update the old path keeps working and nothing ever reports that it is stale (#551).
+
+    Moves only when ALL of these hold; anything else returns False and changes nothing:
+      * the current value is ours by record (is_ours_statusline), never by the look of the path;
+      * it names a cached `statusline.py` of the SAME plugin as the running one;
+      * that version is strictly OLDER than the running one, so an older session (or a second
+        Claude Code install) never drags a newer status line back.
+    Only the path inside the command changes: flags and `refreshInterval` stay as they were.
+    """
+    current = data.get(STATUSLINE_KEY)
+    if not is_ours_statusline(data, current):
+        return False
+    new = _CACHED_STATUSLINE.fullmatch('"' + running + '"')
+    old = _CACHED_STATUSLINE.search(current["command"])
+    if not new or not old or old.group("plugin") != new.group("plugin") or old.group("path") == running:
+        return False
+    old_v, new_v = _version_tuple(old.group("version")), _version_tuple(new.group("version"))
+    if old_v is None or new_v is None or not old_v < new_v:
+        return False
+    command = current["command"].replace('"' + old.group("path") + '"', '"' + running + '"')
+    current["command"] = command
+    data[META][STATUSLINE_META] = command
+    return True
+
+
 def remove_statusline_only(data: dict) -> tuple[bool, str]:
     """Undo exactly what apply_statusline wrote, and nothing else — never touches `env`/routing.
     Returns (changed, restored_json). Shared by `off` (always this, regardless of whether routing
@@ -2868,6 +2914,44 @@ def cmd_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
+    """SessionStart step: point a status line we installed at the plugin that is running now (#551).
+
+    Looks at the three scopes the plugin installs into, but only at files that already hold our
+    ownership record, and rewrites only that record and the command. Never fails: a file that is
+    missing, unreadable, malformed or unwritable stays as it was, and the exit code is always 0.
+    """
+    running = os.path.join(os.path.dirname(os.path.realpath(__file__)), "statusline.py")
+    base = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    files = [user_scope_files()[0],
+             os.path.join(base, ".claude", "settings.json"),
+             os.path.join(base, ".claude", "settings.local.json")]
+    try:
+        scopes = _read_install_scopes()
+        for key in (user_scope_key(), project_key(base)):
+            row = scopes.get(key)
+            if isinstance(row, dict) and isinstance(row.get("file"), str):
+                files.append(row["file"])
+    except Exception:
+        pass
+    seen: set = set()
+    for path in files:
+        real = os.path.realpath(path)
+        if real in seen or not os.path.isfile(real):
+            continue
+        seen.add(real)
+        try:
+            with open(real, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict) or not repoint_statusline(data, running):
+                continue
+            save(real, data)
+            print(f"context-guru: status line updated to this plugin version ({real})")
+        except Exception:
+            continue
+    return 0
+
+
 def cmd_off(args: argparse.Namespace) -> int:
     """Turn the status line off, and only the status line — unlike `remove`, this never touches
     `env`/routing even when both were installed together. Ships alongside statusline being on by
@@ -3966,6 +4050,9 @@ def main() -> int:
              "with no question asked (see the module comment above cmd_gitignore_ensure)")
     gi.add_argument("--file", required=True)
 
+    sub.add_parser("statusline-repoint",
+                   help="SessionStart: point a status line we installed at the running plugin version")
+
     st = sub.add_parser("strategy")
     st.add_argument("op", choices=("list", "show", "set", "clear", "sync"))
     st.add_argument("--name", default="",
@@ -4055,7 +4142,7 @@ def main() -> int:
             ap.error("strategy set needs --name; one of " + ", ".join(STRATEGIES))
     if args.cmd == "preset" and args.op == "set" and not args.name:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
-    rc = {"add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
+    rc = {"statusline-repoint": cmd_statusline_repoint, "add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
           "enable-plugin": cmd_enable_plugin,
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
           "project-key": cmd_project_key, "scopes": cmd_scopes,
