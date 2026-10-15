@@ -133,6 +133,21 @@ func TestBypassedRowGetsItsTokenCountFromTheWorker(t *testing.T) {
 	if e.TokenAccounting != dash.AccountingComplete {
 		t.Errorf("accounting = %q, want complete", e.TokenAccounting)
 	}
+
+	// Totals are what origin/main reported for the same request. The process-wide counters
+	// (/stats, cg_tokens_*_total) never saw a bypassed request: Pipeline.Run returns before it
+	// emits its report. The per-tenant series are summed from the rows, so they carry the count.
+	if s := h.agg.Snapshot(); s.Requests != 0 || s.TokensBefore != 0 || s.TokensAfter != 0 {
+		t.Errorf("process-wide counters = %d requests / %d / %d tokens, want 0 as on main",
+			s.Requests, s.TokensBefore, s.TokensAfter)
+	}
+	rows, err := rec.DB().TenantMetrics(0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("tenant metrics = %v, err %v", rows, err)
+	}
+	if rows[0].TokensBefore != want || rows[0].TokensAfter != want {
+		t.Errorf("per-tenant token totals = %d / %d, want %d (what main stored)", rows[0].TokensBefore, rows[0].TokensAfter, want)
+	}
 }
 
 // cg_ms on the request line is the whole pre-forward stage, not the sum of the components.
@@ -143,5 +158,13 @@ func TestLifecycleLoggerCGMsIsThePreForwardTime(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "cg_ms=612") || !strings.Contains(out, "components_ms=0.4") {
 		t.Fatalf("log line = %q, want cg_ms=612 and components_ms=0.4", out)
+	}
+	if strings.Contains(out, "tokens_pending") {
+		t.Fatalf("a normal request is labelled tokens_pending: %q", out)
+	}
+	buf.Reset()
+	lifecycleLogger(lg, apply.Trace{Run: &components.RunReport{}}, true, time.Millisecond).Info("x")
+	if !strings.Contains(buf.String(), "tokens_pending=true") {
+		t.Fatalf("a bypassed request's log line does not say its tokens are pending: %q", buf.String())
 	}
 }

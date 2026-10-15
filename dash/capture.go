@@ -342,6 +342,9 @@ type Stats struct {
 	Captured int64  `json:"captured"`
 	Written  int64  `json:"written"`
 	Dropped  int64  `json:"dropped"`
+	// CountsDropped is the number of bypassed requests whose token count was skipped because the
+	// count worker's queue was full; their rows keep tokens_before 0.
+	CountsDropped int64 `json:"counts_dropped"`
 	Errors   int64  `json:"errors"`
 	Queued   int    `json:"queued"`
 	QueueCap int    `json:"queue_cap"`
@@ -387,7 +390,7 @@ func (r *Recorder) Stats() Stats {
 	size, _ := r.db.sizeBytes()
 	s := Stats{
 		Captured: r.captured.Load(), Written: r.written.Load(),
-		Dropped: r.dropped.Load(), Errors: r.errors.Load(),
+		Dropped: r.dropped.Load(), Errors: r.errors.Load(), CountsDropped: r.countsDropped.Load(),
 		Queued: len(r.ch), QueueCap: cap(r.ch),
 		Clients: r.hub.Clients(), DBPath: r.db.Path(), DBBytes: size,
 		Mode: r.opts.Mode,
@@ -752,7 +755,9 @@ func (r *Recorder) enqueueCount(e *Event) {
 // and a single large count holds a goroutine for seconds.
 //
 // ponytail: one worker, so rows of big bypassed requests lag behind their request by the
-// queue's total counting time; a pool is the upgrade if that ever shows.
+// queue's total counting time; a pool is the upgrade if that ever shows. Each queued closure pins
+// its parsed request, so the memory ceiling is countQueue (8) large transcripts; queue the raw
+// bytes instead if that matters.
 func (r *Recorder) countLoop() {
 	defer r.wg.Done()
 	for {

@@ -1385,6 +1385,11 @@ func lifecycleLogger(lg *slog.Logger, tr apply.Trace, bypassed bool, added time.
 	// be the sum of the components' own durations, which leaves out the counting and so read
 	// 0.4 ms on a request that took 600 ms to reach the upstream.
 	lg = lg.With("cg_ms", float64(added.Microseconds())/1000.0)
+	if bypassed {
+		// A bypassed request is not counted on the request path; the dashboard's count worker
+		// fills the row's token columns later. 0 above means "not counted here", not "empty".
+		lg = lg.With("tokens_pending", true)
+	}
 	if tr.Restored > 0 {
 		// Inserted after the pipeline, so tokens_after above does not include them.
 		lg = lg.With("expand_restored", tr.Restored, "expand_restored_tokens", tr.RestoredTokens)

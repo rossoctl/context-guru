@@ -112,4 +112,7 @@ func TestBypassCountQueueFullDropsTheCount(t *testing.T) {
 	if got := r.countsDropped.Load(); got < 1 {
 		t.Errorf("countsDropped = %d, want at least 1", got)
 	}
+	if got := r.Stats().CountsDropped; got != r.countsDropped.Load() {
+		t.Errorf("Stats().CountsDropped = %d, want %d", got, r.countsDropped.Load())
+	}
 }
