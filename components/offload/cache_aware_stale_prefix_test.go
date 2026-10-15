@@ -1,6 +1,8 @@
 package offload
 
 import (
+	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -89,5 +91,137 @@ func TestCacheAwareDeclinesOnAStalePrefix(t *testing.T) {
 	}
 	if atomic.LoadInt64(&asker.calls) != 1 {
 		t.Fatalf("Ask was called %d times once the prefix covered the span, want 1", asker.calls)
+	}
+}
+
+// coveredAsker also implements components.PrefixCoveredAsker. Its CoversSpan always says
+// "covered", as a stash read a moment too early would; AskCovered reports what the single
+// snapshot it asks on really holds. The guard must follow AskCovered.
+type coveredAsker struct {
+	fakePrefixAsker
+	snapshotErr   error
+	askCoveredHit int64
+	coversSpanHit int64
+}
+
+func (c *coveredAsker) CoversSpan(string, int, string) bool {
+	atomic.AddInt64(&c.coversSpanHit, 1)
+	return true
+}
+
+func (c *coveredAsker) AskCovered(_ context.Context, _ string, _ int, _, _ string) (string, components.PrefixUsage, error) {
+	atomic.AddInt64(&c.askCoveredHit, 1)
+	if c.snapshotErr != nil {
+		return "", components.PrefixUsage{}, c.snapshotErr
+	}
+	return c.out, c.usage, nil
+}
+
+func TestCacheAwareChecksAndAsksOnOneSnapshot(t *testing.T) {
+	s := newCacheAware(t, caBaseCfg+"instruction_role: auto\n")
+	asker := &coveredAsker{fakePrefixAsker: fakePrefixAsker{out: "<summary>never committed.</summary>"},
+		snapshotErr: components.ErrStalePrefix}
+	ctx := caCtxNoModel("ca-one-snapshot", asker)
+
+	before := CacheAwareSummarizerStalePrefix()
+	req := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), caFixture()...)}
+	var rep components.Report
+	if _, err := s.Offload(req, &rep, ctx); err != nil {
+		t.Fatalf("Offload must fail open: %v", err)
+	}
+	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
+		t.Fatal("the commissioned (and declined) summary never resolved")
+	}
+	if atomic.LoadInt64(&asker.askCoveredHit) == 0 {
+		t.Fatal("AskCovered was never used although the asker implements it")
+	}
+	if atomic.LoadInt64(&asker.coversSpanHit) != 0 || atomic.LoadInt64(&asker.calls) != 0 {
+		t.Fatalf("the separate CoversSpan (%d) / Ask (%d) path ran; check and ask must be one call",
+			asker.coversSpanHit, asker.calls)
+	}
+	if CacheAwareSummarizerStalePrefix() != before+1 {
+		t.Error("the stale snapshot was not counted as a stale-prefix decline")
+	}
+	if _, ok := loadCheckpoint(ctx); ok {
+		t.Fatal("a checkpoint was committed from a snapshot AskCovered refused")
+	}
+
+	asker.snapshotErr = nil // the snapshot covers the span: the same commission now lands
+	req2 := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), caFixture()...)}
+	var rep2 components.Report
+	if _, err := s.Offload(req2, &rep2, ctx); err != nil {
+		t.Fatalf("Offload must fail open: %v", err)
+	}
+	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
+		t.Fatal("the commissioned summary never landed")
+	}
+	if _, ok := loadCheckpoint(ctx); !ok {
+		t.Fatal("no checkpoint after AskCovered succeeded")
+	}
+}
+
+// stashAsker models the host's stash: the thread's next request replaces the body right after the
+// coverage check approved it. Separate CoversSpan then Ask therefore asks over the replacement;
+// AskCovered asks over the body it checked.
+type stashAsker struct {
+	mu          sync.Mutex
+	body        string
+	replacement string
+	askedOver   string
+	out         string
+}
+
+func (a *stashAsker) swap() {
+	a.mu.Lock()
+	a.body = a.replacement
+	a.mu.Unlock()
+}
+
+func (a *stashAsker) CoversSpan(string, int, string) bool {
+	a.mu.Lock()
+	covered := a.body == "approved body"
+	a.mu.Unlock()
+	a.swap() // the replacement lands after the check, before the ask
+	return covered
+}
+
+func (a *stashAsker) Ask(context.Context, string, string) (string, components.PrefixUsage, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.askedOver = a.body
+	return a.out, components.PrefixUsage{}, nil
+}
+
+func (a *stashAsker) AskCovered(context.Context, string, int, string, string) (string, components.PrefixUsage, error) {
+	a.mu.Lock()
+	snapshot := a.body
+	a.mu.Unlock()
+	a.swap()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.askedOver = snapshot
+	return a.out, components.PrefixUsage{}, nil
+}
+
+// The ask must carry the body the coverage check approved, even if the stash is replaced between
+// the check and the ask. Before the single-snapshot ask this asked over the replacement.
+func TestCacheAskCarriesTheApprovedBodyWhenTheStashIsReplaced(t *testing.T) {
+	s := newCacheAware(t, caBaseCfg+"instruction_role: auto\n")
+	asker := &stashAsker{body: "approved body", replacement: "replacement body from the next request",
+		out: "<summary>covers the approved span.</summary>"}
+	ctx := caCtxNoModel("ca-approved-body", asker)
+
+	req := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), caFixture()...)}
+	var rep components.Report
+	if _, err := s.Offload(req, &rep, ctx); err != nil {
+		t.Fatalf("Offload must fail open: %v", err)
+	}
+	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
+		t.Fatal("the commissioned summary never resolved")
+	}
+	asker.mu.Lock()
+	defer asker.mu.Unlock()
+	if asker.askedOver != "approved body" {
+		t.Fatalf("the ask went out over %q, want the body the coverage check approved", asker.askedOver)
 	}
 }
