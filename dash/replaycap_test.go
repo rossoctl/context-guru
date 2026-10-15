@@ -120,12 +120,28 @@ func TestReplayCapSplitsFirstRemovalAndReplay(t *testing.T) {
 	nearEq(t, "stored", c.StoredUSD, 9)
 }
 
-// No exact window, no ceiling: nothing is capped.
-func TestReplayCapNeedsAnExactWindow(t *testing.T) {
-	rows := []capRow{capTestRow(1, 100_000, 900_000, 500_000, "extract_llm", 1)}
-	l := walkReplayCap(rows, func(string) (int, bool) { return 200_000, false })
-	if len(l.ByComponent) != 0 || l.DeltaUSD() != 0 || l.WindowUnknownCovered != 1 {
-		t.Errorf("ledger = %+v, want untouched", l)
+// No exact window: the credit is capped against a conservative assumed window and labelled so,
+// not left uncapped.
+func TestReplayCapAssumesAWindowWhenNoneIsExact(t *testing.T) {
+	unknown := func(string) (int, bool) { return 0, false }
+	rows := []capRow{
+		capTestRow(1, 50_000, 10_000, 50_000, "extract_llm", 1),    // cf 60k: under the assumed 200k
+		capTestRow(2, 300_000, 100_000, 150_000, "extract_llm", 1), // cf 250k: past it
+	}
+	l := walkReplayCap(rows, unknown)
+	c := l.ByComponent["extract_llm"]
+	nearEq(t, "counted", c.CountedUSD, 1)
+	nearEq(t, "past cap", c.PastCapUSD, 1)
+	nearEq(t, "assumed", c.WindowAssumedUSD, 2)
+	// A larger guessed window is lowered to the assumed one; a smaller one is kept.
+	big := func(string) (int, bool) { return 1_000_000, false }
+	nearEq(t, "inexact 1M", walkReplayCap(rows, big).ByComponent["extract_llm"].PastCapUSD, 1)
+	small := func(string) (int, bool) { return 50_000, false }
+	nearEq(t, "inexact 50k", walkReplayCap(rows, small).ByComponent["extract_llm"].PastCapUSD, 2)
+	row := &ComponentRow{Component: "extract_llm", SavedUSD: 2}
+	applyReplayLedgerToRow(row, l)
+	if !row.ReplayWindowAssumed {
+		t.Error("row is not labelled window assumed")
 	}
 }
 

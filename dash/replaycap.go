@@ -60,7 +60,14 @@ type ComponentLedger struct {
 	PastClientCompact  float64 `json:"past_client_compaction_usd"`
 	Rows               int64   `json:"rows"`
 	PastRows           int64   `json:"past_rows"`
+	// WindowAssumedUSD is the stored credit of conversations whose model window was not exactly
+	// known, capped against assumedWindow instead.
+	WindowAssumedUSD float64 `json:"window_assumed_usd"`
 }
+
+// assumedWindow stands in for a model whose context window is not exactly known: 200k, the
+// smallest window of the families seen here, so the assumed ceiling is never later than the real one.
+const assumedWindow = 200_000
 
 // DeltaUSD is the correction to apply to a figure built from the stored credit.
 func (l *ComponentLedger) DeltaUSD() float64 { return -l.PastCapUSD }
@@ -204,10 +211,15 @@ func walkCapConversation(conv []capRow, window windowFn, bypassTS []int64, out *
 	model := conv[0].Model
 	out.Conversations++
 	w, exact := window(model)
+	assumed := false
 	if !exact || w <= 0 {
-		// No exact window: no ceiling, so no cap. The credit stays as stored.
+		// No exact window. Leaving the credit uncapped is the one path that over-credits, so a
+		// conservative window stands in: the smaller of what is known and assumedWindow.
+		assumed = true
 		out.WindowUnknownCovered++
-		return
+		if w <= 0 || w > assumedWindow {
+			w = assumedWindow
+		}
 	}
 	ceil := compactionpoint.For(model).Frac
 	out.CeilingFrac[model] = ceil
@@ -234,6 +246,9 @@ func walkCapConversation(conv []capRow, window windowFn, bypassTS []int64, out *
 			l := out.comp(c.Component)
 			l.Rows++
 			l.StoredUSD += c.USD
+			if assumed {
+				l.WindowAssumedUSD += c.USD
+			}
 			if state == capOpen {
 				l.CountedUSD += c.USD
 				l.FirstRemovalUSD += c.FirstUSD
@@ -287,7 +302,7 @@ func firstShare(ev *Event, p modelinfo.Price, priced bool, comp string, gross, u
 }
 
 // ReplayLedgerFor streams the rows one filter selects and runs the cap session by session. A model
-// whose window is not exactly known keeps its stored credit.
+// whose window is not exactly known is capped against an assumed window.
 //
 // Memory is bounded by the largest single session in the scope (about 120 bytes per request plus
 // its credit rows), not by the scope: the ledger itself is a few counters per component.
@@ -407,7 +422,11 @@ func applyReplayLedgerToRow(c *ComponentRow, l *ReplayLedger) {
 		return
 	}
 	cl := l.ByComponent[c.Component]
-	if cl == nil || cl.PastCapUSD == 0 {
+	if cl == nil {
+		return
+	}
+	c.ReplayWindowAssumed = cl.WindowAssumedUSD > 0
+	if cl.PastCapUSD == 0 {
 		return
 	}
 	delta := cl.DeltaUSD()
