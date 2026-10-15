@@ -60,6 +60,14 @@ for (const v of [...DATA_VIEWS, ...SHELL_VIEWS]) {
     for (const id of ['saved-cache', 'saved-compaction', 'saved-filter']) {
       if (!(await page.$(`[data-testid="${id}"]`))) failures.push(`overview: missing the ${id} row`);
     }
+    const total = await page.$('[data-testid="saved-total"]');
+    if (!total) failures.push('overview: the "Together" line under the three savings is missing');
+    else {
+      const t = await total.innerText();
+      if (!/estimated saved/.test(t) || !/(up to \$|cost more than it saved)/.test(t)) failures.push('overview: the Together line must show the estimate and the cache-strategy upper bound apart: ' + t);
+    }
+    const cacheRow = await (await page.$('[data-testid="saved-cache"]')).innerText();
+    if (!/Cache strategy/.test(cacheRow)) failures.push('overview: the cache row does not use the user term "Cache strategy": ' + cacheRow.slice(0, 80));
     if (!(await page.$('#overview-diagnostics:not([open])'))) failures.push('overview: Detailed diagnostics must exist and start closed');
     const rows = await page.$$('#tab-map dd');
     if (rows.length < 5) failures.push(`overview: About the other tabs lists ${rows.length} tabs`);

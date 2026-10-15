@@ -1811,3 +1811,4 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 .ledger-total strong { font-family: var(--serif); font-size: 22px; font-variant-numeric: tabular-nums; }
 
 .lv-id { font-weight: 400; color: var(--fg-muted); font-size: 14px; }
+.ledger-total strong.bound { color: var(--warn); }

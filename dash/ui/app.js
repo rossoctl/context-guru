@@ -1718,7 +1718,7 @@ function renderSavedLedger(o, ka, partial) {
         // pings cost. Other sessions can keep the same cache warm, so it is a ceiling and not a measured saving.
         // It is said that way and drawn in the warning colour, not the savings green.
         el('div', { class: 'lv-big' }, el('strong', { class: (lv.usd < 0 ? 'neg ' : '') + (lv.kind === 'Upper bound' ? 'bound' : ''),
-          text: (lv.kind === 'Upper bound' ? 'up to ' : '') + usd(lv.usd) }),
+          text: (lv.kind === 'Upper bound' && lv.usd >= 0 ? 'up to ' : '') + usd(lv.usd) }),
           el('span', { class: 'lv-of', text: (lv.kind === 'Upper bound' ? ' possible, of ' : ' saved of ') + usd(spent) + ' spent' })),
         bar,
         el('div', { class: 'lv-sub' }, el('span', { class: 'kind-badge ' + lv.kind.replace(' ', '-').toLowerCase(), title: KIND_TIP[lv.kind], text: lv.kind }),
@@ -1741,9 +1741,16 @@ function renderSavedLedger(o, ka, partial) {
   // The three rows together; this equals the server's total_saved_usd (dash/savings.test.mjs). Held back
   // until the full read lands, because the lean read does not carry the tools and skills filter.
   if (!partial && priced) {
+    // Two parts, never one blended figure: the preset and filter savings are estimates, the cache strategy
+    // part is an upper bound, and the Cache strategy tab may say it does not pay off.
+    const est = parts.compaction + parts.filter;
     host.appendChild(el('div', { class: 'ledger-total', 'data-testid': 'saved-total' },
-      el('span', { text: 'All three together' }), el('strong', { text: usd(parts.total) }),
-      el('span', { class: 'lv-of', text: 'of ' + usd(spent) + ' spent; the cache strategy part is an upper bound' })));
+      el('span', { text: 'Together' }),
+      el('span', {}, el('strong', { text: usd(est) }), el('span', { class: 'lv-of', text: ' estimated saved' })),
+      parts.cache >= 0
+        ? el('span', {}, el('strong', { class: 'bound', text: 'up to ' + usd(parts.cache) }), el('span', { class: 'lv-of', text: ' more, from your cache strategy (an upper bound)' }))
+        : el('span', {}, el('strong', { class: 'bound', text: usd(parts.cache) }), el('span', { class: 'lv-of', text: ' from your cache strategy: it cost more than it saved' })),
+      el('span', { class: 'lv-of', text: 'of ' + usd(spent) + ' spent' })));
   }
   const note = $('#ov-saved-note');
   if (note) {
@@ -1757,8 +1764,11 @@ function renderSavedLedger(o, ka, partial) {
  *  few seconds, so opening the tab right after the Overview does not ask the server for it twice. */
 function keepAliveLedger() {
   const now = Date.now();
-  if (!state.kaLedgerP || now - state.kaLedgerAt > 15000) {
+  // Keyed by the whole query (tenant, window, filters): a change of scope must not get the old scope's ledger.
+  const key = qs({});
+  if (!state.kaLedgerP || now - state.kaLedgerAt > 15000 || state.kaLedgerKey !== key) {
     state.kaLedgerAt = now;
+    state.kaLedgerKey = key;
     state.kaLedgerP = api('keepalive').catch((e) => { state.kaLedgerP = null; throw e; });
   }
   return state.kaLedgerP;
@@ -2113,10 +2123,11 @@ const STEP_INFO = {
   toolfilter: ['Tool list filter', 'drops tool definitions the agent is unlikely to use'],
   toolschema: ['Tool schema trimmer', 'shortens tool definitions'],
   toon: ['Compact data format', 'rewrites tabular JSON in a denser format'],
-  agent_compaction: ['Agent compaction', "the agent's own compaction of its transcript"],
+  agent_compaction: ['Agent summary', "the agent's own summary of its earlier turns"],
 };
 function stepInfo(name) {
-  return STEP_INFO[name] || [String(name).replace(/_/g, ' '), 'no description recorded'];
+  // An unknown step shows its name and no description: an empty hint reads better than "no description recorded".
+  return STEP_INFO[name] || [String(name).replace(/_/g, ' '), ''];
 }
 const REASON_TEXT = {
   below_min_size: 'text too short to bother', below_min_tokens: 'text too short to bother',
@@ -2485,7 +2496,7 @@ async function loadComponents() {
       const [vtext, vcls] = verdict(c);
       const tr = el('tr', { class: 'click', onclick: () => { setFilter('component', c.component, { quiet: true }); go('requests'); } },
         el('td', { title: c.component }, el('strong', { text: stepInfo(c.component)[0] }),
-          el('div', { class: 'hint', text: stepInfo(c.component)[1] })),
+          stepInfo(c.component)[1] ? el('div', { class: 'hint', text: stepInfo(c.component)[1] }) : null),
         // A cost never travels alone. saved_usd is what this component's removals were
         // worth over the window — summed per turn, so a frozen reduction replaying across a
         // session is already amortized into it — and net_usd is the verdict. Both from the
@@ -4425,7 +4436,7 @@ const TAB_INFO = {
     see: 'Account list, spend per account and the A/B comparison.' },
   setup: { short: 'Connect Claude Code to it', title: 'Setup', what: 'How to point Claude Code or Codex at this proxy.',
     see: 'Copy-paste settings for your token.' },
-  settings: { short: 'Your account and tokens', title: 'Settings', what: 'Your account: compaction settings, access tokens, password and machines.',
+  settings: { short: 'Your account and tokens', title: 'Settings', what: 'Your account: preset settings, access tokens, password and machines.',
     see: 'Forms you can change, and an audit trail of past changes.' },
   archive: { short: 'Old sessions in storage', title: 'Archive', what: 'Old sessions moved to cold storage to save disk.',
     see: 'A list of archived sessions; open one to read it.' },
