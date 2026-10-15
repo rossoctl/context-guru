@@ -746,8 +746,9 @@ var routeBounds = map[string]time.Duration{
 	// 10s default, so all three returned 503 on 100% of requests to that tab's default view.
 	// /api/tools and /api/toolfilter both appear in the outage's nginx log; /api/prompt escaped it
 	// only because nobody opened that view while it was being recorded.
-	"GET /api/tools":      dashHeavyTimeout,
-	"GET /api/toolfilter": dashHeavyTimeout,
+	"GET /api/tools":       dashHeavyTimeout,
+	"GET /api/toolfilter":  dashHeavyTimeout,
+	"GET /api/adapt/tools": dashHeavyTimeout,
 	// /api/prompt gets the longer bound but NOT a response cache, and the asymmetry is deliberate.
 	// It serves prompt CONTENT — a user's own system prompt and CLAUDE.md text — behind a gate that
 	// depends on the caller's ADDRESS (a.trusted, a CIDR check in single-tenant mode), not only on

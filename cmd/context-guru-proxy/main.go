@@ -658,6 +658,10 @@ func main() {
 		// configuration already live.
 		h.API().SetToolFilterState(h.DashToolFilter())
 	}
+	if tenants == nil && rec != nil {
+		// Single-tenant: the removal list the running pipeline filters, for /api/adapt/tools.
+		h.API().SetToolFilterState(h.DashToolFilter())
+	}
 
 	defer h.Close() // stop the off-path worker pool cleanly (no-op in sync mode)
 	if mode == components.ModeObserve {

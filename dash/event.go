@@ -252,6 +252,8 @@ type Event struct {
 	// query that reads them together rather than frozen into a second column that could
 	// disagree with them. See DB.DeclFilterSavings.
 	FilteredDeclTokens int `json:"filtered_decl_tokens"`
+	// DeclDigest is the declaration set this request carried (tool_declarations.digest).
+	DeclDigest string `json:"decl_digest,omitempty"`
 
 	// KeepAlive marks a row that IS a keep-alive ping rather than agent traffic: a request
 	// context-guru sent on its own initiative, to re-read an idle session's cached prefix so

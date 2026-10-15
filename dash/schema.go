@@ -174,6 +174,10 @@ CREATE TABLE IF NOT EXISTS requests (
   -- saving for a request the filter had declined to touch. 0 therefore means "nothing was
   -- removed here", which is the honest reading on every row that predates the feature.
   filtered_decl_tokens INTEGER NOT NULL DEFAULT 0,
+  -- The digest of the declaration SET this request carried (tool_declarations.digest), so a
+  -- declaration's cost can be priced on exactly the requests that carried it. '' on rows
+  -- written before it existed, where the set is inferred from the tool count instead.
+  decl_digest TEXT NOT NULL DEFAULT '',
   -- Which prompt-cache TTL TIER this request asked for: 'ephemeral_5m', 'ephemeral_1h', or ''
   -- for a body carrying no cache_control at all. The pipeline always computed this and threw
   -- it away, so nothing could group by it and a 1h prompt was priced at the 5m write rate.
@@ -674,6 +678,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "split_stable_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "split_tail_hash", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "decl_digest", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},
