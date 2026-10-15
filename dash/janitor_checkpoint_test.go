@@ -32,7 +32,11 @@ func TestJanitorPassCheckpointsWAL(t *testing.T) {
 	// The one-time migrations start with the recorder and touch the same tables. A checkpoint
 	// cannot truncate the WAL while one of them has a statement open, and one writing during the
 	// measurement grows it, so the test starts only once they are done.
-	<-rec.migrationsDone
+	select {
+	case <-rec.migrationsDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the background migrations did not finish")
+	}
 
 	// Build up a non-trivial WAL directly against the store, bypassing the async
 	// writer so the test controls exactly how much has accumulated before checking.
