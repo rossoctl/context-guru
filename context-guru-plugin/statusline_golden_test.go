@@ -949,3 +949,77 @@ func TestRecordRunFeedsTheWeeklyTip(t *testing.T) {
 		t.Error("record-run accepted a command the tip does not name")
 	}
 }
+
+// TestStatuslineMoneyShowsWhenCachestateIsSlowerThanTheRender is #570. A session with hundreds of
+// threads made /api/cachestate slower than the render budget, so every render's read failed, the
+// last copy aged out after ten minutes, and the line fell back to a bare `saved $x`. The read now
+// starts a detached refresher when it misses the budget, so the slow answer still reaches the disk
+// cache and a later render shows the money line. The refresher also removes a partial .tmp left by
+// an earlier render, and only an old one.
+func TestStatuslineMoneyShowsWhenCachestateIsSlowerThanTheRender(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,`+
+		`"money":{"main":{"saved_usd":50.32,"baseline_usd":250,"threads":1},"others":{"saved_usd":60.03,"baseline_usd":300,"threads":277}}}`,
+		now-60_000, now)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"total_saved_usd": 71.43}`)) //nolint:errcheck
+	})
+	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, r *http.Request) {
+		select { // slower than the 0.36 s render budget, as #570 measured (0.53-0.64 s)
+		case <-time.After(700 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		w.Write([]byte(cache)) //nolint:errcheck
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	tmp := t.TempDir()
+	key := filepath.Join(tmp, "context-guru-statusline-"+port+"-cs-sess-big.json")
+	oldTmp, newTmp := key+".111.tmp", key+".222.tmp"
+	for _, f := range []string{oldTmp, newTmp} {
+		if err := os.WriteFile(f, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(oldTmp, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	env := routedEnv(port)
+	env["TMPDIR"] = tmp
+	stdin := `{"session_id":"sess-big","cost":{"total_cost_usd":4.1},"context_window":{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000}}`
+	want := "saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents"
+	deadline := time.Now().Add(8 * time.Second)
+	var out string
+	for time.Now().Before(deadline) {
+		var code int
+		var elapsed time.Duration
+		out, code, elapsed = runStatusline(t, env, stdin, "--layout=balanced")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if elapsed > 500*time.Millisecond {
+			t.Errorf("render took %v; the budget is 0.5 s", elapsed)
+		}
+		if strings.Contains(out, want) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !strings.Contains(out, want) {
+		t.Fatalf("the money line never showed against a slow /api/cachestate; last render %q", out)
+	}
+	if _, err := os.Stat(oldTmp); !os.IsNotExist(err) {
+		t.Errorf("an hour-old partial .tmp must be removed by the refresher: %v", err)
+	}
+	if _, err := os.Stat(newTmp); err != nil {
+		t.Errorf("a fresh .tmp may belong to a write in progress and must stay: %v", err)
+	}
+}

@@ -697,6 +697,9 @@ HINT_FULL_FRACTION = 0.85  # the context bar's `⚠ rewrite near` from here
 TIP_DAYS = 7  # a command not run for this long is named in the tip
 TIP_COMMANDS = ("save-more", "remove-mcp-and-skills")
 CACHESTATE_TTL_SECONDS = 2.0
+# A cachestate read that misses the render budget starts at most one detached refresher per this
+# many seconds, so the copy a slow proxy leaves stays about this fresh (#570).
+CACHESTATE_REFRESH_WINDOW_SECONDS = 5.0
 DAY_TTL_SECONDS = 60.0
 CACHE_BAR_CELLS = 6
 AGENT_ROWS = 5  # named sub-agents shown before `+N more`
@@ -801,10 +804,14 @@ def _money(x: float, approx: bool = False) -> str:
     return f"{'≈' if approx else ''}{sign}${abs(x):.2f}"
 
 
-def _fetch_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | None, float]:
+def _fetch_json(port: str, query: str, tag: str, ttl: float,
+                refresh_window: float | None = None) -> tuple[dict | None, float]:
     """(body, age_seconds) for one cheap GET, through a disk cache. A failed fetch serves the last
     body up to STALE_STATS_MAX_AGE_SECONDS old WITH its age, so the caller can tell fresh from
-    stale; nothing cached and nothing fetched is (None, 0). Never raises."""
+    stale; nothing cached and nothing fetched is (None, 0). With refresh_window, a failed fetch also
+    starts one detached refresher per window (see _bg_json): a read that is slower than the render
+    budget then still lands in the cache for a later render, instead of failing on every render
+    until the copy is too old to show (#570). Never raises."""
     path = os.path.join(_tmpdir(), f"context-guru-statusline-{port}-{tag}.json")
     cached, age = None, 0.0
     try:
@@ -821,6 +828,8 @@ def _fetch_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | Non
         if not isinstance(obj, dict):
             raise ValueError
     except Exception:  # noqa: BLE001 - any failure means "use what we have"
+        if refresh_window:
+            _spawn_refresh(port, query, path, refresh_window)
         return (cached, age) if cached is not None and age < STALE_STATS_MAX_AGE_SECONDS else (None, 0.0)
     try:
         tmp = path + f".{os.getpid()}.tmp"
@@ -835,13 +844,13 @@ def _fetch_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | Non
 REFRESH_WINDOW_SECONDS = 30
 
 
-def _take_refresh_slot(path: str) -> bool:
+def _take_refresh_slot(path: str, window: float = REFRESH_WINDOW_SECONDS) -> bool:
     """True for exactly ONE caller per refresh window, however many renders start at once. The lock
     file's name carries the window number and is created with O_EXCL, so the creation itself is the
     election: no stat-then-write gap, and no stale lock to clear (a lock left by a crashed refresher
     belongs to an earlier window and simply stops mattering). The previous window's file is removed
     best effort."""
-    slot = int(time.time() // REFRESH_WINDOW_SECONDS)
+    slot = int(time.time() // window)
     try:
         os.close(os.open(f"{path}.lock.{slot}", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
     except FileExistsError:
@@ -879,15 +888,20 @@ def _bg_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | None, 
                 return json.load(fh), 0.0
         except Exception:  # noqa: BLE001 - too slow or down: the detached refresher fills it for a later render
             pass
-    if not _take_refresh_slot(path):
-        return cached, age
+    _spawn_refresh(port, query, path)
+    return cached, age
+
+
+def _spawn_refresh(port: str, query: str, path: str, window: float = REFRESH_WINDOW_SECONDS) -> None:
+    """Start ONE detached refresher for `path` per window (the lock file elects it). Never raises."""
+    if not _take_refresh_slot(path, window):
+        return
     try:
         subprocess.Popen([sys.executable, os.path.abspath(__file__), "--refresh", port, query, path],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     except OSError:
         pass
-    return cached, age
 
 
 def _refresh(port: str, query: str, path: str, timeout: float = 60.0) -> None:
@@ -902,6 +916,30 @@ def _refresh(port: str, query: str, path: str, timeout: float = 60.0) -> None:
     with open(tmp, "wb") as fh:
         fh.write(body)
     os.replace(tmp, path)
+    if timeout:
+        _sweep_tmp(path)
+
+
+TMP_LEFTOVER_SECONDS = 60
+
+
+def _sweep_tmp(path: str) -> None:
+    """Remove `path`'s .tmp files older than TMP_LEFTOVER_SECONDS. A render's read runs on a daemon
+    thread, and the process can exit in the middle of its write, which leaves a partial .tmp that
+    nothing else removes. Only the detached refresher sweeps: it has no render budget to spend."""
+    d, prefix = os.path.split(path)
+    prefix += "."
+    try:
+        with os.scandir(d or ".") as it:
+            for e in it:
+                if e.name.startswith(prefix) and e.name.endswith(".tmp"):
+                    try:
+                        if time.time() - e.stat().st_mtime > TMP_LEFTOVER_SECONDS:
+                            os.unlink(e.path)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
 
 
 def _num(d: object, k: str) -> float | None:
@@ -1465,7 +1503,7 @@ def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
     if session_id and on & {"save", "cache", "agents", "ctx", "fill", "clock0", "wagents"}:
         jobs["cs"] = lambda: _fetch_json(
             port, "/api/cachestate?session=" + _quote(session_id),
-            "cs-" + session_id, CACHESTATE_TTL_SECONDS)
+            "cs-" + session_id, CACHESTATE_TTL_SECONDS, CACHESTATE_REFRESH_WINDOW_SECONDS)
     now_ms, midnight = int(_now_s() * 1000), _day_start_ms()
     if "spark" in on:
         jobs["series"] = lambda: _bg_json(
