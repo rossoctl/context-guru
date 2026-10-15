@@ -420,16 +420,25 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	toolUseNames, stopReason := usage.ToolUseNames, usage.StopReason
 	failedCall := status != 0 && status/100 != 2
 	provider := bschemas.ModelProvider(c.provider)
+	// Both closures run on the writer goroutine, one after the other: normalize once, lazily.
+	var normMsgs []bschemas.ChatMessage
+	var normDone bool
+	norm := func() []bschemas.ChatMessage {
+		if !normDone {
+			normMsgs, normDone = apply.NormalizeMessages(provider, waitBody), true
+		}
+		return normMsgs
+	}
 	if c.rec.LifecycleOn() {
 		ts, endTS, cacheW, cacheW1h := e.TS, time.Now().UnixMilli(), usage.CacheWrite-usage.CacheWrite1h, usage.CacheWrite1h
 		rec := c.rec
 		e.LifecycleFn = func() *dash.LifecycleRow {
 			return rec.ObserveLifecycle(tenantID, sessionID, threadID, ts, endTS,
-				scanLifecycle(provider, waitBody), cacheW, cacheW1h)
+				scanLifecycle(norm, waitBody), cacheW, cacheW1h)
 		}
 	}
 	e.WaitCause = func() dash.WaitCauseResult {
-		obs := waits.Observe(tenantID, sessionID, threadID, provider, waitBody)
+		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm)
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
 		waitingFor, waitTool := waitcause.ClassifyWaitingFor(
 			toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
