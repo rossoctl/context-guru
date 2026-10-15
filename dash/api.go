@@ -1248,6 +1248,13 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 					o.ApplySummarizeLedger(l)
 					o.Waterfall = o.waterfall()
 				}
+				// The replay cap reads every row of the scope, so only a session keeps it bounded.
+				if f.Session != "" {
+					if l, lerr := db.ReplayLedgerFor(f, a.windows, a.pricer); lerr == nil {
+						o.ApplyReplayLedger(l)
+						o.Waterfall = o.waterfall()
+					}
+				}
 			}
 			return json.Marshal(o)
 		})
@@ -1308,7 +1315,17 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 			return nil
 		})
 		var sumLedger *SummarizeLedger
+		var repLedger *ReplayLedger
 		if a.pricer != nil && a.windows != nil {
+			g.Go(func() error {
+				l, err := db.ReplayLedgerFor(f, a.windows, a.pricer)
+				if err != nil {
+					slog.Warn("context-guru: replay cap unavailable; the headline keeps its stored credit", "err", err)
+					return nil
+				}
+				repLedger = l
+				return nil
+			})
 			g.Go(func() error {
 				l, err := db.SummarizeLedgerFor(f, a.windows, a.pricer)
 				if err != nil {
@@ -1325,6 +1342,7 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		}
 		// Before the additions below: they add to the totals this corrects.
 		o.ApplySummarizeLedger(sumLedger)
+		o.ApplyReplayLedger(repLedger)
 		if cachesplitHist != nil {
 			o.CachesplitHistorical = cachesplitHist
 			// Folded into the running total here, not inside Overview() itself, because
@@ -1508,6 +1526,14 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 			} else {
 				for _, c := range rows {
 					applySummarizeLedgerToRow(c, ls[c.Component])
+				}
+			}
+			// Every other replaying component, capped at the counterfactual client compaction.
+			if l, err := db.ReplayLedgerFor(f, a.windows, a.pricer); err != nil {
+				slog.Warn("context-guru: replay cap failed; components read their stored credit", "err", err)
+			} else {
+				for _, c := range rows {
+					applyReplayLedgerToRow(c, l)
 				}
 			}
 		}

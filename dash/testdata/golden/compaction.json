@@ -83,5 +83,12 @@
    "write_5m": 1.25
   }
  },
+ "replay_ledger": {
+  "by_component": {},
+  "closed_client_compaction": 0,
+  "closed_counterfactual": 0,
+  "conversations": 0,
+  "window_unknown_conversations": 0
+ },
  "scanned": 591
 }

@@ -316,11 +316,13 @@ type CompactionEpisodes struct {
 	Assumptions CompactionAssumptions `json:"assumptions"`
 	// Ledger is summarize's credit, row by row, split into what counts and what does not. The
 	// headline and /api/components read the same ledger, so the three figures agree.
-	Ledger  SummarizeLedger    `json:"ledger"`
-	Pricing *kvcache.PriceList `json:"pricing"`
-	FirstTS int64              `json:"first_ts"`
-	LastTS  int64              `json:"last_ts"`
-	Scanned int64              `json:"scanned"`
+	Ledger SummarizeLedger `json:"ledger"`
+	// ReplayLedger is the same ledger for every other replaying component (see replaycap.go).
+	ReplayLedger *ReplayLedger      `json:"replay_ledger,omitempty"`
+	Pricing      *kvcache.PriceList `json:"pricing"`
+	FirstTS      int64              `json:"first_ts"`
+	LastTS       int64              `json:"last_ts"`
+	Scanned      int64              `json:"scanned"`
 }
 
 // SummarizeLedger is every summarize credit row the walk saw, sorted into what counts and what
@@ -1278,6 +1280,9 @@ func (d *DB) CompactionEpisodesFor(f Filter, windows modelinfo.Resolver, p model
 		},
 		list.For, spanFrac, fillFrac, ceilingFrac)
 	out.Pricing = list
+	if rl, err := d.ReplayLedgerFor(f, windows, p); err == nil {
+		out.ReplayLedger = rl
+	}
 	return out, nil
 }
 
