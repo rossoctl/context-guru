@@ -874,8 +874,6 @@ func (k *Keeper) Forget(tenantID string) {
 	}
 	// Client lifecycle end marks (see lifecycle.go) are bucketed by tenant already, so this is
 	// a single delete rather than a prefix scan.
-	// Client lifecycle end marks (see lifecycle.go) are bucketed by tenant already, so this is
-	// a single delete rather than a prefix scan.
 	delete(k.ended, tenantID)
 	// The route breaker and dead-credential marks are also keyed with the tenant first (see
 	// breaker.go), so they are cleared the same way: nothing of this tenant's survives Forget.
@@ -1115,6 +1113,12 @@ func (k *Keeper) fire(j pingJob) {
 	case outcomeFailedRecorded:
 		k.record1(j, u, status, ms, start)
 		return
+	case outcomeMissed:
+		cost := k.record1(j, u, status, ms, start)
+		slog.Info("context-guru: cache keep-alive ping missed (entry had expired); cache re-written",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
+			"cache_write", u.CacheWrite, "fresh_input", u.FreshInput, "cost_usd", cost)
+		return
 	}
 	cost := k.record1(j, u, status, ms, start)
 	slog.Debug("context-guru: cache keep-alive ping",
@@ -1155,25 +1159,29 @@ func (k *Keeper) noteOutcome(j pingJob, status int, u Usage) outcome {
 		k.mu.Lock()
 		k.markCredDeadLocked(j.tenant, j.e.cred, j.e.model, status, k.now())
 		k.mu.Unlock()
+		slog.Debug("context-guru: cache keep-alive ping refused the credential; not pinging with it again",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
 		return outcomeFailed
 	}
 	switch {
 	case status == http.StatusTooManyRequests || status >= 500:
 		k.skipped.Add(1)
+		slog.Debug("context-guru: cache keep-alive ping hit a transient error; retrying at the next slot",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
 		return outcomeTransient
 	case status >= 400:
 		k.failed.Add(1)
 		k.markStopped(j.e)
-		k.mu.Lock()
-		k.routeFailedLocked(routeKey(j.tenant, j.e.endpoint, j.e.route, j.e.model), k.now())
-		k.mu.Unlock()
+		k.routeFailed(j)
+		slog.Debug("context-guru: cache keep-alive ping refused; not pinging this session again",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
 		return outcomeFailed
 	case u.FreshInput == 0 && u.CacheRead == 0 && u.CacheWrite == 0:
 		k.failed.Add(1)
 		k.markStopped(j.e)
-		k.mu.Lock()
-		k.routeFailedLocked(routeKey(j.tenant, j.e.endpoint, j.e.route, j.e.model), k.now())
-		k.mu.Unlock()
+		k.routeFailed(j)
+		slog.Warn("context-guru: cache keep-alive ping got no usable answer; not pinging this session again",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
 		return outcomeFailedRecorded
 	}
 	k.mu.Lock()

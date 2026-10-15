@@ -24,6 +24,30 @@ func TestARequestThatStartedBeforeTheEndIsNotHeld(t *testing.T) {
 	}
 }
 
+// Record's client-alias ended branch: an end mark on the client's own id (Record.Client) ends
+// an entry keyed on a different session id (a content hash), exactly as one on Key.Session does.
+func TestAnEndMarkOnTheClientAliasEndsTheSession(t *testing.T) {
+	start := time.Now()
+	fd := newFake(okPing)
+	k := New(Options{Dispatcher: fd, Now: func() time.Time { return start }})
+	key := Key{Tenant: "t", Session: "content-hash"}
+	rec := func(at time.Time) Record {
+		r := trackedRecord(fd, key, at)
+		r.Client = "codex-id"
+		return r
+	}
+	k.Record(rec(start))
+	k.MarkEnded("t", "codex-id", start.Add(time.Second))
+	k.Record(rec(start)) // in flight when the client ended the session
+	if _, ok := k.Entry(key); ok {
+		t.Fatal("a request that started before the client alias's end mark must not be held")
+	}
+	k.Record(rec(start.Add(2 * time.Second))) // the session resumed
+	if _, ok := k.Entry(key); !ok {
+		t.Fatal("a request that started after the client alias's end mark must be held")
+	}
+}
+
 func TestCompactRetiresOnlyTheMainThreadStartedBefore(t *testing.T) {
 	start := time.Now()
 	fd := newFake(okPing)
@@ -90,6 +114,10 @@ func TestForgetClearsEveryNewMapForThatTenantOnly(t *testing.T) {
 		k.Arrive(Key{Tenant: ten, Session: "s"})
 		k.mu.Lock()
 		k.routeFailedLocked(routeKey(ten, "e", "/r", "m"), start)
+		// A second route, failed up to the limit, so routeTripped holds one entry per tenant.
+		for i := 0; i < routeFailLimit; i++ {
+			k.routeFailedLocked(routeKey(ten, "e", "/tripped", "m"), start)
+		}
 		k.markCredDeadLocked(ten, "c", "m", 401, start)
 		k.mu.Unlock()
 	}
@@ -97,7 +125,8 @@ func TestForgetClearsEveryNewMapForThatTenantOnly(t *testing.T) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	for name, n := range map[string]int{"ended": len(k.ended), "inflight": len(k.inflight),
-		"routeFails": len(k.routeFails), "credDead": len(k.credDead)} {
+		"routeFails": len(k.routeFails), "routeTripped": len(k.routeTripped),
+		"credDead": len(k.credDead)} {
 		if n != 1 {
 			t.Errorf("%s has %d entries after Forget(a), want 1 (tenant b's)", name, n)
 		}

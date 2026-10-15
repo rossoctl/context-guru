@@ -1,7 +1,11 @@
 package keepalive
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -241,5 +245,76 @@ func TestSweepStopsADueEntryWhoseCredentialDiedWhileIdle(t *testing.T) {
 	}
 	if e, ok := k.Entry(target); !ok || !e.Stopped {
 		t.Fatalf("a dead credential must stop the due entry: entry=%+v ok=%v", e, ok)
+	}
+}
+
+// lockedBuf is a log sink a ping goroutine may write while the test reads it.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// captureLogs routes the default logger, at Debug, into a buffer for the rest of the test.
+func captureLogs(t *testing.T) *lockedBuf {
+	t.Helper()
+	buf := &lockedBuf{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+// The operator-visible lines main logged for a ping's failure outcomes: a Warn for an all-zero 2xx
+// and for the trip itself, a Debug for any other 4xx and for a credential refusal. None of them
+// names the credential or its id.
+func TestPingFailuresLogWhatMainLogged(t *testing.T) {
+	logs := captureLogs(t)
+	now := time.Now()
+	fd := newFake(func(DispatchRequest) (Usage, int, error) { return Usage{}, http.StatusOK, nil })
+	k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+	failRoute(t, k, fd, "t", 3, &now)
+	out := logs.String()
+	for _, want := range []string{"ping got no usable answer",
+		"keep-alive off for a route whose pings keep refreshing nothing", "route=/v1/messages",
+		"model=claude-sonnet-5", "failures=3", "for=1h0m0s"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("logs lack %q:\n%s", want, out)
+		}
+	}
+
+	status := http.StatusBadRequest
+	fd = newFake(func(DispatchRequest) (Usage, int, error) { return Usage{}, status, nil })
+	k = New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+	ping := func(key Key, cred string) {
+		r := trackedRecord(fd, key, now)
+		r.Cred = cred
+		k.Record(r)
+		k.Record(r) // a session's first request is never held
+		now = now.Add(281 * time.Second)
+		k.Sweep(now)
+	}
+	ping(Key{Tenant: "t", Session: "x"}, "")
+	if !strings.Contains(logs.String(), "ping refused; not pinging this session again") {
+		t.Errorf("a 400 did not log main's refusal line:\n%s", logs.String())
+	}
+	status = http.StatusUnauthorized
+	ping(Key{Tenant: "t", Session: "y"}, "secret-cred-id")
+	if !strings.Contains(logs.String(), "ping refused the credential; not pinging with it again") {
+		t.Errorf("a 401 did not log main's credential line:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "secret-cred-id") {
+		t.Errorf("a log line names the credential id:\n%s", logs.String())
 	}
 }

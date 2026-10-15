@@ -149,6 +149,38 @@ func TestAnOpenRequestOnTheSameThreadPausesItsPing(t *testing.T) {
 	}
 }
 
+// A panic in the host's record BEFORE it hands off to keepalive.Keeper.Record must still depart
+// the thread, or its open count leaks and the thread is never pinged again. A nil request panics
+// at r.UserAgent() while the campaign's arguments are built, ahead of the hand-off. (The normal
+// path departs exactly once — TestAnOpenRequestOnTheSameThreadPausesItsPing pins that.)
+func TestAPanicBeforeTheHandOffStillDeparts(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
+	up := upstream{base: "http://up", path: "/v1/messages"}
+	recordOne(t, k, pol, kaBody, clock.now(), up)  // an earlier turn: the gate needs turn >= 1
+	k.arrive("t1", "sess-1", "")                   // request A, which will panic in record
+	k.arrive("t1", "sess-1", "")                   // request B, overlapping
+	recordTurn(t, k, pol, kaBody, clock.now(), up) // B finishes and holds
+	if k.Stats().Live != 1 {
+		t.Fatalf("setup: %d live, want 1", k.Stats().Live)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("setup: record with a nil request did not panic")
+			}
+		}()
+		k.record(&Tenancy{ID: "t1", Cache: pol}, "sess-1", "", clock.now(), []byte(kaBody), up, nil,
+			bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+	}()
+	k.Sweep(clock.advance(290 * time.Second))
+	time.Sleep(30 * time.Millisecond)
+	if fs.n() != 1 {
+		t.Errorf("%d pings after A's record panicked before its hand-off, want 1 "+
+			"(A's open count leaked and paused the thread)", fs.n())
+	}
+}
+
 // routeFailLimit and routeTripFor mirror package keepalive's breaker constants (breaker.go), which
 // these host-level tests drive through the proxy's own record and Dispatcher.
 const (

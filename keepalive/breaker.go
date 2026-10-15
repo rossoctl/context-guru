@@ -1,6 +1,9 @@
 package keepalive
 
-import "time"
+import (
+	"log/slog"
+	"time"
+)
 
 // The route breaker and the dead-credential marks (main #527). Both are keyed with the tenant
 // first, so one tenant can never switch off another's pings.
@@ -27,8 +30,9 @@ func credModelKey(tenant, cred, model string) string {
 func credAllKey(tenant, cred string) string { return tenant + "\x00" + cred }
 
 // routeFailedLocked counts a failure on route and trips it at the limit. It also prunes trips
-// that have expired, so the map cannot grow without bound. k.mu must be held.
-func (k *Keeper) routeFailedLocked(route string, now time.Time) {
+// that have expired, so the map cannot grow without bound. It reports whether this failure
+// tripped the route, so the caller can log the trip once k.mu is released. k.mu must be held.
+func (k *Keeper) routeFailedLocked(route string, now time.Time) bool {
 	for r, until := range k.routeTripped {
 		if !now.Before(until) {
 			delete(k.routeTripped, r)
@@ -39,6 +43,22 @@ func (k *Keeper) routeFailedLocked(route string, now time.Time) {
 		delete(k.routeFails, route)
 		k.routeTripped[route] = now.Add(routeTripFor)
 		k.routeTrips.Add(1)
+		return true
+	}
+	return false
+}
+
+// routeFailed is routeFailedLocked for a ping's outcome: it takes k.mu itself and, when the
+// failure trips the route, logs main's operator-visible Warn. The log names the tenant (by
+// label), the endpoint+route and the model, never the credential or its id.
+func (k *Keeper) routeFailed(j pingJob) {
+	k.mu.Lock()
+	tripped := k.routeFailedLocked(routeKey(j.tenant, j.e.endpoint, j.e.route, j.e.model), k.now())
+	k.mu.Unlock()
+	if tripped {
+		slog.Warn("context-guru: cache keep-alive off for a route whose pings keep refreshing nothing",
+			"tenant", tenantLabel(j.tenant), "route", j.e.endpoint+j.e.route, "model", j.e.model,
+			"failures", routeFailLimit, "for", routeTripFor.String())
 	}
 }
 

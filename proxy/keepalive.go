@@ -266,6 +266,18 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	if k == nil || tn == nil {
 		return
 	}
+	// keepalive.Keeper.Record departs the thread's open request (the one arrive opened) on every
+	// return path of its own. A panic in this function BEFORE it hands off would skip that and
+	// leave the thread paused until restart, so depart here unless the hand-off happened. Not an
+	// unconditional deferred depart: Record has already departed on the normal path, and a second
+	// depart would release a CONCURRENT request's count on the same thread. The key is the one
+	// arrive used (proxy.go: tn.ID, tr.Session, threadID — serve's session and threadID).
+	recorded := false
+	defer func() {
+		if !recorded {
+			k.depart(tn.ID, session, threadID)
+		}
+	}()
 	// NO AUDIT SINK, NO RETENTION. An audit control that --dashboard silently removes is not a
 	// control, and this is the one that makes the whole credential arrangement reviewable. Given
 	// the choice between an unconditional second sink and refusing to hold anything we cannot
@@ -319,7 +331,8 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		cred = credKey(up, r.Header)
 	}
 	key := keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}
-	k.Keeper.Record(keepalive.Record{Key: key, StartedAt: startedAt, Body: body,
+	// Built before `recorded` is set, so a panic evaluating any of its fields still departs.
+	rec := keepalive.Record{Key: key, StartedAt: startedAt, Body: body,
 		Cred: cred, Client: client,
 		Provider: provider, Endpoint: up.base, Route: route, Status: status,
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
@@ -327,7 +340,9 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 			StopReason: u.StopReason},
 		UsageOK: usageOK, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
-		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }})
+		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
+	recorded = true
+	k.Keeper.Record(rec)
 }
 
 // resolvePolicy layers the manager strategy and the session override over the account's own
