@@ -34,6 +34,11 @@ type kaEntry struct {
 	// Dispatcher's Release.
 	key             Key
 	tenant, session string
+	// client is Record.Client as it stood when this entry was created — the tenant-scoped id a
+	// client's hooks name this session by, when the host keys it differently (Codex's
+	// session-id header). "" when there is none. MarkEnded / EndedAfter and
+	// RetireSessionStartedBefore match a session on either Key.Session or this.
+	client string
 	// cred is Record.Cred as it stood when this entry was created — the opaque credential id
 	// the host computed for the request, "" meaning a server-held key. Read by the route
 	// breaker's gate (see breaker.go) at Record and at Sweep time.
@@ -238,7 +243,11 @@ type Record struct {
 	// Cred is an opaque, tenant-free credential id the host computes for the request's
 	// provider key; "" means a server-held key (never subject to the dead-credential mark,
 	// only ever the route breaker). The proxy host fills this from main's HMAC credKey.
-	Cred    string
+	Cred string
+	// Client is the id the client itself names the session by, when the host keys it
+	// differently (Codex's session-id header). "" when there is none. MarkEnded and
+	// RetireSessionStartedBefore match on either Key.Session or Client.
+	Client  string
 	UsageOK bool
 	Policy  Policy // resolved by the host
 	Tag     string // host label returned by Arrive (proxy: the applied strategy id)
@@ -292,6 +301,11 @@ type Keeper struct {
 	// Depart decrement. A due entry whose own thread has one or more open requests is skipped by
 	// Sweep — another thread's open request never pauses it. Port of main's `inflight` field.
 	inflight map[string]int
+	// ended holds client lifecycle SessionEnd marks, bucketed by tenant first (main #527's
+	// clientsignal.go: keeper.ended). A tenant's own bucket is a plain session (or client alias)
+	// id -> the instant it was marked ended; see markEndedLocked / endedAfterLocked. Lazily
+	// created, so a keeper that never sees a lifecycle signal allocates nothing.
+	ended map[string]map[string]time.Time
 	// turns counts requests seen per THREAD (keyed like live), so the first-request gate
 	// survives the entry's own lifecycle: an entry is dropped the moment the next request arrives, and retired by
 	// policy a few minutes later, while "has this session sent a request before?" has to
@@ -566,6 +580,21 @@ func (k *Keeper) Record(r Record) {
 		return
 	}
 	key := r.Key.id()
+	// A client lifecycle signal (host-gated; see MarkEnded) that this session already ended
+	// holds nothing further: this request was in flight when the user left, so its cache entry
+	// is not worth holding. Matched on Key.Session or r.Client, the id the client's own hooks
+	// may name the session by. Port of main's clientsignal.go endedAfter check (#527), kept
+	// first among Record's gates as main has it.
+	k.mu.Lock()
+	ended := k.endedAfterLocked(r.Key.Tenant, r.Key.Session, startedAt) ||
+		(r.Client != "" && k.endedAfterLocked(r.Key.Tenant, r.Client, startedAt))
+	if ended {
+		k.retireLocked(key)
+	}
+	k.mu.Unlock()
+	if ended {
+		return
+	}
 	// The kill switch stops RETENTION, not merely pinging. A switch that left bodies and
 	// credentials accumulating while refusing to use them would be the worst of both.
 	if Disabled() {
@@ -656,7 +685,7 @@ func (k *Keeper) Record(r Record) {
 		emitter = components.NopEmitter{}
 	}
 	e := &kaEntry{
-		key: r.Key, tenant: r.Key.Tenant, session: session, thread: threadID, startedAt: startedAt,
+		key: r.Key, tenant: r.Key.Tenant, session: session, client: r.Client, thread: threadID, startedAt: startedAt,
 		cred: r.Cred,
 		body: owned, endpoint: r.Endpoint,
 		st:       r.Store,
@@ -802,26 +831,12 @@ func (k *Keeper) retireLocked(key string) {
 	offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 }
 
-// retireSession releases every thread of one session: the primary thread's key and every key
-// under it. The separator is NUL, which no session id contains, so a prefix can never reach
-// into another session.
+// RetireSession releases every thread of one session: the primary thread's key and every key
+// under it, matched on Key.Session or a client alias (see RetireSessionStartedBefore). The
+// separator is NUL, which no session id contains, so a prefix can never reach into another
+// session.
 func (k *Keeper) RetireSession(tenantID, session string) {
-	if k == nil {
-		return
-	}
-	base := Key{Tenant: tenantID, Session: session}.id()
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	for key, e := range k.live {
-		if key != base && !strings.HasPrefix(key, base+"\x00") {
-			continue
-		}
-		k.bytes -= int64(len(e.body))
-		k.releaseLocked(e)
-		e.clear()
-		delete(k.live, key)
-		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
-	}
+	k.RetireSessionStartedBefore(tenantID, session, time.Time{})
 }
 
 // forget releases everything held for one tenant, for the paths that end an account's authority
@@ -855,6 +870,11 @@ func (k *Keeper) Forget(tenantID string) {
 		delete(k.turns, key)
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}
+	// Client lifecycle end marks (see lifecycle.go) are bucketed by tenant already, so this is
+	// a single delete rather than a prefix scan.
+	// Client lifecycle end marks (see lifecycle.go) are bucketed by tenant already, so this is
+	// a single delete rather than a prefix scan.
+	delete(k.ended, tenantID)
 	// The route breaker and dead-credential marks are also keyed with the tenant first (see
 	// breaker.go), so they are cleared the same way: nothing of this tenant's survives Forget.
 	for r := range k.routeFails {
