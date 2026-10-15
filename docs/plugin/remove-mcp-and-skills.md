@@ -4,9 +4,6 @@
 
 `/context-guru:remove-mcp-and-skills` lists the MCP servers, MCP tools and skills that were declared on your requests and never used, prices what carrying them cost, and shows what the ones you already removed have **measurably** saved since. Built-in tools (Read, Bash, Edit and the like) are never listed. It asks one question and filters them only on a yes.
 
-![/context-guru:remove-mcp-and-skills](img/remove-mcp-and-skills-dark.svg#only-dark)
-![/context-guru:remove-mcp-and-skills](img/remove-mcp-and-skills-light.svg#only-light)
-
 ```text
 ╭─ Remove MCP servers and skills ─────────────────────────────────────────────────────────────────╮
 │ So far: the 2 items you already removed saved $4.50 (measured, since 2026-09-15).               │

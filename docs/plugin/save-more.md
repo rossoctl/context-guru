@@ -18,9 +18,6 @@ Codex: `$context-guru-save-more`, with the same words.
 
 ## The screen
 
-![/context-guru:save-more](img/save-more-dark.svg#only-dark)
-![/context-guru:save-more](img/save-more-light.svg#only-light)
-
 Each report opens with a card that answers two questions in plain words: what your **current** setting saved so far, and what the **recommended** change would have saved per week over the same past sessions, with its range. Then a ranked table of every option, and the caveats.
 
 ```text
@@ -228,17 +225,6 @@ The words may come in either order (`apply cache X` or `apply X cache`). A chang
 | `The analysis took longer than 5 minutes` | a shorter window: `--days 7` |
 | `This proxy needs a sign-in for this` | on the hosted service, set `CG_TOKEN` to your context-guru token (taken from the agent's own `cg_live_` key when there is one), or change it in the dashboard |
 | any other sentence | the proxy's own reason (for example, too many reports at once); act on it |
-
-## Moved from `/context-guru:adapt`
-
-| Before | Now |
-|---|---|
-| `/context-guru:adapt compaction` | `/context-guru:save-more config` |
-| `/context-guru:adapt cache` | `/context-guru:save-more cache` |
-| `/context-guru:adapt tools` | `/context-guru:remove-mcp-and-skills` |
-| `/context-guru:adapt` | `/context-guru:save-more` |
-
-`/context-guru:adapt` still works for one release: it says where the command moved and shows the new screen.
 
 ## The report format
 

@@ -51,7 +51,6 @@ The old names keep working for one release. Each says where it moved and runs th
 | `/context-guru:cost-unused` | `/context-guru:insights tools` |
 | `/context-guru:cost-cold`, `/context-guru:cost-compact` | `/context-guru:insights cache` |
 | `/context-guru:cost-trends` | `/context-guru:insights savings` |
-| `/context-guru:adapt` | `/context-guru:save-more`, and `/context-guru:remove-mcp-and-skills` for `adapt tools` |
 
 `/context-guru:statusline` still installs, changes and removes the status line; `/context-guru:doctor` checks that it is there.
 
