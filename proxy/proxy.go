@@ -1398,7 +1398,8 @@ const maxExpandRounds = 3
 // proxy memory (the body is buffered and token-counted several times). Generous
 // enough for very long agent transcripts; requests above it get 413 — unless
 // readGatedBody finds a reason to read further. See maxCompactionRequestBytes.
-const maxRequestBytes = 32 << 20 // 32 MiB
+// A var only so the size tests can lower it; nothing else assigns it.
+var maxRequestBytes int64 = 32 << 20 // 32 MiB
 
 // maxCompactionRequestBytes is the ceiling readGatedBody extends to for the two cases whose
 // entire point is a body already larger than maxRequestBytes: the agent's own compaction
@@ -1407,7 +1408,7 @@ const maxRequestBytes = 32 << 20 // 32 MiB
 // receive and shrink a body that is, by definition, already large. Matches the existing
 // generous-but-bounded precedent already used in this package for a comparable purpose
 // (maxKeepAliveBytes, keepalive.go).
-const maxCompactionRequestBytes = 128 << 20 // 128 MiB
+var maxCompactionRequestBytes int64 = 128 << 20 // 128 MiB
 
 // readGatedBody reads a request body up to maxRequestBytes as the cheap default —
 // identical cost and behavior to plain http.MaxBytesReader for the overwhelming majority of
