@@ -98,10 +98,13 @@ type sentEntry struct {
 // request replaced the main thread's body, so a prefix ask on the main thread failed its coverage
 // check (ErrStalePrefix) or answered from the wrong conversation.
 type sentStash struct {
-	mu    sync.Mutex
-	m     map[string]sentEntry
-	bytes int
-	seq   uint64
+	// afterEntryRead, set only by tests, runs in snapshotCovering right after the entry is read, so a
+	// test can replace the stash at the exact point a second read would have gone wrong.
+	afterEntryRead func()
+	mu             sync.Mutex
+	m              map[string]sentEntry
+	bytes          int
+	seq            uint64
 }
 
 func newSentStash() *sentStash { return &sentStash{m: map[string]sentEntry{}} }
@@ -218,6 +221,9 @@ func (s *sentStash) snapshotCovering(session string, count int, hash string) ([]
 	s.mu.Lock()
 	e, ok := s.m[session]
 	s.mu.Unlock()
+	if s.afterEntryRead != nil {
+		s.afterEntryRead()
+	}
 	if !ok || len(e.forwarded) == 0 {
 		return nil, components.ErrNoPrefix
 	}

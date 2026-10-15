@@ -71,3 +71,22 @@ func TestAskCoveredRefusesAHashFromAReplacedBody(t *testing.T) {
 		t.Error("the ask went out over the replacement body")
 	}
 }
+
+// The body snapshotCovering returns is the entry it read and checked, not a second read of the
+// stash: replace the stash at the point right after the read and the original still comes back.
+func TestSnapshotCoveringReturnsTheEntryItChecked(t *testing.T) {
+	stash := newSentStash()
+	const session = "covered-4"
+	stash.put(session, bschemas.Anthropic, []byte(prefixBodyFixture), []byte(prefixBodyFixture))
+	hash := components.SpanHash(apply.NormalizeMessages(bschemas.Anthropic, []byte(prefixBodyFixture))[:1])
+	other := strings.Replace(prefixBodyFixture, "find the flaky test", "write the release notes", 1)
+	stash.afterEntryRead = func() { stash.put(session, bschemas.Anthropic, []byte(other), []byte(other)) }
+
+	body, err := stash.snapshotCovering(session, 1, hash)
+	if err != nil {
+		t.Fatalf("snapshotCovering: %v", err)
+	}
+	if !strings.Contains(string(body), "find the flaky test") || strings.Contains(string(body), "release notes") {
+		t.Fatalf("the snapshot is not the entry that was checked: %q", body)
+	}
+}
