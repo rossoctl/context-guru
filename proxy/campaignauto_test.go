@@ -147,7 +147,7 @@ func refreshFixture(t *testing.T, gap int64, mode string) (f *mgrFixture, tid, b
 	f, dir := newCampaignFixture(t, "ship", "parity.model.json")
 	_, tid = f.signUpJar(t, "user@ibm.com")
 	t0 := time.Now().Add(-20 * 24 * time.Hour).UnixMilli()
-	n := 0
+	var evs []*dash.Event
 	for _, tc := range []struct {
 		tenant string
 		gap    int64
@@ -155,31 +155,15 @@ func refreshFixture(t *testing.T, gap int64, mode string) (f *mgrFixture, tid, b
 		for s := 0; s < 80; s++ {
 			ts := t0 + int64(s)*3*3600e3
 			for i := 0; i < 30; i++ {
-				for st := f.rec.Stats(); st.Queued > st.QueueCap/2; st = f.rec.Stats() {
-					time.Sleep(time.Millisecond) // the recorder drops rather than blocks when its queue is full
-				}
-				f.rec.Record(&dash.Event{TenantID: tc.tenant, SessionID: fmt.Sprintf("s%d", s), TS: ts, Model: "m1", Status: 200, Mode: dash.ModeActive,
+				evs = append(evs, &dash.Event{TenantID: tc.tenant, SessionID: fmt.Sprintf("s%d", s), TS: ts, Model: "m1", Status: 200, Mode: dash.ModeActive,
 					TokenAccounting: dash.AccountingComplete, CacheRead: 50000, UpstreamMs: 1000})
 				ts += 1000 + tc.gap
-				n++
 			}
 		}
 	}
-	// the deadline moves with progress: under -race on a loaded host the writer is slow, not stuck
-	last := int64(-1)
-	for end := time.Now().Add(20 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		st := f.rec.Stats()
-		if st.Written >= int64(n) {
-			break
-		} else if st.Dropped > 0 {
-			t.Fatalf("the recorder dropped %d rows", st.Dropped)
-		}
-		if st.Written > last {
-			last, end = st.Written, time.Now().Add(20*time.Second)
-		}
-		if time.Now().After(end) {
-			t.Fatalf("the recorder wrote nothing for 20 s (%d of %d rows)", st.Written, n)
-		}
+	// straight to the store in one transaction: through the recorder's queue this fixture took most of a minute under -race
+	if err := f.h.opts.Dashboard.DB().InsertEvents(evs); err != nil {
+		t.Fatal(err)
 	}
 	id := "cmp-0123456789ab"
 	base = filepath.Join(dir, id)
@@ -291,5 +275,64 @@ func TestAutoRefreshSwapRechecksTheModeUnderTheLock(t *testing.T) {
 		if got != c.want || (pc.spec == ps) != c.want || (disk["v"] == "new") != c.want {
 			t.Errorf("mode %s, rec %s: swapped %v (memory %v, disk %v), want %v", c.mode, c.rec, got, pc.spec == ps, disk["v"], c.want)
 		}
+	}
+}
+
+// The auto builder's tenant rows do not ride on the capped fleet read: accounts with 4 and 3 requests, older than another tenant's 6 that fill a
+// cap of 6, each get all their own rows; a row in both reads counts once; one tenant's rows never leak into another's build (each tenant's
+// read is dropped before the next); and the build says the fleet read was truncated.
+func TestAutoRowsForReadsTheTenantsOwnRowsPastTheFleetCap(t *testing.T) {
+	f, _ := newCampaignFixture(t, "ship", "parity.model.json")
+	_, tid := f.signUpJar(t, "user@ibm.com")
+	t0 := time.Now().Add(-5 * time.Hour).UnixMilli()
+	for i := 0; i < 4; i++ {
+		f.record(t, tid, "mine", &dash.Event{TS: t0 + int64(i)*60e3, Model: "m1", Status: 200, CacheRead: 50000, UpstreamMs: 1000, CostUSD: 0.01})
+	}
+	for i := 0; i < 3; i++ {
+		f.record(t, "second-tenant", "theirs", &dash.Event{TS: t0 + 600e3 + int64(i)*60e3, Model: "m1", Status: 200, CacheRead: 50000, UpstreamMs: 1000, CostUSD: 0.01})
+	}
+	for i := 0; i < 6; i++ {
+		f.record(t, "other-tenant", fmt.Sprintf("s%d", i), &dash.Event{TS: t0 + 3600e3 + int64(i)*60e3, Model: "m1", Status: 200, CacheRead: 50000, UpstreamMs: 1000, CostUSD: 0.01})
+	}
+	since, until := t0-60e3, time.Now().UnixMilli()
+	count := func(rows []predictive.AutoRow) map[string]int {
+		n := map[string]int{}
+		for _, r := range rows {
+			n[r.Scope]++
+		}
+		return n
+	}
+	// under the default cap the fleet read already holds the tenant's rows: they must count once, not twice
+	d, err := f.h.autoFleet(since, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, cut, err := f.h.autoRowsFor(d, tid, flatPrice, false, until)
+	if err != nil || cut {
+		t.Fatal(err, cut)
+	}
+	if n := count(rows); n[tid] != 4 || n["second-tenant"] != 3 || n["other-tenant"] != 6 {
+		t.Fatalf("uncapped rows by tenant %v; want 4 / 3 / 6, each counted once", n)
+	}
+	defer dash.SetKVCacheMaxRows(6)()
+	if d, err = f.h.autoFleet(since, until); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _, err = f.h.autoRowsFor(d, "second-tenant", flatPrice, false, until); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _, err = f.h.autoRowsFor(d, tid, flatPrice, false, until); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(rows); n[tid] != 4 || n["second-tenant"] != 0 || n["other-tenant"] != 6 {
+		t.Fatalf("capped rows by tenant %v; want the tenant's 4 plus the fleet read's 6, and none of the tenant read before it", n)
+	}
+	spec := map[string]any{"evidence": map[string]any{}}
+	d.note(spec, false)
+	if data := spec["evidence"].(map[string]any)["data"].(map[string]any); data["fleet_truncated"] != true || data["fleet_rows_in_window"] != int64(13) {
+		t.Errorf("evidence.data = %v; want the fleet read reported as truncated (6 of 13)", data)
+	}
+	if cv, _ := spec["caveats"].([]string); len(cv) != 1 {
+		t.Errorf("caveats %v; want one saying the fleet prior was cut", cv)
 	}
 }

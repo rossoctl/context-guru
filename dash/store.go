@@ -311,6 +311,9 @@ func (d *DB) Path() string { return d.path }
 // gzPair is one blob's before/after compression, precomputed outside the transaction.
 type gzPair struct{ before, after []byte }
 
+// InsertEvents writes events straight to the store in one transaction, without the recorder's queue. For test fixtures in other packages.
+func (d *DB) InsertEvents(evs []*Event) error { return d.insertBatch(evs) }
+
 // insertBatch writes a batch of captured events in ONE transaction — the whole
 // point of batching: a per-request fsync would make the writer the bottleneck
 // under agent traffic. A failed batch is logged and dropped; observability never
