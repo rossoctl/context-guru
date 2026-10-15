@@ -33,6 +33,7 @@ One command per question. Each opens with one line that answers it, then a small
 | `/context-guru:doctor` | Is it set up right? | [Doctor](doctor.md) |
 | `/context-guru:save-more` | Which config and keep-alive strategy would have cost least on my history? Change them, after a yes. | [Save more](save-more.md) |
 | `/context-guru:remove-mcp-and-skills` | Which MCP servers and skills do I never use, and what does removing them save? | [Remove MCP servers and skills](remove-mcp-and-skills.md) |
+| `/context-guru:cache-campaign` | Would a keep-alive campaign built from a tenant's history beat what it does today? (managers) | [Cache campaign](cache-campaign.md) |
 
 Five more views draw in the terminal: `/context-guru:watch`, `timeline`, `chart`, `heatmap` and `fill`. They are on [Terminal views](terminal-views.md).
 

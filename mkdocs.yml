@@ -112,6 +112,7 @@ nav:
           - Doctor: plugin/doctor.md
           - Save more: plugin/save-more.md
           - Remove MCP servers and skills: plugin/remove-mcp-and-skills.md
+          - Cache campaign: plugin/cache-campaign.md
           - Terminal views: plugin/terminal-views.md
           - Status line: plugin/statusline.md
           - Configuration and troubleshooting: plugin/configuration.md
