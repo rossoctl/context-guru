@@ -85,7 +85,7 @@ func CloneMessages(in []schemas.ChatMessage) []schemas.ChatMessage {
 func clonePlainText(m schemas.ChatMessage) (schemas.ChatMessage, bool) {
 	if m.Name != nil || m.ChatToolMessage != nil || m.ChatAssistantMessage != nil ||
 		m.Content == nil || m.Content.ContentStr == nil || m.Content.ContentBlocks != nil ||
-		!utf8.ValidString(*m.Content.ContentStr) {
+		!utf8.ValidString(*m.Content.ContentStr) || !utf8.ValidString(string(m.Role)) {
 		return schemas.ChatMessage{}, false
 	}
 	str := *m.Content.ContentStr

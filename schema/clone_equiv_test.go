@@ -18,6 +18,7 @@ func TestCloneMessagesMatchesTheJSONRoundTrip(t *testing.T) {
 		{Role: "user", Content: str("café   \x00 \t \"q\" <b>&</b>")},
 		{Role: "user", Content: str("bad utf8 \xff\xfe tail")},
 		{Role: "", Content: str("no role")},
+		{Role: "\xdb", Content: str("bad utf8 role")},
 		{Role: "user", Name: &name, Content: str("named")},
 		{Role: "user", Content: &schemas.ChatMessageContent{ContentBlocks: []schemas.ChatContentBlock{{Type: "text", Text: &name}}}},
 		{Role: "user"},
