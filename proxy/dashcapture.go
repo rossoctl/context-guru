@@ -13,7 +13,6 @@ import (
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/predictive"
-	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -429,11 +428,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 				scanLifecycle(provider, waitBody), cacheW, cacheW1h)
 		}
 	}
-	if tr := c.trace; tr.Bypassed && tr.Run != nil && len(waitBody) > 0 {
-		e.BypassTokens = func() int {
-			return schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: apply.NormalizeMessages(provider, waitBody)})
-		}
-	}
+	e.BypassCount = c.trace.BypassCount
 	e.WaitCause = func() dash.WaitCauseResult {
 		obs := waits.Observe(tenantID, sessionID, threadID, provider, waitBody)
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)

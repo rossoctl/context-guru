@@ -788,3 +788,14 @@ func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64,
 	}
 	return deleted, nil
 }
+
+// setBypassTokens stores the token count of a bypassed request after the fact. A bypassed row
+// is forwarded untouched, so after equals before. Priced with the count still unknown, such a
+// row is labelled "missing"; with a count it is "partial", exactly as when it was counted inline.
+func (d *DB) setBypassTokens(id int64, before, attempted, frozen int) error {
+	_, err := d.sql.Exec(`UPDATE requests SET tokens_before = ?, tokens_after = ?, attempted_tokens = ?,
+		frozen_tokens = ?,
+		token_accounting = CASE WHEN token_accounting = ? AND ? > 0 THEN ? ELSE token_accounting END
+		WHERE id = ?`, before, before, attempted, frozen, AccountingMissing, before, AccountingPartial, id)
+	return err
+}

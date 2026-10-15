@@ -10,15 +10,12 @@ import (
 	"testing"
 	"time"
 
-	bschemas "github.com/maximhq/bifrost/core/schemas"
-
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/metrics"
-	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -94,9 +91,9 @@ func TestBypassedRequestIsNotTokenizedOnTheRequestPath(t *testing.T) {
 }
 
 // The count moves off the request path, it does not disappear: the dashboard row of a bypassed
-// request carries the same tokens_before/after the pipeline used to report, and still says why
-// it was not compacted.
-func TestBypassedRowGetsItsTokenCountFromTheWriter(t *testing.T) {
+// request ends up with the figures main stored for the same body, and still says why it was not
+// compacted. The constants are what origin/main wrote for bypassBody(64 KiB) through this route.
+func TestBypassedRowGetsItsTokenCountFromTheWorker(t *testing.T) {
 	up := fakeUpstream(t)
 	defer up.Close()
 	h, rec := dashHandler(t, up.URL, dash.Options{CaptureContent: true, ContentCap: 1 << 16,
@@ -104,8 +101,9 @@ func TestBypassedRowGetsItsTokenCountFromTheWriter(t *testing.T) {
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
-	body := bypassBody(t, 1<<20)
+	body := bypassBody(t, 64<<10)
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/openai/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("x-context-guru-bypass", "true")
 	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -113,17 +111,27 @@ func TestBypassedRowGetsItsTokenCountFromTheWriter(t *testing.T) {
 	resp.Body.Close()
 	waitForRows(t, rec, 1)
 
-	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
-	if err != nil || len(page.Requests) != 1 {
-		t.Fatalf("rows = %v, err %v", page, err)
+	var e *dash.Event
+	for i := 0; i < 400; i++ { // the worker fills the counts after the insert
+		page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+		if err != nil || len(page.Requests) != 1 {
+			t.Fatalf("rows = %v, err %v", page, err)
+		}
+		if e = page.Requests[0]; e.TokensBefore > 0 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-	e := page.Requests[0]
-	want := schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: apply.NormalizeMessages(bschemas.OpenAI, body)})
 	if e.Mode != dash.ModeBypass || e.UncompressedReason != dash.ReasonBypassed {
 		t.Errorf("mode %q reason %q, want bypass / bypassed", e.Mode, e.UncompressedReason)
 	}
-	if e.TokensBefore != want || e.TokensAfter != want || want == 0 {
-		t.Errorf("tokens before/after = %d/%d, want %d on both", e.TokensBefore, e.TokensAfter, want)
+	const want = 11992 // origin/main stored this for the same body
+	if e.TokensBefore != want || e.TokensAfter != want || e.AttemptedTokens != want || e.FrozenTokens != 0 {
+		t.Errorf("before/after/attempted/frozen = %d/%d/%d/%d, want %d/%d/%d/0",
+			e.TokensBefore, e.TokensAfter, e.AttemptedTokens, e.FrozenTokens, want, want, want)
+	}
+	if e.TokenAccounting != dash.AccountingComplete {
+		t.Errorf("accounting = %q, want complete", e.TokenAccounting)
 	}
 }
 

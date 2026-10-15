@@ -194,6 +194,10 @@ type Recorder struct {
 	diskProbe func(dir string) (float64, bool)
 	// remote is cold storage, or nil.
 	remote Remote
+	// counts feeds the bypass count worker (see countLoop). Small and bounded on purpose.
+	counts chan countJob
+	// countsDropped counts rows whose token count was skipped because the queue was full.
+	countsDropped atomic.Int64
 	// tenantQuota reads a tenant's own row quota from the control plane (see
 	// SetTenantQuota). A func rather than a value because a manager can change it at
 	// any time, and a pointer because it is wired after the recorder starts.
@@ -225,12 +229,15 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		seenModel: map[string]bool{},
 		seenKeys:  map[string]struct{}{},
 		remote:    opts.Remote,
+		counts:    make(chan countJob, countQueue),
 	}
 	if opts.LifecycleSignals {
 		r.life = newLifecycle()
 	}
 	r.wg.Add(1)
 	go r.run()
+	r.wg.Add(1)
+	go r.countLoop()
 	// The archiver gets its OWN goroutine. It must never share the writer's, because
 	// an rclone round trip takes seconds and the writer owes the request path a fast
 	// insert — a blocked writer means a full queue means dropped events, which is
@@ -433,15 +440,6 @@ func (r *Recorder) run() {
 			if e.LifecycleFn != nil {
 				e.Lifecycle = e.LifecycleFn()
 			}
-			if e.BypassTokens != nil {
-				n := e.BypassTokens()
-				e.TokensBefore, e.TokensAfter = n, n
-				// Price() ran on the request path while the count was still zero and labelled the
-				// row "missing"; with a count it is "partial", exactly as before the count moved.
-				if n > 0 && e.TokenAccounting == AccountingMissing {
-					e.TokenAccounting = AccountingPartial
-				}
-			}
 			e.Redact()
 		}
 		if err := r.db.insertBatch(batch); err != nil {
@@ -456,6 +454,7 @@ func (r *Recorder) run() {
 				"written_total", r.written.Load(), "dropped_total", r.dropped.Load())
 			for _, e := range batch {
 				r.hub.Publish(e)
+				r.enqueueCount(e)
 			}
 		}
 		batch = batch[:0]
@@ -723,4 +722,52 @@ func (r *Recorder) MarkUnique(tenant, component string, keys []string, saved int
 		return 0
 	}
 	return saved * newKeys / len(keys)
+}
+
+// countQueue bounds the bypass token counts waiting for the count worker. A bypassed 33 MiB
+// request takes ~12 s to count, so a deeper queue would only hold transcripts in memory.
+const countQueue = 8
+
+type countJob struct {
+	id         int64
+	accounting string
+	count      func() (before, attempted int)
+}
+
+// enqueueCount hands a just-inserted bypassed row to the count worker. Never blocks: when the
+// queue is full the row keeps tokens_before 0, which the accounting already reads as unknown.
+func (r *Recorder) enqueueCount(e *Event) {
+	if e.BypassCount == nil || e.ID == 0 {
+		return
+	}
+	select {
+	case r.counts <- countJob{e.ID, e.TokenAccounting, e.BypassCount}:
+	default:
+		r.countsDropped.Add(1)
+	}
+}
+
+// countLoop is the ONE goroutine that counts the tokens of bypassed requests and updates their
+// rows. It is separate from the writer on purpose: the writer owes every account a fast insert,
+// and a single large count holds a goroutine for seconds.
+//
+// ponytail: one worker, so rows of big bypassed requests lag behind their request by the
+// queue's total counting time; a pool is the upgrade if that ever shows.
+func (r *Recorder) countLoop() {
+	defer r.wg.Done()
+	for {
+		select {
+		case j := <-r.counts:
+			before, attempted := j.count()
+			frozen := before - attempted
+			if frozen < 0 {
+				frozen = 0
+			}
+			if err := r.db.setBypassTokens(j.id, before, attempted, frozen); err != nil {
+				slog.Warn("dash: could not store a bypassed request's token count", "id", j.id, "err", err)
+			}
+		case <-r.done:
+			return
+		}
+	}
 }

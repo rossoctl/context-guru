@@ -146,11 +146,11 @@ type Event struct {
 	Lifecycle   *LifecycleRow        `json:"-"`
 	LifecycleFn func() *LifecycleRow `json:"-"`
 	Model       string               `json:"model"`
-	// BypassTokens, when set, is invoked by the writer goroutine to fill TokensBefore/TokensAfter
-	// of a BYPASSED request, which the pipeline does not count on the request path (counting a
-	// large transcript took ~0.35 s per MiB). A bypassed request is forwarded untouched, so the
-	// two figures are equal. nil on every other row.
-	BypassTokens func() int `json:"-"`
+	// BypassCount, when set, fills tokens_before/after, attempted_tokens and frozen_tokens of a
+	// BYPASSED request, which the pipeline does not count on the request path (counting a large
+	// transcript took ~0.35 s per MiB). It runs on the recorder's count worker, never on the
+	// writer or the request path, after the row is inserted. nil on every other row.
+	BypassCount func() (before, attempted int) `json:"-"`
 	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
 	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
 	// tokens.BilledDeltaFactor(Model), resolved once in Price.
