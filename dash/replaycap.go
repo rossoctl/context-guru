@@ -132,9 +132,10 @@ type sessionKey struct{ tenant, session string }
 // walkReplayCap runs the rule over rows ordered by (tenant, session, model, ts, id).
 //
 // A drop in tokens_before is a client compaction only when the agent's compaction request went
-// by since the previous turn of that conversation. A drop alone is not enough: a subagent shares
+// by since the previous turn of that conversation and the transcript does not come back within a
+// few turns. A drop alone is not enough: a subagent shares
 // the session and the model, its transcript is smaller, and the turns interleave. On the
-// snapshot three drops in four were that, not a compaction.
+// large real dataset most drops were that, not a compaction.
 func walkReplayCap(rows []capRow, window windowFn) *ReplayLedger {
 	out := &ReplayLedger{ByComponent: map[string]*ComponentLedger{}, CeilingFrac: map[string]float64{}}
 	bypass := map[sessionKey][]int64{}
@@ -165,6 +166,21 @@ func bypassBetween(ts []int64, from, to int64) bool {
 	return false
 }
 
+// recoveryLookahead is how many turns after a drop may bring the transcript back before the drop
+// stops being a compaction. A subagent or auxiliary turn is followed by the main thread's, which
+// is as large as before; a compaction is not. On a large real dataset 37% of drops of 100k or more
+// recovered, and a compaction request in between did not rule them out.
+const recoveryLookahead = 3
+
+func recovers(next []capRow, prev int64) bool {
+	for i := 0; i < len(next) && i < recoveryLookahead; i++ {
+		if next[i].TokensBefore >= prev {
+			return true
+		}
+	}
+	return false
+}
+
 const (
 	capOpen = iota
 	capCounterfactual
@@ -186,10 +202,10 @@ func walkCapConversation(conv []capRow, window windowFn, bypassTS []int64, out *
 	f, _ := tokens.BilledDeltaFactor(model)
 	state := capOpen
 	var prevBefore, prevTS int64
-	for _, r := range conv {
+	for i, r := range conv {
 		if state == capOpen {
 			if prevBefore > 0 && r.TokensBefore > 0 && r.TokensBefore < prevBefore &&
-				bypassBetween(bypassTS, prevTS, r.TS) {
+				bypassBetween(bypassTS, prevTS, r.TS) && !recovers(conv[i+1:], prevBefore) {
 				state = capClientCompaction
 				out.ClosedClientCompaction++
 			} else if r.Billed > 0 {

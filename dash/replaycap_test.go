@@ -272,3 +272,25 @@ func TestReplayCapReachesEveryReadPath(t *testing.T) {
 	}
 	nearEq(t, "episode view past cap", eps.ReplayLedger.ByComponent["extract_llm"].PastCapUSD, 2)
 }
+
+// An interleaved subagent turn right after a compaction request is not a compaction: the main
+// thread's next turn is as large as before. A real compaction stays small.
+func TestReplayCapRequiresTheDropToPersist(t *testing.T) {
+	compaction := capTestRow(3, 130_000, 0, 130_000, "", 0)
+	compaction.Bypassed = true
+	mk := func(afterDrop int64) []capRow {
+		return []capRow{
+			capTestRow(1, 100_000, 10_000, 100_000, "searchfold", 1),
+			capTestRow(2, 120_000, 10_000, 120_000, "searchfold", 1),
+			compaction,
+			capTestRow(4, 30_000, 10_000, 30_000, "searchfold", 1), // the drop
+			capTestRow(5, afterDrop, 10_000, afterDrop, "searchfold", 1),
+		}
+	}
+	if l := walkReplayCap(mk(135_000), fixedWindow(1_000_000)); l.ClosedClientCompaction != 0 {
+		t.Errorf("a drop the main thread recovered from read as a compaction")
+	}
+	if l := walkReplayCap(mk(40_000), fixedWindow(1_000_000)); l.ClosedClientCompaction != 1 {
+		t.Errorf("a persistent drop after the compaction request was missed")
+	}
+}
