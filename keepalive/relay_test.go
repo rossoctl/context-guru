@@ -35,6 +35,10 @@ func TestKeepAliveNameCheckIsForRelaysOnly(t *testing.T) {
 		{bschemas.Anthropic, "https://evil-anthropic.com.example", "gpt-5", false},
 		{bschemas.Anthropic, "https://evilanthropic.com", "gpt-5", false},
 		{bschemas.Anthropic, "https://anthropic.com.evil.example", "gpt-5-mini", false},
+		{bschemas.Anthropic, "api.anthropic.com", "my-team-alias", true},
+		{bschemas.Anthropic, "api.anthropic.com:443", "my-team-alias", true},
+		{bschemas.Anthropic, "EU.Anthropic.com", "my-team-alias", true},
+		{bschemas.Anthropic, "anthropic.com.evil.example:443", "gpt-5-mini", false},
 	}
 	for _, c := range cases {
 		if got := relayServesClaude(c.p, c.base, c.model); got != c.want {
