@@ -142,7 +142,11 @@
      slab. So the chart gets its own softened steps from the SAME hues — one scheme, two densities,
      rather than two schemes that can drift apart. */
   --ins-cell-remove:   color-mix(in srgb, var(--ins-vd-remove) 62%, var(--bg-raised));
-  --ins-cell-consider: color-mix(in srgb, var(--ins-vd-consider) 55%, var(--bg-raised));
+  /* Amber from --pal-yellow rather than from --warn. --warn is a dark brown chosen for legible
+     small TEXT on a pale pill; softened into a large cell it reads as mud rather than as amber
+     ("not light amber"). The pill keeps --warn, where it is right; the cell takes the palette's
+     own yellow, which is the same signal at the density a block of colour needs. */
+  --ins-cell-consider: color-mix(in srgb, var(--pal-yellow) 58%, var(--bg-raised));
   --ins-cell-keep:     color-mix(in srgb, var(--ins-vd-keep) 60%, var(--bg-raised));
 }
 .ins-vd.remove   { background: var(--bad-soft);  color: var(--ins-vd-remove);   border-color: var(--ins-vd-remove); }

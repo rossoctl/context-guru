@@ -328,12 +328,20 @@ func TestTheChartAndTheTablesSpeakOneColourLanguage(t *testing.T) {
 			t.Errorf("%s is not declared in insights.css; the chart has nowhere to read it from",
 				tok)
 		}
+		// Each cell colour is a color-mix against the page surface, so it is the same SIGNAL at a
+		// different density rather than an independently chosen hue.
+		//
+		// Not asserted as "derives from the pill token" any more, which was too literal:
+		// --ins-cell-consider takes --pal-yellow because --warn is a dark brown picked for legible
+		// small text on a pale pill, and softening that into a large block reads as mud rather
+		// than amber. The property worth protecting is that a cell colour is a DERIVED, softened
+		// step and never a hand-picked literal — a literal is what drifts.
 		cell := strings.Replace(tok, "--ins-vd-", "--ins-cell-", 1)
 		val := cssTokenValue(t, css, cell)
-		if !strings.Contains(val, "var("+tok+")") {
-			t.Errorf("%s = %q, which does not derive from %s. The chart paints the cell variant, "+
-				"so a cell colour that stops tracking its pill colour is exactly how the chart "+
-				"and the tables drift apart again", cell, val, tok)
+		if !strings.Contains(val, "color-mix") || !strings.Contains(val, "var(--") {
+			t.Errorf("%s = %q; a cell colour must be a color-mix of palette tokens against the "+
+				"surface, not a literal — a literal cannot follow the dark theme and is what "+
+				"lets the chart and the tables drift apart", cell, val)
 		}
 		// READ, not merely mentioned. `strings.Contains(js, tok)` is not enough: a chart that
 		// hardcodes '#b02a1e' still mentions the token in its fallback argument, and that mutant

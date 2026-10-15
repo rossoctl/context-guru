@@ -972,14 +972,17 @@ function insRollup(tl) {
  * of daily columns is 121 cells across a panel that is maybe 900px wide, and a 7px column cannot
  * be aimed at — the reader is selecting a RANGE by eye, so a column has to be big enough to see. */
 const INS_MAX_COLS = 60;
-const INS_ROW_PX = 26;
+/* Row height. 26px packed 28 named rows into a space where the labels touched, which is the
+ * difference between a chart you can read and one you have to hover to use. A row carries a
+ * capability name, so it is sized for the name rather than for the cell. */
+const INS_ROW_PX = 32;
 const INS_CHART_MIN_H = 240;
 /* The most rows the chart will draw. Showing every carried capability made the chart 2,174px tall
  * on a real store — taller than the window, so the reader scrolled past the picture to reach the
  * tables it is meant to explain, and the diagonal that tells the story was spread over two
  * screens. Rows are already sorted worst-waste-first, so a cap keeps the finding and drops the
  * tail; the tables stay complete, and the count of what is not shown is reported. */
-const INS_MAX_ROWS = 28;
+const INS_MAX_ROWS = 20;
 
 /* The instance, kept so a re-render resizes rather than leaks: ECharts holds a canvas/SVG root
  * and its own event listeners, and dropping the DOM node without dispose() keeps both alive. */
@@ -998,7 +1001,7 @@ function insChartTheme() {
        * the scheme comment in insights.css — one scheme, two densities. */
       remove: v('--ins-cell-remove', '#cc6b60'),
       stale: v('--ins-cell-remove', '#cc6b60'),
-      consider: v('--ins-cell-consider', '#c49a4d'),
+      consider: v('--ins-cell-consider', '#f3cd80'),
       keep: v('--ins-cell-keep', '#9aa2ae'),
     },
     /* Carried-but-never-invoked, declared beside the verdicts so the legend can name it. */
@@ -1147,9 +1150,25 @@ function insDrawChart(host, g, tl) {
   insEChart.setOption({
     animation: false,
     textStyle: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11 },
-    grid: { left: 4, right: 16, top: 8, bottom: 74, containLabel: true },
+    /* `left: 8` plus containLabel gives the capability names room: they are the chart's y axis
+     * and the thing a reader scans, so they get space rather than being squeezed by the plot. */
+    grid: { left: 8, right: 24, top: 12, bottom: 78, containLabel: true },
     tooltip: {
-      position: 'top',
+      /* PINNED, not following the cell.
+       *
+       * `position: 'top'` anchors the tooltip above whichever cell is hovered, so dragging the
+       * pointer across a grid of 168 small cells makes it leap from one anchor to the next —
+       * reported as "horrous flicking". A fixed corner means the pointer can cross the whole row
+       * and the only thing that changes is the text inside it.
+       *
+       * Top-right of the plot, and `confine` so it never escapes the chart: the rows are labelled
+       * down the left, and a tooltip over the labels hides the name of the thing it describes. */
+      position: (point, params, dom, rect, size) => [size.viewSize[0] - size.contentSize[0] - 8, 8],
+      confine: true,
+      /* No transition on the DOM node either: a 0.1s ease on a box that re-anchors per cell is
+       * the other half of the same flicker. */
+      transitionDuration: 0,
+      enterable: false,
       formatter: (p) => {
         const r = g.rows[p.value[1]];
         /* x is the gap centre (ci + 0.5), so floor it back to the column it describes. */
