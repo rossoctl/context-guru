@@ -216,6 +216,63 @@ func cssRuleFor(t *testing.T, css, selector string) string {
 	return css[i+open : i+end]
 }
 
+// TestEveryColourTheChartPaintsIsNamedInItsLegend.
+//
+// Reported from use: "All colors used in project should be in Legend. Currently i have colors that
+// not clear to me" and "grey light grey white all not clar". Three defects, all mine:
+//
+//  1. TWO GREYS A HAIR APART. `in use / built in` was --fg-muted (#566072) and `carried, never
+//     used` was --fg-faint (#626b79) at 13% — indistinguishable on screen, and they mean opposite
+//     things: a capability earning its weight versus one that is pure waste.
+//  2. OPACITY AS MAGNITUDE. I encoded invocation count as opacity within the verdict hue, so one
+//     legend entry became a dozen shades on screen (#566072 at 0.35, 0.36, 0.39…). A legend can
+//     name a colour; it cannot name a gradient the reader is supposed to infer.
+//  3. The chart painted --accent blue and white for the slider, neither explained anywhere.
+//
+// The rule this pins: a cell colour is either in the legend or it is not a cell colour. Chrome
+// control furniture (slider, handles) is exempt — it is not data — but no DATA series may be
+// painted in a hue the legend does not name.
+func TestEveryColourTheChartPaintsIsNamedInItsLegend(t *testing.T) {
+	code := stripJSComments(readUI(t, "ui/insights.js"))
+
+	// No opacity-as-magnitude. The function that computed it must be gone, not merely unused:
+	// leaving it invites the next change to wire it back in.
+	if strings.Contains(code, "insOpacityFor") {
+		t.Error("insOpacityFor still exists. Encoding invocation count as opacity turns one " +
+			"legend entry into a dozen shades on screen, and a legend cannot name a gradient")
+	}
+	// Each data series takes a flat colour from the theme, and the two states that were grey-on-
+	// grey must now be genuinely different hues rather than the same ink at two opacities.
+	for _, tok := range []string{"--ins-vd-keep", "--ins-carried"} {
+		if !strings.Contains(code, "v('"+tok+"'") {
+			t.Errorf("the chart does not look up %s; the states that were two near-identical "+
+				"greys need distinct, separately-declared hues", tok)
+		}
+	}
+	css := readUI(t, "ui/insights.css")
+	keep := cssTokenValue(t, css, "--ins-vd-keep")
+	carried := cssTokenValue(t, css, "--ins-carried")
+	if keep == carried {
+		t.Errorf("--ins-vd-keep and --ins-carried are both %q; `in use` and `carried but never "+
+			"invoked` are opposite findings and must not share a colour", keep)
+	}
+}
+
+// cssTokenValue reads one custom property's declared value.
+func cssTokenValue(t *testing.T, css, token string) string {
+	t.Helper()
+	at := strings.Index(css, token+":")
+	if at < 0 {
+		t.Fatalf("%s is not declared in insights.css", token)
+	}
+	rest := css[at+len(token)+1:]
+	end := strings.Index(rest, ";")
+	if end < 0 {
+		t.Fatalf("%s has no terminated value", token)
+	}
+	return strings.TrimSpace(rest[:end])
+}
+
 // TestTheChartAndTheTablesSpeakOneColourLanguage is the test that stops the two surfaces drifting.
 //
 // They had drifted: a built-in read red in the tables and neutral-faint in the chart; a removable

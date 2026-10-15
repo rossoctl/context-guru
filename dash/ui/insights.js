@@ -544,13 +544,21 @@ function insRender() {
    * this view was supposed to give them. */
   const chartPanel = el('div', { class: 'panel' },
     el('h2', { text: 'What you carry, and whether you use it' }),
-    /* Rewritten with the colour change: this described a blue magnitude ramp and a volume strip
-     * above the heatmap, and neither exists any more. A hint that explains an older version of
-     * the picture is worse than none, because the reader trusts it. */
+    /* NAMES EVERY COLOUR ON SCREEN, including the slider's, which is not a data colour and so
+     * cannot be a legend entry — but was still an unexplained blue to the reader: "All colors
+     * used in project should be in Legend. Currently i have colors that not clear to me."
+     *
+     * Rewritten twice now. It first described a blue magnitude ramp and a volume strip that no
+     * longer existed, then "grey means in use... the faintest cells are..." after those two
+     * greys had been replaced by green and violet. A hint explaining an older version of the
+     * picture is worse than none, because the reader trusts it. */
     el('p', { class: 'hint', text: 'One row per capability, worst waste first, with the ones you '
-      + 'actually use below so there is something to read the waste against. Red or amber means '
-      + 'the weight is removable; grey means it is in use or built in, and the faintest cells are '
-      + 'days you carried something and never reached for it. Colours match the tables below.' }));
+      + 'actually use below so there is something to read the waste against. Each cell is one '
+      + 'day. Violet means you carried it that day and never called it — that is the waste. '
+      + 'Green means you used it. Red and amber appear on capabilities the tables recommend '
+      + 'removing, or cannot yet recommend removing, in the same colours they use there. The '
+      + 'blue bar under the chart is the range control, not data: drag its ends to narrow every '
+      + 'figure on this page to a period.' }));
   chartPanel.appendChild(insProjectPicker());
   const chart = insChart();
   if (chart) chartPanel.appendChild(chart);
@@ -989,8 +997,10 @@ function insChartTheme() {
       remove: v('--ins-vd-remove', '#b02a1e'),
       stale: v('--ins-vd-remove', '#b02a1e'),
       consider: v('--ins-vd-consider', '#8a5800'),
-      keep: v('--ins-vd-keep', '#566072'),
+      keep: v('--ins-vd-keep', '#008300'),
     },
+    /* Carried-but-never-invoked, declared beside the verdicts so the legend can name it. */
+    carried: v('--ins-carried', '#4a3aa7'),
     ink: v('--fg', '#1b1f1c'),
     muted: v('--fg-muted', '#5c635d'),
     faint: v('--fg-faint', '#8b918b'),
@@ -1103,10 +1113,13 @@ function insDrawChart(host, g, tl) {
        * hanging half off the plot. */
       const x = ci + 0.5;
       if (v > 0) {
-        /* Opacity carries the count, floored so one invocation is still clearly a mark rather
-         * than a smudge, and capped at the row's own peak so a quiet capability is readable
-         * beside a noisy one. */
-        if (live) byVd[vd].push({ value: [x, ri, v], itemStyle: { opacity: insOpacityFor(v, peak) } });
+        /* A FLAT colour, no per-cell opacity.
+         *
+         * Invocation count used to modulate opacity inside the verdict hue, which looked
+         * informative and read as broken: one legend entry became a dozen shades on screen
+         * (#566072 at 0.35, 0.36, 0.39…), and a legend can name a colour but not a gradient the
+         * reader is left to infer. The count is in the tooltip, where a number belongs. */
+        if (live) byVd[vd].push([x, ri, v]);
         else usedOut.push([x, ri, v]);
       } else if (r.carried[ci] > 0) {
         if (!live) { idleOut.push([x, ri, 0]); return; }
@@ -1120,11 +1133,11 @@ function insDrawChart(host, g, tl) {
          * Low opacity, not full: the strong mark is reserved for a real invocation, and a solid
          * red block on a row that was never called would overstate a single day's share of the
          * cost. It is a tint of the finding, which is what it is. */
-        if (vd === 'remove' || vd === 'stale' || vd === 'consider') {
-          byVd[vd].push({ value: [x, ri, 0], itemStyle: { opacity: 0.3 } });
-        } else {
-          idle.push([x, ri, 0]);
-        }
+        /* The verdict colour at low opacity was the other half of the unreadable-grey problem:
+         * it produced a second shade of every verdict hue with no legend entry. A
+         * carried-never-invoked day is ONE state with ONE colour, and the row's verdict is
+         * already visible wherever that capability WAS invoked. */
+        idle.push([x, ri, 0]);
       }
     });
   });
@@ -1258,18 +1271,25 @@ function insDrawChart(host, g, tl) {
       /* Carried and never invoked: neutral rather than any verdict hue, because this is the
        * ABSENCE of a call on that day, not a judgement about the capability. The row's verdict is
        * already shown wherever it WAS called. */
+      /* Carried and never invoked: its own declared hue, at an opacity chosen once for the whole
+       * series rather than per cell. This is the quietest state because it is the most common and
+       * it is the BACKGROUND the coloured states read against — but it is one colour with one
+       * legend entry, not a gradient. */
       { name: 'carried, never used', type: 'heatmap', data: idle,
-        itemStyle: { color: t.faint, opacity: 0.13, borderRadius: 2,
+        itemStyle: { color: t.carried, opacity: 0.55, borderRadius: 2,
           borderWidth: 2, borderColor: 'transparent' } },
       /* OUTSIDE THE SELECTION. Grey, and still visible: the reader is deciding whether their
        * range is the right one, which they cannot do if the rest of the history is blank. Kept
        * darker than the carried-only tint so a real invocation outside the range still reads as
        * an invocation — it is excluded from the count, not absent from the record. */
+      /* Outside the selected range. ONE colour for both, because the distinction between an
+       * invocation and mere carriage is not what this series is saying — it is saying "not
+       * counted in the figures below". Two shades of it would be two unexplained greys again. */
       { name: 'outside the range', type: 'heatmap', data: usedOut,
-        itemStyle: { color: t.faint, opacity: 0.5, borderRadius: 2,
+        itemStyle: { color: t.carried, opacity: 0.45, borderRadius: 2,
           borderWidth: 2, borderColor: 'transparent' } },
       { name: 'outside the range', type: 'heatmap', data: idleOut,
-        itemStyle: { color: t.faint, opacity: 0.08, borderRadius: 2,
+        itemStyle: { color: t.carried, opacity: 0.45, borderRadius: 2,
           borderWidth: 2, borderColor: 'transparent' } },
     ],
   });
@@ -1451,15 +1471,6 @@ function insVerdictOf(name) {
   return insVerdictMap[name] || 'keep';
 }
 
-/* insOpacityFor turns an invocation count into an opacity inside the verdict's own hue.
- *
- * Floored at 0.35 because the question a cell answers first is "was this used at all", and a
- * single invocation rendered at 1/1136th opacity answers it wrong — it reads as empty. Scaled
- * against the grid's peak rather than per row, so two rows are comparable. */
-function insOpacityFor(v, peak) {
-  if (v <= 0) return 0;
-  return Math.min(1, 0.35 + 0.65 * (v / Math.max(1, peak)));
-}
 
 /* insLegendFor names only the states this chart actually drew. */
 function insLegendFor(byVd, idle, idleOut, usedOut) {

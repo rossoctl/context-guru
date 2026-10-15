@@ -108,7 +108,23 @@
 :root {
   --ins-vd-remove:   var(--bad);
   --ins-vd-consider: var(--warn);
-  --ins-vd-keep:     var(--fg-muted);
+  /* IN USE. A real hue, not ink. This was --fg-muted while "carried, never used" was --fg-faint
+     at low opacity: two greys a hair apart, meaning opposite things, and reported as unreadable
+     ("grey light grey white all not clar"). Green reads as "this one is fine", which is exactly
+     what an invoked capability is and the one state on this page that IS good news. Taken from
+     the validated categorical palette rather than picked by eye. */
+  --ins-vd-keep:     var(--pal-green);
+  /* CARRIED BUT NEVER INVOKED — a day this capability was in the system prompt, was paid for,
+     and nothing reached for it.
+
+     A DEFINED HUE, not faint ink. This was --fg-faint at low opacity, which made the single most
+     important state on the page the hardest one to see — and indistinguishable from the other
+     greys, which is what "grey light grey white all not clar" was about. Violet because it must
+     not be confused with the three verdict colours (red removable, amber unproven, green in
+     use); it is a different KIND of statement from a verdict, being an observation about one day
+     rather than a recommendation about a capability. From the validated categorical palette,
+     where it is a distinct hue in both themes. */
+  --ins-carried:     var(--pal-violet);
 }
 .ins-vd.remove   { background: var(--bad-soft);  color: var(--ins-vd-remove);   border-color: var(--ins-vd-remove); }
 .ins-vd.consider { background: var(--warn-soft); color: var(--ins-vd-consider); border-color: var(--ins-vd-consider); }
