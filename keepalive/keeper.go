@@ -1414,11 +1414,21 @@ type Plan struct {
 	Idle        time.Duration
 }
 
-// Plans returns the plan of every thread still to be pinged, keyed by thread ("" = main).
-// session == "" with all == true lists every session, keyed by Key.id(). Only an entry that will
+// Plans returns the plan of every thread of ONE session still to be pinged, keyed by thread
+// ("" = main). session must always match — this never lists "every session" — and all only
+// drops the TENANT filter, matching main's allTenants: a single-tenant deployment calls this
+// with all=true and its one real session id, never with session="". Only an entry that will
 // still be pinged has a plan: the same conditions as PendingPings, plus pingable. Port of main's
-// Handler.KeepAlivePlans (git show 67c5f758:proxy/keepalive.go L2102), for the status line's
-// "held warm until".
+// Handler.KeepAlivePlans (git show 67c5f758:proxy/keepalive.go L2102: `e.session != session ||
+// (!allTenants && e.tenant != tenantID)`, keyed by e.thread unconditionally), for the status
+// line's "held warm until".
+//
+// Keyed by thread even under all=true, same as main: if two different tenants' entries for this
+// session land on the same thread (e.g. both "", the main thread — ordinarily impossible, since a
+// session id is scoped to its tenant, but all=true deliberately steps outside that scope), one
+// overwrites the other in the result map. Map iteration order is unspecified, so which tenant's
+// entry survives is nondeterministic — exactly main's own behavior, which keys the identical way
+// with no tie-break either.
 func (k *Keeper) Plans(tenant string, all bool, session string) map[string]Plan {
 	if k == nil {
 		return nil
@@ -1426,16 +1436,12 @@ func (k *Keeper) Plans(tenant string, all bool, session string) map[string]Plan 
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	out := map[string]Plan{}
-	for id, e := range k.live {
-		if (!all && (e.tenant != tenant || e.session != session)) ||
+	for _, e := range k.live {
+		if e.session != session || (!all && e.tenant != tenant) ||
 			e.stopped || !e.pol.On() || e.pings >= e.pol.MaxPings || !e.pingable() {
 			continue
 		}
-		key := e.thread
-		if all {
-			key = id
-		}
-		out[key] = Plan{RefreshedAt: e.refreshedAt, NextPing: e.startedAt.Add(e.pol.Idle),
+		out[e.thread] = Plan{RefreshedAt: e.refreshedAt, NextPing: e.startedAt.Add(e.pol.Idle),
 			PingsLeft: e.pol.MaxPings - e.pings, Idle: e.pol.Idle}
 	}
 	return out
