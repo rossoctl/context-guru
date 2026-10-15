@@ -220,21 +220,6 @@ func (w Window) contains(now time.Time) (bool, error) {
 	//
 	// Writing 1440 for "24:00" closes it without touching exclusivity: every existing window
 	// keeps its exact meaning, and a caller who means all day can now say so.
-	// BOTH ENDS INCLUSIVE, and the end is the reason. A window is written in wall-clock
-	// minutes, so "00:00".."23:59" is how a person says "all day" — there is no "24:00" to
-	// write instead. With an exclusive end that window excluded 23:59 itself, i.e. the one
-	// minute it most obviously meant to cover, and so did every window ending on the minute
-	// somebody chose as its last.
-	//
-	// This is not a hypothetical: it made TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart
-	// fail on main for exactly one minute a day. CI hit it at 20:59:11Z, which is 23:59 in
-	// Asia/Jerusalem (DefaultStrategyTZ), so mins was 1439 and end was 1439 — and 1439 < 1439
-	// is false. One minute in 1440 is precisely how a bug like this survives review.
-	//
-	// The cost of inclusivity is that a window ending 17:00 now covers 17:00:00-17:00:59. That
-	// is the reading a person expects from a minute-granularity field, and two adjacent windows
-	// (..17:00 and 17:00..) overlapping for that minute is harmless here: InWindow is an OR over
-	// windows, so an instant covered twice is covered once.
 	return mins >= start && mins < end, nil
 }
 
