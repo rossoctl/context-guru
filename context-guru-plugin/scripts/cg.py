@@ -10,8 +10,9 @@
     doctor    is it set up right
     save-more              which config and keep-alive strategy would have cost least on my own history
     remove-mcp-and-skills  which MCP servers and skills I carry and never use, and what removing them saves
+    cache-campaign         build, compare and switch a keep-alive campaign for a tenant (manager login; docs/plugin/cache-campaign.md)
 
-Read-only: GETs against the local proxy, except `apply` and `revert`, which the user confirms first. Output is
+Read-only: GETs against the local proxy, except `apply`, `revert` and `cache-campaign build | mode`, which the user confirms first. Output is
 plain Unicode, no colour codes, so it reads the same on a light and a dark terminal and survives
 being echoed by the model. Stdlib only; `run(cmd, api, opts)` takes the fetcher so tests feed it a
 captured bundle.
@@ -87,6 +88,8 @@ class Api:
         headers = {"Content-Type": "application/json"} if data else {}
         if self.token:  # hosted: the account's own proxy token, accepted by /api/adapt/* only
             headers["x-context-guru-token"] = self.token
+        if os.environ.get("CG_DASH_COOKIE"):  # the manager routes (cache-campaign) take the dashboard login cookie, name=value
+            headers["Cookie"] = os.environ["CG_DASH_COOKIE"]
         req = urllib.request.Request(self.base + path + q, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -290,6 +293,135 @@ def cmd_cache(api: Api, o: dict) -> list[str]:
     if o["details"] and sp:
         L += [""] + C.cmd_cold(sp, {**o, "label": f"in the last {d} days"}, C.Style(False), C.Projects())
     return L
+
+
+# ---------------------------------------------------------------------------------------------
+# /context-guru:cache-campaign  -- the server half is proxy/campaignbuild.go; see predictive/README.md. The manager view; a user
+# picks their own keep-alive strategy with save-more cache.
+
+MOCK_CAMPAIGN = {  # the shape of GET /api/cache/campaigns/{id}, trimmed to the fields this command reads
+    "id": "cmp-sample", "state": "done", "mode": "off", "live": False, "recommendation": "ship",
+    "window": {"since": 0, "until": 30 * DAY_MS}, "scope": {"type": "user", "id": "sample"},
+    "summary": {"model": {"strategy": "plan", "net_usd": 41.2, "ci95": [28.1, 53.9]},
+                "best_baseline": {"strategy": "best fixed rule", "net_usd": 29.4, "ci95": [20.0, 38.1]},
+                "vs_best_baseline": {"vs": "best fixed rule", "diff_usd": 11.8, "ci95": [4.2, 19.5]}},
+}
+VERDICT = {"ship": "Ready to switch on. Try shadow first: it decides but spends nothing.",
+           "baseline": "The plan did not beat a simple rule on your history. Keep your current setup.", "insufficient_data": "Not enough history yet to say."}
+COOKIE_HINT = "Only a manager can use campaigns. Set CG_DASH_COOKIE to your dashboard login cookie."
+CAMPAIGN_BASE = "/api/cache/campaigns"
+CAMPAIGN_USAGE = ("Usage: /context-guru:cache-campaign [show [ID] [details] | build [--builder auto] [--session-end] | mode ID off|shadow|active [--force]]")
+
+
+def campaign_error(code: int, doc: dict | None, what: str) -> list[str]:
+    """One line for a failed call: unreachable, the login hint for 401/403, else the server's own {"error"} text."""
+    if code == 0:
+        return ["Cannot reach the proxy."]
+    if code == -1:
+        return [f"{what}: the proxy did not answer in time."]
+    if code in (401, 403):
+        return [COOKIE_HINT]
+    msg = (doc or {}).get("error")
+    return [f"{what}: {msg}." if msg else f"{what} (HTTP {code})."]
+
+
+def campaign_screen(doc: dict, example: bool, details: bool) -> list[str]:
+    s = doc.get("summary") or {}
+    m, b, v = s.get("model"), s.get("best_baseline"), s.get("vs_best_baseline")
+    w = doc.get("window") or {}
+    days = round(((w.get("until") or 0) - (w.get("since") or 0)) / DAY_MS)
+    if not (m and b and v):
+        rec = doc.get("recommendation")
+        if rec in VERDICT:
+            return [f"Campaign {doc['id']}: {VERDICT[rec]}" + (f" {s['reason']}." if s.get("reason") else "")]
+        return [f"Campaign {doc['id']} has no result: {doc.get('error') or doc.get('state')}."]
+    lo, hi = v["ci95"]
+    verb = "beats" if lo > 0 else ("is not clearly better than" if hi > 0 else "does worse than")
+    head = f"Over {days} days your history says the plan {verb} the best fixed rule by {dollars(abs(v['diff_usd']))} (likely between {dollars(lo)} and {dollars(hi)}). {VERDICT.get(doc.get('recommendation'), '')}"
+    top = max(abs(m["net_usd"]), abs(b["net_usd"]), 0.01)
+    L = ([head] if not example else ["No cache plan available: this proxy cannot build one yet.", "", "EXAMPLE, not your data:", "  " + head])
+    pad = "  " if example else ""
+    L += ["", f"{pad}Plan             {cells(m['net_usd'] / top)} {dollars(m['net_usd'])}", f"{pad}Best fixed rule  {cells(b['net_usd'] / top)} {dollars(b['net_usd'])}",
+          f"{pad}Dollars compare strategies on your past traffic. They are not your bill, and not a promise."]
+    sh = doc.get("shadow")
+    if doc.get("live") and sh:
+        L += ["", f"Running in {doc['mode']} mode: {sh.get('decisions', 0)} decisions so far, would have earned about "
+                  f"{dollars(sh.get('est_net_usd', 0))} (estimate, not billed)."]
+    if details:
+        ev = (doc.get("spec") or {}).get("evidence") or {}
+        sh_ = ev.get("shipped")
+        if sh_:  # the auto builder: the plan that runs (refitted on the whole window) next to the fleet's
+            L += ["", f"Running plan {sh_.get('plan')}, fleet plan {sh_.get('fleet_plan')} (shrinkage kappa {sh_.get('kappa')}, "
+                      f"half-life {sh_.get('half_life_days')} days; None = no limit). Rebuilt daily while it runs."]
+        rows = ev.get("table") or []
+        if rows:
+            L += ["", "All strategies"] + C.table([[r["strategy"], dollars(r["net_usd"]), f"{dollars(r['ci95'][0])} to {dollars(r['ci95'][1])}"] for r in rows], "lrl")
+    if not example:
+        rec = doc.get("recommendation")
+        nxt = (f"Switch it on in shadow: /context-guru:cache-campaign mode {doc['id']} shadow" if doc.get("mode") == "off" and rec != "baseline"
+               else f"Mode is {doc.get('mode')}.")
+        if rec == "ship" and doc.get("mode") != "active":
+            nxt += f"   Or live: /context-guru:cache-campaign mode {doc['id']} active"
+        L += ["", nxt]
+    return L
+
+
+def poll(api: Api, cid: str, tries: int = 20) -> tuple[int, dict | None]:
+    for _ in range(tries):
+        code, doc = api.send("GET", f"{CAMPAIGN_BASE}/{urllib.parse.quote(cid)}")
+        if code != 200 or not doc or doc.get("state") != "running":
+            return code, doc
+        time.sleep(4)
+    return 200, doc
+
+
+def cmd_campaign(api: Api, o: dict) -> list[str]:
+    arg, opt = o["args"], o["campaign"]
+    if o.get("mock"):
+        return campaign_screen(MOCK_CAMPAIGN, True, o["details"])
+    verb = arg[0] if arg else "latest"
+    if verb == "build":
+        body = {"scope": opt["scope"], "id": opt["id"], "window": opt["window"], "objective": "net_usd"}
+        if opt.get("builder", "model") != "model":
+            body.update(builder=opt["builder"], session_end=bool(opt.get("session_end")))
+        code, built = api.send("POST", f"{CAMPAIGN_BASE}/build", body=body)
+        if code == 404 and api.send("GET", CAMPAIGN_BASE)[0] == 404:  # no such route: an older proxy
+            return campaign_screen(MOCK_CAMPAIGN, True, False)
+        if code not in (200, 202) or not built or "campaign_id" not in built:
+            return campaign_error(code, built, "Campaign build failed")
+        code, doc = poll(api, built["campaign_id"])
+        if doc and doc.get("state") == "running":
+            return [f"Still building {doc['id']} ({doc.get('stage', 'working')}); a build takes 1 to 8 minutes. Check: /context-guru:cache-campaign show {doc['id']}"]
+    elif verb == "mode" and len(arg) >= 3 and arg[2] in ("off", "shadow", "active"):
+        code, doc = api.send("POST", f"{CAMPAIGN_BASE}/{urllib.parse.quote(arg[1])}/mode", body={"mode": arg[2], "force": bool(o["force"])})
+        if code == 409:
+            return [f"Not allowed yet: {(doc or {}).get('error', 'the build is not done or not recommended')}."
+                    + ("" if o["force"] or arg[2] != "active" else " Add --force to go live anyway.")]
+        if code != 200 or not doc:
+            return campaign_error(code, doc, "Mode change failed")
+        return [f"Campaign {doc['id']} is now {doc['mode']}." + (" It decides but spends nothing." if doc["mode"] == "shadow" else "")]
+    elif verb not in ("latest", "show"):
+        return [CAMPAIGN_USAGE]
+    else:
+        if verb == "show" and len(arg) > 1:
+            cid = arg[1]
+        else:
+            code, lst = api.send("GET", CAMPAIGN_BASE)
+            if code == 404:  # no such route: an older proxy
+                return campaign_screen(MOCK_CAMPAIGN, True, False)
+            if code != 200 or not lst:
+                return campaign_error(code, lst, "Could not list campaigns")
+            if not lst.get("campaigns"):
+                return ["No campaigns yet. Build one from your history: /context-guru:cache-campaign build"]
+            cid = lst["campaigns"][0]["id"]
+        code, doc = api.send("GET", f"{CAMPAIGN_BASE}/{urllib.parse.quote(cid)}")
+        if code != 200 or not doc:
+            return campaign_error(code, doc, f"Could not show campaign {cid}")
+    if doc.get("state") == "failed":
+        return [f"Campaign {doc['id']} failed: {doc.get('error') or 'unknown error'}."]
+    if doc.get("state") == "running":
+        return [f"Campaign {doc['id']} is still building ({doc.get('stage', 'working')}). Check again soon."]
+    return campaign_screen(doc, False, o["details"])
 
 
 # ---------------------------------------------------------------------------------------------
@@ -951,13 +1083,14 @@ def cmd_insights(api: Api, o: dict) -> list[str]:
 
 
 CMDS = {"home": cmd_home, "insights": cmd_insights, "savings": cmd_savings, "cache": cmd_cache, "waste": cmd_waste,
-        "session": cmd_session, "doctor": cmd_doctor}
+        "session": cmd_session, "doctor": cmd_doctor, "cache-campaign": cmd_campaign}
 
 
 def run(cmd: str, api: Api, opts: dict) -> str:
-    o = {"now": int(time.time() * 1000), "tz_min": 0, "days": 0, "details": False, "session": None, "args": [], **opts}
+    o = {"now": int(time.time() * 1000), "tz_min": 0, "days": 0, "details": False, "session": None, "args": [], "force": False,
+         "campaign": {"scope": "tenant", "id": "", "window": "30d"}, **opts}
     L = CMDS[cmd](api, o)
-    if not o["details"] and cmd not in ("doctor", "home", "insights"):
+    if not o["details"] and cmd not in ("doctor", "home", "insights", "cache-campaign"):
         L += ["", f"More: /context-guru:{INSIGHT_NAME.get(cmd, cmd)} details"]
     return "\n".join(L)
 
@@ -967,7 +1100,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES]))
     ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; save-more [config|cache]; apply <kind> <option>@<basis>; revert <kind>")
     ap.add_argument("--custom", action="store_true", help="save-more config: also search custom combinations, not only the shipped presets")
-    ap.add_argument("--force", action="store_true", help="apply: go ahead although the proxy's own check failed (asked separately)")
+    ap.add_argument("--force", action="store_true", help="apply: go ahead although the proxy's own check failed (asked separately); "
+                    "cache-campaign mode ... active: go live although the build did not recommend it")
     ap.add_argument("--days", type=int, default=0)
     ap.add_argument("--port")
     ap.add_argument("--session")
@@ -975,13 +1109,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fixture", help="read a captured bundle of API responses from this file (tests, demos)")
     ap.add_argument("--now", help="pretend it is this ISO time")
     ap.add_argument("--tz-offset-min", type=int)
+    ap.add_argument("--scope", choices=("user", "tenant"), default="tenant", help="cache-campaign build: whose history")
+    ap.add_argument("--id", default=os.environ.get("CG_TENANT", ""), help="cache-campaign build: tenant id")
+    ap.add_argument("--window", default="30d", help="cache-campaign build: history window, e.g. 30d")
+    ap.add_argument("--builder", choices=("model", "auto"), default="model", help="cache-campaign build: model (a predictor) or auto (a per-tenant plan shrunk to the fleet's)")
+    ap.add_argument("--session-end", action="store_true", help="cache-campaign build --builder auto: score as if the SessionEnd hook is installed")
+    ap.add_argument("--mock", action="store_true", help="cache-campaign: use the documented sample response")
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] in ("config", "compaction", "tools"):  # `cg.py config revert`: the read side, which names the change
         argv = ["save-more", *argv]
     a = ap.parse_args(argv)
     if a.cmd not in (*READS, *WRITES) and set(a.args) & set(WRITES):  # `cg.py cache revert`: say the one command that does it
         a.args, a.cmd = [a.cmd, *a.args], "save-more"
-    opts: dict = {"days": a.days, "session": a.session, "json": a.json, "force": a.force, "custom": a.custom,
+    opts: dict = {"days": a.days, "session": a.session, "json": a.json, "force": a.force, "custom": a.custom, "mock": a.mock,
+                  "campaign": {"scope": a.scope, "id": a.id, "window": a.window, "builder": a.builder, "session_end": a.session_end},
                   "details": "details" in a.args, "args": [x for x in a.args if x != "details"],
                   "tz_min": a.tz_offset_min if a.tz_offset_min is not None else time.localtime().tm_gmtoff // 60}
     if a.now:
@@ -991,7 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
             api = Api("", json.load(f))
     else:
         adapt = a.cmd in (*READS, *WRITES)
-        base = proxy_base(a.port) or (hosted_base() if adapt else None)
+        base = proxy_base(a.port) or (hosted_base() if adapt else None) or ("http://127.0.0.1:0" if a.mock else None)
         if not base:
             print(NO_PROXY)
             return 1 if adapt else 0  # a read that showed no report must not count as run (the skills chain on it)
