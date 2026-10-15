@@ -151,6 +151,9 @@ type Event struct {
 	// transcript took ~0.35 s per MiB). It runs on the recorder's count worker, never on the
 	// writer or the request path, after the row is inserted. nil on every other row.
 	BypassCount func() (before, attempted int) `json:"-"`
+	// BypassBytes is the size of the bypassed request body BypassCount will tokenize; the count
+	// queue is bounded by the total of it (see countMaxBytes).
+	BypassBytes int `json:"-"`
 	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
 	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
 	// tokens.BilledDeltaFactor(Model), resolved once in Price.

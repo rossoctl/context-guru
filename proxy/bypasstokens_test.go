@@ -168,3 +168,12 @@ func TestLifecycleLoggerCGMsIsThePreForwardTime(t *testing.T) {
 		t.Fatalf("a bypassed request's log line does not say its tokens are pending: %q", buf.String())
 	}
 }
+
+func TestBypassCountDroppedIsExportedToPrometheus(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+	h, _ := dashHandler(t, up.URL, dash.Options{})
+	if out := h.renderMetrics(); !strings.Contains(out, "cg_bypass_count_dropped_total 0") {
+		t.Fatalf("/metrics has no cg_bypass_count_dropped_total series")
+	}
+}

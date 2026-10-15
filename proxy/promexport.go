@@ -784,6 +784,9 @@ func (h *Handler) renderMetrics() string {
 		// Dropped events mean the capture queue filled — observability degrading under
 		// load, which is exactly when it is most wanted. Worth an alert.
 		promLine(&b, "cg_dash_events_total", `disposition="dropped"`, float64(st.Dropped))
+		promHeader(&b, "cg_bypass_count_dropped_total",
+			"Bypassed requests whose token count was skipped because the count worker's queue was full; their rows keep tokens_before 0.", "counter")
+		promLine(&b, "cg_bypass_count_dropped_total", "", float64(st.CountsDropped))
 		promHeader(&b, "cg_dash_db_bytes", "Size of the local dashboard database, write-ahead log included.", "gauge")
 		promLine(&b, "cg_dash_db_bytes", "", float64(h.rec.DBSizeBytes()))
 		promHeader(&b, "cg_dash_disk_used_ratio",

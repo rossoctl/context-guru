@@ -116,3 +116,30 @@ func TestBypassCountQueueFullDropsTheCount(t *testing.T) {
 		t.Errorf("Stats().CountsDropped = %d, want %d", got, r.countsDropped.Load())
 	}
 }
+
+// The queue is bounded by the total body size it holds, not just by job count, because a queued
+// job pins its parsed request. One job is always accepted, however large.
+func TestBypassCountQueueIsBoundedByBytes(t *testing.T) {
+	r, err := NewRecorder(Options{DBPath: ":memory:", BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	defer func() { close(release); r.Close() }()
+	block := func() (int, int) { <-release; return 1, 1 }
+
+	big := bypassEvent(4000, AccountingMissing, block)
+	big.BypassBytes = 3 * countMaxBytes // larger than the whole bound: still accepted when nothing is queued
+	r.Record(big)
+	waitWritten(t, r, 1)
+	if got := r.countsDropped.Load(); got != 0 {
+		t.Fatalf("a lone oversized job was dropped (%d)", got)
+	}
+	small := bypassEvent(4001, AccountingMissing, block)
+	small.BypassBytes = 1 << 20
+	r.Record(small)
+	waitWritten(t, r, 2)
+	if got := r.countsDropped.Load(); got != 1 {
+		t.Errorf("countsDropped = %d, want 1: a job that would exceed the byte bound was queued", got)
+	}
+}

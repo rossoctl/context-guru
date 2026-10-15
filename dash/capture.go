@@ -196,6 +196,8 @@ type Recorder struct {
 	remote Remote
 	// counts feeds the bypass count worker (see countLoop). Small and bounded on purpose.
 	counts chan countJob
+	// queuedCountBytes is the total body size of the jobs in counts plus the one being counted.
+	queuedCountBytes atomic.Int64
 	// countsDropped counts rows whose token count was skipped because the queue was full.
 	countsDropped atomic.Int64
 	// tenantQuota reads a tenant's own row quota from the control plane (see
@@ -731,7 +733,17 @@ func (r *Recorder) MarkUnique(tenant, component string, keys []string, saved int
 // request takes ~12 s to count, so a deeper queue would only hold transcripts in memory.
 const countQueue = 8
 
+// countMaxBytes bounds the total request-body size queued for counting. A queued job pins its
+// parsed request, a small multiple of the body, so this is what bounds the memory the worker can
+// hold. A job is always accepted when nothing is queued, so one transcript larger than this is
+// still counted.
+//
+// ponytail: the multiple (parsed request vs body) is not measured; queue the raw bytes and parse
+// in the worker if the ceiling ever needs to be exact.
+const countMaxBytes = 64 << 20
+
 type countJob struct {
+	size       int64
 	id         int64
 	accounting string
 	count      func() (before, attempted int)
@@ -743,9 +755,16 @@ func (r *Recorder) enqueueCount(e *Event) {
 	if e.BypassCount == nil || e.ID == 0 {
 		return
 	}
+	size := int64(e.BypassBytes)
+	if q := r.queuedCountBytes.Load(); q > 0 && q+size > countMaxBytes {
+		r.countsDropped.Add(1)
+		return
+	}
+	r.queuedCountBytes.Add(size)
 	select {
-	case r.counts <- countJob{e.ID, e.TokenAccounting, e.BypassCount}:
+	case r.counts <- countJob{size, e.ID, e.TokenAccounting, e.BypassCount}:
 	default:
+		r.queuedCountBytes.Add(-size)
 		r.countsDropped.Add(1)
 	}
 }
@@ -764,6 +783,7 @@ func (r *Recorder) countLoop() {
 		select {
 		case j := <-r.counts:
 			before, attempted := j.count()
+			r.queuedCountBytes.Add(-j.size)
 			frozen := before - attempted
 			if frozen < 0 {
 				frozen = 0
