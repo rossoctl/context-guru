@@ -372,6 +372,11 @@ func TestValidPredictorRef(t *testing.T) {
 // is live" — and a manager-only gate refuses a plain user. Update and delete take
 // effect just as immediately.
 func TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart(t *testing.T) {
+	// Pinned to the last minute of the day in DefaultStrategyTZ. With the wall clock this test
+	// failed for one minute in 1440: a window ending "23:59" is exclusive and misses 23:59:xx.
+	// "24:00" is the end-of-day spelling; the fixed instant keeps that regression covered.
+	loc, _ := time.LoadLocation(tenant.DefaultStrategyTZ)
+	at := time.Date(2026, 10, 14, 23, 59, 30, 0, loc)
 	f := newMgrFixture(t)
 	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
 	userJar, userID := f.signUpJar(t, "user@ibm.com")
@@ -379,7 +384,7 @@ func TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart(t *testing.T) {
 	// A plain user may not create one.
 	body := `{"name":"biz hours","idle_seconds":280,"max_pings":2,"min_prefix_tokens":20000,
 		"max_usd_per_ping":0.25,"active":true,
-		"windows":[{"start":"00:00","end":"23:59"}],"target":{"mode":"all"}}`
+		"windows":[{"start":"00:00","end":"24:00"}],"target":{"mode":"all"}}`
 	w, _ := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, userJar)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("a plain user's create = %d, want 403: %s", w.Code, w.Body)
@@ -397,7 +402,7 @@ func TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart(t *testing.T) {
 	// Live in the keeper right now, with no restart: an all-target strategy that is
 	// active and covers this instant matches any tenant, including the one that just
 	// signed up.
-	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, time.Now()); applied != id {
+	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, at); applied != id {
 		t.Errorf("applyStrategy after create = %q, want %q", applied, id)
 	}
 
@@ -422,7 +427,7 @@ func TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("patch = %d, want 200: %s", w.Code, w.Body)
 	}
-	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, time.Now()); applied != "" {
+	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, at); applied != "" {
 		t.Errorf("a deactivated strategy still applied: %q", applied)
 	}
 
@@ -449,7 +454,7 @@ func TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("delete = %d, want 200: %s", w.Code, w.Body)
 	}
-	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, time.Now()); applied != "" {
+	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, at); applied != "" {
 		t.Errorf("a deleted strategy still applied: %q", applied)
 	}
 	w, out = f.do(t, http.MethodGet, "/api/keepalive/strategies", "", mgrJar)

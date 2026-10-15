@@ -1,6 +1,7 @@
 package keepalive
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -100,5 +101,22 @@ func TestForgetClearsEveryNewMapForThatTenantOnly(t *testing.T) {
 		if n != 1 {
 			t.Errorf("%s has %d entries after Forget(a), want 1 (tenant b's)", name, n)
 		}
+	}
+}
+
+// One tenant filling its end-mark bucket evicts only its own oldest marks. Moved from main's
+// proxy/clientsignal_test.go TestEndMarkCapIsPerTenant, which read the keeper's map directly.
+func TestEndMarkCapIsPerTenant(t *testing.T) {
+	now := time.Now()
+	k := New(Options{Dispatcher: newFake(okPing), Now: func() time.Time { return now }})
+	k.MarkEnded("victim", "v", now)
+	for i := 0; i < maxEndedPerTenant+50; i++ {
+		k.MarkEnded("noisy", "s"+strconv.Itoa(i), now.Add(time.Duration(i)*time.Second))
+	}
+	k.mu.Lock()
+	nb, vb := len(k.ended["noisy"]), len(k.ended["victim"])
+	k.mu.Unlock()
+	if nb != maxEndedPerTenant || vb != 1 {
+		t.Errorf("noisy bucket %d (want %d), victim bucket %d (want 1)", nb, maxEndedPerTenant, vb)
 	}
 }

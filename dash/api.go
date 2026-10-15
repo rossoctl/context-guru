@@ -43,6 +43,8 @@ type API struct {
 	// single-tenant: there is no consent layer, so the operator's flag is the whole
 	// decision. Supplied by the host in hosted mode.
 	tenantCapture func(tenantID string) bool
+	// kaPlans reads the keep-alive keeper's per-thread plan for /api/cachestate. nil = no plans.
+	kaPlans func(tenantID string, allTenants bool, session string) map[string]KeepAlivePlan
 	// pricer values the pre-instrumentation split figure on read. nil = that figure is omitted.
 	pricer modelinfo.Pricer
 	// windows resolves a model's context window, and is separate from pricer because the two
@@ -1198,13 +1200,16 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		a.unauthorized(w)
 		return
 	}
-	if statsLean(r) {
+	// A lean read with neither a session nor a window (`since=0`, the lifetime total) goes to the
+	// full handler below, which is exact. Nothing on a render asks for it any more (#510); an
+	// older installed plugin that still does gets the same answer it always got.
+	if statsLean(r) && (f.Session != "" || f.Since != 0 || f.Until != 0) {
 		// ?lean=1 answers every field the status line's _fetch_stats actually reads
 		// (context-guru-plugin/scripts/statusline.py: total_saved_usd, keepalive_net_usd,
 		// keepalive_misses_avoided, upstream_ms_avg) plus what scripts/cg.py reads
 		// (cost_usd, baseline_cost_usd, cache_saved_usd and 7 waterfall keys) at FULL
 		// precision for a SESSION, and at a small, disclosed, bounded discount (the two
-		// read-time-priced credits below) for a time window or the lifetime read — see
+		// read-time-priced credits below) for a time window — see
 		// dash/overview_lean.go's own doc comment for exactly which fields and why.
 		//
 		// #502: this used to run the FULL Overview() (sixteen queries; lean reads a handful

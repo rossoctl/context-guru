@@ -4,12 +4,15 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/keepalive"
+	"github.com/rossoctl/context-guru/predictive"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -70,6 +73,10 @@ type keeper struct {
 	// restart: a strategy is a standing rule a manager expects to still be there after a
 	// deploy, so it is reloaded from SQLite at boot. See keepalivestrategy.go.
 	strategies []tenant.Strategy
+	// pred holds the learned keep-alive campaigns (predictive.go). Never nil.
+	pred *predRuntime
+	// signalApplied counts client lifecycle signals that changed anything (clientsignal.go).
+	signalApplied atomic.Int64
 }
 
 func newKeeper(h *Handler) *keeper { return newKeeperWith(h, keepalive.Options{}) }
@@ -84,7 +91,9 @@ func newKeeperWith(h *Handler, o keepalive.Options) *keeper {
 	k := &keeper{h: h, overrides: map[string]sessionOverride{}}
 	if h != nil {
 		k.d = h.dispatcher()
+		k.pred = newPredRuntime(h.campaignDir())
 	} else {
+		k.pred = newPredRuntime("")
 		k.d = NewDispatcher(nil)
 	}
 	o.Dispatcher = k.d
@@ -104,6 +113,11 @@ func newKeeperWith(h *Handler, o keepalive.Options) *keeper {
 		// incoming() and Do() only expire the one ref they were just asked about, so this is what
 		// frees the common case of a ref nobody asks about again at all.
 		k.d.sweepIncoming(now)
+		// A learned campaign's periodic rebuild rides the same tick (campaignauto.go); it starts
+		// at most one refresh per period and never alongside a build.
+		if k.h != nil {
+			k.h.maybeRefreshAutoCampaigns(now)
+		}
 	}
 	k.Keeper = keepalive.New(o)
 	// Loaded once at construction. Unlike overrides, a strategy is a standing rule a
@@ -163,6 +177,39 @@ func (k *keeper) retireSession(tenant, session string) {
 		return
 	}
 	k.Keeper.RetireSession(tenant, session)
+}
+
+// depart ends one open request on key's thread, for a path that returns after arrive without
+// reaching record (record departs for itself, through keepalive.Keeper.Record).
+func (k *keeper) depart(tenant, session, threadID string) {
+	if k == nil {
+		return
+	}
+	k.Keeper.Depart(keepalive.Key{Tenant: tenant, Session: session, Thread: threadID})
+}
+
+// markEnded, endedAfter and retireSessionStartedBefore are the client-signal half of the keeper
+// (clientsignal.go), nil-safe like the wrappers above. session is the SCOPED client id
+// (scopedClientID), the same string record passes as Key.Session or Record.Client.
+func (k *keeper) markEnded(tenant, session string, at time.Time) {
+	if k == nil {
+		return
+	}
+	k.Keeper.MarkEnded(tenant, session, at)
+}
+
+func (k *keeper) endedAfter(tenant, session string, startedAt time.Time) bool {
+	if k == nil {
+		return false
+	}
+	return k.Keeper.EndedAfter(tenant, session, startedAt)
+}
+
+func (k *keeper) retireSessionStartedBefore(tenant, session string, cutoff time.Time) int {
+	if k == nil {
+		return 0
+	}
+	return k.Keeper.RetireSessionStartedBefore(tenant, session, cutoff)
 }
 
 // forget releases everything held for one tenant (see keepalive.Keeper.Forget) and drops its
@@ -234,15 +281,46 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// per request and its cache is keyed on the configuration document, so an account that turns
 	// the setting off stops being retained on its very next request; anything held for a session
 	// that goes quiet instead is dropped by the keeper's hard deadline, within (K+1)x X.
+	//
+	// A client that reported this session ended (clientsignal.go) holds nothing further. The
+	// check is made here as well as in the core so that such a request is not scored by a
+	// campaign either; a zero policy then lets the core retire the thread and depart, as main's
+	// record did (retire, then return). The switch is the host's: the core has none.
+	client := clientSessionAlias(tn.ID, session, r)
+	tracked := session != "" && len(body) > 0 && !startedAt.IsZero() && status >= 200 && status < 300
+	ended := tracked && clientSignalEnabled() && (k.endedAfter(tn.ID, session, startedAt) ||
+		(client != "" && k.endedAfter(tn.ID, client, startedAt)))
 	pol := tn.Cache
 	applied := ""
-	if k.h == nil || k.h.rec == nil {
+	if ended || k.h == nil || k.h.rec == nil {
 		pol = keepalive.Policy{}
 	} else {
-		pol, applied = k.resolvePolicy(tn, session, provider, pol)
+		// A learned campaign (predictive.go) scores every finished response of its tenant, in
+		// shadow or active mode. It runs only on a request the core would consider (2xx, a body,
+		// a start time), after the kill switch and the no-audit-sink refusal, so a switched-off
+		// or unaudited keep-alive retains and tracks nothing for it, and a failure inside it is
+		// contained (recover).
+		var pdec predDecision
+		var pdecOK bool
+		if tracked && !keepAliveDisabled() && provider != bschemas.OpenAI && usageOK {
+			var arr *predictive.Arrival
+			if u.Live != nil {
+				arr = u.Live.Arrival
+			}
+			pdec, pdecOK = k.predictiveDecide(arr, !tn.Cache.KeepAlive, tn.ID, session, threadID,
+				string(provider), startedAt, body, r.UserAgent(), u)
+		}
+		pol, applied = k.resolvePolicy(tn, session, provider, pol, pdec, pdecOK)
+	}
+	// The credential id only matters for a hold the core may keep, so it is not computed (an
+	// HMAC over the masked auth headers) for any other request.
+	cred := ""
+	if tracked && pol.On() {
+		cred = credKey(up, r.Header)
 	}
 	key := keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}
 	k.Keeper.Record(keepalive.Record{Key: key, StartedAt: startedAt, Body: body,
+		Cred: cred, Client: client,
 		Provider: provider, Endpoint: up.base, Route: route, Status: status,
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
@@ -255,7 +333,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 // resolvePolicy layers the manager strategy and the session override over the account's own
 // policy — the old record's policy block, unchanged.
 func (k *keeper) resolvePolicy(tn *Tenancy, session string, provider bschemas.ModelProvider,
-	pol CachePolicy) (CachePolicy, string) {
+	pol CachePolicy, pdec predDecision, pdecOK bool) (CachePolicy, string) {
 	// The manager-controlled strategy layer, resolved once here and generalizing the one
 	// hook the session override already had — see keepalivestrategy.go's applyStrategy.
 	// A matching ACTIVE strategy forces KeepAlive on and replaces Idle/MaxPings/
@@ -264,6 +342,11 @@ func (k *keeper) resolvePolicy(tn *Tenancy, session string, provider bschemas.Mo
 	applied := ""
 	if provider != bschemas.OpenAI {
 		pol, applied = k.applyStrategy(tn.ID, pol, k.now())
+		// An ACTIVE campaign decides the ping count unless a manager strategy matched (the more
+		// explicit instruction).
+		if pdecOK && applied == "" && pdec.active {
+			pol, applied = pdec.apply(pol), campaignStrategyID(pdec.campaign.meta.ID)
+		}
 	}
 	// A per-session manual override, if one is armed and unexpired. Everything below reads
 	// `pol` and neither knows nor cares where it came from. An override may switch the
@@ -315,4 +398,22 @@ func (h *Handler) PendingPings() int {
 		return 0
 	}
 	return h.keeper.pendingPings()
+}
+
+// KeepAlivePlans is the keeper's ping plan for one session's threads, keyed by thread id, for the
+// status line's "held warm until" (dash.API.SetKeepAlivePlans). Only an entry that will still be
+// pinged has a plan (keepalive.Keeper.Plans). allTenants matches the session in any tenant, for a
+// single-tenant or service-wide scope.
+func (h *Handler) KeepAlivePlans(tenantID string, allTenants bool, session string) map[string]dash.KeepAlivePlan {
+	if h == nil || h.keeper == nil || session == "" {
+		return nil
+	}
+	plans := h.keeper.Keeper.Plans(tenantID, allTenants, session)
+	out := make(map[string]dash.KeepAlivePlan, len(plans))
+	for th, p := range plans {
+		out[th] = dash.KeepAlivePlan{RefreshedMS: p.RefreshedAt.UnixMilli(),
+			NextPingMS: p.NextPing.UnixMilli(), PingsLeft: p.PingsLeft,
+			IdleMS: p.Idle.Milliseconds()}
+	}
+	return out
 }

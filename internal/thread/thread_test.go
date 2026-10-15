@@ -312,7 +312,7 @@ func TestNoMessageListFallsBackToTheSession(t *testing.T) {
 
 func TestValidHeaderID(t *testing.T) {
 	for v, want := range map[string]bool{
-		"a9b99ca1f8284c823": true, "agent_1.x:y-z": true,
+		"a9b99ca1f8284c823": true, "agent_1.x:y-z": true, "researcher@session-ab47f1d6": true,
 		"": false, "has space": false, "new\nline": false, "nul\x00": false,
 		string(make([]byte, maxHeaderID+1)): false,
 	} {

@@ -131,17 +131,7 @@ func (d *Dispatcher) pinCheapModel(cfg CheapModelConfig) components.Model {
 // own token has been scrubbed out of them, and masked. A server-held key (up.setKey) retains
 // nothing — Do injects it at send time, exactly as the request path does.
 func (d *Dispatcher) hold(key keepalive.Key, up upstream, reqHeaders http.Header) dispatch.Ref {
-	var auth []heldHeader
-	if up.setKey == nil {
-		slots := http.Header{}
-		for _, name := range authHeaders {
-			for _, v := range reqHeaders.Values(name) {
-				slots.Add(name, v)
-			}
-		}
-		scrubToken(slots)
-		auth = maskHeaders(slots)
-	}
+	auth := heldAuth(up, reqHeaders)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.issueLocked(&target{kind: kindSession, up: up, auth: auth, key: key})

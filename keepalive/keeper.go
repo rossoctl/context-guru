@@ -240,9 +240,11 @@ type Record struct {
 	Route     string // upstream path
 	Status    int
 	Usage     Usage
-	// Cred is an opaque, tenant-free credential id the host computes for the request's
-	// provider key; "" means a server-held key (never subject to the dead-credential mark,
-	// only ever the route breaker). The proxy host fills this from main's HMAC credKey.
+	// Cred is an opaque credential id the host computes for the request's provider key; ""
+	// means a server-held key (never subject to the dead-credential mark, only ever the route
+	// breaker). The package scopes it by Key.Tenant itself, so the host passes the bare id with
+	// no tenant prefix: the proxy host passes its per-process HMAC of the masked auth headers
+	// (proxy/credmask.go credKey).
 	Cred string
 	// Client is the id the client itself names the session by, when the host keys it
 	// differently (Codex's session-id header). "" when there is none. MarkEnded and

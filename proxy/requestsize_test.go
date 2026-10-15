@@ -9,16 +9,34 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rossoctl/context-guru/proxy"
 	"github.com/tidwall/gjson"
 )
 
-// The two constants live in the internal proxy package (proxy.go), not exported. Mirrored
-// here rather than imported, same convention as agentcompaction_test.go's fixture phrases:
-// a change to either constant must not make these tests pass by construction.
+// The ceilings are lowered for these tests (tokenizing a 33 MiB body took over 100 s under
+// -race and the tests only need a body over the ceiling, not a body of a particular size).
+// The shipped values are pinned by TestShippedRequestCeilings, so a change to either must not
+// pass by construction.
 const (
-	testMaxRequestBytes           = 32 << 20
-	testMaxCompactionRequestBytes = 128 << 20
+	testMaxRequestBytes           = 1 << 20
+	testMaxCompactionRequestBytes = 4 << 20
 )
+
+// useSmallCeilings lowers the two ceilings for one test and restores them after. These tests
+// are serial, so the swap is not observed by a running handler of another test.
+func useSmallCeilings(t *testing.T) {
+	t.Helper()
+	prevReq, prevCompact := proxy.SetRequestCeilings(testMaxRequestBytes, testMaxCompactionRequestBytes)
+	t.Cleanup(func() { proxy.SetRequestCeilings(prevReq, prevCompact) })
+}
+
+func TestShippedRequestCeilings(t *testing.T) {
+	req, compact := proxy.SetRequestCeilings(0, 0)
+	proxy.SetRequestCeilings(req, compact)
+	if req != 32<<20 || compact != 128<<20 {
+		t.Fatalf("shipped ceilings = %d / %d, want 32 MiB / 128 MiB", req, compact)
+	}
+}
 
 // repeatBannerToSize builds the realistic shape that actually triggers #278: a repeated,
 // low-entropy line (the cgssh2 SSH MOTD banner, in the real incident) rather than a single
@@ -59,6 +77,7 @@ func oversizedBody(t *testing.T, over int, lastMsg map[string]any) []byte {
 // rendered it as "Request too large (max 32MB)" with no distinguishable status from the
 // proxy at all). An ordinary oversized request must still be refused, but honestly.
 func TestOversizedNonCompactionRequestGets413(t *testing.T) {
+	useSmallCeilings(t)
 	var upstreamHit bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHit = true
@@ -92,6 +111,7 @@ func TestOversizedNonCompactionRequestGets413(t *testing.T) {
 // already is (see agentcompaction_test.go's TestAgentCompactionIsBypassed) — this test
 // only proves the SAME thing still holds once the body is oversized.
 func TestOversizedAgentCompactionRequestSucceeds(t *testing.T) {
+	useSmallCeilings(t)
 	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		up.record(r)
@@ -124,6 +144,7 @@ func TestOversizedAgentCompactionRequestSucceeds(t *testing.T) {
 // ceiling, it does not remove it. A body over testMaxCompactionRequestBytes is refused
 // regardless of content — memory is still bounded, just at the higher tier.
 func TestOverHardCeilingIsRefusedEvenIfCompaction(t *testing.T) {
+	useSmallCeilings(t)
 	var upstreamHit bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHit = true
@@ -158,6 +179,7 @@ func TestOverHardCeilingIsRefusedEvenIfCompaction(t *testing.T) {
 // proxy.go's own doc comment on compact()), so this also proves the oversized body actually
 // reaches and is shrunk by the pipeline, not merely accepted.
 func TestCompactEndpointAcceptsOversizedBody(t *testing.T) {
+	useSmallCeilings(t)
 	h, _ := buildHandler(t, "pipeline: [dedup]\ncomponents:\n  dedup: {min_tokens: 20}\n", "http://unused.invalid")
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -202,6 +224,7 @@ func TestCompactEndpointAcceptsOversizedBody(t *testing.T) {
 // request — still bounded, not unlimited, but a real, larger blast radius worth a named
 // test rather than an implicit one.
 func TestOversizedToolResultQuotingCompactionPhraseStillGetsThroughAtTheHigherCeiling(t *testing.T) {
+	useSmallCeilings(t)
 	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		up.record(r)
@@ -272,6 +295,7 @@ const ccCompactPromptForSizeTest = "CRITICAL: Respond with TEXT ONLY. Do NOT cal
 // reworded, but `error.type` is a wire contract with the client and changing it silently
 // re-breaks the diagnosis.
 func TestRefusalIsParseableByTheAgent(t *testing.T) {
+	useSmallCeilings(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("an oversized, non-compaction request must never reach the upstream")
 	}))
@@ -313,6 +337,7 @@ func TestRefusalIsParseableByTheAgent(t *testing.T) {
 // the 32 MiB tier here would tell a caller its compaction request was refused by a limit it
 // was in fact allowed to exceed.
 func TestRefusalOverHardCeilingNamesTheHigherTier(t *testing.T) {
+	useSmallCeilings(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("a body over the hard ceiling must never reach the upstream")
 	}))

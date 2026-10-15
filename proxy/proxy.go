@@ -408,6 +408,7 @@ func (h *Handler) Mux() *http.ServeMux {
 	// requests — billed calls, added by a proxy sold on reducing them. See counttokens.go.
 	m.HandleFunc("POST /anthropic"+countTokensPath, h.countTokens(h.anthropicCountTokensUpstream()))
 	m.HandleFunc("POST /compact", h.compact)
+	m.HandleFunc("POST /signal", h.clientSignal)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	// A browser asks for /favicon.ico unprompted, and in hosted mode Bob's "/" catch-all
 	// would otherwise answer it with a 401 — putting a red error in the console of every
@@ -1259,6 +1260,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			cp.noteWaitBody(orig)
 			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
 			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
+			if cp != nil {
+				cp.predArrival = h.predRT().arrive(tn.ID, tr.Session, threadID, time.Now())
+			}
 			// Drop any cache_aware_summarizer keep-alive substitute registered off an EARLIER
 			// turn's conversation — but never the one this request's own pipeline run (above)
 			// may just have written: an unconditional clear here used to delete that candidate
@@ -1406,7 +1410,8 @@ const maxExpandRounds = 3
 // proxy memory (the body is buffered and token-counted several times). Generous
 // enough for very long agent transcripts; requests above it get 413 — unless
 // readGatedBody finds a reason to read further. See maxCompactionRequestBytes.
-const maxRequestBytes = 32 << 20 // 32 MiB
+// A var only so the size tests can lower it; nothing else assigns it.
+var maxRequestBytes int64 = 32 << 20 // 32 MiB
 
 // maxCompactionRequestBytes is the ceiling readGatedBody extends to for the two cases whose
 // entire point is a body already larger than maxRequestBytes: the agent's own compaction
@@ -1415,7 +1420,7 @@ const maxRequestBytes = 32 << 20 // 32 MiB
 // receive and shrink a body that is, by definition, already large. Matches the existing
 // generous-but-bounded precedent already used in this package for a comparable purpose
 // (maxKeepAliveBytes, keepalive.go).
-const maxCompactionRequestBytes = 128 << 20 // 128 MiB
+var maxCompactionRequestBytes int64 = 128 << 20 // 128 MiB
 
 // readGatedBody reads a request body up to maxRequestBytes as the cheap default —
 // identical cost and behavior to plain http.MaxBytesReader for the overwhelming majority of
@@ -1604,6 +1609,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// actually went upstream on the final round (an expand round rewrites it) and the
 		// prefix a ping would replay is the one the provider just hashed. Costs nothing when
 		// no tenant has opted in.
+		ttfb := 0.0
+		if sse && !sseBuffered {
+			ttfb = msSince(reqStart, sseFirstByte)
+		}
+		usage.Live = cp.liveFacts(ttfb)
 		h.keeper.record(tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache
 		// was COLD: this request has now either rewritten that prefix or failed trying to, and

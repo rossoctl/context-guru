@@ -411,6 +411,7 @@ func TestKeeperSurvivesASideRequestsArrival(t *testing.T) {
 	if got := k.Stats().Live; got != 1 {
 		t.Fatalf("after the side request's arrival: %d live entries, want 1 (the main thread survives)", got)
 	}
+	rec(side.ID, start.Add(2*time.Second), sideBody) // the side request finishes: nothing of the session is in flight
 	if n := k.Sweep(clock.advance(300 * time.Second)); n != 1 {
 		t.Fatalf("sweep fired %d pings, want 1 (the main thread, still live)", n)
 	}

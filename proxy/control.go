@@ -152,7 +152,9 @@ func (h *Handler) allCtlRoutes() []ctlRoute {
 	// Strategy campaigns: bulk-create keep-alive strategies from a batch of suggest
 	// cells, declared beside their handlers in campaign.go and appended here for the
 	// same reason.
-	return append(rs, h.campaignCtlRoutes()...)
+	rs = append(rs, h.campaignCtlRoutes()...)
+	// Learned keep-alive campaigns: build from a tenant's history, run in shadow or active mode (campaignbuild.go).
+	return append(rs, h.cacheCampaignCtlRoutes()...)
 }
 
 // grafanaUserHeader carries the authorized manager's address from this endpoint to
@@ -1928,6 +1930,7 @@ func (h *Handler) ctlPurgeTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.purgeTenantData(target.ID)
+	h.predRT().eraseTenant(target.ID) // campaigns are derived from the purged history
 	if err != nil {
 		// 502 rather than 500 when cold storage is what failed: the local rows are gone or
 		// still there as reported, and the part that did not work is a remote system.
@@ -1999,6 +2002,7 @@ func (h *Handler) ctlDeleteTenant(w http.ResponseWriter, r *http.Request) {
 	// gap the test cannot see.
 	h.opts.Tenants.Forget(target.ID)
 	h.keeper.forget(target.ID)
+	h.predRT().eraseTenant(target.ID)
 	// Step 3: the tail. Best-effort by construction — the account is already gone, so
 	// there is nothing left to fail back to.
 	if tail, tErr := h.purgeTenantData(target.ID); tErr != nil {
