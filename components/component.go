@@ -243,6 +243,16 @@ type PrefixCoverage interface {
 	CoversSpan(session string, count int, hash string) bool
 }
 
+// PrefixCoveredAsker, when a PrefixAsker also implements it, checks coverage and asks on ONE
+// snapshot of the stash. PrefixCoverage.CoversSpan followed by Ask reads the stash twice: when the
+// call runs detached, the thread's next request can replace the stashed body between the two
+// reads, and the ask then goes out over a body the check never approved. AskCovered returns
+// ErrStalePrefix when the snapshot does not cover the first `count` normalized messages hashed to
+// `hash`, ErrNoPrefix when nothing is stashed, and otherwise asks on exactly the body it checked.
+type PrefixCoveredAsker interface {
+	AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, PrefixUsage, error)
+}
+
 // ErrNoPrefix is what Ask returns on the FIRST turn of a session: nothing has been forwarded yet, so
 // there is no cached prefix to append to.
 //
