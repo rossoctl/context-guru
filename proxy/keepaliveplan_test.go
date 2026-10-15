@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/components/offload"
 )
 
 // TestKeepAlivePlansReportsOnlyThreadsStillToBePinged: the status line's "held warm until" must
@@ -90,5 +92,34 @@ func TestAPingThatReadNothingIsNotARefresh(t *testing.T) {
 	k.mu.Unlock()
 	if !got.Equal(t0) {
 		t.Errorf("refreshedAt = %v after a ping that read nothing, want the real request's start %v", got, t0)
+	}
+}
+
+// TestASummarySubstituteThatReadNothingIsNotARefresh is TestAPingThatReadNothingIsNotARefresh for
+// the cache_aware_summarizer path, which books its own refresh (recordSummarySubstitute). A
+// substitute that read nothing from the cache refreshed nothing that was there, so refreshedAt must
+// stay on the real request; one that read the cache moves it to the substitute's start.
+func TestASummarySubstituteThatReadNothingIsNotARefresh(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	t0 := clock.now()
+	recordOne(t, k, kaPolicy(), kaBody, t0, upstream{base: "http://up", path: "/v1/messages"})
+	k.mu.Lock()
+	e := k.live[kaKey("t1", "sess-1")]
+	k.mu.Unlock()
+	j := pingJob{e: e, tenant: "t1", session: "sess-1", st: e.st, emitter: e.emitter}
+	refreshedAt := func() time.Time {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		return e.refreshedAt
+	}
+
+	k.recordSummarySubstitute(j, offload.KeepAliveSummaryResult{FreshInput: 10, CacheWrite: 48576, Output: 1}, 1, clock.advance(time.Minute))
+	if got := refreshedAt(); !got.Equal(t0) {
+		t.Errorf("refreshedAt = %v after a substitute that read nothing, want the real request's start %v", got, t0)
+	}
+	at := clock.advance(time.Minute)
+	k.recordSummarySubstitute(j, offload.KeepAliveSummaryResult{CacheRead: 48576, Output: 1}, 1, at)
+	if got := refreshedAt(); !got.Equal(at) {
+		t.Errorf("refreshedAt = %v after a substitute that read the cache, want its start %v", got, at)
 	}
 }
