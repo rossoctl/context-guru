@@ -1,7 +1,9 @@
 package dash
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -175,14 +177,72 @@ func TestCacheStateSplitsTheSessionsMoney(t *testing.T) {
 	}
 }
 
-// TestCacheThreadsQueryIsIndexed: the per-thread money is one indexed read of the session.
+// TestCacheThreadsQueryIsIndexed: the per-thread money and the per-thread TTL are each one indexed
+// read of the session. Neither may look the TTL up again per thread: a correlated subquery that
+// walks the session once for each thread made /api/cachestate take 1.6 s at 300 threads, longer
+// than the status line waits for it (#570).
 func TestCacheThreadsQueryIsIndexed(t *testing.T) {
 	db := openTestDB(t)
 	seedLeanFixture(t, db)
-	q, args := cacheThreadsQuery(Filter{Session: "s-target"})
-	plan := explainPlan(t, db, q, args)
-	assertNoWholeTableScan(t, "cache threads", plan)
-	assertSessionOrTimeIndexed(t, "cache threads", plan)
+	for name, build := range map[string]func(Filter) (string, []any){
+		"cache threads": cacheThreadsQuery, "cache ttl": cacheTTLQuery,
+	} {
+		q, args := build(Filter{Session: "s-target"})
+		plan := explainPlan(t, db, q, args)
+		assertNoWholeTableScan(t, name, plan)
+		assertSessionOrTimeIndexed(t, name, plan)
+		for _, p := range plan {
+			if strings.Contains(p, "SEARCH w ") {
+				t.Errorf("%s: a per-thread TTL subquery is back in the plan: %q", name, plan)
+			}
+		}
+	}
+}
+
+// TestCacheThreadsTakesEachThreadsTTLFromItsLatestWrite: each thread's TTL is the tier of its own
+// latest cache write, pings included, and 300 when it never wrote.
+func TestCacheThreadsTakesEachThreadsTTLFromItsLatestWrite(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	row := func(ago int64, thread string, write, write1h int64) *Event {
+		e := mkEvent(now-ago, "s1", "aws/claude-sonnet-5", 1000, 1000)
+		e.Status, e.ThreadID, e.CacheRead, e.CacheWrite, e.CacheWrite1h = 200, thread, 5000, write, write1h
+		return e
+	}
+	ping := row(20_000, "a:P", 900, 900)
+	ping.KeepAlive = true
+	seed(t, rec,
+		// main: a 1h write, then a 5m write: 300
+		row(100_000, "", 900, 900), row(50_000, "", 900, 0), row(10_000, "", 0, 0),
+		// a:H: one 1h write, then reads: 3600
+		row(90_000, "a:H", 900, 900), row(15_000, "a:H", 0, 0),
+		// a:N: never wrote: 300
+		row(80_000, "a:N", 0, 0),
+		// a:P: the latest write is a 1h ping: 3600
+		row(70_000, "a:P", 900, 0), ping, row(12_000, "a:P", 0, 0),
+	)
+	_, body := get(t, a, "/api/cachestate?session=s1", "")
+	want := map[string]float64{"": 300, "a:H": 3600, "a:N": 300, "a:P": 3600}
+	got := map[string]float64{}
+	for _, x := range body["threads"].([]any) {
+		th := x.(map[string]any)
+		got[th["id"].(string)] = th["ttl_s"].(float64)
+	}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("thread %q ttl_s = %v, want %v (all: %v)", id, got[id], w, got)
+		}
+	}
+	// A time window on the request does not hide a:H's 1h write: the tier is the cache entry's.
+	_, body = get(t, a, fmt.Sprintf("/api/cachestate?session=s1&since=%d", now-30_000), "")
+	for _, x := range body["threads"].([]any) {
+		if th := x.(map[string]any); th["id"] == "a:H" && th["ttl_s"] != 3600.0 {
+			t.Errorf("with since=, a:H ttl_s = %v, want 3600 from its write before the window", th["ttl_s"])
+		}
+	}
+	if !strings.Contains(fmt.Sprint(body["threads"]), "a:H") {
+		t.Errorf("a:H (last touch 15 s ago) must be listed with since=30 s ago: %v", body["threads"])
+	}
 }
 
 // TestCacheThreadsTakesItsCacheFieldsFromTheLatestTouch pins the one-MAX bare-column rule

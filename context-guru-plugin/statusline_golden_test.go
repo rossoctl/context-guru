@@ -949,3 +949,131 @@ func TestRecordRunFeedsTheWeeklyTip(t *testing.T) {
 		t.Error("record-run accepted a command the tip does not name")
 	}
 }
+
+// TestStatuslineMoneyShowsWhenCachestateIsSlowerThanTheRender is #570. A session with hundreds of
+// threads made /api/cachestate slower than the render budget, so every render's read failed, the
+// last copy aged out after ten minutes, and the line fell back to a bare `saved $x`. The read now
+// starts a detached refresher when it misses the budget, so the slow answer still reaches the disk
+// cache and a later render shows the money line. The refresher also removes its own key's old
+// partial .tmp and old lock files, and nothing of another key's or a fresh one.
+func TestStatuslineMoneyShowsWhenCachestateIsSlowerThanTheRender(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,`+
+		`"money":{"main":{"saved_usd":50.32,"baseline_usd":250,"threads":1},"others":{"saved_usd":60.03,"baseline_usd":300,"threads":277}}}`,
+		now-60_000, now)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"total_saved_usd": 71.43}`)) //nolint:errcheck
+	})
+	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, r *http.Request) {
+		select { // slower than the 0.36 s render budget, as #570 measured (0.53-0.64 s)
+		case <-time.After(700 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		w.Write([]byte(cache)) //nolint:errcheck
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	tmp := t.TempDir()
+	key := filepath.Join(tmp, "context-guru-statusline-"+port+"-cs-sess-big.json")
+	other := filepath.Join(tmp, "context-guru-statusline-"+port+"-cs-sess-other.json")
+	oldTmp, newTmp, oldLock := key+".111.tmp", key+".222.tmp", key+".lock.12"
+	otherTmp, otherLock := other+".333.tmp", other+".lock.12"
+	for _, f := range []string{oldTmp, newTmp, oldLock, otherTmp, otherLock} {
+		if err := os.WriteFile(f, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if f == newTmp {
+			continue
+		}
+		if err := os.Chtimes(f, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := routedEnv(port)
+	env["TMPDIR"] = tmp
+	stdin := `{"session_id":"sess-big","cost":{"total_cost_usd":4.1},"context_window":{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000}}`
+	want := "saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents"
+	deadline := time.Now().Add(8 * time.Second)
+	var out string
+	for time.Now().Before(deadline) {
+		var code int
+		var elapsed time.Duration
+		out, code, elapsed = runStatusline(t, env, stdin, "--layout=balanced")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if elapsed > 500*time.Millisecond {
+			t.Errorf("render took %v; the budget is 0.5 s", elapsed)
+		}
+		if strings.Contains(out, want) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !strings.Contains(out, want) {
+		t.Fatalf("the money line never showed against a slow /api/cachestate; last render %q", out)
+	}
+	if _, err := os.Stat(oldTmp); !os.IsNotExist(err) {
+		t.Errorf("an hour-old partial .tmp must be removed by the refresher: %v", err)
+	}
+	if _, err := os.Stat(oldLock); !os.IsNotExist(err) {
+		t.Errorf("an hour-old lock of a past window must be removed by the refresher: %v", err)
+	}
+	if _, err := os.Stat(newTmp); err != nil {
+		t.Errorf("a fresh .tmp may belong to a write in progress and must stay: %v", err)
+	}
+	for _, f := range []string{otherTmp, otherLock} {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("another session's file %s is not this refresher's to remove: %v", filepath.Base(f), err)
+		}
+	}
+}
+
+// TestStatuslineCachestateRefreshIsOnePerWindow: a cachestate read that misses the budget starts
+// a detached refresher, but N renders at once start exactly one, and the next one starts only in
+// the next CACHESTATE_REFRESH_WINDOW_SECONDS window (5 s, not _bg_json's 30 s).
+func TestStatuslineCachestateRefreshIsOnePerWindow(t *testing.T) {
+	py := requireTool(t, "python3")
+	script := `
+import importlib.util, sys, threading, os, tempfile
+spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+tmp = tempfile.mkdtemp(); m._tmpdir = lambda: tmp
+spawned = []
+class P:  # stands in for the detached refresher
+    def __init__(self, *a, **k): spawned.append(1)
+m.subprocess.Popen = P
+m._http_get = lambda *a, **k: (_ for _ in ()).throw(TimeoutError("slow"))  # every inline read misses the budget
+w = m.CACHESTATE_REFRESH_WINDOW_SECONDS
+base = 30 * 1000000 + 1.0  # 1 s into a window of both lengths
+clock = [base]; m.time.time = lambda: clock[0]
+def burst(n):
+    spawned.clear(); bar = threading.Barrier(n)
+    def go():
+        bar.wait(); m._fetch_json("1", "/api/cachestate?session=s", "cs-s", 2.0, w)
+    ts = [threading.Thread(target=go) for _ in range(n)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    return len(spawned)
+print("window", w)
+print("burst", burst(16))              # exactly one
+print("same window", burst(4))         # none
+clock[0] = base + w + 0.5              # the next 5 s window, still inside the same 30 s one
+print("next window", burst(4))         # one
+`
+	out, err := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	want := "window 5.0\nburst 1\nsame window 0\nnext window 1"
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
+	}
+}
