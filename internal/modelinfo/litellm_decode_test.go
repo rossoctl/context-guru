@@ -73,8 +73,8 @@ func TestLiteLLMDecodesTheRealDocument(t *testing.T) {
 	l.mu.Lock()
 	n := len(l.byKey)
 	l.mu.Unlock()
-	if n < 2900 {
-		t.Errorf("decoded %d keys from the real document; want >2900 (a strict whole-map decode yields 0)", n)
+	if n < 4000 {
+		t.Errorf("decoded %d keys from the real document; want >4000 (a strict whole-map decode yields 0)", n)
 	}
 	// The two models context-guru is actually deployed against must resolve a
 	// non-zero window, or every fraction-based trigger is dead.
