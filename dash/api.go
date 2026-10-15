@@ -205,12 +205,13 @@ func (c *jsonCache) generation() uint64 {
 	return c.gen
 }
 
+// setIfCurrent stores body only if no clear() has happened since gen was read. The check and the store are
+// ONE lock hold: with two, a clear landing between them put the old body back.
 func (c *jsonCache) setIfCurrent(key string, body []byte, gen uint64) {
 	c.mu.Lock()
-	stale := c.gen != gen
-	c.mu.Unlock()
-	if !stale {
-		c.set(key, body)
+	defer c.mu.Unlock()
+	if c.gen == gen {
+		c.setLocked(key, body)
 	}
 }
 
@@ -246,17 +247,24 @@ func (c *jsonCache) get(key string) ([]byte, bool) {
 // endRefresh runs (via defer) the moment it returns either way, so this cannot serve a body
 // forever — only up to dashCacheTTL+dashCacheStale+dashComputeTimeout past when it was written.
 func (c *jsonCache) load(key string) (body []byte, fresh bool) {
+	body, fresh, _ = c.loadAged(key)
+	return body, fresh
+}
+
+// loadAged is load plus the entry's age, read under the same lock hold as the body so the pair is
+// consistent: a clear between two separate reads made an old body report an age of 0.
+func (c *jsonCache) loadAged(key string) (body []byte, fresh bool, age time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[key]
 	if !ok {
-		return nil, false
+		return nil, false, 0
 	}
-	age := time.Since(e.at)
+	age = time.Since(e.at)
 	if age >= dashCacheTTL+dashCacheStale && !c.refreshing[key] {
-		return nil, false
+		return nil, false, 0
 	}
-	return e.body, age < dashCacheTTL
+	return e.body, age < dashCacheTTL, age
 }
 
 // beginRefresh claims the right to refresh key, returning false if another refresh for it is
@@ -284,6 +292,10 @@ func (c *jsonCache) endRefresh(key string) {
 func (c *jsonCache) set(key string, body []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.setLocked(key, body)
+}
+
+func (c *jsonCache) setLocked(key string, body []byte) {
 	if c.entries == nil {
 		c.entries = make(map[string]jsonCacheEntry)
 	}
@@ -308,8 +320,8 @@ func (c *jsonCache) set(key string, body []byte) {
 // that no code change produced. The header costs one line per response and makes the harness
 // able to tell the two apart.
 func serveCached(w http.ResponseWriter, c *jsonCache, key string) bool {
-	if body, ok := c.get(key); ok {
-		writeCachedJSON(w, body, "hit", c.age(key))
+	if body, fresh, age := c.loadAged(key); body != nil && fresh {
+		writeCachedJSON(w, body, "hit", age)
 		return true
 	}
 	w.Header().Set("X-Cache", "miss")
@@ -349,9 +361,9 @@ func writeCachedJSON(w http.ResponseWriter, body []byte, state string, age time.
 // be killed instantly and the entry could never become fresh again.
 func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, key string,
 	compute func(db *DB) ([]byte, error)) {
-	if body, fresh := c.load(key); body != nil {
+	if body, fresh, age := c.loadAged(key); body != nil {
 		if fresh {
-			writeCachedJSON(w, body, "hit", c.age(key))
+			writeCachedJSON(w, body, "hit", age)
 			return
 		}
 		// Only the first stale reader for this key starts a refresh; every other concurrent
@@ -364,7 +376,7 @@ func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, ke
 		if c.beginRefresh(key) {
 			go a.refreshJSON(c, key, compute)
 		}
-		writeCachedJSON(w, body, "stale", c.age(key))
+		writeCachedJSON(w, body, "stale", age)
 		return
 	}
 	w.Header().Set("X-Cache", "miss")

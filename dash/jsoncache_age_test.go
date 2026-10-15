@@ -114,3 +114,60 @@ func TestInvalidateStateCachesDropsReadsAndIgnoresALateOldCompute(t *testing.T) 
 		t.Errorf("a strategy write left the route cache holding %q", body)
 	}
 }
+
+// The live routes go through serveJSON, so this is the guard on the real path: a clear that lands while
+// a compute is running must not be undone by that compute finishing, in the foreground flight and in the
+// background refresh alike. The next read after the write recomputes from the new state.
+func TestAClearDuringASlowComputeIsNotUndoneByIt(t *testing.T) {
+	a, _ := newTestAPI(t, Options{})
+	c := &a.toolFilterCache
+
+	// foreground flight: a cold read starts, the write lands, the read finishes.
+	release := make(chan struct{})
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.serveJSON(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/toolfilter", nil), c, "k",
+			func(*DB) ([]byte, error) { close(started); <-release; return []byte(`{"v":"old state"}`), nil })
+	}()
+	<-started
+	a.InvalidateStateCaches("account")
+	close(release)
+	<-done
+	if body, _ := c.load("k"); body != nil {
+		t.Fatalf("a compute that began before the write stored %q after it", body)
+	}
+
+	// background refresh: a stale entry, the refresh starts, the write lands, the refresh finishes.
+	c.set("k2", []byte(`{"v":"before"}`))
+	c.mu.Lock()
+	e := c.entries["k2"]
+	e.at = time.Now().Add(-2 * time.Minute)
+	c.entries["k2"] = e
+	c.mu.Unlock()
+	release2 := make(chan struct{})
+	started2 := make(chan struct{})
+	w := httptest.NewRecorder()
+	a.serveJSON(w, httptest.NewRequest(http.MethodGet, "/api/toolfilter", nil), c, "k2",
+		func(*DB) ([]byte, error) { close(started2); <-release2; return []byte(`{"v":"old state"}`), nil })
+	<-started2
+	a.InvalidateStateCaches("account")
+	close(release2)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		c.mu.Lock()
+		refreshing := c.refreshing["k2"]
+		c.mu.Unlock()
+		if !refreshing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the refresh never finished")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if body, _ := c.load("k2"); body != nil {
+		t.Fatalf("a refresh that began before the write stored %q after it", body)
+	}
+}

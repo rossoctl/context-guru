@@ -428,3 +428,33 @@ func TestSaveMoreAppliesThePresetWithoutOverrides(t *testing.T) {
 		t.Fatalf("stored %q, priced %q", doc, want)
 	}
 }
+
+// On a single-tenant proxy there is no registry to announce a configuration change, so a local apply or
+// revert has to drop the dashboard's cached reads itself: the removal list in the running pipeline just
+// changed, and /api/toolfilter may otherwise answer from a body up to ten minutes old.
+func TestAdaptApplyLocalDropsTheDashboardsCachedReads(t *testing.T) {
+	h := localAdaptHandler(t, filepath.Join(t.TempDir(), "d.db.adapt.json"))
+	mux := h.Mux()
+	get := func() string {
+		r := httptest.NewRequest("GET", "/api/toolfilter", nil)
+		r.RemoteAddr = "127.0.0.1:4000"
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w.Header().Get("X-Cache")
+	}
+	get() // computes and caches
+	if got := get(); got != "hit" {
+		t.Fatalf("second read X-Cache = %q, want hit; the test needs a warm cache to prove anything", got)
+	}
+	basis := offer(h, "", "preset: house\n", []string{"format", "searchfold", "textclean"}, nil)
+	r := httptest.NewRequest("POST", "/api/adapt/compaction/apply", strings.NewReader(`{"option":"c1","basis":"`+basis+`"}`))
+	r.RemoteAddr = "127.0.0.1:4000"
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("apply = %d %s", w.Code, w.Body)
+	}
+	if got := get(); got == "hit" || got == "stale" {
+		t.Errorf("read right after a local apply X-Cache = %q; a cached body from before the apply was served", got)
+	}
+}
