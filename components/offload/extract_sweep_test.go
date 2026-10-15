@@ -1290,3 +1290,60 @@ func TestBlockFallbackDecliningAWritePublishesTheCorrectRejection(t *testing.T) 
 		t.Errorf("Rejection = %q, want %q", call.Rejection, want)
 	}
 }
+
+// A coverage asker that also implements PrefixCoveredAsker. CoversSpan says "covered" (the guard's
+// early read); AskCovered answers from the single snapshot it asks on, which may by then differ.
+type fakeCoveredAsker struct {
+	fakeCoverageAsker
+	snapshotErr   error
+	askCoveredHit atomic.Int64
+	gotCoverCount atomic.Int64
+	gotCoverHash  atomic.Value
+}
+
+func (f *fakeCoveredAsker) AskCovered(_ context.Context, _ string, count int, hash, _ string) (string, components.PrefixUsage, error) {
+	f.askCoveredHit.Add(1)
+	f.gotCoverCount.Store(int64(count))
+	f.gotCoverHash.Store(hash)
+	if f.snapshotErr != nil {
+		return "", components.PrefixUsage{}, f.snapshotErr
+	}
+	return f.reply, components.PrefixUsage{}, nil
+}
+
+// The ask goes out through AskCovered with the span the guard verified, so the stash cannot change
+// between the check and the ask; a snapshot AskCovered refuses is counted as a stale prefix, not as
+// a failed call, and nothing was sent.
+func TestSweepAsksOnTheSnapshotItChecked(t *testing.T) {
+	asker := &fakeCoveredAsker{fakeCoverageAsker: fakeCoverageAsker{covers: true, fakeAsker: fakeAsker{reply: "[]"}}}
+	e := newSweepSmall(t, "")
+	ctx := preExpiryCtx("s-covered", asker, store.NewMemory(store.Options{}))
+	ctx.MaxCachedIdx = 5
+	rep := &components.Report{}
+	if _, err := e.Offload(sweepReqStocked(), rep, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if asker.askCoveredHit.Load() != 1 || atomic.LoadInt64(&asker.calls) != 0 {
+		t.Fatalf("AskCovered calls=%d, plain Ask calls=%d; the ask must be the single-snapshot one",
+			asker.askCoveredHit.Load(), asker.calls)
+	}
+	if got := asker.gotCoverCount.Load(); got != 6 {
+		t.Errorf("AskCovered was given count %d, want the guard's 6", got)
+	}
+	if h, _ := asker.gotCoverHash.Load().(string); h == "" || h != asker.gotHash.Load() {
+		t.Errorf("AskCovered was given hash %q, want the one the guard verified (%v)", h, asker.gotHash.Load())
+	}
+
+	// Now the snapshot disagrees with the early read.
+	stale := &fakeCoveredAsker{fakeCoverageAsker: fakeCoverageAsker{covers: true, fakeAsker: fakeAsker{reply: "[]"}},
+		snapshotErr: components.ErrStalePrefix}
+	ctx2 := preExpiryCtx("s-covered-stale", stale, store.NewMemory(store.Options{}))
+	ctx2.MaxCachedIdx = 5
+	rep2 := &components.Report{}
+	if _, err := e.Offload(sweepReqStocked(), rep2, ctx2); err != nil {
+		t.Fatal(err)
+	}
+	if rep2.Gates["sweep_stale_prefix"] != 1 || rep2.Gates["sweep_ask_failed"] != 0 {
+		t.Fatalf("a refused snapshot must count as sweep_stale_prefix, not a failed ask (gates: %v)", rep2.Gates)
+	}
+}
