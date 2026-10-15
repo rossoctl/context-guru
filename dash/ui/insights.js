@@ -1072,12 +1072,14 @@ function insUsageBars(tl) {
       ? { key: 'base:' + it.name, label: insShortName(it.name), kind: 'builtin' }
       : insRemovalGroup(it);
     const row = groups[g.key] || (groups[g.key] = {
-      key: g.key, label: g.label, kind: g.kind, baseline: base, members: [], usd: 0, tokens: 0,
+      key: g.key, label: g.label, kind: g.kind, baseline: base, members: [],
+      usd: 0, tokens: 0, reads: 0,
       used: cols.map(() => 0), carried: cols.map(() => 0),
     });
     row.members.push(it.name);
     row.usd += it.usd || 0;
     row.tokens += it.tokens || 0;
+    row.reads += it.reads || 0;
     const s = tl.items[name];
     cols.forEach((c, ci) => {
       for (let i = c.fromIdx; i <= c.toIdx; i++) {
@@ -1093,11 +1095,10 @@ function insUsageBars(tl) {
   /* Worst first: the bar with the most wasted buckets, then by money. A reader scans from the top,
    * so the top is where the answer goes. */
   const all = Object.keys(groups).map((k) => groups[k]);
-  /* The busiest day anywhere on the chart, so every bar is shaded on one scale and two bars can
-   * be compared. Per-bar scaling would make a cheap capability's worst day look as dark as an
-   * expensive one's. */
-  const peak = all.reduce((m, r) => Math.max(m, ...r.carried), 0);
-  all.forEach((r) => { r.peak = peak; });
+  /* One scale for the whole chart, so two bars are comparable: per-bar ranking would make a
+   * cheap capability's worst day look as dark as an expensive one's. */
+  const ranks = insShadeRanks(all);
+  all.forEach((r) => { r.ranks = ranks; });
   const wastedCount = (r) => r.carried.reduce((n, c, i) => n + (c && !r.used[i] ? 1 : 0), 0);
   const rank = (a, b) => wastedCount(b) - wastedCount(a) || (b.usd || 0) - (a.usd || 0);
   /* Two blocks, not one ordering: everything you can act on, worst first, then the baseline
@@ -1116,11 +1117,12 @@ function insUsageBars(tl) {
  * Without a floor a cheap day fades into the surface and reads as a day the capability was not
  * carried at all — which is the one distinction this chart turns on.
  *
- * 0.62, raised from 0.35 after looking at it: the lower floor spread the shades nicely and left
- * the whole chart washed out, so red stopped reading as red. A narrower band costs some
- * resolution between a quiet day and a middling one, and buys back the thing the colour is for —
- * telling waste from use at a glance. The exact figure for any day is in the tooltip. */
-const INS_SHADE_FLOOR = 0.62;
+ * 0.45. It went 0.35 -> 0.62 to stop the chart looking washed out, and 0.62 left only 38% of the
+ * band for every day on the chart — two days whose costs differed by a quarter came out 0.006
+ * apart, which is invisible. Ranking the days (insShadeRanks) is what makes a lower floor safe:
+ * the separation no longer depends on how the values happen to cluster, so the band can be wider
+ * without any pair collapsing together. */
+const INS_SHADE_FLOOR = 0.45;
 
 /* insDayShade turns a day's carriage count into an opacity within that day's own colour.
  *
@@ -1131,10 +1133,45 @@ const INS_SHADE_FLOOR = 0.62;
  *
  * The square root rather than the raw ratio, because the distribution is top-heavy: without it
  * the many mid-volume days bunch together and only the single busiest looks different. */
-function insDayShade(count, peak) {
+function insDayShade(count, ranks) {
   if (count <= 0) return 0;
-  const frac = Math.sqrt(count / Math.max(1, peak));
-  return INS_SHADE_FLOOR + (1 - INS_SHADE_FLOOR) * Math.min(1, frac);
+  const r = ranks[count];
+  return INS_SHADE_FLOOR + (1 - INS_SHADE_FLOOR) * (r === undefined ? 1 : r);
+}
+
+/* insShadedColour mixes a colour toward the page surface by `shade`, 0..1.
+ *
+ * The shade reaches the cell this way rather than through `opacity`, because ECharts recomputes a
+ * stacked bar's point opacity and the spread asked for is not the spread painted — measured, a
+ * 0.55-1.00 request came out as 0.47-0.74. color-mix is a channel the library does not touch, and
+ * it keeps every colour a token, so dark mode re-derives the whole ramp against its own surface
+ * instead of fading toward white. */
+function insShadedColour(colour, shade, surface) {
+  if (shade >= 0.999) return colour;
+  const pct = Math.round(Math.max(0, Math.min(1, shade)) * 100);
+  return 'color-mix(in srgb, ' + colour + ' ' + pct + '%, ' + surface + ')';
+}
+
+/* insShadeRanks maps each day-cost that actually occurs to its position among them, 0..1.
+ *
+ * WHY RANK AND NOT VALUE, which is the subtlety this chart turns on. A linear or logarithmic
+ * scale maps a value to a colour, and what the eye needs is a map from DIFFERENCE to colour.
+ * Measured on the real store: six days fell between 105 and 601 requests, five of them between
+ * 326 and 403 — so any value-proportional scale rendered those five in effectively one shade,
+ * faithfully and uselessly. Ranking spreads whatever values are present evenly across the band,
+ * which turned the smallest gap between two days from 0.006 into 0.11.
+ *
+ * The cost is that the shade shows ORDER rather than magnitude: a day twice as expensive as
+ * another is one step darker, not twice as dark. That is the right trade for a chart whose job is
+ * "which days did this cost me more" — and the tooltip carries the actual figure for anyone
+ * asking "how much more". */
+function insShadeRanks(rows) {
+  const seen = {};
+  for (const r of rows) for (const c of r.carried) if (c > 0) seen[c] = true;
+  const vals = Object.keys(seen).map(Number).sort((a, b) => a - b);
+  const ranks = {};
+  vals.forEach((v, i) => { ranks[v] = vals.length > 1 ? i / (vals.length - 1) : 1; });
+  return ranks;
 }
 
 /* insRangePicker chooses the window in weeks and months rather than by date. */
@@ -1244,12 +1281,21 @@ function insDrawChart(host, g) {
       value: 1,
       itemStyle: {
         color: !r.carried[ci] ? t.surface
-          : r.baseline ? (r.used[ci] ? t.baseline : t.wasted)
-            : (r.used[ci] ? t.used : t.wasted),
-        /* The SHADE is how much that day cost; the HUE is still whether it was used. So a deep
-         * red is an expensive wasted day and a pale red a cheap one, and the two questions stay
-         * on separate channels. */
-        opacity: r.carried[ci] ? insDayShade(r.carried[ci], r.peak) : 1,
+          : insShadedColour(
+            r.baseline ? (r.used[ci] ? t.baseline : t.wasted)
+              : (r.used[ci] ? t.used : t.wasted),
+            insDayShade(r.carried[ci], r.ranks), t.surface),
+        /* The shade is baked INTO the colour, not set as opacity.
+         *
+         * `opacity` on a stacked bar's data point does not survive: ECharts recomputes it, and
+         * the 0.55-1.00 spread this code asked for painted as 0.47-0.74 — a near-uniform column
+         * where every day of ArtifactData looked the same despite costing between $0.31 and
+         * $2.00. Measured by reading fill-opacity back out of the rendered SVG.
+         *
+         * color-mix against the page surface produces the same visual result through a channel
+         * ECharts does not touch, and it keeps the colour a token so dark mode still re-derives
+         * it. */
+        opacity: 1,
         /* NO border. At one day per segment a 1px rule is as wide as the line it separates, so
          * it ate the colour it was meant to delimit — the bar became mostly surface. A run of
          * same-coloured days reading as one block is correct here: that IS the finding. */
@@ -1279,20 +1325,32 @@ function insDrawChart(host, g) {
           (g.width > 1 ? ' + ' + (g.width - 1) + ' day(s)' : '');
         const state = !r.carried[ci] ? 'not carried'
           : (r.used[ci] ? 'invoked — earning its weight' : 'carried, never invoked');
-        /* The exact figure for THAT day, because the shade is a comparison and this is the
-         * number. Carriage count times the per-request weight is what that day actually cost. */
+        /* THAT DAY'S COST, not the window's.
+         *
+         * This printed `usd(r.usd)` — the total across every day — on each individual cell, so
+         * hovering any day of ArtifactData reported $7.23 when 11 Oct cost $2.00 and 8 Oct cost
+         * $0.31. Spotted by the reader: "Event caption itself inside Hint is same 7.23 it's
+         * definetly bug and not chart issue". It was: the arithmetic was right and the label was
+         * reading the wrong field.
+         *
+         * Apportioned by that day's share of the reads, which is exact rather than an estimate:
+         * cost is linear in tokens carried, so day_cost = total * day_tokens / total_tokens. The
+         * six days of ArtifactData sum to $7.2035, its reported total, to the cent. */
         const dayTok = r.carried[ci] * (r.tokens || 0);
+        const dayUSD = r.reads > 0 ? (r.usd || 0) * (dayTok / r.reads) : 0;
         const dayLine = r.carried[ci]
-          ? '<br>' + r.carried[ci].toLocaleString() + ' request(s) carried it that day · ' +
-            dayTok.toLocaleString() + ' tok'
+          ? '<br>' + (dayUSD ? usd(dayUSD) + ' wasted that day · ' : '') +
+            r.carried[ci].toLocaleString() + ' request(s) · ' + dayTok.toLocaleString() + ' tok'
           : '';
         const inside = r.members.length > 1
           ? '<br><span style="opacity:.75">' + r.members.length + ' items inside; see the ' +
             'tables below</span>'
           : '';
-        return '<strong>' + r.label + '</strong><br>' + when + ': ' + state + dayLine + '<br>' +
-          (r.usd ? usd(r.usd) + ' wasted · ' : '') +
-          (r.tokens || 0).toLocaleString() + ' tok/request' + inside;
+        /* The window total is still shown, but LABELLED as the total and placed after the day's
+         * own figure, so the two can never be read for each other again. */
+        return '<strong>' + r.label + '</strong><br>' + when + ': ' + state + dayLine +
+          '<br><span style="opacity:.75">' + (r.usd ? usd(r.usd) + ' wasted in total · ' : '') +
+          (r.tokens || 0).toLocaleString() + ' tok on every request</span>' + inside;
       },
     },
     legend: {

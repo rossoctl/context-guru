@@ -138,3 +138,43 @@ func TestADaysShadeCarriesWhatItCostThatDay(t *testing.T) {
 			"surface and reads as a day the capability was not carried at all")
 	}
 }
+
+// TWO DAYS THAT COST DIFFERENT AMOUNTS MUST LOOK DIFFERENT.
+//
+// The reader's second observation, after the per-day amounts started reaching the chart at all:
+// "i think generally none of the cells should be same collor, it very difficult to produce same
+// number of request per day so once price is same total is different each day".
+//
+// Correct, and the first scale failed it. Measured on the real store: days of 326 and 403
+// requests — a 24% difference in what they cost — rendered 0.006 apart in opacity, because a
+// 0.62 floor left only 38% of the range to work with and the square root compressed the top end
+// where the days actually clustered. Six genuinely different days spanned 22% of the band.
+//
+// So the scale is RANK-based: the distinct values that actually occur are spread evenly across
+// the band, which guarantees separation no matter how the costs cluster. On the same data that
+// turns the smallest gap between two days from 0.006 into 0.11.
+//
+// A LINEAR OR LOG SCALE IS THE WRONG TOOL HERE, and that is the subtlety worth recording: both
+// map value to colour, and the eye needs them to map DIFFERENCE to colour. When six days fall
+// between 326 and 403 requests, any value-proportional scale puts them on top of each other —
+// faithfully, and uselessly.
+func TestTwoDaysThatCostDifferentAmountsLookDifferent(t *testing.T) {
+	code := stripJSComments(readUI(t, "ui/insights.js"))
+
+	// Rank, not raw ratio: the shade comes from the value's POSITION among the values present.
+	if !strings.Contains(code, "insShadeRanks") {
+		t.Error("no insShadeRanks: without ranking the distinct day-costs, days that cluster " +
+			"together render in indistinguishable shades however differently they cost")
+	}
+	// The square root is gone: it compressed exactly the top of the range where the days sit.
+	if strings.Contains(code, "Math.sqrt(count") {
+		t.Error("the shade still square-roots the raw ratio, which compresses the busy end of " +
+			"the range — where real days cluster — into one shade")
+	}
+	// And the floor has to leave room to separate them. 0.62 left 38% of the band for every day.
+	if strings.Contains(code, "INS_SHADE_FLOOR = 0.62") {
+		t.Error("the shade floor is still 0.62, which leaves too little range to tell two days " +
+			"apart; it was raised to stop the chart looking washed out, and ranking is what " +
+			"makes a lower floor safe again")
+	}
+}
