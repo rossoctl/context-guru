@@ -40,6 +40,13 @@ type kaEntry struct {
 	cred string
 	// thread is the session thread this entry keeps warm; "" is the primary thread.
 	thread string
+	// refreshedAt is the last moment this entry's provider-side cache entry is KNOWN refreshed:
+	// the real request that created it, or a later ping or summary substitute call that actually
+	// READ the cache (CacheRead > 0). A ping or substitute that wrote instead of reading refreshed
+	// nothing that was there before, so it must not move this clock — see record1 and
+	// recordSummarySubstitute, both gated on CacheRead > 0 the same way. Surfaced to hosts via
+	// Plan.RefreshedAt, for a status line.
+	refreshedAt time.Time
 	// startedAt is when the last upstream request on this session STARTED — a real request
 	// or a ping, whichever was later.
 	//
@@ -609,7 +616,7 @@ func (k *Keeper) Record(r Record) {
 	// Nothing to keep alive unless the provider honours explicit breakpoints and this
 	// request actually established or read an entry. A request that wrote and read nothing
 	// has no prefix worth a ping.
-	if !eligible(provider, model, route) {
+	if !eligible(provider, model, route) || !relayServesClaude(provider, r.Endpoint, model) {
 		k.retire(key)
 		return
 	}
@@ -659,6 +666,7 @@ func (k *Keeper) Record(r Record) {
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
 	}
+	e.refreshedAt = startedAt // the real request refreshed the provider's entry
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	// The turn count outlives the entry, which is dropped on the next request's arrival. It is
@@ -1256,6 +1264,9 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
+	if u.CacheRead > 0 {
+		e.refreshedAt = startedAt
+	}
 	k.mu.Unlock()
 	for {
 		old := k.spentUSD.Load()
@@ -1393,6 +1404,41 @@ func (k *Keeper) LiveSessionKeys() []string {
 		}
 	}
 	return keys
+}
+
+// Plan is one thread's keep-alive plan, for a status line. Times are absolute; the host converts.
+type Plan struct {
+	RefreshedAt time.Time // the last moment the provider's entry is known refreshed
+	NextPing    time.Time // startedAt + Idle
+	PingsLeft   int
+	Idle        time.Duration
+}
+
+// Plans returns the plan of every thread still to be pinged, keyed by thread ("" = main).
+// session == "" with all == true lists every session, keyed by Key.id(). Only an entry that will
+// still be pinged has a plan: the same conditions as PendingPings, plus pingable. Port of main's
+// Handler.KeepAlivePlans (git show 67c5f758:proxy/keepalive.go L2102), for the status line's
+// "held warm until".
+func (k *Keeper) Plans(tenant string, all bool, session string) map[string]Plan {
+	if k == nil {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	out := map[string]Plan{}
+	for id, e := range k.live {
+		if (!all && (e.tenant != tenant || e.session != session)) ||
+			e.stopped || !e.pol.On() || e.pings >= e.pol.MaxPings || !e.pingable() {
+			continue
+		}
+		key := e.thread
+		if all {
+			key = id
+		}
+		out[key] = Plan{RefreshedAt: e.refreshedAt, NextPing: e.startedAt.Add(e.pol.Idle),
+			PingsLeft: e.pol.MaxPings - e.pings, Idle: e.pol.Idle}
+	}
+	return out
 }
 
 // Entry snapshots one tracked entry. Exported for tests and replay tooling; hosts do not need it.

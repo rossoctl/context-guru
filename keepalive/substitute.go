@@ -197,6 +197,9 @@ func (k *Keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
+	if u.CacheRead > 0 {
+		e.refreshedAt = startedAt
+	}
 	k.mu.Unlock()
 	for {
 		old := k.spentUSD.Load()
