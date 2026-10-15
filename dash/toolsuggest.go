@@ -173,11 +173,11 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 	sessions := map[string]bool{}
 	for rows.Next() {
 		var session, model string
-		var tok, cacheRead, cacheWrite, ts int64
-		if err := rows.Scan(&session, &model, &tok, &cacheRead, &cacheWrite, &ts); err != nil {
+		var tok, cacheRead, cacheWrite, cacheWrite1h, ts int64
+		if err := rows.Scan(&session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts); err != nil {
 			return nil, err
 		}
-		accumulateDeclFilterRow(out, sessions, session, model, tok, cacheRead, cacheWrite, ts, price)
+		accumulateDeclFilterRow(out, sessions, session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, price)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -193,7 +193,7 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 func declFilterSavingsQuery(f Filter) (string, []any) {
 	where, args := f.where()
 	return `SELECT r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.ts FROM requests r
+		r.cache_read, r.cache_write, r.cache_write_1h, r.ts FROM requests r
 		WHERE ` + where + ` AND r.filtered_decl_tokens > 0`, args
 }
 
@@ -202,7 +202,7 @@ func declFilterSavingsQuery(f Filter) (string, []any) {
 // ITS OWN model's rate and cache tier. Shared with DeclFilterSavingsByTenant so the two never
 // drift on how a row is priced.
 func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
-	session, model string, tok, cacheRead, cacheWrite, ts int64, price func(string) (modelinfo.Price, bool)) {
+	session, model string, tok, cacheRead, cacheWrite, cacheWrite1h, ts int64, price func(string) (modelinfo.Price, bool)) {
 	out.Requests++
 	sessions[session] = true
 	out.Reads += tok
@@ -227,6 +227,11 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 		// have cost the creation rate (1.25x fresh).
 		out.CacheWriteTokens += tok
 		rate = p.CacheWrite
+		// A one-hour breakpoint precedes every 5-minute one, so a request that wrote any 1h tokens
+		// wrote the declarations at the head at the 1h rate: 2x input. (The same rule as carriedCost.)
+		if cacheWrite1h > 0 {
+			rate = 2 * p.Input
+		}
 	default:
 		out.FreshTokens += tok
 		rate = p.Input
@@ -244,7 +249,7 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinfo.Price, bool)) (map[string]*DeclFilterSaving, error) {
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.ts FROM requests r
+		r.cache_read, r.cache_write, r.cache_write_1h, r.ts FROM requests r
 		WHERE `+cond+` AND r.filtered_decl_tokens > 0`, args...)
 	if err != nil {
 		return nil, err
@@ -254,8 +259,8 @@ func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinf
 	sessions := map[string]map[string]bool{}
 	for rows.Next() {
 		var tenant, session, model string
-		var tok, cacheRead, cacheWrite, ts int64
-		if err := rows.Scan(&tenant, &session, &model, &tok, &cacheRead, &cacheWrite, &ts); err != nil {
+		var tok, cacheRead, cacheWrite, cacheWrite1h, ts int64
+		if err := rows.Scan(&tenant, &session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts); err != nil {
 			return nil, err
 		}
 		s, ok := out[tenant]
@@ -264,7 +269,7 @@ func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinf
 			out[tenant] = s
 			sessions[tenant] = map[string]bool{}
 		}
-		accumulateDeclFilterRow(s, sessions[tenant], session, model, tok, cacheRead, cacheWrite, ts, price)
+		accumulateDeclFilterRow(s, sessions[tenant], session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, price)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

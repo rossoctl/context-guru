@@ -197,7 +197,11 @@ func TestAdaptToolsEnvelope(t *testing.T) {
 	doc.finish(ToolFilterState{Removed: []string{"mcp__old", "Workflow"}})
 	if doc.Best != "remove-sufficient" || doc.Current != "keep" || doc.Recommendation == nil ||
 		doc.Recommendation.PerMonthUSD != 3 || doc.Recommendation.NetDeltaUSD != 2 ||
-		doc.Options[1].SpendUSD != 1 || doc.Options[1].NetUSD != 2 || doc.Items[0].LastUsedMS != nil {
+		doc.Options[1].SpendUSD != 1 || doc.Options[1].NetUSD != 2 || doc.Items[0].LastUsedMS != nil ||
+		doc.WouldAddUSD != 2 || doc.Recommendation.SavedToDateUSD != 3 || doc.Recommendation.RewriteUSD != 1 ||
+		math.Abs(doc.Recommendation.SavedPerWeekUSD-0.7) > 1e-9 ||
+		doc.Recommendation.Question != "Remove 1 item (a)? Over the last 30 days they would have saved about $0.70 a week. The one-off cache rewrite costs about $1.00, so it pays back in about 2 weeks." ||
+		doc.PaybackWeeks == nil || math.Abs(*doc.PaybackWeeks-1/0.7) > 1e-9 || doc.Recommendation.ItemsN != 1 {
 		t.Fatalf("doc %+v rec %+v", doc, doc.Recommendation)
 	}
 	remove := map[string]string{}
@@ -259,5 +263,185 @@ func TestCarriedSetsStopsWaitingWhenCancelled(t *testing.T) {
 	}
 	if len(carriedSlot) != 1 {
 		t.Fatal("the cancelled request took or released the slot")
+	}
+}
+
+// Built-in tools are never listed, whichever agent's they are, even when never used.
+func TestAdaptToolsNeverListsBuiltins(t *testing.T) {
+	db := openTestDB(t)
+	e := mkEvent(day(0), "s", "opus", 100, 100)
+	e.TenantID, e.Tools, e.CacheRead, e.DeclDigest = "t1", 5, 1000, "d"
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	var decls []Decl
+	for _, n := range []string{"Read", "Grep", "WebFetch", "shell", "apply_patch"} { // Claude Code's, Codex's
+		decls = append(decls, Decl{Kind: KindTool, Name: n, Tokens: 500})
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s", ts: day(0), inv: &Inventory{Digest: "d", UseFingerprint: 1, Decls: decls}}}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := db.AdaptTools(Filter{Tenant: "t1"}, adaptPrice, ToolFilterState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Items) != 0 || doc.Recommendation != nil {
+		t.Fatalf("built-in tools listed: %+v", doc.Items)
+	}
+}
+
+// After a removal, the saving is measured from the rows: the requests the filter acted on carry
+// the removed declaration in the set the client sent and record the tokens not forwarded. Rows
+// from before the removal count for nothing.
+func TestAdaptToolsMeasuresWhatARemovalSaved(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := 0; i < 4; i++ {
+		e := mkEvent(day(i), "s", "opus", 100, 100)
+		e.TenantID, e.Tools, e.CacheRead, e.CacheWrite, e.DeclDigest = "t1", 2, 1000, 0, "d"
+		if i >= 2 { // removed from here on: the filter stripped the server's 100 tokens
+			e.FilteredDeclTokens = 100
+		}
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s", ts: day(0), inv: &Inventory{Digest: "d", UseFingerprint: 1,
+		Decls: []Decl{{Kind: KindTool, Name: "Read", Tokens: 50}, {Kind: KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := db.AdaptTools(Filter{Tenant: "t1"}, adaptPrice, ToolFilterState{Enabled: true, Removed: []string{"mcp__srv"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 2 * 100 * 0.1 // two filtered requests, cache read at opus's 0.1
+	sv := doc.SavedSoFar.Filter
+	if math.Abs(sv.USD-want) > 1e-9 || sv.Requests != 2 || len(sv.Items) != 1 ||
+		sv.Items[0].RemoveAs != "mcp__srv" || math.Abs(sv.Items[0].USD-want) > 1e-9 || sv.Items[0].Requests != 2 {
+		t.Fatalf("saved so far %+v, want $%v on 2 requests for mcp__srv", doc.SavedSoFar, want)
+	}
+	if td := doc.ToDate; td == nil || td.Class != "observed" || td.Items != 1 || math.Abs(td.SavedUSD-want) > 1e-9 ||
+		len(doc.Removed) != 1 || doc.Removed[0].Name != "srv" || doc.Removed[0].Requests != 2 || doc.Removed[0].SinceMS != day(0) {
+		t.Fatalf("to_date %+v removed %+v", doc.ToDate, doc.Removed)
+	}
+	if math.Abs(doc.SavedSoFar.TotalUSD-want) > 1e-9 || len(doc.Items) != 0 || doc.WouldAddUSD != 0 {
+		t.Fatalf("doc %+v", doc)
+	}
+}
+
+// Payback: a rewrite under a week of saving goes unmentioned; one beyond the whole window means
+// keep as is, and the payback is still reported.
+func TestAdaptToolsPayback(t *testing.T) {
+	item := func(usd float64) []AdaptToolsItem {
+		return []AdaptToolsItem{{Name: "a", RemoveAs: "mcp__a", USD: usd, Sufficient: true}}
+	}
+	quick := &AdaptToolsDoc{RewriteUSD: 0.1, Window: AdaptToolsWindow{Since: day(0), Until: day(28)}, Items: item(4)} // $1/week
+	quick.finish(ToolFilterState{})
+	if quick.Recommendation == nil || strings.Contains(quick.Recommendation.Question, "pays back") ||
+		math.Abs(*quick.PaybackWeeks-0.1) > 1e-9 {
+		t.Fatalf("quick payback: %+v", quick.Recommendation)
+	}
+	slow := &AdaptToolsDoc{RewriteUSD: 5, Window: AdaptToolsWindow{Since: day(0), Until: day(28)}, Items: item(4)} // 5 weeks > 4
+	slow.finish(ToolFilterState{})
+	if slow.Recommendation != nil || slow.Best != "keep" || math.Abs(*slow.PaybackWeeks-5) > 1e-9 {
+		t.Fatalf("payback beyond the window must keep as is: best %s rec %+v", slow.Best, slow.Recommendation)
+	}
+}
+
+// A declaration removed in the client is priced per later request that still carried MCP tools,
+// at that request's rate, and reported as an estimate apart from the measured saving.
+func TestAdaptToolsEstimatesAClientSideRemovalPerRequest(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	add := func(session, digest string, ts int64, n, tools int) {
+		for i := 0; i < n; i++ {
+			e := mkEvent(ts+int64(i), session, "opus", 100, 100)
+			e.TenantID, e.Tools, e.CacheRead, e.CacheWrite, e.DeclDigest = "t1", tools, 1000, 0, digest
+			evs = append(evs, e)
+		}
+	}
+	add("before", "both", day(0), 2, 2)
+	for i, sess := range []string{"after1", "after2", "after3"} { // detection needs 3 later sessions
+		add(sess, "b-only", day(1+i), 1+i%2, 1)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	a := Decl{Kind: KindMCPTool, Name: "mcp__a__x", Server: "a", Tokens: 200}
+	b := Decl{Kind: KindMCPTool, Name: "mcp__b__y", Server: "b", Tokens: 50}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{
+		{tenant: "t1", session: "before", ts: day(0), inv: &Inventory{Digest: "both", UseFingerprint: 1, Decls: []Decl{a, b}}},
+		{tenant: "t1", session: "after1", ts: day(1), inv: &Inventory{Digest: "b-only", UseFingerprint: 2, Decls: []Decl{b}}},
+		{tenant: "t1", session: "after2", ts: day(2), inv: &Inventory{Digest: "b-only", UseFingerprint: 3, Decls: []Decl{b}}},
+		{tenant: "t1", session: "after3", ts: day(3), inv: &Inventory{Digest: "b-only", UseFingerprint: 4, Decls: []Decl{b}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := db.AdaptTools(Filter{Tenant: "t1"}, adaptPrice, ToolFilterState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := doc.SavedSoFar.Client
+	want := 4 * 200 * 0.1 // four requests in later sessions that still carried MCP tools, cache read at opus's rate
+	if cl.Class != "estimated" || cl.Label != "estimated (removed in the client)" || len(cl.Items) != 1 ||
+		cl.Items[0].Name != "mcp__a__x" || cl.Items[0].Requests != 4 || math.Abs(cl.Items[0].USD-want) > 1e-9 {
+		t.Fatalf("client %+v, want mcp__a__x at $%v over 4 requests", cl, want)
+	}
+	// Never summed into the measured figure.
+	if doc.SavedSoFar.TotalUSD != 0 || doc.ToDate.SavedUSD != 0 || doc.ToDate.Items != 0 ||
+		len(doc.Removed) != 1 || doc.Removed[0].Class != "estimated" {
+		t.Fatalf("measured %v, to_date %+v, removed %+v", doc.SavedSoFar.TotalUSD, doc.ToDate, doc.Removed)
+	}
+}
+
+// The filter's measured total and its per-item rows price a one-hour write the same way (2x
+// input), and when the filter's own token count differs from the items', the difference is a row
+// of its own instead of a silent gap.
+func TestAdaptToolsSavedItemsAndTotalAgree(t *testing.T) {
+	seed := func(filtered int) *AdaptToolsDoc {
+		db := openTestDB(t)
+		read := mkEvent(day(0), "s", "opus", 100, 100)
+		read.TenantID, read.Tools, read.CacheRead, read.CacheWrite, read.DeclDigest, read.FilteredDeclTokens = "t1", 2, 1000, 0, "d", filtered
+		hour := mkEvent(day(0)+1, "s", "opus", 100, 100)
+		hour.TenantID, hour.Tools, hour.CacheRead, hour.CacheWrite, hour.CacheWrite1h, hour.DeclDigest, hour.FilteredDeclTokens =
+			"t1", 2, 0, 5000, 5000, "d", filtered
+		if err := db.insertBatch([]*Event{read, hour}); err != nil {
+			t.Fatal(err)
+		}
+		w := &invWriter{db: db, seen: map[string]*invSession{}}
+		if err := w.write([]invMsg{{tenant: "t1", session: "s", ts: day(0), inv: &Inventory{Digest: "d", UseFingerprint: 1,
+			Decls: []Decl{{Kind: KindTool, Name: "Read", Tokens: 50}, {Kind: KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}}}); err != nil {
+			t.Fatal(err)
+		}
+		doc, err := db.AdaptTools(Filter{Tenant: "t1"}, adaptPrice, ToolFilterState{Enabled: true, Removed: []string{"mcp__srv"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return doc
+	}
+	// 100 tokens read at 0.1, plus 100 tokens in a one-hour write at 2x input.
+	want := 100*0.1 + 100*2.0
+	same := seed(100).SavedSoFar.Filter
+	if math.Abs(same.USD-want) > 1e-9 || len(same.Items) != 1 || math.Abs(same.Items[0].USD-want) > 1e-9 {
+		t.Fatalf("filter %+v, want total and the one item both $%v", same, want)
+	}
+	// The filter counted 150 tokens where the set says the item is 100: a 50-token gap per request.
+	gap := seed(150).SavedSoFar.Filter
+	if len(gap.Items) != 2 || gap.Items[1].Kind != "unattributed" || math.Abs(gap.Items[1].USD-50*(0.1+2.0)) > 1e-9 {
+		t.Fatalf("filter %+v, want an unattributed row of the gap", gap)
+	}
+	// One basis: the rows, unattributed included, always add up to the total.
+	for _, p := range []AdaptToolsSavedPart{same, gap} {
+		sum := 0.0
+		for _, it := range p.Items {
+			sum += it.USD
+		}
+		if math.Abs(sum-p.USD) > 1e-9 || math.Abs(p.USD-150*(0.1+2.0)) > 1e-9 && p.USD != want {
+			t.Fatalf("rows sum to $%v, total $%v", sum, p.USD)
+		}
 	}
 }
