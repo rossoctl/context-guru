@@ -1,7 +1,7 @@
 ---
 name: watch
 description: A live terminal view of every cache's countdown, what you saved today, and the last 20 requests. One frame here; the live version runs in a second terminal.
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/tv.py:*)
+allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/tv.py" watch:*)
 ---
 
 Run this, then print its output exactly as it is in one code block. Add nothing before or after it.

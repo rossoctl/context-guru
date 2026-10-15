@@ -545,10 +545,25 @@ func main() {
 		}
 	}
 
+	// What /api/adapt/* applies on top of on a single-tenant proxy: the document it was started
+	// with, rebuilt by the same builder hosted accounts use, with the applied override kept beside
+	// the dashboard database so each proxy (one per project for the plugin) has its own.
+	baseConfig, adaptOverride := "preset: "+*preset+"\n", ""
+	if *cfgPath != "" {
+		if b, err := os.ReadFile(*cfgPath); err == nil {
+			baseConfig = string(b)
+		}
+	}
+	if tenants == nil && *dashOn && *dashDB != ":memory:" && *dashDB != "" {
+		adaptOverride = *dashDB + ".adapt.json"
+	}
 	h := proxy.New(pipe, cfg.NewStore(), agg, proxy.Options{
-		Tenants:      tenants,   // nil => single-tenant, unchanged behaviour
-		Upstreams:    upstreams, // the allow-list; a tenant picks a name, never a URL
-		MetricsToken: *metricsToken,
+		BaseConfig:    baseConfig,
+		BuildConfig:   buildTenantConfig,
+		AdaptOverride: adaptOverride,
+		Tenants:       tenants,   // nil => single-tenant, unchanged behaviour
+		Upstreams:     upstreams, // the allow-list; a tenant picks a name, never a URL
+		MetricsToken:  *metricsToken,
 		// Both come from the dashboard's store, so both are nil when the dashboard is
 		// off — with no request rows there is nothing to price a cap against and nothing
 		// to roll up per tenant.
@@ -616,6 +631,11 @@ func main() {
 		// through modelinfo.Exact on the dash side, which is what keeps the last-resort
 		// substring table's 200,000-for-every-Opus out of a span measurement.
 		h.API().SetWindows(windows)
+		// The keeper's ping plan, so /api/cachestate can say how long a cache is held warm.
+		h.API().SetKeepAlivePlans(h.KeepAlivePlans)
+		// The configuration the adapt reports compare against: each account's in hosted mode, this
+		// proxy's own (with any applied override) otherwise.
+		h.API().SetAdaptCompactionConfig(h.DashAdaptConfig())
 	}
 
 	// One identity resolver for both halves of the dashboard: the read routes (dash)
@@ -636,6 +656,10 @@ func main() {
 		// Read-only here: the WRITE goes through the control plane (POST /api/toolfilter), which
 		// is where the validation, the audit entry and the manager gate for a compaction
 		// configuration already live.
+		h.API().SetToolFilterState(h.DashToolFilter())
+	}
+	if tenants == nil && rec != nil {
+		// Single-tenant: the removal list the running pipeline filters, for /api/adapt/tools.
 		h.API().SetToolFilterState(h.DashToolFilter())
 	}
 
@@ -1278,7 +1302,10 @@ func modelWindows() modelinfo.Resolver {
 	if url == "" {
 		// The public map. A fetch failure here is a network inconvenience, not a misconfiguration, so
 		// the embedded table remains the right answer and the chain keeps its fallback.
-		return append(chain, live, modelinfo.DefaultStatic())
+		// Builtin sits between the map and the table so a listed model stays exact while the map is
+		// not loaded (#515). It is NOT added behind an explicit MODEL_INFO_URL below: that document
+		// is the operator's authority, and a built-in figure must not answer past it.
+		return append(chain, modelinfo.NewChain(live)...)
 	}
 	// AN EXPLICIT MODEL_INFO_URL IS AN AUTHORITY THE OPERATOR NAMED, and guessing past it is wrong for
 	// the same reason MODEL_PRICES is fatal rather than skipped a few lines up: a silently-absent

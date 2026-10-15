@@ -1,0 +1,38 @@
+Not applied: the numbers changed since you saw them. Here they are again; nothing was written.
+
+╭─ Save more: cache ──────────────────────────────────────────────────────────────────────────────╮
+│ So far: your current keep-alive strategy saved $31.10 in 30 days (observed).                    │
+│ Change: cache strategy 5-min-ping -> adaptive. Over the last 30 days it would have saved about  │
+│ $2.89 a week (95% CI $0.72 to $4.89).                                                           │
+│ Before -> after: $300.00 billed on these sessions, $287.00 with the change.                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+switch to adaptive keep-alive to save about $12.40 more over the last 30 days.
+  best vs default +$12.40 (95% CI $3.10 to $21.00)  ·  best vs current +$12.40 (95% CI $3.10 to
+  $21.00)
+
+      option                            saved  spent     net
+  ★   adaptive    Adaptive keep-alive  $51.20  $7.70  $43.50  ████████████
+  ▸◦  5-min-ping  Ping every 5 min     $40.10  $9.00  $31.10  █████████░░░
+      none        No pings                 $0     $0      $0  ░░░░░░░░░░░░
+  ★ recommended   ▸ yours now   ◦ the default
+  1 more not evaluated: too little history: 13 held-out sessions (need 20)
+  saved: what it avoided paying · spent: what it paid itself · net = saved - spent, on your past
+  sessions
+
+  What adaptive keep-alive adds over the default, by hour (Europe/Amsterdam)
+        0     6     12    18   23
+  Mon   ░░░ ░░ ░░▒░░▒█░░▓█▓░░ ░░
+  Tue   ░░░░░░░░▓░░░▓▒▒▓▒▒█░░░░░
+  Wed   ░░░░░░░░░▓█▓█▒▓▓▓▒█░░░ ░
+  Thu   ░░░░░░ ░░░░█░▒▒█░▒▓░░░░░
+  Fri   ░░░░░░░░▓▒ ▒▒▓█▓▓▓▓ ░░░░
+  Sat   ░░░░  ░░░  ░░░ ░░░░░░░░░
+  Sun   ░░░░░░░░ ░░░░ ░░░░░░░░░░
+        ░ little   █ most (up to $0.38 in one hour slot)
+
+  counterfactual · replay of past sessions · 2026-09-08..2026-10-08 · 412 sessions, 18,301 requests
+  ! 31 sessions ended inside the window; their last gap is censored.
+
+Recommended: cache strategy 5-min-ping -> adaptive (takes effect at the next proxy restart).
+Why: it had the highest net on your own sessions
+Apply it? Say yes, or run: /context-guru:save-more apply cache adaptive@3f9a1c

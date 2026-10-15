@@ -133,6 +133,28 @@ func TestStatsLeanSkipsThePricedExtras(t *testing.T) {
 	}
 }
 
+// TestStatsLeanCountsTheSessionsPings: the status line shows this session's ping count and spend
+// from the lean read, so lean must report both, and only for the session asked about.
+func TestStatsLeanCountsTheSessionsPings(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	ping := func(ts int64, session string) *Event {
+		e := mkEvent(ts, session, "aws/claude-sonnet-5", 1000, 1000)
+		e.KeepAlive, e.CostUSD = true, 0.002
+		return e
+	}
+	seed(t, rec, mkEvent(now, "sess-1", "aws/claude-sonnet-5", 1000, 800),
+		ping(now+1, "sess-1"), ping(now+2, "sess-1"), ping(now+3, "sess-2"))
+
+	_, body := get(t, a, "/api/stats?lean=1&session=sess-1", "127.0.0.1:1")
+	if body["keepalive_pings"] != 2.0 {
+		t.Errorf("keepalive_pings = %v, want 2", body["keepalive_pings"])
+	}
+	if usd, _ := body["keepalive_ping_usd"].(float64); math.Abs(usd-0.004) > 1e-9 {
+		t.Errorf("keepalive_ping_usd = %v, want 0.004", body["keepalive_ping_usd"])
+	}
+}
+
 // TestStatsLeanIsACacheKeySeparateFromTheFullHandler guards against a lean and a non-lean
 // request for the same scope colliding on one cache entry — cacheKey includes the raw query
 // string (dash/api.go's cacheKey), so this is really a test that the ?lean=1 param survives
@@ -249,11 +271,9 @@ func TestStatsLeanTotalSavedMatchesFullHandlerWhenSessionScoped(t *testing.T) {
 	}
 }
 
-// TestStatsLeanMatchesFullForLifetimeToo is #502's lifetime decision: a bounded lifetime
-// (tried in an earlier version of this PR, removed on review) would have understated
-// total_saved_usd without a session. The shipped behavior instead answers `since=0` EXACTLY
-// like the full handler — Overview() plus both read-time-priced credits, unconditionally — so
-// lean and full must agree to the last cent even with no session filter at all.
+// TestStatsLeanMatchesFullForLifetimeToo: a lean read with no session and no window (`since=0`)
+// is answered by the full handler (#510 removed the lean lifetime path), so an older plugin that
+// still asks for it gets the exact number, to the last cent.
 func TestStatsLeanMatchesFullForLifetimeToo(t *testing.T) {
 	db := seedCredit(t, 1000)
 	qualifies := mkEvent(9100, "s-new-hist", "aws/claude-sonnet-5", 100, 100)
@@ -275,6 +295,6 @@ func TestStatsLeanMatchesFullForLifetimeToo(t *testing.T) {
 	}
 	if math.Abs(fullSaved-leanSaved) > 1e-9 {
 		t.Errorf("lean total_saved_usd = %v, full = %v — lifetime must match exactly, "+
-			"it is not a bounded read in this release", leanSaved, fullSaved)
+			"an unbounded lean read must be the full handler's answer", leanSaved, fullSaved)
 	}
 }

@@ -1,11 +1,13 @@
 # Cache
 
+`/context-guru:insights cache` (was `/context-guru:cache`, which still works for one release). `/context-guru:insights` shows it together with the other two.
+
 **Question: is my cache about to cost me?**
 
 The provider keeps your conversation cheap to reuse for a few minutes after each message. If you pause longer than that, the next message re-sends the whole conversation at a higher price. This screen shows how long you have, what a lapse would cost right now, and what past lapses cost.
 
-![/context-guru:cache](img/cache-dark.svg#only-dark)
-![/context-guru:cache](img/cache-light.svg#only-light)
+![/context-guru:insights cache](img/cache-dark.svg#only-dark)
+![/context-guru:insights cache](img/cache-light.svg#only-light)
 
 ```text
 Cache is warm for 2:41 more. If it lapses, the next message costs $1.91 extra.
@@ -21,7 +23,7 @@ Cache misses in 7 days: 377 costing $145.67 extra   (measured)
 
 The cache keeps your conversation cheap to reuse for a few minutes after each message.
 
-More: /context-guru:cache details
+More: /context-guru:insights cache details
 ```
 
 When the cache has already lapsed the first line says so and gives the price of the next message:
@@ -40,7 +42,7 @@ Cache misses in 7 days: 377 costing $145.67 extra   (measured)
 
 The cache keeps your conversation cheap to reuse for a few minutes after each message.
 
-More: /context-guru:cache details
+More: /context-guru:insights cache details
 ```
 
 ## Reading it

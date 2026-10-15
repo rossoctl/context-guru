@@ -6,7 +6,7 @@
 // actually remove, from what, and what would the agent no longer know" with numbers
 // instead of intuition.
 //
-//	CG_SKEL_CAPTURE=/home/vpcuser/cg-research/prod/bodies.jsonl \
+//	CG_SKEL_CAPTURE=/path/to/bodies.jsonl \
 //	  CGO_ENABLED=1 go test -tags cg_skeleton ./components/offload -run SkeletonCapture -v
 //
 // Several captures may be given, colon-separated. CG_SKEL_SAMPLE=1 also prints a

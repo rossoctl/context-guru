@@ -1,7 +1,7 @@
 # Operator price list — USD per MILLION tokens.
 #
 # Consulted BEFORE the public LiteLLM prices map, because a gateway does not charge
-# the public API's rates: ete-litellm bills aws/claude-sonnet-5 at $1.52/MTok in
+# the public API's rates: litellm-gateway bills aws/claude-sonnet-5 at $1.52/MTok in
 # where anthropic.com bills $3.00, so without this file every dollar figure on the
 # dashboard for that gateway was about twice the truth. It is also the only way to
 # price a model the public map has never heard of — a preview id, or a server-resolved
@@ -25,7 +25,7 @@ cache_read_frac: 0.1
 cache_write_frac: 1.25
 
 models:
-  # ── ete-litellm: bedrock ──────────────────────────────────────────────────────
+  # ── litellm-gateway: bedrock ──────────────────────────────────────────────────────
   - {match: "aws/claude-opus-5",     in: 3.80, out: 19.00}
   - {match: "aws/claude-opus-4-8",   in: 3.80, out: 19.00}
   - {match: "aws/claude-opus-4-7",   in: 3.80, out: 19.00}
@@ -37,7 +37,7 @@ models:
   - {match: "aws/claude-haiku-4-5",  in: 0.76, out: 3.80}
   - {match: "aws/gpt-oss-120b",      in: 0.15, out: 0.60}
 
-  # ── ete-litellm: azure ────────────────────────────────────────────────────────
+  # ── litellm-gateway: azure ────────────────────────────────────────────────────────
   - {match: "azure/gpt-4o",   in: 2.50, out: 10.00}
   - {match: "azure/gpt-4.1",  in: 2.00, out: 8.00}
   - {match: "azure/gpt-5-2025-08-07",      in: 1.25, out: 10.00}
@@ -52,7 +52,7 @@ models:
   - {match: "azure/gpt-5.6-luna",  in: 1.00, out: 6.00}
   - {match: "azure/gpt-5.6-terra", in: 2.50, out: 15.00}
 
-  # ── ete-litellm: vertex ───────────────────────────────────────────────────────
+  # ── litellm-gateway: vertex ───────────────────────────────────────────────────────
   - {match: "gcp/gemini-2.0-flash",        in: 0.10, out: 0.40}
   - {match: "gcp/gemini-2.5-flash",        in: 0.30, out: 2.50}
   - {match: "gcp/gemini-2.5-pro",          in: 1.25, out: 10.00}
@@ -62,7 +62,7 @@ models:
   - {match: "gcp/gemini-3.6-flash",        in: 1.50, out: 7.50}
   - {match: "gcp/gemini-3.5-flash-lite",   in: 0.30, out: 2.50}
 
-  # ── ete-litellm: the bare aliases ────────────────────────────────────────────
+  # ── litellm-gateway: the bare aliases ────────────────────────────────────────────
   # The gateway also serves several ids WITHOUT a provider prefix (`claude-opus-4-8`,
   # `claude-sonnet-4-6`, `gemini-2.5-pro`, …) and with mixed case (`Azure/gpt-4o`).
   # Case is normalised on lookup; the missing prefix is not, so these families catch

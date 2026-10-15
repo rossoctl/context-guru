@@ -12,6 +12,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/predictive"
 	"github.com/tidwall/gjson"
 )
 
@@ -56,6 +57,8 @@ type capture struct {
 	tenant string
 	// meta is the request's own metadata, read once off the pristine inbound body.
 	meta dash.Meta
+	// predArrival is set by the handler when a cache campaign tracks this tenant (see LiveFacts.Arrival).
+	predArrival *predictive.Arrival
 	// thread is the session thread this request belongs to (see internal/thread), set by
 	// noteThread once the session id is known. "" is the primary thread. inherits/hasInherit
 	// name the thread a NEW thread continues by content (thread.Result.Inherits).
@@ -417,16 +420,25 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	toolUseNames, stopReason := usage.ToolUseNames, usage.StopReason
 	failedCall := status != 0 && status/100 != 2
 	provider := bschemas.ModelProvider(c.provider)
+	// Both closures run on the writer goroutine, one after the other: normalize once, lazily.
+	var normMsgs []bschemas.ChatMessage
+	var normDone bool
+	norm := func() []bschemas.ChatMessage {
+		if !normDone {
+			normMsgs, normDone = apply.NormalizeMessages(provider, waitBody), true
+		}
+		return normMsgs
+	}
 	if c.rec.LifecycleOn() {
 		ts, endTS, cacheW, cacheW1h := e.TS, time.Now().UnixMilli(), usage.CacheWrite-usage.CacheWrite1h, usage.CacheWrite1h
 		rec := c.rec
 		e.LifecycleFn = func() *dash.LifecycleRow {
 			return rec.ObserveLifecycle(tenantID, sessionID, threadID, ts, endTS,
-				scanLifecycle(provider, waitBody), cacheW, cacheW1h)
+				scanLifecycle(norm, waitBody), cacheW, cacheW1h)
 		}
 	}
 	e.WaitCause = func() dash.WaitCauseResult {
-		obs := waits.Observe(tenantID, sessionID, threadID, provider, waitBody)
+		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm)
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
 		waitingFor, waitTool := waitcause.ClassifyWaitingFor(
 			toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
@@ -554,6 +566,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// are whatever the caller wrote, up to and including something they pasted — so it rides
 	// the same captureContent decision as the transcript, and the writer stores NULL for it
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
+	if c.inv != nil {
+		e.DeclDigest = c.inv.Digest
+	}
 	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent)
 	c.rec.Record(e)
 }
@@ -564,4 +579,25 @@ func cacheAttributionTTLMs(provider, model string) int64 {
 		return 0
 	}
 	return ttl.Milliseconds()
+}
+
+// LiveFacts are the request-side inputs of a learned keep-alive campaign, taken from the same places the dashboard row is filled from, so
+// a campaign sees at serve time the values it was trained on.
+type LiveFacts struct {
+	Messages, Tools, SystemBlocks, MaxTokens int
+	Effort, Thinking, CacheTTL, Agent        string
+	Stream                                   bool
+	TTFBMs                                   float64
+	// Arrival is this request's identity in a learned campaign's tracker (nil when no campaign applies). It travels with the request, not with its thread,
+	// because requests overlap on a thread.
+	Arrival *predictive.Arrival
+}
+
+// liveFacts reads them off the capture (nil-safe). ttfbMs is the streamed first-byte delay, 0 on buffered responses, as the dashboard records it.
+func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
+	if c == nil {
+		return nil
+	}
+	return &LiveFacts{Messages: c.trace.Messages, Tools: c.meta.Tools, SystemBlocks: c.meta.SystemBlocks, MaxTokens: c.meta.MaxTokens,
+		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
 }

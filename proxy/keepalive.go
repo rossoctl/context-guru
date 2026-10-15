@@ -2,13 +2,18 @@ package proxy
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,8 +23,10 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/predictive"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 	"github.com/tidwall/gjson"
@@ -114,6 +121,15 @@ var credMask = func() []byte {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		panic("context-guru: no entropy for the keep-alive credential mask: " + err.Error())
+	}
+	return b
+}()
+
+// credIDKey keys credKey's HMAC: random per process, in memory only, never logged or stored.
+var credIDKey = func() []byte {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic("context-guru: no entropy for the keep-alive credential id key: " + err.Error())
 	}
 	return b
 }()
@@ -231,6 +247,13 @@ const (
 // main thread's cache expire.
 type kaEntry struct {
 	tenant, session string
+	// client is the tenant-scoped id the client itself names the session by when the proxy keys it
+	// differently (Codex: the session-id header, which its hooks report, while the proxy derives the
+	// key from content). "" when there is none. A client signal matches on either.
+	client string
+	// cred identifies the caller's credential this entry pings with (credKey), "" for a
+	// server-held key. An auth refusal stops every entry with the same cred, and only those.
+	cred string
 	// thread is the session thread this entry keeps warm; "" is the primary thread.
 	thread string
 	// startedAt is when the last upstream request on this session STARTED — a real request
@@ -288,6 +311,8 @@ type kaEntry struct {
 	model, route, preset, agent string
 	pol                         CachePolicy
 	pings                       int
+	// missed counts this entry's pings in a row that read nothing (see fire).
+	missed int
 	// turn is how many requests this session sent BEFORE the one that established this entry.
 	// 0 means the session's first request, which the gate skips.
 	turn int
@@ -307,6 +332,10 @@ type kaEntry struct {
 	// refreshed is what the last ping read from cache. It is the ceiling on what the next
 	// real request may credit to this mechanism — see dash.Event.keepaliveSavedUSD.
 	refreshed int64
+	// refreshedAt is when the provider's entry was last known refreshed: the real request's start,
+	// then each ping that READ the cache. Unlike startedAt, which the sweep advances before a ping
+	// is sent, a refused or failed ping does not move it. Read by KeepAlivePlans.
+	refreshedAt time.Time
 	// stopped means this session will not be pinged again: a ping wrote instead of reading,
 	// or the upstream refused in a way that repeating cannot fix.
 	stopped bool
@@ -478,10 +507,29 @@ type keeper struct {
 	// session id and is cleared wholesale at the bound; give it an LRU only if session churn
 	// is ever shown to cost real pings.
 	turns map[string]int
+	// pred holds the learned keep-alive campaigns (predictive.go). Never nil.
+	pred *predRuntime
 	// overrides is the per-session manual keep-alive, keyed like live. In memory only and
 	// deliberately so — an authorization to spend that silently survives a restart is worse
 	// than one that does not. See keepaliveoverride.go.
 	overrides map[string]sessionOverride
+	// ended is when a client lifecycle signal last ended each session, keyed like live. See clientsignal.go.
+	ended         map[string]map[string]time.Time
+	signalApplied atomic.Int64
+	// inflight counts each THREAD's real requests between arrive and record, keyed like live
+	// (kaThreadKey). A due ping waits while its own thread has one open: two requests of one
+	// thread can overlap, and the first one's fresh hold must not be pinged under the second.
+	// Per thread, not per session: a subagent's slow request must not let the main thread's
+	// cache expire (since the compaction call stays on the main thread, no case needs more).
+	inflight map[string]int
+	// routeFails counts consecutive failed pings per upstream route (kaRouteKey); at
+	// routeFailLimit the route is tripped until routeTripped[key] and holds nothing.
+	routeFails   map[string]int
+	routeTripped map[string]time.Time
+	routeTrips   atomic.Int64
+	// credDead holds credentials (credKey) a ping was refused for (401/403), until the time given.
+	credDead map[string]time.Time
+	missed   atomic.Int64
 	// strategies is the manager-controlled keep-alive strategy list, loaded from the
 	// tenant registry at process start and replaced wholesale on every write through the
 	// control routes — never mutated in place, the same pattern k.overrides itself
@@ -561,6 +609,7 @@ func newKeeper(h *Handler) *keeper {
 	k := &keeper{h: h, stop: make(chan struct{}), done: make(chan struct{}),
 		live: map[string]*kaEntry{}, turns: map[string]int{},
 		overrides: map[string]sessionOverride{}, now: time.Now}
+	k.pred = newPredRuntime(h.campaignDir())
 	k.send = k.sendPing
 	k.dispatch = func(j pingJob) { go k.fire(j) }
 	// Loaded once at construction. Unlike overrides, a strategy is a standing rule a
@@ -591,6 +640,7 @@ func (k *keeper) start() {
 				return
 			case <-t.C:
 				k.sweep(k.now())
+				k.h.maybeRefreshAutoCampaigns(k.now())
 			}
 		}
 	}()
@@ -674,6 +724,10 @@ func (k *keeper) arrive(tenant, session, threadID string) (pings int, refreshed 
 	key := kaThreadKey(tenant, session, threadID)
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.inflight == nil {
+		k.inflight = map[string]int{}
+	}
+	k.inflight[key]++
 	e, ok := k.live[key]
 	if !ok {
 		return 0, 0, ""
@@ -694,6 +748,9 @@ func (k *keeper) arrive(tenant, session, threadID string) (pings int, refreshed 
 func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool) {
+	if k != nil && tn != nil && session != "" {
+		defer k.departed(kaThreadKey(tn.ID, session, threadID)) // last: the request is over once its hold (if any) is stored
+	}
 	if k == nil || tn == nil || session == "" || len(body) == 0 || startedAt.IsZero() {
 		return
 	}
@@ -704,6 +761,12 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		return
 	}
 	key := kaThreadKey(tn.ID, session, threadID)
+	// A client that reported this session ended (clientsignal.go) holds nothing further: retire, and do not score or arm a campaign decision for it.
+	client := clientSessionAlias(tn.ID, session, r)
+	if clientSignalEnabled() && (k.endedAfter(tn.ID, session, startedAt) || (client != "" && k.endedAfter(tn.ID, client, startedAt))) {
+		k.retire(key)
+		return
+	}
 	// The kill switch stops RETENTION, not merely pinging. A switch that left bodies and
 	// credentials accumulating while refusing to use them would be the worst of both.
 	if keepAliveDisabled() {
@@ -725,6 +788,17 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// per request and its cache is keyed on the configuration document, so an account that turns
 	// the setting off stops being retained on its very next request; anything held for a session
 	// that goes quiet instead is dropped by the hard deadline below, within (K+1)x X.
+	// A learned campaign (predictive.go) scores every finished response of its tenant, in shadow or active mode. It runs only here, after the kill switch and the
+	// no-audit-sink refusal above, so a switched-off or unaudited keep-alive retains and tracks nothing for it, and a failure inside it is contained (recover).
+	var pdec predDecision
+	var pdecOK bool
+	if provider != bschemas.OpenAI && usageOK {
+		var arr *predictive.Arrival
+		if u.Live != nil {
+			arr = u.Live.Arrival
+		}
+		pdec, pdecOK = k.predictiveDecide(arr, !tn.Cache.KeepAlive, tn.ID, session, threadID, string(provider), startedAt, body, r.UserAgent(), u)
+	}
 	pol := tn.Cache
 	// The manager-controlled strategy layer, resolved once here and generalizing the one
 	// hook the session override already had — see keepalivestrategy.go's applyStrategy.
@@ -734,6 +808,10 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	applied := ""
 	if provider != bschemas.OpenAI {
 		pol, applied = k.applyStrategy(tn.ID, pol, k.now())
+		// An ACTIVE campaign decides the ping count unless a manager strategy matched (the more explicit instruction).
+		if pdecOK && applied == "" && pdec.active {
+			pol, applied = pdec.apply(pol), campaignStrategyID(pdec.campaign.meta.ID)
+		}
 	}
 	// A per-session manual override, if one is armed and unexpired. Everything below reads
 	// `pol` and neither knows nor cares where it came from. An override may switch the
@@ -769,7 +847,8 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// Nothing to keep alive unless the provider honours explicit breakpoints and this
 	// request actually established or read an entry. A request that wrote and read nothing
 	// has no prefix worth a ping.
-	if !keepAliveEligible(provider, model, route) {
+	if !keepAliveEligible(provider, model, route) || !relayServesClaude(provider, up.base, model) ||
+		k.routeIsTripped(kaRouteKey(tn.ID, up, model), k.now()) {
 		k.retire(key)
 		return
 	}
@@ -804,15 +883,22 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	// that reported no usage is not pingable: without it there is no honest estimate of either.
 	prefix := u.CacheRead + u.CacheWrite
 	hdr, auth := pingHeaders(r, up)
+	cred := credKey(tn.ID, auth)
+	if k.credIsDead(cred, model, k.now()) {
+		k.retire(key)
+		k.skipped.Add(1)
+		return
+	}
 	e := &kaEntry{
-		tenant: tn.ID, session: session, thread: threadID, startedAt: startedAt, body: owned, up: up,
+		tenant: tn.ID, session: session, client: client, thread: threadID, startedAt: startedAt, body: owned, up: up,
 		st:       tn.Store,
 		emitter:  tn.Pipe.Emitter(),
 		provider: provider, model: model, route: route, preset: tn.Preset,
 		agent: r.UserAgent(), pol: pol, prefix: prefix, stopReason: u.StopReason,
 		pingUSD: k.projectedPingUSD(model, prefix, route),
-		hdr:     hdr, auth: auth, appliedStrategy: applied,
+		hdr:     hdr, auth: auth, appliedStrategy: applied, cred: cred,
 	}
+	e.refreshedAt = startedAt // the real request refreshed the provider's entry
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	// The turn count outlives the entry, which is dropped on the next request's arrival. It is
@@ -938,11 +1024,20 @@ func (k *keeper) retire(key string) {
 // under it. The separator is NUL, which no session id contains, so a prefix can never reach
 // into another session.
 func (k *keeper) retireSession(tenantID, session string) {
+	k.retireSessionStartedBefore(tenantID, session, time.Time{})
+}
+
+// retireSessionStartedBefore is retireSession restricted to entries whose last request (real or
+// ping) started before cutoff; a zero cutoff retires them all. A non-zero cutoff is the compact path,
+// and only the main agent compacts (its compaction call stays on the main thread), so it retires the
+// main thread only: an idle subagent's or teammate's held cache keeps its keep-alive.
+func (k *keeper) retireSessionStartedBefore(tenantID, session string, cutoff time.Time) {
 	base := kaKey(tenantID, session)
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	for key, e := range k.live {
-		if key != base && !strings.HasPrefix(key, base+"\x00") {
+		own := key == base || strings.HasPrefix(key, base+"\x00") || (e.client != "" && e.tenant == tenantID && e.client == session)
+		if !own || (!cutoff.IsZero() && (e.thread != "" || !e.startedAt.Before(cutoff))) {
 			continue
 		}
 		k.bytes -= int64(len(e.body))
@@ -986,6 +1081,21 @@ func (k *keeper) forget(tenantID string) {
 	// account-wide box must not leave armed sessions pinging on the strength of an
 	// authorization the account has just withdrawn.
 	k.forgetOverrides(tenantID)
+	for key := range k.routeFails {
+		if strings.HasPrefix(key, prefix) {
+			delete(k.routeFails, key)
+		}
+	}
+	for key := range k.routeTripped {
+		if strings.HasPrefix(key, prefix) {
+			delete(k.routeTripped, key)
+		}
+	}
+	for key := range k.credDead {
+		if strings.HasPrefix(key, prefix) {
+			delete(k.credDead, key)
+		}
+	}
 }
 
 // evictLocked enforces both bounds by dropping the entries whose deadline is furthest away
@@ -1039,7 +1149,15 @@ func (k *keeper) sweep(now time.Time) int {
 			}
 			continue
 		}
-		if !e.due(now) {
+		if !e.due(now) || k.inflight[key] > 0 {
+			continue
+		}
+		if t, ok := k.routeTripped[kaRouteKey(e.tenant, e.up, e.model)]; ok && now.Before(t) {
+			e.stopped = true
+			continue
+		}
+		if k.credIsDeadLocked(e.cred, e.model, now) {
+			e.stopped = true
 			continue
 		}
 		// Everything the ping needs, taken HERE under the lock. Nothing outside it may read the
@@ -1173,25 +1291,79 @@ func (k *keeper) fire(j pingJob) {
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "err", err)
 		return
 	}
-	// A 4xx will repeat identically, so stop rather than spend the rest of K learning the
-	// same thing. A 5xx is transient and the next ping may work.
-	if status >= 400 && status < 500 {
+	// TRANSIENT: a 429 or any 5xx (a 529 overload burst). Booked and counted skipped: nothing
+	// fails, nothing stops, and the next ping slot tries again.
+	if status == http.StatusTooManyRequests || status >= 500 {
+		k.skipped.Add(1)
+		slog.Debug("context-guru: cache keep-alive ping hit a transient error; retrying at the next slot",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
+		k.record1(j, u, status, ms, start) // the audit row, as before
+		return
+	}
+	// FAILED, the credential: a 401/403 is about the key, not the route. Every session pinging with
+	// that key stops, and only those: one user's revoked key leaves the account's teammates alone.
+	// A 401 is the key itself, on every model; a 403 is often a per-model permission or a gateway
+	// policy / budget refusal, so it blocks only this (credential, model).
+	if (status == http.StatusUnauthorized || status == http.StatusForbidden) && j.e.cred != "" {
+		k.failed.Add(1)
 		k.markStopped(j.e)
+		dead := j.e.cred
+		if status == http.StatusForbidden {
+			dead = credModelKey(j.e.cred, j.e.model)
+		}
+		k.markCredDead(dead, k.now())
+		slog.Debug("context-guru: cache keep-alive ping refused the credential; not pinging with it again",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
+		return
+	}
+	// FAILED, non-retryable: any other 4xx will repeat identically (a refused body), so the
+	// session stops and the route counts it.
+	if status >= 400 {
+		k.failed.Add(1)
+		k.markStopped(j.e)
+		k.routeFailed(kaRouteKey(j.tenant, j.up, j.e.model), k.now())
 		slog.Debug("context-guru: cache keep-alive ping refused; not pinging this session again",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
 		return
 	}
+	// FAILED: a 2xx with no usage at all, i.e. not answered as a model call (a translating gateway
+	// in front of a provider that refused it). Booked (the row is the audit trail), not a refresh,
+	// this session stops, and the route trips after routeFailLimit in a row.
+	if u.FreshInput == 0 && u.CacheRead == 0 && u.CacheWrite == 0 {
+		k.failed.Add(1)
+		k.markStopped(j.e)
+		k.routeFailed(kaRouteKey(j.tenant, j.up, j.e.model), k.now())
+		slog.Warn("context-guru: cache keep-alive ping got no usable answer; not pinging this session again",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
+		k.record1(j, u, status, ms, start)
+		return
+	}
+	k.routeOK(kaRouteKey(j.tenant, j.up, j.e.model))
+	// MISSED: a real miss, the ping landed after the entry expired and read nothing (Anthropic
+	// writes the prefix again; OpenAI just bills it fresh). It still leaves the prefix cached, so
+	// pinging goes on. Two misses in a row are not expiry but a prefix that does not match, which
+	// is the guard below.
+	if u.CacheRead == 0 && k.notePingMiss(j.e) {
+		k.missed.Add(1)
+		cost := k.record1(j, u, status, ms, start)
+		slog.Info("context-guru: cache keep-alive ping missed (entry had expired); cache re-written",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
+			"cache_write", u.CacheWrite, "fresh_input", u.FreshInput, "cost_usd", cost)
+		return
+	}
 	// THE guard. A ping is supposed to be a pure cache READ; if the provider says it wrote
-	// more than it read, the prefix did not match and this ping cost 12.5x what a read
-	// costs instead of saving 11.5x. That is the mechanism being wrong, not expensive, so
-	// it is an ERROR and the session is dropped.
-	if u.CacheWrite > u.CacheRead {
+	// more than it read (or missed twice running), the prefix did not match and this ping cost
+	// 12.5x what a read costs instead of saving 11.5x. That is the mechanism being wrong, not
+	// expensive, so it is an ERROR and the session is dropped.
+	if u.CacheWrite > u.CacheRead || u.CacheRead == 0 {
 		k.wrote.Add(1)
 		k.markStopped(j.e)
-		slog.Error("context-guru: cache keep-alive ping CREATED a cache entry instead of "+
-			"refreshing one; not pinging this session again",
+		slog.Error("context-guru: cache keep-alive ping did not read the held prefix (it wrote more "+
+			"than it read, or missed twice running); not pinging this session again",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
 			"cache_write", u.CacheWrite, "cache_read", u.CacheRead)
+	} else {
+		k.notePingRead(j.e)
 	}
 	cost := k.record1(j, u, status, ms, start)
 	slog.Debug("context-guru: cache keep-alive ping",
@@ -1344,6 +1516,9 @@ func (k *keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
+	if u.CacheRead > 0 {
+		e.refreshedAt = startedAt
+	}
 	k.mu.Unlock()
 	for {
 		old := k.spentUSD.Load()
@@ -1371,6 +1546,133 @@ func (k *keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 }
 
 // markStopped stops pinging one session, if it is still tracked.
+// routeFailLimit consecutive failed pings trip a route for routeTripFor. A route is the tenant, the
+// upstream endpoint and the model: one model a gateway cannot cache does not stop another, and one
+// tenant's failures never switch off another tenant's keep-alive.
+const (
+	routeFailLimit = 3
+	routeTripFor   = time.Hour
+)
+
+func kaRouteKey(tenant string, up upstream, model string) string {
+	return tenant + "\x00" + up.base + up.path + "\x00" + model
+}
+
+// credKey is a per-process id for the credential a hold pings with: an HMAC (credIDKey) over the
+// FULL auth header values. They are hashed in their masked form, which is the whole value XORed
+// with a fixed per-process mask, a bijection: two keys collide only if they are the same key, and
+// no plaintext copy is made to compute it. "" when the upstream injects a server-held key.
+func credKey(tenant string, auth []maskedHeader) string {
+	if len(auth) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(auth))
+	for _, a := range auth {
+		parts = append(parts, a.name+"\x00"+string(a.val))
+	}
+	sort.Strings(parts)
+	m := hmac.New(sha256.New, credIDKey)
+	m.Write([]byte(strings.Join(parts, "\x01")))
+	return tenant + "\x00" + hex.EncodeToString(m.Sum(nil)[:16])
+}
+
+// ponytail: credDead has no count cap; expired marks are pruned on every new mark, and a mark needs a
+// refused ping, so it grows with refused keys per hour. Cap it if a tenant can mint keys in bulk.
+func (k *keeper) markCredDead(cred string, now time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.credDead == nil {
+		k.credDead = map[string]time.Time{}
+	}
+	for c, t := range k.credDead {
+		if !now.Before(t) {
+			delete(k.credDead, c)
+		}
+	}
+	k.credDead[cred] = now.Add(routeTripFor)
+}
+
+func credModelKey(cred, model string) string { return cred + "\x00" + model }
+
+// credIsDead: the credential is blocked on every model (a 401) or on this one (a 403). A Bedrock
+// SigV4 Authorization differs on every request, so its mark only ever matches its own entry: harmless.
+func (k *keeper) credIsDead(cred, model string, now time.Time) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.credIsDeadLocked(cred, model, now)
+}
+
+func (k *keeper) credIsDeadLocked(cred, model string, now time.Time) bool {
+	if cred == "" {
+		return false
+	}
+	for _, key := range [2]string{cred, credModelKey(cred, model)} {
+		if t, ok := k.credDead[key]; ok && now.Before(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// departed is arrive's other half: a real request of the thread (kaThreadKey) has finished.
+func (k *keeper) departed(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.inflight[key] <= 1 {
+		delete(k.inflight, key)
+		return
+	}
+	k.inflight[key]--
+}
+
+func (k *keeper) routeFailed(key string, now time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.routeFails == nil {
+		k.routeFails, k.routeTripped = map[string]int{}, map[string]time.Time{}
+	}
+	for kk, t := range k.routeTripped { // expired trips are dead weight
+		if !now.Before(t) {
+			delete(k.routeTripped, kk)
+		}
+	}
+	k.routeFails[key]++
+	if k.routeFails[key] >= routeFailLimit {
+		delete(k.routeFails, key)
+		k.routeTripped[key] = now.Add(routeTripFor)
+		k.routeTrips.Add(1)
+		slog.Warn("context-guru: cache keep-alive off for a route whose pings keep refreshing nothing",
+			"failures", routeFailLimit, "for", routeTripFor.String())
+	}
+}
+
+func (k *keeper) routeOK(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.routeFails, key)
+}
+
+func (k *keeper) routeIsTripped(key string, now time.Time) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	t, ok := k.routeTripped[key]
+	return ok && now.Before(t)
+}
+
+// notePingMiss records a ping that read nothing and reports whether it is the first in a row.
+func (k *keeper) notePingMiss(e *kaEntry) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e.missed++
+	return e.missed == 1
+}
+
+func (k *keeper) notePingRead(e *kaEntry) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e.missed = 0
+}
+
 func (k *keeper) markStopped(e *kaEntry) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -1452,6 +1754,9 @@ func (k *keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
+	if u.CacheRead > 0 {
+		e.refreshedAt = startedAt
+	}
 	k.mu.Unlock()
 	for {
 		old := k.spentUSD.Load()
@@ -1642,14 +1947,53 @@ func keepAliveEligible(p bschemas.ModelProvider, model, route string) bool {
 	return false
 }
 
+// relayServesClaude: the Anthropic route forwarded to anything but Anthropic itself is a relay
+// (LiteLLM, a corporate gateway) that may serve another family there, an OpenAI / Azure model
+// with automatic caching or none, where a ping buys nothing. Only those are name-checked; native
+// Anthropic, Bedrock and Vertex upstreams are eligible by type (their ARNs, inference profiles and
+// aliases often do not say "claude").
+// ponytail: name test; a Claude-named alias of another family is caught by the route breaker.
+func relayServesClaude(p bschemas.ModelProvider, base, model string) bool {
+	if p != bschemas.Anthropic {
+		return true
+	}
+	if u, err := url.Parse(base); err == nil && (u.Hostname() == "anthropic.com" || strings.HasSuffix(u.Hostname(), ".anthropic.com")) {
+		return true
+	}
+	return claudeModel(model)
+}
+
+// claudeModel matches provider-prefixed ids (aws/..., vertex_ai/..., us.anthropic.claude-...,
+// Bedrock ARNs naming a Claude model) by substring. CONTEXT_GURU_KEEPALIVE_MODELS adds more,
+// comma-separated, for a deployment alias whose name says nothing (an application inference profile).
+func claudeModel(model string) bool {
+	m := strings.ToLower(model)
+	words := []string{"claude", "opus", "sonnet", "haiku"}
+	for _, w := range strings.Split(os.Getenv("CONTEXT_GURU_KEEPALIVE_MODELS"), ",") {
+		if w = strings.ToLower(strings.TrimSpace(w)); w != "" {
+			words = append(words, w)
+		}
+	}
+	for _, w := range words {
+		if strings.Contains(m, w) {
+			return true
+		}
+	}
+	return false
+}
+
 // KeepAliveStats is the keeper's own ledger, for /stats. Every field is a way the mechanism
 // can be worthless, which is the point of publishing them together: pings with no
 // conversions is a policy that spends and gains nothing, and `wrote` above zero is a bug.
 type KeepAliveStats struct {
-	Live     int     `json:"live_sessions"`
-	Pings    int64   `json:"pings"`
-	Skipped  int64   `json:"skipped"`
-	Failed   int64   `json:"failed"`
+	Live    int   `json:"live_sessions"`
+	Pings   int64 `json:"pings"`
+	Skipped int64 `json:"skipped"`
+	Failed  int64 `json:"failed"`
+	// RouteTrips counts routes switched off after routeFailLimit failed pings in a row.
+	RouteTrips int64 `json:"route_trips"`
+	// Missed counts pings that landed after the entry expired: they re-wrote it, so pinging went on.
+	Missed   int64   `json:"missed"`
 	Wrote    int64   `json:"wrote_instead_of_read"`
 	SpentUSD float64 `json:"spend_usd"`
 	// SummarySubstituted, SummarySubstituteFailed and SummarySubstituteOverBudget are
@@ -1736,7 +2080,7 @@ func (k *keeper) Stats() KeepAliveStats {
 	live := len(k.live)
 	k.mu.Unlock()
 	return KeepAliveStats{Live: live, Pings: k.pings.Load(), Skipped: k.skipped.Load(),
-		Failed: k.failed.Load(), Wrote: k.wrote.Load(),
+		Failed: k.failed.Load(), Wrote: k.wrote.Load(), RouteTrips: k.routeTrips.Load(), Missed: k.missed.Load(),
 		SpentUSD:                           math.Float64frombits(k.spentUSD.Load()),
 		SummarySubstituted:                 k.summarySubstituted.Load(),
 		SummarySubstituteFailed:            k.summarySubstituteFailed.Load(),
@@ -1749,6 +2093,32 @@ func (k *keeper) Stats() KeepAliveStats {
 		SummarySubstituteRefreshPaid:       k.summarySubstituteRefreshPaid.Load(),
 		SummarySubstituteRefreshNotWorthIt: k.summarySubstituteRefreshNotWorthIt.Load(),
 	}
+}
+
+// KeepAlivePlans is the keeper's ping plan for one session's threads, keyed by thread id, for the
+// status line's "held warm until" (dash.API.SetKeepAlivePlans). Only an entry that will still be
+// pinged has a plan: the same conditions as pendingPings, plus pingable. allTenants matches the
+// session in any tenant, for a single-tenant or service-wide scope.
+func (h *Handler) KeepAlivePlans(tenantID string, allTenants bool, session string) map[string]dash.KeepAlivePlan {
+	if h == nil || h.keeper == nil || session == "" {
+		return nil
+	}
+	k := h.keeper
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	out := map[string]dash.KeepAlivePlan{}
+	for _, e := range k.live {
+		if e.session != session || (!allTenants && e.tenant != tenantID) {
+			continue
+		}
+		if e.stopped || !e.pol.on() || e.pings >= e.pol.MaxPings || !e.pingable() {
+			continue
+		}
+		out[e.thread] = dash.KeepAlivePlan{RefreshedMS: e.refreshedAt.UnixMilli(),
+			NextPingMS: e.startedAt.Add(e.pol.Idle).UnixMilli(), PingsLeft: e.pol.MaxPings - e.pings,
+			IdleMS: e.pol.Idle.Milliseconds()}
+	}
+	return out
 }
 
 // LiveSessionKeys returns the session ids the keeper currently considers live — a copy,

@@ -10,6 +10,28 @@
             "statusMessage": "Checking context-guru proxy"
           }
         ]
+      },
+      {
+        "matcher": "compact|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/codex_plugin.py\" signal",
+            "async": true,
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/codex_plugin.py\" signal",
+            "timeout": 3
+          }
+        ]
       }
     ]
   }

@@ -62,9 +62,9 @@ probe)
   grep -c '"msg":"cg.sweep.ask"' "$H/i022log-i027pf1.jsonl" 2>/dev/null | sed 's/^/  asks made: /'
   grep -o '"ctx_window":[0-9]*' "$H/i022log-i027pf1.jsonl" 2>/dev/null | sort | uniq -c
   python3 - <<'PY'
-import json, glob, collections
+import json, glob, collections, os
 rows = []
-for f in glob.glob("/home/vpcuser/cg-loca/i022log-i027pf1.jsonl"):
+for f in glob.glob(os.path.expanduser("~/cg-loca/i022log-i027pf1.jsonl")):
     for l in open(f, errors="replace"):
         if '"cg.sweep.econ"' not in l:
             continue

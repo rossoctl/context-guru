@@ -11,4 +11,4 @@ Cache misses in 7 days: 377 costing $145.67 extra   (measured)
 
 The cache keeps your conversation cheap to reuse for a few minutes after each message.
 
-More: /context-guru:cache details
+More: /context-guru:insights cache details

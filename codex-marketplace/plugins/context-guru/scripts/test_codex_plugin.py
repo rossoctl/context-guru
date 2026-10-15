@@ -19,17 +19,41 @@ SPEC.loader.exec_module(PLUGIN)
 
 
 class CodexPluginTest(unittest.TestCase):
-    def test_session_hook_is_advisory_only(self):
+    def test_session_start_hook_is_advisory_and_the_lifecycle_hooks_only_signal(self):
         hooks = json.loads((MODULE_PATH.parent.parent / "hooks.json").read_text())["hooks"]
-        self.assertEqual(list(hooks), ["SessionStart"])
-        command = hooks["SessionStart"][0]["hooks"][0]["command"]
-        self.assertIn("session-start-hook", command)
+        self.assertEqual(sorted(hooks), ["SessionEnd", "SessionStart"])
+        advisory = hooks["SessionStart"][0]["hooks"][0]["command"]
+        self.assertIn("session-start-hook", advisory)
+        signals = [h["command"] for g in hooks["SessionStart"][1:] + hooks["SessionEnd"] for h in g["hooks"]]
+        self.assertTrue(signals and all(c.endswith("codex_plugin.py\" signal") for c in signals), signals)
 
     def test_plugin_wires_onboarding_and_doctor_skills(self):
         root = MODULE_PATH.parent.parent
         manifest = json.loads((root / ".codex-plugin/plugin.json").read_text())
         self.assertTrue((root / manifest["onboardingSkill"]).is_file())
         self.assertTrue((root / "skills/doctor/SKILL.md").is_file())
+
+    def test_signal_hook_sends_only_the_closed_fields(self):
+        PLUGIN.state_dir().mkdir(parents=True)
+        PLUGIN.state_dir().joinpath("install.json").write_text('{"port": 8791}')
+        payload = {"session_id": "019a-thread", "hook_event_name": "SessionEnd", "reason": "other",
+                   "cwd": "/home/u/secret", "transcript_path": "/home/u/t.jsonl"}
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch.object(PLUGIN.urllib.request, "urlopen") as send:
+            self.assertEqual(PLUGIN.signal_hook(None), 0)
+        request = send.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8791/signal")
+        self.assertEqual(json.loads(request.data),
+                         {"session": "019a-thread", "event": "SessionEnd", "kind": "other"})
+        for bad in ({"session_id": "../x", "hook_event_name": "SessionEnd"},
+                    {"session_id": "s", "hook_event_name": "Stop"}):
+            with mock.patch("sys.stdin", io.StringIO(json.dumps(bad))), \
+                 mock.patch.object(PLUGIN.urllib.request, "urlopen") as send:
+                self.assertEqual(PLUGIN.signal_hook(None), 0)
+            send.assert_not_called()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch.object(PLUGIN.urllib.request, "urlopen", side_effect=OSError("refused")):
+            self.assertEqual(PLUGIN.signal_hook(None), 0)
 
     def test_skills_cover_sandbox_boundaries(self):
         skills = MODULE_PATH.parent.parent / "skills"

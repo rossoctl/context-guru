@@ -907,6 +907,9 @@ func (r *Registry) Config(t *Tenant) string {
 	return r.opts.DefaultConfig
 }
 
+// DefaultConfig is the document a tenant with no stored configuration runs under.
+func (r *Registry) DefaultConfig() string { return r.opts.DefaultConfig }
+
 func (r *Registry) clearCache() {
 	r.mu.Lock()
 	r.cache = map[string]cacheEntry{}

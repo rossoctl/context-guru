@@ -176,6 +176,13 @@ type Options struct {
 	// single-tenant mode, where /stats stays open as it always was — the benchmark
 	// harnesses in deploy/harbor read it.
 	StatsTrusted func(*http.Request) bool
+	// Single-tenant /api/adapt/* apply (adaptapply.go): BaseConfig is the configuration document
+	// the proxy was started with (its config file, or `preset: X`), BuildConfig rebuilds a
+	// pipeline from a document, and AdaptOverride is the file an applied configuration is kept
+	// in so a restart keeps it ("" keeps it in memory only).
+	BaseConfig    string
+	BuildConfig   ConfigBuilder
+	AdaptOverride string
 }
 
 // ObserveOptions tunes observe mode: one option per real decision.
@@ -234,8 +241,14 @@ type Handler struct {
 	// mode presented through the same type the hosted path uses. Built once so the
 	// request path has exactly ONE way to reach a pipeline, rather than a branch at
 	// every use — which is how a hosted deployment would eventually leak the shared
-	// one into a tenant's request.
-	static *Tenancy
+	// one into a tenant's request. Atomic because a local adapt apply swaps its pipeline
+	// (adaptapply.go) while requests are in flight.
+	static atomic.Pointer[Tenancy]
+	// adaptMu guards the adapt apply rate limit (adaptHits) and the single-tenant override
+	// (adaptMem when it has no file).
+	adaptMu   sync.Mutex
+	adaptHits map[string][]time.Time
+	adaptMem  *adaptOverride
 	// limiter enforces Options.Limits. Always non-nil; a zero Limits makes it a no-op.
 	limiter *Limiter
 	// regLim bounds self-registration attempts per client address. Separate from
@@ -332,8 +345,9 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	// The single-tenant view of this handler's own configuration. In hosted mode it
 	// is never consulted (tenancyFor goes to Options.Tenants); it exists so the
 	// request path has one shape.
-	h.static = &Tenancy{Preset: opts.Preset, Pipe: pipe, Store: st,
-		Shadow: h.shadow, Mode: h.mode(), Cache: opts.Cache}
+	h.static.Store(&Tenancy{Preset: opts.Preset, Pipe: pipe, Store: st,
+		Shadow: h.shadow, Mode: h.mode(), Cache: opts.Cache})
+	h.startAdaptOverride()
 	h.limiter = NewLimiter(opts.Limits)
 	h.keeper = newKeeper(h)
 	h.keeper.start()
@@ -398,6 +412,7 @@ func (h *Handler) Mux() *http.ServeMux {
 	// requests — billed calls, added by a proxy sold on reducing them. See counttokens.go.
 	m.HandleFunc("POST /anthropic"+countTokensPath, h.countTokens(h.anthropicCountTokensUpstream()))
 	m.HandleFunc("POST /compact", h.compact)
+	m.HandleFunc("POST /signal", h.clientSignal)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	// A browser asks for /favicon.ico unprompted, and in hosted mode Bob's "/" catch-all
 	// would otherwise answer it with a 401 — putting a red error in the console of every
@@ -425,6 +440,12 @@ func (h *Handler) Mux() *http.ServeMux {
 	// Control plane: registration, sign-in, settings, tokens, the manager's roster.
 	// Mounted after the dashboard so both live under /api/, and only in hosted mode.
 	h.MountControl(m)
+	// Both deployments: adaptPrincipal decides who may (adaptapply.go).
+	if h.api != nil {
+		m.HandleFunc("POST /api/adapt/compaction/apply", h.adaptCompactionApply)
+		m.HandleFunc("POST /api/save-more/config/apply", h.saveMoreConfigApply)
+		m.HandleFunc("POST /api/adapt/tools/apply", h.adaptToolsApply)
+	}
 	// Bob (BobShell) gateway. Bob is OpenAI-compatible but calls Bob-specific
 	// paths: its model call is POST /inference/v1/chat/completions (reduced like
 	// any OpenAI chat), and its control-plane calls (/admin/v1/profile,
@@ -1247,6 +1268,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			cp.noteWaitBody(orig)
 			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
 			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
+			if cp != nil {
+				cp.predArrival = h.predRT().arrive(tn.ID, tr.Session, threadID, time.Now())
+			}
 			// Drop any cache_aware_summarizer keep-alive substitute registered off an EARLIER
 			// turn's conversation — but never the one this request's own pipeline run (above)
 			// may just have written: an unconditional clear here used to delete that candidate
@@ -1269,8 +1293,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// Skipped on a bypassed request too, and this one DOES cost cache sometimes. The
 			// earlier claim here — that a bypassed request is a compaction whose prefix is its
 			// own, so skipping is free — is true for a real compaction and false for a false
-			// positive, and isAgentCompaction has a reachable one: it fires on any last message
-			// with role "user" containing a compaction phrase (agentcompaction.go:71-77), and in
+			// positive, and isAgentCompaction has a reachable one: it fires on any last turn
+			// with role "user" containing a compaction phrase (see isAgentCompaction), and in
 			// the Anthropic dialect a tool_result IS a user-role message. So a tool output that
 			// quotes one of those phrases — a session reading the docs page, or reading this
 			// file — makes an ordinary mid-conversation turn bypass, lose the expand tool, and
@@ -1394,7 +1418,8 @@ const maxExpandRounds = 3
 // proxy memory (the body is buffered and token-counted several times). Generous
 // enough for very long agent transcripts; requests above it get 413 — unless
 // readGatedBody finds a reason to read further. See maxCompactionRequestBytes.
-const maxRequestBytes = 32 << 20 // 32 MiB
+// A var only so the size tests can lower it; nothing else assigns it.
+var maxRequestBytes int64 = 32 << 20 // 32 MiB
 
 // maxCompactionRequestBytes is the ceiling readGatedBody extends to for the two cases whose
 // entire point is a body already larger than maxRequestBytes: the agent's own compaction
@@ -1403,7 +1428,7 @@ const maxRequestBytes = 32 << 20 // 32 MiB
 // receive and shrink a body that is, by definition, already large. Matches the existing
 // generous-but-bounded precedent already used in this package for a comparable purpose
 // (maxKeepAliveBytes, keepalive.go).
-const maxCompactionRequestBytes = 128 << 20 // 128 MiB
+var maxCompactionRequestBytes int64 = 128 << 20 // 128 MiB
 
 // readGatedBody reads a request body up to maxRequestBytes as the cheap default —
 // identical cost and behavior to plain http.MaxBytesReader for the overwhelming majority of
@@ -1592,6 +1617,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// actually went upstream on the final round (an expand round rewrites it) and the
 		// prefix a ping would replay is the one the provider just hashed. Costs nothing when
 		// no tenant has opted in.
+		ttfb := 0.0
+		if sse && !sseBuffered {
+			ttfb = msSince(reqStart, sseFirstByte)
+		}
+		usage.Live = cp.liveFacts(ttfb)
 		h.keeper.record(tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache
 		// was COLD: this request has now either rewritten that prefix or failed trying to, and

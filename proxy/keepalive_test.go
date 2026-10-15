@@ -169,10 +169,11 @@ func TestPingBodyLeavesTheHashedPrefixByteIdentical(t *testing.T) {
 
 // The provider bills a request that reports more written than read as a CREATION, which is
 // the one outcome that makes this mechanism cost money instead of saving it. It must be
-// loud, counted, and terminal for that session.
+// loud, counted, and terminal for that session. (A ping that reads NOTHING is first taken as a
+// real expiry miss; see TestARealMissIsNotAFailedPing. A partial read is a prefix mismatch.)
 func TestPingThatWritesInsteadOfReadingStopsTheSession(t *testing.T) {
 	k, fs, clock := testKeeper(t, Limits{})
-	fs.usage = Usage{CacheWrite: 48576, CacheRead: 0, Output: 1}
+	fs.usage = Usage{CacheWrite: 48576, CacheRead: 1024, Output: 1}
 	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
 
 	k.sweep(clock.advance(281 * time.Second))

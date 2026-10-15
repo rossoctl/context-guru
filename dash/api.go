@@ -39,10 +39,16 @@ type API struct {
 	// compaction configuration, owned, validated and audited by the control plane, and a
 	// copy here would be a second answer to "what is this proxy actually sending".
 	toolFilterFn func(tenantID string) ToolFilterState
+	// adaptCompactionConfigFn reads a tenant's stored config for /api/adapt/compaction. nil = no accounts.
+	adaptCompactionConfigFn AdaptCompactionConfigFunc
+	// offers are the latest /api/adapt/* report's options per account, for the apply routes.
+	offers adaptOffers
 	// tenantCapture reports whether ONE tenant consented to transcript capture. nil =
 	// single-tenant: there is no consent layer, so the operator's flag is the whole
 	// decision. Supplied by the host in hosted mode.
 	tenantCapture func(tenantID string) bool
+	// kaPlans reads the keep-alive keeper's per-thread plan for /api/cachestate. nil = no plans.
+	kaPlans func(tenantID string, allTenants bool, session string) map[string]KeepAlivePlan
 	// pricer values the pre-instrumentation split figure on read. nil = that figure is omitted.
 	pricer modelinfo.Pricer
 	// windows resolves a model's context window, and is separate from pricer because the two
@@ -671,6 +677,7 @@ func (a *API) routes() []route {
 	// The Components tab's compaction-episode measurement, declared beside its handler in
 	// compactepisode.go and appended here for the same reason as the rest: this table is what
 	// the scoping tests walk.
+	rs = append(rs, a.adaptRoutes()...)
 	return append(rs, a.compactEpisodeRoutes()...)
 }
 
@@ -739,8 +746,9 @@ var routeBounds = map[string]time.Duration{
 	// 10s default, so all three returned 503 on 100% of requests to that tab's default view.
 	// /api/tools and /api/toolfilter both appear in the outage's nginx log; /api/prompt escaped it
 	// only because nobody opened that view while it was being recorded.
-	"GET /api/tools":      dashHeavyTimeout,
-	"GET /api/toolfilter": dashHeavyTimeout,
+	"GET /api/tools":       dashHeavyTimeout,
+	"GET /api/toolfilter":  dashHeavyTimeout,
+	"GET /api/adapt/tools": dashHeavyTimeout,
 	// /api/prompt gets the longer bound but NOT a response cache, and the asymmetry is deliberate.
 	// It serves prompt CONTENT — a user's own system prompt and CLAUDE.md text — behind a gate that
 	// depends on the caller's ADDRESS (a.trusted, a CIDR check in single-tenant mode), not only on
@@ -749,6 +757,10 @@ var routeBounds = map[string]time.Duration{
 	// trustedness too; that is a change to a content gate and does not belong in an outage fix, so
 	// it waits, and meanwhile it simply gets long enough to finish.
 	"GET /api/prompt": dashHeavyTimeout,
+	// A replay of the account's stored requests under dozens of configurations: minutes on a
+	// large account, and the plugin waits for it.
+	"GET /api/adapt/compaction": 5 * time.Minute,
+	"GET /api/save-more/config": 5 * time.Minute,
 	// The routes behind cachedRoute: the first reader after a restart or a lapsed cache waits for the
 	// real computation, so it gets the heavy bound rather than the 10 s that is right for a read that
 	// is normally already in the cache.
@@ -1198,13 +1210,16 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		a.unauthorized(w)
 		return
 	}
-	if statsLean(r) {
+	// A lean read with neither a session nor a window (`since=0`, the lifetime total) goes to the
+	// full handler below, which is exact. Nothing on a render asks for it any more (#510); an
+	// older installed plugin that still does gets the same answer it always got.
+	if statsLean(r) && (f.Session != "" || f.Since != 0 || f.Until != 0) {
 		// ?lean=1 answers every field the status line's _fetch_stats actually reads
 		// (context-guru-plugin/scripts/statusline.py: total_saved_usd, keepalive_net_usd,
 		// keepalive_misses_avoided, upstream_ms_avg) plus what scripts/cg.py reads
 		// (cost_usd, baseline_cost_usd, cache_saved_usd and 7 waterfall keys) at FULL
 		// precision for a SESSION, and at a small, disclosed, bounded discount (the two
-		// read-time-priced credits below) for a time window or the lifetime read — see
+		// read-time-priced credits below) for a time window — see
 		// dash/overview_lean.go's own doc comment for exactly which fields and why.
 		//
 		// #502: this used to run the FULL Overview() (sixteen queries; lean reads a handful

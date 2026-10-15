@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -877,16 +878,17 @@ func TestJSONModeIsTheSameDocument(t *testing.T) {
 // The four insights skills are redirects now. Each tells the user where the command moved and runs
 // the new one through cg.py, with nothing else it may run and no option read of its own.
 func TestInsightSkillsAreRedirects(t *testing.T) {
-	moved := map[string]string{"insights": "status", "insights-capabilities": "waste", "insights-idle": "cache", "insights-components": "savings",
-		"cost-today": "status", "cost-unused": "waste", "cost-cold": "cache", "cost-compact": "cache", "cost-trends": "savings"}
+	moved := map[string]string{"insights-capabilities": "insights tools", "insights-idle": "insights cache", "insights-components": "insights savings",
+		"cost-today": "status", "cost-unused": "insights tools", "cost-cold": "insights cache", "cost-compact": "insights cache",
+		"cost-trends": "insights savings", "savings": "insights savings", "cache": "insights cache", "waste": "insights tools"}
 	for name, to := range moved {
 		t.Run(name, func(t *testing.T) {
 			body := readFileString(t, filepath.Join("skills", name, "SKILL.md"))
 			if !strings.Contains(body, "moved to `/context-guru:"+to+"`") {
 				t.Errorf("does not say it moved to /context-guru:%s", to)
 			}
-			if !strings.Contains(body, "allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py:*)") {
-				t.Error("must be allowed to run only cg.py")
+			if !regexp.MustCompile(`allowed-tools: Bash\(python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/cg\.py" [a-z]+:\*\)`).MatchString(body) {
+				t.Error("must be allowed to run only its own cg.py command")
 			}
 			if strings.Contains(body, "CLAUDE_PLUGIN_OPTION_") {
 				t.Error("must not resolve plugin options; cg.py takes the proxy from the session")
