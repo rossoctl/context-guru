@@ -1812,3 +1812,16 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 
 .lv-id { font-weight: 400; color: var(--fg-muted); font-size: 14px; }
 .ledger-total strong.bound { color: var(--warn); }
+
+/* ═══ form controls ═══ */
+input[type="date"], input[type="datetime-local"], input[type="time"], input[type="file"], input[type="number"] {
+  font: inherit; font-size: 13px; color: var(--fg); background: var(--bg-raised);
+  border: 1px solid var(--border); border-radius: var(--r); padding: 5px var(--sp-2); min-height: 32px;
+}
+input[type="date"]:hover, input[type="datetime-local"]:hover, input[type="time"]:hover, input[type="number"]:hover { border-color: var(--fg-faint); }
+input[type="file"]::file-selector-button {
+  font: inherit; font-size: 13px; color: var(--fg); background: var(--bg-sunken);
+  border: 1px solid var(--border); border-radius: var(--r-sm); padding: 3px var(--sp-3); margin-right: var(--sp-3); cursor: pointer;
+}
+input[type="file"]::file-selector-button:hover { border-color: var(--fg-faint); }
+.comp-job { font-size: 12.5px; }

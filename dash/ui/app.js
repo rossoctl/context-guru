@@ -2123,6 +2123,12 @@ const STEP_INFO = {
   toolfilter: ['Tool list filter', 'drops tool definitions the agent is unlikely to use'],
   toolschema: ['Tool schema trimmer', 'shortens tool definitions'],
   toon: ['Compact data format', 'rewrites tabular JSON in a denser format'],
+  mask: ['Old-output hider', 'hides older tool output beyond a recent window'],
+  coref: ['Unused-output trimmer', 'cuts tool output that no later turn used'],
+  agentdiet: ['Trajectory trimmer', 'removes steps from the agent\'s history that no longer matter'],
+  readlifecycle: ['Stale file-read remover', 'removes file reads whose content no longer matches the file'],
+  smartcrush: ['JSON list shortener', 'keeps the first, last and error items of a long JSON list'],
+  cache_aware_summarizer: ['Cache-friendly summarizer', 'summarizes by appending to the conversation so the cached prompt is reused'],
   agent_compaction: ['Agent summary', "the agent's own summary of its earlier turns"],
 };
 function stepInfo(name) {
@@ -2475,22 +2481,15 @@ function renderUnpricedNote(components) {
   }
 }
 
-/** The fold for steps this page has no description for, kept next to the Preset steps table. */
-function renderUndescribedSteps(rows) {
-  const table = $('[data-testid=components-table]');
-  if (!table) return;
-  const wrap = table.closest('.tblwrap') || table;
-  let host = $('#components-undescribed');
-  if (!host) {
-    host = el('details', { class: 'why', id: 'components-undescribed', 'data-testid': 'components-undescribed' });
-    wrap.after(host);
+/** The names of the steps this build registers (GET /api/options), or null when that is not available. */
+async function currentSteps() {
+  if (state.currentSteps === undefined) {
+    try {
+      const o = await api('options');
+      state.currentSteps = Array.isArray(o.components) ? new Set(o.components.map((c) => (typeof c === 'string' ? c : c.name))) : null;
+    } catch (_) { state.currentSteps = null; }
   }
-  clear(host);
-  host.hidden = !rows.length;
-  if (!rows.length) return;
-  host.appendChild(el('summary', { text: 'Other steps in the history (' + rows.length + '), without a description here' }));
-  host.appendChild(el('ul', { class: 'plain-list' }, rows.map((c) => el('li', {},
-    el('strong', { text: String(c.component).replace(/_/g, ' ') }), ' ran ' + num(c.runs) + ' times and removed ' + compact(c.saved_unique) + ' tokens'))));
+  return state.currentSteps;
 }
 
 async function loadComponents() {
@@ -2501,12 +2500,10 @@ async function loadComponents() {
     // /api/components has no LIMIT — every component that ran in the window is in this
     // array — so sorting it here IS a global sort, not a sort of one page.
     const all = state.sort ? sortRows(raw, state.sort, state.dir) : raw;
-    // Steps the page can describe are listed; any other name in the history (a step that has since left the
-    // product, say) goes into a fold under the table so no recorded figure is dropped, and the table is not
-    // padded with rows nobody can explain.
-    const components = all.filter((c) => STEP_INFO[c.component]);
-    const undescribed = all.filter((c) => !STEP_INFO[c.component]);
-    renderUndescribedSteps(undescribed);
+    // Only steps this build has are listed. A name in the history that the build no longer registers (a step
+    // that has left the product) is not shown: the table describes what your preset can do today.
+    const current = await currentSteps();
+    const components = all.filter((c) => (current ? current.has(c.component) : !!STEP_INFO[c.component]) || c.component === 'agent_compaction');
     syncSortHeads('[data-testid=components-table]', COMPONENT_SORT);
     clear(body);
     if (!components.length) {
@@ -6388,7 +6385,8 @@ function loadSettings() {
         ? ' — calls a preset model on the request path (+117ms typical, up to ~945ms on file reads) and bills to the shared credential'
         : '';
       grid.appendChild(el('label', { class: 'comp', for: id }, cb,
-        el('span', { class: 'comp-name' }, name),
+        el('span', { class: 'comp-name', title: name }, stepInfo(name)[0]),
+        stepInfo(name)[1] ? el('span', { class: 'comp-job muted', text: ' — ' + stepInfo(name)[1] }) : null,
         warn ? el('span', { class: 'comp-warn' }, warn) : null));
     }
     if (mgr) host.appendChild(el('div', { class: 'field' },
@@ -6924,10 +6922,8 @@ function renderComponentFields(name, fields, values, disabled, ctx) {
     if (det.open) openComps.add(name); else openComps.delete(name);
   });
   det.appendChild(el('summary', {},
-    el('span', { class: 'comp-name' }, name),
-    el('span', { class: 'muted' },
-      ` — ${setCount} of ${fields.length} key${fields.length === 1 ? '' : 's'} set`
-      + (disabled ? ', read-only' : ''))));
+    el('span', { class: 'comp-name', title: name }, stepInfo(name)[0]),
+    el('span', { class: 'muted' }, setCount ? ` — ${setCount} of ${fields.length} setting${fields.length === 1 ? '' : 's'} changed` : '')));
   // Why it is locked, when the reason is this component rather than the whole page (an
   // inherited or unreadable configuration is stated once, above, not fourteen times).
   if (ctx && ctx.off) {
@@ -8974,7 +8970,7 @@ function renderKASessions() {
     const net = s.net_usd;
     body.appendChild(el('tr', {},
       el('td', {}, el('code', { class: 'clip', text: s.session_id })),
-      wide ? el('td', {}, s.tenant_id || '—') : el('td', { hidden: 'hidden' }),
+      wide ? el('td', {}, el('span', { title: s.tenant_id, text: s.tenant_id ? s.tenant_id.slice(0, 6) : '—' })) : el('td', { hidden: 'hidden' }),
       el('td', { class: 'num' }, num(s.turns)),
       el('td', { class: 'num' }, num(s.expiries)),
       el('td', { class: 'num' }, usd(s.expiry_usd)),

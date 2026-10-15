@@ -652,9 +652,9 @@
       the sessions it touches that pays a large rebate to a few. Across this service
       <strong>34 of 119</strong> pinged sessions came out ahead and the worst single session
       paid <strong>$2.42</strong> for nothing.</p>
-    <p class="hint">The bar splits your sessions into winners and losers. Each table row is
-      one session: <em>Expiries</em> are times its cache ran out while idle, <em>Pings</em> are warm-up
-      requests sent, and <em>Net</em> is what was avoided minus what was spent (the avoided figure is a ceiling, not a measurement).</p>
+    <p class="hint">The bar splits your sessions into winners and losers; each row below is one session.</p>
+    <details class="why"><summary>What the columns mean</summary>
+      <p><em>Expiries</em> are times a session's cache ran out while idle. <em>Strategy requests</em> are the warm-up requests sent. <em>Net</em> is what was avoided minus what was spent; the avoided figure is a ceiling, not a measurement.</p></details>
     <div id="ka-split"></div>
     <div id="ka-worst"></div>
     <div class="tblwrap" tabindex="0">
@@ -663,7 +663,7 @@
           <th>Session</th><th data-scope-col hidden>Account</th><th class="num">Turns</th>
           <th class="num" title="Times the cached prompt was forgotten while the session sat idle">Cache ran out</th><th class="num" title="What those cache rewrites cost">Cost of running out</th>
           <th class="num" title="Requests your cache strategy sent to keep the cache warm">Strategy requests</th><th class="num" title="What those requests cost">Their cost</th>
-          <th class="num" title="The most your cache strategy could have saved; an upper bound">Avoided (upper bound)</th><th class="num">Net</th>
+          <th class="num" title="The most your cache strategy could have saved; an upper bound">Avoided (at most)</th><th class="num">Net</th>
           <th class="num" title="Size of the cached start of the conversation, in tokens">Cached prompt size</th><th><span class="vh">Row actions</span></th>
         </tr></thead>
         <tbody id="ka-sessions-body"></tbody>
