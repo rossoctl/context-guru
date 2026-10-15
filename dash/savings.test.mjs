@@ -16,3 +16,12 @@ test('missing parts count as zero, not as NaN', () => {
   const p = savedParts({ net_saved_usd: 5, total_saved_usd: 5 });
   assert.equal(p.total, 5); assert.equal(p.cache, 0);
 });
+
+test('the capped note says what was not counted, or that the cap was not applied', async () => {
+  const { capNote } = createRequire(import.meta.url)('./ui/savings.js');
+  const fmt = (v) => '$' + v.toFixed(2);
+  assert.equal(capNote({}, fmt), '');
+  assert.equal(capNote({ replay_cap_correction_usd: 0 }, fmt), '');
+  assert.match(capNote({ replay_cap_correction_usd: -1.5 }, fmt), /Capped: \$1\.50 of replay credit/);
+  assert.match(capNote({ replay_cap_not_applied: true, replay_cap_correction_usd: -1.5 }, fmt), /Cap not applied/);
+});

@@ -1555,7 +1555,9 @@ async function loadOverview(opts = {}) {
     const wasDirty = state.dirty;
     // Two reads of the same endpoint. ?lean=1 answers the figures the three savings rows need at
     // full precision without the slow parts of the full read, so the rows paint first; the full
-    // read follows and fills in the tools and skills filter row and the plots. No number differs.
+    // read follows and fills in the tools and skills filter row and the plots. The net and total
+    // dollars do not change when it lands: both reads apply the same caps (dash/api.go, pinned by
+    // TestLeanStatsMatchFullForTheSameWindow).
     const lean = await api('stats', { lean: 1 });
     state.overview = lean;
     state.overviewFull = false;
@@ -1691,7 +1693,7 @@ function renderSavedLedger(o, ka, partial) {
       id: 'compaction', tid: 'saved-compaction', name: 'Your preset', named: presetName, href: '#/components', more: 'Preset steps tab',
       what: 'Old tool output and repeated text your preset removes before it reaches the model.',
       ran: o.requests > 0, usd: parts.compaction, tok: o.saved_unique, of: o.tokens_before,
-      extra: '', kind: 'Estimated', note: 'after our own model calls',
+      extra: '', kind: 'Estimated', note: 'after our own model calls', cap: capNote(o, usd),
     },
     {
       id: 'filter', tid: 'saved-filter', name: 'Tools and skills filter', href: '#/tools', more: 'Inventory tab',
@@ -1725,7 +1727,8 @@ function renderSavedLedger(o, ka, partial) {
           ' ' + (share ? pct(share, share < 10 ? 1 : 0) + ' of spend · ' : '') + lv.note),
         lv.parts ? el('div', { class: 'lv-sub lv-parts' }, lv.parts.filter((p) => p[1] !== 0 || p[2]).map((p, i) => el('span', {},
           (i ? ' · ' : 'of which ') + p[0] + ' ' + usd(p[1]) + (p[2] ? ' (upper bound)' : ''))) ) : null,
-        lv.forecast ? el('div', { class: 'lv-sub' }, lv.forecast) : null);
+        lv.forecast ? el('div', { class: 'lv-sub' }, lv.forecast) : null,
+        lv.cap ? el('div', { class: 'lv-sub lv-capped', 'data-testid': 'replay-capped', text: lv.cap }) : null);
     const tokens = lv.tok === null || lv.tok === undefined || !lv.ran
       ? el('div', { class: 'lv-tokens lv-none' }, '—')
       : el('div', { class: 'lv-tokens' },

@@ -59,6 +59,8 @@ type API struct {
 	// against a real 1,000,000, and a span sized against that measures a fifth of the work it
 	// claims to. nil means every window is unknown, which excludes rather than guesses.
 	windows modelinfo.Resolver
+	// replayLedgerFn replaces the replay ledger read in tests.
+	replayLedgerFn func(*DB, Filter) (*ReplayLedger, error)
 	// statsCache, facetsCache and componentsCache hold the last rendered body per
 	// (principal, query), briefly. Overview alone measured 25s under real production write
 	// load (many sequential queries, each one a chance to queue behind the writer), and
@@ -509,6 +511,14 @@ func (a *API) SetPricer(p modelinfo.Pricer) { a.pricer = p }
 // SetWindows supplies the context-window resolver, for the views that ask how FULL a context got
 // rather than what it cost. Separate from SetPricer for the reason the fields are separate.
 func (a *API) SetWindows(r modelinfo.Resolver) { a.windows = r }
+
+// replayLedger is db.ReplayLedgerFor unless a test replaced it.
+func (a *API) replayLedger(db *DB, f Filter) (*ReplayLedger, error) {
+	if a.replayLedgerFn != nil {
+		return a.replayLedgerFn(db, f)
+	}
+	return db.ReplayLedgerFor(f, a.windows, a.pricer)
+}
 
 // Who has to act when there is no transcript to show. This is a SEPARATE axis from the
 // transcript state, deliberately: the state answers "why is this panel empty" and the
@@ -1237,17 +1247,39 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		// path. Every query on it must have a cost that does not grow with the session's
 		// size squared, nor with the whole table."
 		a.serveJSON(w, r, &a.statsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
+			// The replay scan is independent of OverviewLean: start it first, so first paint waits for
+			// the slower of the two, not their sum.
+			var repLedger *ReplayLedger
+			var repErr error
+			repDone := make(chan struct{})
+			go func() {
+				defer close(repDone)
+				if a.pricer != nil && a.windows != nil {
+					repLedger, repErr = a.replayLedger(db, f)
+				}
+			}()
 			o, err := db.OverviewLean(f, a.pricer, a.priceFn(r))
+			<-repDone
 			if err != nil {
 				return nil, err
 			}
 			// The ledger reads only the sessions in which summarize ever acted, so its cost follows
 			// their rows, not the window or the table. The status line then agrees with the dashboard.
+			// Without a price table or a window resolver there is nothing to cap against: say so.
+			o.ReplayCapNotApplied = a.pricer == nil || a.windows == nil
 			if a.pricer != nil && a.windows != nil {
 				if l, lerr := db.SummarizeLedgerFor(f, a.windows, a.pricer); lerr == nil {
 					o.ApplySummarizeLedger(l)
 					o.Waterfall = o.waterfall()
 				}
+				// The same cap as the full read, so the net and total do not change when it lands. A
+				// session or a window bounds the scan (lifetime reads go to the full handler).
+				if repErr == nil {
+					o.ApplyReplayLedger(repLedger)
+				} else {
+					o.ReplayCapNotApplied = true
+				}
+				o.Waterfall = o.waterfall()
 			}
 			return json.Marshal(o)
 		})
@@ -1308,7 +1340,19 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 			return nil
 		})
 		var sumLedger *SummarizeLedger
+		var repLedger *ReplayLedger
+		var repFailed bool
 		if a.pricer != nil && a.windows != nil {
+			g.Go(func() error {
+				l, err := a.replayLedger(db, f)
+				if err != nil {
+					slog.Warn("context-guru: replay cap unavailable; the headline keeps its stored credit", "err", err)
+					repFailed = true
+					return nil
+				}
+				repLedger = l
+				return nil
+			})
 			g.Go(func() error {
 				l, err := db.SummarizeLedgerFor(f, a.windows, a.pricer)
 				if err != nil {
@@ -1325,6 +1369,8 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		}
 		// Before the additions below: they add to the totals this corrects.
 		o.ApplySummarizeLedger(sumLedger)
+		o.ApplyReplayLedger(repLedger)
+		o.ReplayCapNotApplied = repFailed || a.pricer == nil || a.windows == nil
 		if cachesplitHist != nil {
 			o.CachesplitHistorical = cachesplitHist
 			// Folded into the running total here, not inside Overview() itself, because
@@ -1480,8 +1526,22 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 	}
 	a.serveJSON(w, r, &a.componentsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
 		// ONE pass over request_components feeds the rows and both valuations below (components).
+		// The replay cap streams the whole scope; start it beside the component read, not after.
+		var repLedger *ReplayLedger
+		var repErr error
+		repCtx, repCancel := context.WithCancel(db.readCtx())
+		defer repCancel()
+		repDone := make(chan struct{})
+		go func() {
+			defer close(repDone)
+			if a.pricer != nil {
+				repLedger, repErr = db.ReplayLedgerForCtx(repCtx, f, a.windows, a.pricer)
+			}
+		}()
 		rows, groups, err := db.components(f)
 		if err != nil {
+			repCancel()
+			<-repDone
 			return nil, err
 		}
 		// Value the rows whose saved_usd predates the column, into their own field. Without this
@@ -1493,6 +1553,8 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 			// halves so the two opposite-signed verdicts can be shown together. Both are
 			// re-groupings of what was just read, so neither touches the database.
 			if err := decomposeFromGroups(groups, a.pricer, rows); err != nil {
+				repCancel()
+				<-repDone
 				return nil, err
 			}
 			if err := estimateFromGroups(groups, a.pricer, rows); err != nil {
@@ -1508,6 +1570,15 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 			} else {
 				for _, c := range rows {
 					applySummarizeLedgerToRow(c, ls[c.Component])
+				}
+			}
+			// Every other replaying component, capped at the counterfactual client compaction.
+			<-repDone
+			if repErr != nil {
+				slog.Warn("context-guru: replay cap failed; components read their stored credit", "err", repErr)
+			} else {
+				for _, c := range rows {
+					applyReplayLedgerToRow(c, repLedger)
 				}
 			}
 		}

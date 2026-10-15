@@ -767,8 +767,14 @@ type ComponentRow struct {
 	// attribution ledger took out of SavedUSD (see SummarizeLedger). Set on the summarize row only.
 	SummarizeCreditPastSpanUSD     float64 `json:"summarize_credit_past_span_usd,omitempty"`
 	SummarizeCreditPrefixChangeUSD float64 `json:"summarize_credit_prefix_change_usd,omitempty"`
-	LLMCallsCold                   int64   `json:"llm_calls_cold"`
-	LLMCallsAcc                    int64   `json:"llm_calls_accepted"`
+	// ReplayCreditPastCapUSD is stored credit the replay ledger took out of SavedUSD: turns after
+	// the counterfactual (or a real) client compaction. Set on the capped components' rows.
+	ReplayCreditPastCapUSD float64 `json:"replay_credit_past_cap_usd,omitempty"`
+	// ReplayWindowAssumed marks a row whose cap used an assumed context window for some
+	// conversations (the model's window is not exactly published).
+	ReplayWindowAssumed bool  `json:"replay_window_assumed,omitempty"`
+	LLMCallsCold        int64 `json:"llm_calls_cold"`
+	LLMCallsAcc         int64 `json:"llm_calls_accepted"`
 	// LLMCostUSD is the figure every verdict on this row is computed from, and it is the
 	// GATEWAY-priced one — see the query for why the dashboard used to carry two.
 	// LLMCostGatewayUSD and LLMCostReportedUSD are the two sources kept separable so the UI
