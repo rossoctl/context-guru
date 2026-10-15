@@ -150,6 +150,7 @@ func sandboxEnv(t *testing.T, extra ...string) []string {
 		"HOME="+root,
 		"XDG_STATE_HOME="+filepath.Join(root, "xdg-state"),
 		"XDG_CONFIG_HOME="+filepath.Join(root, "xdg-config"),
+		leakMark(t), // whatever these commands leave running is stopped when t ends (leak_test.go)
 	)
 	return append(env, extra...)
 }
@@ -6908,6 +6909,11 @@ func routeEnv(t *testing.T, home, state, extraPath string) []string {
 	path := os.Getenv("PATH")
 	if extraPath != "" {
 		path = extraPath + string(os.PathListSeparator) + path
+		// A proxy that never answers fails the health check whatever the wait: wait 1 s, not the
+		// product's 15 (CONTEXT_GURU_HEALTH_BUDGET, which start-proxy.sh already honours).
+		if _, err := os.Stat(filepath.Join(extraPath, neverAnswers)); err == nil {
+			env = append(env, "CONTEXT_GURU_HEALTH_BUDGET=1")
+		}
 	}
 	// Every route test that installs scans for a port. Unpinned, the scan starts at the real 8787 on
 	// a box shared with live proxies, so a port taken between --plan and --route (by anything) fails
@@ -7197,11 +7203,19 @@ func TestRouteAttachModeSkipsInstallAndStart(t *testing.T) {
 // It MUST answer --version and exit: install.sh probes the installed version by running the binary,
 // and the first version of this fixture served forever on that probe, hanging the run before a
 // single assertion could fail. A fake that does not exit where the real one does is not a fake.
+// neverAnswers marks a fakeProxyDir whose proxy starts and never answers /healthz.
+const neverAnswers = "never-answers"
+
 func fakeProxyDir(t *testing.T, port string, listen bool) string {
 	t.Helper()
 	py := requireTool(t, "python3")
 	dir := t.TempDir()
 	body := "sleep 300\n"
+	if !listen { // routeEnv reads this: waiting the installer's full 15 s on it proves nothing more than 1 s
+		if err := os.WriteFile(filepath.Join(dir, neverAnswers), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if listen {
 		body = "exec " + py + " -c '\n" +
 			"import http.server\n" +
