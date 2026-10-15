@@ -103,6 +103,7 @@ nav:
       - Use with Claude Code: how-to/use-with-claude-code.md
       - Claude Code plugin:
           - Overview and install: plugin/index.md
+          - Commands: plugin/commands.md
           - Home and status: plugin/status.md
           - Insights: plugin/insights.md
           - Insights savings: plugin/savings.md
