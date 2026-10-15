@@ -59,6 +59,9 @@ type cacheBuildIn struct {
 	// Builder is "model" (the default: the Python pipeline trains a predictor) or "auto" (predictive.AutoTune picks a plan in-process, see campaignauto.go).
 	Builder    string `json:"builder"`
 	SessionEnd bool   `json:"session_end"` // auto only: score as if the client's SessionEnd signal is delivered
+	// SegmentBy (auto only) tunes one plan per value of this feature (a key of segFeatures) instead of one per tenant.
+	SegmentBy string `json:"segment_by,omitempty"`
+	Via       string `json:"-"` // set in-process: "adapt" for a build an adapt apply started
 }
 
 // parseBuildWindow accepts {"days":N}, {"since":ms,"until":ms}, or "30d"; the default is the last 30 days.
@@ -166,44 +169,53 @@ func (h *Handler) ctlBuildCacheCampaign(w http.ResponseWriter, r *http.Request) 
 		ctlErr(w, http.StatusBadRequest, `builder must be "model" or "auto"`)
 		return
 	}
+	if _, ok := segFeatures[in.SegmentBy]; in.SegmentBy != "" && (!ok || in.Builder != "auto") {
+		ctlErr(w, http.StatusBadRequest, `segment_by needs builder "auto" and one of dow, hour, prefix, model, client, stop_reason`)
+		return
+	}
 	since, until, err := parseBuildWindow(in.Window, time.Now())
 	if err != nil {
 		ctlErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	out, code, msg := h.startCacheBuild(r.Context(), actorID, in, since, until, nil)
+	if code != http.StatusAccepted {
+		ctlErr(w, code, msg)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, out)
+}
+
+// startCacheBuild starts one build for in.ID and returns the 202 body, or an HTTP status and message. after, if set, runs when an auto build ends.
+func (h *Handler) startCacheBuild(ctx context.Context, actorID string, in cacheBuildIn, since, until int64, after func(id string)) (map[string]any, int, string) {
 	dir := h.campaignDir()
 	if h.opts.Dashboard == nil || h.opts.Dashboard.DB() == nil || dir == "" {
-		ctlErr(w, http.StatusServiceUnavailable, "campaign builds need the dashboard database, which is not enabled on this deployment")
-		return
+		return nil, http.StatusServiceUnavailable, "campaign builds need the dashboard database, which is not enabled on this deployment"
 	}
-	models, err := h.opts.Dashboard.DB().WithContext(r.Context()).KVCacheModels(dash.Filter{Tenant: in.ID, Since: since, Until: until})
+	models, err := h.opts.Dashboard.DB().WithContext(ctx).KVCacheModels(dash.Filter{Tenant: in.ID, Since: since, Until: until})
 	if err != nil {
 		slog.Error("context-guru: could not list models for a campaign build", "err", err)
-		ctlErr(w, http.StatusInternalServerError, "could not read this tenant's history")
-		return
+		return nil, http.StatusInternalServerError, "could not read this tenant's history"
 	}
 	if len(models) == 0 {
-		ctlErr(w, http.StatusNotFound, "no traffic for this scope in that window")
-		return
+		return nil, http.StatusNotFound, "no traffic for this scope in that window"
 	}
 	prices := map[string]map[string]float64{}
 	for _, m := range models {
 		if h.opts.Prices == nil {
 			break
 		}
-		if p, ok := h.opts.Prices.Price(r.Context(), m); ok && !p.Zero() {
+		if p, ok := h.opts.Prices.Price(ctx, m); ok && !p.Zero() {
 			prices[m] = map[string]float64{"in": p.Input, "out": p.Output, "cache_read": p.CacheRead, "cache_write_5m": p.CacheWrite}
 		}
 	}
 	if len(prices) == 0 {
-		ctlErr(w, http.StatusUnprocessableEntity, "none of this tenant's models has a price, so dollars cannot be computed")
-		return
+		return nil, http.StatusUnprocessableEntity, "none of this tenant's models has a price, so dollars cannot be computed"
 	}
 	buildMu.Lock()
 	if len(buildActive) > 0 {
 		buildMu.Unlock()
-		ctlErr(w, http.StatusTooManyRequests, "another campaign build is running; builds run one at a time")
-		return
+		return nil, http.StatusTooManyRequests, "another campaign build is running; builds run one at a time"
 	}
 	id := newCampaignID()
 	buildActive[id] = true
@@ -213,31 +225,36 @@ func (h *Handler) ctlBuildCacheCampaign(w http.ResponseWriter, r *http.Request) 
 		buildMu.Lock()
 		delete(buildActive, id)
 		buildMu.Unlock()
-		ctlErr(w, http.StatusInternalServerError, "could not create the campaign directory")
-		return
+		return nil, http.StatusInternalServerError, "could not create the campaign directory"
 	}
-	meta := campaignMeta{ID: id, Tenant: in.ID, ScopeType: in.Scope, Mode: campaignModeOff, CreatedAt: time.Now().UnixMilli(), Actor: actorID}
+	meta := campaignMeta{ID: id, Tenant: in.ID, ScopeType: in.Scope, Mode: campaignModeOff, CreatedAt: time.Now().UnixMilli(), Actor: actorID, ModeBy: actorID, Via: in.Via}
 	_ = writeJSONFile(filepath.Join(out, "meta.json"), meta)
-	_ = writeJSONFile(filepath.Join(out, "request.json"), map[string]any{"scope": in.Scope, "id": in.ID, "since": since, "until": until, "objective": in.Objective, "builder": in.Builder, "session_end": in.SessionEnd})
+	_ = writeJSONFile(filepath.Join(out, "request.json"), map[string]any{"scope": in.Scope, "id": in.ID, "since": since, "until": until, "objective": in.Objective, "builder": in.Builder, "session_end": in.SessionEnd, "segment_by": in.SegmentBy})
 	_ = writeJSONFile(filepath.Join(out, "status.json"), map[string]any{"state": "running", "stage": "starting"})
 	pricesPath := filepath.Join(out, "prices.json")
 	if err := writeJSONFile(pricesPath, prices); err != nil {
 		buildMu.Lock()
 		delete(buildActive, id)
 		buildMu.Unlock()
-		ctlErr(w, http.StatusInternalServerError, "could not write the price table")
-		return
+		return nil, http.StatusInternalServerError, "could not write the price table"
 	}
-	if err := h.registry().AuditWrite(actorID, in.ID, "cache_campaign:"+id, "", "build requested"); err != nil {
-		slog.Warn("context-guru: could not audit a campaign build", "err", err)
+	if reg := h.registry(); reg != nil {
+		if err := reg.AuditWrite(actorID, in.ID, "cache_campaign:"+id, "", "build requested"); err != nil {
+			slog.Warn("context-guru: could not audit a campaign build", "err", err)
+		}
 	}
 	if in.Builder == "auto" {
-		go h.runAutoBuild(id, out, in, since, until)
+		go func() {
+			h.runAutoBuild(id, out, in, since, until)
+			if after != nil {
+				after(id)
+			}
+		}()
 	} else {
 		go h.runCampaignBuild(id, out, in, since, until, pricesPath)
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"campaign_id": id, "state": "running", "poll": "/api/cache/campaigns/" + id,
-		"scope": map[string]string{"type": in.Scope, "id": in.ID}, "window": map[string]int64{"since": since, "until": until}, "objective": in.Objective, "builder": in.Builder})
+	return map[string]any{"campaign_id": id, "state": "running", "poll": "/api/cache/campaigns/" + id,
+		"scope": map[string]string{"type": in.Scope, "id": in.ID}, "window": map[string]int64{"since": since, "until": until}, "objective": in.Objective, "builder": in.Builder}, http.StatusAccepted, ""
 }
 
 // buildCommand is the program that builds. Overridable for tests and for deployments with the pipeline elsewhere.
@@ -428,49 +445,69 @@ func (h *Handler) ctlSetCacheCampaignMode(w http.ResponseWriter, r *http.Request
 		ctlErr(w, http.StatusBadRequest, `mode must be "off", "shadow" or "active"`)
 		return
 	}
-	id := r.PathValue("id")
+	v, code, msg := h.setCampaignMode(actorID, r.PathValue("id"), in.Mode, in.Force)
+	if code != http.StatusOK {
+		ctlErr(w, code, msg)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+// campaignModeMu serialises campaign mode changes, so a check made just before one (setCampaignModeIf) still holds when it is written.
+var campaignModeMu sync.Mutex
+
+// setCampaignMode switches a finished campaign's mode (audited) and returns its view, or an HTTP status and message.
+func (h *Handler) setCampaignMode(actorID, id, mode string, force bool) (map[string]any, int, string) {
+	return h.setCampaignModeIf(actorID, id, mode, force, nil)
+}
+
+// setCampaignModeIf is setCampaignMode refused with 409 when refuse, asked under the same lock as the write, says so.
+func (h *Handler) setCampaignModeIf(actorID, id, mode string, force bool, refuse func() (bool, string)) (map[string]any, int, string) {
+	campaignModeMu.Lock()
+	defer campaignModeMu.Unlock()
+	if refuse != nil {
+		if no, why := refuse(); no {
+			return nil, http.StatusConflict, why
+		}
+	}
 	v, err := h.campaignView(id, false)
 	if err != nil {
-		ctlErr(w, http.StatusNotFound, "no such campaign")
-		return
+		return nil, http.StatusNotFound, "no such campaign"
 	}
 	if v["state"] != "done" {
-		ctlErr(w, http.StatusConflict, "the campaign build has not finished")
-		return
+		return nil, http.StatusConflict, "the campaign build has not finished"
 	}
-	if in.Mode == campaignModeActive && v["recommendation"] != "ship" && !in.Force {
-		ctlErr(w, http.StatusConflict, fmt.Sprintf("the build recommends %q, not ship; run it in shadow first, or pass force to override", v["recommendation"]))
-		return
+	if mode == campaignModeActive && v["recommendation"] != "ship" && !force {
+		return nil, http.StatusConflict, fmt.Sprintf("the build recommends %q, not ship; run it in shadow first, or pass force to override", v["recommendation"])
 	}
-	if in.Mode != campaignModeOff && v["recommendation"] == "insufficient_data" {
-		ctlErr(w, http.StatusConflict, "this scope has too little history to run a campaign")
-		return
+	if mode != campaignModeOff && v["recommendation"] == "insufficient_data" {
+		return nil, http.StatusConflict, "this scope has too little history to run a campaign"
 	}
 	dir := h.campaignDir()
 	mb, _ := os.ReadFile(filepath.Join(dir, id, "meta.json"))
 	var meta campaignMeta
 	_ = json.Unmarshal(mb, &meta)
 	before := meta.Mode
-	meta.Mode = in.Mode
-	if err := h.registry().AuditWrite(actorID, meta.Tenant, "cache_campaign:"+id, before, in.Mode); err != nil {
-		ctlErr(w, http.StatusInternalServerError, "could not record this in the audit log, so it was not changed")
-		return
+	meta.Mode, meta.ModeBy = mode, actorID
+	if reg := h.registry(); reg != nil {
+		if err := reg.AuditWrite(actorID, meta.Tenant, "cache_campaign:"+id, before, mode); err != nil {
+			return nil, http.StatusInternalServerError, "could not record this in the audit log, so it was not changed"
+		}
+	} else {
+		slog.Info("context-guru: cache campaign mode changed", "campaign", id, "from", before, "to", mode)
 	}
 	if err := writeJSONFile(filepath.Join(dir, id, "meta.json"), meta); err != nil {
-		ctlErr(w, http.StatusInternalServerError, "could not save the mode")
-		return
+		return nil, http.StatusInternalServerError, "could not save the mode"
 	}
 	rt := h.predRT()
 	if rt == nil {
-		ctlErr(w, http.StatusServiceUnavailable, "the keep-alive is not built into this deployment")
-		return
+		return nil, http.StatusServiceUnavailable, "the keep-alive is not built into this deployment"
 	}
 	if err := rt.load(id); err != nil {
-		ctlErr(w, http.StatusInternalServerError, "could not load the campaign: "+err.Error())
-		return
+		return nil, http.StatusInternalServerError, "could not load the campaign: " + err.Error()
 	}
 	v, _ = h.campaignView(id, false)
-	writeJSON(w, http.StatusOK, v)
+	return v, http.StatusOK, ""
 }
 
 func (h *Handler) predRT() *predRuntime {

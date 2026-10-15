@@ -79,7 +79,7 @@ func synthRows(target string, targetSessions int) []predictive.AutoRow {
 func TestAutoSpecPicksAndGatesThePlan(t *testing.T) {
 	const t0 = int64(1_786_000_000_000)
 	until := t0 + 80*30*60e3 + 3600e3
-	spec, rec := autoSpec(synthRows("me", 80), "me", t0, until, false)
+	spec, rec := autoSpec(synthRows("me", 80), nil, "me", t0, until, false, "")
 	ev := spec["evidence"].(map[string]any)
 	if rec != "ship" || ev["subject"] != "auto(K1)" {
 		t.Fatalf("a tenant that only needs K1: rec %s, subject %v, evidence %v", rec, ev["subject"], ev["paired_vs_baselines"])
@@ -89,7 +89,7 @@ func TestAutoSpecPicksAndGatesThePlan(t *testing.T) {
 		t.Errorf("shipped rule %v, want plan K1", seg)
 	}
 	// a tenant that looks like the fleet gets the fleet plan and the baseline recommendation
-	spec, rec = autoSpec(synthRows("fleet-0", 0), "fleet-0", t0, until, false)
+	spec, rec = autoSpec(synthRows("fleet-0", 0), nil, "fleet-0", t0, until, false, "")
 	if rec != "baseline" {
 		t.Errorf("a tenant like the fleet: rec %s, want baseline", rec)
 	}
@@ -101,13 +101,13 @@ func TestAutoSpecPicksAndGatesThePlan(t *testing.T) {
 			me[i].Gain[1] -= 0.2
 		}
 	}
-	spec, rec = autoSpec(me, "me", t0, until, false)
+	spec, rec = autoSpec(me, nil, "me", t0, until, false, "")
 	rule := spec["policy"].(map[string]any)["segments"].([]any)[0].(map[string]any)["rule"].(map[string]any)
 	if rec == "ship" || rule["plan"] != "K3" {
 		t.Errorf("a non-ship build must run the fleet plan K3: rec %s, rule %v, tuner %v", rec, rule, spec["evidence"].(map[string]any)["tuner"])
 	}
 	// too little history
-	if _, rec = autoSpec(synthRows("me", 3), "me", t0, until, false); rec != "insufficient_data" {
+	if _, rec = autoSpec(synthRows("me", 3), nil, "me", t0, until, false, ""); rec != "insufficient_data" {
 		t.Errorf("3 sessions: rec %s, want insufficient_data", rec)
 	}
 }
@@ -235,7 +235,7 @@ func TestWriteSpecValidatedKeepsTheOldSpecOnABadOne(t *testing.T) {
 // No plan of an auto campaign, and no active campaign decision, schedules a ping later than the configured keep-alive interval.
 func TestAutoPlansNeverPingLaterThanTheConfiguredInterval(t *testing.T) {
 	const t0 = int64(1_786_000_000_000)
-	spec, _ := autoSpec(synthRows("me", 80), "me", t0, t0+80*30*60e3+3600e3, false)
+	spec, _ := autoSpec(synthRows("me", 80), nil, "me", t0, t0+80*30*60e3+3600e3, false, "")
 	for name, p := range spec["menu"].(map[string]any) {
 		for _, g := range p.(map[string]any)["gaps_s"].([]float64) {
 			if g > campaignKeepAlive5mIdle {
@@ -311,7 +311,7 @@ func TestAutoRowsForReadsTheTenantsOwnRowsPastTheFleetCap(t *testing.T) {
 	if err != nil || cut {
 		t.Fatal(err, cut)
 	}
-	if n := count(rows); n[tid] != 4 || n["second-tenant"] != 3 || n["other-tenant"] != 6 {
+	if n := count(rows.rows); n[tid] != 4 || n["second-tenant"] != 3 || n["other-tenant"] != 6 {
 		t.Fatalf("uncapped rows by tenant %v; want 4 / 3 / 6, each counted once", n)
 	}
 	defer dash.SetKVCacheMaxRows(6)()
@@ -324,7 +324,7 @@ func TestAutoRowsForReadsTheTenantsOwnRowsPastTheFleetCap(t *testing.T) {
 	if rows, _, err = f.h.autoRowsFor(d, tid, flatPrice, false, until); err != nil {
 		t.Fatal(err)
 	}
-	if n := count(rows); n[tid] != 4 || n["second-tenant"] != 0 || n["other-tenant"] != 6 {
+	if n := count(rows.rows); n[tid] != 4 || n["second-tenant"] != 0 || n["other-tenant"] != 6 {
 		t.Fatalf("capped rows by tenant %v; want the tenant's 4 plus the fleet read's 6, and none of the tenant read before it", n)
 	}
 	spec := map[string]any{"evidence": map[string]any{}}

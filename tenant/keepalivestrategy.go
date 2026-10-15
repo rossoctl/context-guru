@@ -111,6 +111,9 @@ type StrategyPatch struct {
 // ErrNoStrategy names no keep-alive strategy.
 var ErrNoStrategy = errors.New("tenant: no such keep-alive strategy")
 
+// Zone is the IANA zone the window is evaluated in: TZ, or DefaultStrategyTZ when it is empty.
+func (w Window) Zone() string { return w.tzOrDefault() }
+
 // tzOrDefault is w.TZ, or DefaultStrategyTZ when it is empty.
 func (w Window) tzOrDefault() string {
 	if w.TZ == "" {
@@ -256,6 +259,9 @@ func (t Target) Validate() error {
 		return fmt.Errorf("tenant: target mode must be %q or %q", TargetAll, TargetList)
 	}
 }
+
+// Covers reports whether the target includes tenantID, ignoring Active and the windows.
+func (t Target) Covers(tenantID string) bool { return t.matches(tenantID) }
 
 func (t Target) matches(tenantID string) bool {
 	switch t.Mode {
