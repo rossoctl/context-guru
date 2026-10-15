@@ -155,6 +155,9 @@ type Overview struct {
 	// replaying components (extract_llm, searchfold, ...) earned after the counterfactual client
 	// compaction, or after a real one. Zero or negative.
 	ReplayCapCorrectionUSD float64 `json:"replay_cap_correction_usd"`
+	// ReplayCapNotApplied is true when the cap could not be computed (it errored or timed out), so
+	// the figures above carry the stored, uncapped replay credit. The page says so.
+	ReplayCapNotApplied bool `json:"replay_cap_not_applied"`
 	// CacheSavedUSD is what the PROVIDER's prompt cache saved over paying the fresh rate
 	// for the same tokens. Context, not credit: the agent places most of the breakpoints
 	// itself. It is here because it is the number that collapses when a pipeline rewrites

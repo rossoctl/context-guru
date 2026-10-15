@@ -16,4 +16,17 @@ function savedParts(o) {
   return { cache, keepalive, reorder, compaction, filter, total: cache + compaction + filter, serverTotal: o.total_saved_usd || 0 };
 }
 
-if (typeof module !== 'undefined') module.exports = { savedParts };
+// The note under "Your preset" when the replay cap changed the figure, or could not be applied.
+// '' when there is nothing to say. `fmt` formats dollars.
+function capNote(o, fmt) {
+  if (o.replay_cap_not_applied) {
+    return 'Cap not applied: the replay cap could not be computed in time, so this figure may be too high.';
+  }
+  const c = o.replay_cap_correction_usd || 0;
+  if (c < 0) {
+    return 'Capped: ' + fmt(-c) + ' of replay credit earned after the client would have compacted is not counted.';
+  }
+  return '';
+}
+
+if (typeof module !== 'undefined') module.exports = { savedParts, capNote };

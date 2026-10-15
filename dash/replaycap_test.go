@@ -3,8 +3,11 @@ package dash
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -203,10 +206,18 @@ func TestReplayLedgerThroughSQLMovesTheHeadlineAndTheRow(t *testing.T) {
 	o.ApplyReplayLedger(l)
 	nearEq(t, "baseline", o.BaselineCostUSD, 10+l.DeltaUSD())
 	nearEq(t, "correction", o.ReplayCapCorrectionUSD, l.DeltaUSD())
+	nearEq(t, "net saved", o.NetSavedUSD, 4+l.DeltaUSD())
+	nearEq(t, "total saved", o.TotalSavedUSD, 5+l.DeltaUSD())
+	nearEq(t, "total reduced", o.TotalReducedUSD, 5+l.DeltaUSD())
+	if l.DeltaUSD() >= 0 {
+		t.Fatal("the fixture does not cap anything")
+	}
 	row := &ComponentRow{Component: "extract_llm", SavedUSD: c.StoredUSD, NetUSD: c.StoredUSD,
 		NetUSDWithEstimate: c.StoredUSD, SavedUSDReplay: c.StoredUSD, SavedUSDDecomposed: c.StoredUSD}
 	applyReplayLedgerToRow(row, l)
 	nearEq(t, "row saved", row.SavedUSD, c.CountedUSD)
+	nearEq(t, "row net", row.NetUSD, c.CountedUSD)
+	nearEq(t, "row net with estimate", row.NetUSDWithEstimate, c.CountedUSD)
 	nearEq(t, "row replay", row.SavedUSDReplay, c.CountedUSD)
 	nearEq(t, "row past cap", row.ReplayCreditPastCapUSD, c.PastCapUSD)
 	// summarize's own component is left to its ledger.
@@ -388,4 +399,171 @@ func TestReplayLedgerLeavesEverySummarizerToItsOwnLedger(t *testing.T) {
 	if len(l.ByComponent) != 1 || l.ByComponent["extract_llm"] == nil {
 		t.Errorf("ledger components = %v, want only extract_llm", l.ByComponent)
 	}
+}
+
+// A drop that persists but with no compaction request in between is not a client compaction: the
+// request is the evidence, not the drop alone.
+func TestReplayCapNeedsTheCompactionRequestAsEvidence(t *testing.T) {
+	rows := []capRow{
+		capTestRow(1, 100_000, 10_000, 100_000, "searchfold", 1),
+		capTestRow(2, 120_000, 10_000, 120_000, "searchfold", 1),
+		capTestRow(3, 30_000, 10_000, 30_000, "searchfold", 1), // a persistent drop, no request
+		capTestRow(4, 40_000, 10_000, 40_000, "searchfold", 1),
+		capTestRow(5, 50_000, 10_000, 50_000, "searchfold", 1),
+	}
+	l := walkReplayCap(rows, fixedWindow(1_000_000))
+	nearEq(t, "counted", l.ByComponent["searchfold"].CountedUSD, 5)
+	if l.ClosedClientCompaction != 0 {
+		t.Error("a drop with no compaction request closed the credit")
+	}
+	// A compaction request BEFORE the previous turn is not evidence for this drop either.
+	early := capTestRow(1, 100_000, 0, 100_000, "", 0)
+	early.Bypassed = true
+	rows2 := append([]capRow{early}, rows...)
+	for i := range rows2[1:] {
+		rows2[i+1].TS += 10
+	}
+	if l := walkReplayCap(rows2, fixedWindow(1_000_000)); l.ClosedClientCompaction != 0 {
+		t.Error("a compaction request before the previous turn closed the credit")
+	}
+	// And one after the drop is not evidence either.
+	late := capTestRow(99, 100_000, 0, 100_000, "", 0)
+	late.Bypassed = true
+	if l := walkReplayCap(append(append([]capRow{}, rows...), late), fixedWindow(1_000_000)); l.ClosedClientCompaction != 0 {
+		t.Error("a compaction request after the drop closed the credit")
+	}
+}
+
+// firstShare prices the unique part through Event.ComponentSavedUSD: on a hit turn a first removal is
+// worth the creation rate and the replay the read rate, so its share exceeds its token share.
+func TestFirstShareIsPricedNotCountedInTokens(t *testing.T) {
+	price := handPrice["m1"]
+	ev := &Event{Model: "m1", CacheMissReason: CacheHit, FreshInput: 10, CacheRead: 50_000}
+	ev.BilledTokenFactor = 1
+	got := firstShare(ev, price, true, "extract_llm", 1000, 100)
+	want := 100 * price.CacheWrite / (100*price.CacheWrite + 900*price.CacheRead)
+	nearEq(t, "priced share", got, want)
+	nearEq(t, "token share without a price", firstShare(ev, price, false, "extract_llm", 1000, 100), 0.1)
+	nearEq(t, "no unique part", firstShare(ev, price, true, "extract_llm", 1000, 0), 0)
+	nearEq(t, "unique clamped to gross", firstShare(ev, price, true, "extract_llm", 100, 500), 1)
+}
+
+// ... and the ledger reads the split through it.
+func TestReplayLedgerSplitsFirstRemovalThroughFirstShare(t *testing.T) {
+	db := openTestDB(t)
+	e := mkEvent(DayMs+1, "s", "m1", 300_000, 299_000)
+	e.TenantID = "t1"
+	e.TokenAccounting = AccountingComplete
+	e.FreshInput, e.CacheRead, e.CacheWrite = 10, 50_000, 0
+	e.CacheMissReason = CacheHit
+	e.Components = []CompRow{{Component: "extract_llm", Acted: true, SavedGross: 1000, SavedUnique: 100, SavedUSD: 2}}
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := db.ReplayLedgerFor(Filter{TenantAll: true}, testWindows{}, handPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	price := handPrice["m1"]
+	share := 100 * price.CacheWrite / (100*price.CacheWrite + 900*price.CacheRead)
+	c := l.ByComponent["extract_llm"]
+	nearEq(t, "first removal", c.FirstRemovalUSD, 2*share)
+	nearEq(t, "replay", c.ReplayUSD, 2*(1-share))
+}
+
+// The lean and the full read of one window give the same net and total, so the figure on the page
+// does not move when the full read replaces the lean one.
+func TestLeanStatsMatchFullForTheSameWindow(t *testing.T) {
+	api, until := replayCapAPI(t)
+	type body struct {
+		Net        float64 `json:"net_saved_usd"`
+		Total      float64 `json:"total_saved_usd"`
+		Reduced    float64 `json:"total_reduced_usd"`
+		Correction float64 `json:"replay_cap_correction_usd"`
+	}
+	for _, path := range []string{fmt.Sprintf("/api/stats?since=0&until=%d", until), "/api/stats?session=s"} {
+		var full, lean body
+		api.get(t, path, &full)
+		api.get(t, strings.Replace(path, "/api/stats?", "/api/stats?lean=1&", 1), &lean)
+		if full.Correction >= 0 {
+			t.Fatalf("%s: the fixture is not capped (%v)", path, full.Correction)
+		}
+		nearEq(t, path+" correction", lean.Correction, full.Correction)
+		nearEq(t, path+" net_saved_usd", lean.Net, full.Net)
+		nearEq(t, path+" total_saved_usd", lean.Total, full.Total)
+		nearEq(t, path+" total_reduced_usd", lean.Reduced, full.Reduced)
+	}
+}
+
+// When the cap cannot be computed the headline says so, on both reads, instead of silently showing
+// the uncapped figure.
+func TestHeadlineSaysWhenTheCapWasNotApplied(t *testing.T) {
+	api, until := replayCapAPI(t)
+	api.a.replayLedgerFn = func(*DB, Filter) (*ReplayLedger, error) { return nil, errors.New("timed out") }
+	for _, path := range []string{fmt.Sprintf("/api/stats?since=0&until=%d", until), fmt.Sprintf("/api/stats?lean=1&since=0&until=%d", until)} {
+		var b struct {
+			NotApplied bool    `json:"replay_cap_not_applied"`
+			Correction float64 `json:"replay_cap_correction_usd"`
+		}
+		api.get(t, path, &b)
+		if !b.NotApplied || b.Correction != 0 {
+			t.Errorf("%s: not_applied=%v correction=%v, want true and 0", path, b.NotApplied, b.Correction)
+		}
+	}
+	var ok struct {
+		NotApplied bool `json:"replay_cap_not_applied"`
+	}
+	api.a.replayLedgerFn = nil
+	api.a.statsCache = jsonCache{}
+	api.get(t, fmt.Sprintf("/api/stats?since=0&until=%d", until), &ok)
+	if ok.NotApplied {
+		t.Error("a working cap reported not_applied")
+	}
+}
+
+type replayCapHarness struct {
+	a   *API
+	mux *http.ServeMux
+}
+
+func (h replayCapHarness) get(t *testing.T, path string, v any) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	h.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET %s: %d %s", path, w.Code, w.Body)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), v); err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+}
+
+// replayCapAPI serves a session whose credit is capped from its second turn.
+func replayCapAPI(t *testing.T) (replayCapHarness, int64) {
+	t.Helper()
+	db := openTestDB(t)
+	mk := func(ts int64, before, after int, fresh, read int64) *Event {
+		e := mkEvent(ts, "s", "aws/claude-sonnet-5", before, after)
+		e.TenantID = "t1"
+		e.FreshInput, e.CacheRead, e.CacheWrite = fresh, read, 0
+		e.TokenAccounting = AccountingComplete
+		e.Components = []CompRow{{Component: "extract_llm", Kind: "offload", Acted: true, Mutated: true,
+			SavedGross: before - after, SavedUnique: 0, SavedUSD: 1}}
+		return e
+	}
+	if err := db.insertBatch([]*Event{
+		mk(DayMs+1, 300_000, 200_000, 1_000, 300_000),
+		mk(DayMs+2, 700_000, 100_000, 1_000, 449_000),
+		mk(DayMs+3, 710_000, 100_000, 1_000, 450_000),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := &Recorder{db: db, hub: NewHub(), done: make(chan struct{})}
+	t.Cleanup(func() { rec.Close() })
+	api := NewAPI(rec)
+	api.SetPricer(staticPricer{ibmSonnet})
+	api.SetWindows(testWindows{})
+	mux := http.NewServeMux()
+	api.Mount(mux)
+	return replayCapHarness{a: api, mux: mux}, DayMs + 10
 }
