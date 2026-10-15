@@ -437,6 +437,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 				scanLifecycle(norm, waitBody), cacheW, cacheW1h)
 		}
 	}
+	e.BypassCount, e.BypassBytes = c.trace.BypassCount, len(waitBody)
 	e.WaitCause = func() dash.WaitCauseResult {
 		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm)
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)

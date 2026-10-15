@@ -67,7 +67,7 @@ func (p *Pipeline) Names() []string {
 // report. req is mutated; on any per-component failure that component's changes
 // are rolled back, so the returned request is never worse than the input.
 func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
-	rr := &RunReport{Session: c.Session, TokensBefore: schema.MessagesTokens(req), Mode: c.effMode()}
+	rr := &RunReport{Session: c.Session, Mode: c.effMode()}
 	// Hand cmdfilter its per-family ledger sink when the emitter implements one, so no
 	// host has to thread a second field through every Ctx construction site.
 	if c.FilterStats == nil {
@@ -76,9 +76,13 @@ func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
 		}
 	}
 	if c.Bypass {
-		rr.TokensAfter = rr.TokensBefore
+		// A bypassed request is forwarded untouched, so there is nothing to compare and the token
+		// count is left at zero: counting the whole transcript here cost ~0.35 s per MiB on the
+		// request path (a 33 MiB compaction request took ~12 s before it was forwarded). The
+		// dashboard writer counts it off the request path (Event.BypassTokens).
 		return rr
 	}
+	rr.TokensBefore = schema.MessagesTokens(req)
 	// ONE snapshot for the whole run, kept in step with req.Input as components land
 	// (see runOne). Cloning the entire transcript per component was ~20% of the rewrite
 	// path's CPU on real 600 KB Claude Code requests, and all but a handful of its

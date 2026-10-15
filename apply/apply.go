@@ -217,8 +217,13 @@ type Trace struct {
 	Thread         thread.Result
 	ThreadResolved bool
 	Bypassed       bool
-	CacheAware     bool
-	MaxCachedIdx   int
+	// BypassCount, set only on a bypassed request, returns the token figures the pipeline would
+	// have reported for it: the message tokens before (and, nothing having run, after) and
+	// AttemptedTokens. It tokenizes the whole transcript, so it must never be called on the
+	// request path; the dashboard's count worker calls it.
+	BypassCount  func() (before, attempted int)
+	CacheAware   bool
+	MaxCachedIdx int
 	// Messages is the normalized message count this request carried.
 	Messages int
 	// AttemptedTokens is the token count of the messages age/supersession
@@ -720,7 +725,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// The eligible (attempted) denominator: what age/supersession offloaders were
 	// allowed to touch. Everything before MaxCachedIdx is frozen for cache safety —
 	// the cost of that mechanism, reported next to its benefit.
-	tr.AttemptedTokens = attemptedTokens(norm, c)
+	// A bypassed request is not compacted and counting its text is the slow part (see
+	// Pipeline.Run), so it is counted later, off the request path, through Trace.BypassCount.
+	if !bypass {
+		tr.AttemptedTokens = attemptedTokens(norm, c)
+	}
 
 	// From here on, everything this request logs carries the RESOLVED session. The
 	// caller (the proxy) already put tenant and route on the context logger; the session
@@ -746,6 +755,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// already in slot.pre, filled by normalize. Marshalling every message a second time
 	// here was pure duplicate work on every request, for a path only summarize takes.
 
+	if bypass {
+		tr.BypassCount = func() (before, attempted int) {
+			return schema.MessagesTokens(chat), attemptedTokens(norm, c)
+		}
+	}
 	rr := pipe.Run(chat, c)
 	tr.Run = rr
 	if debug && rr != nil {

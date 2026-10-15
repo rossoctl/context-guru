@@ -6,6 +6,7 @@ package tokens
 import (
 	"hash/maphash"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tiktoken-go/tokenizer"
 )
@@ -41,6 +42,21 @@ const countCacheCap = 200_000
 // encoding and the churn would just thrash the map.
 const minCacheLen = 24
 
+// Counters for the memo above, read through Stats: lookups that hit, strings that had to be
+// encoded, and the bytes of those strings. Tests use the last one to prove a path did not
+// tokenize; an operator can use hit rate to see whether the memo is earning its keep.
+var cacheHits, cacheMisses, encodedBytes atomic.Int64
+
+// CacheStats is a snapshot of the counters above.
+type CacheStats struct {
+	Hits, Misses, EncodedBytes int64
+}
+
+// Stats returns the memo's counters since process start.
+func Stats() CacheStats {
+	return CacheStats{cacheHits.Load(), cacheMisses.Load(), encodedBytes.Load()}
+}
+
 func cacheHash(text string) uint64 {
 	var h maphash.Hash
 	h.SetSeed(cacheSeed)
@@ -62,10 +78,13 @@ func Count(text string) int {
 		cacheMu.Lock()
 		if n, ok := countMap[key]; ok {
 			cacheMu.Unlock()
+			cacheHits.Add(1)
 			return n
 		}
 		cacheMu.Unlock()
 	}
+	cacheMisses.Add(1)
+	encodedBytes.Add(int64(len(text)))
 	c := codec()
 	var n int
 	if c == nil {
