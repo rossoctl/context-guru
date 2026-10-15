@@ -200,6 +200,10 @@ type Recorder struct {
 	queuedCountBytes atomic.Int64
 	// countsDropped counts rows whose token count was skipped because the queue was full.
 	countsDropped atomic.Int64
+	// migrationsDone is closed when the one-time background migrations have finished or been
+	// stopped. They read and write the requests table, so a test that measures the WAL waits for
+	// it first.
+	migrationsDone chan struct{}
 	// tenantQuota reads a tenant's own row quota from the control plane (see
 	// SetTenantQuota). A func rather than a value because a manager can change it at
 	// any time, and a pointer because it is wired after the recorder starts.
@@ -232,6 +236,8 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		seenKeys:  map[string]struct{}{},
 		remote:    opts.Remote,
 		counts:    make(chan countJob, countQueue),
+
+		migrationsDone: make(chan struct{}),
 	}
 	if opts.LifecycleSignals {
 		r.life = newLifecycle()
@@ -273,6 +279,7 @@ func NewRecorder(opts Options) (*Recorder, error) {
 // both at once still finishes well inside the time a single one used to take alone.
 func (r *Recorder) backgroundMigrations() {
 	defer r.wg.Done()
+	defer close(r.migrationsDone)
 	r.dedupeLoop()
 	r.keepAliveStrategyBackfillLoop()
 }
