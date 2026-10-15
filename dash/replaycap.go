@@ -300,7 +300,8 @@ const capSelect = `SELECT r.id, r.tenant_id, r.session_id, r.model, r.ts, r.bypa
 		r.cache_miss_reason, r.fresh_input, r.cache_read, r.cache_write,
 		c.component, c.saved_gross, c.saved_unique, c.saved_usd
 	FROM requests r
-	LEFT JOIN request_components c ON c.request_id = r.id AND c.component <> 'summarize'
+	LEFT JOIN request_components c ON c.request_id = r.id AND %c
+
 		AND c.saved_usd <> 0 AND c.saved_gross > 0
 	WHERE %s
 	ORDER BY r.tenant_id, r.session_id, r.model, r.ts, r.id`
@@ -324,6 +325,15 @@ func firstShare(ev *Event, p modelinfo.Price, priced bool, comp string, gross, u
 	return float64(unique) / float64(gross)
 }
 
+// notSummarizerSQL excludes the summarizers (SummarizerComponents): they have their own ledger.
+func notSummarizerSQL() string {
+	q := make([]string, len(SummarizerComponents))
+	for i, n := range SummarizerComponents {
+		q[i] = "'" + strings.ReplaceAll(n, "'", "") + "'"
+	}
+	return "c.component NOT IN (" + strings.Join(q, ", ") + ")"
+}
+
 // ReplayLedgerFor streams the rows one filter selects and runs the cap session by session. A model
 // whose window is not exactly known is capped against an assumed window.
 //
@@ -340,7 +350,7 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 		return newReplayLedger(), nil
 	}
 	cond, args := f.where()
-	rs, err := d.sql.QueryContext(ctx, strings.Replace(capSelect, "%s", cond, 1), args...)
+	rs, err := d.sql.QueryContext(ctx, strings.Replace(strings.Replace(capSelect, "%c", notSummarizerSQL(), 1), "%s", cond, 1), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +460,7 @@ func applyReplayLedgerToRow(c *ComponentRow, l *ReplayLedger) {
 		return
 	}
 	cl := l.ByComponent[c.Component]
-	if cl == nil {
+	if cl == nil || IsSummarizer(c.Component) {
 		return
 	}
 	c.ReplayWindowAssumed = cl.WindowAssumedUSD > 0

@@ -210,10 +210,12 @@ func TestReplayLedgerThroughSQLMovesTheHeadlineAndTheRow(t *testing.T) {
 	nearEq(t, "row replay", row.SavedUSDReplay, c.CountedUSD)
 	nearEq(t, "row past cap", row.ReplayCreditPastCapUSD, c.PastCapUSD)
 	// summarize's own component is left to its ledger.
-	other := &ComponentRow{Component: SummarizeComponent, SavedUSD: 1}
-	applyReplayLedgerToRow(other, l)
-	if other.SavedUSD != 1 {
-		t.Errorf("summarize row moved by the replay ledger: %v", other.SavedUSD)
+	for _, name := range SummarizerComponents {
+		other := &ComponentRow{Component: name, SavedUSD: 1}
+		applyReplayLedgerToRow(other, l)
+		if other.SavedUSD != 1 {
+			t.Errorf("%s row moved by the replay ledger: %v", name, other.SavedUSD)
+		}
 	}
 }
 
@@ -363,5 +365,27 @@ func TestAssumedWindowIsTheSmallestOfKnownFamilyAndDefault(t *testing.T) {
 		if got := assumedWindowFor(tc.model, tc.known); got != tc.want {
 			t.Errorf("assumedWindowFor(%q, %d) = %d, want %d", tc.model, tc.known, got, tc.want)
 		}
+	}
+}
+
+// Every summarizer is outside the replay ledger: the summarize ledger owns it.
+func TestReplayLedgerLeavesEverySummarizerToItsOwnLedger(t *testing.T) {
+	db := openTestDB(t)
+	e := mkEvent(DayMs+1, "s", "m1", 300_000, 200_000)
+	e.TenantID = "t1"
+	e.TokenAccounting = AccountingComplete
+	e.Components = nil
+	for _, name := range append([]string{"extract_llm"}, SummarizerComponents...) {
+		e.Components = append(e.Components, CompRow{Component: name, Acted: true, SavedGross: 100_000, SavedUSD: 1})
+	}
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := db.ReplayLedgerFor(Filter{TenantAll: true}, testWindows{}, handPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l.ByComponent) != 1 || l.ByComponent["extract_llm"] == nil {
+		t.Errorf("ledger components = %v, want only extract_llm", l.ByComponent)
 	}
 }

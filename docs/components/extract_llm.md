@@ -794,7 +794,7 @@ The cap does not read the real compaction to place the counterfactual one. Remov
 the real transcript smaller, so a rule that waited for the real client to compact would credit
 exactly the turns the removals pushed past the ceiling. The same rule caps every replaying
 component (`searchfold`, `dedup`, `extract`, ...), and one ledger feeds the headline,
-`/api/components` and the episode view (`replay_ledger`). `summarize` keeps its own span.
+`/api/components` and the episode view (`replay_ledger`). The summarizers (`summarize`, `cache_aware_summarizer`) keep their own span and ledger.
 
 `extract_llm` keeps the stored price of a first removal (the cache-write rate), not the
 cache-read rate `summarize` gets: it fires on cold turns, where the uncompacted prefix would have
