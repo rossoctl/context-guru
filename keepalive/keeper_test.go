@@ -142,7 +142,8 @@ func TestPingBodyLeavesTheHashedPrefixByteIdentical(t *testing.T) {
 func TestPingThatWritesInsteadOfReadingStopsTheSession(t *testing.T) {
 	k, fd, clock := testKeeper(t)
 	fd.setResp(func(DispatchRequest) (Usage, int, error) {
-		return Usage{CacheWrite: 48576, CacheRead: 0, Output: 1}, http.StatusOK, nil
+		// A zero read is a first miss now; see TestARealMissIsNotAFailedPing.
+		return Usage{CacheWrite: 48576, CacheRead: 1024, Output: 1}, http.StatusOK, nil
 	})
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
 

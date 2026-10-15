@@ -118,6 +118,9 @@ type kaEntry struct {
 	// stopped means this session will not be pinged again: a ping wrote instead of reading,
 	// or the upstream refused in a way that repeating cannot fix.
 	stopped bool
+	// missed counts this entry's current run of consecutive zero-read pings. Reset to 0 by
+	// notePingRead; a second miss in a row (missed == 2) stops the entry — see noteOutcome.
+	missed int
 	// tag is the host's label for this entry (Record.Tag) — in cmd/context-guru-proxy, the id of
 	// the manager-controlled keep-alive strategy that resolved this entry's policy, "" when none
 	// matched (account config or a session override supplied it instead). Resolved once, at
@@ -278,6 +281,7 @@ type Keeper struct {
 	skipped  atomic.Int64 // due, but a limit or a cap or a gate refused
 	failed   atomic.Int64
 	wrote    atomic.Int64  // pings that CREATED instead of refreshing — a bug, not a cost
+	missed   atomic.Int64  // pings that read nothing — a real cache miss, not a failure
 	spentUSD atomic.Uint64 // float64 bits; only ever read as a whole
 	// summarySubstituted counts pings replaced by cache_aware_summarizer's own cache-reading
 	// call (see fireSummarySubstitute) — accounted toward `pings` as well, since it IS the ping
@@ -946,30 +950,20 @@ func (k *Keeper) fire(j pingJob) {
 	ms := float64(k.now().Sub(start).Microseconds()) / 1000.0
 	k.pings.Add(1)
 	if err != nil {
-		k.failed.Add(1)
+		k.failed.Add(1) // a transport error: counted, not stopped, not a breaker failure
 		slog.Debug("context-guru: cache keep-alive ping failed",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "err", err)
 		return
 	}
-	// A 4xx will repeat identically, so stop rather than spend the rest of K learning the
-	// same thing. A 5xx is transient and the next ping may work.
-	if status >= 400 && status < 500 {
-		k.markStopped(j.e)
-		slog.Debug("context-guru: cache keep-alive ping refused; not pinging this session again",
-			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
+	switch k.noteOutcome(j, status, u) {
+	case outcomeTransient:
+		k.record1(j, u, status, ms, start) // the audit row; the next ping may work
 		return
-	}
-	// THE guard. A ping is supposed to be a pure cache READ; if the provider says it wrote
-	// more than it read, the prefix did not match and this ping cost 12.5x what a read
-	// costs instead of saving 11.5x. That is the mechanism being wrong, not expensive, so
-	// it is an ERROR and the session is dropped.
-	if u.CacheWrite > u.CacheRead {
-		k.wrote.Add(1)
-		k.markStopped(j.e)
-		slog.Error("context-guru: cache keep-alive ping CREATED a cache entry instead of "+
-			"refreshing one; not pinging this session again",
-			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
-			"cache_write", u.CacheWrite, "cache_read", u.CacheRead)
+	case outcomeFailed:
+		return
+	case outcomeFailedRecorded:
+		k.record1(j, u, status, ms, start)
+		return
 	}
 	cost := k.record1(j, u, status, ms, start)
 	slog.Debug("context-guru: cache keep-alive ping",
@@ -983,6 +977,65 @@ func (k *Keeper) markStopped(e *kaEntry) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	e.stopped = true
+}
+
+// outcome is what one ping's answer means for its entry. The order of checks is main's (#527).
+type outcome int
+
+const (
+	outcomeRead outcome = iota
+	outcomeMissed
+	outcomeTransient
+	outcomeFailed         // stopped, no audit row
+	outcomeFailedRecorded // stopped, with an audit row
+	outcomeStopped        // the guard: wrote more than it read, or missed twice running
+)
+
+// noteOutcome classifies a ping's answer and applies it to the entry and the counters.
+func (k *Keeper) noteOutcome(j pingJob, status int, u Usage) outcome {
+	switch {
+	case status == http.StatusTooManyRequests || status >= 500:
+		k.skipped.Add(1)
+		return outcomeTransient
+	case status >= 400:
+		k.failed.Add(1)
+		k.markStopped(j.e)
+		return outcomeFailed
+	case u.FreshInput == 0 && u.CacheRead == 0 && u.CacheWrite == 0:
+		k.failed.Add(1)
+		k.markStopped(j.e)
+		return outcomeFailedRecorded
+	}
+	if u.CacheRead == 0 && k.notePingMiss(j.e) {
+		k.missed.Add(1)
+		return outcomeMissed
+	}
+	if u.CacheWrite > u.CacheRead || u.CacheRead == 0 {
+		k.wrote.Add(1)
+		k.markStopped(j.e)
+		slog.Error("context-guru: cache keep-alive ping did not read the held prefix (it wrote more than it read, "+
+			"or missed twice running); not pinging this session again",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
+			"cache_write", u.CacheWrite, "cache_read", u.CacheRead)
+		return outcomeStopped
+	}
+	k.notePingRead(j.e)
+	return outcomeRead
+}
+
+// notePingMiss counts a miss on e and reports whether it is the FIRST in a row.
+func (k *Keeper) notePingMiss(e *kaEntry) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e.missed++
+	return e.missed == 1
+}
+
+// notePingRead resets e's run of misses.
+func (k *Keeper) notePingRead(e *kaEntry) {
+	k.mu.Lock()
+	e.missed = 0
+	k.mu.Unlock()
 }
 
 // record1 books one ping: the session's running spend, the process counter, and whatever
@@ -1092,11 +1145,15 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 // can be worthless, which is the point of publishing them together: pings with no
 // conversions is a policy that spends and gains nothing, and `wrote` above zero is a bug.
 type Stats struct {
-	Live     int     `json:"live_sessions"`
-	Pings    int64   `json:"pings"`
-	Skipped  int64   `json:"skipped"`
-	Failed   int64   `json:"failed"`
-	Wrote    int64   `json:"wrote_instead_of_read"`
+	Live    int   `json:"live_sessions"`
+	Pings   int64 `json:"pings"`
+	Skipped int64 `json:"skipped"`
+	Failed  int64 `json:"failed"`
+	Wrote   int64 `json:"wrote_instead_of_read"`
+	// Missed counts pings that read nothing — a real cache miss, not a failure. A FIRST miss
+	// in a row keeps pinging; a SECOND stops it (see noteOutcome), which is why Missed and
+	// Wrote can both be 1 for the same session (TestASecondMissInARowStops).
+	Missed   int64   `json:"missed"`
 	SpentUSD float64 `json:"spend_usd"`
 	// SummarySubstituted, SummarySubstituteFailed and SummarySubstituteOverBudget are
 	// cache_aware_summarizer's share of Pings — see fireSummarySubstitute. A deployment running
@@ -1154,7 +1211,7 @@ func (k *Keeper) Stats() Stats {
 	live := len(k.live)
 	k.mu.Unlock()
 	return Stats{Live: live, Pings: k.pings.Load(), Skipped: k.skipped.Load(),
-		Failed: k.failed.Load(), Wrote: k.wrote.Load(),
+		Failed: k.failed.Load(), Wrote: k.wrote.Load(), Missed: k.missed.Load(),
 		SpentUSD:                           math.Float64frombits(k.spentUSD.Load()),
 		SummarySubstituted:                 k.summarySubstituted.Load(),
 		SummarySubstituteFailed:            k.summarySubstituteFailed.Load(),
