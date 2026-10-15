@@ -43,8 +43,13 @@ func (e *repointEnv) userFile() string { return filepath.Join(e.home, ".claude",
 
 // version copies the real scripts into the cache as `ver` and returns its scripts directory.
 func (e *repointEnv) version(ver string) string {
+	return e.versionOf("context-guru", "context-guru", ver)
+}
+
+// versionOf is version() for any marketplace and plugin name in the cache path.
+func (e *repointEnv) versionOf(market, plugin, ver string) string {
 	e.t.Helper()
-	dir := filepath.Join(e.cache, ver, "scripts")
+	dir := filepath.Join(e.home, ".claude", "plugins", "cache", market, plugin, ver, "scripts")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		e.t.Fatal(err)
 	}
@@ -271,5 +276,53 @@ func TestRepointDoesNotRunWhenTheFileIsMissing(t *testing.T) {
 	}
 	if _, err := os.Stat(e.userFile()); !os.IsNotExist(err) {
 		t.Error("a missing settings file must not be created")
+	}
+}
+
+// A string compare puts "0.10.0" before "0.9.0". The versions must be compared as numbers.
+func TestRepointComparesVersionsAsNumbers(t *testing.T) {
+	t.Run("0.9.0 installed, 0.10.0 running: re-point", func(t *testing.T) {
+		e := newRepointEnv(t)
+		a, b := e.version("0.9.0"), e.version("0.10.0")
+		e.install(a, e.userFile(), "", true)
+		e.sessionStart(b)
+		if cmd, _, rec := statusLineOf(t, e.userFile()); cmd != quoted(b) || rec != quoted(b) {
+			t.Errorf("want B in both, got %q / %q", cmd, rec)
+		}
+	})
+	t.Run("0.10.0 installed, 0.9.0 running: leave", func(t *testing.T) {
+		e := newRepointEnv(t)
+		a, b := e.version("0.10.0"), e.version("0.9.0")
+		e.install(a, e.userFile(), "", true)
+		before, _ := os.ReadFile(e.userFile())
+		e.sessionStart(b)
+		after, _ := os.ReadFile(e.userFile())
+		if string(before) != string(after) {
+			t.Errorf("a newer version must stay\nbefore: %s\nafter:  %s", before, after)
+		}
+	})
+}
+
+// Another plugin's (or another marketplace's) cached statusline.py is not ours to move, even when
+// the ownership record names it and its version is older.
+func TestRepointLeavesAnotherPluginsScriptAlone(t *testing.T) {
+	for _, c := range []struct{ name, market, plugin string }{
+		{"another plugin name", "context-guru", "other-plugin"},
+		{"another marketplace", "other-market", "context-guru"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newRepointEnv(t)
+			a, b := e.versionOf(c.market, c.plugin, "0.5.0"), e.version("0.5.1")
+			e.install(a, e.userFile(), "", true)
+			before, _ := os.ReadFile(e.userFile())
+			e.sessionStart(b)
+			if out, code := e.run("python3", filepath.Join(b, "settings.py"), "statusline-repoint"); code != 0 || strings.TrimSpace(out) != "" {
+				t.Errorf("exit %d, output %q", code, out)
+			}
+			after, _ := os.ReadFile(e.userFile())
+			if string(before) != string(after) {
+				t.Errorf("file changed\nbefore: %s\nafter:  %s", before, after)
+			}
+		})
 	}
 }

@@ -146,7 +146,7 @@ def apply_statusline(data: dict, command: str) -> None:
 # <marketplace>/<plugin>/<version>/scripts/statusline.py`, inside the double quotes install.sh wraps
 # around it. Anything else (a dev checkout, a hand-written path) does not match and is left alone.
 _CACHED_STATUSLINE = re.compile(
-    r'"(?P<path>[^"]*/plugins/cache/[^/"]+/(?P<plugin>[^/"]+)/(?P<version>[^/"]+)/scripts/statusline\.py)"')
+    r'"(?P<path>[^"]*/plugins/cache/(?P<market>[^/"]+)/(?P<plugin>[^/"]+)/(?P<version>[^/"]+)/scripts/statusline\.py)"')
 
 
 def _version_tuple(text: str) -> tuple | None:
@@ -167,7 +167,7 @@ def repoint_statusline(data: dict, running: str) -> bool:
 
     Moves only when ALL of these hold; anything else returns False and changes nothing:
       * the current value is ours by record (is_ours_statusline), never by the look of the path;
-      * it names a cached `statusline.py` of the SAME plugin as the running one;
+      * it names a cached `statusline.py` of the SAME plugin (marketplace and name) as the running one;
       * that version is strictly OLDER than the running one, so an older session (or a second
         Claude Code install) never drags a newer status line back.
     Only the path inside the command changes: flags and `refreshInterval` stay as they were.
@@ -177,7 +177,7 @@ def repoint_statusline(data: dict, running: str) -> bool:
         return False
     new = _CACHED_STATUSLINE.fullmatch('"' + running + '"')
     old = _CACHED_STATUSLINE.search(current["command"])
-    if not new or not old or old.group("plugin") != new.group("plugin") or old.group("path") == running:
+    if not new or not old or (old.group("market"), old.group("plugin")) != (new.group("market"), new.group("plugin")) or old.group("path") == running:
         return False
     old_v, new_v = _version_tuple(old.group("version")), _version_tuple(new.group("version"))
     if old_v is None or new_v is None or not old_v < new_v:
