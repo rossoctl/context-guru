@@ -652,7 +652,7 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 		if cur != nil {
 			cur.Turns++
 			cur.EndTS, cur.EndBilled = r.TS, r.Billed
-			credited = creditTurn(cur, led, r, isFreshSummary(r) != "")
+			credited = creditTurn(cur, led, r)
 			// CUMULATIVE NEW CONTENT, which is neither of the two obvious axes.
 			//
 			// Per-turn SIZE does not work: compaction reduces what a turn sends, so `r.Billed`
@@ -728,7 +728,7 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 				// Event.uniqueRate now prices a summary's removal as a read when the entry was live,
 				// and the headline credits this turn, so this view must too or the two disagree.
 				if !credited {
-					creditTurn(cur, led, r, isFreshSummary(r) != "")
+					creditOpening(cur, led, r)
 				}
 			} else if !credited && r.SavedUSD != 0 && r.SavedGross > 0 {
 				// A credit row outside every episode.
@@ -736,7 +736,7 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 					if !ghost.active {
 						ghost.active, ghost.new, anchored = true, 0, true
 					}
-					creditTurn(&CompactionEpisode{}, led, r, false)
+					creditTurn(&CompactionEpisode{}, led, r)
 				} else {
 					led.Rows++
 					led.StoredUSD += r.StoredUSD
@@ -821,8 +821,8 @@ func chargeRowCosts(e *CompactionEpisode, r compactRow, p kvcache.Pricing, opens
 //
 // # Which buckets count
 //
-//   - first removal (fresh): always. The turn made a summary; what it removed was priced at the
-//     rate the previous turn paid for it.
+//   - first removal (the unique part of the row): always. The turn made a summary; what it removed
+//     was priced at the rate the previous turn paid for it.
 //   - ttl_expiry: the entry had lapsed, so an uncompacted prefix would have been RE-CREATED.
 //     ColdCreditUSD.
 //   - hit: the entry was live, so the removed span would have been read. ReadCreditUSD.
@@ -830,20 +830,17 @@ func chargeRowCosts(e *CompactionEpisode, r compactRow, p kvcache.Pricing, opens
 //   - prefix_change: not credited. The entry missed because the prompt CHANGED, which inside a
 //     span we opened is frequently our own doing, so crediting it would credit this component for
 //     the misses it caused. The write is charged instead (see chargeRowCosts).
-func creditTurn(e *CompactionEpisode, led *SummarizeLedger, r compactRow, fresh bool) bool {
+func creditTurn(e *CompactionEpisode, led *SummarizeLedger, r compactRow) bool {
 	if r.SavedUSD == 0 || r.SavedGross <= 0 {
 		return false
 	}
 	led.Rows++
 	led.StoredUSD += r.StoredUSD
 	// The first removal on this row, whatever the verdict: it was priced at the rate the previous
-	// turn paid, so it does not depend on whether THIS turn hit. A fresh-summary row's whole removal
-	// is a first removal.
-	first := r.FirstUSD
-	if fresh && first == 0 {
-		first = r.SavedUSD
-	}
-	first = math.Min(math.Max(first, 0), r.SavedUSD)
+	// turn paid, so it does not depend on whether THIS turn hit. Only the unique part is a first
+	// removal. A turn that commissions a new summary often also replays the old one; that replay
+	// follows the verdict and span rules like any other.
+	first := math.Min(math.Max(r.FirstUSD, 0), r.SavedUSD)
 	rest := r.SavedUSD - first
 	e.FirstRemovalCreditUSD += first
 	led.FirstRemovalUSD += first
@@ -862,6 +859,21 @@ func creditTurn(e *CompactionEpisode, led *SummarizeLedger, r compactRow, fresh 
 		led.ReplayUSD += rest
 	}
 	return true
+}
+
+// creditOpening credits the row that OPENS an episode. Only its first removal is the new
+// summary's. Whatever else it saved is the replay of an earlier summary, past that summary's span,
+// so it goes to the ledger's past-span bucket.
+func creditOpening(e *CompactionEpisode, led *SummarizeLedger, r compactRow) {
+	if r.SavedUSD == 0 || r.SavedGross <= 0 {
+		return
+	}
+	first := math.Min(math.Max(r.FirstUSD, 0), r.SavedUSD)
+	led.Rows++
+	led.StoredUSD += r.StoredUSD
+	e.FirstRemovalCreditUSD += first
+	led.FirstRemovalUSD += first
+	led.PastSpanUSD += r.StoredUSD * (r.SavedUSD - first) / r.SavedUSD
 }
 
 // finishEpisode computes the net once the credits and debits are all in.
@@ -1183,6 +1195,7 @@ func (d *DB) compactEpisodeDataset(f Filter, price rePriceFn, summarizeOnly bool
 		r.Acted = acted != 0
 		r.StoredUSD = r.SavedUSD
 		rePriceRow(&r, price)
+		apportionFirst(&r)
 		out = append(out, r)
 	}
 	return out, rows.Err()

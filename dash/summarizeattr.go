@@ -3,6 +3,7 @@ package dash
 import (
 	"context"
 	"database/sql"
+	"math"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -56,6 +57,16 @@ func rePriceRow(r *compactRow, price rePriceFn) {
 	r.FirstUSD = ev.ComponentSavedUSD(p, SummarizeComponent, int(r.SavedUnique), int(r.SavedUnique))
 }
 
+// apportionFirst gives a row that was not re-priced (no rates available) the unique share of its
+// stored figure as its first removal, so the ledger can still tell a first removal from a replay.
+func apportionFirst(r *compactRow) {
+	if r.FirstUSD != 0 || r.SavedUnique <= 0 || r.SavedGross <= 0 {
+		return
+	}
+	share := float64(min(int(r.SavedUnique), int(r.SavedGross))) / float64(r.SavedGross)
+	r.FirstUSD = r.SavedUSD * share
+}
+
 // SummarizeLedgerFor runs the walk over the sessions in which summarize ever acted and returns
 // its ledger. A conversation whose model window is not exactly known contributes nothing, so its
 // credit stays as stored: the same rule the episode view uses for the same reason.
@@ -105,16 +116,21 @@ func (o *Overview) ApplySummarizeLedger(l *SummarizeLedger) {
 
 // applySummarizeLedgerToRow moves summarize's component row onto the ledger: the saved figure,
 // its first-removal / replay split and the verdicts that follow from them.
+//
+// An empty ledger (an unknown model window, a trigger above the client ceiling, no resolver) leaves
+// the row as it was. A partial one covers only some conversations: the stored credit the ledger did
+// not see stays in the replay column, so the split still adds up to saved_usd.
 func applySummarizeLedgerToRow(c *ComponentRow, l *SummarizeLedger) {
-	if c == nil || l == nil || c.Component != SummarizeComponent {
+	if c == nil || l == nil || c.Component != SummarizeComponent || l.Rows == 0 {
 		return
 	}
 	delta := l.DeltaUSD()
+	uncovered := math.Max(c.SavedUSD-l.StoredUSD, 0)
 	c.SavedUSD += delta
 	c.NetUSD += delta
 	c.NetUSDWithEstimate += delta
 	c.SavedUSDFirstRemoval = l.FirstRemovalUSD
-	c.SavedUSDReplay = l.ReplayUSD
+	c.SavedUSDReplay = l.ReplayUSD + uncovered
 	c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay
 	c.SavedUSDDecomposedStored = c.SavedUSDDecomposed
 	c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval - c.LLMCostUSD

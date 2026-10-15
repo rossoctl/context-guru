@@ -599,9 +599,9 @@ func TestTheTurnThatClosesOneSpanAndOpensAnotherIsCreditedOnce(t *testing.T) {
 	if first.State != EpisodeClosed {
 		t.Errorf("first episode state = %q, want closed", first.State)
 	}
-	if want := 500_000 * readRate; offUSD(first.FirstRemovalCreditUSD, want) {
-		t.Errorf("the closing turn's saving belongs to the span it closed: first-removal credit = %v, want %v",
-			first.FirstRemovalCreditUSD, want)
+	if want := 500_000 * readRate; offUSD(first.ReadCreditUSD, want) {
+		t.Errorf("the closing turn's saving belongs to the span it closed: read credit = %v, want %v",
+			first.ReadCreditUSD, want)
 	}
 	if second.FirstRemovalCreditUSD != 0 || second.ColdCreditUSD != 0 || second.ReadCreditUSD != 0 || second.OtherCreditUSD != 0 {
 		t.Errorf("the same saving must not also be credited to the new span: %+v", second)
@@ -782,7 +782,7 @@ func TestTheQueryFeedsTheWalkAClosedEpisode(t *testing.T) {
 // at the corrected rate.
 func TestTheCompactionTurnIsCreditedForItsRemovalAndChargedForItsWrite(t *testing.T) {
 	out := walk([]compactRow{
-		row(1, 1_000, fresh, saved(900_000), miss(CacheHit), wrote(40_000), cgCost(0.05)),
+		row(1, 1_000, fresh, firstRemoval(900_000), miss(CacheHit), wrote(40_000), cgCost(0.05)),
 		row(2, testSpan, saved(200_000), miss(CacheHit)),
 	}, exactWindow, testPrice)
 
@@ -1316,5 +1316,35 @@ func TestAFirstRemovalWithNoEventOpensAnInferredEpisode(t *testing.T) {
 	}
 	if want := 200_000 * readRate; offUSD(out.Ledger.CountedUSD(), want) {
 		t.Errorf("counted = %v, want %v", out.Ledger.CountedUSD(), want)
+	}
+}
+
+// A turn that commissions a new summary often also replays the old one. Only a first removal is the
+// new summary's; the replay belongs to the old summary, whose span has ended. Counting the whole
+// row as a first removal repeated the write-rate error of problem 1 once per summary.
+func TestAReplayOnTheCommissioningTurnIsNotAFirstRemoval(t *testing.T) {
+	started := func(r *compactRow) { r.Events = `{"` + offload.EventSummaryStarted + `":1}` }
+	for _, reason := range []string{CacheTTLExpiry, CachePrefixChange, CacheHit} {
+		t.Run(reason, func(t *testing.T) {
+			out := walk([]compactRow{
+				row(1, 1_000, started),
+				row(2, 10_000, replay, firstRemoval(100_000)),
+				row(3, testSpan, saved(100_000)), // closes the span
+				// A second summary is commissioned. This turn also replays the old one.
+				row(4, 1_000, started, saved(500_000), miss(reason)),
+			}, exactWindow, testPrice)
+			if want := 100_000 * readRate; offUSD(out.Ledger.FirstRemovalUSD, want) {
+				t.Errorf("first removal = %v, want %v: the one real first removal, nothing from the replay",
+					out.Ledger.FirstRemovalUSD, want)
+			}
+			rate := readRate
+			if reason == CacheTTLExpiry {
+				rate = writeRate
+			}
+			if want := 500_000 * rate; offUSD(out.Ledger.PastSpanUSD, want) {
+				t.Errorf("past-span = %v, want %v: the old summary's replay is past its span",
+					out.Ledger.PastSpanUSD, want)
+			}
+		})
 	}
 }

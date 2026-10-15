@@ -203,3 +203,26 @@ func TestSummarizerOwnCostIsAttributedToSummarize(t *testing.T) {
 	nearEq(t, "llm_cost_usd", got.LLMCostUSD, 0.45)
 	nearEq(t, "net", got.NetUSD, got.SavedUSD-0.45)
 }
+
+// An empty ledger must leave the summarize row as the stored figures made it. The ledger is empty
+// when the window is a guess, the trigger is above the client ceiling, or there is no resolver.
+func TestAnEmptyLedgerLeavesTheSummarizeRowAlone(t *testing.T) {
+	row := &ComponentRow{Component: SummarizeComponent, SavedUSD: 5, SavedUSDFirstRemoval: 1, SavedUSDReplay: 4,
+		SavedUSDDecomposed: 5, NetUSDFirstRemoval: 0.9, LLMCostUSD: 0.1, NetUSD: 4.9}
+	applySummarizeLedgerToRow(row, &SummarizeLedger{})
+	if row.SavedUSD != 5 || row.SavedUSDFirstRemoval != 1 || row.SavedUSDReplay != 4 ||
+		row.SavedUSDDecomposed != 5 || row.NetUSDFirstRemoval != 0.9 {
+		t.Errorf("row changed under an empty ledger: %+v", row)
+	}
+}
+
+// A partial ledger covers some conversations. The stored credit it did not see stays in the replay
+// column, so the split still adds up to saved_usd.
+func TestAPartialLedgerKeepsTheUncoveredCreditInTheSplit(t *testing.T) {
+	l := &SummarizeLedger{FirstRemovalUSD: 1, ReplayUSD: 2, StoredUSD: 10, Rows: 3}
+	row := &ComponentRow{Component: SummarizeComponent, SavedUSD: 15, NetUSD: 15, NetUSDWithEstimate: 15}
+	applySummarizeLedgerToRow(row, l)
+	nearEq(t, "saved", row.SavedUSD, 15+l.DeltaUSD())
+	nearEq(t, "split adds up", row.SavedUSDFirstRemoval+row.SavedUSDReplay, row.SavedUSD)
+	nearEq(t, "replay holds the uncovered 5", row.SavedUSDReplay, 2+5)
+}
