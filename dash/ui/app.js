@@ -8613,8 +8613,20 @@ async function loadKeepAlive() {
   // "is this costing me money".
   const host = clear($('#ka-tiles'));
   loadingState(host, 2);
+  // Every read starts now, the ledger first. The other panels used to start only after the ledger
+  // had come back, which put the slowest one (the recommendation, about nine seconds) behind it on
+  // the critical path; an earlier banner started it in parallel by accident and its removal made the
+  // tab four seconds slower. Each panel still fills from its own request, so one slow query never
+  // blanks another.
+  const ledger = api('keepalive');
+  loadKASessions();
+  loadKALive();
+  loadKABehaviour();
+  loadKACalc();
+  loadKAArmed();
+  loadKARecommend();
   try {
-    kaState.ledger = await api('keepalive');
+    kaState.ledger = await ledger;
     renderKAVerdict(kaState.ledger);
     // The decision row paints immediately with the ledger half, and again when the
     // counterfactual lands. The ledger must not wait on a window function; the row must not
@@ -8624,15 +8636,7 @@ async function loadKeepAlive() {
   } catch (e) {
     if (aborted(e)) return;
     errorState(host, 'Could not read the keep-alive ledger', e);
-    return;
   }
-  // The rest, each from its own request: one slow panel must not blank the others.
-  loadKASessions();
-  loadKALive();
-  loadKABehaviour();
-  loadKACalc();
-  loadKAArmed();
-  loadKARecommend();
 }
 
 /**
@@ -9398,7 +9402,8 @@ async function loadKARecommend() {
   // Same payload, two places: the decision row above (which is what a reader acts on) and the
   // detail below. Rendering it only here is how the refusal came to sit 2,900 px under a green
   // "Winner" tile that contradicted it.
-  renderKADecision(kaState.ledger, rec);
+  // If the ledger has not landed yet, its own handler renders the decision row with this payload.
+  if (kaState.ledger) renderKADecision(kaState.ledger, rec);
   clear(host);
   if (rec.refused) {
     // Two different refusals, and only one of them is about thin history: "your own gaps are
