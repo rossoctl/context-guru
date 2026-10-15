@@ -319,6 +319,10 @@ async function api(path, extra) {
     try { const j = await res.json(); if (j.error) msg = j.error; } catch (_) { /* not json */ }
     const e = new Error(msg); e.status = res.status; throw e;
   }
+  // The server may answer from a cache that is up to ten minutes old (stale-while-revalidate) and
+  // says how old in the Age header. Keep it per endpoint so a page can show the age of its DATA.
+  const age = Number(res.headers.get('Age')) || 0;
+  (state.ageMs ||= {})[path] = age * 1000;
   return res.json();
 }
 
@@ -1559,7 +1563,9 @@ async function loadOverview(opts = {}) {
     const lean = await api('stats', { lean: 1 });
     state.overview = lean;
     state.overviewFull = false;
-    state.loadedAt = Date.now();
+    // "Updated N ago" is the age of the DATA: a body served from the server's stale cache is older
+    // than the moment it arrived (see the Age header read in api()).
+    state.loadedAt = Date.now() - ((state.ageMs && state.ageMs.stats) || 0);
     if (state.dirty === wasDirty) {
       state.dirty = false;
       $('#refresh-now').classList.remove('has-new');
@@ -1574,6 +1580,13 @@ async function loadOverview(opts = {}) {
     const o = await api('stats');
     state.overview = o;
     state.overviewFull = true;
+    // Past the 30 s freshness window the server is recomputing behind a stale answer, so look again once,
+    // shortly, and the page converges on current figures unasked.
+    const dataAge = (state.ageMs && state.ageMs.stats) || 0;
+    state.loadedAt = Date.now() - dataAge;
+    if (dataAge > 45000 && !state.staleRetry) {
+      state.staleRetry = setTimeout(() => { state.staleRetry = 0; if (state.view === 'overview') loadOverview(); }, 10000);
+    }
     renderSavedLedger(o, state.keepAliveLedger, false);
     if ($('#overview-diagnostics').open) renderDiagnostics();
     else state.diagStale = true;

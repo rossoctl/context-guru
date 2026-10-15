@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver, same as dash: no extra C toolchain
@@ -278,6 +279,26 @@ type Registry struct {
 
 	mu    sync.RWMutex
 	cache map[string]cacheEntry // sha256(token) hex -> resolved tenant
+
+	onChange atomic.Pointer[func(kind string)]
+}
+
+// SetOnChange registers fn to run after every committed write to an account (its configuration, its
+// removal list, its upstreams, its label) and to the keep-alive strategy and campaign ledgers. The
+// dashboard uses it to drop cached reads that include that state; without it a cached body would show
+// the old state for as long as the cache may serve it. Set once at start-up.
+func (r *Registry) SetOnChange(fn func(kind string)) { r.onChange.Store(&fn) }
+
+// ChangeAccount and ChangeStrategy are the kinds passed to the listener.
+const (
+	ChangeAccount  = "account"
+	ChangeStrategy = "strategy"
+)
+
+func (r *Registry) changed(kind string) {
+	if fn := r.onChange.Load(); fn != nil && *fn != nil {
+		(*fn)(kind)
+	}
 }
 
 type cacheEntry struct {
@@ -767,6 +788,7 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 	// hot, so precise invalidation buys nothing and can be wrong in one direction
 	// that matters (a disabled tenant still being served).
 	r.clearCache()
+	r.changed(ChangeAccount)
 	// Disabling an account must also close its dashboard logins. Blocking the proxy
 	// while leaving a live cookie behind would let a disabled user keep reading their
 	// history for up to the session TTL, which is not what "disabled" means to
