@@ -1222,7 +1222,8 @@ function insDrawChart(host, g) {
     animation: false,
     textStyle: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11 },
     /* The bottom gutter holds the rotated labels; the left holds nothing but a little air. */
-    grid: { left: 16, right: 24, top: 12, bottom: insUsageGutter(rows), containLabel: false },
+    /* The left gutter holds the date labels now, the bottom holds the rotated capability names. */
+    grid: { left: 62, right: 24, top: 12, bottom: insUsageGutter(rows), containLabel: false },
     tooltip: {
       trigger: 'item',
       /* Pinned and instant. A tooltip that re-anchors per segment flickers while the pointer
@@ -1269,7 +1270,31 @@ function insDrawChart(host, g) {
       axisLabel: { color: t.muted, rotate: 45, interval: 0, fontSize: 10 },
       axisLine: { lineStyle: { color: t.border } },
       axisTick: { show: false } },
-    yAxis: { type: 'value', max: nCols, show: false },
+    /* THE TIME AXIS, LABELLED WITH REAL DATES.
+     *
+     * It was hidden, which left the chart's whole vertical dimension unexplained — a reader could
+     * see that a bar changed colour partway up but not WHEN, which is the question the form
+     * exists to answer.
+     *
+     * Each stacked segment is exactly one unit tall, so value n is day n: the formatter maps the
+     * axis position back to the bucket's own date. Ticks every `step` days rather than on all of
+     * them, because at one day per segment the labels would overlap — the axis shows enough
+     * scale to read the bar against, and the pinned tooltip names the exact day under the
+     * pointer. */
+    yAxis: {
+      type: 'value', min: 0, max: nCols, interval: insDateTickStep(nCols),
+      axisLabel: { color: t.faint, fontSize: 10,
+        formatter: (v) => {
+          const i = Math.round(v);
+          /* The axis counts segment EDGES, so edge i is the start of day i; the last edge is one
+           * day past the end and has no bucket of its own. */
+          if (i < 0 || i >= g.cols.length) return '';
+          return insColLabel(g.cols[i].from, 1);
+        } },
+      axisLine: { lineStyle: { color: t.border } },
+      axisTick: { show: false },
+      splitLine: { show: false },
+    },
     series,
   });
 
@@ -1284,6 +1309,12 @@ function insDrawChart(host, g) {
  * Explicitly, not via containLabel, which CLIPS when it runs out of room — a capability name
  * missing its own beginning reads as a different capability. 7.4px per character is measured for
  * the 11px monospace this chart uses. */
+/* insDateTickStep keeps the date labels from colliding: roughly eight of them, whatever the
+ * window holds, so a week shows every day and a quarter shows every fortnight. */
+function insDateTickStep(nDays) {
+  return Math.max(1, Math.ceil(nDays / 8));
+}
+
 function insUsageGutter(rows) {
   const longest = rows.reduce((m, r) => Math.max(m, (r.label || '').length), 0);
   /* A label rotated 45° is about 0.7 of its length tall. Reserved explicitly rather than via
