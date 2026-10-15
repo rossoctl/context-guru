@@ -543,22 +543,15 @@ function insRender() {
    * rather than guessed — a brush on a blank frame would make the reader supply the knowledge
    * this view was supposed to give them. */
   const chartPanel = el('div', { class: 'panel' },
-    el('h2', { text: 'What you carry, and whether you use it' }),
-    /* NAMES EVERY COLOUR ON SCREEN, including the slider's, which is not a data colour and so
-     * cannot be a legend entry — but was still an unexplained blue to the reader: "All colors
-     * used in project should be in Legend. Currently i have colors that not clear to me."
-     *
-     * Rewritten twice now. It first described a blue magnitude ramp and a volume strip that no
-     * longer existed, then "grey means in use... the faintest cells are..." after those two
-     * greys had been replaced by green and violet. A hint explaining an older version of the
-     * picture is worse than none, because the reader trusts it. */
-    el('p', { class: 'hint', text: 'One row per capability, worst waste first, with the ones you '
-      + 'actually use below so there is something to read the waste against. Each cell is one '
-      + 'day. Violet means you carried it that day and never called it — that is the waste. '
-      + 'Green means you used it. Red and amber appear on capabilities the tables recommend '
-      + 'removing, or cannot yet recommend removing, in the same colours they use there. The '
-      + 'blue bar under the chart is the range control, not data: drag its ends to narrow every '
-      + 'figure on this page to a period.' }));
+    el('h2', { text: 'What your unused capabilities cost, worst first' }),
+    /* Rewritten with the form. This described a heatmap's colours and its day grid, and before
+     * that a magnitude ramp and a volume strip — none of which exist. A hint explaining an older
+     * version of the picture is worse than none, because the reader trusts it. */
+    el('p', { class: 'hint', text: 'One bar per capability you can remove, longest first, showing '
+      + 'what carrying it costs you for nothing. Red means the evidence is sufficient to '
+      + 'recommend removing it; amber means it has never been invoked but has not yet been '
+      + 'observed long enough to be sure. Colours match the tables below, and the figure on each '
+      + 'bar is the same number the tables report.' }));
   chartPanel.appendChild(insProjectPicker());
   const chart = insChart();
   if (chart) chartPanel.appendChild(chart);
@@ -939,72 +932,54 @@ function insRollup(tl) {
 }
 
 
-
-/* ── the activity chart (Apache ECharts) ────────────────────────────────────
+/* ── the waste chart (Apache ECharts) ──────────────────────────────────────
  *
- * A heatmap of capability (rows) against time (columns), with a dataZoom brush: drag on the
- * slider or inside the plot to select a period, and every table below describes only that period.
+ * One horizontal bar per removable capability, longest first: what this costs you per request,
+ * for nothing.
  *
- * WHY A LIBRARY, AND WHY THIS ONE. Two earlier attempts were hand-built — forty lines of pointer
- * events, then d3 primitives — and both failed the same way: the gesture worked and the
- * affordance did not. d3 is a toolkit, so "use d3" still meant assembling a heatmap out of
- * rectangles and approximating a range control. ECharts ships both as configuration:
- * `series.type: 'heatmap'`, `dataZoom`, `visualMap`, tooltips and axis pointers are the library's
- * job, not ours. The chart below is a config object, which is the point.
+ * WHY NOT A HEATMAP, which is what this was. A capability-by-day heatmap answers "when did I use
+ * this", and that is worth seeing — once there are months of history with real phase changes in
+ * them. On the store this actually runs against there are eight days in which nearly every
+ * capability was carried every single day, so the heatmap rendered as a wall of one colour and
+ * was read exactly that way. Four rounds of colour and geometry fixes did not change that,
+ * because the form was answering a question the data could not yet support.
  *
- * Measured rather than assumed: the `common` build is 645 KB raw and 213 KB gzipped and contains
- * heatmap, dataZoom and visualMap; the full bundle is 1,005 KB for components we do not use, and
- * the `simple` build drops dataZoom, which is the one thing we are here for. ApexCharts is
- * lighter (135 KB gz) but its selection is less capable than dataZoom. Apache-2.0. Vendored
- * rather than loaded from a CDN because this page serves `script-src 'self'`.
+ * The question the page DOES exist to answer has a clean ranking behind it: 55 removable items,
+ * $31.70 in total, the worst single one at $7.14. A bar per capability says that at a glance,
+ * needs no hover, and puts the thing to act on first.
  *
- * WHY THE HEATMAP FORM. Three forms were rendered against four months of simulated phased work —
- * planning, documentation, testing, TDD. A total-activity area shows WHEN you worked and hides
- * the phase boundary completely, because volume is flat across it: the same number of calls, to a
- * different set of tools. A distinct-capabilities count shows churn but not identity. Only the
- * heatmap reads as the story without explanation.
+ * WHY A LIBRARY AT ALL, still. Axis layout, label measurement, value formatting and a range
+ * control are the library's job; two earlier hand-built attempts failed on exactly those. The
+ * dependency stays, the chart TYPE changes — which is a config change, not a rebuild.
  *
- * ROWS ARE ORDERED BY FIRST USE, which is the design rather than a detail: it produces a
- * diagonal, and the diagonal IS the progression. Sorted by volume the same data looks like noise.
+ * HORIZONTAL, because the labels are capability names: `mcp__web-search__google_pse_search` does
+ * not fit under a vertical bar at any readable size, and rotating it is not reading it.
  */
 
-/* The widest the time axis gets. Beyond this, days are rolled into multi-day columns: four months
- * of daily columns is 121 cells across a panel that is maybe 900px wide, and a 7px column cannot
- * be aimed at — the reader is selecting a RANGE by eye, so a column has to be big enough to see. */
-const INS_MAX_COLS = 60;
-/* Row height. 26px packed 28 named rows into a space where the labels touched, which is the
- * difference between a chart you can read and one you have to hover to use. A row carries a
- * capability name, so it is sized for the name rather than for the cell. */
-const INS_ROW_PX = 32;
-const INS_CHART_MIN_H = 240;
-/* The most rows the chart will draw. Showing every carried capability made the chart 2,174px tall
- * on a real store — taller than the window, so the reader scrolled past the picture to reach the
- * tables it is meant to explain, and the diagonal that tells the story was spread over two
- * screens. Rows are already sorted worst-waste-first, so a cap keeps the finding and drops the
- * tail; the tables stay complete, and the count of what is not shown is reported. */
-const INS_MAX_ROWS = 20;
+const INS_BAR_PX = 22;
+const INS_BAR_MIN_H = 220;
+/* The most bars drawn. Twenty fits on a screen with room for the labels, and the rows are already
+ * sorted worst-first so what is cut is the tail. The footnote says how many are not shown; the
+ * tables below keep every one. */
+const INS_MAX_BARS = 20;
 
-/* The instance, kept so a re-render resizes rather than leaks: ECharts holds a canvas/SVG root
- * and its own event listeners, and dropping the DOM node without dispose() keeps both alive. */
+/* The instance, kept so a re-render resizes rather than leaks: ECharts holds a root and its own
+ * listeners, and dropping the DOM node without dispose() keeps both alive. */
 let insEChart = null;
 
 function insChartTheme() {
   const cs = getComputedStyle(document.documentElement);
   const v = (n, f) => cs.getPropertyValue(n).trim() || f;
   return {
-    /* The ramp comes from the stylesheet, so it is declared once for both themes and dark mode
-     * re-steps against its own surface instead of inverting. */
-    /* The VERDICT hues, read from the stylesheet rather than restated here, so a cell and the
-     * table pill under it cannot disagree — they had, in three different colours for one item. */
+    /* The VERDICT hues, read from the stylesheet rather than restated here, so a bar and the
+     * table pill under it cannot disagree. The cell variants are the softened steps — see the
+     * scheme comment in insights.css. */
     vd: {
-      /* The CELL variants: same hues as the table pills, softened for a large flat block. See
-       * the scheme comment in insights.css — one scheme, two densities. */
       remove: v('--ins-cell-remove', '#cc6b60'),
       stale: v('--ins-cell-remove', '#cc6b60'),
       consider: v('--ins-cell-consider', '#f3cd80'),
       keep: v('--ins-cell-keep', '#9aa2ae'),
     },
-    /* Carried-but-never-invoked, declared beside the verdicts so the legend can name it. */
     carried: v('--ins-carried', '#b0a9dc'),
     ink: v('--fg', '#1b1f1c'),
     muted: v('--fg-muted', '#5c635d'),
@@ -1015,384 +990,155 @@ function insChartTheme() {
   };
 }
 
+/* insBarRows is the ranked row set, and the ranking is the whole point of the chart.
+ *
+ * ONLY WHAT CAN BE REMOVED. A built-in gets no bar: its weight is real but removing it breaks the
+ * agent, and putting the biggest unactionable item at the top of a chart about what to remove is
+ * the one misreading this view must not invite. The tables already filter on scope; the chart has
+ * to agree with them.
+ *
+ * BY MONEY, falling back to tokens. A model with no published rate reports $0, which would sort a
+ * genuinely heavy capability to the bottom — so an unpriced row ranks on its per-request weight
+ * and is labelled as unpriced rather than as free.
+ */
+function insBarRows() {
+  const items = ((insDoc && insDoc.items) || []).filter(
+    (it) => it.scope && it.scope !== 'none' && (it.usd > 0 || it.tokens > 0));
+  items.sort((a, b) => (b.usd || 0) - (a.usd || 0) || (b.tokens || 0) - (a.tokens || 0));
+  return items;
+}
+
 function insChart() {
   if (typeof echarts === 'undefined') {
     return el('p', { class: 'empty', text: 'The charting library did not load, so the picture is ' +
       'unavailable. The tables below are unaffected.' });
   }
-  const tl = insFullTimeline || (insDoc && insDoc.timeline);
-  if (!tl || !tl.buckets.length) return null;
-  const g = insRollup(tl);
-  if (!g.rows.length) {
-    return el('p', { class: 'empty', text: 'Nothing was carried in this range, so there is ' +
-      'nothing to chart. The tables below still list your inventory.' });
+  const all = insBarRows();
+  if (!all.length) {
+    return el('p', { class: 'empty', text: 'Nothing removable has a measured cost in this ' +
+      'range, so there is nothing to rank. The tables below still list your inventory.' });
   }
+  const rows = all.slice(0, INS_MAX_BARS);
 
   const host = el('div', { class: 'ins-echart' });
-  const h = Math.max(INS_CHART_MIN_H, g.rows.length * INS_ROW_PX + 120);
+  const h = Math.max(INS_BAR_MIN_H, rows.length * INS_BAR_PX + 70);
   host.style.setProperty('height', h + 'px');
 
   /* Rendered after the node is in the document, because ECharts measures its container and a
    * detached div has no width. */
-  setTimeout(() => insDrawChart(host, g, tl), 0);
-  if (!g.hidden) return host;
+  setTimeout(() => insDrawChart(host, rows), 0);
 
-  /* The chart is capped, so it SAYS it is capped. Rows are sorted worst-waste-first, so what is
-   * cut is the quietest tail — but a reader who counts 28 rows against a table of 79 needs to
-   * know which they are looking at, or the picture reads as the whole inventory. */
-  return el('div', {}, host,
-    el('p', { class: 'hint', text: 'Showing ' + g.shownUnused + ' of ' + g.totalUnused +
-      ' never-invoked capabilities, heaviest first, alongside the most active ones you do use — ' +
-      'so the waste has something to be read against. ' + g.hidden + ' lighter rows are not ' +
-      'charted; all ' + g.total + ' are in the tables below.' }));
+  if (all.length <= rows.length) return host;
+  return el('div', {}, host, insBarFootnote(rows.length, all.length));
 }
 
-function insDrawChart(host, g, tl) {
+/* insBarGutter is the width the row labels need, in pixels.
+ *
+ * Measured from the longest label rather than guessed, because the alternative — containLabel —
+ * silently truncates when it runs out of room, and a clipped capability name reads as a
+ * different capability. Capped so one pathological name cannot eat the plot. */
+function insBarGutter(rows) {
+  const longest = rows.reduce((m, r) => Math.max(m, insBarLabel(r).length), 0);
+  return Math.min(260, Math.max(90, longest * 7.4 + 16));
+}
+
+/* insBarLabel is a capability's name at a width the axis gutter can hold.
+ *
+ * An MCP tool carries its server in its name — `mcp__web-search__google_pse_search` — which is
+ * both the longest kind of label here and the most redundant, since the server is repeated on
+ * every one of its tools. Rendered as `web-search/google_pse_search`, which is the same two
+ * facts in half the width. Everything else keeps whatever insShortName leaves, and a name still
+ * too long is truncated from the FRONT with an ellipsis rather than clipped silently: a label
+ * missing its own beginning, with no mark to say so, reads as a different tool. */
+function insBarLabel(it) {
+  let n = insShortName(it.name);
+  const mcp = n.match(/^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/);
+  if (mcp) n = mcp[1] + '/' + mcp[2];
+  return n.length > 32 ? '…' + n.slice(-31) : n;
+}
+
+/* insBarFootnote names what the chart is not showing. A chart capped at 20 of 55 reads as the
+ * whole inventory unless it says so, and the figure a reader would then quote is wrong. */
+function insBarFootnote(shown, total) {
+  return el('p', { class: 'hint', text: 'Showing the ' + shown + ' most expensive of ' + total +
+    ' removable capabilities. The other ' + (total - shown) + ' cost less each; all of them are ' +
+    'in the tables below.' });
+}
+
+function insDrawChart(host, rows) {
   if (!host.clientWidth) return;
   const t = insChartTheme();
   if (insEChart) { try { insEChart.dispose(); } catch (_) { /* already gone */ } }
   insEChart = echarts.init(host, null, { renderer: 'svg' });
 
-  /* EDGES, NOT CENTRES — n+1 labels for n columns.
-   *
-   * A column covers a span of time: the one labelled 8 holds everything from the 8th up to the
-   * 9th. Drawn as a category axis, ECharts centres "8" under that band, so the handle that
-   * reports 8 lands at the band's left edge while the label sits in its middle — measured at 29px
-   * and 13px out, in opposite directions, which is why it read as broken rather than merely
-   * offset: "when it selects for example 8 it's not aligned with 8 in chart".
-   *
-   * So the axis is now the BOUNDARIES between columns, which is the reader's own model:
-   *
-   *     |8|--------^--------|9|--------^--------|10|
-   *
-   * A date labels an edge, a cell fills the gap between two edges, and a selection is a whole
-   * number of gaps. A value axis with interval 1 puts the ticks exactly on the integers, and each
-   * cell is placed at i + 0.5 so it straddles the gap rather than centring on an edge. Measured:
-   * labels at 19/130/240/351 with cells spanning 18→130 and 129→241 — edge-aligned, gap-filled,
-   * nothing hanging off the plot. */
-  const edges = g.cols.map((c) => insColLabel(c.from, g.width));
-  edges.push(insColLabel(insColEnd(g, tl), g.width));
-  const cols = edges;
-  const rows = g.rows.map((r) => insShortName(r.name));
-  const peak = Math.max(1, ...g.rows.flatMap((r) => r.calls));
-
-  /* HUE IS THE VERDICT. OPACITY IS THE MAGNITUDE. POSITION IS THE OWNER.
-   *
-   * The cell used to sit on a blue sequential ramp, which encoded invocation count in a hue that
-   * appeared nowhere in the tables — so the same item read green in its table pill, red if it was
-   * a built-in, and blue in the chart. Three colours, one item, and no way to check the picture
-   * against the table beneath it.
-   *
-   * Hue now carries the VERDICT, read from the same stylesheet tokens the pills use, so red means
-   * removable waste in both places. That spends the one channel a reader actually looks at on the
-   * one fact they act on.
-   *
-   * Magnitude moves to OPACITY within the verdict hue — "how much" stays legible without a second
-   * meaning in the same channel. Owner identity moves to row GROUPING rather than hue: a
-   * per-plugin palette would need ~15 distinct colours where 8 are validated, and the rule is
-   * never to cycle a categorical scale. Grouped rows let a wasteful owner read as a solid red
-   * block, which is the thing worth seeing.
-   *
-   * THE SELECTION IS ENCODED IN THE CELLS, NOT DRAWN OVER THEM. The first version shaded the
-   * excluded range with a markArea band, and it looked broken: a band runs to a category
-   * BOUNDARY, so it covered some cells and clipped others down the middle, and being attached to
-   * one series it left the carried-only cells unshaded entirely — "parts of chart painted gray
-   * but not all". Greying the excluded CELLS instead means the boundary is always a cell edge,
-   * every cell is treated the same way, and what the tables are counting is the part that still
-   * has colour. */
-  const sel = insSelectedCols(g, insSince, insUntil);
-  const inSel = (ci) => !sel || (ci >= sel[0] && ci <= sel[1]);
-  /* One bucket per verdict, plus the two that fall outside the selection. A row whose verdict the
-   * document does not carry — this plugin's own skills, held out of the tables — charts as `keep`,
-   * which is the honest default: it is present, and nothing is being recommended about it. */
-  const byVd = { remove: [], stale: [], consider: [], keep: [] };
-  const idle = [];
-  const usedOut = [];
-  const idleOut = [];
-  g.rows.forEach((r, ri) => {
-    const vd = byVd[insVerdictOf(r.name)] ? insVerdictOf(r.name) : 'keep';
-    r.calls.forEach((v, ci) => {
-      const live = inSel(ci);
-      /* ci + 0.5 puts the cell in the GAP between edge ci and edge ci+1, which is the span it
-       * actually describes. An integer would centre it on the edge and leave the first cell
-       * hanging half off the plot. */
-      const x = ci + 0.5;
-      if (v > 0) {
-        /* A FLAT colour, no per-cell opacity.
-         *
-         * Invocation count used to modulate opacity inside the verdict hue, which looked
-         * informative and read as broken: one legend entry became a dozen shades on screen
-         * (#566072 at 0.35, 0.36, 0.39…), and a legend can name a colour but not a gradient the
-         * reader is left to infer. The count is in the tooltip, where a number belongs. */
-        if (live) byVd[vd].push([x, ri, v]);
-        else usedOut.push([x, ri, v]);
-      } else if (r.carried[ci] > 0) {
-        if (!live) { idleOut.push([x, ri, 0]); return; }
-        /* CARRIED, NOT CALLED — and this is where the money is.
-         *
-         * A day like this was billed: the declaration went up in the system prompt and nothing
-         * reached for it. So when the row's verdict says that carriage is removable, the cell
-         * takes the VERDICT colour at a low opacity rather than the neutral wash: a faint grey
-         * everywhere was why the chart looked monochrome and why the waste was invisible in it.
-         *
-         * Low opacity, not full: the strong mark is reserved for a real invocation, and a solid
-         * red block on a row that was never called would overstate a single day's share of the
-         * cost. It is a tint of the finding, which is what it is. */
-        /* The verdict colour at low opacity was the other half of the unreadable-grey problem:
-         * it produced a second shade of every verdict hue with no legend entry. A
-         * carried-never-invoked day is ONE state with ONE colour, and the row's verdict is
-         * already visible wherever that capability WAS invoked. */
-        idle.push([x, ri, 0]);
-      }
-    });
-  });
+  /* Longest bar at the TOP, which means last in the array: a category y axis counts upward from
+   * the bottom. */
+  const ordered = rows.slice().reverse();
+  const priced = ordered.some((r) => r.usd > 0);
 
   insEChart.setOption({
     animation: false,
     textStyle: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11 },
-    /* `left: 8` plus containLabel gives the capability names room: they are the chart's y axis
-     * and the thing a reader scans, so they get space rather than being squeezed by the plot. */
-    grid: { left: 8, right: 24, top: 12, bottom: 78, containLabel: true },
+    /* AN EXPLICIT LEFT GUTTER, not containLabel.
+     *
+     * containLabel asks ECharts to fit the labels, and when they do not fit it CLIPS them — so
+     * `mcp__web-search__google_pse_search` rendered as `ch/google_pse_search`, a label missing
+     * its own beginning with nothing to say so. Reserving the width instead means the longest
+     * label decides the gutter and every one of them is whole. 7px per character is measured for
+     * the 11px monospace this chart uses, with a floor so a chart of short names is not
+     * lopsided. */
+    grid: { left: insBarGutter(ordered), right: 92, top: 8, bottom: 28, containLabel: false },
     tooltip: {
-      /* PINNED, not following the cell.
-       *
-       * `position: 'top'` anchors the tooltip above whichever cell is hovered, so dragging the
-       * pointer across a grid of 168 small cells makes it leap from one anchor to the next —
-       * reported as "horrous flicking". A fixed corner means the pointer can cross the whole row
-       * and the only thing that changes is the text inside it.
-       *
-       * Top-right of the plot, and `confine` so it never escapes the chart: the rows are labelled
-       * down the left, and a tooltip over the labels hides the name of the thing it describes. */
-      position: (point, params, dom, rect, size) => [size.viewSize[0] - size.contentSize[0] - 8, 8],
+      trigger: 'item',
+      /* Pinned and instant. A tooltip that re-anchors per bar flickers while the pointer
+       * travels, which is what a previous version of this chart did. */
+      position: (pt, params, dom, rect, size) => [size.viewSize[0] - size.contentSize[0] - 8, 8],
       confine: true,
-      /* No transition on the DOM node either: a 0.1s ease on a box that re-anchors per cell is
-       * the other half of the same flicker. */
       transitionDuration: 0,
-      enterable: false,
       formatter: (p) => {
-        const r = g.rows[p.value[1]];
-        /* x is the gap centre (ci + 0.5), so floor it back to the column it describes. */
-        const ci = Math.floor(p.value[0]);
-        const col = g.cols[ci];
-        if (!r || !col) return '';
-        const when = g.width > 1
-          ? insColLabel(col.from, g.width) + ' → ' + edges[ci + 1]
-          : insColLabel(col.from, g.width);
-        return '<strong>' + r.name + '</strong><br>' + when + ': ' +
-          (p.value[2] > 0 ? p.value[2] + ' invocation(s)' : 'carried, never invoked');
+        const r = ordered[p.dataIndex];
+        if (!r) return '';
+        const money = r.priced ? usd(r.usd) : 'unpriced';
+        return '<strong>' + r.name + '</strong><br>' +
+          money + ' wasted · ' + (r.tokens || 0).toLocaleString() + ' tok/request<br>' +
+          (r.verdict || '') + (r.why ? '<br><span style="opacity:.75">' + r.why + '</span>' : '');
       },
     },
-    /* TWO x AXES over one grid, and the second one is the whole trick.
-     *
-     * The heatmap sits on axis 0, which nothing ever zooms, so its columns keep their width and
-     * their position for the life of the chart. The slider drives axis 1, which is invisible and
-     * carries no series: it exists only to give the slider an extent to draw against and a range
-     * to report. Measured against the alternatives — a slider bound to axis 0 rescales it (six
-     * date ticks collapsed to three and the spacing stretched), and a slider detached with
-     * `xAxisIndex: []` is not PAINTED AT ALL, which is how this shipped briefly: the option
-     * object still reported start and end, so a probe reading those values passed while the
-     * reader saw no slider. Only this arrangement gives both a visible control and a fixed axis. */
-    xAxis: [
-      {
-        /* A VALUE axis, so a tick lands on an integer boundary and a cell can sit between two of
-         * them. `interval: 1` keeps one tick per boundary; the label comes from the edge list. */
-        type: 'value', min: 0, max: g.cols.length, interval: 1,
-        splitLine: { show: false },
-        axisLabel: { color: t.faint, formatter: (v) => insEdgeLabel(edges, v, cols.length) },
-        axisLine: { lineStyle: { color: t.border } },
-        axisTick: { show: true, lineStyle: { color: t.border } },
-      },
-      { type: 'value', min: 0, max: g.cols.length, gridIndex: 0, show: false },
-    ],
-    yAxis: {
-      type: 'category', data: rows, splitArea: { show: false },
+    xAxis: {
+      type: 'value',
+      /* Money if anything is priced, otherwise per-request weight — never a mix, which would put
+       * two units on one axis. */
+      name: priced ? 'wasted' : 'tokens per request',
+      nameLocation: 'end',
+      nameTextStyle: { color: t.faint, fontSize: 10, align: 'right' },
+      axisLabel: { color: t.faint, formatter: (v) => (priced ? '$' + v : compact(v)) },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      splitLine: { lineStyle: { color: t.border, opacity: 0.6 } },
+    },
+    yAxis: { type: 'category',
+      /* insBarLabel, not insShortName: an MCP tool is named `mcp__<server>__<tool>`, which is
+       * wider than the gutter and was clipped to `__web-search__google_pse_search` — a label
+       * missing its own beginning. The full name is in the tooltip and in the tables. */
+      data: ordered.map((r) => insBarLabel(r)),
       axisLabel: { color: t.muted },
       axisLine: { lineStyle: { color: t.border } },
-      axisTick: { show: false },
-    },
-    /* The colour legend, which the library draws and we would otherwise have to. */
-    /* A VERDICT legend, not a magnitude ramp. The old visualMap explained a blue scale that meant
-     * nothing in the tables; this names the three states a reader acts on, in the colours the
-     * table pills use. Non-interactive: clicking a legend entry to hide a series would let
-     * somebody hide their own waste by accident. */
-    legend: {
-      bottom: 30, left: 'center', orient: 'horizontal',
-      itemWidth: 11, itemHeight: 11, itemGap: 16, icon: 'roundRect',
-      selectedMode: false,
-      textStyle: { color: t.muted, fontSize: 10 },
-      /* ONLY THE STATES PRESENT. A legend entry with no cells behind it reads as a colour the
-       * reader should go looking for, and they will not find it: the chart draws a row only for a
-       * capability that was invoked at least once, and anything invoked is `keep` by definition —
-       * so on a store where nothing has yet cleared the evidence floor, `removable waste` and
-       * `below the floor` are honestly empty. Advertising them anyway makes a correct chart look
-       * broken. The faint wash is always listed, because carriage-without-use is the finding. */
-      data: insLegendFor(byVd, idle, idleOut, usedOut),
-    },
-    /* THE RANGE CONTROL — a SELECTOR, not a zoom.
-     *
-     * The obvious configuration is wrong, and it was shipped before this comment existed. A
-     * dataZoom bound to the x axis RESCALES that axis: narrow to three days and the heatmap's
-     * remaining cells stretch to fill the plot while the slider beneath keeps its full width and
-     * merely moves its window. Measured: cells went from 174px to 225px wide and eleven of them
-     * left the plot entirely. The reader's own words for it — "I lose correlation between ruler
-     * and graph, because graph range shrinked while ruler stay on same size just moved" — are
-     * the defect exactly. Two scales for one time axis, stacked, is worse than no ruler.
-     *
-     * So the heatmap's axis never rescales: the slider drives the hidden second x axis instead
-     * (see xAxis above), which keeps the control painted and its handles grabbable while zooming
-     * nothing the reader is looking at. The selection is drawn ON the heatmap as a markArea band
-     * (below), so every day stays on screen at a fixed position directly under its tick — the
-     * excluded range is dimmed rather than deleted, and the reader can still see what they are
-     * leaving out and judge whether to widen again.
-     *
-     * No `inside` zoom: dragging the plot would be a second, hidden way to change the range, and
-     * on axis 0 it would rescale the thing we just finished pinning. */
-    dataZoom: [
-      /* THE HANDLES SNAP TO WHOLE DAYS. A column is a day (or a rolled group of them) and a range
-       * is a count of columns, so "11.75" is not a selectable thing — ECharts coerces it to a
-       * category eventually, but mid-drag the handle sits between two days and the reader cannot
-       * tell which one they are about to get: "rule should be defined well 11-12-13, not allow
-       * to select 11.75". `minValueSpan: 1` keeps the span at least one whole column, and the
-       * handler below rounds both ends to an integer index before it computes a date, so the
-       * window can only ever start and end on a day boundary. The label shows that day's name,
-       * never a number, so what the handle reports is what the tables will count. */
-      { type: 'slider', xAxisIndex: 1, filterMode: 'none', bottom: 4, height: 22,
-        minValueSpan: 1,
-        borderColor: t.border, fillerColor: 'transparent',
-        dataBackground: { lineStyle: { color: t.faint, opacity: 0.5 },
-          areaStyle: { color: t.faint, opacity: 0.18 } },
-        selectedDataBackground: { lineStyle: { color: t.accent },
-          areaStyle: { color: t.accent, opacity: 0.22 } },
-        handleStyle: { color: t.surface, borderColor: t.accent, borderWidth: 1.5 },
-        moveHandleStyle: { color: t.accent, opacity: 0.5 },
-        textStyle: { color: t.muted, fontSize: 10 },
-        labelFormatter: (i) => cols[Math.round(i)] || '' },
-    ],
-    series: [
-      /* ONE SERIES PER VERDICT, each in that verdict's own hue, so the cell and its table pill
-       * agree. `remove` and `stale` share a colour because they are the same instruction with
-       * different evidence — both legend entries would say "removable waste", so they are one
-       * entry and two series. */
-      { name: 'removable waste', type: 'heatmap', data: byVd.remove,
-        itemStyle: { color: t.vd.remove, borderRadius: 2, borderWidth: 2,
-          borderColor: 'transparent' },
-        /* focus 'self': only the hovered CELL, never its whole series. The default is
-         * 'series', which highlighted all 160 cells of a colour at once and read as the chart
-         * blinking. */
-        emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
-      { name: 'removable waste', type: 'heatmap', data: byVd.stale,
-        itemStyle: { color: t.vd.remove, borderRadius: 2, borderWidth: 2,
-          borderColor: 'transparent' },
-        /* focus 'self': only the hovered CELL, never its whole series. The default is
-         * 'series', which highlighted all 160 cells of a colour at once and read as the chart
-         * blinking. */
-        emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
-      { name: 'below the evidence floor', type: 'heatmap', data: byVd.consider,
-        itemStyle: { color: t.vd.consider, borderRadius: 2, borderWidth: 2,
-          borderColor: 'transparent' },
-        /* focus 'self': only the hovered CELL, never its whole series. The default is
-         * 'series', which highlighted all 160 cells of a colour at once and read as the chart
-         * blinking. */
-        emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
-      { name: 'in use / built in', type: 'heatmap', data: byVd.keep,
-        itemStyle: { color: t.vd.keep, borderRadius: 2, borderWidth: 2,
-          borderColor: 'transparent' },
-        /* focus 'self': only the hovered CELL, never its whole series. The default is
-         * 'series', which highlighted all 160 cells of a colour at once and read as the chart
-         * blinking. */
-        emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
-      /* Carried and never invoked: neutral rather than any verdict hue, because this is the
-       * ABSENCE of a call on that day, not a judgement about the capability. The row's verdict is
-       * already shown wherever it WAS called. */
-      /* Carried and never invoked: its own declared hue, at an opacity chosen once for the whole
-       * series rather than per cell. This is the quietest state because it is the most common and
-       * it is the BACKGROUND the coloured states read against — but it is one colour with one
-       * legend entry, not a gradient. */
-      { name: 'carried, never used', type: 'heatmap', data: idle,
-        itemStyle: { color: t.carried, opacity: 1, borderRadius: 2,
-          borderWidth: 2, borderColor: 'transparent' },
-        emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1.5 } } },
-      /* OUTSIDE THE SELECTION. Grey, and still visible: the reader is deciding whether their
-       * range is the right one, which they cannot do if the rest of the history is blank. Kept
-       * darker than the carried-only tint so a real invocation outside the range still reads as
-       * an invocation — it is excluded from the count, not absent from the record. */
-      /* Outside the selected range. ONE colour for both, because the distinction between an
-       * invocation and mere carriage is not what this series is saying — it is saying "not
-       * counted in the figures below". Two shades of it would be two unexplained greys again. */
-      /* focus 'self' here too. These are empty until a range is selected, so they cannot blink
-       * today — but an emphasis default that depends on a series happening to be empty is the
-       * kind of thing that comes back. */
-      { name: 'outside the range', type: 'heatmap', data: usedOut,
-        itemStyle: { color: t.carried, opacity: 0.45, borderRadius: 2,
-          borderWidth: 2, borderColor: 'transparent' },
-        emphasis: { focus: 'self' } },
-      { name: 'outside the range', type: 'heatmap', data: idleOut,
-        itemStyle: { color: t.carried, opacity: 0.45, borderRadius: 2,
-          borderWidth: 2, borderColor: 'transparent' },
-        emphasis: { focus: 'self' } },
-    ],
-  });
-
-  /* THE SLIDER SHOWS THE SELECTION IT CAUSED. A narrowing re-queries, which re-renders the panel
-   * and builds a fresh chart, and a fresh chart starts at full width — so the banner said
-   * "11 Oct → 12 Oct" while the slider sat at 0-100%, and the reader lost the place they had just
-   * picked. Verified in a browser before and after. The window is the source of truth, so the
-   * slider is restored FROM it rather than remembered separately.
-   *
-   * As PERCENTAGES rather than start/endValue, so the restore does not depend on how the hidden
-   * axis the slider drives resolves an index. `sel` is the same selection the cells were split
-   * on, computed once above, so the handles and the colouring cannot disagree. */
-  if (sel) {
-    /* Edges again: a selection of columns sel[0]..sel[1] runs from edge sel[0] to edge sel[1]+1. */
-    const span = g.cols.length;
-    insEChart.setOption({ dataZoom: [{
-      start: (sel[0] / span) * 100,
-      end: ((sel[1] + 1) / span) * 100,
-    }] }, false);
-  }
-
-  /* The brush drives the tables. Debounced, because dataZoom fires continuously while dragging
-   * and each change is a round trip: re-querying on every frame would queue dozens of requests
-   * for a range the reader has already moved past. */
-  let pending = null;
-  insEChart.on('dataZoom', () => {
-    const opt = insEChart.getOption();
-    const dz = (opt.dataZoom || [])[0] || {};
-    /* THE HANDLES ARE ON EDGES, 0..nCols, and the selection is the gaps BETWEEN them: edges 1
-     * and 3 select columns 1 and 2. So the left edge rounds to a column index directly, and the
-     * right edge rounds down by one to name the last column inside the selection. Both are
-     * rounded to a whole edge first, which is what keeps a range a whole number of days. */
-    const span = g.cols.length;                         // nCols gaps, nCols+1 edges
-    const e0 = Math.round(dz.start !== undefined ? (dz.start / 100) * span : 0);
-    const e1 = Math.round(dz.end !== undefined ? (dz.end / 100) * span : span);
-    const a = Math.max(0, Math.min(span - 1, e0));
-    const b = Math.max(a, Math.min(span - 1, e1 - 1));
-    clearTimeout(pending);
-    pending = setTimeout(() => {
-      /* Exact DAYS, not the rolled bucket, with `until` at the end of the last day so the final
-       * day is included rather than silently dropped. */
-      const since = g.cols[a].from;
-      const until = tl.buckets[g.cols[b].toIdx] + 24 * 3600 * 1000 - 1;
-      /* Widening back to the full extent CLEARS the window rather than sending the first and
-       * last day as an explicit range. The two are not the same query: an explicit range is
-       * bounded by what the chart has already loaded, while no window means "all recorded
-       * history" and is what the banner then claims. Sending the range would leave the banner
-       * saying SELECTED RANGE forever, with no way back except the escape-hatch button. */
-      const whole = a === 0 && b === g.cols.length - 1;
-      const nextSince = whole ? 0 : since;
-      const nextUntil = whole ? 0 : until;
-      if (nextSince === insSince && nextUntil === insUntil) {
-        /* The window did not change, but a handle may be resting between two edges. Snap it so
-         * the control shows the range it actually selected rather than where the mouse stopped. */
-        insEChart.setOption({ dataZoom: [{
-          start: (a / span) * 100, end: ((b + 1) / span) * 100,
-        }] }, false);
-        return;
-      }
-      insSince = nextSince;
-      insUntil = nextUntil;
-      loadInsights();
-    }, 260);
+      axisTick: { show: false } },
+    series: [{
+      type: 'bar',
+      data: ordered.map((r) => ({
+        value: priced ? (r.usd || 0) : (r.tokens || 0),
+        /* THE BAR CARRIES ITS VERDICT COLOUR, the same one the table pill uses, so red is
+         * removable in both places. */
+        itemStyle: { color: t.vd[r.verdict] || t.vd.keep, borderRadius: [0, 3, 3, 0] },
+      })),
+      barMaxWidth: 16,
+      /* The value printed at the end of the bar: the one number the bar encodes, so the chart
+       * does not depend on hover to be read. */
+      label: { show: true, position: 'right', color: t.muted, fontSize: 10,
+        formatter: (p) => (priced ? usd(p.value) : compact(p.value)) },
+      emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1 } },
+    }],
   });
 
   /* Resize with the panel. ECharts cannot know its container changed. */

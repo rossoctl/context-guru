@@ -367,20 +367,24 @@ func TestTheChartAndTheTablesSpeakOneColourLanguage(t *testing.T) {
 	}
 
 	// Every verdict the shaping layer can emit must have somewhere to be painted, or its rows
-	// fall back to a default and silently read as something else. Checked as a BUCKET rather than
-	// a quoted literal, because the verdict names reach the chart as object keys.
+	// fall back to a default and silently read as something else.
+	//
+	// The theme must carry a hue for EVERY verdict the shaping layer emits. Asserted on the theme
+	// rather than on per-verdict series: the chart used to be a heatmap with one series per
+	// verdict, and is now a bar chart that colours each bar by its own verdict — the mechanism
+	// changed, the property did not, and a test pinned to the mechanism would have failed the
+	// rewrite while the colours stayed correct.
 	for _, vd := range []string{"remove", "stale", "consider", "keep"} {
-		if !strings.Contains(code, "byVd."+vd) && !strings.Contains(code, vd+": [") {
-			t.Errorf("the chart has no bucket for the %q verdict; rows carrying it will be "+
+		if !strings.Contains(code, vd+": v('--ins-") {
+			t.Errorf("insChartTheme has no hue for the %q verdict, so anything carrying it is "+
 				"painted as something else", vd)
 		}
 	}
-	// And each bucket is actually drawn, with a colour taken from the theme.
-	for _, vd := range []string{"remove", "consider", "keep"} {
-		if !strings.Contains(code, "t.vd."+vd) {
-			t.Errorf("no series paints the %q bucket with t.vd.%s, so its cells are not carrying "+
-				"the verdict colour the tables use", vd, vd)
-		}
+	// And the bars take their colour from that theme, keyed by the row's own verdict, rather than
+	// from a literal or a palette of their own.
+	if !strings.Contains(code, "t.vd[r.verdict]") {
+		t.Error("the bars do not colour themselves from t.vd keyed by the row's verdict, so the " +
+			"chart and the table pills can disagree again")
 	}
 }
 
