@@ -207,6 +207,51 @@ func (s *sentStash) CoversSpan(session string, count int, hash string) bool {
 	return components.SpanHash(norm[:count]) == hash
 }
 
+// snapshotCovering returns the stashed forwarded body for session if the stashed PRE-pipeline body
+// covers the first count normalized messages hashed to hash, from ONE read of the entry: the
+// returned body is the one that was checked. A missing session is components.ErrNoPrefix, a
+// present one that falls short components.ErrStalePrefix.
+func (s *sentStash) snapshotCovering(session string, count int, hash string) ([]byte, error) {
+	if s == nil || session == "" {
+		return nil, components.ErrNoPrefix
+	}
+	s.mu.Lock()
+	e, ok := s.m[session]
+	s.mu.Unlock()
+	if !ok || len(e.forwarded) == 0 {
+		return nil, components.ErrNoPrefix
+	}
+	// e's slices are never mutated after put (a replacement installs new ones), so reading them
+	// outside the lock is safe and is the same entry that was just selected.
+	if count >= 0 {
+		norm := apply.NormalizeMessages(e.provider, e.preBody)
+		if count > len(norm) || components.SpanHash(norm[:count]) != hash {
+			return nil, components.ErrStalePrefix
+		}
+	}
+	return e.forwarded, nil
+}
+
+// AskCovered implements components.PrefixCoveredAsker: coverage check and ask on one snapshot.
+func (p prefixAsker) AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, components.PrefixUsage, error) {
+	body, err := p.stash.snapshotCovering(session, count, hash)
+	if err != nil {
+		return "", components.PrefixUsage{}, err
+	}
+	reply, u, err := p.cli.CompletePrefixed(ctx, body, ask)
+	return reply, components.PrefixUsage(u), err
+}
+
+// AskCovered implements components.PrefixCoveredAsker for the Responses route.
+func (p responsesPrefixAsker) AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, components.PrefixUsage, error) {
+	body, err := p.stash.snapshotCovering(session, count, hash)
+	if err != nil {
+		return "", components.PrefixUsage{}, err
+	}
+	reply, u, err := p.cli.CompletePrefixedResponses(ctx, body, ask)
+	return reply, components.PrefixUsage(u), err
+}
+
 // prefixAsker is the components.PrefixAsker the pipeline receives. Created per request and holds no
 // lock; the stash owns its own.
 type prefixAsker struct {
