@@ -98,3 +98,65 @@ func TestDepartWithNoArrivalIsANoOp(t *testing.T) {
 	var nilK *Keeper
 	nilK.Depart(Key{Session: "s"}) // nil-safe, like Arrive
 }
+
+// Record must depart on every early-return path, not only its ordinary one — an empty Body, a
+// zero StartedAt, a refused Status, and a turn-0 Record all return before Record reaches its
+// pingable() check, and each must still end the Arrive it is closing out.
+//
+// A single later Record on the same thread cannot by itself prove this: Record's own defer
+// departs unconditionally, so one subsequent Record silently absorbs a single leaked count
+// regardless of whether the broken call departed correctly. To actually surface a leak, a
+// SECOND Arrive has to open on top of the (possibly still-open) first one, so that only a
+// correctly-departed broken call leaves the thread's count at exactly zero once the final,
+// tracking Record departs its own Arrive. If the broken call leaked instead, the count is left
+// at one, and Sweep must not fire — this is the shape of the bug the review found: an unpaired
+// Arrive stops that thread's pings for good.
+func TestRecordDepartsOnEveryEarlyReturnPath(t *testing.T) {
+	start := time.Now()
+	cases := []struct {
+		name string
+		// turnZero, when true, means the broken call IS the session's very first Record (turn
+		// 0: counted, not tracked, and no setup call precedes it). When false, an ordinary
+		// turn-0 Record runs first so the broken call is a later turn instead.
+		turnZero bool
+		broken   func(fd *fakeDispatcher, key Key) Record
+	}{
+		{name: "empty body", broken: func(fd *fakeDispatcher, key Key) Record {
+			r := trackedRecord(fd, key, start)
+			r.Body = nil
+			return r
+		}},
+		{name: "zero StartedAt", broken: func(fd *fakeDispatcher, key Key) Record {
+			r := trackedRecord(fd, key, start)
+			r.StartedAt = time.Time{}
+			return r
+		}},
+		{name: "refused status", broken: func(fd *fakeDispatcher, key Key) Record {
+			r := trackedRecord(fd, key, start)
+			r.Status = 500
+			return r
+		}},
+		{name: "turn-0 Record", turnZero: true, broken: func(fd *fakeDispatcher, key Key) Record {
+			return trackedRecord(fd, key, start) // turn 0: counted, not tracked
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			now := start
+			fd := newFake(okPing)
+			k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+			key := Key{Tenant: "t", Session: "s"}
+			if !c.turnZero {
+				k.Record(trackedRecord(fd, key, start)) // turn 0: counted, not tracked
+			}
+			k.Arrive(key) // request A opens
+			k.Record(c.broken(fd, key))
+			k.Arrive(key)                           // request B opens on the same thread
+			k.Record(trackedRecord(fd, key, start)) // B finishes: tracked, and departs its own open
+			now = start.Add(281 * time.Second)
+			if n := k.Sweep(now); n != 1 {
+				t.Fatalf("Sweep started %d pings after a %s Record, want 1: A's open count leaked", n, c.name)
+			}
+		})
+	}
+}

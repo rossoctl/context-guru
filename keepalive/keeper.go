@@ -482,6 +482,11 @@ func (k *Keeper) releaseLocked(e *kaEntry) {
 //
 // Only THIS thread's entry is cleared: a subagent's request says nothing about whether the main
 // thread is still idle.
+//
+// Every Arrive must be paired with a Record or a Depart for the same Key, once that request
+// ends. An unpaired Arrive — a request that opens here and then neither calls Record nor
+// Depart — leaks that thread's open count and stops its pings for good; nothing but Forget
+// clears it.
 func (k *Keeper) Arrive(key Key) (pings int, refreshed int64, tag string) {
 	if k == nil || key.Session == "" {
 		return 0, 0, ""
@@ -533,15 +538,20 @@ func (k *Keeper) departLocked(id string) {
 func (k *Keeper) Record(r Record) {
 	session, threadID, startedAt, body := r.Key.Session, r.Key.Thread, r.StartedAt, r.Body
 	provider, route, status, u, usageOK := r.Provider, r.Route, r.Status, r.Usage, r.UsageOK
-	if k == nil || session == "" || len(body) == 0 || startedAt.IsZero() {
+	if k == nil || session == "" {
 		return
 	}
-	// Ends the request's own open count on this thread, on every return path below — the host's
-	// Arrive opened it, and Record is how it closes for the ordinary case. Must run AFTER Record
-	// has released k.mu: Depart takes the lock itself, and this defer, registered first, runs
-	// LAST (LIFO), after every k.mu.Unlock() registered further down. Port of main's deferred
-	// `departed` (43d0fe9e): departing after the hold is stored, not before.
+	// Ends the request's own open count on this thread, on EVERY return path below — including
+	// an empty body, a zero StartedAt, and a refused status, which the old guard below used to
+	// return out from before this ran, leaking the Arrive count. The host's Arrive opened it,
+	// and Record is how it closes for the ordinary case. Must run AFTER Record has released
+	// k.mu: Depart takes the lock itself, and this defer, registered first, runs LAST (LIFO),
+	// after every k.mu.Unlock() registered further down. Port of main's deferred `departed`
+	// (43d0fe9e): departing after the hold is stored, not before.
 	defer k.Depart(r.Key)
+	if len(body) == 0 || startedAt.IsZero() {
+		return
+	}
 	// Only a request the provider ACCEPTED left a cache entry behind. Tracking a 4xx or a
 	// failed forward would hold a body and a credential in order to ping a prefix that was
 	// never cached — cost with no possible benefit.
