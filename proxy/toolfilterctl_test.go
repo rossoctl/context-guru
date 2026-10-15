@@ -393,3 +393,39 @@ func TestToolFilterStoresASkillUnderItsOwnPrefix(t *testing.T) {
 		t.Errorf("re-including left a skill in the removal list: %q", doc)
 	}
 }
+
+// A removal switch has to show on the very next load. GET /api/toolfilter is served from the
+// dashboard's response cache, which may answer from a body up to ten minutes old; the write must
+// therefore drop that cached body, or a reload would show the switch as it was before the click.
+func TestToolFilterWriteShowsOnTheNextRead(t *testing.T) {
+	f := newMgrFixture(t)
+	f.h.API().SetToolFilterState(f.h.DashToolFilter())
+	w, _ := f.signUp(t, "boss@ibm.com", "l")
+	jar := w.Result().Cookies()
+
+	// Warm the cache with the state before the click.
+	before, doc := f.do(t, "GET", "/api/toolfilter?tenant=me", "", jar)
+	if before.Code != http.StatusOK {
+		t.Fatalf("GET /api/toolfilter = %d %s", before.Code, before.Body)
+	}
+	if hasExcluded(doc, "Workflow") {
+		t.Fatalf("precondition: Workflow is already excluded: %v", doc)
+	}
+	if again, _ := f.do(t, "GET", "/api/toolfilter?tenant=me", "", jar); again.Header().Get("X-Cache") != "hit" {
+		t.Fatalf("second read X-Cache = %q; the test needs a warm cache to prove anything",
+			again.Header().Get("X-Cache"))
+	}
+
+	if w, _ := f.do(t, "POST", "/api/toolfilter",
+		`{"kind":"tool","name":"Workflow","action":"exclude"}`, jar); w.Code != http.StatusOK {
+		t.Fatalf("exclude = %d %s", w.Code, w.Body)
+	}
+	after, doc := f.do(t, "GET", "/api/toolfilter?tenant=me", "", jar)
+	if !hasExcluded(doc, "Workflow") {
+		t.Errorf("the read right after the write still shows the old switch (X-Cache %q): %v",
+			after.Header().Get("X-Cache"), doc)
+	}
+	if got := after.Header().Get("X-Cache"); got == "stale" {
+		t.Errorf("served a stale body after a write that changed it")
+	}
+}
