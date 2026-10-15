@@ -793,3 +793,72 @@ func TestARequestSharingAllButThreeMessagesIsANewThread(t *testing.T) {
 		t.Fatal("a request sharing 5 of 8 messages joined the main thread")
 	}
 }
+
+// convTail builds a conversation whose last message is a volatile system reminder that the next
+// turn replaces, as Claude Code sends it: texts are the stable messages, reminder is the trailing
+// message. It declares tools, as every real Claude Code main-agent request does.
+func convTail(reminder string, texts ...string) []byte {
+	msgs := make([]any, 0, len(texts)+1)
+	for i, t := range texts {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		msgs = append(msgs, map[string]any{"role": role, "content": []any{map[string]any{"type": "text", "text": t}}})
+	}
+	msgs = append(msgs, map[string]any{"role": "system", "content": []any{map[string]any{"type": "text", "text": reminder, "cache_control": map[string]any{"type": "ephemeral"}}}})
+	b, _ := json.Marshal(map[string]any{
+		"model": "claude-sonnet-5", "system": "sys", "messages": msgs,
+		"tools": []any{map[string]any{"name": "Bash", "input_schema": map[string]any{"type": "object"}}},
+	})
+	return b
+}
+
+// A replaced trailing system message (#519) keeps a growing conversation on one thread.
+func TestAReplacedTrailingSystemReminderKeepsTheThread(t *testing.T) {
+	tr := testTracker()
+	var ids []string
+	for n := 3; n <= 9; n += 2 { // a conversation growing by a user/assistant pair each turn
+		texts := make([]string, n)
+		for i := range texts {
+			texts[i] = fmt.Sprintf("message %d", i)
+		}
+		ids = append(ids, tr.Resolve("s", "", convTail(fmt.Sprintf("reminder for turn %d", n), texts...), false).ID)
+	}
+	for i, id := range ids {
+		if id != ids[0] {
+			t.Fatalf("turn %d resolved to thread %q, the first turn to %q: a replaced trailing reminder split the conversation", i, id, ids[0])
+		}
+	}
+}
+
+// convTools is conv with a tools declaration, as every real Claude Code main-agent request has.
+func convTools(texts ...string) []byte {
+	var m map[string]any
+	_ = json.Unmarshal(conv(texts...), &m)
+	m["tools"] = []any{map[string]any{"name": "Bash", "input_schema": map[string]any{"type": "object"}}}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// Two conversations that only share their first message are two threads: a rewritten tail may
+// replace the last message or two, but not everything after the first. (Tolerating only the last
+// message, as #499 did, joins [hello hi] and [hello other x] into one thread.)
+func TestTwoConversationsSharingOnlyTheFirstMessageStayTwoThreads(t *testing.T) {
+	tr := testTracker()
+	a := tr.Resolve("s", "", convTools("hello", "hi"), false)
+	b := tr.Resolve("s", "", convTools("hello", "other", "x"), false)
+	if a.ID == b.ID {
+		t.Fatalf("conversations sharing only their first message share thread %q", a.ID)
+	}
+}
+
+// Conversations that share nothing are separate threads.
+func TestUnrelatedConversationsWithTrailingRemindersStayTwoThreads(t *testing.T) {
+	tr := testTracker()
+	a := tr.Resolve("s", "", convTail("r1", "alpha one", "alpha two", "alpha three"), false)
+	b := tr.Resolve("s", "", convTail("r2", "beta one", "beta two", "beta three"), false)
+	if a.ID == b.ID {
+		t.Fatalf("two conversations that share no messages must not share a thread (both %q)", a.ID)
+	}
+}
