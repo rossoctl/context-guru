@@ -280,6 +280,9 @@ func TestAdaptReportGateMatchesTheBuilder(t *testing.T) {
 	if rep["display_tz"] != tenant.DefaultStrategyTZ {
 		t.Errorf("display_tz %v", rep["display_tz"])
 	}
+	if note, _ := rep["display_tz_note"].(string); !strings.Contains(note, "offset as of "+time.Now().In(func() *time.Location { l, _ := time.LoadLocation(tenant.DefaultStrategyTZ); return l }()).Format("2006-01-02")) {
+		t.Errorf("display_tz_note %q does not name the offset's date", note)
+	}
 	for _, o := range rep["options"].([]any) {
 		o := o.(map[string]any)
 		if o["id"] == "by_hour" && (o["plan"] == nil || strings.Contains(fmt.Sprint(o["label"], o["plan"]), "UTC:")) {
