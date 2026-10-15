@@ -408,6 +408,9 @@ func manyToolResultsRequest(model string, results int) []byte {
 // So this drives the REAL handler over ONE keep-alive connection with content capture
 // ON — the path a client actually pays for — and compares against the same handler
 // with the dashboard off. It fails if the dashboard adds a perceptible cost.
+// maxAddedLatency is the most the dashboard may add per request, whatever the runner's own speed.
+const maxAddedLatency = 30 * time.Millisecond
+
 func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 	up := fakeUpstream(t)
 	defer up.Close()
@@ -508,7 +511,7 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 	//
 	// 20% of the request's own cost (it was 10%, which a loaded CI runner crossed by 0.6 ms) keeps the guard honest at both ends: the regression
 	// this exists to catch (content redaction moved back onto the request goroutine,
-	// ~53 ms) is caught at any baseline, while contention that slows BOTH handlers
+	// ~53 ms) is caught at any baseline (the budget is capped, below), while contention that slows BOTH handlers
 	// equally cannot trip it.
 	//
 	// The gate reads the median, not the minimum. The minimum was tried and is worse: it
@@ -519,13 +522,19 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 	if rel := off / 5; rel > budget {
 		budget = rel
 	}
+	// Capped: a relative budget alone grows with a slow runner until it would let the regression this guards
+	// (about 53 ms) through. The paired differences cancel shared load, so a fixed ceiling does not flake;
+	// if a runner's paired noise ever nears it, raise the cap rather than removing it.
+	if budget > maxAddedLatency {
+		budget = maxAddedLatency
+	}
 	t.Logf("median per-request latency over %d paired requests: dashboard off %v, on with "+
 		"content ON %v (added %v, budget %v); minima for reference: off %v, on %v",
 		iters, off, on, added, budget, slices.Min(offs), slices.Min(ons))
 
 	if added > budget {
 		t.Errorf("the dashboard added %v per request with content capture on (median of %d "+
-			"paired samples, budget %v = max(5ms, 20%% of the %v baseline)); something "+
+			"paired samples, budget %v = min(max(5ms, 20%% of the %v baseline), 30ms)); something "+
 			"expensive is back on the request goroutine", added, iters, budget, off)
 	}
 }
