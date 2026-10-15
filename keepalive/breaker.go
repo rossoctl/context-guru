@@ -9,9 +9,13 @@ const (
 	routeTripFor   = time.Hour // how long a trip, and a dead credential, lasts
 )
 
-// routeKey names one (tenant, endpoint, model) route.
-func routeKey(tenant, endpoint, model string) string {
-	return tenant + "\x00" + endpoint + "\x00" + model
+// routeKey names one (tenant, endpoint+route, model) route — matching main's kaRouteKey
+// (tenant + "\x00" + up.base + up.path + "\x00" + model, `git show 67c5f758:proxy/keepalive.go`
+// L1557-1558): endpoint and route are concatenated directly, with no separator between them,
+// because that pair is exactly where the ping is sent (base+path), so two different paths on
+// the same endpoint must trip independently.
+func routeKey(tenant, endpoint, route, model string) string {
+	return tenant + "\x00" + endpoint + route + "\x00" + model
 }
 
 // credModelKey names one credential on one model, for a 403.

@@ -539,16 +539,23 @@ func (k *Keeper) Record(r Record) {
 	// this model, must not accumulate another body and another held credential while it
 	// waits out its hour. Any OLDER entry for this thread is dropped too, same as every
 	// other refusal path above.
+	//
+	// A tripped route increments no counter here (main L850-853: a retire only) — the trip
+	// already counted itself at RouteTrips when it fired, and Skipped is reserved for a gate
+	// that refuses something that would otherwise have been tracked. A dead credential DOES
+	// count as Skipped (main L886-891): unlike a route trip, nothing else ever counts it.
 	now := k.now()
 	k.mu.Lock()
-	tripped := k.routeIsTrippedLocked(routeKey(r.Key.Tenant, r.Endpoint, model), now) ||
-		k.credIsDeadLocked(r.Key.Tenant, r.Cred, model, now)
-	if tripped {
+	routeTripped := k.routeIsTrippedLocked(routeKey(r.Key.Tenant, r.Endpoint, r.Route, model), now)
+	credDead := k.credIsDeadLocked(r.Key.Tenant, r.Cred, model, now)
+	if routeTripped || credDead {
 		k.retireLocked(key)
 	}
 	k.mu.Unlock()
-	if tripped {
-		k.skipped.Add(1)
+	if routeTripped || credDead {
+		if credDead {
+			k.skipped.Add(1)
+		}
 		return
 	}
 	if len(body) > MaxBodyBytes {
@@ -877,7 +884,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 		// The route breaker and the dead-credential mark can trip or land WHILE an entry is
 		// sitting idle waiting for its next ping, not only at Record time — so this is
 		// checked again here, right before a ping would be sent.
-		if k.routeIsTrippedLocked(routeKey(e.tenant, e.endpoint, e.model), now) ||
+		if k.routeIsTrippedLocked(routeKey(e.tenant, e.endpoint, e.route, e.model), now) ||
 			k.credIsDeadLocked(e.tenant, e.cred, e.model, now) {
 			e.stopped = true
 			continue
@@ -1080,19 +1087,19 @@ func (k *Keeper) noteOutcome(j pingJob, status int, u Usage) outcome {
 		k.failed.Add(1)
 		k.markStopped(j.e)
 		k.mu.Lock()
-		k.routeFailedLocked(routeKey(j.tenant, j.e.endpoint, j.e.model), k.now())
+		k.routeFailedLocked(routeKey(j.tenant, j.e.endpoint, j.e.route, j.e.model), k.now())
 		k.mu.Unlock()
 		return outcomeFailed
 	case u.FreshInput == 0 && u.CacheRead == 0 && u.CacheWrite == 0:
 		k.failed.Add(1)
 		k.markStopped(j.e)
 		k.mu.Lock()
-		k.routeFailedLocked(routeKey(j.tenant, j.e.endpoint, j.e.model), k.now())
+		k.routeFailedLocked(routeKey(j.tenant, j.e.endpoint, j.e.route, j.e.model), k.now())
 		k.mu.Unlock()
 		return outcomeFailedRecorded
 	}
 	k.mu.Lock()
-	k.routeOKLocked(routeKey(j.tenant, j.e.endpoint, j.e.model))
+	k.routeOKLocked(routeKey(j.tenant, j.e.endpoint, j.e.route, j.e.model))
 	k.mu.Unlock()
 	if u.CacheRead == 0 && k.notePingMiss(j.e) {
 		k.missed.Add(1)

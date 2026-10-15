@@ -155,3 +155,91 @@ func TestEmptyTenantAndCredUseTheRouteBreaker(t *testing.T) {
 		t.Fatalf("a 401 with no credential id must count toward the breaker: RouteTrips = %d", s.RouteTrips)
 	}
 }
+
+// TestARouteTripIsPerRoutePath pins main's kaRouteKey shape: the key is tenant + endpoint +
+// ROUTE PATH + model (`git show 67c5f758:proxy/keepalive.go` L1557-1558), not just
+// tenant+endpoint+model. The ping goes to endpoint+route, so two different paths on the same
+// endpoint must trip independently.
+func TestARouteTripIsPerRoutePath(t *testing.T) {
+	now := time.Now()
+	fd := newFake(func(DispatchRequest) (Usage, int, error) { return Usage{}, http.StatusOK, nil }) // all-zero: failure
+	k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+	failRoute(t, k, fd, "t", 3, &now) // trips tenant t, endpoint "", route "/v1/messages", model claude-sonnet-5
+	if s := k.Stats(); s.RouteTrips != 1 {
+		t.Fatalf("RouteTrips = %d after 3 failures, want 1", s.RouteTrips)
+	}
+	key := Key{Tenant: "t", Session: "other-route"}
+	r := trackedRecord(fd, key, now)
+	r.Route = "/v1/chat/completions"
+	k.Record(r)
+	k.Record(r)
+	if _, ok := k.Entry(key); !ok {
+		t.Fatal("a trip on one route path must not refuse a hold on a different route path")
+	}
+}
+
+// TestSweepStopsADueEntryWhoseRouteTrippedWhileIdle covers the Sweep gate (keeper.go, right
+// after e.due(now)): a route can trip through OTHER sessions' failures while an entry sits
+// idle waiting for its own next ping. When that entry becomes due, Sweep must send it no ping
+// and must stop it, not merely skip one tick.
+func TestSweepStopsADueEntryWhoseRouteTrippedWhileIdle(t *testing.T) {
+	start := time.Now()
+	now := start
+	fd := newFake(func(DispatchRequest) (Usage, int, error) { return Usage{}, http.StatusOK, nil }) // all-zero: failure
+	k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+	// target holds the same route (endpoint "" + "/v1/messages") and model as failRoute's own
+	// sessions, but with a long Idle so it is not itself due while the OTHER sessions trip it.
+	target := Key{Tenant: "t", Session: "target"}
+	r := trackedRecord(fd, target, now)
+	r.Policy.Idle = 40 * time.Minute // due well inside the trip's 1-hour life, long after it fires
+	k.Record(r)
+	k.Record(r)
+	if _, ok := k.Entry(target); !ok {
+		t.Fatal("target must be tracked before the route trips")
+	}
+	failRoute(t, k, fd, "t", 3, &now) // same tenant, route and model as target: trips target's route
+	if s := k.Stats(); s.RouteTrips != 1 {
+		t.Fatalf("RouteTrips = %d, want 1", s.RouteTrips)
+	}
+	before := fd.n()
+	now = start.Add(40*time.Minute + time.Second) // target is now due; the trip is still live
+	k.Sweep(now)
+	if got := fd.n(); got != before {
+		t.Fatalf("a tripped route must send no ping: sent %d, want %d", got, before)
+	}
+	if e, ok := k.Entry(target); !ok || !e.Stopped {
+		t.Fatalf("a tripped route must stop the due entry: entry=%+v ok=%v", e, ok)
+	}
+}
+
+// TestSweepStopsADueEntryWhoseCredentialDiedWhileIdle is TestSweepStopsADueEntryWhoseRouteTrippedWhileIdle's
+// counterpart for the dead-credential mark: a credential can be marked dead by a 401 on
+// ANOTHER session while an entry using the same credential sits idle. When that entry becomes
+// due, Sweep must send it no ping and must stop it.
+func TestSweepStopsADueEntryWhoseCredentialDiedWhileIdle(t *testing.T) {
+	start := time.Now()
+	now := start
+	fd := newFake(func(DispatchRequest) (Usage, int, error) { return Usage{}, http.StatusUnauthorized, nil })
+	k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+	// target holds credential c1 with a long Idle, so it is not itself due when "other"'s ping
+	// (same credential, default Idle) fires and marks c1 dead.
+	target := Key{Tenant: "t", Session: "target"}
+	r := credRecord(fd, target, now, "c1", "claude-sonnet-5")
+	r.Policy.Idle = 40 * time.Minute
+	k.Record(r)
+	k.Record(r)
+	other := Key{Tenant: "t", Session: "other"}
+	k.Record(credRecord(fd, other, now, "c1", "claude-sonnet-5"))
+	k.Record(credRecord(fd, other, now, "c1", "claude-sonnet-5"))
+	now = start.Add(281 * time.Second)
+	k.Sweep(now) // pings "other"; its 401 marks credential c1 dead for an hour from now
+	before := fd.n()
+	now = start.Add(40*time.Minute + time.Second) // target is now due; c1's mark is still live
+	k.Sweep(now)
+	if got := fd.n(); got != before {
+		t.Fatalf("a dead credential must send no ping: sent %d, want %d", got, before)
+	}
+	if e, ok := k.Entry(target); !ok || !e.Stopped {
+		t.Fatalf("a dead credential must stop the due entry: entry=%+v ok=%v", e, ok)
+	}
+}
