@@ -1247,7 +1247,19 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		// path. Every query on it must have a cost that does not grow with the session's
 		// size squared, nor with the whole table."
 		a.serveJSON(w, r, &a.statsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
+			// The replay scan is independent of OverviewLean: start it first, so first paint waits for
+			// the slower of the two, not their sum.
+			var repLedger *ReplayLedger
+			var repErr error
+			repDone := make(chan struct{})
+			go func() {
+				defer close(repDone)
+				if a.pricer != nil && a.windows != nil {
+					repLedger, repErr = a.replayLedger(db, f)
+				}
+			}()
 			o, err := db.OverviewLean(f, a.pricer, a.priceFn(r))
+			<-repDone
 			if err != nil {
 				return nil, err
 			}
@@ -1260,8 +1272,8 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 				}
 				// The same cap as the full read, so the net and total do not change when it lands. A
 				// session or a window bounds the scan (lifetime reads go to the full handler).
-				if l, lerr := a.replayLedger(db, f); lerr == nil {
-					o.ApplyReplayLedger(l)
+				if repErr == nil {
+					o.ApplyReplayLedger(repLedger)
 				} else {
 					o.ReplayCapNotApplied = true
 				}
