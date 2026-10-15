@@ -53,8 +53,8 @@ func rePriceRow(r *compactRow, price rePriceFn) {
 		FreshInput: r.FreshInput, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite,
 	}
 	ev.BilledTokenFactor, _ = tokens.BilledDeltaFactor(r.Model)
-	r.SavedUSD = ev.ComponentSavedUSD(p, SummarizeComponent, int(r.SavedGross), int(r.SavedUnique))
-	r.FirstUSD = ev.ComponentSavedUSD(p, SummarizeComponent, int(r.SavedUnique), int(r.SavedUnique))
+	r.SavedUSD = ev.ComponentSavedUSD(p, SummarizerComponents[0], int(r.SavedGross), int(r.SavedUnique))
+	r.FirstUSD = ev.ComponentSavedUSD(p, SummarizerComponents[0], int(r.SavedUnique), int(r.SavedUnique))
 }
 
 // apportionFirst gives a row that was not re-priced (no rates available) the unique share of its
@@ -70,12 +70,52 @@ func apportionFirst(r *compactRow) {
 // SummarizeLedgerFor runs the walk over the sessions in which summarize ever acted and returns
 // its ledger. A conversation whose model window is not exactly known contributes nothing, so its
 // credit stays as stored: the same rule the episode view uses for the same reason.
+//
+// It walks each summarizer component on its own and returns the sum, so the headline is the sum of
+// the per-component figures SummarizeLedgersFor gives the Components tab.
 func (d *DB) SummarizeLedgerFor(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer) (*SummarizeLedger, error) {
+	m, err := d.SummarizeLedgersFor(f, windows, p)
+	if err != nil {
+		return nil, err
+	}
+	return sumLedgers(m), nil
+}
+
+// sumLedgers adds ledgers field by field.
+func sumLedgers(m map[string]*SummarizeLedger) *SummarizeLedger {
+	t := &SummarizeLedger{}
+	for _, name := range SummarizerComponents {
+		if l := m[name]; l != nil {
+			t.FirstRemovalUSD += l.FirstRemovalUSD
+			t.ReplayUSD += l.ReplayUSD
+			t.StoredUSD += l.StoredUSD
+			t.PastSpanUSD += l.PastSpanUSD
+			t.PrefixChangeUSD += l.PrefixChangeUSD
+			t.Rows += l.Rows
+		}
+	}
+	return t
+}
+
+// SummarizeLedgersFor is one ledger per summarizer component, keyed by component name.
+func (d *DB) SummarizeLedgersFor(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer) (map[string]*SummarizeLedger, error) {
+	out := map[string]*SummarizeLedger{}
+	for _, name := range SummarizerComponents {
+		l, err := d.summarizerLedger(f, windows, p, name)
+		if err != nil {
+			return nil, err
+		}
+		out[name] = l
+	}
+	return out, nil
+}
+
+func (d *DB) summarizerLedger(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer, component string) (*SummarizeLedger, error) {
 	if d == nil || p == nil || windows == nil {
 		return &SummarizeLedger{}, nil
 	}
 	ctx := d.readCtx()
-	rows, err := d.compactEpisodeDataset(f, pricerFn(ctx, p), true)
+	rows, err := d.compactEpisodeDataset(f, pricerFn(ctx, p), true, []string{component})
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
 	}
@@ -121,7 +161,7 @@ func (o *Overview) ApplySummarizeLedger(l *SummarizeLedger) {
 // the row as it was. A partial one covers only some conversations: the stored credit the ledger did
 // not see stays in the replay column, so the split still adds up to saved_usd.
 func applySummarizeLedgerToRow(c *ComponentRow, l *SummarizeLedger) {
-	if c == nil || l == nil || c.Component != SummarizeComponent || l.Rows == 0 {
+	if c == nil || l == nil || !IsSummarizer(c.Component) || l.Rows == 0 {
 		return
 	}
 	delta := l.DeltaUSD()
@@ -150,10 +190,13 @@ func applySummarizeLedgerToRow(c *ComponentRow, l *SummarizeLedger) {
 //
 // A request counts as one call. A request with an extraction call is left to extract_llm's share
 // (the apportioning in components()), so nothing is counted twice.
-func (d *DB) summarizerOwnCost(cond string, args []any) (calls int64, usd float64, err error) {
+func (d *DB) summarizerOwnCost(cond string, args []any, component string) (calls int64, usd float64, err error) {
+	if !IsSummarizer(component) {
+		return 0, 0, nil // the name is spliced into the SQL, so only a listed one gets in
+	}
 	var cost sql.NullFloat64
 	err = d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*), SUM(r.cg_llm_cost_usd)
-		FROM requests r JOIN request_components c ON c.request_id = r.id AND c.component = 'summarize'
+		FROM requests r JOIN request_components c ON c.request_id = r.id AND c.component = '`+component+`'
 		WHERE `+cond+` AND r.cg_llm_cost_usd > 0
 		AND NOT EXISTS (SELECT 1 FROM extraction_calls x WHERE x.request_id = r.id
 			AND x.strategy NOT GLOB '*_billed')`, args...).Scan(&calls, &cost)

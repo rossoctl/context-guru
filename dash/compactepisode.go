@@ -2,6 +2,7 @@ package dash
 
 import (
 	"database/sql"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
@@ -64,7 +65,11 @@ import (
 // verdict, and summarize's own per-request figures.
 type compactRow struct {
 	Tenant, Session, Model string
-	TS                     int64
+	// Thread is the session thread the request ran on ("" is the primary one). The client-compaction
+	// detector compares a request with the previous one on ITS thread only: a subagent's small
+	// request on the same model is not the client compacting the main transcript.
+	Thread string
+	TS     int64
 	// TokensBefore is our own tokenizer's count of the message text. Used ONLY to detect a
 	// client-side compaction (a drop), never as a fraction of the window.
 	TokensBefore int64
@@ -600,7 +605,7 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 	}
 	var out []CompactionEpisode
 	var cur *CompactionEpisode
-	var prevTokensBefore int64
+	prevTokensBefore := map[string]int64{} // by thread
 	// endedBefore is true once an episode has ended in this conversation: a credit row after
 	// that, outside a new episode, is past the span.
 	endedBefore := false
@@ -636,7 +641,7 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 			// nothing later is ours — but what the summary earned before it is real and counts.
 			// This episode used to be voided and counted as $0, which threw away the credit of the
 			// five episodes in six that end this way.
-			if prevTokensBefore > 0 && r.TokensBefore > 0 && r.TokensBefore < prevTokensBefore {
+			if pt := prevTokensBefore[r.Thread]; pt > 0 && r.TokensBefore > 0 && r.TokensBefore < pt {
 				cur.State = EpisodeClientCompacted
 				finishEpisode(cur, p)
 				out = append(out, *cur)
@@ -644,7 +649,7 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 				endedBefore = true
 			}
 		}
-		if cur == nil && ghost.active && prevTokensBefore > 0 && r.TokensBefore > 0 && r.TokensBefore < prevTokensBefore {
+		if pt := prevTokensBefore[r.Thread]; cur == nil && ghost.active && pt > 0 && r.TokensBefore > 0 && r.TokensBefore < pt {
 			// The client compacted: the ghost span ends here as an episode's would.
 			ghost.active = false
 			endedBefore = true
@@ -751,7 +756,7 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 				}
 			}
 		}
-		prevTokensBefore = r.TokensBefore
+		prevTokensBefore[r.Thread] = r.TokensBefore
 	}
 	if cur != nil {
 		// Never closed inside the queried range.
@@ -1150,33 +1155,77 @@ func compactAssumptions(spanFrac, fillFrac float64) CompactionAssumptions {
 // LEFT, not INNER: every turn inside a span is part of the measurement even when summarize did
 // nothing on it, because the span is a quantity of WORK and the turns that did nothing still
 // consumed some. An INNER join would silently shorten every span to the turns summarize touched.
-const compactEpisodeSelect = `SELECT r.tenant_id, r.session_id, r.model, r.ts, r.tokens_before,
+const compactEpisodeSelectTmpl = `SELECT r.tenant_id, r.session_id, r.thread_id, r.model, r.ts, r.tokens_before,
 		r.fresh_input + r.cache_read + r.cache_write AS billed,
 		r.cache_miss_reason, r.cache_write, r.cache_write_1h, r.cache_read, r.cg_llm_cost_usd,
-		COALESCE(c.saved_gross, 0), COALESCE(c.saved_usd, 0), COALESCE(c.events, ''),
-		COALESCE(c.acted, 0), r.fresh_input, COALESCE(c.saved_unique, 0)
+		%[1]s, r.fresh_input, %[2]s
 	FROM requests r
-	LEFT JOIN request_components c ON c.request_id = r.id AND c.component = 'summarize'
-	WHERE %s
+	%[3]s
+	WHERE %%s
 	ORDER BY r.tenant_id, r.session_id, r.model, r.ts, r.id`
 
-// summarizeSessionsOnly narrows the dataset to sessions in which summarize ever acted. The
+// compactEpisodeSelectFor builds the select for a set of summarizer components: one LEFT JOIN per
+// component, on (request_id, component), so each probe uses idx_rc_request_comp. The columns are
+// the sum across the components (a request normally has one). Names come from SummarizerComponents
+// only; anything else is refused.
+func compactEpisodeSelectFor(components []string) string {
+	var joins, gross, usd, events, acted, unique []string
+	for i, name := range components {
+		if !IsSummarizer(name) {
+			continue
+		}
+		al := "c" + strconv.Itoa(i)
+		joins = append(joins, "LEFT JOIN request_components "+al+" ON "+al+".request_id = r.id AND "+al+".component = '"+name+"'")
+		gross = append(gross, "COALESCE("+al+".saved_gross, 0)")
+		usd = append(usd, "COALESCE("+al+".saved_usd, 0)")
+		events = append(events, al+".events")
+		acted = append(acted, "COALESCE("+al+".acted, 0)")
+		unique = append(unique, "COALESCE("+al+".saved_unique, 0)")
+	}
+	if len(joins) == 0 {
+		return "" // no valid component: the caller reads nothing
+	}
+	cols := strings.Join(gross, " + ") + ", " + strings.Join(usd, " + ") + ", COALESCE(" +
+		strings.Join(events, ", ") + ", ''), MAX(" + strings.Join(acted, ", ") + ")"
+	// MAX with one argument is an aggregate in SQLite; a single component needs the bare column.
+	if len(acted) == 1 {
+		cols = strings.Join(gross, " + ") + ", " + strings.Join(usd, " + ") + ", COALESCE(" +
+			strings.Join(events, ", ") + ", ''), " + acted[0]
+	}
+	return fmt.Sprintf(compactEpisodeSelectTmpl, cols, strings.Join(unique, " + "), strings.Join(joins, "\n\t"))
+}
+
+// summarizeSessionsOnly narrows the dataset to sessions in which a summarizer ever acted. The
 // ledger needs no others, and it runs on the stats path, which must not load every request.
-const summarizeSessionsOnly = ` AND (r.tenant_id, r.session_id) IN (
+// Uncorrelated, so SQLite evaluates the inner select once.
+func summarizeSessionsOnly() string {
+	var q []string
+	for _, n := range SummarizerComponents {
+		q = append(q, "'"+n+"'")
+	}
+	return ` AND (r.tenant_id, r.session_id) IN (
 	SELECT r2.tenant_id, r2.session_id FROM request_components c2 JOIN requests r2 ON r2.id = c2.request_id
-	WHERE c2.component = 'summarize' AND c2.acted = 1)`
+	WHERE c2.component IN (` + strings.Join(q, ", ") + `) AND c2.acted = 1)`
+}
 
 // rePriceFn resolves a model's rates for the read-time pricing of a stored row.
 type rePriceFn func(model string) (modelinfo.Price, bool)
 
 // compactEpisodeDataset reads the ordered rows one filter selects. price, when set, values each
 // summarize first removal again through Event.ComponentSavedUSD (see rePriceRow).
-func (d *DB) compactEpisodeDataset(f Filter, price rePriceFn, summarizeOnly bool) ([]compactRow, error) {
+func (d *DB) compactEpisodeDataset(f Filter, price rePriceFn, summarizeOnly bool, components []string) ([]compactRow, error) {
+	if components == nil {
+		components = SummarizerComponents
+	}
 	cond, args := f.where()
 	if summarizeOnly {
-		cond += summarizeSessionsOnly
+		cond += summarizeSessionsOnly()
 	}
-	q := strings.Replace(compactEpisodeSelect, "%s", cond, 1)
+	sel := compactEpisodeSelectFor(components)
+	if sel == "" {
+		return nil, nil
+	}
+	q := strings.Replace(sel, "%s", cond, 1)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
@@ -1186,7 +1235,7 @@ func (d *DB) compactEpisodeDataset(f Filter, price rePriceFn, summarizeOnly bool
 	for rows.Next() {
 		var r compactRow
 		var acted int
-		if err := rows.Scan(&r.Tenant, &r.Session, &r.Model, &r.TS, &r.TokensBefore,
+		if err := rows.Scan(&r.Tenant, &r.Session, &r.Thread, &r.Model, &r.TS, &r.TokensBefore,
 			&r.Billed, &r.MissReason, &r.CacheWrite, &r.CacheWrite1h, &r.CacheRead,
 			&r.CGLLMCostUSD, &r.SavedGross, &r.SavedUSD, &r.Events, &acted,
 			&r.FreshInput, &r.SavedUnique); err != nil {
@@ -1209,7 +1258,7 @@ func (d *DB) compactEpisodeDataset(f Filter, price rePriceFn, summarizeOnly bool
 func (d *DB) CompactionEpisodesFor(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer,
 	cfg KVCacheSimConfig, spanFrac, fillFrac, ceilingFrac float64) (*CompactionEpisodes, error) {
 	ctx := d.readCtx()
-	rows, err := d.compactEpisodeDataset(f, pricerFn(ctx, p), false)
+	rows, err := d.compactEpisodeDataset(f, pricerFn(ctx, p), false, nil)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
 	}

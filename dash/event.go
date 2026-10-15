@@ -777,9 +777,23 @@ func (e *Event) ComponentSavedUSD(p modelinfo.Price, component string, gross, un
 		e.BilledTokenFactor
 }
 
-// SummarizeComponent is the pipeline name of the component whose removals are EARLIER
-// transcript: a summary replaces turns the provider has already been sent.
-const SummarizeComponent = "summarize"
+// SummarizerComponents is THE list of pipeline components whose removals are EARLIER transcript:
+// a summary replaces turns the provider has already been sent. Every place that treats a
+// component as a summarizer (the first-removal rate, the baseline split, the ledger, the cost
+// attribution, the SQL) reads this list and no other. The default preset runs "summarize"; the
+// medium, high and xhigh presets run "cache_aware_summarizer". Add a new summarizer here and
+// nowhere else.
+var SummarizerComponents = []string{"summarize", "cache_aware_summarizer"}
+
+// IsSummarizer reports whether a component name is on SummarizerComponents.
+func IsSummarizer(component string) bool {
+	for _, n := range SummarizerComponents {
+		if n == component {
+			return true
+		}
+	}
+	return false
+}
 
 // uniqueRate is what the FIRST removal of a component's content would have been billed at.
 //
@@ -795,7 +809,7 @@ const SummarizeComponent = "summarize"
 // stands. Any other verdict (hit, or prefix_change, which on a summary turn is our own rewrite
 // of a live entry) says it was live, so the counterfactual is a read.
 func (e *Event) uniqueRate(p modelinfo.Price, component string) float64 {
-	if component == SummarizeComponent {
+	if IsSummarizer(component) {
 		switch e.CacheMissReason {
 		case CacheTTLExpiry, CacheColdStart:
 		default:
@@ -1015,16 +1029,16 @@ func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
 	if unique < 0 {
 		unique = 0
 	}
-	// The part of the unique removal that belongs to summarize is priced by its own rate (see
+	// The part of the unique removal that belongs to a summarizer is priced by its own rate (see
 	// uniqueRate); every other component's unique part stays at the write rate.
 	sumUnique := 0
 	for _, c := range e.Components {
-		if c.Component == SummarizeComponent && c.SavedUnique > 0 {
+		if IsSummarizer(c.Component) && c.SavedUnique > 0 {
 			sumUnique += min(c.SavedUnique, max(c.SavedGross, 0))
 		}
 	}
 	sumUnique = min(sumUnique, unique)
-	raw := float64(unique-sumUnique)*p.CacheWrite + float64(sumUnique)*e.uniqueRate(p, SummarizeComponent) +
+	raw := float64(unique-sumUnique)*p.CacheWrite + float64(sumUnique)*e.uniqueRate(p, SummarizerComponents[0]) +
 		float64(gross-unique)*e.repeatRate(p)
 	return raw * e.BilledTokenFactor
 }

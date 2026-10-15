@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/dash"
 )
 
@@ -60,5 +62,65 @@ func TestArriveAtReportsWhenTheEntryWasLastRefreshed(t *testing.T) {
 	}
 	if again := k.arriveAt("t1", "sess-1", ""); !again.refreshedAt.IsZero() || again.pings != 0 {
 		t.Errorf("the entry must be cleared once a real request arrives: %+v", again)
+	}
+}
+
+// A ping from AFTER this request (a clock skew, or an entry cleared out of order) gives a negative
+// age. It must not shorten the gap into the past.
+func TestAFutureRefreshTimeNeverShortensTheGap(t *testing.T) {
+	base := time.UnixMilli(1_000_000)
+	ts := base.UnixMilli() + 327_000
+	if got := entryAgeMs(327_000, ts, time.UnixMilli(ts+5_000)); got != 327_000 {
+		t.Errorf("age = %d, want the raw gap 327000 for a refresh time after the request", got)
+	}
+}
+
+// The wiring, end to end: noteKeepAlive hands the refresh time to the capture and finish() uses it
+// for the verdict that is STORED. entryAgeMs alone passes with the wiring cut, which is how a
+// zero time in finish() went unnoticed.
+func TestFinishUsesThePingRefreshTimeForTheStoredVerdict(t *testing.T) {
+	const gap = 327 * time.Second
+	for _, tc := range []struct {
+		name        string
+		refreshedAt func(first time.Time) time.Time
+		want        string
+	}{
+		{"a ping refreshed the entry 31 s before the turn", func(f time.Time) time.Time { return f.Add(296 * time.Second) }, dash.CachePrefixChange},
+		{"no ping: the entry lapsed", func(time.Time) time.Time { return time.Time{} }, dash.CacheTTLExpiry},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, err := dash.NewRecorder(dash.Options{
+				DBPath: filepath.Join(t.TempDir(), "d.db"), BatchSize: 1, FlushInterval: time.Millisecond})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { rec.Close() })
+			first := time.Now().Add(-time.Hour)
+			mk := func(start time.Time) *capture {
+				return &capture{rec: rec, tenant: "t1", provider: "anthropic", model: "claude-opus-5-5",
+					route: "/v1/messages", start: start, status: 200,
+					trace: apply.Trace{Session: "sess-1"}}
+			}
+			a := mk(first)
+			a.finish(Usage{FreshInput: 10, CacheWrite: 1000}, true, false, 0, 0)
+			b := mk(first.Add(gap))
+			b.noteKeepAlive(kaArrival{pings: 1, refreshed: 400_000, refreshedAt: tc.refreshedAt(first)})
+			// The turn re-created its prefix: a miss with a write.
+			b.finish(Usage{FreshInput: 10, CacheWrite: 220_000}, true, false, 0, 0)
+
+			var got string
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) {
+				pg, err := rec.DB().Requests(dash.Filter{TenantAll: true}, 0, 10)
+				if err == nil && len(pg.Requests) == 2 {
+					got = pg.Requests[0].CacheMissReason // newest first
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if got != tc.want {
+				t.Errorf("stored verdict = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

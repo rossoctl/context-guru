@@ -336,10 +336,10 @@ func (c *capture) noteUpstream(ms float64, status int) {
 }
 
 // noteKeepAlive records what the idle keep-alive did during the span this request ended.
-func (c *capture) noteKeepAlive(pings int, refreshed int64, strategyID string, refreshedAt time.Time) {
+func (c *capture) noteKeepAlive(ka kaArrival) {
 	if c != nil {
-		c.kaPings, c.kaRefreshed, c.kaStrategy = pings, refreshed, strategyID
-		c.kaRefreshedAt = refreshedAt
+		c.kaPings, c.kaRefreshed, c.kaStrategy = ka.pings, ka.refreshed, ka.strategyID
+		c.kaRefreshedAt = ka.refreshedAt
 	}
 }
 

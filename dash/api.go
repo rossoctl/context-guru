@@ -1500,12 +1500,12 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 			// summarize's credit, put through the attribution rule: nothing past its span, and the
 			// first removal priced at the rate the previous turn paid. The same ledger moves the
 			// headline, so the two cannot disagree.
-			if l, err := db.SummarizeLedgerFor(f, a.windows, a.pricer); err != nil {
+			if ls, err := db.SummarizeLedgersFor(f, a.windows, a.pricer); err != nil {
 				slog.Warn("context-guru: summarize attribution failed; summarize reads its stored credit",
 					"err", err)
 			} else {
 				for _, c := range rows {
-					applySummarizeLedgerToRow(c, l)
+					applySummarizeLedgerToRow(c, ls[c.Component])
 				}
 			}
 		}

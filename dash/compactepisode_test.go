@@ -728,7 +728,7 @@ func TestTheQueryFeedsTheWalkAClosedEpisode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, err := db.compactEpisodeDataset(Filter{TenantAll: true}, nil, false)
+	rows, err := db.compactEpisodeDataset(Filter{TenantAll: true}, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

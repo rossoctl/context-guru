@@ -18,10 +18,10 @@ func TestSummarizeFirstRemovalIsPricedAtTheRateThePreviousTurnPaid(t *testing.T)
 		name, component, reason string
 		want                    float64
 	}{
-		{"hit reads", SummarizeComponent, CacheHit, price.CacheRead},
-		{"our own rewrite of a live entry reads", SummarizeComponent, CachePrefixChange, price.CacheRead},
-		{"a lapsed entry re-creates", SummarizeComponent, CacheTTLExpiry, price.CacheWrite},
-		{"a cold start re-creates", SummarizeComponent, CacheColdStart, price.CacheWrite},
+		{"hit reads", SummarizerComponents[0], CacheHit, price.CacheRead},
+		{"our own rewrite of a live entry reads", SummarizerComponents[0], CachePrefixChange, price.CacheRead},
+		{"a lapsed entry re-creates", SummarizerComponents[0], CacheTTLExpiry, price.CacheWrite},
+		{"a cold start re-creates", SummarizerComponents[0], CacheColdStart, price.CacheWrite},
 		{"another component's new content is a write", "extract", CacheHit, price.CacheWrite},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -49,7 +49,7 @@ func TestRePriceRowMatchesWhatPriceWouldHaveStored(t *testing.T) {
 	e := &Event{
 		Model: "m1", FreshInput: 10, CacheRead: 49_000, CacheWrite: 7_400,
 		CacheMissReason: CacheHit, TokenAccounting: AccountingComplete,
-		Components: []CompRow{{Component: SummarizeComponent, SavedGross: 589_000, SavedUnique: 589_000}},
+		Components: []CompRow{{Component: SummarizerComponents[0], SavedGross: 589_000, SavedUnique: 589_000}},
 	}
 	e.Price(price, true)
 	r := compactRow{
@@ -87,7 +87,7 @@ func summarizeEvent(ts int64, before int, session string, fresh, read int64, rea
 	e.CacheMissReason = reason
 	e.TokenAccounting = AccountingComplete
 	e.Components = []CompRow{{
-		Component: SummarizeComponent, Kind: "offload", Acted: true, Mutated: true,
+		Component: SummarizerComponents[0], Kind: "offload", Acted: true, Mutated: true,
 		SavedGross: gross, SavedUnique: unique, SavedUSD: stored, Events: ev,
 	}}
 	return e
@@ -138,7 +138,7 @@ func TestSummarizeLedgerCapsCreditAtTheSpanAndRePricesTheFirstRemoval(t *testing
 	nearEq(t, "total saved", o.TotalSavedUSD, 5+l.DeltaUSD())
 
 	// And so does the component row, with the verdict following.
-	row := &ComponentRow{Component: SummarizeComponent, SavedUSD: l.StoredUSD, NetUSD: l.StoredUSD,
+	row := &ComponentRow{Component: SummarizerComponents[0], SavedUSD: l.StoredUSD, NetUSD: l.StoredUSD,
 		NetUSDWithEstimate: l.StoredUSD, LLMCostUSD: 0.001}
 	applySummarizeLedgerToRow(row, l)
 	nearEq(t, "row saved", row.SavedUSD, l.CountedUSD())
@@ -190,7 +190,7 @@ func TestSummarizerOwnCostIsAttributedToSummarize(t *testing.T) {
 	}
 	var got *ComponentRow
 	for _, r := range rows {
-		if r.Component == SummarizeComponent {
+		if r.Component == SummarizerComponents[0] {
 			got = r
 		}
 	}
@@ -207,7 +207,7 @@ func TestSummarizerOwnCostIsAttributedToSummarize(t *testing.T) {
 // An empty ledger must leave the summarize row as the stored figures made it. The ledger is empty
 // when the window is a guess, the trigger is above the client ceiling, or there is no resolver.
 func TestAnEmptyLedgerLeavesTheSummarizeRowAlone(t *testing.T) {
-	row := &ComponentRow{Component: SummarizeComponent, SavedUSD: 5, SavedUSDFirstRemoval: 1, SavedUSDReplay: 4,
+	row := &ComponentRow{Component: SummarizerComponents[0], SavedUSD: 5, SavedUSDFirstRemoval: 1, SavedUSDReplay: 4,
 		SavedUSDDecomposed: 5, NetUSDFirstRemoval: 0.9, LLMCostUSD: 0.1, NetUSD: 4.9}
 	applySummarizeLedgerToRow(row, &SummarizeLedger{})
 	if row.SavedUSD != 5 || row.SavedUSDFirstRemoval != 1 || row.SavedUSDReplay != 4 ||
@@ -220,7 +220,7 @@ func TestAnEmptyLedgerLeavesTheSummarizeRowAlone(t *testing.T) {
 // column, so the split still adds up to saved_usd.
 func TestAPartialLedgerKeepsTheUncoveredCreditInTheSplit(t *testing.T) {
 	l := &SummarizeLedger{FirstRemovalUSD: 1, ReplayUSD: 2, StoredUSD: 10, Rows: 3}
-	row := &ComponentRow{Component: SummarizeComponent, SavedUSD: 15, NetUSD: 15, NetUSDWithEstimate: 15}
+	row := &ComponentRow{Component: SummarizerComponents[0], SavedUSD: 15, NetUSD: 15, NetUSDWithEstimate: 15}
 	applySummarizeLedgerToRow(row, l)
 	nearEq(t, "saved", row.SavedUSD, 15+l.DeltaUSD())
 	nearEq(t, "split adds up", row.SavedUSDFirstRemoval+row.SavedUSDReplay, row.SavedUSD)

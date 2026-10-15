@@ -985,10 +985,14 @@ func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup,
 	if err := irows.Err(); err != nil {
 		return nil, nil, err
 	}
-	// summarize's own spend. It records no extraction_calls rows, so the loops above left it at
+	// A summarizer's own spend. It records no extraction_calls rows, so the loops above left it at
 	// zero calls and zero dollars while its cost sat unowned in requests.cg_llm_cost_usd.
-	if sc, ok := byName[SummarizeComponent]; ok {
-		calls, usd, err := d.summarizerOwnCost(cond, args)
+	for _, name := range SummarizerComponents {
+		sc, ok := byName[name]
+		if !ok {
+			continue
+		}
+		calls, usd, err := d.summarizerOwnCost(cond, args, name)
 		if err != nil {
 			return nil, nil, err
 		}
