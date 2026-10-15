@@ -176,6 +176,13 @@ type Options struct {
 	// single-tenant mode, where /stats stays open as it always was — the benchmark
 	// harnesses in deploy/harbor read it.
 	StatsTrusted func(*http.Request) bool
+	// Single-tenant /api/adapt/* apply (adaptapply.go): BaseConfig is the configuration document
+	// the proxy was started with (its config file, or `preset: X`), BuildConfig rebuilds a
+	// pipeline from a document, and AdaptOverride is the file an applied configuration is kept
+	// in so a restart keeps it ("" keeps it in memory only).
+	BaseConfig    string
+	BuildConfig   ConfigBuilder
+	AdaptOverride string
 }
 
 // ObserveOptions tunes observe mode: one option per real decision.
@@ -234,8 +241,14 @@ type Handler struct {
 	// mode presented through the same type the hosted path uses. Built once so the
 	// request path has exactly ONE way to reach a pipeline, rather than a branch at
 	// every use — which is how a hosted deployment would eventually leak the shared
-	// one into a tenant's request.
-	static *Tenancy
+	// one into a tenant's request. Atomic because a local adapt apply swaps its pipeline
+	// (adaptapply.go) while requests are in flight.
+	static atomic.Pointer[Tenancy]
+	// adaptMu guards the adapt apply rate limit (adaptHits) and the single-tenant override
+	// (adaptMem when it has no file).
+	adaptMu   sync.Mutex
+	adaptHits map[string][]time.Time
+	adaptMem  *adaptOverride
 	// limiter enforces Options.Limits. Always non-nil; a zero Limits makes it a no-op.
 	limiter *Limiter
 	// regLim bounds self-registration attempts per client address. Separate from
@@ -332,8 +345,9 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	// The single-tenant view of this handler's own configuration. In hosted mode it
 	// is never consulted (tenancyFor goes to Options.Tenants); it exists so the
 	// request path has one shape.
-	h.static = &Tenancy{Preset: opts.Preset, Pipe: pipe, Store: st,
-		Shadow: h.shadow, Mode: h.mode(), Cache: opts.Cache}
+	h.static.Store(&Tenancy{Preset: opts.Preset, Pipe: pipe, Store: st,
+		Shadow: h.shadow, Mode: h.mode(), Cache: opts.Cache})
+	h.startAdaptOverride()
 	h.limiter = NewLimiter(opts.Limits)
 	h.keeper = newKeeper(h)
 	h.keeper.start()
@@ -426,6 +440,10 @@ func (h *Handler) Mux() *http.ServeMux {
 	// Control plane: registration, sign-in, settings, tokens, the manager's roster.
 	// Mounted after the dashboard so both live under /api/, and only in hosted mode.
 	h.MountControl(m)
+	// Both deployments: adaptPrincipal decides who may (adaptapply.go).
+	if h.api != nil {
+		m.HandleFunc("POST /api/adapt/compaction/apply", h.adaptCompactionApply)
+	}
 	// Bob (BobShell) gateway. Bob is OpenAI-compatible but calls Bob-specific
 	// paths: its model call is POST /inference/v1/chat/completions (reduced like
 	// any OpenAI chat), and its control-plane calls (/admin/v1/profile,

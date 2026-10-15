@@ -545,10 +545,25 @@ func main() {
 		}
 	}
 
+	// What /api/adapt/* applies on top of on a single-tenant proxy: the document it was started
+	// with, rebuilt by the same builder hosted accounts use, with the applied override kept beside
+	// the dashboard database so each proxy (one per project for the plugin) has its own.
+	baseConfig, adaptOverride := "preset: "+*preset+"\n", ""
+	if *cfgPath != "" {
+		if b, err := os.ReadFile(*cfgPath); err == nil {
+			baseConfig = string(b)
+		}
+	}
+	if tenants == nil && *dashOn && *dashDB != ":memory:" && *dashDB != "" {
+		adaptOverride = *dashDB + ".adapt.json"
+	}
 	h := proxy.New(pipe, cfg.NewStore(), agg, proxy.Options{
-		Tenants:      tenants,   // nil => single-tenant, unchanged behaviour
-		Upstreams:    upstreams, // the allow-list; a tenant picks a name, never a URL
-		MetricsToken: *metricsToken,
+		BaseConfig:    baseConfig,
+		BuildConfig:   buildTenantConfig,
+		AdaptOverride: adaptOverride,
+		Tenants:       tenants,   // nil => single-tenant, unchanged behaviour
+		Upstreams:     upstreams, // the allow-list; a tenant picks a name, never a URL
+		MetricsToken:  *metricsToken,
 		// Both come from the dashboard's store, so both are nil when the dashboard is
 		// off — with no request rows there is nothing to price a cap against and nothing
 		// to roll up per tenant.
@@ -618,6 +633,9 @@ func main() {
 		h.API().SetWindows(windows)
 		// The keeper's ping plan, so /api/cachestate can say how long a cache is held warm.
 		h.API().SetKeepAlivePlans(h.KeepAlivePlans)
+		// The configuration the adapt reports compare against: each account's in hosted mode, this
+		// proxy's own (with any applied override) otherwise.
+		h.API().SetAdaptCompactionConfig(h.DashAdaptConfig())
 	}
 
 	// One identity resolver for both halves of the dashboard: the read routes (dash)
