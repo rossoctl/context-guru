@@ -103,12 +103,8 @@ ANTHROPIC_BASE_URL=https://127.0.0.1:1/nope ANTHROPIC_AUTH_TOKEN=bogus \
 ```
 
 **Which preset?** `codesmart` is the recommended pipeline and the cheapest arm in the
-[benchmarks](../RESULTS.md) at the highest reward. Use `coding` if you want `skeleton` to
-strip function bodies out of large source reads — it needs a `cg_skeleton` build. See
+[benchmarks](../RESULTS.md) at the highest reward. See
 [Choose a preset](../reference/presets.md).
-
-**`context-guru-proxy` exits with `unknown component "skeleton"`.** The `coding` preset
-needs a build with the `cg_skeleton` tag; `make build` does not pass it.
 
 **Pinning the model.** context-guru forwards whatever `model` Claude Code sends. Set
 `FORCE_MODEL` on the proxy to override it (useful in eval harnesses).

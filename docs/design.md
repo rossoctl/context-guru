@@ -12,7 +12,7 @@ infrastructure the components sit on.
 |---|---|
 | `components/` | `Component`/`Reformat`/`Offload` interfaces, `Report`, `Ctx`, the `Pipeline`, the registry |
 | `components/reformat/` | lossless components: `format`, `toon`, `searchfold`, `cacheinject`, `cachesplit` |
-| `components/offload/` | lossy-reversible components: `skeleton`, `dedup`, `collapse`, `failed_run`, `cmdfilter`, `extract`, `extract_llm`, `smartcrush`, `mask`, `summarize` |
+| `components/offload/` | lossy-reversible components: `dedup`, `cmdfilter`, `extract`, `extract_llm`, `summarize` |
 | `components/dsl/` | declarative text-filter engine (wrapped by `cmdfilter`) |
 | `components/all/` | blank-imports every component so `init()` registrations run |
 | `schema/` | helpers over bifrost's schema: token counting, deep-clone, `MessageText`/`SetMessageText`, `Rewritable`, `ToolCalls` (pairs a tool result with the call that produced it), `ValidateShapeFor`/`ValidateShape` (static message-shape validation) |
@@ -206,7 +206,7 @@ entry budget so one session can't starve the rewind stashes the expand loop need
 original", which is right for a *new* compaction. But once the provider has cached the compacted
 bytes, forwarding the original **is** the destructive act. So the store keeps the fact that a freeze
 was dropped, and re-derives it even at depth where the replacement is a pure function of
-`(content, config)` — `mask` and `failed_run` qualify, since their output depends only on content
+`(content, config)` — a deterministic offloader qualifies when its output depends only on content
 and never on position. `extract_llm` is excluded: its replacement is a sampled model output, so
 re-deriving could splice *different* bytes into an already-cached prefix, which is the exact
 corruption this repair exists to prevent — a lost `extract_llm` decision simply forwards the
@@ -216,8 +216,7 @@ message verbatim instead.
 
 The tail gate protects the provider's cached prefix. On a turn whose prompt cache has **provably
 expired** there is no prefix left to protect, so restricting a deterministic offloader to the tail
-buys nothing on exactly the most expensive turns there are. `mask`, `failed_run` and `collapse`
-therefore take a `cold_cache` option, **on by default** since 2026-08: when the session's own
+buys nothing on exactly the most expensive turns there are. A deterministic offloader may take a `cold_cache` option: when the session's own
 message prefix is provably cold, it lifts the depth restriction for new decisions, which are then
 frozen and replayed byte-for-byte on every later warm turn.
 
@@ -371,10 +370,9 @@ Unknown keys are rejected.
 
 ```yaml
 preset: balanced
-pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
+pipeline: [format, dedup, cmdfilter, cachesplit]   # order + enable
 components:
-  collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }
-  smartcrush: { min_items: 5, keep_first: 3, keep_last: 2 }
+  extract:    { min_tokens: 400 }
 store: { ttl_seconds: 10000, max_entries: 5000 }
 ```
 

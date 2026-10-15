@@ -14,7 +14,7 @@ Agent: claude-code (Anthropic dialect -> proxy /anthropic route).
 
 Usage:
   sweep.py --matrix validate            # small baseline+agent validation matrix
-  sweep.py --configs off agent mask extract --benchmark terminal-bench-sample@2.0 --n-tasks 2
+  sweep.py --configs off agent dedup extract --benchmark terminal-bench-sample@2.0 --n-tasks 2
   sweep.py --benchmark swebench-verified@1.0 --configs off agent --n-tasks 1 --timeout 5400
 """
 import argparse, csv, json, os, re, shutil, signal, socket, subprocess, sys, time, urllib.request
@@ -38,14 +38,9 @@ CONFIGS = {
     "balanced":   "preset:balanced",
     "format":     "format",
     "dedup":      "dedup",
-    "failed_run": "failed_run",
     "cmdfilter":  "cmdfilter",
     "cacheinject":"cacheinject",
-    "mask":       "mask",
-    "collapse":   "collapse",
     "extract":    "extract",
-    "smartcrush": "smartcrush",
-    "skeleton":   "skeleton",
     "phi_evict":  "phi_evict",
     "toon":       "toon",
 }

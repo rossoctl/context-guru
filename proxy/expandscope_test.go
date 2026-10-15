@@ -29,7 +29,7 @@ func offloadTenancy(t *testing.T) (*httptest.Server, *tenant.Registry) {
 	t.Cleanup(upstream.Close)
 	t.Setenv("TEST_UPSTREAM_KEY", "not-a-real-key")
 
-	const cfgDoc = "pipeline: [collapse]\ncomponents:\n  collapse: {max_tokens: 20, head_lines: 2, tail_lines: 2}\nmode: sync\n"
+	const cfgDoc = "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 20}\nmode: sync\n"
 	reg, err := tenant.Open("", tenant.Options{
 		DefaultConfig: cfgDoc, DefaultUpOpenAI: "up", DefaultUpAnthropic: "up",
 		Validate: config.Validate,

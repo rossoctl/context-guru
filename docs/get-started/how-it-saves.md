@@ -8,20 +8,20 @@ them need the others, and none of them touch what the model sees or does.
 
     **Carry less context.** Tool output is full of tokens the model never reads:
     pretty-printing whitespace, ANSI color codes, terminal redraws, repeated warning
-    lines. `format`/`textclean`/`searchfold`/`linecap` strip exactly that — deterministically,
+    lines. `format`/`textclean`/`searchfold` strip exactly that — deterministically,
     with no model call — and leave every unique, informative byte untouched.
 
     ```mermaid
     flowchart LR
-      A[Tool output<br/>2,000-line build log] --> B{format · textclean<br/>searchfold · linecap}
+      A[Tool output<br/>2,000-line build log] --> B{format · textclean<br/>searchfold}
       B --> C[Same information<br/>fewer tokens]
     ```
 
     **Example:** a dependency install repeats "resolving dependency graph" 30 times
-    before the real error. `linecap` collapses the repeats to one line + `(×30)`;
+    before the real error. `extract` collapses the repeats to one line + `(×30)`;
     `format` compacts any pretty-printed JSON in the same response. Nothing an agent
     would act on is ever touched — file paths, stack frames, and diffs always survive
-    a cap intact.
+    intact.
 
     **Measured:** −0.5% of tool-output tokens, fleet-wide. Small per request, and it
     compounds — it runs first, so every later component sees an honestly-smaller number.

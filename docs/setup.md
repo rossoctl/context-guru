@@ -7,8 +7,7 @@ contributor workflow.
 
 ## Prerequisites
 
-- **Go 1.26**. A **C toolchain** is needed only for the `cg_skeleton` tag used below
-  (tree-sitter), and for `make test`'s race detector — *not* for the binary itself, which is
+- **Go 1.26**. A **C toolchain** is needed only for `make test`'s race detector — *not* for the binary itself, which is
   pure Go and statically linked. bifrost's tokenizer does **not** use cgo: o200k_base is
   embedded (`internal/tokens/tokens.go`). CI asserts the pure-Go build on every PR — natively, for
   linux/amd64 — in the `purego` job (`.github/workflows/ci.yaml`), which builds with
@@ -18,7 +17,7 @@ contributor workflow.
 
   Cross-compilation to the other three release targets (linux/arm64, darwin/amd64, darwin/arm64) is
   covered by the release build, not by that per-PR job.
-- If you do not need `skeleton`, skip the build entirely and use a
+- To skip the build entirely, use a
   [release binary](https://github.com/rossoctl/context-guru/releases).
 - **Docker** (for the gateway image / eval-containers), and the **eval-containers** repo.
 
@@ -27,7 +26,7 @@ contributor workflow.
 Local binary (from the repo root):
 
 ```sh
-CGO_ENABLED=1 go build -tags cg_skeleton -o bin/context-guru-proxy ./cmd/context-guru-proxy
+CGO_ENABLED=0 go build -o bin/context-guru-proxy ./cmd/context-guru-proxy
 ```
 
 Gateway image:
@@ -129,9 +128,6 @@ Run the same task twice — once with the component in the pipeline, once with
 
 <details markdown="1">
 <summary>Troubleshooting</summary>
-
-**The proxy exits with `components: unknown component "skeleton"`.** Build with the
-`cg_skeleton` tag, as in the build command above — `make build` does not pass it.
 
 **The base service refuses to start over missing OpenAI credentials.** It marks them required
 even on an Anthropic-only run; set `OPENAI_API_KEY=unused` and

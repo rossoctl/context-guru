@@ -36,7 +36,7 @@ type Component interface {
 }
 
 // Reformat is a lossless component: it repacks the request denser in place and
-// loses no information. Examples: format re-encode, code skeleton, cache_control
+// loses no information. Examples: format re-encode, cache_control
 // injection.
 type Reformat interface {
 	Component
@@ -50,7 +50,7 @@ type Reformat interface {
 // data) — UNLESS it set rep.Irreversible, the deliberate lossy drop a non-`full`
 // marker_mode makes (summary/off: no stash, no restoration). Returning no keys
 // AND leaving the request unchanged is a legitimate no-op (set rep.Skipped).
-// Examples: collapse, dedup, cmdfilter, extract, smartcrush.
+// Examples: dedup, cmdfilter, extract.
 type Offload interface {
 	Component
 	Offload(req *schemas.BifrostChatRequest, rep *Report, c *Ctx) (cacheKeys []string, err error)
@@ -473,7 +473,7 @@ type Ctx struct {
 	PrevBilledInput int
 	// CacheAware is true when this request goes to a prompt-caching backend and the
 	// pipeline should avoid mutating already-cached content. When true, supersession/
-	// age-based offloaders (failed_run, mask, collapse) must restrict their
+	// offloaders that replay a frozen decision (cmdfilter) must restrict new
 	// mutations to the uncached tail (message index > MaxCachedIdx) so they don't
 	// invalidate the provider's KV cache at a full→collapsed transition. Deterministic
 	// tail/in-place offloaders (dedup, cmdfilter, extract) are already byte-stable on
@@ -483,12 +483,7 @@ type Ctx struct {
 	// cache TTL, so the cached prefix CacheAware exists to protect is certainly gone.
 	//
 	// It is INFORMATION, not a global lifting of the tail gate: the gate stays where it is
-	// and each component opts in. mask, failed_run and collapse opt in BY DEFAULT since
-	// 2026-08 (their replacements are pure functions of (content, config), which is what
-	// makes a decision taken at depth re-derivable on every later warm turn); readlifecycle
-	// and skeleton do not, because theirs are not. `cold_cache: false` restores the gate per
-	// component. See coldCacheDefault in components/offload for the measurement that flipped
-	// it — 90.8% of the context was being frozen on turns whose cache had already expired.
+	// and each component opts in.
 	//
 	// False means "warm, or unknown". A new session, an evicted tracker entry and the first
 	// turn after a restart all read false: acting on a fabricated idle time would invalidate
@@ -687,9 +682,7 @@ func (c *Ctx) TailOnly(i int) bool {
 // TailOnlyCold is TailOnly with the depth restriction lifted on a turn whose prompt cache
 // is provably gone (ColdCache), for a component that opted in.
 //
-// The opt-in is per component. It defaults ON for the three whose replacement is a pure
-// function of (content, config) — mask, failed_run, collapse — and OFF for the two whose is
-// not. When ColdCache is right there is no prefix to disturb, so acting at depth is free by
+// The opt-in is per component. When ColdCache is right there is no prefix to disturb, so acting at depth is free by
 // construction; when it is WRONG the component flips content the provider is still holding
 // and forces a cache-write of the whole suffix at 1.25x the fresh rate, where a missed cold
 // turn only forgoes a saving. That asymmetry is why the DETECTION is conservative rather

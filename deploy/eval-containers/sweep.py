@@ -46,12 +46,7 @@ CONFIGS = [
     ("cg-dedup", "claude-code", "cg:dedup"),
     ("cg-cmdfilter", "claude-code", "cg:cmdfilter"),
     ("cg-cacheinject", "claude-code", "cg:cacheinject"),
-    ("cg-failed_run", "claude-code", "cg:failed_run"),
     # lossy offloaders (run without expand yet — measures savings AND reward impact)
-    ("cg-skeleton", "claude-code", "cg:skeleton"),
-    ("cg-collapse", "claude-code", "cg:collapse"),
-    ("cg-mask", "claude-code", "cg:mask"),
-    ("cg-smartcrush", "claude-code", "cg:smartcrush"),
     ("cg-extract", "claude-code", "cg:extract"),
     ("cg-phi_evict", "claude-code", "cg:phi_evict"),
     # combined + competitors

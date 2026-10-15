@@ -19,7 +19,7 @@ import (
 // compacted by extract, which re-derives every turn and stops at skipReduce, and extract_llm,
 // which checks kept-verbatim before its replay. Both still flipped with the switch on. The fix
 // now lives in isKeptVerbatim, which every one of them consults, so this table covers one offloader
-// per route into it: reapplyFrozen (mask, failed_run), skipReduce (extract), and extract_llm's own
+// per route into it: skipReduce (extract), and extract_llm's own
 // check.
 //
 // Each row asserts its own control FIRST: without Ctx.Restored, the same expand flips the message
@@ -36,25 +36,6 @@ func TestFixedRestoreKeepsTheCompactionAtTheOriginalPosition(t *testing.T) {
 		idx int
 		req func(body string) []bschemas.ChatMessage
 	}{
-		{name: "mask (reapplyFrozen)", body: strings.Repeat("verbose tool output line\n", 30), idx: 1,
-			req: func(b string) []bschemas.ChatMessage {
-				return []bschemas.ChatMessage{userMsg("go"), tool(b), tool("tail")}
-			},
-			make: func(t *testing.T) (components.Offload, func(store.Store, bool) *components.Ctx) {
-				return maskFor(t), plainCtx
-			}},
-		{name: "failed_run (reapplyFrozen, then its own check)", idx: 1,
-			body: strings.Repeat("--- FAIL: TestX\n", 40) + "3 failed\n",
-			req: func(b string) []bschemas.ChatMessage {
-				return []bschemas.ChatMessage{userMsg("go"), tool(b), tool(strings.Repeat("ok pkg\n", 40) + "5 passed\n")}
-			},
-			make: func(t *testing.T) (components.Offload, func(store.Store, bool) *components.Ctx) {
-				c, err := newFailedRun([]byte("min_tokens: 5\n"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				return c.(components.Offload), plainCtx
-			}},
 		{name: "extract (skipReduce) — the e8f16627 shape", body: strings.Repeat("verbose tool output line\n", 30), idx: 1,
 			req: func(b string) []bschemas.ChatMessage {
 				return []bschemas.ChatMessage{userMsg("go"), tool(b), tool("tail")}

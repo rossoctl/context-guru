@@ -42,7 +42,7 @@ func resolveTimeoutEnv(name string, def time.Duration) time.Duration {
 
 // resolveBudget converts an absolute token knob + an optional fraction-of-window
 // into an effective token count: the fraction (ceil(frac*window)) wins when set and
-// the window is known, else the absolute. Lets size knobs (collapse.max_tokens)
+// the window is known, else the absolute. Lets size knobs (size knobs)
 // scale with the model context window while staying backward compatible when no
 // fraction is configured or the window is unknown.
 func resolveBudget(absolute int, frac float64, window int) int {
@@ -53,7 +53,7 @@ func resolveBudget(absolute int, frac float64, window int) int {
 }
 
 // headPeek returns a single-line, whitespace-collapsed, clipped snippet of the
-// start of content — the cue an age/budget-based offloader (mask) can
+// start of content — the cue an age/budget-based offloader (removed) can
 // leave inside its marker so the model knows WHAT was hidden without a blind
 // expand round-trip. Replay/diff analysis showed a bare "[older tool output
 // masked]" marker gives the model zero signal (e.g. it masked a still-relevant
@@ -216,7 +216,7 @@ func collapseObviousNoise(content string) (string, bool) {
 }
 
 // errWords mark a tool output (or an item) as carrying a failure — such items
-// are preserved by smartcrush and prioritized elsewhere, since dropping the one
+// are preserved by a removed component and prioritized elsewhere, since dropping the one
 // error in a haystack is exactly the accuracy loss to avoid.
 var errWords = []string{"error", "fail", "exception", "panic", "fatal", "traceback"}
 

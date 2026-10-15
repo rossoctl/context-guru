@@ -33,7 +33,7 @@ func setDoc(t *testing.T, f *mgrFixture, id, doc string) {
 func TestASaveFromAStalePageIsRefused(t *testing.T) {
 	f := newMgrFixture(t)
 	mgrJar, id := f.signUpJar(t, "boss@ibm.com")
-	const stored = "pipeline:\n  - format\n  - linecap\n  - extract\nmode: sync\n"
+	const stored = "pipeline:\n  - format\n  - dedup\n  - extract\nmode: sync\n"
 	setDoc(t, f, id, stored)
 	before, err := f.reg.Get(id)
 	if err != nil {
@@ -41,7 +41,7 @@ func TestASaveFromAStalePageIsRefused(t *testing.T) {
 	}
 
 	// A page that rendered from a DIFFERENT pipeline: this is the stale render that put `toon`
-	// back and took `linecap` out.
+	// back and took `dedup` out.
 	body := `{"config":{"pipeline":["format","toon"],` +
 		`"pipeline_known":["format","toon","extract"],` +
 		`"pipeline_base":["format","extract"],` +
@@ -63,11 +63,11 @@ func TestASaveFromAStalePageIsRefused(t *testing.T) {
 	}
 
 	// The SAME body with a base that matches is accepted. `extract` IS claimed in
-	// pipeline_known and absent from `pipeline`, so it is removed; `linecap` is not claimed, so it
+	// pipeline_known and absent from `pipeline`, so it is removed; `dedup` is not claimed, so it
 	// survives at its own index. Both halves of the rule in one save.
 	ok := `{"config":{"pipeline":["format","toon"],` +
 		`"pipeline_known":["format","toon","extract"],` +
-		`"pipeline_base":["format","linecap","extract"],` +
+		`"pipeline_base":["format","dedup","extract"],` +
 		`"components":{},"cache":{"keepalive":false,"head_ttl_1h":false}}}`
 	w, _ = f.do(t, http.MethodPut, "/api/me", ok, mgrJar)
 	if w.Code != http.StatusOK {
@@ -81,8 +81,8 @@ func TestASaveFromAStalePageIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasName(got.Pipeline, "linecap") {
-		t.Errorf("linecap was dropped by a client that did not render it: %v\n%s",
+	if !hasName(got.Pipeline, "dedup") {
+		t.Errorf("dedup was dropped by a client that did not render it: %v\n%s",
 			got.Pipeline, saved.ConfigYAML)
 	}
 	if hasName(got.Pipeline, "extract") {
@@ -350,12 +350,12 @@ func TestArmingIsRateLimited(t *testing.T) {
 func TestASaveFromAPageThatReorderedThePipelineIsRefused(t *testing.T) {
 	f := newMgrFixture(t)
 	mgrJar, id := f.signUpJar(t, "boss@ibm.com")
-	const stored = "pipeline:\n  - format\n  - linecap\n  - extract\nmode: sync\n"
+	const stored = "pipeline:\n  - format\n  - dedup\n  - extract\nmode: sync\n"
 	setDoc(t, f, id, stored)
 	// The same three names, permuted: as a SET this matches the stored pipeline exactly.
-	body := `{"config":{"pipeline":["format","linecap","extract"],` +
-		`"pipeline_known":["format","linecap","extract"],` +
-		`"pipeline_base":["linecap","format","extract"],` +
+	body := `{"config":{"pipeline":["format","dedup","extract"],` +
+		`"pipeline_known":["format","dedup","extract"],` +
+		`"pipeline_base":["dedup","format","extract"],` +
 		`"components":{},"cache":{"keepalive":false,"head_ttl_1h":false}}}`
 	w, _ := f.do(t, http.MethodPut, "/api/me", body, mgrJar)
 	if w.Code != http.StatusConflict {

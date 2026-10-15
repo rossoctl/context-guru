@@ -1324,11 +1324,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// on a transcript containing marker-shaped text the model duly called it and got
 				// "[expand: original for id ... is no longer available]".
 				//
-				// Which presets those are is NOT a list worth writing down here — `mcp` looks
-				// offloader-free and is not, because `smartcrush` implements components.Offload.
-				// That is exactly why the gate asks the interface (Pipeline.HasOffload) instead
-				// of naming presets: a list in a comment is a second source of truth, and this
-				// one was wrong about `mcp` in its first draft.
+				// Which presets those are is NOT a list worth writing down here. The gate asks
+				// the interface (Pipeline.HasOffload) instead of naming presets: a list in a
+				// comment is a second source of truth.
 				//
 				// `off` mattered most: it is the A/B control arm, and a control that carries an
 				// extra tool declaration is not a control.
@@ -2243,11 +2241,6 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		snap.SummarizeAsyncRefused, snap.SummarizeAsyncUnresolved,
 		snap.SummarizeAsyncPanics = offload.AsyncSummaryStats()
 	snap.SummarizeAsyncConcurrency = offload.MaxConcurrentSummaries()
-	// agentdiet owns a third budget (a window of steps, between one tool output and a
-	// whole span), and runs in its own arm — so it reports its own counters too.
-	snap.AgentDietTimeouts = offload.AgentDietTimeouts()
-	snap.AgentDietErrors = offload.AgentDietErrors()
-	snap.AgentDietCallTimeoutMs = offload.AgentDietCallTimeout().Milliseconds()
 	// cache_aware_summarizer's budget, plus the decline counter that distinguishes "this arm ran"
 	// from "this arm was a no-op indistinguishable from off".
 	snap.CacheAwareSummarizerCalls = offload.CacheAwareSummarizerCalls()

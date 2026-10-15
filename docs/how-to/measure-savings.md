@@ -96,7 +96,7 @@ never zero. Filter to `complete` before quoting a dollar figure.
 guard that turned each candidate away, which separates three different situations:
 
 - **No legal opportunity** — `format: {not_json_shaped: 471}` (no JSON tool outputs
-  exist), `dedup: {no_earlier_identical_output: 234}`, `failed_run: {fewer_than_two_runs: 44}`.
+  exist), `dedup: {no_earlier_identical_output: 234}`.
 - **Correctly declining** — `marker_no_win` (the recovery marker would cost more than the
   rewrite saves), `cached_prefix` (cache safety froze the message), `economic_gate:*` (an
   LLM call would lose money here).

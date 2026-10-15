@@ -147,40 +147,6 @@ func TestSweepBooksNothingForADropItCouldNotStash(t *testing.T) {
 	}
 }
 
-// Every component that declines a removal for want of a reserve slot must COUNT it, or the counter
-// the docs name as the signal to raise a budget is not a count of refusals.
-func TestAgentDietRefusalsReachTheRefusalCounter(t *testing.T) {
-	model := &silentModel{}
-	c, err := newAgentDiet([]byte("delay_steps: 0\ncontext_steps: 1\nmin_step_tokens: 10\n" +
-		"min_saved_tokens: 1\nmax_keep_ratio: 1.0\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	d := c.(*AgentDiet)
-	d.modelClient = model
-	d.mode = markerFull
-	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
-		userMsg("run the tests"),
-		callMsg("t1"), toolResultMsgWithID("t1", strings.Repeat("pytest output line\n", 200)),
-		callMsg("t2"), toolResultMsgWithID("t2", strings.Repeat("more output here\n", 200)),
-	}}
-	rep := &components.Report{Component: "agentdiet"}
-	before := StashRefusals()
-	if _, err := d.Offload(req, rep, ctxFor(store.NewMemory(store.Options{MaxEntries: 1}))); err != nil {
-		t.Fatal(err)
-	}
-	if rep.Gates["stash_reserve_exhausted"] == 0 {
-		t.Fatalf("agentdiet did not decline for want of a reserve slot, so there is no refusal to "+
-			"count (gates: %v)", rep.Gates)
-	}
-	if got := StashRefusals() - before; got == 0 {
-		t.Error("agentdiet declined a whole step's removals and StashRefusals() did not move. " +
-			"docs/reference/config.md tells operators that stash_refused is THE signal to raise a " +
-			"budget, and that it is deliberately upstream of expand_unresolved_missing — so a " +
-			"deployment starving this component would read 0 while it declined every turn")
-	}
-}
-
 func extractGrossValue(name string) float64 {
 	if s := metricsExtractByComponent(name); s != nil {
 		return s.GrossValueUSD

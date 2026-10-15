@@ -123,7 +123,7 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		*snap = schema.CloneMessages(before)
 	}
 	// baseline is the guard's OWN copy of the pre-run size. rep.TokensBefore is handed to
-	// the component, so a component can write to it — mask and failed_run both did
+	// the component, so a component can write to it — one did
 	// (`rep.TokensBefore += saved`) — and comparing against the field let a component move
 	// the goalpost and splice a request it had GROWN onto the wire. The never-worse
 	// guarantee is the product's central safety claim, so it may not depend on component

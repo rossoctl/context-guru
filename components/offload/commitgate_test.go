@@ -112,19 +112,7 @@ type gateCase struct {
 // TestEveryOffloadComponentIsHeldToTheCommitGate — which is the point: the invariant's whole
 // weakness is the caller nobody thought about.
 var gateExempt = map[string]string{
-	"failed_run": "needs a superseded failed RUN (a later successful invocation of the same " +
-		"command) to have anything to collapse; the shape is covered by mask, which shares " +
-		"its commit path verbatim — tryMark, commitMark, SetMessageText, freeze",
-	"readlifecycle": "needs a read/edit event pair across messages to classify a body as " +
-		"stale; same commit path as mask",
-	"skeleton": "acts only on a line-numbered source dump or a fenced block whose grammar " +
-		"tree-sitter recognises, so a fixture depends on the cg_skeleton build tag",
-	"smartcrush": "acts only on a JSON array of records above its floor; same commit path " +
-		"as dedup",
-	"agentdiet": "reached only through a reflection model call over a multi-STEP trajectory, so " +
-		"its candidates are steps rather than messages; pinned by " +
-		"TestAgentDietDoesNotPayForAReflectionItCannotStash and " +
-		"TestAgentDietRefusalsReachTheRefusalCounter",
+
 	"cache_aware_summarizer": "commissions its summary OFF the hot path, so a single Offload " +
 		"stamps no marker at all — the gate's driver requires one call to produce one, which this " +
 		"component cannot do for the same structural reason summarize cannot. The property the gate " +
@@ -162,43 +150,6 @@ func noisyLines(tag string) string {
 
 func gateCases() []gateCase {
 	return []gateCase{
-		{"mask", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
-			c, err := newMask([]byte("keep_recent: 0\nmin_tokens: 20\n"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			return c.(components.Offload), toolMsgs(wideOutput("m1"), wideOutput("m2")), ctxFor(st)
-		}},
-		{"linecap", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
-			c, err := newLinecap([]byte("max_line_chars: 40\nmin_size: 10\n"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			return c.(components.Offload), toolMsgs(wideOutput("l1"), wideOutput("l2")), ctxFor(st)
-		}},
-		{"collapse", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
-			c, err := newCollapse([]byte("max_tokens: 20\nhead_lines: 2\ntail_lines: 2\n"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			body := strings.Repeat("a line of log output that goes on for a while\n", 80)
-			return c.(components.Offload), toolMsgs(body, body+"tail\n"), ctxFor(st)
-		}},
-		{"coref", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
-			// Driven rather than exempted, because coref DID have the defect this table exists to
-			// catch: it ignored commitMark's return and spliced plus froze regardless.
-			//
-			// min_later_turns AND min_batch_frac are both defaulted out of the way, the same as
-			// corefFor does. Leaving the opportunity floor at its default of 8 protects this
-			// fixture's tail candidate, nothing is cut, and the saturated case below would then
-			// pass vacuously -- which this table's own precondition catches.
-			c, err := newCoref([]byte("min_tokens: 20\nmin_batch_frac: 0\nmin_later_turns: 0\n" +
-				"break_even: false\n"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			return c.(components.Offload), corefReq(), corefCtx(st)
-		}},
 		{"dedup", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
 			c, err := newDedup([]byte("min_tokens: 20\n"))
 			if err != nil {

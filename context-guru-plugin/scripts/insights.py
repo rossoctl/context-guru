@@ -105,8 +105,8 @@ PRESET_PIPELINES: dict[str, tuple[str, ...]] = {
     "cache": ("cachesplit",),
     "house": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract",
               "cachesplit", "toolfilter"),
-    "codesmart": ("format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter",
-                  "extract_llm", "extract", "linecap", "cachesplit"),
+    "codesmart": ("format", "textclean", "searchfold", "dedup", "cmdfilter",
+                  "extract_llm", "extract", "cachesplit"),
     "housellm": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm",
                  "extract_llm_sweep", "extract", "cachesplit", "toolfilter"),
     "conservative": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract",
@@ -148,11 +148,6 @@ COMPONENTS: dict[str, dict[str, str]] = {
     "toon":       {"what": "re-encodes tabular tool output more compactly", "counterfactual": "none"},
     "cmdfilter":  {"what": "trims command echo and shell preamble from bash output",
                    "counterfactual": "none"},
-    "failed_run": {"what": "offloads the output of runs a later run superseded",
-                   "counterfactual": "none"},
-    "linecap":    {"what": "caps very long single tool outputs", "counterfactual": "none"},
-    "collapse":   {"what": "head/tail collapse as a last-resort catch-all", "counterfactual": "none"},
-    "mask":       {"what": "offloads tool outputs older than a threshold", "counterfactual": "related"},
     "extract":    {"what": "keeps the relevant part of a large tool output, reversibly",
                    "counterfactual": "related"},
     "extract_llm": {"what": "a cheap model decides what of a tool output is still relevant "
@@ -163,8 +158,6 @@ COMPONENTS: dict[str, dict[str, str]] = {
     "cache_aware_summarizer": {"what": "a compaction model rewrites the transcript, reusing the "
                                       "cached prefix instead of paying full price for it",
                                "counterfactual": "related"},
-    "smartcrush": {"what": "structure-aware compression of large outputs", "counterfactual": "none"},
-    "agentdiet":  {"what": "the published AgentDiet baseline, for A/B only", "counterfactual": "none"},
     "cachesplit": {"what": "moves the cache breakpoint off the volatile tail so the prefix stays "
                            "cacheable", "counterfactual": "measured"},
     "cacheinject": {"what": "places a cache breakpoint where none was set", "counterfactual": "none"},

@@ -88,14 +88,14 @@ func TestChildAttachesTheBlockItCreates(t *testing.T) {
 
 // Bug 2: a save must never drop a component the client did not render a control for.
 //
-// The reported incident: `linecap` vanished from an operator's pipeline and `toon` was
+// The reported incident: `dedup` vanished from an operator's pipeline and `toon` was
 // re-added at the end. The server writes the posted pipeline wholesale, so a stale render or
 // a cached bundle whose /api/options predates a component produces exactly that — and the
 // server could not tell it from a deliberate removal. PipelineKnown is the client CLAIMING
 // what it drew, so absence from it resolves the ambiguity in favour of the stored document.
 func TestASaveNeverDropsAComponentTheClientDidNotRender(t *testing.T) {
-	const doc = "pipeline:\n  - format\n  - linecap\n  - extract\n"
-	// The client draws format and extract, does not know linecap, and posts without it.
+	const doc = "pipeline:\n  - format\n  - dedup\n  - extract\n"
+	// The client draws format and extract, does not know dedup, and posts without it.
 	out, err := ApplyForm(doc, Form{
 		Pipeline:      []string{"format", "extract"},
 		PipelineKnown: []string{"format", "extract"},
@@ -103,14 +103,14 @@ func TestASaveNeverDropsAComponentTheClientDidNotRender(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyForm: %v", err)
 	}
-	if got := pipelineOf(t, out); !reflect.DeepEqual(got, []string{"format", "linecap", "extract"}) {
-		t.Errorf("linecap was not preserved at its own index: got %v\n%s", got, out)
+	if got := pipelineOf(t, out); !reflect.DeepEqual(got, []string{"format", "dedup", "extract"}) {
+		t.Errorf("dedup was not preserved at its own index: got %v\n%s", got, out)
 	}
 	// And a DECLARED removal still removes. Without this the fix would be "the pipeline is
 	// append-only", which is a different bug.
 	out, err = ApplyForm(doc, Form{
 		Pipeline:      []string{"format", "extract"},
-		PipelineKnown: []string{"format", "linecap", "extract"},
+		PipelineKnown: []string{"format", "dedup", "extract"},
 	})
 	if err != nil {
 		t.Fatalf("ApplyForm (declared removal): %v", err)
@@ -123,13 +123,13 @@ func TestASaveNeverDropsAComponentTheClientDidNotRender(t *testing.T) {
 // The old-bundle direction: a client that declares nothing removes nothing. A cached app.js
 // and a hand-rolled API client are the same case, and both can still add and reorder.
 func TestASaveFromAClientThatDeclaresNothingRemovesNothing(t *testing.T) {
-	const doc = "pipeline:\n  - format\n  - linecap\n  - extract\n  - toon\n"
+	const doc = "pipeline:\n  - format\n  - dedup\n  - extract\n  - toon\n"
 	out, err := ApplyForm(doc, Form{Pipeline: []string{"format"}})
 	if err != nil {
 		t.Fatalf("ApplyForm: %v", err)
 	}
 	got := pipelineOf(t, out)
-	for _, want := range []string{"format", "linecap", "extract", "toon"} {
+	for _, want := range []string{"format", "dedup", "extract", "toon"} {
 		if !contains(got, want) {
 			t.Errorf("%s was removed by a client that declared nothing: got %v", want, got)
 		}
@@ -142,20 +142,20 @@ func TestASaveFromAClientThatDeclaresNothingRemovesNothing(t *testing.T) {
 func TestAPreservedComponentKeepsItsOwnBlock(t *testing.T) {
 	const doc = `pipeline:
   - format
-  - linecap
+  - dedup
 components:
-  linecap:
-    max_line_chars: 4000
+  dedup:
+    min_tokens: 4000
 `
 	out, err := ApplyForm(doc, Form{
 		Pipeline:      []string{"format"},
 		PipelineKnown: []string{"format"},
-		Components:    map[string]map[string]any{"linecap": {"max_line_chars": 4000}},
+		Components:    map[string]map[string]any{"dedup": {"min_tokens": 4000}},
 	})
 	if err != nil {
 		t.Fatalf("ApplyForm: %v", err)
 	}
-	if !strings.Contains(out, "max_line_chars: 4000") {
+	if !strings.Contains(out, "min_tokens: 4000") {
 		t.Errorf("the preserved component's configuration was cleared:\n%s", out)
 	}
 }

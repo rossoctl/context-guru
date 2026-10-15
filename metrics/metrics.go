@@ -765,14 +765,6 @@ type Snapshot struct {
 	SummarizeAwaitedMs        int64 `json:"summarize_awaited_ms"`
 	SummarizeAwaitTimeouts    int64 `json:"summarize_await_timeouts"`
 	SummarizeAsyncConcurrency int64 `json:"summarize_async_concurrency"`
-	// AgentDiet* are the same three figures for the `agentdiet` baseline, which owns a
-	// third budget: its prompt is a window of b+1+a serialized steps, so it sits
-	// between extract_llm's single tool output and summarize's whole span. Reported
-	// separately for the same reason as summarize — it runs in its own arm, so folding
-	// it into LLM* would show llm_timeouts 0 while every reflection call expired.
-	AgentDietTimeouts      int64 `json:"agentdiet_timeouts"`
-	AgentDietErrors        int64 `json:"agentdiet_errors"`
-	AgentDietCallTimeoutMs int64 `json:"agentdiet_call_timeout_ms"`
 	// CacheAwareSummarizer* are cache_aware_summarizer's. That method's whole claim is WHERE the
 	// summarization request is built — the conversation plus an appended instruction, so the
 	// backend recognises a prefix it already has — which makes its cost profile different in

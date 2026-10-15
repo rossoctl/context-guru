@@ -21,8 +21,7 @@ To build from source instead you need **Go 1.26** — and still no C toolchain: 
 with cgo disabled and produces the same statically linked binary. CI asserts that natively for
 linux/amd64 (the `purego` job), and the release workflow asserts it again before publishing.
 
-A C compiler is needed for exactly two things: `make test` (the race detector requires cgo) and the
-optional [`skeleton`](../components/skeleton.md) component's `cg_skeleton` build tag.
+A C compiler is needed for exactly one thing: `make test` (the race detector requires cgo).
 
 ## Steps
 
@@ -106,18 +105,6 @@ Tool outputs on the Anthropic dialect ride in `tool_result` blocks inside a user
 
 <details markdown="1">
 <summary>Troubleshooting</summary>
-
-**The proxy exits with `components: unknown component "skeleton"`.** The
-[`skeleton`](../components/skeleton.md) component needs the `cg_skeleton` build tag, and
-`make build` does not pass it. Build it explicitly:
-
-```sh
-CGO_ENABLED=1 go build -tags cg_skeleton -o bin/context-guru-proxy ./cmd/context-guru-proxy
-```
-
-The `coding` preset, and any pipeline listing `skeleton`, needs that binary. Without the tag
-the component is not registered, and the proxy refuses to start rather than quietly running
-a pipeline that is missing a component you asked for. Every other component is unaffected.
 
 **`/stats` shows zero requests.** The agent is not reaching the proxy. Confirm the base URL
 includes the dialect path (`/anthropic`, or `/openai/v1`), and note that Claude Code's

@@ -305,45 +305,6 @@ func sweepCacheHits() int64 {
 	return 0
 }
 
-// agentdiet pays a reflection model call over a whole step, and every plan it produces wants a
-// payload. If the reserve cannot take even the smallest of them, the call is paid and every plan
-// is then declined at commitMark — a model call for a step guaranteed to be left verbatim.
-//
-// Weaker than summarize's check on purpose: it probes with the SMALLEST candidate, so it skips
-// only when nothing at all can be admitted and never declines a step whose plans might still fit.
-func TestAgentDietDoesNotPayForAReflectionItCannotStash(t *testing.T) {
-	model := &silentModel{}
-	c, err := newAgentDiet([]byte("delay_steps: 0\ncontext_steps: 1\nmin_step_tokens: 10\n" +
-		"min_saved_tokens: 1\nmax_keep_ratio: 1.0\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	d := c.(*AgentDiet)
-	d.modelClient = model
-	d.mode = markerFull
-
-	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
-		userMsg("run the tests"),
-		callMsg("t1"), toolResultMsgWithID("t1", strings.Repeat("pytest output line\n", 200)),
-		callMsg("t2"), toolResultMsgWithID("t2", strings.Repeat("more output here\n", 200)),
-	}}
-	// A reserve with no room at all.
-	st := store.NewMemory(store.Options{MaxEntries: 1})
-	rep := &components.Report{Component: "agentdiet"}
-	if _, err := d.Offload(req, rep, ctxFor(st)); err != nil {
-		t.Fatalf("Offload: %v", err)
-	}
-	if n := atomic.LoadInt64(&model.calls); n != 0 {
-		t.Errorf("the reflection model was called %d time(s) although the reserve could not "+
-			"hold ANY payload: every plan it produced would be declined at commitMark, so the "+
-			"call is paid for a step that is guaranteed to be left verbatim", n)
-	}
-	if rep.Gates["stash_reserve_exhausted"] == 0 {
-		t.Errorf("the skip was not recorded as stash_reserve_exhausted, so a run that stopped "+
-			"reducing looks like a run with nothing to reduce (gates: %v)", rep.Gates)
-	}
-}
-
 // The sweep's debug row must carry its OWN economics, and the ledger must carry the WIRE's.
 //
 // Two separate numbers that a single variable used to serve, which is how one of them was lost:

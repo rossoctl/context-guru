@@ -29,7 +29,7 @@ func TestBuildEmptyPipeline(t *testing.T) {
 // TestBuildMarshalsComponentBlock exercises the components:<name> config-block
 // marshal path in Build (the raw block is handed to the constructor).
 func TestBuildMarshalsComponentBlock(t *testing.T) {
-	c, err := LoadBytes([]byte("pipeline: [collapse]\ncomponents:\n  collapse: {max_tokens: 123}\n"))
+	c, err := LoadBytes([]byte("pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 123}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,14 +37,6 @@ func TestBuildMarshalsComponentBlock(t *testing.T) {
 		t.Fatalf("build with a component config block failed: %v", err)
 	}
 }
-
-// buildTagged names components that only register under a build tag, so a default
-// pure-Go build legitimately does not have them. `skeleton` needs `cg_skeleton`
-// (tree-sitter), and neither the Makefile nor CI passes that tag — so a preset naming
-// it cannot build here. That is the tag, not a typo, which is why the test below skips
-// buildTagged lists components that only exist in a tagged build. A preset naming one is a
-// FAILURE, not an excuse (see the loop below) — this map exists so the failure can say why.
-var buildTagged = map[string]bool{"skeleton": true}
 
 // Every preset must actually BUILD. A name-list is only a promise until the registry
 // resolves it, and a rich preset's embedded YAML doc is only valid until something
@@ -58,20 +50,10 @@ func TestEveryPresetBuilds(t *testing.T) {
 	for name := range presets {
 		t.Run(name, func(t *testing.T) {
 			pipeline, _ := PresetPipeline(name)
-			// NOT a skip. A preset is a promise that one word of config works, and it is
-			// resolved in whatever binary the user is running — so a preset that names a
-			// tag-gated component is broken FOR EVERY USER of the default build, which is
-			// exactly the failure this test was written to catch. Skipping it is how
-			// `preset: coding` shipped naming `skeleton` and died at boot with
-			// `unknown component "skeleton"` for anyone who selected it.
-			//
-			// A tag-gated component is welcome to exist; a DEFAULT-BUILD preset may not
-			// depend on one. If a tagged build ever needs its own preset, give it a
-			// separate name declared in the tagged file.
+			// Build ignores a removed name, so a preset naming one would pass the build below.
 			for _, comp := range pipeline {
-				if buildTagged[comp] && !registered[comp] {
-					t.Fatalf("preset %q names %q, which is behind a build tag and is not in this build: "+
-						"every user selecting this preset gets a boot failure", name, comp)
+				if removedComponents[comp] || !registered[comp] {
+					t.Fatalf("preset %q names %q, which is removed or not registered", name, comp)
 				}
 			}
 			c, err := LoadBytes([]byte("preset: " + name + "\n"))
@@ -133,7 +115,7 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 	// fast. See TestCachePresetIsCachesplitAlone, which holds the other side of that trade.
 	// summarizer1509 is exempt for exactly summarize's reason — it IS summarize, configured as the
 	// cache-unaware no-reuse reference arm, and it restructures the transcript alone.
-	exempt := map[string]bool{"off": true, "summarize": true, "summarizer1509": true, "agentdiet": true, "cache": true}
+	exempt := map[string]bool{"off": true, "summarize": true, "summarizer1509": true, "cache": true}
 	for name, pipeline := range presets {
 		if exempt[name] {
 			continue
@@ -208,26 +190,6 @@ func TestToonIsInNoPreset(t *testing.T) {
 		if !has {
 			t.Errorf("preset %q is exempted from the toon rule but no longer runs toon; "+
 				"drop the exemption rather than leaving a standing permission", name)
-		}
-	}
-}
-
-// linecap must sit immediately before cachesplit in every preset that runs it. The mechanism
-// is asserted in components/offload (TestLinecapYieldsToAnEarlierOffloader), but the mistake
-// that actually happened was an ORDERING one: every Offload leaves a marker and every Offload
-// skips marker-bearing content, so a modest reducer ahead of a drastic one takes its candidate
-// away. Measured on `general` over 1,795 real captured requests, linecap 7th saved 5,524,476
-// tokens — worse than the 5,556,801 with no linecap at all — against 5,811,621 placed last.
-func TestLinecapRunsLastAmongTheOffloaders(t *testing.T) {
-	for name, pipeline := range presets {
-		for i, c := range pipeline {
-			if c != "linecap" {
-				continue
-			}
-			if i != len(pipeline)-2 || pipeline[len(pipeline)-1] != "cachesplit" {
-				t.Errorf("preset %q runs linecap at %d of %v; it must be immediately before "+
-					"cachesplit, or it steals candidates from the heavier offloaders", name, i, pipeline)
-			}
 		}
 	}
 }
@@ -354,5 +316,47 @@ func TestExpandFixedRestoreReachesThePipeline(t *testing.T) {
 	}
 	if _, err := LoadBytes([]byte("expand:\n  fixed_restor: true\n")); err == nil {
 		t.Error("a typo'd expand key was accepted")
+	}
+}
+
+// A stored config that still names a removed component (or the removed agentdiet preset) must
+// load, build, and run without it: warn and ignore, never fail the proxy at boot.
+func TestRemovedComponentsAreIgnoredNotFatal(t *testing.T) {
+	for _, doc := range []string{
+		"pipeline: [format, failed_run, collapse, mask, linecap, smartcrush, readlifecycle, coref, agentdiet, skeleton, extract]\n" +
+			"components:\n  collapse: {max_tokens: 3000}\n  mask: {keep_recent: 3}\n  extract: {min_tokens: 400}\n",
+		"preset: agentdiet\n",
+	} {
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatalf("load: %v\n%s", err, doc)
+		}
+		for _, n := range c.Pipeline {
+			if removedComponents[n] {
+				t.Errorf("removed component %q left in the pipeline %v", n, c.Pipeline)
+			}
+		}
+		if _, ok := c.Components["collapse"]; ok {
+			t.Error("a removed component's config block was kept")
+		}
+		if _, err := c.Build(nil); err != nil {
+			t.Fatalf("build: %v\n%s", err, doc)
+		}
+	}
+	// Built straight from a struct (no LoadBytes), as library callers do.
+	c := &Config{Pipeline: []string{"format", "failed_run", "extract"}}
+	if _, err := c.Build(nil); err != nil {
+		t.Fatalf("struct build: %v", err)
+	}
+	if got := strings.Join(c.Pipeline, ","); got != "format,extract" {
+		t.Errorf("pipeline = %s, want format,extract", got)
+	}
+}
+
+// /compact?preset=agentdiet must behave like `preset: agentdiet` in a config: empty pipeline, not an error.
+func TestRemovedPresetResolvesToEmptyPipeline(t *testing.T) {
+	p, ok := PresetPipeline("agentdiet")
+	if !ok || len(p) != 0 {
+		t.Fatalf("PresetPipeline(agentdiet) = %v, %v; want empty, true", p, ok)
 	}
 }

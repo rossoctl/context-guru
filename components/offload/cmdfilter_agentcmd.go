@@ -37,7 +37,7 @@ import "fmt"
 //
 // The file-dump class is 81% of the mass and has no LOSSLESS reduction: its content IS
 // the file. The only removable bytes are `Read`'s `NNN\t` gutter, and a line number is on
-// the never-drop list. Shrinking a file dump needs signature extraction (`skeleton.go`,
+// the never-drop list. Shrinking a file dump needs signature extraction (removed,
 // tree-sitter), a different mechanism from a line filter. Recorded here so the next person
 // does not re-derive it from the same corpus.
 //

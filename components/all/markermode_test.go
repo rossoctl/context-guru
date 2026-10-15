@@ -16,12 +16,13 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// bigTool builds a many-line tool output collapse will reduce (well over its
-// head+tail window and token floor).
+// bigTool builds a tool output extract will reduce: one informative line, then the same
+// noise line repeated well past its token floor.
 func bigTool() *schemas.BifrostChatRequest {
 	var b strings.Builder
+	b.WriteString("line 50: the only informative line\n")
 	for i := 0; i < 120; i++ {
-		fmt.Fprintf(&b, "line %d: some tool output content to pad this out\n", i)
+		fmt.Fprintf(&b, "retry: connection refused to the database host, waiting\n")
 	}
 	return &schemas.BifrostChatRequest{Input: []schemas.ChatMessage{toolMsg(b.String())}}
 }
@@ -31,12 +32,12 @@ func bigTool() *schemas.BifrostChatRequest {
 // non-ASCII ⟪cg⟫ survives JSON round-trip and HasPlaceholder still matches it — the
 // cross-turn skip-detection depends on this (HANDOVER review item 5).
 func TestMarkerModeSummarySurvivesWire(t *testing.T) {
-	cfg, err := config.LoadBytes([]byte("pipeline: [collapse]\ncomponents:\n  collapse: {max_tokens: 10, head_lines: 2, tail_lines: 2, marker_mode: summary}\n"))
+	cfg, err := config.LoadBytes([]byte("pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 10, marker_mode: summary}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	p, _ := cfg.Build(nil)
-	big := strings.Repeat("a fairly long line of tool output content to reduce\n", 60)
+	big := "line 1: header\n" + strings.Repeat("a fairly long line of tool output content to reduce\n", 60)
 	body, _ := json.Marshal(map[string]any{
 		"model": "claude-sonnet-4-6",
 		"messages": []any{
@@ -48,7 +49,7 @@ func TestMarkerModeSummarySurvivesWire(t *testing.T) {
 	})
 	out, changed := apply.Body(context.Background(), p, store.NewMemory(store.Options{}), schemas.Anthropic, body, "", false)
 	if !changed {
-		t.Fatal("summary-mode collapse should have reduced the tool_result")
+		t.Fatal("summary-mode extract should have reduced the tool_result")
 	}
 	got := gjson.GetBytes(out, "messages.1.content.0.content").String()
 	if !strings.Contains(got, expand.SummaryMarker) || !expand.HasPlaceholder(got) {
@@ -64,7 +65,7 @@ func TestMarkerModeSummarySurvivesWire(t *testing.T) {
 func TestMarkerModeFull(t *testing.T) {
 	req := bigTool()
 	before := schema.MessagesTokens(req)
-	_, st := run(t, "pipeline: [collapse]\ncomponents:\n  collapse: {max_tokens: 10, head_lines: 2, tail_lines: 2}\n", req)
+	_, st := run(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 10}\n", req)
 	got := schema.MessageText(req.Input[0])
 	if schema.MessagesTokens(req) >= before {
 		t.Fatalf("full: expected reduction, before=%d after=%d", before, schema.MessagesTokens(req))
@@ -84,7 +85,7 @@ func TestMarkerModeFull(t *testing.T) {
 func TestMarkerModeSummary(t *testing.T) {
 	req := bigTool()
 	before := schema.MessagesTokens(req)
-	run(t, "pipeline: [collapse]\ncomponents:\n  collapse: {max_tokens: 10, head_lines: 2, tail_lines: 2, marker_mode: summary}\n", req)
+	run(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 10, marker_mode: summary}\n", req)
 	got := schema.MessageText(req.Input[0])
 	if schema.MessagesTokens(req) >= before {
 		t.Fatalf("summary: expected reduction (guard must not revert), before=%d after=%d", before, schema.MessagesTokens(req))
@@ -102,7 +103,7 @@ func TestMarkerModeSummary(t *testing.T) {
 func TestMarkerModeOff(t *testing.T) {
 	req := bigTool()
 	before := schema.MessagesTokens(req)
-	run(t, "pipeline: [collapse]\ncomponents:\n  collapse: {max_tokens: 10, head_lines: 2, tail_lines: 2, marker_mode: off}\n", req)
+	run(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 10, marker_mode: off}\n", req)
 	got := schema.MessageText(req.Input[0])
 	if schema.MessagesTokens(req) >= before {
 		t.Fatalf("off: expected reduction (guard must not revert), before=%d after=%d", before, schema.MessagesTokens(req))
