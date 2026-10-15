@@ -1280,7 +1280,10 @@ func modelWindows() modelinfo.Resolver {
 	if url == "" {
 		// The public map. A fetch failure here is a network inconvenience, not a misconfiguration, so
 		// the embedded table remains the right answer and the chain keeps its fallback.
-		return append(chain, live, modelinfo.DefaultStatic())
+		// Builtin sits between the map and the table so a listed model stays exact while the map is
+		// not loaded (#515). It is NOT added behind an explicit MODEL_INFO_URL below: that document
+		// is the operator's authority, and a built-in figure must not answer past it.
+		return append(chain, modelinfo.NewChain(live)...)
 	}
 	// AN EXPLICIT MODEL_INFO_URL IS AN AUTHORITY THE OPERATOR NAMED, and guessing past it is wrong for
 	// the same reason MODEL_PRICES is fatal rather than skipped a few lines up: a silently-absent
