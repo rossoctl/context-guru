@@ -1087,7 +1087,7 @@ function insUsageBars(tl) {
     const row = groups[g.key] || (groups[g.key] = {
       key: g.key, label: g.label, kind: g.kind, baseline: base, members: [],
       usd: 0, tokens: 0, reads: 0,
-      used: cols.map(() => 0), carried: cols.map(() => 0),
+      used: cols.map(() => 0), carried: cols.map(() => 0), dayTok: cols.map(() => 0),
     });
     row.members.push(it.name);
     row.usd += it.usd || 0;
@@ -1101,6 +1101,18 @@ function insUsageBars(tl) {
          * with 860 requests rendered exactly like one with 206, and every day of a bar looked
          * identical however much it had actually cost. The count is what the shade needs. */
         row.carried[ci] += s.carried[i] || 0;
+        /* THE DAY'S TOKENS, accumulated PER MEMBER rather than derived later.
+         *
+         * A grouped row holds 15 skills, and computing a day's tokens as
+         * sum(carried) * sum(tokens) multiplies every skill's carriage by every skill's weight —
+         * a 15x over-count. Measured on superpowers: 11 October reported $5.35 against a group
+         * total of $1.31, and the six days summed to $19.61 against that same $1.31. A day
+         * cannot cost more than the window it sits in, which is how the reader caught it: "How
+         * in superpoer plugin west per day is 3 USD and totals is less?"
+         *
+         * Each member now contributes its own carriage times its own weight, so the days sum to
+         * the total by construction rather than by coincidence. */
+        row.dayTok[ci] += (s.carried[i] || 0) * (it.tokens || 0);
       }
     });
   }
@@ -1177,12 +1189,20 @@ function insColumnTotal(r) {
    * already says it is not actionable, so the total does not need to repeat it. */
   if (r.usd > 0) return usd(r.usd);
   if (r.tokens) return compact(r.tokens) + ' tok';
-  /* NO FIGURE BECAUSE THERE IS NO WASTE. An invoked capability carries no cost columns at all,
-   * by design: every figure on this page means "spent for nothing", and a capability that was
-   * used earned its weight. Printed as a word, because a blank where every neighbour has a
-   * number reads as missing data — which is exactly how it looked on the built-in tab, where
-   * fifteen genuinely-used tools showed nothing at all. */
-  return 'in use';
+  /* HOW OFTEN IT WAS CALLED, for a capability the document gives no cost for.
+   *
+   * The reader asked for the total instead of the words "in use", to judge removal for
+   * themselves — and there is no total to give: the shaping layer withholds every cost field
+   * for an invoked capability on purpose (see insightsshape.go, "AN INVOKED ITEM CARRIES NO COST
+   * COLUMNS"), because each one means "spent for nothing" and a used capability earned its
+   * weight. So `usd` and `tokens` arrive as 0, and printing $0.00 would claim it was free.
+   *
+   * The invocation count IS available, and it is the figure that actually bears on the decision
+   * for these: a built-in called 1,911 times is plainly earning its place, one called twice is
+   * worth a look. Emitting the weight for invoked items as well would need a change in the
+   * shaping layer and its honesty rules; this reports what the document holds. */
+  const calls = r.used.reduce((n, u) => n + u, 0);
+  return calls ? calls + (calls === 1 ? ' day used' : ' days used') : '';
 }
 
 /* insShadedColour mixes a colour toward the page surface by `shade`, 0..1.
@@ -1476,7 +1496,8 @@ function insDrawChart(host, g) {
          * Apportioned by that day's share of the reads, which is exact rather than an estimate:
          * cost is linear in tokens carried, so day_cost = total * day_tokens / total_tokens. The
          * six days of ArtifactData sum to $7.2035, its reported total, to the cent. */
-        const dayTok = r.carried[ci] * (r.tokens || 0);
+        /* Read, not recomputed: carried x tokens is only valid for a single-member row. */
+        const dayTok = r.dayTok[ci] || 0;
         const dayUSD = r.reads > 0 ? (r.usd || 0) * (dayTok / r.reads) : 0;
         const dayLine = r.carried[ci]
           ? '<br>' + (dayUSD ? usd(dayUSD) + ' wasted that day · ' : '') +
