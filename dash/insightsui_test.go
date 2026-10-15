@@ -216,72 +216,39 @@ func cssRuleFor(t *testing.T, css, selector string) string {
 	return css[i+open : i+end]
 }
 
-// TestHoveringOneCellHighlightsOnlyThatCell.
+// TestHoveringDoesNotDimTheRestOfTheChart.
 //
-// Reported from use: "when o hover mouse on light violed cells all cell start blinking".
+// This test previously demanded `focus: 'self'` on every series, on the reasoning that ECharts
+// otherwise highlights a whole series at once. That reasoning was wrong in the direction that
+// matters: focus works by BLURRING everything which is not the hovered item, so pointing anywhere
+// faded the entire chart to near-invisible, and moving the pointer in and out made it flash.
+// Reported as "when i move mouse on empty cell all chart dissapear" — and the test was holding
+// the bug in place.
 //
-// ECharts defaults a heatmap's emphasis to the whole SERIES, so hovering any one cell highlights
-// every cell that shares its colour — 160 of them on a real grid, which reads as the chart
-// flashing. `focus: 'self'` narrows it to the cell under the pointer, which is the only one the
-// tooltip is describing anyway.
-//
-// Asserted per series rather than once, because an emphasis block without a focus is the default
-// that caused this: adding a series and copying its neighbour's emphasis is how it comes back.
-func TestHoveringOneCellHighlightsOnlyThatCell(t *testing.T) {
-	code := stripJSComments(readUI(t, "ui/insights.js"))
-	emph := strings.Count(code, "emphasis: {")
-	focus := strings.Count(code, "focus: 'self'")
-	if emph == 0 {
-		t.Fatal("no series declares an emphasis style; hovering a cell would give no feedback")
-	}
-	if focus < emph {
-		t.Errorf("%d series declare emphasis but only %d set focus: 'self'. Without it ECharts "+
-			"highlights the whole SERIES, so hovering one cell flashes every cell of that "+
-			"colour — 160 of them on a real grid", emph, focus)
-	}
-}
-
-// TestEveryColourTheChartPaintsIsNamedInItsLegend.
-//
-// Reported from use: "All colors used in project should be in Legend. Currently i have colors that
-// not clear to me" and "grey light grey white all not clar". Three defects, all mine:
-//
-//  1. TWO GREYS A HAIR APART. `in use / built in` was --fg-muted (#566072) and `carried, never
-//     used` was --fg-faint (#626b79) at 13% — indistinguishable on screen, and they mean opposite
-//     things: a capability earning its weight versus one that is pure waste.
-//  2. OPACITY AS MAGNITUDE. I encoded invocation count as opacity within the verdict hue, so one
-//     legend entry became a dozen shades on screen (#566072 at 0.35, 0.36, 0.39…). A legend can
-//     name a colour; it cannot name a gradient the reader is supposed to infer.
-//  3. The chart painted --accent blue and white for the slider, neither explained anywhere.
-//
-// The rule this pins: a cell colour is either in the legend or it is not a cell colour. Chrome
-// control furniture (slider, handles) is exempt — it is not data — but no DATA series may be
-// painted in a hue the legend does not name.
-func TestEveryColourTheChartPaintsIsNamedInItsLegend(t *testing.T) {
+// So the requirement is the opposite one, stated as the property rather than as a flag: hovering
+// must not change anything except the thing under the pointer. The pinned tooltip is the
+// feedback; the chart itself holds still.
+func TestHoveringDoesNotDimTheRestOfTheChart(t *testing.T) {
 	code := stripJSComments(readUI(t, "ui/insights.js"))
 
-	// No opacity-as-magnitude. The function that computed it must be gone, not merely unused:
-	// leaving it invites the next change to wire it back in.
-	if strings.Contains(code, "insOpacityFor") {
-		t.Error("insOpacityFor still exists. Encoding invocation count as opacity turns one " +
-			"legend entry into a dozen shades on screen, and a legend cannot name a gradient")
-	}
-	// Each data series takes a flat colour from the theme, and the two states that were grey-on-
-	// grey must now be genuinely different hues rather than the same ink at two opacities. The
-	// chart reads the softened `--ins-cell-*` variants; see the derivation check in
-	// TestTheChartAndTheTablesSpeakOneColourLanguage for why those exist.
-	for _, tok := range []string{"--ins-cell-keep", "--ins-carried"} {
-		if !strings.Contains(code, "v('"+tok+"'") {
-			t.Errorf("the chart does not look up %s; the states that were two near-identical "+
-				"greys need distinct, separately-declared hues", tok)
+	// No focus-based emphasis anywhere: every value of `focus` except 'none' blurs something.
+	for _, bad := range []string{"focus: 'self'", "focus: 'series'", "focus: 'ancestor'"} {
+		if strings.Contains(code, bad) {
+			t.Errorf("the chart sets %s. Focus dims everything that is not the hovered item, so "+
+				"a hover over any cell fades the whole chart and moving the pointer flashes it",
+				bad)
 		}
 	}
-	css := readUI(t, "ui/insights.css")
-	keep := cssTokenValue(t, css, "--ins-vd-keep")
-	carried := cssTokenValue(t, css, "--ins-carried")
-	if keep == carried {
-		t.Errorf("--ins-vd-keep and --ins-carried are both %q; `in use` and `carried but never "+
-			"invoked` are opposite findings and must not share a colour", keep)
+	// And blurring is explicitly neutralised, so a future ECharts default cannot reintroduce it.
+	if !strings.Contains(code, "blur: { itemStyle: { opacity: 1 } }") {
+		t.Error("the chart does not pin blur to full opacity; without it an ECharts default can " +
+			"start dimming unhovered marks again and the chart will flash on hover")
+	}
+	// The tooltip is what reports the hovered item, and it has to hold still: one re-anchoring
+	// box chasing the pointer across 33 bars is the other half of the same reported flicker.
+	if !strings.Contains(code, "transitionDuration: 0") {
+		t.Error("the tooltip animates between positions, which reads as flicker while the " +
+			"pointer travels")
 	}
 }
 
@@ -298,94 +265,6 @@ func cssTokenValue(t *testing.T, css, token string) string {
 		t.Fatalf("%s has no terminated value", token)
 	}
 	return strings.TrimSpace(rest[:end])
-}
-
-// TestTheChartAndTheTablesSpeakOneColourLanguage is the test that stops the two surfaces drifting.
-//
-// They had drifted: a built-in read red in the tables and neutral-faint in the chart; a removable
-// item read green in the tables and sat on a blue magnitude ramp in the chart. Same item, three
-// different colours, so the picture could not be checked against the table beneath it --
-// "if i see build in tools in red in tables in chart it should be same color".
-//
-// The fix is structural rather than a matched pair of literals: the chart reads the SAME custom
-// properties the table pills are painted with, so there is one definition and nothing to keep in
-// sync. This asserts that structure, because a test comparing two hard-coded hues would pass
-// while both were wrong.
-func TestTheChartAndTheTablesSpeakOneColourLanguage(t *testing.T) {
-	css := readUI(t, "ui/insights.css")
-	js := readUI(t, "ui/insights.js")
-
-	// Every verdict colour is declared once, in the stylesheet, and READ by the chart rather than
-	// copied into it.
-	//
-	// The chart reads the `--ins-cell-*` variants rather than the pill tokens: a table pill is
-	// small text on a soft background and needs the full-strength hue, while a chart cell is a
-	// large flat block where that same hue is a slab. They are DERIVED from the pill tokens with
-	// color-mix, so there is still one scheme — which is what this test protects — at two
-	// densities. A cell token that stopped deriving from its pill token is the drift to catch.
-	for _, tok := range []string{"--ins-vd-remove", "--ins-vd-consider", "--ins-vd-keep"} {
-		if !strings.Contains(css, tok+":") {
-			t.Errorf("%s is not declared in insights.css; the chart has nowhere to read it from",
-				tok)
-		}
-		// Each cell colour is a color-mix against the page surface, so it is the same SIGNAL at a
-		// different density rather than an independently chosen hue.
-		//
-		// Not asserted as "derives from the pill token" any more, which was too literal:
-		// --ins-cell-consider takes --pal-yellow because --warn is a dark brown picked for legible
-		// small text on a pale pill, and softening that into a large block reads as mud rather
-		// than amber. The property worth protecting is that a cell colour is a DERIVED, softened
-		// step and never a hand-picked literal — a literal is what drifts.
-		cell := strings.Replace(tok, "--ins-vd-", "--ins-cell-", 1)
-		val := cssTokenValue(t, css, cell)
-		if !strings.Contains(val, "color-mix") || !strings.Contains(val, "var(--") {
-			t.Errorf("%s = %q; a cell colour must be a color-mix of palette tokens against the "+
-				"surface, not a literal — a literal cannot follow the dark theme and is what "+
-				"lets the chart and the tables drift apart", cell, val)
-		}
-		// READ, not merely mentioned. `strings.Contains(js, tok)` is not enough: a chart that
-		// hardcodes '#b02a1e' still mentions the token in its fallback argument, and that mutant
-		// survived this test — the exact drift it exists to catch, since the stylesheet could
-		// then change while the chart kept the old hue. So require the lookup form.
-		if !strings.Contains(stripJSComments(js), "v('"+cell+"'") {
-			t.Errorf("insights.js does not LOOK UP %s (expected v('%s', …)); the chart is "+
-				"painting that verdict with a colour of its own, which is how the chart and the "+
-				"tables came to disagree in the first place", cell, cell)
-		}
-	}
-
-	// Read CODE, not prose. These assertions are about what the chart is configured to do, and
-	// the file explains its own history at length — an earlier version of this test failed on the
-	// comment that says why the visualMap was REMOVED, which is the opposite of the finding.
-	code := stripJSComments(js)
-
-	// The blue magnitude ramp must be gone from the cells: it encoded "how many invocations" in a
-	// hue that meant nothing in the tables, and that is the channel the verdict now needs.
-	if strings.Contains(code, "visualMap") {
-		t.Error("insights.js still configures a visualMap. The cell hue now carries the VERDICT, " +
-			"so a magnitude ramp would put two unrelated meanings in one channel")
-	}
-
-	// Every verdict the shaping layer can emit must have somewhere to be painted, or its rows
-	// fall back to a default and silently read as something else.
-	//
-	// The theme must carry a hue for EVERY verdict the shaping layer emits. Asserted on the theme
-	// rather than on per-verdict series: the chart used to be a heatmap with one series per
-	// verdict, and is now a bar chart that colours each bar by its own verdict — the mechanism
-	// changed, the property did not, and a test pinned to the mechanism would have failed the
-	// rewrite while the colours stayed correct.
-	for _, vd := range []string{"remove", "stale", "consider", "keep"} {
-		if !strings.Contains(code, vd+": v('--ins-") {
-			t.Errorf("insChartTheme has no hue for the %q verdict, so anything carrying it is "+
-				"painted as something else", vd)
-		}
-	}
-	// And the bars take their colour from that theme, keyed by the row's own verdict, rather than
-	// from a literal or a palette of their own.
-	if !strings.Contains(code, "t.vd[r.verdict]") {
-		t.Error("the bars do not colour themselves from t.vd keyed by the row's verdict, so the " +
-			"chart and the table pills can disagree again")
-	}
 }
 
 // TestTheChartDoesNotHideTheWasteItIsAboout guards against the tautology that shipped: the chart

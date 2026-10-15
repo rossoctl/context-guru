@@ -148,6 +148,28 @@
      own yellow, which is the same signal at the density a block of colour needs. */
   --ins-cell-consider: color-mix(in srgb, var(--pal-yellow) 58%, var(--bg-raised));
   --ins-cell-keep:     color-mix(in srgb, var(--ins-vd-keep) 60%, var(--bg-raised));
+
+  /* ── the usage chart's two states ──────────────────────────────────────
+     One question per time segment: was this capability earning its weight in that period?
+
+     RED FOR WASTED, GREEN FOR USED, which is the one place on this page green appears — because
+     it is the one place a period genuinely is good news. Deliberately NOT an intensity ramp: a
+     ramp cannot separate "never invoked" from "invoked once", and that is precisely the
+     distinction a removal decision turns on.
+
+     Softened against the surface like every other cell colour here: a bar is a large flat block,
+     and full-strength red across 28 of them is a page that shouts rather than a page that
+     ranks. */
+  --ins-wasted:  color-mix(in srgb, var(--bad) 58%, var(--bg-raised));
+  --ins-used:    color-mix(in srgb, var(--pal-green) 58%, var(--bg-raised));
+  /* THE BASELINE: Claude Code's own built-ins, shown so the chart has something real to contrast
+     against. Without them every bar is red on this store, because no removable capability has
+     ever been invoked — and an all-red chart carries no pattern.
+
+     Deliberately desaturated rather than given the `used` green: these are not a finding and not
+     an option. They are what genuine usage looks like, drawn quietly underneath so the eye reads
+     them as context rather than as something to act on. */
+  --ins-baseline: color-mix(in srgb, var(--pal-green) 26%, var(--bg-raised));
 }
 .ins-vd.remove   { background: var(--bad-soft);  color: var(--ins-vd-remove);   border-color: var(--ins-vd-remove); }
 .ins-vd.consider { background: var(--warn-soft); color: var(--ins-vd-consider); border-color: var(--ins-vd-consider); }

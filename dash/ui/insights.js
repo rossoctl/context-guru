@@ -543,16 +543,18 @@ function insRender() {
    * rather than guessed — a brush on a blank frame would make the reader supply the knowledge
    * this view was supposed to give them. */
   const chartPanel = el('div', { class: 'panel' },
-    el('h2', { text: 'What your unused capabilities cost, worst first' }),
-    /* Rewritten with the form. This described a heatmap's colours and its day grid, and before
-     * that a magnitude ramp and a volume strip — none of which exist. A hint explaining an older
-     * version of the picture is worse than none, because the reader trusts it. */
-    el('p', { class: 'hint', text: 'One bar per capability you can remove, longest first, showing '
-      + 'what carrying it costs you for nothing. Red means the evidence is sufficient to '
-      + 'recommend removing it; amber means it has never been invoked but has not yet been '
-      + 'observed long enough to be sure. Colours match the tables below, and the figure on each '
-      + 'bar is the same number the tables report.' }));
+    el('h2', { text: 'What you carry, and when you actually used it' }),
+    /* Rewritten with the form, for the third time: it has described a magnitude ramp, a day
+     * grid, and a cost ranking, each after that thing stopped existing. A hint explaining an
+     * older version of the picture is worse than none, because the reader trusts it. */
+    el('p', { class: 'hint', text: 'One bar per thing you can switch off, divided into periods. '
+      + 'Red means you carried it through that period and never called it; green means you used '
+      + 'it. A bar that is all red is pure waste. A bar that turns red partway is something you '
+      + 'stopped using — which is usually the easiest thing to remove. A plugin appears as one '
+      + 'bar because the plugin is the only unit you can disable; its individual skills are in '
+      + 'the tables below.' }));
   chartPanel.appendChild(insProjectPicker());
+  chartPanel.appendChild(insRangePicker());
   const chart = insChart();
   if (chart) chartPanel.appendChild(chart);
   chartPanel.appendChild(insScopeLine());
@@ -932,55 +934,52 @@ function insRollup(tl) {
 }
 
 
-/* ── the waste chart (Apache ECharts) ──────────────────────────────────────
+/* ── the usage chart (Apache ECharts) ──────────────────────────────────────
  *
- * One horizontal bar per removable capability, longest first: what this costs you per request,
- * for nothing.
+ * One stacked bar per removable capability. Each bar is divided into time buckets, and each
+ * bucket is red when the capability was carried but never invoked in that period, green when it
+ * was invoked. So a bar that is entirely red is pure waste, and a bar that is green early and red
+ * later is something you stopped using — which is the pattern worth finding.
  *
- * WHY NOT A HEATMAP, which is what this was. A capability-by-day heatmap answers "when did I use
- * this", and that is worth seeing — once there are months of history with real phase changes in
- * them. On the store this actually runs against there are eight days in which nearly every
- * capability was carried every single day, so the heatmap rendered as a wall of one colour and
- * was read exactly that way. Four rounds of colour and geometry fixes did not change that,
- * because the form was answering a question the data could not yet support.
+ * WHY THIS FORM, after two others. A heatmap carried the same information and was unreadable:
+ * 160 small cells, with no legible way to tell a used day from a carried one. A ranked bar chart
+ * of cost was readable and answered a narrower question — it said what was expensive, never when
+ * it stopped being used. The decision this page supports needs both, and "did I stop using it"
+ * is a shape over time rather than a number.
  *
- * The question the page DOES exist to answer has a clean ranking behind it: 55 removable items,
- * $31.70 in total, the worst single one at $7.14. A bar per capability says that at a glance,
- * needs no hover, and puts the thing to act on first.
+ * GROUPED BY WHAT CAN ACTUALLY BE REMOVED. A plugin's skills collapse into one bar for the
+ * plugin, because `skillOverrides` has no effect on them — verified on real traffic — so the
+ * plugin is the only unit that can be switched off. Measured: 55 removable items become 28 bars,
+ * wide enough for horizontal labels with no scrolling. Offering 15 separate bars for one
+ * plugin's skills would offer 15 removals that do not exist.
  *
- * WHY A LIBRARY AT ALL, still. Axis layout, label measurement, value formatting and a range
- * control are the library's job; two earlier hand-built attempts failed on exactly those. The
- * dependency stays, the chart TYPE changes — which is a config change, not a rebuild.
+ * BUILT-INS NEVER APPEAR. Their weight is real, but removing one breaks the agent, and the
+ * biggest unactionable item at the top of a chart about what to remove is the one misreading this
+ * view must not invite.
  *
- * HORIZONTAL, because the labels are capability names: `mcp__web-search__google_pse_search` does
- * not fit under a vertical bar at any readable size, and rotating it is not reading it.
+ * BUCKETS FOLLOW THE WINDOW, so a month is never 30 slivers and a week is never one undivided
+ * block — the density failure that sank the heatmap, parameterised away.
  */
 
-const INS_BAR_PX = 22;
-const INS_BAR_MIN_H = 220;
-/* The most bars drawn. Twenty fits on a screen with room for the labels, and the rows are already
- * sorted worst-first so what is cut is the tail. The footnote says how many are not shown; the
- * tables below keep every one. */
-const INS_MAX_BARS = 20;
+const INS_BAR_PX = 26;
+const INS_USAGE_MIN_H = 260;
 
 /* The instance, kept so a re-render resizes rather than leaks: ECharts holds a root and its own
  * listeners, and dropping the DOM node without dispose() keeps both alive. */
 let insEChart = null;
 
+/* The window, in days back from now, or 0 for everything the store holds. Coarse on purpose: the
+ * question is "what pattern does this capability show over time", and an exact date range is both
+ * more precision than that needs and more clicks to express. */
+let insWindowDays = 0;
+
 function insChartTheme() {
   const cs = getComputedStyle(document.documentElement);
   const v = (n, f) => cs.getPropertyValue(n).trim() || f;
   return {
-    /* The VERDICT hues, read from the stylesheet rather than restated here, so a bar and the
-     * table pill under it cannot disagree. The cell variants are the softened steps — see the
-     * scheme comment in insights.css. */
-    vd: {
-      remove: v('--ins-cell-remove', '#cc6b60'),
-      stale: v('--ins-cell-remove', '#cc6b60'),
-      consider: v('--ins-cell-consider', '#f3cd80'),
-      keep: v('--ins-cell-keep', '#9aa2ae'),
-    },
-    carried: v('--ins-carried', '#b0a9dc'),
+    wasted: v('--ins-wasted', '#d08a80'),
+    used: v('--ins-used', '#66b366'),
+    baseline: v('--ins-baseline', '#bcd9bc'),
     ink: v('--fg', '#1b1f1c'),
     muted: v('--fg-muted', '#5c635d'),
     faint: v('--fg-faint', '#8b918b'),
@@ -990,22 +989,146 @@ function insChartTheme() {
   };
 }
 
-/* insBarRows is the ranked row set, and the ranking is the whole point of the chart.
+/* insIsBaseline marks Claude Code's own built-ins.
  *
- * ONLY WHAT CAN BE REMOVED. A built-in gets no bar: its weight is real but removing it breaks the
- * agent, and putting the biggest unactionable item at the top of a chart about what to remove is
- * the one misreading this view must not invite. The tables already filter on scope; the chart has
- * to agree with them.
+ * They are charted, because without them this chart is solid red on real data — no removable
+ * capability here has ever been invoked, so the green that makes the form readable comes entirely
+ * from the built-ins. But they are never actionable: the weight is real and removing one takes
+ * away a capability the model is expected to have. So they sit below a divider, in their own
+ * desaturated colour, and nothing offers to remove them. */
+function insIsBaseline(it) { return !it.scope || it.scope === 'none'; }
+
+/* insRemovalGroup is the key a capability is charted under: the thing that would actually be
+ * switched off. A plugin for a plugin's skill, a server for an MCP tool, the item itself for
+ * anything individually removable. */
+function insRemovalGroup(it) {
+  if (it.plugin) return { key: 'plugin:' + it.plugin, label: it.plugin, kind: 'plugin' };
+  if (it.server) return { key: 'server:' + it.server, label: it.server, kind: 'server' };
+  return { key: 'item:' + it.name, label: insShortName(it.name), kind: 'item' };
+}
+
+/* insBucketDays is how many days one segment covers, chosen from the window so a bar always has
+ * roughly four to eight segments. A segment thinner than a few pixels is the heatmap's failure
+ * mode; a bar with one segment shows no pattern at all. */
+function insBucketDays(days) {
+  if (days <= 10) return 1;        // a week or so: daily
+  if (days <= 35) return 7;        // a month: weekly
+  if (days <= 80) return 14;       // a quarter: fortnightly
+  return 30;                       // longer: monthly
+}
+
+/* insUsageBars turns the per-day timeline into one row per removal group, each row holding a
+ * used/wasted pair per bucket.
  *
- * BY MONEY, falling back to tokens. A model with no published rate reports $0, which would sort a
- * genuinely heavy capability to the bottom — so an unpriced row ranks on its per-request weight
- * and is labelled as unpriced rather than as free.
+ * A GROUP IS USED IN A BUCKET IF ANY OF ITS MEMBERS WAS. That is the honest reading for a bar
+ * whose unit is the removal: if one skill of a plugin was invoked that week, switching the plugin
+ * off that week would have cost you something. Summing invocations instead would let a busy
+ * member hide a dead one, which is the opposite of what the chart is for.
  */
-function insBarRows() {
-  const items = ((insDoc && insDoc.items) || []).filter(
-    (it) => it.scope && it.scope !== 'none' && (it.usd > 0 || it.tokens > 0));
-  items.sort((a, b) => (b.usd || 0) - (a.usd || 0) || (b.tokens || 0) - (a.tokens || 0));
-  return items;
+function insUsageBars(tl) {
+  const byName = {};
+  for (const it of (insDoc && insDoc.items) || []) byName[it.name] = it;
+
+  /* ONE SEGMENT PER DAY, not per bucket.
+   *
+   * Each day is a thin line, and a bar is those lines stacked — so the bar's own surface carries
+   * the history and no aggregation hides a day. Bucketing was there to keep segments thick
+   * enough to aim at, which mattered when the tooltip followed the segment; it does not now,
+   * because the tooltip is pinned and names the date it is describing. */
+  const nDays = tl.buckets.length;
+  const width = 1;
+  const cols = [];
+  for (let i = 0; i < nDays; i++) {
+    cols.push({ from: tl.buckets[i], fromIdx: i, toIdx: i });
+  }
+  /* EMPTY PERIODS ARE DROPPED, not drawn.
+   *
+   * A period in which NOTHING was carried is a period you did not work — a weekend, a holiday —
+   * and drawing it put a white band straight through every bar on the chart, which reads as the
+   * chart being broken rather than as time off. Measured: two idle days split all 28 bars in
+   * half. The axis is "periods in which you worked", which is the honest subject for a question
+   * about usage patterns, and the tooltip still names the real dates. */
+  const anyTraffic = cols.map((c) => {
+    for (const nm in tl.items) {
+      const srs = tl.items[nm];
+      for (let i = c.fromIdx; i <= c.toIdx; i++) {
+        if ((srs.carried[i] || 0) > 0 || (srs.calls[i] || 0) > 0) return true;
+      }
+    }
+    return false;
+  });
+  const kept = cols.filter((c, i) => anyTraffic[i]);
+  cols.length = 0;
+  kept.forEach((c) => cols.push(c));
+
+  const groups = {};
+  for (const name in tl.items) {
+    const it = byName[name];
+    if (!it) continue;
+    const base = insIsBaseline(it);
+    const g = base
+      ? { key: 'base:' + it.name, label: insShortName(it.name), kind: 'builtin' }
+      : insRemovalGroup(it);
+    const row = groups[g.key] || (groups[g.key] = {
+      key: g.key, label: g.label, kind: g.kind, baseline: base, members: [], usd: 0, tokens: 0,
+      used: cols.map(() => 0), carried: cols.map(() => 0),
+    });
+    row.members.push(it.name);
+    row.usd += it.usd || 0;
+    row.tokens += it.tokens || 0;
+    const s = tl.items[name];
+    cols.forEach((c, ci) => {
+      for (let i = c.fromIdx; i <= c.toIdx; i++) {
+        if ((s.calls[i] || 0) > 0) row.used[ci] = 1;
+        if ((s.carried[i] || 0) > 0) row.carried[ci] = 1;
+      }
+    });
+  }
+
+  /* Worst first: the bar with the most wasted buckets, then by money. A reader scans from the top,
+   * so the top is where the answer goes. */
+  const all = Object.keys(groups).map((k) => groups[k]);
+  const wastedCount = (r) => r.carried.reduce((n, c, i) => n + (c && !r.used[i] ? 1 : 0), 0);
+  const rank = (a, b) => wastedCount(b) - wastedCount(a) || (b.usd || 0) - (a.usd || 0);
+  /* Two blocks, not one ordering: everything you can act on, worst first, then the baseline
+   * underneath. Interleaving them by waste would put an unremovable built-in at the top of a
+   * chart about what to remove. The baseline keeps only the most-used few — it is there for
+   * contrast, not for completeness, and twenty built-ins would crowd out the subject. */
+  const act = all.filter((r) => !r.baseline).sort(rank);
+  const base = all.filter((r) => r.baseline)
+    .sort((a, b) => b.used.reduce((n, u) => n + u, 0) - a.used.reduce((n, u) => n + u, 0))
+    .slice(0, 5);
+  return { rows: act.concat(base), cols, width, actionable: act.length, baseline: base.length };
+}
+
+/* insRangePicker chooses the window in weeks and months rather than by date. */
+function insRangePicker() {
+  const opts = [[0, 'all history'], [7, 'last week'], [14, 'last 2 weeks'],
+    [21, 'last 3 weeks'], [30, 'last month'], [90, 'last 3 months']];
+  const sel = el('select', {
+    'data-testid': 'insights-window',
+    'aria-label': 'Analysis window',
+    onchange: (ev) => {
+      insWindowDays = Number(ev.currentTarget.value) || 0;
+      /* Re-query rather than re-render: the verdicts and the evidence floor are computed
+       * server-side over the window, so narrowing locally would leave the advice describing a
+       * period the rows no longer cover. */
+      const now = Date.now();
+      insSince = insWindowDays ? now - insWindowDays * 86400000 : 0;
+      insUntil = 0;
+      loadInsights();
+    },
+  });
+  for (const [v, label] of opts) {
+    const o = el('option', { value: String(v) }, label);
+    if (v === insWindowDays) o.setAttribute('selected', 'selected');
+    sel.appendChild(o);
+  }
+  return el('div', { class: 'ins-proj' },
+    el('label', {}, 'Window ', sel),
+    el('span', { class: 'hint', text: insWindowDays
+      ? 'Buckets are sized to the window, so each bar stays readable.'
+      : 'Everything the proxy has recorded.' }));
 }
 
 function insChart() {
@@ -1013,139 +1136,160 @@ function insChart() {
     return el('p', { class: 'empty', text: 'The charting library did not load, so the picture is ' +
       'unavailable. The tables below are unaffected.' });
   }
-  const all = insBarRows();
-  if (!all.length) {
-    return el('p', { class: 'empty', text: 'Nothing removable has a measured cost in this ' +
-      'range, so there is nothing to rank. The tables below still list your inventory.' });
+  const tl = insDoc && insDoc.timeline;
+  if (!tl || !tl.buckets.length) return null;
+  const g = insUsageBars(tl);
+  if (!g.rows.length) {
+    return el('p', { class: 'empty', text: 'Nothing removable was carried in this window, so ' +
+      'there is no usage pattern to show. The tables below still list your inventory.' });
   }
-  const rows = all.slice(0, INS_MAX_BARS);
 
   const host = el('div', { class: 'ins-echart' });
-  const h = Math.max(INS_BAR_MIN_H, rows.length * INS_BAR_PX + 70);
+  /* A fixed plot height: the bars are vertical now, so the row count widens the chart rather
+   * than lengthening it, and the page should not grow with the number of tools. */
+  const h = 460;
   host.style.setProperty('height', h + 'px');
-
-  /* Rendered after the node is in the document, because ECharts measures its container and a
-   * detached div has no width. */
-  setTimeout(() => insDrawChart(host, rows), 0);
-
-  if (all.length <= rows.length) return host;
-  return el('div', {}, host, insBarFootnote(rows.length, all.length));
+  setTimeout(() => insDrawChart(host, g), 0);
+  return host;
 }
 
-/* insBarGutter is the width the row labels need, in pixels.
- *
- * Measured from the longest label rather than guessed, because the alternative — containLabel —
- * silently truncates when it runs out of room, and a clipped capability name reads as a
- * different capability. Capped so one pathological name cannot eat the plot. */
-function insBarGutter(rows) {
-  const longest = rows.reduce((m, r) => Math.max(m, insBarLabel(r).length), 0);
-  return Math.min(260, Math.max(90, longest * 7.4 + 16));
-}
-
-/* insBarLabel is a capability's name at a width the axis gutter can hold.
- *
- * An MCP tool carries its server in its name — `mcp__web-search__google_pse_search` — which is
- * both the longest kind of label here and the most redundant, since the server is repeated on
- * every one of its tools. Rendered as `web-search/google_pse_search`, which is the same two
- * facts in half the width. Everything else keeps whatever insShortName leaves, and a name still
- * too long is truncated from the FRONT with an ellipsis rather than clipped silently: a label
- * missing its own beginning, with no mark to say so, reads as a different tool. */
-function insBarLabel(it) {
-  let n = insShortName(it.name);
-  const mcp = n.match(/^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/);
-  if (mcp) n = mcp[1] + '/' + mcp[2];
-  return n.length > 32 ? '…' + n.slice(-31) : n;
-}
-
-/* insBarFootnote names what the chart is not showing. A chart capped at 20 of 55 reads as the
- * whole inventory unless it says so, and the figure a reader would then quote is wrong. */
-function insBarFootnote(shown, total) {
-  return el('p', { class: 'hint', text: 'Showing the ' + shown + ' most expensive of ' + total +
-    ' removable capabilities. The other ' + (total - shown) + ' cost less each; all of them are ' +
-    'in the tables below.' });
-}
-
-function insDrawChart(host, rows) {
+function insDrawChart(host, g) {
   if (!host.clientWidth) return;
   const t = insChartTheme();
   if (insEChart) { try { insEChart.dispose(); } catch (_) { /* already gone */ } }
   insEChart = echarts.init(host, null, { renderer: 'svg' });
 
-  /* Longest bar at the TOP, which means last in the array: a category y axis counts upward from
-   * the bottom. */
-  const ordered = rows.slice().reverse();
-  const priced = ordered.some((r) => r.usd > 0);
+  /* Worst at the LEFT, which is first in the array: a category x axis reads left to right, so
+   * unlike the horizontal form this needs no reversing. */
+  const rows = g.rows;
+  const nCols = g.cols.length;
+
+  /* One series per bucket, stacked: that is how a bar gets divided along time. Each series holds
+   * one segment for every bar, coloured per bar by whether THAT capability was used in THAT
+   * period — so the colour varies within a series, which is why it is set per data point. */
+  const series = g.cols.map((c, ci) => ({
+    type: 'bar',
+    stack: 'time',
+    name: insColLabel(c.from, g.width),
+    /* ADJACENT BARS. `barCategoryGap: 0` removes the space between capabilities so the chart
+     * reads as one continuous field, and barWidth '100%' lets each bar fill its slot. A gap
+     * between bars is space spent on nothing when there are 33 of them. */
+    barCategoryGap: 0,
+    barGap: '-100%',
+    barWidth: '100%',
+    /* focus 'self': only the hovered SEGMENT highlights, never its whole series. The default
+     * is 'series', which would light up that period across all 28 bars at once — the
+     * whole-grid flash a previous version of this chart was reported for. */
+    /* NO FOCUS, AND NO BLUR. `focus: 'self'` was added to stop a hover highlighting a whole
+     * series, and it caused something worse: focus works by BLURRING everything that is not the
+     * hovered item, so pointing anywhere — an empty cell especially — faded the entire chart to
+     * near-invisible, and moving the pointer in and out made it flash. Reported as "when i move
+     * mouse on empty cell all chart dissapear".
+     *
+     * `focus: 'none'` is the explicit default: nothing is blurred, nothing is dimmed, and the
+     * only feedback is the hovered segment's own outline. The tooltip, which is pinned, says
+     * what is under the pointer — that is the feedback a reader needs, and it costs the rest of
+     * the chart nothing. */
+    emphasis: { disabled: true },
+    blur: { itemStyle: { opacity: 1 } },
+    /* EVERY PERIOD GETS A SEGMENT, which is what lets one bar mix red and green.
+     *
+     * This drew a segment only where `carried` was set, and that produced two wrong pictures at
+     * once: a built-in's bar was pure green with holes in it — floating blocks with gaps beneath
+     * — because the days it was not declared vanished rather than reading as unused; and no bar
+     * ever mixed the two colours, which is the one thing the form exists to show. A tool used in
+     * some periods and not others is the pattern worth finding, so every period is drawn and the
+     * COLOUR carries the state.
+     *
+     * A period the capability was not carried at all is drawn in the surface colour: the bar
+     * keeps its full height so periods line up across every column, and an absent period reads
+     * as a gap rather than as waste it never cost you. */
+    data: rows.map((r) => ({
+      value: 1,
+      itemStyle: {
+        color: !r.carried[ci] ? t.surface
+          : r.baseline ? (r.used[ci] ? t.baseline : t.wasted)
+            : (r.used[ci] ? t.used : t.wasted),
+        /* NO border. At one day per segment a 1px rule is as wide as the line it separates, so
+         * it ate the colour it was meant to delimit — the bar became mostly surface. A run of
+         * same-coloured days reading as one block is correct here: that IS the finding. */
+        borderWidth: 0,
+      },
+    })),
+  }));
 
   insEChart.setOption({
     animation: false,
     textStyle: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11 },
-    /* AN EXPLICIT LEFT GUTTER, not containLabel.
-     *
-     * containLabel asks ECharts to fit the labels, and when they do not fit it CLIPS them — so
-     * `mcp__web-search__google_pse_search` rendered as `ch/google_pse_search`, a label missing
-     * its own beginning with nothing to say so. Reserving the width instead means the longest
-     * label decides the gutter and every one of them is whole. 7px per character is measured for
-     * the 11px monospace this chart uses, with a floor so a chart of short names is not
-     * lopsided. */
-    grid: { left: insBarGutter(ordered), right: 92, top: 8, bottom: 28, containLabel: false },
+    /* The bottom gutter holds the rotated labels; the left holds nothing but a little air. */
+    grid: { left: 16, right: 24, top: 12, bottom: insUsageGutter(rows), containLabel: false },
     tooltip: {
       trigger: 'item',
-      /* Pinned and instant. A tooltip that re-anchors per bar flickers while the pointer
-       * travels, which is what a previous version of this chart did. */
+      /* Pinned and instant. A tooltip that re-anchors per segment flickers while the pointer
+       * travels, which an earlier version of this chart did. */
       position: (pt, params, dom, rect, size) => [size.viewSize[0] - size.contentSize[0] - 8, 8],
       confine: true,
       transitionDuration: 0,
       formatter: (p) => {
-        const r = ordered[p.dataIndex];
+        const r = rows[p.dataIndex];
         if (!r) return '';
-        const money = r.priced ? usd(r.usd) : 'unpriced';
-        return '<strong>' + r.name + '</strong><br>' +
-          money + ' wasted · ' + (r.tokens || 0).toLocaleString() + ' tok/request<br>' +
-          (r.verdict || '') + (r.why ? '<br><span style="opacity:.75">' + r.why + '</span>' : '');
+        const ci = p.seriesIndex;
+        const when = insColLabel(g.cols[ci].from, g.width) +
+          (g.width > 1 ? ' + ' + (g.width - 1) + ' day(s)' : '');
+        const state = !r.carried[ci] ? 'not carried'
+          : (r.used[ci] ? 'invoked — earning its weight' : 'carried, never invoked');
+        const inside = r.members.length > 1
+          ? '<br><span style="opacity:.75">' + r.members.length + ' items inside; see the ' +
+            'tables below</span>'
+          : '';
+        return '<strong>' + r.label + '</strong><br>' + when + ': ' + state + '<br>' +
+          (r.usd ? usd(r.usd) + ' wasted · ' : '') +
+          (r.tokens || 0).toLocaleString() + ' tok/request' + inside;
       },
     },
-    xAxis: {
-      type: 'value',
-      /* Money if anything is priced, otherwise per-request weight — never a mix, which would put
-       * two units on one axis. */
-      name: priced ? 'wasted' : 'tokens per request',
-      nameLocation: 'end',
-      nameTextStyle: { color: t.faint, fontSize: 10, align: 'right' },
-      axisLabel: { color: t.faint, formatter: (v) => (priced ? '$' + v : compact(v)) },
-      axisLine: { show: false },
-      axisTick: { show: false },
-      splitLine: { lineStyle: { color: t.border, opacity: 0.6 } },
+    legend: {
+      bottom: 4, left: 'center', itemWidth: 11, itemHeight: 11, itemGap: 16,
+      icon: 'roundRect', selectedMode: false,
+      textStyle: { color: t.muted, fontSize: 10 },
+      /* The legend names the two STATES, not the buckets: a reader needs to know what red and
+       * green mean, and twenty-eight date entries would be noise. Hand-built because the series
+       * are the buckets. */
+      data: [{ name: 'carried, never invoked', itemStyle: { color: t.wasted } },
+        { name: 'invoked in that period', itemStyle: { color: t.used } },
+        { name: "built in — can't be removed", itemStyle: { color: t.baseline } }],
     },
-    yAxis: { type: 'category',
-      /* insBarLabel, not insShortName: an MCP tool is named `mcp__<server>__<tool>`, which is
-       * wider than the gutter and was clipped to `__web-search__google_pse_search` — a label
-       * missing its own beginning. The full name is in the tooltip and in the tables. */
-      data: ordered.map((r) => insBarLabel(r)),
-      axisLabel: { color: t.muted },
+    /* VERTICAL BARS: tools along X, time stacking upward on Y — one column per capability, each
+     * divided into periods from oldest at the bottom to newest at the top.
+     *
+     * Labels rotate 45°, because a capability name is far wider than its column: at 28 columns
+     * across a page each is roughly 40px, and `claude-md-management` is not going to fit
+     * horizontally. Rotated beats truncated — a name missing its end reads as a different tool. */
+    xAxis: { type: 'category',
+      data: rows.map((r) => r.label),
+      axisLabel: { color: t.muted, rotate: 45, interval: 0, fontSize: 10 },
       axisLine: { lineStyle: { color: t.border } },
       axisTick: { show: false } },
-    series: [{
-      type: 'bar',
-      data: ordered.map((r) => ({
-        value: priced ? (r.usd || 0) : (r.tokens || 0),
-        /* THE BAR CARRIES ITS VERDICT COLOUR, the same one the table pill uses, so red is
-         * removable in both places. */
-        itemStyle: { color: t.vd[r.verdict] || t.vd.keep, borderRadius: [0, 3, 3, 0] },
-      })),
-      barMaxWidth: 16,
-      /* The value printed at the end of the bar: the one number the bar encodes, so the chart
-       * does not depend on hover to be read. */
-      label: { show: true, position: 'right', color: t.muted, fontSize: 10,
-        formatter: (p) => (priced ? usd(p.value) : compact(p.value)) },
-      emphasis: { focus: 'self', itemStyle: { borderColor: t.ink, borderWidth: 1 } },
-    }],
+    yAxis: { type: 'value', max: nCols, show: false },
+    series,
   });
 
-  /* Resize with the panel. ECharts cannot know its container changed. */
   if (window.ResizeObserver && !host.__ro) {
     host.__ro = new ResizeObserver(() => { if (insEChart) insEChart.resize(); });
     host.__ro.observe(host);
   }
+}
+
+/* insUsageGutter reserves the width the row labels need, measured from the longest.
+ *
+ * Explicitly, not via containLabel, which CLIPS when it runs out of room — a capability name
+ * missing its own beginning reads as a different capability. 7.4px per character is measured for
+ * the 11px monospace this chart uses. */
+function insUsageGutter(rows) {
+  const longest = rows.reduce((m, r) => Math.max(m, (r.label || '').length), 0);
+  /* A label rotated 45° is about 0.7 of its length tall. Reserved explicitly rather than via
+   * containLabel, which CLIPS when short of room — and a capability name missing its own end
+   * reads as a different capability. The legend sits below this, hence the extra 34. */
+  return Math.min(220, Math.max(70, Math.round(longest * 7.4 * 0.7) + 34));
 }
 
 /* insSelectedCols maps the active window onto column indices, or null when nothing is selected.
