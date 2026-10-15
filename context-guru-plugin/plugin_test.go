@@ -3736,7 +3736,8 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 	dir := t.TempDir()
 	argvFile := filepath.Join(dir, "argv")
 	fake := filepath.Join(dir, "fake-proxy")
-	body := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > " + argvFile + "\nprintenv PRESET >> " +
+	body := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n%s\\n' \"$*\" \"$PRESET\" > " + argvFile + ".tmp && mv " + argvFile + ".tmp " +
 		argvFile + "\nsleep 30\n"
 	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -3759,7 +3760,16 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("must never fail a session: %v\n%s", err, out)
 	}
-	got, rerr := os.ReadFile(argvFile)
+	// start-proxy.sh returns once the proxy has been LAUNCHED, not once the fake has written its file.
+	// The fake publishes argv and PRESET in one rename, so a reader sees both lines or no file; wait
+	// for the file instead of reading it once (#560).
+	var got []byte
+	var rerr error
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if got, rerr = os.ReadFile(argvFile); rerr == nil {
+			break
+		}
+	}
 	if rerr != nil {
 		t.Fatalf("the proxy never ran: %v\n%s", rerr, out)
 	}
