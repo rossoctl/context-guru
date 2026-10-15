@@ -34,6 +34,44 @@ working for them, or works worse, and nobody notices. See [Keep this page right]
 At every level the agent still has its own copy of the transcript and sends it again each turn.
 "No way back" means the model cannot get removed text back through the `expand` tool.
 
+## Why the proxy stores rewrites at all
+
+The client never sees the rewritten request, so it cannot keep it.
+
+1. The client (for example Claude Code) sends its **whole transcript** on every request, as it
+   has it locally.
+2. The proxy rewrites that copy and sends the rewritten copy to the provider.
+3. The provider returns **only the new assistant message**. The API has no way to hand an edited
+   history back.
+4. The client **adds** that message to its own transcript, which still holds the original tool
+   outputs.
+5. On the next turn the client sends the originals again, and the proxy must make the same rewrite
+   again.
+
+So:
+
+- **A rewrite that depends only on the message needs no storage.** The proxy runs it again every
+  turn and gets the same bytes. `format`, `toon`, `searchfold`, `textclean`, `toolfilter`,
+  `cachesplit`, `cmdfilter`, `linecap`, `dedup`, `smartcrush` and `extract` work this way. Only
+  CPU time is repeated.
+- **Storage is needed only when the proxy cannot rebuild the rewrite from the message:**
+  - **Model-written text** (`extract_llm`, `summarize`, `cache_aware_summarizer`, `agentdiet`).
+    A model gives different words each time it is asked.
+  - **Gated rewrites** (`mask`, `failed_run`, `collapse`, `readlifecycle`, `coref`). They act only
+    on the part of the conversation that is not cached yet, so next turn they must know that they
+    already acted. A flag is enough; see [What "metadata only" would need](#what-metadata-only-would-need).
+- **The originals stored for `expand`** are a copy of what the client already has. They exist
+  only because the proxy cannot ask the client for its copy.
+
+**Where the data sits matters.** With the local plugin install, the Store is in the proxy process
+on the user's own machine, next to a transcript that already holds everything. Storing content is
+mainly a question for the hosted service, where the Store is on our side.
+
+**A possible change, not checked:** a plugin that runs inside the client could rewrite the local
+transcript itself. The client would then keep the shortened version, and the proxy would not need
+to store it. Nobody has checked whether Claude Code's plugin or hook interface allows a plugin to
+change earlier messages.
+
 ## What turns off when
 
 | Switch | Default | Turns off | Does not turn off |
