@@ -102,7 +102,7 @@ func TestTheLosingMajorityIsOnThePage(t *testing.T) {
 			"whatever the sign is")
 	}
 	// The only thing that branch may add is the way out.
-	if guardAt < 0 || !strings.Contains(body[guardAt:], "Turn keep-alive off") {
+	if guardAt < 0 || !strings.Contains(body[guardAt:], "Turn your cache strategy off") {
 		t.Error("a negative own net does not offer a way to switch the mechanism off")
 	}
 	// The status segments are labelled in WORDS as well as coloured — a status must never rest
