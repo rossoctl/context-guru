@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -5473,13 +5474,29 @@ func portScanBase(t *testing.T) {
 
 // nextPortBase is the next scan base: a 64-port window that no other call in this process and no
 // other `go test` run on the same box (CI, another session) is scanning at the same time. Calls are
-// 400 ports apart and each process takes one of four 100-port lanes by its pid, so windows never
-// overlap; the 50 slots are reused in turn (-count runs), long after their test cleaned up. All of it
-// stays below 32768, the kernel's ephemeral range, so it never meets a port freePort or an outgoing
-// connection was just given.
+// 400 ports apart, and each process holds one of four 100-port lanes for its lifetime (an exclusive
+// lock on a lane file, so two concurrent runs never share one), so windows never overlap; the 50
+// slots are reused in turn (-count runs), long after their test cleaned up. All of it stays below
+// 32768, the kernel's ephemeral range, so it never meets a port freePort or an outgoing connection
+// was just given.
 func nextPortBase() string {
-	return strconv.Itoa(10000 + int(portTestBaseCounter.Add(1)%50)*400 + os.Getpid()%4*100)
+	return strconv.Itoa(10000 + int(portTestBaseCounter.Add(1)%50)*400 + portLane()*100)
 }
+
+var portLane = sync.OnceValue(func() int {
+	for lane := 0; lane < 4; lane++ {
+		f, err := os.OpenFile(filepath.Join(os.TempDir(), fmt.Sprintf("context-guru-plugin-test-lane-%d", lane)),
+			os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			continue
+		}
+		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			return lane // the file stays open, and so locked, until this test process exits
+		}
+		f.Close()
+	}
+	return os.Getpid() % 4 // more than four runs at once: share a lane, as before
+})
 
 // TestPortAllocAssignsDistinctPortsAndIsIdempotent: two fresh projects get two different ports,
 // scanning up from the default; re-running `alloc` for either one returns the SAME port rather
