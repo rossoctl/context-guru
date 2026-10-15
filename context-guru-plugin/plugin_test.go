@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -5468,9 +5469,34 @@ var portTestBaseCounter atomic.Int64
 // that both scan for a port cannot collide with EACH OTHER either.
 func portScanBase(t *testing.T) {
 	t.Helper()
-	base := 39000 + int(portTestBaseCounter.Add(1))*100
-	t.Setenv("CONTEXT_GURU_PORT_BASE", strconv.Itoa(base))
+	t.Setenv("CONTEXT_GURU_PORT_BASE", nextPortBase())
 }
+
+// nextPortBase is the next scan base: a 64-port window that no other call in this process and no
+// other `go test` run on the same box (CI, another session) is scanning at the same time. Calls are
+// 400 ports apart, and each process holds one of four 100-port lanes for its lifetime (an exclusive
+// lock on a lane file, so two concurrent runs never share one), so windows never overlap; the 50
+// slots are reused in turn (-count runs), long after their test cleaned up. All of it stays below
+// 32768, the kernel's ephemeral range, so it never meets a port freePort or an outgoing connection
+// was just given.
+func nextPortBase() string {
+	return strconv.Itoa(10000 + int(portTestBaseCounter.Add(1)%50)*400 + portLane()*100)
+}
+
+var portLane = sync.OnceValue(func() int {
+	for lane := 0; lane < 4; lane++ {
+		f, err := os.OpenFile(filepath.Join(os.TempDir(), fmt.Sprintf("context-guru-plugin-test-lane-%d", lane)),
+			os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			continue
+		}
+		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			return lane // the file stays open, and so locked, until this test process exits
+		}
+		f.Close()
+	}
+	return os.Getpid() % 4 // more than four runs at once: share a lane, as before
+})
 
 // TestPortAllocAssignsDistinctPortsAndIsIdempotent: two fresh projects get two different ports,
 // scanning up from the default; re-running `alloc` for either one returns the SAME port rather
@@ -6882,6 +6908,13 @@ func routeEnv(t *testing.T, home, state, extraPath string) []string {
 	path := os.Getenv("PATH")
 	if extraPath != "" {
 		path = extraPath + string(os.PathListSeparator) + path
+	}
+	// Every route test that installs scans for a port. Unpinned, the scan starts at the real 8787 on
+	// a box shared with live proxies, so a port taken between --plan and --route (by anything) fails
+	// the test with port_changed_since_plan, and one taken after it fails the healthz wait. A test that
+	// pinned its own base keeps it.
+	if os.Getenv("CONTEXT_GURU_PORT_BASE") == "" {
+		env = append(env, "CONTEXT_GURU_PORT_BASE="+nextPortBase())
 	}
 	return append(env,
 		"HOME="+home,
