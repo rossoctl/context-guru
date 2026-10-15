@@ -179,11 +179,39 @@ type jsonCache struct {
 	// serveJSON — which is both wasted work and the thing that was turning an isolated ~1s query
 	// into a 40s one under real concurrent load.
 	refreshing map[string]bool
+	// gen counts clear() calls; see generation.
+	gen uint64
 }
 
 type jsonCacheEntry struct {
 	at   time.Time
 	body []byte
+}
+
+// clear drops every entry. A refresh already in flight is allowed to finish; it stores a body computed
+// after the clear began only if it started after, so the claim is released but the old entry is gone.
+func (c *jsonCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = nil
+	c.gen++
+}
+
+// generation is read before a compute starts and handed to setIfCurrent after it: a compute that began
+// before a clear read state that has since changed, and its body must not be stored as current.
+func (c *jsonCache) generation() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gen
+}
+
+func (c *jsonCache) setIfCurrent(key string, body []byte, gen uint64) {
+	c.mu.Lock()
+	stale := c.gen != gen
+	c.mu.Unlock()
+	if !stale {
+		c.set(key, body)
+	}
 }
 
 // age is how long ago the entry for key was computed; 0 when there is none.
@@ -358,9 +386,10 @@ func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, ke
 	v, err, _ := a.jsonInflight.Do(fmt.Sprintf("%p\x00%s", c, key), func() (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), dashComputeTimeout)
 		defer cancel()
+		gen := c.generation()
 		body, err := compute(a.rec.DB().WithContext(ctx))
 		if err == nil {
-			c.set(key, body)
+			c.setIfCurrent(key, body, gen)
 		}
 		return body, err
 	})
@@ -408,6 +437,20 @@ func (c *capture) WriteHeader(code int)        { c.code = code }
 // on each tab switch and on its five-minute refresh; none of them existed in a cache before, so
 // a reader paid the full price every time. The key is the caller's principal plus the full query
 // string (cacheKey), so two accounts never share a body, and the path, so two routes never do.
+// InvalidateStateCaches drops cached reads that include state a user can edit, so a change shows on
+// the next load instead of after the stale window. kind is the tenant package's ChangeAccount (an
+// account's configuration, which holds the tool and skill removal list) or ChangeStrategy (keep-alive
+// strategies and campaigns). Read-only aggregates (stats, series, sessions) are left to the stale-while-
+// revalidate path: nothing a user can edit appears in them.
+func (a *API) InvalidateStateCaches(kind string) {
+	a.toolsCache.clear()
+	a.toolFilterCache.clear()
+	a.promptCache.clear()
+	if kind == "strategy" {
+		a.routeCache.clear()
+	}
+}
+
 func (a *API) cachedRoute(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p := Principal{Manager: true}
@@ -443,6 +486,7 @@ func (a *API) refreshJSON(c *jsonCache, key string, compute func(db *DB) ([]byte
 	defer c.endRefresh(key)
 	ctx, cancel := context.WithTimeout(context.Background(), dashComputeTimeout)
 	defer cancel()
+	gen := c.generation()
 	body, err := compute(a.rec.DB().WithContext(ctx))
 	if err != nil {
 		// Keep the stale entry: it is still servable and still inside its cap. Dropping it would
@@ -451,7 +495,7 @@ func (a *API) refreshJSON(c *jsonCache, key string, compute func(db *DB) ([]byte
 			"err", err)
 		return
 	}
-	c.set(key, body)
+	c.setIfCurrent(key, body, gen)
 }
 
 // cacheKey scopes a cache entry to the actual caller, not just the URL: a manager and a

@@ -303,7 +303,7 @@ func (s Strategy) Matches(now time.Time, tenantID string) bool {
 // caller (proxy's control route) validates the numeric bounds — the keep-alive's own
 // spend-authorization limits, which this package does not know about — and every
 // window and the target before calling this.
-func (r *Registry) CreateStrategy(actorID string, s Strategy) (Strategy, error) {
+func (r *Registry) createStrategy(actorID string, s Strategy) (Strategy, error) {
 	if strings.TrimSpace(s.Name) == "" {
 		return Strategy{}, fmt.Errorf("tenant: a strategy needs a name")
 	}
@@ -334,7 +334,7 @@ func (r *Registry) CreateStrategy(actorID string, s Strategy) (Strategy, error) 
 }
 
 // UpdateStrategy applies a sparse patch and returns the resolved strategy.
-func (r *Registry) UpdateStrategy(actorID, id string, p StrategyPatch) (Strategy, error) {
+func (r *Registry) updateStrategy(actorID, id string, p StrategyPatch) (Strategy, error) {
 	s, err := r.StrategyByID(id)
 	if err != nil {
 		return Strategy{}, err
@@ -402,7 +402,7 @@ func (r *Registry) UpdateStrategy(actorID, id string, p StrategyPatch) (Strategy
 
 // DeleteStrategy removes a strategy. It does not un-ping anything already sent — there
 // is nothing to undo — it only stops the strategy matching new requests.
-func (r *Registry) DeleteStrategy(id string) error {
+func (r *Registry) deleteStrategy(id string) error {
 	res, err := r.db.Exec(`DELETE FROM keepalive_strategies WHERE id = ?`, id)
 	if err != nil {
 		return err
@@ -471,4 +471,30 @@ func scanStrategy(sc scanner) (Strategy, error) {
 	out.Active = active != 0
 	out.CreatedAt, out.UpdatedAt = msTime(createdAt), msTime(updatedAt)
 	return out, nil
+}
+
+// The three writers below commit through the unexported versions above and then tell the registry's
+// listener, so a cached dashboard read that includes strategies is dropped the moment one changes.
+func (r *Registry) CreateStrategy(actorID string, s Strategy) (Strategy, error) {
+	out, err := r.createStrategy(actorID, s)
+	if err == nil {
+		r.changed(ChangeStrategy)
+	}
+	return out, err
+}
+
+func (r *Registry) UpdateStrategy(actorID, id string, p StrategyPatch) (Strategy, error) {
+	out, err := r.updateStrategy(actorID, id, p)
+	if err == nil {
+		r.changed(ChangeStrategy)
+	}
+	return out, err
+}
+
+func (r *Registry) DeleteStrategy(id string) error {
+	err := r.deleteStrategy(id)
+	if err == nil {
+		r.changed(ChangeStrategy)
+	}
+	return err
 }

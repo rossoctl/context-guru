@@ -91,3 +91,26 @@ func TestOverviewFreshnessUsesTheAgeOfTheData(t *testing.T) {
 		}
 	}
 }
+
+// InvalidateStateCaches drops the cached tool reads at once, so a write shows on the next load; a read
+// that began before the write and finishes after it must not put its old body back.
+func TestInvalidateStateCachesDropsReadsAndIgnoresALateOldCompute(t *testing.T) {
+	a, _ := newTestAPI(t, Options{})
+	a.toolFilterCache.set("k", []byte(`{"v":"before the click"}`))
+	a.routeCache.set("r", []byte(`{"v":"route"}`))
+
+	gen := a.toolFilterCache.generation() // a compute begins now, reading the old state
+	a.InvalidateStateCaches("account")
+	a.toolFilterCache.setIfCurrent("k", []byte(`{"v":"computed from the old state"}`), gen)
+
+	if body, _ := a.toolFilterCache.load("k"); body != nil {
+		t.Errorf("after the write the cache still holds %q", body)
+	}
+	if body, _ := a.routeCache.load("r"); body == nil {
+		t.Error("an account write dropped the route cache, which holds no account state")
+	}
+	a.InvalidateStateCaches("strategy")
+	if body, _ := a.routeCache.load("r"); body != nil {
+		t.Errorf("a strategy write left the route cache holding %q", body)
+	}
+}
