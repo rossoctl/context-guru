@@ -158,7 +158,7 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 // measured tokens, at 1.53 ms + one TextTokens call per tool message. It stays REGISTERED
 // (tabular traffic can opt in) but no preset may pay for it by default.
 //
-// house/housellm are exempt because an operator asked for toon in them explicitly, knowing
+// house/housellm/housetail are exempt because an operator asked for toon in them explicitly, knowing
 // the number above. The measurement is not retracted and the rule still holds everywhere
 // else: what an exemption buys is that adding toon to a THIRD preset still has to be a
 // decision somebody makes here, rather than something that quietly spreads.
@@ -167,7 +167,7 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 // house's or housellm's pipeline verbatim, toon included, rather than re-deriving it.
 func TestToonIsInNoPreset(t *testing.T) {
 	byOperatorRequest := map[string]bool{
-		"house": true, "housellm": true,
+		"house": true, "housellm": true, "housetail": true,
 		"conservative": true, "medium": true, "high": true, "xhigh": true,
 	}
 	for name, pipeline := range presets {
