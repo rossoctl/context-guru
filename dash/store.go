@@ -345,9 +345,9 @@ func (d *DB) insertBatch(evs []*Event) error {
 		reasoning_effort, thinking_mode, thinking_budget, temperature, top_p, max_tokens, stream,
 		tool_choice, tools, system_blocks,
 		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
-		keepalive_strategy_id, billed_token_factor, project
+		keepalive_strategy_id, billed_token_factor, project, source
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -406,6 +406,11 @@ func (d *DB) insertBatch(evs []*Event) error {
 			// point before the value is on disk and on the SSE feed, and a path is a
 			// client-chosen string that could be named after a credential.
 			ProjectPath(e.Project),
+			/* Allow-listed rather than stored as given: this is the field every honesty rule
+			 * downstream keys off, so an unrecognised value must not quietly become a third
+			 * kind of row. Anything but the one known marker records as measured, which is the
+			 * safe direction — it claims LESS about the row. */
+			sourceOf(e.Source),
 		)
 		if err != nil {
 			return err

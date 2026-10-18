@@ -101,6 +101,18 @@ type Event struct {
 	BilledTokenFactorMeasured bool   `json:"billed_token_factor_measured"`
 	Provider                  string `json:"provider"`
 	Agent                     string `json:"agent"`
+	// Source says how this row came to exist: "" for a request the proxy MEASURED as it passed,
+	// SourceImported for one recovered from a Claude Code transcript after the fact.
+	//
+	// The two can answer different questions and the difference is not recoverable from anything
+	// else on the row. A measured row saw the request, so it knows what was declared on it and
+	// can say "you carried this and never called it". An imported row knows only what the
+	// provider billed, because a transcript does not record the declaration list — so it can
+	// report spend and must never produce a waste verdict.
+	//
+	// "" rather than a word for measured, because every row written before this column existed
+	// is measured and cannot be back-filled.
+	Source string `json:"source,omitempty"`
 	// Project is the directory the agent was started in — what a user means by "project". Read
 	// from the request body, since nothing else in a request identifies one: the session id is a
 	// hash of the conversation head, and one session can span directories (measured: 8 of 48 do).

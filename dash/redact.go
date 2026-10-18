@@ -79,6 +79,25 @@ func metaEnum(s string) string {
 // one thing we can say about a legitimate value is what it looks like.
 var projectPathShape = regexp.MustCompile(`^/[^\s\x00-\x1f]{0,511}$`)
 
+// SourceImported marks a row recovered from a Claude Code transcript rather than measured by the
+// proxy. A measured row stores "" — see Event.Source for why.
+const SourceImported = "imported"
+
+// sourceOf allow-lists the source marker.
+//
+// ALLOW-LISTED, not stored as given, because every honesty rule downstream keys off this field:
+// a report decides whether it may show a waste verdict by asking whether the window contains
+// imported rows. An unrecognised value would quietly become a third kind of row that no rule
+// covers. Anything but the known marker records as measured, which is the safe direction — it
+// claims LESS about what the row can support, so a mistake here under-reports rather than
+// inventing a finding.
+func sourceOf(s string) string {
+	if s == SourceImported {
+		return SourceImported
+	}
+	return ""
+}
+
 // ProjectPath sanitizes an agent's launch directory for storage.
 //
 // THE TRUST BOUNDARY FOR THE PROJECT DIMENSION. A launch directory is a value the CLIENT chose, so

@@ -44,6 +44,13 @@ type Filter struct {
 	// Project scopes to one launch directory. Unset means EVERY project, which is the view the
 	// dashboard opens on — not "the unattributed ones", since absence is not a value.
 	Project string
+	// Source selects rows of one kind: SourceImported for recovered history. Unset means BOTH,
+	// which is the view the dashboard opens on.
+	Source string
+	// SourceMeasured selects the rows the proxy measured itself. Separate from an empty Source
+	// for the same reason ProjectNone is separate from an empty Project: a measured row stores
+	// "", so absence could not also mean "only those" without making one meaning unreachable.
+	SourceMeasured bool
 	// ProjectNone selects the rows that state NO project. Separate from an empty Project for the
 	// same reason TenantAll is separate from an empty Tenant: "" is a legitimate stored value
 	// here (it is what every pre-migration row and every client that does not state a directory
@@ -141,6 +148,12 @@ func (f Filter) where() (string, []any) {
 	if f.ProjectNone {
 		add("r.project = ''")
 	}
+	if f.Source != "" {
+		add("r.source = ?", f.Source)
+	}
+	if f.SourceMeasured {
+		add("r.source = ''")
+	}
 	if f.Q != "" {
 		like := "%" + f.Q + "%"
 		add("(r.session_id LIKE ? OR r.model LIKE ? OR r.agent LIKE ?)", like, like, like)
@@ -168,7 +181,7 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.reasoning_effort, r.thinking_mode, r.thinking_budget, r.temperature, r.top_p,
 	r.max_tokens, r.stream, r.tool_choice, r.tools, r.system_blocks,
 	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason,
-	r.project`
+	r.project, r.source`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -185,7 +198,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.ReasoningEffort, &e.ThinkingMode, &e.ThinkingBudget, &temp, &topP,
 		&e.MaxTokens, &stream, &e.ToolChoice, &e.Tools, &e.SystemBlocks,
 		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason,
-		&e.Project)
+		&e.Project, &e.Source)
 	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
 	e.KeepAlive = keepAlive != 0
 	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one

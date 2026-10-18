@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS requests (
   -- as '', and so does every request from a client that does not state a working directory. The
   -- dashboard reports that as its own group rather than folding it into any real folder.
   project            TEXT    NOT NULL DEFAULT '',
+  -- How this row came to exist: '' if the proxy measured the request as it passed, 'imported' if
+  -- it was recovered from a Claude Code transcript afterwards. An imported row carries the usage
+  -- the provider billed and NOT the tools the request declared, because a transcript does not
+  -- record them -- so it can report spend and can never support a waste verdict. '' rather than
+  -- a word for measured, since every row written before this column existed is measured.
+  source             TEXT    NOT NULL DEFAULT '',
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -667,6 +673,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The project dimension. Additive with a '' default, which doubles as "unattributed": a row
 	// that predates the column cannot be back-filled, because the body it came from is long gone.
 	{"requests", "project", "TEXT NOT NULL DEFAULT ''"},
+	// Measured-vs-imported. Additive with a '' default, which doubles as "measured": a row that
+	// predates the column saw the proxy, by definition.
+	{"requests", "source", "TEXT NOT NULL DEFAULT ''"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
