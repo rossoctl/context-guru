@@ -35,11 +35,22 @@ background task, so it cannot wait for the reviewers.
    scripts/offload-review.sh <pr>
    scripts/offload-review.sh <pr> --live-tests /tmp/offload-review-pr<N>-rules.md
    ```
-3. **Read the result.**
-   - Exit 0: read both `.claude/worktrees/review-pr<N>-<backend>-r{1,2}/.review.md`.
-   - Exit 1: read that reviewer's `review.log`, report it to the user, and stop.
-   - Exit 1 with "already has both round-N reviews": you did not push since that round.
-   - Exit 3: the round budget is used. Go to "More rounds".
+3. **Read the result.** Each reviewer has 3 files in its worktree,
+   `.claude/worktrees/review-pr<N>-<backend>-r<1|2>/`:
+   - `.review.md`: the review. The reviewer writes it and posts it on the PR.
+   - `review.log`: the tool's full output. The script writes it, not the reviewer. Read it only
+     when something failed; the reviewer never sees it.
+   - `.review-prompt.md`: the prompt the script gave the reviewer.
+
+   | Exit | Meaning | What you do |
+   |---|---|---|
+   | 0 | Both reviews are posted. | Read both `.review.md` files. |
+   | 1 | A reviewer failed, or the input is wrong. | Read the message and that reviewer's `review.log`. Report it to the user. Stop. |
+   | 2 | The round budget is used. | Go to "More rounds". |
+   | 3 | This head already has both reviews of its round. | You did not push since that round. Push the fixes first. |
+
+   A warning "files changed in <checkout> during the review" means a reviewer may have written
+   outside its worktree. Check that checkout with `git status` before you go on.
 4. **If both verdicts are `approve`**, tell the user that the PR is ready to merge. Stop.
 5. **Fix the findings** in your own worktree. Check each finding first: fix the real ones; for
    one you reject, reply on the PR and say why. Commit with `git commit -s`, then push.
@@ -65,6 +76,26 @@ The default budget is 2 rounds. Only the user can grant more. You may ask for th
 
 Do not ask for more rounds just because there are findings. Fix them in the rounds you have.
 
+## Clean up after the PR merges
+
+Run this when the PR is merged or closed, not before. Round 2 needs the round-1 sessions.
+
+```
+scripts/offload-review.sh <pr> --cleanup
+```
+
+It removes:
+- both reviewer worktrees, `.claude/worktrees/review-pr<N>-<backend>-r<1|2>`, with their files;
+- the backend's sessions for those worktrees (for `bob`: `~/.bob/tmp/<hash of the worktree path>`);
+- the live-test rules file, `/tmp/offload-review-pr<N>-rules.md`.
+
+It refuses while the PR is still open. To clean up an open PR you gave up on, ask the user
+first, then run it with `OFFLOAD_FORCE=1`.
+
+If the reviewers ran live tests, the eval box still has their folders, `review-pr<N>-r<1|2>`.
+Remove them by the box rules: put the path in a variable, check that it is not empty, then
+remove it.
+
 ## Rules
 
 - Do not edit the reviewer worktrees. They belong to the reviewers.
@@ -76,13 +107,14 @@ Do not ask for more rounds just because there are findings. Fix them in the roun
 
 ## Add a backend
 
-Create `scripts/offload-review/backends/<name>.sh` with three functions. Each one runs inside
-the reviewer's worktree:
+Create `scripts/offload-review/backends/<name>.sh` with three functions, and one optional one.
+Each one runs inside the reviewer's worktree:
 
 - `backend_label`: one line for the identity table, with the tool and version.
 - `backend_has_session`: exit 0 when this worktree has an earlier session to resume.
 - `backend_run <prompt-file> <resume:0|1>`: run one review with every tool approved. The tool
   must post the review itself, as `review-prompt.md` says.
+- `backend_cleanup` (optional): delete this worktree's sessions. `--cleanup` calls it.
 
 The tool must keep sessions per folder, or `backend_has_session` and `backend_run` must store
 their own session id in the worktree, for example in `.review-session`.
