@@ -69,15 +69,26 @@ fi
 git -C "$main" fetch -q origin "$head_ref" "$base_ref"
 label=$(backend_label)
 
-run_reviewer() {
-  local r=$1 wt=$main/.claude/worktrees/review-pr$pr-$backend-r$r mode=fresh resume=0
-  local live="Live tests are NOT approved. Read the code only."
+wt_of() { echo "$main/.claude/worktrees/review-pr$pr-$backend-r$1"; }
+
+# One after the other, not in the reviewers' parallel jobs: two `git worktree add` calls at the
+# same time can fail on a git lock file.
+for r in 1 2; do
+  wt=$(wt_of "$r")
   if [ -d "$wt" ]; then
     git -C "$wt" checkout -q --detach "$sha"
     git -C "$wt" clean -qfd
   else
     git -C "$main" worktree add -q --detach "$wt" "$sha"
   fi
+done
+
+run_reviewer() {
+  # Two `local` lines: bash expands a whole `local` line before it sets any name on it.
+  local r=$1
+  local wt mode=fresh resume=0
+  local live="Live tests are NOT approved. Read the code only."
+  wt=$(wt_of "$r")
   cd "$wt"
   if [ "$round" -gt 1 ] && backend_has_session; then mode=resumed; resume=1; fi
 
@@ -126,7 +137,8 @@ wait "$p2" || { echo "Reviewer 2 failed; see its review.log" >&2; rc=1; }
 
 reviews=$(gh api --paginate "repos/$repo/pulls/$pr/reviews" --jq '.[].body')
 for r in 1 2; do
-  wt=$main/.claude/worktrees/review-pr$pr-$backend-r$r
+  wt=$(wt_of "$r")
+  [ -d "$wt" ] || { echo "Reviewer $r has no worktree at $wt" >&2; rc=1; continue; }
   # A reviewer may write only its own files. Anything else is a broken rule.
   extra=$(git -C "$wt" status --porcelain | grep -vE ' \.review(-prompt)?\.md$| review\.log$' || true)
   [ -z "$extra" ] || { echo "Reviewer $r changed files:"$'\n'"$extra" >&2; rc=1; }
