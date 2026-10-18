@@ -176,8 +176,8 @@ type Operation struct {
 
     At     Position // first position the change touches, in this producer's output
     Spans  []Span   // every touched range, when the change is not contiguous; nil otherwise
-    Before Size     // what the producer received over the touched ranges
-    After  Size     // what it sent on
+    Before Size     // what the producer received over the touched ranges; the sum over Spans
+    After  Size     // what it sent on over the same ranges
 
     // kind = reduce | add
     ChangeID     string   // the same on every request that carries this change
@@ -208,9 +208,12 @@ type Position struct {
 }
 
 // Span is a range of positions in one section: [From, To], both in this producer's output.
+// Before and After are the sizes over this range only. The operation's Before and After are the
+// sums over its Spans.
 type Span struct {
-    Section  Section
-    From, To int
+    Section       Section
+    From, To      int
+    Before, After Size
 }
 
 type Size struct {
@@ -263,8 +266,8 @@ and can be reported as unpriced (R19).
 
 The provider hashes `tools`, then `system`, then `messages`. A comparison of two positions in that
 order shows whether a change is before a cache boundary. For a change with `Spans`, each span is
-compared on its own, and the change's tokens are split over the spans by their `Before` bytes. A
-producer reports positions in its own output. If a later producer adds or removes messages, it reports a `Splice`, and the library maps
+compared on its own and priced with its own `Before − After`. So a change with spans on both sides
+of B\* gets the right tier for each part. A producer reports positions in its own output. If a later producer adds or removes messages, it reports a `Splice`, and the library maps
 earlier positions into the forwarded body.
 
 ## 5. The collector (Cortex)
@@ -434,7 +437,7 @@ type Unpriced struct {
 }
 
 type CheckFailure struct {
-    Check    string // "sum" | "order" | "unique_change" | "attribution" (§6.5)
+    Check    string // "sum" | "order" | "unique_change" | "spans" | "attribution" (§6.5)
     Producer string // "" when the check is not about one producer
     Detail   string // numbers only, no content
 }
@@ -485,7 +488,8 @@ The library reports failed checks in `Result.Checks`. A failure does not stop pr
    and did not report it.
 2. **Order:** stages do not decrease.
 3. **Unique `ChangeID` inside a request.**
-4. **Attribution:** each `cacheBreak` names at most one operation, and that operation is at or
+4. **Spans:** for an operation with `Spans`, its `Before` and `After` equal the sums over its spans.
+5. **Attribution:** each `cacheBreak` names at most one operation, and that operation is at or
    before the break.
 
 ## 7. Recording in Cortex

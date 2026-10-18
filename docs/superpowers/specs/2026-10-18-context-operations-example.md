@@ -95,9 +95,12 @@ What the collector holds after the pipeline ran:
       "status": "applied", "reversibility": "irreversible",
       "at": {"section": "tools", "index": 2},
       "spans": [
-        {"section": "tools", "from": 2,  "to": 2},
-        {"section": "tools", "from": 9,  "to": 9},
-        {"section": "tools", "from": 15, "to": 15}
+        {"section": "tools", "from": 2,  "to": 2,
+         "before": {"tokens": 900, "tokenizer": "bytes-estimate"}, "after": {"tokens": 0}},
+        {"section": "tools", "from": 9,  "to": 9,
+         "before": {"tokens": 450, "tokenizer": "bytes-estimate"}, "after": {"tokens": 0}},
+        {"section": "tools", "from": 15, "to": 15,
+         "before": {"tokens": 700, "tokenizer": "bytes-estimate"}, "after": {"tokens": 0}}
       ],
       "before": {"tokens": 8000, "tokenizer": "bytes-estimate"},
       "after": {"tokens": 0},
@@ -139,7 +142,12 @@ spans. tool-prune has no tokenizer, so its token count is a byte estimate (desig
 
 op1 is **one** operation for 12 declarations, because tool-prune removes one account list in one
 decision. That is one change unit (design §4.2 rule 1). Its `before` and `after` cover only the
-declarations it removed.
+declarations it removed, not the whole `tools` section. Each span has its own size, and the 12 span
+sizes add up to the operation's 8,000 (the 3 shown add up to 2,050).
+
+The `tools` section sizes, 20,000 in the client body and 12,300 forwarded, are not on any
+operation. The collector sends them to the sum check (design §6.5): op1 removes 8,000 and op4 adds
+300, so 20,000 − 8,000 + 300 = 12,300.
 
 ### 3. What the collector adds
 
