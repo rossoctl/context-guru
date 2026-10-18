@@ -53,6 +53,10 @@ Three problems remain with that approach:
   that `mask` had already reduced.
 - Every figure can be summed **for each session and for each thread**, so a subagent's saving is
   separate from the main thread's.
+- The model serves **API users and subscription users**. An API user pays for each token, so a
+  saving is money. A subscription user pays a fixed price and has a usage limit, so a saving is
+  usage-limit headroom. The operations and the library are the same for both; only the conversion
+  to a value differs (§7.4).
 
 ## 2. Decisions
 
@@ -70,11 +74,12 @@ Three problems remain with that approach:
 | D10 | How is the cache state used? | **As an input to every price.** The tier of a content change depends on the state (§6.2). An operation that changes the state (`stateChange`, §4.4) is priced as the difference between two states. |
 | D11 | What happens to a change that a later change ends? | **It stops on that request.** The later change names it in `Supersedes` and takes over its tokens. Each change keeps the total it had until then (§4.5). |
 | D12 | Where does the thread ID come from? | **From the collector, on every operation.** It uses the agent's thread header when there is one, else the matching fingerprint (§5.3). |
+| D13 | How does the model serve a subscription user? | **The library does not change.** It already returns tokens for each tier (D3). The request carries a `Billing` fact. The host converts tokens to dollars for an API user, and to usage-limit units for a subscription user, with an API-equivalent dollar figure beside it, marked as such (§7.4). |
 
 ## 3. Requirements
 
 The numbers are the order in which the requirements were found, so they are not in sequence.
-R35 to R39 were added after the first review.
+R35 to R39 were added after the first review, and R40 to R43 for subscription plans.
 **R10 is withdrawn.** It asked for a flag that separates a replay from a fresh act. `FirstApplied`
 (§4.1) replaces it.
 
@@ -153,6 +158,18 @@ R35 to R39 were added after the first review.
 - **R18.** Each request carries request ID, session, thread (if known) and agent.
 - **R39.** Each operation carries its session ID and thread ID, so every figure can be summed for
   one session, for one thread, or for one subagent.
+
+### F. Billing plans
+
+- **R40.** Operations and the library are independent of the billing plan. They carry tokens and
+  tiers only. The plan is a fact on the request, not a field of any operation's price.
+- **R41.** Each request names its billing: `api` (pay for each token) or `subscription` (fixed price
+  with a usage limit), and the plan when it is known.
+- **R42.** Each `spend` and `ping` operation names **who paid** for it. A subscription user's own
+  call uses their usage limit. A call on an operator's API key costs the operator money. One
+  session can have both.
+- **R43.** A subscription saving is never reported as money saved. It is reported as usage-limit
+  headroom, and an API-equivalent dollar figure can be shown beside it, labelled as an equivalent.
 - **R19.** The model is versioned. An unknown kind or class is kept and reported as unpriced, never
   dropped.
 - **R20.** The operation list has a size limit, with aggregation above it.
@@ -174,9 +191,23 @@ type RequestOps struct {
     Thread    Thread
     Agent     string
     At        time.Time
+    Billing   Billing     // how the provider charges this request (R41)
     Ping      bool        // a request the host sent itself to keep the cache hot
     Ops       []Operation // in pipeline order
     Truncated *Aggregate  // set when Ops went over the limit
+}
+
+// Billing is a fact the host reads from the request's credential, not a price.
+type Billing struct {
+    Mode    BillingMode // api | subscription | unknown
+    Plan    string      // the plan name when the host knows it, for example "max-5x"; "" otherwise
+    Account string      // a hash of the account the credential belongs to; never the credential
+}
+
+// Payer is who pays for a call that a producer or the keeper made (R42).
+type Payer struct {
+    Billing  Billing // the billing of the credential the call used
+    Operator bool    // true when the call used the operator's credential, not the user's
 }
 
 // Thread identifies one conversation inside a session: the main thread, a subagent, or a fork.
@@ -245,9 +276,10 @@ type Operation struct {
     // class = restore
     Reverses string // ChangeID this restore adds back
 
-    // kind = spend
+    // kind = spend | ping
     SpendID  string   // the same ID as the CostRecorder record
     Produced []string // ChangeIDs this call created
+    PaidBy   Payer    // who paid for the call (R42)
 
     // kind = reroute
     FromModel, ToModel, FromHost, ToHost string
@@ -294,6 +326,7 @@ type Kind string          // reduce | add | stateChange | ping | spend | reroute
 type Mechanism string     // keepAlive | cacheSplit | breakpointTTL
 type Phase string         // hot | cold | unknown
 type ThreadSource string  // header | prefix | new
+type BillingMode string   // api | subscription | unknown
 type Class string         // reencode | envelope | reduce | summarize | restore | inject
 type Signal string        // shape | redundancy | age | reference | relevance | account
 type Status string        // applied | projected | reverted | discarded
@@ -762,6 +795,41 @@ prices them through `ops.Price` too. Their current rules (`cachesplitSavedUSD`,
 tier in both hosts. The dollars are equal only when the two rate tables are equal. The test cases
 use one fixed rate table, so they can compare dollars (§11.2).
 
+### 7.4 Billing plans
+
+`ops.Price` returns the same tokens for each tier for an API user and for a subscription user. The
+host converts them to a value by the request's `Billing.Mode`:
+
+| `Billing.Mode` | Value of a saving | Value of a spend or ping | Shown as |
+|---|---|---|---|
+| `api` | tokens × the provider's rates | measured dollars | money saved; money spent |
+| `subscription` | tokens × the plan's **weights**, in usage-limit units | the same weights, if `PaidBy` is the user's subscription | usage-limit headroom; an API-equivalent dollar figure beside it, labelled "API equivalent" |
+| `unknown` | as `api`, with every figure marked `Estimated` | as `api` | money, marked estimated |
+
+**Weights.** A weight says how much one token of a tier counts against the usage limit, compared
+with one input token. The provider does not publish weights for each tier. So the default weights
+are the ratios of the API rates (input 1, cache write 5m 1.25, cache write 1h 2, cache read 0.1,
+output 5), and every subscription figure is marked `Estimated`. A host can set measured weights in
+its config (§12, question 3).
+
+**Who paid, when it is mixed.** If `PaidBy.Operator` is true, the call cost the operator money,
+whatever the user's plan. That spend is shown in dollars, apart from the user's usage-limit
+figures. A subscription user's net figure is then two numbers, not one: usage-limit headroom
+gained, and operator dollars spent. They are never added together.
+
+**Keep-alive on a subscription.** A ping on the user's own credential uses the user's usage limit,
+not money. The keep-alive window still adds up (§4.4), in usage-limit units.
+
+**Detection.** The host reads `Billing.Mode` from the credential type on the request: an API key
+means `api`; an OAuth token from a subscription login means `subscription`. If it cannot tell, it
+uses `unknown`. Cortex and the proxy must use one rule, so the rule is a function in `ops`:
+`ops.BillingFrom(headers)`. It reads only the credential type and returns no part of the credential
+(R2).
+
+**Recording.** `event.Saving` gains `Basis`: `usd` or `subscriptionEquivalent`. `TotalAvoidedUSD`
+and the cost ledger count only `Basis = usd`. A subscription saving goes in a new usage-limit
+column, so API-equivalent dollars never enter a money total.
+
 ## 8. Errors
 
 The rule: an error in savings never changes the request and never invents money. If a fact is
@@ -777,6 +845,7 @@ missing, report too little and say why.
 | No rate for a tier | `Saving.Provenance` is empty, as today. Tokens are on the record. |
 | Producer not on the allow-list | Kept on the event, unpriced. |
 | `on_error: observe` | `Status = projected`. Priced and shown as "would have saved", never in totals. |
+| `Billing.Mode` is `unknown` | Priced as `api`, every figure marked `Estimated`. |
 
 ## 9. Migration
 
@@ -871,6 +940,7 @@ drops the combinations that cannot occur, and states the reason for each drop in
 | Cache state | hot; cold (expired); cold (first request); rescued by a ping; unknown (restart) |
 | Cache result | full hit; partial hit; miss with write ≥ input; miss with write < input |
 | Breakpoints | end of `system` + last message (Claude Code); one after `tools` only; none; one inside the messages before a break |
+| Billing | `api`; `subscription` with the user paying for spend; `subscription` with the operator paying; `unknown` |
 | TTL of the next breakpoint | 5m, 1h |
 | Component type | summarizer (`summarize`, `cache_aware_summarizer`); other context-guru component; tool-prune |
 | Tokens | counted by a tokenizer; `bytes-estimate`; with and without the proxy's `BilledTokenFactor` |
@@ -893,6 +963,8 @@ drops the combinations that cannot occur, and states the reason for each drop in
     a restore of the summary, after which the earlier changes are reported again.
 11. A subagent thread: its operations, its totals, and a session total that adds both threads.
 12. The interaction on a rescued request, and the conservation check on every case.
+13. The worked example on a subscription plan: the same tokens, in usage-limit units, with a
+    summarizer call paid by the operator.
 
 **C. Cases from real traffic.** For each difference that a shadow step (§9 steps 4 and 7) logs and
 no case matches, add a case. Then decide: it is a bug in `ops`, or a new `differs` case with a
@@ -930,7 +1002,11 @@ Each has test cases that are marked `differs` or `notCovered` until it is decide
    read the parent's entry. The model scopes the cache state to a thread (§5.4), so the fork's first
    request is `cold` or `unknown`, and a read from the parent's entry is not credited to anyone.
    That reports too little.
-3. **The tokenizer correction.** The proxy multiplies its counted tokens by `BilledTokenFactor`
+3. **Usage-limit weights.** The provider publishes no weights for each tier, so the defaults (§7.4)
+   are the API rate ratios, an estimate. It is not verified whether a subscription response carries
+   usage-limit headers that a host could use to measure the weights. If it does, a calibration
+   could replace the defaults for each plan.
+4. **The tokenizer correction.** The proxy multiplies its counted tokens by `BilledTokenFactor`
    (o200k_base to the provider's tokenizer). Cortex uses a bytes ratio. Option: `Input` takes a
    factor for each tokenizer name, so `ops.Price` applies the correction in one place. The
    generated cases test both, with and without the factor.

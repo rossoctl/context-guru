@@ -10,7 +10,8 @@ This file follows one session from turn 5 to turn 13, with one subagent. It show
 4. how a change inside the cached prefix costs money, and whether it pays back;
 5. a **keep-alive ping**, and the request it rescues;
 6. a **summary** that ends earlier changes;
-7. a **subagent**, and the totals for each thread and for the session.
+7. a **subagent**, and the totals for each thread and for the session;
+8. the same session for a user with a **subscription plan**.
 
 A script computed every figure. For each request, the operations add up to the bill without the
 operations minus the bill with them (design §6.3, "Conservation").
@@ -490,6 +491,53 @@ inside one column, as the cost ledger does today.
 
 ---
 
+## The same session on a subscription plan
+
+Now the user has a subscription plan, not an API key. The host reads the credential type and sets:
+
+```json
+"billing": {"mode": "subscription", "plan": "max-5x", "account": "acct-9c1e"}
+```
+
+**The operations do not change.** Every operation above, and every token count that `ops.Price`
+returns, is the same. Only the host's conversion changes (design §7.4).
+
+The host converts tokens to **usage-limit units**: one unit is one input token. It uses the default
+weights (input 1, cache write 1.25, cache read 0.1, output 5), so every figure is marked
+`Estimated`.
+
+| Item | API user | Subscription user |
+|---|---|---|
+| Turn 5 saving | +$0.03012 | 11,640 × 0.1 + 7,100 × 1.25 = **10,039 units** (API equivalent $0.03012) |
+| Session savings | +$0.48267 | **160,890 units** (API equivalent $0.48267) |
+| 3 keep-alive pings, on the user's credential | −$0.03125 | **10,416 units** of the user's limit |
+| Summarizer call, on the **operator's** API key | −$0.02361 | **−$0.02361 to the operator**, in dollars |
+
+So the subscription user's net figure is two numbers, and they are not added together:
+
+- **Usage-limit headroom gained:** 160,890 − 10,416 = **150,474 units**, about 50 turns of 3,000
+  input tokens.
+- **Operator money spent:** **$0.02361**, for the summarizer call.
+
+The summarizer call names its payer:
+
+```json
+{ "id": "op31", "kind": "spend", "producer": "context-guru", "component": "summarize",
+  "spendId": "spend-summ-12", "produced": ["cg:summarize:ab12"],
+  "paidBy": {"billing": {"mode": "api"}, "operator": true} }
+```
+
+A ping on the user's own credential names the user's subscription:
+
+```json
+"paidBy": {"billing": {"mode": "subscription", "plan": "max-5x"}, "operator": false}
+```
+
+The API-equivalent dollars are labelled as an equivalent, and they never enter `TotalAvoidedUSD` or
+the cost ledger's money columns.
+
+---
+
 ## Summary of the model, as the example uses it
 
 | Field | Used for |
@@ -506,3 +554,5 @@ inside one column, as the cost ledger does today.
 | `structure` | move later positions after a summary |
 | `spendId`, `produced` | join measured cost to the change it paid for |
 | `attributedTo` | which change a `cacheBreak` is charged to; absent means nobody |
+| `billing` (`RequestOps`) | how the host values the tokens: money, or usage-limit units |
+| `paidBy` | who paid for a spend or a ping: the user's plan, or the operator's key |
