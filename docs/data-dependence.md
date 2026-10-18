@@ -93,25 +93,58 @@ itself. The client would then keep the shortened version, and the proxy would no
 it. Nobody has checked if Claude Code's plugin or hook interface lets a plugin change earlier
 messages.
 
-## What turns off when
+## Will my setup work?
 
-| Switch | Default | Turns off | Does not turn off |
+Find your preset and your cache strategy below. Each cell says what happens at that storage level.
+
+- ✅ **Works**: the same as with everything stored.
+- ✅ **Works, no `expand`**: the same savings. The model cannot ask for removed text back. The
+  agent still has its own copy.
+- ⚠️ **Partly**: some parts work, and the cell says which parts do not.
+- ❌ **Does not work**: it does nothing, or it can cost more than it saves.
+
+"Metadata only" does not exist yet. That column says what would happen if it were added to the
+code as it is today.
+
+### Plugin presets
+
+These are the presets in the Claude Code plugin picker.
+
+| Preset | Off | Metadata only | Everything |
 |---|---|---|---|
-| `store.enabled` (YAML) | on | The Store: originals, frozen decisions, saved model results, billed-token and cache-time records. The proxy stops offering the `expand` tool. | The observe-mode store, the body stash, keep-alive bodies and credentials, component caches in memory, the dashboard |
-| `--store` / `STORE` | follows YAML | Overrides the operator's `store.enabled` | In hosted mode, each account's own `store.enabled` |
-| `--dashboard` / `DASHBOARD` | off (the plugin turns it on) | The dashboard database and its in-memory memos. Keep-alive also stops keeping bodies. | The body stash, the Store |
-| `--dashboard-content` / `DASHBOARD_CONTENT` | off | New writes of `request_content`, extraction-call text and `declaration_text` | Tool, MCP-server and skill names; `extraction_calls.rejection`; `request_components.err`; rows already written; keep-alive; the body stash; the memos |
-| Account consent `capture_content` (hosted) | **on** for a new account | The same as `--dashboard-content`, for one account. Both must be on. | The same as the row above. Turning it off deletes nothing. |
-| `--dashboard-retention` and size limits | 7 days, 512 MiB | Old dashboard rows, with their content | `declaration_text`, `tenant_spend`, `archived_sessions` |
-| `--archive-remote` | off | Upload of old sessions to remote storage | — |
-| `cache.keepalive` (YAML), plugin strategy `none` | off in Go, `5-min-ping` in the plugin | Keep-alive bodies, credentials and pings | Manager strategies and per-session overrides can turn it on again |
-| `CONTEXT_GURU_KEEPALIVE=off` | unset | All keep-alive, everywhere | — |
-| `INJECT_EXPAND` | `auto` | The `expand` tool offer | Storing the originals |
-| `CONTEXT_GURU_DUMP`, `CONTEXT_GURU_CAPTURE` | unset | (opt-in) Writes before/after text or whole request bodies to a file, with no redaction. The proxy refuses them in hosted mode. | — |
-| `CG_LOG_LEVEL=debug` | `info` | (opt-in) Logs the first 160 characters of each tool output | — |
+| `off` | ✅ Works | ✅ Works | ✅ Works |
+| `conservative` | ✅ Works, no `expand` | ✅ Works, no `expand` | ✅ Works |
+| `medium` | ⚠️ **Partly.** The `conservative` part works. `extract_llm` pays for each rewrite, uses it for one turn, then breaks the cache. The summary is never made. | ⚠️ **Partly.** The same as Off. | ✅ Works |
+| `high` | ⚠️ **Partly.** The same as `medium`. | ⚠️ **Partly.** The same as `medium`. On OpenAI it also pays for a summary every turn and throws it away. | ✅ Works |
+| `xhigh` | ⚠️ **Partly.** The same as `high`. The sweep also pays full price to ask which outputs to remove, and its removals last one turn. | ⚠️ **Partly.** The same as `high`, plus the sweep problem from the Off column. | ✅ Works |
 
-The **body stash** keeps the last request body of each thread, for a cheap question to the model
-(see [Features outside the pipeline](#features-outside-the-pipeline)). **No switch** turns it off.
+**At Off, use `conservative`.** `medium`, `high` and `xhigh` add model calls that last one turn, so
+they can cost more than `conservative`.
+
+### Cache strategies
+
+| Strategy | Off | Metadata only | Everything |
+|---|---|---|---|
+| `none` | ✅ Works | ✅ Works | ✅ Works |
+| `5-min-ping` | ❌ **Cannot work without storage.** A ping sends your last request again, with your credential, so the proxy must keep both. **Today it runs anyway and keeps both.** That breaks the opt-out (see [What this audit found](#what-this-audit-found)). | ❌ Cannot work, for the same reason | ✅ Works |
+| `1-hour-head` | ✅ Works. It only asks the provider for a longer cache, and stores nothing. | ✅ Works | ✅ Works |
+
+`medium` makes its summary in the idle time that `5-min-ping` keeps warm. Without `5-min-ping`,
+`medium` almost never makes a summary, at any level.
+
+### Other presets
+
+These presets are for the standalone proxy and for benchmarks.
+
+| Preset | Off | Metadata only | Everything |
+|---|---|---|---|
+| `cache`, `safe` | ✅ Works | ✅ Works | ✅ Works |
+| `house`, `coding`, `mcp` | ✅ Works, no `expand` | ✅ Works, no `expand` | ✅ Works |
+| `balanced`, `codesafe` | ⚠️ **Partly.** `failed_run` (and `collapse` in `codesafe`) shortens a message once, then sends it in full the next turn. That breaks the cache. | ⚠️ **Partly.** The same as Off. | ✅ Works |
+| `codesmart`, `aggressive`, `agent`, `general`, `housellm` | ⚠️ **Partly.** The rule-based part works, but some rewrites last one turn and break the cache. `extract_llm` (and the sweep in `housellm`) pays for calls that last one turn. | ⚠️ **Partly.** The same as Off. | ✅ Works |
+| `summarize` | ❌ **Does not work.** It does not start, because it cannot tell how full the window is. | ❌ **Does not work, and costs money.** It pays for a summary every turn and throws it away. | ✅ Works |
+| `summarizer1509` | ❌ **Does not work, and costs money.** It starts at a fixed size (20,000 tokens), pays for a summary every turn and throws it away. | ❌ The same as Off | ✅ Works |
+| `agentdiet` | ❌ **Does not work.** It pays for a model call every turn, and breaks the cache every turn. | ❌ The same as Off | ✅ Works |
 
 ## Pipeline components
 
@@ -227,7 +260,7 @@ behaviour. Each finding needs a decision from its owner.
 - **Pays for model calls that last one turn:** `extract_llm`, `extract_llm_sweep` (at full price)
   and `agentdiet`.
 - **`coref` loses its spending limit.**
-- **`summarize` and `cache_aware_summarizer` do not start.** This is safe only by accident. They
+- **`summarize` and `cache_aware_summarizer` do not start with their default settings.** This is safe only by accident. `summarizer1509` starts at a fixed size, so it pays for summaries and throws them away. They
   start as soon as the proxy keeps the billed-token record, as at "metadata only".
 - **Nothing warns at startup** when these components run with storage off.
 
@@ -258,3 +291,23 @@ behaviour. Each finding needs a decision from its owner.
   The person in "Decided by" confirms it before merge.
 - Write the reason in plain words: **why** the component needs the data. A file name or line
   number is not a reason, and the test rejects it.
+
+## Technical notes: what each switch turns off
+
+| Switch | Default | Turns off | Does not turn off |
+|---|---|---|---|
+| `store.enabled` (YAML) | on | The Store: originals, frozen decisions, saved model results, billed-token and cache-time records. The proxy stops offering the `expand` tool. | The observe-mode store, the body stash, keep-alive bodies and credentials, component caches in memory, the dashboard |
+| `--store` / `STORE` | follows YAML | Overrides the operator's `store.enabled` | In hosted mode, each account's own `store.enabled` |
+| `--dashboard` / `DASHBOARD` | off (the plugin turns it on) | The dashboard database and its in-memory memos. Keep-alive also stops keeping bodies. | The body stash, the Store |
+| `--dashboard-content` / `DASHBOARD_CONTENT` | off | New writes of `request_content`, extraction-call text and `declaration_text` | Tool, MCP-server and skill names; `extraction_calls.rejection`; `request_components.err`; rows already written; keep-alive; the body stash; the memos |
+| Account consent `capture_content` (hosted) | **on** for a new account | The same as `--dashboard-content`, for one account. Both must be on. | The same as the row above. Turning it off deletes nothing. |
+| `--dashboard-retention` and size limits | 7 days, 512 MiB | Old dashboard rows, with their content | `declaration_text`, `tenant_spend`, `archived_sessions` |
+| `--archive-remote` | off | Upload of old sessions to remote storage | — |
+| `cache.keepalive` (YAML), plugin strategy `none` | off in Go, `5-min-ping` in the plugin | Keep-alive bodies, credentials and pings | Manager strategies and per-session overrides can turn it on again |
+| `CONTEXT_GURU_KEEPALIVE=off` | unset | All keep-alive, everywhere | — |
+| `INJECT_EXPAND` | `auto` | The `expand` tool offer | Storing the originals |
+| `CONTEXT_GURU_DUMP`, `CONTEXT_GURU_CAPTURE` | unset | (opt-in) Writes before/after text or whole request bodies to a file, with no redaction. The proxy refuses them in hosted mode. | — |
+| `CG_LOG_LEVEL=debug` | `info` | (opt-in) Logs the first 160 characters of each tool output | — |
+
+The **body stash** keeps the last request body of each thread, for a cheap question to the model
+(see [Features outside the pipeline](#features-outside-the-pipeline)). **No switch** turns it off.
