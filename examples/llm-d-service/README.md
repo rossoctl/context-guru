@@ -60,7 +60,7 @@ and [`docs/design.md`](../../docs/design.md) (the pipeline, store, fail-open mod
 | Config | Component(s) | Uses an LLM? | What it does | Best for |
 |---|---|:--:|---|---|
 | [`configs/toon.yaml`](configs/toon.yaml) | `format` + `toon` | no | Re-encodes uniform JSON object-arrays in tool outputs as **TOON** (field names once, then one row per element). | Deterministic, zero-cost, zero-latency wins on structured/tabular tool output. |
-| [`configs/extract-code.yaml`](configs/extract-code.yaml) | `extract` (`strategy: code`) | yes | A cheap LLM writes a sandboxed filter that **deletes irrelevant lines** from large tool outputs (verified deletion-only — never invents text). | Big, noisy tool outputs where only a slice is relevant to the current goal. |
+| [`configs/extract-code.yaml`](configs/extract-code.yaml) | `extract_llm` (`strategy: code`) | yes | A cheap LLM writes a sandboxed filter that **deletes irrelevant lines** from large tool outputs (verified deletion-only — never invents text). | Big, noisy tool outputs where only a slice is relevant to the current goal. |
 | [`configs/summarize.yaml`](configs/summarize.yaml) | `summarize` | yes | A cheap LLM **summarizes the middle** of a long transcript into one message, keeping the head + last few turns. | Long agentic sessions where the transcript itself is the token cost. |
 
 All three set `store: { enabled: false }` and `marker_mode: "off"` — irreversible, marker-free output.
@@ -97,21 +97,24 @@ bin/context-guru-proxy --config examples/llm-d-service/configs/toon.yaml
 # listens on :4000 (set LISTEN_ADDR to change)
 ```
 
-The LLM configs need a model. Put the endpoint + credentials in the config's `model:` block, or
-leave `api_key: ""` and supply the key via the environment:
+The LLM configs need a model. They use `model.source: config`, which takes the endpoint and the
+credential from the proxy's `CHEAP_MODEL_*` environment. A config file cannot hold them: the
+`model:` block refuses `provider`, `base_url`, `api_key` and `auth`.
 
 ```sh
-# Option A — credentials in the environment (recommended; keeps secrets out of files)
-export OPENAI_API_KEY=sk-...            # or ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN
+# An OpenAI-compatible endpoint (e.g. the llm-d gateway)
+export CHEAP_MODEL=gpt-4o-mini CHEAP_MODEL_PROVIDER=openai \
+       CHEAP_MODEL_BASE=http://your-llm-endpoint:8000 CHEAP_MODEL_KEY=sk-...
 bin/context-guru-proxy --config examples/llm-d-service/configs/extract-code.yaml
 
-# Option B — a shared "cheap model" via env, and set model.source: config with an empty block
+# An Anthropic-shaped gateway that takes a bearer token
 export CHEAP_MODEL=claude-haiku-4-5 CHEAP_MODEL_PROVIDER=anthropic \
        CHEAP_MODEL_BASE=https://your-gateway CHEAP_MODEL_KEY=... CHEAP_MODEL_AUTH=bearer
 bin/context-guru-proxy --config examples/llm-d-service/configs/summarize.yaml
 ```
 
-Edit the `model:` block in each LLM config to point at your endpoint (see the reference in §9).
+If `CHEAP_MODEL_KEY` is unset, the key falls back to `OPENAI_API_KEY` (openai) or
+`ANTHROPIC_API_KEY` (anthropic). The `model.model` value in a config overrides `CHEAP_MODEL`.
 
 ---
 
@@ -205,17 +208,23 @@ store:
 
 You can also override at launch: `--store=false` or `STORE=false` (wins over the file).
 
-**Model block** — on `extract` / `summarize` under `components:`:
+**Model block** — on `extract_llm` / `summarize` / `cache_aware_summarizer` under `components:`:
 
 ```yaml
 model:
-  source: config          # "config" = use the block below; "incoming" = reuse the request's own model+key
-  provider: openai        # openai | anthropic
-  base_url: http://your-llm-endpoint:8000   # your endpoint (default: provider public API)
-  model: gpt-4o-mini      # model id the cheap calls use
-  api_key: ""             # empty => env: OPENAI_API_KEY, or ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN
-  auth: bearer            # anthropic only: x-api-key (default) | bearer (LiteLLM/gateways)
+  source: config          # "config" = the host's CHEAP_MODEL_* model; "incoming" = reuse the request's own endpoint+key
+  model: gpt-4o-mini      # model id the cheap calls use (empty = the source's own model)
 ```
+
+The endpoint and credential are host settings, not component settings:
+
+| Env var | Meaning |
+|---|---|
+| `CHEAP_MODEL` | model id; unset = no configured model |
+| `CHEAP_MODEL_PROVIDER` | `anthropic` (default) \| `openai` |
+| `CHEAP_MODEL_BASE` | upstream base URL (default: the provider's public API) |
+| `CHEAP_MODEL_KEY` | API key (default: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) |
+| `CHEAP_MODEL_AUTH` | anthropic only: `x-api-key` (default) \| `bearer` (LiteLLM/gateways) |
 
 **Other knobs** (see [`docs/components.md`](../../docs/components.md) for the full set):
 
@@ -230,8 +239,9 @@ model:
 - **The response is identical to the input.** The request didn't meet a gate: below `min_tokens`
   (toon/format), or below the LLM config's `trigger`. Send a larger tool output / longer transcript,
   or lower the thresholds (see [`sample/configs/`](sample/configs) for lowered-trigger demo copies).
-- **LLM config does nothing / logs "no model".** No reachable model: check `base_url`, the key
-  (`api_key` or the env fallback), and `auth` (bearer vs x-api-key). With no model, `extract`
+- **LLM config does nothing / logs "no model".** No reachable model: check `CHEAP_MODEL` is set,
+  then `CHEAP_MODEL_BASE`, the key (`CHEAP_MODEL_KEY` or its env fallback), and `CHEAP_MODEL_AUTH`
+  (bearer vs x-api-key). With no model, `extract_llm`
   degrades to a deterministic line projection and `summarize` no-ops — the request still returns `200`.
 - **`summarize` output says tool outputs are "masked".** `include_tool_calls` defaults to `false`,
   so the summarizer sees the transcript shape, not tool bodies. Set `include_tool_calls: true` to fold them in.
@@ -245,7 +255,7 @@ model:
 
 - **Fail-open by design** — a component that errors, panics, or would *grow* the request is reverted;
   the original request is always a valid fallback.
-- **Secrets** — prefer leaving `api_key: ""` and supplying the key via the environment rather than
-  committing it into a config file.
+- **Secrets** — a config file cannot hold a credential. The key is always a host setting
+  (`CHEAP_MODEL_KEY` or its env fallback).
 - **Files in this example:** [`configs/`](configs) (the 3 configs), [`build.sh`](build.sh),
   [`client/main.go`](client/main.go), [`sample/`](sample) (a captured before/after run).

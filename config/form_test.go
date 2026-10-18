@@ -770,17 +770,16 @@ func TestTheColdCacheKeysSurviveASaveThatDoesNotMentionThem(t *testing.T) {
 	}
 }
 
-// A credential is write-only. It is declared (the form has to be able to SET it) but never
-// echoed back, and "absent from the form" therefore cannot mean "cleared" — otherwise every
-// save would delete the stored key.
-func TestAStoredCredentialIsNeverEchoedAndNeverLost(t *testing.T) {
+// A credential is no longer a component setting: the model: block names a source, and the
+// endpoint and key live on the host (CHEAP_MODEL_*). A stored document that still carries one
+// can be read — the form declares no such field, so the value never reaches the payload — but
+// a save over it is refused, saying where the setting lives now, rather than writing the
+// retired key back out. Neither path may echo the stored value: the error reaches the page.
+func TestAStoredCredentialIsNeverEchoedAndASaveIsRefused(t *testing.T) {
 	const secret = "sk-do-not-echo-me"
 	doc := "pipeline: [extract_llm]\nmode: sync\ncomponents:\n  extract_llm:\n" +
 		"    strategy: code\n    model:\n      model: claude-haiku-4-5\n      api_key: " + secret + "\n"
 	f := mustParse(t, doc)
-	if _, ok := f.Components["extract_llm"]["model.api_key"]; ok {
-		t.Error("the parsed form carries the stored api_key")
-	}
 	blob, err := json.Marshal(f)
 	if err != nil {
 		t.Fatal(err)
@@ -789,20 +788,14 @@ func TestAStoredCredentialIsNeverEchoedAndNeverLost(t *testing.T) {
 		t.Errorf("the api_key reached the settings payload: %s", blob)
 	}
 	out, err := ApplyForm(doc, f)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatalf("saving over a document that stores model.api_key succeeded:\n%s", out)
 	}
-	if !strings.Contains(out, secret) {
-		t.Errorf("saving the form deleted the stored credential:\n%s", out)
+	if !strings.Contains(err.Error(), "CHEAP_MODEL_KEY") {
+		t.Errorf("the refusal does not say where the credential lives now: %v", err)
 	}
-	// An explicit empty string is how it gets cleared.
-	f.Components["extract_llm"]["model.api_key"] = ""
-	out, err = ApplyForm(doc, f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(out, secret) {
-		t.Errorf("an explicit clear left the credential in place:\n%s", out)
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("the refusal echoed the stored credential: %v", err)
 	}
 }
 
