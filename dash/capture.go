@@ -23,7 +23,8 @@ type Options struct {
 	RetentionAge   time.Duration
 	RetentionBytes int64
 	// CaptureContent enables the before/after content capture the diff view needs.
-	// Opt-OUT: it is the headline feature, so it defaults on. ContentCap bounds each
+	// Opt-IN: the zero value is off, and so is --dashboard-content, because capture writes
+	// arbitrary agent output to disk through a best-effort redactor. ContentCap bounds each
 	// captured blob (default 16 KiB); ContentMaxPerRequest bounds how many
 	// rewritten messages are captured per request (default 24).
 	CaptureContent       bool
@@ -104,7 +105,8 @@ type Options struct {
 	// loudly what was lost.
 	ArchiveRequired bool
 	// LifecycleSignals records the per-request lifecycle signals into request_lifecycle
-	// (dash/lifecycle.go). Off by default.
+	// (dash/lifecycle.go). The zero value is off, but --dashboard-lifecycle-signals defaults
+	// to on: the rows hold only counts and sizes, never content.
 	LifecycleSignals bool
 }
 

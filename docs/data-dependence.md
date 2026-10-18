@@ -264,11 +264,13 @@ behaviour. Each finding needs a decision from its owner.
   start as soon as the proxy keeps the billed-token record, as at "metadata only".
 - **Nothing warns at startup** when these components run with storage off.
 
-### Code comments that disagree with the defaults
+### Code comments that disagreed with the defaults
 
-- The dashboard's `CaptureContent` comment says "on by default". It is off.
-- The account `CaptureContent` comment says "Off by default". A new account starts with it **on**.
-- The `LifecycleSignals` comment says "Off by default". The flag is on by default. It writes only
+This PR fixes 3 code comments that said the wrong default:
+
+- The dashboard's `CaptureContent` comment said "on by default". It is off.
+- The account `CaptureContent` comment said "Off by default". A new account starts with it **on**.
+- The `LifecycleSignals` comment said "Off by default". The flag is on by default. It writes only
   counts.
 
 ## Open questions
