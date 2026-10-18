@@ -17,6 +17,8 @@
 # Exit 0: both reviews are posted. Exit 1: a reviewer failed. Exit 3: the round budget is used.
 # Output for each reviewer: <worktree>/.review.md and <worktree>/review.log.
 set -euo pipefail
+# A step that fails under `set -e` would otherwise end the script with no message.
+trap 'echo "offload-review: line $LINENO failed (exit $?)" >&2' ERR
 
 usage="usage: offload-review.sh <pr> [--backend <name>] [--live-tests <rules-file>]"
 pr=${1:?$usage}
@@ -52,7 +54,8 @@ base_ref=$(jq -r .baseRefName <<<"$pr_json")
 
 reviews=$(gh api --paginate "repos/$repo/pulls/$pr/reviews" --jq '.[].body')
 # Round = rounds that reviewer 1 already posted, plus 1. Rounds count across backends.
-done_rounds=$(grep -oE '<!-- offload-review reviewer=1 round=[0-9]+' <<<"$reviews" | sort -u | wc -l | tr -d ' ')
+# `|| true`: grep exits 1 on a PR with no reviews yet, and pipefail would end the script.
+done_rounds=$({ grep -oE '<!-- offload-review reviewer=1 round=[0-9]+' <<<"$reviews" || true; } | sort -u | wc -l | tr -d ' ')
 round=$((done_rounds + 1))
 if [ "$round" -gt "$max_rounds" ]; then
   echo "PR #$pr used its $max_rounds review rounds. A person must decide now." >&2
