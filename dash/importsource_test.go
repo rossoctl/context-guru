@@ -1,6 +1,9 @@
 package dash
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // The `source` column: whether a row was MEASURED by the proxy or IMPORTED from a transcript.
 //
@@ -117,5 +120,58 @@ func TestTheSourceColumnArrivesWithoutDiscardingHistory(t *testing.T) {
 	}
 	if src != "" {
 		t.Errorf("a row written with no source reads %q; want \"\", which means measured", src)
+	}
+}
+
+// IMPORTED HISTORY MUST SURVIVE THE RETENTION PRUNE, which is the flaw that made the first
+// version of this feature pointless.
+//
+// The janitor deletes requests older than RetentionAge, seven days by default. Imported history
+// is old BY DEFINITION — that is the only reason to import it — so the first live import wrote
+// 5,379 rows and the next janitor pass deleted 5,362 of them, leaving the seventeen that happened
+// to fall inside the window. The dashboard then showed a span of one week and seventeen imported
+// requests, which looked like the import had barely found anything.
+//
+// Age is the wrong question for these rows. A measured row ages out because the live traffic
+// behind it keeps coming and the recent rows are the ones that matter; an imported row is a
+// one-off recovery of something that cannot be re-fetched once deleted, and its whole value is
+// being old. So the age rule skips them, and the BYTE rule does not — disk pressure is a real
+// constraint either way, and that rule evicts oldest-first regardless of source.
+func TestTheRetentionPruneDoesNotDeleteImportedHistory(t *testing.T) {
+	db := openTestDB(t)
+	old := time.Now().Add(-90 * 24 * time.Hour).UnixMilli()
+	recent := time.Now().Add(-1 * time.Hour).UnixMilli()
+
+	if err := db.insertBatch([]*Event{
+		// Old measured rows: these SHOULD go. The live traffic behind them continues.
+		{TS: old, SessionID: "m-old", Model: "m", TokensBefore: 10},
+		// Old imported rows: these must stay. They cannot be re-fetched.
+		{TS: old, SessionID: "i-old", Model: "m", Source: SourceImported, CacheWrite: 100},
+		{TS: recent, SessionID: "m-new", Model: "m", TokensBefore: 10},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Prune(time.Now(), 7*24*time.Hour, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	var imported int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM requests WHERE source = ?`,
+		SourceImported).Scan(&imported); err != nil {
+		t.Fatal(err)
+	}
+	if imported != 1 {
+		t.Errorf("%d imported rows survived a 7-day prune; want 1. Imported history is old by "+
+			"definition, so an age rule that applies to it deletes the entire import", imported)
+	}
+	var measuredOld int
+	if err := db.sql.QueryRow(
+		`SELECT COUNT(*) FROM requests WHERE session_id = 'm-old'`).Scan(&measuredOld); err != nil {
+		t.Fatal(err)
+	}
+	if measuredOld != 0 {
+		t.Error("an old MEASURED row survived the prune; the age rule still has to work for the " +
+			"rows it was written for")
 	}
 }
