@@ -130,7 +130,7 @@ So B\* = `messages[8]`.
       ],
       "before": {"tokens": 8000, "tokenizer": "bytes-estimate"},
       "after": {"tokens": 0},
-      "changeId": "tp:decl-set-7f3a", "firstApplied": false
+      "changeId": "tp:decl-set-7f3a"
     },
     {
       "id": "op2", "kind": "reduce",
@@ -167,6 +167,9 @@ To keep the example short, bytes and the cg tokenizer name are left out, and op1
 spans. op1 is **one** operation for 12 declarations, because tool-prune removes one account list in
 one decision (design §4.2 rule 1). Its sizes cover only the declarations it removed. The 12 span
 sizes add up to 8,000 (the 3 shown add up to 2,050).
+
+op1 has no `firstApplied`. tool-prune keeps no state, so it cannot know whether an earlier request
+carried the same change (design §4.7). Its price does not need it.
 
 The `tools` section sizes are not on any operation. The collector sends them to the sum check
 (design §6.5): 20,000 − 8,000 (op1) + 300 (op4) = 12,300 forwarded.

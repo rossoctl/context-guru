@@ -62,12 +62,12 @@ Three problems remain with that approach:
 
 | # | Question | Decision |
 |---|---|---|
-| D1 | Who knows that a change is applied for the first time? | **The producer.** context-guru knows it from its frozen state, which is keyed by content hash and survives agent compaction. The library stays stateless. |
+| D1 | Who knows that a change is applied for the first time? | **The producer, when it keeps state.** context-guru knows it from its frozen state, which is keyed by content hash and survives agent compaction. A stateless producer (tool-prune) does not know it, and leaves `FirstApplied` unset (§4.7). The library stays stateless. |
 | D2 | Where is the savings logic? | **In a context-guru library.** Cortex calls it and keeps no producer-specific pricing rules. |
 | D3 | What does the library return? | **Tokens for each tier**, not dollars. Cortex prices them with its own rates (discounts, overrides, long-context tiers), so a saving and the request's spend use the same rates. |
 | D4 | How is cg's own spend recorded? | **As operations, in the same report as the savings.** A `spend` or `ping` operation carries the provider's billed usage of the call (`Call`). The host prices it with the savings, in one path. There is no second record and no `CostRecorder` (§4.6). `ops.Price` does not price the call; it returns `Call.Usage` for the host to price (D3). |
 | D5 | Shape | **One typed operation for each change unit**, with an aggregate fallback above a limit. |
-| D6 | How is a saving across requests counted? | **Realized on each request, not projected.** Each request lists every change in its body, fresh or replayed, and is priced from that request's own cache result. |
+| D6 | How is a saving across requests counted? | **Realized on each request, not projected.** Each request lists every change in its body, fresh or replayed, and is priced from that request's own cache result. The producer remembers past changes, not the library or the host (§4.7). |
 | D7 | Where do the types live? | **A standalone module in the context-guru repo,** `github.com/rossoctl/context-guru/ops`, with no dependency on the engine. Cortex's pipeline and every plugin import it without the engine's dependencies. |
 | D8 | Which hosts compute dollars from operations? | **Both: Cortex and the context-guru proxy.** The proxy stops using its own saving rules (`dash/event.go`) when it switches. The comparison of request fingerprints (§5) is a pure function in `ops`, so the proxy does not need Cortex to find B\*. |
 | D9 | How is the implementation validated? | **Against an exhaustive list of test cases made with the current computation** (§11), before any host switches. |
@@ -275,7 +275,7 @@ type Operation struct {
 
     // kind = reduce | add | stateChange | ping
     ChangeID     string   // the same on every request that carries this change
-    FirstApplied bool     // true only on the first request that carries it
+    FirstApplied *bool    // true only on the first request that carries it; nil = not known (§4.7)
     ContentKeys  []string // hashes of removed content
 
     // kind = reduce: the changes this one ends (§4.5)
@@ -362,7 +362,8 @@ and can be reported as unpriced (R19).
 2. **A replay is a new operation with the same `ChangeID` and `FirstApplied = false`.** A replay's
    cost, if any, is a `spend` operation, not part of the reduction.
 3. **`FirstApplied` does not choose the tier.** The position does (§6.2). `FirstApplied` counts
-   fresh acts and marks where a change's payback starts.
+   fresh acts and marks where a change's payback starts. It is optional: a producer that keeps no
+   state leaves it unset (§4.7).
 4. **`Before` and `After` are measured at the producer's own input.** For `add` and for a restore,
    `After > Before`.
 5. **Only the collector writes `cacheBreak`.**
@@ -479,6 +480,51 @@ write the ledger was never built. So no recorded figure changes. Each `Charge` f
 | `Session`, `Client` | `Session`, `Thread`, `RequestOps.Agent` |
 | `Host`, `Model`, `Usage`, `Status`, `Duration` | `Call` |
 | `At` | `RequestOps.At` |
+
+### 4.7 Replays: who remembers past changes
+
+**Each request lists every change in its body, fresh or replayed (D6). The producer remembers past
+changes.** The library and the hosts remember nothing except the fingerprints of recent requests
+(§5.2). This is a decision, not an oversight, for three reasons:
+
+1. **The producer already re-applies each change on every request.** The client sends its whole
+   uncompacted transcript on every turn. To keep the forwarded body the same, context-guru replays
+   each frozen decision, and tool-prune removes the same declarations. So the producer already knows
+   every change in the body. Reporting it adds no state.
+2. **The price changes on every request, even when the change does not.** The same tokens are a
+   cache read on a hot turn and a cache write on a cold turn (§6.2). The library needs each change's
+   tokens and position **on this request**, and positions move: a summary turns 9 messages into 1.
+3. **A register of past changes elsewhere fails in each place it could live:**
+
+   | Where | Why it fails |
+   |---|---|
+   | The `ops` library | It is no longer a pure function (R26). Two hosts can disagree, and pricing an old request again gives a different figure. |
+   | The host's collector | It must move positions after each `Splice`, apply `Supersedes`, and drop changes when the agent compacts its own transcript. It cannot see the content, so it cannot tell whether a change is still in the body, and a wrong guess is silent. |
+   | The archive | It has gaps (`droppedEvents`). One lost request makes every later request wrong. |
+
+**The cost is size, not correctness.** A replayed operation repeats about 200 bytes on every
+request. If that becomes a problem, a later version can send a compact replay (`changeId`, `at`,
+`tokens`) and the full operation only once. That change would not change the model or the price, so
+it is not part of this design.
+
+**A stateless producer.** tool-prune keeps no state. It reads its `remove` list from config and
+removes the same declarations from every request. It can report every field of a replay except
+`FirstApplied`:
+
+| Field | Set by tool-prune? | How |
+|---|---|---|
+| `ChangeID` | **Yes** | A hash of the removed set and the config. It is the same on every request with the same config, so no state is needed. |
+| `At`, `Spans`, `Before`, `After` | **Yes** | From the body it just changed: facts about this request. |
+| `FirstApplied` | **No** | It needs to know whether an earlier request of this session carried the same `ChangeID`. tool-prune leaves it unset. |
+
+An unset `FirstApplied` does not change any price, because the tier comes from the position and the
+cache state (rule 3). A reader that needs the first application finds it in the session history:
+the first event with that `ChangeID`.
+
+**A config change of a stateless producer.** A new `remove` list (for example, a hot reload) gives
+a new `ChangeID`. The old change stops and a new one starts. If the new list removes a declaration
+that the old list kept, the forwarded body changes inside the cached prefix. The collector then adds
+a `cacheBreak` attributed to tool-prune (§5.4). That is the real cost of the config change.
 
 ## 5. The collector
 
