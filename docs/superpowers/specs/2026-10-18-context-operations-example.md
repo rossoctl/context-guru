@@ -15,6 +15,8 @@ The model includes two corrections found while writing this example:
 - The **tier** of a saved token comes from its **position** compared with the previous request's
   cache boundary. It does not come from `firstApplied`.
 - `removalId` is renamed **`changeId`**, because an `add` operation also needs a stable ID.
+- The counterfactual is *"this change was never made"*, not *"this change was not made on this
+  request only"*. See design §6.2.
 
 ## Setup
 
@@ -71,6 +73,9 @@ messages
 - cg added the `context_guru_expand` tool (300 tokens) on every turn since turn 1.
 - On turn 4, Cortex forwarded messages 0 to 8. The provider cached them. So the **previous cache
   boundary** for this thread is `messages[8]`. This is B* in the design (§5.2).
+- The client is Claude Code. It puts cache breakpoints at the end of `system` and on the **last
+  message**. On turn 5 the last message is `messages[9]`, so the last breakpoint `L` is
+  `messages[9]`.
 
 ### 2. The operations
 
@@ -88,8 +93,14 @@ What the collector holds after the pipeline ran:
       "producer": "tool-prune", "stage": 0,
       "class": "envelope", "signal": "account",
       "status": "applied", "reversibility": "irreversible",
-      "at": {"section": "tools", "index": 0},
-      "before": {"tokens": 20000}, "after": {"tokens": 12000},
+      "at": {"section": "tools", "index": 2},
+      "spans": [
+        {"section": "tools", "from": 2,  "to": 2},
+        {"section": "tools", "from": 9,  "to": 9},
+        {"section": "tools", "from": 15, "to": 15}
+      ],
+      "before": {"tokens": 8000, "tokenizer": "bytes-estimate"},
+      "after": {"tokens": 0},
       "changeId": "tp:decl-set-7f3a", "firstApplied": false
     },
     {
@@ -123,7 +134,12 @@ What the collector holds after the pipeline ran:
 }
 ```
 
-Bytes and the tokenizer name are left out to keep the example short.
+To keep the example short, bytes and the cg tokenizer name are left out, and op1 lists 3 of its 12
+spans. tool-prune has no tokenizer, so its token count is a byte estimate (design §4.2 rule 8).
+
+op1 is **one** operation for 12 declarations, because tool-prune removes one account list in one
+decision. That is one change unit (design §4.2 rule 1). Its `before` and `after` cover only the
+declarations it removed.
 
 ### 3. What the collector adds
 
@@ -146,31 +162,38 @@ The response usage: `cache_read 51,360`, `cache_write 900`, `input 0`.
 
 ### 5. The library: choose the counterfactual tier
 
-The question for each operation: *"If this operation had not happened, how would the provider
-have billed these tokens on this request?"*
+The question for each operation: *"If this change had never been made, on this request or on an
+earlier one, how would the provider have billed these tokens on this request?"*
+
+For op1 and op2, which were made on earlier turns, this means: the earlier requests would have
+carried the content too, so the provider would have cached it.
 
 The library input:
 
 ```
 ops                 the four operations above
 boundary (B*)       messages[8]     (from the collector: design §5.2)
+last breakpoint L   messages[9]     (5m TTL)
 usage               cache_read 51,360, cache_write 900, input 0
 ```
 
 The rule:
 
-- If the operation's position is **at or before** the previous boundary, the tokens were in the
-  cached prefix. On a cache hit, they would have been a **cache read**.
-- If the position is **after** the previous boundary, the tokens are new this turn. They would have
-  been a **cache write** if the response shows a cache write, else **input**.
-- On a cache miss (no cache read), every position is new: cache write or input, by the same test.
+| Position of the tokens | Tier |
+|---|---|
+| at or before B\* | cache read |
+| after B\*, at or before `L` | cache write, at the TTL of the next breakpoint |
+| after `L` | input |
 
-| Op | Tokens changed | Position vs `messages[8]` | Counterfactual tier |
-|---|---|---|---|
-| op1 | −8,000 (saved) | `tools`: before | cache read |
-| op2 | −3,940 (saved) | `messages[3]`: before | cache read |
-| op3 | −7,100 (saved) | `messages[9]`: after | cache write |
-| op4 | +300 (cost) | `tools`: before | cache read |
+| Op | Tokens changed | Position | vs B\* = `messages[8]` | vs `L` = `messages[9]` | Tier |
+|---|---|---|---|---|---|
+| op1 | −8,000 (saved) | `tools` | before | — | cache read |
+| op2 | −3,940 (saved) | `messages[3]` | before | — | cache read |
+| op3 | −7,100 (saved) | `messages[9]` | after | at | cache write (5m) |
+| op4 | +300 (cost) | `tools` | before | — | cache read |
+
+If the client had put no breakpoint on `messages[9]`, op3's tokens would be after `L`, and the tier
+would be **input**: 7,100 × $3.00/M = $0.02130, not $0.02663.
 
 The library output, in tokens for each tier. A positive number is a saving, a negative number is a
 cost:
@@ -307,13 +330,14 @@ cache-read rate, +$0.00599.
 | Turn | Saving | Penalty | Total for this change |
 |---|---|---|---|
 | 7 | +$0.00599 | −$0.02743 | −$0.02144 |
-| 8 | +$0.00599 | | −$0.01545 |
-| 9 | +$0.00599 | | −$0.00946 |
-| 10 | +$0.00599 | | −$0.00347 |
-| 11 | +$0.00599 | | **+$0.00252** |
+| 8 | +$0.00599 | | −$0.01546 |
+| 9 | +$0.00599 | | −$0.00947 |
+| 10 | +$0.00599 | | −$0.00349 |
+| 11 | +$0.00599 | | **+$0.00250** |
 
-The change pays back on turn 11. If the session had ended on turn 10, the change would have lost
-$0.00347. The total for each `changeId` shows this, because the penalty and the savings carry the
+The totals are sums of the exact values (saving $0.005985, penalty $0.0274275), rounded only for
+display, as in the table for op3. The change pays back on turn 11. If the session had ended on
+turn 10, the change would have lost $0.00349. The total for each `changeId` shows this, because the penalty and the savings carry the
 same ID.
 
 The penalty is exact here: it counts only the cached content after the break. The current
@@ -327,7 +351,7 @@ The penalty is exact here: it counts only the cached content after the break. Th
 |---|---|
 | `kind` | `reduce` saves; `add` costs; `cacheBreak` moves tokens from read to write |
 | `producer`, `stage`, `component` | attribution for each plugin and each component |
-| `at` | choose the tier (compared with the previous boundary); find the cause of a break |
+| `at`, `spans` | choose the tier (compared with B\* and with the last breakpoint `L`); find the cause of a break |
 | `before`, `after` | the token change, measured at the producer's own input |
 | `changeId` | sum one change across requests; link a penalty to the change that caused it |
 | `firstApplied` | count fresh acts; mark where the payback of a change starts |

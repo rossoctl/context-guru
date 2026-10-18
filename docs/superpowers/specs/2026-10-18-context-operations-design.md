@@ -54,6 +54,10 @@ Three problems remain with that approach:
 
 ## 3. Requirements
 
+The numbers are the order in which the requirements were found, so they are not in sequence.
+**R10 is withdrawn.** It asked for a flag that separates a replay from a fresh act. `FirstApplied`
+(§4.1) replaces it.
+
 ### A. Boundary
 
 - **R1.** Operations are facts. They carry no rates, no dollars and no tier choice.
@@ -84,7 +88,8 @@ Three problems remain with that approach:
 ### C. Facts for pricing
 
 - **R7.** Each operation has a position: section and index, in the provider's hash order.
-- **R8.** Sizes are in bytes, and optionally in tokens with the tokenizer named.
+- **R8.** Sizes are in bytes, and in tokens with the tokenizer named. A producer with no tokenizer
+  sends a byte estimate and marks it (§4.2 rule 8).
 - **R9.** A reduction carries hashes of the content it removed.
 - **R11.** Model-call usage is the provider's billed usage, measured by Cortex (D4).
 - **R22.** A change has an ID that is the same on every request that carries it (`ChangeID`).
@@ -139,6 +144,23 @@ type RequestOps struct {
     Truncated *Aggregate  // set when Ops went over the limit
 }
 
+// Aggregate replaces the operations past the limit. It keeps one entry for each key, so the tier
+// stays exact; only the totals for each change are lost.
+type Aggregate struct {
+    Limit   int
+    Dropped int // operations folded into Entries
+    Entries []AggregateEntry
+}
+
+type AggregateEntry struct {
+    Producer, Component string
+    Class               Class
+    FirstApplied        bool
+    Side                Side // beforeBoundary | afterBoundary, from the producer's own view
+    Ops                 int
+    Before, After       Size
+}
+
 type Operation struct {
     ID        string // unique inside the request
     Kind      Kind   // reduce | add | reroute | spend | cacheBreak
@@ -152,8 +174,9 @@ type Operation struct {
     Reversibility Reversibility // lossless | reversible | irreversible
     StashKey      string        // set when reversible
 
-    At     Position // in this producer's output
-    Before Size     // what the producer received at At
+    At     Position // first position the change touches, in this producer's output
+    Spans  []Span   // every touched range, when the change is not contiguous; nil otherwise
+    Before Size     // what the producer received over the touched ranges
     After  Size     // what it sent on
 
     // kind = reduce | add
@@ -184,19 +207,40 @@ type Position struct {
     Index   int     // block or message index in that section
 }
 
+// Span is a range of positions in one section: [From, To], both in this producer's output.
+type Span struct {
+    Section  Section
+    From, To int
+}
+
 type Size struct {
     Bytes     int    // always set
-    Tokens    int    // optional
-    Tokenizer string // set when Tokens is set
+    Tokens    int    // required on reduce and add; see rule 8
+    Tokenizer string // the tokenizer that counted Tokens; "bytes-estimate" when estimated
 }
 
 type Splice struct{ At, Removed, Inserted int } // messages only
+
+type Kind string          // reduce | add | reroute | spend | cacheBreak
+type Class string         // reencode | envelope | reduce | summarize | restore | inject
+type Signal string        // shape | redundancy | age | reference | relevance | account
+type Status string        // applied | projected | reverted | discarded
+type Reversibility string // lossless | reversible | irreversible
+type Section string       // tools | system | messages
+type Cause string         // producer | client | expired | unknown
+type Side string          // beforeBoundary | afterBoundary
 ```
+
+The enums are strings, not integers, so an unknown value from a newer producer survives a decode
+and can be reported as unpriced (R19).
 
 ### 4.2 Rules
 
-1. **One operation for each item.** A component that reduces 12 tool outputs reports 12 `reduce`
-   operations, each with its own `ChangeID`.
+1. **One operation for each change unit.** A change unit is what the producer decides, replays and
+   reverses as one. A component that reduces 12 tool outputs with 12 decisions reports 12 `reduce`
+   operations, each with its own `ChangeID`. tool-prune removes the declarations of one account
+   list in one decision, so it reports one operation for all of them. Its declarations are not
+   next to each other, so it lists them in `Spans`. `At` is the first one.
 2. **A replay is a new operation with the same `ChangeID` and `FirstApplied = false`.** A replay's
    cost, if any, is a `spend` operation, not part of the reduction.
 3. **`FirstApplied` does not choose the tier.** The position does (§6.2). `FirstApplied` counts
@@ -208,12 +252,19 @@ type Splice struct{ At, Removed, Inserted int } // messages only
    its `SpendID` and thread. The value of a ping is out of scope (§10).
 7. **`ChangeID`** is derived from the component, the original content key and the replacement
    bytes. Two components that remove the same content in different ways have different IDs.
+8. **The tokens a change saved come from the operation's own `Size`, not from the forwarded body.**
+   Removed tokens are not in the forwarded body, so nothing else can count them. A producer with a
+   tokenizer (context-guru) counts them and names the tokenizer. A producer with none (tool-prune)
+   estimates them from bytes with the ratio of its own input, and sets
+   `Tokenizer = "bytes-estimate"`. The library marks every priced result that uses an estimate as
+   `Estimated`.
 
 ### 4.3 Why positions are (section, index)
 
 The provider hashes `tools`, then `system`, then `messages`. A comparison of two positions in that
-order shows whether a change is before a cache boundary. A producer reports positions in its own
-output. If a later producer adds or removes messages, it reports a `Splice`, and the library maps
+order shows whether a change is before a cache boundary. For a change with `Spans`, each span is
+compared on its own, and the change's tokens are split over the spans by their `Before` bytes. A
+producer reports positions in its own output. If a later producer adds or removes messages, it reports a `Splice`, and the library maps
 earlier positions into the forwarded body.
 
 ## 5. The collector (Cortex)
@@ -247,19 +298,25 @@ The collector keeps a fingerprint of each recent request, for each session:
 ```go
 type Fingerprint struct {
     At        time.Time
-    Client    []PosHash // client body, before any plugin
-    Forwarded []PosHash // body as sent upstream
-    Cached    Position  // extent cached after its response: cache_read + cache_write
+    Client    Body     // client body, before any plugin
+    Forwarded Body     // body as sent upstream
+    Cached    Position // extent cached after its response: cache_read + cache_write
+}
+
+// Body lists every position in hash order: tools, then system, then messages. The slice index is
+// the position, so PosHash does not repeat it. Start gives the first index of each section.
+type Body struct {
+    Start [3]int
+    Pos   []PosHash
 }
 
 type PosHash struct {
-    Pos   Position
-    Hash  uint64 // cumulative: equal hashes mean an equal prefix up to Pos
-    Bytes int
+    Hash  uint64 // cumulative: equal hashes mean an equal prefix up to this position
+    Bytes int32
 }
 ```
 
-It holds hashes and sizes only (R2).
+`PosHash` is 12 bytes. It holds hashes and sizes only (R2).
 
 ### 5.3 Finding the matching previous request
 
@@ -282,14 +339,18 @@ forwarded body. `clientFirstDiff` is the same comparison on client bodies.
 
 ### 5.5 Tokens for each position
 
+These are the tokens of content that **was forwarded**: the library needs them for the penalty of a
+cache break (§6.2), which counts forwarded content between the break and B\*. The tokens a change
+**removed** are not in the forwarded body; they come from the operation's own `Size` (§4.2 rule 8).
+
 Cortex has no tokenizer. The collector sends bytes for each forwarded position, and the library
 converts them with the request's own ratio (billed prompt tokens ÷ forwarded body bytes), as
 `pricing.EstimateTokensFromBytes` does today. Results that use the ratio are marked `Estimated`.
 
 ### 5.6 Limits
 
-- **Memory:** 12 bytes for each position. 2 bodies × 4 fingerprints × 2,000 positions is about
-  200 KB for each session. `session.max_sessions` (100) limits the total to about 20 MB.
+- **Memory:** 12 bytes for each position (`PosHash`, §5.2). 2 bodies × 4 fingerprints × 2,000
+  positions is about 200 KB for each session. `session.max_sessions` (100) limits the total to about 20 MB.
 - **Restart:** fingerprints are lost. Only the next request of each session gets `penaltyUnknown`.
   They are not persisted (§10).
 - context-guru keeps its own `MaxCachedIdx` for its own decisions. For pricing, the collector's B\*
@@ -303,21 +364,54 @@ converts them with the request's own ratio (billed prompt tokens ÷ forwarded bo
 func Price(in Input) Result // pure
 
 type Input struct {
-    Ops       []Operation // producers' operations + the collector's cacheBreak
-    Usage     Usage       // billed: input, cache_read, cache_write, cache_write_1h
-    Forwarded []PosBytes  // positions of the forwarded body, with bytes
-    Boundary  *Position   // B*; nil = unknown
+    Ops         []Operation  // producers' operations + the collector's cacheBreak
+    Usage       Usage        // billed usage of this request
+    Forwarded   []PosBytes   // every position of the forwarded body, in hash order
+    Breakpoints []Breakpoint // cache_control breakpoints of the forwarded body, in hash order
+    Boundary    *Position    // B*; nil = unknown
+}
+
+// Usage is the provider's billed prompt usage. CacheWrite1h is the part of CacheWrite billed at
+// the one-hour rate, never an addition to it.
+type Usage struct {
+    Input, CacheRead, CacheWrite, CacheWrite1h int
+}
+
+type PosBytes struct {
+    Pos   Position
+    Bytes int
+}
+
+type Breakpoint struct {
+    Pos Position
+    TTL string // "5m" | "1h"
 }
 ```
 
 ### 6.2 Tier rule
 
-The question for each operation is: *if this operation had not happened, how would the provider
-have billed these tokens on this request?*
+**The counterfactual.** The question for each operation is: *if this change had never been made —
+on this request or on any earlier request of the same conversation — how would the provider have
+billed these tokens on this request?*
 
-- Position **at or before** B\*, and the cache hit: **cache read**.
-- Position **after** B\*: **cache write** if the response shows a cache write, else **input**.
-- Cache miss (B\* = 0): every position is new, so cache write or input by the same test.
+That is the question for a change across requests. A different question is possible: *what if the
+change was not made on this request only?* For a replayed change, the answer to that question is a
+cache break, because the earlier requests cached the body without the content. That figure is the
+cost of **stopping** the change, not the value of the change, so the library does not use it.
+
+**The rule.** `L` is the last breakpoint in the forwarded body. The provider writes the cache only
+up to a breakpoint, and bills content after `L` as input.
+
+| Position of the tokens | Tier |
+|---|---|
+| at or before B\* | **cache read** |
+| after B\*, at or before `L` | **cache write**, at the TTL of the first breakpoint at or after the position (5m or 1h) |
+| after `L` | **input** |
+| any position, with no breakpoint in the body | **input** |
+
+On a cache miss, B\* = 0, so the first row matches nothing. A position is compared in hash order:
+section first (tools, system, messages), then index. For a change with `Spans`, each span is
+compared on its own (§4.3).
 
 A `cacheBreak` attributed to an operation moves the cached content from the break to B\*, as
 forwarded on this request, from the read tier to the write tier. The new tail after B\* is written
@@ -331,7 +425,23 @@ type Result struct {
     Ops      []PricedOp     // one for each input operation, same order
     Unpriced []Unpriced     // with a machine-stable reason
     Checks   []CheckFailure // §6.5
-    Boundary BoundaryInfo   // the B* used, and its source: collector | cacheRead | unknown
+    Boundary BoundaryInfo   // the B* used, and its source
+}
+
+type Unpriced struct {
+    OpID   string
+    Reason string // "unknown_kind", "negative_size", "producer_not_allowed", ...
+}
+
+type CheckFailure struct {
+    Check    string // "sum" | "order" | "unique_change" | "attribution" (§6.5)
+    Producer string // "" when the check is not about one producer
+    Detail   string // numbers only, no content
+}
+
+type BoundaryInfo struct {
+    Pos    *Position // nil when unknown
+    Source string    // "collector" | "cacheRead" | "unknown"
 }
 
 type PricedOp struct {
@@ -439,7 +549,7 @@ Each step merges alone and leaves the totals correct.
 | Step | Repo | Change | Verification |
 |---|---|---|---|
 | 1 | context-guru | Create the `ops` module: types, `Price`, checks. No callers. | Unit tests; the worked example as a golden test. |
-| 2 | context-guru | The engine builds `[]ops.Operation` from `Trace` and the reports, with `ChangeID` and `FirstApplied` from its frozen state. Additive to `apply.Result`. | Replay tests: the same `ChangeID` on each turn, `FirstApplied` once. |
+| 2 | context-guru | The engine builds `[]ops.Operation` from `Trace` and the reports. **This is new work for each change, not a read of existing fields.** The frozen state is keyed by content hash (`components/offload/state.go`), so `ChangeID` can be derived. But replays are counted only for each component today (`Report.Replays`), and `apply.Trace` records no ID or replay flag for each change. Each offloader must record, for each change, whether it replayed a frozen decision or made a new one. | Replay tests: the same `ChangeID` on each turn, `FirstApplied` once. |
 | 3 | context-guru | The proxy's `dash` calls `ops.Price` in shadow, and logs the difference from its current figure. | Comparison on captured sessions. |
 | 4 | Cortex | `pctx.ReportOps`, the collector, fingerprints. No pricing change. | Tests for each row of §5.4. |
 | 5 | Cortex | tool-prune and context-guru report operations beside their current events. `settle` computes both figures, writes the current one, logs the difference. | The Cortex / cg proxy / control comparison test (`62333ee9` on `feat/contextguru-keepalive`), on both figures. |
