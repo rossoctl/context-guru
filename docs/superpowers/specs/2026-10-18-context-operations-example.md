@@ -46,7 +46,7 @@ on the **last message**. So the provider can read or write the cache at two poin
 | Report operations | each producer (plugin), and the keeper for pings |
 | Collect operations; find the thread, the cache state and B\*; add `cacheBreak` and `keepAlive` | the host's collector, with `ops.Compare` |
 | Choose the tier; return tokens for each tier | `ops.Price` (pure) |
-| Convert tokens to dollars; add measured spend | the host (Cortex `pricing.Resolver`, or the proxy's `modelinfo`) |
+| Convert tokens to dollars, for savings and for spend | the host (Cortex `pricing.Resolver`, or the proxy's `modelinfo`) |
 
 **Session and thread.** The session is `s1`. The main thread is `main`. A subagent thread
 `t-a1b2` runs once, between turns 8 and 9. Every operation carries both IDs. To keep the JSON
@@ -296,14 +296,20 @@ The user is idle after turn 9. The keeper sends a ping 4 minutes after turn 9. T
   "ops": [
     { "id": "op1", "kind": "ping", "producer": "keeper",
       "changeId": "ka:main:w1", "firstApplied": true,
-      "spendId": "spend-ping-p1" }
+      "call": {
+        "host": "api.anthropic.com", "model": "agent-model",
+        "usage": {"input": 10, "cacheRead": 40310, "cacheWrite": 0},
+        "output": 1, "status": 200,
+        "paidBy": {"billing": {"mode": "api"}, "operator": false}
+      } }
   ]
 }
 ```
 
-The ping re-sends turn 9's forwarded body (40,310 tokens) and gets a 1-token reply. The host
-measures its cost at its transport: 40,310 read + 10 input + 1 output = **−$0.01214**. `ops.Price`
-does not price it (design §6.3). The host joins the cost on `spendId`.
+The ping re-sends turn 9's forwarded body (40,310 tokens) and gets a 1-token reply. The keeper sends
+this report through the host's `Sink`, because a ping has no request to travel with (design §4.6).
+The usage in `call` is what the provider billed. `ops.Price` returns it unchanged, and the host
+prices it with the same rates as the savings: 40,310 read + 10 input + 1 output = **−$0.01214**.
 
 ### Turn 10: the rescued request
 
@@ -382,10 +388,18 @@ The summarizer call is a `spend` operation, linked by `produced`:
 
 ```json
 { "id": "op31", "kind": "spend", "producer": "context-guru", "component": "summarize",
-  "spendId": "spend-summ-12", "produced": ["cg:summarize:ab12"] }
+  "produced": ["cg:summarize:ab12"],
+  "call": {
+    "host": "api.anthropic.com", "model": "summarizer-model",
+    "usage": {"input": 16110, "cacheRead": 0, "cacheWrite": 0},
+    "output": 1500, "status": 200, "detached": false,
+    "paidBy": {"billing": {"mode": "api"}, "operator": false}
+  } }
 ```
 
-The host measures it: 16,110 input + 1,500 output on the summarizer model = **−$0.02361**.
+The call finished before the response, so op31 travels in turn 12's own report, through
+`pctx.ReportOps`. The host prices `call.usage` on the summarizer model: 16,110 input + 1,500 output
+= **−$0.02361**.
 
 ### The price
 
@@ -396,7 +410,7 @@ attributed to op30. The provider reads `tools` and `system` (15,300) and writes 
 |---|---|---|
 | Saving (op30) | 38,500 × $0.30 | +$0.01155 |
 | Penalty (cacheBreak) | 14,400 × ($3.75 − $0.30) | −$0.04968 |
-| Summarizer call (op31) | measured | −$0.02361 |
+| Summarizer call (op31) | `call.usage`, priced by the host | −$0.02361 |
 | **The summary on turn 12** | | **−$0.06174** |
 
 The other operations on turn 12 (tool-prune, expand, cmdfilter) add +$0.00444. Turn 12 is
@@ -523,14 +537,16 @@ The summarizer call names its payer:
 
 ```json
 { "id": "op31", "kind": "spend", "producer": "context-guru", "component": "summarize",
-  "spendId": "spend-summ-12", "produced": ["cg:summarize:ab12"],
-  "paidBy": {"billing": {"mode": "api"}, "operator": true} }
+  "produced": ["cg:summarize:ab12"],
+  "call": { "...": "the same usage as above",
+            "paidBy": {"billing": {"mode": "api"}, "operator": true} } }
 ```
 
-A ping on the user's own credential names the user's subscription:
+A ping on the user's own credential names the user's subscription, inside its `call`:
 
 ```json
-"paidBy": {"billing": {"mode": "subscription", "plan": "max-5x"}, "operator": false}
+"call": { "...": "the ping's usage",
+          "paidBy": {"billing": {"mode": "subscription", "plan": "max-5x"}, "operator": false} }
 ```
 
 The API-equivalent dollars are labelled as an equivalent, and they never enter `TotalAvoidedUSD` or
@@ -542,7 +558,7 @@ the cost ledger's money columns.
 
 | Field | Used for |
 |---|---|
-| `kind` | `reduce` saves; `add` costs; `stateChange` moves tokens between tiers; `ping` and `spend` carry measured cost; `cacheBreak` moves tokens from read to write |
+| `kind` | `reduce` saves; `add` costs; `stateChange` moves tokens between tiers; `ping` and `spend` carry a call's billed usage; `cacheBreak` moves tokens from read to write |
 | `session`, `thread` | totals for each session, each thread, each subagent |
 | `Input.State` | the tier of every change: hot (read) or cold (write) |
 | `at`, `spans` | the tier, compared with B\* and with the last breakpoint `L` |
@@ -552,7 +568,8 @@ the cost ledger's money columns.
 | `firstApplied` | count fresh acts; mark where payback starts |
 | `supersedes`, `inherited` | end earlier changes; show how much a summary took over |
 | `structure` | move later positions after a summary |
-| `spendId`, `produced` | join measured cost to the change it paid for |
+| `call` | the billed usage of a ping or a model call; the host prices it with the savings |
+| `produced` | join a call's cost to the change it paid for |
 | `attributedTo` | which change a `cacheBreak` is charged to; absent means nobody |
 | `billing` (`RequestOps`) | how the host values the tokens: money, or usage-limit units |
-| `paidBy` | who paid for a spend or a ping: the user's plan, or the operator's key |
+| `call.paidBy` | who paid for a spend or a ping: the user's plan, or the operator's key |

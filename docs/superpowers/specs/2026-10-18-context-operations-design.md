@@ -65,7 +65,7 @@ Three problems remain with that approach:
 | D1 | Who knows that a change is applied for the first time? | **The producer.** context-guru knows it from its frozen state, which is keyed by content hash and survives agent compaction. The library stays stateless. |
 | D2 | Where is the savings logic? | **In a context-guru library.** Cortex calls it and keeps no producer-specific pricing rules. |
 | D3 | What does the library return? | **Tokens for each tier**, not dollars. Cortex prices them with its own rates (discounts, overrides, long-context tiers), so a saving and the request's spend use the same rates. |
-| D4 | Does the library also price cg's own spend? | **No.** A `spend` operation carries a `SpendID` that links it to the `CostRecorder` record Cortex measured at its transport. |
+| D4 | How is cg's own spend recorded? | **As operations, in the same report as the savings.** A `spend` or `ping` operation carries the provider's billed usage of the call (`Call`). The host prices it with the savings, in one path. There is no second record and no `CostRecorder` (§4.6). `ops.Price` does not price the call; it returns `Call.Usage` for the host to price (D3). |
 | D5 | Shape | **One typed operation for each change unit**, with an aggregate fallback above a limit. |
 | D6 | How is a saving across requests counted? | **Realized on each request, not projected.** Each request lists every change in its body, fresh or replayed, and is priced from that request's own cache result. |
 | D7 | Where do the types live? | **A standalone module in the context-guru repo,** `github.com/rossoctl/context-guru/ops`, with no dependency on the engine. Cortex's pipeline and every plugin import it without the engine's dependencies. |
@@ -99,7 +99,8 @@ R35 to R39 were added after the first review, and R40 to R43 for subscription pl
 - **R4.** Every operation that changes money is covered, not only reductions: reductions,
   additions, cache breaks, model calls, restores.
 - **R5.** Spend that happens outside a request (a keep-alive ping, a detached summarizer call)
-  carries its own attribution.
+  carries its own attribution. It uses the same operations and the same recording path as spend
+  inside a request (§4.6).
 - **R6.** An operation has an ID, so a later operation can refer to it.
 - **R27.** The model is not specific to one producer. Each operation names its producer and its
   pipeline stage.
@@ -116,7 +117,8 @@ R35 to R39 were added after the first review, and R40 to R43 for subscription pl
 - **R8.** Sizes are in bytes, and in tokens with the tokenizer named. A producer with no tokenizer
   sends a byte estimate and marks it (§4.2 rule 8).
 - **R9.** A reduction carries hashes of the content it removed.
-- **R11.** Model-call usage is the provider's billed usage, measured by Cortex (D4).
+- **R11.** Model-call usage is the provider's billed usage, read from the call's own response by
+  the model client the host gives the engine. The engine does not count it (§4.6).
 - **R22.** A change has an ID that is the same on every request that carries it (`ChangeID`).
 - **R23.** A one-time cost (a cache break) is linked to the change that caused it, so payback can
   be computed.
@@ -204,6 +206,18 @@ type Billing struct {
     Account string      // a hash of the account the credential belongs to; never the credential
 }
 
+// ModelCall is one upstream call a producer or the keeper made. The host's model client fills it
+// from the call's own response, so the usage is what the provider billed.
+type ModelCall struct {
+    Host, Model string
+    Usage       Usage         // input, cache read, cache write (and its 1h part), as billed
+    Output      int           // output tokens, as billed
+    Status      int           // upstream HTTP status
+    Duration    time.Duration // 0 when not measured
+    Detached    bool          // finished after the request it served was answered
+    PaidBy      Payer         // who paid for the call (R42)
+}
+
 // Payer is who pays for a call that a producer or the keeper made (R42).
 type Payer struct {
     Billing  Billing // the billing of the credential the call used
@@ -277,9 +291,8 @@ type Operation struct {
     Reverses string // ChangeID this restore adds back
 
     // kind = spend | ping
-    SpendID  string   // the same ID as the CostRecorder record
-    Produced []string // ChangeIDs this call created
-    PaidBy   Payer    // who paid for the call (R42)
+    Call     *ModelCall // the call, with the provider's billed usage (§4.6)
+    Produced []string   // ChangeIDs this call created
 
     // kind = reroute
     FromModel, ToModel, FromHost, ToHost string
@@ -354,7 +367,7 @@ and can be reported as unpriced (R19).
    `After > Before`.
 5. **Only the collector writes `cacheBreak`.**
 6. **A keep-alive ping is its own `RequestOps`, with `Ping = true`.** It has one `ping` operation
-   with a `SpendID`. Its `ChangeID` names the keep-alive window, and the `stateChange` operation on
+   whose `Call` carries the ping's billed usage. Its `ChangeID` names the keep-alive window, and the `stateChange` operation on
    the request it rescued has the same `ChangeID`. So the cost and the value of a window add up
    (§4.4).
 7. **`ChangeID`** is derived from the component, the original content key and the replacement
@@ -416,6 +429,56 @@ summary replaces messages 0 to 8, and messages 3 and 5 were reduced by `mask` an
 
 `Inherited` lets a report show how much of a summary's saving was new work and how much it took
 over. The price does not use it.
+
+### 4.6 Spend: one channel with the savings
+
+cg spends money in two places: a model call during a request (`extract_llm`, an inline
+`summarize`), and a call outside any request (a keep-alive ping, a summarizer call that finishes
+after the response). Both are reported as operations. There is no parallel record.
+
+| Where the call happens | How it is reported |
+|---|---|
+| During a request | a `spend` operation in that request's `RequestOps`, through `pctx.ReportOps` |
+| Outside a request | a standalone `RequestOps` with one `ping` or `spend` operation, through the host's `Sink` |
+
+```go
+// Sink receives a RequestOps that has no request to travel with: a ping, or a detached call.
+type Sink interface {
+    Report(RequestOps)
+}
+```
+
+The contract of `Sink` is the contract `CostRecorder` had:
+
+- It is safe for concurrent use. A background sweep and a model-call path can both call it.
+- It does not block on I/O.
+- It never makes the session active or refreshes it. A ping is not agent activity.
+- It may drop a report for a session that no longer exists.
+
+**Where the usage comes from.** The host gives the engine its model client (`components.Model`;
+in Cortex, `cgModel`). The client reads the usage from each response, and fills `ModelCall`. The
+engine's own usage accounting is not used, because under Cortex it is zero (2026-10-14 spec, §0).
+
+**A detached call.** A summarizer call can finish after its request was answered. Its `spend`
+operation then cannot travel with that request. The engine sends it through the `Sink`, with
+`Detached = true`, and with the request's session and thread. Its `Produced` names the change it
+made, so the cost is still joined to that change.
+
+**How the host records it.** The host handles a report from `ReportOps` and a report from `Sink`
+the same way. It prices `Saved`, `Caused` and `Call.Usage` with one resolver, at one time. So spend
+has the same rates, provenance, currency and billing basis (§7.4) as the savings.
+
+**What it replaces.** `core/cost/spend` (`Charge`, `CostRecorder`, `RecorderConsumer`) is removed.
+Today both Cortex wirings inject `spend.LogRecorder{}`, which only logs, and the recorder that would
+write the ledger was never built. So no recorded figure changes. Each `Charge` field has a place:
+
+| `spend.Charge` | Operation |
+|---|---|
+| `Plugin` | `Producer` |
+| `Purpose` (`keep-alive`, `compaction`) | `Kind` (`ping`, `spend`) |
+| `Session`, `Client` | `Session`, `Thread`, `RequestOps.Agent` |
+| `Host`, `Model`, `Usage`, `Status`, `Duration` | `Call` |
+| `At` | `RequestOps.At` |
 
 ## 5. The collector
 
@@ -674,6 +737,7 @@ type PricedOp struct {
     Status    Status
     Saved     TierTokens // tokens the provider did not bill, by tier; never negative
     Caused    TierTokens // tokens the provider billed because of this operation; never negative
+    Call      *ModelCall // spend and ping only: copied from the operation, for the host to price
     Estimated bool
     Reason    string // "cached_prefix", "new_tail", "cold", "break_penalty", "rescued", ...
 }
@@ -690,8 +754,8 @@ A break penalty has both sides: the tokens are written (`Caused.CacheWrite5m`) i
 (`Saved.CacheRead`). The net is the rate difference, with no special rule.
 
 A `cacheBreak` is priced as its own operation. Cortex adds it to the operation it is attributed to.
-`spend` and `ping` operations are not priced in tokens. They pass through with their `SpendID`,
-and the host adds the money it measured for that call.
+`spend` and `ping` operations are not priced in tokens. `PricedOp.Call` returns their `Call.Usage`
+unchanged, and the host prices it with the same resolver as the savings (§4.6).
 
 **Conservation.** For each request, the priced `Saved − Caused` of all content changes, cache
 breaks and state changes, plus `Interaction`, equals the bill of the client body in the state it
@@ -802,8 +866,8 @@ host converts them to a value by the request's `Billing.Mode`:
 
 | `Billing.Mode` | Value of a saving | Value of a spend or ping | Shown as |
 |---|---|---|---|
-| `api` | tokens × the provider's rates | measured dollars | money saved; money spent |
-| `subscription` | tokens × the plan's **weights**, in usage-limit units | the same weights, if `PaidBy` is the user's subscription | usage-limit headroom; an API-equivalent dollar figure beside it, labelled "API equivalent" |
+| `api` | tokens × the provider's rates | `Call.Usage` × the provider's rates | money saved; money spent |
+| `subscription` | tokens × the plan's **weights**, in usage-limit units | `Call.Usage` × the same weights, if `Call.PaidBy` is the user's subscription | usage-limit headroom; an API-equivalent dollar figure beside it, labelled "API equivalent" |
 | `unknown` | as `api`, with every figure marked `Estimated` | as `api` | money, marked estimated |
 
 **Weights.** A weight says how much one token of a tier counts against the usage limit, compared
@@ -812,7 +876,7 @@ are the ratios of the API rates (input 1, cache write 5m 1.25, cache write 1h 2,
 output 5), and every subscription figure is marked `Estimated`. A host can set measured weights in
 its config (§12, question 3).
 
-**Who paid, when it is mixed.** If `PaidBy.Operator` is true, the call cost the operator money,
+**Who paid, when it is mixed.** If `Call.PaidBy.Operator` is true, the call cost the operator money,
 whatever the user's plan. That spend is shown in dollars, apart from the user's usage-limit
 figures. A subscription user's net figure is then two numbers, not one: usage-limit headroom
 gained, and operator dollars spent. They are never added together.
@@ -857,8 +921,8 @@ Each step merges alone and leaves the totals correct.
 | 2 | context-guru | Create the `ops` module: types, `Price`, `Compare`, checks. No callers. | Every case in the list passes (§11.4). |
 | 3 | context-guru | The engine builds `[]ops.Operation` from `Trace` and the reports. **This is new work for each change, not a read of existing fields.** The frozen state is keyed by content hash (`components/offload/state.go`), so `ChangeID` can be derived. But replays are counted only for each component today (`Report.Replays`), and `apply.Trace` records no ID or replay flag for each change. Each offloader must record, for each change, whether it replayed a frozen decision or made a new one. | Replay tests: the same `ChangeID` on each turn, `FirstApplied` once. |
 | 4 | context-guru | The proxy computes dollars from `ops` **in shadow** (§7.3): it stores its current figure, and logs the `ops` figure and the difference. | Each logged difference matches a `differs` case (§11.4). |
-| 5 | context-guru | The proxy **switches** to the `ops` figure, and its collector to `ops.Compare`. The keeper reports its pings as `ping` operations. | Dashboard totals before and after on the same captured sessions. |
-| 6 | Cortex | `pctx.ReportOps`, the collector, fingerprints. No pricing change. | The `Compare` cases pass through the Cortex collector. |
+| 5 | context-guru | The proxy **switches** to the `ops` figure, and its collector to `ops.Compare`. The keeper reports its pings as `ping` operations, and the engine its model calls as `spend` operations, both through the proxy's `Sink`. | Dashboard totals before and after on the same captured sessions. |
+| 6 | Cortex | `pctx.ReportOps`, the `Sink`, the collector, fingerprints. `cgModel` fills `ModelCall`. `plugins.Deps.Costs` becomes `plugins.Deps.Ops`, and `core/cost/spend` is removed. No pricing change. | The `Compare` cases pass through the Cortex collector. |
 | 7 | Cortex | tool-prune and context-guru report operations beside their current events. `settle` computes both figures, writes the current one, logs the difference. | Each logged difference matches a `differs` case; also the Cortex / cg proxy / control comparison test (`62333ee9` on `feat/contextguru-keepalive`). |
 | 8 | Cortex | `settle` switches to `ops.Price`. The new event fields. | Ledger totals before and after on the same replay. |
 | 9 | both | Remove the current events, `saving.go`, `unique.go`, the per-producer draft functions, and the proxy's rules that `ops` replaced (`uniqueRate`, `repeatRate`, the reduction part of `baselineDeltaUSD`, `cachesplitSavedUSD`, `keepaliveSavedUSD`). **Do not remove a rule that a `notCovered` case still uses.** | `go mod tidy -diff` in every module. All cases pass in both repos. |
