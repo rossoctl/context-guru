@@ -1251,6 +1251,27 @@ func (d *DB) Breakdown(f Filter, dim string) ([]*GroupRow, error) {
 	return out, rows.Err()
 }
 
+// CoverageFor is the measured/imported split of a window.
+//
+// Asked of the REQUESTS rather than of the inventory, because an inventory row has no source: the
+// declarations table is keyed by digest and shared across requests, so "was this watched" is a
+// property of the traffic and only a request query can answer it.
+func (d *DB) CoverageFor(f Filter) (*InsightsCoverage, error) {
+	where, args := f.where()
+	var out InsightsCoverage
+	err := d.sql.QueryRow(`SELECT
+		COALESCE(SUM(CASE WHEN r.source = '' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN r.source <> '' THEN 1 ELSE 0 END), 0),
+		COALESCE(COUNT(DISTINCT CASE WHEN r.source <> ''
+			THEN date(r.ts/1000, 'unixepoch', 'localtime') END), 0)
+		FROM requests r WHERE `+where, args...).
+		Scan(&out.MeasuredRequests, &out.ImportedRequests, &out.ImportedDays)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // facetQueries are the distinct-value lists that populate the filter dropdowns.
 var facetQueries = map[string]string{
 	"model":       "model",
