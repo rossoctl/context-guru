@@ -151,7 +151,7 @@ type summarizeConfig struct {
 
 func newSummarize(raw []byte) (components.Component, error) {
 	cfg := summarizeConfig{SummaryLevel: "regular", KeepFirst: 1, KeepLast: 3, StartFrom: 6, MinTokens: 500, ResummarizeTokens: 6000}
-	if err := decodeWithModelHint(raw, &cfg); err != nil {
+	if err := decodeWithModelHint("summarize", raw, &cfg); err != nil {
 		return nil, err
 	}
 	// Refused rather than clamped: a negative keep_first is a typo, and silently reading it as 0

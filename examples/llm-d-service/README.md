@@ -98,8 +98,9 @@ bin/context-guru-proxy --config examples/llm-d-service/configs/toon.yaml
 ```
 
 The LLM configs need a model. They use `model.source: config`, which takes the endpoint and the
-credential from the proxy's `CHEAP_MODEL_*` environment. A config file cannot hold them: the
-`model:` block refuses `provider`, `base_url`, `api_key` and `auth`.
+credential from the proxy's `CHEAP_MODEL_*` environment. A config file cannot hold them: if the
+`model:` block still sets `provider`, `base_url`, `api_key` or `auth`, the proxy ignores those
+keys, starts anyway, and logs one `cg.config.retired_model_keys_ignored` WARN per component.
 
 ```sh
 # An OpenAI-compatible endpoint (e.g. the llm-d gateway)

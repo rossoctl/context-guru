@@ -427,7 +427,7 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 			}
 		}
 	}
-	if err := decodeWithModelHint(raw, &cfg); err != nil {
+	if err := decodeWithModelHint("extract_llm", raw, &cfg); err != nil {
 		return nil, err
 	}
 	rewrite := true
