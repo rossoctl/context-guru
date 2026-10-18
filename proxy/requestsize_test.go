@@ -39,7 +39,7 @@ func TestShippedRequestCeilings(t *testing.T) {
 }
 
 // repeatBannerToSize builds the realistic shape that actually triggers #278: a repeated,
-// low-entropy line (the cgssh2 SSH MOTD banner, in the real incident) rather than a single
+// low-entropy line (an SSH MOTD banner, in the real incident) rather than a single
 // repeated character. A single repeated byte is a known BPE-tokenizer worst case (pathological
 // merge behavior on a run of one character) and made an earlier version of this test hang for
 // minutes on a size a real transcript reaches routinely — using realistic filler avoids that

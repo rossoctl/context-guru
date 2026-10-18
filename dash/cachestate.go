@@ -111,9 +111,14 @@ func endTS(ts int64, upstreamMS float64) int64 {
 }
 
 // ThreadsFor lists the session's per-thread cache entries touched since sinceMS (at most 16, most
-// recent first) and the session's money split into the main thread and every other one. One
-// indexed read of the session's rows (cacheThreadsQuery), whatever the number of threads.
+// recent first) and the session's money split into the main thread and every other one. Two
+// indexed reads of the session's rows (cacheThreadsQuery, cacheTTLQuery), whatever the number of
+// threads.
 func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, error) {
+	ttls, err := d.threadTTLs(f)
+	if err != nil {
+		return nil, nil, err
+	}
 	q, args := cacheThreadsQuery(f)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
@@ -133,9 +138,13 @@ func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, 
 			prefix                               sql.NullInt64
 			base, cost, cgllm, split, kaSv, ping float64
 		)
-		if err := rows.Scan(&t.ID, &last, &ms, &model, &prefix, &t.TTLSeconds,
+		if err := rows.Scan(&t.ID, &last, &ms, &model, &prefix,
 			&base, &cost, &cgllm, &split, &kaSv, &ping); err != nil {
 			return nil, nil, err
+		}
+		t.TTLSeconds = 300
+		if ttl, ok := ttls[t.ID]; ok {
+			t.TTLSeconds = ttl
 		}
 		t.SavedUSD, t.BaselineUSD = threadMoney(base, cost, cgllm, split, kaSv, ping)
 		m := &money.Others
@@ -163,21 +172,55 @@ func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, 
 // maxCacheThreads bounds the cache entries one /api/cachestate lists.
 const maxCacheThreads = 16
 
-// cacheThreadsQuery is ThreadsFor's one statement, pulled out for the EXPLAIN-plan test. GROUP BY
-// thread over every row of the session (agent rows and pings, any status): the money columns sum
-// all of them, while the cache columns come from the thread's latest successful cache-touching
-// row. That works because the select has exactly one MAX(), and SQLite then takes the bare
-// columns (upstream_ms, model, the prefix and the TTL subquery's inputs) from the row that holds
-// it. A thread with no such row has a NULL MAX and is reported for its money only.
+// threadTTLs maps each thread of the session to the TTL its latest cache write was billed at: 3600
+// for the 1h tier, else 300. A thread with no write is absent (ThreadsFor then uses 300).
+func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
+	q, args := cacheTTLQuery(f)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var (
+			id   string
+			last int64
+			ttl  int64
+		)
+		if err := rows.Scan(&id, &last, &ttl); err != nil {
+			return nil, err
+		}
+		out[id] = ttl
+	}
+	return out, rows.Err()
+}
+
+// cacheTTLQuery is threadTTLs' one statement: GROUP BY thread over the session's cache writes
+// (agent rows and pings, any status), with the TTL taken as a bare column from the row that holds
+// the one MAX(ts), so from the thread's latest write. It replaces a correlated subquery per
+// thread, which walked the session's rows once for each thread: 1.6 s for 300 threads (#570).
+// Like that subquery, it reads every write of the session: the request's other filters (a time
+// window, a model) do not change which tier the provider's cache entry is on.
+func cacheTTLQuery(f Filter) (string, []any) {
+	cond, args := withKeepAlive(Filter{Tenant: f.Tenant, TenantAll: f.TenantAll, Session: f.Session}).where()
+	return `SELECT r.thread_id, MAX(r.ts), CASE WHEN r.cache_write_1h > 0 THEN 3600 ELSE 300 END
+		FROM requests r WHERE ` + cond + ` AND r.cache_write > 0 GROUP BY r.thread_id`, args
+}
+
+// cacheThreadsQuery is ThreadsFor's money and cache statement, pulled out for the EXPLAIN-plan
+// test. GROUP BY thread over every row of the session (agent rows and pings, any status): the
+// money columns sum all of them, while the cache columns come from the thread's latest successful
+// cache-touching row. That works because the select has exactly one MAX(), and SQLite then takes
+// the bare columns (upstream_ms, model and the prefix) from the row that holds it. A thread with
+// no such row has a NULL MAX and is reported for its money only. Its TTL comes from cacheTTLQuery:
+// a correlated subquery here would run once per thread.
 func cacheThreadsQuery(f Filter) (string, []any) {
 	cond, args := withKeepAlive(f).where()
 	const agent = "r.keepalive = 0"
 	return `SELECT r.thread_id,
 		MAX(CASE WHEN r.status BETWEEN 200 AND 299 AND r.cache_read + r.cache_write > 0 THEN r.ts END),
 		r.upstream_ms, r.model, r.fresh_input + r.cache_read + r.cache_write,
-		COALESCE((SELECT CASE WHEN w.cache_write_1h > 0 THEN 3600 ELSE 300 END FROM requests w
-			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.thread_id = r.thread_id
-			AND w.cache_write > 0 ORDER BY w.ts DESC LIMIT 1), 300),
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.baseline_cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cg_llm_cost_usd ELSE 0 END),0),

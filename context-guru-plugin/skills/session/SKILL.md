@@ -2,7 +2,7 @@
 name: session
 description: A one-line timeline of this session: turns, pauses, cache misses, pings and compactions, with a dollar verdict.
 argument-hint: "[details]"
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cg.py:*)
+allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" session:*)
 ---
 
 Run this, then print its output exactly as it is in one code block. Add nothing before or after it.

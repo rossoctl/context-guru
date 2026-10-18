@@ -335,7 +335,7 @@ flowchart LR
   U --> C[client]
   H -. one struct,<br/>one non-blocking send .-> Q[[capture channel<br/>buffered · drops + counts]]
   Q --> W[writer goroutine<br/>batched transaction]
-  W --> DB[(SQLite · WAL<br/>requests<br/>request_components<br/>request_content<br/>bench_runs/tasks)]
+  W --> DB[(SQLite · WAL<br/>requests<br/>request_components<br/>request_content)]
   W --> S[SSE hub<br/>write timeout + eviction]
   DB --> A[/api/*<br/>filters · keyset paging · query-time buckets/]
   S --> A

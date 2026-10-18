@@ -287,7 +287,7 @@ func removalDecisions(body []byte) (dec map[string]bool, ok bool) {
 //
 // Skipped unless CONTEXT_GURU_CAPTURE names a readable capture:
 //
-//	CONTEXT_GURU_CAPTURE=/home/vpcuser/cg-research/bench/long.jsonl \
+//	CONTEXT_GURU_CAPTURE=/path/to/bench/long.jsonl \
 //	  go test ./apply -run FilterProseSetStableOverCapture -v
 func TestFilterProseSetStableOverCapture(t *testing.T) {
 	path := os.Getenv("CONTEXT_GURU_CAPTURE")

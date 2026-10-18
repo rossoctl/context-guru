@@ -36,7 +36,7 @@ import (
 //	  go test ./apply -run TriggerCounterfactual -v
 //
 // CG_TRIGGER_CF_MAX caps the request count. CG_TRIGGER_CF_IN_RATE is the capture model's
-// real $/MTok (default 1.52, ete-litellm aws/claude-sonnet-5).
+// real $/MTok (default 1.52, litellm-gateway aws/claude-sonnet-5).
 func TestTriggerCounterfactual(t *testing.T) {
 	if os.Getenv("CG_TRIGGER_CF") == "" {
 		t.Skip("set CG_TRIGGER_CF=1 to run the trigger counterfactual")

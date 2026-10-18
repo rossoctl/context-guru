@@ -592,7 +592,7 @@ Calibration this sits inside: `Read` output is **6.9%** of interactive input tok
 
 ### Why it is off by default
 
-Deterministic replay through `cg-research/bench/ab.sh` (same capture, same clock, config the only
+Deterministic A/B replay of one capture (same capture, same clock, config the only
 difference), arm `pipeline: [readlifecycle]` against `pipeline: []`:
 
 | capture | requests | removed | gates |

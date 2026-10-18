@@ -109,6 +109,8 @@
  "prefix_change_cost_usd": 0,
  "prefix_change_requests": 0,
  "prefix_change_requests_all": 0,
+ "replay_cap_correction_usd": 0,
+ "replay_cap_not_applied": true,
  "replay_projected_tokens": 952685,
  "replay_realized_pct": 0,
  "replay_tokens": 0,
@@ -144,6 +146,7 @@
  "sse_recorded": 0,
  "sse_stream_rows": 0,
  "sse_streamed": 0,
+ "summarize_correction_usd": 0,
  "tier_costs": {
   "addressable_usd": 25.8265485,
   "cache_read_usd": 3.1396935,

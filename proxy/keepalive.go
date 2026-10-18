@@ -165,11 +165,45 @@ func (k *keeper) Stop() {
 	k.mu.Unlock()
 }
 
-func (k *keeper) arrive(tenant, session, threadID string) (int, int64, string) {
-	if k == nil {
-		return 0, 0, ""
+// arrive tells the keeper a real request just started on this session, and reports what the
+// keep-alive did during the span that request just ended.
+//
+// Called at the START of the request, before it goes upstream: an entry left in the map
+// while a real request is in flight could be pinged concurrently with it, which is both
+// pointless (the real request refreshes the entry itself) and a second request against the
+// tenant's concurrency budget.
+//
+// strategyID is e.appliedStrategy — which manager-controlled strategy resolved this idle
+// span's policy, "" when none did. It is in scope right here and nowhere else once the entry
+// is cleared, so this is the one place a real request's credit can be attributed to the
+// strategy that earned it, rather than only the tenant's whole lifetime credit.
+//
+// Only THIS thread's entry is cleared: a subagent's request says nothing about whether the main
+// thread is still idle.
+func (k *keeper) arrive(tenant, session, threadID string) (pings int, refreshed int64, strategyID string) {
+	a := k.arriveAt(tenant, session, threadID)
+	return a.pings, a.refreshed, a.strategyID
+}
+
+// kaArrival is what the keeper knew about an idle span at the moment a real request ended it.
+type kaArrival struct {
+	pings      int
+	refreshed  int64
+	strategyID string
+	// refreshedAt is when the provider's entry was last known refreshed: the previous real
+	// request's start, or the start of the last ping that READ the cache. Zero when no entry.
+	refreshedAt time.Time
+}
+
+// arriveAt is arrive plus the instant the provider's entry was last refreshed. The cache-miss
+// verdict needs it: the dashboard's idle gap runs from the last real request, but a ping that
+// read the cache moved the provider's clock, so the entry's true age is shorter.
+func (k *keeper) arriveAt(tenant, session, threadID string) kaArrival {
+	if k == nil || session == "" {
+		return kaArrival{}
 	}
-	return k.Keeper.Arrive(keepalive.Key{Tenant: tenant, Session: session, Thread: threadID})
+	pings, refreshed, tag, refreshedAt := k.Keeper.ArriveAt(keepalive.Key{Tenant: tenant, Session: session, Thread: threadID})
+	return kaArrival{pings: pings, refreshed: refreshed, strategyID: tag, refreshedAt: refreshedAt}
 }
 
 func (k *keeper) retireSession(tenant, session string) {

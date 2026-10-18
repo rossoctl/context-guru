@@ -14,7 +14,7 @@ How long you were away before an expiry
   30-60m  22x  $15.09  █░░░░░░░░░
   1-4h    19x  $14.01  █░░░░░░░░░
   >4h      6x   $5.39  █░░░░░░░░░
-  Estimate: $88.38 followed pauses of 5-60 min, the range a 1-hour cache lifetime would cover; a longer lifetime or pings cost money too - see /context-guru:insights-idle for the net.
+  Estimate: $88.38 followed pauses of 5-60 min, the range a 1-hour cache lifetime would cover; a longer lifetime or pings cost money too - see /context-guru:insights cache for the net.
 
 Costliest rewrites
   Tue 22:00  api        claude-opus-5  412k ctx  after 23:00  idle_expiry     $1.96

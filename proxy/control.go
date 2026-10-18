@@ -266,6 +266,13 @@ func (h *Handler) DashAuth() dash.Authenticator {
 	return func(r *http.Request) (dash.Principal, bool) {
 		t, err := h.webPrincipal(r)
 		if err != nil {
+			// The /api/adapt/* and /api/save-more/* reports alone also take the account's own proxy token, so the
+			// plugin can show one from the terminal (adaptapply.go). Never as a manager.
+			if strings.HasPrefix(r.URL.Path, "/api/adapt/") || strings.HasPrefix(r.URL.Path, "/api/save-more/") {
+				if who, aerr := h.adaptPrincipal(r); aerr == nil && who.ViaToken {
+					return dash.Principal{TenantID: who.TenantID}, true
+				}
+			}
 			return dash.Principal{}, false
 		}
 		return dash.Principal{TenantID: t.ID, Manager: t.IsManager()}, true

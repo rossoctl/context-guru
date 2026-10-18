@@ -212,6 +212,7 @@ type Request struct {
 	ID             int64  `json:"id"`
 	User           string `json:"user"`
 	ConversationID string `json:"conversation_id"`
+	ThreadID       string `json:"-"`  // the request's thread within its session ("" = the main thread, or recorded before threads)
 	TS             int64  `json:"ts"` // epoch ms, UTC
 	HourUTC        int    `json:"hour_utc"`
 	Bucket         Bucket `json:"bucket"`

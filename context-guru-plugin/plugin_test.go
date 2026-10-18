@@ -150,6 +150,7 @@ func sandboxEnv(t *testing.T, extra ...string) []string {
 		"HOME="+root,
 		"XDG_STATE_HOME="+filepath.Join(root, "xdg-state"),
 		"XDG_CONFIG_HOME="+filepath.Join(root, "xdg-config"),
+		leakMark(t), // whatever these commands leave running is stopped when t ends (leak_test.go)
 	)
 	return append(env, extra...)
 }
@@ -3735,7 +3736,8 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 	dir := t.TempDir()
 	argvFile := filepath.Join(dir, "argv")
 	fake := filepath.Join(dir, "fake-proxy")
-	body := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > " + argvFile + "\nprintenv PRESET >> " +
+	body := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n%s\\n' \"$*\" \"$PRESET\" > " + argvFile + ".tmp && mv " + argvFile + ".tmp " +
 		argvFile + "\nsleep 30\n"
 	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -3758,7 +3760,16 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("must never fail a session: %v\n%s", err, out)
 	}
-	got, rerr := os.ReadFile(argvFile)
+	// start-proxy.sh returns once the proxy has been LAUNCHED, not once the fake has written its file.
+	// The fake publishes argv and PRESET in one rename, so a reader sees both lines or no file; wait
+	// for the file instead of reading it once (#560).
+	var got []byte
+	var rerr error
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if got, rerr = os.ReadFile(argvFile); rerr == nil {
+			break
+		}
+	}
 	if rerr != nil {
 		t.Fatalf("the proxy never ran: %v\n%s", rerr, out)
 	}
@@ -6908,6 +6919,11 @@ func routeEnv(t *testing.T, home, state, extraPath string) []string {
 	path := os.Getenv("PATH")
 	if extraPath != "" {
 		path = extraPath + string(os.PathListSeparator) + path
+		// A proxy that never answers fails the health check whatever the wait: wait 1 s, not the
+		// product's 15 (CONTEXT_GURU_HEALTH_BUDGET, which start-proxy.sh already honours).
+		if _, err := os.Stat(filepath.Join(extraPath, neverAnswers)); err == nil {
+			env = append(env, "CONTEXT_GURU_HEALTH_BUDGET=1")
+		}
 	}
 	// Every route test that installs scans for a port. Unpinned, the scan starts at the real 8787 on
 	// a box shared with live proxies, so a port taken between --plan and --route (by anything) fails
@@ -7197,11 +7213,19 @@ func TestRouteAttachModeSkipsInstallAndStart(t *testing.T) {
 // It MUST answer --version and exit: install.sh probes the installed version by running the binary,
 // and the first version of this fixture served forever on that probe, hanging the run before a
 // single assertion could fail. A fake that does not exit where the real one does is not a fake.
+// neverAnswers marks a fakeProxyDir whose proxy starts and never answers /healthz.
+const neverAnswers = "never-answers"
+
 func fakeProxyDir(t *testing.T, port string, listen bool) string {
 	t.Helper()
 	py := requireTool(t, "python3")
 	dir := t.TempDir()
 	body := "sleep 300\n"
+	if !listen { // routeEnv reads this: waiting the installer's full 15 s on it proves nothing more than 1 s
+		if err := os.WriteFile(filepath.Join(dir, neverAnswers), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if listen {
 		body = "exec " + py + " -c '\n" +
 			"import http.server\n" +

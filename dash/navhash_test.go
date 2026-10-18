@@ -20,7 +20,7 @@ func TestNavHashCompatibility(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node is not on PATH, so navhash.test.mjs did not run: the URL " +
-			"compatibility contract (17 bare views, 14 filter dimensions, legacy range=<ms>, " +
+			"compatibility contract (16 bare views, 14 filter dimensions, legacy range=<ms>, " +
 			"the two hashes dash/kvcache.go writes, and #/group/view) is UNVERIFIED in this " +
 			"run. Run `node --test dash/navhash.test.mjs`.")
 	}

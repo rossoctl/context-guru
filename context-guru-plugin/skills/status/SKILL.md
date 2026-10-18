@@ -92,8 +92,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" home
 Print its output exactly as it is, in one code block. It opens with the dollars saved, then today
 against yesterday, then the top three things to do. Saved dollars (`✓ Saved`) and spend you could
 still avoid (`≈ Estimated`) are different things: never add them or call an estimate a saving.
-The other questions have their own commands: `/context-guru:savings`, `/context-guru:cache`,
-`/context-guru:waste`, `/context-guru:session`, `/context-guru:doctor`.
+The other questions have their own commands: `/context-guru:insights` (`savings`, `cache`, `tools`),
+`/context-guru:session`, `/context-guru:doctor`.
 
 ## Be honest about the numbers
 

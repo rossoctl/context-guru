@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -39,6 +40,10 @@ type API struct {
 	// compaction configuration, owned, validated and audited by the control plane, and a
 	// copy here would be a second answer to "what is this proxy actually sending".
 	toolFilterFn func(tenantID string) ToolFilterState
+	// adaptCompactionConfigFn reads a tenant's stored config for /api/adapt/compaction. nil = no accounts.
+	adaptCompactionConfigFn AdaptCompactionConfigFunc
+	// offers are the latest /api/adapt/* report's options per account, for the apply routes.
+	offers adaptOffers
 	// tenantCapture reports whether ONE tenant consented to transcript capture. nil =
 	// single-tenant: there is no consent layer, so the operator's flag is the whole
 	// decision. Supplied by the host in hosted mode.
@@ -54,6 +59,8 @@ type API struct {
 	// against a real 1,000,000, and a span sized against that measures a fifth of the work it
 	// claims to. nil means every window is unknown, which excludes rather than guesses.
 	windows modelinfo.Resolver
+	// replayLedgerFn replaces the replay ledger read in tests.
+	replayLedgerFn func(*DB, Filter) (*ReplayLedger, error)
 	// statsCache, facetsCache and componentsCache hold the last rendered body per
 	// (principal, query), briefly. Overview alone measured 25s under real production write
 	// load (many sequential queries, each one a chance to queue behind the writer), and
@@ -329,7 +336,10 @@ func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, ke
 	// Detaching it means the result is always cached even if nobody is left to receive it, so the
 	// next reader gets a hit rather than starting again. Each caller still gets its own deadline
 	// from the handler timeout, which is what bounds THEIR wait; this bounds the WORK.
-	v, err, _ := a.jsonInflight.Do(key, func() (any, error) {
+	// The flight key names the CACHE as well as the entry: /api/stats and /api/tools, for one account and
+	// the same filters, have the same entry key, and two concurrent requests for them collapsed onto one
+	// computation, so /api/stats answered with the tools report.
+	v, err, _ := a.jsonInflight.Do(fmt.Sprintf("%p\x00%s", c, key), func() (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), dashComputeTimeout)
 		defer cancel()
 		body, err := compute(a.rec.DB().WithContext(ctx))
@@ -502,6 +512,14 @@ func (a *API) SetPricer(p modelinfo.Pricer) { a.pricer = p }
 // rather than what it cost. Separate from SetPricer for the reason the fields are separate.
 func (a *API) SetWindows(r modelinfo.Resolver) { a.windows = r }
 
+// replayLedger is db.ReplayLedgerFor unless a test replaced it.
+func (a *API) replayLedger(db *DB, f Filter) (*ReplayLedger, error) {
+	if a.replayLedgerFn != nil {
+		return a.replayLedgerFn(db, f)
+	}
+	return db.ReplayLedgerFor(f, a.windows, a.pricer)
+}
+
 // Who has to act when there is no transcript to show. This is a SEPARATE axis from the
 // transcript state, deliberately: the state answers "why is this panel empty" and the
 // answer is the same either way (nothing was captured), while this names the party who
@@ -647,8 +665,6 @@ func (a *API) routes() []route {
 		{"GET /api/breakdown", scopeTenant, a.breakdown},
 		{"GET /api/facets", scopeTenant, a.facets},
 		{"GET /api/config", scopeManager, a.config},
-		{"GET /api/benchmarks", scopeManager, a.benchmarks},
-		{"GET /api/benchmarks/{id}/tasks", scopeManager, a.benchmarkTasks},
 		{"GET /api/capture", scopeTenant, a.capture},
 		{"GET /api/whoami", scopePublic, a.whoamiHandler},
 		{"GET /api/archive", scopeTenant, a.archive},
@@ -673,6 +689,7 @@ func (a *API) routes() []route {
 	// The Components tab's compaction-episode measurement, declared beside its handler in
 	// compactepisode.go and appended here for the same reason as the rest: this table is what
 	// the scoping tests walk.
+	rs = append(rs, a.adaptRoutes()...)
 	return append(rs, a.compactEpisodeRoutes()...)
 }
 
@@ -741,8 +758,9 @@ var routeBounds = map[string]time.Duration{
 	// 10s default, so all three returned 503 on 100% of requests to that tab's default view.
 	// /api/tools and /api/toolfilter both appear in the outage's nginx log; /api/prompt escaped it
 	// only because nobody opened that view while it was being recorded.
-	"GET /api/tools":      dashHeavyTimeout,
-	"GET /api/toolfilter": dashHeavyTimeout,
+	"GET /api/tools":       dashHeavyTimeout,
+	"GET /api/toolfilter":  dashHeavyTimeout,
+	"GET /api/adapt/tools": dashHeavyTimeout,
 	// /api/prompt gets the longer bound but NOT a response cache, and the asymmetry is deliberate.
 	// It serves prompt CONTENT — a user's own system prompt and CLAUDE.md text — behind a gate that
 	// depends on the caller's ADDRESS (a.trusted, a CIDR check in single-tenant mode), not only on
@@ -751,6 +769,10 @@ var routeBounds = map[string]time.Duration{
 	// trustedness too; that is a change to a content gate and does not belong in an outage fix, so
 	// it waits, and meanwhile it simply gets long enough to finish.
 	"GET /api/prompt": dashHeavyTimeout,
+	// A replay of the account's stored requests under dozens of configurations: minutes on a
+	// large account, and the plugin waits for it.
+	"GET /api/adapt/compaction": 5 * time.Minute,
+	"GET /api/save-more/config": 5 * time.Minute,
 	// The routes behind cachedRoute: the first reader after a restart or a lapsed cache waits for the
 	// real computation, so it gets the heavy bound rather than the 10 s that is right for a read that
 	// is normally already in the cache.
@@ -1225,9 +1247,39 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		// path. Every query on it must have a cost that does not grow with the session's
 		// size squared, nor with the whole table."
 		a.serveJSON(w, r, &a.statsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
+			// The replay scan is independent of OverviewLean: start it first, so first paint waits for
+			// the slower of the two, not their sum.
+			var repLedger *ReplayLedger
+			var repErr error
+			repDone := make(chan struct{})
+			go func() {
+				defer close(repDone)
+				if a.pricer != nil && a.windows != nil {
+					repLedger, repErr = a.replayLedger(db, f)
+				}
+			}()
 			o, err := db.OverviewLean(f, a.pricer, a.priceFn(r))
+			<-repDone
 			if err != nil {
 				return nil, err
+			}
+			// The ledger reads only the sessions in which summarize ever acted, so its cost follows
+			// their rows, not the window or the table. The status line then agrees with the dashboard.
+			// Without a price table or a window resolver there is nothing to cap against: say so.
+			o.ReplayCapNotApplied = a.pricer == nil || a.windows == nil
+			if a.pricer != nil && a.windows != nil {
+				if l, lerr := db.SummarizeLedgerFor(f, a.windows, a.pricer); lerr == nil {
+					o.ApplySummarizeLedger(l)
+					o.Waterfall = o.waterfall()
+				}
+				// The same cap as the full read, so the net and total do not change when it lands. A
+				// session or a window bounds the scan (lifetime reads go to the full handler).
+				if repErr == nil {
+					o.ApplyReplayLedger(repLedger)
+				} else {
+					o.ReplayCapNotApplied = true
+				}
+				o.Waterfall = o.waterfall()
 			}
 			return json.Marshal(o)
 		})
@@ -1287,10 +1339,38 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 			declCredit = c
 			return nil
 		})
+		var sumLedger *SummarizeLedger
+		var repLedger *ReplayLedger
+		var repFailed bool
+		if a.pricer != nil && a.windows != nil {
+			g.Go(func() error {
+				l, err := a.replayLedger(db, f)
+				if err != nil {
+					slog.Warn("context-guru: replay cap unavailable; the headline keeps its stored credit", "err", err)
+					repFailed = true
+					return nil
+				}
+				repLedger = l
+				return nil
+			})
+			g.Go(func() error {
+				l, err := db.SummarizeLedgerFor(f, a.windows, a.pricer)
+				if err != nil {
+					slog.Warn("context-guru: summarize attribution unavailable; the headline keeps its stored credit", "err", err)
+					return nil
+				}
+				sumLedger = l
+				return nil
+			})
+		}
 		g.Wait() //nolint:errcheck // every goroutine above always returns nil; see each one's own error handling
 		if overviewErr != nil {
 			return nil, overviewErr
 		}
+		// Before the additions below: they add to the totals this corrects.
+		o.ApplySummarizeLedger(sumLedger)
+		o.ApplyReplayLedger(repLedger)
+		o.ReplayCapNotApplied = repFailed || a.pricer == nil || a.windows == nil
 		if cachesplitHist != nil {
 			o.CachesplitHistorical = cachesplitHist
 			// Folded into the running total here, not inside Overview() itself, because
@@ -1446,8 +1526,22 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 	}
 	a.serveJSON(w, r, &a.componentsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
 		// ONE pass over request_components feeds the rows and both valuations below (components).
+		// The replay cap streams the whole scope; start it beside the component read, not after.
+		var repLedger *ReplayLedger
+		var repErr error
+		repCtx, repCancel := context.WithCancel(db.readCtx())
+		defer repCancel()
+		repDone := make(chan struct{})
+		go func() {
+			defer close(repDone)
+			if a.pricer != nil {
+				repLedger, repErr = db.ReplayLedgerForCtx(repCtx, f, a.windows, a.pricer)
+			}
+		}()
 		rows, groups, err := db.components(f)
 		if err != nil {
+			repCancel()
+			<-repDone
 			return nil, err
 		}
 		// Value the rows whose saved_usd predates the column, into their own field. Without this
@@ -1459,11 +1553,33 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 			// halves so the two opposite-signed verdicts can be shown together. Both are
 			// re-groupings of what was just read, so neither touches the database.
 			if err := decomposeFromGroups(groups, a.pricer, rows); err != nil {
+				repCancel()
+				<-repDone
 				return nil, err
 			}
 			if err := estimateFromGroups(groups, a.pricer, rows); err != nil {
 				slog.Warn("context-guru: component saved_usd estimate failed; pre-column rows read $0.00",
 					"err", err)
+			}
+			// summarize's credit, put through the attribution rule: nothing past its span, and the
+			// first removal priced at the rate the previous turn paid. The same ledger moves the
+			// headline, so the two cannot disagree.
+			if ls, err := db.SummarizeLedgersFor(f, a.windows, a.pricer); err != nil {
+				slog.Warn("context-guru: summarize attribution failed; summarize reads its stored credit",
+					"err", err)
+			} else {
+				for _, c := range rows {
+					applySummarizeLedgerToRow(c, ls[c.Component])
+				}
+			}
+			// Every other replaying component, capped at the counterfactual client compaction.
+			<-repDone
+			if repErr != nil {
+				slog.Warn("context-guru: replay cap failed; components read their stored credit", "err", repErr)
+			} else {
+				for _, c := range rows {
+					applyReplayLedgerToRow(c, repLedger)
+				}
 			}
 		}
 		return json.Marshal(map[string]any{"components": rows})
@@ -1574,43 +1690,6 @@ func (a *API) config(w http.ResponseWriter, r *http.Request) {
 	}
 	body["description"] = localConfigDescription
 	writeJSON(w, body)
-}
-
-// benchmarks lists ingested harbor runs. A MANAGER view in hosted mode: the runs are
-// the operator's own eval history, not any tenant's traffic — and ?refresh=1 walks the
-// filesystem and inserts rows, which unauthenticated is a writer denial of service
-// anyone can repeat.
-func (a *API) benchmarks(w http.ResponseWriter, r *http.Request) {
-	if !a.requireManager(w, r, "benchmark runs") {
-		return
-	}
-	if r.URL.Query().Get("refresh") == "1" {
-		// The DIRS go back with the counts. Without them a re-scan of a mistyped path and a
-		// correct scan of an empty directory are the same response — and the UI reported both
-		// as "nothing happened" because it discarded the body entirely.
-		dirs := a.rec.Opts().BenchDirs
-		runs, tasks := a.db(r).IngestBenchRoots(dirs)
-		writeJSON(w, map[string]any{"ingested_runs": runs, "ingested_tasks": tasks, "dirs": dirs})
-		return
-	}
-	runs, err := a.db(r).BenchRuns()
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, map[string]any{"runs": runs})
-}
-
-func (a *API) benchmarkTasks(w http.ResponseWriter, r *http.Request) {
-	if !a.requireManager(w, r, "benchmark runs") {
-		return
-	}
-	rows, err := a.db(r).BenchTasks(atoi64(r.PathValue("id")), r.URL.Query().Get("arm"))
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, map[string]any{"tasks": rows})
 }
 
 // capture reports the capture pipeline's own health, drops included. Exposed as a

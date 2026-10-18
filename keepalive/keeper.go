@@ -511,8 +511,16 @@ func (k *Keeper) releaseLocked(e *kaEntry) {
 // Depart — leaks that thread's open count and stops its pings for good; nothing but Forget
 // clears it.
 func (k *Keeper) Arrive(key Key) (pings int, refreshed int64, tag string) {
+	pings, refreshed, tag, _ = k.ArriveAt(key)
+	return pings, refreshed, tag
+}
+
+// ArriveAt is Arrive plus the instant the entry's provider-side cache was last known refreshed
+// (see kaEntry.refreshedAt) — the real request that started the idle span, or the start of the
+// last ping that READ the cache. Zero when there was no entry.
+func (k *Keeper) ArriveAt(key Key) (pings int, refreshed int64, tag string, refreshedAt time.Time) {
 	if k == nil || key.Session == "" {
-		return 0, 0, ""
+		return 0, 0, "", time.Time{}
 	}
 	id := key.id()
 	k.mu.Lock()
@@ -520,14 +528,14 @@ func (k *Keeper) Arrive(key Key) (pings int, refreshed int64, tag string) {
 	k.inflight[id]++
 	e, ok := k.live[id]
 	if !ok {
-		return 0, 0, ""
+		return 0, 0, "", time.Time{}
 	}
-	pings, refreshed, tag = e.pings, e.refreshed, e.tag
+	pings, refreshed, tag, refreshedAt = e.pings, e.refreshed, e.tag, e.refreshedAt
 	k.bytes -= int64(len(e.body))
 	k.releaseLocked(e)
 	e.clear()
 	delete(k.live, id)
-	return pings, refreshed, tag
+	return pings, refreshed, tag, refreshedAt
 }
 
 // Depart ends one open request on key's thread. Record calls it for its own key, so a host calls
@@ -1528,3 +1536,7 @@ func predictorFor(id string) (func(stopReason string) float64, bool) {
 	}
 	return nil, false
 }
+
+// PredictorFor is predictorFor, exported for a host that needs to replay the same gate
+// outside the keeper (the adapt-cache report's currentPlan).
+func PredictorFor(id string) (func(stopReason string) float64, bool) { return predictorFor(id) }

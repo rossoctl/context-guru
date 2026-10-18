@@ -344,7 +344,7 @@ message text) is the size gate.
 
 ## Measuring what it earned
 
-The Components tab carries a **What each summary earned** panel, which follows every summary for
+The Preset steps tab (Components) carries a **What each summary earned** panel, which follows every summary for
 **10% more of the model's context window** and reports what happened over that span:
 
 | Column | What it is |
@@ -368,10 +368,30 @@ have paid for a summary — sound, but deduced. It exists because the marker is 
 the only way to see what the **old size-only trigger** achieved, and therefore the only available
 comparison.
 
-**Spans that are `open` or `voided` are counted and not totalled.** Open means the span had not
-finished inside the time range being viewed; voided means the client compacted its own transcript
-part-way through, which is the very thing this trigger tries to get ahead of, so the remainder is
-not comparable.
+**A span that is `open` is counted and not totalled.** Open means the span had not finished inside
+the time range being viewed. A span the **client** ended is totalled: when the client compacts its
+own transcript inside the span (state `closed_client_compaction`), both worlds carry a summary from
+that turn on, so nothing later is ours. The credit earned *before* that turn counts. It used to be
+voided and counted as $0.
+
+**One rule sets the credit everywhere.** Summarize fires at 0.90 of the window. Without it, the
+client compacts at about 1.00. So credit is ours only inside that 0.10 span. The episode view, the
+Components tab and the headline "net from compaction" all read the same ledger (`ledger` in the
+episode response, `summarize_correction_usd` on `/api/stats`):
+
+- A first removal is priced at the rate the previous turn paid for that content. A read, when its
+  cache was live. It was a cache write.
+- A replay turn inside the span counts at the rate its own turn paid.
+- A replay turn after the span ended (it closed, or the client compacted) is not credited.
+- A replay turn that missed because the prompt changed (`prefix_change`) inside a span is not
+  credited. Its cache write is charged instead.
+- A second summary inside an open span rolls the span forward. It does not start a new one, and its
+  cost is charged to the same episode.
+- A conversation with summarize credit and no summary event before it anchors a span at the first
+  turn we can see. It is bounded like any other, but it is not listed as an episode.
+
+Summarize's own model spend (`llm_calls`, `llm_cost_usd` on the Components tab) is the
+`cg_llm_cost_usd` of requests where summarize ran and no extraction call owns the cost.
 
 !!! note "Expect the settled total to be empty on a young session, by design"
     The span is 10% of the window's worth of **new** content, and a summarized session adds new

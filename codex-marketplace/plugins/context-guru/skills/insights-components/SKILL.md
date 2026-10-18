@@ -1,12 +1,12 @@
 ---
 name: context-guru-insights-components
-description: Moved to the savings skill. Kept for one release so existing habits still work.
+description: Moved to the insights skill (`savings`). Kept for one release so existing habits still work.
 ---
 
-This command moved to `context-guru-savings`. Say so in one line, then run the new one from this skill directory and print its output exactly as it is in one code block:
+This command moved to `context-guru-insights` (`savings`). Say so in one line, then run the new one from this skill directory and print its output exactly as it is in one code block:
 
 ```bash
-python3 ../../scripts/cg.py savings
+python3 ../../scripts/cg.py insights savings
 ```
 
 If loopback access is blocked, retry the same read-only command with `sandbox_permissions="require_escalated"`.

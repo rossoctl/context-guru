@@ -174,6 +174,10 @@ CREATE TABLE IF NOT EXISTS requests (
   -- saving for a request the filter had declined to touch. 0 therefore means "nothing was
   -- removed here", which is the honest reading on every row that predates the feature.
   filtered_decl_tokens INTEGER NOT NULL DEFAULT 0,
+  -- The digest of the declaration SET this request carried (tool_declarations.digest), so a
+  -- declaration's cost can be priced on exactly the requests that carried it. '' on rows
+  -- written before it existed, where the set is inferred from the tool count instead.
+  decl_digest TEXT NOT NULL DEFAULT '',
   -- Which prompt-cache TTL TIER this request asked for: 'ephemeral_5m', 'ephemeral_1h', or ''
   -- for a body carrying no cache_control at all. The pipeline always computed this and threw
   -- it away, so nothing could group by it and a 1h prompt was priced at the 5m write rate.
@@ -337,32 +341,6 @@ CREATE TABLE IF NOT EXISTS tenant_spend (
   PRIMARY KEY (tenant_id, month)
 );
 
--- Ingested benchmark runs (deploy/harbor's summary.json + rows-*.json).
-CREATE TABLE IF NOT EXISTS bench_runs (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  name     TEXT NOT NULL UNIQUE,   -- run directory name, so re-ingesting replaces
-  ts       INTEGER NOT NULL,
-  dataset  TEXT NOT NULL DEFAULT '',
-  model    TEXT NOT NULL DEFAULT '',
-  summary  TEXT NOT NULL DEFAULT '{}'
-);
-CREATE TABLE IF NOT EXISTS bench_tasks (
-  run_id            INTEGER NOT NULL REFERENCES bench_runs(id) ON DELETE CASCADE,
-  arm               TEXT    NOT NULL,   -- config name: off|codesmart|headroom|rtk|…
-  task              TEXT    NOT NULL,
-  reward            REAL    NOT NULL DEFAULT 0,
-  steps             INTEGER NOT NULL DEFAULT 0,
-  prompt_tokens     INTEGER NOT NULL DEFAULT 0,
-  completion_tokens INTEGER NOT NULL DEFAULT 0,
-  cache_read        INTEGER NOT NULL DEFAULT 0,
-  cache_write       INTEGER NOT NULL DEFAULT 0,
-  fresh_input       INTEGER NOT NULL DEFAULT 0,
-  cost_usd          REAL    NOT NULL DEFAULT 0,
-  norm_cost_usd     REAL    NOT NULL DEFAULT 0,
-  wall_s            REAL    NOT NULL DEFAULT 0,
-  exception         INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_bt_run ON bench_tasks(run_id, arm);
 `
 
 // additiveDDL holds tables that can be created on an EXISTING database without touching
@@ -674,6 +652,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "split_stable_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "split_tail_hash", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "decl_digest", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},

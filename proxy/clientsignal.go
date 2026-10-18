@@ -173,8 +173,8 @@ func (k *keeper) signal(tenantID, scoped, event, kind string, now time.Time) boo
 		// starts after the mark and is tracked normally; see keepalive.Keeper.EndedAfter.
 		before := k.Stats().Live
 		k.retireSession(tenantID, scoped)
-		// The hook's id is the campaign's key: campaign decisions are made only off the OpenAI route (keeper.record), and Codex, the one client
-		// whose hook id differs from the proxy's session key, always uses it.
+		// The hook's id is the campaign's key: campaign decisions are never made on the OpenAI route (keeper.record), and Codex, the one client
+		// whose hook id differs from the proxy's session key, always uses that route.
 		k.pred.sessionEnded(tenantID, scoped, now, time.Time{})
 		slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "retired", before-k.Stats().Live)
 		k.markEnded(tenantID, scoped, now)

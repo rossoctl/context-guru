@@ -187,14 +187,18 @@ func uiHandler() http.Handler {
 	}
 	files := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// StripPrefix leaves "" for /dashboard/. That is the five-page home; the classic,
-		// full-detail dashboard stays at the explicit index.html.
+		// StripPrefix leaves "" for /dashboard/ and "index.html" for the explicit URL.
 		name := strings.TrimPrefix(r.URL.Path, "/")
 		if name == "" {
-			name = "home.html"
+			name = "index.html"
+		}
+		// A short-lived five-page home was served at home.html; send an old bookmark to the dashboard.
+		if name == "home.html" {
+			http.Redirect(w, r, "index.html", http.StatusMovedPermanently)
+			return
 		}
 		switch name {
-		case "index.html", "home.html":
+		case "index.html":
 			w.Header().Set("Cache-Control", "no-cache")
 		default:
 			w.Header().Set("Cache-Control", "public, max-age=3600")

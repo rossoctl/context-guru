@@ -50,9 +50,6 @@ type Options struct {
 	// /api/config. It is redacted before serving; nothing sensitive should be in
 	// here in the first place.
 	Effective map[string]any
-	// BenchDirs are directories scanned for harbor benchmark runs (summary.json +
-	// rows-*.json) at startup and on demand.
-	BenchDirs []string
 
 	// DiskHighWatermark is the fraction of the FILESYSTEM in use at which the
 	// janitor starts evicting the oldest sessions; DiskLowWatermark is where it
@@ -194,6 +191,12 @@ type Recorder struct {
 	diskProbe func(dir string) (float64, bool)
 	// remote is cold storage, or nil.
 	remote Remote
+	// counts feeds the bypass count worker (see countLoop). Small and bounded on purpose.
+	counts chan countJob
+	// queuedCountBytes is the total body size of the jobs in counts plus the one being counted.
+	queuedCountBytes atomic.Int64
+	// countsDropped counts rows whose token count was skipped because the queue was full.
+	countsDropped atomic.Int64
 	// tenantQuota reads a tenant's own row quota from the control plane (see
 	// SetTenantQuota). A func rather than a value because a manager can change it at
 	// any time, and a pointer because it is wired after the recorder starts.
@@ -225,12 +228,15 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		seenModel: map[string]bool{},
 		seenKeys:  map[string]struct{}{},
 		remote:    opts.Remote,
+		counts:    make(chan countJob, countQueue),
 	}
 	if opts.LifecycleSignals {
 		r.life = newLifecycle()
 	}
 	r.wg.Add(1)
 	go r.run()
+	r.wg.Add(1)
+	go r.countLoop()
 	// The archiver gets its OWN goroutine. It must never share the writer's, because
 	// an rclone round trip takes seconds and the writer owes the request path a fast
 	// insert — a blocked writer means a full queue means dropped events, which is
@@ -332,15 +338,18 @@ func (r *Recorder) Close() error {
 // Stats reports the capture pipeline's own health — including its drops, which is
 // the number that keeps every other number honest.
 type Stats struct {
-	Captured int64  `json:"captured"`
-	Written  int64  `json:"written"`
-	Dropped  int64  `json:"dropped"`
-	Errors   int64  `json:"errors"`
-	Queued   int    `json:"queued"`
-	QueueCap int    `json:"queue_cap"`
-	Clients  int    `json:"sse_clients"`
-	DBPath   string `json:"db_path"`
-	DBBytes  int64  `json:"db_bytes"`
+	Captured int64 `json:"captured"`
+	Written  int64 `json:"written"`
+	Dropped  int64 `json:"dropped"`
+	// CountsDropped is the number of bypassed requests whose token count was skipped because the
+	// count worker's queue was full; their rows keep tokens_before 0.
+	CountsDropped int64  `json:"counts_dropped"`
+	Errors        int64  `json:"errors"`
+	Queued        int    `json:"queued"`
+	QueueCap      int    `json:"queue_cap"`
+	Clients       int    `json:"sse_clients"`
+	DBPath        string `json:"db_path"`
+	DBBytes       int64  `json:"db_bytes"`
 	// Mode is the proxy's operating mode ("active" | "observe"). The UI renders an
 	// unmissable banner in observe mode: every request was forwarded UNTOUCHED, so a
 	// reader who mistakes these figures for enforced savings has drawn exactly the wrong
@@ -380,7 +389,7 @@ func (r *Recorder) Stats() Stats {
 	size, _ := r.db.sizeBytes()
 	s := Stats{
 		Captured: r.captured.Load(), Written: r.written.Load(),
-		Dropped: r.dropped.Load(), Errors: r.errors.Load(),
+		Dropped: r.dropped.Load(), Errors: r.errors.Load(), CountsDropped: r.countsDropped.Load(),
 		Queued: len(r.ch), QueueCap: cap(r.ch),
 		Clients: r.hub.Clients(), DBPath: r.db.Path(), DBBytes: size,
 		Mode: r.opts.Mode,
@@ -447,6 +456,7 @@ func (r *Recorder) run() {
 				"written_total", r.written.Load(), "dropped_total", r.dropped.Load())
 			for _, e := range batch {
 				r.hub.Publish(e)
+				r.enqueueCount(e)
 			}
 		}
 		batch = batch[:0]
@@ -714,4 +724,72 @@ func (r *Recorder) MarkUnique(tenant, component string, keys []string, saved int
 		return 0
 	}
 	return saved * newKeys / len(keys)
+}
+
+// countQueue bounds the bypass token counts waiting for the count worker. A bypassed 33 MiB
+// request takes ~12 s to count, so a deeper queue would only hold transcripts in memory.
+const countQueue = 8
+
+// countMaxBytes bounds the total request-body size queued for counting. A queued job pins its
+// parsed request, a small multiple of the body, so this is what bounds the memory the worker can
+// hold. A job is always accepted when nothing is queued, so one transcript larger than this is
+// still counted.
+//
+// ponytail: the multiple (parsed request vs body) is not measured; queue the raw bytes and parse
+// in the worker if the ceiling ever needs to be exact.
+const countMaxBytes = 64 << 20
+
+type countJob struct {
+	size       int64
+	id         int64
+	accounting string
+	count      func() (before, attempted int)
+}
+
+// enqueueCount hands a just-inserted bypassed row to the count worker. Never blocks: when the
+// queue is full the row keeps tokens_before 0, which the accounting already reads as unknown.
+func (r *Recorder) enqueueCount(e *Event) {
+	if e.BypassCount == nil || e.ID == 0 {
+		return
+	}
+	size := int64(e.BypassBytes)
+	if q := r.queuedCountBytes.Load(); q > 0 && q+size > countMaxBytes {
+		r.countsDropped.Add(1)
+		return
+	}
+	r.queuedCountBytes.Add(size)
+	select {
+	case r.counts <- countJob{size, e.ID, e.TokenAccounting, e.BypassCount}:
+	default:
+		r.queuedCountBytes.Add(-size)
+		r.countsDropped.Add(1)
+	}
+}
+
+// countLoop is the ONE goroutine that counts the tokens of bypassed requests and updates their
+// rows. It is separate from the writer on purpose: the writer owes every account a fast insert,
+// and a single large count holds a goroutine for seconds.
+//
+// ponytail: one worker, so rows of big bypassed requests lag behind their request by the
+// queue's total counting time; a pool is the upgrade if that ever shows. Each queued closure pins
+// its parsed request, so the memory ceiling is countQueue (8) large transcripts; queue the raw
+// bytes instead if that matters.
+func (r *Recorder) countLoop() {
+	defer r.wg.Done()
+	for {
+		select {
+		case j := <-r.counts:
+			before, attempted := j.count()
+			r.queuedCountBytes.Add(-j.size)
+			frozen := before - attempted
+			if frozen < 0 {
+				frozen = 0
+			}
+			if err := r.db.setBypassTokens(j.id, before, attempted, frozen); err != nil {
+				slog.Warn("dash: could not store a bypassed request's token count", "id", j.id, "err", err)
+			}
+		case <-r.done:
+			return
+		}
+	}
 }

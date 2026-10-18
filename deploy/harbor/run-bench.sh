@@ -20,7 +20,7 @@
 set -euo pipefail
 export PATH="$PATH:$HOME/.local/bin"
 PROXY_URL="$1"; JOBS_DIR="$2"; shift 2
-cd /home/vpcuser/projects/context-engineering/harbor
+cd "${HARBOR_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)/harbor}"
 
 if [ -n "${CG_TOKEN:-}" ]; then
   : "${CG_GATEWAY_KEY:?CG_TOKEN is set, so the agent forwards its own provider key: set CG_GATEWAY_KEY too}"

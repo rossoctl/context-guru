@@ -5,7 +5,7 @@ The status line sits under the prompt and answers two questions all the time: **
 ![Warm: green, seconds ticking down](../statusline-live/warm-dark.svg#only-dark)
 ![Warm: green, seconds ticking down](../statusline-live/warm-light.svg#only-light)
 
-The first line is money, the second is the cache clock, the sub-agents, the context bar, the session's keep-alive pings and at most one hint:
+The first line is money, the second is the cache clock, the sub-agents, the context bar and the session's keep-alive pings. A third line, the weekly tip, appears only when it applies:
 
 ```text
 saved $0.31 of $4.41 session · saved $0.12 of $0.90 subagents
@@ -27,7 +27,7 @@ Every number is about this session. There is no today or lifetime total on the l
 | `agents reviewer active ● 4:58 saved $1.20 of $6.00 · Explore ◐ 0:51 · 1 cold` | Each sub-agent's cache, under the name Claude Code's agents list shows (`←` / `↓` in Claude Code), most recently used first, up to five, then `+N more`. `active` marks an agent that made a request in the last 10 seconds. Each clock is that agent's time until cold, with `↻` when pings hold it, followed by that agent's own `saved $z of $q` on the same basis as the session figure. Side requests are not listed; they count only in the subagents total. Cold ones are counted. A narrow terminal drops the per-agent money first. See [Sub-agents](#sub-agents-and-the-selected-agent). |
 | `ctx ███░░░░░ 41%` | How full you are, as a share of the model's context limit. |
 | `ka 3 pings $0.04` | Keep-alive pings the proxy sent in this session, and what they cost. Shown after the first ping. |
-| `▸ hint` | At most one thing worth acting on, dollars first. |
+| `Tip: …` | The weekly tip; see [The weekly tip](#the-weekly-tip). The status line gives no other advice: that comes from `/context-guru:save-more`, `/context-guru:remove-mcp-and-skills` and the automatic sweep. |
 | `▲ update v0.3.2` | A newer proxy release is waiting; shown first so it cannot scroll off. |
 
 ### The cache clock
@@ -35,7 +35,7 @@ Every number is about this session. There is no today or lifetime total on the l
 | State | Looks like | Rule |
 |---|---|---|
 | Warm | green `●` | more than 60 s left (a fifth of the lifetime on the 1 h tier) |
-| Expiring | amber `◐` | 60 s to 15 s left; the hint prices what a pause would cost |
+| Expiring | amber `◐` | 60 s to 15 s left |
 | Critical | red `◐ 0:09!` | the last 15 s |
 | Cold | red `○ cold 1:15` | expired; counts up how long it has been cold |
 
@@ -97,19 +97,21 @@ The unlabelled form: one running sub-agent, then several, then five.
 ![Five sub-agents](../statusline-live/agents-5-dark.svg#only-dark)
 ![Five sub-agents](../statusline-live/agents-5-light.svg#only-light)
 
-### Model changed while the cache is warm
+### The weekly tip
 
-Switching model rewrites the cache, so the hint says so before you send.
+```text
+Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-skills for over a week — worth a shot.
+```
 
-![Model switch](../statusline-live/model-switch-dark.svg#only-dark)
-![Model switch](../statusline-live/model-switch-light.svg#only-light)
+On by default in `balanced` and `detailed`, as its own last line. It names each of those commands (of the ones your plugin has) that has not run in the last 7 days, and shows nothing when all of them ran this week. `save-more config` and `save-more cache` count as running `save-more`. The commands record when they last ran in `last-run.json` in the plugin's state directory, and the status line only reads that file, so the tip costs no network call; if that file cannot be read, there is no tip. A command that has never run counts from the first time the status line saw the install, so a new install sees no tip in its first week.
 
-### Tool set changed
+A narrow terminal gets the short form first, naming the command stale longest (`(+1)` when another is stale too), and drops the tip only when even that does not fit:
 
-From Claude Code's own miss report, when it is under two minutes old.
+```text
+Tip: try /context-guru:save-more (not run for 7+ days) (+1)
+```
 
-![Tool set changed](../statusline-live/tool-set-changed-dark.svg#only-dark)
-![Tool set changed](../statusline-live/tool-set-changed-light.svg#only-light)
+Turn it off for good with `python3 "<plugin dir>/scripts/statusline.py" --set-tips=off` (`--set-tips=on` brings it back), or per installed command with `--hide=tip`.
 
 ### Proxy offline
 
@@ -120,12 +122,12 @@ Refused is `cg ✕ proxy offline`. A slow proxy shows `cg: stats loading…`, th
 
 ### Narrow terminals and the worst case
 
-At 80 columns, with the cache cold, five sub-agents and a hint:
+At 80 columns, with the cache cold and five sub-agents:
 
 ![Worst case at 80 columns](../statusline-live/worst-case-80-dark.svg#only-dark)
 ![Worst case at 80 columns](../statusline-live/worst-case-80-light.svg#only-light)
 
-At 40 columns the line sheds, in order: tools, latency, keep-alive pings, spend, the update marker, the long hint form, then the agents shrink to a count, then the `saved` total and label and the context bar. The cache clock is shortened last.
+A line too wide for the terminal sheds, in order: the tip, tools, latency, keep-alive pings, spend, the update marker, then the agents shrink to a count, then the `saved` total and label and the context bar. The cache clock is shortened last.
 
 ![40 columns](../statusline-live/narrow-40-dark.svg#only-dark)
 ![40 columns](../statusline-live/narrow-40-light.svg#only-light)
@@ -134,8 +136,8 @@ At 40 columns the line sheds, in order: tools, latency, keep-alive pings, spend,
 
 | Layout | Shows |
 |---|---|
-| `minimal` | one line: saved, cache, hint |
-| `balanced` (default) | update, saved, cache, agents, context, keep-alive pings, hint |
+| `minimal` | one line: saved, cache |
+| `balanced` (default) | update, saved, cache, agents, context, keep-alive pings, the weekly tip |
 | `detailed` | balanced plus `spent $4.10 · $2.73/h · up 1h30m` (the rate appears after 5 minutes), a slow-upstream note (only when upstream averages 3 s or more) and the least-used tool or skill |
 
 ![Detailed layout](../statusline-live/detailed-dark.svg#only-dark)
@@ -147,7 +149,7 @@ Switch without editing settings, and keep the choice across renders:
 python3 "<plugin dir>/scripts/statusline.py" --set-layout=detailed   # or minimal, balanced, auto
 ```
 
-`auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache agents ctx hint latency tools ka`), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`.
+`auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache agents ctx ka latency tools tip`), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`.
 
 ## Modes
 
@@ -161,7 +163,7 @@ Five more layouts each answer one question on the second line, next to the cache
 | `fill` | How full is my context, and with what? | A stacked bar: `▒` always loaded, `█` conversation, `░` free; the percent and, when it is filling, the time to full. At 100 columns or more, a legend with the two shares and what a miss now would cost |
 | `watch` | Which sub-agent caches are about to lapse? | Line 1 the saved figure and the main clock; line 2 `agent caches (2) ████ 4:30  █░░░ 0:50`: one mini-bar per running sub-agent in id order, up to 4, then `+N more` |
 
-All five show the cache clock but have no hint slot.
+All five show the cache clock. They have no tip line.
 
 ### spark
 

@@ -176,6 +176,13 @@ type Options struct {
 	// single-tenant mode, where /stats stays open as it always was — the benchmark
 	// harnesses in deploy/harbor read it.
 	StatsTrusted func(*http.Request) bool
+	// Single-tenant /api/adapt/* apply (adaptapply.go): BaseConfig is the configuration document
+	// the proxy was started with (its config file, or `preset: X`), BuildConfig rebuilds a
+	// pipeline from a document, and AdaptOverride is the file an applied configuration is kept
+	// in so a restart keeps it ("" keeps it in memory only).
+	BaseConfig    string
+	BuildConfig   ConfigBuilder
+	AdaptOverride string
 }
 
 // ObserveOptions tunes observe mode: one option per real decision.
@@ -240,8 +247,14 @@ type Handler struct {
 	// mode presented through the same type the hosted path uses. Built once so the
 	// request path has exactly ONE way to reach a pipeline, rather than a branch at
 	// every use — which is how a hosted deployment would eventually leak the shared
-	// one into a tenant's request.
-	static *Tenancy
+	// one into a tenant's request. Atomic because a local adapt apply swaps its pipeline
+	// (adaptapply.go) while requests are in flight.
+	static atomic.Pointer[Tenancy]
+	// adaptMu guards the adapt apply rate limit (adaptHits) and the single-tenant override
+	// (adaptMem when it has no file).
+	adaptMu   sync.Mutex
+	adaptHits map[string][]time.Time
+	adaptMem  *adaptOverride
 	// limiter enforces Options.Limits. Always non-nil; a zero Limits makes it a no-op.
 	limiter *Limiter
 	// regLim bounds self-registration attempts per client address. Separate from
@@ -338,8 +351,9 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	// The single-tenant view of this handler's own configuration. In hosted mode it
 	// is never consulted (tenancyFor goes to Options.Tenants); it exists so the
 	// request path has one shape.
-	h.static = &Tenancy{Preset: opts.Preset, Pipe: pipe, Store: st,
-		Shadow: h.shadow, Mode: h.mode(), Cache: opts.Cache}
+	h.static.Store(&Tenancy{Preset: opts.Preset, Pipe: pipe, Store: st,
+		Shadow: h.shadow, Mode: h.mode(), Cache: opts.Cache})
+	h.startAdaptOverride()
 	h.limiter = NewLimiter(opts.Limits)
 	h.dispatcher()
 	if opts.CheapModel != nil {
@@ -433,9 +447,18 @@ func (h *Handler) Mux() *http.ServeMux {
 	if h.api != nil {
 		h.api.Mount(m)
 	}
+	if h.opts.Dashboard != nil {
+		h.mountAdapt(m)
+	}
 	// Control plane: registration, sign-in, settings, tokens, the manager's roster.
 	// Mounted after the dashboard so both live under /api/, and only in hosted mode.
 	h.MountControl(m)
+	// Both deployments: adaptPrincipal decides who may (adaptapply.go).
+	if h.api != nil {
+		m.HandleFunc("POST /api/adapt/compaction/apply", h.adaptCompactionApply)
+		m.HandleFunc("POST /api/save-more/config/apply", h.saveMoreConfigApply)
+		m.HandleFunc("POST /api/adapt/tools/apply", h.adaptToolsApply)
+	}
 	// Bob (BobShell) gateway. Bob is OpenAI-compatible but calls Bob-specific
 	// paths: its model call is POST /inference/v1/chat/completions (reduced like
 	// any OpenAI chat), and its control-plane calls (/admin/v1/profile,
@@ -1129,8 +1152,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		if api == "responses" {
 			wire = "responses"
 		}
-		var tr apply.Trace  // hoisted: the lifecycle log line below reads it
-		var threadID string // hoisted with it: serve hands it to the keeper
+		var tr apply.Trace      // hoisted: the lifecycle log line below reads it
+		var added time.Duration // hoisted with tr: the lifecycle log line reads both
+		var threadID string     // hoisted with it: serve hands it to the keeper
 		// preBody is what the pipeline's own components are about to receive as req.Input, BEFORE
 		// any of them — cache_aware_summarizer and extract_llm_sweep included — runs. Captured here,
 		// read by h.serve below, and stashed alongside the body actually forwarded: see the
@@ -1189,7 +1213,6 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					anchor = &expand.Anchor{At: at, Fp: fp}
 				}
 			}
-			var added time.Duration
 			// Captured BEFORE the pipeline runs — see ClearStaleKeepAliveCandidate's own comment
 			// on why this request's "did I register fresh keep-alive material" test has to be a
 			// timestamp comparison rather than clearing by call order: tr.Session (the key a
@@ -1258,8 +1281,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// and dashcapture.go's finish() for where the actual scan (waitcause.Tracker.
 			// Observe) now runs. This line itself costs one slice-header copy, not a scan.
 			cp.noteWaitBody(orig)
-			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session, threadID)
-			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
+			cp.noteKeepAlive(h.keeper.arriveAt(tn.ID, tr.Session, threadID))
 			if cp != nil {
 				cp.predArrival = h.predRT().arrive(tn.ID, tr.Session, threadID, time.Now())
 			}
@@ -1362,7 +1384,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// emits it in a defer once the response is finished, so a request produces exactly
 		// one lifecycle line whichever way it ends — and the attrs are built here, once,
 		// rather than on the response path.
-		slg := lifecycleLogger(lg, tr, bypassed)
+		slg := lifecycleLogger(lg, tr, bypassed, added)
 		if threadID != thread.Primary {
 			slg = slg.With("thread", threadID)
 		}
@@ -1385,12 +1407,22 @@ func tenantLabel(id string) string {
 // lifecycleLogger returns the request logger with this request's pipeline outcome
 // attached: the resolved session (so every line of this request correlates, including
 // the ones apply wrote), and the token accounting.
-func lifecycleLogger(lg *slog.Logger, tr apply.Trace, bypassed bool) *slog.Logger {
+func lifecycleLogger(lg *slog.Logger, tr apply.Trace, bypassed bool, added time.Duration) *slog.Logger {
 	lg = lg.With("session", tr.Session, "messages", tr.Messages, "bypassed", bypassed,
 		"cache_aware", tr.CacheAware, "frozen_tokens", tr.FrozenTokens)
 	if tr.Run != nil {
 		lg = lg.With("tokens_before", tr.Run.TokensBefore, "tokens_after", tr.Run.TokensAfter,
-			"saved", tr.Run.Saved(), "cg_ms", tr.Run.DurationMs)
+			"saved", tr.Run.Saved(), "components_ms", tr.Run.DurationMs)
+	}
+	// cg_ms is everything this proxy did before forwarding (normalizing, counting, the
+	// components): the figure the dashboard's cg_latency_ms and /stats already carry. It used to
+	// be the sum of the components' own durations, which leaves out the counting and so read
+	// 0.4 ms on a request that took 600 ms to reach the upstream.
+	lg = lg.With("cg_ms", float64(added.Microseconds())/1000.0)
+	if bypassed {
+		// A bypassed request is not counted on the request path; the dashboard's count worker
+		// fills the row's token columns later. 0 above means "not counted here", not "empty".
+		lg = lg.With("tokens_pending", true)
 	}
 	if tr.Restored > 0 {
 		// Inserted after the pipeline, so tokens_after above does not include them.
