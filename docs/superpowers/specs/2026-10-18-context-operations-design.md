@@ -37,7 +37,11 @@ Three problems remain with that approach:
 
 - Each producer reports the **operations** it performed on the context, as **facts**.
 - **One library**, owned by context-guru, turns operations into **tokens for each billing tier**.
-- **Cortex** converts tokens to dollars with its own `pricing.Resolver`, and records them.
+- **Each host** converts tokens to dollars with its own rates, and records them. There are two
+  hosts: **Cortex** (`pricing.Resolver`) and the **context-guru proxy** (`internal/modelinfo`).
+  For the same request, both get the same tokens for each tier.
+- An **exhaustive list of test cases**, made with the current saving computation, validates the
+  implementation before any host uses it (§11).
 - The model supports savings **across requests**: removing K tokens from message *i* saves on
   every later request that still carries the removal.
 - context-guru is **one plugin in a longer pipeline**. Other plugins (tool-prune, cpex,
@@ -54,6 +58,8 @@ Three problems remain with that approach:
 | D5 | Shape | **One typed operation for each item**, with an aggregate fallback above a limit. |
 | D6 | How is a saving across requests counted? | **Realized on each request, not projected.** Each request lists every change in its body, fresh or replayed, and is priced from that request's own cache result. |
 | D7 | Where do the types live? | **A standalone module in the context-guru repo,** `github.com/rossoctl/context-guru/ops`, with no dependency on the engine. Cortex's pipeline and every plugin import it without the engine's dependencies. |
+| D8 | Which hosts compute dollars from operations? | **Both: Cortex and the context-guru proxy.** The proxy stops using its own saving rules (`dash/event.go`) when it switches. The comparison of request fingerprints (§5) is a pure function in `ops`, so the proxy does not need Cortex to find B\*. |
+| D9 | How is the implementation validated? | **Against an exhaustive list of test cases made with the current computation** (§11), before any host switches. |
 
 ## 3. Requirements
 
@@ -273,7 +279,22 @@ compared on its own and priced with its own `Before − After`. So a change with
 of B\* gets the right tier for each part. A producer reports positions in its own output. If a later producer adds or removes messages, it reports a `Splice`, and the library maps
 earlier positions into the forwarded body.
 
-## 5. The collector (Cortex)
+## 5. The collector
+
+Each host has a collector: Cortex, and the context-guru proxy. The two parts are split this way:
+
+- **In `ops`, a pure function:** `ops.Compare` takes the recent fingerprints of a session and the
+  fingerprints of this request. It returns B\* and the `cacheBreak` operation, by the rules in
+  §5.2 to §5.4. Both hosts call it, so both classify a break the same way.
+- **In each host:** collecting the operations (§5.1, Cortex only, because the proxy runs one
+  producer), building the fingerprints, and keeping the last K of them for each session.
+
+```go
+func Compare(recent []Fingerprint, cur Fingerprint, usage Usage) (boundary *Position, brk *Operation)
+```
+
+The proxy already finds a prefix change in its own way (`Event.AttributeCache`). It changes to
+`ops.Compare` at migration step 5 (§9).
 
 ### 5.1 Collecting
 
@@ -495,7 +516,9 @@ The library reports failed checks in `Result.Checks`. A failure does not stop pr
 5. **Attribution:** each `cacheBreak` names at most one operation, and that operation is at or
    before the break.
 
-## 7. Recording in Cortex
+## 7. Recording the result
+
+§7.1 and §7.2 are Cortex. §7.3 is the context-guru proxy.
 
 ### 7.1 From `Result` to `event.Saving`
 
@@ -533,6 +556,25 @@ can compute the fold when it opens a session. There is no ledger column for each
 Without an archive (a cluster sidecar), totals for each change cover only the events in memory. The
 per-request savings and the ledger totals are correct either way.
 
+### 7.3 The context-guru proxy
+
+The proxy computes its dollar savings from `ops.Price`, as Cortex does:
+
+1. The engine returns the request's operations (migration step 3).
+2. The proxy's collector calls `ops.Compare` and adds the `cacheBreak` operation.
+3. The proxy calls `ops.Price`.
+4. The proxy converts each `PricedOp` to dollars with `internal/modelinfo.Price` for the request's
+   model.
+5. The proxy stores the dollars in the columns its dashboard reads today: the saving of each
+   component (`ComponentSavedUSD`) and the baseline delta (`baselineDeltaUSD`).
+
+The proxy keeps two of its current rules until the model covers them (§12): the `cachesplit`
+saving and the keep-alive saving.
+
+**Agreement between hosts.** For the same request, `ops.Price` returns the same tokens for each
+tier in both hosts. The dollars are equal only when the two rate tables are equal. The test cases
+use one fixed rate table, so they can compare dollars (§11.2).
+
 ## 8. Errors
 
 The rule: an error in savings never changes the request and never invents money. If a fact is
@@ -555,16 +597,18 @@ Each step merges alone and leaves the totals correct.
 
 | Step | Repo | Change | Verification |
 |---|---|---|---|
-| 1 | context-guru | Create the `ops` module: types, `Price`, checks. No callers. | Unit tests; the worked example as a golden test. |
-| 2 | context-guru | The engine builds `[]ops.Operation` from `Trace` and the reports. **This is new work for each change, not a read of existing fields.** The frozen state is keyed by content hash (`components/offload/state.go`), so `ChangeID` can be derived. But replays are counted only for each component today (`Report.Replays`), and `apply.Trace` records no ID or replay flag for each change. Each offloader must record, for each change, whether it replayed a frozen decision or made a new one. | Replay tests: the same `ChangeID` on each turn, `FirstApplied` once. |
-| 3 | context-guru | The proxy's `dash` calls `ops.Price` in shadow, and logs the difference from its current figure. | Comparison on captured sessions. |
-| 4 | Cortex | `pctx.ReportOps`, the collector, fingerprints. No pricing change. | Tests for each row of §5.4. |
-| 5 | Cortex | tool-prune and context-guru report operations beside their current events. `settle` computes both figures, writes the current one, logs the difference. | The Cortex / cg proxy / control comparison test (`62333ee9` on `feat/contextguru-keepalive`), on both figures. |
-| 6 | Cortex | `settle` switches to `ops.Price`. The new event fields. | Ledger totals before and after on the same replay. |
-| 7 | both | Remove the current events, `saving.go`, `unique.go`, the per-producer draft functions, and the cg proxy's own repeat-rate rule. | `go mod tidy -diff` in every module. |
-| 8 | Cortex | agentop's per-change view. | TUI tests. |
+| 1 | context-guru | **Make the test-case list** (§11), with the current computation. No `ops` code yet. | The list is reviewed. Each `differs` case cites a spec section. Each `notCovered` case is in §12. |
+| 2 | context-guru | Create the `ops` module: types, `Price`, `Compare`, checks. No callers. | Every case in the list passes (§11.4). |
+| 3 | context-guru | The engine builds `[]ops.Operation` from `Trace` and the reports. **This is new work for each change, not a read of existing fields.** The frozen state is keyed by content hash (`components/offload/state.go`), so `ChangeID` can be derived. But replays are counted only for each component today (`Report.Replays`), and `apply.Trace` records no ID or replay flag for each change. Each offloader must record, for each change, whether it replayed a frozen decision or made a new one. | Replay tests: the same `ChangeID` on each turn, `FirstApplied` once. |
+| 4 | context-guru | The proxy computes dollars from `ops` **in shadow** (§7.3): it stores its current figure, and logs the `ops` figure and the difference. | Each logged difference matches a `differs` case (§11.4). |
+| 5 | context-guru | The proxy **switches** to the `ops` figure, and its collector to `ops.Compare`. It keeps its `cachesplit` and keep-alive rules (§12). | Dashboard totals before and after on the same captured sessions. |
+| 6 | Cortex | `pctx.ReportOps`, the collector, fingerprints. No pricing change. | The `Compare` cases pass through the Cortex collector. |
+| 7 | Cortex | tool-prune and context-guru report operations beside their current events. `settle` computes both figures, writes the current one, logs the difference. | Each logged difference matches a `differs` case; also the Cortex / cg proxy / control comparison test (`62333ee9` on `feat/contextguru-keepalive`). |
+| 8 | Cortex | `settle` switches to `ops.Price`. The new event fields. | Ledger totals before and after on the same replay. |
+| 9 | both | Remove the current events, `saving.go`, `unique.go`, the per-producer draft functions, and the proxy's rules that `ops` replaced (`uniqueRate`, `repeatRate`, the reduction part of `baselineDeltaUSD`). **Do not remove a rule that a `notCovered` case still uses.** | `go mod tidy -diff` in every module. All cases pass in both repos. |
+| 10 | Cortex | agentop's per-change view. | TUI tests. |
 
-Expected differences at step 6. Each one corrects a known error, so none is a regression:
+Expected differences at step 8 (and, for the proxy, at step 5). Each one corrects a known error, so none is a regression:
 
 - The penalty is lower. The current one uses the whole `cache_write` as an upper bound.
 - The tier for each change comes from its position, not from a unique fraction for the request.
@@ -577,17 +621,116 @@ Expected differences at step 6. Each one corrects a known error, so none is a re
 - Pricing of `reroute` (inference-router).
 - Persisting fingerprints across a restart.
 
-## 11. Testing
+## 11. Test cases
 
-1. **Golden test from the worked example.** The turn-5 operations, the turn-8 expiry and the turn-7
-   coref break are table tests in `ops`. The expected tokens for each tier are the figures in the
-   example file. If the two disagree, one of them is wrong.
-2. **Property tests in `ops`:** `Saved` and `Caused` are never negative; an empty list gives an
+Before the implementation starts, we make an **exhaustive list of test cases** with the current
+saving computation. The list is the specification the implementation must meet. It also records
+each place where the new figure differs from the current one on purpose.
+
+### 11.1 Where the current figures come from
+
+| Current rule | Repo | Used for |
+|---|---|---|
+| `dash.Event.Price`: `ComponentSavedUSD`, `uniqueRate`, `repeatRate`, `baselineDeltaUSD`, `cachesplitSavedUSD`, `keepaliveSavedUSD`, `BilledTokenFactor` | context-guru | every context-guru case |
+| `settle`: `pruneDraft`, `compactionDraft`, `rewritePenalty` | Cortex (`feat/contextguru-keepalive`) | tool-prune cases, rewrite-penalty cases |
+
+Cortex's `repeatUsage` is a copy of the proxy's `repeatRate`, so the proxy is the source for the
+context-guru reductions. The Cortex rules are removed at step 9, so their figures are recorded
+once: a generator runs in Cortex on `feat/contextguru-keepalive` and writes them into the case
+files. context-guru never imports Cortex.
+
+### 11.2 One case
+
+Each case is a JSON file in `ops/opscases/`. The package embeds them and exports `All() []Case`,
+so a test in Cortex can run the same list.
+
+```json
+{
+  "id": "reduce/replay/before-bstar/hit/5m",
+  "dims": {"kind": "reduce", "firstApplied": false, "position": "beforeBStar",
+           "cache": "hit", "ttl": "5m"},
+  "input": { "...": "an ops.Input" },
+  "rates": "fixture-v1",
+  "expected": { "...": "the ops.Result, tokens for each tier" },
+  "current": { "source": "dash.Event.Price", "usd": 0.00240 },
+  "verdict": "same",
+  "reason": ""
+}
+```
+
+- `expected` is what `ops.Price` must return, by this spec.
+- `current` is the figure the current code gives for the same request, in dollars.
+- `rates` names a fixed rate table in the package. `fixture-v1` is: input $3.00/M, cache write 5m
+  $3.75/M, cache write 1h $6.00/M, cache read $0.30/M. With one table, `expected` and `current`
+  can be compared in dollars.
+- `verdict` is one of:
+  - `same`: `expected`, priced at `rates`, equals `current` within one micro-dollar.
+  - `differs`: the figures differ on purpose. `reason` must cite the spec section that causes it.
+  - `notCovered`: the current code prices something the model does not. The case is listed in §12.
+
+### 11.3 What makes the list exhaustive
+
+**A. Generated cases.** A generator makes one case for each combination of these dimensions. It
+drops the combinations that cannot occur, and states the reason for each drop in its code.
+
+| Dimension | Values |
+|---|---|
+| Kind | `reduce`, `add`, `restore` |
+| `FirstApplied` | true, false |
+| Position | before B\*; after B\* and at or before `L`; after `L`; no breakpoint in the body; spans on both sides of B\* |
+| Cache result | full hit; partial hit; miss with write ≥ input; miss with write < input; expired; boundary unknown (first turn, restart) |
+| TTL of the next breakpoint | 5m, 1h |
+| Component type | summarizer (`summarize`, `cache_aware_summarizer`); other context-guru component; tool-prune |
+| Tokens | counted by a tokenizer; `bytes-estimate`; with and without the proxy's `BilledTokenFactor` |
+
+**B. Hand-written cases.** These test how operations interact, which a cross product cannot do:
+
+1. The worked example: turn 5, the turn-8 expiry and the turn-7 coref break, with every figure in
+   the example file.
+2. Cache breaks: one for each `Cause`. A producer break attributed to the earliest operation. Two
+   producers whose changes are both before the break.
+3. Two producers on the same content (R25), and a structure change that moves positions (`Splice`).
+4. Each `Status`: `projected` is priced and not counted; `reverted` and `discarded` are not priced.
+5. Each `Unpriced` reason, and each `CheckFailure`.
+6. A list over the limit, which becomes an `Aggregate`.
+7. `spend` and `reroute` operations, which pass through unpriced.
+8. The current rules the model does not cover: the `cachesplit` saving and the keep-alive saving
+   (`notCovered`).
+
+**C. Cases from real traffic.** For each difference that a shadow step (§9 steps 4 and 7) logs and
+no case matches, add a case. Then decide: it is a bug in `ops`, or a new `differs` case with a
+reason.
+
+### 11.4 How the list validates the implementation
+
+| Test | Where | Passes when |
+|---|---|---|
+| `ops` unit test | context-guru | `ops.Price` returns `expected` for every case. `ops.Compare` returns the expected B\* and break for every collector case. |
+| Agreement with the current code | context-guru | Every `same` case equals `current`. |
+| Review of the differences | PR review | Every `differs` case cites a spec section, and a reviewer approves the list. |
+| Cortex contract test | Cortex | Cortex builds the same inputs through its own plugins and collector, and gets `expected`. A type change in context-guru fails the Cortex build on upgrade. |
+| Shadow steps | both | Every logged difference matches a `differs` case. |
+| Removal gate | both | No rule is removed while a `notCovered` case uses it. |
+
+### 11.5 Other tests
+
+1. **Property tests in `ops`:** `Saved` and `Caused` are never negative; an empty list gives an
    empty result; reordering operations of different producers does not change each one's price,
    except for break attribution.
-3. **Contract test in Cortex** that builds operations through its plugins and passes them to
-   `ops.Price`, so a type change in context-guru fails the Cortex build on upgrade.
-4. **Collector tests** for each row of §5.4, and for two threads sharing a session (§5.3).
-5. **End-to-end:** the LiteLLM integration test (`06c712cb` on `feat/contextguru-keepalive`) checks
+2. **End-to-end:** the LiteLLM integration test (`06c712cb` on `feat/contextguru-keepalive`) checks
    that the reported saving equals the change in billed cost against the control arm, within a
    tolerance.
+
+## 12. Open questions
+
+These come from current rules that the model does not cover. Each has `notCovered` cases (§11.3).
+
+1. **The `cachesplit` saving.** `cachesplit` moves a breakpoint, so tokens move from the write
+   tier to the read tier. It removes nothing, so no `reduce` operation describes it. Option: a
+   kind for a change to the cache structure. Until then, the proxy keeps `cachesplitSavedUSD`.
+2. **The keep-alive saving.** A ping's value is a cache hit on a later request. It is out of scope
+   (§10). Until it is covered, the proxy keeps `keepaliveSavedUSD`.
+3. **The tokenizer correction.** The proxy multiplies its counted tokens by `BilledTokenFactor`
+   (o200k_base to the provider's tokenizer). Cortex uses a bytes ratio. Option: `Input` takes a
+   factor for each tokenizer name, so `ops.Price` applies the correction in one place. The
+   generated cases test both, with and without the factor.
