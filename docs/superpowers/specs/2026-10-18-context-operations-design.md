@@ -66,7 +66,7 @@ Three problems remain with that approach:
 | D2 | Where is the savings logic? | **In a context-guru library.** Cortex calls it and keeps no producer-specific pricing rules. |
 | D3 | What does the library return? | **Tokens for each tier**, not dollars. Cortex prices them with its own rates (discounts, overrides, long-context tiers), so a saving and the request's spend use the same rates. |
 | D4 | How is cg's own spend recorded? | **As operations, in the same report as the savings.** A `spend` or `ping` operation carries the provider's billed usage of the call (`Call`). The host prices it with the savings, in one path. There is no second record and no `CostRecorder` (§4.6). `ops.Price` does not price the call; it returns `Call.Usage` for the host to price (D3). |
-| D5 | Shape | **One typed operation for each change unit**, with an aggregate fallback above a limit. |
+| D5 | Shape | **One typed operation for each change unit**, in-process only. The recorded summary (`event.Saving`/`ChangeSaving`) has the aggregate fallback above a limit, not the operation list itself (R20, §7.1). |
 | D6 | How is a saving across requests counted? | **Realized on each request, not projected.** Each request lists every change in its body, fresh or replayed, and is priced from that request's own cache result. The producer remembers past changes, not the library or the host (§4.7). |
 | D7 | Where do the types live? | **A standalone module in the context-guru repo,** `github.com/rossoctl/context-guru/ops`, with no dependency on the engine. Cortex's pipeline and every plugin import it without the engine's dependencies. |
 | D8 | Which hosts compute dollars from operations? | **Both: Cortex and the context-guru proxy.** The proxy stops using its own saving rules (`dash/event.go`) when it switches. The comparison of request fingerprints (§5) is a pure function in `ops`, so the proxy does not need Cortex to find B\*. |
@@ -182,7 +182,11 @@ R35 to R39 were added after the first review, and R40 to R43 for subscription pl
   headroom, and an API-equivalent dollar figure can be shown beside it, labelled as an equivalent.
 - **R19.** The model is versioned. An unknown `Kind` is kept and reported as unpriced, never
   dropped.
-- **R20.** The operation list has a size limit, with aggregation above it.
+- **R20.** `RequestOps`/`Operation` is request-scoped and in-process only: input to `ops.Price`,
+  discarded once the request's `event.Saving` is written. It is never recorded (R2's `:9094` and
+  archive concern, and the session store's own size history, apply to what IS recorded —
+  `event.Saving` and `Saving.Changes`/`ChangeSaving` — not to the raw operation list). That
+  recorded summary has a size limit, with aggregation above it (§7.1).
 - **R21.** Second-order effects are not operations. Example: the agent compacts later because its
   requests are smaller.
 
@@ -206,8 +210,8 @@ type RequestOps struct {
     // through its own Call.PaidBy, so nothing here reads RequestOps.Billing (R41, §7.4).
     Billing Billing
     Ping    bool // a request the host sent itself to keep the cache hot
-    Ops       []Operation // in pipeline order
-    Truncated *Aggregate  // set when Ops went over the limit
+    // Ops is in-process only: input to ops.Price for this request, never recorded (R20).
+    Ops []Operation // in pipeline order
 }
 
 // Billing is a fact the host reads from the request's credential, not a price.
@@ -243,22 +247,6 @@ type Thread struct {
     Parent string       // the thread this one was forked from; "" if none
 }
 
-// Aggregate replaces the operations past the limit. It keeps one entry for each key, so the tier
-// stays exact; only the totals for each change are lost.
-type Aggregate struct {
-    Limit   int
-    Dropped int // operations folded into Entries
-    Entries []AggregateEntry
-}
-
-type AggregateEntry struct {
-    Producer, Component string
-    Kind                Kind
-    FirstApplied        bool
-    Side                Side // beforeBoundary | afterBoundary, from the producer's own view
-    Ops                 int
-    Before, After       Size
-}
 
 type Operation struct {
     ID        string // unique inside the request only; across requests, use ChangeID (R6)
@@ -854,9 +842,11 @@ The library reports failed checks in `Result.Checks`. A failure does not stop pr
 
 ### 7.1 From `Result` to `event.Saving`
 
-`settle` calls `ops.Price` once for each request. It prices `Saved` and `Caused` with its
-`pricing.Resolver`, at the same model and long-context tier as the request itself. It writes one
-`event.Saving` for each (producer, component):
+`settle` calls `ops.Price` once for each request, over the in-process `RequestOps`/`Operation`
+list (R20): that list is never recorded. `settle` prices `Saved` and `Caused` with its
+`pricing.Resolver`, at the same model and long-context tier as the request itself, then discards
+the operations and writes one `event.Saving` for each (producer, component) — the only form that
+reaches the session store, `:9094`, and the archive:
 
 | `event.Saving` field | Source |
 |---|---|
@@ -881,6 +871,27 @@ New fields, all additive (the ledger rule is "add, never rename"):
 `TotalAvoidedUSD` does not change: `max(0, USD − PenaltyUSD)` for each saving, floored at zero.
 Signed totals are out of scope (§10).
 
+**Size.** `Saving.Changes` is already small per request — one `ChangeSaving` per change touched,
+not per operation — but a request can still touch many changes (a `coref` batch cut, a wide
+`mask`/`cmdfilter` pass). So `Saving.Changes` has a size limit, with aggregation above it:
+
+```go
+// Aggregate replaces entries past the limit. One bucket per key, so a thread/session total is
+// still exact; only each individual change's own cross-request total is lost for entries folded
+// in here.
+type Aggregate struct {
+    Limit   int
+    Dropped int // ChangeSaving entries folded into Entries
+    Entries []AggregateEntry
+}
+
+type AggregateEntry struct {
+    Producer, Component string
+    FirstApplied         bool
+    SavedUSD, CausedUSD  float64 // summed
+}
+```
+
 ### 7.2 Totals for each change across requests
 
 A total for one `changeId` is a fold over the session's events: add `Changes[i]` where the
@@ -890,13 +901,13 @@ can compute the fold when it opens a session. There is no ledger column for each
 Without an archive (a cluster sidecar), totals for each change cover only the events in memory. The
 per-request savings and the ledger totals are correct either way.
 
-**Totals for a session and for a thread.** Every `PricedOp` carries `Session` and `Thread`, so the
-same fold gives:
+**Totals for a session and for a thread.** `Saving.Thread`/`ChangeSaving.Thread` carry the thread
+(§7.1), so the same fold over recorded events gives:
 
 | Total | Sum of |
 |---|---|
-| A change | `PricedOp`s with one `ChangeID` in one thread |
-| A thread | every `PricedOp`, ping and spend of one `Thread`, plus its `Interaction` |
+| A change | `ChangeSaving`s with one `changeId` in one thread |
+| A thread | every `Saving` of one `Thread`, plus its spend/ping and `Event.InteractionUSD` |
 | A session | every thread of the session |
 | A subagent | the threads whose `Parent` chain leads to the main thread, one at a time |
 
@@ -1082,7 +1093,7 @@ drops the combinations that cannot occur, and states the reason for each drop in
 4. A projected operation: priced, shown as "would have saved", and not counted. A reverted change
    that still made a model call: no reduction, and its `spend` operation counted.
 5. Each `Unpriced` reason, and each `CheckFailure`.
-6. A list over the limit, which becomes an `Aggregate`.
+6. `Saving.Changes` over the limit, which becomes an `Aggregate` (§7.1).
 7. `spend` and `reroute` operations, which pass through unpriced.
 8. Keep-alive: a window that rescued its request; a window whose pings did not stop the expiry; a
    gap inside the TTL, where the ping is not credited; two threads with their own windows.
