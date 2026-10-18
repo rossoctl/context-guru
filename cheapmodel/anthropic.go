@@ -28,7 +28,7 @@ type Anthropic struct {
 	D         dispatch.Dispatcher
 	Ref       dispatch.Ref
 	Model     string // e.g. claude-haiku-4-5
-	MaxTokens int    // default 2048
+	MaxTokens int    // default DefaultMaxTokens (4096)
 }
 
 // AsModel is components.Remodeler: same endpoint, same credential, different model.
