@@ -11,7 +11,7 @@ The process was first used for v0.5.1 and v0.5.2.
 | **Release owner** | Decides what goes into the release. Approves the release notes. Gives the integrator authority to merge. |
 | **Integrator** | Keeps the release list. Starts reviews, merges, rebases, runs the integration check, writes the notes, tags. |
 | **PR author** | Writes the change and its tests. Fixes review findings. |
-| **Reviewer** | Reviews one PR. Never the author of that PR. |
+| **Reviewer** | Gives one independent review of one PR. Never the author of that PR. Each PR has 2 reviewers. |
 
 The integrator and the reviewers can be people or AI agent sessions. The rules are the same.
 
@@ -30,22 +30,59 @@ Each PR needs these before it can merge:
   - unit tests and race tests pass;
   - one test fails on `main` and passes on the PR. It proves the change fixes something;
   - mutations: break each new check on purpose, and show that a test fails.
-- **One separate reviewer** with a **budget of 2 review rounds**, unless the release owner sets another number for that PR.
+- **Two independent reviews**, both approved at the head that merges (see below).
 - **Green CI** at the head that merges.
 
-**Rules for reviews:**
+### Two independent reviews
 
-- Round 1 is thorough. The reviewer reads the full diff and the code around it, runs the tests and their own mutations, then posts all real findings at once.
+A PR needs approval from **2 different reviewers**. Each one starts from scratch.
+
+- **Independent means a different reviewer, not a second round.** Two rounds by the same reviewer count as one review. When the reviewer is an AI agent, each review is a new agent session or subagent, with a fresh context. A reviewer that continues an earlier conversation about the PR is not independent.
+- **Who starts them:**
+  - **Review 1** usually comes from the author's side. The author starts a separate reviewer; the author never reviews their own PR.
+  - **Review 2** is always started by the integrator.
+  - If a PR reaches the release list with no review, the integrator starts both, as 2 separate reviewers.
+- **Review 2 forms its own view first.** It reads the PR, the issue and the code, runs the tests and writes its findings. Only then may it read review 1, to say where it agrees or differs. It never copies a finding it did not check itself.
+- **A PR with 1 approved review is not ready.** The integrator starts review 2. Do not merge on one review, however many rounds it had.
+
+### What each review must state
+
+Each review starts with an identity block, so a reader can see that the 2 reviews are independent:
+
+```text
+Reviewer:    <name of the person, or of the agent session or subagent>
+Kind:        human | AI agent (<tool>, <model>)
+Started by:  <author's session | integrator | release owner>
+Context:     fresh | continues <earlier review link>
+Review:      1 of 2 | 2 of 2
+Head:        <full commit SHA reviewed>
+Verdict:     approve | blocking: <why>
+```
+
+A review without this block does not count toward the 2.
+
+### Rules for each review
+
+- **It is thorough.** The reviewer reads the full diff and the code around it, runs the tests and their own mutations, then posts all real findings at once.
 - **The reviewer runs the tests before posting.** A finding that the tests do not back up is not posted. A finding that only a live run could show is marked "unverified live" and goes on the list for the integration check (step 5).
 - **No live tests on single PRs.** Live testing happens once, in the integration check.
-- Each review is posted on the PR, never only in chat, with the verdict in the first line: "approve" or "blocking: <why>".
-- No small style points in a review. A small point that matters goes at the end, marked "non-blocking".
-- Round 2 checks only that the round-1 findings are fixed, and reviews only the new changes.
-- **If a PR still blocks after its last round, stop.** Tell the release owner. Do not start another round.
+- Each review is posted on the PR, never only in chat.
+- No small style points. A small point that matters goes at the end, marked "non-blocking".
 
-**A PR that was already reviewed:** if it has 2 approved rounds at its current head, it needs no further review. If it has 1, the integrator starts one more review. If the head moved after the last approval, review only the delta (`git range-diff` separates a rebase from new code).
+### When a review finds problems
 
-**A docs-only PR** gets a review only if the release owner asks for one. The owner can review it by hand.
+- The author fixes the findings and pushes.
+- **The same reviewer re-checks its own findings.** The re-check covers only those findings and the new changes. It is not a new independent review, and its identity block says `Context: continues <link>`.
+- Each reviewer has **1 re-check**, unless the release owner sets another number for that PR. If the PR still blocks after it, stop and tell the release owner. Do not start another round.
+
+### When the head moves after an approval
+
+An approval counts only for the head it names. If the head moves (a rebase, a fix, a conflict resolution):
+
+- **A rebase with no other change:** the integrator confirms with `git range-diff` that only the base moved. Then both approvals still count. Say so on the PR.
+- **Any new code, or a conflict resolution:** each reviewer whose approval should still count re-checks the delta. The integrator can instead start a new independent reviewer for the delta.
+
+**A docs-only PR** needs only the release owner's review, by hand, unless the owner asks for the 2 reviews.
 
 ## 3. Merge
 
@@ -148,6 +185,7 @@ Say in the PR body what changed in each plugin. A plugin that did not change kee
 
 ## Notes for an integrator that is an AI agent session
 
+- **Start each reviewer as a new agent, with a fresh context.** Never send review 2 to the agent that did review 1, and never ask a fixer to review its own work. Tell each reviewer which review it is (1 of 2 or 2 of 2) and to post the identity block.
 - **Brief each agent in one message,** with all of its requirements: the issue, what to check, the tests to write, where to work, and how to report. Requirements that arrive in pieces cost extra test runs.
 - **Each agent works in its own git worktree and branch.** No agent changes the main checkout.
 - **Remote test runs stay in the foreground.** An agent that ends its turn to wait for a remote job is not woken when the job ends.
