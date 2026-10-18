@@ -98,6 +98,7 @@ func (d *DB) ImportHistory(home string, opt ImportOptions) (*ImportResult, error
 
 	files := TranscriptFiles(home)
 	var batch []*Event
+	var uses []importedUse
 	for _, f := range files {
 		turns, err := ReadTranscript(f)
 		if err != nil {
@@ -136,6 +137,24 @@ func (d *DB) ImportHistory(home string, opt ImportOptions) (*ImportResult, error
 			}
 			if opt.Apply {
 				batch = append(batch, importedEvent(tn))
+				/* INVOCATIONS TOO, not only spend.
+				 *
+				 * An import that writes `requests` and nothing else produces history that can
+				 * only make a capability look MORE abandoned than it was: the verdict logic
+				 * reads `tool_uses` to decide whether something earned its weight, so spend
+				 * without invocations is evidence of carriage with no evidence of use. Observed
+				 * on a real store — `superpowers:brainstorming` was reported as "never invoked"
+				 * while the user's own transcripts showed four calls a month earlier, and the
+				 * page was recommending its removal.
+				 *
+				 * The bias is the serious part. The error was not noise in both directions; it
+				 * pushed every imported capability toward `remove`. */
+				for _, name := range tn.Called {
+					uses = append(uses, importedUse{
+						session: tn.SessionID, name: name, ts: tn.TS,
+						isSkill: tn.Skills[name],
+					})
+				}
 			}
 		}
 	}
@@ -158,7 +177,98 @@ func (d *DB) ImportHistory(home string, opt ImportOptions) (*ImportResult, error
 		}
 		out.Imported += end - i
 	}
+	if err := d.insertImportedUses(uses); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// importedUse is one capability invocation recovered from a transcript.
+type importedUse struct {
+	session string
+	name    string
+	ts      int64
+	// isSkill comes from the transcript, which saw the invocation go through the `Skill` tool.
+	// Not derived from the name: a marketplace skill is a bare word like `artifact-design` and
+	// looks exactly like a tool.
+	isSkill bool
+}
+
+// insertImportedUses records recovered invocations in tool_uses.
+//
+// WRITTEN AS AN ABSOLUTE COUNT, not accumulated. The live path upserts with
+// `calls = calls + excluded.calls`, which is right for it: each batch carries new traffic. An
+// import re-reads the SAME transcripts every run, so accumulating would make a capability look
+// twice as used after a second run — and a user who re-runs an import to pick up last week's
+// history would silently inflate every figure that run touched.
+//
+// Skills and plain tools are told apart the way the inventory does it: a skill's name goes in the
+// `skill` column, a tool's in `name`. Reading a transcript, the distinction is whether the
+// invocation came through the `Skill` tool — see transcriptCalled.
+func (d *DB) insertImportedUses(uses []importedUse) error {
+	if len(uses) == 0 {
+		return nil
+	}
+	// Collapsed per (session, capability) first, because tool_uses holds one accumulated row per
+	// pair and a session invokes the same capability many times.
+	type key struct{ session, name string }
+	type acc struct {
+		calls       int
+		first, last int64
+		// isSkill comes from the transcript, which saw the invocation go through the `Skill`
+		// tool. Not derived from the name: a marketplace skill is a bare word like
+		// `artifact-design` and is indistinguishable from a tool by shape alone.
+		isSkill bool
+	}
+	agg := map[key]*acc{}
+	for _, u := range uses {
+		k := key{u.session, u.name}
+		a := agg[k]
+		if a == nil {
+			a = &acc{}
+			agg[k] = a
+		}
+		a.calls++
+		if u.isSkill {
+			a.isSkill = true
+		}
+		if a.first == 0 || u.ts < a.first {
+			a.first = u.ts
+		}
+		if u.ts > a.last {
+			a.last = u.ts
+		}
+	}
+
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT INTO tool_uses(
+		tenant_id, session_id, name, server, skill, calls, first_ts, last_ts
+	) VALUES ('',?,?,'',?,?,?,?)
+	ON CONFLICT(tenant_id, session_id, name, skill) DO UPDATE SET
+		calls = excluded.calls,
+		first_ts = MIN(first_ts, excluded.first_ts),
+		last_ts = MAX(last_ts, excluded.last_ts)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for k, a := range agg {
+		// A capability whose name carries a colon came through the Skill tool; anything else is a
+		// tool or an MCP tool, which the inventory keys by `name`.
+		toolName, skillName := k.name, ""
+		if a.isSkill {
+			toolName, skillName = "Skill", k.name
+		}
+		if _, err := stmt.Exec(k.session, toolName, skillName,
+			a.calls, a.first, a.last); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // importedEvent is one transcript turn as a request row.

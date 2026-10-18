@@ -54,6 +54,15 @@ type TranscriptTurn struct {
 	// Called is every capability this turn invoked: tool names as sent, and SKILLS BY THEIR OWN
 	// NAME rather than by the tool that ran them. See transcriptCalled.
 	Called []string
+	// Skills is the subset of Called that arrived through the `Skill` tool.
+	//
+	// CARRIED AS A FACT, not re-derived from the name. The obvious test is a colon —
+	// `superpowers:brainstorming` has one — but a marketplace skill does not: `artifact-design`
+	// and `dataviz` are both skills and both bare. Guessing from the shape of the name files them
+	// as tools, which puts them in the wrong half of the inventory. The transcript already knows,
+	// because the invocation came through one specific tool, so the answer is recorded rather
+	// than inferred.
+	Skills map[string]bool
 }
 
 // transcriptEntry is the subset of a transcript line this code reads. Deliberately partial: the
@@ -124,6 +133,7 @@ func ReadTranscript(path string) ([]TranscriptTurn, error) {
 		if total == 0 {
 			continue
 		}
+		called, skills := transcriptCalled(&e)
 		ts, err := time.Parse(time.RFC3339Nano, e.Timestamp)
 		if err != nil {
 			// A turn with no usable timestamp cannot be placed on any axis, and guessing one
@@ -142,7 +152,8 @@ func ReadTranscript(path string) ([]TranscriptTurn, error) {
 			CacheRead:  u.CacheReadInputToks,
 			CacheWrite: u.CacheCreationInToks,
 			Output:     u.OutputTokens,
-			Called:     transcriptCalled(&e),
+			Called:     called,
+			Skills:     skills,
 		})
 	}
 	// A scanner error mid-file still yields what was read: half a transcript is worth more than
@@ -158,9 +169,10 @@ func ReadTranscript(path string) ([]TranscriptTurn, error) {
 // made, and it matters more here than anywhere: "which of my skills have I ever used" is the
 // question this import exists to answer, and collapsing them all into one name answers it wrong
 // while looking like it worked.
-func transcriptCalled(e *transcriptEntry) []string {
+func transcriptCalled(e *transcriptEntry) ([]string, map[string]bool) {
 	var out []string
 	seen := map[string]bool{}
+	skills := map[string]bool{}
 	for _, b := range e.Message.Content {
 		if b.Type != "tool_use" || b.Name == "" {
 			continue
@@ -168,6 +180,9 @@ func transcriptCalled(e *transcriptEntry) []string {
 		name := b.Name
 		if name == "Skill" && b.Input.Skill != "" {
 			name = b.Input.Skill
+			// Recorded here, where it is known for certain, rather than guessed from the name
+			// later: a marketplace skill is a bare word and indistinguishable from a tool.
+			skills[name] = true
 		}
 		if seen[name] {
 			continue
@@ -175,7 +190,7 @@ func transcriptCalled(e *transcriptEntry) []string {
 		seen[name] = true
 		out = append(out, name)
 	}
-	return out
+	return out, skills
 }
 
 // TranscriptFiles lists every session transcript on this machine, oldest first.
