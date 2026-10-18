@@ -243,7 +243,8 @@ collector adds a break attributed to op12:
 
 ```json
 { "id": "op13", "kind": "cacheBreak", "cause": "producer",
-  "at": {"section": "messages", "index": 5}, "attributedTo": "op12" }
+  "at": {"section": "messages", "index": 5},
+  "attributedTo": "op12", "attributedChange": "cg:coref:5e2d" }
 ```
 
 ### Where the breakpoints matter
@@ -574,6 +575,7 @@ the cost ledger's money columns.
 | `structure` | move later positions after a summary |
 | `call` | the billed usage of a ping or a model call; the host prices it with the savings |
 | `produced` | join a call's cost to the change it paid for |
-| `attributedTo` | which change a `cacheBreak` is charged to; absent means nobody |
+| `id` | names an operation inside its request: results, check failures, and `attributedTo` |
+| `attributedTo`, `attributedChange` | the operation, and the change, a `cacheBreak` is charged to; absent means nobody |
 | `billing` (`RequestOps`) | how the host values the tokens: money, or usage-limit units |
 | `call.paidBy` | who paid for a spend or a ping: the user's plan, or the operator's key |

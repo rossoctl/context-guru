@@ -101,7 +101,9 @@ R35 to R39 were added after the first review, and R40 to R43 for subscription pl
 - **R5.** Spend that happens outside a request (a keep-alive ping, a detached summarizer call)
   carries its own attribution. It uses the same operations and the same recording path as spend
   inside a request (§4.6).
-- **R6.** An operation has an ID, so a later operation can refer to it.
+- **R6.** An operation has an ID that is unique inside its request. Results, check failures and
+  `cacheBreak` attribution refer to it. A reference to a change in another request uses `ChangeID`
+  (R22), not the operation ID.
 - **R27.** The model is not specific to one producer. Each operation names its producer and its
   pipeline stage.
 - **R28.** One collector for each request collects the operations of all plugins, in order, and
@@ -251,7 +253,7 @@ type AggregateEntry struct {
 }
 
 type Operation struct {
-    ID        string // unique inside the request
+    ID        string // unique inside the request only; across requests, use ChangeID (R6)
     Kind      Kind   // reduce | add | stateChange | ping | spend | reroute | cacheBreak
 
     // Session and Thread are copied from RequestOps by the framework. They are on every operation
@@ -296,7 +298,8 @@ type Operation struct {
 
     // kind = cacheBreak (written by the collector only)
     Cause        Cause  // producer | client | expired | unknown
-    AttributedTo string // operation ID; "" means nobody
+    AttributedTo     string // the cause's operation ID, in this request; "" means nobody
+    AttributedChange string // the cause's ChangeID, so a penalty joins its change's total; "" = nobody
 
     // a change to the message list, for mapping positions
     Structure *Splice
@@ -627,7 +630,7 @@ forwarded body. `clientFirstDiff` is the same comparison on client bodies.
 
 | Comparison | Result |
 |---|---|
-| `fwdFirstDiff < clientFirstDiff` | A plugin broke the cache. Add `cacheBreak{cause: producer, at: fwdFirstDiff}`, attributed to the earliest operation at or before `fwdFirstDiff`. |
+| `fwdFirstDiff < clientFirstDiff` | A plugin broke the cache. Add `cacheBreak{cause: producer, at: fwdFirstDiff}`, attributed to the earliest operation at or before `fwdFirstDiff`: its `ID` in `AttributedTo`, its `ChangeID` in `AttributedChange`. |
 | `fwdFirstDiff ≥ clientFirstDiff` | The client changed its body. Add `cacheBreak{cause: client}`, attributed to nobody. |
 | No diff, but `cache_read` is far below the matching request's cached extent | The cache expired. Add `cacheBreak{cause: expired}`, attributed to nobody. |
 | No matching fingerprint | First turn or restart: `cause: unknown`. B\* is unknown (§6.4). |
