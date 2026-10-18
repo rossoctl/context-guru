@@ -201,8 +201,11 @@ type RequestOps struct {
     Thread    Thread
     Agent     string
     At        time.Time
-    Billing   Billing     // how the provider charges this request (R41)
-    Ping      bool        // a request the host sent itself to keep the cache hot
+    // Billing applies only when Ops has a priced content change (reduce, add, stateChange,
+    // cacheBreak). Zero value otherwise: a Ping report's content is a `ping` operation, priced
+    // through its own Call.PaidBy, so nothing here reads RequestOps.Billing (R41, §7.4).
+    Billing Billing
+    Ping    bool // a request the host sent itself to keep the cache hot
     Ops       []Operation // in pipeline order
     Truncated *Aggregate  // set when Ops went over the limit
 }
@@ -445,10 +448,10 @@ cg spends money in two places: a model call during a request (`extract_llm`, an 
 `summarize`), and a call outside any request (a keep-alive ping, a summarizer call that finishes
 after the response). Both are reported as operations. There is no parallel record.
 
-| Where the call happens | How it is reported |
-|---|---|
-| During a request | a `spend` operation in that request's `RequestOps`, through `pctx.ReportOps` |
-| Outside a request | a standalone `RequestOps` with one `ping` or `spend` operation, through the host's `Sink` |
+| Where the call happens | Who assembles `RequestOps` | How it is reported |
+|---|---|---|
+| During a request | the collector, incrementally: it opens one `RequestOps` per request (`Session`, `Thread`, `Billing` resolved from the credential before any plugin runs), and each plugin's `pctx.ReportOps(ops...)` call appends operations into it, stamped with `Producer` and `Stage` (§5.1). A `spend` operation made during a request is appended the same way as any other operation. | `pctx.ReportOps` |
+| Outside a request | the caller itself — the keeper, for a ping. There is no open collector to supply facts, so the caller fills `RequestOps` with what it knows about the thread it is acting on: `Session` and `Thread`. It leaves `Billing` unset, because its one operation (`ping` or a detached `spend`) is priced through its own `Call.PaidBy`, which carries its own `Billing` (R41, §7.4). | the host's `Sink` |
 
 ```go
 // Sink receives a RequestOps that has no request to travel with: a ping, or a detached call.
@@ -469,9 +472,12 @@ in Cortex, `cgModel`). The client reads the usage from each response, and fills 
 engine's own usage accounting is not used, because under Cortex it is zero (2026-10-14 spec, §0).
 
 **A detached call.** A summarizer call can finish after its request was answered. Its `spend`
-operation then cannot travel with that request. The engine sends it through the `Sink`, with
-`Detached = true`, and with the request's session and thread. Its `Produced` names the change it
-made, so the cost is still joined to that change.
+operation then cannot travel with that request's `RequestOps`, which the collector may already have
+closed and recorded. The engine sends it through the `Sink` instead, as a standalone `RequestOps`
+with `Detached = true` on the operation, and `Session`/`Thread` set from the request that caused the
+call — the engine still has those, even though the request is gone. `Billing` is left unset, for the
+same reason a ping leaves it unset: the one operation prices through its own `Call.PaidBy`. Its
+`Produced` names the change it made, so the cost is still joined to that change.
 
 **How the host records it.** The host handles a report from `ReportOps` and a report from `Sink`
 the same way. It prices `Saved`, `Caused` and `Call.Usage` with one resolver, at one time. So spend
