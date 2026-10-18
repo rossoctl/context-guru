@@ -46,6 +46,13 @@ Three problems remain with that approach:
   every later request that still carries the removal.
 - context-guru is **one plugin in a longer pipeline**. Other plugins (tool-prune, cpex,
   inference-router) also change the request. The model covers all of them.
+- Every figure uses the **cache state** of the request: hot, cold, or kept hot by a keep-alive.
+- The model covers the operations that change the **cache state**, not only the content: keep-alive
+  pings, `cachesplit`, and the TTL of a breakpoint.
+- A later operation can **end** the effect of earlier ones. Example: a summary replaces messages
+  that `mask` had already reduced.
+- Every figure can be summed **for each session and for each thread**, so a subagent's saving is
+  separate from the main thread's.
 
 ## 2. Decisions
 
@@ -55,15 +62,19 @@ Three problems remain with that approach:
 | D2 | Where is the savings logic? | **In a context-guru library.** Cortex calls it and keeps no producer-specific pricing rules. |
 | D3 | What does the library return? | **Tokens for each tier**, not dollars. Cortex prices them with its own rates (discounts, overrides, long-context tiers), so a saving and the request's spend use the same rates. |
 | D4 | Does the library also price cg's own spend? | **No.** A `spend` operation carries a `SpendID` that links it to the `CostRecorder` record Cortex measured at its transport. |
-| D5 | Shape | **One typed operation for each item**, with an aggregate fallback above a limit. |
+| D5 | Shape | **One typed operation for each change unit**, with an aggregate fallback above a limit. |
 | D6 | How is a saving across requests counted? | **Realized on each request, not projected.** Each request lists every change in its body, fresh or replayed, and is priced from that request's own cache result. |
 | D7 | Where do the types live? | **A standalone module in the context-guru repo,** `github.com/rossoctl/context-guru/ops`, with no dependency on the engine. Cortex's pipeline and every plugin import it without the engine's dependencies. |
 | D8 | Which hosts compute dollars from operations? | **Both: Cortex and the context-guru proxy.** The proxy stops using its own saving rules (`dash/event.go`) when it switches. The comparison of request fingerprints (§5) is a pure function in `ops`, so the proxy does not need Cortex to find B\*. |
 | D9 | How is the implementation validated? | **Against an exhaustive list of test cases made with the current computation** (§11), before any host switches. |
+| D10 | How is the cache state used? | **As an input to every price.** The tier of a content change depends on the state (§6.2). An operation that changes the state (`stateChange`, §4.4) is priced as the difference between two states. |
+| D11 | What happens to a change that a later change ends? | **It stops on that request.** The later change names it in `Supersedes` and takes over its tokens. Each change keeps the total it had until then (§4.5). |
+| D12 | Where does the thread ID come from? | **From the collector, on every operation.** It uses the agent's thread header when there is one, else the matching fingerprint (§5.3). |
 
 ## 3. Requirements
 
 The numbers are the order in which the requirements were found, so they are not in sequence.
+R35 to R39 were added after the first review.
 **R10 is withdrawn.** It asked for a flag that separates a replay from a fresh act. `FirstApplied`
 (§4.1) replaces it.
 
@@ -112,6 +123,14 @@ The numbers are the order in which the requirements were found, so they are not 
   charged to a plugin.
 - **R32.** Positions resolve in the forwarded body. A producer that adds or removes messages
   reports that.
+- **R36.** Every price uses the request's cache state: hot (the previous entry was read), cold
+  (expired, or the first request), or rescued (a keep-alive kept the entry hot). The same change
+  has a different value in each state.
+- **R37.** Cache breakpoints are an input. The provider writes and reads the cache only at a
+  breakpoint, so the tier of a position and the size of a cache-break penalty depend on where the
+  breakpoints are, and on their TTL.
+- **R38.** Operations that change the cache state are covered: a keep-alive ping, `cachesplit`, and
+  a breakpoint TTL change. Each one is priced as the difference between two states.
 
 ### D. Status and correctness
 
@@ -123,13 +142,17 @@ The numbers are the order in which the requirements were found, so they are not 
   minus the forwarded body. The library checks this.
 - **R15.** Each request is complete without history.
 - **R16.** Operations are in the order they ran.
-- **R25.** When two producers change the same content, each one is credited for its own change,
-  in order.
+- **R25.** When two producers change the same content on one request, each one is credited for
+  its own change, in pipeline order.
+- **R35.** A change can end earlier changes (a summary of reduced messages). The later change names
+  them, and they stop. Their totals until then do not change (§4.5).
 
 ### E. Operability
 
 - **R17.** Each operation names its component, taxonomy class and decision signal.
 - **R18.** Each request carries request ID, session, thread (if known) and agent.
+- **R39.** Each operation carries its session ID and thread ID, so every figure can be summed for
+  one session, for one thread, or for one subagent.
 - **R19.** The model is versioned. An unknown kind or class is kept and reported as unpriced, never
   dropped.
 - **R20.** The operation list has a size limit, with aggregation above it.
@@ -143,14 +166,25 @@ The numbers are the order in which the requirements were found, so they are not 
 ```go
 package ops // github.com/rossoctl/context-guru/ops
 
+// RequestOps is the operations of one request, or of one keep-alive ping (Ping set).
 type RequestOps struct {
     Version   int
     RequestID string
     Session   string
-    Thread    string // "" when the host cannot resolve threads
+    Thread    Thread
     Agent     string
+    At        time.Time
+    Ping      bool        // a request the host sent itself to keep the cache hot
     Ops       []Operation // in pipeline order
     Truncated *Aggregate  // set when Ops went over the limit
+}
+
+// Thread identifies one conversation inside a session: the main thread, a subagent, or a fork.
+// Each thread has its own provider cache entry.
+type Thread struct {
+    ID     string       // "main" for the primary thread
+    Source ThreadSource // header | prefix | new
+    Parent string       // the thread this one was forked from; "" if none
 }
 
 // Aggregate replaces the operations past the limit. It keeps one entry for each key, so the tier
@@ -172,7 +206,13 @@ type AggregateEntry struct {
 
 type Operation struct {
     ID        string // unique inside the request
-    Kind      Kind   // reduce | add | reroute | spend | cacheBreak
+    Kind      Kind   // reduce | add | stateChange | ping | spend | reroute | cacheBreak
+
+    // Session and Thread are copied from RequestOps by the framework. They are on every operation
+    // so a store of operations can be summed for one session or one thread with no join.
+    Session string
+    Thread  string
+
     Producer  string // set by the framework, not by the producer
     Stage     int    // set by the framework
     Component string // "mask", "dedup"; "" for a one-operation plugin
@@ -188,10 +228,19 @@ type Operation struct {
     Before Size     // what the producer received over the touched ranges; the sum over Spans
     After  Size     // what it sent on over the same ranges
 
-    // kind = reduce | add
+    // kind = reduce | add | stateChange | ping
     ChangeID     string   // the same on every request that carries this change
     FirstApplied bool     // true only on the first request that carries it
     ContentKeys  []string // hashes of removed content
+
+    // kind = reduce: the changes this one ends (§4.5)
+    Supersedes []string // ChangeIDs; they are not reported again after this request
+    Inherited  Size     // the part of Before - After that the superseded changes had removed
+
+    // kind = stateChange (§4.4)
+    Mechanism Mechanism // keepAlive | cacheSplit | breakpointTTL
+    StateFrom CacheState
+    StateTo   CacheState
 
     // class = restore
     Reverses string // ChangeID this restore adds back
@@ -233,7 +282,18 @@ type Size struct {
 
 type Splice struct{ At, Removed, Inserted int } // messages only
 
-type Kind string          // reduce | add | reroute | spend | cacheBreak
+// CacheState is the state of the thread's provider cache entry when a request arrives.
+type CacheState struct {
+    Phase     Phase         // hot | cold | unknown
+    Extent    *Position     // the last position the entry covers; nil when cold or unknown
+    Gap       time.Duration // time since the entry was last written or read
+    TTL       time.Duration // lifetime of the entry: 5m or 1h, from its breakpoint
+}
+
+type Kind string          // reduce | add | stateChange | ping | spend | reroute | cacheBreak
+type Mechanism string     // keepAlive | cacheSplit | breakpointTTL
+type Phase string         // hot | cold | unknown
+type ThreadSource string  // header | prefix | new
 type Class string         // reencode | envelope | reduce | summarize | restore | inject
 type Signal string        // shape | redundancy | age | reference | relevance | account
 type Status string        // applied | projected | reverted | discarded
@@ -260,8 +320,10 @@ and can be reported as unpriced (R19).
 4. **`Before` and `After` are measured at the producer's own input.** For `add` and for a restore,
    `After > Before`.
 5. **Only the collector writes `cacheBreak`.**
-6. **A keep-alive ping is not in `RequestOps`.** It reaches the ledger through `CostRecorder`, with
-   its `SpendID` and thread. The value of a ping is out of scope (§10).
+6. **A keep-alive ping is its own `RequestOps`, with `Ping = true`.** It has one `ping` operation
+   with a `SpendID`. Its `ChangeID` names the keep-alive window, and the `stateChange` operation on
+   the request it rescued has the same `ChangeID`. So the cost and the value of a window add up
+   (§4.4).
 7. **`ChangeID`** is derived from the component, the original content key and the replacement
    bytes. Two components that remove the same content in different ways have different IDs.
 8. **The tokens a change saved come from the operation's own `Size`, not from the forwarded body.**
@@ -276,8 +338,51 @@ and can be reported as unpriced (R19).
 The provider hashes `tools`, then `system`, then `messages`. A comparison of two positions in that
 order shows whether a change is before a cache boundary. For a change with `Spans`, each span is
 compared on its own and priced with its own `Before − After`. So a change with spans on both sides
-of B\* gets the right tier for each part. A producer reports positions in its own output. If a later producer adds or removes messages, it reports a `Splice`, and the library maps
-earlier positions into the forwarded body.
+of B\* gets the right tier for each part. A producer reports positions in its own output. If a
+later producer adds or removes messages, it reports a `Splice`, and the library maps earlier
+positions into the forwarded body.
+
+### 4.4 Operations that change the cache state
+
+A `stateChange` operation does not change the content. It changes how the provider bills content
+that is already there.
+
+| Mechanism | Producer | What changes | Reported on |
+|---|---|---|---|
+| `keepAlive` | the keeper, through the host's collector | `StateFrom = cold`, `StateTo = hot`: a ping read the entry, so it did not expire | the first request after the ping window, when it was rescued |
+| `cacheSplit` | context-guru (`cachesplit`) | the stable half of the system block is read, not written, when the volatile tail changed | each request where the split applies |
+| `breakpointTTL` | context-guru (`apply/headttl.go`) | the head of the request is held for 1h, not 5m | each request where the 1h entry is read after a gap longer than 5m |
+
+**When the collector adds a `keepAlive` operation.** All four conditions must be true. They are the
+conditions of the current `keepaliveSavedUSD`:
+
+1. The keeper sent at least one ping for this thread during the gap before this request.
+2. The gap is longer than the entry's TTL, so without a ping the entry would have expired.
+3. The provider read more than it wrote.
+4. The tokens are the smaller of what the last ping read and what this request read.
+
+**The ping and the rescue share one `ChangeID`,** the ID of the keep-alive window. A window whose
+pings rescued nothing has only `ping` operations, so its total is negative. That is the cost of a
+ping that was not needed, and it is visible for each thread.
+
+### 4.5 Changes that end other changes
+
+A change can remove content that earlier changes had already reduced. Example: on turn 12 a
+summary replaces messages 0 to 8, and messages 3 and 5 were reduced by `mask` and `coref`.
+
+1. The later change lists the earlier ones in `Supersedes`.
+2. The earlier changes are **not reported** after that request. Their content is gone, so there is
+   nothing to replay.
+3. The later change's `Before` is the **client's** size of the content it replaced, so its saving
+   covers all of it. `Inherited` is the part that the superseded changes had removed.
+4. The totals of the superseded changes until that request do not change. A change that did not
+   pay back before it was ended shows a loss.
+5. If the later change is reversed (a restore, or the summary is dropped), the earlier changes do
+   not come back by themselves. The producer reports them again as new operations, with their old
+   `ChangeID` and `FirstApplied = false`.
+
+`Inherited` lets a report show how much of a summary's saving was new work and how much it took
+over. The price does not use it.
 
 ## 5. The collector
 
@@ -324,6 +429,7 @@ The collector keeps a fingerprint of each recent request, for each session:
 
 ```go
 type Fingerprint struct {
+    Thread    string
     At        time.Time
     Client    Body     // client body, before any plugin
     Forwarded Body     // body as sent upstream
@@ -347,10 +453,22 @@ type PosHash struct {
 
 ### 5.3 Finding the matching previous request
 
-Subagents share the session with the main thread, and Cortex cannot tell which subagent sent a
-request. The provider's cache is addressed by content, not by thread. So the collector compares the
-request with the last K = 4 fingerprints of the session, and selects the one with the longest
-common client prefix. This meets R24 without a thread ID.
+Subagents share the session with the main thread. The provider's cache is addressed by content,
+not by thread. So the collector compares the request with the last K = 4 fingerprints of the
+session, and selects the one with the longest common client prefix. This meets R24.
+
+The same match gives the **thread ID** on every operation (R39):
+
+| Case | Thread ID | `Source` |
+|---|---|---|
+| The agent sends a thread header | the header value | `header` |
+| No header; a fingerprint matches | the matching fingerprint's thread | `prefix` |
+| No header; nothing matches, and the request is not the session's first | a new ID | `new` |
+| The session's first request | `main` | `new` |
+
+A fingerprint now also stores its thread ID. context-guru's `internal/thread` resolves threads the
+same way (header first, then prefix continuity). The collector reuses its rule, so both hosts give
+the same thread ID for the same traffic.
 
 ### 5.4 Classifying a break
 
@@ -363,6 +481,18 @@ forwarded body. `clientFirstDiff` is the same comparison on client bodies.
 | `fwdFirstDiff ≥ clientFirstDiff` | The client changed its body. Add `cacheBreak{cause: client}`, attributed to nobody. |
 | No diff, but `cache_read` is far below the matching request's cached extent | The cache expired. Add `cacheBreak{cause: expired}`, attributed to nobody. |
 | No matching fingerprint | First turn or restart: `cause: unknown`. B\* is unknown (§6.4). |
+
+The same comparison gives the **cache state** for `Input.State` (R36):
+
+| Case | `Phase` | `Extent` |
+|---|---|---|
+| A fingerprint matches, and `Gap` ≤ its TTL | `hot` | the matching request's cached extent |
+| A fingerprint matches, `Gap` > TTL, and a ping of this thread read the entry inside its TTL | `hot`, and the collector adds a `keepAlive` operation (§4.4) | the extent the ping read |
+| A fingerprint matches, and `Gap` > TTL with no ping | `cold` | nil |
+| No fingerprint matches | `unknown` | nil |
+
+`Gap` is measured from the start of the last request or ping that touched the entry, because the
+provider measures the TTL from the start of a request.
 
 ### 5.5 Tokens for each position
 
@@ -396,6 +526,7 @@ type Input struct {
     Forwarded   []PosBytes   // every position of the forwarded body, in hash order
     Breakpoints []Breakpoint // cache_control breakpoints of the forwarded body, in hash order
     Boundary    *Position    // B*; nil = unknown
+    State       CacheState   // the thread's cache state on arrival (§5.4)
 }
 
 // Usage is the provider's billed prompt usage. CacheWrite1h is the part of CacheWrite billed at
@@ -440,16 +571,44 @@ On a cache miss, B\* = 0, so the first row matches nothing. A position is compar
 section first (tools, system, messages), then index. For a change with `Spans`, each span is
 compared on its own (§4.3).
 
-A `cacheBreak` attributed to an operation moves the cached content from the break to B\*, as
-forwarded on this request, from the read tier to the write tier. The new tail after B\* is written
-anyway, so it is not counted.
+**The state.** B\* comes from the state: B\* = `State.Extent` when `Phase = hot`, limited by where
+the client changed its own body (§5.2). When `Phase = cold`, B\* = 0, so every position takes the
+write or input tier. So the same 8,000 tokens are worth 8,000 × read on a hot turn and 8,000 ×
+write on a cold turn.
+
+**A cache break, and the breakpoints.** A `cacheBreak` attributed to an operation moves content
+from the read tier to the write tier. The content that moves is:
+
+- **from** the end of what the provider still read on this request (`Usage.CacheRead`, mapped onto
+  the forwarded positions),
+- **to** B\*, as forwarded on this request.
+
+The start is the read extent, not the position of the break. The provider reads only up to a
+breakpoint. If the last breakpoint before the break is the end of `system`, the provider reads only
+`tools` and `system`, and every message before the break is written again too. So a break deep in
+the messages costs the same as a break at `messages[0]` when there is no breakpoint between them.
+The new tail after B\* is written anyway, so it is not counted.
+
+**A state change.** A `stateChange` operation moves its tokens from the tier of `StateFrom` to the
+tier of `StateTo`: for `keepAlive` and `cacheSplit`, from write to read. For `breakpointTTL`, from
+write (the 5m entry expired) to read. The 1h write premium, paid on the request that writes the 1h
+entry, is a `Caused.CacheWrite1h` on that request.
+
+**The interaction.** On a rescued request, the content changes are priced in the hot state (rule
+above). Without the ping they would have been priced cold, which is worth more. The difference is
+neither the ping's nor the content changes' alone. The library reports it as
+`Result.Interaction`, attributed to nobody, so the request total still equals the bill without
+the operations minus the bill with them.
 
 ### 6.3 Output
 
 ```go
 type Result struct {
-    Version  int
-    Ops      []PricedOp     // one for each input operation, same order
+    Version     int
+    Session     string
+    Thread      string
+    Ops         []PricedOp     // one for each input operation, same order
+    Interaction TierTokens     // §6.2: on a rescued request; attributed to nobody
     Unpriced []Unpriced     // with a machine-stable reason
     Checks   []CheckFailure // §6.5
     Boundary BoundaryInfo   // the B* used, and its source
@@ -461,7 +620,8 @@ type Unpriced struct {
 }
 
 type CheckFailure struct {
-    Check    string // "sum" | "order" | "unique_change" | "spans" | "attribution" (§6.5)
+    Check    string // "sum" | "order" | "unique_change" | "spans" | "attribution" |
+                    // "conservation" | "supersession" | "thread" (§6.5)
     Producer string // "" when the check is not about one producer
     Detail   string // numbers only, no content
 }
@@ -473,6 +633,8 @@ type BoundaryInfo struct {
 
 type PricedOp struct {
     OpID      string
+    Session   string
+    Thread    string
     Producer  string
     Component string
     ChangeID  string
@@ -480,7 +642,7 @@ type PricedOp struct {
     Saved     TierTokens // tokens the provider did not bill, by tier; never negative
     Caused    TierTokens // tokens the provider billed because of this operation; never negative
     Estimated bool
-    Reason    string // "cached_prefix", "new_tail", "expired", "break_penalty", ...
+    Reason    string // "cached_prefix", "new_tail", "cold", "break_penalty", "rescued", ...
 }
 
 type TierTokens struct {
@@ -495,7 +657,13 @@ A break penalty has both sides: the tokens are written (`Caused.CacheWrite5m`) i
 (`Saved.CacheRead`). The net is the rate difference, with no special rule.
 
 A `cacheBreak` is priced as its own operation. Cortex adds it to the operation it is attributed to.
-`spend` operations are not priced. They pass through with their `SpendID`.
+`spend` and `ping` operations are not priced in tokens. They pass through with their `SpendID`,
+and the host adds the money it measured for that call.
+
+**Conservation.** For each request, the priced `Saved − Caused` of all content changes, cache
+breaks and state changes, plus `Interaction`, equals the bill of the client body in the state it
+would have had without any operation, minus the bill of the forwarded body. The library checks
+this in tokens (§6.5, check 6).
 
 ### 6.4 Unknown boundary
 
@@ -515,6 +683,10 @@ The library reports failed checks in `Result.Checks`. A failure does not stop pr
 4. **Spans:** for an operation with `Spans`, its `Before` and `After` equal the sums over its spans.
 5. **Attribution:** each `cacheBreak` names at most one operation, and that operation is at or
    before the break.
+6. **Conservation:** the request total equals the bill difference (§6.3).
+7. **Supersession:** a `ChangeID` that an earlier request listed in `Supersedes` does not appear
+   again, unless a restore reversed the superseding change.
+8. **Thread:** every operation has the request's `Session` and `Thread`.
 
 ## 7. Recording the result
 
@@ -543,6 +715,8 @@ New fields, all additive (the ledger rule is "add, never rename"):
 | `Saving.Producer` | event and ledger | group `context-guru/*` in the per-plugin breakdown |
 | `Saving.Changes []ChangeSaving` | event only | `{changeId, savedUSD, causedUSD, firstApplied}`, for totals and payback for each change. Not in the ledger, which keys by minute. |
 | `Event.UnattributedBreakUSD` | event | client edits and expired caches. Shown, never charged to a plugin. |
+| `Event.InteractionUSD` | event | the interaction on a rescued request (§6.2). Counted in the session total, never charged to a plugin. |
+| `Saving.Thread`, `ChangeSaving.Thread` | event and ledger | sum for each thread; a subagent's saving is separate from the main thread's |
 
 `TotalAvoidedUSD` does not change: `max(0, USD − PenaltyUSD)` for each saving, floored at zero.
 Signed totals are out of scope (§10).
@@ -556,6 +730,18 @@ can compute the fold when it opens a session. There is no ledger column for each
 Without an archive (a cluster sidecar), totals for each change cover only the events in memory. The
 per-request savings and the ledger totals are correct either way.
 
+**Totals for a session and for a thread.** Every `PricedOp` carries `Session` and `Thread`, so the
+same fold gives:
+
+| Total | Sum of |
+|---|---|
+| A change | `PricedOp`s with one `ChangeID` in one thread |
+| A thread | every `PricedOp`, ping and spend of one `Thread`, plus its `Interaction` |
+| A session | every thread of the session |
+| A subagent | the threads whose `Parent` chain leads to the main thread, one at a time |
+
+Spend (`spend`, `ping`) is shown beside the savings, never inside them, as today.
+
 ### 7.3 The context-guru proxy
 
 The proxy computes its dollar savings from `ops.Price`, as Cortex does:
@@ -568,8 +754,9 @@ The proxy computes its dollar savings from `ops.Price`, as Cortex does:
 5. The proxy stores the dollars in the columns its dashboard reads today: the saving of each
    component (`ComponentSavedUSD`) and the baseline delta (`baselineDeltaUSD`).
 
-The proxy keeps two of its current rules until the model covers them (§12): the `cachesplit`
-saving and the keep-alive saving.
+The `cachesplit` and keep-alive savings are `stateChange` operations now (§4.4), so the proxy
+prices them through `ops.Price` too. Their current rules (`cachesplitSavedUSD`,
+`keepaliveSavedUSD`) are the source of their test cases (§11), and are removed at step 9.
 
 **Agreement between hosts.** For the same request, `ops.Price` returns the same tokens for each
 tier in both hosts. The dollars are equal only when the two rate tables are equal. The test cases
@@ -601,11 +788,11 @@ Each step merges alone and leaves the totals correct.
 | 2 | context-guru | Create the `ops` module: types, `Price`, `Compare`, checks. No callers. | Every case in the list passes (§11.4). |
 | 3 | context-guru | The engine builds `[]ops.Operation` from `Trace` and the reports. **This is new work for each change, not a read of existing fields.** The frozen state is keyed by content hash (`components/offload/state.go`), so `ChangeID` can be derived. But replays are counted only for each component today (`Report.Replays`), and `apply.Trace` records no ID or replay flag for each change. Each offloader must record, for each change, whether it replayed a frozen decision or made a new one. | Replay tests: the same `ChangeID` on each turn, `FirstApplied` once. |
 | 4 | context-guru | The proxy computes dollars from `ops` **in shadow** (§7.3): it stores its current figure, and logs the `ops` figure and the difference. | Each logged difference matches a `differs` case (§11.4). |
-| 5 | context-guru | The proxy **switches** to the `ops` figure, and its collector to `ops.Compare`. It keeps its `cachesplit` and keep-alive rules (§12). | Dashboard totals before and after on the same captured sessions. |
+| 5 | context-guru | The proxy **switches** to the `ops` figure, and its collector to `ops.Compare`. The keeper reports its pings as `ping` operations. | Dashboard totals before and after on the same captured sessions. |
 | 6 | Cortex | `pctx.ReportOps`, the collector, fingerprints. No pricing change. | The `Compare` cases pass through the Cortex collector. |
 | 7 | Cortex | tool-prune and context-guru report operations beside their current events. `settle` computes both figures, writes the current one, logs the difference. | Each logged difference matches a `differs` case; also the Cortex / cg proxy / control comparison test (`62333ee9` on `feat/contextguru-keepalive`). |
 | 8 | Cortex | `settle` switches to `ops.Price`. The new event fields. | Ledger totals before and after on the same replay. |
-| 9 | both | Remove the current events, `saving.go`, `unique.go`, the per-producer draft functions, and the proxy's rules that `ops` replaced (`uniqueRate`, `repeatRate`, the reduction part of `baselineDeltaUSD`). **Do not remove a rule that a `notCovered` case still uses.** | `go mod tidy -diff` in every module. All cases pass in both repos. |
+| 9 | both | Remove the current events, `saving.go`, `unique.go`, the per-producer draft functions, and the proxy's rules that `ops` replaced (`uniqueRate`, `repeatRate`, the reduction part of `baselineDeltaUSD`, `cachesplitSavedUSD`, `keepaliveSavedUSD`). **Do not remove a rule that a `notCovered` case still uses.** | `go mod tidy -diff` in every module. All cases pass in both repos. |
 | 10 | Cortex | agentop's per-change view. | TUI tests. |
 
 Expected differences at step 8 (and, for the proxy, at step 5). Each one corrects a known error, so none is a regression:
@@ -613,11 +800,14 @@ Expected differences at step 8 (and, for the proxy, at step 5). Each one correct
 - The penalty is lower. The current one uses the whole `cache_write` as an upper bound.
 - The tier for each change comes from its position, not from a unique fraction for the request.
 - The `context_guru_expand` declaration becomes a cost. The current figure does not count it.
+- A cache-break penalty starts at the read extent, not at the break (§6.2). With few breakpoints it
+  is larger than a count from the break.
+- A keep-alive window whose pings rescued nothing is a negative figure for its thread. Today the
+  ping cost and the saving are in separate columns.
 
 ## 10. Out of scope
 
 - Signed totals in the ledger.
-- The value of a keep-alive ping (a later cache hit it caused).
 - Pricing of `reroute` (inference-router).
 - Persisting fingerprints across a restart.
 
@@ -675,10 +865,12 @@ drops the combinations that cannot occur, and states the reason for each drop in
 
 | Dimension | Values |
 |---|---|
-| Kind | `reduce`, `add`, `restore` |
+| Kind | `reduce`, `add`, `restore`, `stateChange` (each `Mechanism`) |
 | `FirstApplied` | true, false |
 | Position | before B\*; after B\* and at or before `L`; after `L`; no breakpoint in the body; spans on both sides of B\* |
-| Cache result | full hit; partial hit; miss with write ≥ input; miss with write < input; expired; boundary unknown (first turn, restart) |
+| Cache state | hot; cold (expired); cold (first request); rescued by a ping; unknown (restart) |
+| Cache result | full hit; partial hit; miss with write ≥ input; miss with write < input |
+| Breakpoints | end of `system` + last message (Claude Code); one after `tools` only; none; one inside the messages before a break |
 | TTL of the next breakpoint | 5m, 1h |
 | Component type | summarizer (`summarize`, `cache_aware_summarizer`); other context-guru component; tool-prune |
 | Tokens | counted by a tokenizer; `bytes-estimate`; with and without the proxy's `BilledTokenFactor` |
@@ -694,8 +886,13 @@ drops the combinations that cannot occur, and states the reason for each drop in
 5. Each `Unpriced` reason, and each `CheckFailure`.
 6. A list over the limit, which becomes an `Aggregate`.
 7. `spend` and `reroute` operations, which pass through unpriced.
-8. The current rules the model does not cover: the `cachesplit` saving and the keep-alive saving
-   (`notCovered`).
+8. Keep-alive: a window that rescued its request; a window whose pings did not stop the expiry; a
+   gap inside the TTL, where the ping is not credited; two threads with their own windows.
+9. `cachesplit` and `breakpointTTL`, with the current `cachesplitSavedUSD` as the source.
+10. Supersession: a summary of reduced messages; a superseded change that is never reported again;
+    a restore of the summary, after which the earlier changes are reported again.
+11. A subagent thread: its operations, its totals, and a session total that adds both threads.
+12. The interaction on a rescued request, and the conservation check on every case.
 
 **C. Cases from real traffic.** For each difference that a shadow step (§9 steps 4 and 7) logs and
 no case matches, add a case. Then decide: it is a bug in `ops`, or a new `differs` case with a
@@ -723,13 +920,16 @@ reason.
 
 ## 12. Open questions
 
-These come from current rules that the model does not cover. Each has `notCovered` cases (§11.3).
+Each has test cases that are marked `differs` or `notCovered` until it is decided (§11.3).
 
-1. **The `cachesplit` saving.** `cachesplit` moves a breakpoint, so tokens move from the write
-   tier to the read tier. It removes nothing, so no `reduce` operation describes it. Option: a
-   kind for a change to the cache structure. Until then, the proxy keeps `cachesplitSavedUSD`.
-2. **The keep-alive saving.** A ping's value is a cache hit on a later request. It is out of scope
-   (§10). Until it is covered, the proxy keeps `keepaliveSavedUSD`.
+1. **The interaction on a rescued request (§6.2).** It is attributed to nobody. An alternative is
+   to give it to the keep-alive window, because the window caused the state. That would make the
+   keep-alive figure larger on every request with large reductions. A decision is needed before the
+   test cases are frozen.
+2. **Content shared by two threads.** A fork starts with its parent's content, so the provider can
+   read the parent's entry. The model scopes the cache state to a thread (§5.4), so the fork's first
+   request is `cold` or `unknown`, and a read from the parent's entry is not credited to anyone.
+   That reports too little.
 3. **The tokenizer correction.** The proxy multiplies its counted tokens by `BilledTokenFactor`
    (o200k_base to the provider's tokenizer). Cortex uses a bytes ratio. Option: `Input` takes a
    factor for each tokenizer name, so `ops.Price` applies the correction in one place. The

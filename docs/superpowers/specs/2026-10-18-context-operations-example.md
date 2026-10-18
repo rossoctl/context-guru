@@ -2,21 +2,18 @@
 
 **Status:** draft, for the context-operations design. Not yet approved.
 
-This file shows the operations object model on one session. It shows:
+This file follows one session from turn 5 to turn 13, with one subagent. It shows:
 
-1. the context (the request body) on one turn,
-2. the list of operations the plugins report for that turn,
-3. how the savings library prices them,
-4. how one change saves money across later requests,
-5. how a change inside the cached prefix costs money, and when it pays back.
+1. the context (the request body), and the operations the plugins report;
+2. how the library prices them, from the **cache state** and the **breakpoints**;
+3. how one change saves money across later requests;
+4. how a change inside the cached prefix costs money, and whether it pays back;
+5. a **keep-alive ping**, and the request it rescues;
+6. a **summary** that ends earlier changes;
+7. a **subagent**, and the totals for each thread and for the session.
 
-The model includes two corrections found while writing this example:
-
-- The **tier** of a saved token comes from its **position** compared with the previous request's
-  cache boundary. It does not come from `firstApplied`.
-- `removalId` is renamed **`changeId`**, because an `add` operation also needs a stable ID.
-- The counterfactual is *"this change was never made"*, not *"this change was not made on this
-  request only"*. See design §6.2.
+A script computed every figure. For each request, the operations add up to the bill without the
+operations minus the bill with them (design §6.3, "Conservation").
 
 ## Setup
 
@@ -25,68 +22,96 @@ The model includes two corrections found while writing this example:
 | Stage | Producer | What it does in this example |
 |---|---|---|
 | 0 | `tool-prune` | Removes 12 tool declarations the account does not use |
-| 1 | `context-guru` | `mask`, `cmdfilter`, `coref`; adds the `context_guru_expand` tool |
+| 1 | `context-guru` | `mask`, `cmdfilter`, `coref`, `summarize`; adds the `context_guru_expand` tool |
+| — | keeper | Sends keep-alive pings between turns (not in the pipeline) |
 
 **Rates** (example values, per million tokens):
 
-| Tier | Rate |
-|---|---|
-| input | $3.00 |
-| cache write (5m) | $3.75 |
-| cache read | $0.30 |
+| Tier | Agent model | Summarizer model |
+|---|---|---|
+| input | $3.00 | $1.00 |
+| cache write (5m) | $3.75 | |
+| cache read | $0.30 | |
+| output | $15.00 | $5.00 |
+
+**Breakpoints.** The client is Claude Code. It sets a 5m breakpoint at the end of `system`, and one
+on the **last message**. So the provider can read or write the cache at two points only: the end of
+`system`, and the end of the body.
 
 **Who does what:**
 
 | Step | Done by |
 |---|---|
-| Report operations | each producer (plugin) |
-| Collect operations, compare with the previous forwarded body, add `cacheBreak` | Cortex collector |
-| Choose the counterfactual tier, return tokens per tier | cg `ops` library (pure function) |
-| Convert tokens to dollars | Cortex `pricing.Resolver` |
+| Report operations | each producer (plugin), and the keeper for pings |
+| Collect operations; find the thread, the cache state and B\*; add `cacheBreak` and `keepAlive` | the host's collector, with `ops.Compare` |
+| Choose the tier; return tokens for each tier | `ops.Price` (pure) |
+| Convert tokens to dollars; add measured spend | the host (Cortex `pricing.Resolver`, or the proxy's `modelinfo`) |
+
+**Session and thread.** The session is `s1`. The main thread is `main`. A subagent thread
+`t-a1b2` runs once, between turns 8 and 9. Every operation carries both IDs. To keep the JSON
+short, the examples show them once, in `RequestOps`.
+
+## The session at a glance
+
+| Request | Thread | Arrives | Cache state | What happens | Net |
+|---|---|---|---|---|---|
+| T5 | main | 1 min after T4 | hot | `cmdfilter` reduces a new output | +$0.03012 |
+| T6 | main | 1 min after T5 | hot | replays only | +$0.00562 |
+| T7 | main | 1 min after T6 | hot | `coref` reduces message 5, **inside** the cached prefix | −$0.05398 |
+| T8 | main | 1 min after T7 | hot | replays only | +$0.01161 |
+| S1 | t-a1b2 | — | cold (first request) | subagent: `cmdfilter` | +$0.01575 |
+| T9 | main | 1 min after T8 | hot | replays only | +$0.01161 |
+| p1 | main | 4 min after T9 | | **keep-alive ping** | −$0.01214 |
+| T10 | main | 8 min after T9 | **rescued** | the ping kept the cache hot | +$0.28416 |
+| T11 | main | 1 min after T10 | hot | replays only | +$0.01161 |
+| T12 | main | 1 min after T11 | hot | **`summarize`** replaces messages 0 to 8 | −$0.05730 |
+| p2, p3 | main | 4 and 8 min after T12 | | two pings; the keeper's limit is 2 | −$0.01911 |
+| T13 | main | 14 min after T12 | **cold** (expired) | the pings did not reach | +$0.19988 |
 
 ---
 
-## Turn 5
+## Turn 5: one request in detail
 
-### 1. The context
+### The context
 
 The body the **client** sends. Token counts in brackets.
 
 ```
 tools      30 declarations                                 [20,000]
-system     Claude Code system prompt                       [ 3,000]
+system     Claude Code system prompt                       [ 3,000]   ← breakpoint 1
 messages
   [0..2]   user prompt, assistant, ...                     [10,000]
   [3]      tool_result: Read a.go                          [ 4,000]
   [4]      assistant                                       [ 1,000]
   [5]      tool_result: grep over the repo                 [20,000]
   [6..8]   assistant, tool calls, results                  [ 5,000]
-  [9]      tool_result: pytest output            (NEW)     [ 8,000]
+  [9]      tool_result: pytest output            (NEW)     [ 8,000]   ← breakpoint 2 (L)
                                                    total   [71,000]
 ```
 
-**State from earlier turns:**
+State from earlier turns:
 
 - `tool-prune` removed the same 12 declarations (8,000 tokens) on every turn since turn 1.
-- On turn 3, cg's `mask` reduced message 3 to a 60-token marker. cg replays that decision on every
-  later turn.
+- On turn 3, `mask` reduced message 3 to a 60-token marker. cg replays it on every later turn.
 - cg added the `context_guru_expand` tool (300 tokens) on every turn since turn 1.
-- On turn 4, Cortex forwarded messages 0 to 8. The provider cached them. So the **previous cache
-  boundary** for this thread is `messages[8]`. This is B* in the design (§5.2).
-- The client is Claude Code. It puts cache breakpoints at the end of `system` and on the **last
-  message**. On turn 5 the last message is `messages[9]`, so the last breakpoint `L` is
-  `messages[9]`.
+- Turn 4 forwarded messages 0 to 8, and the provider cached them.
 
-### 2. The operations
+### The cache state
 
-What the collector holds after the pipeline ran:
+The collector finds turn 4's fingerprint. The gap is 1 minute, inside the 5m TTL:
+
+```json
+"state": {"phase": "hot", "extent": {"section": "messages", "index": 8}, "gap": "1m", "ttl": "5m"}
+```
+
+So B\* = `messages[8]`.
+
+### The operations
 
 ```json
 {
-  "version": 1,
-  "requestId": "req-5",
-  "session": "s1",
-  "thread": "main",
+  "version": 1, "requestId": "req-5", "session": "s1",
+  "thread": {"id": "main", "source": "header"},
   "ops": [
     {
       "id": "op1", "kind": "reduce",
@@ -138,54 +163,22 @@ What the collector holds after the pipeline ran:
 ```
 
 To keep the example short, bytes and the cg tokenizer name are left out, and op1 lists 3 of its 12
-spans. tool-prune has no tokenizer, so its token count is a byte estimate (design §4.2 rule 8).
+spans. op1 is **one** operation for 12 declarations, because tool-prune removes one account list in
+one decision (design §4.2 rule 1). Its sizes cover only the declarations it removed. The 12 span
+sizes add up to 8,000 (the 3 shown add up to 2,050).
 
-op1 is **one** operation for 12 declarations, because tool-prune removes one account list in one
-decision. That is one change unit (design §4.2 rule 1). Its `before` and `after` cover only the
-declarations it removed, not the whole `tools` section. Each span has its own size, and the 12 span
-sizes add up to the operation's 8,000 (the 3 shown add up to 2,050).
+The `tools` section sizes are not on any operation. The collector sends them to the sum check
+(design §6.5): 20,000 − 8,000 (op1) + 300 (op4) = 12,300 forwarded.
 
-The `tools` section sizes, 20,000 in the client body and 12,300 forwarded, are not on any
-operation. The collector sends them to the sum check (design §6.5): op1 removes 8,000 and op4 adds
-300, so 20,000 − 8,000 + 300 = 12,300.
+### The bill
 
-### 3. What the collector adds
+The **forwarded** body is 52,260 tokens. The provider bills `cache_read 51,360`,
+`cache_write 900`, `input 0`.
 
-The collector compares the forwarded body with the turn-4 forwarded body. They are the same up to
-`messages[8]`. So no plugin broke the cache, and the collector adds no `cacheBreak` operation.
+### The price
 
-### 4. What the provider bills
-
-The **forwarded** body:
-
-```
-tools      18 declarations + expand tool          [12,300]
-system                                            [ 3,000]
-messages   [0..8], with [3] masked                [36,060]
-           [9] filtered                           [   900]
-                                          total   [52,260]
-```
-
-The response usage: `cache_read 51,360`, `cache_write 900`, `input 0`.
-
-### 5. The library: choose the counterfactual tier
-
-The question for each operation: *"If this change had never been made, on this request or on an
-earlier one, how would the provider have billed these tokens on this request?"*
-
-For op1 and op2, which were made on earlier turns, this means: the earlier requests would have
-carried the content too, so the provider would have cached it.
-
-The library input:
-
-```
-ops                 the four operations above
-boundary (B*)       messages[8]     (from the collector: design §5.2)
-last breakpoint L   messages[9]     (5m TTL)
-usage               cache_read 51,360, cache_write 900, input 0
-```
-
-The rule:
+The question for each operation (design §6.2): *if this change had never been made, how would the
+provider have billed these tokens on this request?*
 
 | Position of the tokens | Tier |
 |---|---|
@@ -193,85 +186,41 @@ The rule:
 | after B\*, at or before `L` | cache write, at the TTL of the next breakpoint |
 | after `L` | input |
 
-| Op | Tokens changed | Position | vs B\* = `messages[8]` | vs `L` = `messages[9]` | Tier |
-|---|---|---|---|---|---|
-| op1 | −8,000 (saved) | `tools` | before | — | cache read |
-| op2 | −3,940 (saved) | `messages[3]` | before | — | cache read |
-| op3 | −7,100 (saved) | `messages[9]` | after | at | cache write (5m) |
-| op4 | +300 (cost) | `tools` | before | — | cache read |
-
-If the client had put no breakpoint on `messages[9]`, op3's tokens would be after `L`, and the tier
-would be **input**: 7,100 × $3.00/M = $0.02130, not $0.02663.
-
-The library output, in tokens for each tier. A positive number is a saving, a negative number is a
-cost:
-
-```
-op1  {cacheRead: +8000}
-op2  {cacheRead: +3940}
-op3  {cacheWrite: +7100}
-op4  {cacheRead: -300}
-```
-
-### 6. Cortex: convert to dollars
-
-| Op | Calculation | Result |
-|---|---|---|
-| op1 | 8,000 × $0.30/M | +$0.00240 |
-| op2 | 3,940 × $0.30/M | +$0.00118 |
-| op3 | 7,100 × $3.75/M | +$0.02663 |
-| op4 | 300 × $0.30/M | −$0.00009 |
-| **Request total** | | **+$0.03012** |
-
-For each producer:
-
-| Producer | Result |
-|---|---|
-| `tool-prune` | +$0.00240 |
-| `context-guru` | +$0.02772 |
-
----
-
-## Across requests: change `cg:cmdfilter:c40e`
-
-cg replays op3 on every later turn. Each replay is a new operation with the **same `changeId`** and
-`firstApplied: false`. The library prices it again on each request, from that request's own
-position and cache result.
-
-| Turn | Situation | Tier for the 7,100 tokens | Saving | Total for this change |
+| Op | Tokens | Position | Tier | Result |
 |---|---|---|---|---|
-| 5 | first applied; after the boundary | cache write | $0.02663 | $0.02663 |
-| 6 | replay; `messages[9]` is now cached | cache read | $0.00213 | $0.02876 |
-| 7 | replay; cache hit | cache read | $0.00213 | $0.03089 |
-| 8 | replay; **cache TTL expired** (`cache_read 0`) | cache write | $0.02663 | $0.05751 |
+| op1 | −8,000 | `tools`: before B\* | cache read | 8,000 × $0.30 = **+$0.00240** |
+| op2 | −3,940 | `messages[3]`: before B\* | cache read | 3,940 × $0.30 = **+$0.00118** |
+| op3 | −7,100 | `messages[9]`: after B\*, at `L` | cache write 5m | 7,100 × $3.75 = **+$0.02663** |
+| op4 | +300 | `tools`: before B\* | cache read | 300 × $0.30 = **−$0.00009** |
+| **Turn 5** | | | | **+$0.03012** |
 
-On turn 8, the collector adds an operation with no producer:
-
-```json
-{ "id": "op9", "kind": "cacheBreak", "cause": "expired" }
-```
-
-The break was not caused by a plugin, so the library charges it to nobody. On turn 8, op1, op2 and
-op4 also move to the cache-write tier, by the same rule.
-
-**What this shows.** A change of K tokens saves on every later request that still carries it. On
-each request it saves K × the rate of the tier those tokens would have had **on that request**. It
-does not save K × the input rate every time. With a warm cache, most turns are at the cache-read
-rate.
+All rates are per million tokens. If the client had put no breakpoint on `messages[9]`, op3's
+tokens would be after `L`. The tier would then be input, and the saving $0.02130.
 
 ---
 
-## A change that costs money first: `coref` on turn 7
+## One change across requests: `cg:cmdfilter:c40e`
 
-### The context on turn 7
+cg replays op3 on every later turn: a new operation with the same `changeId` and
+`firstApplied: false`. The library prices it on each request from that request's own state.
 
-Turn 6 added messages 10 and 11 (2,000 tokens). Cortex forwarded messages 0 to 11 on turn 6, so
-the **previous boundary** on turn 7 is `messages[11]`.
+| Request | State | Tier for the 7,100 tokens | Saving | Total |
+|---|---|---|---|---|
+| T5 | hot; position new | cache write | +$0.02663 | +$0.02663 |
+| T6 to T12 | hot; position cached | cache read | +$0.00213 each | +$0.04154 at T12 |
+| T13 | **cold** | cache write | +$0.02663 | **+$0.06816** |
 
-On turn 7, cg's `coref` finds that no later turn uses anything from message 5, the 20,000-token
-grep output. It reduces it to a 50-token marker. Message 5 is **inside** the cached prefix.
+On a hot turn the change saves at the cache-read rate. On a cold turn it saves at the cache-write
+rate, 12.5 times more. The same change has a different value in each state.
 
-### The operation
+---
+
+## A change inside the cached prefix: `coref` on turn 7
+
+### The context and the operation
+
+On turn 7, `coref` reduces message 5 (the 20,000-token grep output) to 50 tokens. Message 5 is
+inside the cached prefix: turn 6 cached through `messages[11]`, so B\* = `messages[11]`.
 
 ```json
 {
@@ -285,71 +234,259 @@ grep output. It reduces it to a 50-token marker. Message 5 is **inside** the cac
 }
 ```
 
-### What the collector adds
+The forwarded body first differs from turn 6's at `messages[5]`. The client did not change, so the
+collector adds a break attributed to op12:
 
-The forwarded body first differs from the turn-6 forwarded body at `messages[5]`. The earliest
-operation at or before that position is op12. So the collector adds:
+```json
+{ "id": "op13", "kind": "cacheBreak", "cause": "producer",
+  "at": {"section": "messages", "index": 5}, "attributedTo": "op12" }
+```
+
+### Where the breakpoints matter
+
+The provider reads the cache only up to a breakpoint. The last breakpoint before `messages[5]` is
+the end of `system`. So the provider reads only `tools` and `system` (15,300 tokens). It writes
+**everything** after them again, including messages 0 to 4, which coref did not touch.
+
+The bill: `cache_read 15,300`, `cache_write 21,010`.
+
+| Content written again, from the read extent to B\* | Tokens |
+|---|---|
+| messages 0 to 4 (not changed, but after the last breakpoint before the break) | 11,060 |
+| message 5, now the marker | 50 |
+| messages 6 to 11 | 7,900 |
+| **Penalty** | **19,010** |
+
+```
+saving    19,950 × $0.30            = +$0.00599
+penalty   19,010 × ($3.75 − $0.30)  = −$0.06558
+net on turn 7                       = −$0.05960
+```
+
+If the client had a breakpoint on `messages[4]`, the penalty would start at message 5: 7,950
+tokens, −$0.02743. Here the breakpoints, not the size of the change, decide most of the cost.
+
+### Does it pay back?
+
+coref saves +$0.00599 on each later hot turn. The summary on turn 12 ends it (see below).
+
+| Request | Saving | Penalty | Total |
+|---|---|---|---|
+| T7 | +$0.00599 | −$0.06558 | −$0.05960 |
+| T8 to T11 | +$0.00599 each | | −$0.03566 at T11 |
+| T12 | ended by the summary | | **−$0.03566** (final) |
+
+The change did not pay back. It needed 10 more hot turns, and it had 4 before the summary ended
+it. The total for its `changeId` shows this.
+
+---
+
+## A keep-alive ping: p1, and turn 10
+
+### The ping
+
+The user is idle after turn 9. The keeper sends a ping 4 minutes after turn 9. The ping is its own
+`RequestOps`:
 
 ```json
 {
-  "id": "op13", "kind": "cacheBreak", "cause": "producer",
-  "at": {"section": "messages", "index": 5},
-  "attributedTo": "op12"
+  "version": 1, "requestId": "ping-p1", "session": "s1",
+  "thread": {"id": "main", "source": "header"}, "ping": true,
+  "ops": [
+    { "id": "op1", "kind": "ping", "producer": "keeper",
+      "changeId": "ka:main:w1", "firstApplied": true,
+      "spendId": "spend-ping-p1" }
+  ]
 }
 ```
 
-### The calculation
+The ping re-sends turn 9's forwarded body (40,310 tokens) and gets a 1-token reply. The host
+measures its cost at its transport: 40,310 read + 10 input + 1 output = **−$0.01214**. `ops.Price`
+does not price it (design §6.3). The host joins the cost on `spendId`.
 
-**Saving.** 19,950 tokens. The position is before the previous boundary, so the tier is cache read.
+### Turn 10: the rescued request
 
-```
-19,950 × $0.30/M = +$0.00599
-```
+Turn 10 arrives 8 minutes after turn 9. Without the ping, the 5m entry would have expired at 6
+minutes. The ping read it at 4 minutes, so it is hot until 9 minutes. The collector checks the four
+conditions of design §4.4, and adds:
 
-**Penalty.** Everything from the break to the previous boundary was cached, and is now written
-again. The new turn-7 tail after the boundary is written anyway, so it is not counted.
-
-| Content from `messages[5]` to `messages[11]` | Tokens |
-|---|---|
-| message 5, now the marker | 50 |
-| messages 6 to 8 | 5,000 |
-| message 9, filtered | 900 |
-| messages 10 and 11 | 2,000 |
-| **Re-written** | **7,950** |
-
-The library output for op13: `{cacheWrite: −7950, cacheRead: +7950}`. The tokens move from the
-read tier to the write tier.
-
-```
-7,950 × ($3.75 − $0.30)/M = −$0.02743
+```json
+{
+  "id": "op20", "kind": "stateChange", "mechanism": "keepAlive",
+  "producer": "keeper",
+  "stateFrom": {"phase": "cold"},
+  "stateTo": {"phase": "hot", "extent": {"section": "messages", "index": 17}},
+  "before": {"tokens": 40310}, "after": {"tokens": 40310},
+  "changeId": "ka:main:w1", "firstApplied": false
+}
 ```
 
-**Net on turn 7** for change `cg:coref:5e2d`:
+Each turn adds two messages, so turn 9 forwarded messages 0 to 17. The extent is `messages[17]`.
+The ping and the rescue have the same `changeId`, so the cost and the value of the window add up.
 
-```
-+$0.00599 − $0.02743 = −$0.02144
-```
+| Item | Calculation | Result |
+|---|---|---|
+| Content changes, priced **hot** | the replays of tool-prune, expand, mask, coref, cmdfilter | +$0.01161 |
+| Rescue (op20) | 40,310 × ($3.75 − $0.30) | +$0.13907 |
+| Interaction (design §6.2) | 38,690 × ($3.75 − $0.30) | +$0.13348 |
+| **Turn 10** | | **+$0.28416** |
 
-### Payback
+**The interaction.** The content changes are priced in the hot state, which the ping caused.
+Without the ping, the same changes would be priced cold, and would be worth more. That difference
+is the interaction. It belongs to neither of them alone. So it is attributed to nobody, and it is
+counted only in the thread and session totals (design §12, question 1).
 
-cg replays the coref change on every later turn. On each cache hit it saves 19,950 tokens at the
-cache-read rate, +$0.00599.
+**The window `ka:main:w1`:** −$0.01214 (p1) + $0.13907 (rescue) = **+$0.12693**.
 
-| Turn | Saving | Penalty | Total for this change |
+---
+
+## A summary that ends earlier changes: turn 12
+
+### The context
+
+On turn 12, cg's `summarize` replaces messages 0 to 8 with one 1,500-token summary. In the
+**client** body those messages are 40,000 tokens. Two of them were already reduced:
+
+| Message | Client tokens | Reduced by | Forwarded before the summary |
 |---|---|---|---|
-| 7 | +$0.00599 | −$0.02743 | −$0.02144 |
-| 8 | +$0.00599 | | −$0.01546 |
-| 9 | +$0.00599 | | −$0.00947 |
-| 10 | +$0.00599 | | −$0.00349 |
-| 11 | +$0.00599 | | **+$0.00250** |
+| 3 | 4,000 | `mask` (`cg:mask:91ab`) | 60 |
+| 5 | 20,000 | `coref` (`cg:coref:5e2d`) | 50 |
+| 0 to 2, 4, 6 to 8 | 16,000 | — | 16,000 |
+| **Total** | **40,000** | | **16,110** |
 
-The totals are sums of the exact values (saving $0.005985, penalty $0.0274275), rounded only for
-display, as in the table for op3. The change pays back on turn 11. If the session had ended on
-turn 10, the change would have lost $0.00349. The total for each `changeId` shows this, because the penalty and the savings carry the
-same ID.
+### The operation
 
-The penalty is exact here: it counts only the cached content after the break. The current
-`rewritePenalty` uses the response's whole `cache_write`, which is an upper bound.
+```json
+{
+  "id": "op30", "kind": "reduce",
+  "producer": "context-guru", "stage": 1, "component": "summarize",
+  "class": "summarize", "signal": "age",
+  "status": "applied", "reversibility": "reversible", "stashKey": "cg:ab12",
+  "at": {"section": "messages", "index": 0},
+  "before": {"tokens": 40000}, "after": {"tokens": 1500},
+  "supersedes": ["cg:mask:91ab", "cg:coref:5e2d"],
+  "inherited": {"tokens": 23890},
+  "changeId": "cg:summarize:ab12", "firstApplied": true,
+  "structure": {"at": 0, "removed": 9, "inserted": 1}
+}
+```
+
+- `before` is the **client's** 40,000 tokens, so the summary's saving (38,500) covers all of it.
+- `supersedes` names the two changes it ends. From turn 12, cg does not report them again.
+- `inherited` is what they had removed: (4,000 − 60) + (20,000 − 50) = 23,890. The summary's own
+  new work is 38,500 − 23,890 = 14,610. The price does not use `inherited`. A report can.
+- `structure` tells the library that 9 messages became 1, so later positions move.
+
+The summarizer call is a `spend` operation, linked by `produced`:
+
+```json
+{ "id": "op31", "kind": "spend", "producer": "context-guru", "component": "summarize",
+  "spendId": "spend-summ-12", "produced": ["cg:summarize:ab12"] }
+```
+
+The host measures it: 16,110 input + 1,500 output on the summarizer model = **−$0.02361**.
+
+### The price
+
+The summary is at `messages[0]`, inside the cached prefix, so the collector adds a `cacheBreak`
+attributed to op30. The provider reads `tools` and `system` (15,300) and writes the rest (16,400).
+
+| Item | Calculation | Result |
+|---|---|---|
+| Saving (op30) | 38,500 × $0.30 | +$0.01155 |
+| Penalty (cacheBreak) | 14,400 × ($3.75 − $0.30) | −$0.04968 |
+| Summarizer call (op31) | measured | −$0.02361 |
+| **The summary on turn 12** | | **−$0.06174** |
+
+The other operations on turn 12 (tool-prune, expand, cmdfilter) add +$0.00444. Turn 12 is
+−$0.05730 in total.
+
+### What happens to `mask` and `coref`
+
+| Change | Last request | Total | Note |
+|---|---|---|---|
+| `cg:mask:91ab` | T11 | +$0.00827 | ended by the summary; its total does not change |
+| `cg:coref:5e2d` | T11 | −$0.03566 | ended before it paid back |
+
+From turn 12, their tokens are part of the summary's saving. Nothing is counted twice: on turn 12
+the summary saves 38,500 tokens, and `mask` and `coref` save nothing.
+
+On turn 13 (cold), the summary saves 38,500 × $3.75 = +$0.14438. Its total is then **+$0.08264**.
+
+---
+
+## A cold request: turn 13
+
+The user is idle after turn 12. The keeper sends ping p2 at 4 minutes and ping p3 at 8 minutes.
+Each costs −$0.00956. The keeper's limit is 2 pings for each idle gap, so it sends no more. p3
+kept the entry hot until 13 minutes.
+
+Turn 13 arrives at 14 minutes. The entry has expired, so the state is **cold**. The collector adds:
+
+```json
+{ "id": "op40", "kind": "cacheBreak", "cause": "expired" }
+```
+
+The break is attributed to nobody. Every content change is priced cold (cache write):
+
+| Change | Tokens | Result |
+|---|---|---|
+| `tp:decl-set-7f3a` | 8,000 | +$0.03000 |
+| `cg:cmdfilter:c40e` | 7,100 | +$0.02663 |
+| `cg:summarize:ab12` | 38,500 | +$0.14438 |
+| `cg:expand-tool:v3` | +300 | −$0.00113 |
+| **Turn 13** | | **+$0.19988** |
+
+**The window `ka:main:w2`:** −$0.00956 (p2) − $0.00956 (p3), and no rescue = **−$0.01911**. A
+window that rescues nothing is a cost, and the thread total shows it.
+
+---
+
+## A subagent: S1
+
+Between turns 8 and 9, the agent starts a subagent. Its request has a thread header, so the
+collector sets `thread: {"id": "t-a1b2", "source": "header", "parent": "main"}`. The thread has no
+earlier fingerprint, so its state is `cold`. Its client body is 14,000 tokens.
+
+| Op | Tokens | Tier | Result |
+|---|---|---|---|
+| `cg:cmdfilter:77d0` (reduce) | 4,500 | cache write (cold) | +$0.01688 |
+| `cg:expand-tool:v3` (add) | +300 | cache write (cold) | −$0.00113 |
+| **S1** | | | **+$0.01575** |
+
+`cg:expand-tool:v3` has the same `changeId` in both threads. Its totals stay apart, because the
+total for a change is summed inside one thread (design §7.2).
+
+---
+
+## Totals
+
+### For each change, in thread `main`
+
+| Change | Kind | Requests | Total |
+|---|---|---|---|
+| `tp:decl-set-7f3a` | reduce | T5 to T13 | +$0.04920 |
+| `cg:expand-tool:v3` | add | T5 to T13 | −$0.00185 |
+| `cg:mask:91ab` | reduce | T5 to T11 (ended) | +$0.00827 |
+| `cg:cmdfilter:c40e` | reduce | T5 to T13 | +$0.06816 |
+| `cg:coref:5e2d` | reduce + break | T7 to T11 (ended) | −$0.03566 |
+| `cg:summarize:ab12` | reduce + break + spend | T12 to T13 | +$0.08264 |
+| `ka:main:w1` | ping + rescue | p1, T10 | +$0.12693 |
+| `ka:main:w2` | ping | p2, p3 | −$0.01911 |
+| interaction | — | T10 | +$0.13348 |
+| **Thread `main`** | | | **+$0.41207** |
+
+### For each thread, and for the session
+
+| | Savings | Spend (summarizer, pings) | Net |
+|---|---|---|---|
+| Thread `main` | +$0.46692 | −$0.05486 | **+$0.41207** |
+| Thread `t-a1b2` (subagent) | +$0.01575 | $0.00000 | **+$0.01575** |
+| **Session `s1`** | **+$0.48267** | **−$0.05486** | **+$0.42782** |
+
+"Savings" are content changes, cache breaks, state changes and the interaction. "Spend" is the
+money that cg and the keeper paid for their own calls. The two are shown apart and never netted
+inside one column, as the cost ledger does today.
 
 ---
 
@@ -357,11 +494,15 @@ The penalty is exact here: it counts only the cached content after the break. Th
 
 | Field | Used for |
 |---|---|
-| `kind` | `reduce` saves; `add` costs; `cacheBreak` moves tokens from read to write |
-| `producer`, `stage`, `component` | attribution for each plugin and each component |
-| `at`, `spans` | choose the tier (compared with B\* and with the last breakpoint `L`); find the cause of a break |
-| `before`, `after` | the token change, measured at the producer's own input |
-| `changeId` | sum one change across requests; link a penalty to the change that caused it |
-| `firstApplied` | count fresh acts; mark where the payback of a change starts |
-| `status` | only `applied` operations count |
-| `attributedTo` | which operation a `cacheBreak` is charged to; absent means nobody |
+| `kind` | `reduce` saves; `add` costs; `stateChange` moves tokens between tiers; `ping` and `spend` carry measured cost; `cacheBreak` moves tokens from read to write |
+| `session`, `thread` | totals for each session, each thread, each subagent |
+| `Input.State` | the tier of every change: hot (read) or cold (write) |
+| `at`, `spans` | the tier, compared with B\* and with the last breakpoint `L` |
+| `Input.Breakpoints` | where the provider can read and write; the size of a break penalty |
+| `before`, `after` | the token change, measured at the producer's own input (the client size for a summary) |
+| `changeId` | sum one change across requests; join a ping with its rescue; join a penalty with its cause |
+| `firstApplied` | count fresh acts; mark where payback starts |
+| `supersedes`, `inherited` | end earlier changes; show how much a summary took over |
+| `structure` | move later positions after a summary |
+| `spendId`, `produced` | join measured cost to the change it paid for |
+| `attributedTo` | which change a `cacheBreak` is charged to; absent means nobody |
