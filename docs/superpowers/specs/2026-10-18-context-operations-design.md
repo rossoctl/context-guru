@@ -162,7 +162,9 @@ R35 to R39 were added after the first review, and R40 to R43 for subscription pl
 
 ### E. Operability
 
-- **R17.** Each operation names its component, taxonomy class and decision signal.
+- **R17.** Each operation names its producer and its component. The taxonomy of a component (what
+  kind of change it makes, and what made it decide) depends on the component only, so a report maps
+  `Component` to it with a table in cg. The operation does not carry it.
 - **R18.** Each request carries request ID, session, thread (if known) and agent.
 - **R39.** Each operation carries its session ID and thread ID, so every figure can be summed for
   one session, for one thread, or for one subagent.
@@ -178,7 +180,7 @@ R35 to R39 were added after the first review, and R40 to R43 for subscription pl
   session can have both.
 - **R43.** A subscription saving is never reported as money saved. It is reported as usage-limit
   headroom, and an API-equivalent dollar figure can be shown beside it, labelled as an equivalent.
-- **R19.** The model is versioned. An unknown kind or class is kept and reported as unpriced, never
+- **R19.** The model is versioned. An unknown `Kind` is kept and reported as unpriced, never
   dropped.
 - **R20.** The operation list has a size limit, with aggregation above it.
 - **R21.** Second-order effects are not operations. Example: the agent compacts later because its
@@ -248,7 +250,7 @@ type Aggregate struct {
 
 type AggregateEntry struct {
     Producer, Component string
-    Class               Class
+    Kind                Kind
     FirstApplied        bool
     Side                Side // beforeBoundary | afterBoundary, from the producer's own view
     Ops                 int
@@ -267,8 +269,6 @@ type Operation struct {
     Producer  string // set by the framework, not by the producer
     Stage     int    // set by the framework
     Component string // "mask", "dedup"; "" for a one-operation plugin
-    Class     Class  // reencode | envelope | reduce | summarize | restore | inject
-    Signal    Signal // shape | redundancy | age | reference | relevance | account; "" if none
 
     Projected bool // set by the framework: the plugin runs under on_error: observe (R12)
 
@@ -287,8 +287,8 @@ type Operation struct {
     StateFrom CacheState
     StateTo   CacheState
 
-    // class = restore
-    Reverses string // ChangeID this restore adds back
+    // kind = add: set only when this add is a restore
+    Reverses string // ChangeID of the removal this restore adds back
 
     // kind = spend | ping
     Call     *ModelCall // the call, with the provider's billed usage (§4.6)
@@ -341,8 +341,6 @@ type Mechanism string     // keepAlive | cacheSplit | breakpointTTL
 type Phase string         // hot | cold | unknown
 type ThreadSource string  // header | prefix | new
 type BillingMode string   // api | subscription | unknown
-type Class string         // reencode | envelope | reduce | summarize | restore | inject
-type Signal string        // shape | redundancy | age | reference | relevance | account
 type Section string       // tools | system | messages
 type Cause string         // producer | client | expired | unknown
 type Side string          // beforeBoundary | afterBoundary
@@ -363,8 +361,8 @@ and can be reported as unpriced (R19).
 3. **`FirstApplied` does not choose the tier.** The position does (§6.2). `FirstApplied` counts
    fresh acts and marks where a change's payback starts. It is optional: a producer that keeps no
    state leaves it unset (§4.7).
-4. **`Before` and `After` are measured at the producer's own input.** For `add` and for a restore,
-   `After > Before`.
+4. **`Before` and `After` are measured at the producer's own input.** For an `add`, including a
+   restore (an `add` with `Reverses` set), `After > Before`.
 5. **Only the collector writes `cacheBreak`.**
 6. **A keep-alive ping is its own `RequestOps`, with `Ping = true`.** It has one `ping` operation
    whose `Call` carries the ping's billed usage. Its `ChangeID` names the keep-alive window, and the `stateChange` operation on
@@ -1057,7 +1055,7 @@ drops the combinations that cannot occur, and states the reason for each drop in
 
 | Dimension | Values |
 |---|---|
-| Kind | `reduce`, `add`, `restore`, `stateChange` (each `Mechanism`) |
+| Kind | `reduce`, `add`, `add` with `Reverses` (a restore), `stateChange` (each `Mechanism`) |
 | `FirstApplied` | true, false |
 | Position | before B\*; after B\* and at or before `L`; after `L`; no breakpoint in the body; spans on both sides of B\* |
 | Cache state | hot; cold (expired); cold (first request); rescued by a ping; unknown (restart) |

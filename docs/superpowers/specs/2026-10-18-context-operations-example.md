@@ -117,7 +117,6 @@ So B\* = `messages[8]`.
     {
       "id": "op1", "kind": "reduce",
       "producer": "tool-prune", "stage": 0,
-      "class": "envelope", "signal": "account",
       "at": {"section": "tools", "index": 2},
       "spans": [
         {"section": "tools", "from": 2,  "to": 2,
@@ -134,7 +133,6 @@ So B\* = `messages[8]`.
     {
       "id": "op2", "kind": "reduce",
       "producer": "context-guru", "stage": 1, "component": "mask",
-      "class": "reduce", "signal": "age",
       "at": {"section": "messages", "index": 3},
       "before": {"tokens": 4000}, "after": {"tokens": 60},
       "changeId": "cg:mask:91ab", "firstApplied": false
@@ -142,7 +140,6 @@ So B\* = `messages[8]`.
     {
       "id": "op3", "kind": "reduce",
       "producer": "context-guru", "stage": 1, "component": "cmdfilter",
-      "class": "reduce", "signal": "shape",
       "at": {"section": "messages", "index": 9},
       "before": {"tokens": 8000}, "after": {"tokens": 900},
       "changeId": "cg:cmdfilter:c40e", "firstApplied": true
@@ -150,7 +147,6 @@ So B\* = `messages[8]`.
     {
       "id": "op4", "kind": "add",
       "producer": "context-guru", "stage": 1, "component": "expand",
-      "class": "inject",
       "at": {"section": "tools", "index": 18},
       "before": {"tokens": 0}, "after": {"tokens": 300},
       "changeId": "cg:expand-tool:v3", "firstApplied": false
@@ -226,7 +222,6 @@ inside the cached prefix: turn 6 cached through `messages[11]`, so B\* = `messag
 {
   "id": "op12", "kind": "reduce",
   "producer": "context-guru", "stage": 1, "component": "coref",
-  "class": "reduce", "signal": "reference",
   "at": {"section": "messages", "index": 5},
   "before": {"tokens": 20000}, "after": {"tokens": 50},
   "changeId": "cg:coref:5e2d", "firstApplied": true
@@ -366,7 +361,6 @@ On turn 12, cg's `summarize` replaces messages 0 to 8 with one 1,500-token summa
 {
   "id": "op30", "kind": "reduce",
   "producer": "context-guru", "stage": 1, "component": "summarize",
-  "class": "summarize", "signal": "age",
   "at": {"section": "messages", "index": 0},
   "before": {"tokens": 40000}, "after": {"tokens": 1500},
   "changeId": "cg:summarize:ab12", "firstApplied": true,
