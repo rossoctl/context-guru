@@ -62,6 +62,19 @@ the work. Use short sections such as *Summary*, *What we found*, *Why it happens
 *What changed* / *How it was tested* for a PR), *Open questions*. If deeper technical detail is
 needed, put it in a separate *Technical notes* section at the end, so the main text stays simple.
 
+## Review process
+
+**Every PR goes through the `offload-review` skill before it is offered for merge.** When you
+finish committing and the PR is pushed and ready, run the skill. It is not optional, and you do
+not wait for the user to ask.
+
+- Run it in the main session, not in a subagent.
+- Fix the findings, reply on the PR to each one, and run the next round, as the skill says.
+- The budget is 2 rounds. Only the user grants more; you may ask.
+- After the PR merges or closes, run the skill's cleanup.
+
+See [.claude/skills/offload-review/SKILL.md](.claude/skills/offload-review/SKILL.md).
+
 ## Layout
 
 See [docs/design.md](docs/design.md) for package layout.
