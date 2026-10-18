@@ -130,9 +130,23 @@ $(cat "$rules")"
     if [ "$mode" = resumed ]; then
       echo "# Re-check, round $round"
       echo "Your round-$((round - 1)) review is earlier in this session. The author pushed fixes."
-      echo "Check that each of your earlier findings is fixed. Review only the new changes."
-      echo "Raise a new finding on old code only when it is serious."
       echo "Follow the same rules and format as before; they are repeated below."
+      echo
+    fi
+    if [ "$round" -gt 1 ]; then
+      echo "# Read the PR conversation first"
+      echo "Read every review and comment on the PR, from the author and from the other reviewer:"
+      echo "  gh pr view $pr --repo $repo --comments"
+      echo "  gh api --paginate repos/$repo/pulls/$pr/reviews --jq '.[].body'"
+      echo "  gh api --paginate repos/$repo/pulls/$pr/comments --jq '.[] | \"\\(.path):\\(.line) \\(.body)\"'"
+      echo "Then:"
+      echo "- For each earlier finding (yours and the other reviewer's), say: fixed, not fixed, or"
+      echo "  rejected by the author. If the author rejected it with a reason, check the reason."
+      echo "  Accept it when it is right. Keep the finding only if you can show the reason is wrong."
+      echo "- Do not repeat a finding the other reviewer already raised. Write \"agree with"
+      echo "  reviewer N, finding M\" and add only new proof."
+      echo "- Review the new changes since round $((round - 1)). Raise a new finding on old code"
+      echo "  only when it is serious."
       echo
     fi
     cat "$skill/review-prompt.md"

@@ -38,6 +38,7 @@ background task, so it cannot wait for the reviewers.
 3. **Read the result.**
    - Exit 0: read both `.claude/worktrees/review-pr<N>-<backend>-r{1,2}/.review.md`.
    - Exit 1: read that reviewer's `review.log`, report it to the user, and stop.
+   - Exit 1 with "already has both round-N reviews": you did not push since that round.
    - Exit 3: the round budget (2) is used. Tell the user that the PR is problematic. Stop.
 4. **If both verdicts are `approve`**, tell the user that the PR is ready to merge. Stop.
 5. **Fix the findings** in your own worktree. Check each finding first: fix the real ones; for
@@ -48,7 +49,10 @@ background task, so it cannot wait for the reviewers.
 ## Rules
 
 - Do not edit the reviewer worktrees. They belong to the reviewers.
-- Do not tell a reviewer what the other one found.
+- Round 1 is independent: the reviewers do not read the PR conversation. From round 2 on, each
+  reviewer reads all of it, so it sees your replies and the other reviewer's findings.
+- Reply on the PR to every finding before the next round: fixed (with the commit), or rejected
+  (with the reason and proof). The reviewers read these replies.
 - Write PR replies in ASD-STE100 style, with `--body-file` from a quoted heredoc.
 
 ## Add a backend

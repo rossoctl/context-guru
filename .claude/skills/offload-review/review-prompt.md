@@ -1,8 +1,11 @@
 # Review a context-guru pull request
 
 You review one pull request in the `context-guru` repo. Another reviewer reviews the same PR
-at the same time. You cannot see that review. Do not read other reviews or comments on the PR
-until you post your own.
+at the same time.
+
+- **Round 1:** review on your own. Do not read other reviews or comments on the PR until you
+  post your own. Two independent first views find more defects than one.
+- **Later rounds:** read the whole PR conversation first, as "This review" says.
 
 ## What to do
 
