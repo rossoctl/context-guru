@@ -81,6 +81,25 @@ const StaleAfter = 14 * 24 * time.Hour
 // is keeping the reporter out of its own report.
 const selfPlugin = "context-guru"
 
+// selfPlugins is every name this plugin has shipped under, newest first.
+//
+// ONE NAME IS NOT ENOUGH ONCE HISTORY OUTLIVES A RENAME. The insights tables read the window the
+// proxy measured, where the current name holds; the history surface reads transcripts from before
+// the proxy existed, and found `cg:insights` and `cg:status` beside `context-guru:status` — four
+// records of this tool measuring itself, two of which a prefix match on today's name misses.
+// Retiring a name does not retire the history written under it.
+var selfPlugins = []string{selfPlugin, "cg"}
+
+// isSelfOwned reports whether a capability name belongs to this plugin.
+func isSelfOwned(name string) bool {
+	for _, p := range selfPlugins {
+		if strings.HasPrefix(name, p+":") {
+			return true
+		}
+	}
+	return false
+}
+
 // removalScope maps a Removal.Kind to the scope at which that mechanism actually operates.
 var removalScope = map[string]string{
 	"plugin_skill": ScopePlugin,
@@ -260,7 +279,7 @@ func ShapeInsights(rep *ToolReport, opt InsightsOptions) *InsightsDoc {
 			continue
 		}
 		// This plugin's own skills never reach the tables.
-		if strings.HasPrefix(r.Name, selfPlugin+":") {
+		if isSelfOwned(r.Name) {
 			if r.SessionsUsed > 0 || r.Calls > 0 {
 				continue // an invoked one was never in the inventory to exclude
 			}

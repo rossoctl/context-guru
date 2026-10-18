@@ -70,6 +70,11 @@ type API struct {
 	// shapes them. Its own entry because the shaped document is a different payload under a
 	// different key: sharing toolsCache would serve an inventory to a caller asking for advice.
 	insightsCache jsonCache
+	// historyCache covers GET /api/history, which reads the invocation table and the installed
+	// inventory off disk. Its own cache rather than sharing the insights one: the two answer
+	// different questions over different sources, so an invalidation that matters to one is
+	// usually noise to the other.
+	historyCache jsonCache
 	// jsonInflight collapses concurrent COLD reads of the same cache key onto one computation.
 	// Keyed by the same principal-scoped cacheKey as the caches, so two tenants never share a
 	// computation and a manager never shares one with a tenant.
@@ -611,7 +616,8 @@ func (a *API) routes() []route {
 	// The served insights view's own read: the inventory, shaped into removal advice. Declared
 	// beside its handler in insightsapi.go and appended here for the same reason as the rest —
 	// this table is what the scoping tests walk.
-	return append(rs, a.insightsRoutes()...)
+	rs = append(rs, a.insightsRoutes()...)
+	return append(rs, a.historyRoutes()...)
 }
 
 // Mount registers every dashboard route on a mux under the given prefix
