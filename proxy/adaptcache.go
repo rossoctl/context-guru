@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
 )
@@ -143,10 +144,10 @@ func (h *Handler) currentPlan(tn *Tenancy, facts []rowFacts) (adaptPlan, string,
 			}, "active campaign " + id, true
 		}
 	}
-	if !pol.on() {
+	if !pol.On() {
 		return func(int) (int, float64, bool) { return 0, 0, false }, "keep-alive off", true
 	}
-	gate, _ := predictorFor(pol.PredictorID)
+	gate, _ := keepalive.PredictorFor(pol.PredictorID)
 	return func(i int) (int, float64, bool) {
 		f := &facts[i]
 		if f.turn < 1 || f.prefix < int64(pol.MinPrefixTokens) || f.ping > pol.Ceiling() || (pol.PredictorID != "" && (gate == nil || gate(f.stop) < pol.PredictorThreshold)) {

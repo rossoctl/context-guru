@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -58,14 +57,14 @@ func (k *keeper) loadStrategies() {
 // the two can never disagree," an invariant that requires them to see the same instant,
 // not just the same code path. k.now defaults to time.Now in production (newKeeper) but
 // is swapped for a deterministic/simulated clock throughout this package's own test
-// suite, so a caller reaching for time.Now() directly is a real, if usually invisible,
-// gap between the two halves' inputs. A nil keeper (or one with no clock set, which
-// should not happen outside a test that never called newKeeper) falls back to time.Now.
+// suite (newKeeperWith's keepalive.Options.Now), so a caller reaching for time.Now()
+// directly is a real, if usually invisible, gap between the two halves' inputs. A nil
+// keeper falls back to time.Now.
 func (k *keeper) clockNow() time.Time {
-	if k == nil || k.now == nil {
+	if k == nil {
 		return time.Now()
 	}
-	return k.now()
+	return k.Keeper.Now()
 }
 
 // bestStrategyFor resolves the highest-priority ACTIVE strategy matching tenantID at
@@ -252,7 +251,7 @@ func validStrategyBounds(idle time.Duration, pings, minPrefix int, maxUSDPerPing
 }
 
 // knownPredictorIDs is the set of predictor names a strategy is allowed to reference —
-// kept in lockstep with predictorFor's switch by TestKnownPredictorIDsMatchPredictorFor,
+// kept in lockstep with keepalive's predictorFor switch by TestKnownPredictorIDsMatchPredictorFor,
 // so accepting a strategy at creation time can never promise a gate that pingable() does
 // not actually know how to evaluate.
 //
@@ -264,24 +263,6 @@ func validStrategyBounds(idle time.Duration, pings, minPrefix int, maxUSDPerPing
 // rather than a model: predictorFor never runs anything heavier than kvcache.ClusterOf in
 // the hot path.
 var knownPredictorIDs = map[string]bool{"stop-reason-gated": true}
-
-// predictorFor resolves a predictor id to a probability function over the entry's own
-// stop_reason, and reports whether the id is known. This is the whole production-safe
-// predictor class: a rule, or (a future entry) a portable logistic-regression dot product
-// — never an embedded model or a call out of the hot path. See kaEntry.stopReason and
-// CachePolicy.PredictorID/PredictorThreshold for where the result is used.
-func predictorFor(id string) (func(stopReason string) float64, bool) {
-	switch id {
-	case "stop-reason-gated":
-		return func(stopReason string) float64 {
-			if kvcache.ClusterOf(stopReason) == kvcache.ClusterActuallyDone {
-				return 1.0
-			}
-			return 0.0
-		}, true
-	}
-	return nil, false
-}
 
 // validPredictorRef checks predictorID against knownPredictorIDs (empty is always
 // valid — "no predictor gate") and the threshold's own shape.

@@ -103,10 +103,11 @@ func logDecisions(lg *slog.Logger, rr *components.RunReport) {
 			"saved", rep.Saved(), "duration_ms", rep.DurationMs,
 			"changed_msgs", len(rep.ChangedIdx),
 		}
-		// "stashed" only for an Offload: a Reformat's CacheKeys are dedup keys over
-		// content it did NOT stash (see components.reformatKeys), and labelling those
-		// "stashed" would read as a reversibility claim the fold never makes.
-		if rep.Kind == "offload" {
+		// "stashed" only for an Offload that stashed: a Reformat's CacheKeys, and an
+		// Irreversible Offload's, are dedup keys over content it did NOT stash (see
+		// components.reformatKeys), and labelling those "stashed" would read as a
+		// reversibility claim the run never makes.
+		if rep.Kind == "offload" && !rep.Irreversible {
 			attrs = append(attrs, "stashed", len(rep.CacheKeys))
 		} else {
 			attrs = append(attrs, "dedup_keys", len(rep.CacheKeys))

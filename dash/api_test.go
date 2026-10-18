@@ -698,6 +698,12 @@ func TestSettingsFormSpeaksTheSameFieldNamesAsTheServer(t *testing.T) {
 		t.Error("the text control does not blank a secret before rendering: a stored " +
 			"credential would be echoed into the DOM")
 	}
+	// Zero is now the correct count: model.api_key was the only Secret field any component
+	// declared, and it was retired — a component config block names a source, never a
+	// credential (components/offload/modelcfg.go); credentials are the host's own business
+	// (dispatch.Dispatcher). The write-only JS checks above still guard the plumbing for
+	// whenever a component declares one again; this loop keeps checking its shape, it just
+	// has nothing to iterate today.
 	secrets := 0
 	for name, decls := range all {
 		for _, fd := range decls {
@@ -711,9 +717,7 @@ func TestSettingsFormSpeaksTheSameFieldNamesAsTheServer(t *testing.T) {
 			}
 		}
 	}
-	if secrets == 0 {
-		t.Error("no secret fields declared; the write-only path above is untested")
-	}
+	t.Logf("%d secret field(s) declared", secrets)
 
 	// Min is semantics, not validation trivia, and the number input has to carry the right
 	// one: 0 on a CAP means unlimited and is a legitimate choice, while 0 on a size threshold

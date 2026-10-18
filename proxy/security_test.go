@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,8 +14,9 @@ import (
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -415,42 +418,61 @@ func TestRegisterDoesNotRevealWhetherTheAddressIsTaken(t *testing.T) {
 // pointed at the same up.base. So one request carried two different credentials to one
 // host. Both now read the same resolved decision, up.setKey.
 func TestIncomingModelFollowsTheRoutesCredentialDecision(t *testing.T) {
+	// What the credential actually was is now opaque to the component (D/Ref name a host-held
+	// secret); proven here by what the fake upstream actually received.
+	var seenKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenKey = r.Header.Get("x-api-key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"ok"}]}`)
+	}))
+	defer srv.Close()
+
 	// Gateway mode: the operator holds the key, the caller holds a placeholder.
 	h := New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil,
 		Options{AnthropicKey: "gateway-key-for-this-test"})
 	defer h.Close()
 	body := []byte(`{"model":"claude-haiku-4-5"}`)
-	up := upstream{base: "https://upstream.invalid", path: "/v1/messages",
+	up := upstream{base: srv.URL, path: "/v1/messages",
 		setKey: headerKey("x-api-key", h.opts.AnthropicKey)}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
 	r.Header.Set("x-api-key", "caller-placeholder")
 
-	m, ok := h.incomingModel("anthropic", up, body, r).(cheapmodel.Anthropic)
+	m, ok := h.incomingModel(bschemas.Anthropic, up, body, r).(cheapmodel.Anthropic)
 	if !ok {
 		t.Fatalf("gateway route produced no model client")
 	}
-	if m.APIKey == "caller-placeholder" {
-		t.Errorf("the component's client carries the CALLER's credential to a route that " +
+	if _, err := m.Complete(context.Background(), "p"); err != nil {
+		t.Fatal(err)
+	}
+	if seenKey == "caller-placeholder" {
+		t.Errorf("the component's client carried the CALLER's credential to a route that " +
 			"replaces it with the server's")
 	}
-	if m.APIKey != h.opts.AnthropicKey {
-		t.Errorf("model client key = %q, want the same credential setUpstreamAuth injects", m.APIKey)
+	if seenKey != h.opts.AnthropicKey {
+		t.Errorf("upstream saw x-api-key %q, want the same credential setUpstreamAuth injects", seenKey)
 	}
 
 	// Hosted: the injector holds its key in a closure that cannot be read back, and a
 	// server credential must not fund a tenant's compaction anyway (the reason
 	// staticModel is withheld there). So the component degrades to deterministic.
 	h.opts.Tenants = NewTenantSource(nil, nil, nil, 0)
-	if got := h.incomingModel("anthropic", up, body, r); got != nil {
+	if got := h.incomingModel(bschemas.Anthropic, up, body, r); got != nil {
 		t.Errorf("hosted mode handed a component a server-held credential: %#v", got)
 	}
 
 	// And the hosted DEFAULT is unchanged: no server key on the route, so the caller's
 	// own credential is what both exits use — the whole point of that path.
-	noKey := upstream{base: "https://upstream.invalid", path: "/v1/messages"}
-	m2, ok := h.incomingModel("anthropic", noKey, body, r).(cheapmodel.Anthropic)
-	if !ok || m2.APIKey != "caller-placeholder" {
-		t.Errorf("a route that forwards the caller's key did not give the component the same: %#v", m2)
+	noKey := upstream{base: srv.URL, path: "/v1/messages"}
+	m2, ok := h.incomingModel(bschemas.Anthropic, noKey, body, r).(cheapmodel.Anthropic)
+	if !ok {
+		t.Fatalf("a route that forwards the caller's key did not give the component a client: %#v", m2)
+	}
+	if _, err := m2.Complete(context.Background(), "p"); err != nil {
+		t.Fatal(err)
+	}
+	if seenKey != "caller-placeholder" {
+		t.Errorf("upstream saw x-api-key %q, want the caller's own credential", seenKey)
 	}
 }
 

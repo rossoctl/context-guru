@@ -51,15 +51,9 @@ import (
 // one-line `curl --data-binary @-` hook sends. Only those fields are read; every other field of the
 // payload (cwd, transcript_path, model) is discarded by the decoder, never logged or stored.
 
-const (
-	// maxLifecycleBody fits a raw hook payload (its cwd and transcript path are the bulk of it).
-	maxLifecycleBody = 4096
-	// lifecycleTTL is how long a SessionEnd mark is remembered: past it the mark is dead weight.
-	lifecycleTTL = 12 * time.Hour
-	// maxEndedPerTenant bounds one tenant's end marks. The cap is per tenant, not global, so
-	// one tenant's churn cannot evict another tenant's marks.
-	maxEndedPerTenant = 2000
-)
+// maxLifecycleBody fits a raw hook payload (its cwd and transcript path are the bulk of it). The
+// end marks' lifetime and per-tenant cap are package keepalive's (lifecycle.go).
+const maxLifecycleBody = 4096
 
 // compactRaceMargin bounds how late a SessionStart compact event may arrive after the request that
 // follows the compaction started. Measured hook-to-proxy delivery is 0.2-0.8 s; the old prefix's last
@@ -176,16 +170,14 @@ func (k *keeper) signal(tenantID, scoped, event, kind string, now time.Time) boo
 	case "SessionEnd":
 		// Every end reason (even clear / resume) retires the id the event names: that id will not
 		// send its next request from this process. If it does (a resumed session) the request
-		// starts after the mark and is tracked normally; see endedAfter.
+		// starts after the mark and is tracked normally; see keepalive.Keeper.EndedAfter.
 		before := k.Stats().Live
 		k.retireSession(tenantID, scoped)
 		// The hook's id is the campaign's key: campaign decisions are never made on the OpenAI route (keeper.record), and Codex, the one client
 		// whose hook id differs from the proxy's session key, always uses that route.
 		k.pred.sessionEnded(tenantID, scoped, now, time.Time{})
 		slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "retired", before-k.Stats().Live)
-		k.mu.Lock()
-		k.markEndedLocked(tenantID, kaKey(tenantID, scoped), now)
-		k.mu.Unlock()
+		k.markEnded(tenantID, scoped, now)
 		k.signalApplied.Add(1)
 		return true
 	case "SessionStart":
@@ -209,41 +201,4 @@ func (k *keeper) signal(tenantID, scoped, event, kind string, now time.Time) boo
 	// positive, so a rule that stops them would lose money. SessionStart presence: see the table above.
 	slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "applied", false)
 	return false
-}
-
-// endedAfter reports whether the session was ended by a client signal at or after startedAt, i.e. the
-// request that started at startedAt was in flight when the user left. Its cache entry is not worth
-// holding. A request that starts after the mark is a resumed session and is tracked.
-func (k *keeper) endedAfter(tenantID, scoped string, startedAt time.Time) bool {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	t, ok := k.ended[tenantID][kaKey(tenantID, scoped)]
-	return ok && !startedAt.After(t)
-}
-
-// markEndedLocked records an end mark under the tenant's own bucket. At the cap it first drops
-// marks older than lifecycleTTL, then the oldest, and only ever from this tenant's bucket.
-func (k *keeper) markEndedLocked(tenantID, key string, now time.Time) {
-	if k.ended == nil {
-		k.ended = map[string]map[string]time.Time{}
-	}
-	b := k.ended[tenantID]
-	if b == nil {
-		b = map[string]time.Time{}
-		k.ended[tenantID] = b
-	}
-	if _, ok := b[key]; !ok && len(b) >= maxEndedPerTenant {
-		oldK, oldT := "", now
-		for kk, t := range b {
-			if now.Sub(t) > lifecycleTTL {
-				delete(b, kk)
-			} else if oldK == "" || t.Before(oldT) {
-				oldK, oldT = kk, t
-			}
-		}
-		if len(b) >= maxEndedPerTenant {
-			delete(b, oldK)
-		}
-	}
-	b[key] = now
 }

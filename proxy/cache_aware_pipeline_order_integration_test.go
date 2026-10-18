@@ -211,7 +211,7 @@ func TestXHighPresetCommitsACacheAwareSummary(t *testing.T) {
 // `high` runs the same summarizer as xhigh at cache_state `any` (#417), so it must commit a
 // summary on the same fixture. `medium` pins cache_state: pre_expiry, so on these warm turns it
 // must NOT ask (it waits for the pre-expiry window); its reserve path is covered by the
-// pre_expiry tests in components/offload and proxy/keepalive_summarysubstitute_test.go.
+// pre_expiry tests in components/offload and keepalive/substitute_test.go.
 func TestHighPresetCommitsACacheAwareSummary(t *testing.T) {
 	asked := pipelineOrderFixture(t, presetWithLowTrigger(t, "high"))
 	if len(asked) != 1 {

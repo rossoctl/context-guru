@@ -1,4 +1,4 @@
-package modelinfo
+package modelinfo_test
 
 import (
 	"compress/gzip"
@@ -10,11 +10,14 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 )
 
 func bundledMap(t *testing.T) []byte {
 	t.Helper()
-	f, err := os.Open("testdata/litellm_prices.json.gz")
+	f, err := os.Open("litellm/testdata/litellm_prices.json.gz")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +49,7 @@ func TestBuiltinPinnedToBundledMap(t *testing.T) {
 			doc[k] = e
 		}
 	}
+	builtinWindows := modelinfo.DefaultBuiltin().Windows()
 	if len(builtinWindows) == 0 {
 		t.Fatal("builtin list is empty")
 	}
@@ -63,10 +67,10 @@ func TestBuiltinPinnedToBundledMap(t *testing.T) {
 
 // With no map loaded, each listed id (and its gateway forms) is exact.
 func TestBuiltinExactWithoutMap(t *testing.T) {
-	unloaded := NewLiteLLM("http://127.0.0.1:1/none", &http.Client{Timeout: 50 * time.Millisecond}, time.Hour)
-	c := NewChain(unloaded)
+	unloaded := litellm.NewLiteLLM("http://127.0.0.1:1/none", &http.Client{Timeout: 50 * time.Millisecond}, time.Hour)
+	c := modelinfo.NewChain(unloaded)
 	ctx := context.Background()
-	for id, want := range builtinWindows {
+	for id, want := range modelinfo.DefaultBuiltin().Windows() {
 		for _, form := range []string{id, "aws/" + id, "anthropic/" + id, id + "[1m]", "aws/" + id + "[1m]"} {
 			w, exact, ok := c.WindowExact(ctx, form)
 			if !ok || !exact || w != want {
@@ -78,7 +82,7 @@ func TestBuiltinExactWithoutMap(t *testing.T) {
 
 // An unlisted id, and an id that only shares a prefix with an entry, stay inexact.
 func TestBuiltinStaysInexactForUnlisted(t *testing.T) {
-	c := NewChain(NewLiteLLM("http://127.0.0.1:1/none", &http.Client{Timeout: 50 * time.Millisecond}, time.Hour))
+	c := modelinfo.NewChain(litellm.NewLiteLLM("http://127.0.0.1:1/none", &http.Client{Timeout: 50 * time.Millisecond}, time.Hour))
 	ctx := context.Background()
 	for _, id := range []string{
 		"claude-sonnet-5-future", "claude-sonnet-5-5-future", "claude-opus-5-1", "claude-opus-4-60",
@@ -87,7 +91,7 @@ func TestBuiltinStaysInexactForUnlisted(t *testing.T) {
 		if _, exact, _ := c.WindowExact(ctx, id); exact {
 			t.Errorf("%s resolved exact; want inexact", id)
 		}
-		if _, ok := DefaultBuiltin().Window(ctx, id); ok {
+		if _, ok := modelinfo.DefaultBuiltin().Window(ctx, id); ok {
 			t.Errorf("Builtin answered for %s; want a miss", id)
 		}
 	}
@@ -99,10 +103,21 @@ func TestBuiltinBehindLoadedMap(t *testing.T) {
 		w.Write([]byte(`{"claude-opus-5":{"max_input_tokens":64000}}`))
 	}))
 	defer srv.Close()
-	l := NewLiteLLM(srv.URL, srv.Client(), time.Hour)
-	waitFor(t, l, "claude-opus-5")
-	w, exact, ok := NewChain(l).WindowExact(context.Background(), "claude-opus-5")
+	l := litellm.NewLiteLLM(srv.URL, srv.Client(), time.Hour)
+	waitForBuiltinTest(t, l, "claude-opus-5")
+	w, exact, ok := modelinfo.NewChain(l).WindowExact(context.Background(), "claude-opus-5")
 	if !ok || !exact || w != 64000 {
 		t.Errorf("got %d,%v,%v; want the map's 64000,true,true", w, exact, ok)
 	}
+}
+
+func waitForBuiltinTest(t *testing.T, l *litellm.LiteLLM, model string) {
+	t.Helper()
+	for i := 0; i < 400; i++ {
+		if _, ok := l.Window(context.Background(), model); ok {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("litellm map never loaded (%s never resolved)", model)
 }

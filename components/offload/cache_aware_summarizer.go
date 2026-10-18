@@ -116,9 +116,10 @@ type CacheAwareSummarizer struct {
 	maxRequestTokens  int
 	resummarizeTokens int
 	modelSource       string
-	modelClient       components.Model
-	trigger           components.Trigger
-	mode              markerMode
+	// modelClient is a test-injection seam only; see AgentDiet.modelClient.
+	modelClient components.Model
+	trigger     components.Trigger
+	mode        markerMode
 	// overrideProfiles caches the on-disk registry after the first successful read.
 	overrideProfiles atomic.Value
 }
@@ -542,7 +543,7 @@ func newCacheAwareSummarizer(raw []byte) (components.Component, error) {
 	cfg := cacheAwareSummarizerConfig{
 		KeepLastTurns: 10, MinTokens: 500, ResummarizeTokens: 6000, InstructionRole: "auto",
 	}
-	if err := components.Decode(raw, &cfg); err != nil {
+	if err := decodeWithModelHint("cache_aware_summarizer", raw, &cfg); err != nil {
 		return nil, err
 	}
 	if cfg.KeepLastTurns < 0 {
@@ -580,8 +581,8 @@ func newCacheAwareSummarizer(raw []byte) (components.Component, error) {
 	c := &CacheAwareSummarizer{
 		keepLastTurns: cfg.KeepLastTurns, modelID: cfg.ModelID, profilesPath: cfg.ProfilesPath,
 		profiles: profiles, minTokens: cfg.MinTokens, maxRequestTokens: cfg.MaxRequestTokens, resummarizeTokens: cfg.ResummarizeTokens,
-		modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(),
-		trigger: cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode),
+		modelSource: cfg.Model.Source,
+		trigger:     cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode),
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.InstructionRole)) {
 	case "", "auto":
@@ -775,7 +776,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		rep.Gate("request_over_max_tokens")
 		return declineButReplayStale()
 	}
-	model := s.modelClient
+	model := s.modelClient // test-injection seam; nil in production
 	if model == nil {
 		model = c.Model.For(s.modelSource)
 	}

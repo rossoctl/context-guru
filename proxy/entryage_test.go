@@ -50,7 +50,7 @@ func TestArriveAtReportsWhenTheEntryWasLastRefreshed(t *testing.T) {
 	start := clock.now()
 	recordOne(t, k, kaPolicy(), kaBody, start, upstream{base: "http://up", path: "/v1/messages"})
 	at := clock.advance(281 * time.Second)
-	k.sweep(at)
+	k.Sweep(at)
 	waitPings(t, k, 1)
 
 	a := k.arriveAt("t1", "sess-1", "")

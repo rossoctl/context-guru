@@ -20,6 +20,9 @@ infrastructure the components sit on.
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
+| `dispatch/` | the one way a core package reaches an external service: `Dispatcher` (`Do`/`Release`/`Price`), resolved by an opaque host-issued `Ref`; `dispatch/dispatchtest` is the exported host contract (`Contract`) plus a recording `Fake` and a minimal `HTTPHost` for tests |
+| `keepalive/` | the idle keep-alive, host-agnostic; sends pings through the host's `dispatch.Dispatcher` (cmd/context-guru-proxy's `proxy.Dispatcher`; the Cortex plugin's `cortexDispatcher`) |
+| `cheapmodel/` | Anthropic/OpenAI wire-format clients for the cheap-model call (extraction, summarization); hold a `dispatch.Dispatcher` + `dispatch.Ref`, never a credential — a host builds one over its own Dispatcher |
 | `modes/` | per-session cached-prefix boundary (`Tracker`) + the bounded off-path worker pool (`Pool`) |
 | `metrics/` | `Emitter` implementations: `Slog`, `Aggregator` (for `/stats`), `Tee` |
 | `dash/` | the persistent observability layer: SQLite store, off-hot-path capture, SSE hub, JSON API, embedded UI |
@@ -400,8 +403,8 @@ flowchart LR
 ```
 
 - **`incoming`** (default) reuses the proxied request's model + the gateway's key — zero extra config,
-  works through the eval-containers gateway. **`config`** uses a dedicated cheap model (`internal/cheapmodel`
-  Anthropic/OpenAI). The external plugin host offers only `config` (its incoming key is a placeholder).
+  works through the eval-containers gateway. **`config`** uses a dedicated cheap model (`cheapmodel.Anthropic`/`OpenAI`, pinned on the host's
+  `dispatch.Dispatcher`). The external plugin host offers only `config` (its incoming key is a placeholder).
 - The call is synchronous in the request path (in `sync` mode; in `observe` it happens off-path), so
   it's bounded (short timeout, retry) and **fail-open**: any error reverts the component (pipeline
   guarantee), and a missing model degrades gracefully.

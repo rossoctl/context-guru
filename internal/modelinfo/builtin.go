@@ -35,10 +35,15 @@ var builtinWindows = map[string]int{
 // DefaultBuiltin returns the built-in exact list.
 func DefaultBuiltin() Builtin { return Builtin{windows: builtinWindows} }
 
+// Windows returns the exact list's own ids and windows, for a test that needs to walk every
+// entry (e.g. pinning each against the bundled LiteLLM snapshot) without reaching into the
+// unexported map directly.
+func (b Builtin) Windows() map[string]int { return b.windows }
+
 // Window returns the window for an exactly listed model.
 func (b Builtin) Window(_ context.Context, model string) (int, bool) {
 	// The last path segment, so a gateway route (aws/…, anthropic/…) matches. Still one whole id.
-	_, tail := normalize(model)
+	_, tail := Normalize(model)
 	w, ok := b.windows[tail]
 	return w, ok
 }
