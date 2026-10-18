@@ -80,7 +80,7 @@ Three problems remain with that approach:
 
 The numbers are the order in which the requirements were found, so they are not in sequence.
 R35 to R39 were added after the first review, and R40 to R43 for subscription plans.
-**R10 is withdrawn.** It asked for a flag that separates a replay from a fresh act. `FirstApplied`
+**R13 is withdrawn** (see D). **R10 is withdrawn.** It asked for a flag that separates a replay from a fresh act. `FirstApplied`
 (§4.1) replaces it.
 
 ### A. Boundary
@@ -143,10 +143,13 @@ R35 to R39 were added after the first review, and R40 to R43 for subscription pl
 
 ### D. Status and correctness
 
-- **R12.** Each operation has a status: `applied`, `projected`, `reverted`, `discarded`. Only
-  `applied` counts in totals.
-- **R13.** Each operation has a reversibility class: `lossless`, `reversible` (with a stash key),
-  `irreversible`.
+- **R12.** An operation is applied or projected. A projected operation comes from a plugin under
+  `on_error: observe`: the plugin computed the change, but the original body went upstream. Only
+  applied operations count in totals. A change that is not in the forwarded body (reverted by the
+  pipeline, or discarded by the writeback) is not reported.
+- **R13 is withdrawn.** It asked for a reversibility class and a stash key. No pricing rule, check
+  or attribution reads them, and the expand loop finds stashed content by its marker in the body.
+  cg's component API keeps the safety rule that a lossy offload must stash its original.
 - **R14.** Changes are additive. For each section, the applied changes add up to the client body
   minus the forwarded body. The library checks this.
 - **R15.** Each request is complete without history.
@@ -267,9 +270,7 @@ type Operation struct {
     Class     Class  // reencode | envelope | reduce | summarize | restore | inject
     Signal    Signal // shape | redundancy | age | reference | relevance | account; "" if none
 
-    Status        Status        // applied | projected | reverted | discarded
-    Reversibility Reversibility // lossless | reversible | irreversible
-    StashKey      string        // set when reversible
+    Projected bool // set by the framework: the plugin runs under on_error: observe (R12)
 
     At     Position // first position the change touches, in this producer's output
     Spans  []Span   // every touched range, when the change is not contiguous; nil otherwise
@@ -342,8 +343,6 @@ type ThreadSource string  // header | prefix | new
 type BillingMode string   // api | subscription | unknown
 type Class string         // reencode | envelope | reduce | summarize | restore | inject
 type Signal string        // shape | redundancy | age | reference | relevance | account
-type Status string        // applied | projected | reverted | discarded
-type Reversibility string // lossless | reversible | irreversible
 type Section string       // tools | system | messages
 type Cause string         // producer | client | expired | unknown
 type Side string          // beforeBoundary | afterBoundary
@@ -559,8 +558,12 @@ The proxy already finds a prefix change in its own way (`Event.AttributeCache`).
 - Each plugin calls `pctx.ReportOps(ops...)` during its pass. The pipeline runs in sequence, so the
   list is in order.
 - The framework sets `Producer` and `Stage`. A plugin cannot report under another plugin's name.
-- The framework sets `Status = projected` on every operation of a plugin whose `SetBody` returned
+- The framework sets `Projected = true` on every operation of a plugin whose `SetBody` returned
   false (`on_error: observe`).
+- A producer reports only changes that are in the forwarded body, or that would be there for a
+  projected operation. A change the pipeline reverted (an error, a panic, the never-worse guard) or
+  the writeback discarded is not reported. It saves nothing, as a change that ended (§4.5). Its
+  model call, if any, is still a `spend` operation, so the money it cost is counted.
 - `settle` keeps an explicit allow-list of producers, for the reason `savingComponents` has today:
   a plugin must not add itself to the money record only by reporting operations. Operations from
   a producer that is not on the list are kept on the event and marked unpriced.
@@ -791,7 +794,7 @@ type PricedOp struct {
     Producer  string
     Component string
     ChangeID  string
-    Status    Status
+    Projected bool
     Saved     TierTokens // tokens the provider did not bill, by tier; never negative
     Caused    TierTokens // tokens the provider billed because of this operation; never negative
     Call      *ModelCall // spend and ping only: copied from the operation, for the host to price
@@ -829,7 +832,7 @@ direction.
 
 The library reports failed checks in `Result.Checks`. A failure does not stop pricing.
 
-1. **Sum:** for each section, the applied operations' `Before − After` add up to the client size
+1. **Sum:** for each section, the applied (not projected) operations' `Before − After` add up to the client size
    minus the forwarded size. The collector sends both. A failure means a plugin changed the body
    and did not report it.
 2. **Order:** stages do not decrease.
@@ -837,7 +840,8 @@ The library reports failed checks in `Result.Checks`. A failure does not stop pr
 4. **Spans:** for an operation with `Spans`, its `Before` and `After` equal the sums over its spans.
 5. **Attribution:** each `cacheBreak` names at most one operation, and that operation is at or
    before the break.
-6. **Conservation:** the request total equals the bill difference (§6.3).
+6. **Conservation:** the request total of the applied operations equals the bill difference (§6.3).
+   Projected operations are left out, because their content went upstream unchanged.
 7. **Thread:** every operation has the request's `Session` and `Thread`.
 
 ## 7. Recording the result
@@ -857,7 +861,7 @@ The library reports failed checks in `Result.Checks`. A failure does not stop pr
 | `USD` | `Saved`, priced |
 | `PenaltyUSD` | `Caused`, priced, plus the attributed `cacheBreak` operations |
 | `Tier` | the tier with the largest `Saved` |
-| `Projected` | `Status == projected` |
+| `Projected` | `Projected` |
 | `Estimated` | any operation `Estimated` |
 
 New fields, all additive (the ledger rule is "add, never rename"):
@@ -963,7 +967,7 @@ missing, report too little and say why.
 | Response has no usage | Nothing is priced, as today. |
 | No rate for a tier | `Saving.Provenance` is empty, as today. Tokens are on the record. |
 | Producer not on the allow-list | Kept on the event, unpriced. |
-| `on_error: observe` | `Status = projected`. Priced and shown as "would have saved", never in totals. |
+| `on_error: observe` | `Projected = true`. Priced and shown as "would have saved", never in totals. |
 | `Billing.Mode` is `unknown` | Priced as `api`, every figure marked `Estimated`. |
 
 ## 9. Migration
@@ -1071,7 +1075,8 @@ drops the combinations that cannot occur, and states the reason for each drop in
 2. Cache breaks: one for each `Cause`. A producer break attributed to the earliest operation. Two
    producers whose changes are both before the break.
 3. Two producers on the same content (R25), and a structure change that moves positions (`Splice`).
-4. Each `Status`: `projected` is priced and not counted; `reverted` and `discarded` are not priced.
+4. A projected operation: priced, shown as "would have saved", and not counted. A reverted change
+   that still made a model call: no reduction, and its `spend` operation counted.
 5. Each `Unpriced` reason, and each `CheckFailure`.
 6. A list over the limit, which becomes an `Aggregate`.
 7. `spend` and `reroute` operations, which pass through unpriced.
