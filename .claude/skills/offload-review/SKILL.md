@@ -39,12 +39,31 @@ background task, so it cannot wait for the reviewers.
    - Exit 0: read both `.claude/worktrees/review-pr<N>-<backend>-r{1,2}/.review.md`.
    - Exit 1: read that reviewer's `review.log`, report it to the user, and stop.
    - Exit 1 with "already has both round-N reviews": you did not push since that round.
-   - Exit 3: the round budget (2) is used. Tell the user that the PR is problematic. Stop.
+   - Exit 3: the round budget is used. Go to "More rounds".
 4. **If both verdicts are `approve`**, tell the user that the PR is ready to merge. Stop.
 5. **Fix the findings** in your own worktree. Check each finding first: fix the real ones; for
    one you reject, reply on the PR and say why. Commit with `git commit -s`, then push.
 6. **Run step 2 again** for round 2. Each reviewer checks its own earlier findings.
-7. After round 2, report both verdicts to the user. Do not start round 3.
+7. After the last round of the budget, report both verdicts to the user. Do not start another
+   round on your own.
+
+## More rounds
+
+The default budget is 2 rounds. Only the user can grant more. You may ask for them.
+
+1. When a reviewer still blocks after the last round, ask the user with AskUserQuestion.
+   Give the facts: each open finding, your reply to it, and why one more round can close it.
+   Example: "Reviewer 2 kept a finding that my reply disproves; it did not see the reply."
+2. Offer: one more round, or stop and let a person decide.
+3. If the user grants N more rounds, run the next round with the new total:
+   ```
+   OFFLOAD_MAX_ROUNDS=<old total + N> scripts/offload-review.sh <pr>
+   ```
+   Keep that total for the later rounds the user granted.
+4. If the user says stop, the PR waits for a person. Do not ask again for that PR unless the user
+   brings it up.
+
+Do not ask for more rounds just because there are findings. Fix them in the rounds you have.
 
 ## Rules
 

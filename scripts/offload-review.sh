@@ -80,7 +80,8 @@ else
   todo=(1 2)
 fi
 if [ "$round" -gt "$max_rounds" ]; then
-  echo "PR #$pr used its $max_rounds review rounds. A person must decide now." >&2
+  echo "PR #$pr used its $max_rounds review rounds. Ask the user for more rounds" \
+    "(OFFLOAD_MAX_ROUNDS=$((max_rounds + 1))), or let a person decide." >&2
   exit 3
 fi
 
