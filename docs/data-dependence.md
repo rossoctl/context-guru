@@ -20,6 +20,8 @@ says what each one does at three storage levels: off, metadata only, and everyth
   repeat its removals from a flag, but its cheap question to the model needs last turn's text.
 - **The proxy keeps content after the user opts out**, in 7 places. The worst are 2 full request
   bodies per thread, and the user's credential for keep-alive.
+- **With storage off today, use preset `conservative` and cache strategy `none` or `1-hour-head`.**
+  Every other plugin preset pays for savings that last one turn, so it does not work.
 - **"Metadata only" does not exist yet.** Today the Store keeps everything or nothing.
 
 ## Terms
@@ -100,8 +102,11 @@ Find your preset and your cache strategy below. Each cell says what happens at t
 - ✅ **Works**: the same as with everything stored.
 - ✅ **Works, no `expand`**: the same savings. The model cannot ask for removed text back. The
   agent still has its own copy.
-- ⚠️ **Partly**: some parts work, and the cell says which parts do not.
-- ❌ **Does not work**: it does nothing, or it can cost more than it saves.
+- ❌ **Does not work**: it does nothing, or it pays for something that lasts only one turn. That
+  is a model call, or a cache write when a shortened message comes back in full the next turn.
+  The cell says which.
+
+There is no "partly". A setup that pays for a saving that lasts one turn does not work.
 
 "Metadata only" does not exist yet. That column says what would happen if it were added to the
 code as it is today.
@@ -114,12 +119,11 @@ These are the presets in the Claude Code plugin picker.
 |---|---|---|---|
 | `off` | ✅ Works | ✅ Works | ✅ Works |
 | `conservative` | ✅ Works, no `expand` | ✅ Works, no `expand` | ✅ Works |
-| `medium` | ⚠️ **Partly.** The `conservative` part works. `extract_llm` pays for each rewrite, uses it for one turn, then breaks the cache. The summary is never made. | ⚠️ **Partly.** The same as Off. | ✅ Works |
-| `high` | ⚠️ **Partly.** The same as `medium`. | ⚠️ **Partly.** The same as `medium`. On OpenAI it also pays for a summary every turn and throws it away. | ✅ Works |
-| `xhigh` | ⚠️ **Partly.** The same as `high`. The sweep also pays full price to ask which outputs to remove, and its removals last one turn. | ⚠️ **Partly.** The same as `high`, plus the sweep problem from the Off column. | ✅ Works |
+| `medium` | ❌ **Does not work.** `extract_llm` pays for a model call on each new large output, and the rewrite lasts one turn. The summary is never made. | ❌ The same as Off | ✅ Works |
+| `high` | ❌ **Does not work.** The same as `medium`. | ❌ The same as `medium`. On OpenAI it also pays for a summary every turn and throws it away. | ✅ Works |
+| `xhigh` | ❌ **Does not work.** The same as `high`. The sweep also pays full price to ask which outputs to remove, and the removals last one turn. | ❌ The same as Off | ✅ Works |
 
-**At Off, use `conservative`.** `medium`, `high` and `xhigh` add model calls that last one turn, so
-they can cost more than `conservative`.
+**With storage off, use `conservative`.** It is the only plugin preset that saves anything.
 
 ### Cache strategies
 
@@ -140,11 +144,11 @@ These presets are for the standalone proxy and for benchmarks.
 |---|---|---|---|
 | `cache`, `safe` | ✅ Works | ✅ Works | ✅ Works |
 | `house`, `coding`, `mcp` | ✅ Works, no `expand` | ✅ Works, no `expand` | ✅ Works |
-| `balanced`, `codesafe` | ⚠️ **Partly.** `failed_run` (and `collapse` in `codesafe`) shortens a message once, then sends it in full the next turn. That breaks the cache. | ⚠️ **Partly.** The same as Off. | ✅ Works |
-| `codesmart`, `aggressive`, `agent`, `general`, `housellm` | ⚠️ **Partly.** The rule-based part works, but some rewrites last one turn and break the cache. `extract_llm` (and the sweep in `housellm`) pays for calls that last one turn. | ⚠️ **Partly.** The same as Off. | ✅ Works |
+| `balanced`, `codesafe` | ❌ **Does not work.** `failed_run` (and `collapse` in `codesafe`) shortens a message once, then sends it in full the next turn. The user pays a cache write for a saving of one turn. | ❌ The same as Off | ✅ Works |
+| `codesmart`, `aggressive`, `agent`, `general`, `housellm` | ❌ **Does not work.** `extract_llm` (and the sweep in `housellm`) pays for model calls that last one turn. Some rule-based rewrites also last one turn. | ❌ The same as Off | ✅ Works |
 | `summarize` | ❌ **Does not work.** It does not start, because it cannot tell how full the window is. | ❌ **Does not work, and costs money.** It pays for a summary every turn and throws it away. | ✅ Works |
 | `summarizer1509` | ❌ **Does not work, and costs money.** It starts at a fixed size (20,000 tokens), pays for a summary every turn and throws it away. | ❌ The same as Off | ✅ Works |
-| `agentdiet` | ❌ **Does not work.** It pays for a model call every turn, and breaks the cache every turn. | ❌ The same as Off | ✅ Works |
+| `agentdiet` | ❌ **Does not work.** It pays for a model call every turn, and the rewrite lasts one turn. | ❌ The same as Off | ✅ Works |
 
 ## Pipeline components
 
@@ -164,22 +168,22 @@ One row for each registered component. The test `components/all/datadep_test.go`
 | `cachesplit` | none | Nothing kept. The dashboard keeps one hash per thread for savings reports. | Works fully | Works fully | Works fully | It moves the part of the system prompt that changes every session after the cache bookmark. That depends only on the current request. | #32 |
 | `textclean` | none | Nothing kept | Works fully | Works fully | Works fully | It removes terminal colour codes and screen-redraw leftovers that were never visible text. The result depends only on the output itself. | Osher Elhadad, #89 |
 | `toolfilter` | none | Nothing kept | Works fully | Works fully | Works fully | It removes the tool, MCP-server and skill declarations the operator listed. It decides from that fixed list and the current request. | Osher Elhadad, #84 |
-| `mask` | content | Store: the frozen decision and the original | Masks a message for one turn, then **breaks the cache**. No way back. | Today: same as Off. **With a change:** works, and the cache stays stable. No way back. | Works fully, with `expand` | It hides old tool outputs, and must send the same masked text every later turn. It builds that text from the message alone, so a "masked" flag is enough to build it again. | Osher Elhadad, first commit a91d6f4; storage rules in #187 |
-| `failed_run` | content | Store: the frozen decision and the original | Shortens once, then **breaks the cache**. No way back. | Today: same as Off. **With a change:** works, and the cache stays stable. No way back. | Works fully, with `expand` | It replaces a failed run that the agent ran again with a fixed sentence. A "replaced" flag is enough to send the same sentence again. | Osher Elhadad, first commit a91d6f4 |
-| `collapse` | content | Store: the frozen decision and the original | Cuts once, then **breaks the cache**. No way back. | Today: same as Off. **With a change:** works if it also keeps the cut size, a number. No way back. | Works fully, with `expand` | It is the last-resort limit for very large outputs. It can build the cut again from the output and the cut size, so it needs a flag and one number. | Osher Elhadad, first commit a91d6f4 |
-| `readlifecycle` | content | Store: the frozen decision and the original file read | Removes an old read once, then **breaks the cache**. No way back. | Today: same as Off. **With a change:** works if it also keeps its label ("stale" or "superseded"). No way back. | Works fully, with `expand` | It removes file reads that a later edit or read made out of date. The label can change later in the conversation, so it must keep the label it first used. | Osher Elhadad, #89 |
+| `mask` | content | Store: the frozen decision and the original | ❌ **Does not work.** Masks a message for one turn, then **breaks the cache**. No way back. | ❌ **Does not work today**: the same as Off. **With a change:** works, and the cache stays stable. No way back. | Works fully, with `expand` | It hides old tool outputs, and must send the same masked text every later turn. It builds that text from the message alone, so a "masked" flag is enough to build it again. | Osher Elhadad, first commit a91d6f4; storage rules in #187 |
+| `failed_run` | content | Store: the frozen decision and the original | ❌ **Does not work.** Shortens once, then **breaks the cache**. No way back. | ❌ **Does not work today**: the same as Off. **With a change:** works, and the cache stays stable. No way back. | Works fully, with `expand` | It replaces a failed run that the agent ran again with a fixed sentence. A "replaced" flag is enough to send the same sentence again. | Osher Elhadad, first commit a91d6f4 |
+| `collapse` | content | Store: the frozen decision and the original | ❌ **Does not work.** Cuts once, then **breaks the cache**. No way back. | ❌ **Does not work today**: the same as Off. **With a change:** works if it also keeps the cut size, a number. No way back. | Works fully, with `expand` | It is the last-resort limit for very large outputs. It can build the cut again from the output and the cut size, so it needs a flag and one number. | Osher Elhadad, first commit a91d6f4 |
+| `readlifecycle` | content | Store: the frozen decision and the original file read | ❌ **Does not work.** Removes an old read once, then **breaks the cache**. No way back. | ❌ **Does not work today**: the same as Off. **With a change:** works if it also keeps its label ("stale" or "superseded"). No way back. | Works fully, with `expand` | It removes file reads that a later edit or read made out of date. The label can change later in the conversation, so it must keep the label it first used. | Osher Elhadad, #89 |
 | `skeleton` | content | Store: the frozen decision and the original source | **Skips** | **Skips** | Works fully, with `expand` | It removes function bodies from source code. Without the original, the agent cannot tell a removed body from an empty one, so it refuses to run. | Osher Elhadad, first commit a91d6f4 |
 | `cmdfilter` | content | Store: the filtered text (a speed-up) and the original | Works. Same bytes every turn, so the cache stays stable. No way back. | Same as Off | Works fully, with `expand` | It applies a filter for each known command, and the same output always gives the same text. It keeps the original only so the agent can get dropped lines back. | Osher Elhadad, first commit a91d6f4; memo in #188 |
 | `linecap` | content | Store: the original | Works. Same bytes every turn. No way back. | Same as Off | Works fully, with `expand` | It shortens very long lines and folds repeated lines, the same way every time. It keeps the original only so the agent can get the cut lines back. | Osher Elhadad, #89 |
 | `dedup` | content | Store: the original | Works. Same bytes every turn. The note still says "expand", with nothing to expand. | Same as Off | Works fully, with `expand` | It replaces a repeated tool output with a pointer to the earlier copy in the same request. It keeps the repeat only so the agent can get it back. | Osher Elhadad, first commit a91d6f4 |
 | `smartcrush` | content | Store: the original | Works. Same bytes every turn. No way back. | Same as Off | Works fully, with `expand` | It keeps the first and last items of a long JSON array, and any error items, the same way every time. It keeps the full array only for `expand`. | Osher Elhadad, first commit a91d6f4 |
 | `extract` | content | Store: the original | Works. Same bytes every turn. No way back. | Same as Off | Works fully, with `expand` | It removes clear noise, such as repeated lines and progress bars, the same way every time. It keeps the original only for `expand`. | Osher Elhadad, first commit a91d6f4 |
-| `coref` | content | Store: the frozen decision, the original, and a count of cache rebuilds it spent (metadata) | **No spending limit**, because the count always reads zero. Each cut lasts one turn, then **breaks the cache**. | Today: **harmful.** The limit works, but each cut undoes itself next turn. **Turn it off.** **With a change:** works. | Works fully, with `expand` | It removes tool outputs that nothing later refers to, and so changes the cached history on purpose. It must remember which outputs it cut, and how many cache rebuilds it spent. | David Amid, commit b224704; docs/proposals/coref-compaction.md |
-| `extract_llm` | content | Store: the model's rewrite, a copy for other sessions, and the original. Memory: counts per session. | Pays one model call per new large output, and uses it for one turn. Then it **breaks the cache**. Without prompt caching it pays again every turn, up to 8 calls. | Same as Off, and it approves **more** calls. It remembers an output, and counts on a reuse that cannot happen. **Cannot work.** | Works fully: one call, then free reuse | A model rewrites each large tool output, and the words differ each time. To send the same bytes next turn, it must keep the rewrite, which is content. | Osher Elhadad, #51; storage rules in #40 and #188 |
-| `extract_llm_sweep` | content | Store: its removals with a short description of each output (no text), the originals, and "still needed" answers | It has no body stash, so it **pays full price** to send parts of up to 12 outputs to the model. Each removal lasts one turn, then **breaks the cache**. | Today: same as Off. **With a change:** it can repeat its removals from a flag. The cheap question still needs the body stash. | Works fully: a cheap question, then free reuse | It asks the agent's model which old outputs are no longer needed. The cheap question needs the exact text from last turn; repeating a removal needs only a flag. | David Amid, #118 |
+| `coref` | content | Store: the frozen decision, the original, and a count of cache rebuilds it spent (metadata) | ❌ **Does not work.** **No spending limit**, because the count always reads zero. Each cut lasts one turn, then **breaks the cache**. | ❌ **Does not work today, and is harmful.** The limit works, but each cut undoes itself next turn. **Turn it off.** **With a change:** works. | Works fully, with `expand` | It removes tool outputs that nothing later refers to, and so changes the cached history on purpose. It must remember which outputs it cut, and how many cache rebuilds it spent. | David Amid, commit b224704; docs/proposals/coref-compaction.md |
+| `extract_llm` | content | Store: the model's rewrite, a copy for other sessions, and the original. Memory: counts per session. | ❌ **Does not work.** Pays one model call per new large output, and uses it for one turn. Then it **breaks the cache**. Without prompt caching it pays again every turn, up to 8 calls. | ❌ **Does not work**: the same as Off, and it approves **more** calls. It remembers an output, and counts on a reuse that cannot happen. **Cannot work.** | Works fully: one call, then free reuse | A model rewrites each large tool output, and the words differ each time. To send the same bytes next turn, it must keep the rewrite, which is content. | Osher Elhadad, #51; storage rules in #40 and #188 |
+| `extract_llm_sweep` | content | Store: its removals with a short description of each output (no text), the originals, and "still needed" answers | ❌ **Does not work.** It has no body stash, so it **pays full price** to send parts of up to 12 outputs to the model. Each removal lasts one turn, then **breaks the cache**. | ❌ **Does not work today**: the same as Off. **With a change:** it can repeat its removals from a flag. The cheap question still needs the body stash. | Works fully: a cheap question, then free reuse | It asks the agent's model which old outputs are no longer needed. The cheap question needs the exact text from last turn; repeating a removal needs only a flag. | David Amid, #118 |
 | `summarize` | content | Store: the model-written summary and the replaced turns. Memory: a copy of the turns while the model call runs. | **Does not start** by default, because it cannot tell how full the window is. Without a session (`/compact`) it works in one request. No way back. | **Pays for a summary every turn above 90% full, and throws it away.** The next turn can wait up to 120 seconds for it. **Cannot work.** | Works fully | It replaces old turns with a model-written summary, and the words differ each time. It must keep the summary to send the same bytes next turn. | Osher Elhadad, commit 68e8b51; checkpoint in #430 |
 | `cache_aware_summarizer` | content | Store: the summary and the replaced turns. Memory: copies of turns, for summaries during idle time and after a cold turn. | **Does not start** by default, because it cannot tell how full the window is. | It keeps copies of turns in memory, which is content. On Anthropic it does nothing and costs nothing. On OpenAI it **pays and throws the summary away** every turn. **Cannot work.** | Works fully | Like `summarize`, it must keep the summary to send the same bytes later. It also keeps the conversation in memory, to summarize while the user is idle. | Itay Nakash, #256 |
-| `agentdiet` | content | Store: the frozen decision and the original step | **Pays one model call per turn.** The step it shortened last turn comes back in full, which **breaks the cache**. | Same as Off. **Cannot work.** | Works fully | A model rewrites one older agent step each turn, and the words differ each time. The history stays short only if the proxy keeps every rewrite. | Itay Nakash, #66 |
+| `agentdiet` | content | Store: the frozen decision and the original step | ❌ **Does not work.** **Pays one model call per turn.** The step it shortened last turn comes back in full, which **breaks the cache**. | ❌ **Does not work**: the same as Off. **Cannot work.** | Works fully | A model rewrites one older agent step each turn, and the words differ each time. The history stays short only if the proxy keeps every rewrite. | Itay Nakash, #66 |
 
 ### Libraries that are not components
 
@@ -251,18 +255,22 @@ behaviour. Each finding needs a decision from its owner.
 
 ### Problems with storage off today
 
-- **No way back:** `mask`, `failed_run`, `collapse`, `readlifecycle`, `cmdfilter`, `linecap`,
-  `dedup`, `smartcrush`, `extract`, `extract_llm`, `extract_llm_sweep`, `agentdiet`, `coref`, and
-  `summarize` without a session. Only `skeleton` refuses.
-- **Breaks the cache:** `mask`, `failed_run`, `collapse`, `readlifecycle`, `extract_llm`,
-  `extract_llm_sweep`, `agentdiet` and `coref`. Each one shortens a message once, then sends it in
-  full the next turn. So storage off can cost more than no compaction.
-- **Pays for model calls that last one turn:** `extract_llm`, `extract_llm_sweep` (at full price)
-  and `agentdiet`.
-- **`coref` loses its spending limit.**
-- **`summarize` and `cache_aware_summarizer` do not start with their default settings.** This is safe only by accident. `summarizer1509` starts at a fixed size, so it pays for summaries and throws them away. They
-  start as soon as the proxy keeps the billed-token record, as at "metadata only".
-- **Nothing warns at startup** when these components run with storage off.
+- **8 components do not work.** They pay for a saving that lasts one turn: `mask`, `failed_run`,
+  `collapse`, `readlifecycle`, `coref`, `extract_llm`, `extract_llm_sweep` and `agentdiet`.
+  - Each one shortens a message once, then sends it in full the next turn. The user pays a cache
+    write each time, so storage off can cost more than no compaction.
+  - `extract_llm`, `extract_llm_sweep` (at full price) and `agentdiet` also pay for a model call
+    each time.
+  - `coref` also loses its spending limit.
+- **The summarizers do not work.**
+  - `summarize` and `cache_aware_summarizer` do not start with their default settings. This is
+    safe only by accident. They start as soon as the proxy keeps the billed-token record, as at
+    "metadata only".
+  - `summarizer1509` starts at a fixed size, pays for a summary every turn and throws it away.
+- **`skeleton` refuses to run.** This is the safe behaviour.
+- **No way back** for the rest: `cmdfilter`, `linecap`, `dedup`, `smartcrush` and `extract` still
+  work, but the model cannot get removed text back through `expand`.
+- **Nothing warns at startup** when a component that does not work runs with storage off.
 
 ### Code comments that disagreed with the defaults
 
