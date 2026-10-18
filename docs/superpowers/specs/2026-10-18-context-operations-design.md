@@ -72,7 +72,7 @@ Three problems remain with that approach:
 | D8 | Which hosts compute dollars from operations? | **Both: Cortex and the context-guru proxy.** The proxy stops using its own saving rules (`dash/event.go`) when it switches. The comparison of request fingerprints (§5) is a pure function in `ops`, so the proxy does not need Cortex to find B\*. |
 | D9 | How is the implementation validated? | **Against an exhaustive list of test cases made with the current computation** (§11), before any host switches. |
 | D10 | How is the cache state used? | **As an input to every price.** The tier of a content change depends on the state (§6.2). An operation that changes the state (`stateChange`, §4.4) is priced as the difference between two states. |
-| D11 | What happens to a change that a later change ends? | **It stops on that request.** The later change names it in `Supersedes` and takes over its tokens. Each change keeps the total it had until then (§4.5). |
+| D11 | What happens to a change that a later change ends? | **Its producer stops reporting it.** No link names the change that ended it. The snapshot rule (D6) and the measurement at each producer's own input (R29) give the right price and stop any double count. Each change keeps the total it had until then (§4.5). |
 | D12 | Where does the thread ID come from? | **From the collector, on every operation.** It uses the agent's thread header when there is one, else the matching fingerprint (§5.3). |
 | D13 | How does the model serve a subscription user? | **The library does not change.** It already returns tokens for each tier (D3). The request carries a `Billing` fact. The host converts tokens to dollars for an API user, and to usage-limit units for a subscription user, with an API-equivalent dollar figure beside it, marked as such (§7.4). |
 
@@ -151,8 +151,9 @@ R35 to R39 were added after the first review, and R40 to R43 for subscription pl
 - **R16.** Operations are in the order they ran.
 - **R25.** When two producers change the same content on one request, each one is credited for
   its own change, in pipeline order.
-- **R35.** A change can end earlier changes (a summary of reduced messages). The later change names
-  them, and they stop. Their totals until then do not change (§4.5).
+- **R35.** A later change can end earlier ones (a summary of reduced messages). The model shows
+  this by the earlier change not being reported, not by a link. Their totals until then do not
+  change (§4.5).
 
 ### E. Operability
 
@@ -277,10 +278,6 @@ type Operation struct {
     ChangeID     string   // the same on every request that carries this change
     FirstApplied *bool    // true only on the first request that carries it; nil = not known (§4.7)
     ContentKeys  []string // hashes of removed content
-
-    // kind = reduce: the changes this one ends (§4.5)
-    Supersedes []string // ChangeIDs; they are not reported again after this request
-    Inherited  Size     // the part of Before - After that the superseded changes had removed
 
     // kind = stateChange (§4.4)
     Mechanism Mechanism // keepAlive | cacheSplit | breakpointTTL
@@ -412,24 +409,35 @@ conditions of the current `keepaliveSavedUSD`:
 pings rescued nothing has only `ping` operations, so its total is negative. That is the cost of a
 ping that was not needed, and it is visible for each thread.
 
-### 4.5 Changes that end other changes
+### 4.5 Changes that end
 
 A change can remove content that earlier changes had already reduced. Example: on turn 12 a
 summary replaces messages 0 to 8, and messages 3 and 5 were reduced by `mask` and `coref`.
 
-1. The later change lists the earlier ones in `Supersedes`.
-2. The earlier changes are **not reported** after that request. Their content is gone, so there is
-   nothing to replay.
-3. The later change's `Before` is the **client's** size of the content it replaced, so its saving
-   covers all of it. `Inherited` is the part that the superseded changes had removed.
-4. The totals of the superseded changes until that request do not change. A change that did not
-   pay back before it was ended shows a loss.
-5. If the later change is reversed (a restore, or the summary is dropped), the earlier changes do
-   not come back by themselves. The producer reports them again as new operations, with their old
-   `ChangeID` and `FirstApplied = false`.
+**A change ends when its producer stops reporting it.** There is no field that names the change
+that ended it. Nothing more is needed:
 
-`Inherited` lets a report show how much of a summary's saving was new work and how much it took
-over. The price does not use it.
+1. **The price.** Each request is a snapshot (D6). A change that is not reported on a request saves
+   nothing on that request. Its total until then does not change, so a change that did not pay back
+   before it ended shows a loss.
+2. **No double count.** Each producer's change is measured at its own input (R29), and the sum
+   check tests the total (§6.5, check 1). So the tokens are counted once, in either pipeline order:
+
+   | Pipeline order | `mask` | `coref` | summary | Total |
+   |---|---|---|---|---|
+   | Summarizer first (cg's `medium`, `high`, `xhigh` presets) | not reported | not reported | 40,000 → 1,500 = 38,500 | **38,500** |
+   | Summarizer after the reducers | 3,940 | 19,950 | 16,110 → 1,500 = 14,610 | **38,500** |
+
+   The order changes **who gets the credit**, not the total. Credit follows pipeline order (R25).
+   In cg's presets the summarizer runs first, so it gets all of it: the reducers find their content
+   gone, and they report nothing.
+3. **A restore.** If the summary is reversed (a restore, or the summary is dropped), the producer
+   replays `mask` and `coref` again. They are reported with their old `ChangeID` and
+   `FirstApplied = false`.
+
+**Why a change stopped** is not on the operation. A report can find it: the change last appeared at
+position P on request N, and request N+1 has a change whose span covers P (`At` and `Structure`).
+That is a question for a report, not for a price, so the report answers it.
 
 ### 4.6 Spend: one channel with the savings
 
@@ -499,7 +507,7 @@ changes.** The library and the hosts remember nothing except the fingerprints of
    | Where | Why it fails |
    |---|---|
    | The `ops` library | It is no longer a pure function (R26). Two hosts can disagree, and pricing an old request again gives a different figure. |
-   | The host's collector | It must move positions after each `Splice`, apply `Supersedes`, and drop changes when the agent compacts its own transcript. It cannot see the content, so it cannot tell whether a change is still in the body, and a wrong guess is silent. |
+   | The host's collector | It must move positions after each `Splice`, find which changes a summary ended, and drop changes when the agent compacts its own transcript. It cannot see the content, so it cannot tell whether a change is still in the body, and a wrong guess is silent. |
    | The archive | It has gaps (`droppedEvents`). One lost request makes every later request wrong. |
 
 **The cost is size, not correctness.** A replayed operation repeats about 200 bytes on every
@@ -763,7 +771,7 @@ type Unpriced struct {
 
 type CheckFailure struct {
     Check    string // "sum" | "order" | "unique_change" | "spans" | "attribution" |
-                    // "conservation" | "supersession" | "thread" (§6.5)
+                    // "conservation" | "thread" (§6.5)
     Producer string // "" when the check is not about one producer
     Detail   string // numbers only, no content
 }
@@ -827,9 +835,7 @@ The library reports failed checks in `Result.Checks`. A failure does not stop pr
 5. **Attribution:** each `cacheBreak` names at most one operation, and that operation is at or
    before the break.
 6. **Conservation:** the request total equals the bill difference (§6.3).
-7. **Supersession:** a `ChangeID` that an earlier request listed in `Supersedes` does not appear
-   again, unless a restore reversed the superseding change.
-8. **Thread:** every operation has the request's `Session` and `Thread`.
+7. **Thread:** every operation has the request's `Session` and `Thread`.
 
 ## 7. Recording the result
 
@@ -1069,8 +1075,9 @@ drops the combinations that cannot occur, and states the reason for each drop in
 8. Keep-alive: a window that rescued its request; a window whose pings did not stop the expiry; a
    gap inside the TTL, where the ping is not credited; two threads with their own windows.
 9. `cachesplit` and `breakpointTTL`, with the current `cachesplitSavedUSD` as the source.
-10. Supersession: a summary of reduced messages; a superseded change that is never reported again;
-    a restore of the summary, after which the earlier changes are reported again.
+10. Changes that end: a summary of reduced messages, in both pipeline orders, with the same total;
+    an ended change that is not reported again; a restore of the summary, after which the earlier
+    changes are reported again.
 11. A subagent thread: its operations, its totals, and a session total that adds both threads.
 12. The interaction on a rescued request, and the conservation check on every case.
 13. The worked example on a subscription plan: the same tokens, in usage-limit units, with a

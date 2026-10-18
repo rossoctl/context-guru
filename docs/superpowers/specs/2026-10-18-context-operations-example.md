@@ -374,17 +374,18 @@ On turn 12, cg's `summarize` replaces messages 0 to 8 with one 1,500-token summa
   "status": "applied", "reversibility": "reversible", "stashKey": "cg:ab12",
   "at": {"section": "messages", "index": 0},
   "before": {"tokens": 40000}, "after": {"tokens": 1500},
-  "supersedes": ["cg:mask:91ab", "cg:coref:5e2d"],
-  "inherited": {"tokens": 23890},
   "changeId": "cg:summarize:ab12", "firstApplied": true,
   "structure": {"at": 0, "removed": 9, "inserted": 1}
 }
 ```
 
 - `before` is the **client's** 40,000 tokens, so the summary's saving (38,500) covers all of it.
-- `supersedes` names the two changes it ends. From turn 12, cg does not report them again.
-- `inherited` is what they had removed: (4,000 − 60) + (20,000 − 50) = 23,890. The summary's own
-  new work is 38,500 − 23,890 = 14,610. The price does not use `inherited`. A report can.
+- The summarizer runs **first** in the pipeline, as in cg's presets. So `mask` and `coref` run after
+  it, find messages 3 and 5 gone, and report nothing. Their absence from turn 12's list is how they
+  end (design §4.5). No field on op30 names them.
+- A report can still show how much the summary took over: `mask` and `coref` had removed
+  (4,000 − 60) + (20,000 − 50) = 23,890 tokens, so the summary's own new work is 38,500 − 23,890 =
+  14,610. The price does not need this figure.
 - `structure` tells the library that 9 messages became 1, so later positions move.
 
 The summarizer call is a `spend` operation, linked by `produced`:
@@ -569,7 +570,7 @@ the cost ledger's money columns.
 | `before`, `after` | the token change, measured at the producer's own input (the client size for a summary) |
 | `changeId` | sum one change across requests; join a ping with its rescue; join a penalty with its cause |
 | `firstApplied` | count fresh acts; mark where payback starts |
-| `supersedes`, `inherited` | end earlier changes; show how much a summary took over |
+| (absence) | a change that is not reported has ended; it saves nothing on that request |
 | `structure` | move later positions after a summary |
 | `call` | the billed usage of a ping or a model call; the host prices it with the savings |
 | `produced` | join a call's cost to the change it paid for |
