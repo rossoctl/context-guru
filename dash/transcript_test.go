@@ -3,8 +3,10 @@ package dash
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Reading Claude Code's own session transcripts.
@@ -33,6 +35,25 @@ func writeJSONL(t *testing.T, home, enc, sess string, lines ...string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// turnLine builds one billed assistant turn, shaped as the real transcripts are.
+func turnLine(sess, cwd string, tsMs int64, cacheWrite, out int64) string {
+	return turnEntry(sess, cwd, tsMs, cacheWrite, out)
+}
+
+// turnLineCalling is turnLine with tool_use blocks, for the cases that care what was invoked.
+func turnLineCalling(sess, cwd string, tsMs int64, blocks ...string) string {
+	return turnEntry(sess, cwd, tsMs, 5000, 400, blocks...)
+}
+
+func turnEntry(sess, cwd string, tsMs, cacheWrite, out int64, blocks ...string) string {
+	ts := time.UnixMilli(tsMs).UTC().Format(time.RFC3339Nano)
+	return `{"type":"assistant","sessionId":"` + sess + `","cwd":"` + cwd + `",` +
+		`"timestamp":"` + ts + `","message":{"model":"claude-opus-5","role":"assistant",` +
+		`"usage":{"input_tokens":1,"cache_creation_input_tokens":` + strconv.FormatInt(cacheWrite, 10) +
+		`,"cache_read_input_tokens":0,"output_tokens":` + strconv.FormatInt(out, 10) + `},"content":[` +
+		strings.Join(blocks, ",") + `]}}`
 }
 
 // An assistant turn is one request: it carries the usage the provider billed, the model, the
