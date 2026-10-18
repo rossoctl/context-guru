@@ -528,6 +528,86 @@ a new `ChangeID`. The old change stops and a new one starts. If the new list rem
 that the old list kept, the forwarded body changes inside the cached prefix. The collector then adds
 a `cacheBreak` attributed to tool-prune (§5.4). That is the real cost of the config change.
 
+### 4.8 Sequence: three flows, and which repo each step is in
+
+`participant` labels mark which repo owns each piece: Cortex (the pipeline, the collector,
+`settle`) or context-guru (a plugin, the keeper, `ops`). `ops` is a library import in both; it
+runs in-process in whichever repo calls it, never as its own service.
+
+**A. A normal request.** A plugin reduces a tool output; the collector finds no break; `settle`
+prices and records.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Pipeline as Pipeline collector<br/>(Cortex)
+    participant Plugin as context-guru plugin<br/>(context-guru)
+    participant Ops as ops.Price / ops.Compare<br/>(context-guru, imported)
+    participant Settle as settle<br/>(Cortex)
+    participant Store as Session store<br/>(Cortex)
+    participant Upstream
+
+    Client->>Pipeline: request
+    Pipeline->>Pipeline: open RequestOps<br/>(Session, Thread, Billing from credential)
+    Pipeline->>Plugin: OnRequest(pctx)
+    Plugin->>Plugin: reduce a tool output<br/>(mask/cmdfilter/coref/...)
+    Plugin->>Pipeline: pctx.ReportOps(ops...)
+    Pipeline->>Pipeline: stamp Producer, Stage<br/>append into RequestOps.Ops
+    Pipeline->>Upstream: forward (smaller) body
+    Upstream-->>Pipeline: response + usage
+    Pipeline->>Pipeline: ops.Compare(fingerprints, usage)<br/>-> B*, cacheBreak (if any)
+    Pipeline->>Ops: Price(RequestOps.Ops, usage, B*, breakpoints, state)
+    Ops-->>Pipeline: Result (PricedOp[], in-process only)
+    Pipeline->>Settle: Result
+    Settle->>Settle: price Saved/Caused with pricing.Resolver
+    Settle->>Settle: discard RequestOps/Operation (R20)
+    Settle->>Store: event.Saving{Changes: []ChangeSaving, ...}
+    Pipeline-->>Client: response
+```
+
+**B. A detached call.** The request has already been answered; its `RequestOps` may already be
+closed and recorded. The summarizer call finishes afterward and reports through `Sink`.
+
+```mermaid
+sequenceDiagram
+    participant Pipeline as Pipeline collector<br/>(Cortex)
+    participant Store as Session store<br/>(Cortex)
+    participant Plugin as context-guru plugin<br/>(context-guru)
+    participant Model as Summarizer model call<br/>(context-guru, via cgModel)
+    participant Sink as Sink<br/>(Cortex, injected)
+    participant Settle as settle<br/>(Cortex)
+
+    Note over Pipeline,Store: request N already answered<br/>its RequestOps/event.Saving already recorded
+    Plugin->>Model: summarizer call (async)
+    Model-->>Plugin: response + billed usage
+    Plugin->>Plugin: build standalone RequestOps<br/>Session/Thread from request N (kept),<br/>Billing unset, one spend op (Detached=true, Call, Produced)
+    Plugin->>Sink: Report(RequestOps)
+    Sink->>Settle: RequestOps
+    Settle->>Settle: price Call.Usage with pricing.Resolver<br/>(same path as a request's Saved/Caused)
+    Settle->>Store: event.Saving (joined to the change via Produced)
+```
+
+**C. A standalone keep-alive ping.** No request is open at all; the keeper acts between turns.
+
+```mermaid
+sequenceDiagram
+    participant Keeper as Keeper<br/>(context-guru)
+    participant Upstream
+    participant Sink as Sink<br/>(Cortex, injected)
+    participant Settle as settle<br/>(Cortex)
+    participant Store as Session store<br/>(Cortex)
+
+    Note over Keeper: idle gap on thread T exceeds the cache TTL
+    Keeper->>Upstream: ping (re-sends thread T's last forwarded body)
+    Upstream-->>Keeper: response + billed usage
+    Keeper->>Keeper: build standalone RequestOps<br/>Session/Thread known from T, Billing unset,<br/>one ping op (ChangeID = window ID, Call)
+    Keeper->>Sink: Report(RequestOps)
+    Sink->>Settle: RequestOps
+    Settle->>Settle: price Call.Usage
+    Note over Settle: on the NEXT request on thread T,<br/>the collector adds a stateChange (keepAlive)<br/>with the SAME ChangeID -- ping cost and rescue<br/>value join under one change (§4.4, §4.6)
+    Settle->>Store: event.Saving (ping leg)
+```
+
 ## 5. The collector
 
 Each host has a collector: Cortex, and the context-guru proxy. The two parts are split this way:
