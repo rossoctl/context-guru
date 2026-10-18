@@ -9,8 +9,11 @@ Read it first. It shows one session from body to dollars.
 
 ## 0. Base, and the problem
 
-This design starts from the savings code on branch `feat/contextguru-keepalive`, which is not yet
-on `main`. That branch adds:
+**Paths.** `core/...`, `cmd/agentop` and `pctx` are in `rossoctl/cortex`. `components/...`,
+`apply/...`, `dash` and `ops` are in this repo.
+
+This design starts from the savings code on the Cortex branch `feat/contextguru-keepalive`, which
+is not yet on Cortex `main`. That branch adds:
 
 - a `context-guru/event` that the context-guru plugin publishes for each request
   (`core/plugins/contextguru/saving.go`, `unique.go`),
