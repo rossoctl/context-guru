@@ -37,9 +37,14 @@ done
 
 root=$(git rev-parse --show-toplevel)
 skill=$root/.claude/skills/offload-review
+# A plain name only: `--backend ../x` must not source a file from outside backends/.
+[[ $backend =~ ^[a-z0-9_-]+$ ]] || { echo "bad backend name: $backend" >&2; exit 1; }
 [ -f "$root/scripts/offload-review/backends/$backend.sh" ] || { echo "no backend $backend in scripts/offload-review/backends" >&2; exit 1; }
 # shellcheck source=/dev/null
 . "$root/scripts/offload-review/backends/$backend.sh"
+for fn in backend_label backend_has_session backend_run; do
+  declare -F "$fn" >/dev/null || { echo "backend $backend does not define $fn" >&2; exit 1; }
+done
 
 max_rounds=${OFFLOAD_MAX_ROUNDS:-2}
 # Worktrees hang off the main checkout, even when this runs inside another worktree.
@@ -53,17 +58,30 @@ sha=$(jq -r .headRefOid <<<"$pr_json")
 base_ref=$(jq -r .baseRefName <<<"$pr_json")
 
 reviews=$(gh api --paginate "repos/$repo/pulls/$pr/reviews" --jq '.[].body')
-# Round = rounds that reviewer 1 already posted, plus 1. Rounds count across backends.
+# posted <reviewer> <round>: exit 0 when that reviewer posted that round on this head.
+posted() { grep -qE "<!-- offload-review reviewer=$1 round=$2 sha=$sha backend=[a-z0-9_-]+ verdict=(approve|blocking)" <<<"$reviews"; }
+
+# The last round is the highest round in any marker, from either reviewer and any backend.
 # `|| true`: grep exits 1 on a PR with no reviews yet, and pipefail would end the script.
-done_rounds=$({ grep -oE '<!-- offload-review reviewer=1 round=[0-9]+' <<<"$reviews" || true; } | sort -u | wc -l | tr -d ' ')
-round=$((done_rounds + 1))
+last=$({ grep -oE '<!-- offload-review reviewer=[12] round=[0-9]+' <<<"$reviews" || true; } \
+  | sed -E 's/.*round=//' | sort -n | tail -1)
+last=${last:-0}
+todo=()
+if [ "$last" -gt 0 ] && { posted 1 "$last" || posted 2 "$last"; }; then
+  # The last round is on this head. Finish it: run only the reviewer that has not posted.
+  round=$last
+  for r in 1 2; do posted "$r" "$round" || todo+=("$r"); done
+  if [ ${#todo[@]} -eq 0 ]; then
+    echo "Head $sha already has both round-$round reviews. Push the fixes first." >&2
+    exit 1
+  fi
+else
+  round=$((last + 1))
+  todo=(1 2)
+fi
 if [ "$round" -gt "$max_rounds" ]; then
   echo "PR #$pr used its $max_rounds review rounds. A person must decide now." >&2
   exit 3
-fi
-if grep -qE "<!-- offload-review reviewer=1 round=[0-9]+ sha=$sha " <<<"$reviews"; then
-  echo "Head $sha already has a review. Push the fixes first." >&2
-  exit 1
 fi
 
 git -C "$main" fetch -q origin "$head_ref" "$base_ref"
@@ -73,7 +91,7 @@ wt_of() { echo "$main/.claude/worktrees/review-pr$pr-$backend-r$1"; }
 
 # One after the other, not in the reviewers' parallel jobs: two `git worktree add` calls at the
 # same time can fail on a git lock file.
-for r in 1 2; do
+for r in "${todo[@]}"; do
   wt=$(wt_of "$r")
   if [ -d "$wt" ]; then
     git -C "$wt" checkout -q --detach "$sha"
@@ -90,7 +108,13 @@ run_reviewer() {
   local live="Live tests are NOT approved. Read the code only."
   wt=$(wt_of "$r")
   cd "$wt"
-  if [ "$round" -gt 1 ] && backend_has_session; then mode=resumed; resume=1; fi
+  if [ "$round" -gt 1 ]; then
+    if backend_has_session 2>>review.log; then
+      mode=resumed; resume=1
+    else
+      echo "Reviewer $r: no earlier session found; round $round starts fresh." >&2
+    fi
+  fi
 
   if [ -n "$rules" ]; then
     live="Live tests ARE approved by the user. Use your own box folder, review-pr$pr-r$r.
@@ -129,14 +153,16 @@ $(cat "$rules")"
   backend_run .review-prompt.md "$resume" > review.log 2>&1
 }
 
-run_reviewer 1 & p1=$!
-run_reviewer 2 & p2=$!
+[ ${#todo[@]} -eq 2 ] || echo "Round $round: reviewer ${todo[*]} has not posted yet; running it only."
+pids=()
+for r in "${todo[@]}"; do run_reviewer "$r" & pids+=("$!"); done
 rc=0
-wait "$p1" || { echo "Reviewer 1 failed; see its review.log" >&2; rc=1; }
-wait "$p2" || { echo "Reviewer 2 failed; see its review.log" >&2; rc=1; }
+for i in "${!todo[@]}"; do
+  wait "${pids[$i]}" || { echo "Reviewer ${todo[$i]} failed; see its review.log" >&2; rc=1; }
+done
 
 reviews=$(gh api --paginate "repos/$repo/pulls/$pr/reviews" --jq '.[].body')
-for r in 1 2; do
+for r in "${todo[@]}"; do
   wt=$(wt_of "$r")
   [ -d "$wt" ] || { echo "Reviewer $r has no worktree at $wt" >&2; rc=1; continue; }
   # A reviewer may write only its own files. Anything else is a broken rule.

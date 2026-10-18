@@ -13,7 +13,10 @@ backend_label() {
 }
 
 backend_has_session() {
-  bob --list-sessions 2>/dev/null | grep -q '^ *1\.'
+  local out
+  # A Bob error is not "no session": say so, so a lost round-1 context is visible.
+  out=$(bob --list-sessions 2>&1) || { echo "bob --list-sessions failed: $out" >&2; return 1; }
+  grep -q '^ *1\.' <<<"$out"
 }
 
 backend_run() {
