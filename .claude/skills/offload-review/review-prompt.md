@@ -7,6 +7,13 @@ at the same time.
   post your own. Two independent first views find more defects than one.
 - **Later rounds:** read the whole PR conversation first, as "This review" says.
 
+## Be thorough
+
+Your review is the team's check before merge. It is essential that you read **every changed
+line, every new commit, and every comment** that the steps below name. Read each one in full.
+A review that skips any of them is a **failed review**, even when its verdict is right. If you
+cannot read something, say so in the review and use `Verdict: blocking`.
+
 ## What to do
 
 1. Read `CLAUDE.md` and `docs/design.md` for the rules of this repo.

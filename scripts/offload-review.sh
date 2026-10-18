@@ -174,22 +174,9 @@ $(cat "$rules")"
       echo
     fi
     if [ "$round" -gt 1 ]; then
-      echo "# Read the PR conversation first"
-      echo "Read every review and comment on the PR, from the author and from the other reviewer:"
-      # Not `gh pr view --comments`: on some repos it fails on a GraphQL deprecation. Three
-      # endpoints, because GitHub keeps reviews, PR comments and inline comments apart.
-      echo "  gh api --paginate repos/$repo/pulls/$pr/reviews --jq '.[] | \"== review by \\(.user.login):\", .body'"
-      echo "  gh api --paginate repos/$repo/issues/$pr/comments --jq '.[] | \"== comment by \\(.user.login):\", .body'"
-      echo "  gh api --paginate repos/$repo/pulls/$pr/comments --jq '.[] | \"== inline \\(.path):\\(.line):\", .body'"
-      echo "The author's replies to findings are in the second list. Read all three."
-      echo "Then:"
-      echo "- For each earlier finding (yours and the other reviewer's), say: fixed, not fixed, or"
-      echo "  rejected by the author. If the author rejected it with a reason, check the reason."
-      echo "  Accept it when it is right. Keep the finding only if you can show the reason is wrong."
-      echo "- Do not repeat a finding the other reviewer already raised. Write \"agree with"
-      echo "  reviewer N, finding M\" only after you checked it yourself, and add only new proof."
-      echo "- Review the new changes since round $((round - 1)). Raise a new finding on old code"
-      echo "  only when it is serious."
+      # A plain file with placeholders, not echo lines: escaping jq inside echo broke twice.
+      sed -e "s|{{PR}}|$pr|g" -e "s|{{REPO}}|$repo|g" -e "s|{{ROUND}}|$round|g" \
+        -e "s|{{REVIEWER}}|$r|g" "$skill/review-prompt-later-rounds.md"
       echo
     fi
     cat "$skill/review-prompt.md"
@@ -238,7 +225,7 @@ for r in "${todo[@]}"; do
   wt=$(wt_of "$r")
   [ -d "$wt" ] || { echo "Reviewer $r has no worktree at $wt" >&2; rc=1; continue; }
   # A reviewer may write only its own files. Anything else is a broken rule.
-  extra=$(git -C "$wt" status --porcelain | grep -vE ' (\.review(-prompt)?\.md|review\.log)$' || true)
+  extra=$(git -C "$wt" status --porcelain | grep -vE ' (\.review(-prompt)?\.md|\.review-in-(reviews|comments|inline)\.txt|review\.log)$' || true)
   [ -z "$extra" ] || { echo "Reviewer $r changed files:"$'\n'"$extra" >&2; rc=1; }
   [ "$(git -C "$wt" rev-parse HEAD)" = "$sha" ] || { echo "Reviewer $r moved HEAD" >&2; rc=1; }
   grep -qE "<!-- offload-review reviewer=$r round=$round sha=$sha backend=$backend verdict=(approve|blocking)" <<<"$reviews" \
