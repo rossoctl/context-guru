@@ -2,6 +2,7 @@
 # Offload two independent reviews of one PR to an agent tool, in parallel, on this machine.
 #
 #   scripts/offload-review.sh <pr> [--backend <name>] [--live-tests <rules-file>]
+#   scripts/offload-review.sh <pr> --cleanup
 #
 # --backend picks the reviewer tool from scripts/offload-review/backends/<name>.sh.
 # The default is $OFFLOAD_BACKEND, else bob.
@@ -14,23 +15,36 @@
 # user approved it. <rules-file> holds the box rules; they are not in this repo, so the caller
 # passes them in.
 #
-# Exit 0: both reviews are posted. Exit 1: a reviewer failed. Exit 3: the round budget is used.
-# Output for each reviewer: <worktree>/.review.md and <worktree>/review.log.
+# --cleanup runs after the PR merges or closes. It removes the reviewer worktrees, the backend's
+# sessions for them, and the live-test rules file.
+#
+# Exit codes:
+#   0  both reviews are posted (or --cleanup is done)
+#   1  a reviewer failed, or the input is wrong
+#   2  the round budget is used; only the user can grant more (OFFLOAD_MAX_ROUNDS)
+#   3  this head already has both reviews of its round; push the fixes first
+#
+# Files for each reviewer, in its worktree:
+#   .review-prompt.md  the prompt this script writes for the reviewer
+#   .review.md         the review the reviewer writes and posts
+#   review.log         the tool's output; this script writes it, the reviewer does not
 set -euo pipefail
 # A step that fails under `set -e` would otherwise end the script with no message.
 trap 'echo "offload-review: line $LINENO failed (exit $?)" >&2' ERR
 
-usage="usage: offload-review.sh <pr> [--backend <name>] [--live-tests <rules-file>]"
+usage="usage: offload-review.sh <pr> [--backend <name>] [--live-tests <rules-file>] | <pr> --cleanup"
 pr=${1:?$usage}
 shift
 backend=${OFFLOAD_BACKEND:-bob}
 rules=
+cleanup=0
 while [ $# -gt 0 ]; do
   case $1 in
     --backend) backend=${2:?$usage}; shift 2 ;;
     --live-tests)
       rules=${2:?$usage}; shift 2
       [ -s "$rules" ] || { echo "rules file $rules is empty or missing" >&2; exit 1; } ;;
+    --cleanup) cleanup=1; shift ;;
     *) echo "$usage" >&2; exit 1 ;;
   esac
 done
@@ -51,6 +65,31 @@ max_rounds=${OFFLOAD_MAX_ROUNDS:-2}
 main=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
 repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 me=$(gh api user --jq .login)
+[[ $pr =~ ^[0-9]+$ ]] || { echo "bad PR number: $pr" >&2; exit 1; }
+
+if [ "$cleanup" = 1 ]; then
+  state=$(gh pr view "$pr" --repo "$repo" --json state --jq .state)
+  if [ "$state" = OPEN ] && [ "${OFFLOAD_FORCE:-0}" != 1 ]; then
+    echo "PR #$pr is still open. Clean up after it merges or closes (or set OFFLOAD_FORCE=1)." >&2
+    exit 1
+  fi
+  for wt in "$main"/.claude/worktrees/review-pr"$pr"-*-r[12]; do
+    [ -d "$wt" ] || continue
+    name=${wt##*/}; b=${name#review-pr"$pr"-}; b=${b%-r[12]}
+    if [[ $b =~ ^[a-z0-9_-]+$ ]] && [ -f "$root/scripts/offload-review/backends/$b.sh" ]; then
+      # A subshell, so one backend's functions do not leak into the next worktree's cleanup.
+      # shellcheck source=/dev/null
+      ( . "$root/scripts/offload-review/backends/$b.sh"; cd "$wt"
+        if declare -F backend_cleanup >/dev/null; then backend_cleanup; fi ) \
+        || echo "Backend $b could not clean up its sessions for $wt" >&2
+    fi
+    # --force: the worktree holds the reviewer's untracked files (.review.md and the rest).
+    git -C "$main" worktree remove --force "$wt"
+    echo "Removed $wt"
+  done
+  rm -f "/tmp/offload-review-pr$pr-rules.md"
+  exit 0
+fi
 
 pr_json=$(gh pr view "$pr" --repo "$repo" --json headRefName,headRefOid,baseRefName)
 head_ref=$(jq -r .headRefName <<<"$pr_json")
@@ -73,7 +112,7 @@ if [ "$last" -gt 0 ] && { posted 1 "$last" || posted 2 "$last"; }; then
   for r in 1 2; do posted "$r" "$round" || todo+=("$r"); done
   if [ ${#todo[@]} -eq 0 ]; then
     echo "Head $sha already has both round-$round reviews. Push the fixes first." >&2
-    exit 1
+    exit 3
   fi
 else
   round=$((last + 1))
@@ -82,7 +121,7 @@ fi
 if [ "$round" -gt "$max_rounds" ]; then
   echo "PR #$pr used its $max_rounds review rounds. Ask the user for more rounds" \
     "(OFFLOAD_MAX_ROUNDS=$((max_rounds + 1))), or let a person decide." >&2
-  exit 3
+  exit 2
 fi
 
 git -C "$main" fetch -q origin "$head_ref" "$base_ref"
@@ -159,17 +198,27 @@ $(cat "$rules")"
     echo "- PR: #$pr in $repo, head $sha, base $base."
     echo "- Read the diff with: git diff $base..HEAD"
     echo "- You are reviewer $r of 2, round $round of $max_rounds, context: $mode."
+    echo "- Your folder is $wt. It is a git worktree of the PR head, only for you."
+    echo "  Write your review to $wt/.review.md. Do not change any file outside this folder."
+    [ "$round" -gt 1 ] || echo "  Do not read the other review-pr* folders in $main/.claude/worktrees."
     echo "- Marker line (line 1 of .review.md): $marker"
     echo "- Identity table (lines 2-4):"
     echo "  | Reviewer | Kind | Started by | Context | Review | Round | Head | Verdict |"
     echo "  |---|---|---|---|---|---|---|---|"
     echo "  | Reviewer $r ($backend, user of @$me) | $label | offload-review skill, @$me's session | $mode | $r of 2 | $round of $max_rounds | \`${sha:0:12}\` | **<verdict>** |"
-    echo "- Post with: gh pr review $pr --repo $repo --comment --body-file .review.md"
+    echo "- Post with: gh pr review $pr --repo $repo --comment --body-file $wt/.review.md"
     echo "- $live"
   } > .review-prompt.md
 
   backend_run .review-prompt.md "$resume" > review.log 2>&1
 }
+
+# A reviewer may write only in its own worktree. Its worktree is checked below. The checkouts
+# where people work are checked here, but only with a warning: the user may edit them during
+# the run.
+watched=("$main"); [ "$root" = "$main" ] || watched+=("$root")
+before=()
+for d in "${watched[@]}"; do before+=("$(git -C "$d" status --porcelain)"); done
 
 [ ${#todo[@]} -eq 2 ] || echo "Round $round: reviewer ${todo[*]} has not posted yet; running it only."
 pids=()
@@ -177,6 +226,11 @@ for r in "${todo[@]}"; do run_reviewer "$r" & pids+=("$!"); done
 rc=0
 for i in "${!todo[@]}"; do
   wait "${pids[$i]}" || { echo "Reviewer ${todo[$i]} failed; see its review.log" >&2; rc=1; }
+done
+
+for i in "${!watched[@]}"; do
+  [ "$(git -C "${watched[$i]}" status --porcelain)" = "${before[$i]}" ] \
+    || echo "Warning: files changed in ${watched[$i]} during the review. Check that a reviewer did not write there." >&2
 done
 
 reviews=$(gh api --paginate "repos/$repo/pulls/$pr/reviews" --jq '.[].body')

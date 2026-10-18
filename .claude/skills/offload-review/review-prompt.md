@@ -12,7 +12,8 @@ at the same time.
 1. Read `CLAUDE.md` and `docs/design.md` for the rules of this repo.
 2. Read the full diff and the code around each change.
 3. For each finding you believe, try to prove it: exact lines, a reasoning trace, or a test.
-4. Write your review to `.review.md` in the repo root, in the format below.
+4. Write your review to `.review.md` in your folder, in the format below. "This review" gives
+   the exact path.
 5. Post it on the PR with the command given under "This review". Post it only one time.
 
 ## Do not
