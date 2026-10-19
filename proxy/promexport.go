@@ -742,6 +742,9 @@ func (h *Handler) renderMetrics() string {
 	promHeader(&b, "cg_upstream_silent_failures_total",
 		"Streaming upstream requests whose resend was silent too; these became a 502.", "counter")
 	promLine(&b, "cg_upstream_silent_failures_total", "", float64(upstreamSilenceFailures.Load()))
+	promHeader(&b, "cg_upstream_dropped_reuse_resends_total",
+		"Upstream requests resent on a new connection because the upstream closed their reused keep-alive connection without sending a byte of response (Go reports this as EOF; it used to be a 502).", "counter")
+	promLine(&b, "cg_upstream_dropped_reuse_resends_total", "", float64(upstreamDroppedReuseResends.Load()))
 
 	// extract_llm economics. The one component that SPENDS money, so gross savings can look
 	// impressive while it is underwater — measured live at a NET of -$0.7085, and until these

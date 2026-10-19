@@ -2115,16 +2115,16 @@ func (h *Handler) doUpstream(r *http.Request, up upstream, body []byte) (*http.R
 		req.Header.Del("Accept-Encoding")
 		return req, nil
 	}
-	// A streaming request the upstream accepted but never answered is resent once on a new
-	// connection instead of waiting out the ten-minute header timeout. See upstreamsilence.go.
+	// A request the upstream accepted but never answered is resent once on a new connection: a
+	// streaming one after streamSilenceTimeout of silence instead of the ten-minute header
+	// timeout, and any one whose reused connection was closed before a byte came back instead of
+	// a 502. Non-streaming requests get no silence deadline — their headers arrive only once the
+	// answer is generated. See upstreamsilence.go.
+	silence := time.Duration(0)
 	if streamsRequest(body) {
-		return doWithSilenceGuard(r.Context(), h.client, h.streamSilenceTimeout(), build)
+		silence = h.streamSilenceTimeout()
 	}
-	req, err := build(r.Context())
-	if err != nil {
-		return nil, err
-	}
-	return h.client.Do(req)
+	return doWithSilenceGuard(r.Context(), h.client, silence, build)
 }
 
 // streamSilenceTimeout is the silence guard's budget: Options.StreamSilenceTimeout, else the

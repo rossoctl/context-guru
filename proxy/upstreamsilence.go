@@ -68,19 +68,29 @@ func streamsRequest(body []byte) bool {
 	return gjson.GetBytes(body, "stream").Bool()
 }
 
-// doWithSilenceGuard sends req (built by build, called once per attempt so each attempt has a
-// fresh body reader) and, for a streaming request, abandons an attempt that has produced no
-// response byte within timeout and sends it once more on a new connection.
+// doWithSilenceGuard sends the request (built by build, called once per attempt so each attempt
+// has a fresh body reader) and sends it once more, on a new connection, when the first attempt
+// provably reached nobody:
+//
+//   - silence (streaming requests only, when timeout > 0): the request was written and no
+//     response byte arrived within timeout; or
+//   - a dropped reused connection (every request): the upstream closed a kept-alive connection
+//     after our request was written and before it sent a byte of response. See
+//     errUnansweredReuse.
 //
 // The returned response's body stays tied to the attempt that produced it; closing it releases
 // that attempt.
 func doWithSilenceGuard(ctx context.Context, client *http.Client, timeout time.Duration,
 	build func(context.Context) (*http.Request, error)) (*http.Response, error) {
 	resp, err := silenceAttempt(ctx, client, timeout, build, false)
-	if !errors.Is(err, errUpstreamSilent) {
+	switch {
+	case errors.Is(err, errUpstreamSilent):
+		upstreamSilenceResends.Add(1)
+	case errors.Is(err, errUnansweredReuse):
+		upstreamDroppedReuseResends.Add(1)
+	default:
 		return resp, err
 	}
-	upstreamSilenceResends.Add(1)
 	resp, err = silenceAttempt(ctx, client, timeout, build, true)
 	if errors.Is(err, errUpstreamSilent) {
 		upstreamSilenceFailures.Add(1)
@@ -89,17 +99,40 @@ func doWithSilenceGuard(ctx context.Context, client *http.Client, timeout time.D
 	return resp, err
 }
 
+// errUnansweredReuse marks an attempt that went out on a REUSED connection which the upstream
+// then closed without sending one byte of response — Go reports it as a bare "EOF".
+//
+// The IBM LiteLLM gateway does this: the packet capture shows our request ACKed, then about a
+// second later the gateway's TLS close_notify and FIN, and never a response. That is the
+// documented "server closed an idle keep-alive connection" race, and the request was never
+// processed. Go's transport retries exactly this case by itself — but only for idempotent
+// requests, and a POST is not one, so every occurrence became a 502 (55 on contextguru2 since
+// September; the one in the 2026-10-18 benchmark at 15:21:33 was this). Resending on a NEW
+// connection is safe for the same reason Go's own retry is: nothing came back, so the upstream
+// had not started a response, and nothing has been forwarded to the client.
+var errUnansweredReuse = errors.New("upstream closed a reused connection without answering")
+
+// upstreamDroppedReuseResends counts requests resent because their reused connection was closed
+// unanswered. A resend on a FRESH connection never counts here (a fresh connection that is
+// closed on us is a real failure, and it is returned as one).
+var upstreamDroppedReuseResends atomic.Int64
+
 // silenceAttempt runs one attempt under a watchdog that fires if no response byte has arrived
 // within timeout of the request being WRITTEN. Time spent dialling, handshaking or uploading a
 // large body does not count against it: those failures have their own errors, and a slow upload
-// is not a silent gateway.
+// is not a silent gateway. timeout <= 0 disables the watchdog (non-streaming requests).
 func silenceAttempt(parent context.Context, client *http.Client, timeout time.Duration,
 	build func(context.Context) (*http.Request, error), fresh bool) (*http.Response, error) {
 	ctx, cancel := context.WithCancelCause(parent)
-	var answered atomic.Bool
+	var answered, reused, wrote atomic.Bool
 	var watchdog atomic.Pointer[time.Timer]
 	trace := &httptrace.ClientTrace{
-		WroteRequest: func(httptrace.WroteRequestInfo) {
+		GotConn: func(info httptrace.GotConnInfo) { reused.Store(info.Reused) },
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			wrote.Store(info.Err == nil)
+			if timeout <= 0 {
+				return
+			}
 			watchdog.Store(time.AfterFunc(timeout, func() {
 				if !answered.Load() {
 					cancel(errUpstreamSilent)
@@ -132,6 +165,13 @@ func silenceAttempt(parent context.Context, client *http.Client, timeout time.Du
 			return nil, errUpstreamSilent
 		}
 		cancel(nil)
+		// Only the exact shape that cannot have been processed: our request fully written on a
+		// REUSED connection, no response byte, then the connection ended (EOF). A fresh connection
+		// closed on us, a reset, a timeout, or the client going away are all returned as they are.
+		if !fresh && reused.Load() && wrote.Load() && !answered.Load() && parent.Err() == nil &&
+			errors.Is(err, io.EOF) {
+			return nil, errUnansweredReuse
+		}
 		return nil, err
 	}
 	// Headers arrived, so the watchdog's job is done. The attempt's context must stay alive for as

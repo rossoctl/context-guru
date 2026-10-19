@@ -309,3 +309,114 @@ func TestABurstOfStreamsKeepsItsConnectionsWarm(t *testing.T) {
 		t.Errorf("second burst opened %d new connections; the pool closed warm ones after the first burst", got-8)
 	}
 }
+
+// dropAfterRequestGateway answers the first request on each connection, then on the SECOND request
+// of a connection reads it and closes the connection without a byte of response — what the
+// packet capture showed the LiteLLM gateway doing (request ACKed, then its FIN, never a response).
+type dropAfterRequestGateway struct {
+	ln       net.Listener
+	drop     func(n int) bool // per request on a connection, 1-based
+	requests atomic.Int64
+	conns    atomic.Int64
+}
+
+func newDropGateway(t *testing.T, drop func(n int) bool) *dropAfterRequestGateway {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &dropAfterRequestGateway{ln: ln, drop: drop}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			g.conns.Add(1)
+			go g.handle(c)
+		}
+	}()
+	t.Cleanup(func() { ln.Close() })
+	return g
+}
+
+func (g *dropAfterRequestGateway) handle(c net.Conn) {
+	defer c.Close()
+	br := bufio.NewReader(c)
+	for n := 1; ; n++ {
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		io.Copy(io.Discard, req.Body)
+		g.requests.Add(1)
+		if g.drop(n) {
+			return // close with no response: the client's read sees EOF
+		}
+		body := `{"type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`
+		fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+	}
+}
+
+const nonStreamBody = `{"model":"m","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`
+
+// The 15:21:33 502: a reused connection the upstream closes after reading the request. It is sent
+// again on a new connection and answered, instead of becoming "Post ...: EOF" / 502. This holds for
+// non-streaming requests too: nothing came back, so nothing was generated.
+func TestAReusedConnectionClosedUnansweredIsResent(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		silence    time.Duration
+	}{{"streaming", streamBody, time.Minute}, {"non-streaming", nonStreamBody, 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newDropGateway(t, func(n int) bool { return n == 2 })
+			c := &http.Client{Transport: upstreamTransport(time.Minute)}
+			// Warm the pool: one answered request leaves a kept-alive connection behind.
+			resp, err := doWithSilenceGuard(context.Background(), c, tc.silence, silenceBuild(g.url(), tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			before := upstreamDroppedReuseResends.Load()
+			resp, err = doWithSilenceGuard(context.Background(), c, tc.silence, silenceBuild(g.url(), tc.body))
+			if err != nil {
+				t.Fatalf("a request dropped on a reused connection reached the caller as %v", err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != 200 {
+				t.Fatalf("status %d", resp.StatusCode)
+			}
+			if got := g.requests.Load(); got != 3 {
+				t.Errorf("upstream saw %d requests, want 3 (warm-up, dropped, resend)", got)
+			}
+			if got := g.conns.Load(); got != 2 {
+				t.Errorf("upstream saw %d connections, want 2: the resend must use a new one", got)
+			}
+			if upstreamDroppedReuseResends.Load() != before+1 {
+				t.Errorf("the resend was not counted")
+			}
+		})
+	}
+}
+
+func (g *dropAfterRequestGateway) url() string { return "http://" + g.ln.Addr().String() }
+
+// A FRESH connection closed on us is a real failure and is returned as one — never resent, so a
+// gateway that drops every request fails fast instead of looping.
+func TestAFreshConnectionClosedUnansweredIsNotResent(t *testing.T) {
+	g := newDropGateway(t, func(int) bool { return true })
+	c := &http.Client{Transport: upstreamTransport(time.Minute)}
+	_, err := doWithSilenceGuard(context.Background(), c, 0, silenceBuild(g.url(), nonStreamBody))
+	if err == nil {
+		t.Fatal("a request the upstream never answered was reported as a success")
+	}
+	if errors.Is(err, errUnansweredReuse) {
+		t.Fatalf("a fresh connection was treated as a stale reused one: %v", err)
+	}
+	if got := g.requests.Load(); got != 1 {
+		t.Errorf("upstream saw %d requests, want 1", got)
+	}
+}
