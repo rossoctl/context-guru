@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -572,4 +574,232 @@ func TestCountTokensRecoversADroppedReusedConnection(t *testing.T) {
 	if s := post(); s != 200 {
 		t.Fatalf("count_tokens on a dropped reused connection returned %d, want 200 from the resend", s)
 	}
+}
+
+// The first byte arrives right around the silence deadline (44-55 ms against 50 ms). An answered
+// attempt must never be thrown away, a body must never be corrupted, and a call is sent at most
+// twice. Errors are expected when BOTH copies are slower than the deadline.
+func TestAFirstByteRacingTheWatchdogIsNeverLostOrDuplicated(t *testing.T) {
+	var reqs atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		reqs.Add(1)
+		time.Sleep(time.Duration(44+rand.Intn(12)) * time.Millisecond)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		io.WriteString(w, "data: x\n\n")
+	}))
+	defer srv.Close()
+	c := &http.Client{Transport: upstreamTransport(30 * time.Second)}
+	const N = 200
+	errs := 0
+	for i := 0; i < N; i++ {
+		before := reqs.Load()
+		resp, err := doWithSilenceGuard(context.Background(), c, 50*time.Millisecond, silenceBuild(srv.URL, streamBody))
+		if err != nil {
+			errs++
+			continue
+		}
+		b, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || string(b) != "data: x\n\n" {
+			t.Fatalf("iter %d body=%q err=%v", i, b, err)
+		}
+		if sent := reqs.Load() - before; sent > 2 {
+			t.Fatalf("sent %d", sent)
+		}
+	}
+	t.Logf("errors(both copies silent) %d", errs)
+	t.Logf("total server requests %d for %d calls (resends only when the first copy was silent)", reqs.Load(), N)
+}
+
+// chaosGateway answers, drops (closes a reused connection after reading the request) or goes silent
+// at random, per request. It counts how many times each request body was received.
+type chaosGateway struct {
+	ln          net.Listener
+	mu          sync.Mutex
+	perID       map[string]int
+	maxSeen     int
+	conns       []net.Conn
+	silentCount map[string]int
+}
+
+func newChaosGateway(t *testing.T) *chaosGateway {
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	g := &chaosGateway{ln: ln, perID: map[string]int{}, silentCount: map[string]int{}}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			g.mu.Lock()
+			g.conns = append(g.conns, c)
+			g.mu.Unlock()
+			go g.handle(c)
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		g.mu.Lock()
+		for _, c := range g.conns {
+			c.Close()
+		}
+		g.mu.Unlock()
+	})
+	return g
+}
+
+func (g *chaosGateway) handle(c net.Conn) {
+	br := bufio.NewReader(c)
+	first := true
+	for {
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		b, _ := io.ReadAll(req.Body)
+		id := string(b)
+		g.mu.Lock()
+		g.perID[id]++
+		n := g.perID[id]
+		if n > g.maxSeen {
+			g.maxSeen = n
+		}
+		g.mu.Unlock()
+		r := rand.Intn(10)
+		switch {
+		case !first && r < 3:
+			c.Close() // drop reused conn
+			return
+		case r == 9 && strings.Contains(id, "stream\":true"):
+			g.mu.Lock()
+			g.silentCount[id]++
+			g.mu.Unlock()
+			// silent: hold the conn
+			io.Copy(io.Discard, c)
+			return
+		}
+		first = false
+		body := "echo:" + id
+		fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+	}
+}
+
+// Many concurrent requests against a gateway that drops and ignores requests at random. Every
+// request must end in its OWN correct response or an error, no request may be sent more often than
+// the bounds allow, and no goroutine may be left behind.
+func TestConcurrentRequestsAgainstAFlakyGateway(t *testing.T) {
+	g := newChaosGateway(t)
+	c := &http.Client{Transport: upstreamTransport(30 * time.Second)}
+	time.Sleep(50 * time.Millisecond)
+	before := goroutinesSettled()
+	var ok, fail atomic.Int64
+	var wg sync.WaitGroup
+	for w := 0; w < 50; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				body := fmt.Sprintf(`{"stream":%v,"id":"%d-%d"}`, i%2 == 0, w, i)
+				resp, err := doWithSilenceGuard(context.Background(), c, 100*time.Millisecond, rawBuild("http://"+g.ln.Addr().String(), body))
+				if err != nil {
+					fail.Add(1)
+					continue
+				}
+				b, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil || string(b) != "echo:"+body {
+					t.Errorf("wrong response %q err=%v", b, err)
+					return
+				}
+				ok.Add(1)
+			}
+		}(w)
+	}
+	wg.Wait()
+	g.mu.Lock()
+	max := g.maxSeen
+	g.mu.Unlock()
+	// 1 + 2 drops + 1 silence resend (each of which may itself drop) is the theoretical max
+	if max > 1+maxDroppedReuseRetries+1 {
+		t.Errorf("a request was sent %d times", max)
+	}
+	c.Transport.(*http.Transport).CloseIdleConnections()
+	g.mu.Lock()
+	for _, cn := range g.conns {
+		cn.Close()
+	}
+	g.mu.Unlock()
+	after := goroutinesSettled()
+	t.Logf("ok=%d fail=%d maxSends=%d goroutines %d -> %d", ok.Load(), fail.Load(), max, before, after)
+	if after > before+3 {
+		t.Errorf("goroutine leak %d -> %d", before, after)
+	}
+}
+
+func goroutinesSettled() int {
+	var n int
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		n = runtime.NumGoroutine()
+	}
+	return n
+}
+
+// rawBuild posts body exactly as given, to url.
+func rawBuild(url, body string) func(context.Context) (*http.Request, error) {
+	return func(ctx context.Context) (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+	}
+}
+
+// A resend closes the idle pool (freshAttempt). Connections that are carrying a stream are not idle,
+// so ten slow streams in flight on the same transport must all complete.
+func TestClosingIdleConnectionsForAResendDoesNotBreakOtherStreams(t *testing.T) {
+	var n atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		k := n.Add(1)
+		if k == 100 { // the silent one
+			<-r.Context().Done()
+			return
+		}
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		for i := 0; i < 10; i++ {
+			time.Sleep(50 * time.Millisecond)
+			io.WriteString(w, "x")
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer srv.Close()
+	c := &http.Client{Transport: upstreamTransport(30 * time.Second)}
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := doWithSilenceGuard(context.Background(), c, 5*time.Second, silenceBuild(srv.URL, streamBody))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			b, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil || len(b) != 10 {
+				t.Errorf("stream broken: %d bytes err=%v", len(b), err)
+			}
+		}()
+	}
+	time.Sleep(100 * time.Millisecond)
+	n.Store(99)
+	resp, err := doWithSilenceGuard(context.Background(), c, 200*time.Millisecond, silenceBuild(srv.URL, streamBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	wg.Wait()
 }

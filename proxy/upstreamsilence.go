@@ -194,12 +194,21 @@ func silenceAttempt(parent context.Context, client *http.Client, silence time.Du
 				return
 			}
 			watchdog = time.AfterFunc(silence, func() {
+				// Under mu, and GotFirstResponseByte takes mu too: a byte that arrives while the
+				// watchdog fires either wins (no cancel) or loses (cancel before any byte), never
+				// both — so an answered attempt is never thrown away and resent.
+				mu.Lock()
+				defer mu.Unlock()
 				if !answered.Load() {
 					cancel(errUpstreamSilent)
 				}
 			})
 		},
-		GotFirstResponseByte: func() { answered.Store(true) },
+		GotFirstResponseByte: func() {
+			mu.Lock()
+			answered.Store(true)
+			mu.Unlock()
+		},
 	}
 	req, err := build(httptrace.WithClientTrace(ctx, trace))
 	if err != nil {
