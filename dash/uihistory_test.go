@@ -45,7 +45,7 @@ func TestTheHistoryViewRendersItsBasis(t *testing.T) {
 		code.WriteString(line)
 		code.WriteString("\n")
 	}
-	lits := regexp.MustCompile(`'(?:[^'\\]|\\.)*'`).FindAllString(code.String(), -1)
+	lits := jsStringLiterals(code.String())
 	var said bool
 	for _, r := range lits {
 		low := strings.ToLower(r)
@@ -154,7 +154,7 @@ func TestTheHistoryViewKeepsToolsOutOfTheSkillCount(t *testing.T) {
 	}
 	// And tools must be marked as not removable, or a reader takes them for waste.
 	lits := strings.ToLower(strings.Join(
-		regexp.MustCompile(`'(?:[^'\\]|\\.)*'`).FindAllString(code, -1), " "))
+		jsStringLiterals(code), " "))
 	var says bool
 	for _, p := range []string{"cannot be removed", "part of claude code", "not removable"} {
 		if strings.Contains(lits, p) {
@@ -243,5 +243,40 @@ func TestTheHistoryViewStatesTheTotalOfItsGroups(t *testing.T) {
 		t.Error("the view never sums the owner groups, so a reader has to add them up to check " +
 			"them against the headline -- which is exactly the arithmetic that got reported as " +
 			"not closing")
+	}
+}
+
+// A PROJECT WITH NO MEASURED TRAFFIC GETS AN EXPLANATION, NOT A BROKEN OR BLANK PAGE.
+//
+// THE BUG, reported as "if I select ai-native-company I get a bug": that project's 115 requests
+// were all imported from Claude Code's transcripts, so Cleanup has nothing to price and the
+// document is legitimately empty. The view had no empty state at all — it went straight to the
+// range picker and the chart, both of which index into a timeline that has no days.
+//
+// So the view checks coverage FIRST, says plainly that nothing here was measured and why that
+// means no figures rather than no waste, points at the History tab (which can answer for imported
+// history), and keeps the project picker so the reader can choose another.
+func TestTheCleanupViewExplainsAProjectWithNoMeasuredTraffic(t *testing.T) {
+	src := readUI(t, "ui/insights.js")
+	code := stripComments(src)
+	if !strings.Contains(code, "measured_requests") {
+		t.Fatal("the Cleanup view never reads coverage.measured_requests, so it cannot tell a " +
+			"project with nothing to report from one that was never measured")
+	}
+	lits := strings.ToLower(strings.Join(
+		jsStringLiterals(code), " "))
+	for _, want := range []string{"history tab", "before"} {
+		if !strings.Contains(lits, want) {
+			t.Errorf("the empty state does not mention %q. A reader who selected a project and "+
+				"got no figures has to be told that it was never MEASURED — the alternative "+
+				"reading, that it carried nothing, is false — and where to look instead", want)
+		}
+	}
+	// The early return has to come BEFORE the chart is built, or the chart still throws.
+	i := strings.Index(code, "measured_requests")
+	j := strings.Index(code, "const chart = insChart()")
+	if i < 0 || j < 0 || i > j {
+		t.Error("the coverage check runs after insChart(), so the chart still reads an empty " +
+			"timeline before the explanation can render")
 	}
 }
