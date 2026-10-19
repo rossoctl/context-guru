@@ -765,7 +765,11 @@ async function loadInsights() {
     if (insProjects === null) {
       insProjects = [];
       try {
-        const f = await api('facets');
+        /* MEASURED PROJECTS ONLY. Reported, of a project used only before the proxy existed: "it
+         * should only be in History and not on this page". This page prices what each request
+         * declared, which only the proxy sees, so such a project could only ever show an empty
+         * state. History lists every project, imported or not. */
+        const f = await api('facets', { measured: 1 });
         if (f && Array.isArray(f.project)) insProjects = f.project.filter(Boolean).sort();
       } catch (_) {
         /* A picker that cannot list projects is a missing control, not a broken page: the
