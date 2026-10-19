@@ -387,3 +387,44 @@ func TestAnUnpricedWindowIsNotValuedAndCannotPassAsACeiling(t *testing.T) {
 			"nothing", v.Valued, v.TotalUSD)
 	}
 }
+
+// A REJECTED NO-OP ROW IS NOT A TURN, for the ceiling exactly as for Simulate. Simulate skips a row
+// whose upstream rejected it, whose cost is unknown and whose prefix is empty: the provider read
+// nothing, so the cache entry is untouched. The optimum's dynamic program used to keep such a row as
+// a trajectory step, so it planned around a turn Simulate never bills — and on CG2's live history
+// keepalive-5m came out $39.94 BELOW "optimal" over 35 (account, hour) cells. A ceiling a plain arm
+// beats is not a ceiling.
+func TestOptimalIgnoresRejectedNoOpRowsLikeSimulate(t *testing.T) {
+	reqs, cfg := dataset(t)
+	// Put a rejected, empty, unpriced row in the middle of every trajectory, right after each turn,
+	// the shape a failed upstream call leaves in the dashboard.
+	var withNoOps []*Request
+	next := int64(10_000)
+	for _, r := range reqs {
+		withNoOps = append(withNoOps, r)
+		next++
+		withNoOps = append(withNoOps, &Request{ID: next, User: r.User, ConversationID: r.ConversationID,
+			TS: r.TS + 1, HourUTC: r.HourUTC, Bucket: r.Bucket, Model: r.Model,
+			Rejected: true, CostKnown: false, CachedContext: 0, MissReason: "hit"})
+	}
+	Derive(withNoOps)
+	best := Simulate(withNoOps, NewOptimal(withNoOps, cfg), cfg)
+	clean := Simulate(reqs, NewOptimal(reqs, cfg), cfg)
+	if diff := best.TotalUSD - clean.TotalUSD; diff > 0.01 || diff < -0.01 {
+		t.Errorf("no-op rows moved the optimum from $%.6f to $%.6f; Simulate bills them as nothing, so "+
+			"the ceiling must not change", clean.TotalUSD, best.TotalUSD)
+	}
+	for _, spec := range Registry() {
+		if spec.Name == StrategyOptimal || spec.Name == StrategyReplay {
+			continue
+		}
+		s, err := NewStrategy(spec.Name, withNoOps, cfg)
+		if err != nil {
+			t.Fatalf("%s: %v", spec.Name, err)
+		}
+		if got := Simulate(withNoOps, s, cfg); got.TotalUSD < best.TotalUSD-0.01 {
+			t.Errorf("%s costs $%.6f, BELOW the optimum's $%.6f on a history with rejected no-op rows",
+				spec.Name, got.TotalUSD, best.TotalUSD)
+		}
+	}
+}
