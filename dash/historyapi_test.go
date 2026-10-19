@@ -539,3 +539,58 @@ func TestTheHistorySplitsUnusedHereFromNeverUsedAnywhere(t *testing.T) {
 			doc.UsedHere, doc.UnusedHere, doc.UsedHere+doc.UnusedHere, doc.InstalledSkills)
 	}
 }
+
+// THE WASTE LIST MUST NOT COUNT THIS TOOL'S OWN SKILLS.
+//
+// THE BUG, reported as "never used still 40 WTF". The figure was wrong, not merely confusingly
+// scoped: nine of those forty were context-guru's own skills -- insights, install, update,
+// statusline and the rest -- so the page was billing the user for the reporter's own inventory
+// and calling it their waste.
+//
+// The self-exclusion filtered the USED list only. An unused self-owned skill fell straight
+// through into NeverUsed, which is the one list that matters here, and inflated both the headline
+// count and the denominator it is read against.
+func TestTheWasteListExcludesThisToolsOwnSkills(t *testing.T) {
+	db := openTestDB(t)
+	home := t.TempDir()
+	// Two of this tool's own skills, under both names it has shipped under, and two genuine
+	// third-party ones. None of them ever invoked.
+	mkSkill(t, home, selfPlugin, "insights")
+	mkSkill(t, home, "cg", "status")
+	mkSkill(t, home, "superpowers", "never-touched")
+	mkSkill(t, home, "superpowers", "also-untouched")
+	if err := db.insertBatch([]*Event{
+		{TS: daysAgo(10), SessionID: "s1", Model: "m", Source: SourceImported, CacheWrite: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := db.HistoryDocFor(Filter{}, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range doc.NeverUsed {
+		if isSelfOwned(n) {
+			t.Errorf("%q is in the waste list. These are the reporter's own skills, so counting "+
+				"them as the user's waste bills them for this tool's inventory -- and the "+
+				"headline count is wrong by however many it has", n)
+		}
+	}
+	if len(doc.NeverUsed) != 2 {
+		t.Errorf("NeverUsed has %d entries (%v); want exactly the 2 third-party skills",
+			len(doc.NeverUsed), doc.NeverUsed)
+	}
+	// AND THE DENOMINATOR DROPS WITH IT. "40 of 46" is two wrong numbers if nine of each belong
+	// to the reporter: the ratio has to describe the user's own inventory.
+	if doc.InstalledSkills != 2 {
+		t.Errorf("InstalledSkills = %d; want 2. The count the waste figure is read against has "+
+			"to exclude the same skills the waste figure does, or the ratio is nonsense",
+			doc.InstalledSkills)
+	}
+	// Reported, not hidden: they do occupy the prompt.
+	if doc.SelfExcluded.Items != 2 {
+		t.Errorf("SelfExcluded.Items = %d; want 2 -- excluded from the figures and still "+
+			"disclosed, since they are carried on every request like any other skill",
+			doc.SelfExcluded.Items)
+	}
+}

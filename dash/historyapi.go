@@ -105,6 +105,9 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 	// Read once: every folder in this document resolves through the same grouping, and
 	// ProjectGroups parses every transcript on disk.
 	groups := ProjectGroups(home)
+	// This tool's own capabilities, gathered from the used list and the installed inventory
+	// alike. A set rather than a counter because the two overlap -- see SelfExcluded.
+	selfOwned := map[string]bool{}
 
 	// The span and the measured/imported split, from the requests themselves.
 	if err := d.sql.QueryRow(`SELECT
@@ -169,9 +172,11 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 		// isSelfOwned, not a prefix match on the current one, because this surface reads history
 		// from before the rename.
 		if isSelfOwned(u.Name) {
-			// Counted, not merely skipped — see HistoryDoc.SelfExcluded.
-			doc.SelfExcluded.Plugin = selfPlugin
-			doc.SelfExcluded.Items++
+			// Recorded in a SET, here and from the inventory below, and counted once at the
+			// end. A self-owned skill can be both installed and invoked, so incrementing in
+			// both places would overstate what this tool carries; counting in only one place
+			// would miss the skills that appear in just the other.
+			selfOwned[u.Name] = true
 			continue
 		}
 		called[u.Name] = true
@@ -197,7 +202,24 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 	if err != nil {
 		return nil, err
 	}
-	installed := installedSkills(home)
+	installed := map[string]bool{}
+	for name := range installedSkills(home) {
+		// THIS TOOL'S OWN SKILLS LEAVE THE INVENTORY ENTIRELY, not just the used list.
+		//
+		// Reported as "never used still 40", and the figure was wrong rather than merely
+		// confusingly scoped: nine of those forty were context-guru's own skills, so the page
+		// billed the user for the reporter's own inventory and called it their waste.
+		//
+		// Excluded HERE rather than at each use, so every figure derived from `installed` agrees:
+		// the waste list, the overlap count and the denominator both are read against. Filtering
+		// only the waste list would leave "40 of 46" with nine of the 46 still belonging to this
+		// tool, which is a different wrong number.
+		if isSelfOwned(name) {
+			selfOwned[name] = true
+			continue
+		}
+		installed[name] = true
+	}
 	doc.InstalledSkills = len(installed)
 	for name := range installed {
 		if calledAnywhere[name] {
@@ -210,6 +232,12 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 		doc.NeverUsed = append(doc.NeverUsed, name)
 	}
 	sort.Strings(doc.NeverUsed)
+
+	// Settled once both sources have been seen.
+	if len(selfOwned) > 0 {
+		doc.SelfExcluded.Plugin = selfPlugin
+		doc.SelfExcluded.Items = len(selfOwned)
+	}
 
 	// THE PER-PROJECT SPLIT. Only meaningful under a project filter, where `called` holds this
 	// folder's invocations and `calledAnywhere` holds every project's.
