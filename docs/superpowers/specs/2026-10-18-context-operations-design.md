@@ -6,6 +6,9 @@
 the plugins).
 **Worked example:** [`2026-10-18-context-operations-example.md`](2026-10-18-context-operations-example.md).
 Read it first. It shows one session from body to dollars.
+**Problem statement:** [rossoctl/cortex#1417](https://github.com/rossoctl/cortex/issues/1417),
+"Counting savings from request-rewriting plugins (context-guru, tool-prune): open questions". §0.1
+maps each of its questions to this spec.
 
 ## 0. Base, and the problem
 
@@ -32,6 +35,24 @@ Three problems remain with that approach:
 3. **The facts are too coarse.** One aggregate for each request cannot give the saving of one
    change across requests, or the payback of a change that broke the cache. `PrefixRewritten` is a
    boolean, so the penalty is an upper bound (the whole `cache_write`).
+
+### 0.1 The questions in cortex#1417
+
+[cortex#1417](https://github.com/rossoctl/cortex/issues/1417) lists the open questions from the
+Cortex side. This spec answers them as follows.
+
+| # | Question in the issue | Answer in this spec |
+|---|---|---|
+| 1 | One set of numbers: spend and savings priced from different rate tables | Inside one host, spend and savings use one resolver (D3, D4, §4.6). The tier logic is in one library. The rates stay host-local by design (§1). |
+| 2 | A figure operators can trust: how it was computed, and who stands behind it | Each recorded figure names its producer, its component, `Estimated` and `Projected` (§7.1), and the `ops` version that computed it (R46). The rules are reviewed in context-guru through the case list and `differences.json` (§11.4). |
+| 3a | Cache effects: a saving priced at the tier the rewritten request landed in | Saved tokens are priced at the tier they would have had without the change: B\* and the breakpoints (§5.2, R36, R37). A break that a change caused is a separate `cacheBreak` cost, linked to that change (R23). |
+| 3b | The plugin's own LLM calls through `core/llmclient`, not in the ledger; the `ibac` judge too | `spend` operations with the call's billed usage (D4, §4.6). This applies to every plugin that calls a model, not only context-guru (R47). |
+| 3c | Keep-alive: the cost and the benefit land on different requests | `ping` operations, and the rescue rule (§4.6, §6.2). |
+| 4 | Content re-sent every turn: overcount for compaction, correct for tool-prune | `ChangeID` and `FirstApplied` (R22, D1); the tier comes from the position, so tool-prune is priced on every turn and a compaction is not counted again at the full rate (§4.7). |
+| 5 | Two ways of counting tokens | `Size.Tokenizer`, `bytes-estimate` and `Estimated` (R8); the correction factor is open (§12, Q4). |
+| 6 | Credit across several plugins | Each producer is measured against its own input (R29), and R25 for the same content. |
+| 7 | Observe mode | `Projected` (R12), never counted in totals. |
+| — | Where the baseline lives, and how changes to it are reviewed | In the `ops` library in context-guru (D2). A change to it changes the case list, and every intended difference is in `differences.json` (§11.2, §11.4). |
 
 ## 1. Goal
 
@@ -85,8 +106,9 @@ Three problems remain with that approach:
 ## 3. Requirements
 
 The numbers are the order in which the requirements were found, so they are not in sequence.
-R35 to R39 were added after the first review, R40 to R43 for subscription plans, and R44 after a
-second review that checked the model against the real engine and both hosts (§13).
+R35 to R39 were added after the first review, R40 to R43 for subscription plans, R44 and R45 after a
+second review that checked the model against the real engine and both hosts (§13), and R46 and R47
+from [cortex#1417](https://github.com/rossoctl/cortex/issues/1417) (§0.1).
 **R13 is withdrawn** (see D). **R10 is withdrawn.** It asked for a flag that separates a replay from a fresh act. `FirstApplied`
 (§4.1) replaces it.
 
@@ -108,6 +130,10 @@ second review that checked the model against the real engine and both hosts (§1
 - **R5.** Spend that happens outside a request (a keep-alive ping, a detached summarizer call)
   carries its own attribution. It uses the same operations and the same recording path as spend
   inside a request (§4.6).
+- **R47.** A model call that any plugin makes outside the listener is a `spend` operation, not
+  only context-guru's. Example: the `ibac` judge calls a model through `core/llmclient`, so the call
+  is not in the ledger today. It is reported the same way as the summarizer (§4.6). Its cost is not
+  joined to a saving, because it produces none: `Produced` is empty.
 - **R6.** An operation has an ID that is unique inside its request. Results, check failures and
   `cacheBreak` attribution refer to it. A reference to a change in another request uses `ChangeID`
   (R22), not the operation ID.
@@ -179,6 +205,10 @@ second review that checked the model against the real engine and both hosts (§1
   kind of change it makes, and what made it decide) depends on the component only, so a report maps
   `Component` to it with a table in cg. The operation does not carry it.
 - **R18.** Each request carries request ID, session, thread (if known) and agent.
+- **R46.** Each recorded saving names the version of the `ops` rules that computed it
+  (`Saving.OpsVersion`). An operator can then trace a figure to the rules and the case list that
+  define it. A change to the rules changes the version, so figures from two versions are not
+  compared as if they were the same.
 - **R39.** Each operation carries its session ID and thread ID, so every figure can be summed for
   one session, for one thread, or for one subagent.
 
@@ -1093,6 +1123,7 @@ reaches the session store, `:9094`, and the archive:
 | `Projected` | `Projected` |
 | `DiscardedCount` (new, additive) | per (producer, component), the count of operations with `Discarded = true` on this request (R44, §5.1a) — never priced, surfaced for diagnosis the way `Report.Discarded` is today |
 | `Estimated` | any operation `Estimated` |
+| `OpsVersion` (new, additive) | `Result.Version`, the version of the `ops` rules (R46) |
 
 New fields, all additive (the ledger rule is "add, never rename"):
 
