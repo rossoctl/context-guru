@@ -285,3 +285,57 @@ func stripComments(src string) string {
 	}
 	return b.String()
 }
+
+// THE PROJECT VIEW HAS TO SHOW ITS OWN ARITHMETIC CLOSING.
+//
+// THE CONFUSION THIS FIXES, reported by a reader of the live page: "how is it possible that every
+// project writes a different number of used tools but the same number of unused tools, if the
+// number of all tools is the same?"
+//
+// The figures were right and the layout was not. The never-used-anywhere count is a fact about
+// the MACHINE and cannot move when a project is selected; it sat in a tile beside two
+// project-scoped figures, so a reader saw one number refuse to change while its neighbours did
+// and correctly concluded something was broken.
+//
+// The fix is to show the identity the reader was trying to check. In any project:
+//
+//	used here + unused here = installed
+//	used here + used elsewhere = used anywhere   (6 on the measured machine)
+//
+// so the view states both halves and labels the machine-wide figure as machine-wide.
+func TestTheProjectViewShowsHowItsFiguresAddUp(t *testing.T) {
+	src := readUI(t, "ui/history.js")
+	code := stripComments(src)
+	lits := strings.ToLower(strings.Join(
+		regexp.MustCompile(`'(?:[^'\\]|\\.)*'`).FindAllString(code, -1), " "))
+
+	// THE IDENTITY MUST BE RENDERED AS ARITHMETIC THE READER CAN FOLLOW, not merely mentioned.
+	//
+	// Matched as one expression -- `usedHere + elsewhere` with nothing between -- because a
+	// looser pattern spanning `[^;]*` crossed line breaks and paired a usedHere from one tile
+	// with an elsewhere from the next, passing on coincidental proximity while both real
+	// arithmetic sites had been removed.
+	// "6 are used somewhere on this machine" was already on the page and did not help: the
+	// reader still could not see that used-here plus used-elsewhere makes that 6. So the view
+	// has to put the two addends next to their sum.
+	if !regexp.MustCompile(`usedHere\s*\+\s*elsewhere|elsewhere\s*\+\s*usedHere`).
+		MatchString(code) {
+		t.Error("the view never renders used-here and used-elsewhere as parts of one total. A " +
+			"reader seeing 'used here 1' beside 'never used anywhere 40' cannot work out where " +
+			"the other 5 went, and reads the page as broken -- which is exactly what happened")
+	}
+	// And the machine-wide figure must say that it is the SAME in every project, which is the
+	// specific fact whose absence made it look like a bug.
+	var labelled bool
+	for _, p := range []string{"same in every project", "not a figure about this project",
+		"whole machine, not this project", "does not change when you pick"} {
+		if strings.Contains(lits, p) {
+			labelled = true
+		}
+	}
+	if !labelled {
+		t.Error("nothing says the never-used-anywhere figure is the same in every project. It " +
+			"cannot move when a project is selected, so beside two figures that do move it " +
+			"reads as a number that is mysteriously stuck")
+	}
+}

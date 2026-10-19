@@ -102,16 +102,30 @@ function histRender() {
         el('div', { class: 's', text: 'invoked at least once somewhere on this machine' })));
     } else {
       const elsewhere = d.unused_here_but_used_elsewhere || 0;
+      const usedHere = d.used_here || 0;
       const wasteHere = Math.max(0, (d.unused_here || 0) - elsewhere);
+      /* THE TWO ADDENDS BESIDE THEIR SUM.
+       *
+       * Reported against the live page: "how is it possible that every project writes a
+       * different number of used tools but the same number of unused tools, if the number of all
+       * tools is the same?" The figures were right; the layout hid the identity the reader was
+       * trying to check. Of the skills used anywhere on this machine, this project uses some and
+       * the others are used in different projects -- usedHere + elsewhere is that total, and
+       * showing it is what makes the row add up on screen. */
       grid.appendChild(el('div', { class: 'tile' },
         el('div', { class: 'k', text: 'used in this project' }),
-        el('div', { class: 'v', text: (d.used_here || 0) + ' of ' + inst }),
-        el('div', { class: 's', text: usedInst + ' are used somewhere on this machine' })));
+        el('div', { class: 'v', text: usedHere + ' of ' + (usedHere + elsewhere) }),
+        el('div', { class: 's', text: 'of the ' + (usedHere + elsewhere) + ' skills you use '
+          + 'anywhere, this project uses ' + usedHere + ' and the other ' + elsewhere
+          + ' are used in different projects — which is not waste' })));
       grid.appendChild(el('div', { class: 'tile' + (wasteHere ? ' bad' : '') },
-        el('div', { class: 'k', text: 'never used in any project' }),
-        el('div', { class: 'v', text: String(wasteHere) }),
-        el('div', { class: 's', text: 'the waste. A further ' + elsewhere + ' are unused here '
-          + 'but used in other projects, which is not waste.' })));
+        el('div', { class: 'k', text: 'never used, anywhere' }),
+        el('div', { class: 'v', text: wasteHere + ' of ' + inst }),
+        /* LABELLED AS NOT BELONGING TO THE PROJECT. It cannot move when a project is selected --
+         * picking a folder does not change which skills you have used somewhere -- so beside two
+         * figures that do move it reads as a number that is stuck unless this says otherwise. */
+        el('div', { class: 's', text: 'the waste, and the same in every project: picking a '
+          + 'folder does not change which skills you have used somewhere' })));
     }
     grid.appendChild(el('div', { class: 'tile' },
       el('div', { class: 'k', text: 'evidence' }),
