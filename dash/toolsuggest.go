@@ -621,3 +621,34 @@ func (a *API) toolFilterDoc(w http.ResponseWriter, r *http.Request) {
 		return json.Marshal(doc)
 	})
 }
+
+// AutoEligibleDecls lists the tool names an account has declared in at least minSessions
+// distinct sessions over at least minSpan and never called in any recorded session: the same
+// sufficiency rule as suggest(), as one query, for toolfilter auto mode. Skills are not
+// included; built-ins are (the prose gate in apply keeps the ones the system prompt names).
+func (d *DB) AutoEligibleDecls(tenant string, minSessions int, minSpan time.Duration) ([]string, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT d.name FROM tool_declarations d
+		WHERE d.tenant_id = ? AND d.kind IN ('tool','mcp_tool') AND d.name <> ''
+		GROUP BY d.name
+		HAVING COUNT(DISTINCT d.session_id) >= ? AND MAX(d.ts) - MIN(d.ts) >= ?
+		   AND NOT EXISTS (SELECT 1 FROM tool_uses u WHERE u.tenant_id = d.tenant_id AND u.name = d.name)
+		ORDER BY d.name`, tenant, minSessions, minSpan.Milliseconds())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// AutoMinSessions / AutoMinSpan are the thresholds toolfilter auto mode uses (same as suggest()).
+const AutoMinSessions = suggestMinSessions
+
+var AutoMinSpan = suggestMinSpan

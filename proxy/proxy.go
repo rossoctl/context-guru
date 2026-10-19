@@ -102,6 +102,9 @@ type Options struct {
 	//
 	// `always` still injects unconditionally — an operator asking for it by name gets it.
 	InjectExpand string
+	// AutoToolEligible, when set, replaces the dashboard-history query that feeds toolfilter auto
+	// mode with a fixed candidate list per tenant. A test seam; production leaves it nil.
+	AutoToolEligible func(tenant string) []string
 	// CacheMode controls cache-aware compaction ("auto"|"on"|"off"; empty=auto).
 	// auto/on keep offloaders from mutating already-cached content on prompt-caching
 	// backends; off restores legacy compact-everything (for confirmed non-caching backends).
@@ -1255,6 +1258,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			})
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
+			if tn.Mode != components.ModeObserve && !bypassed {
+				body = h.applyAutoTools(tn, wire, body, &tr)
+			}
 			cp.noteTrace(tr)
 			// A real request has arrived on this session: cancel any pending keep-alive
 			// (this request refreshes the entry itself, and a ping concurrent with it would
@@ -1599,7 +1605,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// Advertised covers BOTH proxy-injected tools. The response loop is what keeps a
 	// proxy-injected tool_use away from the client, and gating it on expand alone let an
 	// adjudication call stream straight through on a request that advertised only that one.
-	advertised := expand.HasTool(wire, body) || adjudicate.HasTool(wire, body)
+	advertised := expand.HasTool(wire, body) || adjudicate.HasTool(wire, body) || hasRestoreTool(wire, body)
 	// SSE accounting is PER CLIENT REQUEST, not per upstream round: one client request
 	// that drives several expand rounds waited for all of them, so timing a single
 	// round would report a healthy TTFB for a client that waited three round-trips.
@@ -1820,7 +1826,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// withheld and round 1's message_stop may be the only terminator this client
 			// will ever get (see the terminator check below).
 			prevWithheld = withheld
-			respBody, withheld, found = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName)
+			respBody, withheld, found = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName, apply.RestoreToolName)
 			resp.Body.Close()
 			switch {
 			case found && sp.blocks == 0:
@@ -1934,7 +1940,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			msg = agg
 		}
 
-		calls, otherTools := expand.ResponseCalls(wire, msg, adjudicate.ToolName)
+		calls, otherTools := expand.ResponseCalls(wire, msg, adjudicate.ToolName, apply.RestoreToolName)
 		// Calls the AGENT made to the adjudication tool. Answered HERE, in band, whenever this turn
 		// called PROXY tools only: by the time the request-path repair runs, the client has already
 		// received a tool_use for a tool it does not implement, already answered "not found", and
@@ -1956,7 +1962,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// or maxExpandRounds is spent). An earlier version of this comment said the backstop was only
 		// for "a path this loop does not see", which was false for the first of those.
 		strays := adjudicate.ResponseCallIDs(wire, msg)
-		if (len(calls) == 0 && len(strays) == 0) || otherTools {
+		var restores []apply.RestoreCall
+		if wire == "anthropic" {
+			restores = apply.RestoreCalls(msg)
+		}
+		if (len(calls) == 0 && len(strays) == 0 && len(restores) == 0) || otherTools {
 			bail() // normal answer (or a CLIENT tool) — hand it over unchanged
 			return
 		}
@@ -2003,7 +2013,22 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// back — `unresolved > 0` is the tell.
 		lg.Debug("cg.expand", "round", round, "calls", len(calls),
 			"resolved", got, "unresolved", len(calls)-got)
-		next, ok := expand.Continuation(wire, body, msg, resolved)
+		// Toolfilter auto mode: the model asked for hidden tools back. Answer in band and re-declare
+		// them on THIS continuation, the only request that needs them; see apply/toolauto.go for why
+		// that is the cheapest moment.
+		restoreNames := []string{}
+		for _, rc := range restores {
+			restoreNames = append(restoreNames, rc.Names...)
+		}
+		toolsBody, restoreAnswer := body, ""
+		if len(restores) > 0 {
+			toolsBody, restoreAnswer = apply.RestoreTools(tn.Store, session, body, restoreNames)
+			for _, rc := range restores {
+				resolved[rc.CallID] = restoreAnswer
+			}
+			lg.Info("cg.toolfilter_restore", "names", restoreNames, "answer", restoreAnswer)
+		}
+		next, ok := expand.Continuation(wire, toolsBody, msg, resolved)
 		if !ok {
 			bail() // malformed shapes — fail open, hand the response over unchanged
 			return
@@ -2484,4 +2509,17 @@ func copyHeaders(dst, src http.Header) {
 		dst[k] = append([]string(nil), vs...)
 	}
 	dst.Del("Cookie") // a browser session is not an upstream credential
+}
+
+// hasRestoreTool reports whether the outgoing Anthropic body advertises toolfilter's restore stub.
+func hasRestoreTool(wire string, body []byte) bool {
+	if wire != "anthropic" {
+		return false
+	}
+	for _, t := range gjson.GetBytes(body, "tools").Array() {
+		if t.Get("name").String() == apply.RestoreToolName {
+			return true
+		}
+	}
+	return false
 }
