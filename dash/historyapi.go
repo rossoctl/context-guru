@@ -33,6 +33,12 @@ type HistoryUse struct {
 	LastTS  int64 `json:"last_ts"`
 }
 
+// HistoryOwner is one plugin or marketplace and its unused skills.
+type HistoryOwner struct {
+	Owner  string   `json:"owner"`
+	Skills []string `json:"skills"`
+}
+
 // HistoryProject is the traffic recorded against one project folder.
 type HistoryProject struct {
 	Project  string `json:"project"`
@@ -44,6 +50,12 @@ type HistoryProject struct {
 type HistoryDoc struct {
 	// Used, most-called first.
 	Used []HistoryUse `json:"used"`
+	// NeverUsedOwners groups NeverUsed by the owner that can remove them.
+	//
+	// OWNER IS THE UNIT OF ACTION. A plugin's skills come and go together, so thirty-one unused
+	// skills are not thirty-one decisions -- measured on a real machine, they were three. The
+	// flat list stays for callers that want it; this is what a reader acts on.
+	NeverUsedOwners []HistoryOwner `json:"never_used_owners"`
 	// NeverUsed is installed on this machine and absent from every invocation in the window.
 	//
 	// THE FINDING THIS SURFACE EXISTS FOR. The inventory is on disk and the invocations are in
@@ -108,6 +120,15 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 	// This tool's own capabilities, gathered from the used list and the installed inventory
 	// alike. A set rather than a counter because the two overlap -- see SelfExcluded.
 	selfOwned := map[string]bool{}
+	// THE INVENTORY, READ FIRST, because the used list is filtered against it.
+	//
+	// A SKILL THIS MACHINE DID NOT INSTALL IS NOT IN THIS PAGE'S POPULATION. Claude Code ships
+	// bundled skills inside its own binary -- `artifact-design` and `dataviz` were measured being
+	// invoked and are present nowhere on disk. The user did not install them and cannot remove
+	// them, and counting them made the used list disagree with the headline: "31 of 35 never
+	// used" beside six skills in use, when 35 - 31 is 4. Those are the two numbers a reader
+	// compares, so they have to be over one population.
+	skillOwners := installedSkillOwners(home)
 
 	// The span and the measured/imported split, from the requests themselves.
 	if err := d.sql.QueryRow(`SELECT
@@ -179,6 +200,14 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 			selfOwned[u.Name] = true
 			continue
 		}
+		// A used SKILL has to be one this machine installed; see skillOwners above. Tools are
+		// not filtered, because they are reported in their own section under their own count and
+		// are never summed with skills.
+		if u.Skill {
+			if _, installed := skillOwners[u.Name]; !installed {
+				continue
+			}
+		}
 		called[u.Name] = true
 		doc.Used = append(doc.Used, u)
 	}
@@ -203,7 +232,7 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 		return nil, err
 	}
 	installed := map[string]bool{}
-	for name := range installedSkills(home) {
+	for name := range skillOwners {
 		// THIS TOOL'S OWN SKILLS LEAVE THE INVENTORY ENTIRELY, not just the used list.
 		//
 		// Reported as "never used still 40", and the figure was wrong rather than merely
@@ -232,6 +261,31 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 		doc.NeverUsed = append(doc.NeverUsed, name)
 	}
 	sort.Strings(doc.NeverUsed)
+
+	// Grouped by owner, which is what a reader can act on.
+	byOwner := map[string][]string{}
+	for _, n := range doc.NeverUsed {
+		o := skillOwners[n]
+		if o == "" {
+			// Installed by something this walk does not recognise. Named as unknown rather than
+			// bundled with a real owner, which would attribute a skill to a plugin that never
+			// shipped it.
+			o = "(unknown)"
+		}
+		byOwner[o] = append(byOwner[o], n)
+	}
+	doc.NeverUsedOwners = []HistoryOwner{}
+	for o, skills := range byOwner {
+		sort.Strings(skills)
+		doc.NeverUsedOwners = append(doc.NeverUsedOwners, HistoryOwner{Owner: o, Skills: skills})
+	}
+	// Biggest first: the owner with the most unused skills is the largest single decision.
+	sort.Slice(doc.NeverUsedOwners, func(i, j int) bool {
+		if len(doc.NeverUsedOwners[i].Skills) != len(doc.NeverUsedOwners[j].Skills) {
+			return len(doc.NeverUsedOwners[i].Skills) > len(doc.NeverUsedOwners[j].Skills)
+		}
+		return doc.NeverUsedOwners[i].Owner < doc.NeverUsedOwners[j].Owner
+	})
 
 	// Settled once both sources have been seen.
 	if len(selfOwned) > 0 {

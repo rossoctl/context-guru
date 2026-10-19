@@ -211,6 +211,11 @@ func containsFold(hay, needle string) bool {
 // `context-guru:status`, all four of them this tool measuring itself.
 func TestTheHistoryKeepsContextGuruOutOfItsOwnReport(t *testing.T) {
 	db := openTestDB(t)
+	// The third-party skill has to be INSTALLED for this test to say anything: the used list is
+	// filtered to the inventory, because a skill this machine never installed is not in this
+	// page's population. See TestTheUsedSkillListIsLimitedToInstalledSkills.
+	home := t.TempDir()
+	mkSkill(t, home, "superpowers", "brainstorming")
 	if err := db.insertBatch([]*Event{
 		{TS: daysAgo(30), SessionID: "s1", Model: "m", Source: SourceImported, CacheWrite: 100},
 	}); err != nil {
@@ -225,7 +230,7 @@ func TestTheHistoryKeepsContextGuruOutOfItsOwnReport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := db.HistoryDocFor(Filter{}, t.TempDir())
+	doc, err := db.HistoryDocFor(Filter{}, home)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,5 +597,115 @@ func TestTheWasteListExcludesThisToolsOwnSkills(t *testing.T) {
 		t.Errorf("SelfExcluded.Items = %d; want 2 -- excluded from the figures and still "+
 			"disclosed, since they are carried on every request like any other skill",
 			doc.SelfExcluded.Items)
+	}
+}
+
+// EVERY UNUSED SKILL HAS TO NAME ITS OWNER.
+//
+// THE DEFECT: nineteen of the thirty-one skills in the waste list grouped under "(standalone)",
+// which tells the reader nothing and cannot be acted on. They are marketplace skills, installed
+// from `anthropic-agent-skills`, and that name is on disk -- the inventory walk read the
+// directory and threw the owner away.
+//
+// Owner matters because it is the unit of removal: thirty-one rows are not thirty-one decisions,
+// they are three.
+func TestTheInventoryNamesTheOwnerOfEverySkill(t *testing.T) {
+	home := t.TempDir()
+	// A plugin skill, keyed <plugin>:<name>.
+	mkSkill(t, home, "superpowers", "brainstorming")
+	// And a marketplace skill, which has no prefix in its name at all.
+	mkMarketplaceSkill(t, home, "anthropic-agent-skills", "docx")
+
+	owners := installedSkillOwners(home)
+	if got := owners["superpowers:brainstorming"]; got != "superpowers" {
+		t.Errorf("owner of a plugin skill = %q; want superpowers", got)
+	}
+	if got := owners["docx"]; got != "anthropic-agent-skills" {
+		t.Errorf("owner of a marketplace skill = %q; want anthropic-agent-skills. The directory "+
+			"it was read from names it, and grouping it as (standalone) gives the reader nothing "+
+			"to act on -- owner is the unit of removal", got)
+	}
+}
+
+// mkMarketplaceSkill creates a skill as the marketplace layout stores it: no plugin directory,
+// so the name carries no prefix.
+func mkMarketplaceSkill(t *testing.T, home, market, name string) {
+	t.Helper()
+	dir := filepath.Join(home, ".claude", "plugins", "marketplaces", market, "skills", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"),
+		[]byte("---\nname: "+name+"\ndescription: x\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// THE "YOU DO USE" LIST IS THE SAME POPULATION AS THE WASTE LIST.
+//
+// THE DEFECT, and the last survivor of the reported one: the headline said "31 of your 35 never
+// used" while the list below it named 6 skills in use. 35 - 31 is 4. The extra two were
+// `artifact-design` and `dataviz` -- Claude Code's own BUNDLED skills, shipped inside the binary
+// and present nowhere on disk. The user did not install them and cannot remove them, so counting
+// them here put two populations in two numbers on one screen, which is exactly the fault the
+// whole page was rewritten to remove.
+//
+// The control list has to be a subset of the inventory, or it cannot be used to check the
+// headline against -- which is the only reason it is on the page.
+func TestTheUsedSkillListIsLimitedToInstalledSkills(t *testing.T) {
+	db := openTestDB(t)
+	home := t.TempDir()
+	mkSkill(t, home, "superpowers", "brainstorming")
+	mkSkill(t, home, "superpowers", "never-touched")
+	if err := db.insertBatch([]*Event{
+		{TS: daysAgo(10), SessionID: "s1", Model: "m", Source: SourceImported, CacheWrite: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.insertImportedUses([]importedUse{
+		{session: "s1", name: "superpowers:brainstorming", ts: daysAgo(10), isSkill: true,
+			project: "/Users/v/a"},
+		// A bundled skill: invoked, and on disk nowhere.
+		{session: "s1", name: "dataviz", ts: daysAgo(10), isSkill: true, project: "/Users/v/a"},
+		// A plain tool, which belongs in the tools section and not among skills.
+		{session: "s1", name: "Bash", ts: daysAgo(10), project: "/Users/v/a"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := db.HistoryDocFor(Filter{}, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var usedSkills []string
+	for _, u := range doc.Used {
+		if u.Skill {
+			usedSkills = append(usedSkills, u.Name)
+		}
+	}
+	if len(usedSkills) != 1 || usedSkills[0] != "superpowers:brainstorming" {
+		t.Errorf("used skills = %v; want only the INSTALLED one. dataviz is one of Claude "+
+			"Code's own bundled skills, present nowhere on disk -- counting it makes the list "+
+			"disagree with the headline, since installed minus never-used cannot account for it",
+			usedSkills)
+	}
+	// THE ARITHMETIC THE READER CHECKS. installed - never-used must equal the list's length, or
+	// the two numbers on screen describe different populations.
+	if doc.InstalledSkills-len(doc.NeverUsed) != len(usedSkills) {
+		t.Errorf("installed %d - never-used %d = %d, but the used list has %d entries. Those are "+
+			"the two numbers a reader compares, and they have to be over one population",
+			doc.InstalledSkills, len(doc.NeverUsed),
+			doc.InstalledSkills-len(doc.NeverUsed), len(usedSkills))
+	}
+	// The tool is still reported, just not as a skill.
+	var sawTool bool
+	for _, u := range doc.Used {
+		if u.Name == "Bash" && !u.Skill {
+			sawTool = true
+		}
+	}
+	if !sawTool {
+		t.Error("the tool invocation was dropped entirely; tools belong in their own section, " +
+			"not nowhere")
 	}
 }
