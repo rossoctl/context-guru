@@ -258,3 +258,54 @@ func TestANonStreamingRequestIsNeverResentForSilence(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// The pool keeps a warm connection for every stream of a burst. With DefaultTransport's
+// MaxIdleConnsPerHost of 2, a burst of 8 left only 2 connections and the next burst paid six new
+// TCP+TLS handshakes; production showed 172 of 388 upstream connections closed that way.
+func TestABurstOfStreamsKeepsItsConnectionsWarm(t *testing.T) {
+	var conns atomic.Int64
+	release := make(chan struct{})
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release // hold every request open so the burst really is concurrent
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "event: message_stop\ndata: {}\n\n")
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+	c := &http.Client{Transport: upstreamTransport(time.Minute)}
+	burst := func() {
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				resp, err := c.Get(srv.URL)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}()
+		}
+		for conns.Load() < 8 && t.Context().Err() == nil {
+			time.Sleep(5 * time.Millisecond)
+		}
+		close(release)
+		wg.Wait()
+	}
+	burst()
+	if got := conns.Load(); got != 8 {
+		t.Fatalf("first burst opened %d connections, want 8", got)
+	}
+	release = make(chan struct{})
+	burst()
+	if got := conns.Load(); got != 8 {
+		t.Errorf("second burst opened %d new connections; the pool closed warm ones after the first burst", got-8)
+	}
+}

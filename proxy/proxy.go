@@ -331,8 +331,21 @@ func upstreamTransport(headerTimeout time.Duration) http.RoundTripper {
 	}
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.ResponseHeaderTimeout = headerTimeout
+	// Keep a warm connection for every request that was in flight, not two. DefaultTransport's
+	// MaxIdleConnsPerHost is 2, so when a burst of N streams to one gateway finishes, N-2 healthy
+	// connections are closed on the spot and the next burst pays N-2 new TCP+TLS handshakes.
+	// Measured on contextguru2 (2026-10-18): 172 of 388 upstream connections were closed less than
+	// a second after their last response for exactly this reason, with up to 16 open at once.
+	// IdleConnTimeout stays at DefaultTransport's 90 s: shorter would only add handshakes, and the
+	// upstream that motivated upstreamsilence.go hangs fresh connections as often as reused ones.
+	t.MaxIdleConnsPerHost = upstreamIdleConnsPerHost
 	return t
 }
+
+// upstreamIdleConnsPerHost is the warm-connection pool per upstream host. Above the 16
+// simultaneous streams measured in production, and still bounded so an idle proxy holds a small,
+// fixed number of sockets.
+const upstreamIdleConnsPerHost = 32
 
 // defaultUpstreamHeaderTimeout is how long an upstream may take to say ANYTHING before we
 // treat it as gone. Generous on purpose: a non-streaming request generates its whole answer
