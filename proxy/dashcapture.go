@@ -504,16 +504,12 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Only a known expiry can establish ttl_expiry. OpenAI's 30m is a
 	// minimum guarantee, so a later miss cannot be attributed to expiry alone.
 	//
-	// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
-	// measured from the last real request, so without this a 297 s gap with a ping at 289 s
-	// reads as an expiry on a turn that came 8 s after the refresh.
 	//
 	// The cause comes from a measured comparison with this thread's previous request, not from
 	// CacheWrite > 0 (issue #600). A miss with nothing measured reads unknown.
 	if c.inv != nil && c.inv.System != nil {
 		e.SystemHash = c.inv.System.Hash
 	}
-	e.DeclDigest = ""
 	if c.inv != nil {
 		e.DeclDigest = c.inv.Digest
 	}
@@ -523,6 +519,10 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// not refresh it. SinceLastMs below keeps the per-thread gap.
 	cause, modelGap, known, lastWasSame := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
 		dash.FactsOf(e), e.Status >= 200 && e.Status < 300)
+	//
+	// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
+	// measured from the last real request, so without this a 297 s gap with a ping at 289 s
+	// reads as an expiry on a turn that came 8 s after the refresh.
 	age := sinceMs
 	if known {
 		age = modelGap
@@ -601,9 +601,6 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// are whatever the caller wrote, up to and including something they pasted — so it rides
 	// the same captureContent decision as the transcript, and the writer stores NULL for it
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
-	if c.inv != nil {
-		e.DeclDigest = c.inv.Digest
-	}
 	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent)
 	c.rec.Record(e)
 }
