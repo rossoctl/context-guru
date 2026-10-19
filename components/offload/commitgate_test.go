@@ -176,6 +176,13 @@ func gateCases() []gateCase {
 			}
 			return c.(components.Offload), toolMsgs(wideOutput("l1"), wideOutput("l2")), ctxFor(st)
 		}},
+		{"searchcap", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
+			c, err := newSearchcap([]byte("per_file: 2\nmin_size: 10\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return c.(components.Offload), toolMsgs(hits("pkg/a.go", 30), hits("pkg/b.go", 30)), ctxFor(st)
+		}},
 		{"collapse", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
 			c, err := newCollapse([]byte("max_tokens: 20\nhead_lines: 2\ntail_lines: 2\n"))
 			if err != nil {
