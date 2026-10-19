@@ -463,7 +463,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// are whatever the caller wrote, up to and including something they pasted — so it rides
 	// the same captureContent decision as the transcript, and the writer stores NULL for it
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
-	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent)
+	// e.Project rides along: invocations are recorded per folder, because one session works in
+	// several and a per-session folder cannot scope a per-project report.
+	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent, e.Project)
 	c.rec.Record(e)
 }
 

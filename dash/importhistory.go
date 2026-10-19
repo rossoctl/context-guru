@@ -153,6 +153,10 @@ func (d *DB) ImportHistory(home string, opt ImportOptions) (*ImportResult, error
 					uses = append(uses, importedUse{
 						session: tn.SessionID, name: name, ts: tn.TS,
 						isSkill: tn.Skills[name],
+						// The turn's own folder, which the transcript records per turn. Read and
+						// then discarded by an earlier version of this importer, which is why the
+						// dashboard could not scope usage to a project at all.
+						project: tn.Project,
 					})
 				}
 			}
@@ -192,6 +196,11 @@ type importedUse struct {
 	// Not derived from the name: a marketplace skill is a bare word like `artifact-design` and
 	// looks exactly like a tool.
 	isSkill bool
+	// project is the folder this invocation happened in. Carried per-invocation rather than
+	// per-session because ONE SESSION WORKS IN SEVERAL FOLDERS — measured, one spanned 14 — and
+	// a per-session folder is exactly the approximation that made every project report the same
+	// usage figures.
+	project string
 }
 
 // insertImportedUses records recovered invocations in tool_uses.
@@ -211,7 +220,9 @@ func (d *DB) insertImportedUses(uses []importedUse) error {
 	}
 	// Collapsed per (session, capability) first, because tool_uses holds one accumulated row per
 	// pair and a session invokes the same capability many times.
-	type key struct{ session, name string }
+	// KEYED BY FOLDER TOO, matching the table's primary key: the same capability invoked in two
+	// folders in one session is two facts, and collapsing them is the defect this fixes.
+	type key struct{ session, project, name string }
 	type acc struct {
 		calls       int
 		first, last int64
@@ -222,7 +233,7 @@ func (d *DB) insertImportedUses(uses []importedUse) error {
 	}
 	agg := map[key]*acc{}
 	for _, u := range uses {
-		k := key{u.session, u.name}
+		k := key{u.session, u.project, u.name}
 		a := agg[k]
 		if a == nil {
 			a = &acc{}
@@ -246,9 +257,9 @@ func (d *DB) insertImportedUses(uses []importedUse) error {
 	}
 	defer tx.Rollback()
 	stmt, err := tx.Prepare(`INSERT INTO tool_uses(
-		tenant_id, session_id, name, server, skill, calls, first_ts, last_ts
-	) VALUES ('',?,?,'',?,?,?,?)
-	ON CONFLICT(tenant_id, session_id, name, skill) DO UPDATE SET
+		tenant_id, session_id, name, server, skill, calls, first_ts, last_ts, project
+	) VALUES ('',?,?,'',?,?,?,?,?)
+	ON CONFLICT(tenant_id, session_id, project, name, skill) DO UPDATE SET
 		calls = excluded.calls,
 		first_ts = MIN(first_ts, excluded.first_ts),
 		last_ts = MAX(last_ts, excluded.last_ts)`)
@@ -264,7 +275,7 @@ func (d *DB) insertImportedUses(uses []importedUse) error {
 			toolName, skillName = "Skill", k.name
 		}
 		if _, err := stmt.Exec(k.session, toolName, skillName,
-			a.calls, a.first, a.last); err != nil {
+			a.calls, a.first, a.last, k.project); err != nil {
 			return err
 		}
 	}

@@ -516,7 +516,12 @@ func skillArg(toolName string, input gjson.Result) string {
 type invMsg struct {
 	tenant, session string
 	ts              int64
-	inv             *Inventory
+	// project is the folder this request came from. Carried per MESSAGE, not per session: one
+	// Claude Code session works in several folders — measured on a live store, one spanned 14 —
+	// and a per-session folder is the approximation that made every project report identical
+	// usage figures.
+	project string
+	inv     *Inventory
 	// text is whether this request's PROMPT TEXT may be stored: the operator's
 	// --dashboard-content AND this tenant's own opt-in, decided by the caller (see
 	// proxy.captureContentFor) and carried per message rather than read here, because a
@@ -590,7 +595,7 @@ var invWriters sync.Map // *Recorder -> *invWriter
 // and keeps every measurement: the token weights, the names and the usage counts are
 // identifiers and operational metrics, and an account that declined transcript capture must
 // not lose the whole inventory feature as the price of that choice.
-func (r *Recorder) RecordInventory(tenant, session string, ts int64, inv *Inventory, text bool) {
+func (r *Recorder) RecordInventory(tenant, session string, ts int64, inv *Inventory, text bool, project string) {
 	if r == nil || inv == nil || session == "" {
 		return
 	}
@@ -604,7 +609,8 @@ func (r *Recorder) RecordInventory(tenant, session string, ts int64, inv *Invent
 		}
 	}
 	select {
-	case w.(*invWriter).ch <- invMsg{tenant: tenant, session: session, ts: ts, inv: inv, text: text}:
+	case w.(*invWriter).ch <- invMsg{tenant: tenant, session: session, ts: ts,
+		project: project, inv: inv, text: text}:
 	default:
 		r.dropped.Add(1)
 	}
@@ -703,9 +709,9 @@ func (w *invWriter) write(batch []invMsg) error {
 		return sql.NullString{String: h, Valid: true}, nil
 	}
 	useStmt, err := tx.Prepare(`INSERT INTO tool_uses(
-		tenant_id, session_id, name, server, skill, calls, first_ts, last_ts
-	) VALUES (?,?,?,?,?,?,?,?)
-	ON CONFLICT(tenant_id, session_id, name, skill) DO UPDATE SET
+		tenant_id, session_id, name, server, skill, calls, first_ts, last_ts, project
+	) VALUES (?,?,?,?,?,?,?,?,?)
+	ON CONFLICT(tenant_id, session_id, project, name, skill) DO UPDATE SET
 		calls = calls + excluded.calls, last_ts = excluded.last_ts`)
 	if err != nil {
 		return err
@@ -756,7 +762,7 @@ func (w *invWriter) write(batch []invMsg) error {
 		st.lastFP = m.inv.UseFingerprint
 		for _, u := range m.inv.Used {
 			if _, err := useStmt.Exec(m.tenant, m.session, u.Name, u.Server, u.Skill,
-				u.Calls, m.ts, m.ts); err != nil {
+				u.Calls, m.ts, m.ts, m.project); err != nil {
 				return err
 			}
 		}

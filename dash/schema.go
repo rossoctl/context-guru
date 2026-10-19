@@ -532,12 +532,30 @@ CREATE TABLE IF NOT EXISTS tool_uses (
   calls      INTEGER NOT NULL DEFAULT 0,
   first_ts   INTEGER NOT NULL DEFAULT 0,
   last_ts    INTEGER NOT NULL DEFAULT 0,
+  -- project is the folder the invocation happened in. '' means UNKNOWN -- a row written before
+  -- this column existed -- which is a different claim from "outside any project" and is reported
+  -- as unknown rather than as a folder.
+  project    TEXT    NOT NULL DEFAULT '',
   -- tenant_id LEADS the key, as on tool_declarations: without it the upsert below
   -- (calls = calls + excluded.calls) ADDS one account's call counts to another account's
   -- row whenever a session id is shared, which is a cross-account write.
-  PRIMARY KEY (tenant_id, session_id, name, skill)
+  --
+  -- project IS IN THE KEY, and that is not cosmetic. One Claude Code session works in several
+  -- folders -- measured on a live store, 8 sessions spanned more than one and one spanned 14 --
+  -- so without it the same capability invoked in two folders collapses into one row whose
+  -- project is whichever folder was written last. That is exactly the defect this column exists
+  -- to fix: every project reported the same usage because the per-project query had to select
+  -- whole sessions instead.
+  PRIMARY KEY (tenant_id, session_id, project, name, skill)
 );
 CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts DESC);
+-- The idx_tooluses_project index is deliberately NOT here. additiveDDL runs on every open,
+-- BEFORE migrateToolUsesProject, and CREATE TABLE IF NOT EXISTS is a no-op on an existing
+-- database -- so an index over the project column here runs against the OLD table and fails
+-- with "no such column: project". That fails the open, and the proxy then falls back to an
+-- in-memory database: the dashboard comes up looking healthy with every row of history gone.
+-- Observed doing exactly that. The index is created by the migration, which is the only place
+-- that knows the column exists.
 
 -- One row per DISTINCT piece of stored prompt text, keyed by its content hash.
 --
@@ -687,6 +705,95 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
 }
 
+// migrateToolUsesProject adds tool_uses.project and puts it in the primary key.
+//
+// A TABLE REBUILD RATHER THAN AN ALTER, because SQLite cannot add a column to a primary key and
+// the column is useless outside it: one session working in two folders would collapse to a single
+// row recording whichever folder was written last. That is the reported defect -- every project
+// showed the same usage figures -- so a migration that added the column alone would look applied
+// and change nothing.
+//
+// Not in additiveColumns for the same reason: that path is for a column a plain ALTER can add.
+// A version bump is also wrong here, since it renames the database aside and discards every row,
+// including the thousands of invocations imported from the user's own history -- which is the
+// data this whole surface exists to show.
+//
+// Idempotent: migrations run on every open, so it probes for the column and returns if present.
+func migrateToolUsesProject(db *sql.DB) error {
+	var has bool
+	rows, err := db.Query(`PRAGMA table_info(tool_uses)`)
+	if err != nil {
+		// No such table yet: `ddl` will create it with the column already in place.
+		return nil
+	}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "project" {
+			has = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+
+	// One transaction: an interrupted rebuild must not leave the table missing or half-copied.
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// EXISTING ROWS COPY WITH project = '' -- unknown. Their folder is not recoverable: the
+	// request body they came from is long gone. Guessing one would attribute a user's work to a
+	// project they may never have touched.
+	for _, stmt := range []string{
+		`CREATE TABLE tool_uses_new (
+			tenant_id  TEXT    NOT NULL DEFAULT '',
+			session_id TEXT    NOT NULL DEFAULT '',
+			name       TEXT    NOT NULL DEFAULT '',
+			server     TEXT    NOT NULL DEFAULT '',
+			skill      TEXT    NOT NULL DEFAULT '',
+			calls      INTEGER NOT NULL DEFAULT 0,
+			first_ts   INTEGER NOT NULL DEFAULT 0,
+			last_ts    INTEGER NOT NULL DEFAULT 0,
+			project    TEXT    NOT NULL DEFAULT '',
+			PRIMARY KEY (tenant_id, session_id, project, name, skill)
+		)`,
+		`INSERT INTO tool_uses_new(
+			tenant_id, session_id, name, server, skill, calls, first_ts, last_ts, project)
+		 SELECT tenant_id, session_id, name, server, skill, calls, first_ts, last_ts, ''
+		 FROM tool_uses`,
+		// THE TRIGGER HAS TO GO FIRST. trg_tool_inventory_gc names tool_uses in its body, and
+		// SQLite refuses to drop a table a trigger references. Missing this failed the open on a
+		// real database -- and the proxy answers that by falling back to in-memory, so the
+		// dashboard came up healthy-looking with every row of history gone.
+		`DROP TRIGGER IF EXISTS trg_tool_inventory_gc`,
+		`DROP TABLE tool_uses`,
+		`ALTER TABLE tool_uses_new RENAME TO tool_uses`,
+		`CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_tooluses_project ON tool_uses(tenant_id, project)`,
+		// THE GC TRIGGER NEEDS NO RESTORE HERE, verified rather than assumed: it is defined in
+		// additiveDDL2, which migrate() executes on BOTH paths (already-at-version and fresh)
+		// after this migration runs, so it is recreated on the same open that drops it. Checked by
+		// removing it from this list and confirming the trigger was still present afterwards.
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // migrate creates the schema and validates its version. A version mismatch is
 // reported to the caller, which renames the old file aside and retries — see Open.
 func migrate(db *sql.DB) error {
@@ -696,6 +803,12 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := addColumns(db); err != nil {
+		return err
+	}
+	// The tool_uses rebuild. After addColumns and on every open, like the additive phases: an
+	// existing database at the current version returns early below, so a migration placed after
+	// that check would never run on exactly the databases that need it.
+	if err := migrateToolUsesProject(db); err != nil {
 		return err
 	}
 	var have string

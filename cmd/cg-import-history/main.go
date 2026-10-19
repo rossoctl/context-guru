@@ -35,6 +35,14 @@ func main() {
 	home := flag.String("home", "", "override the home directory holding .claude/projects")
 	apply := flag.Bool("apply", false, "write the changes; omit for a dry run")
 	sinceDays := flag.Int("since-days", 0, "ignore history older than this many days (0 = all)")
+	// -backfill-projects repairs the FOLDER on invocations imported before tool_uses.project
+	// existed. Its own flag rather than part of the import, because the import dedupes against
+	// the request rows it already wrote -- correctly, so a second run cannot double-count spend
+	// -- and that dedupe skips exactly the turns whose invocations need a folder. Measured on a
+	// live store after the upgrade: every invocation row carried an unknown folder and a
+	// re-import skipped all of them, leaving every per-project list empty.
+	backfill := flag.Bool("backfill-projects", false,
+		"repair the project folder on already-imported invocations; writes no request rows")
 	flag.Parse()
 
 	if *db == "" {
@@ -48,6 +56,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer d.Close()
+
+	if *backfill {
+		n, err := d.BackfillUseProjects(*home)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "backfill: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("BACKFILL — %d invocations re-attributed to the folder they happened in\n", n)
+		fmt.Println("no request rows were written, so nothing about spend changed")
+		return
+	}
 
 	opt := dash.ImportOptions{Apply: *apply}
 	if *sinceDays > 0 {
