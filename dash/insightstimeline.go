@@ -66,7 +66,11 @@ func bucketOf(ms int64) TimelineBucket {
 // default window would hide the phase before it — which is the exact question the reader came with.
 func (d *DB) ToolTimeline(f Filter, days int) (*ToolTimeline, error) {
 	where, args := f.where()
-	tl := &ToolTimeline{Items: map[string]*TimelineItem{}}
+	// Buckets starts as an EMPTY slice, not nil: Go marshals nil as null, and the chart reads
+	// .buckets.length. A scope with no measured traffic -- a project whose history was all imported
+	// from transcripts -- reached it with null, threw, and the reader got a broken page instead of
+	// the reason it was empty.
+	tl := &ToolTimeline{Items: map[string]*TimelineItem{}, Buckets: []TimelineBucket{}}
 
 	// Requests per day, per session: the denominator for carriage. A declaration is carried by
 	// every request of the session that declared it, and the session is the only grain the
