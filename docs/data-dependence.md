@@ -18,8 +18,8 @@ says what each one does at three storage levels: off, metadata only, and everyth
   each time. These are `extract_llm`, `summarize`, `cache_aware_summarizer` and `agentdiet`.
 - **2 are special cases.** `skeleton` refuses to run without storage. `extract_llm_sweep` could
   repeat its removals from a flag, but its cheap question to the model needs last turn's text.
-- **The proxy keeps content after the user opts out**, in 7 places. The worst are 2 full request
-  bodies per thread, and the user's credential for keep-alive.
+- **Context Guru keeps content after the user opts out**, in 7 places. The worst are 2 full
+  request bodies per thread, and the last request body for keep-alive.
 - **With storage off today, use preset `conservative` and cache strategy `none` or `1-hour-head`.**
   Every other plugin preset pays for savings that last one turn, so it does not work.
 - **"Metadata only" does not exist yet.** Today the Store keeps everything or nothing.
@@ -34,16 +34,19 @@ says what each one does at three storage levels: off, metadata only, and everyth
   shortened copy, a sample, or the first characters of content are content.
 - **Kept**: held after the request ends, in memory or on disk. Text held only while one request
   runs is not kept.
-- **Store**: the proxy's in-memory key-value store for each conversation. It is never written to
+- **Store**: Context Guru's in-memory key-value store for each conversation. It is never written to
   disk. `store.enabled: false` replaces it with a Store that keeps nothing.
-- **Original**: the text of a tool output before a component shortened it. The proxy keeps it in
+- **Original**: the text of a tool output before a component shortened it. Context Guru keeps it in
   the Store so the model can get it back with the `expand` tool.
-- **Frozen decision**: the exact shortened text a component sent. The proxy keeps it in the Store
+- **Frozen decision**: the exact shortened text a component sent. Context Guru keeps it in the Store
   and sends the same text on every later turn.
 - **Breaks the cache**: the next turn sends different bytes for a message the provider already
   cached. The user then pays to write the cache again, from that message to the end.
 - **No way back**: the model cannot get removed text back through the `expand` tool. The agent
   still has its own copy.
+- **Host**: the program that runs Context Guru. That is the proxy binary, or another program
+  that uses Context Guru as a library. The host sends requests to the provider and holds
+  credentials.
 - **Kind** (in the tables): `none` (keeps nothing), `metadata`, or `content`. It is what the
   component keeps at the "Everything" level.
 - **Decided by**: the person, and the issue or PR, that decided the current behaviour. If no later
@@ -52,46 +55,47 @@ says what each one does at three storage levels: off, metadata only, and everyth
 
 ## The three storage levels
 
-| Level | What the proxy keeps | Exists today? |
+| Level | What Context Guru keeps | Exists today? |
 |---|---|---|
 | **Off** | Nothing in the Store. It keeps only the in-memory trackers that every request needs: how much of the conversation the provider cached, and when. These hold counts and timestamps. | **Partly.** `store.enabled: false` removes the Store. It does **not** remove the in-memory content in [Features outside the pipeline](#features-outside-the-pipeline). |
 | **Metadata only** | Hashes, counts, ids, token numbers, timestamps and flags, in the Store and in memory. No content. | **No.** The "Metadata only" columns say what the code would do with a Store that refuses content. [What "metadata only" would need](#what-metadata-only-would-need) lists the changes. |
 | **Everything** | Content and metadata. | Yes. This is the default. |
 
-## Why the proxy stores rewrites at all
+## Why Context Guru stores rewrites at all
 
 The client never sees the rewritten request, so it cannot keep it.
 
 1. The client (for example Claude Code) sends its **whole transcript** on every request.
-2. The proxy rewrites that copy and sends the result to the provider.
+2. Context Guru rewrites that copy and sends the result to the provider.
 3. The provider returns **only the new assistant message**. The API cannot hand an edited history
    back.
 4. The client **adds** that message to its own transcript. Its transcript still holds the
    original tool outputs.
-5. On the next turn the client sends the originals again. The proxy must make the same rewrite
+5. On the next turn the client sends the originals again. Context Guru must make the same rewrite
    again.
 
 The results:
 
-- **A rewrite that depends only on the message needs no storage.** The proxy runs it again every
+- **A rewrite that depends only on the message needs no storage.** Context Guru runs it again every
   turn and gets the same bytes. Only CPU time is repeated. These components work this way:
   `format`, `toon`, `searchfold`, `textclean`, `toolfilter`, `cachesplit`, `cmdfilter`, `linecap`,
   `dedup`, `smartcrush` and `extract`.
-- **Storage is necessary only when the proxy cannot rebuild the rewrite from the message:**
+- **Storage is necessary only when Context Guru cannot rebuild the rewrite from the message:**
   - **Model-written text** (`extract_llm`, `summarize`, `cache_aware_summarizer`, `agentdiet`). A
     model gives different words each time.
   - **Gated rewrites** (`mask`, `failed_run`, `collapse`, `readlifecycle`, `coref`). They act only
     on the part of the conversation that is not cached yet. On the next turn they must know that
     they already acted. A flag is enough.
-- **The originals for `expand`** are a copy of what the client already has. The proxy keeps them
+- **The originals for `expand`** are a copy of what the client already has. Context Guru keeps them
   only because it cannot ask the client for its copy.
 
-**Where the data sits matters.** With the local plugin install, the Store is in the proxy process
+**Where the data sits matters.** Context Guru runs inside a host: the proxy binary, or another
+program that uses it as a library. With the local plugin install, the Store is in the proxy process
 on the user's own machine. That machine already holds the full transcript. Storing content is
 mainly a question for the hosted service, where the Store is on our side.
 
 **A possible change, not checked:** a plugin inside the client could rewrite the local transcript
-itself. The client would then keep the shortened version, and the proxy would not need to store
+itself. The client would then keep the shortened version, and Context Guru would not need to store
 it. Nobody has checked if Claude Code's plugin or hook interface lets a plugin change earlier
 messages.
 
@@ -132,14 +136,17 @@ These are the presets in the Claude Code plugin picker.
 | Strategy | Off | Metadata only | Everything |
 |---|---|---|---|
 | `none` | ✅ Works | ✅ Works | ✅ Works |
-| `5-min-ping` | ❌ **Cannot work without storage.** A ping sends your last request again, with your credential, so the proxy must keep both. **Today it runs anyway and keeps both.** That breaks the opt-out (see [What this audit found](#what-this-audit-found)). | ❌ Cannot work, for the same reason | ✅ Works |
+| `5-min-ping` | ❌ **Cannot work without storage.** A ping sends your last request again, so Context Guru must keep it. **Today it runs anyway and keeps it.** That breaks the opt-out (see [What this audit found](#what-this-audit-found)). | ❌ Cannot work, for the same reason | ✅ Works |
 | `1-hour-head` | ✅ Works. It sends no request of its own. It changes only a label on the request the client is sending, so the provider keeps that cache for 1 hour. It keeps nothing. | ✅ Works | ✅ Works |
 
 **Why `5-min-ping` needs storage and `1-hour-head` does not:** a ping is a **new** request that
-the proxy sends by itself while the user is idle. To read the same cache, the ping must have the
-exact bytes of the last prompt, and it must be billed to the user, so the proxy keeps both.
-`1-hour-head` only changes the request that the client sends anyway. The client supplies the bytes
-and the credential, so the proxy keeps nothing.
+Context Guru sends by itself while the user is idle. To read the same cache, the ping must have the
+exact bytes of the last prompt, so Context Guru keeps them. `1-hour-head` only changes the request
+that the client sends anyway. The client supplies the bytes, so Context Guru keeps nothing.
+
+**The credential:** Context Guru itself does not keep it. It keeps only a handle, and the host that
+runs it (for example the proxy binary) sends the ping through its Dispatcher. The proxy binary's
+Dispatcher keeps the credential in memory, masked, until the hold ends.
 
 `medium` makes its summary in the idle time that `5-min-ping` keeps warm. Without `5-min-ping`,
 `medium` almost never makes a summary, at any level.
@@ -191,7 +198,7 @@ One row for each registered component. The test `components/all/datadep_test.go`
 | `extract_llm_sweep` | content | Store: its removals with a short description of each output (no text), the originals, and "still needed" answers | ❌ **Does not work.** It has no body stash, so it **pays full price** to send parts of up to 12 outputs to the model. Each removal lasts one turn, then **breaks the cache**. | ❌ **Does not work today**: the same as Off. **With a change:** 🟡 it can repeat its removals from a flag. The cheap question still needs the body stash. | ✅ Works: a cheap question, then free reuse | It asks the agent's model which old outputs are no longer needed. The cheap question needs the exact text from last turn; repeating a removal needs only a flag. | David Amid, #118 |
 | `summarize` | content | Store: the model-written summary and the replaced turns. Memory: a copy of the turns while the model call runs. | ❌ **Does not work.** **Does not start** by default, because it cannot tell how full the window is. Without a session (`/compact`) it works in one request. No way back. | ❌ **Does not work.** **Pays for a summary every turn above 90% full, and throws it away.** The next turn can wait up to 120 seconds for it. **Cannot work.** | ✅ Works | It replaces old turns with a model-written summary, and the words differ each time. It must keep the summary to send the same bytes next turn. | Osher Elhadad, commit 68e8b51; checkpoint in #430 |
 | `cache_aware_summarizer` | content | Store: the summary and the replaced turns. Memory: copies of turns, for summaries during idle time and after a cold turn. | ❌ **Does not work.** **Does not start** by default, because it cannot tell how full the window is. | ❌ **Does not work.** It keeps copies of turns in memory, which is content. On Anthropic it does nothing and costs nothing. On OpenAI it **pays and throws the summary away** every turn. **Cannot work.** | ✅ Works | Like `summarize`, it must keep the summary to send the same bytes later. It also keeps the conversation in memory, to summarize while the user is idle. | Itay Nakash, #256 |
-| `agentdiet` | content | Store: the frozen decision and the original step | ❌ **Does not work.** **Pays one model call per turn.** The step it shortened last turn comes back in full, which **breaks the cache**. | ❌ **Does not work**: the same as Off. **Cannot work.** | ✅ Works | A model rewrites one older agent step each turn, and the words differ each time. The history stays short only if the proxy keeps every rewrite. | Itay Nakash, #66 |
+| `agentdiet` | content | Store: the frozen decision and the original step | ❌ **Does not work.** **Pays one model call per turn.** The step it shortened last turn comes back in full, which **breaks the cache**. | ❌ **Does not work**: the same as Off. **Cannot work.** | ✅ Works | A model rewrites one older agent step each turn, and the words differ each time. The history stays short only if Context Guru keeps every rewrite. | Itay Nakash, #66 |
 
 ### Libraries that are not components
 
@@ -202,13 +209,13 @@ One row for each registered component. The test `components/all/datadep_test.go`
 
 | Feature | Kind | Off | Metadata only | Everything | Reason |
 |---|---|---|---|---|---|
-| `expand` and the originals | content | ❌ Not offered. Removals have no way back. | ❌ Not offered | ✅ Works | When the proxy replaces a large output with a short marker, it must keep the original. Otherwise it has nothing to give back. |
-| Frozen decisions and saved model results | content | ❌ Gone | ❌ Gone. The rule-based components can use a flag instead. | ✅ Works. Kept for about 2.8 hours. | After the proxy shortens a cached message, it must send the same text every later turn. Otherwise the user pays to write the cache again. |
-| Billed-token and cache-time records | metadata | ❌ Gone. `summarize` cannot tell how full the window is. A warm cache can look cold when one conversation comes under two ids. | 🟡 Works, metadata. This record also makes `summarize` start, and so start to waste calls. | 🟡 Works, metadata | To know how full the window is, the proxy needs the size the provider billed last turn. It also needs the time the cache was last used. |
-| **Keep-alive pings** | content and a credential | ❌ **Should be off. Today it is still on**, and keeps the last body and the credential. | ❌ Off | ✅ Works | To keep the prompt cache warm, the proxy sends the exact same prompt again with the user's credential. Without the text, it cannot ping. |
-| **Body stash** | content | ❌ **Should be off. Today it is still on**, with 2 full bodies per thread. | ❌ Off. `extract_llm_sweep` then pays full price, and `cache_aware_summarizer` stops. | ✅ Works | To ask the model a cheap question, the proxy adds the question to the exact text it sent last turn. The provider already cached that text. |
+| `expand` and the originals | content | ❌ Not offered. Removals have no way back. | ❌ Not offered | ✅ Works | When Context Guru replaces a large output with a short marker, it must keep the original. Otherwise it has nothing to give back. |
+| Frozen decisions and saved model results | content | ❌ Gone | ❌ Gone. The rule-based components can use a flag instead. | ✅ Works. Kept for about 2.8 hours. | After Context Guru shortens a cached message, it must send the same text every later turn. Otherwise the user pays to write the cache again. |
+| Billed-token and cache-time records | metadata | ❌ Gone. `summarize` cannot tell how full the window is. A warm cache can look cold when one conversation comes under two ids. | 🟡 Works, metadata. This record also makes `summarize` start, and so start to waste calls. | 🟡 Works, metadata | To know how full the window is, Context Guru needs the size the provider billed last turn. It also needs the time the cache was last used. |
+| **Keep-alive pings** | content. The host keeps the credential. | ❌ **Should be off. Today it is still on**, and keeps the last body. The proxy binary also keeps the credential. | ❌ Off | ✅ Works | To keep the prompt cache warm, the proxy sends the exact same prompt again with the user's credential. Without the text, it cannot ping. |
+| **Body stash** | content | ❌ **Should be off. Today it is still on**, with 2 full bodies per thread. | ❌ Off. `extract_llm_sweep` then pays full price, and `cache_aware_summarizer` stops. | ✅ Works | To ask the model a cheap question, Context Guru adds the question to the exact text it sent last turn. The provider already cached that text. |
 | Observe-mode store | content | ❌ **Should follow the level. Today it is still a real Store.** | It should follow the level | ✅ Works | Observe mode runs the pipeline later on a copy, to estimate savings. The copy should store only what the real run would store. |
-| Dashboard database | content and metadata | ❌ Off | 🟡 Works, metadata: numbers, fixed codes, ids, and tool, MCP-server and skill names. **No** before/after text, summaries, declaration text, error text or rejection text. | ✅ Works. It keeps text only when content capture is on. | The dashboard shows what the proxy removed and what your setup carries. Every number on it needs only counts and prices. |
+| Dashboard database | content and metadata | ❌ Off | 🟡 Works, metadata: numbers, fixed codes, ids, and tool, MCP-server and skill names. **No** before/after text, summaries, declaration text, error text or rejection text. | ✅ Works. It keeps text only when content capture is on. | The dashboard shows what Context Guru removed and what your setup carries. Every number on it needs only counts and prices. |
 | Dashboard memos | content | ❌ Off, with the dashboard | 🟡 Works, metadata: a hash and a token count. That is all they need. | ✅ Works. They keep declaration and system-prompt text. | They remember a tool list so they do not count its tokens again on every request. A hash and a count are enough. |
 | Archive | content and metadata | ❌ Off | 🟡 Works, metadata rows only | ✅ Works | It moves old conversations off the local disk. The database stays small, and you can still open old history. |
 | Insights | metadata | ❌ Off (it needs the dashboard) | 🟡 Works, metadata | 🟡 Works, metadata | A cost report needs only counts, tool names and prices, not the text. |
@@ -222,7 +229,7 @@ One row for each registered component. The test `components/all/datadep_test.go`
 ## What "metadata only" would need
 
 1. **A separate "may store content" check.** Every component must ask it before a model call, and
-   the proxy must ask it before it offers `expand`. Today one flag answers two questions: "can I
+   Context Guru must ask it before it offers `expand`. Today one flag answers two questions: "can I
    keep the original?" and "can I keep the result?". Either answer makes some components pay for
    a model call and then throw the result away.
 2. **An "already done" flag per message** for the rule-based components. All of them except
@@ -233,7 +240,7 @@ One row for each registered component. The test `components/all/datadep_test.go`
 4. **A way for `coref` to send its cuts again.** Until then, turn `coref` off at this level.
 5. **A way for `extract_llm_sweep` to repeat its removals** from the flag.
 6. **Turn off the model-written components** (`extract_llm`, `summarize`, `cache_aware_summarizer`,
-   `agentdiet`). The proxy cannot build their text again, so they either pay for nothing or break
+   `agentdiet`). Context Guru cannot build their text again, so they either pay for nothing or break
    the cache.
 7. **Turn off** keep-alive, the body stash and `expand`. The dashboard keeps only metadata columns,
    and its memos keep only hashes and counts.
@@ -247,8 +254,9 @@ behaviour. Each finding needs a decision from its owner.
 
 1. **The body stash** keeps 2 full request bodies per thread, on every successful request. No
    switch turns it off. It fills even when no component uses it.
-2. **Keep-alive** keeps the last request body and the user's credential. It does this with storage
-   off and with content capture off. The plugin turns keep-alive on by default.
+2. **Keep-alive** keeps the last request body, with storage off and with content capture off.
+   The proxy binary's Dispatcher also keeps the user's credential, masked, for the same time. The
+   plugin turns keep-alive on by default. See #595.
 3. **Nothing deletes `declaration_text`**: not retention, and not an account purge. Tool
    declarations and whole system prompts stay after the user turns consent off.
 4. **Turning consent off deletes nothing.** Old rows in `request_content`, `extraction_calls` and
@@ -272,7 +280,7 @@ behaviour. Each finding needs a decision from its owner.
   - `coref` also loses its spending limit.
 - **The summarizers do not work.**
   - `summarize` and `cache_aware_summarizer` do not start with their default settings. This is
-    safe only by accident. They start as soon as the proxy keeps the billed-token record, as at
+    safe only by accident. They start as soon as Context Guru keeps the billed-token record, as at
     "metadata only".
   - `summarizer1509` starts at a fixed size, pays for a summary every turn and throws it away.
 - **`skeleton` refuses to run.** This is the safe behaviour.
@@ -295,7 +303,7 @@ This PR fixes 3 code comments that said the wrong default:
    components can edit the cached part of the conversation.
 2. **Are tool, MCP-server and skill names metadata?** They are ids, but the user chooses them.
 3. **Are content hashes metadata?** They are short SHA-256 values with no secret salt. A person who
-   can read the Store can check if the proxy saw a guessed text. A secret salt stops that.
+   can read the Store can check if Context Guru saw a guessed text. A secret salt stops that.
 4. **Is a session id from the client metadata?** It can contain a user or account id.
 
 ## Keep this page right
@@ -314,17 +322,17 @@ This PR fixes 3 code comments that said the wrong default:
 
 | Switch | Default | Turns off | Does not turn off |
 |---|---|---|---|
-| `store.enabled` (YAML) | on | The Store: originals, frozen decisions, saved model results, billed-token and cache-time records. The proxy stops offering the `expand` tool. | The observe-mode store, the body stash, keep-alive bodies and credentials, component caches in memory, the dashboard |
+| `store.enabled` (YAML) | on | The Store: originals, frozen decisions, saved model results, billed-token and cache-time records. Context Guru stops offering the `expand` tool. | The observe-mode store, the body stash, keep-alive bodies and credentials, component caches in memory, the dashboard |
 | `--store` / `STORE` | follows YAML | Overrides the operator's `store.enabled` | In hosted mode, each account's own `store.enabled` |
 | `--dashboard` / `DASHBOARD` | off (the plugin turns it on) | The dashboard database and its in-memory memos. Keep-alive also stops keeping bodies. | The body stash, the Store |
 | `--dashboard-content` / `DASHBOARD_CONTENT` | off | New writes of `request_content`, extraction-call text and `declaration_text` | Tool, MCP-server and skill names; `extraction_calls.rejection`; `request_components.err`; rows already written; keep-alive; the body stash; the memos |
 | Account consent `capture_content` (hosted) | **on** for a new account | The same as `--dashboard-content`, for one account. Both must be on. | The same as the row above. Turning it off deletes nothing. |
 | `--dashboard-retention` and size limits | 7 days, 512 MiB | Old dashboard rows, with their content | `declaration_text`, `tenant_spend`, `archived_sessions` |
 | `--archive-remote` | off | Upload of old sessions to remote storage | — |
-| `cache.keepalive` (YAML), plugin strategy `none` | off in Go, `5-min-ping` in the plugin | Keep-alive bodies, credentials and pings | Manager strategies and per-session overrides can turn it on again |
+| `cache.keepalive` (YAML), plugin strategy `none` | off in Go, `5-min-ping` in the plugin | Keep-alive bodies, the held credential, and pings | Manager strategies and per-session overrides can turn it on again |
 | `CONTEXT_GURU_KEEPALIVE=off` | unset | All keep-alive, everywhere | — |
 | `INJECT_EXPAND` | `auto` | The `expand` tool offer | Storing the originals |
-| `CONTEXT_GURU_DUMP`, `CONTEXT_GURU_CAPTURE` | unset | (opt-in) Writes before/after text or whole request bodies to a file, with no redaction. The proxy refuses them in hosted mode. | — |
+| `CONTEXT_GURU_DUMP`, `CONTEXT_GURU_CAPTURE` | unset | (opt-in) Writes before/after text or whole request bodies to a file, with no redaction. Context Guru refuses them in hosted mode. | — |
 | `CG_LOG_LEVEL=debug` | `info` | (opt-in) Logs the first 160 characters of each tool output | — |
 
 The **body stash** keeps the last request body of each thread, for a cheap question to the model
