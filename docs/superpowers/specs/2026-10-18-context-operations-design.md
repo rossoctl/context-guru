@@ -1233,16 +1233,16 @@ Each step merges alone and leaves the totals correct.
 
 | Step | Repo | Change | Verification |
 |---|---|---|---|
-| 1 | context-guru | **Make the test-case list** (§11), with the current computation. No `ops` code yet. | The list is reviewed. Each `differs` case cites a spec section. Each `notCovered` case is in §12. |
+| 1 | context-guru | **Make the test-case list** (§11), with the current computation. No `ops` code yet. | The list is reviewed. Each `differs` entry cites a spec section. Each `notCovered` entry is in §12. |
 | 2 | context-guru | Create the `ops` module: types, `Price`, `Compare`, checks. No callers. | Every case in the list passes (§11.4). |
 | 3 | context-guru | The engine builds `[]ops.Operation` from `Trace` and the reports, and returns them in `apply.Result.Ops` with `apply.Result.Thread`. Marker and apply-only changes are built by `apply` (§4.2 rule 9). **This is new work for each change, not a read of existing fields.** The frozen state is keyed by content hash (`components/offload/state.go`), so `ChangeID` can be derived. But replays are counted only for each component today (`Report.Replays`), and `apply.Trace` records no ID or replay flag for each change. Each offloader must record, for each change, whether it replayed a frozen decision or made a new one. | Replay tests: the same `ChangeID` on each turn, `FirstApplied` once. |
 | 4 | context-guru | **The proxy's collector.** It reads `apply.Result.Ops`; keeps one fingerprint per `thread.Key` beside `dash.Recorder`; calls `ops.Compare`; sets `Billing` with `ops.BillingFrom`; implements `OpsEmitter` on `dashEmitter`; and converts each `KeepAliveReport` with `ops.FromKeepAlive`. Nothing reads its output yet. This is the largest proxy step, and it uses only engine types: none of it depends on Cortex. | The `Compare` cases pass through the proxy's collector. The `MaxCachedIdx`/B\* agreement counter is zero on captured sessions (§5.6). |
-| 5 | context-guru | The proxy computes dollars from `ops` **in shadow** (§7.3): it stores its current figure, and logs the `ops` figure and the difference. | Each logged difference matches a `differs` case (§11.4). |
+| 5 | context-guru | The proxy computes dollars from `ops` **in shadow** (§7.3): it stores its current figure, and logs the `ops` figure and the difference. | Each logged difference matches a `differs` entry (§11.4). |
 | 6 | context-guru | The proxy **switches** to the `ops` figure. `dash.Recorder`'s `TailChanged` and cold-start attribution read `ops.Compare`'s state instead of their own copy, so the proxy has one cache-state rule, not two. | Dashboard totals before and after on the same captured sessions. |
 | 7 | Cortex | **The Cortex collector.** `pctx.ReportOps`; the context-guru plugin passes `apply.Result.Ops` through it; one fingerprint per `thread.Key`; `cgModel` fills `ModelCall`; `pingEmitter` calls `ops.FromKeepAlive` and implements `OpsEmitter`. `plugins.Deps.Costs` and `core/cost/spend` are removed. No pricing change. | The `Compare` cases pass through the Cortex collector. |
-| 8 | Cortex | tool-prune and context-guru report operations beside their current events. `settle` computes both figures, writes the current one, logs the difference. | Each logged difference matches a `differs` case; also the Cortex / cg proxy / control comparison test (`62333ee9` on `feat/contextguru-keepalive`). |
+| 8 | Cortex | tool-prune and context-guru report operations beside their current events. `settle` computes both figures, writes the current one, logs the difference. | Each logged difference matches a `differs` entry; also the Cortex / cg proxy / control comparison test (`62333ee9` on `feat/contextguru-keepalive`). |
 | 9 | Cortex | `settle` switches to `ops.Price`. The new event fields. | Ledger totals before and after on the same replay. |
-| 10 | both | Remove the current events, `saving.go`, `unique.go`, the per-producer draft functions, and the proxy's rules that `ops` replaced (`uniqueRate`, `repeatRate`, the reduction part of `baselineDeltaUSD`, `cachesplitSavedUSD`, `keepaliveSavedUSD`). **Do not remove a rule that a `notCovered` case still uses, nor any path §10.1 keeps** (gates, events, tool inventory, holdout replay, `KeepAliveReport`). | `go mod tidy -diff` in every module. All cases pass in both repos. |
+| 10 | both | Remove the current events, `saving.go`, `unique.go`, the per-producer draft functions, and the proxy's rules that `ops` replaced (`uniqueRate`, `repeatRate`, the reduction part of `baselineDeltaUSD`, `cachesplitSavedUSD`, `keepaliveSavedUSD`). **Do not remove a rule that a `notCovered` entry still uses, nor any path §10.1 keeps** (gates, events, tool inventory, holdout replay, `KeepAliveReport`). | `go mod tidy -diff` in every module. All cases pass in both repos. |
 | 11 | Cortex | agentop's per-change view. | TUI tests. |
 
 Expected differences at step 9 (and, for the proxy, at step 6). Each one corrects a known error, so none is a regression:
@@ -1309,14 +1309,14 @@ each place where the new figure differs from the current one on purpose.
 | `settle`: `pruneDraft`, `compactionDraft`, `rewritePenalty` | Cortex (`feat/contextguru-keepalive`) | tool-prune cases, rewrite-penalty cases |
 
 Cortex's `repeatUsage` is a copy of the proxy's `repeatRate`, so the proxy is the source for the
-context-guru reductions. The Cortex rules are removed at step 10, so their figures are recorded
-once: a generator runs in Cortex on `feat/contextguru-keepalive` and writes them into the case
-files. context-guru never imports Cortex.
+context-guru reductions. context-guru never imports Cortex: the comparison with the Cortex rules
+runs in Cortex (§11.4).
 
 ### 11.2 One case
 
 Each case is a JSON file in `ops/opscases/`. The package embeds them and exports `All() []Case`,
-so a test in Cortex can run the same list.
+so a test in Cortex can run the same list. A case holds only what the spec decides: the input and
+the expected result. It does not hold the current code's figure, nor a judgement about it.
 
 ```json
 {
@@ -1325,22 +1325,23 @@ so a test in Cortex can run the same list.
            "cache": "hit", "ttl": "5m"},
   "input": { "...": "an ops.Input" },
   "rates": "fixture-v1",
-  "expected": { "...": "the ops.Result, tokens for each tier" },
-  "current": { "source": "dash.Event.Price", "usd": 0.00240 },
-  "verdict": "same",
-  "reason": ""
+  "expected": { "...": "the ops.Result, tokens for each tier" }
 }
 ```
 
 - `expected` is what `ops.Price` must return, by this spec.
-- `current` is the figure the current code gives for the same request, in dollars.
 - `rates` names a fixed rate table in the package. `fixture-v1` is: input $3.00/M, cache write 5m
-  $3.75/M, cache write 1h $6.00/M, cache read $0.30/M. With one table, `expected` and `current`
-  can be compared in dollars.
-- `verdict` is one of:
-  - `same`: `expected`, priced at `rates`, equals `current` within one micro-dollar.
-  - `differs`: the figures differ on purpose. `reason` must cite the spec section that causes it.
-  - `notCovered`: the current code prices something the model does not. The case is listed in §12.
+  $3.75/M, cache write 1h $6.00/M, cache read $0.30/M. With one table, `expected` and the current
+  code's figure can be compared in dollars.
+
+The places where the current code is meant to give a different figure are in one separate file,
+`ops/opscases/differences.json`. Each entry has a case ID, a kind, and a reason:
+
+- `differs`: the figures differ on purpose. The reason cites the spec section that causes it.
+- `notCovered`: the current code prices something the model does not. The case is listed in §12.
+
+A case that is not in this file must agree with the current code. The current figure is never
+stored: the agreement test computes it each time it runs (§11.4).
 
 ### 11.3 What makes the list exhaustive
 
@@ -1402,7 +1403,7 @@ drops the combinations that cannot occur, and states the reason for each drop in
     operation.
 
 **C. Cases from real traffic.** For each difference that a shadow step (§9 steps 5 and 8) logs and
-no case matches, add a case. Then decide: it is a bug in `ops`, or a new `differs` case with a
+no case matches, add a case. Then decide: it is a bug in `ops`, or a new `differs` entry with a
 reason.
 
 ### 11.4 How the list validates the implementation
@@ -1410,11 +1411,12 @@ reason.
 | Test | Where | Passes when |
 |---|---|---|
 | `ops` unit test | context-guru | `ops.Price` returns `expected` for every case. `ops.Compare` returns the expected B\* and break for every collector case. |
-| Agreement with the current code | context-guru | Every `same` case equals `current`. |
-| Review of the differences | PR review | Every `differs` case cites a spec section, and a reviewer approves the list. |
+| Agreement with the current code | context-guru | The test runs `dash.Event.Price` on each case's input. Each case not in `differences.json` equals `expected` within one micro-dollar. Each `differs` entry really differs, so a stale entry fails. |
+| Agreement with the Cortex rules | Cortex, until step 10 | The same test with `pruneDraft`, `compactionDraft` and `rewritePenalty`, for the tool-prune and rewrite-penalty cases. It is removed with those rules. |
+| Review of the differences | PR review | Every `differs` entry cites a spec section, and a reviewer approves `differences.json`. |
 | Cortex contract test | Cortex | Cortex builds the same inputs through its own plugins and collector, and gets `expected`. A type change in context-guru fails the Cortex build on upgrade. |
-| Shadow steps | both | Every logged difference matches a `differs` case. |
-| Removal gate | both | No rule is removed while a `notCovered` case uses it. |
+| Shadow steps | both | Every logged difference matches a `differs` entry. |
+| Removal gate | both | No rule is removed while a `notCovered` entry uses it. |
 
 ### 11.5 Other tests
 
@@ -1427,7 +1429,7 @@ reason.
 
 ## 12. Open questions
 
-Each has test cases that are marked `differs` or `notCovered` until it is decided (§11.3).
+Each has test cases that are marked `differs` or `notCovered` in `differences.json` until it is decided (§11.3).
 
 1. **The interaction on a rescued request (§6.2).** It is attributed to nobody. An alternative is
    to give it to the keep-alive window, because the window caused the state. That would make the
