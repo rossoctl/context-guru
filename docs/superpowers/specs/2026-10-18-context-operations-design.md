@@ -40,6 +40,12 @@ Three problems remain with that approach:
 - **Each host** converts tokens to dollars with its own rates, and records them. There are two
   hosts: **Cortex** (`pricing.Resolver`) and the **context-guru proxy** (`internal/modelinfo`).
   For the same request, both get the same tokens for each tier.
+- **What is centralized is the logic, not the rates.** The `ops` library decides which tier every
+  token falls in, in one place. The dollar rate for each tier stays in each host's own rate table,
+  by design: Cortex has discounts, overrides and long-context tiers that the proxy does not. So the
+  two hosts report the same tokens and can report different dollars for the same request, when
+  their tables differ. Equal dollars are a property of the test cases, which use one fixed table
+  (§11.2), not of production.
 - An **exhaustive list of test cases**, made with the current saving computation, validates the
   implementation before any host uses it (§11).
 - The model supports savings **across requests**: removing K tokens from message *i* saves on
@@ -73,13 +79,14 @@ Three problems remain with that approach:
 | D9 | How is the implementation validated? | **Against an exhaustive list of test cases made with the current computation** (§11), before any host switches. |
 | D10 | How is the cache state used? | **As an input to every price.** The tier of a content change depends on the state (§6.2). An operation that changes the state (`stateChange`, §4.4) is priced as the difference between two states. |
 | D11 | What happens to a change that a later change ends? | **Its producer stops reporting it.** No link names the change that ended it. The snapshot rule (D6) and the measurement at each producer's own input (R29) give the right price and stop any double count. Each change keeps the total it had until then (§4.5). |
-| D12 | Where does the thread ID come from? | **From the collector, on every operation.** It uses the agent's thread header when there is one, else the matching fingerprint (§5.3). |
+| D12 | Where does the thread ID come from? | **From the engine's `internal/thread`, in both hosts**, copied onto every operation. The host keeps one fingerprint per thread, keyed by `thread.Key`, and compares each request with its own thread's previous request (§5.3). |
 | D13 | How does the model serve a subscription user? | **The library does not change.** It already returns tokens for each tier (D3). The request carries a `Billing` fact. The host converts tokens to dollars for an API user, and to usage-limit units for a subscription user, with an API-equivalent dollar figure beside it, marked as such (§7.4). |
 
 ## 3. Requirements
 
 The numbers are the order in which the requirements were found, so they are not in sequence.
-R35 to R39 were added after the first review, and R40 to R43 for subscription plans.
+R35 to R39 were added after the first review, R40 to R43 for subscription plans, and R44 after a
+second review that checked the model against the real engine and both hosts (§13).
 **R13 is withdrawn** (see D). **R10 is withdrawn.** It asked for a flag that separates a replay from a fresh act. `FirstApplied`
 (§4.1) replaces it.
 
@@ -140,13 +147,19 @@ R35 to R39 were added after the first review, and R40 to R43 for subscription pl
   breakpoints are, and on their TTL.
 - **R38.** Operations that change the cache state are covered: a keep-alive ping, `cachesplit`, and
   a breakpoint TTL change. Each one is priced as the difference between two states.
+- **R45.** The cache state distinguishes a proven expiry from an unproven floor. A provider whose
+  TTL is only a guaranteed minimum (no documented maximum) never scores `cold` from elapsed time
+  alone — that would invent a saving the provider may not have billed. See §5.4.
 
 ### D. Status and correctness
 
 - **R12.** An operation is applied or projected. A projected operation comes from a plugin under
   `on_error: observe`: the plugin computed the change, but the original body went upstream. Only
   applied operations count in totals. A change that is not in the forwarded body (reverted by the
-  pipeline, or discarded by the writeback) is not reported.
+  pipeline) is not reported.
+- **R44.** A change the producer made but the WRITEBACK silently discarded (bifrost cannot
+  round-trip the message, so the splice is dropped — issue #32) is counted, not treated as absent.
+  See §5.1a.
 - **R13 is withdrawn.** It asked for a reversibility class and a stash key. No pricing rule, check
   or attribution reads them, and the expand loop finds stashed content by its marker in the body.
   cg's component API keeps the safety rule that a lossy offload must stash its original.
@@ -262,6 +275,7 @@ type Operation struct {
     Component string // "mask", "dedup"; "" for a one-operation plugin
 
     Projected bool // set by the framework: the plugin runs under on_error: observe (R12)
+    Discarded bool // set by the framework: the writeback could not splice this change (R44, §5.1a)
 
     At     Position // first position the change touches, in this producer's output
     Spans  []Span   // every touched range, when the change is not contiguous; nil otherwise
@@ -291,7 +305,6 @@ type Operation struct {
     // kind = cacheBreak (written by the collector only)
     Cause        Cause  // producer | client | expired | unknown
     AttributedTo     string // the cause's operation ID, in this request; "" means nobody
-    AttributedChange string // the cause's ChangeID, so a penalty joins its change's total; "" = nobody
 
     // a change to the message list, for mapping positions
     Structure *Splice
@@ -321,15 +334,20 @@ type Splice struct{ At, Removed, Inserted int } // messages only
 
 // CacheState is the state of the thread's provider cache entry when a request arrives.
 type CacheState struct {
-    Phase     Phase         // hot | cold | unknown
-    Extent    *Position     // the last position the entry covers; nil when cold or unknown
-    Gap       time.Duration // time since the entry was last written or read
-    TTL       time.Duration // lifetime of the entry: 5m or 1h, from its breakpoint
+    Phase    Phase         // hot | cold | unknown
+    Extent   *Position     // the last position the entry covers; nil when cold or unknown
+    Gap      time.Duration // time since the entry was last written or read
+    TTL      time.Duration // lifetime of the entry: 5m or 1h, from its breakpoint
+    // Lifetime says whether TTL is a proven expiry (exact) or only a guaranteed floor
+    // (minimum): Anthropic's TTL is exact; OpenAI GPT-5.6+ states only a 30-minute minimum
+    // with no documented maximum (R45, §5.4). Gap > TTL proves expiry only when exact.
+    Lifetime LifetimeKind
 }
 
 type Kind string          // reduce | add | stateChange | ping | spend | reroute | cacheBreak
 type Mechanism string     // keepAlive | cacheSplit | breakpointTTL
 type Phase string         // hot | cold | unknown
+type LifetimeKind string  // exact | minimum | unknown — see apply.CacheLifetimeKind
 type ThreadSource string  // header | prefix | new
 type BillingMode string   // api | subscription | unknown
 type Section string       // tools | system | messages
@@ -359,14 +377,39 @@ and can be reported as unpriced (R19).
    whose `Call` carries the ping's billed usage. Its `ChangeID` names the keep-alive window, and the `stateChange` operation on
    the request it rescued has the same `ChangeID`. So the cost and the value of a window add up
    (§4.4).
-7. **`ChangeID`** is derived from the component, the original content key and the replacement
-   bytes. Two components that remove the same content in different ways have different IDs.
+7. **`ChangeID` is derived from the component and the original content key only — never from the
+   replacement bytes.** This matches the engine's own stable key (`frozenKey(session, component,
+   contentKey(original))`, `components/offload/state.go`) rather than adding to it. Two
+   components that remove the same content in different ways still get different IDs, because
+   `component` is part of the key.
+
+   Replacement bytes were in an earlier draft of this rule, and that was a mistake: `mask.go`'s
+   own comment states that `readlifecycle` and `skeleton` are **not** pure functions of
+   (content, config) — `readlifecycle`'s marker text depends on later transcript events
+   (`classify()`), and `skeleton`'s body depends on the paired tool call, not the message. For
+   both, the same logical decision can produce different replacement bytes on different turns
+   for reasons that have nothing to do with whether the change is new. Keying `ChangeID` on
+   replacement bytes would churn the ID every time that happens — breaking the cross-request fold
+   (§7.2) and `FirstApplied` for exactly the two components the engine already flags as unusual.
+   Keying on content only, as `frozenKey` does, is stable regardless.
 8. **The tokens a change saved come from the operation's own `Size`, not from the forwarded body.**
    Removed tokens are not in the forwarded body, so nothing else can count them. A producer with a
    tokenizer (context-guru) counts them and names the tokenizer. A producer with none (tool-prune)
    estimates them from bytes with the ratio of its own input, and sets
    `Tokenizer = "bytes-estimate"`. The library marks every priced result that uses an estimate as
    `Estimated`.
+9. **The engine reports a change that `apply` writes, under the component that decided it.**
+   `toolschema`, `toolfilter` and `cachesplit` are marker components: their `Reformat()` does
+   nothing, and `apply` performs the rewrite (`apply/envelope.go`, `apply/prefixsplit.go`). `apply`
+   holds the only exact numbers (`Trace.FilteredDeclTokens`, `Trace.SplitStableTokens`). So `apply`
+   builds the operation and sets `Component` to the marker component's name. The mixed-TTL head
+   (`apply/headttl.go`) has no component; its operations use `Component = "headttl"`.
+10. **A batched decision is one operation.** `coref` plans many cuts across messages that are not
+    next to each other, gates them as one batch (`min_batch_frac`, `break_even`), and spends one
+    unit of `rewrite_budget` for the whole pass. The batch is the change unit (rule 1): one
+    `reduce` operation, one `ChangeID`, one `Span` for each cut, and at most one attributed
+    `cacheBreak`. Reporting each cut as its own operation would split one rewrite penalty across N
+    changes, and no single cut's payback would then be meaningful.
 
 ### 4.3 Why positions are (section, index)
 
@@ -386,7 +429,7 @@ that is already there.
 |---|---|---|---|
 | `keepAlive` | the keeper, through the host's collector | `StateFrom = cold`, `StateTo = hot`: a ping read the entry, so it did not expire | the first request after the ping window, when it was rescued |
 | `cacheSplit` | context-guru (`cachesplit`) | the stable half of the system block is read, not written, when the volatile tail changed | each request where the split applies |
-| `breakpointTTL` | context-guru (`apply/headttl.go`) | the head of the request is held for 1h, not 5m | each request where the 1h entry is read after a gap longer than 5m |
+| `breakpointTTL` | context-guru (`apply/headttl.go`, `Component = "headttl"`) | the head of the request is held for 1h, not 5m | **two legs:** a cost on **every request that writes** the head at 1h (the premium), and a saving on each request that reads the 1h entry after a gap longer than 5m (the rescue) |
 
 **When the collector adds a `keepAlive` operation.** All four conditions must be true. They are the
 conditions of the current `keepaliveSavedUSD`:
@@ -399,6 +442,23 @@ conditions of the current `keepaliveSavedUSD`:
 **The ping and the rescue share one `ChangeID`,** the ID of the keep-alive window. A window whose
 pings rescued nothing has only `ping` operations, so its total is negative. That is the cost of a
 ping that was not needed, and it is visible for each thread.
+
+**`breakpointTTL` is a bet, and both legs are recorded.** The 1h write premium (2.0× input against
+1.25× for 5m) is paid on every request that creates the head entry at 1h, whether or not a later
+request ever reads it. The benefit appears only on requests that arrive more than 5 and less than
+60 minutes later. Measured over 19,805 production requests, a blanket 1h head cost $773.00 extra on
+14,499 creating requests to recover $754.66 on 290 — net −$18.34; size-gating turned it positive.
+If the model priced only the reading request, every write that never paid off would be missing, and
+the figure would overstate the bet. So, like a keep-alive window:
+
+- **On each 1h-writing request,** `apply` reports a `stateChange` with `Mechanism = breakpointTTL`
+  and only a cost: `Caused.CacheWrite1h` for the head's tokens, less the 5m write it replaced. Its
+  `ChangeID` names the head entry (`"headttl:" + Thread + ":" + head content key`).
+- **On each request that reads that entry after the 5m TTL,** `apply` reports a `stateChange` with
+  the same `ChangeID` and the saving (write → read, §6.2).
+
+A head entry that is written at 1h and never read again has only the cost leg, so its total is
+negative — the same visibility a keep-alive window that rescued nothing has.
 
 ### 4.5 Changes that end
 
@@ -430,58 +490,83 @@ that ended it. Nothing more is needed:
 position P on request N, and request N+1 has a change whose span covers P (`At` and `Structure`).
 That is a question for a report, not for a price, so the report answers it.
 
-### 4.6 Spend: one channel with the savings
+### 4.6 How operations reach the host
 
-cg spends money in two places: a model call during a request (`extract_llm`, an inline
-`summarize`), and a call outside any request (a keep-alive ping, a summarizer call that finishes
-after the response). Both are reported as operations. There is no parallel record.
+There are three kinds of producer, and each reaches the host through a path that already exists.
+The design adds no new reporting interface for the engine or the keeper.
 
-| Where the call happens | Who assembles `RequestOps` | How it is reported |
+| Producer | When it runs | How its operations reach the host |
 |---|---|---|
-| During a request | the collector, incrementally: it opens one `RequestOps` per request (`Session`, `Thread`, `Billing` resolved from the credential before any plugin runs), and each plugin's `pctx.ReportOps(ops...)` call appends operations into it, stamped with `Producer` and `Stage` (§5.1). A `spend` operation made during a request is appended the same way as any other operation. | `pctx.ReportOps` |
-| Outside a request | the caller itself — the keeper, for a ping. There is no open collector to supply facts, so the caller fills `RequestOps` with what it knows about the thread it is acting on: `Session` and `Thread`. It leaves `Billing` unset, because its one operation (`ping` or a detached `spend`) is priced through its own `Call.PaidBy`, which carries its own `Billing` (R41, §7.4). | the host's `Sink` |
+| **The context-guru engine** (every component, including the ones whose bytes `apply` writes, §4.2 rule 9) | inside a request | **`apply.Result.Ops`**: the engine returns its operations with the rewritten body, in both hosts. In Cortex the context-guru plugin passes them to `pctx.ReportOps(result.Ops...)`. In the proxy there is no other producer, so the proxy reads `result.Ops` directly. |
+| **Another Cortex plugin** (tool-prune, cpex) | inside a request | `pctx.ReportOps(ops...)`, during its own pass. Cortex only. |
+| **The keeper**, and a **detached** engine model call | between requests, or after the response | the host's `components.Emitter`, through its optional capabilities: `KeepAliveEmitter.KeepAlivePing(KeepAliveReport)` for a ping (exists today), and `OpsEmitter.Ops(RequestOps)` for a detached call (new, same pattern). |
+
+**Why not a new `Sink`.** An earlier draft added a `Sink` interface for pings. The keeper already
+has a host-agnostic report path: `components.KeepAliveEmitter`, added so the keeper could be
+exported from the proxy without a direct call into `dash` (issue #382, PR #591). The proxy wires
+it to its `dashEmitter`; Cortex wires it to `pingEmitter` (`core/plugins/contextguru/spend.go`). A
+second interface would make the keeper report each ping twice, or retire `KeepAliveReport` and lose
+the fields the dashboard groups by (`Strategy`, `Preset`, `StopReason`, `MaxTokens`,
+`FreshInput`). So the keeper keeps reporting `KeepAliveReport`, and **each host converts it** to a
+`RequestOps` with one `ping` operation:
+
+| `KeepAliveReport` | `ping` operation |
+|---|---|
+| `Session`, `Thread` | `RequestOps.Session`, `RequestOps.Thread`, and the same on the operation |
+| `Window` (new, additive: the start of the idle gap the ping served) | `ChangeID = "ka:" + Thread + ":" + Window` |
+| `Model`, `Provider`, `Route`, `Status`, `DurationMs` | `Call.Model`, `Call.Host`, `Call.Status`, `Call.Duration` |
+| `CacheRead`, `CacheWrite`, `CacheWrite1h`, `FreshInput`, `Output` | `Call.Usage`, `Call.Output` |
+| `TS` | `RequestOps.At` |
+| `Strategy`, `Preset`, `StopReason`, `MaxTokens`, `Agent` | not on the operation; the dashboard keeps reading them from `KeepAliveReport` (§10.1) |
+| `CostUSD` | not used: the host prices `Call.Usage` with its own rates, like every other call |
+
+The conversion is a pure function in `ops` (`ops.FromKeepAlive(KeepAliveReport, PaidBy)`), so both
+hosts build the same operation. The host supplies `PaidBy`, because only it knows which credential
+the ping used.
 
 ```go
-// Sink receives a RequestOps that has no request to travel with: a ping, or a detached call.
-type Sink interface {
-    Report(RequestOps)
+// OpsEmitter is an optional Emitter capability, the same pattern as KeepAliveEmitter: the engine
+// type-asserts for it and does nothing if it is absent. It carries a RequestOps that has no
+// request to travel with: today, only a detached model call.
+type OpsEmitter interface {
+    Ops(RequestOps)
 }
 ```
 
-The contract of `Sink` is the contract `CostRecorder` had:
+The contract of both capabilities is the contract `CostRecorder` had: safe for concurrent use; no
+blocking I/O; never makes the session active (a ping is not agent activity); may drop a report for
+a session that no longer exists.
 
-- It is safe for concurrent use. A background sweep and a model-call path can both call it.
-- It does not block on I/O.
-- It never makes the session active or refreshes it. A ping is not agent activity.
-- It may drop a report for a session that no longer exists.
+**Who builds a standalone `RequestOps`.** No collector is open, so the caller fills it from what it
+knows about the thread it acts on: `Session` and `Thread`. It leaves `Billing` unset, because its
+one operation is priced through its own `Call.PaidBy` (R41, §7.4).
 
 **Where the usage comes from.** The host gives the engine its model client (`components.Model`;
 in Cortex, `cgModel`). The client reads the usage from each response, and fills `ModelCall`. The
 engine's own usage accounting is not used, because under Cortex it is zero (2026-10-14 spec, §0).
 
 **A detached call.** A summarizer call can finish after its request was answered. Its `spend`
-operation then cannot travel with that request's `RequestOps`, which the collector may already have
-closed and recorded. The engine sends it through the `Sink` instead, as a standalone `RequestOps`
-with `Detached = true` on the operation, and `Session`/`Thread` set from the request that caused the
-call — the engine still has those, even though the request is gone. `Billing` is left unset, for the
-same reason a ping leaves it unset: the one operation prices through its own `Call.PaidBy`. Its
-`Produced` names the change it made, so the cost is still joined to that change.
+operation then cannot travel in that request's `apply.Result`. The engine sends it through
+`OpsEmitter`, as a standalone `RequestOps` with `Detached = true` on the operation, and
+`Session`/`Thread` from the request that caused the call. Its `Produced` names the change it made,
+so the cost is still joined to that change.
 
-**How the host records it.** The host handles a report from `ReportOps` and a report from `Sink`
-the same way. It prices `Saved`, `Caused` and `Call.Usage` with one resolver, at one time. So spend
-has the same rates, provenance, currency and billing basis (§7.4) as the savings.
+**A prefix ask.** `extract_llm_sweep` asks the request's own model a question, as a separate
+upstream call whose body is the previous turn's forwarded bytes plus one trailing user message
+(`PrefixAsker`). That is an ordinary `spend` operation: its `Call.Usage` shows the cache read it
+was designed for (measured 19,595 read, 0 written). When the sweep falls back to a call without the
+cached prefix, the same operation shows fresh input instead. No new kind is needed; the test cases
+cover both (§11.3).
+
+**How the host records it.** The host handles operations from `apply.Result`, from `ReportOps`,
+and from either Emitter capability the same way. It prices `Saved`, `Caused` and `Call.Usage` with
+one resolver. So spend has the same rates, provenance, currency and billing basis (§7.4) as the
+savings.
 
 **What it replaces.** `core/cost/spend` (`Charge`, `CostRecorder`, `RecorderConsumer`) is removed.
 Today both Cortex wirings inject `spend.LogRecorder{}`, which only logs, and the recorder that would
-write the ledger was never built. So no recorded figure changes. Each `Charge` field has a place:
-
-| `spend.Charge` | Operation |
-|---|---|
-| `Plugin` | `Producer` |
-| `Purpose` (`keep-alive`, `compaction`) | `Kind` (`ping`, `spend`) |
-| `Session`, `Client` | `Session`, `Thread`, `RequestOps.Agent` |
-| `Host`, `Model`, `Usage`, `Status`, `Duration` | `Call` |
-| `At` | `RequestOps.At` |
+write the ledger was never built. So no recorded figure changes. Cortex's `pingEmitter` keeps
+implementing `KeepAliveEmitter`, and calls `ops.FromKeepAlive` instead of building a `spend.Charge`.
 
 ### 4.7 Replays: who remembers past changes
 
@@ -548,14 +633,14 @@ sequenceDiagram
     participant Upstream
 
     Client->>Pipeline: request
-    Pipeline->>Pipeline: open RequestOps<br/>(Session, Thread, Billing from credential)
+    Pipeline->>Pipeline: open RequestOps<br/>(Session, Agent, Billing from credential)
     Pipeline->>Plugin: OnRequest(pctx)
-    Plugin->>Plugin: reduce a tool output<br/>(mask/cmdfilter/coref/...)
-    Plugin->>Pipeline: pctx.ReportOps(ops...)
+    Plugin->>Plugin: apply.Apply: resolve thread,<br/>reduce a tool output (mask/cmdfilter/coref/...)
+    Plugin->>Pipeline: pctx.ReportOps(result.Ops...)<br/>+ result.Thread
     Pipeline->>Pipeline: stamp Producer, Stage<br/>append into RequestOps.Ops
     Pipeline->>Upstream: forward (smaller) body
     Upstream-->>Pipeline: response + usage
-    Pipeline->>Pipeline: ops.Compare(fingerprints, usage)<br/>-> B*, cacheBreak (if any)
+    Pipeline->>Pipeline: prev = fingerprint[thread.Key]<br/>ops.Compare(prev, cur, usage)<br/>-> B*, cacheBreak, CacheState
     Pipeline->>Ops: Price(RequestOps.Ops, usage, B*, breakpoints, state)
     Ops-->>Pipeline: Result (PricedOp[], in-process only)
     Pipeline->>Settle: Result
@@ -566,7 +651,8 @@ sequenceDiagram
 ```
 
 **B. A detached call.** The request has already been answered; its `RequestOps` may already be
-closed and recorded. The summarizer call finishes afterward and reports through `Sink`.
+closed and recorded. The summarizer call finishes afterward and reports through the host's
+`OpsEmitter`.
 
 ```mermaid
 sequenceDiagram
@@ -574,15 +660,15 @@ sequenceDiagram
     participant Store as Session store<br/>(Cortex)
     participant Plugin as context-guru plugin<br/>(context-guru)
     participant Model as Summarizer model call<br/>(context-guru, via cgModel)
-    participant Sink as Sink<br/>(Cortex, injected)
+    participant Emitter as OpsEmitter<br/>(host: Cortex pingEmitter / proxy dashEmitter)
     participant Settle as settle<br/>(Cortex)
 
     Note over Pipeline,Store: request N already answered<br/>its RequestOps/event.Saving already recorded
     Plugin->>Model: summarizer call (async)
     Model-->>Plugin: response + billed usage
-    Plugin->>Plugin: build standalone RequestOps<br/>Session/Thread from request N (kept),<br/>Billing unset, one spend op (Detached=true, Call, Produced)
-    Plugin->>Sink: Report(RequestOps)
-    Sink->>Settle: RequestOps
+    Plugin->>Plugin: build standalone RequestOps<br/>Session/Thread from request N (kept)<br/>Billing unset, one spend op (Detached=true, Call, Produced)
+    Plugin->>Emitter: Ops(RequestOps)
+    Emitter->>Settle: RequestOps
     Settle->>Settle: price Call.Usage with pricing.Resolver<br/>(same path as a request's Saved/Caused)
     Settle->>Store: event.Saving (joined to the change via Produced)
 ```
@@ -593,16 +679,16 @@ sequenceDiagram
 sequenceDiagram
     participant Keeper as Keeper<br/>(context-guru)
     participant Upstream
-    participant Sink as Sink<br/>(Cortex, injected)
+    participant Emitter as KeepAliveEmitter<br/>(host: Cortex pingEmitter / proxy dashEmitter)
     participant Settle as settle<br/>(Cortex)
     participant Store as Session store<br/>(Cortex)
 
     Note over Keeper: idle gap on thread T exceeds the cache TTL
     Keeper->>Upstream: ping (re-sends thread T's last forwarded body)
     Upstream-->>Keeper: response + billed usage
-    Keeper->>Keeper: build standalone RequestOps<br/>Session/Thread known from T, Billing unset,<br/>one ping op (ChangeID = window ID, Call)
-    Keeper->>Sink: Report(RequestOps)
-    Sink->>Settle: RequestOps
+    Keeper->>Emitter: KeepAlivePing(KeepAliveReport)<br/>(existing path, unchanged)
+    Emitter->>Emitter: ops.FromKeepAlive(report, PaidBy)<br/>-> RequestOps with one ping op<br/>(ChangeID = window ID, Billing unset)
+    Emitter->>Settle: RequestOps
     Settle->>Settle: price Call.Usage
     Note over Settle: on the NEXT request on thread T,<br/>the collector adds a stateChange (keepAlive)<br/>with the SAME ChangeID -- ping cost and rescue<br/>value join under one change (§4.4, §4.6)
     Settle->>Store: event.Saving (ping leg)
@@ -610,20 +696,22 @@ sequenceDiagram
 
 ## 5. The collector
 
-Each host has a collector: Cortex, and the context-guru proxy. The two parts are split this way:
+Each host has a collector: Cortex, and the context-guru proxy. The parts are split this way:
 
-- **In `ops`, a pure function:** `ops.Compare` takes the recent fingerprints of a session and the
-  fingerprints of this request. It returns B\* and the `cacheBreak` operation, by the rules in
-  §5.2 to §5.4. Both hosts call it, so both classify a break the same way.
-- **In each host:** collecting the operations (§5.1, Cortex only, because the proxy runs one
-  producer), building the fingerprints, and keeping the last K of them for each session.
+| Part | Where | Cortex | Proxy |
+|---|---|---|---|
+| Resolve the thread | `internal/thread` (engine) | the engine resolves it inside `apply`, as today, and returns it in `apply.Result.Thread` | the same |
+| Collect the operations | host | `pctx.ReportOps`, from every plugin, in pipeline order (§5.1) | `apply.Result.Ops`: the engine is the only producer |
+| Keep the previous request's fingerprint, per thread | host | a map keyed by `thread.Key(session, thread)` | the same map, beside `dash.Recorder`'s `lastTail` (§5.3) |
+| Compare, and find B\*, the break and the cache state | `ops.Compare` (pure) | called after the response | the same call |
+| Convert keep-alive reports | `ops.FromKeepAlive` (pure) | in `pingEmitter` | in `dashEmitter` |
 
 ```go
-func Compare(recent []Fingerprint, cur Fingerprint, usage Usage) (boundary *Position, brk *Operation)
+func Compare(prev *Fingerprint, cur Fingerprint, usage Usage) (boundary *Position, brk *Operation, state CacheState)
 ```
 
-The proxy already finds a prefix change in its own way (`Event.AttributeCache`). It changes to
-`ops.Compare` at migration step 5 (§9).
+`prev` is the fingerprint of **this thread's** previous request, or nil. The host looks it up by
+`thread.Key`; `ops.Compare` does no matching of its own.
 
 ### 5.1 Collecting
 
@@ -633,12 +721,50 @@ The proxy already finds a prefix change in its own way (`Event.AttributeCache`).
 - The framework sets `Projected = true` on every operation of a plugin whose `SetBody` returned
   false (`on_error: observe`).
 - A producer reports only changes that are in the forwarded body, or that would be there for a
-  projected operation. A change the pipeline reverted (an error, a panic, the never-worse guard) or
-  the writeback discarded is not reported. It saves nothing, as a change that ended (§4.5). Its
-  model call, if any, is still a `spend` operation, so the money it cost is counted.
+  projected operation. A change the pipeline reverted (an error, a panic, the never-worse guard) is
+  not reported. It saves nothing, as a change that ended (§4.5). Its model call, if any, is still a
+  `spend` operation, so the money it cost is counted.
 - `settle` keeps an explicit allow-list of producers, for the reason `savingComponents` has today:
   a plugin must not add itself to the money record only by reporting operations. Operations from
   a producer that is not on the list are kept on the event and marked unpriced.
+
+### 5.1a Discarded, not reverted (R44)
+
+A **reverted** change never touched the forwarded body: the pipeline undid it before anything else
+ran, so "it saves nothing" is simply true. A **discarded** change is a different failure, and
+treating it the same way reopens an incident this engine already had.
+
+bifrost cannot round-trip an Anthropic `tool_use` block: it drops `id`, `name` and `input` on
+unmarshal (`apply/metawrite.go`). So the writeback compares the pre- and post-pipeline marshal of
+each changed message, and if splicing the component's change back in would lose a field the
+original had, it throws the change away rather than ship a corrupted block. That rule is correct —
+but it is also exactly where `cacheinject`'s breakpoints lived, because its targets are the
+messages carrying `tool_use`. The component believed it changed 46 messages; the writeback forwarded
+0 of them (issue #32). The component's own counters — `Report.Saved()`, `Report.ChangedIdx` — looked
+identical to a working run, because they describe what the component decided, not what reached the
+wire. `Report.Discarded` exists so a reader can compare it against `ChangedIdx` and see the gap.
+
+If an `Operation` for a discarded change is simply never reported — the current wording of this
+section — the new model reproduces the same blind spot `Report.Discarded` was built to close, with
+no equivalent counter to catch it. So:
+
+- **A discarded change IS reported**, with `Discarded = true` and `Projected = false`. Its
+  `Before`/`After` describe what the producer attempted, not what shipped.
+- **It is not priced as a saving.** The sum check (§6.5, check 1) and conservation (check 6) treat
+  it the same as a reverted or projected change: left out, because its content did not change on
+  the wire.
+- **It is counted.** `settle` keeps a per-(producer, component) count of discarded operations,
+  surfaced the way `Report.Discarded` is today — on `/v1/pipeline` or an equivalent metrics path —
+  so an operator can tell "this component is declining" from "this component's writes keep being
+  thrown away," which is exactly the distinction #32 took two benchmark studies to find without
+  this field.
+- **Its model call, if any, is still a `spend` operation** and is still priced: the money was
+  spent whether or not the change survived to the wire.
+
+```go
+// on Operation, alongside Projected:
+Discarded bool // the writeback could not splice this change back (R44); never priced as a saving
+```
 
 ### 5.2 The counterfactual boundary B\*
 
@@ -648,12 +774,12 @@ Without it, the cache would have read through `messages[11]`. So the library nee
 boundary that would have applied if no plugin had changed anything:
 
 ```
-B* = min( prevCachedExtent,   // what the matching previous request left cached
+B* = min( prevCachedExtent,   // what this thread's previous request left cached
           clientFirstDiff )   // where the client changed its own body
 B* = 0 when the cache expired
 ```
 
-The collector keeps a fingerprint of each recent request, for each session:
+The collector keeps one fingerprint for each thread: the most recent request of that thread (§5.3).
 
 ```go
 type Fingerprint struct {
@@ -679,48 +805,69 @@ type PosHash struct {
 
 `PosHash` is 12 bytes. It holds hashes and sizes only (R2).
 
-### 5.3 Finding the matching previous request
+### 5.3 The thread, and the previous request
 
-Subagents share the session with the main thread. The provider's cache is addressed by content,
-not by thread. So the collector compares the request with the last K = 4 fingerprints of the
-session, and selects the one with the longest common client prefix. This meets R24.
+**The thread comes from `internal/thread`, not from the collector.** The engine already resolves
+each request's thread (`thread.Result`): the agent's header first, then prefix continuity, then the
+session as a last resort. It also returns two signals that a weaker rule would lose:
 
-The same match gives the **thread ID** on every operation (R39):
+- `Disagree`: the header named a known thread, but prefix continuity matched a different one. The
+  header wins; the host logs the drift.
+- `Inherits`: a new thread whose content is mostly an existing thread's — a rewind, an edited
+  earlier message, a fork. Its first request is that thread's next turn, not a cold start.
 
-| Case | Thread ID | `Source` |
-|---|---|---|
-| The agent sends a thread header | the header value | `header` |
-| No header; a fingerprint matches | the matching fingerprint's thread | `prefix` |
-| No header; nothing matches, and the request is not the session's first | a new ID | `new` |
-| The session's first request | `main` | `new` |
+The engine runs inside both hosts, so both get the same `thread.Result` for the same traffic. The
+operations copy `Thread.ID` (R39), and `RequestOps.Thread` carries `Source` and `Parent`
+(`Parent = Inherits`).
 
-A fingerprint now also stores its thread ID. context-guru's `internal/thread` resolves threads the
-same way (header first, then prefix continuity). The collector reuses its rule, so both hosts give
-the same thread ID for the same traffic.
+**The previous request is this thread's previous request.** The host keeps one fingerprint per
+thread, keyed by `thread.Key(session, thread)` — the key `dash.Recorder` already uses for
+`lastTail` and `lastSeen`. A new thread with `Inherits` set starts from the inherited thread's
+fingerprint, so a fork reads its parent's cache instead of scoring cold.
+
+An earlier draft matched each request against the last 4 fingerprints of the session by longest
+common prefix. That answered a weaker question. After interleaved subagent requests the best prefix
+match can be an older request, and a main thread whose previous turn is more than 4 requests back
+drops out of the window. `cachesplit`'s saving depends on comparing the volatile tail with **this
+thread's immediately previous request** (`cachesplitSavedUSD`, `TailChanged`), so a stale match
+would misattribute it. Keying by thread gives the right baseline for every rule that needs one.
 
 ### 5.4 Classifying a break
 
-`fwdFirstDiff` is where the matching fingerprint's forwarded body first differs from this request's
+`fwdFirstDiff` is where this thread's previous forwarded body first differs from this request's
 forwarded body. `clientFirstDiff` is the same comparison on client bodies.
 
 | Comparison | Result |
 |---|---|
-| `fwdFirstDiff < clientFirstDiff` | A plugin broke the cache. Add `cacheBreak{cause: producer, at: fwdFirstDiff}`, attributed to the earliest operation at or before `fwdFirstDiff`: its `ID` in `AttributedTo`, its `ChangeID` in `AttributedChange`. |
+| `fwdFirstDiff < clientFirstDiff` | A plugin broke the cache. Add `cacheBreak{cause: producer, at: fwdFirstDiff}`, attributed to the earliest operation at or before `fwdFirstDiff`: its `ID` in `AttributedTo`. |
 | `fwdFirstDiff ≥ clientFirstDiff` | The client changed its body. Add `cacheBreak{cause: client}`, attributed to nobody. |
-| No diff, but `cache_read` is far below the matching request's cached extent | The cache expired. Add `cacheBreak{cause: expired}`, attributed to nobody. |
-| No matching fingerprint | First turn or restart: `cause: unknown`. B\* is unknown (§6.4). |
+| No diff, but `cache_read` is far below the previous request's cached extent | The cache expired. Add `cacheBreak{cause: expired}`, attributed to nobody. |
+| No previous fingerprint for this thread | First turn of the thread with no `Inherits`, or a restart: `cause: unknown`. B\* is unknown (§6.4). |
 
 The same comparison gives the **cache state** for `Input.State` (R36):
 
 | Case | `Phase` | `Extent` |
 |---|---|---|
-| A fingerprint matches, and `Gap` ≤ its TTL | `hot` | the matching request's cached extent |
-| A fingerprint matches, `Gap` > TTL, and a ping of this thread read the entry inside its TTL | `hot`, and the collector adds a `keepAlive` operation (§4.4) | the extent the ping read |
-| A fingerprint matches, and `Gap` > TTL with no ping | `cold` | nil |
-| No fingerprint matches | `unknown` | nil |
+| A previous fingerprint exists, and `Gap` ≤ its TTL | `hot` | the previous request's cached extent |
+| A previous fingerprint exists, `Gap` > TTL, and a ping of this thread read the entry inside its TTL | `hot`, and the collector adds a `keepAlive` operation (§4.4) | the extent the ping read |
+| A previous fingerprint exists, `Gap` > TTL, no ping, `Lifetime = exact` | `cold` | nil |
+| A previous fingerprint exists, `Gap` > TTL, no ping, `Lifetime = minimum` | `unknown` | nil |
+| No previous fingerprint for this thread | `unknown` | nil |
 
 `Gap` is measured from the start of the last request or ping that touched the entry, because the
 provider measures the TTL from the start of a request.
+
+**Why `minimum` is not `cold` (R45).** `TTL` can be a proven expiry or only a guaranteed floor
+(`apply.CacheLifetimeKind`: Anthropic's is `Exact`; OpenAI GPT-5.6+ states only a 30-minute
+`Minimum`, with no documented maximum — "a minimum may prove an entry is still eligible, but
+cannot prove it has expired"). On an `Exact` provider, `Gap` past `TTL` proves the entry gone, so
+`cold` is correct and B\* = 0 is the honest answer. On a `Minimum` provider, the same `Gap` proves
+nothing — the entry may still be live — so scoring it `cold` invents a cache-write saving that may
+not exist, in the unsafe direction. The host already carries this distinction
+(`keepaliveCreditFloorMs`: pre-5.6 OpenAI is never credited, exactly because `Minimum` cannot stand
+in for proof of expiry). The collector sets `CacheState.Lifetime` from the same source and the
+table above routes a `Minimum`-with-no-proof gap to `unknown`, not `cold` — §6.4 then applies
+(`penaltyUnknown`), the safe direction.
 
 ### 5.5 Tokens for each position
 
@@ -734,12 +881,15 @@ converts them with the request's own ratio (billed prompt tokens ÷ forwarded bo
 
 ### 5.6 Limits
 
-- **Memory:** 12 bytes for each position (`PosHash`, §5.2). 2 bodies × 4 fingerprints × 2,000
-  positions is about 200 KB for each session. `session.max_sessions` (100) limits the total to about 20 MB.
+- **Memory:** 12 bytes for each position (`PosHash`, §5.2). 2 bodies × 2,000 positions is about
+  48 KB for each thread. `internal/thread` caps threads at 64 for each session; a typical session
+  has 1 to 5. `session.max_sessions` (100) bounds the total.
 - **Restart:** fingerprints are lost. Only the next request of each session gets `penaltyUnknown`.
   They are not persisted (§10).
 - context-guru keeps its own `MaxCachedIdx` for its own decisions. For pricing, the collector's B\*
-  is the only authority (R30).
+  is the only authority (R30), because it is computed from the forwarded body after every plugin
+  ran. In the proxy there is no later plugin, so the two must agree: the proxy checks
+  `MaxCachedIdx` against B\* and counts a disagreement (a bug in one of them), at no extra cost.
 
 ## 6. The library
 
@@ -818,9 +968,9 @@ the messages costs the same as a break at `messages[0]` when there is no breakpo
 The new tail after B\* is written anyway, so it is not counted.
 
 **A state change.** A `stateChange` operation moves its tokens from the tier of `StateFrom` to the
-tier of `StateTo`: for `keepAlive` and `cacheSplit`, from write to read. For `breakpointTTL`, from
-write (the 5m entry expired) to read. The 1h write premium, paid on the request that writes the 1h
-entry, is a `Caused.CacheWrite1h` on that request.
+tier of `StateTo`: for `keepAlive` and `cacheSplit`, from write to read. For `breakpointTTL` there
+are two legs (§4.4): on a reading request, from write (the 5m entry would have expired) to read; on
+every writing request, the premium alone, as `Caused.CacheWrite1h` minus the 5m write it replaced.
 
 **The interaction.** On a rescued request, the content changes are priced in the hot state (rule
 above). Without the ping they would have been priced cold, which is worth more. The difference is
@@ -867,11 +1017,14 @@ type PricedOp struct {
     Component string
     ChangeID  string
     Projected bool
+    Discarded bool // never priced as a saving (R44, §5.1a); still counted for diagnosis
     Saved     TierTokens // tokens the provider did not bill, by tier; never negative
     Caused    TierTokens // tokens the provider billed because of this operation; never negative
     Call      *ModelCall // spend and ping only: copied from the operation, for the host to price
     Estimated bool
-    Reason    string // "cached_prefix", "new_tail", "cold", "break_penalty", "rescued", ...
+    // Reason explains the tier for a reader: "cached_prefix", "new_tail", "cold", "break_penalty",
+    // "rescued", ... It is derived from the other facts, and no pricing rule or host reads it.
+    Reason    string
 }
 
 type TierTokens struct {
@@ -885,7 +1038,9 @@ values (`pricing.MicrosFromUSD`). Cortex prices each side with the existing code
 A break penalty has both sides: the tokens are written (`Caused.CacheWrite5m`) instead of read
 (`Saved.CacheRead`). The net is the rate difference, with no special rule.
 
-A `cacheBreak` is priced as its own operation. Cortex adds it to the operation it is attributed to.
+A `cacheBreak` is priced as its own operation. On its `PricedOp`, `ChangeID` is the `ChangeID` of
+the operation named by `AttributedTo`, so the host adds the penalty to that change's total without
+a lookup. The input carries only `AttributedTo`; the library copies the `ChangeID` once.
 `spend` and `ping` operations are not priced in tokens. `PricedOp.Call` returns their `Call.Usage`
 unchanged, and the host prices it with the same resolver as the savings (§4.6).
 
@@ -904,9 +1059,9 @@ direction.
 
 The library reports failed checks in `Result.Checks`. A failure does not stop pricing.
 
-1. **Sum:** for each section, the applied (not projected) operations' `Before − After` add up to the client size
-   minus the forwarded size. The collector sends both. A failure means a plugin changed the body
-   and did not report it.
+1. **Sum:** for each section, the operations that are applied, not projected, and not discarded —
+   `Before − After` adds up to the client size minus the forwarded size. The collector sends both.
+   A failure means a plugin changed the body and did not report it.
 2. **Order:** stages do not decrease.
 3. **Unique `ChangeID` inside a request.**
 4. **Spans:** for an operation with `Spans`, its `Before` and `After` equal the sums over its spans.
@@ -936,6 +1091,7 @@ reaches the session store, `:9094`, and the archive:
 | `PenaltyUSD` | `Caused`, priced, plus the attributed `cacheBreak` operations |
 | `Tier` | the tier with the largest `Saved` |
 | `Projected` | `Projected` |
+| `DiscardedCount` (new, additive) | per (producer, component), the count of operations with `Discarded = true` on this request (R44, §5.1a) — never priced, surfaced for diagnosis the way `Report.Discarded` is today |
 | `Estimated` | any operation `Estimated` |
 
 New fields, all additive (the ledger rule is "add, never rename"):
@@ -1007,11 +1163,13 @@ The proxy computes its dollar savings from `ops.Price`, as Cortex does:
 
 The `cachesplit` and keep-alive savings are `stateChange` operations now (§4.4), so the proxy
 prices them through `ops.Price` too. Their current rules (`cachesplitSavedUSD`,
-`keepaliveSavedUSD`) are the source of their test cases (§11), and are removed at step 9.
+`keepaliveSavedUSD`) are the source of their test cases (§11), and are removed at step 10.
 
 **Agreement between hosts.** For the same request, `ops.Price` returns the same tokens for each
-tier in both hosts. The dollars are equal only when the two rate tables are equal. The test cases
-use one fixed rate table, so they can compare dollars (§11.2).
+tier in both hosts. The dollars are equal only when the two rate tables are equal (§1). The test
+cases use one fixed rate table, so they can compare dollars (§11.2). A drift between the tables —
+a model priced in one and not the other — shows as a dollar difference on identical tokens, which
+the cross-host comparison test (§9 step 8) reports.
 
 ### 7.4 Billing plans
 
@@ -1042,7 +1200,10 @@ not money. The keep-alive window still adds up (§4.4), in usage-limit units.
 means `api`; an OAuth token from a subscription login means `subscription`. If it cannot tell, it
 uses `unknown`. Cortex and the proxy must use one rule, so the rule is a function in `ops`:
 `ops.BillingFrom(headers)`. It reads only the credential type and returns no part of the credential
-(R2).
+(R2). Both hosts must call it on the **client's** upstream credential header (`x-api-key` or
+`Authorization`) before anything rewrites it — not on the proxy's control-plane login
+(`proxy/authmode.go`), which is a different credential. A contract test in each host feeds the same
+captured headers and expects the same `Billing.Mode`.
 
 **Recording.** `event.Saving` gains `Basis`: `usd` or `subscriptionEquivalent`. `TotalAvoidedUSD`
 and the cost ledger count only `Basis = usd`. A subscription saving goes in a new usage-limit
@@ -1058,11 +1219,12 @@ missing, report too little and say why.
 | `ops.Price` panics | `settle` recovers, writes no saving for the request, and increments `ops_price_panics`. The request and its spend record are unchanged. |
 | A malformed operation (unknown kind, negative size) | Goes to `Unpriced` with a reason. The other operations are priced. |
 | Sum check fails | Pricing goes on. The failure is counted for each plugin on `/v1/pipeline`. |
-| No matching fingerprint | `Boundary.source = unknown`, §6.4. |
+| No previous fingerprint for the thread | `Boundary.source = unknown`, §6.4. |
 | Response has no usage | Nothing is priced, as today. |
 | No rate for a tier | `Saving.Provenance` is empty, as today. Tokens are on the record. |
 | Producer not on the allow-list | Kept on the event, unpriced. |
 | `on_error: observe` | `Projected = true`. Priced and shown as "would have saved", never in totals. |
+| The writeback cannot splice a change back (bifrost tool_use round-trip) | `Discarded = true`. Not priced as a saving; counted in `DiscardedCount` so the gap is visible, not silent (R44, §5.1a). |
 | `Billing.Mode` is `unknown` | Priced as `api`, every figure marked `Estimated`. |
 
 ## 9. Migration
@@ -1073,16 +1235,17 @@ Each step merges alone and leaves the totals correct.
 |---|---|---|---|
 | 1 | context-guru | **Make the test-case list** (§11), with the current computation. No `ops` code yet. | The list is reviewed. Each `differs` case cites a spec section. Each `notCovered` case is in §12. |
 | 2 | context-guru | Create the `ops` module: types, `Price`, `Compare`, checks. No callers. | Every case in the list passes (§11.4). |
-| 3 | context-guru | The engine builds `[]ops.Operation` from `Trace` and the reports. **This is new work for each change, not a read of existing fields.** The frozen state is keyed by content hash (`components/offload/state.go`), so `ChangeID` can be derived. But replays are counted only for each component today (`Report.Replays`), and `apply.Trace` records no ID or replay flag for each change. Each offloader must record, for each change, whether it replayed a frozen decision or made a new one. | Replay tests: the same `ChangeID` on each turn, `FirstApplied` once. |
-| 4 | context-guru | The proxy computes dollars from `ops` **in shadow** (§7.3): it stores its current figure, and logs the `ops` figure and the difference. | Each logged difference matches a `differs` case (§11.4). |
-| 5 | context-guru | The proxy **switches** to the `ops` figure, and its collector to `ops.Compare`. The keeper reports its pings as `ping` operations, and the engine its model calls as `spend` operations, both through the proxy's `Sink`. | Dashboard totals before and after on the same captured sessions. |
-| 6 | Cortex | `pctx.ReportOps`, the `Sink`, the collector, fingerprints. `cgModel` fills `ModelCall`. `plugins.Deps.Costs` becomes `plugins.Deps.Ops`, and `core/cost/spend` is removed. No pricing change. | The `Compare` cases pass through the Cortex collector. |
-| 7 | Cortex | tool-prune and context-guru report operations beside their current events. `settle` computes both figures, writes the current one, logs the difference. | Each logged difference matches a `differs` case; also the Cortex / cg proxy / control comparison test (`62333ee9` on `feat/contextguru-keepalive`). |
-| 8 | Cortex | `settle` switches to `ops.Price`. The new event fields. | Ledger totals before and after on the same replay. |
-| 9 | both | Remove the current events, `saving.go`, `unique.go`, the per-producer draft functions, and the proxy's rules that `ops` replaced (`uniqueRate`, `repeatRate`, the reduction part of `baselineDeltaUSD`, `cachesplitSavedUSD`, `keepaliveSavedUSD`). **Do not remove a rule that a `notCovered` case still uses.** | `go mod tidy -diff` in every module. All cases pass in both repos. |
-| 10 | Cortex | agentop's per-change view. | TUI tests. |
+| 3 | context-guru | The engine builds `[]ops.Operation` from `Trace` and the reports, and returns them in `apply.Result.Ops` with `apply.Result.Thread`. Marker and apply-only changes are built by `apply` (§4.2 rule 9). **This is new work for each change, not a read of existing fields.** The frozen state is keyed by content hash (`components/offload/state.go`), so `ChangeID` can be derived. But replays are counted only for each component today (`Report.Replays`), and `apply.Trace` records no ID or replay flag for each change. Each offloader must record, for each change, whether it replayed a frozen decision or made a new one. | Replay tests: the same `ChangeID` on each turn, `FirstApplied` once. |
+| 4 | context-guru | **The proxy's collector.** It reads `apply.Result.Ops`; keeps one fingerprint per `thread.Key` beside `dash.Recorder`; calls `ops.Compare`; sets `Billing` with `ops.BillingFrom`; implements `OpsEmitter` on `dashEmitter`; and converts each `KeepAliveReport` with `ops.FromKeepAlive`. Nothing reads its output yet. This is the largest proxy step, and it uses only engine types: none of it depends on Cortex. | The `Compare` cases pass through the proxy's collector. The `MaxCachedIdx`/B\* agreement counter is zero on captured sessions (§5.6). |
+| 5 | context-guru | The proxy computes dollars from `ops` **in shadow** (§7.3): it stores its current figure, and logs the `ops` figure and the difference. | Each logged difference matches a `differs` case (§11.4). |
+| 6 | context-guru | The proxy **switches** to the `ops` figure. `dash.Recorder`'s `TailChanged` and cold-start attribution read `ops.Compare`'s state instead of their own copy, so the proxy has one cache-state rule, not two. | Dashboard totals before and after on the same captured sessions. |
+| 7 | Cortex | **The Cortex collector.** `pctx.ReportOps`; the context-guru plugin passes `apply.Result.Ops` through it; one fingerprint per `thread.Key`; `cgModel` fills `ModelCall`; `pingEmitter` calls `ops.FromKeepAlive` and implements `OpsEmitter`. `plugins.Deps.Costs` and `core/cost/spend` are removed. No pricing change. | The `Compare` cases pass through the Cortex collector. |
+| 8 | Cortex | tool-prune and context-guru report operations beside their current events. `settle` computes both figures, writes the current one, logs the difference. | Each logged difference matches a `differs` case; also the Cortex / cg proxy / control comparison test (`62333ee9` on `feat/contextguru-keepalive`). |
+| 9 | Cortex | `settle` switches to `ops.Price`. The new event fields. | Ledger totals before and after on the same replay. |
+| 10 | both | Remove the current events, `saving.go`, `unique.go`, the per-producer draft functions, and the proxy's rules that `ops` replaced (`uniqueRate`, `repeatRate`, the reduction part of `baselineDeltaUSD`, `cachesplitSavedUSD`, `keepaliveSavedUSD`). **Do not remove a rule that a `notCovered` case still uses, nor any path §10.1 keeps** (gates, events, tool inventory, holdout replay, `KeepAliveReport`). | `go mod tidy -diff` in every module. All cases pass in both repos. |
+| 11 | Cortex | agentop's per-change view. | TUI tests. |
 
-Expected differences at step 8 (and, for the proxy, at step 5). Each one corrects a known error, so none is a regression:
+Expected differences at step 9 (and, for the proxy, at step 6). Each one corrects a known error, so none is a regression:
 
 - The penalty is lower. The current one uses the whole `cache_write` as an upper bound.
 - The tier for each change comes from its position, not from a unique fraction for the request.
@@ -1098,6 +1261,40 @@ Expected differences at step 8 (and, for the proxy, at step 5). Each one correct
 - Pricing of `reroute` (inference-router).
 - Persisting fingerprints across a restart.
 
+### 10.1 What this design does not replace
+
+`Operation`/`RequestOps` carries money facts only — tokens, tiers, the IDs needed to join and
+price them. The engine and the proxy's dashboard also need facts an `Operation` deliberately does
+not carry (R2: no content; no names): tool/MCP names, invocation signals, declaration ownership,
+replay text for a holdout, per-ping strategy metadata, per-component decline counters. None of
+that is rebuilt from `Operation`. This design changes nothing about where it lives:
+
+- **Component `Gate`/`Event` counters** (`Report.Gates`, `Report.Events`) — the operator's answer
+  to "is this component declining, or just absent on this traffic" — are unaffected. They are not
+  money, carry no `ChangeID`, and have no place in `Operation`; they keep rolling up into `/stats`
+  the way they do today. Migration step 10 removes the pricing code this design replaces
+  (`saving.go`, `unique.go`, the per-producer draft functions); it removes no gate/event path.
+- **Tool/MCP advisory surfaces** (`dash/toolinventory.go`, `toolsuggest.go`, `toolremoval.go`,
+  `adapttools.go`, `declcredit.go`) read declaration **names**, per-call invocation signals, and
+  the fact that a declaration lives in `tools`. `tp:decl-set-7f3a`'s operation (§4, worked example
+  op1) reports "12 declarations, 8,000 tokens," never which ones — these surfaces keep reading the
+  engine's own declaration-scan data, not `Operation`.
+- **Holdout/control-arm replay** (`dash/kvcachesuggest.go`, `kvcacheholdout.go`,
+  `adaptcompaction.go`) needs the pre/post **text** at a message index to re-run a component under
+  a different config. `Operation` carries no text (R2). These keep their own stored-text path;
+  they are not driven by `ChangeID`/`Size`.
+- **Keep-alive strategy attribution** (`dash/campaignsavings.go`) groups by strategy id, preset,
+  stop reason — fields `components.KeepAliveReport` already carries (§4.6 keeps it as the keeper's
+  report path) but a bare `ping` operation does not. The dashboard columns these feed keep reading
+  `KeepAliveReport`, not the `ping` operation's `Call`.
+- **The headline money total** (`dash/savings.go`'s `baseline − cost − cgllm + cachesplit + kaNet`)
+  IS reconstructable from `event.Saving`/`ChangeSaving`, because §7.1/§7.2 keep the cachesplit,
+  keep-alive and spend terms as separate, summable fields. Only the advisory/diagnostic detail
+  above is out of this design's reach.
+
+If a later design wants to drive any of the surfaces above from `ops`, that is new scope, not an
+extension of this one.
+
 ## 11. Test cases
 
 Before the implementation starts, we make an **exhaustive list of test cases** with the current
@@ -1112,7 +1309,7 @@ each place where the new figure differs from the current one on purpose.
 | `settle`: `pruneDraft`, `compactionDraft`, `rewritePenalty` | Cortex (`feat/contextguru-keepalive`) | tool-prune cases, rewrite-penalty cases |
 
 Cortex's `repeatUsage` is a copy of the proxy's `repeatRate`, so the proxy is the source for the
-context-guru reductions. The Cortex rules are removed at step 9, so their figures are recorded
+context-guru reductions. The Cortex rules are removed at step 10, so their figures are recorded
 once: a generator runs in Cortex on `feat/contextguru-keepalive` and writes them into the case
 files. context-guru never imports Cortex.
 
@@ -1155,12 +1352,13 @@ drops the combinations that cannot occur, and states the reason for each drop in
 | Kind | `reduce`, `add`, `add` with `Reverses` (a restore), `stateChange` (each `Mechanism`) |
 | `FirstApplied` | true, false |
 | Position | before B\*; after B\* and at or before `L`; after `L`; no breakpoint in the body; spans on both sides of B\* |
-| Cache state | hot; cold (expired); cold (first request); rescued by a ping; unknown (restart) |
+| Cache state | hot; cold (expired, `Lifetime: exact`); unknown (gap past an unproven `Lifetime: minimum`, R45); cold (first request); rescued by a ping; unknown (restart) |
 | Cache result | full hit; partial hit; miss with write ≥ input; miss with write < input |
 | Breakpoints | end of `system` + last message (Claude Code); one after `tools` only; none; one inside the messages before a break |
 | Billing | `api`; `subscription` with the user paying for spend; `subscription` with the operator paying; `unknown` |
 | TTL of the next breakpoint | 5m, 1h |
-| Component type | summarizer (`summarize`, `cache_aware_summarizer`); other context-guru component; tool-prune |
+| Component type | summarizer (`summarize`, `cache_aware_summarizer`); other context-guru component; a marker component whose bytes `apply` writes (`toolschema`, `toolfilter`, `cachesplit`, `headttl`); tool-prune |
+| Lifetime | `exact` (Anthropic); `minimum` (OpenAI GPT-5.6+); `unknown` |
 | Tokens | counted by a tokenizer; `bytes-estimate`; with and without the proxy's `BilledTokenFactor` |
 
 **B. Hand-written cases.** These test how operations interact, which a cross product cannot do:
@@ -1171,7 +1369,9 @@ drops the combinations that cannot occur, and states the reason for each drop in
    producers whose changes are both before the break.
 3. Two producers on the same content (R25), and a structure change that moves positions (`Splice`).
 4. A projected operation: priced, shown as "would have saved", and not counted. A reverted change
-   that still made a model call: no reduction, and its `spend` operation counted.
+   that still made a model call: no reduction, and its `spend` operation counted. A discarded
+   change: reported, not priced as a saving, counted in `DiscardedCount`, and its `spend` operation
+   (if any) still priced (R44).
 5. Each `Unpriced` reason, and each `CheckFailure`.
 6. `Saving.Changes` over the limit, which becomes an `Aggregate` (§7.1).
 7. `spend` and `reroute` operations, which pass through unpriced.
@@ -1185,8 +1385,23 @@ drops the combinations that cannot occur, and states the reason for each drop in
 12. The interaction on a rescued request, and the conservation check on every case.
 13. The worked example on a subscription plan: the same tokens, in usage-limit units, with a
     summarizer call paid by the operator.
+14. A `coref` batch: three cuts in messages that are not next to each other, as one operation with
+    three spans, one `ChangeID` and one attributed `cacheBreak`; its payback across later turns.
+15. `extract_llm_sweep`: a prefix ask that reads the previous turn's cache, and a fallback ask that
+    pays fresh input. Both are `spend` operations; their `Call.Usage` differs.
+16. `breakpointTTL`: a 1h head written and read after 20 minutes (both legs); a 1h head written and
+    never read (cost leg only, negative total); the measured blanket-versus-gated case from
+    `apply/headttl.go`.
+17. A discarded change (R44): a `cacheinject`-shaped change on a `tool_use` message that the
+    writeback drops. Reported, not priced as a saving, counted in `DiscardedCount`.
+18. `readlifecycle` and `skeleton`: the same decision with different replacement bytes on two turns
+    keeps one `ChangeID` (§4.2 rule 7).
+19. Interleaved threads: a main thread whose previous request is five requests back, behind four
+    subagent requests, still compares with its own previous request (§5.3).
+20. `ops.FromKeepAlive`: a `KeepAliveReport` from each host's emitter gives the same `ping`
+    operation.
 
-**C. Cases from real traffic.** For each difference that a shadow step (§9 steps 4 and 7) logs and
+**C. Cases from real traffic.** For each difference that a shadow step (§9 steps 5 and 8) logs and
 no case matches, add a case. Then decide: it is a bug in `ops`, or a new `differs` case with a
 reason.
 
@@ -1218,10 +1433,10 @@ Each has test cases that are marked `differs` or `notCovered` until it is decide
    to give it to the keep-alive window, because the window caused the state. That would make the
    keep-alive figure larger on every request with large reductions. A decision is needed before the
    test cases are frozen.
-2. **Content shared by two threads.** A fork starts with its parent's content, so the provider can
-   read the parent's entry. The model scopes the cache state to a thread (§5.4), so the fork's first
-   request is `cold` or `unknown`, and a read from the parent's entry is not credited to anyone.
-   That reports too little.
+2. **Content shared by two threads — closed.** A fork starts with its parent's content, so the
+   provider can read the parent's entry. `internal/thread` marks such a request with `Inherits`,
+   and the host starts the fork from the parent's fingerprint (§5.3). So the fork's first request
+   is scored against the parent's cache, not as `cold`.
 3. **Usage-limit weights.** The provider publishes no weights for each tier, so the defaults (§7.4)
    are the API rate ratios, an estimate. It is not verified whether a subscription response carries
    usage-limit headers that a host could use to measure the weights. If it does, a calibration
@@ -1230,3 +1445,47 @@ Each has test cases that are marked `differs` or `notCovered` until it is decide
    (o200k_base to the provider's tokenizer). Cortex uses a bytes ratio. Option: `Input` takes a
    factor for each tokenizer name, so `ops.Price` applies the correction in one place. The
    generated cases test both, with and without the factor.
+
+## 13. Second review: what changed, and what was checked
+
+A second review checked the model against the real engine (`components/`, `apply/`, `expand/`,
+`keepalive/`, `internal/thread/`, `dash/`), Cortex's cost code, and both deployments. It found the
+items below. Each is fixed in the section named.
+
+| Finding | Fix |
+|---|---|
+| A change the writeback discarded was "not reported", so issue #32's blind spot came back | R44, §5.1a: reported with `Discarded`, never priced, counted in `DiscardedCount` |
+| A gap past an OpenAI-style minimum TTL scored `cold`, inventing a saving | R45, §5.4: `CacheState.Lifetime`; a `minimum` with no proof scores `unknown` |
+| Dashboard and diagnostic surfaces could lose their data at step 10, with no statement | §10.1 lists what keeps its own path; step 10 must not remove it |
+| `ChangeID` included replacement bytes, so `readlifecycle` and `skeleton` churned it | §4.2 rule 7: content key only, as `frozenKey` |
+| A new `Sink` duplicated the keeper's existing `KeepAliveEmitter` | §4.6: keep `KeepAliveEmitter`; convert with `ops.FromKeepAlive`; `OpsEmitter` for detached calls |
+| Thread matching reinvented `internal/thread` and lost `Inherits`/`Disagree` | §5.3: use `thread.Result`; one fingerprint per `thread.Key` |
+| The cachesplit baseline could be a stale request | §5.3: compare with this thread's previous request |
+| The proxy had no specified place to collect operations | §4.6, §5: `apply.Result.Ops`, the same for both hosts |
+| Migration compressed the proxy's collector into one switch step | §9: step 4 builds it, step 6 retires the duplicate cache-state rule |
+| `headttl`'s premium was priced only when the entry was read | §4.4: a cost leg on every writing request |
+| `coref`'s batch was shown as a single cut | §4.2 rule 10, test case 14 |
+| Marker components: the decider is not the writer | §4.2 rule 9 |
+| "One central place" read as one rate table | §1: the logic is central; rates stay host-local |
+| `AttributedChange` duplicated a fact | removed; the library copies the `ChangeID` onto the priced penalty (§6.3) |
+
+**Checked and found correct, no change:**
+
+- `extract_llm_sweep`'s prefix ask fits a `spend` operation; only test cases were missing (§11.3, 15).
+- Withdrawing R13 (reversibility, stash key) holds: `expand` finds stashed content by its marker.
+- Two components that produce identical bytes count separately today too (component is in the
+  `seenKeys` key), so per-component `ChangeID` is not a regression.
+- Session, thread, agent and billing account are four different facts; none can be dropped.
+- `Component = ""` for a one-operation plugin costs nothing.
+
+**Kept as it is, with the trade-off stated:**
+
+- `FirstApplied` rides on the priced operation although only reports read it. A side channel would
+  add a second structure for one optional field.
+- `agentdiet` reduces a step only after `delay_steps`, so its `FirstApplied` marks when the decision
+  was made, not when the content entered the context. A report that dates payback must use the
+  first event with the `ChangeID`, not the content's first turn.
+- The collector computes B\* from the forwarded body instead of trusting the engine's
+  `MaxCachedIdx`, because in Cortex later plugins change the body after the engine. In the proxy
+  the two must agree, and a counter checks it (§5.6).
+

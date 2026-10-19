@@ -234,7 +234,7 @@ collector adds a break attributed to op12:
 ```json
 { "id": "op13", "kind": "cacheBreak", "cause": "producer",
   "at": {"section": "messages", "index": 5},
-  "attributedTo": "op12", "attributedChange": "cg:coref:5e2d" }
+  "attributedTo": "op12" }
 ```
 
 ### Where the breakpoints matter
@@ -300,9 +300,10 @@ The user is idle after turn 9. The keeper sends a ping 4 minutes after turn 9. T
 }
 ```
 
-The ping re-sends turn 9's forwarded body (40,310 tokens) and gets a 1-token reply. The keeper sends
-this report through the host's `Sink`, because a ping has no request to travel with (design §4.6).
-The usage in `call` is what the provider billed. `ops.Price` returns it unchanged, and the host
+The ping re-sends turn 9's forwarded body (40,310 tokens) and gets a 1-token reply. A ping has no
+request to travel with, so the keeper reports it the way it does today: a `KeepAliveReport` to the
+host's `KeepAliveEmitter`. The host converts that report into the `RequestOps` above with
+`ops.FromKeepAlive` (design §4.6). The usage in `call` is what the provider billed. `ops.Price` returns it unchanged, and the host
 prices it with the same rates as the savings: 40,310 read + 10 input + 1 output = **−$0.01214**.
 
 ### Turn 10: the rescued request
@@ -390,8 +391,8 @@ The summarizer call is a `spend` operation, linked by `produced`:
   } }
 ```
 
-The call finished before the response, so op31 travels in turn 12's own report, through
-`pctx.ReportOps`. The host prices `call.usage` on the summarizer model: 16,110 input + 1,500 output
+The call finished before the response, so op31 travels in turn 12's own `apply.Result.Ops`, which
+the context-guru plugin passes to `pctx.ReportOps`. The host prices `call.usage` on the summarizer model: 16,110 input + 1,500 output
 = **−$0.02361**.
 
 ### The price
@@ -564,6 +565,6 @@ the cost ledger's money columns.
 | `call` | the billed usage of a ping or a model call; the host prices it with the savings |
 | `produced` | join a call's cost to the change it paid for |
 | `id` | names an operation inside its request: results, check failures, and `attributedTo` |
-| `attributedTo`, `attributedChange` | the operation, and the change, a `cacheBreak` is charged to; absent means nobody |
+| `attributedTo` | the operation a `cacheBreak` is charged to; absent means nobody. The priced penalty carries that operation's `changeId` |
 | `billing` (`RequestOps`) | how the host values the tokens: money, or usage-limit units |
 | `call.paidBy` | who paid for a spend or a ping: the user's plan, or the operator's key |
