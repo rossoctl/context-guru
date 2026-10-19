@@ -17,6 +17,8 @@ type PrefixFacts struct {
 	Bypassed     bool
 	// Rewrote says context-guru shortened this request (tokens_after < tokens_before).
 	Rewrote bool
+	// TS is the request time in epoch ms.
+	TS int64
 	// RewroteEarlier is sticky: some earlier, non-bypassed request of the thread was rewritten,
 	// so the provider cache holds a history that differs from the original one.
 	RewroteEarlier bool
@@ -25,7 +27,7 @@ type PrefixFacts struct {
 // FactsOf reads the prefix facts off a captured event.
 func FactsOf(e *Event) PrefixFacts {
 	return PrefixFacts{
-		Model: e.Model, DeclDigest: e.DeclDigest, Tools: e.Tools,
+		TS: e.TS, Model: e.Model, DeclDigest: e.DeclDigest, Tools: e.Tools,
 		SystemHash: e.SystemHash, SystemBlocks: e.SystemBlocks,
 		Effort: e.ReasoningEffort, Thinking: e.ThinkingMode, Budget: e.ThinkingBudget,
 		Bypassed: e.Bypassed,
@@ -33,15 +35,29 @@ func FactsOf(e *Event) PrefixFacts {
 	}
 }
 
-// ObservePrefix stores cur as the thread's latest facts and returns the cause of a miss on cur:
-// one of the Cause* constants, or "" when nothing differed or there is nothing to compare with.
-// The caller uses the cause only on a miss. It must run once per request, in request order,
-// like ObserveThread, and it takes the same key. fromThread is the thread a new thread
-// inherits from (hasFrom says there is one; the primary thread is ""). It is read only when the
+// ObservePrefix compares cur with the thread's previous request of the SAME model, and returns:
+//
+//   - cause: one of the Cause* constants, or "" when nothing differed or there is nothing to
+//     compare with. The caller uses it only on a miss.
+//   - gapMs: the time since that same-model request, the figure the TTL test must use. A cache
+//     entry belongs to one model, so a request on model B in between does not refresh model A's
+//     entry. -1 means the thread has no same-model request: the entry never existed, so no TTL
+//     can have expired it.
+//   - known: false when the thread has no facts at all. The caller then keeps the gap it
+//     measured itself (a restart forgets facts but not recency).
+//
+// A thread whose earlier requests were all on another model reads CauseModelChanged. That is a
+// miss no TTL can rescue, and it is a choice the agent made, so it stays visible as a
+// prefix_change rather than hiding in cold_start.
+//
+// commit says whether cur becomes the thread's new baseline. A failed request must not: its
+// tools or effort would then stand in for the last request that really reached the cache.
+// It must run once per request, in request order, with the key ObserveThread uses. fromThread is
+// the thread a new thread inherits from (hasFrom says there is one); it is read only when the
 // thread has no facts yet.
-func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom bool, cur PrefixFacts, sinceLastMs int64) string {
+func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom bool, cur PrefixFacts, commit bool) (cause string, gapMs int64, known bool) {
 	if r == nil {
-		return ""
+		return "", 0, false
 	}
 	key := thread.Key(session, threadID)
 	r.mu.Lock()
@@ -49,25 +65,37 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 	if r.lastFacts == nil {
 		r.lastFacts = map[string]PrefixFacts{}
 	}
-	prev, ok := r.lastFacts[key]
-	if !ok && hasFrom {
-		prev, ok = r.lastFacts[thread.Key(session, fromThread)]
+	any := func(k string) (PrefixFacts, bool) { f, ok := r.lastFacts[k]; return f, ok }
+	perModel := func(k string) string { return k + "\x00" + cur.Model }
+	prev, same := any(perModel(key))
+	_, hadAny := any(key)
+	if !same && !hadAny && hasFrom {
+		pk := thread.Key(session, fromThread)
+		prev, same = any(perModel(pk))
+		_, hadAny = any(pk)
 	}
-	// A bypassed request re-writes the original history into the cache, which ends the effect.
-	cur.RewroteEarlier = !cur.Bypassed && (prev.RewroteEarlier || prev.Rewrote)
-	r.lastFacts[key] = cur
-	if !ok {
-		return ""
+	if commit {
+		// A bypassed request re-writes the original history into the cache, which ends the
+		// effect of an earlier rewrite.
+		cur.RewroteEarlier = same && !cur.Bypassed && (prev.RewroteEarlier || prev.Rewrote)
+		r.lastFacts[key] = cur
+		r.lastFacts[perModel(key)] = cur
 	}
-	return prefixCause(prev, cur, sinceLastMs)
+	switch {
+	case same:
+		gap := cur.TS - prev.TS
+		return prefixCause(prev, cur, gap), gap, true
+	case hadAny:
+		return CauseModelChanged, -1, true
+	}
+	return "", 0, false
 }
 
 // prefixCause compares two consecutive requests of one thread. The first difference wins, in
-// the order of the Cause* constants. "" means nothing measured differed.
+// the order of the Cause* constants. Both requests are on one model (ObservePrefix picks them
+// so); a model switch is named there. "" means nothing measured differed.
 func prefixCause(prev, cur PrefixFacts, sinceLastMs int64) string {
 	switch {
-	case prev.Model != cur.Model:
-		return CauseModelChanged
 	case cur.Bypassed && (prev.RewroteEarlier || prev.Rewrote):
 		return CauseCompactionAfterRewrite
 	case cur.Bypassed != prev.Bypassed:

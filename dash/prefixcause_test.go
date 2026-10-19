@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"math"
 	"path/filepath"
 	"testing"
 )
@@ -12,9 +13,19 @@ func newFactsRecorder() *Recorder {
 // causeMiss runs one cache-missing request through the same calls proxy/dashcapture.go makes and
 // returns the event, so the test sees the stored reason AND cause.
 func causeMiss(r *Recorder, session, threadID string, ts int64, f PrefixFacts) *Event {
+	return causeMissWith(r, session, threadID, ts, f, 0, 200)
+}
+
+// causeMissWith is causeMiss with a cache read and an HTTP status, and it mirrors the gap rule
+// in proxy/dashcapture.go: the TTL test uses the gap since the last request on the SAME model.
+func causeMissWith(r *Recorder, session, threadID string, ts int64, f PrefixFacts, read int64, status int) *Event {
+	f.TS = ts
 	seenSession, seenModel, since, _ := r.ObserveThread("t1", session, threadID, f.Model, ts, 0)
-	cause := r.ObservePrefix(session, threadID, "", false, f, since)
-	e := &Event{CacheWrite: 400_000}
+	cause, modelGap, known := r.ObservePrefix(session, threadID, "", false, f, status >= 200 && status < 300)
+	if known {
+		since = modelGap
+	}
+	e := &Event{CacheWrite: 400_000, CacheRead: read}
 	e.AttributeCache(seenSession, seenModel, since, fiveMin, cause)
 	return e
 }
@@ -59,19 +70,44 @@ func TestPrefixCauses(t *testing.T) {
 	}
 }
 
-// A model switch on one thread is a model_changed prefix change. The cold-start rule fires
-// only for a model never seen at all, so the first model is seen before the switch.
+// A model switch is named model_changed when the thread has no earlier request on the new model.
 func TestAModelSwitchIsNamed(t *testing.T) {
 	const t0 = int64(1_700_000_000_000)
 	r := newFactsRecorder()
-	a := base()
-	causeMiss(r, "s1", "", t0, a)
+	causeMiss(r, "s1", "", t0, base())
 	b := base()
 	b.Model = "m2"
-	r.seenModel["t1\x00m2"] = true // m2 was used elsewhere, so this is not a cold start
+	r.seenModel["t1\x00m2"] = true // m2 ran in another session, so this is not a cold start
 	e := causeMiss(r, "s1", "", t0+60_000, b)
 	if e.CacheMissReason != CachePrefixChange || e.CacheMissCause != CauseModelChanged {
 		t.Errorf("reason/cause = %q/%q, want prefix_change/model_changed", e.CacheMissReason, e.CacheMissCause)
+	}
+}
+
+// A, B, C on one thread: opus, sonnet, opus. The cache entry belongs to a model, so B does not
+// refresh A's entry. The gap C measures is from A, not from B.
+func TestAnEntryBelongsToItsModel(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	other := base()
+	other.Model = "m2"
+	run := func(cAfter int64, cRead int64) *Event {
+		r := newFactsRecorder()
+		r.seenModel["t1\x00m2"] = true
+		causeMiss(r, "s1", "", t0, base())
+		causeMiss(r, "s1", "", t0+60_000, other)
+		return causeMissWith(r, "s1", "", t0+cAfter, base(), cRead, 200)
+	}
+	// C is 6 min after A but only 5 min after B. Measured from B (the thread's last request) the
+	// entry looks live. Measured from A, the last request on C's model, it expired.
+	if e := run(6*60_000, 0); e.CacheMissReason != CacheTTLExpiry || e.CacheMissCause != "" {
+		t.Errorf("C at 6 min = %q/%q, want ttl_expiry with no cause", e.CacheMissReason, e.CacheMissCause)
+	}
+	// 2 min after A: the entry is live. A read is a hit, and a miss has no model_changed cause.
+	if e := run(2*60_000, 5000); e.CacheMissReason != CacheHit {
+		t.Errorf("C at 2 min with a read = %q, want hit", e.CacheMissReason)
+	}
+	if e := run(2*60_000, 0); e.CacheMissCause == CauseModelChanged || e.CacheMissReason != CacheUnknown {
+		t.Errorf("C at 2 min, missed = %q/%q, want unknown and never model_changed", e.CacheMissReason, e.CacheMissCause)
 	}
 }
 
@@ -128,13 +164,13 @@ func TestAnInheritingThreadComparesWithItsParent(t *testing.T) {
 	changed := base()
 	changed.SystemHash = "s2"
 	r := newFactsRecorder()
-	r.ObservePrefix("s1", "", "", false, base(), 0)
-	if got := r.ObservePrefix("s1", "p:fork", "", true, changed, 60_000); got != CauseSystemChanged {
+	r.ObservePrefix("s1", "", "", false, base(), true)
+	if got, _, _ := r.ObservePrefix("s1", "p:fork", "", true, changed, true); got != CauseSystemChanged {
 		t.Errorf("fork from the primary thread = %q, want %q", got, CauseSystemChanged)
 	}
 	r = newFactsRecorder()
-	r.ObservePrefix("s1", "", "", false, base(), 0)
-	if got := r.ObservePrefix("s1", "p:fork", "", false, changed, 60_000); got != "" {
+	r.ObservePrefix("s1", "", "", false, base(), true)
+	if got, _, _ := r.ObservePrefix("s1", "p:fork", "", false, changed, true); got != "" {
 		t.Errorf("fork with no parent = %q, want no cause", got)
 	}
 }
@@ -175,5 +211,72 @@ func TestCacheMissCausePersistsAndMigrates(t *testing.T) {
 	}
 	if old.CacheMissReason != CachePrefixChange || old.CacheMissCause != "" {
 		t.Errorf("old row after migration = %q/%q, want prefix_change with an empty cause", old.CacheMissReason, old.CacheMissCause)
+	}
+}
+
+// Rewrite, then two normal turns, then a bypass: the earlier rewrite still explains the bypass.
+// Only the sticky RewroteEarlier flag can say so, since neither turn before the bypass was rewritten.
+func TestAnEarlierRewriteStillExplainsALaterBypass(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	r := newFactsRecorder()
+	rw := base()
+	rw.Rewrote = true
+	by := base()
+	by.Bypassed = true
+	causeMiss(r, "s1", "", t0, rw)
+	causeMiss(r, "s1", "", t0+60_000, base())
+	causeMiss(r, "s1", "", t0+120_000, base())
+	if e := causeMiss(r, "s1", "", t0+180_000, by); e.CacheMissCause != CauseCompactionAfterRewrite {
+		t.Errorf("cause = %q, want %q", e.CacheMissCause, CauseCompactionAfterRewrite)
+	}
+}
+
+// A failed request does not become the thread's baseline.
+func TestAFailedRequestDoesNotReplaceTheBaseline(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	r := newFactsRecorder()
+	causeMiss(r, "s1", "", t0, base())
+	bad := base()
+	bad.DeclDigest = "d-bad"
+	causeMissWith(r, "s1", "", t0+60_000, bad, 0, 400)
+	// Same tools as the first request: nothing changed against the last GOOD request.
+	if e := causeMiss(r, "s1", "", t0+120_000, base()); e.CacheMissReason != CacheUnknown || e.CacheMissCause != "" {
+		t.Errorf("after a failed request = %q/%q, want unknown with no cause", e.CacheMissReason, e.CacheMissCause)
+	}
+}
+
+// A miss that wrote no cache is not a prefix change, even when something differs.
+func TestAMissThatWroteNothingIsNotAPrefixChange(t *testing.T) {
+	e := &Event{CacheWrite: 0}
+	e.AttributeCache(true, true, 60_000, fiveMin, CauseToolsChanged)
+	if e.CacheMissReason != CacheUnknown || e.CacheMissCause != "" {
+		t.Errorf("= %q/%q, want unknown with no cause", e.CacheMissReason, e.CacheMissCause)
+	}
+}
+
+// Overview's prefix_change cost counts the measured bucket only. A miss that is now unknown
+// leaves it by design (issue #600): the figure no longer holds guesses.
+func TestOverviewPrefixChangeCostCountsOnlyMeasuredRows(t *testing.T) {
+	db := openTestDB(t)
+	mk := func(ts int64, reason, cause string, cost float64) *Event {
+		e := mkEvent(ts, "s1", "m", 10_000, 10_000)
+		e.CostUSD, e.BaselineCostUSD = cost, cost
+		e.CacheMissReason, e.CacheMissCause = reason, cause
+		return e
+	}
+	if err := db.insertBatch([]*Event{
+		mk(1_000, CacheHit, "", 0.10),
+		mk(2_000, CachePrefixChange, CauseToolsChanged, 0.50),
+		mk(3_000, CacheUnknown, "", 0.70),
+		mk(4_000, CacheUnknown, CauseConcurrent, 0.90),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := db.Overview(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.PrefixChangeRequestsAll != 1 || math.Abs(o.PrefixChangeCostAll-0.50) > 1e-12 {
+		t.Errorf("prefix_change all = %d rows $%.2f, want 1 row $0.50", o.PrefixChangeRequestsAll, o.PrefixChangeCostAll)
 	}
 }

@@ -89,7 +89,7 @@
    "A conversation is (account, session, model). The account is in the key because a session id is client-supplied and can collide between accounts; the MODEL is in it because a cache entry does not transfer between models, so a request on one model cannot read another model's entry and the two are not each other's successor.",
    "A request with no next request in the same conversation has NO idle time. It is counted separately and excluded from every average, never treated as a zero gap.",
    "Keep-alive ping rows written by context-guru itself are excluded from this dataset: counted, they would split one real idle gap into two short ones.",
-   "A cache miss recorded as prefix_change or cold_start cannot be rescued by any TTL. Those rows force a miss in every simulated arm and are reported as forced_misses.",
+   "A cache miss recorded as prefix_change, cold_start or unknown cannot be rescued by any TTL. Those rows force a miss in every simulated arm and are reported as forced_misses.",
    "Requests whose token accounting was incomplete have an UNKNOWN cost and contribute nothing to any dollar figure. They are counted, never valued at zero.",
    "The one-hour write rate is derived from a multiplier because no gateway publishes one. Both the multiplier and the resulting rate are editable above.",
    "A ping cannot generate nothing on a provider that requires max_tokens ≥ 1, so its minimum output is priced and stated rather than rounded away.",

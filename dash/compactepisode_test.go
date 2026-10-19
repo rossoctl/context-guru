@@ -1348,3 +1348,26 @@ func TestAReplayOnTheCommissioningTurnIsNotAFirstRemoval(t *testing.T) {
 		})
 	}
 }
+
+// An unexplained miss (unknown) is not credit and not "other": it goes to the same excluded
+// bucket as prefix_change (issue #600). It also stays a debit, like prefix_change.
+func TestAnUnexplainedMissIsNotSummarizeCredit(t *testing.T) {
+	out := walk([]compactRow{
+		row(1, 1_000, fresh, miss(CacheHit), wrote(5_000)),
+		row(2, 10_000, saved(100_000), miss(CacheUnknown), wrote(50_000)),
+		row(3, testSpan, saved(100_000), miss(CacheHit)),
+	}, exactWindow, testPrice)
+	e := only(t, out)
+	if offUSD(e.OtherCreditUSD, 0) || offUSD(e.ColdCreditUSD, 0) {
+		t.Errorf("unknown must be credited nowhere: other=%v cold=%v", e.OtherCreditUSD, e.ColdCreditUSD)
+	}
+	if want := 100_000 * readRate; offUSD(out.Ledger.PrefixChangeUSD, want) {
+		t.Errorf("excluded bucket = %v, want %v", out.Ledger.PrefixChangeUSD, want)
+	}
+	if want := 100_000 * readRate; offUSD(out.Ledger.CountedUSD(), want) {
+		t.Errorf("counted = %v, want %v (only the hit turn)", out.Ledger.CountedUSD(), want)
+	}
+	if want := (5_000 + 50_000) * writeRate; offUSD(e.InvalidationDebitUSD, want) {
+		t.Errorf("invalidation debit = %v, want %v", e.InvalidationDebitUSD, want)
+	}
+}

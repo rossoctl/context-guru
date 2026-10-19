@@ -517,9 +517,23 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	if c.inv != nil {
 		e.DeclDigest = c.inv.Digest
 	}
-	cause := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit, dash.FactsOf(e), sinceMs)
-	e.AttributeCache(seenSession, seenModel, entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt),
-		cacheAttributionTTLMs(e.Provider, e.Model), cause)
+	//
+	// The gap for the TTL test is measured from the last request on the SAME model: a cache entry
+	// belongs to one model, so a request on another model between two requests on this one does
+	// not refresh it. SinceLastMs below keeps the per-thread gap.
+	cause, modelGap, known := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
+		dash.FactsOf(e), e.Status >= 200 && e.Status < 300)
+	ageGap := sinceMs
+	if known {
+		ageGap = modelGap
+	}
+	// A ping refreshed the entry of the model that last ran in the thread. Cut the age only when
+	// that was this model.
+	age := ageGap
+	if ageGap == sinceMs {
+		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
+	}
+	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model), cause)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
 	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.

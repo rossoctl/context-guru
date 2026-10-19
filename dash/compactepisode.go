@@ -185,8 +185,8 @@ type CompactionEpisode struct {
 	// live). Kept apart from the replay buckets because it is a different claim: one turn, no
 	// replay multiple.
 	FirstRemovalCreditUSD float64 `json:"first_removal_credit_usd"`
-	// OtherCreditUSD is cold_start and unknown turns. Reported apart rather than folded into
-	// either: a session's first turn had no entry to preserve, and "unknown" is not a verdict.
+	// OtherCreditUSD is cold_start turns. Reported apart rather than folded into either: a
+	// session's first turn had no entry to preserve. An unknown turn is not credited at all.
 	OtherCreditUSD float64 `json:"other_credit_usd"`
 	// InvalidationDebitUSD is what THIS component's own rewrite cost on t0: the cache-creation
 	// tokens that turn wrote, at that model's write rates. An UPPER BOUND, deliberately — some
@@ -799,8 +799,9 @@ func chargeRowCosts(e *CompactionEpisode, r compactRow, p kvcache.Pricing, opens
 	switch {
 	case opensNew:
 		e.InvalidationDebitUSD += causedWriteUSD(r, p)
-	case r.MissReason == CachePrefixChange:
-		// A prefix_change turn inside a span we opened is a cache write charged because the prompt
+	case r.MissReason == CachePrefixChange || r.MissReason == CacheUnknown:
+		// A prefix_change turn (or an unexplained, unknown one) inside a span we opened is a cache
+		// write charged because the prompt
 		// no longer matched what was cached — and inside a summarized span the thing that changes
 		// the prompt is US. It is already excluded from the credit for that reason (see creditTurn);
 		// excluding it from the DEBIT as well would be having it both ways, counting neither our
@@ -833,8 +834,9 @@ func chargeRowCosts(e *CompactionEpisode, r compactRow, p kvcache.Pricing, opens
 //   - ttl_expiry: the entry had lapsed, so an uncompacted prefix would have been RE-CREATED.
 //     ColdCreditUSD.
 //   - hit: the entry was live, so the removed span would have been read. ReadCreditUSD.
-//   - cold_start / unknown: reported apart, never blended into either. OtherCreditUSD.
-//   - prefix_change: not credited. The entry missed because the prompt CHANGED, which inside a
+//   - cold_start: reported apart, never blended into either. OtherCreditUSD.
+//   - prefix_change / unknown: not credited. An unexplained miss is never credit. The entry
+//     missed because the prompt CHANGED, which inside a
 //     span we opened is frequently our own doing, so crediting it would credit this component for
 //     the misses it caused. The write is charged instead (see chargeRowCosts).
 func creditTurn(e *CompactionEpisode, led *SummarizeLedger, r compactRow) bool {
@@ -859,9 +861,10 @@ func creditTurn(e *CompactionEpisode, led *SummarizeLedger, r compactRow) bool {
 	case r.MissReason == CacheHit:
 		e.ReadCreditUSD += rest
 		led.ReplayUSD += rest
-	case r.MissReason == CachePrefixChange:
+	case r.MissReason == CachePrefixChange || r.MissReason == CacheUnknown:
+		// An unexplained miss is not credit either (issue #600).
 		led.PrefixChangeUSD += rest
-	default: // cold_start, unknown, ""
+	default: // cold_start, ""
 		e.OtherCreditUSD += rest
 		led.ReplayUSD += rest
 	}

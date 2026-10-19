@@ -1142,6 +1142,10 @@ func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, t
 		e.CacheMissReason = CacheUnknown
 	case cause == CauseConcurrent:
 		e.CacheMissReason, e.CacheMissCause = CacheUnknown, cause
+	case e.CacheWrite <= 0:
+		// Nothing was written, so no prefix was re-created: a changed prefix would have
+		// written it. A failed request or one with no usage lands here.
+		e.CacheMissReason = CacheUnknown
 	default:
 		e.CachePrefixChangeReason()
 		e.CacheMissCause = cause

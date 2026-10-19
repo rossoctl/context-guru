@@ -182,7 +182,7 @@ type Recorder struct {
 	life      *lifecycle             // nil unless Options.LifecycleSignals
 	lastSeen  map[string]int64       // thread.Key(session, thread) -> epoch ms of previous request
 	lastTail  map[string]uint64      // thread.Key(session, thread) -> previous request's volatile-tail hash
-	lastFacts map[string]PrefixFacts // thread.Key(session, thread) -> previous request's prefix facts
+	lastFacts map[string]PrefixFacts // thread.Key(session, thread), and that + "\x00" + model -> latest prefix facts
 	seenModel map[string]bool
 	// perComp accumulates unique-savings dedup keys so a per-request unique figure
 	// exists at capture time. Bounded; see markUnique.
@@ -613,6 +613,11 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 		if now-ts > staleSession {
 			delete(r.lastSeen, k)
 			delete(r.lastTail, k)
+		}
+	}
+	// lastFacts holds two entries per thread and model; they age out by their own request time.
+	for k, f := range r.lastFacts {
+		if now-f.TS > staleSession {
 			delete(r.lastFacts, k)
 		}
 	}
