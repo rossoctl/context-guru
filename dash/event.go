@@ -33,6 +33,35 @@ const (
 	CacheUnknown      = "unknown"
 )
 
+// Cache-miss causes (requests.cache_miss_cause). cache_miss_reason keeps its five values for
+// old readers. The cause says WHAT changed, and it comes from a comparison with the previous
+// request of the same thread (see PrefixFacts), never from a guess. Only the first cause that
+// applies is stored, in this order.
+const (
+	// CauseModelChanged: the thread switched model. Each model has its own cache.
+	CauseModelChanged = "model_changed"
+	// CauseCompactionAfterRewrite: the agent sent an unmodified request (bypass) after
+	// context-guru had rewritten earlier turns of the thread. The cache holds the rewritten
+	// history. The bypass forwards the original, so the prefix differs.
+	CauseCompactionAfterRewrite = "compaction_after_rewrite"
+	// CauseBypassFlip: bypass turned on or off with no earlier rewrite to explain it.
+	CauseBypassFlip = "bypass_flip"
+	// CauseToolsChanged: the tool declarations differ (digest, or count when no digest).
+	CauseToolsChanged = "tools_changed"
+	// CauseSystemChanged: the system prompt differs (hash, or block count when no hash).
+	CauseSystemChanged = "system_changed"
+	// CauseEffortChanged: reasoning effort, thinking mode or thinking budget differs.
+	CauseEffortChanged = "effort_changed"
+	// CauseConcurrent: nothing measured changed and the previous request began less than
+	// concurrentGapMs ago. A cache entry is readable only after the first response starts,
+	// so parallel sub-agent requests miss. The reason is "unknown", not "prefix_change".
+	CauseConcurrent = "concurrent"
+)
+
+// concurrentGapMs is the gap below which an unexplained miss reads as concurrent. Time to
+// first byte on these models is a few seconds, and the cache entry exists only after it.
+const concurrentGapMs = 5000
+
 // "Why didn't you compact this?" — a first-class reason bucket, not an absence of
 // data. An empty string means we DID compact.
 const (
@@ -325,6 +354,11 @@ type Event struct {
 	TokenAccounting    string `json:"token_accounting"`
 	CacheMissReason    string `json:"cache_miss_reason"`
 	UncompressedReason string `json:"uncompressed_reason"`
+	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
+	// Set only from a measured comparison (Cause* constants). "" when nothing was measured.
+	CacheMissCause string `json:"cache_miss_cause,omitempty"`
+	// SystemHash is the system prompt's hash, for the prefix comparison only. Not persisted.
+	SystemHash string `json:"-"`
 
 	// Meta is the request's own knobs, embedded so the JSON stays flat.
 	Meta
@@ -1093,7 +1127,10 @@ func (e *Event) repeatRate(p modelinfo.Price) float64 {
 // first of either is a COLD START, which is not a failure and must never be
 // reported as a bust (headroom's model-aware rule). TTL wins ties: a prefix that
 // changed after the entry had already expired was not the cause.
-func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, prefixChanged bool) {
+//
+// cause is the measured difference from the thread's previous request (Recorder.ObservePrefix):
+// "" when nothing differed. A miss with no measured difference is "unknown", not "prefix_change".
+func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, cause string) {
 	switch {
 	case e.CacheRead > 0:
 		e.CacheMissReason = CacheHit
@@ -1101,10 +1138,13 @@ func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, t
 		e.CacheMissReason = CacheColdStart
 	case ttlMs > 0 && sinceLastMs > ttlMs:
 		e.CacheMissReason = CacheTTLExpiry
-	case prefixChanged:
-		e.CachePrefixChangeReason()
-	default:
+	case cause == "":
 		e.CacheMissReason = CacheUnknown
+	case cause == CauseConcurrent:
+		e.CacheMissReason, e.CacheMissCause = CacheUnknown, cause
+	default:
+		e.CachePrefixChangeReason()
+		e.CacheMissCause = cause
 	}
 }
 

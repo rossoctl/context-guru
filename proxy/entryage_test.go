@@ -35,7 +35,7 @@ func TestAPingThatRefreshedTheEntryShortensItsAge(t *testing.T) {
 				t.Fatalf("entry age = %d ms, want %d", age, tc.wantAge)
 			}
 			e := &dash.Event{CacheWrite: 221_557}
-			e.AttributeCache(true, true, age, ttlMs, e.CacheWrite > 0)
+			e.AttributeCache(true, true, age, ttlMs, causeIf(e.CacheWrite > 0))
 			if e.CacheMissReason != tc.wantReason {
 				t.Errorf("verdict = %q, want %q", e.CacheMissReason, tc.wantReason)
 			}
@@ -85,7 +85,9 @@ func TestFinishUsesThePingRefreshTimeForTheStoredVerdict(t *testing.T) {
 		refreshedAt func(first time.Time) time.Time
 		want        string
 	}{
-		{"a ping refreshed the entry 31 s before the turn", func(f time.Time) time.Time { return f.Add(296 * time.Second) }, dash.CachePrefixChange},
+		// Not ttl_expiry: the entry was 31 s old. Nothing else differs between the two requests, so
+		// the verdict is unknown (issue #600), no longer prefix_change.
+		{"a ping refreshed the entry 31 s before the turn", func(f time.Time) time.Time { return f.Add(296 * time.Second) }, dash.CacheUnknown},
 		{"no ping: the entry lapsed", func(time.Time) time.Time { return time.Time{} }, dash.CacheTTLExpiry},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -123,4 +125,12 @@ func TestFinishUsesThePingRefreshTimeForTheStoredVerdict(t *testing.T) {
 			}
 		})
 	}
+}
+
+// causeIf stands in for a measured change: these tests are about the entry's age, not the cause.
+func causeIf(changed bool) string {
+	if changed {
+		return dash.CauseToolsChanged
+	}
+	return ""
 }

@@ -507,8 +507,19 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
 	// measured from the last real request, so without this a 297 s gap with a ping at 289 s
 	// reads as an expiry on a turn that came 8 s after the refresh.
+	//
+	// The cause comes from a measured comparison with this thread's previous request, not from
+	// CacheWrite > 0 (issue #600). A miss with nothing measured reads unknown.
+	if c.inv != nil && c.inv.System != nil {
+		e.SystemHash = c.inv.System.Hash
+	}
+	e.DeclDigest = ""
+	if c.inv != nil {
+		e.DeclDigest = c.inv.Digest
+	}
+	cause := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit, dash.FactsOf(e), sinceMs)
 	e.AttributeCache(seenSession, seenModel, entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt),
-		cacheAttributionTTLMs(e.Provider, e.Model), e.CacheWrite > 0)
+		cacheAttributionTTLMs(e.Provider, e.Model), cause)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
 	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
