@@ -201,3 +201,47 @@ func stripComments(src string) string {
 	}
 	return b.String()
 }
+
+// THE OWNER ROW MUST SEPARATE THE NAME FROM THE COUNT.
+//
+// THE DEFECT, reported by a reader who could not add the list up: the rows rendered as
+// "anthropic-agent-skills19 skills never used". The two spans had no layout between them, so the
+// owner name ran into its count and `anthropic-agent-skills19` read as one token. The arithmetic
+// was right -- 19 + 11 + 1 = 31 -- and unverifiable on screen, which is the same as wrong for a
+// page whose whole job is letting a reader check a claim.
+//
+// The spans reuse .ins-nm and .ins-meta from the Cleanup tab, where the gap between them lives
+// on .ins-head -- a class this view does not use, because its header is a <summary>. So the
+// summary needs its own rule, and this pins that it has one.
+func TestTheHistoryOwnerRowSeparatesNameFromCount(t *testing.T) {
+	css := readUI(t, "ui/insights.css")
+	// A rule for this view's summary, with a gap. Without it the two spans are adjacent inline
+	// boxes and the browser renders them with no space at all.
+	rx := regexp.MustCompile(`(?s)\.ins-own\s*>?\s*summary[^{]*\{[^}]*gap:`)
+	if !rx.MatchString(css) {
+		t.Error("no rule gives .ins-own summary a gap, so the owner name and its skill count " +
+			"render as one token -- `anthropic-agent-skills19 skills never used`. The list then " +
+			"cannot be added up by eye, which is the only thing it is there for")
+	}
+	// And it has to be a flex row, or `gap` does nothing.
+	rx2 := regexp.MustCompile(`(?s)\.ins-own\s*>?\s*summary[^{]*\{[^}]*display:\s*flex`)
+	if !rx2.MatchString(css) {
+		t.Error(".ins-own summary is not laid out as flex, so any gap declaration is inert")
+	}
+}
+
+// THE GROUPS STATE THEIR OWN TOTAL.
+//
+// Reported: a reader added 19 + 11 + 1 by hand to check it against the headline's 31 and asked
+// why they disagreed. They did not -- but making the reader do the arithmetic is what invites
+// the doubt, especially on a page whose figures have been wrong before. So the sum the page is
+// claiming is printed next to the groups that make it up.
+func TestTheHistoryViewStatesTheTotalOfItsGroups(t *testing.T) {
+	src := readUI(t, "ui/history.js")
+	code := stripComments(src)
+	if !regexp.MustCompile(`reduce\(\(a, g\) => a \+ g\.skills\.length`).MatchString(code) {
+		t.Error("the view never sums the owner groups, so a reader has to add them up to check " +
+			"them against the headline -- which is exactly the arithmetic that got reported as " +
+			"not closing")
+	}
+}

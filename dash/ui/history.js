@@ -99,6 +99,11 @@ function histRender() {
     root.appendChild(el('p', { class: 'empty', text:
       'Every installed skill has been used at least once. Nothing to remove.' }));
   } else {
+    const grouped = groups.reduce((a, g) => a + g.skills.length, 0);
+    root.appendChild(el('p', { class: 'hint', text: 'By the plugin or marketplace that installed '
+      + 'them \u2014 which is what you remove, since a plugin\u2019s skills come and go together. '
+      + groups.length + (groups.length === 1 ? ' owner, ' : ' owners, ') + grouped
+      + ' skills in total.' }));
     for (const g of groups) {
       const sec = el('details', { class: 'ins-own', open: 'open' });
       sec.appendChild(el('summary', {},
