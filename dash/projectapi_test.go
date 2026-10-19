@@ -14,11 +14,20 @@ import (
 // calling the handler directly — the scope decision lives in the route table, and a test that
 // bypasses it would not exercise it.
 func projectAPI(t *testing.T, db *DB) *http.ServeMux {
+	return projectAPIWithHome(t, db, "")
+}
+
+// projectAPIWithHome is projectAPI pointed at a transcript tree the test controls, for the
+// behaviour that depends on one: the project rollup reads ~/.claude/projects, so without an
+// override it is reachable through the HTTP surface and not assertable there.
+func projectAPIWithHome(t *testing.T, db *DB, home string) *http.ServeMux {
 	t.Helper()
 	rec := &Recorder{db: db, hub: NewHub(), done: make(chan struct{})}
 	t.Cleanup(func() { rec.Close() })
 	mux := http.NewServeMux()
-	NewAPI(rec).Mount(mux)
+	api := NewAPI(rec)
+	api.home = home
+	api.Mount(mux)
 	return mux
 }
 

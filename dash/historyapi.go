@@ -409,7 +409,7 @@ func (a *API) history(w http.ResponseWriter, r *http.Request) {
 	a.serveJSON(w, r, &a.historyCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
 		// skillDescriptions' home rules apply: "" means this machine's own, and a hosted proxy
 		// finds nothing, which is correct rather than degraded.
-		doc, err := db.HistoryDocFor(f, "")
+		doc, err := db.HistoryDocFor(f, a.home)
 		if err != nil {
 			return nil, err
 		}

@@ -70,6 +70,14 @@ type API struct {
 	// shapes them. Its own entry because the shaped document is a different payload under a
 	// different key: sharing toolsCache would serve an inventory to a caller asking for advice.
 	insightsCache jsonCache
+	// home overrides the home directory holding .claude/projects. Empty means this machine's
+	// own, which is every real deployment. Set only by tests, which need a transcript tree they
+	// control -- without it the project rollup is reachable through the HTTP surface but not
+	// assertable there, and that rollup is exactly the behaviour that was silently missing.
+	home string
+	// pg / pgOnce cache the transcript project grouping; see projectGroups.
+	pg     *ProjectGroup
+	pgOnce sync.Once
 	// historyCache covers GET /api/history, which reads the invocation table and the installed
 	// inventory off disk. Its own cache rather than sharing the insights one: the two answer
 	// different questions over different sources, so an invalidation that matters to one is
@@ -494,6 +502,32 @@ func (a *API) whoamiHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, a.whoami(r))
 }
 
+// expandProject turns a selected project ROOT into the set of folders that roll up to it.
+//
+// HERE, NOT IN EACH HANDLER, because scope is the one place every surface builds its filter. A
+// project is several folders -- Claude Code records a working directory per request, and one
+// project produced 14 of them on a measured machine -- so matching the root's own path returns a
+// fraction of its traffic. Done per handler, whichever one was missed would under-report
+// silently, which is the worst available failure for a page of cost figures.
+//
+// The grouping is read from this machine's transcripts; a hosted proxy finds none and the filter
+// passes through unchanged, which degrades to exact-folder matching rather than to nothing.
+func (a *API) expandProject(f Filter) Filter {
+	return ExpandProjectFilter(f, a.projectGroups())
+}
+
+// projectGroups reads the transcript grouping, cached for the process.
+//
+// CACHED because ProjectGroups parses every transcript on disk -- 41 files and ~90 MB on a
+// measured machine -- and scope runs on every request. Not invalidated: a session's transcript
+// directory is a fact about the past, so the grouping only GAINS entries, and a project the
+// cache has not seen falls through to exact-folder matching until the process restarts. That is
+// the same degradation a hosted proxy lives with permanently.
+func (a *API) projectGroups() *ProjectGroup {
+	a.pgOnce.Do(func() { a.pg = ProjectGroups(a.home) })
+	return a.pg
+}
+
 // scope authenticates the request and returns the filter to query with. The tenant
 // is OVERWRITTEN on the parsed filter rather than merged into it: a filter parsed
 // from user input and then narrowed is one forgotten branch away from being a filter
@@ -502,7 +536,7 @@ func (a *API) whoamiHandler(w http.ResponseWriter, r *http.Request) {
 // A manager may widen deliberately: ?tenant=<id> for one other tenant, ?tenant=* for
 // the service-wide view. Nobody else can, whatever they put in the query string.
 func (a *API) scope(r *http.Request) (Filter, Principal, bool) {
-	f := filterFrom(r)
+	f := a.expandProject(filterFrom(r))
 	if a.auth == nil {
 		f.TenantAll = true // single-tenant: one deployment, one set of numbers
 		return f, Principal{Manager: true}, true
@@ -1468,7 +1502,10 @@ func (a *API) facets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.serveJSON(w, r, &a.facetsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
-		f, err := db.Facets(flt)
+		// FacetsFor, not Facets: the project column holds every working directory a session
+		// was launched in -- 40 folders for six projects on a measured machine -- and the
+		// picker has to offer projects. See FacetsFor.
+		f, err := db.FacetsFor(flt, a.home)
 		if err != nil {
 			return nil, err
 		}

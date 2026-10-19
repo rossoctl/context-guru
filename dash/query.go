@@ -33,6 +33,13 @@ type Filter struct {
 	// query per session. Mutually exclusive with Session in practice; if both are set, both
 	// apply (AND), which is never useful, so callers should pick one.
 	SessionIn []string
+	// ProjectIn selects rows in ANY of these folders, which is how a project root is scoped.
+	//
+	// A PROJECT IS SEVERAL FOLDERS. Claude Code records a working directory per request, and one
+	// project produces many -- measured, one produced 14 -- so matching the root path alone would
+	// return a fraction of its traffic and selecting a project would show LESS than the pooled
+	// view. Set by ExpandProjectFilter from Project; callers set Project and let that expand it.
+	ProjectIn []string
 	// PerSession asks the tool inventory to keep its per-session cost attribution instead of
 	// collapsing it to totals. Not a row predicate — it changes the SHAPE of the response, not
 	// which rows are in it — and off by default because the breakdown is a per-row array that
@@ -138,6 +145,15 @@ func (f Filter) where() (string, []any) {
 			vals[i] = s
 		}
 		add("r.session_id IN ("+strings.Join(placeholders, ",")+")", vals...)
+	}
+	if len(f.ProjectIn) > 0 {
+		placeholders := make([]string, len(f.ProjectIn))
+		vals := make([]any, len(f.ProjectIn))
+		for i, p := range f.ProjectIn {
+			placeholders[i] = "?"
+			vals[i] = p
+		}
+		add("r.project IN ("+strings.Join(placeholders, ",")+")", vals...)
 	}
 	if f.Component != "" {
 		add("EXISTS (SELECT 1 FROM request_components c WHERE c.request_id = r.id AND c.component = ?)", f.Component)
@@ -1330,8 +1346,63 @@ func selfBlanked(f Filter, dim string) Filter {
 		// contain exactly one entry — the one selected — and switching projects would be
 		// impossible. A one-way door, which is what this whole function exists to prevent.
 		f.Project = ""
+		// ProjectIn is the expanded form of the same choice and shuts the same door.
+		f.ProjectIn = nil
 	}
 	return f
+}
+
+// ExpandProjectFilter turns a selected project ROOT into the set of folders that roll up to it.
+//
+// A project is several folders -- Claude Code records a working directory per request and one
+// project produced 14 of them on a measured machine -- so a query matching the root path alone
+// returns a fraction of its traffic. The picker folds subdirectories into the root, and without
+// this the query would not, which means selecting a project shows LESS than the pooled view did.
+//
+// A root the transcripts do not recognise expands to itself, so a folder with no transcript is
+// still reachable rather than silently empty.
+func ExpandProjectFilter(f Filter, g *ProjectGroup) Filter {
+	if f.Project == "" || g == nil {
+		return f
+	}
+	folders := g.FoldersOf(f.Project)
+	if len(folders) <= 1 {
+		return f // just itself: the plain Project predicate already matches it
+	}
+	f.ProjectIn = folders
+	f.Project = ""
+	return f
+}
+
+// FacetsFor is Facets with the project dimension rolled up to project roots.
+//
+// WHY A SEPARATE ENTRY POINT. Facets reads raw columns, and the project column holds every
+// working directory a session was launched in: on a real machine, 40 folders for six projects,
+// the rest being subdirectories of the same repositories and eighteen throwaway /private/tmp
+// directories. Reported as "I don't understand why I saw so many projects".
+//
+// `home` overrides the home directory, for tests. An empty transcript directory -- the normal
+// state of a hosted proxy, which cannot see the user's disk -- leaves the list unrolled, which
+// degrades to the raw folders rather than to an empty picker.
+func (d *DB) FacetsFor(f Filter, home string) (map[string][]string, error) {
+	out, err := d.Facets(f)
+	if err != nil {
+		return nil, err
+	}
+	groups := ProjectGroups(home)
+	seen := map[string]bool{}
+	var roots []string
+	for _, p := range out["project"] {
+		r := groups.Project(p)
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		roots = append(roots, r)
+	}
+	sort.Strings(roots)
+	out["project"] = roots
+	return out, nil
 }
 
 // Facets returns the distinct values available for each filter dimension, so the
