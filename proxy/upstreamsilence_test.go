@@ -263,10 +263,13 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 // MaxIdleConnsPerHost of 2, a burst of 8 left only 2 connections and the next burst paid six new
 // TCP+TLS handshakes; production showed 172 of 388 upstream connections closed that way.
 func TestABurstOfStreamsKeepsItsConnectionsWarm(t *testing.T) {
-	var conns atomic.Int64
+	var conns, inflight atomic.Int64
+	var mu sync.Mutex
 	release := make(chan struct{})
+	gate := func() chan struct{} { mu.Lock(); defer mu.Unlock(); return release }
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		<-release // hold every request open so the burst really is concurrent
+		inflight.Add(1)
+		<-gate() // hold every request open so the burst really is concurrent
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, "event: message_stop\ndata: {}\n\n")
 	}))
@@ -279,6 +282,7 @@ func TestABurstOfStreamsKeepsItsConnectionsWarm(t *testing.T) {
 	defer srv.Close()
 	c := &http.Client{Transport: upstreamTransport(time.Minute)}
 	burst := func() {
+		inflight.Store(0)
 		var wg sync.WaitGroup
 		for i := 0; i < 8; i++ {
 			wg.Add(1)
@@ -293,17 +297,21 @@ func TestABurstOfStreamsKeepsItsConnectionsWarm(t *testing.T) {
 				resp.Body.Close()
 			}()
 		}
-		for conns.Load() < 8 && t.Context().Err() == nil {
+		for inflight.Load() < 8 && t.Context().Err() == nil {
 			time.Sleep(5 * time.Millisecond)
 		}
+		mu.Lock()
 		close(release)
+		mu.Unlock()
 		wg.Wait()
 	}
 	burst()
 	if got := conns.Load(); got != 8 {
 		t.Fatalf("first burst opened %d connections, want 8", got)
 	}
+	mu.Lock()
 	release = make(chan struct{})
+	mu.Unlock()
 	burst()
 	if got := conns.Load(); got != 8 {
 		t.Errorf("second burst opened %d new connections; the pool closed warm ones after the first burst", got-8)
@@ -418,5 +426,150 @@ func TestAFreshConnectionClosedUnansweredIsNotResent(t *testing.T) {
 	}
 	if got := g.requests.Load(); got != 1 {
 		t.Errorf("upstream saw %d requests, want 1", got)
+	}
+}
+
+// Review finding: Request.Close does not force a new connection, so a resend could take ANOTHER
+// idle pooled connection that the gateway had also dropped. With several warm connections all
+// dropped together (as when the gateway drops its idle connections at once), the request must
+// still be answered on a freshly dialled one.
+func TestAResendNeverReusesAnotherDroppedPooledConnection(t *testing.T) {
+	var dropping atomic.Bool
+	g := newDropGateway(t, func(n int) bool { return n >= 2 && dropping.Load() })
+	c := &http.Client{Transport: upstreamTransport(time.Minute)}
+	// Warm four pooled connections with four concurrent requests.
+	var wg sync.WaitGroup
+	hold := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := doWithSilenceGuard(context.Background(), c, 0, silenceBuild(g.url(), nonStreamBody))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			<-hold
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}()
+	}
+	for g.requests.Load() < 4 && t.Context().Err() == nil {
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(hold)
+	wg.Wait()
+	if got := g.conns.Load(); got != 4 {
+		t.Fatalf("warm-up opened %d connections, want 4", got)
+	}
+	// Now the gateway drops every request on every connection that has already served one.
+	dropping.Store(true)
+	resp, err := doWithSilenceGuard(context.Background(), c, 0, silenceBuild(g.url(), nonStreamBody))
+	if err != nil {
+		t.Fatalf("the resend landed on another dropped pooled connection: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if got := g.conns.Load(); got != 5 {
+		t.Errorf("upstream saw %d connections, want 5: one dropped reuse, then ONE fresh dial", got)
+	}
+}
+
+// An EOF after part of a response is io.ErrUnexpectedEOF, not a dropped request: the upstream
+// processed it, so it must be returned, never resent.
+func TestAResponseCutOffMidwayIsNotResent(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var requests atomic.Int64
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				for n := 1; ; n++ {
+					req, err := http.ReadRequest(br)
+					if err != nil {
+						return
+					}
+					io.Copy(io.Discard, req.Body)
+					requests.Add(1)
+					if n == 1 {
+						body := `{"usage":{}}`
+						fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+						continue
+					}
+					io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Le") // cut off inside the headers
+					return
+				}
+			}(c)
+		}
+	}()
+	url := "http://" + ln.Addr().String()
+	c := &http.Client{Transport: upstreamTransport(time.Minute)}
+	resp, err := doWithSilenceGuard(context.Background(), c, 0, silenceBuild(url, nonStreamBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if _, err := doWithSilenceGuard(context.Background(), c, 0, silenceBuild(url, nonStreamBody)); err == nil {
+		t.Fatal("a truncated response was reported as a success")
+	}
+	if got := requests.Load(); got != 2 {
+		t.Errorf("upstream saw %d requests, want 2: a response cut off midway must not be resent", got)
+	}
+}
+
+// A dropped reused connection on a request whose client has already gone away is not resent.
+func TestADroppedReuseIsNotResentAfterTheClientLeft(t *testing.T) {
+	g := newDropGateway(t, func(n int) bool { return n == 2 })
+	c := &http.Client{Transport: upstreamTransport(time.Minute)}
+	resp, err := doWithSilenceGuard(context.Background(), c, 0, silenceBuild(g.url(), nonStreamBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := doWithSilenceGuard(ctx, c, 0, silenceBuild(g.url(), nonStreamBody)); err == nil {
+		t.Fatal("a cancelled request succeeded")
+	}
+	if got := g.requests.Load(); got > 2 {
+		t.Errorf("upstream saw %d requests: a request whose client left was resent", got)
+	}
+}
+
+// count_tokens is a short POST on the same pooled client, and gets the same recovery.
+func TestCountTokensRecoversADroppedReusedConnection(t *testing.T) {
+	g := newDropGateway(t, func(n int) bool { return n == 2 })
+	h := New(nil, nil, nil, Options{AnthropicUpstream: g.url()})
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	post := func() int {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages/count_tokens",
+			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-api-key", "sk-test")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if s := post(); s != 200 {
+		t.Fatalf("warm-up status %d", s)
+	}
+	if s := post(); s != 200 {
+		t.Fatalf("count_tokens on a dropped reused connection returned %d, want 200 from the resend", s)
 	}
 }
