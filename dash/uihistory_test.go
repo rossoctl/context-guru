@@ -280,3 +280,28 @@ func TestTheCleanupViewExplainsAProjectWithNoMeasuredTraffic(t *testing.T) {
 			"timeline before the explanation can render")
 	}
 }
+
+// EACH TAB STATES ITS SPAN AND WHETHER IT HAS MONEY, AND POINTS AT THE OTHER.
+//
+// The two tabs answer different questions over different spans: History covers all of Claude
+// Code's history including before context-guru existed, and has no money; Cleanup covers only the
+// time since install, and is the only place a dollar figure comes from. A reader told neither reads
+// History's longer span as better evidence for money it does not have. Agreed with the user as the
+// framing for the dashboard skill, which opens both tabs side by side.
+func TestBothTabsStateTheirSpanAndPointAtEachOther(t *testing.T) {
+	hist := jsLiteralText(stripComments(readUI(t, "ui/history.js")))
+	for _, want := range []string{"before context-guru", "no money", "cleanup"} {
+		if !strings.Contains(hist, want) {
+			t.Errorf("History never says %q in rendered text. It has to state that it covers the "+
+				"time before install, that it carries no money, and that Cleanup is where money is",
+				want)
+		}
+	}
+	clean := jsLiteralText(stripComments(readUI(t, "ui/insights.js")))
+	for _, want := range []string{"since context-guru was installed", "history tab"} {
+		if !strings.Contains(clean, want) {
+			t.Errorf("Cleanup never says %q in rendered text. It has to state that its figures "+
+				"cover only the time since install, and send a reader to History for the rest", want)
+		}
+	}
+}

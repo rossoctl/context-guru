@@ -522,6 +522,11 @@ function insRender() {
    * reader has to know what is being counted before choosing how much of it to count. */
   const intro = el('div', { class: 'panel' },
     el('h2', { text: 'What your unused capabilities cost' }),
+    /* The span, first: every figure here is priced from traffic this proxy measured, so it covers
+     * only the time since install. What was never used across the longer history is on History. */
+    el('p', { class: 'hint', text: 'Priced from traffic this proxy measured, so only the time '
+      + 'since context-guru was installed. To see what you never used across all your history, '
+      + 'including before install, open the History tab.' }),
     el('p', { text: 'Every figure on this page is WASTE: tokens sent in the system prompt of ' +
       'every request, for a tool, skill or MCP server that was never invoked in the sessions ' +
       'that carried it.' }),

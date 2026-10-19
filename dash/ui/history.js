@@ -63,7 +63,14 @@ function histRender() {
    * never in a count beside skills, because they are not removable and mixing them is what made
    * "0 of 6" sit next to "Used (1)". */
   root.appendChild(el('div', { class: 'ins-head' },
-    el('h2', { text: 'What you installed and never used' })));
+    el('h2', { text: 'What you installed and never used' }),
+    /* THE SPAN AND THE KIND OF CLAIM, under the heading where it cannot be missed. This tab and
+     * Cleanup are opened side by side by the dashboard skill and answer different questions over
+     * different spans; read without this, History's longer span looks like better evidence for
+     * money it does not carry. */
+    el('p', { class: 'hint', text: 'Across all your Claude Code history, including the time '
+      + 'before context-guru was installed. Counts only, no money: for what carrying these has '
+      + 'cost, see Cleanup, which prices the time since install.' })));
 
   if (!inst) {
     root.appendChild(el('p', { class: 'empty', text:
