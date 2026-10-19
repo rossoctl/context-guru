@@ -521,16 +521,18 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// The gap for the TTL test is measured from the last request on the SAME model: a cache entry
 	// belongs to one model, so a request on another model between two requests on this one does
 	// not refresh it. SinceLastMs below keeps the per-thread gap.
-	cause, modelGap, known := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
+	cause, modelGap, known, lastWasSame := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
 		dash.FactsOf(e), e.Status >= 200 && e.Status < 300)
-	ageGap := sinceMs
+	age := sinceMs
 	if known {
-		ageGap = modelGap
-	}
-	// A ping refreshed the entry of the model that last ran in the thread. Cut the age only when
-	// that was this model.
-	age := ageGap
-	if ageGap == sinceMs {
+		age = modelGap
+		// A ping refreshed the entry of the model that last ran in the thread. Cut the age only
+		// when that was this model. This holds after a failed request too, when the gap since
+		// the last good request differs from sinceMs.
+		if lastWasSame {
+			age = entryAgeMs(modelGap, e.TS, c.kaRefreshedAt)
+		}
+	} else {
 		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
 	}
 	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model), cause)

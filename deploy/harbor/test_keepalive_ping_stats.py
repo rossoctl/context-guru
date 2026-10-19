@@ -279,10 +279,6 @@ class TestSummarize(unittest.TestCase):
         self.assertIn("WARNING", ps.summarize(pd.DataFrame([r])))
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class UnexplainedMissIsUnrescuable(unittest.TestCase):
     """An unexplained miss ("unknown") is never counted as rescuable (issue #600)."""
 
@@ -295,3 +291,7 @@ class UnexplainedMissIsUnrescuable(unittest.TestCase):
         for reason in ("hit", "ttl_expiry"):
             self.assertNotIn(reason, cost.UNRESCUABLE)
             self.assertNotIn(reason, policy._FULL_MISS)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

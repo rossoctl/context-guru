@@ -43,6 +43,8 @@ func FactsOf(e *Event) PrefixFacts {
 //     entry belongs to one model, so a request on model B in between does not refresh model A's
 //     entry. -1 means the thread has no same-model request: the entry never existed, so no TTL
 //     can have expired it.
+//   - lastWasSame: the thread's latest committed request ran this model, so a keep-alive ping
+//     after it refreshed this model's entry (see entryAgeMs).
 //   - known: false when the thread has no facts at all. The caller then keeps the gap it
 //     measured itself (a restart forgets facts but not recency).
 //
@@ -55,9 +57,9 @@ func FactsOf(e *Event) PrefixFacts {
 // It must run once per request, in request order, with the key ObserveThread uses. fromThread is
 // the thread a new thread inherits from (hasFrom says there is one); it is read only when the
 // thread has no facts yet.
-func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom bool, cur PrefixFacts, commit bool) (cause string, gapMs int64, known bool) {
+func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom bool, cur PrefixFacts, commit bool) (cause string, gapMs int64, known, lastWasSame bool) {
 	if r == nil {
-		return "", 0, false
+		return "", 0, false, false
 	}
 	key := thread.Key(session, threadID)
 	r.mu.Lock()
@@ -68,12 +70,15 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 	any := func(k string) (PrefixFacts, bool) { f, ok := r.lastFacts[k]; return f, ok }
 	perModel := func(k string) string { return k + "\x00" + cur.Model }
 	prev, same := any(perModel(key))
-	_, hadAny := any(key)
+	last, hadAny := any(key)
 	if !same && !hadAny && hasFrom {
 		pk := thread.Key(session, fromThread)
 		prev, same = any(perModel(pk))
-		_, hadAny = any(pk)
+		last, hadAny = any(pk)
 	}
+	// The thread's latest committed request was on this model, so a keep-alive ping after it
+	// refreshed THIS model's entry.
+	lastWasSame = hadAny && last.Model == cur.Model
 	if commit {
 		// A bypassed request re-writes the original history into the cache, which ends the
 		// effect of an earlier rewrite.
@@ -84,11 +89,11 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 	switch {
 	case same:
 		gap := cur.TS - prev.TS
-		return prefixCause(prev, cur, gap), gap, true
+		return prefixCause(prev, cur, gap), gap, true, lastWasSame
 	case hadAny:
-		return CauseModelChanged, -1, true
+		return CauseModelChanged, -1, true, false
 	}
-	return "", 0, false
+	return "", 0, false, false
 }
 
 // prefixCause compares two consecutive requests of one thread. The first difference wins, in

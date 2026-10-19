@@ -127,6 +127,45 @@ func TestFinishUsesThePingRefreshTimeForTheStoredVerdict(t *testing.T) {
 	}
 }
 
+// A failed request between the last good one and the miss moves the thread's recency but not the
+// same-model baseline, so the two gaps differ. The ping's refresh cut must still apply: a ping
+// refreshed the entry, a failed request followed, then a miss. It is not an expiry.
+func TestAPingRefreshStillCutsTheAgeAfterAFailedRequest(t *testing.T) {
+	rec, err := dash.NewRecorder(dash.Options{
+		DBPath: filepath.Join(t.TempDir(), "d.db"), BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec.Close() })
+	first := time.Now().Add(-time.Hour)
+	mk := func(start time.Time, status int) *capture {
+		return &capture{rec: rec, tenant: "t1", provider: "anthropic", model: "claude-opus-5-5",
+			route: "/v1/messages", start: start, status: status,
+			trace: apply.Trace{Session: "sess-1"}}
+	}
+	mk(first, 200).finish(Usage{FreshInput: 10, CacheWrite: 1000}, true, false, 0, 0)
+	// 100 s later a request fails. It moves the thread's recency, not the cache entry.
+	mk(first.Add(100*time.Second), 500).finish(Usage{}, false, false, 0, 0)
+	c := mk(first.Add(327*time.Second), 200)
+	// A ping refreshed the entry 31 s before this turn.
+	c.noteKeepAlive(kaArrival{pings: 1, refreshed: 400_000, refreshedAt: first.Add(296 * time.Second)})
+	c.finish(Usage{FreshInput: 10, CacheWrite: 220_000}, true, false, 0, 0)
+
+	var got string
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		pg, err := rec.DB().Requests(dash.Filter{TenantAll: true}, 0, 10)
+		if err == nil && len(pg.Requests) == 3 {
+			got = pg.Requests[0].CacheMissReason // newest first
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got != dash.CacheUnknown {
+		t.Errorf("stored verdict = %q, want %q (a refreshed entry is not an expiry)", got, dash.CacheUnknown)
+	}
+}
+
 // causeIf stands in for a measured change: these tests are about the entry's age, not the cause.
 func causeIf(changed bool) string {
 	if changed {

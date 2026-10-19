@@ -21,7 +21,7 @@ func causeMiss(r *Recorder, session, threadID string, ts int64, f PrefixFacts) *
 func causeMissWith(r *Recorder, session, threadID string, ts int64, f PrefixFacts, read int64, status int) *Event {
 	f.TS = ts
 	seenSession, seenModel, since, _ := r.ObserveThread("t1", session, threadID, f.Model, ts, 0)
-	cause, modelGap, known := r.ObservePrefix(session, threadID, "", false, f, status >= 200 && status < 300)
+	cause, modelGap, known, _ := r.ObservePrefix(session, threadID, "", false, f, status >= 200 && status < 300)
 	if known {
 		since = modelGap
 	}
@@ -165,12 +165,12 @@ func TestAnInheritingThreadComparesWithItsParent(t *testing.T) {
 	changed.SystemHash = "s2"
 	r := newFactsRecorder()
 	r.ObservePrefix("s1", "", "", false, base(), true)
-	if got, _, _ := r.ObservePrefix("s1", "p:fork", "", true, changed, true); got != CauseSystemChanged {
+	if got, _, _, _ := r.ObservePrefix("s1", "p:fork", "", true, changed, true); got != CauseSystemChanged {
 		t.Errorf("fork from the primary thread = %q, want %q", got, CauseSystemChanged)
 	}
 	r = newFactsRecorder()
 	r.ObservePrefix("s1", "", "", false, base(), true)
-	if got, _, _ := r.ObservePrefix("s1", "p:fork", "", false, changed, true); got != "" {
+	if got, _, _, _ := r.ObservePrefix("s1", "p:fork", "", false, changed, true); got != "" {
 		t.Errorf("fork with no parent = %q, want no cause", got)
 	}
 }
