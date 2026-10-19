@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strings"
 )
 
 // GET /api/history — what the user's own past says about the capabilities they installed.
@@ -51,6 +52,18 @@ type HistoryDoc struct {
 	NeverUsed []string `json:"never_used"`
 	// InstalledSkills is the denominator. Half the finding: "31 unused" means nothing without it.
 	InstalledSkills int `json:"installed_skills"`
+	// UsedHere / UnusedHere are the same split for the SELECTED PROJECT, and are 0 when no
+	// project is selected. They partition InstalledSkills.
+	UsedHere   int `json:"used_here"`
+	UnusedHere int `json:"unused_here"`
+	// UnusedHereButUsedElsewhere is the honesty figure, and the reason this split is computed on
+	// the server at all.
+	//
+	// "43 skills not used in this project" is NOT a waste figure: some of those are used in other
+	// projects, which is correct behaviour. Reporting the bare count turns deliberate usage into
+	// an accusation — so the view subtracts this from it and says the rest is waste. A
+	// project-scoped document cannot derive it, because the other projects' usage is not in it.
+	UnusedHereButUsedElsewhere int `json:"unused_here_but_used_elsewhere"`
 	// UsedInstalled is how many of InstalledSkills were invoked. STATED RATHER THAN INFERRED,
 	// because Used and NeverUsed do not partition: a used capability that is not on disk — a
 	// built-in, or one installed under a name since changed — is in neither set. Without this
@@ -89,6 +102,9 @@ type HistoryDoc struct {
 func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 	where, args := f.where()
 	doc := &HistoryDoc{Used: []HistoryUse{}, NeverUsed: []string{}, Projects: []HistoryProject{}}
+	// Read once: every folder in this document resolves through the same grouping, and
+	// ProjectGroups parses every transcript on disk.
+	groups := ProjectGroups(home)
 
 	// The span and the measured/imported split, from the requests themselves.
 	if err := d.sql.QueryRow(`SELECT
@@ -100,15 +116,43 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 		return nil, err
 	}
 
-	// What was invoked. Joined to requests so the window applies: tool_uses is keyed by session,
-	// and a session can straddle a window boundary.
+	// What was invoked.
+	//
+	// SCOPED BY FOLDER WHEN A PROJECT IS SELECTED, not by session. A session that touched the
+	// folder is not the same thing as work done in it: one Claude Code session works in several
+	// folders, and selecting any of them used to return the whole session's tool list. Measured
+	// on a live store, a 6-request folder reported a 2,626-request session's usage, which is why
+	// every project showed the same figures.
+	//
+	// Rows written before `tool_uses.project` existed carry '' and are therefore absent from
+	// every project's list. That is correct rather than lossy: their folder is unknown, and
+	// attributing them to the selected one would be a guess presented as a measurement. They
+	// remain in the unscoped view, where a figure nobody can attribute belongs.
+	useWhere := `u.session_id IN (SELECT DISTINCT r.session_id FROM requests r WHERE ` + where + `)`
+	useArgs := args
+	if f.Project != "" {
+		// EVERY FOLDER THAT ROLLS UP TO THE SELECTED PROJECT, not just the project's own path.
+		// A reader selecting `notes` is asking about the work done in `notes/server` too —
+		// matching only the exact path would mean selecting a project showed LESS than the
+		// unscoped view did, which is the trap folding the picker without folding the query
+		// walks straight into.
+		folders := groups.FoldersOf(f.Project)
+		ph := make([]string, len(folders))
+		pre := make([]any, len(folders))
+		for i, fo := range folders {
+			ph[i] = "?"
+			pre[i] = fo
+		}
+		useWhere = `u.project IN (` + strings.Join(ph, ",") + `) AND ` + useWhere
+		useArgs = append(pre, args...)
+	}
 	rows, err := d.sql.Query(`SELECT
 		CASE WHEN u.skill <> '' THEN u.skill ELSE u.name END AS cap,
 		CASE WHEN u.skill <> '' THEN 1 ELSE 0 END AS is_skill,
 		SUM(u.calls), MIN(u.first_ts), MAX(u.last_ts)
 		FROM tool_uses u
-		WHERE u.session_id IN (SELECT DISTINCT r.session_id FROM requests r WHERE `+where+`)
-		GROUP BY cap, is_skill ORDER BY SUM(u.calls) DESC`, args...)
+		WHERE `+useWhere+`
+		GROUP BY cap, is_skill ORDER BY SUM(u.calls) DESC`, useArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -138,11 +182,25 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 		return nil, err
 	}
 
-	// Installed but never called.
+	// Installed but never called ANYWHERE.
+	//
+	// MACHINE-WIDE ON PURPOSE, and deliberately a different scope from Used above. A skill unused
+	// in one folder is not waste: a user runs `brainstorming` in their notes project and never in
+	// a Go repo, and that is correct behaviour rather than a finding. Scoping this to the selected
+	// project reported every such skill as abandoned — observed on a live store, where each
+	// project claimed 43 of 46 skills were unused, and the busiest one said nothing had been used
+	// at all while listing fifteen invoked capabilities beside it.
+	//
+	// The two scopes are stated in Basis, because two figures from different scopes sitting
+	// side by side are read as sharing one unless something says otherwise.
+	calledAnywhere, err := d.calledAnywhere()
+	if err != nil {
+		return nil, err
+	}
 	installed := installedSkills(home)
 	doc.InstalledSkills = len(installed)
 	for name := range installed {
-		if called[name] {
+		if calledAnywhere[name] {
 			// COUNTED HERE, against the inventory, rather than left to arithmetic on Used. A used
 			// capability absent from disk is in neither set, so Used and NeverUsed do not
 			// partition — and a reader who adds them gets more than the denominator.
@@ -153,7 +211,29 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 	}
 	sort.Strings(doc.NeverUsed)
 
+	// THE PER-PROJECT SPLIT. Only meaningful under a project filter, where `called` holds this
+	// folder's invocations and `calledAnywhere` holds every project's.
+	if f.Project != "" {
+		for name := range installed {
+			if called[name] {
+				doc.UsedHere++
+				continue
+			}
+			doc.UnusedHere++
+			// Used somewhere, just not here. NOT waste, and counted separately so the view can
+			// say so rather than letting a reader take the whole unused count as money burning.
+			if calledAnywhere[name] {
+				doc.UnusedHereButUsedElsewhere++
+			}
+		}
+	}
+
 	// Spend per project. Both sources, because usage is the one thing they agree on.
+	//
+	// ROLLED UP TO THE PROJECT, not listed per directory. The raw column holds every cwd a
+	// session was launched in: on a real machine that was 40 folders for nine projects, most of
+	// them subdirectories of a repository or throwaway /private/tmp directories. Claude Code's
+	// own transcript grouping decides which is which — see ProjectGroups.
 	prows, err := d.sql.Query(`SELECT r.project, COUNT(*),
 		COALESCE(SUM(r.fresh_input + r.cache_read + r.cache_write + r.output_tokens), 0)
 		FROM requests r WHERE `+where+` AND r.project <> ''
@@ -161,17 +241,37 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 	if err != nil {
 		return nil, err
 	}
+	rolled := map[string]*HistoryProject{}
+	var order []string
 	for prows.Next() {
 		var p HistoryProject
 		if err := prows.Scan(&p.Project, &p.Requests, &p.Tokens); err != nil {
 			prows.Close()
 			return nil, err
 		}
-		doc.Projects = append(doc.Projects, p)
+		root := groups.Project(p.Project)
+		agg := rolled[root]
+		if agg == nil {
+			agg = &HistoryProject{Project: root}
+			rolled[root] = agg
+			order = append(order, root)
+		}
+		agg.Requests += p.Requests
+		agg.Tokens += p.Tokens
 	}
 	prows.Close()
 	if err := prows.Err(); err != nil {
 		return nil, err
+	}
+	// Busiest first, which the per-directory ORDER BY no longer guarantees once rows are merged.
+	sort.Slice(order, func(i, j int) bool {
+		if rolled[order[i]].Requests != rolled[order[j]].Requests {
+			return rolled[order[i]].Requests > rolled[order[j]].Requests
+		}
+		return order[i] < order[j]
+	})
+	for _, root := range order {
+		doc.Projects = append(doc.Projects, *rolled[root])
 	}
 
 	// THE BASIS, and the refusal it carries. Stated rather than left to the reader, because the
@@ -180,12 +280,41 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 		"What carrying the unused ones COST is not in this data: a transcript records what a " +
 		"request spent in total and never which tools it declared, so only traffic the proxy " +
 		"watched can be priced."
+	if f.Project != "" {
+		doc.Basis = "what was invoked in " + f.Project + ", from this machine's own session " +
+			"history. The never-used count covers every project on this machine, not just this " +
+			"one: a skill you use elsewhere and not here is not waste. " + doc.Basis
+	}
 	if doc.SelfExcluded.Items > 0 {
 		doc.Basis += " " + selfPlugin + "'s own skills are excluded from these figures — counting " +
 			"the weight of the tool producing this view would be circular — though they do " +
 			"occupy the prompt like any other."
 	}
 	return doc, nil
+}
+
+// calledAnywhere is every capability this machine's history shows being invoked, in any project
+// and any window.
+//
+// UNSCOPED BY DESIGN — see the NeverUsed comment above. It answers "has this ever been reached
+// for", which is the only question whose answer makes "never used" a finding rather than a
+// statement about which folder the reader happens to have selected.
+func (d *DB) calledAnywhere() (map[string]bool, error) {
+	rows, err := d.sql.Query(`SELECT DISTINCT
+		CASE WHEN skill <> '' THEN skill ELSE name END FROM tool_uses`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out[name] = true
+	}
+	return out, rows.Err()
 }
 
 // history serves the document.

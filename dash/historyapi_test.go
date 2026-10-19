@@ -300,3 +300,242 @@ func TestTheHistoryCountsPartitionTheInstalledInventory(t *testing.T) {
 			doc.UsedInstalled+len(doc.NeverUsed), doc.InstalledSkills)
 	}
 }
+
+// "NEVER USED" IS A MACHINE-WIDE CLAIM, EVEN WHEN A PROJECT IS SELECTED.
+//
+// THE BUG THIS FIXES, found by selecting a project on the live dashboard. The used list was
+// scoped to the folder and the installed inventory was not, so every project reported "43 of your
+// 46 skills are unused" — true of the machine, never of one folder. On the busiest project the
+// page said nothing had been used at all while listing fifteen invoked capabilities beside it.
+//
+// The scope mismatch is the mechanical part; the reason for fixing it THIS way is the real one. A
+// skill unused in one folder is not waste — a user runs `brainstorming` in their notes project and
+// never in a Go repo, and that is correct behaviour rather than a finding. Scoping the claim to
+// the folder would report deliberate, sensible usage as abandonment. So the never-used set is
+// computed over the whole machine and the document says which scope each figure carries.
+func TestNeverUsedStaysMachineWideUnderAProjectFilter(t *testing.T) {
+	db := openTestDB(t)
+	home := t.TempDir()
+	mkSkill(t, home, "superpowers", "brainstorming")
+	mkSkill(t, home, "superpowers", "never-touched")
+	if err := db.insertBatch([]*Event{
+		{TS: daysAgo(20), SessionID: "s-notes", Model: "m", Source: SourceImported,
+			Project: "/Users/v/notes", CacheWrite: 100},
+		{TS: daysAgo(10), SessionID: "s-code", Model: "m", Source: SourceImported,
+			Project: "/Users/v/code", CacheWrite: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// brainstorming is used in `notes` and never in `code` — the normal, correct pattern.
+	if err := db.insertImportedUses([]importedUse{
+		{session: "s-notes", name: "superpowers:brainstorming", ts: daysAgo(20), isSkill: true,
+			project: "/Users/v/notes"},
+		{session: "s-code", name: "Bash", ts: daysAgo(10), project: "/Users/v/code"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := db.HistoryDocFor(Filter{Project: "/Users/v/code"}, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The used list is the FOLDER's: that is what the reader selected a project to see.
+	var sawBash bool
+	for _, u := range doc.Used {
+		if u.Name == "Bash" {
+			sawBash = true
+		}
+		if u.Name == "superpowers:brainstorming" {
+			t.Error("the used list leaked an invocation from another project; selecting a project " +
+				"has to scope what was used here")
+		}
+	}
+	if !sawBash {
+		t.Error("the selected project's own invocation is missing from the used list")
+	}
+	// But NEVER-USED is the machine's. brainstorming was used somewhere, so calling it unused
+	// would report deliberate usage as waste.
+	for _, n := range doc.NeverUsed {
+		if n == "superpowers:brainstorming" {
+			t.Error("superpowers:brainstorming is reported as never used because it was not used " +
+				"in THIS project. It was used in another one — a skill you run in your notes and " +
+				"not in a Go repo is not waste, and reporting it as such is a false positive")
+		}
+	}
+	if len(doc.NeverUsed) != 1 || doc.NeverUsed[0] != "superpowers:never-touched" {
+		t.Fatalf("NeverUsed = %v; want only the skill used in no project at all", doc.NeverUsed)
+	}
+	// The overlap is machine-wide too, so it still partitions the inventory.
+	if doc.UsedInstalled != 1 {
+		t.Errorf("UsedInstalled = %d; want 1 — machine-wide, matching NeverUsed's scope",
+			doc.UsedInstalled)
+	}
+	if doc.UsedInstalled+len(doc.NeverUsed) != doc.InstalledSkills {
+		t.Errorf("used %d + never %d != %d installed; the two have to share a scope or the "+
+			"arithmetic on screen does not close",
+			doc.UsedInstalled, len(doc.NeverUsed), doc.InstalledSkills)
+	}
+	// And the document has to SAY the scopes differ, or a reader reads both as the folder's.
+	if !containsFold(doc.Basis, "every project") && !containsFold(doc.Basis, "any project") {
+		t.Errorf("Basis = %q; under a project filter it has to say that the never-used figure "+
+			"covers every project, not the selected one", doc.Basis)
+	}
+}
+
+// SELECTING A PROJECT MUST SHOW THAT PROJECT'S USAGE.
+//
+// THE REPORTED BUG, in one test. `tool_uses` carried no folder, so the used list was built from
+// whole sessions that touched the project — and one session works in several folders. Measured on
+// the live store: selecting `/private/tmp/cgzip`, a folder with 6 requests, returned that
+// session's entire 2,626-request tool list, so every folder reported nearly identical figures.
+func TestTheHistoryScopesUsageToTheSelectedProjectNotTheWholeSession(t *testing.T) {
+	db := openTestDB(t)
+	// ONE SESSION, TWO FOLDERS — the shape that produced the bug.
+	if err := db.insertBatch([]*Event{
+		{TS: daysAgo(10), SessionID: "s1", Model: "m", Source: SourceImported,
+			Project: "/Users/v/notes", CacheWrite: 100},
+		{TS: daysAgo(9), SessionID: "s1", Model: "m", Source: SourceImported,
+			Project: "/Users/v/code", CacheWrite: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.insertImportedUses([]importedUse{
+		{session: "s1", name: "superpowers:brainstorming", ts: daysAgo(10), isSkill: true,
+			project: "/Users/v/notes"},
+		{session: "s1", name: "Grep", ts: daysAgo(9), project: "/Users/v/code"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := db.HistoryDocFor(Filter{Project: "/Users/v/code"}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, u := range doc.Used {
+		got[u.Name] = true
+	}
+	if !got["Grep"] {
+		t.Error("the selected folder's own invocation is missing")
+	}
+	if got["superpowers:brainstorming"] {
+		t.Error("an invocation from ANOTHER folder in the same session leaked into this " +
+			"project's usage. That is the reported defect: every project showed the same " +
+			"figures because the query selected whole sessions rather than folders")
+	}
+}
+
+// THE PICKER OFFERS PROJECTS, NOT EVERY DIRECTORY EVER USED.
+//
+// THE DEFECT, reported against the running dashboard: 40 entries, of which about six were
+// projects. The rest were subdirectories of real repositories and eighteen throwaway
+// /private/tmp folders — every distinct cwd Claude Code had been launched in.
+//
+// Claude Code's own transcript grouping decides; see ProjectGroups. Selecting a project must also
+// INCLUDE its subfolders' traffic, or folding the picker would hide the very rows the reader
+// selected it to see.
+func TestTheHistoryGroupsProjectsAndIncludesTheirSubfolders(t *testing.T) {
+	db := openTestDB(t)
+	home := t.TempDir()
+	// One project with a subfolder, as Claude Code files it.
+	writeJSONL(t, home, "-Users-v-notes", "s-notes",
+		turnLine("s-notes", "/Users/v/notes", daysAgo(9), 100, 10),
+		turnLine("s-notes", "/Users/v/notes", daysAgo(9), 100, 10),
+		turnLineCalling("s-notes", "/Users/v/notes/server", daysAgo(8),
+			`{"type":"tool_use","id":"t1","name":"Grep","input":{"pattern":"x"}}`))
+	if _, err := db.ImportHistory(home, ImportOptions{Apply: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := db.HistoryDocFor(Filter{}, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ONE entry, not two: the subfolder is part of the project.
+	var names []string
+	for _, p := range doc.Projects {
+		names = append(names, p.Project)
+	}
+	if len(names) != 1 || names[0] != "/Users/v/notes" {
+		t.Fatalf("Projects = %v; want just [/Users/v/notes]. A picker listing every directory "+
+			"ever used offered 40 entries for six projects on a real machine", names)
+	}
+
+	// AND SELECTING IT INCLUDES THE SUBFOLDER'S USAGE. Grep ran in notes/server; a reader who
+	// selects notes is asking about that work too.
+	scoped, err := db.HistoryDocFor(Filter{Project: "/Users/v/notes"}, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawGrep bool
+	for _, u := range scoped.Used {
+		if u.Name == "Grep" {
+			sawGrep = true
+		}
+	}
+	if !sawGrep {
+		t.Error("selecting the project hid an invocation made in one of its own subfolders. " +
+			"Folding the picker without folding the query means the reader selects a project " +
+			"and sees less than they did before")
+	}
+}
+
+// THE PER-PROJECT VIEW NEEDS THE SPLIT, AND ONLY THE SERVER CAN COMPUTE IT.
+//
+// "43 skills not used in this project" is not a waste figure: some of those are used in other
+// projects, which is correct behaviour rather than waste. The honest presentation splits the
+// number — never used anywhere (the waste) versus used elsewhere (not waste) — and the view
+// cannot derive that from a project-scoped document, because the other projects' usage is not in
+// it. So the document carries both figures.
+func TestTheHistorySplitsUnusedHereFromNeverUsedAnywhere(t *testing.T) {
+	db := openTestDB(t)
+	home := t.TempDir()
+	mkSkill(t, home, "superpowers", "used-here")
+	mkSkill(t, home, "superpowers", "used-elsewhere")
+	mkSkill(t, home, "superpowers", "used-nowhere")
+	if err := db.insertBatch([]*Event{
+		{TS: daysAgo(20), SessionID: "s-a", Model: "m", Source: SourceImported,
+			Project: "/Users/v/a", CacheWrite: 100},
+		{TS: daysAgo(19), SessionID: "s-b", Model: "m", Source: SourceImported,
+			Project: "/Users/v/b", CacheWrite: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.insertImportedUses([]importedUse{
+		{session: "s-a", name: "superpowers:used-here", ts: daysAgo(20), isSkill: true,
+			project: "/Users/v/a"},
+		{session: "s-b", name: "superpowers:used-elsewhere", ts: daysAgo(19), isSkill: true,
+			project: "/Users/v/b"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := db.HistoryDocFor(Filter{Project: "/Users/v/a"}, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Used in this project: one.
+	if doc.UsedHere != 1 {
+		t.Errorf("UsedHere = %d; want 1", doc.UsedHere)
+	}
+	// Not used HERE: two — but only ONE of them is waste.
+	if doc.UnusedHere != 2 {
+		t.Errorf("UnusedHere = %d; want 2", doc.UnusedHere)
+	}
+	if doc.UnusedHereButUsedElsewhere != 1 {
+		t.Errorf("UnusedHereButUsedElsewhere = %d; want 1 — used-elsewhere is being used "+
+			"correctly in another project and is not waste. Without this figure the view reports "+
+			"2 unused and a reader reads both as money burning",
+			doc.UnusedHereButUsedElsewhere)
+	}
+	// And the waste figure stays machine-wide: exactly the one used nowhere.
+	if len(doc.NeverUsed) != 1 || doc.NeverUsed[0] != "superpowers:used-nowhere" {
+		t.Errorf("NeverUsed = %v; want only the skill used in no project at all", doc.NeverUsed)
+	}
+	// The three have to account for the inventory exactly, or the page shows arithmetic that
+	// does not close.
+	if doc.UsedHere+doc.UnusedHere != doc.InstalledSkills {
+		t.Errorf("used-here %d + unused-here %d = %d, but %d skills are installed",
+			doc.UsedHere, doc.UnusedHere, doc.UsedHere+doc.UnusedHere, doc.InstalledSkills)
+	}
+}
