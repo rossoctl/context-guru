@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Surgically install or restore context-guru's default Codex routing."""
+"""Install or remove context-guru's opt-in Codex profile file.
+
+Codex (>= 0.134) reads `--profile NAME` from `$CODEX_HOME/NAME.config.toml`. config.toml and its
+default `model_provider` are never touched, so a dead proxy cannot stop plain `codex` from
+starting. Only the legacy install (which rewrote the default) is detected and migrated back.
+"""
 
 import json
 import os
@@ -9,6 +14,7 @@ import sys
 
 BEGIN = "# context-guru: begin managed provider"
 END = "# context-guru: end managed provider"
+MARKER = "# Managed by the context-guru Codex plugin."
 MODEL = re.compile(r'^(\s*model_provider\s*=\s*).*$')
 
 
@@ -40,39 +46,23 @@ def _without_block(lines):
     return result
 
 
+def profile_path(config_path):
+    return Path(config_path).with_name("context-guru.config.toml")
+
+
 def install(config_path, state_path, port, provider):
     config_path, state_path = Path(config_path), Path(state_path)
-    existed = config_path.exists()
-    original = config_path.read_text() if existed else ""
-    lines = _without_block(original.splitlines(keepends=True))
-    original_line = None
-    table_at = next((i for i, line in enumerate(lines) if line.lstrip().startswith("[")), len(lines))
-    for index, line in enumerate(lines[:table_at]):
-        if MODEL.match(line.rstrip("\n")):
-            original_line = line.rstrip("\n")
-            lines[index] = 'model_provider = "context-guru"\n'
-            break
-    else:
-        lines.insert(table_at, 'model_provider = "context-guru"\n')
-
-    auth = provider.get("experimental_bearer_token")
-    if lines and not lines[-1].endswith("\n"):
-        lines[-1] += "\n"
-    block = [BEGIN + "\n",
+    if state_path.exists() and is_default_routed(config_path):
+        restore(state_path)  # migrate a legacy install that locked the default provider
+    lines = [MARKER + "\n", 'model_provider = "context-guru"\n\n',
              "[model_providers.context-guru]\n", 'name = "context-guru (local)"\n',
              f'base_url = "http://127.0.0.1:{port}/openai/v1"\n', 'wire_api = "responses"\n',
              f'requires_openai_auth = {str(bool(provider.get("requires_openai_auth", True))).lower()}\n']
-    if auth:
-        block.append(f"experimental_bearer_token = {json.dumps(auth)}\n")
-    block.append(END + "\n")
-    rendered = "".join(lines + block)
+    if provider.get("experimental_bearer_token"):
+        lines.append(f"experimental_bearer_token = {json.dumps(provider['experimental_bearer_token'])}\n")
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    if not state_path.exists():
-        backup = state_path.with_name("config.toml.before-context-guru")
-        _atomic(backup, original)
-        _atomic(state_path, json.dumps({"config": str(config_path), "existed": existed,
-                                       "original_model_provider_line": original_line}) + "\n")
-    _atomic(config_path, rendered)
+    _atomic(profile_path(config_path), "".join(lines))
+    _atomic(state_path, json.dumps({"config": str(config_path), "mode": "profile"}) + "\n")
 
 
 def restore(state_path):
@@ -81,6 +71,12 @@ def restore(state_path):
         return "no_record"
     state = json.loads(state_path.read_text())
     config_path = Path(state["config"])
+    if state.get("mode") == "profile":
+        owned = profile_path(config_path)
+        if owned.exists() and owned.read_text().startswith(MARKER):
+            owned.unlink()
+        state_path.unlink()
+        return "restored"
     lines = _without_block(config_path.read_text().splitlines(keepends=True)) if config_path.exists() else []
     table_at = next((i for i, line in enumerate(lines) if line.lstrip().startswith("[")), len(lines))
     restored = False
@@ -106,13 +102,20 @@ def restore(state_path):
 
 
 def is_routed(config_path):
+    """The managed profile file is present (sessions started with it are routed)."""
+    path = profile_path(config_path)
+    return path.exists() and path.read_text().startswith(MARKER)
+
+
+def is_default_routed(config_path):
+    """Legacy lock-in: the TOP-LEVEL model_provider is context-guru."""
     path = Path(config_path)
     if not path.exists():
         return False
     lines = path.read_text().splitlines()
     table_at = next((i for i, line in enumerate(lines) if line.lstrip().startswith("[")), len(lines))
-    return any(MODEL.match(line) and line.split("=", 1)[1].strip() == '"context-guru"'
-               for line in lines[:table_at]) and BEGIN in lines and END in lines
+    return BEGIN in lines and END in lines and any(MODEL.match(line) and line.split("=", 1)[1].strip() == '"context-guru"'
+                                   for line in lines[:table_at])
 
 
 if __name__ == "__main__":
