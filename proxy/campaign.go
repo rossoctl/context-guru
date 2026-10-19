@@ -157,6 +157,24 @@ func campaignArmFor(arm string) campaignArm {
 		"%q has no live enforcement path yet — it is a simulation-only arm", arm)}
 }
 
+// CampaignCellOutcome is what creating a campaign would do with one uploaded suggest cell: activate
+// it (or keep it on a baseline arm), or record it with skipReason. honorsHeadTTL1h reports whether a
+// tenant's traffic honors the 1h cache tier. It is the SAME decision ctlCreateCampaign makes, so an
+// offline tool that builds an upload file can report it without a second copy of the rules.
+func CampaignCellOutcome(cell dash.KVCacheSuggestion, honorsHeadTTL1h func(tenantID string) bool) (activatable bool, skipReason string) {
+	c := resolveCampaignCell(cell, honorsHeadTTL1h)
+	return c.activatable, c.skipReason
+}
+
+// CampaignArmEnforceable reports whether a campaign can enforce arm on live traffic at all. A cell
+// can still be skipped for its own reasons (too few requests, unpriced rows, a 1h-tier arm on a
+// model that does not honor it) — CampaignCellOutcome answers that.
+func CampaignArmEnforceable(arm string) bool { return campaignArmFor(arm).activatable }
+
+// HeadTTL1hHonored reports whether model is measured to honor the 1h cache tier on this deployment —
+// the set a campaign checks before it activates a 1h-tier arm.
+func HeadTTL1hHonored(model string) bool { return headTTL1hHonoredModels[model] }
+
 // resolvedCampaignCell is one suggest cell's outcome after resolving its arm and, for a
 // 1h-tier arm, checking whether this specific tenant's traffic honors it.
 type resolvedCampaignCell struct {
