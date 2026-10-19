@@ -733,6 +733,16 @@ func (h *Handler) renderMetrics() string {
 	promLine(&b, "cg_llm_failures_total", `kind="timeout"`, float64(offload.LLMTimeouts()))
 	promLine(&b, "cg_llm_failures_total", `kind="error"`, float64(offload.LLMErrors()))
 
+	// The silence guard (upstreamsilence.go). Exported rather than absorbed: a resend that
+	// succeeds is invisible to the client, so without these a gateway hanging one request in
+	// ten would look exactly like a healthy one.
+	promHeader(&b, "cg_upstream_silent_resends_total",
+		"Streaming upstream requests the upstream accepted but never answered within the silence timeout, and that were therefore resent once on a new connection.", "counter")
+	promLine(&b, "cg_upstream_silent_resends_total", "", float64(upstreamSilenceResends.Load()))
+	promHeader(&b, "cg_upstream_silent_failures_total",
+		"Streaming upstream requests whose resend was silent too; these became a 502.", "counter")
+	promLine(&b, "cg_upstream_silent_failures_total", "", float64(upstreamSilenceFailures.Load()))
+
 	// extract_llm economics. The one component that SPENDS money, so gross savings can look
 	// impressive while it is underwater — measured live at a NET of -$0.7085, and until these
 	// series existed that number appeared nowhere a monitor could reach it (only in /stats,

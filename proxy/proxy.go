@@ -75,6 +75,10 @@ type Options struct {
 	// (0 = defaultUpstreamHeaderTimeout). Deliberately NOT a whole-request timeout — see
 	// upstreamTransport for the 502s that cost.
 	UpstreamHeaderTimeout time.Duration
+	// StreamSilenceTimeout bounds how long a STREAMING upstream request may go without a single
+	// response byte after being written before it is resent once on a new connection
+	// (0 = streamSilenceTimeout). See upstreamsilence.go for the gateway behaviour it handles.
+	StreamSilenceTimeout time.Duration
 	// CheapModel is the static "config"-source LLM for NeedsModel components (nil = none): the
 	// operator's own endpoint and credential, pinned once at New. The "incoming"-source client
 	// is built per request from the route's upstream + the gateway's real key.
@@ -2083,19 +2087,40 @@ func (h *Handler) doUpstream(r *http.Request, up upstream, body []byte) (*http.R
 	if up.base == "" {
 		return nil, errNoUpstream
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, up.base+up.path, strings.NewReader(string(body)))
+	build := func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, up.base+up.path, strings.NewReader(string(body)))
+		if err != nil {
+			return nil, err
+		}
+		copyHeaders(req.Header, r.Header)
+		setUpstreamAuth(req.Header, up)
+		// We have to read this response ourselves (streamed usage-sniffing, keep-alive
+		// accounting), so do not let it arrive compressed — see proxy.go:482 for the same
+		// pattern on the Bob-profile fetch. Dropping it lets http.Transport add its own
+		// Accept-Encoding and auto-decompress resp.Body transparently, for both the
+		// client-forward path and the usage sniffer, which read the identical byte stream.
+		req.Header.Del("Accept-Encoding")
+		return req, nil
+	}
+	// A streaming request the upstream accepted but never answered is resent once on a new
+	// connection instead of waiting out the ten-minute header timeout. See upstreamsilence.go.
+	if streamsRequest(body) {
+		return doWithSilenceGuard(r.Context(), h.client, h.streamSilenceTimeout(), build)
+	}
+	req, err := build(r.Context())
 	if err != nil {
 		return nil, err
 	}
-	copyHeaders(req.Header, r.Header)
-	setUpstreamAuth(req.Header, up)
-	// We have to read this response ourselves (streamed usage-sniffing, keep-alive
-	// accounting), so do not let it arrive compressed — see proxy.go:482 for the same
-	// pattern on the Bob-profile fetch. Dropping it lets http.Transport add its own
-	// Accept-Encoding and auto-decompress resp.Body transparently, for both the
-	// client-forward path and the usage sniffer, which read the identical byte stream.
-	req.Header.Del("Accept-Encoding")
 	return h.client.Do(req)
+}
+
+// streamSilenceTimeout is the silence guard's budget: Options.StreamSilenceTimeout, else the
+// measured default.
+func (h *Handler) streamSilenceTimeout() time.Duration {
+	if h.opts.StreamSilenceTimeout > 0 {
+		return h.opts.StreamSilenceTimeout
+	}
+	return streamSilenceTimeout
 }
 
 // setUpstreamAuth applies the route's credential decision to the FORWARDED request.

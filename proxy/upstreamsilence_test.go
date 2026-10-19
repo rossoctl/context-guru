@@ -1,0 +1,260 @@
+package proxy
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// silentGateway reproduces what the packet capture on contextguru2 showed the LiteLLM gateway
+// doing: it reads the WHOLE request (every byte is ACKed) and then sends nothing at all — no
+// headers, no reset, no FIN — on the connections it picks, while answering on others. silent
+// decides, per accepted request in arrival order, whether to go quiet.
+type silentGateway struct {
+	ln       net.Listener
+	silent   func(n int) bool
+	requests atomic.Int64
+	conns    atomic.Int64
+	mu       sync.Mutex
+	open     []net.Conn
+}
+
+func newSilentGateway(t *testing.T, silent func(n int) bool) *silentGateway {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &silentGateway{ln: ln, silent: silent}
+	go g.serve()
+	t.Cleanup(g.close)
+	return g
+}
+
+func (g *silentGateway) url() string { return "http://" + g.ln.Addr().String() }
+
+func (g *silentGateway) close() {
+	g.ln.Close()
+	g.mu.Lock()
+	for _, c := range g.open {
+		c.Close()
+	}
+	g.mu.Unlock()
+}
+
+func (g *silentGateway) serve() {
+	for {
+		c, err := g.ln.Accept()
+		if err != nil {
+			return
+		}
+		g.conns.Add(1)
+		g.mu.Lock()
+		g.open = append(g.open, c)
+		g.mu.Unlock()
+		go g.handle(c)
+	}
+}
+
+func (g *silentGateway) handle(c net.Conn) {
+	br := bufio.NewReader(c)
+	for {
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		io.Copy(io.Discard, req.Body)
+		n := int(g.requests.Add(1))
+		if g.silent(n) {
+			// Hold the connection open and say nothing, exactly like the gateway. Reading on
+			// keeps the peer's writes ACKed; return only when the client closes it.
+			io.Copy(io.Discard, br)
+			return
+		}
+		body := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+		fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+	}
+}
+
+const streamBody = `{"model":"m","max_tokens":5,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+
+func silenceBuild(url string, body string) func(context.Context) (*http.Request, error) {
+	return func(ctx context.Context) (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodPost, url+"/v1/messages", strings.NewReader(body))
+	}
+}
+
+// The failure itself: an accepted, never-answered streaming request is resent once on a NEW
+// connection and the client gets the answer — in about one silence timeout, not ten minutes.
+func TestASilentStreamingRequestIsResentOnANewConnection(t *testing.T) {
+	g := newSilentGateway(t, func(n int) bool { return n == 1 })
+	c := &http.Client{Transport: upstreamTransport(10 * time.Minute)}
+	before := upstreamSilenceResends.Load()
+	start := time.Now()
+	resp, err := doWithSilenceGuard(context.Background(), c, 150*time.Millisecond, silenceBuild(g.url(), streamBody))
+	if err != nil {
+		t.Fatalf("the resend should have been answered: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(b), "message_stop") {
+		t.Fatalf("incomplete stream after the resend: %q", b)
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Errorf("took %s; the silent attempt should have been abandoned after ~150ms", el)
+	}
+	if got := g.requests.Load(); got != 2 {
+		t.Errorf("upstream saw %d requests, want exactly 2 (one silent, one resend)", got)
+	}
+	if got := g.conns.Load(); got != 2 {
+		t.Errorf("upstream saw %d connections, want 2: the resend must not reuse the silent one", got)
+	}
+	if upstreamSilenceResends.Load() != before+1 {
+		t.Errorf("the resend was not counted")
+	}
+}
+
+// A gateway that is genuinely not answering still fails — after two silences, with an error that
+// says so, and never more than one resend.
+func TestAGatewayThatNeverAnswersFailsAfterOneResend(t *testing.T) {
+	g := newSilentGateway(t, func(int) bool { return true })
+	c := &http.Client{Transport: upstreamTransport(10 * time.Minute)}
+	before := upstreamSilenceFailures.Load()
+	_, err := doWithSilenceGuard(context.Background(), c, 100*time.Millisecond, silenceBuild(g.url(), streamBody))
+	if !errors.Is(err, errUpstreamSilent) {
+		t.Fatalf("err = %v, want the silence error", err)
+	}
+	if got := g.requests.Load(); got != 2 {
+		t.Errorf("upstream saw %d requests, want 2: at most ONE resend", got)
+	}
+	if upstreamSilenceFailures.Load() != before+1 {
+		t.Errorf("the failure was not counted")
+	}
+}
+
+// The guard only counts silence AFTER the first response byte has failed to come. A stream whose
+// headers come promptly and whose tokens then take far longer than the timeout is never touched:
+// the deadline is on the first byte, not on the generation.
+func TestASlowStreamAfterTheFirstByteIsNeverResent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		for i := 0; i < 4; i++ {
+			time.Sleep(80 * time.Millisecond)
+			fmt.Fprintf(w, "event: ping\ndata: {\"n\":%d}\n\n", i)
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer srv.Close()
+	var hits atomic.Int64
+	c := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		hits.Add(1)
+		return upstreamTransport(10 * time.Minute).RoundTrip(r)
+	})}
+	resp, err := doWithSilenceGuard(context.Background(), c, 50*time.Millisecond, silenceBuild(srv.URL, streamBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("a streaming body outliving the silence timeout was cut off: %v", err)
+	}
+	if n := strings.Count(string(b), "event: ping"); n != 4 {
+		t.Errorf("got %d chunks, want 4", n)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("%d attempts for a request that answered at once", hits.Load())
+	}
+}
+
+// The client going away cancels the request and is NOT turned into a resend: a cancelled turn
+// must not cost a second generation.
+func TestAClientThatGivesUpIsNotResent(t *testing.T) {
+	g := newSilentGateway(t, func(int) bool { return true })
+	c := &http.Client{Transport: upstreamTransport(10 * time.Minute)}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	_, err := doWithSilenceGuard(ctx, c, time.Second, silenceBuild(g.url(), streamBody))
+	if err == nil || errors.Is(err, errUpstreamSilent) {
+		t.Fatalf("err = %v, want the client's own cancellation", err)
+	}
+	if got := g.requests.Load(); got != 1 {
+		t.Errorf("upstream saw %d requests after the client gave up, want 1", got)
+	}
+}
+
+// End to end through the handler: a streaming /v1/messages turn whose first upstream attempt is
+// silent reaches the client complete, from the resend.
+func TestTheHandlerRecoversASilentStreamingTurn(t *testing.T) {
+	g := newSilentGateway(t, func(n int) bool { return n == 1 })
+	h := New(nil, nil, nil, Options{AnthropicUpstream: g.url(), StreamSilenceTimeout: 150 * time.Millisecond})
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(streamBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(b), "message_stop") {
+		t.Fatalf("status %d body %q: the silent first attempt reached the client", resp.StatusCode, b)
+	}
+	if g.requests.Load() != 2 {
+		t.Errorf("upstream saw %d requests, want 2", g.requests.Load())
+	}
+}
+
+// A NON-streaming request sends its headers only after the whole answer is generated, so
+// silence there is normal and must never trigger a resend — it would duplicate a long
+// generation.
+func TestANonStreamingRequestIsNeverResentForSilence(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond) // "generating", well past the silence timeout below
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer srv.Close()
+	var hits atomic.Int64
+	counting := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		hits.Add(1)
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+	h := New(nil, nil, nil, Options{AnthropicUpstream: srv.URL, Client: counting, StreamSilenceTimeout: 50 * time.Millisecond})
+	front := httptest.NewServer(h.Mux())
+	defer front.Close()
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/anthropic/v1/messages",
+		strings.NewReader(`{"model":"m","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("a non-streaming request was sent %d times; silence before its headers is generation, not a hang", hits.Load())
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
