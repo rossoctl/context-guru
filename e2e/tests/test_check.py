@@ -236,6 +236,17 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(run({"bad_tokens": []})["verdict"], "PASS")
         self.assertEqual(run({})["verdict"], "BLOCKED")
 
+    def test_empty_contrast_is_blocked_not_pass(self):
+        ui = {"pages": {"p": {"errors": [], "values": {}, "overflow": [], "contrast": {}}}}
+        r = {x["id"]: x for x in check.run(EXP, API, ui, "full", probes=PROBES)}["U.contrast.p"]
+        self.assertEqual((r["verdict"], r["detail"]), ("BLOCKED", "no contrast samples"))
+
+    def test_history_page_without_headline_is_blocked(self):
+        page = {"errors": [], "values": {}, "overflow": [], "contrast": {}}
+        v = verdicts(ui={"pages": {"history-pooled-light-desktop": page, "cleanup-pooled-light-desktop": page}})
+        self.assertEqual(v["U.headline_matches_api.history-pooled-light-desktop"], "BLOCKED")
+        self.assertNotIn("U.headline_matches_api.cleanup-pooled-light-desktop", v)
+
     def test_low_contrast_fails(self):
         ui = {"pages": {"p": {"errors": [], "values": {}, "overflow": [], "contrast": {"headline": 2.1}}}}
         self.assertEqual(verdicts(ui=ui)["U.contrast.p"], "FAIL")

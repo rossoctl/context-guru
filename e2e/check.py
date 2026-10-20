@@ -162,12 +162,17 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
     for name, p in pages.items():
         _rec(out, f"U.no_js_errors.{name}", "ui", not p["errors"], [], p["errors"], snapshot=f"snapshots/{name}.png")
         _rec(out, f"U.no_overflow.{name}", "ui", not p["overflow"], [], p["overflow"], snapshot=f"snapshots/{name}.png")
-        low = {k: v for k, v in p.get("contrast", {}).items() if v < 3.0}
-        _rec(out, f"U.contrast.{name}", "ui", not low, ">= 3:1", low, snapshot=f"snapshots/{name}.png")
+        samples = p.get("contrast", {})
+        low = {k: v for k, v in samples.items() if v < 3.0}
+        _rec(out, f"U.contrast.{name}", "ui", not low, ">= 3:1", low, snapshot=f"snapshots/{name}.png",
+             detail="" if samples else "no contrast samples", blocked=not samples)
         bad = p.get("values", {}).get("bad_tokens")
         _rec(out, f"U.no_undefined_text.{name}", "ui", not bad, "no undefined/NaN/null/[object Object] in visible text",
              bad or [], detail="; ".join(bad or []), snapshot=f"snapshots/{name}.png", blocked=bad is None)
-        if "headline_never" in p.get("values", {}):
+        if name.startswith("history-") and "headline_never" not in p.get("values", {}):
+            _rec(out, f"U.headline_matches_api.{name}", "ui", False, len(h.get("never_used", [])), None,
+                 detail="headline not read", snapshot=f"snapshots/{name}.png", blocked=True)
+        elif "headline_never" in p.get("values", {}):
             _rec(out, f"U.headline_matches_api.{name}", "ui",
                  p["values"]["headline_never"] == len(h.get("never_used", [])),
                  len(h.get("never_used", [])), p["values"]["headline_never"], snapshot=f"snapshots/{name}.png")

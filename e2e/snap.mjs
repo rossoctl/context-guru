@@ -9,16 +9,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const tab = await (await fetch('http://127.0.0.1:9222/json/new?about:blank', { method: 'PUT' })).json();
 const ws = new WebSocket(tab.webSocketDebuggerUrl);
-let id = 0; const pending = new Map(); let errors = [];
+const urls = new Map(); let id = 0; const pending = new Map(); let errors = [];
 const send = (method, params = {}) => new Promise((res) => { const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
 ws.onmessage = (m) => {
   const msg = JSON.parse(m.data);
   if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg.result); pending.delete(msg.id); }
+  const m_ = msg.method, pr = msg.params;
+  if (m_ === 'Network.requestWillBeSent') urls.set(pr.requestId, pr.request.url);
+  if (m_ === 'Network.responseReceived' && pr.response.status >= 400 && pr.response.url.startsWith(base)) errors.push(`http ${pr.response.status} ${pr.response.url}`);
+  if (m_ === 'Network.loadingFailed' && !pr.canceled && (urls.get(pr.requestId) || '').startsWith(base)) errors.push(`net ${pr.errorText} ${urls.get(pr.requestId)}`);
+  if (m_ === 'Log.entryAdded' && pr.entry.level === 'error') errors.push(`log.error: ${pr.entry.text} ${pr.entry.url || ''}`.trim());
   if (msg.method === 'Runtime.exceptionThrown') errors.push(msg.params.exceptionDetails.exception?.description || msg.params.exceptionDetails.text);
   if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') errors.push('console.error: ' + msg.params.args.map((a) => a.value ?? a.description).join(' '));
 };
 await new Promise((r) => (ws.onopen = r));
-await send('Runtime.enable'); await send('Page.enable');
+await send('Runtime.enable'); await send('Page.enable'); await send('Network.enable'); await send('Log.enable');
 const evalJS = async (expr) => (await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })).result?.value;
 
 // Poll until expr is truthy; false on timeout (the caller records the error, never throws).
@@ -68,6 +73,10 @@ errors = [];
 
 async function shoot(name, timedOut) {
   await sleep(1500); // charts animate in
+  // Open every <details> in the page bodies (not the header filter popovers) so hidden text/overflow is checked, and the PNG shows what was checked.
+  await evalJS(`document.querySelectorAll('#history-body details, #insights-body details').forEach((d) => { d.open = true; })`);
+  await evalJS(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+  await sleep(300);
   const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   writeFileSync(`${outDir}/snapshots/${name}.png`, Buffer.from(shot.data, 'base64'));
   const read = await evalJS(READ);
@@ -91,20 +100,21 @@ for (const theme of themes) for (const [wname, w] of widths) {
   await shoot(`history-pooled-${theme}-${wname}`, hOk ? [] : [`render timeout: ${hSel}`]);
   for (const [pname, root] of projects) {
     await open('behaviour/insights');
-    const body = '#insights-body';
-    let ok = await waitFor(`(document.querySelector('${body}')?.innerText || '').trim().length > 0`);
-    const timedOut = ok ? [] : [`render timeout: ${body}`];
+    const body = '#insights-body', h2 = '#insights-body .panel h2'; // "Loading..." has no panel; a real render does
+    let ok = await waitFor(`!!document.querySelector('${h2}')`);
+    const timedOut = ok ? [] : [`render timeout: ${h2}`];
     if (ok && root) {
       const ready = await waitFor(`!!document.querySelector('[data-testid=insights-project]')`);
       if (!ready) timedOut.push('render timeout: [data-testid=insights-project]');
       else {
-        // Mark the current content, change the project, wait for the body to be re-rendered (mark gone).
-        await evalJS(`(() => { const b = document.querySelector('${body}'); b.__snapMark = b.firstElementChild; b.__snapText = b.innerText;
+        // Tag the current h2 nodes, change the project, wait until a NEW (untagged) h2 exists: the view re-rendered.
+        await evalJS(`(() => { document.querySelectorAll('${h2}').forEach((e) => { e.__old = true; });
           const s = document.querySelector('[data-testid=insights-project]');
           s.value = ${JSON.stringify(root)}; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
-        const re = await waitFor(`(() => { const b = document.querySelector('${body}'); const s = document.querySelector('[data-testid=insights-project]');
-          return s && s.value === ${JSON.stringify(root)} && (b.firstElementChild !== b.__snapMark || b.innerText !== b.__snapText); })()`);
-        if (!re) timedOut.push(`render timeout: ${body} after project change`);
+        const re = await waitFor(`(() => { const s = document.querySelector('[data-testid=insights-project]');
+          const h = document.querySelector('${h2}');
+          return !!s && s.value === ${JSON.stringify(root)} && !!h && !h.__old; })()`);
+        if (!re) timedOut.push(`render timeout: ${h2} after project change`);
       }
     }
     await shoot(`cleanup-${pname}-${theme}-${wname}`, timedOut);
