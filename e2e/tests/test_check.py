@@ -27,8 +27,8 @@ API = {
                 "never_used_owners": [{"owner": "a", "skills": ["a:x"]}, {"owner": "acme", "skills": ["b"]}],
                 "self_excluded": {"items": 2}, "used": [{"name": "a:y", "skill": True}]},
     "facets_measured": {"project": ["/s/alpha"]},
-    "insights": {"": {"items": [item("mcp__d__s"), item("Bash", usd=0.1, scope="none")], "removable_usd": 0.4},
-                 "/s/alpha": {"items": [item("mcp__d__s"), item("Bash", usd=0.1, scope="none")],
+    "insights": {"": {"items": [item("mcp__d__s"), item("Bash", usd=0.1, scope="none", invoked=True)], "removable_usd": 0.4},
+                 "/s/alpha": {"items": [item("mcp__d__s"), item("Bash", usd=0.1, scope="none", invoked=True)],
                               "removable_usd": 0.4}},
     "stats": {"/s/alpha": {"requests": 12}},
     "unpriced_probe": {"items": [item("mcp__d__s", usd=0, priced=False)]},
@@ -38,11 +38,15 @@ PROBES = {"shutdown": {"session_id": "alpha-s01-x-shutdown-probe", "root": "/s/a
           "unpriced": {"session_id": "alpha-s01-x-unpriced-probe", "root": "/s/alpha"}}
 
 
-def make_db(rows_for=()):
+def make_db(rows_for=(), requests_for=None):
+    """requests_for defaults to rows_for' complement-free case: the probe session HAS a request row."""
     f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     f.close()
     c = sqlite3.connect(f.name)
     c.execute("CREATE TABLE tool_declarations (session_id TEXT, name TEXT)")
+    c.execute("CREATE TABLE requests (session_id TEXT)")
+    for s_ in (PROBES["shutdown"]["session_id"],) if requests_for is None else requests_for:
+        c.execute("INSERT INTO requests VALUES (?)", (s_,))
     for s in rows_for:
         c.execute("INSERT INTO tool_declarations VALUES (?, 'Bash')", (s,))
     c.commit()
@@ -99,13 +103,56 @@ class TestCheck(unittest.TestCase):
         a = copy.deepcopy(API); a["insights"]["/s/alpha"]["items"].append(item("a:y"))
         self.assertEqual(verdicts(a)["C.used_absent./s/alpha"], "FAIL")
 
+    def test_unused_set_is_exact_superset_subset_equal(self):
+        extra = copy.deepcopy(API)  # a USED capability wrongly listed as unused
+        for r in ("", "/s/alpha"):
+            extra["insights"][r]["items"].append(item("a:y"))
+        self.assertEqual(verdicts(extra)["C.unused_set./s/alpha"], "FAIL")
+        missing = copy.deepcopy(API); missing["insights"]["/s/alpha"]["items"][0]["invoked"] = True
+        self.assertEqual(verdicts(missing)["C.unused_set./s/alpha"], "FAIL")
+        self.assertEqual(verdicts()["C.unused_set./s/alpha"], "PASS")
+
+    def test_unused_positive_blocked_when_no_priced_unused_item(self):
+        a = copy.deepcopy(API)
+        for i in a["insights"]["/s/alpha"]["items"]:
+            if not i["invoked"]:
+                i["priced"] = False; i["usd"] = 0
+        a["insights"]["/s/alpha"]["items"].append(item("used", invoked=True))  # priced, but used
+        a["insights"]["/s/alpha"]["removable_usd"] = 0
+        self.assertEqual(verdicts(a)["C.money.unused_positive./s/alpha"], "BLOCKED")
+
+    def test_owner_total_rendered_and_picker_set_can_fail(self):
+        a = copy.deepcopy(API); a["history"]["never_used_owners"].pop()
+        self.assertEqual(verdicts(a)["H.owner_total_rendered"], "FAIL")
+        a = copy.deepcopy(API); a["facets_measured"]["project"] = []
+        self.assertEqual(verdicts(a)["C.picker_set"], "FAIL")
+
+    def test_partition_requires_the_oracle_installed_count(self):
+        a = copy.deepcopy(API)  # self-consistent (1 + 2 == 3 -> 2 + 2 == 4) but not what was installed
+        a["history"]["installed_skills"] = 4; a["history"]["used_installed"] = 2
+        self.assertEqual(verdicts(a)["H.partition"], "FAIL")
+
+    def test_ui_page_checks_can_fail(self):
+        base = {"errors": [], "values": {"headline_never": 2}, "overflow": [], "contrast": {}}
+        self.assertEqual(verdicts(ui={"pages": {"p": base}})["U.headline_matches_api.p"], "PASS")
+        bad = dict(base, errors=["boom"]); self.assertEqual(verdicts(ui={"pages": {"p": bad}})["U.no_js_errors.p"], "FAIL")
+        bad = dict(base, overflow=["#x"]); self.assertEqual(verdicts(ui={"pages": {"p": bad}})["U.no_overflow.p"], "FAIL")
+        bad = dict(base, values={"headline_never": 9})
+        self.assertEqual(verdicts(ui={"pages": {"p": bad}})["U.headline_matches_api.p"], "FAIL")
+
     def test_money_unused_positive_can_fail_for_a_priced_item(self):
         a = copy.deepcopy(API); a["insights"]["/s/alpha"]["items"][0]["usd"] = 0
         v = verdicts(a)
         self.assertEqual(v["C.money.unused_positive./s/alpha"], "FAIL")
 
     def test_total_is_sum_excludes_scope_none_and_can_fail(self):
-        self.assertEqual(verdicts()["C.money.total_is_sum./s/alpha"], "PASS")  # Bash (scope none) not counted
+        # an UNUSED scope-none item has usd but is not part of removable_usd (dash/insightsshape.go)
+        a = copy.deepcopy(API); e = copy.deepcopy(EXP)
+        a["insights"]["/s/alpha"]["items"].append(item("Grep", usd=0.1, scope="none"))
+        e["cleanup"]["unused"]["/s/alpha"].append("Grep")
+        self.assertEqual(verdicts(a, e)["C.money.total_is_sum./s/alpha"], "PASS")
+        a["insights"]["/s/alpha"]["removable_usd"] = 0.5  # the scope-none usd wrongly folded in
+        self.assertEqual(verdicts(a, e)["C.money.total_is_sum./s/alpha"], "FAIL")
         a = copy.deepcopy(API); a["insights"]["/s/alpha"]["removable_usd"] = 0.5
         self.assertEqual(verdicts(a)["C.money.total_is_sum./s/alpha"], "FAIL")
 
@@ -158,6 +205,8 @@ class TestCheck(unittest.TestCase):
         sid = PROBES["shutdown"]["session_id"]
         self.assertEqual(verdicts(db=make_db([sid]))["K.inventory_survives_shutdown"], "BLOCKED")
         self.assertEqual(verdicts(db=make_db([]))["K.inventory_survives_shutdown"], "FAIL")
+        # no request row for the probe: the probe never reached the recorder, a harness reason
+        self.assertEqual(verdicts(db=make_db([], requests_for=[]))["K.inventory_survives_shutdown"], "BLOCKED")
         self.assertEqual(verdicts(db=None)["K.inventory_survives_shutdown"], "BLOCKED")
         self.assertEqual(verdicts(db="/nonexistent/x.db")["K.inventory_survives_shutdown"], "BLOCKED")
 

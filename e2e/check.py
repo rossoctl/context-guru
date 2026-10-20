@@ -26,13 +26,14 @@ def _unused(items):
 
 
 def _shutdown_rows(db, sid):
-    """Rows in tool_declarations for sid, or None if the DB cannot be read."""
+    """(request rows, tool_declarations rows) for sid, or None if the DB cannot be read."""
     if not db or not pathlib.Path(db).exists():
         return None
     try:
         c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         try:
-            return c.execute("SELECT COUNT(*) FROM tool_declarations WHERE session_id = ?", (sid,)).fetchone()[0]
+            q = lambda t: c.execute(f"SELECT COUNT(*) FROM {t} WHERE session_id = ?", (sid,)).fetchone()[0]
+            return q("requests"), q("tool_declarations")
         finally:
             c.close()
     except sqlite3.Error:
@@ -67,8 +68,10 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
     _rec(out, "H.never_used_set", "history", sorted(h.get("never_used", [])) == sorted(he["never_used"]),
          sorted(he["never_used"]), sorted(h.get("never_used", [])))
     _rec(out, "H.partition", "history",
-         h.get("used_installed", -1) + len(h.get("never_used", [])) == h.get("installed_skills", -2),
-         "used + never == installed", [h.get("used_installed"), len(h.get("never_used", [])), h.get("installed_skills")])
+         h.get("used_installed", -1) + len(h.get("never_used", [])) == h.get("installed_skills", -2)
+         and h.get("installed_skills") == he["installed"],
+         f"used + never == installed == {he['installed']} (the oracle's count)",
+         [h.get("used_installed"), len(h.get("never_used", [])), h.get("installed_skills")])
     got_owners = {g["owner"]: len(g["skills"]) for g in h.get("never_used_owners", [])}
     _rec(out, "H.owner_counts", "history", got_owners == he["owners"], he["owners"], got_owners)
     _rec(out, "H.owner_total_rendered", "history", sum(got_owners.values()) == he["owner_total"],
@@ -89,18 +92,20 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
         doc = ins.get(root, {})
         items = doc.get("items", [])
         unused = sorted(i["name"] for i in _unused(items))
-        _rec(out, f"C.unused_set.{root}", "cleanup", set(exp["cleanup"]["unused"][root]) <= set(unused),
-             exp["cleanup"]["unused"][root], unused, "every expected unused item is listed")
+        _rec(out, f"C.unused_set.{root}", "cleanup", sorted(exp["cleanup"]["unused"][root]) == unused,
+             sorted(exp["cleanup"]["unused"][root]), unused,
+             "exact: a missing item hides waste, an extra one accuses the user of waste for something they use")
         _rec(out, f"C.used_absent.{root}", "cleanup",
              not set(exp["cleanup"]["used"][root]) & set(unused), "none listed as unused",
              sorted(set(exp["cleanup"]["used"][root]) & set(unused)))
         priced = [i for i in items if i.get("priced")]
         no_priced = not priced
+        no_priced_unused = not _unused(priced)
         # unpriced items are judged by C.money.unpriced_is_not_zero, not here
         _rec(out, f"C.money.unused_positive.{root}", "money",
              all(i.get("usd", 0) > 0 for i in _unused(priced)), "usd > 0 for every priced unused item",
              [i["name"] for i in _unused(priced) if not i.get("usd", 0) > 0],
-             detail="no priced items" if no_priced else "", blocked=no_priced)
+             detail="no priced unused items" if no_priced_unused else "", blocked=no_priced_unused)
         # dash/insightsshape.go: removable_usd only accumulates items whose scope != "none"
         total = round(sum(i.get("usd", 0) for i in _unused(items) if i.get("scope") != "none"), 6)
         _rec(out, f"C.money.total_is_sum.{root}", "money", abs(total - doc.get("removable_usd", 0)) < 1e-6,
@@ -139,16 +144,19 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
 
     # --- known finding #1 ---------------------------------------------------------------------
     sp = probes.get("shutdown")
-    rows = _shutdown_rows(db, sp["session_id"]) if sp else None
-    if rows is None:
+    got = _shutdown_rows(db, sp["session_id"]) if sp else None
+    if got is None:
         _rec(out, "K.inventory_survives_shutdown", "known", False, "tool_declarations rows for the probe session",
              "n/a", detail="no shutdown probe or no DB copy", blocked=True)
-    elif rows > 0:
-        _rec(out, "K.inventory_survives_shutdown", "known", False, "rows present", rows,
+    elif got[0] == 0:
+        _rec(out, "K.inventory_survives_shutdown", "known", False, "a request row for the probe session", 0,
+             detail="probe request not recorded", blocked=True)
+    elif got[1] > 0:
+        _rec(out, "K.inventory_survives_shutdown", "known", False, "rows present", got[1],
              detail="race not hit; see the Go reproducer", blocked=True)
     else:
         _rec(out, "K.inventory_survives_shutdown", "known", False, "tool_declarations rows for the probe session", 0,
-             detail="inventory writer not drained on Close (dash/toolinventory.go)")
+             detail="request row present, inventory writer not drained on Close (dash/toolinventory.go)")
 
     # --- ui -----------------------------------------------------------------------------------
     for name, p in pages.items():
