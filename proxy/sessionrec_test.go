@@ -415,6 +415,47 @@ func TestRecordSSEResponseIsAggregatedBeforeTranslation(t *testing.T) {
 	}
 }
 
+// Hosted mode: --record on the operator side is not consent. A tenant who has not opted in
+// is not recorded at all -- no clone, no event -- and one who has is keyed to their own id.
+func TestRecordNeedsTheTenantsConsentInHostedMode(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	defer r.Close()
+	h := &Handler{recorder: r, opts: Options{Tenants: &TenantSource{}}}
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
+
+	if rc := h.newRecCtx(req, bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1"}); rc.traceID != "" || rc.pristine != nil {
+		t.Fatalf("recorded a tenant who never opted in: %+v", rc)
+	}
+	if rc := h.newRecCtx(req, bschemas.Anthropic, ccBody("x"), nil); rc.traceID != "" {
+		t.Fatalf("recorded an unauthenticated request in hosted mode: %+v", rc)
+	}
+	rc := h.newRecCtx(req, bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1", RecordTraces: true})
+	if rc.traceID != testSessionUUID || rc.tenantID != "t1" {
+		t.Fatalf("opted-in tenant: got trace %q tenant %q, want %q and t1", rc.traceID, rc.tenantID, testSessionUUID)
+	}
+}
+
+// Each tenant's traces go in their own directory, and two tenants presenting the same session
+// UUID still get two files: one person's session can never be appended to another's.
+func TestRecorderSeparatesTenants(t *testing.T) {
+	r, dir := newTestRecorder(t)
+	a := baseEvent(testSessionUUID, []byte(testSSE), true)
+	a.tenantID = "alice"
+	b := baseEvent(testSessionUUID, []byte(testSSE), true)
+	b.tenantID = "bob"
+	recordAndClose(t, r, a, b)
+
+	if root := traceFiles(t, dir); len(root) != 0 {
+		t.Errorf("hosted traces written to the shared root: %v", root)
+	}
+	for _, who := range []string{"alice", "bob"} {
+		files := traceFiles(t, filepath.Join(dir, who))
+		if len(files) != 1 || filepath.Base(files[0]) != testSessionUUID+".otel.json" {
+			t.Errorf("%s: want one file named for the session, got %v", who, files)
+		}
+	}
+}
+
 // --- 4. One file per session, spans threaded ------------------------------------------
 func TestRecorderWritesOneFilePerSession(t *testing.T) {
 	r, dir := newTestRecorder(t)

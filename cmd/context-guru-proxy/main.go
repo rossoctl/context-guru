@@ -429,7 +429,8 @@ func main() {
 		// this is on, and must not learn what it captures by reading the source.
 		slog.Warn("RECORDING ENABLED: writing every request and response body to disk",
 			"dir", traceRec.Dir(), "body_cap", *recordBodyCap, "tee_cap", *recordTeeCap,
-			"note", "bodies are redacted on a best-effort pattern denylist, which is not a guarantee")
+			"note", "bodies are redacted on a best-effort pattern denylist, which is not a guarantee",
+			"hosted", "only accounts that opted in on their settings page are recorded, each under dir/<account id>/")
 	}
 
 	// Hosted mode. Everything below is nil/empty unless --upstreams was given, and the
