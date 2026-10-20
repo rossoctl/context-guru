@@ -164,6 +164,9 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
         _rec(out, f"U.no_overflow.{name}", "ui", not p["overflow"], [], p["overflow"], snapshot=f"snapshots/{name}.png")
         low = {k: v for k, v in p.get("contrast", {}).items() if v < 3.0}
         _rec(out, f"U.contrast.{name}", "ui", not low, ">= 3:1", low, snapshot=f"snapshots/{name}.png")
+        bad = p.get("values", {}).get("bad_tokens")
+        _rec(out, f"U.no_undefined_text.{name}", "ui", not bad, "no undefined/NaN/null/[object Object] in visible text",
+             bad or [], detail="; ".join(bad or []), snapshot=f"snapshots/{name}.png", blocked=bad is None)
         if "headline_never" in p.get("values", {}):
             _rec(out, f"U.headline_matches_api.{name}", "ui",
                  p["values"]["headline_never"] == len(h.get("never_used", [])),

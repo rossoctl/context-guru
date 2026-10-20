@@ -46,6 +46,11 @@ const READ = `(() => {
     const a = lum(getComputedStyle(el).color), b = lum(bgOf(el));
     out.contrast[label] = Math.round(((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)) * 100) / 100;
   }
+  // Visible text only: body.innerText omits hidden nodes. A bare undefined/NaN/null is a template reading a missing field.
+  const txt = document.body.innerText, bad = [], re = /\\b(undefined|NaN|null)\\b|\\[object Object\\]/g;
+  for (let m; (m = re.exec(txt)) && bad.length < 10; )
+    bad.push(txt.slice(Math.max(0, m.index - 30), m.index + m[0].length + 30).replace(/\\s+/g, ' '));
+  out.values.bad_tokens = bad;
   out.overflow = out.overflow.slice(0, 10);
   return out;
 })()`;

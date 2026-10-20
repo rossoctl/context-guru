@@ -226,6 +226,16 @@ class TestCheck(unittest.TestCase):
                                                           "overflow": [], "contrast": {}}}}
         self.assertEqual(verdicts(ui=ui)["S6.ui_no_js_errors"], "FAIL")
 
+    def test_undefined_text_fails_passes_and_blocks(self):
+        def run(values):
+            ui = {"pages": {"p": {"errors": [], "values": values, "overflow": [], "contrast": {}}}}
+            return {r["id"]: r for r in check.run(EXP, API, ui, "full", probes=PROBES)}["U.no_undefined_text.p"]
+        ctx = "docs-search removable undefined tools"
+        fail = run({"bad_tokens": [ctx]})
+        self.assertEqual((fail["verdict"], fail["detail"]), ("FAIL", ctx))
+        self.assertEqual(run({"bad_tokens": []})["verdict"], "PASS")
+        self.assertEqual(run({})["verdict"], "BLOCKED")
+
     def test_low_contrast_fails(self):
         ui = {"pages": {"p": {"errors": [], "values": {}, "overflow": [], "contrast": {"headline": 2.1}}}}
         self.assertEqual(verdicts(ui=ui)["U.contrast.p"], "FAIL")
