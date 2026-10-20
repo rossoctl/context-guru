@@ -25,7 +25,9 @@ import (
 // DISTINCT from claude-record's own version string: a corpus that mixes two producers must
 // be able to say which rows came from which, or every coverage difference between them
 // becomes unattributable at analysis time.
-const CollectorVersion = "cg-record/0.1.0"
+//
+// 0.2.0: identity redaction (identity.go). Files from 0.1.0 still name the person recording.
+const CollectorVersion = "cg-record/0.2.0"
 
 // SpanKindClient is the only kind this package emits: a proxied model call is an outbound
 // request. Spelled as the corpus spells it.
