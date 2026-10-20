@@ -90,3 +90,11 @@ func TestShortAndGenericNamesSkipped(t *testing.T) {
 		t.Errorf("short or generic usernames compiled into a pattern: %v", r.usernames)
 	}
 }
+
+// A first name whose first letter is multi-byte is still matched Capitalized.
+func TestIdentityMultibyteFirstName(t *testing.T) {
+	r := compileIdentity(Identity{Names: []string{"Élodie Dupont"}})
+	if r.casedNames == nil || !r.casedNames.MatchString("Hi Élodie,") {
+		t.Errorf("Capitalized multi-byte first name not matched: %v", r.casedNames)
+	}
+}

@@ -48,6 +48,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Markers for removed identity. Placeholder's «» family, with the category kept so a reader
@@ -213,7 +215,9 @@ func compileIdentity(id Identity) *identityRules {
 			anyCase[parts[len(parts)-1]] = true
 		}
 		for _, p := range parts {
-			cased[strings.ToUpper(p[:1])+strings.ToLower(p[1:])] = true
+			// By rune, not byte: a first letter like É is two bytes.
+			r, n := utf8.DecodeRuneInString(p)
+			cased[string(unicode.ToUpper(r))+strings.ToLower(p[n:])] = true
 			cased[strings.ToUpper(p)] = true
 		}
 	}
