@@ -186,7 +186,7 @@ Say in the PR body what changed in each plugin. A plugin that did not change kee
 ## Notes for an integrator that is an AI agent session
 
 - **Start each reviewer as a new agent, with a fresh context.** Never send review 2 to the agent that did review 1, and never ask a fixer to review its own work. Tell each reviewer which review it is (1 of 2 or 2 of 2) and to post the identity block.
-- **A Claude Code reviewer starts with the `code-review` skill** on the PR number (for example `code-review 601 high`). The skill finds the candidate defects. The reviewer then applies the rules in step 2: it runs the tests and its own mutations, keeps only the findings the runs back up, and posts one review with the identity block. Put any check you already suspect in the brief too. The skill does not know the history of the PR.
+- **Run PR reviews with the `offload-review` skill** (`.claude/skills/offload-review`). It starts the 2 independent reviewers, and each one posts its review with the identity block. Do not use the generic `code-review` skill for a PR review: it makes one review, it does not know the rules in step 2, and it compares against the current `main` instead of the PR's base.
 - **Brief each agent in one message,** with all of its requirements: the issue, what to check, the tests to write, where to work, and how to report. Requirements that arrive in pieces cost extra test runs.
 - **Each agent works in its own git worktree and branch.** No agent changes the main checkout.
 - **Remote test runs stay in the foreground.** An agent that ends its turn to wait for a remote job is not woken when the job ends.
