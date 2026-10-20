@@ -6504,6 +6504,25 @@ function loadSettings() {
         '11 of 22 realistic credential shapes passing through it. The manager can read ' +
         'whatever this stores. Off by default.')));
 
+    // Trace recording consent. Separate from the box above on purpose: that one keeps
+    // capped transcript text for the diff view; this one keeps the full redacted bodies
+    // of every call as research traces. Off until the user ticks it; a manager cannot.
+    const rec = el('input', {
+      type: 'checkbox', id: 'set-record', 'data-testid': 'set-record',
+    });
+    rec.checked = !!t.record_traces;
+    host.appendChild(el('div', { class: 'field' },
+      el('label', { class: 'comp', for: 'set-record' }, rec,
+        el('span', { class: 'comp-name' }, 'Record my sessions as research traces')),
+      el('p', { class: 'hint warn-text' },
+        'Writes the full request and response of every call, after redaction, to a ' +
+        'directory of your own on this server. Only takes effect if the operator has ' +
+        'turned recording on. Only you can change this.'),
+      whyBlock('What is removed, and what is kept',
+        'Credentials, email addresses and repository URLs are replaced with markers ' +
+        'before anything is written. Source code and tool output are kept: a replayable ' +
+        'trace needs them, so your name can still appear inside them. Off by default.')));
+
     // A stored document the server could not fully load. The fields below are a best-effort
     // read of it, and saving from them would post whatever that read happened to see — over
     // an already-broken document, on a page with no YAML box. So say so, and let the server's
@@ -6991,6 +7010,7 @@ async function saveSettings() {
     .concat([...picked].filter((n) => !prev.includes(n)));
   const body = {
     capture_content: $('#set-capture').checked,
+    record_traces: $('#set-record').checked,
     up_anthropic: $('#set-up_anthropic').value,
     up_openai: $('#set-up_openai').value,
     up_bob: $('#set-up_bob').value,

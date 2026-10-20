@@ -81,6 +81,7 @@ const (
 // request goroutine copies fields and sends; the writer does the work.
 type recEvent struct {
 	traceID  string
+	tenantID string // "" single-tenant; otherwise the file goes under <dir>/<tenantID>/
 	provider bschemas.ModelProvider
 
 	reqBody   []byte // PRISTINE inbound body (pre-pipeline)
@@ -251,10 +252,20 @@ func (r *sessionRecorder) handle(e *recEvent) {
 	if e == nil {
 		return
 	}
-	s := r.sessions[e.traceID]
+	// Keyed by tenant AND session: two tenants can never share a file, even if a client
+	// sent another tenant's session UUID.
+	key := e.tenantID + "\x00" + e.traceID
+	s := r.sessions[key]
 	if s == nil {
-		s = &recSession{traceID: e.traceID, file: r.fileFor(e.traceID)}
-		r.sessions[e.traceID] = s
+		file, err := r.fileFor(e.tenantID, e.traceID)
+		if err != nil {
+			r.errors.Add(1)
+			r.log.Warn("cg.record: could not create the tenant's trace directory; turn dropped",
+				"err", err, "tenant", e.tenantID)
+			return
+		}
+		s = &recSession{traceID: e.traceID, file: file}
+		r.sessions[key] = s
 	}
 	turn, err := r.buildTurn(e, s.lastSpan)
 	if err != nil {
@@ -481,16 +492,27 @@ func (r *sessionRecorder) flushAll(final bool) {
 // list and its first flush replaces a complete file with a one-span one. The analysis side
 // globs *.otel.json, so a second file for the same session still loads; a clobbered one is
 // unrecoverable.
-func (r *sessionRecorder) fileFor(traceID string) string {
-	safe := sanitizeTraceID(traceID)
-	base := filepath.Join(r.dir, safe+".otel.json")
-	if _, err := os.Stat(base); err != nil {
-		return base
+//
+// In hosted mode each tenant's files go in their own subdirectory, created owner-only, so
+// one person's traces are never mixed with another's and can be handed over, or deleted,
+// as a unit. Single-tenant (tenantID ""), files go in the record root as before.
+func (r *sessionRecorder) fileFor(tenantID, traceID string) (string, error) {
+	dir := r.dir
+	if tenantID != "" {
+		dir = filepath.Join(r.dir, sanitizeTraceID(tenantID))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", err
+		}
 	}
-	alt := filepath.Join(r.dir, fmt.Sprintf("%s.%d.otel.json", safe, os.Getpid()))
+	safe := sanitizeTraceID(traceID)
+	base := filepath.Join(dir, safe+".otel.json")
+	if _, err := os.Stat(base); err != nil {
+		return base, nil
+	}
+	alt := filepath.Join(dir, fmt.Sprintf("%s.%d.otel.json", safe, os.Getpid()))
 	r.log.Info("cg.record: a trace file for this session already exists (a restart, most likely); "+
 		"writing alongside it rather than over it", "existing", base, "writing", alt)
-	return alt
+	return alt, nil
 }
 
 // sanitizeTraceID makes a session id safe as a filename.
@@ -539,6 +561,26 @@ func randomSpanID() (string, error) {
 type recCtx struct {
 	pristine []byte // the inbound body as the client sent it, pre-pipeline
 	traceID  string // Claude Code's own session UUID where available -- see newRecCtx
+	tenantID string // the consenting tenant in hosted mode, "" single-tenant
+}
+
+// recordFor decides whether THIS request may be recorded. The same two gates as
+// captureContentFor, both of which must pass: the operator's --record flag (the recorder
+// exists at all) and, in hosted mode, the tenant's own consent.
+//
+// The difference is the default. Content capture is ON for a new account; trace recording
+// is OFF (tenant.Tenant.RecordTraces), because a recorded trace is the full, replayable
+// body of every call -- the most a proxy can keep -- and is for research, not for the
+// person using CG. An operator turning --record on a shared instance records nobody until
+// each person opts in for themselves.
+func (h *Handler) recordFor(tn *Tenancy) bool {
+	if h == nil || h.recorder == nil {
+		return false
+	}
+	if h.opts.Tenants == nil {
+		return true
+	}
+	return tn != nil && tn.RecordTraces
 }
 
 // newRecCtx resolves the recording context, or the zero value when recording is off.
@@ -555,7 +597,7 @@ type recCtx struct {
 // key is the fallback, and it is PREFIXED so an analyst can see at a glance that a file is not
 // keyed on a real session.
 func (h *Handler) newRecCtx(r *http.Request, provider bschemas.ModelProvider, orig []byte, tn *Tenancy) recCtx {
-	if h == nil || h.recorder == nil {
+	if !h.recordFor(tn) {
 		return recCtx{}
 	}
 	id := session.ExplicitID(gjson.GetBytes(orig, "metadata.user_id").String())
@@ -578,7 +620,11 @@ func (h *Handler) newRecCtx(r *http.Request, provider bschemas.ModelProvider, or
 	// bytes.Clone, not an alias: the pipeline owns `body` from here and a future refactor that
 	// mutated the backing array in place would silently corrupt every recorded request. ~200 KB
 	// on an opt-in path buys the invariant outright.
-	return recCtx{pristine: bytes.Clone(orig), traceID: id}
+	var tenantID string
+	if h.opts.Tenants != nil {
+		tenantID = tn.ID // recordFor guarantees tn != nil here
+	}
+	return recCtx{pristine: bytes.Clone(orig), traceID: id, tenantID: tenantID}
 }
 
 // unkeyedProcess is minted once so every unkeyed session in one process shares a file, rather

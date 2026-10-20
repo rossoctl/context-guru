@@ -184,6 +184,12 @@ type Tenant struct {
 	// not a switch. A new account starts with it ON (see Register for why); the column's
 	// DEFAULT 0 applies only to rows inserted without the field.
 	CaptureContent bool
+	// RecordTraces opts this tenant into --record: full, redacted request and response
+	// bodies written as replayable trace files. OFF at registration, unlike
+	// CaptureContent: the diff view is the product, a research trace is not, so nothing
+	// about using CG should depend on agreeing to it. The operator's --record flag must
+	// be on as well, and only the tenant can turn this on (see Update).
+	RecordTraces bool
 	// MaxRows caps this tenant's retained request rows so one heavy user cannot
 	// evict everyone else's history. 0 = the server default
 	// (--dashboard-max-rows-per-tenant). Enforced by the dashboard janitor, which reads
@@ -633,6 +639,7 @@ type Patch struct {
 	UpOpenAI       *string
 	UpBob          *string
 	CaptureContent *bool
+	RecordTraces   *bool
 	MaxRows        *int64
 	Disabled       *bool
 	// Variant and DisabledReason are manager-only, like Role/MaxRows/Disabled: one is
@@ -656,6 +663,12 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 	privileged := p.Role != nil || p.MaxRows != nil || p.Disabled != nil ||
 		p.Variant != nil || p.DisabledReason != nil
 	if privileged && !actor.IsManager() {
+		return ErrForbidden
+	}
+	// The reverse of privileged: consent to trace recording is the tenant's alone. A
+	// manager may not opt someone in -- that is the whole difference between consent and
+	// a setting -- and may not opt them out either, so the one switch has one owner.
+	if p.RecordTraces != nil && actor.ID != targetID {
 		return ErrForbidden
 	}
 	cur, err := r.Get(targetID)
@@ -730,6 +743,11 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 		set("capture_content", boolStr(cur.CaptureContent), boolStr(next.CaptureContent),
 			next.CaptureContent != cur.CaptureContent)
 	}
+	if v := p.RecordTraces; v != nil {
+		next.RecordTraces = *v
+		set("record_traces", boolStr(cur.RecordTraces), boolStr(next.RecordTraces),
+			next.RecordTraces != cur.RecordTraces)
+	}
 	if v := p.MaxRows; v != nil {
 		if *v < 0 {
 			return fmt.Errorf("tenant: max rows must not be negative")
@@ -768,10 +786,11 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 	defer tx.Rollback()
 	if _, err := tx.Exec(`UPDATE tenants SET label=?,role=?,config_yaml=?,up_anthropic=?,
 	  up_openai=?,up_bob=?,capture_content=?,max_rows=?,disabled=?,
-	  variant=?,disabled_reason=? WHERE id=?`,
+	  variant=?,disabled_reason=?,record_traces=? WHERE id=?`,
 		next.Label, string(next.Role), next.ConfigYAML, next.UpAnthropic, next.UpOpenAI,
 		next.UpBob, boolInt(next.CaptureContent), next.MaxRows,
-		boolInt(next.Disabled), next.Variant, next.DisabledReason, targetID); err != nil {
+		boolInt(next.Disabled), next.Variant, next.DisabledReason,
+		boolInt(next.RecordTraces), targetID); err != nil {
 		return err
 	}
 	now := time.Now().UnixMilli()
@@ -1404,6 +1423,10 @@ var migrations = []string{
 	// alone would only duplicate it: measured (EXPLAIN QUERY PLAN against the real
 	// query), the planner never chooses such an index over the PK's own, so it would
 	// add write/storage cost on every insert for zero query benefit.
+
+	// v12: consent to --record trace recording. Additive, DEFAULT 0, so every existing
+	// account migrates to "not recorded" and has to opt in for itself.
+	`ALTER TABLE tenants ADD COLUMN record_traces INTEGER NOT NULL DEFAULT 0;`,
 }
 
 func migrate(db *sql.DB) error {
@@ -1443,7 +1466,7 @@ func migrate(db *sql.DB) error {
 // password_hash is deliberately absent — see Tenant.HasPassword.
 const tenantCols = `t.id,t.label,t.email,t.role,t.config_yaml,t.up_anthropic,t.up_openai,
 	t.up_bob,t.capture_content,t.max_rows,t.disabled,t.created_at,t.last_seen_at,
-	t.email_verified_at,t.password_hash <> '',t.variant,t.disabled_reason`
+	t.email_verified_at,t.password_hash <> '',t.variant,t.disabled_reason,t.record_traces`
 
 // scanner is what *sql.Row and *sql.Rows have in common.
 type scanner interface{ Scan(...any) error }
@@ -1451,15 +1474,17 @@ type scanner interface{ Scan(...any) error }
 func scanTenant(s scanner) (*Tenant, error) {
 	var t Tenant
 	var role string
-	var capture, disabled, haspw int
+	var capture, disabled, haspw, recordTraces int
 	var created, seen, verified int64
 	if err := s.Scan(&t.ID, &t.Label, &t.Email, &role, &t.ConfigYAML, &t.UpAnthropic,
 		&t.UpOpenAI, &t.UpBob, &capture, &t.MaxRows, &disabled,
-		&created, &seen, &verified, &haspw, &t.Variant, &t.DisabledReason); err != nil {
+		&created, &seen, &verified, &haspw, &t.Variant, &t.DisabledReason,
+		&recordTraces); err != nil {
 		return nil, err
 	}
 	t.Role = Role(role)
 	t.CaptureContent = capture != 0
+	t.RecordTraces = recordTraces != 0
 	t.Disabled = disabled != 0
 	t.CreatedAt = msTime(created)
 	t.LastSeenAt = msTime(seen)
