@@ -171,22 +171,23 @@ func normalizeSpace(s string) string {
 // Case-insensitive; non-greedy, so two blocks in one message do not swallow the text between.
 func stripTagBlock(s, tag string) string {
 	open, close := "<"+tag, "</"+tag
+	from := 0
 	for {
-		low := strings.ToLower(s)
-		i := strings.Index(low, open)
-		if i < 0 {
+		// ASCII-only lowering keeps every byte offset valid in s. strings.ToLower does not:
+		// some characters change length when lowered (İ is 2 bytes, its lower form 1).
+		low := asciiLower(s)
+		k := strings.Index(low[from:], open)
+		if k < 0 {
 			break
 		}
+		i := from + k
 		// Confirm this is the tag and not a longer name sharing the prefix.
 		after := i + len(open)
 		if after < len(s) && s[after] != '>' && !unicode.IsSpace(rune(s[after])) {
-			// e.g. <system-reminders> when looking for <system-reminder>: skip past it.
-			j := strings.Index(low[after:], open)
-			if j < 0 {
-				break
-			}
-			_ = j
-			break
+			// e.g. <system-reminders> when looking for <system-reminder>: skip past it and
+			// keep looking, since a real block can still follow.
+			from = after
+			continue
 		}
 		end := strings.Index(low[i:], close)
 		if end < 0 {
@@ -206,6 +207,17 @@ func stripTagBlock(s, tag string) string {
 		s = s[:i] + " " + s[tail:]
 	}
 	return s
+}
+
+// asciiLower lowers A-Z only, so the result has exactly the byte length of s.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // unwrapSession keeps the inside of <session>...</session> and drops the tags.
