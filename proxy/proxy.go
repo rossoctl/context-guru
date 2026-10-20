@@ -40,6 +40,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
+	"github.com/rossoctl/context-guru/routing"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
@@ -83,6 +84,13 @@ type Options struct {
 	// operator's own endpoint and credential, pinned once at New. The "incoming"-source client
 	// is built per request from the route's upstream + the gateway's real key.
 	CheapModel *CheapModelConfig
+	// Routing is the model routing table's rows (routing package); empty = no routing, and the
+	// proxy behaves exactly as before. RoutingEnv reads an env var by name (nil: os.Getenv).
+	// ClassifierBudget is the TOTAL time the classifier redirect may spend on its retries before
+	// the original request goes upstream (0 = classifier.DefaultBudget).
+	Routing          []routing.Row
+	RoutingEnv       func(string) string
+	ClassifierBudget time.Duration
 	// Windows resolves a model's context window (max input tokens) so fraction-based
 	// Trigger thresholds scale with the model. nil => window unknown (0), fractions
 	// ignored, absolutes apply. Built in main from internal/modelinfo.
@@ -221,6 +229,8 @@ type Handler struct {
 	// staticCheapModel is Options.CheapModel pinned on the Dispatcher at New — nil when
 	// unconfigured. staticModel() is the host-mode-aware accessor; this field is unconditional.
 	staticCheapModel components.Model
+	// routes is the routing table built from Options.Routing at New; nil when there is none.
+	routes *routing.Table
 	// sent holds the last body forwarded upstream per session, so a component can put a question to
 	// the request's own model with the bytes the provider's cache was populated from. See
 	// prefixask.go for the bounds and for what happens when one is hit.
@@ -376,6 +386,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	if opts.CheapModel != nil {
 		h.staticCheapModel = h.dispatch.pinCheapModel(*opts.CheapModel)
 	}
+	h.buildRouting()
 	h.keeper = newKeeper(h)
 	h.keeper.start()
 	h.threads = thread.New()
@@ -1116,6 +1127,11 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// external evaluator can REPLAY the exact traffic through any pipeline via
 		// /compact — identical requests, no agent nondeterminism, no repeated LLM spend.
 		captureRequest(string(provider), body)
+		// The auto-mode classifier redirect (routing table row "classifier"). Returns false, and
+		// touches nothing, unless the row is active and the request matches.
+		if h.routeClassifier(w, r, provider, api, tn, body) {
+			return
+		}
 		// Rewrite the messages via the shared apply path; fail open. Supply the
 		// LLM clients NeedsModel components may call: the per-request "incoming"
 		// model (the route's upstream + the gateway's real key + the request's
@@ -2444,6 +2460,9 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	}
 	xs := metrics.ExtractSnapshot(cost, perSavedTok, cacheWrite, cacheRead)
 	snap.Extract = &xs
+	if rs := h.routes.Stats(); len(rs) > 0 {
+		snap.Routing = rs
+	}
 	if s := h.savingsStats(); s != nil && (s.Current != nil || s.Live != nil || s.All != nil) {
 		snap.Savings = s
 	}
