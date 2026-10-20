@@ -487,7 +487,7 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 
 		// ── 2. hit or miss, under THIS strategy's own history ───────────────
 		alive := st.tokens > 0 && r.TS < st.expires
-		forced := r.MissReason == "prefix_change" || r.MissReason == "cold_start"
+		forced := ForcedMiss(r.MissReason)
 		if forced {
 			out.ForcedMisses++
 		}

@@ -179,9 +179,10 @@ type Recorder struct {
 	// Cache-attribution state: the last time we saw each session and whether we
 	// have seen each model, so a cold start is never reported as a bust.
 	mu        sync.Mutex
-	life      *lifecycle        // nil unless Options.LifecycleSignals
-	lastSeen  map[string]int64  // thread.Key(session, thread) -> epoch ms of previous request
-	lastTail  map[string]uint64 // thread.Key(session, thread) -> previous request's volatile-tail hash
+	life      *lifecycle             // nil unless Options.LifecycleSignals
+	lastSeen  map[string]int64       // thread.Key(session, thread) -> epoch ms of previous request
+	lastTail  map[string]uint64      // thread.Key(session, thread) -> previous request's volatile-tail hash
+	lastFacts map[string]PrefixFacts // thread.Key(session, thread), and that + "\x00" + model -> latest prefix facts
 	seenModel map[string]bool
 	// perComp accumulates unique-savings dedup keys so a per-request unique figure
 	// exists at capture time. Bounded; see markUnique.
@@ -225,6 +226,7 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		done:      make(chan struct{}),
 		lastSeen:  map[string]int64{},
 		lastTail:  map[string]uint64{},
+		lastFacts: map[string]PrefixFacts{},
 		seenModel: map[string]bool{},
 		seenKeys:  map[string]struct{}{},
 		remote:    opts.Remote,
@@ -613,8 +615,15 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 			delete(r.lastTail, k)
 		}
 	}
+	// lastFacts holds two entries per thread and model; they age out by their own request time.
+	for k, f := range r.lastFacts {
+		if now-f.TS > staleSession {
+			delete(r.lastFacts, k)
+		}
+	}
 	if len(r.lastSeen) > 20000 {
 		r.lastSeen, r.lastTail = map[string]int64{}, map[string]uint64{}
+		r.lastFacts = map[string]PrefixFacts{}
 	}
 }
 

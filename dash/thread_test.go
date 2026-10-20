@@ -14,7 +14,7 @@ const fiveMin = int64(5 * 60 * 1000)
 func attribute(r *Recorder, session, threadID string, ts int64) string {
 	seenSession, seenModel, since, _ := r.ObserveThread("t1", session, threadID, "m", ts, 0)
 	e := &Event{CacheWrite: 400_000}
-	e.AttributeCache(seenSession, seenModel, since, fiveMin, e.CacheWrite > 0)
+	e.AttributeCache(seenSession, seenModel, since, fiveMin, causeIf(e.CacheWrite > 0))
 	return e.CacheMissReason
 }
 
@@ -134,7 +134,7 @@ func TestAnInheritingThreadIsNotAColdStart(t *testing.T) {
 			seen, seenModel, since, _ = r.ObserveThread("t1", "s1", "p:rewind", "m", t0+gap, 0)
 		}
 		e := &Event{CacheWrite: 400_000}
-		e.AttributeCache(seen, seenModel, since, fiveMin, true)
+		e.AttributeCache(seen, seenModel, since, fiveMin, CauseToolsChanged)
 		return e.CacheMissReason
 	}
 	if got := label(30_000, true); got != CachePrefixChange {
@@ -146,4 +146,12 @@ func TestAnInheritingThreadIsNotAColdStart(t *testing.T) {
 	if got := label(30_000, false); got != CacheColdStart {
 		t.Fatalf("control: not inherited: %q, want %q", got, CacheColdStart)
 	}
+}
+
+// causeIf stands in for a measured change: these tests are about recency and keying.
+func causeIf(changed bool) string {
+	if changed {
+		return CauseToolsChanged
+	}
+	return ""
 }

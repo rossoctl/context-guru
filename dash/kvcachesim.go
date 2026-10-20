@@ -422,7 +422,7 @@ func kvCacheAssumptions(cfg KVCacheSimConfig) KVCacheAssumptions {
 			"counted separately and excluded from every average, never treated as a zero gap.",
 		"Keep-alive ping rows written by context-guru itself are excluded from this dataset: " +
 			"counted, they would split one real idle gap into two short ones.",
-		"A cache miss recorded as prefix_change or cold_start cannot be rescued by any TTL. " +
+		"A cache miss recorded as prefix_change, cold_start or unknown cannot be rescued by any TTL. " +
 			"Those rows force a miss in every simulated arm and are reported as forced_misses.",
 		"Requests whose token accounting was incomplete have an UNKNOWN cost and contribute " +
 			"nothing to any dollar figure. They are counted, never valued at zero.",

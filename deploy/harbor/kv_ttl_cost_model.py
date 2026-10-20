@@ -273,8 +273,9 @@ HORIZON_5M_MS = 5 * 60 * 1000
 HORIZON_1H_MS = 60 * 60 * 1000
 
 # A miss with one of these recorded reasons could not have been prevented by any TTL: the
-# content moved, or there was no entry to begin with.
-UNRESCUABLE = frozenset({"prefix_change", "cold_start"})
+# content moved, there was no entry to begin with, or the dashboard could not explain the miss
+# (an unexplained miss is never counted as rescuable).
+UNRESCUABLE = frozenset({"prefix_change", "cold_start", "unknown"})
 
 
 def tier_of(action: str) -> str:
