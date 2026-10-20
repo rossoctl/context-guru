@@ -15,7 +15,7 @@ def _get(base: str, path: str):
 
 
 def collect(base: str, exp: dict, skill_cmd, unpriced_probe_id: str = "") -> dict:
-    roots = sorted(set(exp["cleanup"]["picker"]) | set(exp["stats"]["requests"]))
+    roots = sorted(set(exp["cleanup"]["picker"]) | set(exp["cleanup"].get("not_in_picker", [])) | set(exp["stats"]["requests"]))
     q = lambda r: urllib.parse.quote(r, safe="")
     out = {
         "history": _get(base, "/api/history"),

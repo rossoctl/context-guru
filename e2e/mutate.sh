@@ -28,10 +28,10 @@ echo "baseline: $BASE_RUN red=[$BASE_RED] crashed=$BASE_CRASH"
 : >"$OUT/mutation.json.items"; missed=0
 for f in e2e/mutations/*.file; do
   id="$(basename "$f" .file)"; file="$(cat "$f")"; expect="$(cat "e2e/mutations/$id.expect")"
-  n="$(python3 -c "import sys;print(open(sys.argv[1]).read().count(open(sys.argv[2]).read().rstrip("\n")))" "$file" "e2e/mutations/$id.from")"
+  n="$(python3 -c "import sys;print(open(sys.argv[1]).read().count(open(sys.argv[2]).read().rstrip(chr(10))))" "$file" "e2e/mutations/$id.from")"
   [ "$n" = 1 ] || { echo "$id: anchor occurs $n times in $file; fix the mutation file"; exit 2; }
   MFILE="$file"
-  python3 -c "import sys;p,a,b=sys.argv[1:];s=open(p).read();open(p,'w').write(s.replace(open(a).read().rstrip("\n"),open(b).read().rstrip("\n")))" \
+  python3 -c "import sys;p,a,b=sys.argv[1:];s=open(p).read();open(p,'w').write(s.replace(open(a).read().rstrip(chr(10)),open(b).read().rstrip(chr(10))))" \
     "$file" "e2e/mutations/$id.from" "e2e/mutations/$id.to"
   git diff --quiet -- "$file" && { echo "$id: mutation changed nothing"; exit 2; }
   runsmoke "$id"

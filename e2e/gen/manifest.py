@@ -119,6 +119,10 @@ def _caps(full: bool) -> list:
         for n in ("insights", "status", "dashboard"):
             add(f"context-guru:{n}", "plugin_skill", "context-guru", tokens=200, self_owned=True)
         add("cg:insights", "plugin_skill", "cg", tokens=200, self_owned=True)
+    else:
+        # Smoke carries one, installed and never invoked: the only state in which a broken self-exclusion
+        # shows (the skill leaks into the installed inventory and the never-used list).
+        add("context-guru:insights", "plugin_skill", "context-guru", tokens=200, self_owned=True)
     return c
 
 

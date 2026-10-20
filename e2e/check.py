@@ -57,8 +57,19 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
          all(not any(p != r and p.startswith(r + "/") for p in picker) for r in exp["cleanup"]["picker"]),
          "no subfolder of a root listed", picker)
     port = re.findall(r"127\.0\.0\.1:(\d+)/dashboard", api.get("skill", {}).get("stdout", ""))
-    _rec(out, "S7.skill_port", "skill", bool(port) and all(p == str(exp["skill"]["port"]) for p in port),
-         exp["skill"]["port"], port)
+    sk = api.get("skill", {})
+    _rec(out, "S7.skill_port", "skill",
+         sk.get("exit") == 0 and bool(port) and all(p == str(exp["skill"]["port"]) for p in port),
+         f"exit 0, port {exp['skill']['port']}", {"exit": sk.get("exit"), "ports": port})
+    # The timeline must be a JSON array for every root, including ones with no measured traffic: null
+    # there threw in the chart. Read at the API, where the bug lives.
+    for root in sorted(set(exp["cleanup"]["picker"]) | set(exp["cleanup"].get("not_in_picker", []))):
+        doc = ins.get(root)
+        tl = (doc or {}).get("timeline") if isinstance(doc, dict) else None
+        got = tl.get("buckets", "<absent>") if isinstance(tl, dict) else "<no timeline>"
+        _rec(out, f"C.timeline_buckets_is_array.{root}", "cleanup", isinstance(got, list),
+             "buckets is a JSON array", got if not isinstance(got, list) else "array",
+             blocked=not isinstance(doc, dict))
     pages = (ui or {}).get("pages", {})
     _rec(out, "S6.ui_no_js_errors", "ui", bool(pages) and not any(p["errors"] for p in pages.values()),
          "no JS errors on any page", {k: v["errors"] for k, v in pages.items() if v["errors"]},

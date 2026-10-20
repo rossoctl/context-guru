@@ -27,9 +27,10 @@ API = {
                 "never_used_owners": [{"owner": "a", "skills": ["a:x"]}, {"owner": "acme", "skills": ["b"]}],
                 "self_excluded": {"items": 2}, "used": [{"name": "a:y", "skill": True}]},
     "facets_measured": {"project": ["/s/alpha"]},
-    "insights": {"": {"items": [item("mcp__d__s"), item("Bash", usd=0.1, scope="none", invoked=True)], "removable_usd": 0.4},
+    "insights": {"/s/hist": {"items": [], "timeline": {"buckets": []}},
+                 "": {"items": [item("mcp__d__s"), item("Bash", usd=0.1, scope="none", invoked=True)], "removable_usd": 0.4},
                  "/s/alpha": {"items": [item("mcp__d__s"), item("Bash", usd=0.1, scope="none", invoked=True)],
-                              "removable_usd": 0.4}},
+                              "removable_usd": 0.4, "timeline": {"buckets": [1]}}},
     "stats": {"/s/alpha": {"requests": 12}},
     "unpriced_probe": {"items": [item("mcp__d__s", usd=0, priced=False)]},
     "skill": {"exit": 0, "stdout": "  http://127.0.0.1:8788/dashboard/#behaviour/history\n"},
@@ -213,6 +214,20 @@ class TestCheck(unittest.TestCase):
     def test_skill_port_can_fail(self):
         a = copy.deepcopy(API); a["skill"]["stdout"] = "http://127.0.0.1:8787/dashboard/"
         self.assertEqual(verdicts(a)["S7.skill_port"], "FAIL")
+
+    def test_skill_port_fails_on_nonzero_exit_even_with_right_port(self):
+        a = copy.deepcopy(API); a["skill"]["exit"] = 1
+        self.assertEqual(verdicts(a)["S7.skill_port"], "FAIL")
+
+    def test_timeline_buckets_array_passes_null_fails_missing_blocks(self):
+        i = "C.timeline_buckets_is_array./s/hist"
+        self.assertEqual(verdicts()[i], "PASS")
+        a = copy.deepcopy(API); a["insights"]["/s/hist"]["timeline"]["buckets"] = None
+        self.assertEqual(verdicts(a)[i], "FAIL")
+        a = copy.deepcopy(API); del a["insights"]["/s/hist"]["timeline"]["buckets"]
+        self.assertEqual(verdicts(a)[i], "FAIL")
+        a = copy.deepcopy(API); del a["insights"]["/s/hist"]
+        self.assertEqual(verdicts(a)[i], "BLOCKED")
 
     def test_skill_port_fails_when_no_url_printed(self):
         a = copy.deepcopy(API); a["skill"]["stdout"] = "nothing"

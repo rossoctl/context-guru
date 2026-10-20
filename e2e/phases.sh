@@ -176,7 +176,9 @@ p_ui() {
   for _ in $(seq 1 40); do curl -fsS -o /dev/null http://127.0.0.1:9222/json/version && break; sleep 0.25; done
   node /src/e2e/snap.mjs "$BASE" "$R/expected.json" "$R" "$TIER"
 }
-p_skill() { "$PLUG/scripts/dashboard.sh" --no-open | tee "$R/logs/skill.out"; }
+# dashboard.sh exits non-zero when nothing answers on its port; that is the product's behaviour and a
+# result for S7.skill_port (collect.py records the exit code), not a crashed phase.
+p_skill() { "$PLUG/scripts/dashboard.sh" --no-open 2>&1 | tee "$R/logs/skill.out"; return 0; }
 p_assert() { python3 -m e2e.check --results "$R" --tier "$TIER"; return 0; }  # a FAIL is a result, not a crash
 
 cd /src
