@@ -57,6 +57,33 @@ class TestReplay(unittest.TestCase):
         self.assertEqual(r["sent"], want)
         self.assertEqual(r["failed"], 0)
 
+    def test_run_records_one_send_time_per_sent_turn(self):
+        import time
+        t0 = int(time.time() * 1000)
+        srv = upstream.serve(0)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        stamps = {}
+        try:
+            r = replay.run(self.m, f"http://127.0.0.1:{srv.server_address[1]}", stamps=stamps)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(len(stamps), r["sent"])
+        self.assertTrue(all(v >= t0 for v in stamps.values()))
+        self.assertTrue(all("@" in k for k in stamps))
+
+    def test_probe_sends_one_turn_under_a_fresh_session_and_records_no_stamp(self):
+        srv = upstream.serve(0)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        stamps = {}
+        try:
+            r = replay.run(self.m, f"http://127.0.0.1:{srv.server_address[1]}", stamps=stamps, probe="-shutdown-probe")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual((r["sent"], r["ok"]), (1, 1))
+        self.assertEqual(stamps, {})
+
     def test_run_counts_an_upstream_400_as_failed(self):
         bad = dataclasses.replace(self.t, fresh=-1)  # upstream rejects negative usage with 400
         srv = upstream.serve(0)

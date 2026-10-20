@@ -29,8 +29,6 @@ p_suite() { CGO_ENABLED=1 make test; }
 
 p_generate() {
   python3 -m e2e.gen.inventory --tier "$TIER" --home "$HOME" &&
-  python3 -m e2e.gen.transcripts --tier "$TIER" --home "$HOME" &&
-  python3 -m e2e.gen.shape --home "$HOME" &&
   python3 -m e2e.oracle --tier "$TIER" --home "$HOME" --out "$R/expected.json" &&
   python3 -m e2e.oracle --tier "$TIER" --home "$HOME" --out "$R/expected.2.json" &&
   cmp "$R/expected.json" "$R/expected.2.json"   # determinism
@@ -83,30 +81,53 @@ stop_proxy() {
   echo "proxy pid $pid did not exit"; return 1
 }
 
-# The user installs, works through the proxy, and imports history afterwards. The importer writes
-# the DB directly, so the proxy is stopped around it.
-p_import() {
-  # FINDING (PR #578): the inventory writer flushes every 2s and Recorder.Close() does not drain it, so
-  # a proxy stopped <2s after its last request loses that tail of tool_declarations (reproduced: 0 rows
-  # after SIGTERM at 0.2s, 11 rows after 5s). A real user does not stop the proxy that fast; wait out
-  # the flush so the rest of the run measures what it means to. Remove this line to expose the loss.
-  sleep 3
-  stop_proxy || return 1
-  /opt/cg/cg-import-history -db "$DB" -apply &&
-  /opt/cg/cg-import-history -db "$DB" -backfill-projects &&
-  start_proxy
+# Wait for the proxy's OWN evidence that inventory is written (tool_declarations rows for every replayed
+# session), so a later stop does not lose a tail the way finding #1 (invWriter not drained on Close) would.
+# A timeout is recorded, not fatal: the later check judges it.
+settle_inventory() {  # settle_inventory <label>
+  local want t0 n=0 res; t0=$(date +%s%3N)
+  want=$(python3 -c "import json;print(len({k.split('@')[0] for k in json.load(open('$R/replay-stamps.json'))}))")
+  while :; do
+    n=$(sqlite3 "$DB" "SELECT COUNT(DISTINCT session_id) FROM tool_declarations" 2>/dev/null || echo 0)
+    [ "$n" -ge "$want" ] && { res="$(( $(date +%s%3N) - t0 ))"; break; }
+    [ $(( $(date +%s%3N) - t0 )) -ge 20000 ] && { res='"timeout"'; break; }
+    sleep 0.25
+  done
+  printf '{"phase":"replay","label":"%s","sessions_wanted":%d,"sessions_seen":%d,"inventory_settle_ms":%s}\n' \
+    "$1" "$want" "$n" "$res" >>"$R/settle.jsonl"
 }
+
+REPLAY="python3 -m e2e.replay --tier $TIER --home $HOME --base $BASE/anthropic --stamps $R/replay-stamps.json"
 
 p_replay() {
   start_upstream || return 1
   start_proxy || return 1
   if [ "$TIER" = smoke ]; then
-    python3 -m e2e.replay --tier "$TIER" --home "$HOME" --base "$BASE/anthropic" --which post
+    $REPLAY --which post || return 1
   else  # Review Focus 3: restart between halves; rows before the restart must survive
-    python3 -m e2e.replay --tier "$TIER" --home "$HOME" --base "$BASE/anthropic" --which first_half &&
-    stop_proxy && start_proxy &&
-    python3 -m e2e.replay --tier "$TIER" --home "$HOME" --base "$BASE/anthropic" --which second_half
+    $REPLAY --which first_half || return 1
+    settle_inventory first_half; stop_proxy && start_proxy || return 1
+    $REPLAY --which second_half || return 1
   fi
+  settle_inventory end
+  # Shutdown probe for finding #1: one fresh-session request, then an IMMEDIATE stop. Its
+  # tool_declarations rows exist only if shutdown drains the inventory writer.
+  $REPLAY --which post --probe=-shutdown-probe --stamps "" --probe-out "$R/shutdown-probe.json" || return 1
+  stop_proxy && start_proxy
+}
+
+p_transcripts() {
+  python3 -m e2e.gen.transcripts --tier "$TIER" --home "$HOME" --stamps "$R/replay-stamps.json" &&
+  python3 -m e2e.gen.shape --home "$HOME"
+}
+
+# The user installs, works through the proxy, and imports history afterwards. The importer writes
+# the DB directly, so the proxy is stopped around it.
+p_import() {
+  stop_proxy || return 1
+  /opt/cg/cg-import-history -db "$DB" -apply &&
+  /opt/cg/cg-import-history -db "$DB" -backfill-projects &&
+  start_proxy
 }
 
 p_api() {
@@ -119,5 +140,5 @@ p_skill() { "$PLUG/scripts/dashboard.sh" --no-open | tee "$R/logs/skill.out"; }
 
 cd /src
 [ "$TIER" = smoke ] || phase suite p_suite
-for ph in preflight generate install replay import api skill; do phase "$ph" "p_$ph"; done
+for ph in preflight generate install replay transcripts import api skill; do phase "$ph" "p_$ph"; done
 echo "== phases complete"

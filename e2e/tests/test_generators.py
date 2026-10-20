@@ -24,6 +24,31 @@ class TestGenerators(unittest.TestCase):
         dirs = {p.name for p in (pathlib.Path(self.home) / ".claude" / "projects").iterdir()}
         self.assertEqual(len(dirs), 12)
 
+    def test_post_install_turns_take_their_stamped_time_and_pre_install_do_not(self):
+        post = [(x, t) for x in self.m.sessions for t in x.turns if mf.measured(t, self.m)]
+        stamps = {f"{x.id}@{t.ts}": 1_800_000_000_000 + i for i, (x, t) in enumerate(post)}
+        transcripts.write(self.m, self.home, stamps)
+        cut = self.m.sessions[mf.TRUNCATED_SESSION_INDEX]  # its last assistant line is half-written
+        cut_key = f"{cut.id}@{cut.turns[-1].ts}"
+        stamped = {transcripts._iso(v) for k, v in stamps.items() if k != cut_key}
+        seen = set()
+        for f in (pathlib.Path(self.home) / ".claude" / "projects").glob("*/*.jsonl"):
+            for l in f.read_text().splitlines():
+                try:
+                    e = json.loads(l)
+                except ValueError:
+                    continue  # the deliberately truncated line
+                if e.get("type") == "assistant":
+                    seen.add(e["timestamp"])
+        self.assertTrue(stamped <= seen, "every post-install turn carries its stamp")
+        pre = {transcripts._iso(t.ts) for x in self.m.sessions for t in x.turns
+               if not mf.measured(t, self.m) and not (x is cut and t is cut.turns[-1])}
+        self.assertTrue(pre <= seen, "pre-install turns keep the manifest time")
+
+    def test_post_install_turn_without_a_stamp_raises(self):
+        with self.assertRaises(KeyError):
+            transcripts.write(self.m, self.home, {})
+
     def test_generator_emits_one_truncated_final_line(self):
         # Review Focus 4: a live session's last line is often cut off.
         r = transcripts.write(self.m, self.home)

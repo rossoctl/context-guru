@@ -30,14 +30,22 @@ def _blocks(t: mf.Turn, caps: dict) -> list:
     return out
 
 
-def _lines(s: mf.Session, caps: dict) -> list:
+def _lines(s: mf.Session, caps: dict, m: mf.Manifest, stamps) -> list:
     out = [json.dumps({"type": "ai-title", "sessionId": s.id, "aiTitle": "work"})]
     for t in s.turns:
-        out.append(json.dumps({"type": "user", "sessionId": s.id, "cwd": t.cwd, "timestamp": _iso(t.ts - 1000),
+        ts = t.ts
+        if stamps is not None and mf.measured(t, m):
+            # The proxy stamped this request's row with its real arrival time; the transcript of the
+            # same request carries that same time.
+            key = f"{s.id}@{t.ts}"
+            if key not in stamps:
+                raise KeyError(f"post-install turn {key} has no stamp: replay did not send it")
+            ts = stamps[key]
+        out.append(json.dumps({"type": "user", "sessionId": s.id, "cwd": t.cwd, "timestamp": _iso(ts - 1000),
                                "isSidechain": False, "entrypoint": "cli", "gitBranch": "main",
                                "message": {"role": "user", "content": "continue"}}))
         out.append(json.dumps({
-            "type": "assistant", "sessionId": s.id, "cwd": t.cwd, "timestamp": _iso(t.ts),
+            "type": "assistant", "sessionId": s.id, "cwd": t.cwd, "timestamp": _iso(ts),
             "isSidechain": False, "entrypoint": "cli", "gitBranch": "main",
             "message": {"model": "claude-opus-5", "role": "assistant", "content": _blocks(t, caps),
                         "usage": {"input_tokens": t.fresh, "cache_read_input_tokens": t.cache_read,
@@ -46,7 +54,7 @@ def _lines(s: mf.Session, caps: dict) -> list:
     return out
 
 
-def write(m: mf.Manifest, home: str) -> dict:
+def write(m: mf.Manifest, home: str, stamps: dict | None = None) -> dict:
     caps = {c.name: c for c in m.capabilities}
     projs = {p.key: p for p in m.projects}
     base = pathlib.Path(home) / ".claude" / "projects"
@@ -55,7 +63,7 @@ def write(m: mf.Manifest, home: str) -> dict:
     for s in m.sessions:
         d = base / projs[s.project].transcript_dir
         d.mkdir(parents=True, exist_ok=True)
-        lines = _lines(s, caps)
+        lines = _lines(s, caps, m, stamps)
         if s is truncated:
             # Killed mid-write: the final assistant line is cut to its first half and ends the file.
             lines = lines[:-1]  # no last-prompt bookkeeping line
@@ -76,8 +84,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tier", required=True)
     ap.add_argument("--home", required=True)
+    ap.add_argument("--stamps", default="", help="replay's send-time map; post-install turns take these times")
     a = ap.parse_args(argv)
-    print(json.dumps(write(mf.build(a.tier, home=a.home), a.home)))
+    stamps = json.load(open(a.stamps)) if a.stamps else None
+    print(json.dumps(write(mf.build(a.tier, home=a.home), a.home, stamps)))
     return 0
 
 
