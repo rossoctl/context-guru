@@ -1,6 +1,7 @@
 import json
 import threading
 import unittest
+import urllib.error
 import urllib.request
 
 from e2e import upstream
@@ -42,6 +43,34 @@ class TestUpstream(unittest.TestCase):
                              {"X-E2E-Usage": "1,2,3,4", "X-E2E-Truncate": "1"})
         self.assertNotIn("message_stop", body)
         self.assertIn("content_block_delta", body)
+
+    def test_malformed_usage_header_is_a_400(self):
+        try:
+            self._post({"model": "m", "messages": []}, {"X-E2E-Usage": "1,2,3"})
+            self.fail("Expected HTTPError")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+            body = json.loads(e.read().decode())
+            self.assertEqual(body["type"], "error")
+            self.assertIn("bad X-E2E-Usage", body["error"]["message"])
+            self.assertIn("1,2,3", body["error"]["message"])
+
+    def test_non_integer_usage_header_is_a_400(self):
+        try:
+            self._post({"model": "m", "messages": []}, {"X-E2E-Usage": "a,b,c,d"})
+            self.fail("Expected HTTPError")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+            body = json.loads(e.read().decode())
+            self.assertEqual(body["type"], "error")
+            self.assertIn("bad X-E2E-Usage", body["error"]["message"])
+
+    def test_missing_usage_header_defaults(self):
+        ct, body = self._post({"model": "m", "messages": []})
+        self.assertIn("json", ct)
+        u = json.loads(body)["usage"]
+        self.assertEqual((u["input_tokens"], u["cache_read_input_tokens"],
+                          u["cache_creation_input_tokens"], u["output_tokens"]), (1, 0, 0, 1))
 
 
 if __name__ == "__main__":

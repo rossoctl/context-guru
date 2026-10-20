@@ -10,10 +10,18 @@ import json
 import sys
 
 
-def _usage(h) -> tuple:
+def _usage(h) -> tuple | None:
+    """Parse X-E2E-Usage header strictly: exactly 4 comma-separated non-negative integers.
+    Returns (a, b, c, d) tuple or None if malformed (caller sends 400).
+    Missing header returns (1, 0, 0, 1)."""
     raw = h.get("X-E2E-Usage", "1,0,0,1")
-    a, b, c, d = (int(x) for x in raw.split(","))
-    return a, b, c, d
+    parts = raw.split(",")
+    if len(parts) != 4:
+        return None
+    try:
+        return tuple(int(x) for x in parts)
+    except ValueError:
+        return None
 
 
 class _H(http.server.BaseHTTPRequestHandler):
@@ -25,7 +33,23 @@ class _H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("content-length", 0))
         req = json.loads(self.rfile.read(n) or b"{}")
-        fresh, cread, cwrite, out = _usage(self.headers)
+        usage_tuple = _usage(self.headers)
+        if usage_tuple is None:
+            raw = self.headers.get("X-E2E-Usage", "")
+            error_body = json.dumps({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": f"bad X-E2E-Usage: {raw}"
+                }
+            }).encode()
+            self.send_response(400)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(error_body)))
+            self.end_headers()
+            self.wfile.write(error_body)
+            return
+        fresh, cread, cwrite, out = usage_tuple
         usage = {"input_tokens": fresh, "cache_read_input_tokens": cread,
                  "cache_creation_input_tokens": cwrite, "output_tokens": out}
         msg = {"id": "msg_e2e", "type": "message", "role": "assistant", "model": req.get("model", "m"),
