@@ -170,10 +170,16 @@ PY
   mkdir -p "$R/db"   # mock data only; kept for diagnosing a mismatch
   sqlite3 "$DB" ".backup '$R/db/dashboard-$PORT.db'"
 }
+p_ui() {
+  chromium --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --remote-debugging-port=9222 \
+    --user-data-dir=/tmp/chrome about:blank >"$R/logs/chromium.log" 2>&1 &
+  for _ in $(seq 1 40); do curl -fsS -o /dev/null http://127.0.0.1:9222/json/version && break; sleep 0.25; done
+  node /src/e2e/snap.mjs "$BASE" "$R/expected.json" "$R" "$TIER"
+}
 p_skill() { "$PLUG/scripts/dashboard.sh" --no-open | tee "$R/logs/skill.out"; }
 p_assert() { python3 -m e2e.check --results "$R" --tier "$TIER"; return 0; }  # a FAIL is a result, not a crash
 
 cd /src
 [ "$TIER" = smoke ] || phase suite p_suite
-for ph in preflight generate install replay transcripts import api skill assert; do phase "$ph" "p_$ph"; done
+for ph in preflight generate install replay transcripts import api skill ui assert; do phase "$ph" "p_$ph"; done
 echo "== phases complete"
