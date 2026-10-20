@@ -82,8 +82,8 @@ class TestOracle(unittest.TestCase):
         self.assertEqual(e_smoke["import"]["valid_pre_install_turns"], 11)
 
     def test_import_count_full(self):
-        """Hard-coded: full tier has 6491 pre-install turns, the cut turn is pre-install, so 6490."""
-        self.assertEqual(self.e["import"]["valid_pre_install_turns"], 6490)
+        """Hard-coded: full tier has 6418 pre-install turns, the cut turn is pre-install, so 6417."""
+        self.assertEqual(self.e["import"]["valid_pre_install_turns"], 6417)
 
 
 if __name__ == "__main__":

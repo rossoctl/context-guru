@@ -83,6 +83,28 @@ class TestManifest(unittest.TestCase):
                 self.assertIn(label_state, cap_observed,
                     f"{tier}: {cap_name} labelled '{label_state}' but observed {cap_observed}")
 
+    def test_every_measured_project_has_post_install_turns(self):
+        """Every project with measured=True must have at least one post-install turn."""
+        m = mf.build("full")
+        for p in m.projects:
+            if p.measured:
+                post_turns = [t for s in m.sessions if s.project == p.key for t in s.turns if mf.measured(t, m)]
+                self.assertGreaterEqual(len(post_turns), 1,
+                    f"measured project {p.key} has no post-install turns")
+
+    def test_wanderer_works_in_tmp_after_install(self):
+        """Wanderer must have a post-install turn with cwd=/tmp/scratch-w (its excursion folder)."""
+        m = mf.build("full")
+        wanderer_post_cwds = set()
+        for s in m.sessions:
+            if s.project == "wanderer":
+                for t in s.turns:
+                    if mf.measured(t, m):
+                        wanderer_post_cwds.add(t.cwd)
+
+        self.assertIn("/tmp/scratch-w", wanderer_post_cwds,
+            f"wanderer has no post-install turn in /tmp/scratch-w; post cwds: {wanderer_post_cwds}")
+
 
 if __name__ == "__main__":
     unittest.main()

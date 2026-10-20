@@ -299,6 +299,9 @@ def build(tier: str, seed: int = SEED, home: str = "/sandbox") -> Manifest:
             elif base == "my-repo" and si == 0:
                 # First my-repo session: post-install for toolkit:writer (post_only)
                 start = rng.randint(INSTALL_DAY, DAYS - 3)
+            elif base == "wanderer" and si == 0:
+                # First wanderer session: post-install to exercise /tmp/scratch-w excursion
+                start = rng.randint(INSTALL_DAY, DAYS - 3)
             elif base == "history-only" or base == "deleted-proj" or not p.measured:
                 start = rng.randint(0, INSTALL_DAY - 4)
             elif base == "mixed" and si == 0:
@@ -316,7 +319,11 @@ def build(tier: str, seed: int = SEED, home: str = "/sandbox") -> Manifest:
                     ts = install - (turns_per_session // 2 - ti) * 600_000
                 if not p.measured and ts >= install:
                     ts = install - 3_600_000 - ti * 60_000
-                cwd = p.folders[ti % len(p.folders)] if len(p.folders) > 1 else p.root
+                # For wanderer post-install: ensure turn 0 uses /tmp/scratch-w excursion
+                if base == "wanderer" and si == 0 and ts >= install and ti == 0:
+                    cwd = "/tmp/scratch-w"
+                else:
+                    cwd = p.folders[ti % len(p.folders)] if len(p.folders) > 1 else p.root
                 invs = []
                 for cname, (state, users, window) in rmap.items():
                     if base not in users:
