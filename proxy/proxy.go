@@ -1912,6 +1912,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				}
 				h.recorder.Record(&recEvent{
 					traceID:   rc.traceID,
+					tenantID:  rc.tenantID,
 					provider:  provider,
 					reqBody:   rc.pristine,
 					respBody:  recBody,
