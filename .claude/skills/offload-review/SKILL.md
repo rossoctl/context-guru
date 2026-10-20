@@ -1,6 +1,6 @@
 ---
 name: offload-review
-description: Offload two independent reviews of a PR to an agent tool on this machine (IBM Bob today), fix their findings, and re-review. Use when you finish committing a PR and it is ready for review.
+description: Offload two independent reviews of a PR to agent tools on this machine, fix their findings, and re-review. Use for every PR review in this repo - when asked to review a PR (yours or another person's), and when you finish committing a PR. Use it instead of the generic code-review skill.
 ---
 
 # Offload review
@@ -14,6 +14,18 @@ backend is `bob`. Use `--backend <name>` or `OFFLOAD_BACKEND` to pick another on
 
 Run this skill in the **main session**, not in a subagent. A subagent is not woken by its own
 background task, so it cannot wait for the reviewers.
+
+## When to use
+
+- **Every PR review in this repo uses this skill.** This includes "review PR <N>" for a PR that
+  another person wrote.
+- **Do not use the generic `code-review` skill for a PR review.** It makes one review, not two
+  independent ones. It does not know this repo's rules. It also compares against the current
+  `main`, not against the PR's base, so a branch that is behind `main` gets findings in files the
+  PR does not change.
+- `code-review` is still correct for a quick check of your own diff before you commit.
+- **A PR by another person:** run the rounds, then report both verdicts to the user. Do not fix
+  the findings (step 5) unless the user asks you to.
 
 ## Before you start
 
