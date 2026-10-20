@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1245,5 +1246,26 @@ func TestTileHoursWindowsUTCSurviveStorageAndDST(t *testing.T) {
 			s.InWindow(d.Add(9*time.Hour+30*time.Minute)) {
 			t.Errorf("%s: cell hour 8 must cover exactly 08:00-09:00 UTC", d.Format("2006-01-02"))
 		}
+	}
+}
+
+// A K-PING ARM BECOMES A LIVE STRATEGY WITH K PINGS. The campaign must enforce exactly the budget the
+// cell was scored at; a strategy left at the default of 2 would run a schedule nobody simulated.
+func TestCampaignEnforcesTheKPingArmsBudget(t *testing.T) {
+	for k := 1; k <= kvcache.MaxKeepAlivePings; k++ {
+		arm := kvcache.StrategyKeepAlive5mPingsPrefix + strconv.Itoa(k)
+		a := campaignArmFor(arm)
+		if !a.activatable || a.baseline {
+			t.Fatalf("%s: activatable=%v baseline=%v, want a live non-baseline arm", arm, a.activatable, a.baseline)
+		}
+		if a.maxPings != k {
+			t.Errorf("%s enforces %d pings, want %d", arm, a.maxPings, k)
+		}
+		if err := validStrategyBounds(time.Duration(a.idleSeconds)*time.Second, a.maxPings, a.minPrefixTokens, 0, false, 0); err != nil {
+			t.Errorf("%s builds a strategy the live bounds refuse: %v", arm, err)
+		}
+	}
+	if a := campaignArmFor("keepalive-5m-x12"); a.activatable {
+		t.Error("x12 is above the live bound and must not be enforceable")
 	}
 }

@@ -142,6 +142,17 @@ func campaignArmFor(arm string) campaignArm {
 			idleSeconds: 3360, maxPings: 1, headTTLMinTokens: campaignDefaultHeadTTLMinTokens,
 			minPrefixTokens: campaignLegacyMinPrefixTokens}
 	}
+	// keepalive-5m-xK: the 5-minute keep-alive with exactly K pings per idle span. The live strategy
+	// carries K as MaxPings, which the simulator replays as the arm's own PingCap. Idle and floor are
+	// keepalive-5m's for K >= 2 (the 270 s / 80k evidence is K>=2) and keepalive-5m-once's for K = 1.
+	if k, ok := kvcache.KeepAlivePingsOf(arm); ok {
+		if k == 1 {
+			return campaignArm{activatable: true, idleSeconds: 280, maxPings: 1,
+				minPrefixTokens: campaignLegacyMinPrefixTokens}
+		}
+		return campaignArm{activatable: true, idleSeconds: campaignKeepAlive5mIdle, maxPings: k,
+			minPrefixTokens: campaignDefaultMinPrefixTokens}
+	}
 	return campaignArm{reason: fmt.Sprintf(
 		"%q has no live enforcement path yet — it is a simulation-only arm", arm)}
 }
