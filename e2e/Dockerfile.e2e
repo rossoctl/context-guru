@@ -10,7 +10,7 @@ RUN mkdir -p /out && make build && cp bin/context-guru-proxy /out/ && \
 FROM golang:1.26-bookworm
 # go stays in the image: tier 2 runs `make test` against /src.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 chromium curl git make jq ca-certificates fonts-dejavu-core xz-utils && \
+      python3 sqlite3 chromium curl git make jq ca-certificates fonts-dejavu-core xz-utils && \
     rm -rf /var/lib/apt/lists/*
 # Node >= 22 (built-in WebSocket) for the snapper; bookworm ships v18. Official tarball, checksum-verified.
 RUN set -eu; v=v22.23.3; \

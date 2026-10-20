@@ -2,3 +2,12 @@ e2e/results
 .superpowers
 **/__pycache__
 bin
+.claude
+**/.DS_Store
+.venv*
+.env
+.env.*
+*.pem
+*.key
+.idea
+.vscode
