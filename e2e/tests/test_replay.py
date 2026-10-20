@@ -1,6 +1,8 @@
+import dataclasses
 import json
 import threading
 import unittest
+from unittest import mock
 
 from e2e import replay, upstream
 from e2e.gen import manifest as mf
@@ -50,9 +52,24 @@ class TestReplay(unittest.TestCase):
             r = replay.run(self.m, f"http://127.0.0.1:{srv.server_address[1]}")
         finally:
             srv.shutdown()
+            srv.server_close()
         want = sum(1 for s in self.m.sessions for t in s.turns if mf.measured(t, self.m))
         self.assertEqual(r["sent"], want)
         self.assertEqual(r["failed"], 0)
+
+    def test_run_counts_an_upstream_400_as_failed(self):
+        bad = dataclasses.replace(self.t, fresh=-1)  # upstream rejects negative usage with 400
+        srv = upstream.serve(0)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with mock.patch.object(replay, "_turns", return_value=[(self.s, bad)]):
+                r = replay.run(self.m, f"http://127.0.0.1:{srv.server_address[1]}", limit=1)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(r["sent"], 1)
+        self.assertEqual(r["ok"], 0)
+        self.assertEqual(r["failed"], 1)
 
 
 if __name__ == "__main__":
