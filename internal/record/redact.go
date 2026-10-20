@@ -106,9 +106,10 @@ var extraSecrets = []*regexp.Regexp{
 // (checksums, short ids) and decoding them all would be a lot of work for nothing.
 var b64Candidate = regexp.MustCompile(`[A-Za-z0-9+/]{64,}={0,2}`)
 
-// Content scrubs credentials from arbitrary recorded text.
+// Content scrubs credentials, and the identity of the person recording, from arbitrary
+// recorded text.
 //
-// Order is deliberate: internal/redact.Content first (it owns the vocabulary and handles
+// Order is deliberate: identity first (see identity.go), then internal/redact.Content (it owns the vocabulary and handles
 // the submatch-preserving URL and header rules), then the extra shapes, then the base64
 // pass. cap<=0 means no cap, and the cap is NOT applied here -- see CapContent -- because
 // a recorded trace wants the whole turn, and truncation for a trace is an incompleteness
@@ -117,6 +118,7 @@ func Content(s string) string {
 	if s == "" {
 		return s
 	}
+	s = identityContent(s)
 	s = redact.Content(s, 0)
 	for _, re := range extraSecrets {
 		s = re.ReplaceAllString(s, Placeholder)
