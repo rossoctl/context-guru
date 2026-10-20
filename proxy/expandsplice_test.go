@@ -282,6 +282,11 @@ func TestAFailedContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
 	// The second round's connection is closed without a response, so not even a completed round
 	// trip stands between the handler's write and the assertion's read; the atomic carries the
 	// edge itself.
+	//
+	// EVERY continuation attempt is killed, not just the first: a reused connection closed
+	// unanswered is now resent once on a new connection (upstreamsilence.go), so a single killed
+	// attempt would be recovered and the round would succeed. Killing both is the failing round
+	// this test is about, and the second kill (on a fresh connection) is not resent again.
 	var calls atomic.Int64
 	head, tail := leadThenExpand("text")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -314,8 +319,9 @@ func TestAFailedContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
 	out, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if n := calls.Load(); n != 2 {
-		t.Fatalf("expected the continuation to be attempted, got %d upstream calls", n)
+	// 1 first round + the continuation + its single resend on a new connection.
+	if n := calls.Load(); n != 3 {
+		t.Fatalf("expected the continuation to be attempted and resent once, got %d upstream calls", n)
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("the stream was already open with its own status, got %d", resp.StatusCode)

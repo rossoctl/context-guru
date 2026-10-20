@@ -75,6 +75,10 @@ type Options struct {
 	// (0 = defaultUpstreamHeaderTimeout). Deliberately NOT a whole-request timeout — see
 	// upstreamTransport for the 502s that cost.
 	UpstreamHeaderTimeout time.Duration
+	// StreamSilenceTimeout bounds how long a STREAMING upstream request may go without a single
+	// response byte after being written before it is resent once on a new connection
+	// (0 = streamSilenceTimeout). See upstreamsilence.go for the gateway behaviour it handles.
+	StreamSilenceTimeout time.Duration
 	// CheapModel is the static "config"-source LLM for NeedsModel components (nil = none): the
 	// operator's own endpoint and credential, pinned once at New. The "incoming"-source client
 	// is built per request from the route's upstream + the gateway's real key.
@@ -327,8 +331,21 @@ func upstreamTransport(headerTimeout time.Duration) http.RoundTripper {
 	}
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.ResponseHeaderTimeout = headerTimeout
+	// Keep a warm connection for every request that was in flight, not two. DefaultTransport's
+	// MaxIdleConnsPerHost is 2, so when a burst of N streams to one gateway finishes, N-2 healthy
+	// connections are closed on the spot and the next burst pays N-2 new TCP+TLS handshakes.
+	// Measured on contextguru2 (2026-10-18): 172 of 388 upstream connections were closed less than
+	// a second after their last response for exactly this reason, with up to 16 open at once.
+	// IdleConnTimeout stays at DefaultTransport's 90 s: shorter would only add handshakes, and the
+	// upstream that motivated upstreamsilence.go hangs fresh connections as often as reused ones.
+	t.MaxIdleConnsPerHost = upstreamIdleConnsPerHost
 	return t
 }
+
+// upstreamIdleConnsPerHost is the warm-connection pool per upstream host. Above the 16
+// simultaneous streams measured in production, and still bounded so an idle proxy holds a small,
+// fixed number of sockets.
+const upstreamIdleConnsPerHost = 32
 
 // defaultUpstreamHeaderTimeout is how long an upstream may take to say ANYTHING before we
 // treat it as gone. Generous on purpose: a non-streaming request generates its whole answer
@@ -2083,19 +2100,40 @@ func (h *Handler) doUpstream(r *http.Request, up upstream, body []byte) (*http.R
 	if up.base == "" {
 		return nil, errNoUpstream
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, up.base+up.path, strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
+	build := func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, up.base+up.path, strings.NewReader(string(body)))
+		if err != nil {
+			return nil, err
+		}
+		copyHeaders(req.Header, r.Header)
+		setUpstreamAuth(req.Header, up)
+		// We have to read this response ourselves (streamed usage-sniffing, keep-alive
+		// accounting), so do not let it arrive compressed — see proxy.go:482 for the same
+		// pattern on the Bob-profile fetch. Dropping it lets http.Transport add its own
+		// Accept-Encoding and auto-decompress resp.Body transparently, for both the
+		// client-forward path and the usage sniffer, which read the identical byte stream.
+		req.Header.Del("Accept-Encoding")
+		return req, nil
 	}
-	copyHeaders(req.Header, r.Header)
-	setUpstreamAuth(req.Header, up)
-	// We have to read this response ourselves (streamed usage-sniffing, keep-alive
-	// accounting), so do not let it arrive compressed — see proxy.go:482 for the same
-	// pattern on the Bob-profile fetch. Dropping it lets http.Transport add its own
-	// Accept-Encoding and auto-decompress resp.Body transparently, for both the
-	// client-forward path and the usage sniffer, which read the identical byte stream.
-	req.Header.Del("Accept-Encoding")
-	return h.client.Do(req)
+	// A request the upstream accepted but never answered is resent once on a new connection: a
+	// streaming one after streamSilenceTimeout of silence instead of the ten-minute header
+	// timeout, and any one whose reused connection was closed before a byte came back instead of
+	// a 502. Non-streaming requests get no silence deadline — their headers arrive only once the
+	// answer is generated. See upstreamsilence.go.
+	silence := time.Duration(0)
+	if streamsRequest(body) {
+		silence = h.streamSilenceTimeout()
+	}
+	return doWithSilenceGuard(r.Context(), h.client, silence, build)
+}
+
+// streamSilenceTimeout is the silence guard's budget: Options.StreamSilenceTimeout, else the
+// measured default.
+func (h *Handler) streamSilenceTimeout() time.Duration {
+	if h.opts.StreamSilenceTimeout > 0 {
+		return h.opts.StreamSilenceTimeout
+	}
+	return streamSilenceTimeout
 }
 
 // setUpstreamAuth applies the route's credential decision to the FORWARDED request.
