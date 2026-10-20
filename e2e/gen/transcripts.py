@@ -47,7 +47,7 @@ def _lines(s: mf.Session, caps: dict, m: mf.Manifest, stamps) -> list:
         out.append(json.dumps({
             "type": "assistant", "sessionId": s.id, "cwd": t.cwd, "timestamp": _iso(ts),
             "isSidechain": False, "entrypoint": "cli", "gitBranch": "main",
-            "message": {"model": "claude-opus-5", "role": "assistant", "content": _blocks(t, caps),
+            "message": {"model": mf.MODEL, "role": "assistant", "content": _blocks(t, caps),
                         "usage": {"input_tokens": t.fresh, "cache_read_input_tokens": t.cache_read,
                                   "cache_creation_input_tokens": t.cache_write, "output_tokens": t.output}}}))
     out.append(json.dumps({"type": "last-prompt", "sessionId": s.id, "lastPrompt": "continue", "leafUuid": "x"}))

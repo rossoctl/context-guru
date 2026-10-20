@@ -110,6 +110,16 @@ class TestGenerators(unittest.TestCase):
             ok += e.get("type") == "assistant"
         self.assertEqual(ok, len(s.turns) - 1)
 
+    def test_assistant_line_message_model_is_priced_model(self):
+        """Assistant line's message.model should use the priced model constant."""
+        transcripts.write(self.m, self.home)
+        f = next((pathlib.Path(self.home) / ".claude" / "projects").glob("*/*.jsonl"))
+        for line in f.read_text().splitlines():
+            e = json.loads(line)
+            if e.get("type") == "assistant":
+                self.assertEqual(e["message"]["model"], mf.MODEL)
+                break
+
 
 if __name__ == "__main__":
     unittest.main()

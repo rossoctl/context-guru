@@ -24,7 +24,7 @@ def _tool(c: mf.Capability) -> dict:
             "input_schema": {"type": "object", "properties": {}}}
 
 
-def body_for(t: mf.Turn, s: mf.Session, m: mf.Manifest, with_marker: bool = True) -> dict:
+def body_for(t: mf.Turn, s: mf.Session, m: mf.Manifest, with_marker: bool = True, model_override: str | None = None) -> dict:
     caps = {c.name: c for c in m.capabilities}
     declared = [c for c in m.capabilities if c.declared]
     tools = [_tool(c) for c in declared if c.kind not in SKILL_KINDS]
@@ -49,7 +49,8 @@ def body_for(t: mf.Turn, s: mf.Session, m: mf.Manifest, with_marker: bool = True
         msgs.append({"role": "assistant", "content": uses})
         msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": u["id"], "content": "ok"}
                                                  for u in uses]})
-    return {"model": "claude-opus-5", "max_tokens": 1024, "stream": t.stream,
+    model = model_override if model_override is not None else mf.MODEL
+    return {"model": model, "max_tokens": 1024, "stream": t.stream,
             "system": [{"type": "text", "text": "You are Claude Code."}],
             "tools": tools, "messages": msgs,
             # Claude Code's real shape: user_id is a JSON OBJECT carrying session_id. session.ExplicitID
@@ -64,17 +65,18 @@ def _turns(m: mf.Manifest, which: str):
     return {"post": post, "first_half": post[:half], "second_half": post[half:]}[which]
 
 
-def run(m: mf.Manifest, base_url: str, which: str = "post", limit=None, stamps=None, probe: str = "") -> dict:
+def run(m: mf.Manifest, base_url: str, which: str = "post", limit=None, stamps=None, probe: str = "", model_override: str | None = None) -> dict:
     """`stamps`, when a dict, gains {"<session>@<manifest_ts>": real response-end ms} per sent turn: the proxy
     stamps its rows with arrival time, so the transcripts must carry the same time to describe the same
-    request. `probe` replays ONE turn under a fresh session id (this suffix appended) and nothing else."""
+    request. `probe` replays ONE turn under a fresh session id (this suffix appended) and nothing else.
+    `model_override` replaces the default model for all requests."""
     sent = ok = failed = trunc = 0
     todo = _turns(m, which)[:limit]
     if probe:
         s0, t0 = todo[0]
         todo = [(dataclasses.replace(s0, id=s0.id + probe), t0)]
     for s, t in todo:
-        body = json.dumps(body_for(t, s, m)).encode()
+        body = json.dumps(body_for(t, s, m, model_override=model_override)).encode()
         h = {"content-type": "application/json", "x-api-key": "sk-e2e-fake",
              "anthropic-version": "2023-06-01",
              "X-E2E-Usage": f"{t.fresh},{t.cache_read},{t.cache_write},{t.output}"}
@@ -108,13 +110,14 @@ def main(argv=None) -> int:
     ap.add_argument("--stamps", default="", help="JSON map of send times; merged with an existing file")
     ap.add_argument("--probe", default="", help="session-id suffix: send one extra turn under a fresh session")
     ap.add_argument("--probe-out", default="", help="where to record the probe's session id")
+    ap.add_argument("--model", default="", help="model to use instead of the default")
     a = ap.parse_args(argv)
     m = mf.build(a.tier, home=a.home)
     stamps = None
     if a.stamps:
         p = pathlib.Path(a.stamps)
         stamps = json.loads(p.read_text()) if p.exists() else {}
-    r = run(m, a.base, a.which, stamps=stamps, probe=a.probe)
+    r = run(m, a.base, a.which, stamps=stamps, probe=a.probe, model_override=a.model if a.model else None)
     if stamps is not None:
         pathlib.Path(a.stamps).write_text(json.dumps(stamps, indent=1, sort_keys=True))
     if a.probe and a.probe_out:

@@ -15,6 +15,8 @@ DAYS = 43
 INSTALL_DAY = 28
 DAY = 86_400_000
 TRUNCATED_SESSION_INDEX = -1  # the session whose final assistant turn the transcript generator cuts short
+MODEL = "claude-sonnet-4-5"          # priced in LiteLLM's list, so the money checks test real pricing
+UNPRICED_MODEL = "claude-opus-5"     # deliberately absent from LiteLLM's list: proves "unpriced is not free"
 
 
 def day_ms(day: int, hour: int = 0) -> int:

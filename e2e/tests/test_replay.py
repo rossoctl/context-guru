@@ -98,6 +98,16 @@ class TestReplay(unittest.TestCase):
         self.assertEqual(r["ok"], 0)
         self.assertEqual(r["failed"], 1)
 
+    def test_body_uses_the_priced_model(self):
+        """body_for() should use the priced model constant by default."""
+        b = replay.body_for(self.t, self.s, self.m)
+        self.assertEqual(b["model"], mf.MODEL)
+
+    def test_model_override_is_used(self):
+        """body_for() with model_override should use the provided model instead of default."""
+        b = replay.body_for(self.t, self.s, self.m, model_override=mf.UNPRICED_MODEL)
+        self.assertEqual(b["model"], mf.UNPRICED_MODEL)
+
 
 if __name__ == "__main__":
     unittest.main()

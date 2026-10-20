@@ -105,6 +105,10 @@ class TestManifest(unittest.TestCase):
         self.assertIn("/tmp/scratch-w", wanderer_post_cwds,
             f"wanderer has no post-install turn in /tmp/scratch-w; post cwds: {wanderer_post_cwds}")
 
+    def test_model_and_unpriced_model_are_different(self):
+        """MODEL and UNPRICED_MODEL constants must be distinct."""
+        self.assertNotEqual(mf.MODEL, mf.UNPRICED_MODEL)
+
 
 if __name__ == "__main__":
     unittest.main()
