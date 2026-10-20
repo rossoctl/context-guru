@@ -72,6 +72,17 @@ class TestUpstream(unittest.TestCase):
         self.assertEqual((u["input_tokens"], u["cache_read_input_tokens"],
                           u["cache_creation_input_tokens"], u["output_tokens"]), (1, 0, 0, 1))
 
+    def test_negative_usage_values_are_a_400(self):
+        try:
+            self._post({"model": "m", "messages": []}, {"X-E2E-Usage": "-1,0,0,1"})
+            self.fail("Expected HTTPError")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+            body = json.loads(e.read().decode())
+            self.assertEqual(body["type"], "error")
+            self.assertIn("bad X-E2E-Usage", body["error"]["message"])
+            self.assertIn("-1,0,0,1", body["error"]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

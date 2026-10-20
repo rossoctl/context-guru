@@ -19,7 +19,10 @@ def _usage(h) -> tuple | None:
     if len(parts) != 4:
         return None
     try:
-        return tuple(int(x) for x in parts)
+        parsed = tuple(int(x) for x in parts)
+        if any(v < 0 for v in parsed):
+            return None
+        return parsed
     except ValueError:
         return None
 
