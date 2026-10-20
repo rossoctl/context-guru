@@ -23,7 +23,9 @@ routes:
     model_name_env: BOB_MODEL
     key_env: BOB_API_KEY
     base_url_env: BOB_BASE_URL
-    dialect: bob
+    # The first test model (GLM 5.3 on the RITS litellm gateway) speaks the Anthropic
+    # Messages shape, so the dialect is anthropic. Use bob for Bob's /inference endpoint.
+    dialect: anthropic
     # price_input: 0.0
     # price_output: 0.0
     # price_cache_read: 0.0
