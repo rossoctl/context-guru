@@ -2,19 +2,29 @@
 FROM golang:1.26 AS build
 WORKDIR /src
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/context-guru-proxy ./cmd/context-guru-proxy && \
+# The proxy is built with the repo's own `make build` (version ldflags from git describe),
+# so the image runs the shipped artifact, not a bare `go build` reporting "dev".
+RUN mkdir -p /out && make build && cp bin/context-guru-proxy /out/ && \
     CGO_ENABLED=0 go build -o /out/cg-import-history ./cmd/cg-import-history
 
 FROM golang:1.26-bookworm
 # go stays in the image: tier 2 runs `make test` against /src.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 nodejs chromium curl git make jq ca-certificates fonts-dejavu-core && \
+      python3 chromium curl git make jq ca-certificates fonts-dejavu-core xz-utils && \
     rm -rf /var/lib/apt/lists/*
+# Node >= 22 (built-in WebSocket) for the snapper; bookworm ships v18. Official tarball, checksum-verified.
+RUN set -eu; v=v22.23.3; \
+    case "$(dpkg --print-architecture)" in arm64) a=arm64;; amd64) a=x64;; *) echo unsupported arch; exit 1;; esac; \
+    f="node-$v-linux-$a.tar.xz"; cd /tmp; \
+    curl -fsSLO "https://nodejs.org/dist/$v/$f" && curl -fsSLO "https://nodejs.org/dist/$v/SHASUMS256.txt"; \
+    grep " $f\$" SHASUMS256.txt | sha256sum -c -; \
+    tar -xJf "$f" -C /usr/local --strip-components=1; rm -f "$f" SHASUMS256.txt; \
+    [ "$(node --version)" = "$v" ]
 RUN useradd -m -d /sandbox -s /bin/bash sandbox
 COPY --from=build /out/ /opt/cg/
 COPY --chown=sandbox:sandbox . /src
 USER sandbox
-ENV HOME=/sandbox PATH=/sandbox/.local/bin:/usr/local/go/bin:/usr/bin:/bin \
+ENV HOME=/sandbox PATH=/sandbox/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin \
     GOFLAGS=-mod=mod GOCACHE=/sandbox/.cache/go-build
 WORKDIR /src
 ENTRYPOINT ["/src/e2e/phases.sh"]
