@@ -179,8 +179,9 @@ type Tenant struct {
 	UpOpenAI    string
 	UpBob       string
 	// CaptureContent opts this tenant into storing before/after transcript text.
-	// Off by default and per-tenant by design: the redactor is a best-effort
-	// denylist, so this is consent, not a switch.
+	// Per-tenant by design: the redactor is a best-effort denylist, so this is consent,
+	// not a switch. A new account starts with it ON (see Register for why); the column's
+	// DEFAULT 0 applies only to rows inserted without the field.
 	CaptureContent bool
 	// MaxRows caps this tenant's retained request rows so one heavy user cannot
 	// evict everyone else's history. 0 = the server default
