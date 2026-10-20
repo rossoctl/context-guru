@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Offload two independent reviews of one PR to an agent tool, in parallel, on this machine.
 #
-#   scripts/offload-review.sh <pr> [--backend <name>] [--live-tests <rules-file>]
+#   scripts/offload-review.sh <pr> [--backend <name>] [--live-tests <rules-file>] [--same-head]
 #   scripts/offload-review.sh <pr> --cleanup
 #
 # --backend picks the reviewer tool from scripts/offload-review/backends/<name>.sh.
@@ -15,6 +15,10 @@
 # user approved it. <rules-file> holds the box rules; they are not in this repo, so the caller
 # passes them in.
 #
+# --same-head starts the next round on a head that already has both reviews of its round. Use it
+# only when the user asked for it: for example, the reviewers could not run their tests, or the
+# author replied to a finding without a code change. The round still counts toward the budget.
+#
 # --cleanup runs after the PR merges or closes. It removes the reviewer worktrees, the backend's
 # sessions for them, and the live-test rules file.
 #
@@ -22,7 +26,7 @@
 #   0  both reviews are posted (or --cleanup is done)
 #   1  a reviewer failed, or the input is wrong
 #   2  the round budget is used; only the user can grant more (OFFLOAD_MAX_ROUNDS)
-#   3  this head already has both reviews of its round; push the fixes first
+#   3  this head already has both reviews of its round; push the fixes first (or --same-head)
 #
 # Files for each reviewer, in its worktree:
 #   .review-prompt.md  the prompt this script writes for the reviewer
@@ -32,12 +36,13 @@ set -euo pipefail
 # A step that fails under `set -e` would otherwise end the script with no message.
 trap 'echo "offload-review: line $LINENO failed (exit $?)" >&2' ERR
 
-usage="usage: offload-review.sh <pr> [--backend <name>] [--live-tests <rules-file>] | <pr> --cleanup"
+usage="usage: offload-review.sh <pr> [--backend <name>] [--live-tests <rules-file>] [--same-head] | <pr> --cleanup"
 pr=${1:?$usage}
 shift
 backend=${OFFLOAD_BACKEND:-bob}
 rules=
 cleanup=0
+same_head=0
 while [ $# -gt 0 ]; do
   case $1 in
     --backend) backend=${2:?$usage}; shift 2 ;;
@@ -45,6 +50,7 @@ while [ $# -gt 0 ]; do
       rules=${2:?$usage}; shift 2
       [ -s "$rules" ] || { echo "rules file $rules is empty or missing" >&2; exit 1; } ;;
     --cleanup) cleanup=1; shift ;;
+    --same-head) same_head=1; shift ;;
     *) echo "$usage" >&2; exit 1 ;;
   esac
 done
@@ -106,13 +112,20 @@ last=$({ grep -oE '<!-- offload-review reviewer=[12] round=[0-9]+' <<<"$reviews"
   | sed -E 's/.*round=//' | sort -n | tail -1)
 last=${last:-0}
 todo=()
+rehead=0 # 1: this round reviews the same head as the round before it
 if [ "$last" -gt 0 ] && { posted 1 "$last" || posted 2 "$last"; }; then
   # The last round is on this head. Finish it: run only the reviewer that has not posted.
   round=$last
   for r in 1 2; do posted "$r" "$round" || todo+=("$r"); done
   if [ ${#todo[@]} -eq 0 ]; then
-    echo "Head $sha already has both round-$round reviews. Push the fixes first." >&2
-    exit 3
+    if [ "$same_head" = 0 ]; then
+      echo "Head $sha already has both round-$round reviews. Push the fixes first," \
+        "or run with --same-head if the user asked for a round on this head." >&2
+      exit 3
+    fi
+    round=$((last + 1))
+    todo=(1 2)
+    rehead=1
   fi
 else
   round=$((last + 1))
@@ -167,7 +180,14 @@ $(cat "$rules")"
   base=$(git merge-base "origin/$base_ref" HEAD)
   marker="<!-- offload-review reviewer=$r round=$round sha=$sha backend=$backend verdict=<approve|blocking> -->"
   {
-    if [ "$mode" = resumed ]; then
+    if [ "$mode" = resumed ] && [ "$rehead" = 1 ]; then
+      echo "# Re-check, round $round, on the same head"
+      echo "Your round-$((round - 1)) review is earlier in this session. The head did not move."
+      echo "This round is for what is new on the PR since then: replies to findings, test results,"
+      echo "and a working eval box if your earlier tests could not run. Run the tests you could not."
+      echo "Follow the same rules and format as before; they are repeated below."
+      echo
+    elif [ "$mode" = resumed ]; then
       echo "# Re-check, round $round"
       echo "Your round-$((round - 1)) review is earlier in this session. The author pushed fixes."
       echo "Follow the same rules and format as before; they are repeated below."
@@ -185,6 +205,7 @@ $(cat "$rules")"
     echo "- PR: #$pr in $repo, head $sha, base $base."
     echo "- Read the diff with: git diff $base..HEAD"
     echo "- You are reviewer $r of 2, round $round of $max_rounds, context: $mode."
+    [ "$rehead" = 0 ] || echo "- The head is the same as in round $((round - 1)). Expect no new commits. That is not a skip."
     echo "- Your folder is $wt. It is a git worktree of the PR head, only for you."
     echo "  Write your review to $wt/.review.md. Do not change any file outside this folder."
     [ "$round" -gt 1 ] || echo "  Do not read the other review-pr* folders in $main/.claude/worktrees."
