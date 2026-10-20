@@ -41,6 +41,9 @@ const MaxResponseBytes = 1 << 20
 const (
 	PurposeKeepAlivePing = "keepalive.ping"
 	PurposeCheapModel    = "cheapmodel.complete"
+	// PurposeRouted is a request the host sends to a model of the routing table instead of the
+	// agent's own (routing package). The content of the original request leaves for that endpoint.
+	PurposeRouted = "routing.complete"
 )
 
 // Request is one call, built by the core.

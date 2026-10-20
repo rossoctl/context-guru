@@ -1030,6 +1030,11 @@ type Snapshot struct {
 	// it shows no field rather than a row of zeroes.
 	KeepAlive any `json:"keepalive,omitempty"`
 
+	// Routing is the model routing table's per-feature view (routing.FeatureStats): active,
+	// model, base URL host, calls, routed, fell_back, not_detected, saved_usd. Never a key.
+	// Filled by the host; omitted when the proxy has no routing file.
+	Routing any `json:"routing,omitempty"`
+
 	// Savings is /stats' reconciled, DB-backed savings figure — dash.SavingsTotals summed
 	// three ways (current session / live sessions / all-time), filled by the host (the
 	// query lives in `dash`, which sits above this package). Omitted entirely on a hosted

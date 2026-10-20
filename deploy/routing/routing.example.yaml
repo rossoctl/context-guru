@@ -1,0 +1,30 @@
+# Model routing table (--routing / CG_ROUTING_FILE).
+#
+# One row per feature. A row names ENVIRONMENT VARIABLES, never values: the model id, the key
+# and the base URL are read from the proxy's environment at boot. A leaked copy of this file
+# holds no secret.
+#
+# A row is ACTIVE when all three variables are set and the base URL is absolute https (http is
+# allowed for localhost and 127.0.0.1 only). Otherwise the row is inactive, one line is logged,
+# and the proxy runs on as if the row did not exist.
+#
+# dialect: anthropic | openai | bob. bob is the OpenAI chat-completions shape with
+# Authorization: Bearer, on /inference/v1/chat/completions.
+#
+# Prices are USD per MILLION tokens and optional. A missing price is $0 for the routed model.
+# /stats uses them to show saved_usd = cost at the original model's price - cost at this row's.
+#
+# SAFETY: the classifier is a safety check. A cheaper model can allow an action the original
+# model would block. Compare verdicts on replayed requests before you turn this on.
+#
+# DATA: the classifier request (user messages, tool calls, CLAUDE.md) is sent to this endpoint.
+routes:
+  - feature: classifier
+    model_name_env: BOB_MODEL
+    key_env: BOB_API_KEY
+    base_url_env: BOB_BASE_URL
+    dialect: bob
+    # price_input: 0.0
+    # price_output: 0.0
+    # price_cache_read: 0.0
+    # price_cache_write: 0.0
