@@ -360,10 +360,10 @@ func (d *DB) insertBatch(evs []*Event) error {
 		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
 		keepalive_strategy_id, billed_token_factor, thread_id,
 		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms,
-		agent_compaction
+		agent_compaction, cache_miss_cause
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -427,7 +427,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.StopReason,
 			strategyID, e.BilledTokenFactor, e.ThreadID,
 			e.WaitingFor, e.WaitTool, e.WakeCause, e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs,
-			boolInt(e.AgentCompaction),
+			boolInt(e.AgentCompaction), e.CacheMissCause,
 		)
 		if err != nil {
 			return err

@@ -2,6 +2,7 @@ package kvcache
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 )
@@ -664,5 +665,42 @@ func TestASucceededRequestWithoutUsageStillRefreshesTheEntry(t *testing.T) {
 	r := Simulate(rows, Fixed5m(), Config{Prices: testPrices()})
 	if r.NoOps != 0 {
 		t.Fatalf("no-ops = %d, want 0: only a rejected request is skipped", r.NoOps)
+	}
+}
+
+// A miss the dashboard could not explain ("unknown") is not rescuable credit: it forces a miss
+// like prefix_change and cold_start (issue #600). It must not turn into a simulated hit.
+func TestAnUnexplainedMissIsAForcedMissToo(t *testing.T) {
+	rows := chain("u", "s", "m", base, 10_000)
+	rows[1].MissReason = "unknown"
+	r := Simulate(rows, Fixed5m(), Config{Prices: testPrices()})
+	if r.ForcedMisses != 1 {
+		t.Errorf("forced_misses = %d, want 1 for the unknown row", r.ForcedMisses)
+	}
+	if r.Hits != 0 {
+		t.Errorf("hits = %d, want 0: an unexplained miss must not become a simulated hit", r.Hits)
+	}
+	for reason, want := range map[string]bool{"unknown": true, "prefix_change": true, "cold_start": true, "hit": false, "ttl_expiry": false, "": false} {
+		if got := ForcedMiss(reason); got != want {
+			t.Errorf("ForcedMiss(%q) = %v, want %v", reason, got, want)
+		}
+	}
+}
+
+// The exact-optimum cost function agrees with Simulate: an unknown successor is not a hit.
+func TestStepCostTreatsAnUnexplainedMissAsAMiss(t *testing.T) {
+	cfg := Config{Prices: testPrices()}
+	prev := req(1, "u", "s", base, "m")
+	mk := func(reason string) float64 {
+		row := req(2, "u", "s", base+10_000, "m")
+		row.MissReason = reason
+		return stepCost(prev, ActionWrite5m, row, ActionWrite5m, cfg)
+	}
+	hit, unknown, forced := mk("hit"), mk("unknown"), mk("prefix_change")
+	if !(hit < unknown) {
+		t.Errorf("a hit (%.6f) must cost less than an unknown miss (%.6f)", hit, unknown)
+	}
+	if math.Abs(unknown-forced) > 1e-12 {
+		t.Errorf("unknown = %.6f, prefix_change = %.6f; they must price the same", unknown, forced)
 	}
 }

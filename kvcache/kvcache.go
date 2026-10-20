@@ -379,3 +379,11 @@ func Derive(reqs []*Request) {
 		return a.ID < b.ID
 	})
 }
+
+// ForcedMiss says whether a recorded miss reason is one no TTL could have rescued: the content
+// moved (prefix_change), there was no entry (cold_start), or the dashboard could not explain the
+// miss (unknown). A miss we cannot explain is never counted as rescuable. Treating it as a live
+// entry would turn every unexplained miss into a simulated hit and raise every arm's hit rate.
+func ForcedMiss(reason string) bool {
+	return reason == "prefix_change" || reason == "cold_start" || reason == "unknown"
+}

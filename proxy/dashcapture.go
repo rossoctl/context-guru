@@ -513,11 +513,38 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Only a known expiry can establish ttl_expiry. OpenAI's 30m is a
 	// minimum guarantee, so a later miss cannot be attributed to expiry alone.
 	//
+	//
+	// The cause comes from a measured comparison with this thread's previous request, not from
+	// CacheWrite > 0 (issue #600). A miss with nothing measured reads unknown.
+	if c.inv != nil && c.inv.System != nil {
+		e.SystemHash = c.inv.System.Hash
+	}
+	if c.inv != nil {
+		e.DeclDigest = c.inv.Digest
+	}
+	//
+	// The gap for the TTL test is measured from the last request on the SAME model: a cache entry
+	// belongs to one model, so a request on another model between two requests on this one does
+	// not refresh it. SinceLastMs below keeps the per-thread gap.
+	cause, modelGap, known, lastWasSame := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
+		dash.FactsOf(e), e.Status >= 200 && e.Status < 300)
+	//
 	// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
 	// measured from the last real request, so without this a 297 s gap with a ping at 289 s
 	// reads as an expiry on a turn that came 8 s after the refresh.
-	e.AttributeCache(seenSession, seenModel, entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt),
-		cacheAttributionTTLMs(e.Provider, e.Model), e.CacheWrite > 0)
+	age := sinceMs
+	if known {
+		age = modelGap
+		// A ping refreshed the entry of the model that last ran in the thread. Cut the age only
+		// when that was this model. This holds after a failed request too, when the gap since
+		// the last good request differs from sinceMs.
+		if lastWasSame {
+			age = entryAgeMs(modelGap, e.TS, c.kaRefreshedAt)
+		}
+	} else {
+		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
+	}
+	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model), cause)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
 	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
@@ -583,9 +610,6 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// are whatever the caller wrote, up to and including something they pasted — so it rides
 	// the same captureContent decision as the transcript, and the writer stores NULL for it
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
-	if c.inv != nil {
-		e.DeclDigest = c.inv.Digest
-	}
 	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent)
 	c.rec.Record(e)
 }

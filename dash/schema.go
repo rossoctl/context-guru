@@ -200,6 +200,7 @@ CREATE TABLE IF NOT EXISTS requests (
   reverts            INTEGER NOT NULL DEFAULT 0,
   token_accounting   TEXT    NOT NULL DEFAULT 'missing', -- complete|partial|missing
   cache_miss_reason  TEXT    NOT NULL DEFAULT '',        -- cold_start|ttl_expiry|prefix_change|unknown|hit
+  cache_miss_cause   TEXT    NOT NULL DEFAULT '',        -- what changed on a miss; see Cause* in event.go
   uncompressed_reason TEXT   NOT NULL DEFAULT '',        -- why we did not compact: '' = we did
   -- Request metadata: the knobs the CLIENT chose, normalized across the Anthropic and
   -- OpenAI dialects at the capture site, plus the provider's terminal stop reason. Real
@@ -680,6 +681,8 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// replay cap reads Bypassed || AgentCompaction as the evidence of a client compaction. 0 on old
 	// rows, which were bypassed for exactly this reason.
 	{"requests", "agent_compaction", "INTEGER NOT NULL DEFAULT 0"},
+	// What changed on a miss, from the per-thread prefix comparison. '' on old rows.
+	{"requests", "cache_miss_cause", "TEXT NOT NULL DEFAULT ''"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},

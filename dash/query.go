@@ -152,7 +152,7 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason,
 	r.thread_id,
 	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms,
-	r.agent_compaction`
+	r.agent_compaction, r.cache_miss_cause`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -173,7 +173,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason,
 		&e.ThreadID,
 		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs,
-		&agentComp)
+		&agentComp, &e.CacheMissCause)
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64

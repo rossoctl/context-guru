@@ -524,7 +524,7 @@ func stepCost(prev *Request, prevAction Action, row *Request, action Action, cfg
 		pingCost, expires = span.cost, span.expires
 	}
 	alive := tokens > 0 && row.TS < expires
-	hit := alive && row.MissReason != "prefix_change" && row.MissReason != "cold_start"
+	hit := alive && !ForcedMiss(row.MissReason)
 	var reusable int64
 	if hit {
 		reusable = tokens
