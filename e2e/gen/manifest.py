@@ -14,6 +14,7 @@ T0 = 1788393600000  # 2026-09-07 00:00 UTC
 DAYS = 43
 INSTALL_DAY = 28
 DAY = 86_400_000
+TRUNCATED_SESSION_INDEX = -1  # the session whose final assistant turn the transcript generator cuts short
 
 
 def day_ms(day: int, hour: int = 0) -> int:

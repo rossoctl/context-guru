@@ -56,8 +56,11 @@ def expected(m: mf.Manifest) -> dict:
 
     # --- Import (Controller ruling amendment) --------------------------------------------------
     pre_install_turns = sum(1 for s in m.sessions for t in s.turns if not mf.measured(t, m))
-    # Minus 1 for all tiers (the full/stress transcript generator truncates exactly one line)
-    valid_pre_install_turns = pre_install_turns - 1
+    # The transcript generator cuts the final turn of the last session. Only a pre-install turn
+    # would have been imported before the cut, so subtract 1 only if that turn is pre-install.
+    last = m.sessions[mf.TRUNCATED_SESSION_INDEX].turns[-1]
+    cut = 0 if mf.measured(last, m) else 1
+    valid_pre_install_turns = pre_install_turns - cut
 
     return {
         "history": {

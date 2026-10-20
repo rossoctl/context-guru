@@ -75,9 +75,15 @@ class TestOracle(unittest.TestCase):
                            check=True, cwd=ROOT.parent)
             self.assertIn("history", json.loads(out.read_text()))
 
-    def test_import_count_excludes_the_truncated_line(self):
-        pre = sum(1 for s in self.m.sessions for t in s.turns if not mf.measured(t, self.m))
-        self.assertEqual(self.e["import"]["valid_pre_install_turns"], pre - 1)
+    def test_import_count_smoke(self):
+        """Hard-coded: smoke tier has 12 pre-install turns, the cut turn is pre-install, so 11."""
+        m_smoke = mf.build("smoke")
+        e_smoke = oracle.expected(m_smoke)
+        self.assertEqual(e_smoke["import"]["valid_pre_install_turns"], 11)
+
+    def test_import_count_full(self):
+        """Hard-coded: full tier has 6491 pre-install turns, the cut turn is pre-install, so 6490."""
+        self.assertEqual(self.e["import"]["valid_pre_install_turns"], 6490)
 
 
 if __name__ == "__main__":
