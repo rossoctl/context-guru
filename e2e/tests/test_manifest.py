@@ -71,6 +71,18 @@ class TestManifest(unittest.TestCase):
         self.assertLessEqual(share, 0.85)
         self.assertEqual(sum(t.truncate for t in post), 2, "two truncated streams (Review Focus 2)")
 
+    def test_role_labels_match_observed_states(self):
+        """Every role label must be observed in the manifest's actual invocations."""
+        for tier in ("smoke", "full"):
+            m = mf.build(tier)
+            observed = mf.observed_states(m)
+            rmap = mf.roles(m)
+
+            for cap_name, (label_state, _projects, _window) in rmap.items():
+                cap_observed = observed[cap_name]
+                self.assertIn(label_state, cap_observed,
+                    f"{tier}: {cap_name} labelled '{label_state}' but observed {cap_observed}")
+
 
 if __name__ == "__main__":
     unittest.main()

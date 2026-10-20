@@ -135,9 +135,9 @@ _FULL_ROLES = {
     "mcp__ticketer__list": ("post_only", ("alpha",), "post"),
     "toolkit:planner": ("several", ("alpha", "beta", "gamma"), "both"),
     "toolkit:reviewer": ("one", ("beta",), "both"),
-    "toolkit:debugger": ("stale", ("alpha",), "pre_early"),
+    "toolkit:debugger": ("stale", ("deleted-proj",), "pre_early"),
     "toolkit:tester": ("pre_only", ("history-only", "deleted-proj"), "pre"),
-    "toolkit:writer": ("one", ("my-repo",), "both"),
+    "toolkit:writer": ("post_only", ("my-repo",), "post"),
     "helpers:formatter": ("one", ("gamma",), "both"),
     "helpers:late-adds": ("post_only", ("beta",), "post"),
     "pdf": ("one", ("wanderer",), "both"),
@@ -154,7 +154,7 @@ _SMOKE_ROLES = {
     "toolkit:planner": ("one", ("alpha",), "both"),
     "pdf": ("pre_only", ("history-only",), "pre"),
     "chartmaker": ("one", ("alpha",), "both"),
-    "Bash": ("several", ("alpha", "gamma"), "both"),
+    "Bash": ("several", ("alpha", "gamma", "history-only"), "both"),
 }
 
 
@@ -162,13 +162,69 @@ def roles(m: Manifest) -> dict:
     return _SMOKE_ROLES if m.tier == "smoke" else _FULL_ROLES
 
 
+def observed_states(m: Manifest) -> dict[str, set[str]]:
+    """Compute actual states for each capability from manifest invocations.
+
+    Returns: capability name -> set of states it actually holds
+    - "never": 0 invocations anywhere
+    - "one": invoked in exactly 1 project
+    - "several": invoked in >= 2 projects
+    - "pre_only": invoked, and every invocation ts < m.install_ms
+    - "post_only": invoked, and every invocation ts >= m.install_ms
+    - "stale": invoked, and last invocation >= 14 days before day_ms(DAYS)
+    """
+    states = {}
+    stale_cutoff = day_ms(DAYS) - 14 * DAY
+
+    for cap in m.capabilities:
+        projects = set()
+        pre_count = 0
+        post_count = 0
+        last_ts = -1
+
+        for session in m.sessions:
+            for turn in session.turns:
+                for inv in turn.invocations:
+                    if inv.cap == cap.name:
+                        projects.add(session.project)
+                        if turn.ts < m.install_ms:
+                            pre_count += 1
+                        else:
+                            post_count += 1
+                        last_ts = max(last_ts, turn.ts)
+
+        cap_states = set()
+        if not projects:
+            cap_states.add("never")
+        else:
+            if len(projects) == 1:
+                cap_states.add("one")
+            else:
+                cap_states.add("several")
+
+            if post_count == 0:
+                cap_states.add("pre_only")
+            elif pre_count == 0:
+                cap_states.add("post_only")
+
+            if last_ts >= 0 and last_ts <= stale_cutoff:
+                cap_states.add("stale")
+
+        states[cap.name] = cap_states
+
+    return states
+
+
 def coverage(m: Manifest) -> set:
-    """The (kind, state) cells this manifest fills, derived from roles plus never-invoked caps."""
-    r = roles(m)
+    """The (kind, state) cells this manifest actually fills from observed invocations."""
+    states = observed_states(m)
     cells = set()
+
     for cap in m.capabilities:
         kind = "self_owned" if cap.self_owned else cap.kind
-        cells.add((kind, r[cap.name][0] if cap.name in r else "never"))
+        for state in states[cap.name]:
+            cells.add((kind, state))
+
     return cells
 
 
@@ -230,16 +286,24 @@ def build(tier: str, seed: int = SEED, home: str = "/sandbox") -> Manifest:
     sess_per_project = 1 if not full else 3
     turns_per_session = 4 if not full else 220
     n_stream, n_trunc = 0, 0
+    # Track which (project, capability) pairs have been invoked
+    invoked_pairs = set()
     for p in projects:
         base = p.key.rsplit("-", 1)[0] if scale > 1 and p.key != "home" else p.key
         for si in range(sess_per_project + (1 if base in ("alpha", "beta") else 0)):
             sid = f"{p.key}-s{si:02d}-{rng.randrange(16**8):08x}"
-            if base == "history-only" or base == "deleted-proj" or not p.measured:
+            if base == "deleted-proj" and si == 0:
+                # First deleted-proj session: early for toolkit:debugger (stale, pre_early)
+                start = rng.randint(0, 3)
+            elif base == "my-repo" and si == 0:
+                # First my-repo session: post-install for toolkit:writer (post_only)
+                start = rng.randint(INSTALL_DAY, DAYS - 3)
+            elif base == "history-only" or base == "deleted-proj" or not p.measured:
                 start = rng.randint(0, INSTALL_DAY - 4)
             elif base == "mixed" and si == 0:
                 start = INSTALL_DAY - 1  # straddles day 28 12:00
             elif base in ("alpha", "beta") and si >= sess_per_project:
-                # Extra sessions for alpha/beta: ensure post-install start
+                # Extra sessions for alpha/beta: ensure post-install start to satisfy post_only and truncation roles
                 start = rng.randint(INSTALL_DAY, DAYS - 3)
             else:
                 start = rng.randint(0, DAYS - 3)
@@ -260,8 +324,12 @@ def build(tier: str, seed: int = SEED, home: str = "/sandbox") -> Manifest:
                     ok = (window == "both" or (window == "pre" and pre) or
                           (window == "post" and not pre) or
                           (window == "pre_early" and ts < day_ms(6)))
-                    if ok and ti % 7 == rng.randint(0, 6):
+                    # Ensure each (project, capability) pair gets at least one invocation, then random
+                    pair = (base, cname)
+                    need_invocation = pair not in invoked_pairs and ok
+                    if need_invocation or (ok and rng.random() < 0.20):
                         invs.append(Invocation(cname))
+                        invoked_pairs.add(pair)
                 fr, cr, cw, out = _usage(rng)
                 is_post = ts >= install
                 stream = is_post and rng.random() < 0.8
