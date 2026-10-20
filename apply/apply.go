@@ -632,12 +632,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// bypass passed through as mutable tail and rewrites them, diverging from the
 		// prefix the provider just cached and forcing a full cache-write of the suffix.
 		//
-		// So the cost of a bypass is not confined to the bypassed request, which is what
-		// the anti-latching argument in proxy/agentcompaction.go used to claim. It lands
-		// on the following turn, and it is a cache-write rather than lost savings. That
-		// matters because a false-positive bypass is reachable: the detector's phrase is
-		// quoted verbatim in this repo's own docs/how-to/agent-compaction.md, so an agent
-		// that reads that page gets it into a trailing tool_result.
+		// So the cost of a bypass is not confined to the bypassed request. It lands on the
+		// following turn, and it is a cache-write rather than lost savings. A request is
+		// bypassed only by the x-context-guru-bypass header, or when it is an agent
+		// compaction body over the size ceiling (see proxy.chat).
 		//
 		// Recording is safe in both directions. On a genuine agent compaction the next
 		// turn is shorter, so modes.Boundary resets anyway and this record is discarded.

@@ -63,6 +63,7 @@ type capture struct {
 	// noteThread once the session id is known. "" is the primary thread. inherits/hasInherit
 	// name the thread a NEW thread continues by content (thread.Result.Inherits).
 	thread     string
+	agentComp  bool
 	inherits   string
 	hasInherit bool
 	// Issue #424's RECORD half. waits is the handler's shared tracker (nil-checked like
@@ -162,6 +163,13 @@ func (c *capture) noteTrace(tr apply.Trace) {
 		if saved := rep.Saved(); saved > 0 && !rep.Reverted && !rep.Skipped {
 			c.unique[rep.Component] = c.rec.MarkUnique(c.tenant, rep.Component, rep.CacheKeys, saved)
 		}
+	}
+}
+
+// noteAgentCompaction records that this request is the agent's own compaction request.
+func (c *capture) noteAgentCompaction(v bool) {
+	if c != nil {
+		c.agentComp = v
 	}
 }
 
@@ -392,6 +400,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.Meta = c.meta
 	e.FromTrace(c.trace, c.unique)
 	e.ThreadID = c.thread
+	e.AgentCompaction = c.agentComp
 	// The provider's terminal reason, off the same response bytes the token tiers came
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason

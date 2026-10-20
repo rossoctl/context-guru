@@ -143,11 +143,13 @@ type capRow struct {
 	TS                        int64
 	TokensBefore, TokensAfter int64
 	Billed                    int64
-	// Bypassed marks a request the proxy forwarded untouched. The agent's own compaction request
-	// is one (isAgentCompaction), and it is the evidence that a drop in tokens_before is the
-	// client compacting.
+	// Bypassed marks a request the proxy forwarded untouched. Rows written before the agent's own
+	// compaction request stopped being bypassed carry it for that request.
 	Bypassed bool
-	Credits  []compCredit
+	// AgentCompaction marks the agent's own compaction request (isAgentCompaction). Either flag is
+	// the evidence that a drop in tokens_before is the client compacting.
+	AgentCompaction bool
+	Credits         []compCredit
 	// What Event.ComponentSavedUSD needs to price the first-removal split.
 	reason             string
 	fresh, read, write int64
@@ -184,10 +186,10 @@ func newReplayLedger() *ReplayLedger {
 // walkCapSession runs the rule over one session's rows, ordered by (model, ts, id). The session is
 // the unit because a compaction request and the turn it shrinks need not share a model.
 func walkCapSession(rows []capRow, window windowFn, out *ReplayLedger) {
-	var bypass []int64
+	var compaction []int64
 	for _, r := range rows {
-		if r.Bypassed {
-			bypass = append(bypass, r.TS)
+		if r.Bypassed || r.AgentCompaction {
+			compaction = append(compaction, r.TS)
 		}
 	}
 	for start := 0; start < len(rows); {
@@ -195,13 +197,13 @@ func walkCapSession(rows []capRow, window windowFn, out *ReplayLedger) {
 		for end < len(rows) && sameConv(&rows[start], &rows[end]) {
 			end++
 		}
-		walkCapConversation(rows[start:end], window, bypass, out)
+		walkCapConversation(rows[start:end], window, compaction, out)
 		start = end
 	}
 }
 
-// bypassBetween reports whether any of the (unsorted) timestamps lies in [from, to].
-func bypassBetween(ts []int64, from, to int64) bool {
+// compactionBetween reports whether any of the (unsorted) timestamps lies in [from, to].
+func compactionBetween(ts []int64, from, to int64) bool {
 	for _, t := range ts {
 		if t >= from && t <= to {
 			return true
@@ -231,7 +233,7 @@ const (
 	capClientCompaction
 )
 
-func walkCapConversation(conv []capRow, window windowFn, bypassTS []int64, out *ReplayLedger) {
+func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, out *ReplayLedger) {
 	model := conv[0].Model
 	out.Conversations++
 	w, exact := window(model)
@@ -253,7 +255,7 @@ func walkCapConversation(conv []capRow, window windowFn, bypassTS []int64, out *
 	for i, r := range conv {
 		if state == capOpen {
 			if prevBefore > 0 && r.TokensBefore > 0 && r.TokensBefore < prevBefore &&
-				bypassBetween(bypassTS, prevTS, r.TS) && !recovers(conv[i+1:], prevBefore) {
+				compactionBetween(compactionTS, prevTS, r.TS) && !recovers(conv[i+1:], prevBefore) {
 				state = capClientCompaction
 				out.ClosedClientCompaction++
 			} else if r.Billed > 0 {
@@ -295,7 +297,7 @@ func walkCapConversation(conv []capRow, window windowFn, bypassTS []int64, out *
 // capSelect streams every request of the scope with its credit rows (one output row per credit,
 // or one with NULLs). summarize has its own ledger. The join is by request id, so a session-scoped
 // call touches only that session's component rows.
-const capSelect = `SELECT r.id, r.tenant_id, r.session_id, r.model, r.ts, r.bypassed, r.tokens_before,
+const capSelect = `SELECT r.id, r.tenant_id, r.session_id, r.model, r.ts, r.bypassed, r.agent_compaction, r.tokens_before,
 		r.tokens_after, r.fresh_input + r.cache_read + r.cache_write,
 		r.cache_miss_reason, r.fresh_input, r.cache_read, r.cache_write,
 		c.component, c.saved_gross, c.saved_unique, c.saved_usd
@@ -387,11 +389,11 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 	for rs.Next() {
 		var id int64
 		var r capRow
-		var bypassed int
+		var bypassed, agentComp int
 		var comp sql.NullString
 		var gross, unique sql.NullInt64
 		var usd sql.NullFloat64
-		if err := rs.Scan(&id, &r.Tenant, &r.Session, &r.Model, &r.TS, &bypassed, &r.TokensBefore,
+		if err := rs.Scan(&id, &r.Tenant, &r.Session, &r.Model, &r.TS, &bypassed, &agentComp, &r.TokensBefore,
 			&r.TokensAfter, &r.Billed, &r.reason, &r.fresh, &r.read, &r.write,
 			&comp, &gross, &unique, &usd); err != nil {
 			return nil, err
@@ -412,6 +414,7 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 				}
 			}
 			r.Bypassed = bypassed != 0
+			r.AgentCompaction = agentComp != 0
 			buf = append(buf, r)
 			lastID = id
 		}

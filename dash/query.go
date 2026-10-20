@@ -152,11 +152,11 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason,
 	r.thread_id,
 	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms,
-	r.cache_miss_cause`
+	r.agent_compaction, r.cache_miss_cause`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
-	var byp, ca, stream, keepAlive int
+	var byp, ca, stream, keepAlive, agentComp int
 	var temp, topP sql.NullFloat64
 	var waitingFor, waitTool, wakeCause sql.NullString
 	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
@@ -172,11 +172,13 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.MaxTokens, &stream, &e.ToolChoice, &e.Tools, &e.SystemBlocks,
 		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason,
 		&e.ThreadID,
-		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs, &e.CacheMissCause)
+		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs,
+		&agentComp, &e.CacheMissCause)
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64
 	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
+	e.AgentCompaction = agentComp != 0
 	e.KeepAlive = keepAlive != 0
 	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one
 	// that set nothing must not read the same on the row.

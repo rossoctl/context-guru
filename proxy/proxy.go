@@ -1130,31 +1130,47 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// C beside the window, resolved once for both the enforced and the observed path.
 		cpoint := compactionpoint.For(gjson.GetBytes(body, "model").String())
 		bypassed := strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
-		// The agent's OWN compaction request rides the same route. Bypass it exactly as the
-		// header does — compacting it destroys content the summary is supposed to carry
-		// verbatim, and the loss is unrecoverable once the summary replaces the transcript
-		// (see isAgentCompaction). Counted as a gate on a `bypass` pseudo-component so
-		// /stats shows components.bypass.gates.agent_compaction — a silent bypass is
-		// indistinguishable from a broken pipeline.
-		// Kept for thread identification too: the agent's own compaction request ends one
-		// prefix of a thread and the next request starts another (see thread.Tracker).
+		// The agent's OWN compaction request (isAgentCompaction) is NOT bypassed. Only the
+		// header above bypasses. The request goes through the normal pipeline, like any other.
+		//
+		// Why: a bypass forwards the ORIGINAL history, but the provider cache holds the history
+		// context-guru REWROTE on the earlier turns. The prefix then differs early, and the
+		// provider writes the whole request to cache again. Measured on production traffic: a
+		// bypassed request missed the cache 31% of the time, an ordinary one 1.6%.
+		//
+		// The trade-off: the summary model now sees the rewritten history (shortened tool
+		// outputs, <<cg:HASH>> markers), not the full original. The Store still holds each
+		// original, and the expand tool stays on the request, so the model can recover one.
+		//
+		// The one exception is size. A compaction body over maxRequestBytes (32 MiB) is bypassed:
+		// the pipeline costs about 0.35 s and 140 MiB of allocation per MiB on the request path
+		// (40 MiB took 13.7 s), and a transcript that large would not keep a warm cache anyway.
+		//
+		// The detection is kept for four things: thread identification (the compaction ends one
+		// prefix of a thread), the larger body limit (readGatedBody), the dashboard row (the
+		// replay cap reads it), and the counter below, so /stats still shows how many
+		// compactions pass through. The counter is a report with Skipped set because the
+		// aggregator counts a report that is not skipped as a run that mutated the request, and
+		// this one mutates nothing.
 		agentCompaction := isAgentCompaction(body)
 		if !bypassed && agentCompaction {
-			bypassed = true
+			gate := "detected"
+			if int64(len(body)) > maxRequestBytes {
+				bypassed = true
+				gate = "oversize_bypass"
+			}
 			if h.agg != nil {
-				rep := components.Report{Component: "bypass", Skipped: true, Mode: tn.Mode}
-				rep.Gate("agent_compaction")
+				rep := components.Report{Component: "agent_compaction", Skipped: true, Mode: tn.Mode}
+				rep.Gate(gate)
 				h.agg.Component(rep)
 			}
-			// The gate name here is the SAME string /stats reports as
-			// components.bypass.gates.agent_compaction, so the log line and the metric
-			// cannot disagree about what happened.
-			lg.Debug("cg.bypass", "gate", "agent_compaction")
+			lg.Debug("cg.agent_compaction", "gate", gate)
 		}
 		// Start the dashboard capture (nil when the dashboard is off). It only holds
 		// values the request path already computed; nothing here does I/O.
 		cp := h.newCapture(r, string(provider), up.path, tn)
 		cp.noteModel(gjson.GetBytes(body, "model").String())
+		cp.noteAgentCompaction(agentCompaction)
 		// The request's own metadata (effort, thinking, sampling, tool_choice, shape),
 		// read from the PRISTINE body in one pass before the pipeline touches it.
 		cp.noteMeta(metaFromBody(body))
@@ -1321,28 +1337,20 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// Skipped in observe mode: nothing was offloaded, so there is nothing to
 			// recover, and injecting a tool declaration would MODIFY the request — which is
 			// precisely the one thing observe mode promises never to do.
-			// Skipped on a bypassed request too, and this one DOES cost cache sometimes. The
-			// earlier claim here — that a bypassed request is a compaction whose prefix is its
-			// own, so skipping is free — is true for a real compaction and false for a false
-			// positive, and isAgentCompaction has a reachable one: it fires on any last turn
-			// with role "user" containing a compaction phrase (see isAgentCompaction), and in
-			// the Anthropic dialect a tool_result IS a user-role message. So a tool output that
-			// quotes one of those phrases — a session reading the docs page, or reading this
-			// file — makes an ordinary mid-conversation turn bypass, lose the expand tool, and
-			// flip the tools array against the very prefix it shares.
+			// Skipped on a bypassed request too: bypass promises a byte-identical forward, so
+			// nothing is injected. Only the x-context-guru-bypass header bypasses. An agent
+			// compaction request is not bypassed, so it gets the tool like every earlier turn
+			// of its thread. That keeps the tools array, which sits ahead of messages in the
+			// provider's cache hash, the same as on the previous turn.
 			//
-			// Measured on the dashboard: bypassed rows carry prefix_change at 26.7% against
-			// 1.44% for non-bypassed, an 18.6x enrichment, with zero cold_start and 22 of 30
-			// mid-session. n=30, so treat the RATE as indicative and the mechanism as
-			// established.
-			//
-			// Not fixed here, deliberately: the fix is to stop the detector matching a
-			// tool_result (require the phrase in a text block), which changes what bypass means
-			// for every caller of it, not just for this injection. That belongs in its own
-			// change with its own measurement — the check it needs is a phrase count in a
-			// capture against bypassed=1 rows. Injecting into a bypassed request instead is not
-			// the answer: bypass promises a byte-identical forward, and breaking that to save a
-			// prefix trades a documented guarantee for an unmeasured gain.
+			// Known gaps this leaves on a compaction turn (the prompt tells the model to call no
+			// tool, so both need a model that ignores it):
+			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand, the
+			//     client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
+			//     the isSSE case in serve). Claude Code uses the Anthropic dialect and is not hit.
+			//   - Any dialect: if the model calls expand on every round, the client gets the raw
+			//     tool call after maxExpandRounds, with no summary. That takes 4 calls in a row.
+			// compactionexpand_test.go pins both, so a change shows.
 			if tn.Mode != components.ModeObserve && !bypassed {
 				im := h.opts.InjectExpand
 				if im == "" {
@@ -1464,8 +1472,8 @@ var maxRequestBytes int64 = 32 << 20 // 32 MiB
 
 // maxCompactionRequestBytes is the ceiling readGatedBody extends to for the two cases whose
 // entire point is a body already larger than maxRequestBytes: the agent's own compaction
-// request (isAgentCompaction — see agentcompaction.go for why that must be forwarded
-// untouched, never pipelined) and the standalone /compact endpoint, whose whole job is to
+// request (isAgentCompaction — see agentcompaction.go; it goes through the pipeline like any
+// other request) and the standalone /compact endpoint, whose whole job is to
 // receive and shrink a body that is, by definition, already large. Matches the existing
 // generous-but-bounded precedent already used in this package for a comparable purpose
 // (maxKeepAliveBytes, keepalive.go).

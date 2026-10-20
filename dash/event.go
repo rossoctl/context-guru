@@ -203,9 +203,14 @@ type Event struct {
 	Route                     string `json:"route"`
 	Status                    int    `json:"status"`
 
-	Bypassed   bool `json:"bypassed"`
-	CacheAware bool `json:"cache_aware"`
-	Messages   int  `json:"messages"`
+	Bypassed bool `json:"bypassed"`
+	// AgentCompaction marks the agent's own compaction request. It is usually not bypassed, but it
+	// can be: a request with the bypass header, or a body over the size ceiling, carries both
+	// flags. The replay cap reads either one as the evidence that a drop in tokens_before is the
+	// client compacting.
+	AgentCompaction bool `json:"agent_compaction"`
+	CacheAware      bool `json:"cache_aware"`
+	Messages        int  `json:"messages"`
 
 	TokensBefore    int `json:"tokens_before"`
 	TokensAfter     int `json:"tokens_after"`

@@ -19,8 +19,8 @@ import (
 	"github.com/rossoctl/context-guru/store"
 )
 
-// The agent's own compaction request (see agentcompaction.go): bypassed, and allowed past the
-// 32 MiB ceiling, which the x-context-guru-bypass header is not.
+// The agent's own compaction request (see agentcompaction.go): allowed past the 32 MiB ceiling,
+// which the x-context-guru-bypass header is not.
 const compactPromptForBypassTest = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n" +
 	"- Tool calls will be REJECTED and will waste your only turn — you will fail the task.\n\n" +
 	"Your task is to create a detailed summary of the conversation so far, paying close " +
@@ -68,6 +68,7 @@ func TestBypassedRequestIsNotTokenizedOnTheRequestPath(t *testing.T) {
 
 	body := bypassBody(t, 33<<20)
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/openai/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("x-context-guru-bypass", "true")
 	encodedBefore := tokens.Stats().EncodedBytes
 	sent := time.Now()
 	resp, err := srv.Client().Do(req)
@@ -175,5 +176,75 @@ func TestBypassCountDroppedIsExportedToPrometheus(t *testing.T) {
 	h, _ := dashHandler(t, up.URL, dash.Options{})
 	if out := h.renderMetrics(); !strings.Contains(out, "cg_bypass_count_dropped_total 0") {
 		t.Fatalf("/metrics has no cg_bypass_count_dropped_total series")
+	}
+}
+
+// The proxy sets Event.AgentCompaction on a detected compaction, and the read path returns it.
+// This is the line the replay cap depends on: dropping it leaves the column at 0, the cap stays
+// open across a compaction, and savings are over-credited.
+func TestACompactionRowIsStoredWithAgentCompactionAndNotBypassed(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+	h, rec := dashHandler(t, up.URL, dash.Options{})
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	post := func(content string) {
+		b, _ := json.Marshal(map[string]any{"model": "gpt-x", "messages": []map[string]any{
+			{"role": "user", "content": content}}})
+		resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	post("an ordinary turn")
+	post(compactPromptForBypassTest)
+	waitForRows(t, rec, 2)
+
+	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+	if err != nil || len(page.Requests) != 2 {
+		t.Fatalf("rows = %v, err %v", page, err)
+	}
+	var comp, ordinary int
+	for _, e := range page.Requests {
+		if e.AgentCompaction {
+			comp++
+			if e.Bypassed {
+				t.Errorf("a compaction without the header was stored as bypassed")
+			}
+		} else {
+			ordinary++
+		}
+	}
+	if comp != 1 || ordinary != 1 {
+		t.Fatalf("rows flagged agent_compaction = %d, ordinary = %d; want 1 and 1", comp, ordinary)
+	}
+}
+
+// A compaction body over maxRequestBytes is bypassed AND flagged, so the replay cap still closes.
+func TestAnOversizeCompactionRowCarriesBothFlags(t *testing.T) {
+	prevReq, prevCompact := maxRequestBytes, maxCompactionRequestBytes
+	maxRequestBytes, maxCompactionRequestBytes = 1<<20, 4<<20
+	t.Cleanup(func() { maxRequestBytes, maxCompactionRequestBytes = prevReq, prevCompact })
+	up := fakeUpstream(t)
+	defer up.Close()
+	h, rec := dashHandler(t, up.URL, dash.Options{})
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	body := bypassBody(t, 2<<20)
+	resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	waitForRows(t, rec, 1)
+	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+	if err != nil || len(page.Requests) != 1 {
+		t.Fatalf("rows = %v, err %v", page, err)
+	}
+	if e := page.Requests[0]; !e.Bypassed || !e.AgentCompaction {
+		t.Fatalf("bypassed=%v agent_compaction=%v, want both true", e.Bypassed, e.AgentCompaction)
 	}
 }
