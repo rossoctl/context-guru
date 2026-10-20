@@ -59,7 +59,7 @@ background task, so it cannot wait for the reviewers.
    | 0 | Both reviews are posted. | Read both `.review.md` files. |
    | 1 | A reviewer failed, or the input is wrong. | Read the message and that reviewer's `review.log`. Report it to the user. Stop. |
    | 2 | The round budget is used. | Go to "More rounds". |
-   | 3 | This head already has both reviews of its round. | You did not push since that round. Push the fixes first. |
+   | 3 | This head already has both reviews of its round. | You did not push since that round. Push the fixes first. If the user asks for a round on the same head, see "Same head". |
 
    A warning "files changed in <checkout> during the review" means a reviewer may have written
    outside its worktree. Check that checkout with `git status` before you go on.
@@ -69,6 +69,22 @@ background task, so it cannot wait for the reviewers.
 6. **Run step 2 again** for round 2. Each reviewer checks its own earlier findings.
 7. After the last round of the budget, report both verdicts to the user. Do not start another
    round on your own.
+
+## Same head
+
+Run a round on a head that already has both reviews only when the user asks for it. Two cases:
+
+- The reviewers could not run their tests (for example, the eval box was down), and now they can.
+- The author answered a finding with a reply and proof, with no code change.
+
+Before the round, post on the PR what is new: the replies and any test results. Then run:
+
+```
+scripts/offload-review.sh <pr> --same-head [--live-tests /tmp/offload-review-pr<N>-rules.md]
+```
+
+Each reviewer resumes its own session and is told that the head did not move. The round counts
+toward the budget, so the user may need to grant more rounds (see "More rounds").
 
 ## More rounds
 
