@@ -136,7 +136,9 @@ def main():
     res["best"] = res["greedy"][-1] if res["greedy"] else None
     # Low risk: no cache break, and nothing removed that the agent edits later. An offline replay cannot show a
     # behaviour change, so this is the pipeline whose saving the replay can actually vouch for.
-    safe = lambda r: r["total"]["breaks"] == 0 and r["total"]["edited_later_pct"] < 0.05
+    # edited_later_pct is a percentage: the limit is 0.05% of removed tokens, which rounds to 0.0% in the report.
+    LOW_RISK_EDITED_PCT = 0.05
+    safe = lambda r: r["total"]["breaks"] == 0 and r["total"]["edited_later_pct"] < LOW_RISK_EDITED_PCT
     res["greedy_low_risk"] = greedy([c for c in helps if safe(res["single"][c])], safe)
     res["best_low_risk"] = res["greedy_low_risk"][-1] if res["greedy_low_risk"] else None
     if args.json:
@@ -149,7 +151,7 @@ def main():
     print("== one component alone"); [show(c, r) for c, r in sorted(res["single"].items(), key=lambda kv: -kv[1]["total"]["saving_pct"])]
     print("== non-default settings"); [show(n, r) for n, r in res["variants"].items()]
     print("== greedy search"); [show("+ " + g["add"], g["result"]) for g in res["greedy"]]
-    for key, title in (("best", "best custom pipeline"), ("best_low_risk", "best low-risk pipeline (0 breaks, 0% edited later)")):
+    for key, title in (("best", "best custom pipeline"), ("best_low_risk", "best low-risk pipeline (0 breaks, <0.05% of removed tokens edited later)")):
         b = res[key]
         if not b:
             continue
