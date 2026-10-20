@@ -50,9 +50,13 @@ def expected(m: mf.Manifest) -> dict:
         unused[r] = sorted(c.name for c in declared if c.name not in inv)
 
     # --- Stats ---------------------------------------------------------------------------------
+    # A pre-install turn reaches the DB only through the importer, which cannot read the transcript line
+    # the generator cuts (see the Import block below), so that one turn is never a request.
+    cut_s = m.sessions[mf.TRUNCATED_SESSION_INDEX]
+    cut_turn = 0 if mf.measured(cut_s.turns[-1], m) else 1
     reqs: dict = {}
     for s in m.sessions:
-        reqs[root_of[s.id]] = reqs.get(root_of[s.id], 0) + len(s.turns)
+        reqs[root_of[s.id]] = reqs.get(root_of[s.id], 0) + len(s.turns) - (cut_turn if s is cut_s else 0)
 
     # --- Import (Controller ruling amendment) --------------------------------------------------
     pre_install_turns = sum(1 for s in m.sessions for t in s.turns if not mf.measured(t, m))

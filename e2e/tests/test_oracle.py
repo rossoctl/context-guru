@@ -61,6 +61,15 @@ class TestOracle(unittest.TestCase):
         self.assertEqual(self.e["stats"]["requests"][w.root], own,
                          "every turn of the project's sessions, /tmp excursion included")
 
+    def test_requests_exclude_the_pre_install_turn_the_transcript_cut_removes(self):
+        # Smoke is the tier whose cut turn is pre-install; there the importer never sees it.
+        m = mf.build("smoke")
+        last_s = m.sessions[mf.TRUNCATED_SESSION_INDEX]
+        self.assertFalse(mf.measured(last_s.turns[-1], m), "precondition: the cut turn is pre-install")
+        root = {p.key: p.root for p in m.projects}[last_s.project]
+        own = sum(len(s.turns) for s in m.sessions if s.project == last_s.project)
+        self.assertEqual(oracle.expected(m)["stats"]["requests"][root], own - 1)
+
     def test_cleanup_unused_never_lists_builtin_or_self(self):
         for root, names in self.e["cleanup"]["unused"].items():
             for n in names:

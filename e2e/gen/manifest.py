@@ -16,7 +16,9 @@ INSTALL_DAY = 28
 DAY = 86_400_000
 TRUNCATED_SESSION_INDEX = -1  # the session whose final assistant turn the transcript generator cuts short
 MODEL = "claude-sonnet-4-5"          # priced in LiteLLM's list, so the money checks test real pricing
-UNPRICED_MODEL = "claude-opus-5"     # deliberately absent from LiteLLM's list: proves "unpriced is not free"
+# No LiteLLM key may CONTAIN this id: LiteLLM.Price falls back to a contains-scan, so a real-looking id such as
+# "claude-opus-5" still resolves (to "anthropic.claude-opus-5") and is NOT unpriced.
+UNPRICED_MODEL = "e2e-unpriced-model"
 
 
 def day_ms(day: int, hour: int = 0) -> int:

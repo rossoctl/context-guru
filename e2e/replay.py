@@ -122,7 +122,8 @@ def main(argv=None) -> int:
         pathlib.Path(a.stamps).write_text(json.dumps(stamps, indent=1, sort_keys=True))
     if a.probe and a.probe_out:
         s0, _ = _turns(m, "post")[0]
-        pathlib.Path(a.probe_out).write_text(json.dumps({"session_id": s0.id + a.probe}))
+        root = next(pr.root for pr in m.projects if pr.key == s0.project)
+        pathlib.Path(a.probe_out).write_text(json.dumps({"session_id": s0.id + a.probe, "root": root}))
     print(json.dumps(r))
     return 1 if r["failed"] else 0
 

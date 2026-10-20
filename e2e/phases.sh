@@ -97,6 +97,15 @@ settle_inventory() {  # settle_inventory <label>
     "$1" "$want" "$n" "$res" >>"$R/settle.jsonl"
 }
 
+settle_session() {  # settle_session <session id>: wait (bounded) for its inventory rows, as settle_inventory does
+  local t0 n=0; t0=$(date +%s)
+  while [ $(( $(date +%s) - t0 )) -lt 20 ]; do
+    n=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tool_declarations WHERE session_id='$1'" 2>/dev/null || echo 0)
+    [ "$n" -gt 0 ] && return 0; sleep 0.25
+  done
+  return 0
+}
+
 REPLAY="python3 -m e2e.replay --tier $TIER --home $HOME --base $BASE/anthropic --stamps $R/replay-stamps.json"
 
 p_replay() {
@@ -130,15 +139,41 @@ p_import() {
   start_proxy
 }
 
+# LiteLLM.Price answers "unknown" until its first (background) fetch lands, so right after a proxy start every
+# item reads priced=false. Poll until some item is priced; a timeout is not fatal, the money checks then
+# report BLOCKED("no priced items") rather than a false FAIL. Polls the same URL collect reads: the dashboard
+# caches a response for 30s and serves it stale while refreshing (dash/api.go), so a cold answer outlives 30s.
+warm_prices() {
+  for _ in $(seq 1 180); do
+    curl -fsS "$BASE/api/insights?timeline=1" | jq -e '[.items[]? | select(.priced)] | length > 0' >/dev/null && return 0
+    sleep 0.5
+  done
+  echo "price cache did not warm"; return 0
+}
+
 p_api() {
+  warm_prices
   python3 -m e2e.collect --base "$BASE" --expected "$R/expected.json" --out "$R/actual-api.json" \
     --skill "$PLUG/scripts/dashboard.sh" || return 1
+  # Unpriced probe, AFTER the main collection: an item is priced only if every session in scope that
+  # declares it is priced (dash/toolapi.go ToolReportFor), so an unpriced session in alpha would flip every
+  # alpha and pooled item to unpriced and leave the money checks nothing to judge. Stats were read above, so
+  # this request is not in the expected request counts (counted=false).
+  $REPLAY --which post --model e2e-unpriced-model --probe=-unpriced-probe --stamps "" \
+    --probe-out "$R/unpriced-probe.json" || return 1
+  python3 - "$R/unpriced-probe.json" <<'PY' || return 1
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["counted"] = False; json.dump(d, open(p, "w"))
+PY
+  settle_session "$(python3 -c "import json;print(json.load(open('$R/unpriced-probe.json'))['session_id'])")"
+  python3 -m e2e.collect --base "$BASE" --out "$R/actual-api.json" --add-unpriced-probe "$R/unpriced-probe.json" || return 1
   mkdir -p "$R/db"   # mock data only; kept for diagnosing a mismatch
   sqlite3 "$DB" ".backup '$R/db/dashboard-$PORT.db'"
 }
 p_skill() { "$PLUG/scripts/dashboard.sh" --no-open | tee "$R/logs/skill.out"; }
+p_assert() { python3 -m e2e.check --results "$R" --tier "$TIER"; return 0; }  # a FAIL is a result, not a crash
 
 cd /src
 [ "$TIER" = smoke ] || phase suite p_suite
-for ph in preflight generate install replay transcripts import api skill; do phase "$ph" "p_$ph"; done
+for ph in preflight generate install replay transcripts import api skill assert; do phase "$ph" "p_$ph"; done
 echo "== phases complete"

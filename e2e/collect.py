@@ -14,7 +14,7 @@ def _get(base: str, path: str):
         return json.loads(r.read())
 
 
-def collect(base: str, exp: dict, skill_cmd) -> dict:
+def collect(base: str, exp: dict, skill_cmd, unpriced_probe_id: str = "") -> dict:
     roots = sorted(set(exp["cleanup"]["picker"]) | set(exp["stats"]["requests"]))
     q = lambda r: urllib.parse.quote(r, safe="")
     out = {
@@ -36,12 +36,18 @@ def collect(base: str, exp: dict, skill_cmd) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", required=True)
-    ap.add_argument("--expected", required=True)
+    ap.add_argument("--expected", default="")
     ap.add_argument("--out", required=True)
     ap.add_argument("--skill", default="")
+    ap.add_argument("--add-unpriced-probe", default="",
+                    help="probe file: add /api/insights for its session to the existing --out and stop")
     a = ap.parse_args(argv)
-    exp = json.load(open(a.expected))
-    got = collect(a.base, exp, [a.skill, "--no-open"] if a.skill else None)
+    if a.add_unpriced_probe:
+        got = json.load(open(a.out))
+        got["unpriced_probe"] = _get(a.base, "/api/insights?session="
+                                     + urllib.parse.quote(json.load(open(a.add_unpriced_probe))["session_id"], safe=""))
+    else:
+        got = collect(a.base, json.load(open(a.expected)), [a.skill, "--no-open"] if a.skill else None)
     json.dump(got, open(a.out, "w"), indent=1, sort_keys=True)
     return 0
 
