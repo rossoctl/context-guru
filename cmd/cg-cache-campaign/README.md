@@ -28,7 +28,8 @@ nice -n 19 ./cg-cache-campaign -db /var/lib/context-guru/cg.db -days 30 \
 
 All numbers come from core. The tool only adds cells up.
 
-- **`campaign`**: each (account, hour) cell runs its own best arm that a campaign can run live. This is the upload.
+- **`campaign`**: each (account, hour) cell runs its own best arm. This is the upload.
+- **Candidates** (default): `fixed-5m`, `keepalive-5m-x1` … `-x11` (1 to 11 pings per idle gap) and `stop-reason-gated`. No `no-cache`, no 1-hour arm. Every one can run live.
 - **One arm everywhere** (`keepalive-5m`, `fixed-1h`, ...): the naive policies.
 - **`observed-policy`**: the cache tier each request asked for.
 - **`current_keepalive`**: what the proxy's live keep-alive pings measured (core's keep-alive ledger).

@@ -11,8 +11,21 @@ import (
 	"github.com/rossoctl/context-guru/proxyapp"
 )
 
+// DefaultArms is what a campaign may choose from: the 5-minute tier only — fixed-5m, the keep-alive
+// with 1 to 11 pings per idle span, and the stop-reason gate. no-cache and every 1-hour arm are
+// excluded by operator decision (2026-10-20).
+func DefaultArms() []string {
+	arms := []string{kvcache.StrategyFixed5m}
+	for k := 1; k <= kvcache.MaxKeepAlivePings; k++ {
+		arms = append(arms, kvcache.KeepAlive5mPings(k).Name())
+	}
+	return append(arms, kvcache.StrategyStopReasonGated)
+}
+
 // Inputs is one run: which history to read, how to price it, and what to score it against.
 type Inputs struct {
+	// Arms is the candidate list every cell is decided over. nil = DefaultArms.
+	Arms     []string
 	DB       *dash.DB
 	Pricer   proxyapp.Pricer
 	Since    int64 // epoch ms, inclusive
@@ -140,7 +153,14 @@ func costsOf(c dash.KVCacheSuggestion, segment string) cellCosts {
 // and the same rates as the dashboard's own campaign preview.
 func Run(in Inputs) (*Result, error) {
 	f := dash.Filter{TenantAll: true, Since: in.Since, Until: in.Until}
-	cfg := dash.KVCacheSimConfig{Baseline: in.Baseline, Semantics: kvcache.DefaultSemantics()}
+	arms := in.Arms
+	if len(arms) == 0 {
+		arms = DefaultArms()
+	}
+	// MaxPings is the simulator's ceiling on EVERY arm; it must be at least the largest K-ping
+	// budget, or keepalive-5m-x11 would silently be scored as x2 (the default ceiling).
+	cfg := dash.KVCacheSimConfig{Baseline: in.Baseline, Semantics: kvcache.DefaultSemantics(),
+		Strategies: arms, MaxPings: kvcache.MaxKeepAlivePings}
 
 	sug, err := in.DB.KVCacheSuggest(f, dash.KVCacheOptions{}, in.Pricer, cfg)
 	if err != nil {
@@ -196,8 +216,10 @@ func Run(in Inputs) (*Result, error) {
 	for _, c := range cells {
 		baseUSD += c.base
 	}
-	rep.Policies = append(rep.Policies, withShare(Policy{Name: "campaign-if-every-arm-were-live", Kind: "simulated",
-		CostUSD: simBest, SavingUSD: baseUSD - simBest, SavingPct: pct(baseUSD-simBest, baseUSD)}, rep.Policies))
+	if simBest < rep.Policies[0].CostUSD-1e-9 {
+		rep.Policies = append(rep.Policies, withShare(Policy{Name: "campaign-if-every-arm-were-live", Kind: "simulated",
+			CostUSD: simBest, SavingUSD: baseUSD - simBest, SavingPct: pct(baseUSD-simBest, baseUSD)}, rep.Policies))
+	}
 	models := map[string][]string{}
 	for _, u := range sug.Users {
 		if ms, err := in.DB.KVCacheModels(dash.Filter{Tenant: u, Since: in.Since, Until: in.Until}); err == nil {

@@ -308,9 +308,45 @@ func TestEveryUploadedWinnerCanRunLive(t *testing.T) {
 			t.Errorf("cell %s/%d names %s, which a campaign cannot enforce", c.User, c.HourUTC, c.BestStrategy)
 		}
 	}
-	live, sim := policy(t, res.Report, "campaign"), policy(t, res.Report, "campaign-if-every-arm-were-live")
-	if live.CostUSD < sim.CostUSD-1e-9 {
-		t.Errorf("the live-only campaign ($%.4f) beats the unrestricted one ($%.4f); restricting arms cannot help",
-			live.CostUSD, sim.CostUSD)
+	// Every default arm has a live path, so nothing was re-picked and the report has no
+	// "if every arm were live" row: the campaign IS the unrestricted per-cell best.
+	if n := res.Report.Campaign.Repicked; n != 0 {
+		t.Errorf("%d cells were re-picked, but every default arm can run live", n)
+	}
+	for _, p := range res.Report.Policies {
+		if p.Name == "campaign-if-every-arm-were-live" {
+			t.Errorf("the report has %q although every candidate can run live", p.Name)
+		}
+	}
+}
+
+// ONLY THE ALLOWED ARMS. By default every cell is decided over the 5-minute tier only: no cell may
+// recommend no-cache or a 1-hour arm, and the K-ping arms are scored at their own budgets.
+func TestTheDefaultCampaignUsesOnlyFiveMinuteArms(t *testing.T) {
+	res, _ := run(t)
+	allowed := map[string]bool{}
+	for _, a := range DefaultArms() {
+		allowed[a] = true
+	}
+	for _, c := range res.Campaign.Cells {
+		if c.BestStrategy != "" && !allowed[c.BestStrategy] {
+			t.Errorf("cell %s/%d recommends %q, outside the 5-minute arms", c.User, c.HourUTC, c.BestStrategy)
+		}
+	}
+	for _, p := range res.Report.Policies {
+		if p.Kind == "arm" && !allowed[p.Name] {
+			t.Errorf("the report scores %q, which is not a candidate", p.Name)
+		}
+	}
+	for _, banned := range []string{kvcache.StrategyNoCache, kvcache.StrategyFixed1h, kvcache.StrategyKeepAlive1h,
+		kvcache.StrategyKeepAlive1hOnce, kvcache.StrategyExtend1h, kvcache.StrategyStickySession1h} {
+		if allowed[banned] {
+			t.Errorf("%s is in DefaultArms", banned)
+		}
+	}
+	// x1 must equal keepalive-5m-once's schedule and the x11 arm must be scored at 11, not capped at 2.
+	x2, x11 := policy(t, res.Report, "keepalive-5m-x2"), policy(t, res.Report, "keepalive-5m-x11")
+	if x2.CostUSD == x11.CostUSD {
+		t.Errorf("x2 and x11 cost the same ($%.6f): the simulator capped x11 at the default MaxPings", x2.CostUSD)
 	}
 }
