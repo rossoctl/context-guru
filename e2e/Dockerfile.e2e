@@ -1,0 +1,20 @@
+# The PR #578 review sandbox. Built from the checkout, so it tests exactly what is on the branch.
+FROM golang:1.26 AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/context-guru-proxy ./cmd/context-guru-proxy && \
+    CGO_ENABLED=0 go build -o /out/cg-import-history ./cmd/cg-import-history
+
+FROM golang:1.26-bookworm
+# go stays in the image: tier 2 runs `make test` against /src.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 nodejs chromium curl git make jq ca-certificates fonts-dejavu-core && \
+    rm -rf /var/lib/apt/lists/*
+RUN useradd -m -d /sandbox -s /bin/bash sandbox
+COPY --from=build /out/ /opt/cg/
+COPY --chown=sandbox:sandbox . /src
+USER sandbox
+ENV HOME=/sandbox PATH=/sandbox/.local/bin:/usr/local/go/bin:/usr/bin:/bin \
+    GOFLAGS=-mod=mod GOCACHE=/sandbox/.cache/go-build
+WORKDIR /src
+ENTRYPOINT ["/src/e2e/phases.sh"]
