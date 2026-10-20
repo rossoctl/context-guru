@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS requests (
   open_background    INTEGER,
   open_teammate      INTEGER,
   monitor_expiry_ms  INTEGER,
+  agent_compaction   INTEGER NOT NULL DEFAULT 0, -- the agent's own compaction request (proxy isAgentCompaction); 0 on rows written before it
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)
@@ -675,6 +676,10 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "open_background", "INTEGER"},
 	{"requests", "open_teammate", "INTEGER"},
 	{"requests", "monitor_expiry_ms", "INTEGER"},
+	// The agent's own compaction request, no longer bypassed (it used to be marked `bypassed`). The
+	// replay cap reads Bypassed || AgentCompaction as the evidence of a client compaction. 0 on old
+	// rows, which were bypassed for exactly this reason.
+	{"requests", "agent_compaction", "INTEGER NOT NULL DEFAULT 0"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},

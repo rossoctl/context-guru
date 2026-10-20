@@ -27,9 +27,12 @@ memory on a single request. Two exceptions, both because the whole point of the 
 carrying a transcript that is, by definition, already this large:
 
 - **The agent's own compaction request** (see [agent-compaction.md](../how-to/agent-compaction.md))
-  — detected the same way it already is for the pipeline bypass — may read up to 128 MiB. It
-  must be forwarded byte-identical regardless of size, so relaxing the *read* ceiling for it
-  costs nothing extra: no pipeline component runs on it either way.
+  — may read up to 128 MiB. The proxy finds it by the opening of the agent's summary prompt
+  (`isAgentCompaction`). Up to 32 MiB it runs the full pipeline, like any other request. **Over
+  32 MiB it is bypassed**: the proxy forwards it untouched, counts it as
+  `components.agent_compaction.gates.oversize_bypass`, and still marks the dashboard row
+  `agent_compaction`. The pipeline is too slow on a body that large. A measured 40 MiB body took
+  13.7 s on the request path and allocated 5.7 GiB.
 - **`/compact`** always reads up to 128 MiB, unconditionally — every caller of this endpoint
   wants exactly this: a body already larger than 32 MiB is the normal, intended input, never a
   reason to refuse up front.
@@ -778,7 +781,8 @@ startup with the replacement named, rather than silently migrated to a value tha
 moment.
 
 (The agent's own compaction is a second route to the same skip — it shrinks the incoming request and
-can drop it back under `min_request_tokens` for several consecutive turns.)
+can drop it back under `min_request_tokens` for several consecutive turns. The compaction request
+itself is not skipped: it goes through the pipeline.)
 
 That is only safe because a skipped turn still **splices**. Once a checkpoint exists, every later turn
 re-emits the same summary bytes from it, with no model call, whichever gate declined and whether or
@@ -788,7 +792,7 @@ full-suffix cache-write, so under a rarely-firing trigger the component would co
 every turn to save it on a few.
 
 The exposure this leaves, stated plainly: a turn that runs **no pipeline** performs no refresh (an
-`x-context-guru-bypass` request, or the agent-compaction bypass), so an unbroken run of bypassed
+`x-context-guru-bypass` request), so an unbroken run of bypassed
 turns longer than `stash_ttl_seconds` could outlive a payload whose marker is still live. Both are
 single-request events in practice, and on the first row above the outcome is the reported one —
 `stash_missing` — not a silent loss.
