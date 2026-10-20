@@ -660,3 +660,17 @@ func texts(ts []ReconTurn) []string {
 	}
 	return out
 }
+
+// A longer tag sharing the prefix must not stop the search: the real block after it is still
+// removed. And a character that changes length when lowered (İ) must not shift the offsets.
+func TestStripTagBlockSkipsLongerNamesAndKeepsOffsets(t *testing.T) {
+	in := "see <system-reminders> then <system-reminder>injected</system-reminder> typed"
+	if got := stripTagBlock(in, "system-reminder"); strings.Contains(got, "injected") {
+		t.Errorf("real block after a longer tag name survived: %q", got)
+	}
+	in = "İİİ <system-reminder>injected</system-reminder> typed"
+	got := stripTagBlock(in, "system-reminder")
+	if strings.Contains(got, "injected") || !strings.HasPrefix(got, "İİİ ") || !strings.HasSuffix(got, " typed") {
+		t.Errorf("offsets shifted around a length-changing character: %q", got)
+	}
+}

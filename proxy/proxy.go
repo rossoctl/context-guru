@@ -1733,7 +1733,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	var recBody []byte
 	var recIsSSE bool
 	var recIncomplete string
-	if h.recorder != nil {
+	// Only for a request that will be recorded: in hosted mode most tenants have not opted
+	// in, and a tee for them would hold up to teeCap bytes per stream for nothing.
+	if h.recorder != nil && rc.traceID != "" {
 		tee = newRecTee(h.recorder.teeCap)
 	}
 	defer func() {
@@ -2002,11 +2004,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			lg.Debug("cg.sse_splice", "round", round, "proxy_calls", strings.Join(called, ","),
 				"blocks_sent", sp.blocks, "bytes", len(respBody))
 			if h.recorder != nil {
-				// sp.pass already reconstructed a JSON message object, so this needs no
-				// aggregation -- recIsSSE stays false. A nil body means the 16 MB retain
-				// bound was blown and the body never materialised at all, which is a
-				// different fact from "empty" and is marked as such.
-				recBody, recIsSSE = respBody, false
+				// sp.pass returns the round's raw event stream (the continuation loop below
+				// aggregates it too), so the writer must aggregate it: recIsSSE is true. A nil
+				// body means the 16 MB retain bound was blown and the body never materialised
+				// at all, which is a different fact from "empty" and is marked as such.
+				recBody, recIsSSE = respBody, true
 				if respBody == nil {
 					recIncomplete = record.IncompleteRetainCap
 				}
