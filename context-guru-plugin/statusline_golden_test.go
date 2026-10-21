@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -67,25 +69,25 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 	}{
 		{"warm/minimal", cs(60, 300, 52000, "0.30"), small, "minimal", 200, "saved $0.31 of $2.10 │ cache ● █████░ 4:00"},
 		{"warm/balanced", cs(60, 300, 52000, "0.30"), small, "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
+			sess + "\ncache ● █████░ 4:00 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
 		{"warm/ping", ping(cs(60, 300, 52000, "0.30")), small, "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 ↻ │ ctx ░░░░░░░░ 5%"},
+			sess + "\ncache ● █████░ 4:00 ↻ │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
 		{"warm/detailed", cs(60, 3600, 52000, "0.30"), small, "detailed", 200,
-			sess + " │ spent $0.41\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
+			sess + " │ spent $0.41\ncache ● ██████ 59:00 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
 		{"expiring/cheap", cs(258, 300, 52000, "0.30"), small, "balanced", 200,
-			sess + "\ncache ◐ █░░░░░ 0:42 │ ctx ░░░░░░░░ 5%"},
+			sess + "\ncache ◐ █░░░░░ 0:42 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
 		{"expiring/costly", cs(258, 300, 412000, "1.20"), payload, "balanced", 200,
-			sess + "\ncache ◐ █░░░░░ 0:42 │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ◐ █░░░░░ 0:42 │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
 		{"expiring/ping-covers-it", ping(cs(258, 300, 412000, "1.20")), payload, "balanced", 200,
-			sess + "\ncache ◐ █░░░░░ 0:42 ↻ │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ◐ █░░░░░ 0:42 ↻ │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
 		{"warm/rewrite-near", cs(60, 300, 900000, "2.70"), full, "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 │ ctx ███████░ 90% ⚠ rewrite near"},
+			sess + "\ncache ● █████░ 4:00 │ next $2.70 if cold │ ctx ███████░ 90% ⚠ rewrite near"},
 		{"cold/balanced", cs(400, 300, 412000, "1.20"), payload, "balanced", 200,
-			sess + "\ncache ○ ░░░░░░ cold 1:40 │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ○ ░░░░░░ cold 1:40 │ next $1.20 │ ctx ███░░░░░ 41%"},
 		{"cold/minimal", cs(400, 300, 412000, "1.20"), payload, "minimal", 200,
 			"saved $0.31 of $2.10 │ cache ○ ░░░░░░ cold 1:40"},
 		{"cold/narrow", cs(400, 300, 412000, "1.20"), payload, "balanced", 60,
-			sess + "\ncache ○ ░░░░░░ cold 1:40 │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ○ ░░░░░░ cold 1:40 │ next $1.20 │ ctx ███░░░░░ 41%"},
 		{"warm/narrow", cs(60, 300, 52000, "0.30"), small, "balanced", 40,
 			"saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 		{"first-run", `{"session":"s","none":true,"now_ms":1}`, `{"session_id":"sess-gold"}`, "balanced", 200,
@@ -151,30 +153,30 @@ func TestStatuslineGoldenLive(t *testing.T) {
 		want                       string
 	}{
 		{"critical", body(m, 290, th("", 290, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
-			sess + "\ncache ◐ ░░░░░░ 0:10! │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ◐ ░░░░░░ 0:10! │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
 		{"cold-counts-up", body(m, 375, th("", 375, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
-			sess + "\ncache ○ ░░░░░░ cold 1:15 │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ○ ░░░░░░ cold 1:15 │ next $1.20 │ ctx ███░░░░░ 41%"},
 		{"cold-long", body(m, 3900, th("", 3900, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
-			sess + "\ncache ○ ░░░░░░ cold 1h00m │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ○ ░░░░░░ cold 1h00m │ next $1.20 │ ctx ███░░░░░ 41%"},
 		// The latest request of the session was a sub-agent's; the main cache must still count down on its own.
 		{"main-not-reset-by-subagent", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("", 200, 300, 412000, "1.20")),
-			ctxPay(m), "balanced", 200, sess + "\ncache ● ██░░░░ 1:40 │ agent ● 4:55 │ ctx ███░░░░░ 41%"},
+			ctxPay(m), "balanced", 200, sess + "\ncache ● ██░░░░ 1:40 │ next $1.20 if cold │ agent ● 4:55 │ ctx ███░░░░░ 41%"},
 		{"two-agents", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("a:2", 250, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")),
-			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ agents 2 · soonest ◐ 0:50 │ ctx ███░░░░░ 41%"},
+			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ next $1.20 if cold │ agents 2 · soonest ◐ 0:50 │ ctx ███░░░░░ 41%"},
 		{"many-agents", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("a:2", 250, 300, 9000, "0.03"),
 			th("a:3", 100, 300, 9000, "0.03"), th("a:4", 7, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")),
-			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ agents 4 · soonest ◐ 0:50 │ ctx ███░░░░░ 41%"},
+			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ next $1.20 if cold │ agents 4 · soonest ◐ 0:50 │ ctx ███░░░░░ 41%"},
 		{"cold-agents-are-counted", body(m, 100, th("a:1", 900, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")),
-			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ agents 1 cold │ ctx ███░░░░░ 41%"},
+			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ next $1.20 if cold │ agents 1 cold │ ctx ███░░░░░ 41%"},
 		{"agents-narrow", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("a:2", 250, 300, 9000, "0.03"),
 			th("a:3", 100, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")), ctxPay(m), "balanced", 36,
 			"saved $0.31 of $2.10 session\ncache ● 3:20 │ agents 3 │ ctx 41%"},
 		{"model-switch", body(m, 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-opus-5-5"), "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ● █████░ 4:00 │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
 		{"same-model-other-spelling", body("aws/claude-sonnet-5-5", 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-sonnet-5-5[1m]"), "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ● █████░ 4:00 │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
 		{"spend-detailed", body(m, 60, th("", 60, 300, 412000, "1.20")), ctxPay(m), "detailed", 200,
-			sess + " │ spent $4.10 · $4.10/h · up 1h00m\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41%"},
+			sess + " │ spent $4.10 · $4.10/h · up 1h00m\ncache ● █████░ 4:00 │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(cgStub(t, c.cache))
@@ -187,6 +189,182 @@ func TestStatuslineGoldenLive(t *testing.T) {
 				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
 			}
 		})
+	}
+}
+
+// The context bar jumped to 100% and dropped back after the next request. /api/cachestate's top-level
+// model, window and window_exact describe the session's LATEST touch on any thread, while _main_cs
+// swaps in only the main thread's model and prefix: a 412k main prompt measured against a sub-agent's
+// 200k window read 100%. Root cause pinned here; the window must follow the main thread's model.
+func TestStatuslineContextBarIgnoresSubagentWindow(t *testing.T) {
+	const now = 1_800_000_000_000
+	th := func(id, model string, agoSec, prefix int) string {
+		return fmt.Sprintf(`{"id":%q,"main":%t,"model":%q,"last_ts":%d,"end_ts":%d,"ttl_s":300,`+
+			`"prefix_tokens":%d,"priced":true,"rewrite_usd":0.03}`, id, id == "", model, now-agoSec*1000, now-agoSec*1000, prefix)
+	}
+	// top level = the sub-agent's touch (haiku, 200k window, exact); the main thread is sonnet on 1M.
+	cache := fmt.Sprintf(`{"session":"s","model":"claude-haiku-5-5","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":9000,`+
+		`"priced":true,"rewrite_usd":0.03,"window":200000,"window_exact":true,"threads":[%s,%s]}`,
+		now-5000, now, th("a:1", "claude-haiku-5-5", 5, 9000), th("", "claude-sonnet-5-5", 100, 412000))
+	stdin := `{"session_id":"sess-gold","model":{"id":"claude-sonnet-5-5"},"context_window":` +
+		`{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":1000000}}`
+	env := routedEnv(cgStub(t, cache))
+	env["CG_STATUSLINE_COLUMNS"] = "200"
+	out, _, _ := runStatusline(t, env, stdin, "--layout=balanced")
+	if strings.Contains(out, "100%") || !strings.Contains(out, "ctx ███░░░░░ 41%") {
+		t.Errorf("context bar must use the main thread's window, not the latest sub-agent's; got %q", out)
+	}
+}
+
+// CONTRACT section 2: the cache segment names the next request's cost warm vs cold. A server that
+// predates next_warm_usd / next_cold_usd still prices the cold case through rewrite_usd; with no
+// price at all the segment says nothing about money.
+func TestStatuslineNextRequestCost(t *testing.T) {
+	const now = 1_800_000_000_000
+	cs := func(agoSec int, extra string) string {
+		return fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"now_ms":%d,"ttl_s":300,"prefix_tokens":52000,%s"window":1000000,"window_exact":true}`,
+			now-agoSec*1000, now, extra)
+	}
+	pay := `{"session_id":"sess-gold","context_window":{"total_input_tokens":52000,"context_window_size":200000}}`
+	for _, c := range []struct{ name, cache, layout, want string }{
+		{"both", cs(60, `"priced":true,"rewrite_usd":0.30,"next_warm_usd":0.026,"next_cold_usd":0.30,`), "balanced",
+			"cache ● █████░ 4:00 │ next $0.03 warm · $0.30 cold │ ctx ░░░░░░░░ 5%"},
+		{"cold", cs(400, `"priced":true,"rewrite_usd":0.30,"next_warm_usd":0.026,"next_cold_usd":0.30,`), "balanced",
+			"cache ○ ░░░░░░ cold 1:40 │ next $0.30 │ ctx ░░░░░░░░ 5%"},
+		{"older-server-falls-back-to-rewrite_usd", cs(60, `"priced":true,"rewrite_usd":0.30,`), "balanced",
+			"cache ● █████░ 4:00 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
+		{"unpriced", cs(60, `"priced":false,`), "balanced", "cache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
+		{"minimal-stays-short", cs(60, `"priced":true,"rewrite_usd":0.30,"next_warm_usd":0.026,"next_cold_usd":0.30,`), "minimal",
+			"cache ● █████░ 4:00"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			env := routedEnv(cgStub(t, c.cache))
+			out, _, _ := runStatusline(t, env, pay, "--layout="+c.layout)
+			lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+			if got := lines[len(lines)-1]; got != c.want {
+				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
+			}
+		})
+	}
+}
+
+// statuslineCounting is cgStub that counts what each route is asked.
+func statuslineCounting(t *testing.T, cache string, fail *atomic.Bool) (port string, hits *sync.Map) {
+	t.Helper()
+	hits = &sync.Map{}
+	count := func(route string) {
+		v, _ := hits.LoadOrStore(route, new(atomic.Int64))
+		v.(*atomic.Int64).Add(1)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
+		count("stats")
+		if fail != nil && fail.Load() {
+			http.Error(w, "boom", 500)
+			return
+		}
+		w.Write([]byte(`{"total_saved_usd": 0.31, "cost_usd": 0.41}`)) //nolint:errcheck
+	})
+	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) {
+		count("cachestate")
+		if fail != nil && fail.Load() {
+			http.Error(w, "boom", 500)
+			return
+		}
+		w.Write([]byte(cache)) //nolint:errcheck
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	return fmt.Sprint(ln.Addr().(*net.TCPAddr).Port), hits
+}
+
+func hitCount(h *sync.Map, route string) int64 {
+	if v, ok := h.Load(route); ok {
+		return v.(*atomic.Int64).Load()
+	}
+	return 0
+}
+
+// CONTRACT section 4: the cache lives in ${XDG_CACHE_HOME}/context-guru (0700), not in a shared
+// /tmp path, and a render that finds fresh copies makes no request at all.
+func TestStatuslineBudgetPrivateCacheDirAndTTL(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,"priced":true,"rewrite_usd":0.3}`, now-60_000, now)
+	port, hits := statuslineCounting(t, cache, nil)
+	xdg, tmp := t.TempDir(), t.TempDir()
+	env := routedEnv(port)
+	env["XDG_CACHE_HOME"], env["TMPDIR"] = xdg, tmp
+	stdin := `{"session_id":"sess-b","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":52000,"context_window_size":200000}}`
+	for i := 0; i < 3; i++ {
+		runStatusline(t, env, stdin, "--layout=balanced")
+	}
+	if n := hitCount(hits, "cachestate"); n != 1 {
+		t.Errorf("cachestate fetched %d times in 3 back-to-back renders; the 10 s cache must make it 1", n)
+	}
+	if n := hitCount(hits, "stats"); n != 1 {
+		t.Errorf("stats fetched %d times in 3 back-to-back renders; the 30 s cache must make it 1", n)
+	}
+	st, err := os.Stat(filepath.Join(xdg, "context-guru"))
+	if err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("want a 0700 %s/context-guru, got %v %v", xdg, st, err)
+	}
+	if m, _ := filepath.Glob(filepath.Join(tmp, "context-guru-*")); len(m) > 0 {
+		t.Errorf("cache files leaked into the shared temp dir: %v", m)
+	}
+	// 12 s later the cachestate copy (10 s) is stale and refetched; the stats copy (30 s) is not.
+	old := time.Now().Add(-12 * time.Second)
+	files, _ := filepath.Glob(filepath.Join(xdg, "context-guru", "context-guru-statusline-*-cs-sess-b.json"))
+	if len(files) != 1 {
+		t.Fatalf("cachestate cache file not found in the private dir: %v", files)
+	}
+	os.Chtimes(files[0], old, old) //nolint:errcheck
+	sf, _ := filepath.Glob(filepath.Join(xdg, "context-guru", "context-guru-statusline-"+port+"-sess-b.json"))
+	for _, f := range sf {
+		os.Chtimes(f, old, old) //nolint:errcheck
+	}
+	runStatusline(t, env, stdin, "--layout=balanced")
+	if n := hitCount(hits, "cachestate"); n != 2 {
+		t.Errorf("cachestate fetched %d times after its 10 s TTL; want 2", n)
+	}
+	if n := hitCount(hits, "stats"); n != 1 {
+		t.Errorf("stats fetched %d times at 12 s old; its TTL is 30 s so want 1", n)
+	}
+}
+
+// Failures back off exponentially: after a failed fetch the next renders inside the back-off make
+// no request and still show the last good copy.
+func TestStatuslineBudgetBacksOffAfterFailure(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,"priced":true,"rewrite_usd":0.3}`, now-60_000, now)
+	var fail atomic.Bool
+	port, hits := statuslineCounting(t, cache, &fail)
+	xdg := t.TempDir()
+	env := routedEnv(port)
+	env["XDG_CACHE_HOME"] = xdg
+	stdin := `{"session_id":"sess-f","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":52000,"context_window_size":200000}}`
+	runStatusline(t, env, stdin, "--layout=balanced")
+	old := time.Now().Add(-time.Hour)
+	filepath.WalkDir(filepath.Join(xdg, "context-guru"), func(p string, d os.DirEntry, err error) error { //nolint:errcheck
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".json") {
+			os.Chtimes(p, old, old) //nolint:errcheck
+		}
+		return nil
+	})
+	fail.Store(true)
+	before := hitCount(hits, "cachestate")
+	for i := 0; i < 4; i++ {
+		out, _, _ := runStatusline(t, env, stdin, "--layout=balanced")
+		if !strings.Contains(out, "cache") {
+			t.Errorf("render %d lost the cached cache state: %q", i, out)
+		}
+	}
+	if n := hitCount(hits, "cachestate") - before; n != 1 {
+		t.Errorf("%d cachestate fetches across 4 renders against a failing server; the first fails and the back-off must stop the rest", n)
 	}
 }
 
@@ -257,16 +435,16 @@ func TestStatuslineGoldenAgentsAndKeepAlive(t *testing.T) {
 	}{
 		{"named-agents", cache(th("", 60, ""), th("a:ad9ba182bf3e760e6", 10, ""), th("a:reviewer@session-ab47f1d6", 250, held(700)),
 			th("a:finished", 900, ""), th("p:0123456789ab", 10, "")), 200, // p: is a side request, not an agent
-			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 4:00 │ agents Explore active ● 4:50 · reviewer ● 11:40 ↻ · 1 cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 4:00 │ next $0.03 if cold │ agents Explore active ● 4:50 · reviewer ● 11:40 ↻ · 1 cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		// Most recently used first, at most five, then `+N more`; `active` within the last 10 s.
 		{"many-agents-capped", cache(th("", 60, ""), th("a:w1@t", 200, ""), th("a:w2@t", 5, ""), th("a:w3@t", 100, ""),
 			th("a:w4@t", 30, ""), th("a:w5@t", 250, ""), th("a:w6@t", 60, ""), th("a:w7@t", 150, "")), 300,
-			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 4:00 │ agents w2 active ● 4:55 · w4 ● 4:30 · w6 ● 4:00 · w3 ● 3:20 · w7 ● 2:30 · +2 more │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 4:00 │ next $0.03 if cold │ agents w2 active ● 4:55 · w4 ● 4:30 · w6 ● 4:00 · w3 ● 3:20 · w7 ● 2:30 · +2 more │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		{"main-held-warm", cache(th("", 60, held(820))), 200,
-			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 13:40 ↻ │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 13:40 ↻ │ next $0.03 if cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		// A plan cannot revive an expired entry (the ping failed or never came): cold is cold.
 		{"plan-cannot-revive-a-cold-cache", cache(th("", 320, held(500))), 200,
-			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ○ ░░░░░░ cold 0:20 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ○ ░░░░░░ cold 0:20 │ next $0.03 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		{"narrow-drops-ka-first", cache(th("", 60, held(820)), th("a:ad9ba182bf3e760e6", 10, "")), 60,
 			"saved $0.31 of $2.64\ncache ● █████░ 13:40 ↻ │ agents 1 │ ctx ░░░░░░░░ 5%"}, // narrow: the main thread's figure only,
 	} {
@@ -330,11 +508,11 @@ func TestStatuslineGoldenMoney(t *testing.T) {
 	}{
 		{"main-only", cache(`"money":{"main":{"saved_usd":0.31,"baseline_usd":2.64,"threads":1},"others":{"saved_usd":0,"baseline_usd":0,"threads":0}},`,
 			th("", 60, pair("0.31", "2.64"))), 200,
-			"saved $0.31 of $2.64 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session\ncache ● █████░ 4:00 │ next $0.03 if cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		// Two named agents with their own figures; the p: side thread is in the total only.
 		{"agents-and-a-side-thread", cache(both, agents...), 220,
 			"saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents\n" +
-				"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 saved $1.20 of $6.00 · Explore ◐ 0:50 saved $0.30 of $2.10 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+				"cache ● █████░ 4:00 │ next $0.03 if cold │ agents reviewer active ● 4:55 saved $1.20 of $6.00 · Explore ◐ 0:50 saved $0.30 of $2.10 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		// Narrow: the per-agent money goes first, then the subagents total, before the names.
 		{"narrow", cache(both, agents...), 90,
 			"saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents\n" +
@@ -343,14 +521,14 @@ func TestStatuslineGoldenMoney(t *testing.T) {
 		{"agent-without-money", cache(both, th("", 60, pair("50.32", "250")), th("a:reviewer@t", 5, pair("1.20", "6.00")),
 			th("a:ad9ba182bf3e760e6", 250, "")), 220,
 			"saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents\n" +
-				"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 saved $1.20 of $6.00 · Explore ◐ 0:50 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+				"cache ● █████░ 4:00 │ next $0.03 if cold │ agents reviewer active ● 4:55 saved $1.20 of $6.00 · Explore ◐ 0:50 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		// A missing field is unknown, not $0.00: that figure is left out.
 		{"missing-fields", cache(`"money":{"main":{"saved_usd":0.31,"threads":1},"others":{"baseline_usd":0.9,"threads":2}},`,
 			th("", 60, ""), th("a:reviewer@t", 5, `,"saved_usd":1.2`)), 200,
-			"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"cache ● █████░ 4:00 │ next $0.03 if cold │ agents reviewer active ● 4:55 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		{"missing-subagents-figure", cache(`"money":{"main":{"saved_usd":0.31,"baseline_usd":2.64,"threads":1},"others":{"baseline_usd":0.9,"threads":2}},`,
 			th("", 60, "")), 200,
-			"saved $0.31 of $2.64 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session\ncache ● █████░ 4:00 │ next $0.03 if cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -788,7 +966,7 @@ func TestStatuslineGoldenWeeklyTip(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		for _, f := range []string{"statusline.py", "settings.py", "tvlib.py"} {
+		for _, f := range []string{"statusline.py", "settings.py", "tvlib.py", "cgcache.py"} {
 			b, err := os.ReadFile(filepath.Join(scriptsDir(t), f))
 			if err != nil {
 				t.Fatal(err)
@@ -815,7 +993,7 @@ func TestStatuslineGoldenWeeklyTip(t *testing.T) {
 	port := cgStub(t, cache)
 	stdin := `{"session_id":"sess-tip","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000}}`
-	const lines = "saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"
+	const lines = "saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"
 	tipBoth := "Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-skills for over a week — worth a shot."
 	py := requireTool(t, "python3")
 	for _, c := range []struct {
@@ -982,8 +1160,9 @@ func TestStatuslineMoneyShowsWhenCachestateIsSlowerThanTheRender(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
 	tmp := t.TempDir()
-	key := filepath.Join(tmp, "context-guru-statusline-"+port+"-cs-sess-big.json")
-	other := filepath.Join(tmp, "context-guru-statusline-"+port+"-cs-sess-other.json")
+	os.MkdirAll(filepath.Join(tmp, "context-guru"), 0o700) //nolint:errcheck
+	key := filepath.Join(tmp, "context-guru", "context-guru-statusline-"+port+"-cs-sess-big.json")
+	other := filepath.Join(tmp, "context-guru", "context-guru-statusline-"+port+"-cs-sess-other.json")
 	oldTmp, newTmp, oldLock := key+".111.tmp", key+".222.tmp", key+".lock.12"
 	otherTmp, otherLock := other+".333.tmp", other+".lock.12"
 	for _, f := range []string{oldTmp, newTmp, oldLock, otherTmp, otherLock} {
@@ -998,7 +1177,7 @@ func TestStatuslineMoneyShowsWhenCachestateIsSlowerThanTheRender(t *testing.T) {
 		}
 	}
 	env := routedEnv(port)
-	env["TMPDIR"] = tmp
+	env["TMPDIR"], env["XDG_CACHE_HOME"] = tmp, tmp
 	stdin := `{"session_id":"sess-big","cost":{"total_cost_usd":4.1},"context_window":{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000}}`
 	want := "saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents"
 	deadline := time.Now().Add(8 * time.Second)
