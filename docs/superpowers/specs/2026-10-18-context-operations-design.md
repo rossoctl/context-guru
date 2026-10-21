@@ -217,8 +217,8 @@ the tier, so no flag is needed (§4.2 rule 3).
 - **R6.** An operation has an ID that is unique inside its request. Results, check failures and
   `cacheChange` attribution refer to it. A reference to a change in another request uses `ChangeID`
   (R22), not the operation ID.
-- **R27.** The model is not specific to one operator. Each operation names its operator and its
-  pipeline stage.
+- **R27.** The model is not specific to one operator. Each operation names its operator. The
+  operations are in pipeline order.
 - **R28.** One collector for each request collects the operations of all plugins, in order, and
   calls the library once.
 - **R33.** A `rewrite` that makes the context larger is a cost: an injected tool declaration, injected text, a
@@ -411,7 +411,6 @@ type Operation struct {
     Thread  string
 
     Operator  string // "context-guru.mask", "tool-prune"; the first part is set by the framework
-    Stage     int    // set by the framework
 
     TryRun    bool // set by the framework: computed but not sent (R12)
     Discarded bool // set by the framework: the writeback could not splice this change (R44, §5.1a)
@@ -737,7 +736,7 @@ func Compare(prev *Fingerprint, cur Fingerprint, usage Usage) (boundary *Positio
 
 - Each plugin calls `pctx.ReportOps(ops...)` during its pass. The pipeline runs in sequence, so the
   list is in order.
-- The framework sets `Operator` and `Stage`. A plugin cannot report under another plugin's name.
+- The framework sets `Operator`. A plugin cannot report under another plugin's name.
 - The framework sets `TryRun = true` on every operation of a plugin whose `SetBody` returned
   false (`on_error: observe`).
 - An operator reports only changes that are in the forwarded body, or that would be there for a
@@ -1082,7 +1081,7 @@ The library reports failed checks in `Result.Checks`. A failure does not stop pr
 1. **Sum:** for each section, the operations that are applied, not `try_run`, and not discarded —
    `Before − After` adds up to the client size minus the forwarded size. The collector sends both.
    A failure means a plugin changed the body and did not report it.
-2. **Order:** stages do not decrease.
+2. **Order:** the operations are in pipeline order, so an operator's output positions are mapped through the `MessageSplice` of the operations before it.
 3. **Unique `ChangeID` inside a request.**
 4. **Spans:** for an operation with `Spans`, its `Before` and `After` equal the sums over its spans.
 5. **Attribution:** each `cacheChange` names at most one operation, and that operation is at or

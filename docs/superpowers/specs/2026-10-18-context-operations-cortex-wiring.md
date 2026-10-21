@@ -138,7 +138,7 @@ sequenceDiagram
     Pipeline->>Plugin: OnRequest(pctx)
     Plugin->>Plugin: apply.Apply: resolve thread,<br/>rewrite a tool output (mask/cmdfilter/coref/...)
     Plugin->>Pipeline: pctx.ReportOps(result.Ops...)<br/>+ result.Thread
-    Pipeline->>Pipeline: stamp Operator, Stage<br/>append into RequestOps.Ops
+    Pipeline->>Pipeline: stamp Operator<br/>append into RequestOps.Ops
     Pipeline->>Upstream: forward (smaller) body
     Upstream-->>Pipeline: response + usage
     Pipeline->>Pipeline: prev = fingerprint[thread.Key]<br/>ops.Compare(prev, cur, usage)<br/>-> B*, cacheChange, CacheState

@@ -49,10 +49,10 @@ both IDs. To keep the JSON short, the examples show them once, in `RequestOps`.
 
 **Pipeline** of examples 6 to 8, in order:
 
-| Stage | Operator | What it does |
+| Order | Operator | What it does |
 |---|---|---|
-| 0 | `tool-prune` | Removes 3 tool declarations the account does not use |
-| 1 | `context-guru` | `mask`, `cmdfilter`, `coref`, `summarize`; adds the `context_guru_expand` tool |
+| 1 | `tool-prune` | Removes 3 tool declarations the account does not use |
+| 2 | `context-guru` | `mask`, `cmdfilter`, `coref`, `summarize`; adds the `context_guru_expand` tool |
 | — | keeper | Sends keep-alive pings between turns (not in the pipeline) |
 
 ---
@@ -376,7 +376,7 @@ So B\* = `messages[8]`.
 
 Earlier examples showed single operations. This time the JSON is the whole report for one request, the
 **envelope**. The envelope names the request (`requestId`), the session and the thread. It holds all
-the operations of the request in `ops`, in pipeline order (`stage`). The library reads the envelope
+the operations of the request in `ops`, in pipeline order. The library reads the envelope
 and prices each operation in it.
 
 ```json
@@ -386,7 +386,7 @@ and prices each operation in it.
   "ops": [
     {
       "id": "op1", "kind": "rewrite",
-      "operator": "tool-prune", "stage": 0,
+      "operator": "tool-prune",
       "at": {"section": "tools", "index": 2},
       "spans": [
         {"section": "tools", "from": 2,  "to": 2,
@@ -401,21 +401,21 @@ and prices each operation in it.
     },
     {
       "id": "op2", "kind": "rewrite",
-      "operator": "context-guru.expand", "stage": 1,
+      "operator": "context-guru.expand",
       "at": {"section": "tools", "index": 18},
       "before": {"tokens": 0}, "after": {"tokens": 300},
       "changeId": "cg:expand-tool:v3"
     },
     {
       "id": "op3", "kind": "rewrite",
-      "operator": "context-guru.mask", "stage": 1,
+      "operator": "context-guru.mask",
       "at": {"section": "messages", "index": 3},
       "before": {"tokens": 4000}, "after": {"tokens": 60},
       "changeId": "cg:mask:91ab"
     },
     {
       "id": "op4", "kind": "rewrite",
-      "operator": "context-guru.cmdfilter", "stage": 1,
+      "operator": "context-guru.cmdfilter",
       "at": {"section": "messages", "index": 9},
       "before": {"tokens": 8000}, "after": {"tokens": 900},
       "changeId": "cg:cmdfilter:c40e"
@@ -473,7 +473,7 @@ Two operations describe the change.
    ```json
    {
      "id": "op12", "kind": "rewrite",
-     "operator": "context-guru.coref", "stage": 1,
+     "operator": "context-guru.coref",
      "at": {"section": "messages", "index": 5},
      "before": {"tokens": 20000}, "after": {"tokens": 50},
      "changeId": "cg:coref:5e2d"
