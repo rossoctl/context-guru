@@ -27,7 +27,7 @@ Cortex side. This spec answers them as follows.
 |---|---|---|
 | 1 | One set of numbers: spend and savings priced from different rate tables | Inside one host, spend and savings use one resolver (D3, D4, §4.6). The tier logic is in one library. The rates stay host-local by design (§1). |
 | 2 | A figure deployers can trust: how it was computed, and who stands behind it | Each recorded figure names its operator, its component, `Estimated` and `Projected` (§7.1), and the `ops` version that computed it (R46). The rules are reviewed in context-guru through the case list and `differences.json` (§11.4). |
-| 3a | Cache effects: a saving priced at the tier the rewritten request landed in | Saved tokens are priced at the tier they would have had without the change: B\* and the breakpoints (§5.2, R36, R37). A break that a change caused is a separate `cacheBreak` cost, linked to that change (R23). |
+| 3a | Cache effects: a saving priced at the tier the rewritten request landed in | Saved tokens are priced at the tier they would have had without the change: B\* and the breakpoints (§5.2, R36, R37). A break that a change caused is a separate `cacheChange` cost, linked to that change (R23). |
 | 3b | The plugin's own LLM calls through `core/llmclient`, not in the ledger; the `ibac` judge too | `spend` operations with the call's billed usage (D4, §4.6). This applies to every plugin that calls a model, not only context-guru (R47). |
 | 3c | Keep-alive: the cost and the benefit land on different requests | `ping` operations, and the rescue rule (§4.6, §6.2). |
 | 4 | Content re-sent every turn: overcount for compaction, correct for tool-prune | `ChangeID` (R22, D1); the tier comes from the position, so tool-prune is priced on every turn and a compaction is not counted again at the full rate (§4.7). |
@@ -141,7 +141,7 @@ sequenceDiagram
     Pipeline->>Pipeline: stamp Operator, Stage<br/>append into RequestOps.Ops
     Pipeline->>Upstream: forward (smaller) body
     Upstream-->>Pipeline: response + usage
-    Pipeline->>Pipeline: prev = fingerprint[thread.Key]<br/>ops.Compare(prev, cur, usage)<br/>-> B*, cacheBreak, CacheState
+    Pipeline->>Pipeline: prev = fingerprint[thread.Key]<br/>ops.Compare(prev, cur, usage)<br/>-> B*, cacheChange, CacheState
     Pipeline->>Ops: Price(RequestOps.Ops, usage, B*, breakpoints, state)
     Ops-->>Pipeline: Result (PricedOp[], in-process only)
     Pipeline->>Settle: Result
@@ -191,7 +191,7 @@ sequenceDiagram
     Emitter->>Emitter: ops.FromKeepAlive(report, Billing)<br/>-> RequestOps with one ping op<br/>(ChangeID = window ID, Billing from the ping's credential)
     Emitter->>Settle: RequestOps
     Settle->>Settle: price Call.Usage
-    Note over Settle: on the NEXT request on thread T,<br/>the collector adds a stateChange (keepAlive)<br/>with the SAME ChangeID -- ping cost and rescue<br/>value join under one change (§4.4, §4.6)
+    Note over Settle: on the NEXT request on thread T,<br/>the collector adds a cacheChange (keepAlive)<br/>with the SAME ChangeID -- ping cost and rescue<br/>value join under one change (§4.4, §4.6)
     Settle->>Store: event.Saving (ping leg)
 ```
 
@@ -208,7 +208,7 @@ reaches the session store, `:9094`, and the archive:
 | `Component` | the operator name, for example `context-guru.mask` |
 | `TokensAvoided` | sum of `Saved` over all tiers |
 | `USD` | `Saved`, priced |
-| `PenaltyUSD` | `Caused`, priced, plus the attributed `cacheBreak` operations |
+| `PenaltyUSD` | `Caused`, priced, plus the attributed `cacheChange` operations |
 | `Tier` | the tier with the largest `Saved` |
 | `Projected` | `Projected` |
 | `DiscardedCount` (new, additive) | per (operator, component), the count of operations with `Discarded = true` on this request (R44, §5.1a) — never priced, surfaced for diagnosis the way `Report.Discarded` is today |
@@ -274,14 +274,14 @@ Spend (`spend`, `ping`) is shown beside the savings, never inside them, as today
 The proxy computes its dollar savings from `ops.Price`, as Cortex does:
 
 1. The engine returns the request's operations (migration step 3).
-2. The proxy's collector calls `ops.Compare` and adds the `cacheBreak` operation.
+2. The proxy's collector calls `ops.Compare` and adds the `cacheChange` operation.
 3. The proxy calls `ops.Price`.
 4. The proxy converts each `PricedOp` to dollars with `internal/modelinfo.Price` for the request's
    model.
 5. The proxy stores the dollars in the columns its dashboard reads today: the saving of each
    component (`ComponentSavedUSD`) and the baseline delta (`baselineDeltaUSD`).
 
-The `cachesplit` and keep-alive savings are `stateChange` operations now (§4.4), so the proxy
+The `cachesplit` and keep-alive savings are `cacheChange` operations now (§4.4), so the proxy
 prices them through `ops.Price` too. Their current rules (`cachesplitSavedUSD`,
 `keepaliveSavedUSD`) are the source of their test cases (§11), and are removed at step 10.
 

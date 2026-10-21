@@ -170,7 +170,7 @@ This document defines one model for the operations, and one way to compute their
 | D7 | Where do the types live? | **A standalone module with no dependency on context-guru, on Cortex, or on any framework.** context-guru and Cortex are two users of it, and other frameworks can be too. The module path `github.com/rossoctl/context-guru/ops` used below is a placeholder; its home and name are not decided. |
 | D8 | Which hosts compute dollars from operations? | **Both: Cortex and the context-guru proxy.** The proxy stops using its own saving rules (`dash/event.go`) when it switches. The comparison of request fingerprints (§5) is a pure function in `ops`, so the proxy does not need Cortex to find B\*. |
 | D9 | How is the implementation validated? | **Against an exhaustive list of test cases made with the current computation** (§11), before any host switches. |
-| D10 | How is the cache state used? | **As an input to every price.** The tier of a content change depends on the state (§6.2). An operation that changes the state (`stateChange`, §4.4) is priced as the difference between two states. |
+| D10 | How is the cache state used? | **As an input to every price.** The tier of a content change depends on the state (§6.2). An operation that changes the state (`cacheChange`, §4.4) is priced as the difference between two states. |
 | D11 | What happens to a change that a later change ends? | **Its operator stops reporting it.** No link names the change that ended it. The snapshot rule (D6) and the measurement at each operator's own input (R29) give the right price and stop any double count. Each change keeps the total it had until then (§4.5). |
 | D12 | Where does the thread ID come from? | **From the engine's `internal/thread`, in both hosts**, copied onto every operation. The host keeps one fingerprint per thread, keyed by `thread.Key`, and compares each request with its own thread's previous request (§5.3). |
 | D13 | How does the model serve a subscription user? | **The library does not change.** It already returns tokens for each tier (D3). The request carries a `Billing` fact. The host converts tokens to dollars for an API user, and to usage-limit units for a subscription user, with an API-equivalent dollar figure beside it, marked as such (§7.4). |
@@ -220,7 +220,7 @@ the tier, so no flag is needed (§4.2 rule 3).
   is not in the ledger today. It is reported the same way as the summarizer (wiring document). Its cost is not
   joined to a saving, because it produces none: `Produced` is empty.
 - **R6.** An operation has an ID that is unique inside its request. Results, check failures and
-  `cacheBreak` attribution refer to it. A reference to a change in another request uses `ChangeID`
+  `cacheChange` attribution refer to it. A reference to a change in another request uses `ChangeID`
   (R22), not the operation ID.
 - **R27.** The model is not specific to one operator. Each operation names its operator and its
   pipeline stage.
@@ -245,7 +245,7 @@ the tier, so no flag is needed (§4.2 rule 3).
      loss over the session.
   4. *The cache can break.* On both Anthropic and OpenAI, a change can invalidate cached content.
 
-  What the library does instead: it keeps the `setting` operation; it records a `cacheBreak` with
+  What the library does instead: it keeps the `setting` operation; it records a `cacheChange` with
   cause `setting` when a request after the change is cold (§5.4), which is measurable; and a report
   can show output tokens per request before and after, labelled as an observation, never in
   `TotalAvoidedUSD`. A measured saving needs a control (a holdout that keeps the old setting). That
@@ -408,7 +408,7 @@ type Thread struct {
 
 type Operation struct {
     ID        string // unique inside the request only; across requests, use ChangeID (R6)
-    Kind      Kind   // rewrite | stateChange | spend | setting | external | cacheBreak
+    Kind      Kind   // rewrite | cacheChange | spend | setting | external
 
     // Session and Thread are copied from RequestOps by the framework. They are on every operation
     // so a store of operations can be summed for one session or one thread with no join.
@@ -421,16 +421,18 @@ type Operation struct {
     TryRun    bool // set by the framework: computed but not sent (R12)
     Discarded bool // set by the framework: the writeback could not splice this change (R44, §5.1a)
 
-    At     Position // first position the change touches, in this operator's output. For a cacheBreak: the first position where the forwarded body differs from the previous request's. It is a cause, not the start of the penalty (§6.2)
+    At     Position // first position the change touches, in this operator's output. For a cacheChange with a Cause: the first position where the forwarded body differs from the previous request's. It is a cause, not the start of the penalty (§6.2)
     Spans  []Span   // every touched range, when the change is not contiguous; nil otherwise
     Before Size     // what the operator received over the touched ranges; the sum over Spans
     After  Size     // what it sent on over the same ranges
 
-    // kind = rewrite | stateChange
+    // kind = rewrite | cacheChange
     ChangeID     string   // the same on every request that carries this change
     ContentKeys  []string // hashes of removed content
 
-    // kind = stateChange (§4.4): a prefix range moves from one state to another
+    // kind = cacheChange (§4.4): a prefix range moves from one state to another. A rescue (cold to
+    // hot) comes from the keeper or `apply`. A break (hot to cold) is written by the collector and
+    // has a Cause.
     StateFrom CacheState
     StateTo   CacheState
 
@@ -448,7 +450,7 @@ type Operation struct {
     // host, or a key of Params (effort, thinking, ...). One key cannot appear twice.
     Settings map[string]SettingChange
 
-    // kind = cacheBreak (written by the collector only)
+    // kind = cacheChange, a break only (written by the collector only)
     Cause        Cause  // operator | client | expired | setting | unknown
     AttributedTo     string // the cause's operation ID, in this request; "" means nobody
 
@@ -496,7 +498,7 @@ type CacheState struct {
     Lifetime LifetimeKind
 }
 
-type Kind string          // rewrite | stateChange | spend | setting | external | cacheBreak
+type Kind string          // rewrite | cacheChange | spend | setting | external
 type Phase string         // hot | cold | unknown
 type LifetimeKind string  // exact | minimum | unknown — see apply.CacheLifetimeKind
 type ThreadSource string  // header | prefix | new
@@ -524,9 +526,9 @@ and can be reported as unpriced (R19).
    is in the sizes, not in the kind. `After < Before` is a saving, `After > Before` is a cost (an
    injected tool declaration, a restore), and equal sizes change no token count. A restore is a
    `rewrite` with `Reverses` set, and its `After` is larger than its `Before`.
-5. **Only the collector writes `cacheBreak`.**
+5. **Only the collector writes a `cacheChange` that has a `Cause` (a break).** A rescue has no `Cause`.
 6. **A keep-alive ping is an ordinary `spend` operation.** Its `Call` carries the ping's billed
-   usage. Its `ChangeID` names the keep-alive window, and the `stateChange` operation on the
+   usage. Its `ChangeID` names the keep-alive window, and the `cacheChange` operation on the
    request it rescued has the same `ChangeID`. So the cost and the value of a window add up
    (§4.4).
 7. **`ChangeID` is derived from the operator and the original content key only — never from the
@@ -560,7 +562,7 @@ and can be reported as unpriced (R19).
     next to each other, gates them as one batch (`min_batch_frac`, `break_even`), and spends one
     unit of `rewrite_budget` for the whole pass. The batch is the change unit (rule 1): one
     `rewrite` operation, one `ChangeID`, one `Span` for each cut, and at most one attributed
-    `cacheBreak`. Reporting each cut as its own operation would split one rewrite penalty across N
+    `cacheChange`. Reporting each cut as its own operation would split one rewrite penalty across N
     changes, and no single cut's payback would then be meaningful.
 
 **A `setting` operation.** It holds all the settings one decision changed, as a map from the setting
@@ -586,12 +588,14 @@ positions into the forwarded body.
 
 ### 4.4 Operations that change the cache state
 
-A `stateChange` operation does not change the content. It changes how the provider bills content
+A `cacheChange` operation does not change the content. It changes how the provider bills content
 that is already there.
 
-A `stateChange` carries a prefix range and two states: `StateFrom` and `StateTo`. There is no
-mechanism field. Two kinds of state change cover the cases:
+A `cacheChange` carries a prefix range and two states: `StateFrom` and `StateTo`. There is no
+mechanism field. Three cases cover it:
 
+- **A prefix is broken.** The provider no longer reads content it read before (`hot` to `cold`). The
+  collector writes it, with a `Cause` and `AttributedTo` (§5.4). It is a cost.
 - **A prefix is warmed.** The provider read the entry, so it did not expire. Examples: a keep-alive
   ping rescued the entry (`cold` to `hot`); a split of the system block means the stable half is
   read, not written, when the volatile tail changed.
@@ -620,10 +624,10 @@ request ever reads it. The benefit appears only on requests that arrive more tha
 If the model priced only the reading request, every write that never paid off would be missing, and
 the figure would overstate the bet. So, like a keep-alive window:
 
-- **On each 1h-writing request,** `apply` reports a `stateChange` for the head's breakpoint TTL
+- **On each 1h-writing request,** `apply` reports a `cacheChange` for the head's breakpoint TTL
   and only a cost: `Caused.CacheWrite1h` for the head's tokens, less the 5m write it replaced. Its
   `ChangeID` names the head entry (`"headttl:" + Thread + ":" + head content key`).
-- **On each request that reads that entry after the 5m TTL,** `apply` reports a `stateChange` with
+- **On each request that reads that entry after the 5m TTL,** `apply` reports a `cacheChange` with
   the same `ChangeID` and the saving (write → read, §6.2).
 
 A head entry that is written at 1h and never read again has only the cost leg, so its total is
@@ -703,7 +707,7 @@ A reader that needs the first application finds it in the session history: the f
 **A config change of a stateless operator.** A new `remove` list (for example, a hot reload) gives
 a new `ChangeID`. The old change stops and a new one starts. If the new list removes a declaration
 that the old list kept, the forwarded body changes inside the cached prefix. The collector then adds
-a `cacheBreak` attributed to tool-prune (§5.4). That is the real cost of the config change.
+a `cacheChange` attributed to tool-prune (§5.4). That is the real cost of the config change.
 
 ### 4.8 Sequence: three flows
 
@@ -863,10 +867,10 @@ forwarded body. `clientFirstDiff` is the same comparison on client bodies.
 
 | Comparison | Result |
 |---|---|
-| `fwdFirstDiff < clientFirstDiff` | A plugin broke the cache. Add `cacheBreak{cause: operator, at: fwdFirstDiff}`, attributed to the earliest operation at or before `fwdFirstDiff`: its `ID` in `AttributedTo`. |
-| `fwdFirstDiff ≥ clientFirstDiff` | The client changed its body. Add `cacheBreak{cause: client}`, attributed to nobody. |
-| A `setting` operation changed the model or a param (`effort`, `thinking`) since the previous request, and the cache did not hold | Add `cacheBreak{cause: setting}`, attributed to the `setting` operation. If it changed several settings, the break names the operation, not one setting: the library cannot say which of them caused it. This is the one cost of a param change that can be measured. |
-| No diff, but `cache_read` is far below the previous request's cached extent | The cache expired. Add `cacheBreak{cause: expired}`, attributed to nobody. |
+| `fwdFirstDiff < clientFirstDiff` | A plugin broke the cache. Add `cacheChange{cause: operator, at: fwdFirstDiff}`, attributed to the earliest operation at or before `fwdFirstDiff`: its `ID` in `AttributedTo`. |
+| `fwdFirstDiff ≥ clientFirstDiff` | The client changed its body. Add `cacheChange{cause: client}`, attributed to nobody. |
+| A `setting` operation changed the model or a param (`effort`, `thinking`) since the previous request, and the cache did not hold | Add `cacheChange{cause: setting}`, attributed to the `setting` operation. If it changed several settings, the break names the operation, not one setting: the library cannot say which of them caused it. This is the one cost of a param change that can be measured. |
+| No diff, but `cache_read` is far below the previous request's cached extent | The cache expired. Add `cacheChange{cause: expired}`, attributed to nobody. |
 | No previous fingerprint for this thread | First turn of the thread with no `Inherits`, or a restart: `cause: unknown`. B\* is unknown (§6.4). |
 
 The same comparison gives the **cache state** for `Input.State` (R36):
@@ -924,7 +928,7 @@ converts them with the request's own ratio (billed prompt tokens ÷ forwarded bo
 func Price(in Input) Result // pure
 
 type Input struct {
-    Ops         []Operation  // operators' operations + the collector's cacheBreak
+    Ops         []Operation  // operators' operations + the collector's cacheChange
     Usage       Usage        // billed usage of this request
     Forwarded   []PosBytes   // every position of the forwarded body, in hash order
     Breakpoints []Breakpoint // cache_control breakpoints of the forwarded body, in hash order
@@ -979,8 +983,8 @@ the client changed its own body (§5.2). When `Phase = cold`, B\* = 0, so every 
 write or input tier. So the same 8,000 tokens are worth 8,000 × read on a hot turn and 8,000 ×
 write on a cold turn.
 
-**A cache break, and the breakpoints.** A `cacheBreak` attributed to an operation moves content
-from the read tier to the write tier. The content that moves is:
+**A break, and the breakpoints.** A `cacheChange` from `hot` to `cold`, attributed to an operation,
+moves content from the read tier to the write tier. The content that moves is:
 
 - **from** the end of what the provider still read on this request (`Usage.CacheRead`, mapped onto
   the forwarded positions),
@@ -992,8 +996,8 @@ breakpoint. If the last breakpoint before the break is the end of `system`, the 
 the messages costs the same as a break at `messages[0]` when there is no breakpoint between them.
 The new tail after B\* is written anyway, so it is not counted.
 
-**A state change.** A `stateChange` operation moves its tokens from the tier of `StateFrom` to the
-tier of `StateTo`: for `keepAlive` and `cacheSplit`, from write to read. For `breakpointTTL` there
+**A rescue.** A `cacheChange` from `cold` to `hot` moves its tokens from the tier of `StateFrom` to
+the tier of `StateTo`: for `keepAlive` and `cacheSplit`, from write to read. For `breakpointTTL` there
 are two legs (§4.4): on a reading request, from write (the 5m entry would have expired) to read; on
 every writing request, the premium alone, as `Caused.CacheWrite1h` minus the 5m write it replaced.
 
@@ -1062,7 +1066,7 @@ values (`pricing.MicrosFromUSD`). Cortex prices each side with the existing code
 A break penalty has both sides: the tokens are written (`Caused.CacheWrite5m`) instead of read
 (`Saved.CacheRead`). The net is the rate difference, with no special rule.
 
-A `cacheBreak` is priced as its own operation. On its `PricedOp`, `ChangeID` is the `ChangeID` of
+A `cacheChange` is priced as its own operation. On its `PricedOp`, `ChangeID` is the `ChangeID` of
 the operation named by `AttributedTo`, so the host adds the penalty to that change's total without
 a lookup. The input carries only `AttributedTo`; the library copies the `ChangeID` once.
 `spend` operations are not priced in tokens. `PricedOp.Call` returns their `Call.Usage`
@@ -1089,7 +1093,7 @@ The library reports failed checks in `Result.Checks`. A failure does not stop pr
 2. **Order:** stages do not decrease.
 3. **Unique `ChangeID` inside a request.**
 4. **Spans:** for an operation with `Spans`, its `Before` and `After` equal the sums over its spans.
-5. **Attribution:** each `cacheBreak` names at most one operation, and that operation is at or
+5. **Attribution:** each `cacheChange` names at most one operation, and that operation is at or
    before the break.
 6. **Conservation:** the request total of the applied operations equals the bill difference (§6.3).
    `try_run` operations are left out, because their content went upstream unchanged.
@@ -1260,7 +1264,7 @@ drops the combinations that cannot occur, and states the reason for each drop in
 
 | Dimension | Values |
 |---|---|
-| Kind | `rewrite` smaller, `rewrite` larger, `rewrite` with `Reverses` (a restore), `stateChange` |
+| Kind | `rewrite` smaller, `rewrite` larger, `rewrite` with `Reverses` (a restore), `cacheChange` |
 | Position | before B\*; after B\* and at or before `L`; after `L`; no breakpoint in the body; spans on both sides of B\* |
 | Cache state | hot; cold (expired, `Lifetime: exact`); unknown (gap past an unproven `Lifetime: minimum`, R45); cold (first request); rescued by a ping; unknown (restart) |
 | Cache result | full hit; partial hit; miss with write ≥ input; miss with write < input |
@@ -1296,7 +1300,7 @@ drops the combinations that cannot occur, and states the reason for each drop in
 13. The worked example on a subscription plan: the same tokens, in usage-limit units, with a
     summarizer call.
 14. A `coref` batch: three cuts in messages that are not next to each other, as one operation with
-    three spans, one `ChangeID` and one attributed `cacheBreak`; its payback across later turns.
+    three spans, one `ChangeID` and one attributed `cacheChange`; its payback across later turns.
 15. `extract_llm_sweep`: a prefix ask that reads the previous turn's cache, and a fallback ask that
     pays fresh input. Both are `spend` operations; their `Call.Usage` differs.
 16. `breakpointTTL`: a 1h head written and read after 20 minutes (both legs); a 1h head written and
@@ -1360,7 +1364,7 @@ Each has test cases that are marked `differs` or `notCovered` in `differences.js
 5. **Where the previous request's hashes live (review of #592).** The counterfactual needs the
    previous request's hashes on the same thread. If the receiver keeps nothing, they can travel in
    each push (with the ID of the previous request), or the operator can keep them. Who classifies a
-   `cacheBreak` follows from this. It is an implementation detail and is left open.
+   `cacheChange` follows from this. It is an implementation detail and is left open.
 6. **Label volume.** Pushing `change` and `request` as labels on every series gives many series in a
    long session. This must be measured before the push model is fixed.
 7. **Asynchronous recalculation (review of #592).** A replay should not cause a recalculation every

@@ -248,13 +248,14 @@ same `changeId`, so the host can add the cost and the saving together.
     "messageSplice": {"at": 0, "removed": 3, "inserted": 1}}
    ```
 
-3. **`cacheBreak`, on request A only, not reported by the operators.** The summary is at the start of
+3. **`cacheChange`, a break, on request A only, not reported by the operators.** The summary is at the start of
    the prompt, so nothing in the cache matches. A break is added, attributed to the `rewrite` (for
    example, by the host's collector; where it is added is an implementation decision). B and C
    have no break: on B the summary is already cached, and on C the cache expired.
 
    ```json
-   {"id": "op3", "kind": "cacheBreak", "cause": "operator",
+   {"id": "op3", "kind": "cacheChange", "cause": "operator",
+    "stateFrom": {"phase": "hot"}, "stateTo": {"phase": "cold"},
     "at": {"section": "messages", "index": 0}, "attributedTo": "op2"}
    ```
 
@@ -269,7 +270,7 @@ same `changeId`, so the host can add the cost and the saving together.
   forwarded body, and compares it with the cache boundary to choose the tier. This example has no
   earlier operator, so no figure here depends on it.
   The `spend` and the `rewrite` are the same on A, B and C. Only the cache state changes the saving.
-- `cacheBreak` moves tokens that follow the break from cache read to cache write. This is the
+- A break (`cacheChange`) moves tokens that follow the break from cache read to cache write. This is the
   **penalty**: tail tokens × ($3.75 − $0.30). Here the tail is 3,000 tokens, so the penalty is
   −$0.01035. It is larger than the saving on A, so the first request with a summary costs money.
   Requests B and C have no break, so they pay no penalty.
@@ -305,12 +306,13 @@ so the break is attributed to the decision. It does not say which setting caused
                   "effort": {"from": "high",        "to": "low"}} }
    ```
 
-2. **`cacheBreak`, not reported by the operators.** A break is added, attributed to `op1`. A
+2. **`cacheChange`, a break, not reported by the operators.** A break is added, attributed to `op1`. A
    component that sees the whole request adds it (for example, the host's collector; where it is
    added is an implementation decision).
 
    ```json
-   { "id": "op2", "kind": "cacheBreak", "cause": "setting", "attributedTo": "op1" }
+   { "id": "op2", "kind": "cacheChange", "cause": "setting",
+     "stateFrom": {"phase": "hot"}, "stateTo": {"phase": "cold"}, "attributedTo": "op1" }
    ```
 
 **What the library returns** (tokens, no dollars):
@@ -447,7 +449,7 @@ good change. It is not, because message 5 is inside the cached prefix.
 
 - Turn 6 cached through `messages[11]`, so B\* = `messages[11]`.
 - The client did not change. The forwarded body first differs from turn 6's at `messages[5]`.
-- So the change itself breaks the cache. The collector adds a `cacheBreak`, attributed to the
+- So the change itself breaks the cache. The collector adds a `cacheChange`, attributed to the
   `coref` operation.
 
 ![Turn 7: coref saves $0.00599 and breaks the cache for $0.06558](2026-10-18-context-operations-example-7.svg)
@@ -478,10 +480,11 @@ Two operations describe the change.
    }
    ```
 
-2. **`cacheBreak`, not reported by the operators.** It is added, attributed to op12.
+2. **`cacheChange`, a break, not reported by the operators.** It is added, attributed to op12.
 
    ```json
-   { "id": "op13", "kind": "cacheBreak", "cause": "operator",
+   { "id": "op13", "kind": "cacheChange", "cause": "operator",
+     "stateFrom": {"phase": "hot"}, "stateTo": {"phase": "cold"},
      "at": {"section": "messages", "index": 5},
      "attributedTo": "op12" }
    ```
@@ -537,12 +540,12 @@ total is negative.
    }
    ```
 
-2. **`stateChange`, on turn 10.** It is added after the four conditions of design §4.4 are checked.
+2. **`cacheChange`, a rescue, on turn 10.** It is added after the four conditions of design §4.4 are checked.
    Turn 9 forwarded messages 0 to 5, so the extent is `messages[5]`.
 
    ```json
    {
-     "id": "op20", "kind": "stateChange", "mechanism": "keepAlive",
+     "id": "op20", "kind": "cacheChange",
      "operator": "keeper",
      "stateFrom": {"phase": "cold"},
      "stateTo": {"phase": "hot", "extent": {"section": "messages", "index": 5}},
@@ -556,7 +559,7 @@ total is negative.
 | Operation | Calculation | Result |
 |---|---|---|
 | Ping (`spend`) | 10,000 read + 10 input + 1 output | −$0.00305 |
-| Rescue (`stateChange`) | 10,000 × ($3.75 − $0.30) | +$0.03450 |
+| Rescue (`cacheChange`, cold to hot) | 10,000 × ($3.75 − $0.30) | +$0.03450 |
 | **Total added to session `s1`** | | **+$0.03145** |
 
 The ping re-sends the 10,000 cached tokens, so they are billed as a read. The 10 input tokens are

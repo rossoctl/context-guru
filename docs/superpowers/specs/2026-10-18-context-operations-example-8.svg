@@ -122,7 +122,7 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 <rect class="write" x="1092.4" y="333" width="14.1" height="22" rx="3"/>
 <text class="t" x="1088.4" y="371" font-size="12" font-weight="600" text-anchor="middle">write new message</text>
 <rect x="1120.5" y="334" width="95.2" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
-<text class="t" x="1168.1" y="348" font-size="12" text-anchor="middle" font-weight="600">stateChange</text>
+<text class="t" x="1168.1" y="348" font-size="12" text-anchor="middle" font-weight="600">cacheChange</text>
 <line class="sep" x1="909.1" y1="333" x2="909.1" y2="355"/>
 <line class="sep" x1="958.5" y1="333" x2="958.5" y2="355"/>
 <line class="sep" x1="1004.3" y1="333" x2="1004.3" y2="355"/>
