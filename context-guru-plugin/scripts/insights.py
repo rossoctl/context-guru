@@ -116,8 +116,7 @@ PRESET_PIPELINES: dict[str, tuple[str, ...]] = {
     "high": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean",
               "extract_llm", "extract", "cachesplit", "toolfilter"),
     "xhigh": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold",
-              "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit",
-              "toolfilter"),
+              "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"),
 }
 
 # What each component this plugin can turn on actually does, in one line a developer can act on,
