@@ -105,6 +105,15 @@ class TestManifest(unittest.TestCase):
         self.assertIn("/tmp/scratch-w", wanderer_post_cwds,
             f"wanderer has no post-install turn in /tmp/scratch-w; post cwds: {wanderer_post_cwds}")
 
+    def test_wanderers_tmp_excursion_is_a_minority_of_its_post_install_turns(self):
+        # A project is named after its most-active folder (R9). The excursion must be a side trip, so a harness
+        # whose mock wanders MORE in /tmp than at home does not manufacture that finding on its own.
+        for tier in ("full", "stress"):
+            m = mf.build(tier)
+            post = [t.cwd for s in m.sessions if s.project.startswith("wanderer") for t in s.turns if mf.measured(t, m)]
+            tmp = post.count("/tmp/scratch-w")
+            self.assertTrue(1 <= tmp <= len(post) // 4 + 1, f"{tier}: {tmp} of {len(post)} post-install turns in /tmp")
+
     def test_model_and_unpriced_model_are_different(self):
         """MODEL and UNPRICED_MODEL constants must be distinct."""
         self.assertNotEqual(mf.MODEL, mf.UNPRICED_MODEL)

@@ -6,8 +6,8 @@
 K.inventory_survives_shutdown | 0  # #1 (pre-existing) tool inventory lost on shutdown: invWriter is not drained on Close; verified outside the harness (Go reproducer, 22/50 runs lost the inventory); in-harness probe is supporting evidence only
 U.no_undefined_text.cleanup-* | undefined  # #2 cleanup card reads "undefined tools": dash/ui/insights.js:674 reads o.tools, the owner object has no tools field
 U.no_overflow.cleanup-* | ins-why  # #3 .ins-why inherits `.tbl td { white-space: nowrap }` (dash/ui/style.css:671-673) and overflows its cell
-C.picker_set | /tmp/scratch-w  # R9 dash/projectgroups.go names a project after its MOST-active cwd: mock wanderer (331 turns in /tmp/scratch-w, 329 in its root) lists as /tmp/scratch-w
-R.requests./sandbox/work/wanderer | 329  # R9, same cause: the wanderer root's request count reads the 329 turns run in the root, not all 660 (count from the 20261020 manifest)
+C.picker_set | /tmp/scratch-w  # R9 dash/projectgroups.go names a project after its MOST-active cwd: seen when the mock wanderer ran 331 turns in /tmp/scratch-w and 329 in its root (20261020T132417Z); since then the excursion is 1 turn in 4, so the root is the most-active cwd and R9 is not expected to reproduce
+R.requests./sandbox/work/wanderer | 329  # R9, same cause: the wanderer root's request count read the 329 turns run in the root, not all 660 (20261020T132417Z)
 U.no_js_errors.cleanup-wanderer-* | after project change  # R9, same cause: the picker never offers /sandbox/work/wanderer, so the snapper's project change never lands
 G.go_test.*/dash.TestTheHistoryReportsWhatWasInvokedAndWhen | TestTheHistoryReportsWhatWasInvokedAndWhen  # test bug (new in the PR): the fixture never installs the skill it expects; passes on a dev host only by reading the host's real home
 G.go_test.*/context-guru-plugin.TestSessionsFlagWindowsTheReportAndIsVisibleOnTheWire | TestSessionsFlagWindowsTheReportAndIsVisibleOnTheWire  # data race in TEST code (new in the PR): context-guru-plugin/insights_test.go:188 vs :205

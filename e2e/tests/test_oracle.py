@@ -61,6 +61,11 @@ class TestOracle(unittest.TestCase):
         self.assertEqual(self.e["stats"]["requests"][w.root], own,
                          "every turn of the project's sessions, /tmp excursion included")
 
+    def test_wanderer_is_filed_under_its_root_not_its_tmp_excursion(self):
+        w = [p for p in self.m.projects if p.key == "wanderer"][0]
+        self.assertEqual((w.root in self.e["cleanup"]["picker"], "/tmp/scratch-w" in self.e["stats"]["requests"]),
+                         (True, False))
+
     def test_requests_exclude_the_pre_install_turn_the_transcript_cut_removes(self):
         # Smoke is the tier whose cut turn is pre-install; there the importer never sees it.
         m = mf.build("smoke")

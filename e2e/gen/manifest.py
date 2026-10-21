@@ -327,9 +327,10 @@ def build(tier: str, seed: int = SEED, home: str = "/sandbox") -> Manifest:
                     ts = install - (turns_per_session // 2 - ti) * 600_000
                 if not p.measured and ts >= install:
                     ts = install - 3_600_000 - ti * 60_000
-                # For wanderer post-install: ensure turn 0 uses /tmp/scratch-w excursion
-                if base == "wanderer" and si == 0 and ts >= install and ti == 0:
-                    cwd = "/tmp/scratch-w"
+                # Wanderer's /tmp excursion is a side trip, one turn in four (turn 0 of its post-install first
+                # session included): most of its work stays in its root, so the root is its most-active folder.
+                if base == "wanderer":
+                    cwd = "/tmp/scratch-w" if ti % 4 == 0 else p.root
                 else:
                     cwd = p.folders[ti % len(p.folders)] if len(p.folders) > 1 else p.root
                 invs = []
