@@ -529,8 +529,9 @@ var presets = map[string][]string{
 	"conservative": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"medium":       {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 	"high":         {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
+
 	// Sweep off for 0.5.3 (#652); restore with #508.
-	"xhigh":        {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
+	"xhigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
