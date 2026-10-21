@@ -294,7 +294,9 @@ func openDSN(d, path string) (*DB, error) {
 // against another returns wrong numbers rather than an error.
 //
 // mode=ro still reads the -wal, so rows the live writer has committed but not yet checkpointed
-// are visible. A missing file is an error, not a fresh database.
+// are visible. A missing file is an error, not a fresh database. With NO live writer, SQLite
+// still creates an empty -wal and the -shm index beside a WAL database to read it, so the
+// directory must be writable; the database file itself is never modified.
 func OpenReadOnly(path string) (*DB, error) {
 	if path == "" || path == ":memory:" {
 		return nil, errors.New("dash: OpenReadOnly needs a database file")

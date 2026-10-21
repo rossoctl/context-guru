@@ -44,6 +44,7 @@ func seededFile(t *testing.T) string {
 func TestOpenReadOnlyReadsAndWritesNothing(t *testing.T) {
 	path := seededFile(t)
 	before := fileDigest(t, path)
+	state := dirState(t, path)
 
 	db, err := OpenReadOnly(path)
 	if err != nil {
@@ -60,6 +61,39 @@ func TestOpenReadOnlyReadsAndWritesNothing(t *testing.T) {
 	if after := fileDigest(t, path); !bytes.Equal(before[:], after[:]) {
 		t.Error("the database or its WAL changed under a read-only handle")
 	}
+	// SQLite needs the -shm index (and an empty -wal) even to READ a WAL database when no writer
+	// is live; those are the only files a read-only open may add, and both must hold no data.
+	after := dirState(t, path)
+	if after["cg.db"] != state["cg.db"] {
+		t.Error("the database file's mtime changed under a read-only handle")
+	}
+	for name := range after {
+		if _, ok := state[name]; !ok && name != "cg.db-wal" && name != "cg.db-shm" {
+			t.Errorf("unexpected file %s appeared beside the database", name)
+		}
+	}
+	if fi, err := os.Stat(path + "-wal"); err == nil && fi.Size() != 0 {
+		t.Errorf("-wal holds %d bytes after a read-only session", fi.Size())
+	}
+}
+
+// dirState lists every file beside path with its mtime, so a test can say nothing was created
+// (-wal, -shm), removed or touched.
+func dirState(t *testing.T, path string) map[string]int64 {
+	t.Helper()
+	ents, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := map[string]int64{}
+	for _, e := range ents {
+		fi, err := e.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		m[e.Name()] = fi.ModTime().UnixNano()
+	}
+	return m
 }
 
 // A write through the handle is refused by SQLite itself, not merely avoided by this package.
