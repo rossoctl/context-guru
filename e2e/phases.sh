@@ -114,7 +114,7 @@ stop_proxy() {
 # A timeout is recorded, not fatal: the later check judges it.
 settle_inventory() {  # settle_inventory <label>
   local want t0 n=0 res; t0=$(date +%s%3N)
-  want=$(python3 -c "import json;print(len({k.split('@')[0] for k in json.load(open('$R/replay-stamps.json'))}))")
+  want=$(python3 -c "import json,sys;print(len({k.split('@')[0] for k in json.load(open(sys.argv[1]))}))" "$R/replay-stamps.json")
   while :; do
     n=$(sqlite3 "$DB" "SELECT COUNT(DISTINCT session_id) FROM tool_declarations" 2>/dev/null || echo 0)
     [ "$n" -ge "$want" ] && { res="$(( $(date +%s%3N) - t0 ))"; break; }
@@ -125,10 +125,17 @@ settle_inventory() {  # settle_inventory <label>
     "$1" "$want" "$n" "$res" >>"$R/settle.jsonl"
 }
 
+# The id is a bound parameter, never spliced into the SQL text; read-only, so a missing DB is not created.
+session_rows() {
+  python3 -c "import sqlite3,sys;c=sqlite3.connect(f'file:{sys.argv[1]}?mode=ro',uri=True)
+print(c.execute('SELECT COUNT(*) FROM tool_declarations WHERE session_id = ?',(sys.argv[2],)).fetchone()[0])" \
+    "$DB" "$1" 2>/dev/null || echo 0
+}
+
 settle_session() {  # settle_session <session id>: wait (bounded) for its inventory rows, as settle_inventory does
   local t0 n=0; t0=$(date +%s)
   while [ $(( $(date +%s) - t0 )) -lt 20 ]; do
-    n=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tool_declarations WHERE session_id='$1'" 2>/dev/null || echo 0)
+    n=$(session_rows "$1")
     [ "$n" -gt 0 ] && return 0; sleep 0.25
   done
   return 0
@@ -193,7 +200,7 @@ p_api() {
 import json, sys
 p = sys.argv[1]; d = json.load(open(p)); d["counted"] = False; json.dump(d, open(p, "w"))
 PY
-  settle_session "$(python3 -c "import json;print(json.load(open('$R/unpriced-probe.json'))['session_id'])")"
+  settle_session "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['session_id'])" "$R/unpriced-probe.json")"
   python3 -m e2e.collect --base "$BASE" --out "$R/actual-api.json" --add-unpriced-probe "$R/unpriced-probe.json" || return 1
   mkdir -p "$R/db"   # mock data only; kept for diagnosing a mismatch
   sqlite3 "$DB" ".backup '$R/db/dashboard-$PORT.db'"

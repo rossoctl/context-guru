@@ -25,7 +25,7 @@ if [ "$TIER" != known ]; then
 fi
 # The host port is published only for --keep (to open the kept dashboard), so tiers can run side by side.
 RM="--rm"; PUB=""; [ "$KEEP" = --keep ] && { RM=""; PUB="-p 127.0.0.1:18788:8788"; }
-rebuild() { (cd "$ROOT" && python3 -c "from e2e import report;report.build('$1')"); }
+rebuild() { (cd "$ROOT" && python3 -c "import sys;from e2e import report;report.build(sys.argv[1])" "$1"); }
 
 run_tier() {  # run_tier <tier> [image] [outdir] -> sets OUTDIR; returns the container's exit code
   local t="$1" img="${2:-cg-e2e:pr578}"

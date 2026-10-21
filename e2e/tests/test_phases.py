@@ -1,6 +1,8 @@
 import pathlib
 import re
+import sqlite3
 import subprocess
+import tempfile
 import unittest
 
 PHASES = pathlib.Path(__file__).resolve().parents[1] / "phases.sh"
@@ -17,8 +19,12 @@ def tier_order(tier: str) -> list[str]:
 
 
 def fn(name: str) -> str:
-    """One one-line function's text out of phases.sh."""
-    return next(l for l in PHASES.read_text().splitlines() if l.startswith(f"{name}() {{"))
+    """One function's text out of phases.sh: a one-liner, or up to its closing brace."""
+    lines = PHASES.read_text().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith(f"{name}() {{"))
+    if lines[start].rstrip().endswith("}"):
+        return lines[start]
+    return "\n".join(lines[start:next(i for i in range(start, len(lines)) if lines[i] == "}") + 1])
 
 
 class TestAssertPhase(unittest.TestCase):
@@ -33,6 +39,28 @@ class TestAssertPhase(unittest.TestCase):
 
     def test_a_judge_traceback_crashes_the_phase(self):
         self.assertEqual((self._rc(3), self._rc(2)), (3, 2))
+
+
+class TestNoInterpolation(unittest.TestCase):
+    def test_session_rows_binds_the_session_id(self):
+        sid = "alpha-s01-x'; DROP TABLE tool_declarations; --"
+        with tempfile.TemporaryDirectory() as d:
+            db = f"{d}/x.db"
+            c = sqlite3.connect(db)
+            c.execute("CREATE TABLE tool_declarations (session_id TEXT, name TEXT)")
+            c.execute("INSERT INTO tool_declarations VALUES (?, 'Bash')", (sid,))
+            c.commit(); c.close()
+            p = subprocess.run(["bash", "-c", f'DB="$1"\n{fn("session_rows")}\nsession_rows "$2"', "-", db, sid],
+                               capture_output=True, text=True, timeout=10)
+        self.assertEqual(p.stdout, "1\n")
+
+    def test_no_inline_python_or_sql_interpolates_a_shell_variable(self):
+        # Paths and ids go in as argv or bound parameters; a quote in one must not change the code that runs.
+        e2e = PHASES.parent
+        bad = [f"{f.name}:{i}" for f in (PHASES, e2e / "run.sh", e2e / "mutate.sh")
+               for i, l in enumerate(f.read_text().splitlines(), 1)
+               if re.search(r'python3 -c "[^"]*\$', l) or re.search(r"(WHERE|=)\s*'\$", l)]
+        self.assertEqual(bad, [])
 
 
 class TestPhaseOrder(unittest.TestCase):
