@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Mutation round: break the PR in five known ways, one at a time, on the smoke tier, and confirm
-# each break turns its check red versus an unmutated baseline. A break that stays green is a
-# harness gap, reported -- never ignored. The PR's files are always restored from git.
+# each break turns its check red versus an unmutated baseline. A break that stays green, or only crashes a
+# phase, is a harness gap, reported -- never ignored. The PR's files are always restored from git.
 set -uo pipefail
 # (.from/.to are read with trailing newlines stripped: the repo's end-of-file hook appends one.)
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
@@ -37,27 +37,14 @@ for f in e2e/mutations/*.file; do
   runsmoke "$id"
   restore                                          # from git, BEFORE judging
   red="$(reds "$RUN")"; cr="$(crashed "$RUN")"; cr="${cr:-0}"
-  python3 - "$id" "$file" "$expect" "$RUN" "$BASE_RUN" "$red" "$BASE_RED" "$cr" "$BASE_CRASH" >>"$OUT/mutation.json.items" <<'PY'
-import json,sys
-i,f,e,run,base,red,bred,cr,bcr=sys.argv[1:]
-red=[x for x in red.split(',') if x]; bred=[x for x in bred.split(',') if x]
-hit=lambda ids:[x for x in ids if (x.startswith(e) if e.endswith('.') else x==e)]
-base_ok=not hit(bred)
-caught=base_ok and (bool(hit(red)) or (int(cr)>0 and int(bcr)==0))
-print(json.dumps({"id":i,"file":f,"expect":e,"caught":caught,"crashed_phase":int(cr)>0,
-  "expect_failed_in_baseline":not base_ok,"expect_matched":hit(red),
-  "turned_red":[x for x in red if x not in bred],"run":run}))
-PY
+  python3 -m e2e.mutation judge "$id" "$file" "$expect" "$RUN" "$BASE_RUN" "$red" "$BASE_RED" "$cr" "$BASE_CRASH" \
+    >>"$OUT/mutation.json.items"
   tail -1 "$OUT/mutation.json.items"
 done
-python3 - "$OUT" "$BASE_RUN" <<'PY'
-import json,sys
-o,b=sys.argv[1:]
-items=[json.loads(l) for l in open(o+'/mutation.json.items') if l.strip().startswith('{')]
-json.dump({"baseline":b,"mutations":items},open(o+'/mutation.json','w'),indent=1)
-print("missed:",sum(not m["caught"] for m in items))
-PY
+# Non-zero if a mutation was missed (a crashed phase is not a catch) or fewer were judged than exist.
+NMUT=$(ls e2e/mutations/*.file | wc -l | tr -d ' ')
+python3 -m e2e.mutation summarize "$OUT" "$BASE_RUN" "$NMUT"; JUDGED_RC=$?
 rm -f "$OUT/mutation.json.items"
 if [ -n "$(git status --porcelain -- $PATHS)" ]; then echo "RESTORE FAILED"; git diff -- $PATHS; exit 4; fi
 echo "results: $OUT"
-python3 -c "import json,sys;sys.exit(sum(not m['caught'] for m in json.load(open(sys.argv[1]))['mutations']))" "$OUT/mutation.json"
+exit $JUDGED_RC
