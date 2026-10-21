@@ -208,12 +208,13 @@ func (d *DB) scopedDeclsScan(h *declScanOnce, sessions func(string) bool) ([]dec
 		kk := key{k.session, k.kind, k.name, k.server}
 		if r := merged[kk]; r == nil {
 			merged[kk] = &declRow{session: k.session, kind: k.kind, name: k.name, server: k.server,
-				tokens: v.tokens, hasText: v.hasText}
+				tokens: v.tokens, hasText: v.hasText, ts: v.last}
 		} else {
 			if v.tokens > r.tokens {
 				r.tokens = v.tokens
 			}
 			r.hasText = r.hasText || v.hasText
+			r.ts = max64(r.ts, v.last)
 		}
 	}
 	out := make([]declRow, 0, len(merged))
