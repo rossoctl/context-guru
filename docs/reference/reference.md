@@ -866,6 +866,7 @@ for every component's config block.
 | `--anthropic-upstream` / `ANTHROPIC_UPSTREAM` | `https://api.anthropic.com` | Anthropic upstream base. |
 | `--bob-upstream` / `BOB_UPSTREAM` | — | Bob (BobShell) backend base. Setting it mounts the [Bob gateway routes](#bob-bobshell-gateway-routes); unset, an unknown path 404s as before. |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | — | Real key injected on forward (gateway mode); empty = pass client auth through. |
+| `--routing` / `CG_ROUTING_FILE` | — | Path to the [model routing table](#model-routing-table). Unset = no routing. An unreadable file turns routing off and is logged; it does not stop the proxy. |
 | `CHEAP_MODEL` (+ `CHEAP_MODEL_BASE` / `_KEY` / `_AUTH` / `_PROVIDER`) | — | Dedicated cheap model for the LLM components (`extract_llm`, `summarize`) — the `model.source: config` client. Without it they no-op. |
 | `FORCE_MODEL` | — | Overwrite the request `model` (eval-containers uses `EVAL_MODEL`). |
 | `INJECT_EXPAND` | `auto` | Whether the `context_guru_expand` tool is advertised: `auto` (whenever the request declares tools, the store persists, **and the pipeline contains at least one Offload** — all three session-stable, so the `tools` array never changes shape mid-session and the prompt-cache prefix survives) \| `always` (unconditional, including when the request declares no tools) \| `never`. The pipeline condition exists because a pipeline that mints no markers would be advertising a tool whose every call must fail. |
@@ -950,6 +951,42 @@ An unparseable or absent value silently keeps the default — pricing must never
     Independently of pricing, the component declines to run on prompt-caching traffic unless
     `allow_on_caching_backend: true` is set — measured net-negative there. See
     [extract_llm](../components/extract_llm.md#the-honest-verdict).
+### Model routing table
+
+A YAML file (`--routing`) that says which model a feature uses, and with which credential. A new
+feature adds one row. It does not add env vars. Example: `deploy/routing/routing.example.yaml`.
+
+```yaml
+routes:
+  - feature: example_feature
+    model_name_env: EXAMPLE_MODEL  # env var NAMES. Never values.
+    key_env: EXAMPLE_API_KEY
+    base_url_env: EXAMPLE_BASE_URL
+    dialect: bob                   # anthropic | openai | bob
+    price_input: 0.5               # optional. USD per million tokens. Missing = $0.
+    price_output: 2.0
+```
+
+- **One row per feature.** A second row for the same feature is ignored.
+- **Strict file.** An unknown field is an error.
+- **Active row:** all 3 env vars are set, and the base URL is absolute `https` (`http` only for
+  `localhost` and `127.0.0.1`; no userinfo, query or fragment).
+- **Inactive row:** one log line names the env var (never its value). The proxy runs on as if the
+  row did not exist.
+- **The core never sees the key or the URL.** The proxy pins both on its `Dispatcher` and hands
+  the feature a model id and a `dispatch.Ref`. A library host loads its own table with
+  `routing.Build`.
+- **`dialect`:** `anthropic` calls `/v1/messages` with `x-api-key`. `openai` calls
+  `/v1/chat/completions` with `Authorization: Bearer`. `bob` is the OpenAI shape on
+  `/inference/v1/chat/completions`.
+- **`/stats`** has a `routing` list, one object per row: `active`, `reason` (inactive only),
+  `model`, `base_url_host`, `dialect`, `calls`, `routed`, `fell_back`, `not_detected`,
+  `saved_usd`. It never has the key.
+- **`saved_usd`** = cost at the original model's price (the proxy price table) minus cost at the
+  row's price. Both use the routed call's token counts. An original model with no known price
+  saves 0. It is on `/stats` only, not on the dashboard row. The dashboard row shows the routed
+  model and its tokens.
+
 ### Dashboard
 
 The [dashboard](../dashboard.md) is **off by default**. Enabling it adds `/dashboard/` and
