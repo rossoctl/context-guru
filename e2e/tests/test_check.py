@@ -312,6 +312,14 @@ class TestCheck(unittest.TestCase):
             self.assertEqual((got[cid]["verdict"], got[cid]["detail"]), ("BLOCKED", "page did not render"), cid)
         self.assertEqual(got["U.no_js_errors.history-p"]["verdict"], "FAIL")
 
+    def test_a_timed_out_page_with_real_defects_still_fails(self):
+        # Rendered, then timed out after the project change: what it did show is evidence, so a defect stays FAIL.
+        page = {"errors": ["render timeout: #insights-body .panel h2 after project change"],
+                "values": {"bad_tokens": ["undefined"], "headline_never": 5}, "overflow": ["ins-why [742>351]"], "contrast": {}}
+        got = {r["id"]: r["verdict"] for r in check.run(EXP, API, {"pages": {"history-p": page}}, "full", probes=PROBES)}
+        self.assertEqual([got[c] for c in ("U.no_overflow.history-p", "U.no_undefined_text.history-p",
+                                           "U.headline_matches_api.history-p")], ["FAIL", "FAIL", "FAIL"])
+
     def test_low_contrast_fails(self):
         ui = {"pages": {"p": {"errors": [], "values": {}, "overflow": [], "contrast": {"headline": 2.1}}}}
         self.assertEqual(verdicts(ui=ui)["U.contrast.p"], "FAIL")
