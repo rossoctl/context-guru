@@ -273,6 +273,15 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(v["U.headline_matches_api.history-pooled-light-desktop"], "BLOCKED")
         self.assertNotIn("U.headline_matches_api.cleanup-pooled-light-desktop", v)
 
+    def test_a_page_that_did_not_render_blocks_its_content_checks(self):
+        # A page that never rendered has no overflow, no undefined text and no headline: that proves nothing.
+        page = {"errors": ["render timeout: #insights-body .panel h2"], "values": {"bad_tokens": [], "headline_never": 2},
+                "overflow": [], "contrast": {}}
+        got = {r["id"]: r for r in check.run(EXP, API, {"pages": {"history-p": page}}, "full", probes=PROBES)}
+        for cid in ("U.no_overflow.history-p", "U.no_undefined_text.history-p", "U.headline_matches_api.history-p"):
+            self.assertEqual((got[cid]["verdict"], got[cid]["detail"]), ("BLOCKED", "page did not render"), cid)
+        self.assertEqual(got["U.no_js_errors.history-p"]["verdict"], "FAIL")
+
     def test_low_contrast_fails(self):
         ui = {"pages": {"p": {"errors": [], "values": {}, "overflow": [], "contrast": {"headline": 2.1}}}}
         self.assertEqual(verdicts(ui=ui)["U.contrast.p"], "FAIL")

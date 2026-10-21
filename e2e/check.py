@@ -176,22 +176,28 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
 
     # --- ui -----------------------------------------------------------------------------------
     for name, p in pages.items():
+        # A page snap.mjs gave up waiting for has no overflow, no bad text and no headline to read: BLOCKED, not PASS.
+        unrendered = any("render timeout" in e for e in p["errors"])
+        nr = "page did not render" if unrendered else ""
         _rec(out, f"U.no_js_errors.{name}", "ui", not p["errors"], [], p["errors"], snapshot=f"snapshots/{name}.png")
-        _rec(out, f"U.no_overflow.{name}", "ui", not p["overflow"], [], p["overflow"], snapshot=f"snapshots/{name}.png")
+        _rec(out, f"U.no_overflow.{name}", "ui", not p["overflow"], [], p["overflow"], detail=nr,
+             snapshot=f"snapshots/{name}.png", blocked=unrendered)
         samples = p.get("contrast", {})
         low = {k: v for k, v in samples.items() if v < 3.0}
         _rec(out, f"U.contrast.{name}", "ui", not low, ">= 3:1", low, snapshot=f"snapshots/{name}.png",
              detail="" if samples else "no contrast samples", blocked=not samples)
         bad = p.get("values", {}).get("bad_tokens")
         _rec(out, f"U.no_undefined_text.{name}", "ui", not bad, "no undefined/NaN/null/[object Object] in visible text",
-             bad or [], detail="; ".join(bad or []), snapshot=f"snapshots/{name}.png", blocked=bad is None)
+             bad or [], detail=nr or "; ".join(bad or []), snapshot=f"snapshots/{name}.png",
+             blocked=unrendered or bad is None)
         if name.startswith("history-") and "headline_never" not in p.get("values", {}):
             _rec(out, f"U.headline_matches_api.{name}", "ui", False, len(h.get("never_used", [])), None,
                  detail="headline not read", snapshot=f"snapshots/{name}.png", blocked=True)
         elif "headline_never" in p.get("values", {}):
             _rec(out, f"U.headline_matches_api.{name}", "ui",
                  p["values"]["headline_never"] == len(h.get("never_used", [])),
-                 len(h.get("never_used", [])), p["values"]["headline_never"], snapshot=f"snapshots/{name}.png")
+                 len(h.get("never_used", [])), p["values"]["headline_never"], detail=nr,
+                 snapshot=f"snapshots/{name}.png", blocked=unrendered)
     for r in out:
         r["tier"] = tier
     return out
