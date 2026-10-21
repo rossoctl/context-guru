@@ -9,12 +9,13 @@ current numbering. Sections that start with `W` are this document's own.
 
 **Problem statement:** [rossoctl/cortex#1417](https://github.com/rossoctl/cortex/issues/1417).
 
-**Open from review:**
-- The method document now says components push facts with an identity, and the receiver keeps no
-  state. The collector, fingerprint and `Compare` text below describes the earlier design (a
-  collector that keeps one fingerprint for each thread). It must be rewritten to the push model.
-- Do `pctx.ReportOps` and the Cortex name for the component that writes to the cost ledger need a
-  name? None is chosen.
+**Open.**
+- **Push or fingerprint (design §11, question 4).** This document and the migration steps assume a
+  collector that keeps one fingerprint for each thread. A push model, where components push facts
+  with an identity and the receiver keeps no state, is under review. Until it is decided, the
+  fingerprint design below is the current one.
+- `pctx.ReportOps` and the Cortex name for the component that writes to the cost ledger have no
+  chosen name (design §11, question 8).
 
 ### W0.1 The questions in cortex#1417
 
@@ -45,7 +46,7 @@ The design adds no new reporting interface for the engine or the keeper.
 | **Another Cortex plugin** (tool-prune, cpex) | inside a request | `pctx.ReportOps(ops...)`, during its own pass. Cortex only. |
 | **The keeper**, and a **detached** engine model call | between requests, or after the response | the host's `components.Emitter`, through its optional capabilities: `KeepAliveEmitter.KeepAlivePing(KeepAliveReport)` for a ping (exists today), and `OpsEmitter.Ops(RequestOps)` for a detached call (new, same pattern). |
 
-**Why not a new `Sink`.** An earlier draft added a `Sink` interface for pings. The keeper already
+**Why not a new `Sink`.** A `Sink` interface for pings would duplicate what exists. The keeper already
 has a host-agnostic report path: `components.KeepAliveEmitter`, added so the keeper could be
 exported from the proxy without a direct call into `dash` (issue #382, PR #591). The proxy wires
 it to its `dashEmitter`; Cortex wires it to `pingEmitter` (`core/plugins/contextguru/spend.go`). A
@@ -56,7 +57,7 @@ the fields the dashboard groups by (`Strategy`, `Preset`, `StopReason`, `MaxToke
 
 | `KeepAliveReport` | `spend` operation |
 |---|---|
-| `Session`, `Thread` | `RequestOps.Session`, `RequestOps.Thread`, and the same on the operation |
+| `Session`, `Thread` | `RequestOps.Session`, `RequestOps.Thread` |
 | `Window` (new, additive: the start of the idle gap the ping served) | `ChangeID = "ka:" + Thread + ":" + Window` |
 | `Model`, `Provider`, `Route` | `Call.Model`, `Call.Host` |
 | `CacheRead`, `CacheWrite`, `CacheWrite1h`, `FreshInput`, `Output` | `Call.Usage` (its prompt fields and `Output`) |
@@ -77,7 +78,7 @@ type OpsEmitter interface {
 }
 ```
 
-The contract of both capabilities is the contract `CostRecorder` had: safe for concurrent use; no
+The contract of both capabilities: safe for concurrent use; no
 blocking I/O; never makes the session active (a ping is not agent activity); may drop a report for
 a session that no longer exists.
 
@@ -139,8 +140,8 @@ sequenceDiagram
     Pipeline->>Pipeline: stamp Operator<br/>append into RequestOps.Ops
     Pipeline->>Upstream: forward (smaller) body
     Upstream-->>Pipeline: response + usage
-    Pipeline->>Pipeline: prev = fingerprint[thread.Key]<br/>ops.Compare(prev, cur, usage)<br/>-> B*, cacheChange, CacheState
-    Pipeline->>Ops: Price(RequestOps.Ops, usage, B*, breakpoints, state)
+    Pipeline->>Pipeline: prev = fingerprint[thread.Key]<br/>ops.Compare(prev, cur, ops, usage, facts)<br/>-> B*, cacheChange, CachePhase
+    Pipeline->>Ops: Price(RequestOps.Ops, usage, B*, breakpoints, phase)
     Ops-->>Pipeline: Result (PricedOp[], in-process only)
     Pipeline->>Settle: Result
     Settle->>Settle: price Saved/Caused with pricing.Resolver
@@ -195,16 +196,11 @@ sequenceDiagram
 
 ## 5. The collector
 
-**Principle (review of #592).** Components push facts, and they do not hand them to something that
-collects. Each pushed fact has an identity (a name plus labels, as in Prometheus: session, thread,
-change). A push with a known identity is an update, not a new record. The receiver keeps no state
-and prices nothing; totals are computed when someone asks. Two points are open (design §11): where the
-previous request's hashes live, and how many series the labels produce in a long session.
+**Current design.** Each host keeps one fingerprint for each thread and compares each request with
+its own thread's previous request. The alternative, a push model, is open (design §11, questions 4
+and 5).
 
-**The rest of this section describes the earlier design:** a collector that keeps one fingerprint
-for each thread. It must be rewritten to the push model.
-
-Each host has a collector: Cortex, and the context-guru proxy. The parts are split this way. The pure parts are in the method document.
+Each host has a collector: Cortex, and the context-guru proxy. The parts are split this way. The pure parts are in the method document (design §5).
 
 | Part | Where | Cortex | Proxy |
 |---|---|---|---|
@@ -241,9 +237,8 @@ session as a last resort. It also returns two signals that a weaker rule would l
 - `Inherits`: a new thread whose content is mostly an existing thread's — a rewind, an edited
   earlier message, a fork. Its first request is that thread's next turn, not a cold start.
 
-The engine runs inside both hosts, so both get the same `thread.Result` for the same traffic. The
-operations copy `Thread.ID` (R39), and `RequestOps.Thread` carries `Source` and `Parent`
-(`Parent = Inherits`).
+The engine runs inside both hosts, so both get the same `thread.Result` for the same traffic. `RequestOps.Thread` carries
+`ID` and `Parent` (`Parent = Inherits`).
 
 **The previous request is this thread's previous request.** The host keeps one fingerprint per
 thread, keyed by `thread.Key(session, thread)` — the key `dash.Recorder` already uses for
@@ -262,7 +257,7 @@ would misattribute it. Keying by thread gives the right baseline for every rule 
 - **Memory:** 12 bytes for each position (`PosHash`, design §5.1). 2 bodies × 2,000 positions is about
   48 KB for each thread. `internal/thread` caps threads at 64 for each session; a typical session
   has 1 to 5. `session.max_sessions` (100) bounds the total.
-- **Restart:** fingerprints are lost. Only the next request of each session gets `penaltyUnknown`.
+- **Restart:** fingerprints are lost. Only the next request of each thread gets `penalty_unknown`.
   They are not persisted (design §9).
 - context-guru keeps its own `MaxCachedIdx` for its own decisions. For pricing, the collector's B\*
   is the only authority (R30), because it is computed from the forwarded body after every plugin

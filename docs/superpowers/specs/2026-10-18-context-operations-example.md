@@ -1,6 +1,6 @@
 # Context operations: examples
 
-**Status:** draft, for the context-operations design. Not yet approved.
+**Status:** proposed.
 
 The examples are a sequence, from the simplest to the most complex. Each one adds one idea to the
 ones before it. Examples 1 to 5 and 8 are small and self-contained. Examples 6 and 7 follow one session, turn 5
@@ -35,6 +35,9 @@ Every example uses these values. The numbers are made up for the examples.
 
 The agent model prices the savings, because the removed tokens would have been billed to the agent's
 requests. The summarizer model prices the summarizer call.
+
+**Rounding.** Each figure is rounded to $0.00001. A total adds the exact amounts, then rounds. It can
+differ by $0.00001 from the sum of the rounded figures.
 
 **Cache state.** A request is **hot** if the previous request of the same thread was less than 5
 minutes ago. It is **cold** if not. A hot request reads the cached prefix. A cold request writes it
@@ -254,7 +257,7 @@ to a smaller model at a lower effort. The numbers are made up for this case.
 | 5 | `small-model` | low | the router changed both settings |
 
 The router changes two settings in one decision. The library does not price a settings change
-(design R50), for two reasons. We do not know what the large model would have written at high
+(design R50), for four reasons. The first two: We do not know what the large model would have written at high
 effort. And the effect depends on the task.
 
 **The cache break.** The provider keeps its cache for a model, so the new model starts cold. Request
@@ -462,8 +465,8 @@ Two operations describe the change.
 
 ### The context
 
-Turn 9 ends at minute 20. The user is idle after it. The 5m cache entry expires at minute 25.
-Turn 10 arrives at minute 28.
+Turn 9 is sent at minute 20, and the provider caches it. The user is then idle. The 5m cache entry
+expires at minute 25. Turn 10 arrives at minute 28.
 
 The diagram shows two cases. Across is the prompt, in tokens. Down is time, in minutes.
 

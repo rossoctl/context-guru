@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 520" width="1300" height="520" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title id="t">A keep-alive ping: without it and with it</title>
-<desc id="d">Two panels. X is the position in the prompt, in tokens. Y is time in minutes, running down. Turn 9 ends at minute 20, and the cache stays hot until minute 25. Left, no ping: turn 10 arrives at minute 28, after the entry expired, so it writes the complete context. Right, a ping at minute 24 keeps the cache hot until minute 29. Turn 10 at minute 28 reads the context of turn 9 and writes its new message.</desc>
+<desc id="d">Two panels. X is the position in the prompt, in tokens. Y is time in minutes, running down. Turn 9 is sent at minute 20, and the cache stays hot until minute 25. Left, no ping: turn 10 arrives at minute 28, after the entry expired, so it writes the complete context. Right, a ping at minute 24 keeps the cache hot until minute 29. Turn 10 at minute 28 reads the context of turn 9 and writes its new message.</desc>
 <style>
 svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6;--write:#eb6834;--red:#d4292a}
 @media (prefers-color-scheme: dark){svg{--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#3a3a37;--read:#3987e5;--write:#d95926;--red:#ee5a5a}}

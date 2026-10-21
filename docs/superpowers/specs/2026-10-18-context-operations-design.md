@@ -5,7 +5,7 @@
 **Worked examples:** [`2026-10-18-context-operations-example.md`](2026-10-18-context-operations-example.md).
 Start with the basic example. Advanced examples follow in the same file.
 **Wiring in hosts:** how Cortex and the context-guru proxy connect to this model is in a separate
-document (moved out after review).
+document.
 
 **Index**
 
@@ -74,7 +74,7 @@ calculation that turns those records into tokens and money.
 5. **One library does the calculation.** It takes operations and the cache facts, and returns tokens
    for each billing class. Each host turns tokens into money with its own price list. The result is
    the same tokens for the same request, wherever it is computed.
-6. **The library is shared.** It is a third-party library for context-guru and Cortex, and we hope
+6. **The library is shared.** It is a shared library for context-guru and Cortex, and we hope
    other AI frameworks use it too. It does not depend on context-guru or on Cortex. Anyone who can report
    operations and the cache facts can get the same tokens.
 
@@ -124,6 +124,14 @@ the rules (§1 to §3), the model (§4), the calculation (§5, §6), and the che
 | Cache state | Hot (the provider still holds the start of the prompt), cold (it does not), or unknown. |
 | Counterfactual | The bill we would have paid if the change had not been made. |
 | Spend | An operation that is a model call (a summarizer call, a keep-alive request). It carries the tokens the provider billed. It is a cost, and its benefit may come later. |
+| ChangeID | The ID of one change. It is the same on every request that carries the change, and a break or a spend that belongs to it carries it too. |
+| B\* | The last position the provider would have read from its cache on this request, if no operator had changed anything (§5.1). |
+| Breakpoint, `L` | A `cache_control` mark in the body. The provider caches up to a breakpoint. `L` is the last one in the body (§6.2). |
+| Break | A cache change from hot to cold. The provider no longer reads content it read before. |
+| Rescue | A cache change from cold to hot. A keep-alive kept the entry alive, so the next request reads it. |
+| Host | Cortex or the context-guru proxy: the program that runs the pipeline, calls the library and turns tokens into money. |
+| Collector | The part of a host that gathers the operations of a request, finds the previous request of the thread, calls `ops.Compare` and adds each `cacheChange` (wiring document, section 5). |
+| Keeper | The context-guru component that sends keep-alive pings between turns. |
 | Thread | One conversation inside a session: the main one, or a subagent's. |
 | Session | All the requests of one working session. The period over which we add up. |
 
@@ -157,7 +165,7 @@ This document defines one model for the operations, and one way to compute their
 
 - **Context operators report operations.** Each one reports facts about what it changed, as sizes and
   positions. No money, no rates.
-- **One library prices them in tokens.** It is a standalone, third-party library for context-guru,
+- **One library prices them in tokens.** It is a standalone, shared library for context-guru,
   Cortex and, we hope, other AI frameworks. It is a pure function. It decides which tier every token
   falls in, using the cache state of the request. It is the only place that holds this logic.
 - **Each host keeps its own rates.** A host multiplies tokens by its own price list. Two hosts get
@@ -205,7 +213,7 @@ This document defines one model for the operations, and one way to compute their
 | # | Question | Decision |
 |---|---|---|
 | D1 | Does the library need to know that a change is applied for the first time? | **No.** The tier comes from the position and the cache state (§6.2). A report finds the first application as the first event with that `ChangeID`. The library stays stateless, and a stateless operator (tool-prune) reports the same fields as any other (§4.6). |
-| D2 | Where is the savings logic? | **In one standalone library,** a third-party library for context-guru and Cortex, and open to other AI frameworks. Hosts call it and keep no operator-specific pricing rules. |
+| D2 | Where is the savings logic? | **In one standalone library,** shared by context-guru and Cortex, and open to other AI frameworks. Hosts call it and keep no operator-specific pricing rules. |
 | D3 | What does the library return? | **Tokens for each tier**, not dollars. Cortex prices them with its own rates (discounts, overrides, long-context tiers), so a saving and the request's spend use the same rates. |
 | D4 | How is cg's own spend recorded? | **As operations, in the same report as the savings.** A `spend` operation carries the provider's billed usage of the call (`Call`). The host prices it with the savings, in one path. There is no second record and no `CostRecorder` (wiring document). `ops.Price` does not price the call; it returns `Call.Usage` for the host to price (D3). |
 | D5 | Shape | **One typed operation for each change unit**, in-process only. The recorded summary (`event.Saving`/`ChangeSaving`) has the aggregate fallback above a limit, not the operation list itself (R20; the recorded form is in the wiring document). |
@@ -253,9 +261,8 @@ numbers are not used: those requirements were dropped.
   only context-guru's. Example: the `ibac` judge calls a model through `core/llmclient`, so the call
   is not in the ledger today. It is reported the same way as the summarizer (wiring document). Its cost is not
   joined to a saving, because it creates none: its `ChangeID` is empty.
-- **R6.** An operation has an ID that is unique inside its request. Results, check failures and
-  `cacheChange` attribution refer to it. A reference to a change in another request uses `ChangeID`
-  (R22), not the operation ID.
+- **R6.** An operation has an ID that is unique inside its request. Results and check failures refer to it.
+  A reference to a change in another request, or from a break to its cause, uses `ChangeID` (R22).
 - **R27.** The model is not specific to one operator. Each operation names its operator. The
   operations are in pipeline order, the order they ran.
 - **R33.** A `rewrite` that makes the context larger is a cost: an injected tool declaration, injected text, a
@@ -301,8 +308,8 @@ numbers are not used: those requirements were dropped.
   charged to a plugin.
 - **R32.** Positions resolve in the forwarded body. An operator that adds or removes messages
   reports that.
-- **R36.** Every price uses the request's cache state: hot (the previous entry was read), cold
-  (expired, or the first request), or rescued (a keep-alive kept the entry hot). The same change
+- **R36.** Every price uses the request's cache state: hot (the previous entry was read, or a keep-alive kept it), cold
+  (expired), or unknown (the first request of a thread, or a gap past an unproven minimum TTL). The same change
   has a different value in each state.
 - **R37.** Cache breakpoints are an input. The provider writes and reads the cache only at a
   breakpoint, so the tier of a position and the size of a cache-break penalty depend on where the
@@ -336,7 +343,7 @@ numbers are not used: those requirements were dropped.
   name only, so a report maps the name to it with a table in cg. The operation does not carry it.
   Example: `context-guru.mask` truncates old tool output; it decides by age and size. Parts must
   not contain a `.`. The allow-list and the per-operator breakdown match on the first part.
-- **R18.** Each request carries request ID, session, thread (if known), agent, **model** and
+- **R18.** Each request carries request ID, session, thread (if known), **model** and
   **params**. The model, and the parameters that change what a call costs, are facts of the
   request. Examples of params: `effort`, `thinking` (the thinking budget), `max_output`,
   `service_tier`. The library does not fix the list. A key it does not know is kept and passed on,
@@ -354,7 +361,7 @@ numbers are not used: those requirements were dropped.
 - **R40.** Operations and the library are independent of the billing plan. They carry tokens and
   tiers only. The plan is a fact on the request, not a field of any operation's price.
 - **R41.** Each request names its billing: `api` (pay for each token) or `subscription` (fixed price
-  with a usage limit), and the plan when it is known.
+  with a usage limit).
 - **R42.** A `spend` operation is priced with the billing of its request. The payer of a call is
   the payer of the request (§9, known limitation).
 - **R43.** A subscription saving is never reported as money saved. It is reported as usage-limit
@@ -497,6 +504,8 @@ type EntryFacts struct {
     // (minimum): Anthropic's TTL is exact; OpenAI GPT-5.6+ states only a 30-minute minimum
     // with no documented maximum (R45, §5.2). Gap > TTL proves expiry only when exact.
     Lifetime LifetimeKind
+    // PingRead is the extent a keep-alive ping of this thread read inside the TTL; nil when none did.
+    PingRead *Position
 }
 
 type Kind string          // rewrite | cacheChange | spend | setting
@@ -577,8 +586,8 @@ positions into the forwarded body.
 A `cacheChange` operation does not change the content. It changes how the provider bills content
 that is already there.
 
-A `cacheChange` carries a prefix range and two states: `CacheBefore` and `CacheAfter`. There is no
-mechanism field. Three cases cover it:
+A `cacheChange` carries a prefix range and two states: `CacheBefore` and `CacheAfter`. Three cases
+cover it:
 
 - **A prefix is broken.** The provider no longer reads content it read before (`hot` to `cold`). The
   collector writes it, and gives it the `ChangeID` of the operation that caused it (§5.2). It is a cost.
@@ -610,10 +619,10 @@ request ever reads it. The benefit appears only on requests that arrive more tha
 If the model priced only the reading request, every write that never paid off would be missing, and
 the figure would overstate the bet. So, like a keep-alive window:
 
-- **On each 1h-writing request,** `apply` reports a `cacheChange` for the head's breakpoint TTL
+- **On each 1h-writing request,** the collector adds a `cacheChange` for the head's breakpoint TTL
   and only a cost: `Caused.CacheWrite1h` for the head's tokens, less the 5m write it replaced. Its
   `ChangeID` names the head entry (`"headttl:" + Thread + ":" + head content key`).
-- **On each request that reads that entry after the 5m TTL,** `apply` reports a `cacheChange` with
+- **On each request that reads that entry after the 5m TTL,** the collector adds a `cacheChange` with
   the same `ChangeID` and the saving (write → read, §6.2).
 
 A head entry that is written at 1h and never read again has only the cost leg, so its total is
@@ -694,11 +703,12 @@ and returns B\*, a break and the cache state. The host keeps the fingerprints, f
 by `thread.Key`, and collects the operations (wiring document, section 5).
 
 ```go
-func Compare(prev *Fingerprint, cur Fingerprint, usage Usage, facts EntryFacts) (boundary *Position, brk *Operation, state CacheState)
+func Compare(prev *Fingerprint, cur Fingerprint, ops []Operation, usage Usage, facts EntryFacts) (boundary *Position, brk *Operation, phase CachePhase)
 ```
 
 `prev` is the fingerprint of **this thread's** previous request, or nil. `ops.Compare` does no
-matching of its own.
+matching of its own. `ops` are the request's operators' operations: the break takes the `ChangeID`
+of the one that changed the first differing position, or of the `setting` operation.
 
 ### 5.1 The counterfactual boundary B\*
 
@@ -744,22 +754,26 @@ type PosHash struct {
 `fwdFirstDiff` is where this thread's previous forwarded body first differs from this request's
 forwarded body. `clientFirstDiff` is the same comparison on client bodies.
 
-| Comparison | Result |
-|---|---|
-| `fwdFirstDiff < clientFirstDiff` | A plugin broke the cache. Add a break with `at: fwdFirstDiff` and the `ChangeID` of the operation that changed the position `fwdFirstDiff`. |
-| `fwdFirstDiff ≥ clientFirstDiff` | The client changed its body. Add a break with no `ChangeID`. |
-| A `setting` operation changed the model or a param (`effort`, `thinking`) since the previous request, and the cache did not hold | Add a break with the `ChangeID` of the `setting` operation. If it changed several settings, the break names the operation, not one setting: the library cannot say which of them caused it. This is the one cost of a param change that can be measured. |
-| No diff, but `cache_read` is far below the previous request's cached extent | The cache expired. Add a break with no `ChangeID`. |
-| No previous fingerprint for this thread | First turn of the thread with no `Inherits`, or a restart: no break is added. B\* is unknown (§6.4). |
+Rows 1 and 2 need a previous fingerprint and a difference in the body. Row 5 is checked first: with no
+previous fingerprint, no other row applies. The other rows are checked in order, and the first match
+wins.
+
+| # | Comparison | Result |
+|---|---|---|
+| 1 | `fwdFirstDiff < clientFirstDiff` | A plugin broke the cache. Add a break with `at: fwdFirstDiff` and the `ChangeID` of the operation that changed the position `fwdFirstDiff`. |
+| 2 | `fwdFirstDiff ≥ clientFirstDiff` | The client changed its body. Add a break with no `ChangeID`. |
+| 3 | A `setting` operation changed the model or a param (`effort`, `thinking`) since the previous request, and the cache did not hold | Add a break with the `ChangeID` of the `setting` operation. If it changed several settings, the break names the operation, not one setting: the library cannot say which of them caused it. This is the one cost of a param change that can be measured. |
+| 4 | No diff, but `cache_read` is far below the previous request's cached extent | The cache expired. Add a break with no `ChangeID`. |
+| 5 | No previous fingerprint for this thread | First turn of the thread with no `Inherits`, or a restart: no break is added. B\* is unknown (§6.4). |
 
 The same comparison gives the **cache state** for `Input.Phase` (R36):
 
 | Case | `CachePhase` | `Extent` |
 |---|---|---|
 | A previous fingerprint exists, and `Gap` ≤ its TTL | `hot` | the previous request's cached extent |
-| A previous fingerprint exists, `Gap` > TTL, and a ping of this thread read the entry inside its TTL | `hot`, and the collector adds a rescue (§4.4) | the extent the ping read |
+| A previous fingerprint exists, `Gap` > TTL, and `PingRead` is set | `hot`, and the collector adds a rescue (§4.4) | `PingRead` |
 | A previous fingerprint exists, `Gap` > TTL, no ping, `Lifetime = exact` | `cold` | nil |
-| A previous fingerprint exists, `Gap` > TTL, no ping, `Lifetime = minimum` | `unknown` | nil |
+| A previous fingerprint exists, `Gap` > TTL, no ping, `Lifetime = minimum` or `unknown` | `unknown` | nil |
 | No previous fingerprint for this thread | `unknown` | nil |
 
 `Gap` is measured from the start of the last request or ping that touched the entry, because the
@@ -775,7 +789,7 @@ not exist, in the unsafe direction. The host already carries this distinction
 (`keepaliveCreditFloorMs`: pre-5.6 OpenAI is never credited, exactly because `Minimum` cannot stand
 in for proof of expiry). The collector sets `EntryFacts.Lifetime` from the same source and the
 table above routes a `Minimum`-with-no-proof gap to `unknown`, not `cold` — §6.4 then applies
-(`penaltyUnknown`), the safe direction.
+(`penalty_unknown`), the safe direction.
 
 ### 5.3 Tokens for each position
 
@@ -797,6 +811,7 @@ func Price(in Input) Result // pure
 type Input struct {
     Ops         []Operation  // operators' operations + the collector's cacheChange
     Usage       Usage        // billed usage of this request
+    Client      []PosBytes   // every position of the client body, in hash order (checks 1 and 6)
     Forwarded   []PosBytes   // every position of the forwarded body, in hash order
     Breakpoints []Breakpoint // cache_control breakpoints of the forwarded body, in hash order
     Boundary    *Position    // B*; nil = unknown (§5.1)
@@ -849,6 +864,11 @@ compared on its own (§4.3).
 write or input tier. So the same 8,000 tokens are worth 8,000 × read on a hot turn and 8,000 ×
 write on a cold turn.
 
+**Added tokens.** A `rewrite` with a `SizeAfter` larger than its `SizeBefore` (an injected tool
+declaration, a restore) is a cost. Its added tokens take the tier of their position, by the same
+rule: read before B\*, write after B\* and at or before `L`, input after `L`. They are `Caused`, not
+`Saved`.
+
 **A break, and the breakpoints.** A break moves content from the read tier to the write tier. The content that moves is:
 
 - **from** the end of what the provider still read on this request (`Usage.CacheRead`, mapped onto
@@ -886,7 +906,7 @@ type Result struct {
 
 type Unpriced struct {
     OpID   string
-    Reason string // "unknown_kind", "negative_size", "operator_not_allowed", ...
+    Reason string // "unknown_kind", "negative_size", "operator_not_allowed", "penalty_unknown", ...
 }
 
 type CheckFailure struct {
@@ -931,7 +951,7 @@ this in tokens (§6.5, check 6).
 ### 6.4 Unknown boundary
 
 If `Boundary` is nil, the library uses the extent `cache_read` covers as the boundary, charges no
-penalty, and marks the result `penaltyUnknown`. This reports too little, which is the safe
+penalty, and adds `penalty_unknown` to `Unpriced`. This reports too little, which is the safe
 direction.
 
 ### 6.5 Checks
@@ -961,14 +981,14 @@ host converts them to a value by the request's `Billing.Mode`:
 | `Billing.Mode` | Value of a saving | Value of a spend | Shown as |
 |---|---|---|---|
 | `api` | tokens × the provider's rates | `Call.Usage` × the provider's rates | money saved; money spent |
-| `subscription` | tokens × the plan's **weights**, in usage-limit units | `Call.Usage` × the same weights | usage-limit headroom; an API-equivalent dollar figure beside it, labelled "API equivalent" |
+| `subscription` | tokens × the **weights**, in usage-limit units | `Call.Usage` × the same weights | usage-limit headroom; an API-equivalent dollar figure beside it, labelled "API equivalent" |
 | `unknown` | as `api`, with every figure marked `Estimated` | as `api` | money, marked estimated |
 
 **Weights.** A weight says how much one token of a tier counts against the usage limit, compared
 with one input token. The provider does not publish weights for each tier. So the default weights
 are the ratios of the API rates (input 1, cache write 5m 1.25, cache write 1h 2, cache read 0.1,
 output 5), and every subscription figure is marked `Estimated`. A host can set measured weights in
-its config (§11, question 3).
+its config (§11, question 2).
 
 **Keep-alive on a subscription.** A ping on the user's own credential uses the user's usage limit,
 not money. The keep-alive window still adds up (§4.4), in usage-limit units.
@@ -996,7 +1016,7 @@ missing, report too little and say why.
 | `ops.Price` panics | The host recovers, writes no saving for the request, and increments `ops_price_panics`. The request and its spend record are unchanged. |
 | A malformed operation (unknown kind, negative size) | Goes to `Unpriced` with a reason. The other operations are priced. |
 | Sum check fails | Pricing goes on. The failure is counted for each plugin on `/v1/pipeline`. |
-| No previous fingerprint for the thread | `Boundary.source = unknown`, §6.4. |
+| No previous fingerprint for the thread | `Boundary` is nil, §6.4. |
 | Response has no usage | Nothing is priced, as today. |
 | No rate for a tier | `Saving.Provenance` is empty, as today. Tokens are on the record. |
 | Operator not on the allow-list | Kept on the event, unpriced. |
@@ -1109,7 +1129,7 @@ drops the combinations that cannot occur, and states the reason for each drop in
 |---|---|
 | Kind | `rewrite` smaller, `rewrite` larger (a restore is one), `cacheChange` |
 | Position | before B\*; after B\* and at or before `L`; after `L`; no breakpoint in the body; spans on both sides of B\* |
-| Cache state | hot; cold (expired, `Lifetime: exact`); unknown (gap past an unproven `Lifetime: minimum`, R45); cold (first request); rescued by a ping; unknown (restart) |
+| Cache state | hot; cold (expired, `Lifetime: exact`); unknown (gap past an unproven `Lifetime: minimum`, R45; first request of a thread; restart); hot, kept by a ping |
 | Cache result | full hit; partial hit; miss with write ≥ input; miss with write < input |
 | Breakpoints | end of `system` + last message (Claude Code); one after `tools` only; none; one inside the messages before a break |
 | TTL of the next breakpoint | 5m, 1h |
@@ -1121,7 +1141,8 @@ drops the combinations that cannot occur, and states the reason for each drop in
 1. The worked example: turn 5, the turn-10 keep-alive and the turn-7 coref break, with every figure in
    the example file.
 2. Cache breaks: one for each cause (operator, client, setting, expired). An operator break gets the `ChangeID` of the operation that changed the first differing position. Two
-   operators whose changes are both before the break.
+   operators whose changes are both before the break: the break names the one that changed the first
+   differing position.
 3. Two operators on the same content (R25), and a message splice that moves positions (`MessageSplice`).
 4. A `DryRun` operation: priced, shown as "would have saved", and not counted. A reverted change
    that still made a model call: no reduction, and its `spend` operation counted.
@@ -1136,18 +1157,18 @@ drops the combinations that cannot occur, and states the reason for each drop in
     changes are reported again.
 11. A subagent thread: its operations, its totals, and a session total that adds both threads.
 12. The interaction on a rescued request, and the conservation check on every case.
-14. A `coref` batch: three cuts in messages that are not next to each other, as one operation with
+13. A `coref` batch: three cuts in messages that are not next to each other, as one operation with
     three spans, one `ChangeID` and one attributed `cacheChange`; its payback across later turns.
-15. `extract_llm_sweep`: a prefix ask that reads the previous turn's cache, and a fallback ask that
+14. `extract_llm_sweep`: a prefix ask that reads the previous turn's cache, and a fallback ask that
     pays fresh input. Both are `spend` operations; their `Call.Usage` differs.
-16. `breakpointTTL`: a 1h head written and read after 20 minutes (both legs); a 1h head written and
+15. `breakpointTTL`: a 1h head written and read after 20 minutes (both legs); a 1h head written and
     never read (cost leg only, negative total); the measured blanket-versus-gated case from
     `apply/headttl.go`.
-17. `readlifecycle` and `skeleton`: the same decision with different replacement bytes on two turns
+16. `readlifecycle` and `skeleton`: the same decision with different replacement bytes on two turns
     keeps one `ChangeID` (§4.2 rule 6).
-18. Interleaved threads: a main thread whose previous request is five requests back, behind four
+17. Interleaved threads: a main thread whose previous request is five requests back, behind four
     subagent requests, still compares with its own previous request (wiring document, W5.2).
-19. `ops.FromKeepAlive`: a `KeepAliveReport` from each host's emitter gives the same `spend`
+18. `ops.FromKeepAlive`: a `KeepAliveReport` from each host's emitter gives the same `spend`
     operation.
 
 **C. Cases from real traffic.** For each difference that a shadow step (wiring document, migration steps 5 and 8) logs and
@@ -1183,25 +1204,28 @@ Each has test cases that are marked `differs` or `notCovered` in `differences.js
    to give it to the keep-alive window, because the window caused the state. That would make the
    keep-alive figure larger on every request with large reductions. A decision is needed before the
    test cases are frozen.
-2. **Content shared by two threads — closed.** A fork starts with its parent's content, so the
-   provider can read the parent's entry. `internal/thread` marks such a request with `Inherits`,
-   and the host starts the fork from the parent's fingerprint (wiring document, W5.2). So the fork's first request
-   is scored against the parent's cache, not as `cold`.
-3. **Usage-limit weights.** The provider publishes no weights for each tier, so the defaults (§7.1)
+2. **Usage-limit weights.** The provider publishes no weights for each tier, so the defaults (§7.1)
    are the API rate ratios, an estimate. It is not verified whether a subscription response carries
    usage-limit headers that a host could use to measure the weights. If it does, a calibration
    could replace the defaults for each plan.
-4. **The tokenizer correction.** The proxy multiplies its counted tokens by `BilledTokenFactor`
+3. **The tokenizer correction.** The proxy multiplies its counted tokens by `BilledTokenFactor`
    (o200k_base to the provider's tokenizer). Cortex uses a bytes ratio. Option: `Input` takes a
    factor for each tokenizer name, so `ops.Price` applies the correction in one place. The
    generated cases test both, with and without the factor.
 
-5. **Where the previous request's hashes live (review of #592).** The counterfactual needs the
-   previous request's hashes on the same thread. If the receiver keeps nothing, they can travel in
-   each push (with the ID of the previous request), or the operator can keep them. Who classifies a
-   `cacheChange` follows from this. It is an implementation detail and is left open.
-6. **Label volume.** Pushing `change` and `request` as labels on every series gives many series in a
+4. **Where the previous request's hashes live.** The counterfactual needs the previous request's
+   hashes on the same thread. The current design (D12, wiring document) has the host keep one
+   fingerprint for each thread. An alternative is a push model: components push facts with an
+   identity, and the receiver keeps no state. Then the hashes travel in each push, or the operator
+   keeps them, and who classifies a `cacheChange` changes with it. Not decided.
+5. **Label volume.** Pushing `change` and `request` as labels on every series gives many series in a
    long session. This must be measured before the push model is fixed.
-7. **Asynchronous recalculation (review of #592).** A replay should not cause a recalculation every
+6. **Asynchronous recalculation.** A replay should not cause a recalculation every
    time. Recalculation should be async and buffered. A newer request for the same key replaces the
    queued one and keeps its queue position, so nothing starves. The queue design is not written.
+7. **Where the library lives.** The module path `github.com/rossoctl/context-guru/ops` is a
+   placeholder. Its home and name are not decided (D7).
+8. **Names in Cortex.** `pctx.ReportOps` and the Cortex name for the component that writes to the
+   cost ledger have no chosen name (wiring document).
+9. **The payer of a call.** A call is priced with the billing of its request (§9, known limitation).
+   A summarizer on the deployer's key, in a subscription session, is priced as the user's.
