@@ -55,7 +55,7 @@ class TestStressEndpointTimings(unittest.TestCase):
         p, rows = self._run({"/api/history": (200, None), "/api/facets": (200, None), "/api/insights": (200, None)})
         self.assertEqual((p.returncode, [r["endpoint"] for r in rows]),
                          (0, ["/api/history", "/api/facets?measured=1", "/api/insights?timeline=1"]))
-        self.assertTrue(all(isinstance(r["ms"], float) for r in rows))
+        self.assertTrue(all(isinstance(r["s"], float) for r in rows))
 
     def test_a_non_200_crashes_the_phase_and_records_no_timing(self):
         p, rows = self._run({"/api/history": (200, None)})  # facets 404s

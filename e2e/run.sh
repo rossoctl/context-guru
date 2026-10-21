@@ -105,7 +105,7 @@ def jl(p):
     except FileNotFoundError:
         return []
 sp = {p["phase"]: p["seconds"] for p in jl(f"{stress}/phases.jsonl")}
-ep = {e["endpoint"]: round(e["ms"] * 1000, 1) for e in jl(f"{stress}/stress-endpoints.jsonl")}
+ep = {e["endpoint"]: round(e["s"] * 1000, 1) for e in jl(f"{stress}/stress-endpoints.jsonl")}  # s -> ms
 out = {"phases": jl(f"{full}/phases.jsonl"),
        "stress": {"import_s": sp.get("import"), "replay_s": sp.get("replay"),
                   "history_api_ms": ep.get("/api/history"), "facets_ms": ep.get("/api/facets?measured=1"),

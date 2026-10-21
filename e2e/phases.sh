@@ -217,7 +217,7 @@ p_endpoints() {
     xc="$(tr -d '\r' <<<"$out" | sed -n 's/^[Xx]-[Cc]ache: *//p' | tr 'A-Z' 'a-z')"
     [ "$code" = 200 ] || { echo "$ep answered '$code'" >/tmp/crash-reason; cat /tmp/crash-reason; return 1; }
     [ "$xc" != hit ] || { echo "$ep answered from cache (X-Cache: hit)" >/tmp/crash-reason; cat /tmp/crash-reason; return 1; }
-    printf '{"endpoint":"%s","ms":%s%s}\n' "$ep" "$t" "${xc:+,\"x_cache\":\"$xc\"}" >>"$R/stress-endpoints.jsonl"
+    printf '{"endpoint":"%s","s":%s%s}\n' "$ep" "$t" "${xc:+,\"x_cache\":\"$xc\"}" >>"$R/stress-endpoints.jsonl"
   done
 }
 # A FAIL (1) is a result, not a crash; any other non-zero code is a judge that crashed (check.py exits 3 on a traceback).
