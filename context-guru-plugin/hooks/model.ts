@@ -81,11 +81,14 @@ export const signature = (v: View | null): string =>
     : JSON.stringify([v.url, v.main.isWarm, v.main.left, v.main.warmUsd, v.main.coldUsd, v.saved, v.subs.map(t => [t.id, t.isWarm, t.left])])
 
 export const pingToast = (r: { status?: number; error?: string; saved_usd?: number; ping_usd?: number; retry_after_s?: number }): string => {
-  if (r.status === 200) return `kept warm — saved ${usd(r.saved_usd ?? 0)} − ping ${usd(r.ping_usd ?? 0)}`
+  if (r.status === 200) return `kept warm \u2014 saved ${usd(r.saved_usd ?? 0)} net (ping cost ${usd(r.ping_usd ?? 0)})`
   if (r.status === 409 && r.error === 'not held') return 'keep-alive is off for this account \u2014 turn it on in the dashboard to ping'
   if (r.status === 409 && r.error === 'busy') return 'a request is running; it refreshes the cache itself'
-  if (r.status === 409 && r.error === 'over budget') return 'one ping would cost more than the per-ping ceiling \u2014 not sent'
-  if (r.status === 409) return 'cache already cold \u2014 nothing to keep warm'
+  if (r.status === 409 && (r.error === 'over budget' || r.error === 'too costly')) {
+    return 'one ping would cost more than the keep-alive per-ping limit, so nothing was sent'
+  }
+  if (r.status === 409 && r.error === 'cold') return 'cache already cold \u2014 nothing to keep warm'
+  if (r.status === 409) return `ping refused: ${r.error ?? 'no detail'}`
   if (r.status === 404 && r.error === 'unknown session') return 'this session is not known to the server yet'
   if (r.status === 404 || r.status === 405) return 'this Context Guru server does not support manual pings yet \u2014 update the proxy'
   if (r.status === 429 && r.error === 'no spare capacity') return `no spare capacity \u2014 try again in ${r.retry_after_s ?? 5}s`

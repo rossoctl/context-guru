@@ -1180,17 +1180,18 @@ def ping_lines(code: int, doc: dict | None) -> list[str]:
     """The one-line answer of POST /api/me/cache/ping, whatever the status."""
     doc = doc or {}
     if code == 200 and doc.get("sent"):
-        return [f"Kept warm: saved {dollars(doc.get('saved_usd', 0))} (a rewrite would have cost {dollars(doc.get('rewrite_usd', 0))}, "
-                f"the ping {dollars(doc.get('ping_usd', 0))})."]
+        return [f"Kept warm: saved {dollars(doc.get('saved_usd', 0))} net (ping cost {dollars(doc.get('ping_usd', 0))})."]
     err = doc.get("error")
     if code == 409 and err == "not held":
         return ["Keep-alive is off for this account. Turn it on in the dashboard to ping."]
     if code == 409 and err == "busy":
         return ["A request is running; it refreshes the cache itself."]
-    if code == 409 and err == "over budget":
-        return ["One ping on this thread would cost more than the per-ping ceiling, so it was not sent."]
-    if code == 409:  # "cold"
+    if code == 409 and err in ("over budget", "too costly"):
+        return ["One ping would cost more than the keep-alive per-ping limit, so nothing was sent."]
+    if code == 409 and err == "cold":
         return ["The cache is already cold, so there is nothing to keep warm. The next request rewrites it."]
+    if code == 409:
+        return [f"Ping refused: {err or 'no detail'}."]
     if code == 404 and err == "unknown session":
         return ["This server does not know that session yet. Send a prompt first."]
     if code in (404, 405) and not err:  # the mux's plain-text "404 page not found": the route does not exist

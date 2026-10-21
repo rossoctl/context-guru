@@ -94,7 +94,7 @@ test('pressing Ping runs the helper with the session id and toasts the saving', 
   const ping = calls.find(c => c.includes('ping'))
   expect(ping).toBeDefined()
   expect(ping).toContain('sess-1')
-  expect(toasts.join('\n')).toMatch(/kept warm .* saved \$0\.460 .* ping \$0\.040/)
+  expect(toasts.join('\n')).toMatch(/kept warm .* saved \$0\.460 net \(ping cost \$0\.040\)/)
   await ui.unmount()
 })
 
@@ -111,7 +111,7 @@ test('/ping answers with text alone and starts no turn', async ($, on) => {
   })
   await boot($, on, true, calls)
   const r = await $.command.run({ command: 'ping', args: '' })
-  expect(r.text).toMatch(/kept warm .* saved \$0\.460 .* ping \$0\.040/)
+  expect(r.text).toMatch(/kept warm .* saved \$0\.460 net \(ping cost \$0\.040\)/)
   expect(r.context).toBeUndefined() // nothing is recorded for the model
   expect(calls.some(c => c.includes('ping'))).toBe(true)
   expect(started).toEqual([])
@@ -147,7 +147,9 @@ test('warm but not pingable: a dim hint instead of the Ping button; an absent fi
 for (const [status, error, want] of [
   [409, 'not held', /keep-alive is off/],
   [409, 'busy', /request is running/],
-  [409, 'over budget', /per-ping ceiling/],
+  [409, 'too costly', /per-ping limit/],
+  [409, 'something new', /ping refused: something new/],
+  [409, 'over budget', /per-ping limit, so nothing was sent/],
   [409, 'cold', /already cold/],
   [429, 'no spare capacity', /no spare capacity/],
   [502, 'upstream', /upstream model refused/],

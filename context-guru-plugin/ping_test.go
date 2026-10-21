@@ -43,13 +43,16 @@ func TestPing(t *testing.T) {
 		want   string
 		code   int
 	}{
-		{"sent", 200, `{"sent":true,"ping_usd":0.04,"rewrite_usd":0.5,"saved_usd":0.46}`, "Kept warm: saved $0.46", 0},
+		{"sent", 200, `{"sent":true,"ping_usd":0.04,"rewrite_usd":0.5,"saved_usd":0.46}`, "Kept warm: saved $0.46 net (ping cost $0.04)", 0},
 		{"cold", 409, `{"error":"cold"}`, "already cold", 1},
 		{"unknown", 404, `{"error":"unknown session"}`, "does not know that session", 1},
 		{"no route", 404, `404 page not found`, "does not support manual pings yet", 1}, // Go's mux for a missing route: no JSON
 		{"method not allowed", 405, ``, "does not support manual pings yet", 1},
 		{"keep-alive off", 409, `{"error":"not held","detail":"x"}`, "Keep-alive is off", 1},
-		{"over budget", 409, `{"error":"over budget"}`, "per-ping ceiling", 1},
+		{"over budget", 409, `{"error":"over budget"}`, "per-ping limit, so nothing was sent", 1},
+		{"too costly", 409, `{"error":"too costly"}`, "per-ping limit, so nothing was sent", 1},
+		{"unknown 409", 409, `{"error":"something new"}`, "Ping refused: something new", 1},
+		{"bare 409", 409, ``, "Ping refused: no detail", 1},
 		{"busy", 409, `{"error":"busy"}`, "refreshes the cache itself", 1},
 		{"no capacity", 429, `{"error":"no spare capacity","retry_after_s":5}`, "No spare capacity", 1},
 		{"upstream", 502, `{"error":"upstream","status":529}`, "upstream model refused", 1},
