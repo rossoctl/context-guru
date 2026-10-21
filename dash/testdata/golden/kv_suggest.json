@@ -93,112 +93,112 @@
      "strategy_usd": 2.8989227999999994
     },
     {
-     "absolute_usd": -0.24725430000000026,
+     "absolute_usd": -0.40551930000000036,
      "baseline": "fixed-5m",
      "baseline_usd": 2.651668499999999,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -9.324480039642978,
+     "percent_usd": -15.292986283918994,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 2.8989227999999994
+     "strategy_usd": 3.0571877999999995
     },
     {
-     "absolute_usd": -0.24725430000000026,
+     "absolute_usd": -0.5637843000000005,
      "baseline": "fixed-5m",
      "baseline_usd": 2.651668499999999,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -9.324480039642978,
+     "percent_usd": -21.26149252819501,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 2.8989227999999994
+     "strategy_usd": 3.2154527999999996
     },
     {
-     "absolute_usd": -0.24725430000000026,
+     "absolute_usd": -0.7220493000000006,
      "baseline": "fixed-5m",
      "baseline_usd": 2.651668499999999,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -9.324480039642978,
+     "percent_usd": -27.229998772471024,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 2.8989227999999994
+     "strategy_usd": 3.3737177999999997
     },
     {
-     "absolute_usd": -0.24725430000000026,
+     "absolute_usd": -0.8803143000000007,
      "baseline": "fixed-5m",
      "baseline_usd": 2.651668499999999,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -9.324480039642978,
+     "percent_usd": -33.198505016747035,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 2.8989227999999994
+     "strategy_usd": 3.5319827999999998
     },
     {
-     "absolute_usd": -0.24725430000000026,
+     "absolute_usd": -1.0385793000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 2.651668499999999,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -9.324480039642978,
+     "percent_usd": -39.167011261023035,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 2.8989227999999994
+     "strategy_usd": 3.6902477999999994
     },
     {
-     "absolute_usd": -0.24725430000000026,
+     "absolute_usd": -0.6825528000000012,
      "baseline": "fixed-5m",
      "baseline_usd": 2.651668499999999,
-     "hit_delta": 2,
+     "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -9.324480039642978,
+     "percent_usd": -25.740502630702196,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 2.8989227999999994
+     "strategy_usd": 3.3342213000000003
     },
     {
-     "absolute_usd": -0.24725430000000026,
+     "absolute_usd": -0.7960068000000011,
      "baseline": "fixed-5m",
      "baseline_usd": 2.651668499999999,
-     "hit_delta": 2,
+     "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -9.324480039642978,
+     "percent_usd": -30.019091752985013,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 2.8989227999999994
+     "strategy_usd": 3.4476753
     },
     {
-     "absolute_usd": -0.24725430000000026,
+     "absolute_usd": -0.9094608000000011,
      "baseline": "fixed-5m",
      "baseline_usd": 2.651668499999999,
-     "hit_delta": 2,
+     "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -9.324480039642978,
+     "percent_usd": -34.29768087526783,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 2.8989227999999994
+     "strategy_usd": 3.5611293
     },
     {
-     "absolute_usd": -0.24725430000000026,
+     "absolute_usd": -1.022914800000001,
      "baseline": "fixed-5m",
      "baseline_usd": 2.651668499999999,
-     "hit_delta": 2,
+     "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -9.324480039642978,
+     "percent_usd": -38.57626999755065,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 2.8989227999999994
+     "strategy_usd": 3.6745833
     },
     {
      "absolute_usd": -0.5425239000000008,
@@ -402,112 +402,112 @@
      "strategy_usd": 2.7398436
     },
     {
-     "absolute_usd": 0.48087359999999935,
+     "absolute_usd": 0.31983299999999915,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2207171999999993,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 14.93063718851191,
+     "percent_usd": 9.930490016323049,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 2.7398436
+     "strategy_usd": 2.9008842
     },
     {
-     "absolute_usd": 0.48087359999999935,
+     "absolute_usd": 0.1587923999999994,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2207171999999993,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 14.93063718851191,
+     "percent_usd": 4.930342844134201,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 2.7398436
+     "strategy_usd": 3.0619248
     },
     {
-     "absolute_usd": 0.48087359999999935,
+     "absolute_usd": -0.0022482000000008107,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2207171999999993,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 14.93063718851191,
+     "percent_usd": -0.06980432805465848,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 2.7398436
+     "strategy_usd": 3.2229654
     },
     {
-     "absolute_usd": 0.48087359999999935,
+     "absolute_usd": -0.163288800000001,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2207171999999993,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 14.93063718851191,
+     "percent_usd": -5.069951500243518,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 2.7398436
+     "strategy_usd": 3.3840060000000003
     },
     {
-     "absolute_usd": 0.48087359999999935,
+     "absolute_usd": -0.32432940000000077,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2207171999999993,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 14.93063718851191,
+     "percent_usd": -10.070098672432366,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 2.7398436
+     "strategy_usd": 3.5450466
     },
     {
-     "absolute_usd": 0.48087359999999935,
+     "absolute_usd": -0.2776110000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2207171999999993,
-     "hit_delta": 6,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 14.93063718851191,
+     "percent_usd": -8.619539772073137,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 2.7398436
+     "strategy_usd": 3.4983281999999996
     },
     {
-     "absolute_usd": 0.48087359999999935,
+     "absolute_usd": -0.42054960000000063,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2207171999999993,
-     "hit_delta": 6,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 14.93063718851191,
+     "percent_usd": -13.057638217972094,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 2.7398436
+     "strategy_usd": 3.6412668
     },
     {
-     "absolute_usd": 0.48087359999999935,
+     "absolute_usd": -0.563488200000001,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2207171999999993,
-     "hit_delta": 6,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 14.93063718851191,
+     "percent_usd": -17.49573666387105,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 2.7398436
+     "strategy_usd": 3.7842054000000003
     },
     {
-     "absolute_usd": 0.48087359999999935,
+     "absolute_usd": -0.7064268000000009,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2207171999999993,
-     "hit_delta": 6,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 14.93063718851191,
+     "percent_usd": -21.933835109769994,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 2.7398436
+     "strategy_usd": 3.927144
     },
     {
      "absolute_usd": -0.35233380000000025,
@@ -622,9 +622,9 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 0.4113648,
-   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read).",
-   "best_strategy": "fixed-1h",
-   "best_usd": 0.37854840000000006,
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 8 keep-alive(s) per idle span, then lets the entry lapse.",
+   "best_strategy": "keepalive-5m-x8",
+   "best_usd": 0.3650757,
    "candidates": [
     {
      "absolute_usd": -0.3013152,
@@ -711,112 +711,112 @@
      "strategy_usd": 0.437934
     },
     {
-     "absolute_usd": -0.026569200000000015,
+     "absolute_usd": -0.039853799999999995,
      "baseline": "fixed-5m",
      "baseline_usd": 0.4113648,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -6.458792779547501,
+     "percent_usd": -9.688189169321245,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 0.437934
+     "strategy_usd": 0.45121859999999997
     },
     {
-     "absolute_usd": -0.026569200000000015,
+     "absolute_usd": -0.053138399999999975,
      "baseline": "fixed-5m",
      "baseline_usd": 0.4113648,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -6.458792779547501,
+     "percent_usd": -12.917585559094988,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 0.437934
+     "strategy_usd": 0.46450319999999995
     },
     {
-     "absolute_usd": -0.026569200000000015,
+     "absolute_usd": -0.06642300000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 0.4113648,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -6.458792779547501,
+     "percent_usd": -16.146981948868742,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 0.437934
+     "strategy_usd": 0.4777878
     },
     {
-     "absolute_usd": -0.026569200000000015,
+     "absolute_usd": -0.07970759999999999,
      "baseline": "fixed-5m",
      "baseline_usd": 0.4113648,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -6.458792779547501,
+     "percent_usd": -19.37637833864249,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 0.437934
+     "strategy_usd": 0.49107239999999996
     },
     {
-     "absolute_usd": -0.026569200000000015,
+     "absolute_usd": -0.09299219999999997,
      "baseline": "fixed-5m",
      "baseline_usd": 0.4113648,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -6.458792779547501,
+     "percent_usd": -22.605774728416232,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 0.437934
+     "strategy_usd": 0.5043569999999999
     },
     {
-     "absolute_usd": -0.026569200000000015,
+     "absolute_usd": 0.04628909999999997,
      "baseline": "fixed-5m",
      "baseline_usd": 0.4113648,
-     "hit_delta": 0,
+     "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -6.458792779547501,
+     "percent_usd": 11.252567064561667,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 0.437934
+     "strategy_usd": 0.3650757
     },
     {
-     "absolute_usd": -0.026569200000000015,
+     "absolute_usd": 0.04628909999999997,
      "baseline": "fixed-5m",
      "baseline_usd": 0.4113648,
-     "hit_delta": 0,
+     "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -6.458792779547501,
+     "percent_usd": 11.252567064561667,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 0.437934
+     "strategy_usd": 0.3650757
     },
     {
-     "absolute_usd": -0.026569200000000015,
+     "absolute_usd": 0.04628909999999997,
      "baseline": "fixed-5m",
      "baseline_usd": 0.4113648,
-     "hit_delta": 0,
+     "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -6.458792779547501,
+     "percent_usd": 11.252567064561667,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 0.437934
+     "strategy_usd": 0.3650757
     },
     {
-     "absolute_usd": -0.026569200000000015,
+     "absolute_usd": 0.04628909999999997,
      "baseline": "fixed-5m",
      "baseline_usd": 0.4113648,
-     "hit_delta": 0,
+     "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -6.458792779547501,
+     "percent_usd": 11.252567064561667,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 0.437934
+     "strategy_usd": 0.3650757
     },
     {
      "absolute_usd": 0.03281639999999991,
@@ -922,8 +922,8 @@
    "optimal_usd": 0.26554890000000003,
    "requests": 5,
    "saving_known": true,
-   "saving_pct": 7.977444837283092,
-   "saving_usd": 0.03281639999999991,
+   "saving_pct": 11.252567064561667,
+   "saving_usd": 0.04628909999999997,
    "unpriced_requests": 0,
    "user": "t1",
    "valued": true
@@ -1020,112 +1020,112 @@
      "strategy_usd": 1.271868
     },
     {
-     "absolute_usd": 0.22608719999999982,
+     "absolute_usd": 0.15338879999999988,
      "baseline": "fixed-5m",
      "baseline_usd": 1.4979551999999998,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 15.093054852374745,
+     "percent_usd": 10.239879003056961,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 1.271868
+     "strategy_usd": 1.3445664
     },
     {
-     "absolute_usd": 0.22608719999999982,
+     "absolute_usd": 0.08069039999999994,
      "baseline": "fixed-5m",
      "baseline_usd": 1.4979551999999998,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 15.093054852374745,
+     "percent_usd": 5.386703153739174,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 1.271868
+     "strategy_usd": 1.4172647999999999
     },
     {
-     "absolute_usd": 0.22608719999999982,
+     "absolute_usd": 0.007991999999999777,
      "baseline": "fixed-5m",
      "baseline_usd": 1.4979551999999998,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 15.093054852374745,
+     "percent_usd": 0.5335273044213724,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 1.271868
+     "strategy_usd": 1.4899632
     },
     {
-     "absolute_usd": 0.22608719999999982,
+     "absolute_usd": -0.06470640000000016,
      "baseline": "fixed-5m",
      "baseline_usd": 1.4979551999999998,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 15.093054852374745,
+     "percent_usd": -4.319648544896414,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 1.271868
+     "strategy_usd": 1.5626616
     },
     {
-     "absolute_usd": 0.22608719999999982,
+     "absolute_usd": -0.1374048000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 1.4979551999999998,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 15.093054852374745,
+     "percent_usd": -9.172824394214201,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 1.271868
+     "strategy_usd": 1.63536
     },
     {
-     "absolute_usd": 0.22608719999999982,
+     "absolute_usd": -0.1100532000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 1.4979551999999998,
-     "hit_delta": 3,
+     "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 15.093054852374745,
+     "percent_usd": -7.346895287656154,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 1.271868
+     "strategy_usd": 1.6080084000000001
     },
     {
-     "absolute_usd": 0.22608719999999982,
+     "absolute_usd": -0.17403360000000045,
      "baseline": "fixed-5m",
      "baseline_usd": 1.4979551999999998,
-     "hit_delta": 3,
+     "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 15.093054852374745,
+     "percent_usd": -11.618077763607381,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 1.271868
+     "strategy_usd": 1.6719888000000003
     },
     {
-     "absolute_usd": 0.22608719999999982,
+     "absolute_usd": -0.2380140000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 1.4979551999999998,
-     "hit_delta": 3,
+     "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 15.093054852374745,
+     "percent_usd": -15.889260239558595,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 1.271868
+     "strategy_usd": 1.7359692000000002
     },
     {
-     "absolute_usd": 0.22608719999999982,
+     "absolute_usd": -0.30199440000000033,
      "baseline": "fixed-5m",
      "baseline_usd": 1.4979551999999998,
-     "hit_delta": 3,
+     "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 15.093054852374745,
+     "percent_usd": -20.16044271550981,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 1.271868
+     "strategy_usd": 1.7999496000000001
     },
     {
      "absolute_usd": -0.09985680000000041,
@@ -1329,112 +1329,112 @@
      "strategy_usd": 1.93494
     },
     {
-     "absolute_usd": 1.3240235999999999,
+     "absolute_usd": 1.2343104,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2589636,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 40.62713679895044,
+     "percent_usd": 37.87432299029053,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 1.93494
+     "strategy_usd": 2.0246532
     },
     {
-     "absolute_usd": 1.3240235999999999,
+     "absolute_usd": 1.1445972000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2589636,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 40.62713679895044,
+     "percent_usd": 35.121509181630636,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 1.93494
+     "strategy_usd": 2.1143663999999998
     },
     {
-     "absolute_usd": 1.3240235999999999,
+     "absolute_usd": 1.054884,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2589636,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 40.62713679895044,
+     "percent_usd": 32.36869537297072,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 1.93494
+     "strategy_usd": 2.2040796
     },
     {
-     "absolute_usd": 1.3240235999999999,
+     "absolute_usd": 0.9651708000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2589636,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 40.62713679895044,
+     "percent_usd": 29.61588156431082,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 1.93494
+     "strategy_usd": 2.2937928
     },
     {
-     "absolute_usd": 1.3240235999999999,
+     "absolute_usd": 0.8754576000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2589636,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 40.62713679895044,
+     "percent_usd": 26.863067755650917,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 1.93494
+     "strategy_usd": 2.3835059999999997
     },
     {
-     "absolute_usd": 1.3240235999999999,
+     "absolute_usd": 0.8919215999999999,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2589636,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 40.62713679895044,
+     "percent_usd": 27.368259037934635,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 1.93494
+     "strategy_usd": 2.367042
     },
     {
-     "absolute_usd": 1.3240235999999999,
+     "absolute_usd": 0.8114591999999998,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2589636,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 40.62713679895044,
+     "percent_usd": 24.899302342622047,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 1.93494
+     "strategy_usd": 2.4475044
     },
     {
-     "absolute_usd": 1.3240235999999999,
+     "absolute_usd": 0.7309968000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2589636,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 40.62713679895044,
+     "percent_usd": 22.430345647309476,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 1.93494
+     "strategy_usd": 2.5279667999999997
     },
     {
-     "absolute_usd": 1.3240235999999999,
+     "absolute_usd": 0.6505344000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2589636,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 40.62713679895044,
+     "percent_usd": 19.96138895199689,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 1.93494
+     "strategy_usd": 2.6084292
     },
     {
      "absolute_usd": 0.8999903999999996,
@@ -1638,112 +1638,112 @@
      "strategy_usd": 1.9562796
     },
     {
-     "absolute_usd": 0.08323079999999972,
+     "absolute_usd": -0.01793160000000027,
      "baseline": "fixed-5m",
      "baseline_usd": 2.0395103999999997,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 4.080920597413954,
+     "percent_usd": -0.8792110106425676,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 1.9562796
+     "strategy_usd": 2.057442
     },
     {
-     "absolute_usd": 0.08323079999999972,
+     "absolute_usd": -0.11909400000000048,
      "baseline": "fixed-5m",
      "baseline_usd": 2.0395103999999997,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 4.080920597413954,
+     "percent_usd": -5.8393426186991,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 1.9562796
+     "strategy_usd": 2.1586044
     },
     {
-     "absolute_usd": 0.08323079999999972,
+     "absolute_usd": -0.22025640000000024,
      "baseline": "fixed-5m",
      "baseline_usd": 2.0395103999999997,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 4.080920597413954,
+     "percent_usd": -10.79947422675561,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 1.9562796
+     "strategy_usd": 2.2597668
     },
     {
-     "absolute_usd": 0.08323079999999972,
+     "absolute_usd": -0.32141880000000045,
      "baseline": "fixed-5m",
      "baseline_usd": 2.0395103999999997,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 4.080920597413954,
+     "percent_usd": -15.759605834812143,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 1.9562796
+     "strategy_usd": 2.3609292
     },
     {
-     "absolute_usd": 0.08323079999999972,
+     "absolute_usd": -0.4225812000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 2.0395103999999997,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 4.080920597413954,
+     "percent_usd": -20.719737442868656,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 1.9562796
+     "strategy_usd": 2.4620916
     },
     {
-     "absolute_usd": 0.08323079999999972,
+     "absolute_usd": -0.5237436000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 2.0395103999999997,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 4.080920597413954,
+     "percent_usd": -25.679869050925184,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 1.9562796
+     "strategy_usd": 2.563254
     },
     {
-     "absolute_usd": 0.08323079999999972,
+     "absolute_usd": -0.6249060000000006,
      "baseline": "fixed-5m",
      "baseline_usd": 2.0395103999999997,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 4.080920597413954,
+     "percent_usd": -30.64000065898172,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 1.9562796
+     "strategy_usd": 2.6644164000000004
     },
     {
-     "absolute_usd": 0.08323079999999972,
+     "absolute_usd": -0.7260684000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 2.0395103999999997,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 4.080920597413954,
+     "percent_usd": -35.600132267038234,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 1.9562796
+     "strategy_usd": 2.7655788
     },
     {
-     "absolute_usd": 0.08323079999999972,
+     "absolute_usd": -0.8272308000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 2.0395103999999997,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 4.080920597413954,
+     "percent_usd": -40.56026387509474,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 1.9562796
+     "strategy_usd": 2.8667412
     },
     {
      "absolute_usd": -0.7504379999999999,
@@ -1947,112 +1947,112 @@
      "strategy_usd": 1.7919290999999995
     },
     {
-     "absolute_usd": 1.5901062000000006,
+     "absolute_usd": 1.5370434000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 3.3820353,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 47.01625083570241,
+     "percent_usd": 45.44729027517839,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 1.7919290999999995
+     "strategy_usd": 1.8449918999999997
     },
     {
-     "absolute_usd": 1.5901062000000006,
+     "absolute_usd": 1.4839806000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 3.3820353,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 47.01625083570241,
+     "percent_usd": 43.87832971465438,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 1.7919290999999995
+     "strategy_usd": 1.8980546999999997
     },
     {
-     "absolute_usd": 1.5901062000000006,
+     "absolute_usd": 1.4309178000000005,
      "baseline": "fixed-5m",
      "baseline_usd": 3.3820353,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 47.01625083570241,
+     "percent_usd": 42.309369154130366,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 1.7919290999999995
+     "strategy_usd": 1.9511174999999996
     },
     {
-     "absolute_usd": 1.5901062000000006,
+     "absolute_usd": 1.3778550000000007,
      "baseline": "fixed-5m",
      "baseline_usd": 3.3820353,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 47.01625083570241,
+     "percent_usd": 40.74040859360636,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 1.7919290999999995
+     "strategy_usd": 2.0041802999999994
     },
     {
-     "absolute_usd": 1.5901062000000006,
+     "absolute_usd": 1.3247922000000005,
      "baseline": "fixed-5m",
      "baseline_usd": 3.3820353,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 47.01625083570241,
+     "percent_usd": 39.17144803308234,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 1.7919290999999995
+     "strategy_usd": 2.0572430999999995
     },
     {
-     "absolute_usd": 1.5901062000000006,
+     "absolute_usd": 1.2717294000000008,
      "baseline": "fixed-5m",
      "baseline_usd": 3.3820353,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 47.01625083570241,
+     "percent_usd": 37.60248747255834,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 1.7919290999999995
+     "strategy_usd": 2.1103058999999993
     },
     {
-     "absolute_usd": 1.5901062000000006,
+     "absolute_usd": 1.2186666000000006,
      "baseline": "fixed-5m",
      "baseline_usd": 3.3820353,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 47.01625083570241,
+     "percent_usd": 36.03352691203432,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 1.7919290999999995
+     "strategy_usd": 2.1633686999999995
     },
     {
-     "absolute_usd": 1.5901062000000006,
+     "absolute_usd": 1.1656038000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 3.3820353,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 47.01625083570241,
+     "percent_usd": 34.4645663515103,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 1.7919290999999995
+     "strategy_usd": 2.2164314999999997
     },
     {
-     "absolute_usd": 1.5901062000000006,
+     "absolute_usd": 1.1125410000000007,
      "baseline": "fixed-5m",
      "baseline_usd": 3.3820353,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 47.01625083570241,
+     "percent_usd": 32.895605790986295,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 1.7919290999999995
+     "strategy_usd": 2.2694942999999994
     },
     {
      "absolute_usd": 1.0045323000000002,
@@ -2256,112 +2256,112 @@
      "strategy_usd": 2.3510918999999992
     },
     {
-     "absolute_usd": 1.0804434000000005,
+     "absolute_usd": 1.0120806000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 31.485714280718618,
+     "percent_usd": 29.493521456707743,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 2.3510918999999992
+     "strategy_usd": 2.4194546999999993
     },
     {
-     "absolute_usd": 1.0804434000000005,
+     "absolute_usd": 0.9437178000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 31.485714280718618,
+     "percent_usd": 27.50132863269687,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 2.3510918999999992
+     "strategy_usd": 2.4878174999999993
     },
     {
-     "absolute_usd": 1.0804434000000005,
+     "absolute_usd": 0.8753550000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 31.485714280718618,
+     "percent_usd": 25.509135808685997,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 2.3510918999999992
+     "strategy_usd": 2.5561802999999994
     },
     {
-     "absolute_usd": 1.0804434000000005,
+     "absolute_usd": 0.8069922000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 31.485714280718618,
+     "percent_usd": 23.516942984675122,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 2.3510918999999992
+     "strategy_usd": 2.6245430999999995
     },
     {
-     "absolute_usd": 1.0804434000000005,
+     "absolute_usd": 0.7386294000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 31.485714280718618,
+     "percent_usd": 21.524750160664244,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 2.3510918999999992
+     "strategy_usd": 2.6929058999999995
     },
     {
-     "absolute_usd": 1.0804434000000005,
+     "absolute_usd": 0.6702666000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 3.4315352999999997,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 31.485714280718618,
+     "percent_usd": 19.53255733665337,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 2.3510918999999992
+     "strategy_usd": 2.7612686999999996
     },
     {
-     "absolute_usd": 1.0804434000000005,
+     "absolute_usd": 0.6019038000000005,
      "baseline": "fixed-5m",
      "baseline_usd": 3.4315352999999997,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 31.485714280718618,
+     "percent_usd": 17.540364512642505,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 2.3510918999999992
+     "strategy_usd": 2.829631499999999
     },
     {
-     "absolute_usd": 1.0804434000000005,
+     "absolute_usd": 0.5335410000000005,
      "baseline": "fixed-5m",
      "baseline_usd": 3.4315352999999997,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 31.485714280718618,
+     "percent_usd": 15.548171688631632,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 2.3510918999999992
+     "strategy_usd": 2.8979942999999992
     },
     {
-     "absolute_usd": 1.0804434000000005,
+     "absolute_usd": 0.46517820000000043,
      "baseline": "fixed-5m",
      "baseline_usd": 3.4315352999999997,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 31.485714280718618,
+     "percent_usd": 13.555978864620757,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 2.3510918999999992
+     "strategy_usd": 2.9663570999999993
     },
     {
      "absolute_usd": 0.16550790000000015,
@@ -2874,112 +2874,112 @@
      "strategy_usd": 3.520766999999999
     },
     {
-     "absolute_usd": 1.3427556000000007,
+     "absolute_usd": 1.1863044000000005,
      "baseline": "fixed-5m",
      "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 27.608704851088817,
+     "percent_usd": 24.391875962496826,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 3.520766999999999
+     "strategy_usd": 3.677218199999999
     },
     {
-     "absolute_usd": 1.3427556000000007,
+     "absolute_usd": 1.0298532000000007,
      "baseline": "fixed-5m",
      "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 27.608704851088817,
+     "percent_usd": 21.175047073904842,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 3.520766999999999
+     "strategy_usd": 3.833669399999999
     },
     {
-     "absolute_usd": 1.3427556000000007,
+     "absolute_usd": 0.8734020000000005,
      "baseline": "fixed-5m",
      "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 27.608704851088817,
+     "percent_usd": 17.958218185312855,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 3.520766999999999
+     "strategy_usd": 3.990120599999999
     },
     {
-     "absolute_usd": 1.3427556000000007,
+     "absolute_usd": 0.7169508000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 27.608704851088817,
+     "percent_usd": 14.741389296720865,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 3.520766999999999
+     "strategy_usd": 4.146571799999999
     },
     {
-     "absolute_usd": 1.3427556000000007,
+     "absolute_usd": 0.5604996,
      "baseline": "fixed-5m",
      "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 27.608704851088817,
+     "percent_usd": 11.524560408128874,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 3.520766999999999
+     "strategy_usd": 4.303023
     },
     {
-     "absolute_usd": 1.3427556000000007,
+     "absolute_usd": 0.9221694,
      "baseline": "fixed-5m",
      "baseline_usd": 4.8635226,
-     "hit_delta": 4,
+     "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 27.608704851088817,
+     "percent_usd": 18.96093584514237,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 3.520766999999999
+     "strategy_usd": 3.9413531999999996
     },
     {
-     "absolute_usd": 1.3427556000000007,
+     "absolute_usd": 0.8108621999999999,
      "baseline": "fixed-5m",
      "baseline_usd": 4.8635226,
-     "hit_delta": 4,
+     "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 27.608704851088817,
+     "percent_usd": 16.672323060655664,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 3.520766999999999
+     "strategy_usd": 4.0526604
     },
     {
-     "absolute_usd": 1.3427556000000007,
+     "absolute_usd": 0.6995550000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 4.8635226,
-     "hit_delta": 4,
+     "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 27.608704851088817,
+     "percent_usd": 14.383710276168967,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 3.520766999999999
+     "strategy_usd": 4.163967599999999
     },
     {
-     "absolute_usd": 1.3427556000000007,
+     "absolute_usd": 0.5882477999999995,
      "baseline": "fixed-5m",
      "baseline_usd": 4.8635226,
-     "hit_delta": 4,
+     "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 27.608704851088817,
+     "percent_usd": 12.095097491682255,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 3.520766999999999
+     "strategy_usd": 4.2752748
     },
     {
      "absolute_usd": 0.9280266000000004,
@@ -3183,112 +3183,112 @@
      "strategy_usd": 2.8070345999999997
     },
     {
-     "absolute_usd": 2.4566928,
+     "absolute_usd": 2.3770296,
      "baseline": "fixed-5m",
      "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 46.67211299734101,
+     "percent_usd": 45.15867596030905,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 2.8070345999999997
+     "strategy_usd": 2.8866977999999994
     },
     {
-     "absolute_usd": 2.4566928,
+     "absolute_usd": 2.2973664,
      "baseline": "fixed-5m",
      "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 46.67211299734101,
+     "percent_usd": 43.64523892327708,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 2.8070345999999997
+     "strategy_usd": 2.9663609999999996
     },
     {
-     "absolute_usd": 2.4566928,
+     "absolute_usd": 2.2177032,
      "baseline": "fixed-5m",
      "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 46.67211299734101,
+     "percent_usd": 42.13180188624509,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 2.8070345999999997
+     "strategy_usd": 3.0460241999999997
     },
     {
-     "absolute_usd": 2.4566928,
+     "absolute_usd": 2.13804,
      "baseline": "fixed-5m",
      "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 46.67211299734101,
+     "percent_usd": 40.61836484921314,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 2.8070345999999997
+     "strategy_usd": 3.1256873999999994
     },
     {
-     "absolute_usd": 2.4566928,
+     "absolute_usd": 2.0583768,
      "baseline": "fixed-5m",
      "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 46.67211299734101,
+     "percent_usd": 39.10492781218116,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 2.8070345999999997
+     "strategy_usd": 3.2053505999999996
     },
     {
-     "absolute_usd": 2.4566928,
+     "absolute_usd": 1.9787135999999999,
      "baseline": "fixed-5m",
      "baseline_usd": 5.2637274,
-     "hit_delta": 8,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 46.67211299734101,
+     "percent_usd": 37.59149077514918,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 2.8070345999999997
+     "strategy_usd": 3.2850137999999998
     },
     {
-     "absolute_usd": 2.4566928,
+     "absolute_usd": 1.8990504000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 5.2637274,
-     "hit_delta": 8,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 46.67211299734101,
+     "percent_usd": 36.07805373811722,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 2.8070345999999997
+     "strategy_usd": 3.3646769999999995
     },
     {
-     "absolute_usd": 2.4566928,
+     "absolute_usd": 1.8193872,
      "baseline": "fixed-5m",
      "baseline_usd": 5.2637274,
-     "hit_delta": 8,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 46.67211299734101,
+     "percent_usd": 34.56461670108524,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 2.8070345999999997
+     "strategy_usd": 3.4443401999999996
     },
     {
-     "absolute_usd": 2.4566928,
+     "absolute_usd": 1.7397239999999998,
      "baseline": "fixed-5m",
      "baseline_usd": 5.2637274,
-     "hit_delta": 8,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 46.67211299734101,
+     "percent_usd": 33.05117966405327,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 2.8070345999999997
+     "strategy_usd": 3.5240034
     },
     {
      "absolute_usd": 1.5929622,
@@ -3492,112 +3492,112 @@
      "strategy_usd": 2.4496079999999996
     },
     {
-     "absolute_usd": 0.7233389999999997,
+     "absolute_usd": 0.6525269999999996,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 22.797071618277894,
+     "percent_usd": 20.565329329484538,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 2.4496079999999996
+     "strategy_usd": 2.5204199999999997
     },
     {
-     "absolute_usd": 0.7233389999999997,
+     "absolute_usd": 0.5817149999999995,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 22.797071618277894,
+     "percent_usd": 18.33358704069118,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 2.4496079999999996
+     "strategy_usd": 2.5912319999999998
     },
     {
-     "absolute_usd": 0.7233389999999997,
+     "absolute_usd": 0.5109029999999994,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 22.797071618277894,
+     "percent_usd": 16.10184475189783,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 2.4496079999999996
+     "strategy_usd": 2.662044
     },
     {
-     "absolute_usd": 0.7233389999999997,
+     "absolute_usd": 0.4400909999999998,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 22.797071618277894,
+     "percent_usd": 13.870102463104486,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 2.4496079999999996
+     "strategy_usd": 2.7328559999999995
     },
     {
-     "absolute_usd": 0.7233389999999997,
+     "absolute_usd": 0.3692789999999997,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 22.797071618277894,
+     "percent_usd": 11.63836017431113,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 2.4496079999999996
+     "strategy_usd": 2.8036679999999996
     },
     {
-     "absolute_usd": 0.7233389999999997,
+     "absolute_usd": 0.2984669999999996,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 22.797071618277894,
+     "percent_usd": 9.406617885517775,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 2.4496079999999996
+     "strategy_usd": 2.8744799999999997
     },
     {
-     "absolute_usd": 0.7233389999999997,
+     "absolute_usd": 0.22765499999999994,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 22.797071618277894,
+     "percent_usd": 7.174875596724433,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 2.4496079999999996
+     "strategy_usd": 2.9452919999999994
     },
     {
-     "absolute_usd": 0.7233389999999997,
+     "absolute_usd": 0.15684299999999984,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 22.797071618277894,
+     "percent_usd": 4.9431333079310775,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 2.4496079999999996
+     "strategy_usd": 3.0161039999999995
     },
     {
-     "absolute_usd": 0.7233389999999997,
+     "absolute_usd": 0.08603099999999975,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 22.797071618277894,
+     "percent_usd": 2.711391019137722,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 2.4496079999999996
+     "strategy_usd": 3.0869159999999995
     },
     {
      "absolute_usd": -0.3762450000000004,
@@ -3801,112 +3801,112 @@
      "strategy_usd": 0.4784917499999999
     },
     {
-     "absolute_usd": 0.16859924999999998,
+     "absolute_usd": 0.14057955,
      "baseline": "fixed-5m",
      "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 26.054952085564477,
+     "percent_usd": 21.724850136997738,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 0.4784917499999999
+     "strategy_usd": 0.5065114499999999
     },
     {
-     "absolute_usd": 0.16859924999999998,
+     "absolute_usd": 0.11255985000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 26.054952085564477,
+     "percent_usd": 17.394748188431,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 0.4784917499999999
+     "strategy_usd": 0.5345311499999998
     },
     {
-     "absolute_usd": 0.16859924999999998,
+     "absolute_usd": 0.08454015000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 26.054952085564477,
+     "percent_usd": 13.064646239864263,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 0.4784917499999999
+     "strategy_usd": 0.5625508499999998
     },
     {
-     "absolute_usd": 0.16859924999999998,
+     "absolute_usd": 0.056520449999999944,
      "baseline": "fixed-5m",
      "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 26.054952085564477,
+     "percent_usd": 8.734544291297508,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 0.4784917499999999
+     "strategy_usd": 0.5905705499999999
     },
     {
-     "absolute_usd": 0.16859924999999998,
+     "absolute_usd": 0.028500749999999964,
      "baseline": "fixed-5m",
      "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 26.054952085564477,
+     "percent_usd": 4.40444234273077,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 0.4784917499999999
+     "strategy_usd": 0.6185902499999999
     },
     {
-     "absolute_usd": 0.16859924999999998,
+     "absolute_usd": 0.1032116999999999,
      "baseline": "fixed-5m",
      "baseline_usd": 0.6470909999999999,
-     "hit_delta": 5,
+     "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 26.054952085564477,
+     "percent_usd": 15.95010593564119,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 0.4784917499999999
+     "strategy_usd": 0.5438793
     },
     {
-     "absolute_usd": 0.16859924999999998,
+     "absolute_usd": 0.08414309999999992,
      "baseline": "fixed-5m",
      "baseline_usd": 0.6470909999999999,
-     "hit_delta": 5,
+     "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 26.054952085564477,
+     "percent_usd": 13.003287018363713,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 0.4784917499999999
+     "strategy_usd": 0.5629479
     },
     {
-     "absolute_usd": 0.16859924999999998,
+     "absolute_usd": 0.06507449999999992,
      "baseline": "fixed-5m",
      "baseline_usd": 0.6470909999999999,
-     "hit_delta": 5,
+     "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 26.054952085564477,
+     "percent_usd": 10.056468101086237,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 0.4784917499999999
+     "strategy_usd": 0.5820164999999999
     },
     {
-     "absolute_usd": 0.16859924999999998,
+     "absolute_usd": 0.04600589999999993,
      "baseline": "fixed-5m",
      "baseline_usd": 0.6470909999999999,
-     "hit_delta": 5,
+     "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 26.054952085564477,
+     "percent_usd": 7.109649183808759,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 0.4784917499999999
+     "strategy_usd": 0.6010850999999999
     },
     {
      "absolute_usd": 0.16794089999999978,
@@ -4110,112 +4110,112 @@
      "strategy_usd": 2.2972874999999995
     },
     {
-     "absolute_usd": 0.24930255000000034,
+     "absolute_usd": 0.11821095000000037,
      "baseline": "fixed-5m",
      "baseline_usd": 2.54659005,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 9.789661669337017,
+     "percent_usd": 4.641930883221678,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 2.2972874999999995
+     "strategy_usd": 2.4283790999999995
     },
     {
-     "absolute_usd": 0.24930255000000034,
+     "absolute_usd": -0.012880649999999605,
      "baseline": "fixed-5m",
      "baseline_usd": 2.54659005,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 9.789661669337017,
+     "percent_usd": -0.50579990289366,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 2.2972874999999995
+     "strategy_usd": 2.5594706999999994
     },
     {
-     "absolute_usd": 0.24930255000000034,
+     "absolute_usd": -0.14397224999999958,
      "baseline": "fixed-5m",
      "baseline_usd": 2.54659005,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 9.789661669337017,
+     "percent_usd": -5.653530689008998,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 2.2972874999999995
+     "strategy_usd": 2.6905622999999994
     },
     {
-     "absolute_usd": 0.24930255000000034,
+     "absolute_usd": -0.27506384999999955,
      "baseline": "fixed-5m",
      "baseline_usd": 2.54659005,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 9.789661669337017,
+     "percent_usd": -10.801261475124337,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 2.2972874999999995
+     "strategy_usd": 2.8216538999999994
     },
     {
-     "absolute_usd": 0.24930255000000034,
+     "absolute_usd": -0.40615545,
      "baseline": "fixed-5m",
      "baseline_usd": 2.54659005,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 9.789661669337017,
+     "percent_usd": -15.948992261239692,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 2.2972874999999995
+     "strategy_usd": 2.9527455
     },
     {
-     "absolute_usd": 0.24930255000000034,
+     "absolute_usd": -0.028699800000000053,
      "baseline": "fixed-5m",
      "baseline_usd": 2.54659005,
-     "hit_delta": 5,
+     "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 9.789661669337017,
+     "percent_usd": -1.1269894029468959,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 2.2972874999999995
+     "strategy_usd": 2.57528985
     },
     {
-     "absolute_usd": 0.24930255000000034,
+     "absolute_usd": -0.11547990000000041,
      "baseline": "fixed-5m",
      "baseline_usd": 2.54659005,
-     "hit_delta": 5,
+     "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 9.789661669337017,
+     "percent_usd": -4.534687473549204,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 2.2972874999999995
+     "strategy_usd": 2.6620699500000002
     },
     {
-     "absolute_usd": 0.24930255000000034,
+     "absolute_usd": -0.20226000000000033,
      "baseline": "fixed-5m",
      "baseline_usd": 2.54659005,
-     "hit_delta": 5,
+     "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 9.789661669337017,
+     "percent_usd": -7.942385544151495,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 2.2972874999999995
+     "strategy_usd": 2.74885005
     },
     {
-     "absolute_usd": 0.24930255000000034,
+     "absolute_usd": -0.28904010000000024,
      "baseline": "fixed-5m",
      "baseline_usd": 2.54659005,
-     "hit_delta": 5,
+     "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 9.789661669337017,
+     "percent_usd": -11.350083614753787,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 2.2972874999999995
+     "strategy_usd": 2.83563015
     },
     {
      "absolute_usd": 0.24537854999999986,
@@ -4419,112 +4419,112 @@
      "strategy_usd": 2.0092335
     },
     {
-     "absolute_usd": -0.276246,
+     "absolute_usd": -0.4143690000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -15.940449657022915,
+     "percent_usd": -23.910674485534383,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 2.0092335
+     "strategy_usd": 2.1473565000000003
     },
     {
-     "absolute_usd": -0.276246,
+     "absolute_usd": -0.552492,
      "baseline": "fixed-5m",
      "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -15.940449657022915,
+     "percent_usd": -31.88089931404583,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 2.0092335
+     "strategy_usd": 2.2854795
     },
     {
-     "absolute_usd": -0.276246,
+     "absolute_usd": -0.6906150000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -15.940449657022915,
+     "percent_usd": -39.851124142557296,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 2.0092335
+     "strategy_usd": 2.4236025000000003
     },
     {
-     "absolute_usd": -0.276246,
+     "absolute_usd": -0.8287380000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -15.940449657022915,
+     "percent_usd": -47.821348971068765,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 2.0092335
+     "strategy_usd": 2.5617255000000005
     },
     {
-     "absolute_usd": -0.276246,
+     "absolute_usd": -0.9668610000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -15.940449657022915,
+     "percent_usd": -55.791573799580206,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 2.0092335
+     "strategy_usd": 2.6998485000000003
     },
     {
-     "absolute_usd": -0.276246,
+     "absolute_usd": -0.33768675000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 1.7329875000000001,
-     "hit_delta": 2,
+     "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -15.940449657022915,
+     "percent_usd": -19.485815679570685,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 2.0092335
+     "strategy_usd": 2.07067425
     },
     {
-     "absolute_usd": -0.276246,
+     "absolute_usd": -0.4089982499999998,
      "baseline": "fixed-5m",
      "baseline_usd": 1.7329875000000001,
-     "hit_delta": 2,
+     "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -15.940449657022915,
+     "percent_usd": -23.600761690433416,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 2.0092335
+     "strategy_usd": 2.14198575
     },
     {
-     "absolute_usd": -0.276246,
+     "absolute_usd": -0.48030975,
      "baseline": "fixed-5m",
      "baseline_usd": 1.7329875000000001,
-     "hit_delta": 2,
+     "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -15.940449657022915,
+     "percent_usd": -27.71570770129617,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 2.0092335
+     "strategy_usd": 2.21329725
     },
     {
-     "absolute_usd": -0.276246,
+     "absolute_usd": -0.5516212499999997,
      "baseline": "fixed-5m",
      "baseline_usd": 1.7329875000000001,
-     "hit_delta": 2,
+     "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -15.940449657022915,
+     "percent_usd": -31.830653712158895,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 2.0092335
+     "strategy_usd": 2.28460875
     },
     {
      "absolute_usd": 0.09051300000000007,
@@ -4728,112 +4728,112 @@
      "strategy_usd": 1.8131017499999997
     },
     {
-     "absolute_usd": 0.5949757500000004,
+     "absolute_usd": 0.48913425000000044,
      "baseline": "fixed-5m",
      "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 24.707500070076662,
+     "percent_usd": 20.312230399561493,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 1.8131017499999997
+     "strategy_usd": 1.9189432499999997
     },
     {
-     "absolute_usd": 0.5949757500000004,
+     "absolute_usd": 0.3832927500000003,
      "baseline": "fixed-5m",
      "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 24.707500070076662,
+     "percent_usd": 15.916960729046314,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 1.8131017499999997
+     "strategy_usd": 2.02478475
     },
     {
-     "absolute_usd": 0.5949757500000004,
+     "absolute_usd": 0.27745125000000037,
      "baseline": "fixed-5m",
      "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 24.707500070076662,
+     "percent_usd": 11.521691058531145,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 1.8131017499999997
+     "strategy_usd": 2.1306262499999997
     },
     {
-     "absolute_usd": 0.5949757500000004,
+     "absolute_usd": 0.17160975000000045,
      "baseline": "fixed-5m",
      "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 24.707500070076662,
+     "percent_usd": 7.126421388015977,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 1.8131017499999997
+     "strategy_usd": 2.2364677499999996
     },
     {
-     "absolute_usd": 0.5949757500000004,
+     "absolute_usd": 0.06576825000000053,
      "baseline": "fixed-5m",
      "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 24.707500070076662,
+     "percent_usd": 2.731151717500808,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 1.8131017499999997
+     "strategy_usd": 2.3423092499999996
     },
     {
-     "absolute_usd": 0.5949757500000004,
+     "absolute_usd": 0.46464450000000035,
      "baseline": "fixed-5m",
      "baseline_usd": 2.4080775,
-     "hit_delta": 3,
+     "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 24.707500070076662,
+     "percent_usd": 19.295246934535967,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 1.8131017499999997
+     "strategy_usd": 1.9434329999999997
     },
     {
-     "absolute_usd": 0.5949757500000004,
+     "absolute_usd": 0.4027815000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 2.4080775,
-     "hit_delta": 3,
+     "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 24.707500070076662,
+     "percent_usd": 16.726268153745057,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 1.8131017499999997
+     "strategy_usd": 2.005296
     },
     {
-     "absolute_usd": 0.5949757500000004,
+     "absolute_usd": 0.3409184999999999,
      "baseline": "fixed-5m",
      "baseline_usd": 2.4080775,
-     "hit_delta": 3,
+     "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 24.707500070076662,
+     "percent_usd": 14.157289372954146,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 1.8131017499999997
+     "strategy_usd": 2.067159
     },
     {
-     "absolute_usd": 0.5949757500000004,
+     "absolute_usd": 0.2790555000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 2.4080775,
-     "hit_delta": 3,
+     "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 24.707500070076662,
+     "percent_usd": 11.588310592163255,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 1.8131017499999997
+     "strategy_usd": 2.129022
     },
     {
      "absolute_usd": 0.8015295000000002,
@@ -5037,112 +5037,112 @@
      "strategy_usd": 4.790763
     },
     {
-     "absolute_usd": 0.6216127500000006,
+     "absolute_usd": 0.3963442500000012,
      "baseline": "fixed-5m",
      "baseline_usd": 5.412375750000001,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 11.485025776342312,
+     "percent_usd": 7.322925611733464,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 4.790763
+     "strategy_usd": 5.0160314999999995
     },
     {
-     "absolute_usd": 0.6216127500000006,
+     "absolute_usd": 0.17107575000000086,
      "baseline": "fixed-5m",
      "baseline_usd": 5.412375750000001,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 11.485025776342312,
+     "percent_usd": 3.1608254471245982,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 4.790763
+     "strategy_usd": 5.2413
     },
     {
-     "absolute_usd": 0.6216127500000006,
+     "absolute_usd": -0.05419274999999857,
      "baseline": "fixed-5m",
      "baseline_usd": 5.412375750000001,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 11.485025776342312,
+     "percent_usd": -1.00127471748425,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 4.790763
+     "strategy_usd": 5.466568499999999
     },
     {
-     "absolute_usd": 0.6216127500000006,
+     "absolute_usd": -0.2794612499999989,
      "baseline": "fixed-5m",
      "baseline_usd": 5.412375750000001,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 11.485025776342312,
+     "percent_usd": -5.163374882093115,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 4.790763
+     "strategy_usd": 5.691837
     },
     {
-     "absolute_usd": 0.6216127500000006,
+     "absolute_usd": -0.5047297499999992,
      "baseline": "fixed-5m",
      "baseline_usd": 5.412375750000001,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 11.485025776342312,
+     "percent_usd": -9.32547504670198,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 4.790763
+     "strategy_usd": 5.9171055
     },
     {
-     "absolute_usd": 0.6216127500000006,
+     "absolute_usd": 0.722538000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 5.412375750000001,
-     "hit_delta": 7,
+     "hit_delta": 11,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 11.485025776342312,
+     "percent_usd": 13.349738328866042,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 4.790763
+     "strategy_usd": 4.68983775
     },
     {
-     "absolute_usd": 0.6216127500000006,
+     "absolute_usd": 0.623775000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 5.412375750000001,
-     "hit_delta": 7,
+     "hit_delta": 11,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 11.485025776342312,
+     "percent_usd": 11.524975885127745,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 4.790763
+     "strategy_usd": 4.788600749999999
     },
     {
-     "absolute_usd": 0.6216127500000006,
+     "absolute_usd": 0.5250120000000011,
      "baseline": "fixed-5m",
      "baseline_usd": 5.412375750000001,
-     "hit_delta": 7,
+     "hit_delta": 11,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 11.485025776342312,
+     "percent_usd": 9.700213441389414,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 4.790763
+     "strategy_usd": 4.88736375
     },
     {
-     "absolute_usd": 0.6216127500000006,
+     "absolute_usd": 0.4262490000000012,
      "baseline": "fixed-5m",
      "baseline_usd": 5.412375750000001,
-     "hit_delta": 7,
+     "hit_delta": 11,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 11.485025776342312,
+     "percent_usd": 7.875450997651099,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 4.790763
+     "strategy_usd": 4.9861267499999995
     },
     {
      "absolute_usd": 1.239101250000001,
@@ -5346,112 +5346,112 @@
      "strategy_usd": 0.24990675
     },
     {
-     "absolute_usd": -0.032169,
+     "absolute_usd": -0.048253500000000005,
      "baseline": "fixed-5m",
      "baseline_usd": 0.21773775,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -14.774195103972554,
+     "percent_usd": -22.161292655958835,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 0.24990675
+     "strategy_usd": 0.26599125
     },
     {
-     "absolute_usd": -0.032169,
+     "absolute_usd": -0.064338,
      "baseline": "fixed-5m",
      "baseline_usd": 0.21773775,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -14.774195103972554,
+     "percent_usd": -29.548390207945108,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 0.24990675
+     "strategy_usd": 0.28207575
     },
     {
-     "absolute_usd": -0.032169,
+     "absolute_usd": -0.08042250000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 0.21773775,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -14.774195103972554,
+     "percent_usd": -36.93548775993139,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 0.24990675
+     "strategy_usd": 0.29816025
     },
     {
-     "absolute_usd": -0.032169,
+     "absolute_usd": -0.09650700000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 0.21773775,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -14.774195103972554,
+     "percent_usd": -44.32258531191767,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 0.24990675
+     "strategy_usd": 0.31424475
     },
     {
-     "absolute_usd": -0.032169,
+     "absolute_usd": -0.11259150000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 0.21773775,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -14.774195103972554,
+     "percent_usd": -51.709682863903936,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 0.24990675
+     "strategy_usd": 0.33032925
     },
     {
-     "absolute_usd": -0.032169,
+     "absolute_usd": -0.128676,
      "baseline": "fixed-5m",
      "baseline_usd": 0.21773775,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -14.774195103972554,
+     "percent_usd": -59.096780415890215,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 0.24990675
+     "strategy_usd": 0.34641375
     },
     {
-     "absolute_usd": -0.032169,
+     "absolute_usd": -0.14476050000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 0.21773775,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -14.774195103972554,
+     "percent_usd": -66.4838779678765,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 0.24990675
+     "strategy_usd": 0.36249825
     },
     {
-     "absolute_usd": -0.032169,
+     "absolute_usd": -0.16084500000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 0.21773775,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -14.774195103972554,
+     "percent_usd": -73.87097551986278,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 0.24990675
+     "strategy_usd": 0.37858275
     },
     {
-     "absolute_usd": -0.032169,
+     "absolute_usd": -0.17692950000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 0.21773775,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -14.774195103972554,
+     "percent_usd": -81.25807307184905,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 0.24990675
+     "strategy_usd": 0.39466725
     },
     {
      "absolute_usd": -0.15266775,
@@ -5655,112 +5655,112 @@
      "strategy_usd": 4.540860299999999
     },
     {
-     "absolute_usd": 0.43009319999999995,
+     "absolute_usd": 0.16903709999999972,
      "baseline": "fixed-5m",
      "baseline_usd": 4.970953499999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.65212680022052,
+     "percent_usd": 3.4004965043426725,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 4.540860299999999
+     "strategy_usd": 4.8019164
     },
     {
-     "absolute_usd": 0.43009319999999995,
+     "absolute_usd": -0.09201899999999963,
      "baseline": "fixed-5m",
      "baseline_usd": 4.970953499999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.65212680022052,
+     "percent_usd": -1.8511337915351578,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 4.540860299999999
+     "strategy_usd": 5.062972499999999
     },
     {
-     "absolute_usd": 0.43009319999999995,
+     "absolute_usd": -0.35307509999999986,
      "baseline": "fixed-5m",
      "baseline_usd": 4.970953499999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.65212680022052,
+     "percent_usd": -7.102764087413006,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 4.540860299999999
+     "strategy_usd": 5.324028599999999
     },
     {
-     "absolute_usd": 0.43009319999999995,
+     "absolute_usd": -0.6141312000000001,
      "baseline": "fixed-5m",
      "baseline_usd": 4.970953499999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.65212680022052,
+     "percent_usd": -12.354394383290854,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 4.540860299999999
+     "strategy_usd": 5.5850846999999995
     },
     {
-     "absolute_usd": 0.43009319999999995,
+     "absolute_usd": -0.8751873000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 4.970953499999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.65212680022052,
+     "percent_usd": -17.6060246791687,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 4.540860299999999
+     "strategy_usd": 5.8461408
     },
     {
-     "absolute_usd": 0.43009319999999995,
+     "absolute_usd": 0.0034951500000000024,
      "baseline": "fixed-5m",
      "baseline_usd": 4.970953499999999,
-     "hit_delta": 5,
+     "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.65212680022052,
+     "percent_usd": 0.07031146036670838,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 4.540860299999999
+     "strategy_usd": 4.967458349999999
     },
     {
-     "absolute_usd": 0.43009319999999995,
+     "absolute_usd": -0.15825525000000074,
      "baseline": "fixed-5m",
      "baseline_usd": 4.970953499999999,
-     "hit_delta": 5,
+     "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.65212680022052,
+     "percent_usd": -3.1835994844852356,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 4.540860299999999
+     "strategy_usd": 5.12920875
     },
     {
-     "absolute_usd": 0.43009319999999995,
+     "absolute_usd": -0.3200056499999997,
      "baseline": "fixed-5m",
      "baseline_usd": 4.970953499999999,
-     "hit_delta": 5,
+     "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.65212680022052,
+     "percent_usd": -6.437510429337142,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 4.540860299999999
+     "strategy_usd": 5.290959149999999
     },
     {
-     "absolute_usd": 0.43009319999999995,
+     "absolute_usd": -0.48175605000000044,
      "baseline": "fixed-5m",
      "baseline_usd": 4.970953499999999,
-     "hit_delta": 5,
+     "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.65212680022052,
+     "percent_usd": -9.691421374189087,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 4.540860299999999
+     "strategy_usd": 5.45270955
     },
     {
      "absolute_usd": 0.5716527000000013,
@@ -5964,112 +5964,112 @@
      "strategy_usd": 4.8096738
     },
     {
-     "absolute_usd": 1.2982024500000016,
+     "absolute_usd": 1.020842550000002,
      "baseline": "fixed-5m",
      "baseline_usd": 6.107876250000001,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 21.254563728268092,
+     "percent_usd": 16.713543435003317,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 4.8096738
+     "strategy_usd": 5.087033699999999
     },
     {
-     "absolute_usd": 1.2982024500000016,
+     "absolute_usd": 0.7434826500000016,
      "baseline": "fixed-5m",
      "baseline_usd": 6.107876250000001,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 21.254563728268092,
+     "percent_usd": 12.172523141738528,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 4.8096738
+     "strategy_usd": 5.3643936
     },
     {
-     "absolute_usd": 1.2982024500000016,
+     "absolute_usd": 0.46612275000000114,
      "baseline": "fixed-5m",
      "baseline_usd": 6.107876250000001,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 21.254563728268092,
+     "percent_usd": 7.6315028484737395,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 4.8096738
+     "strategy_usd": 5.6417535
     },
     {
-     "absolute_usd": 1.2982024500000016,
+     "absolute_usd": 0.1887628500000016,
      "baseline": "fixed-5m",
      "baseline_usd": 6.107876250000001,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 21.254563728268092,
+     "percent_usd": 3.0904825552089656,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 4.8096738
+     "strategy_usd": 5.9191134
     },
     {
-     "absolute_usd": 1.2982024500000016,
+     "absolute_usd": -0.08859704999999884,
      "baseline": "fixed-5m",
      "baseline_usd": 6.107876250000001,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 21.254563728268092,
+     "percent_usd": -1.450537738055823,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 4.8096738
+     "strategy_usd": 6.1964733
     },
     {
-     "absolute_usd": 1.2982024500000016,
+     "absolute_usd": 0.4243173000000011,
      "baseline": "fixed-5m",
      "baseline_usd": 6.107876250000001,
-     "hit_delta": 5,
+     "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 21.254563728268092,
+     "percent_usd": 6.947051358481617,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 4.8096738
+     "strategy_usd": 5.68355895
     },
     {
-     "absolute_usd": 1.2982024500000016,
+     "absolute_usd": 0.2157669000000011,
      "baseline": "fixed-5m",
      "baseline_usd": 6.107876250000001,
-     "hit_delta": 5,
+     "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 21.254563728268092,
+     "percent_usd": 3.532601041155689,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 4.8096738
+     "strategy_usd": 5.89210935
     },
     {
-     "absolute_usd": 1.2982024500000016,
+     "absolute_usd": 0.0072165000000019575,
      "baseline": "fixed-5m",
      "baseline_usd": 6.107876250000001,
-     "hit_delta": 5,
+     "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 21.254563728268092,
+     "percent_usd": 0.11815072382977564,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 4.8096738
+     "strategy_usd": 6.100659749999999
     },
     {
-     "absolute_usd": 1.2982024500000016,
+     "absolute_usd": -0.20133389999999807,
      "baseline": "fixed-5m",
      "baseline_usd": 6.107876250000001,
-     "hit_delta": 5,
+     "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 21.254563728268092,
+     "percent_usd": -3.296299593496152,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 4.8096738
+     "strategy_usd": 6.309210149999999
     },
     {
      "absolute_usd": 0.7371469500000023,
@@ -6582,112 +6582,112 @@
      "strategy_usd": 1.0258147499999999
     },
     {
-     "absolute_usd": 0.4486062000000002,
+     "absolute_usd": 0.39042630000000034,
      "baseline": "fixed-5m",
      "baseline_usd": 1.47442095,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 30.425924156869865,
+     "percent_usd": 26.47997507089141,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 1.0258147499999999
+     "strategy_usd": 1.0839946499999997
     },
     {
-     "absolute_usd": 0.4486062000000002,
+     "absolute_usd": 0.3322464000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 1.47442095,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 30.425924156869865,
+     "percent_usd": 22.534025984912944,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 1.0258147499999999
+     "strategy_usd": 1.1421745499999998
     },
     {
-     "absolute_usd": 0.4486062000000002,
+     "absolute_usd": 0.2740665000000002,
      "baseline": "fixed-5m",
      "baseline_usd": 1.47442095,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 30.425924156869865,
+     "percent_usd": 18.58807689893447,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 1.0258147499999999
+     "strategy_usd": 1.2003544499999999
     },
     {
-     "absolute_usd": 0.4486062000000002,
+     "absolute_usd": 0.21588660000000037,
      "baseline": "fixed-5m",
      "baseline_usd": 1.47442095,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 30.425924156869865,
+     "percent_usd": 14.64212781295602,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 1.0258147499999999
+     "strategy_usd": 1.2585343499999997
     },
     {
-     "absolute_usd": 0.4486062000000002,
+     "absolute_usd": 0.1577067000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 1.47442095,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 30.425924156869865,
+     "percent_usd": 10.696178726977552,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 1.0258147499999999
+     "strategy_usd": 1.3167142499999998
     },
     {
-     "absolute_usd": 0.4486062000000002,
+     "absolute_usd": 0.09952680000000025,
      "baseline": "fixed-5m",
      "baseline_usd": 1.47442095,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 30.425924156869865,
+     "percent_usd": 6.7502296409990805,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 1.0258147499999999
+     "strategy_usd": 1.3748941499999998
     },
     {
-     "absolute_usd": 0.4486062000000002,
+     "absolute_usd": 0.041346900000000186,
      "baseline": "fixed-5m",
      "baseline_usd": 1.47442095,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 30.425924156869865,
+     "percent_usd": 2.8042805550206125,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 1.0258147499999999
+     "strategy_usd": 1.4330740499999999
     },
     {
-     "absolute_usd": 0.4486062000000002,
+     "absolute_usd": -0.016832999999999876,
      "baseline": "fixed-5m",
      "baseline_usd": 1.47442095,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 30.425924156869865,
+     "percent_usd": -1.1416685309578567,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 1.0258147499999999
+     "strategy_usd": 1.49125395
     },
     {
-     "absolute_usd": 0.4486062000000002,
+     "absolute_usd": -0.07501289999999972,
      "baseline": "fixed-5m",
      "baseline_usd": 1.47442095,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 30.425924156869865,
+     "percent_usd": -5.087617616936311,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 1.0258147499999999
+     "strategy_usd": 1.5494338499999998
     },
     {
      "absolute_usd": 0.06716595000000014,
@@ -6891,112 +6891,112 @@
      "strategy_usd": 2.5117913999999995
     },
     {
-     "absolute_usd": 0.6380308500000003,
+     "absolute_usd": 0.48837105000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1498222499999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 20.256090641305246,
+     "percent_usd": 15.50471776621681,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 2.5117913999999995
+     "strategy_usd": 2.6614511999999997
     },
     {
-     "absolute_usd": 0.6380308500000003,
+     "absolute_usd": 0.33871125000000024,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1498222499999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 20.256090641305246,
+     "percent_usd": 10.753344891128389,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 2.5117913999999995
+     "strategy_usd": 2.8111109999999995
     },
     {
-     "absolute_usd": 0.6380308500000003,
+     "absolute_usd": 0.18905145,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1498222499999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 20.256090641305246,
+     "percent_usd": 6.001972016039954,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 2.5117913999999995
+     "strategy_usd": 2.9607707999999997
     },
     {
-     "absolute_usd": 0.6380308500000003,
+     "absolute_usd": 0.03939165000000022,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1498222499999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 20.256090641305246,
+     "percent_usd": 1.2505991409515325,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 2.5117913999999995
+     "strategy_usd": 3.1104305999999995
     },
     {
-     "absolute_usd": 0.6380308500000003,
+     "absolute_usd": -0.11026814999999957,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1498222499999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 20.256090641305246,
+     "percent_usd": -3.5007737341368887,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 2.5117913999999995
+     "strategy_usd": 3.2600903999999993
     },
     {
-     "absolute_usd": 0.6380308500000003,
+     "absolute_usd": 0.35594535000000027,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1498222499999997,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 20.256090641305246,
+     "percent_usd": 11.300490051462438,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 2.5117913999999995
+     "strategy_usd": 2.7938768999999994
     },
     {
-     "absolute_usd": 0.6380308500000003,
+     "absolute_usd": 0.25994775000000025,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1498222499999997,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 20.256090641305246,
+     "percent_usd": 8.252775216125299,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 2.5117913999999995
+     "strategy_usd": 2.8898744999999995
     },
     {
-     "absolute_usd": 0.6380308500000003,
+     "absolute_usd": 0.1639501499999998,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1498222499999997,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 20.256090641305246,
+     "percent_usd": 5.205060380788148,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 2.5117913999999995
+     "strategy_usd": 2.9858721
     },
     {
-     "absolute_usd": 0.6380308500000003,
+     "absolute_usd": 0.06795255000000022,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1498222499999997,
-     "hit_delta": 7,
+     "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 20.256090641305246,
+     "percent_usd": 2.157345545451024,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 2.5117913999999995
+     "strategy_usd": 3.0818696999999995
     },
     {
      "absolute_usd": 0.7317754499999989,
@@ -7200,112 +7200,112 @@
      "strategy_usd": 0.27163665000000004
     },
     {
-     "absolute_usd": -0.03296820000000003,
+     "absolute_usd": -0.04945230000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 0.23866845,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -13.813388405547542,
+     "percent_usd": -20.720082608321306,
      "strategy": "keepalive-5m-x3",
-     "strategy_usd": 0.27163665000000004
+     "strategy_usd": 0.28812075000000004
     },
     {
-     "absolute_usd": -0.03296820000000003,
+     "absolute_usd": -0.06593640000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 0.23866845,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -13.813388405547542,
+     "percent_usd": -27.626776811095073,
      "strategy": "keepalive-5m-x4",
-     "strategy_usd": 0.27163665000000004
+     "strategy_usd": 0.30460485000000004
     },
     {
-     "absolute_usd": -0.03296820000000003,
+     "absolute_usd": -0.08242050000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 0.23866845,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -13.813388405547542,
+     "percent_usd": -34.533471013868834,
      "strategy": "keepalive-5m-x5",
-     "strategy_usd": 0.27163665000000004
+     "strategy_usd": 0.32108895000000004
     },
     {
-     "absolute_usd": -0.03296820000000003,
+     "absolute_usd": -0.09890460000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 0.23866845,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -13.813388405547542,
+     "percent_usd": -41.4401652166426,
      "strategy": "keepalive-5m-x6",
-     "strategy_usd": 0.27163665000000004
+     "strategy_usd": 0.33757305000000004
     },
     {
-     "absolute_usd": -0.03296820000000003,
+     "absolute_usd": -0.11538870000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 0.23866845,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -13.813388405547542,
+     "percent_usd": -48.34685941941637,
      "strategy": "keepalive-5m-x7",
-     "strategy_usd": 0.27163665000000004
+     "strategy_usd": 0.35405715000000004
     },
     {
-     "absolute_usd": -0.03296820000000003,
+     "absolute_usd": -0.13187280000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 0.23866845,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -13.813388405547542,
+     "percent_usd": -55.25355362219013,
      "strategy": "keepalive-5m-x8",
-     "strategy_usd": 0.27163665000000004
+     "strategy_usd": 0.37054125000000004
     },
     {
-     "absolute_usd": -0.03296820000000003,
+     "absolute_usd": -0.14835690000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 0.23866845,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -13.813388405547542,
+     "percent_usd": -62.160247824963896,
      "strategy": "keepalive-5m-x9",
-     "strategy_usd": 0.27163665000000004
+     "strategy_usd": 0.38702535000000005
     },
     {
-     "absolute_usd": -0.03296820000000003,
+     "absolute_usd": -0.16484100000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 0.23866845,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -13.813388405547542,
+     "percent_usd": -69.06694202773765,
      "strategy": "keepalive-5m-x10",
-     "strategy_usd": 0.27163665000000004
+     "strategy_usd": 0.40350945000000005
     },
     {
-     "absolute_usd": -0.03296820000000003,
+     "absolute_usd": -0.18132510000000004,
      "baseline": "fixed-5m",
      "baseline_usd": 0.23866845,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -13.813388405547542,
+     "percent_usd": -75.97363623051142,
      "strategy": "keepalive-5m-x11",
-     "strategy_usd": 0.27163665000000004
+     "strategy_usd": 0.41999355000000005
     },
     {
      "absolute_usd": -0.15646395000000005,
@@ -7430,7 +7430,7 @@
  "total": 591,
  "total_saving_cells": 2,
  "total_saving_known": true,
- "total_saving_usd": 1.5320232000000005,
+ "total_saving_usd": 1.5454959000000006,
  "total_unpriced_requests": 151,
  "truncated": false,
  "users": [

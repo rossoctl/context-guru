@@ -2,7 +2,7 @@
  "baseline": "fixed-5m",
  "cells": [
   {
-   "arm": "fixed-1h",
+   "arm": "keepalive-5m-x8",
    "arms": [
     {
      "chosen": false,
@@ -21,7 +21,7 @@
      "train_saving_usd": 0
     },
     {
-     "chosen": true,
+     "chosen": false,
      "strategy": "fixed-1h",
      "test_known": true,
      "test_saving_usd": -0.32574990000000015,
@@ -64,73 +64,73 @@
      "chosen": false,
      "strategy": "keepalive-5m-x3",
      "test_known": true,
-     "test_saving_usd": -0.02301030000000004,
+     "test_saving_usd": -0.06915330000000008,
      "train_known": true,
-     "train_saving_usd": -0.08962200000000009
+     "train_saving_usd": -0.13443300000000002
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x4",
      "test_known": true,
-     "test_saving_usd": -0.02301030000000004,
+     "test_saving_usd": -0.11529630000000002,
      "train_known": true,
-     "train_saving_usd": -0.08962200000000009
+     "train_saving_usd": -0.17924399999999996
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x5",
      "test_known": true,
-     "test_saving_usd": -0.02301030000000004,
+     "test_saving_usd": -0.16143930000000006,
      "train_known": true,
-     "train_saving_usd": -0.08962200000000009
+     "train_saving_usd": -0.2240549999999999
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x6",
      "test_known": true,
-     "test_saving_usd": -0.02301030000000004,
+     "test_saving_usd": -0.2075823000000001,
      "train_known": true,
-     "train_saving_usd": -0.08962200000000009
+     "train_saving_usd": -0.26886600000000005
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x7",
      "test_known": true,
-     "test_saving_usd": -0.02301030000000004,
+     "test_saving_usd": -0.25372529999999993,
      "train_known": true,
-     "train_saving_usd": -0.08962200000000009
+     "train_saving_usd": -0.3136770000000002
     },
     {
-     "chosen": false,
+     "chosen": true,
      "strategy": "keepalive-5m-x8",
      "test_known": true,
-     "test_saving_usd": -0.02301030000000004,
+     "test_saving_usd": -0.2998683,
      "train_known": true,
-     "train_saving_usd": -0.08962200000000009
+     "train_saving_usd": 0.15580349999999932
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x9",
      "test_known": true,
-     "test_saving_usd": -0.02301030000000004,
+     "test_saving_usd": -0.3460113,
      "train_known": true,
-     "train_saving_usd": -0.08962200000000009
+     "train_saving_usd": 0.15580349999999932
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x10",
      "test_known": true,
-     "test_saving_usd": -0.02301030000000004,
+     "test_saving_usd": -0.39215430000000007,
      "train_known": true,
-     "train_saving_usd": -0.08962200000000009
+     "train_saving_usd": 0.15580349999999932
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x11",
      "test_known": true,
-     "test_saving_usd": -0.02301030000000004,
+     "test_saving_usd": -0.4382973000000001,
      "train_known": true,
-     "train_saving_usd": -0.08962200000000009
+     "train_saving_usd": 0.15580349999999932
     },
     {
      "chosen": false,
@@ -201,11 +201,11 @@
    "test_insufficient_data": false,
    "test_known": true,
    "test_requests": 6,
-   "test_saving_usd": -0.32574990000000015,
+   "test_saving_usd": -0.2998683,
    "train_insufficient_data": false,
    "train_known": true,
    "train_requests": 15,
-   "train_saving_usd": 0.0101339999999992,
+   "train_saving_usd": 0.15580349999999932,
    "user": "t1"
   },
   {
@@ -271,73 +271,73 @@
      "chosen": false,
      "strategy": "keepalive-5m-x3",
      "test_known": true,
-     "test_saving_usd": 0.4809713999999998,
+     "test_saving_usd": 0.4120109999999999,
      "train_known": true,
-     "train_saving_usd": 0.1435242000000001
+     "train_saving_usd": 0.12325500000000011
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x4",
      "test_known": true,
-     "test_saving_usd": 0.4809713999999998,
+     "test_saving_usd": 0.34305059999999976,
      "train_known": true,
-     "train_saving_usd": 0.1435242000000001
+     "train_saving_usd": 0.10298580000000013
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x5",
      "test_known": true,
-     "test_saving_usd": 0.4809713999999998,
+     "test_saving_usd": 0.27409019999999984,
      "train_known": true,
-     "train_saving_usd": 0.1435242000000001
+     "train_saving_usd": 0.08271660000000014
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x6",
      "test_known": true,
-     "test_saving_usd": 0.4809713999999998,
+     "test_saving_usd": 0.2051297999999997,
      "train_known": true,
-     "train_saving_usd": 0.1435242000000001
+     "train_saving_usd": 0.06244740000000015
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x7",
      "test_known": true,
-     "test_saving_usd": 0.4809713999999998,
+     "test_saving_usd": 0.13616939999999977,
      "train_known": true,
-     "train_saving_usd": 0.1435242000000001
+     "train_saving_usd": 0.042178200000000166
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x8",
      "test_known": true,
-     "test_saving_usd": 0.4809713999999998,
+     "test_saving_usd": 0.1741520999999997,
      "train_known": true,
-     "train_saving_usd": 0.1435242000000001
+     "train_saving_usd": 0.12272490000000014
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x9",
      "test_known": true,
-     "test_saving_usd": 0.4809713999999998,
+     "test_saving_usd": 0.11450909999999959,
      "train_known": true,
-     "train_saving_usd": 0.1435242000000001
+     "train_saving_usd": 0.11124030000000018
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x10",
      "test_known": true,
-     "test_saving_usd": 0.4809713999999998,
+     "test_saving_usd": 0.054866099999999696,
      "train_known": true,
-     "train_saving_usd": 0.1435242000000001
+     "train_saving_usd": 0.0997557
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x11",
      "test_known": true,
-     "test_saving_usd": 0.4809713999999998,
+     "test_saving_usd": -0.004776900000000417,
      "train_known": true,
-     "train_saving_usd": 0.1435242000000001
+     "train_saving_usd": 0.08827110000000027
     },
     {
      "chosen": false,
@@ -416,7 +416,7 @@
    "user": "t1"
   },
   {
-   "arm": "fixed-1h",
+   "arm": "keepalive-5m-x8",
    "arms": [
     {
      "chosen": false,
@@ -435,7 +435,7 @@
      "train_saving_usd": 0
     },
     {
-     "chosen": true,
+     "chosen": false,
      "strategy": "fixed-1h",
      "test_known": false,
      "test_saving_usd": 0,
@@ -480,7 +480,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.026569200000000015
+     "train_saving_usd": -0.039853799999999995
     },
     {
      "chosen": false,
@@ -488,7 +488,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.026569200000000015
+     "train_saving_usd": -0.053138399999999975
     },
     {
      "chosen": false,
@@ -496,7 +496,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.026569200000000015
+     "train_saving_usd": -0.06642300000000001
     },
     {
      "chosen": false,
@@ -504,7 +504,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.026569200000000015
+     "train_saving_usd": -0.07970759999999999
     },
     {
      "chosen": false,
@@ -512,15 +512,15 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.026569200000000015
+     "train_saving_usd": -0.09299219999999997
     },
     {
-     "chosen": false,
+     "chosen": true,
      "strategy": "keepalive-5m-x8",
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.026569200000000015
+     "train_saving_usd": 0.04628909999999997
     },
     {
      "chosen": false,
@@ -528,7 +528,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.026569200000000015
+     "train_saving_usd": 0.04628909999999997
     },
     {
      "chosen": false,
@@ -536,7 +536,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.026569200000000015
+     "train_saving_usd": 0.04628909999999997
     },
     {
      "chosen": false,
@@ -544,7 +544,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.026569200000000015
+     "train_saving_usd": 0.04628909999999997
     },
     {
      "chosen": false,
@@ -620,7 +620,7 @@
    "train_insufficient_data": false,
    "train_known": true,
    "train_requests": 5,
-   "train_saving_usd": 0.03281639999999991,
+   "train_saving_usd": 0.04628909999999997,
    "user": "t1"
   },
   {
@@ -688,7 +688,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.24405599999999983
+     "train_saving_usd": 0.18034199999999978
     },
     {
      "chosen": false,
@@ -696,7 +696,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.24405599999999983
+     "train_saving_usd": 0.11662799999999995
     },
     {
      "chosen": false,
@@ -704,7 +704,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.24405599999999983
+     "train_saving_usd": 0.052913999999999906
     },
     {
      "chosen": false,
@@ -712,7 +712,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.24405599999999983
+     "train_saving_usd": -0.010800000000000143
     },
     {
      "chosen": false,
@@ -720,7 +720,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.24405599999999983
+     "train_saving_usd": -0.07451400000000019
     },
     {
      "chosen": false,
@@ -728,7 +728,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.24405599999999983
+     "train_saving_usd": -0.03817800000000027
     },
     {
      "chosen": false,
@@ -736,7 +736,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.24405599999999983
+     "train_saving_usd": -0.09317400000000031
     },
     {
      "chosen": false,
@@ -744,7 +744,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.24405599999999983
+     "train_saving_usd": -0.14817000000000036
     },
     {
      "chosen": false,
@@ -752,7 +752,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.24405599999999983
+     "train_saving_usd": -0.2031660000000004
     },
     {
      "chosen": false,
@@ -894,73 +894,73 @@
      "chosen": false,
      "strategy": "keepalive-5m-x3",
      "test_known": true,
-     "test_saving_usd": 0.16590120000000008,
+     "test_saving_usd": 0.15665040000000008,
      "train_known": true,
-     "train_saving_usd": 1.1850912
+     "train_saving_usd": 1.1181131999999998
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x4",
      "test_known": true,
-     "test_saving_usd": 0.16590120000000008,
+     "test_saving_usd": 0.14739960000000008,
      "train_known": true,
-     "train_saving_usd": 1.1850912
+     "train_saving_usd": 1.0511352
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x5",
      "test_known": true,
-     "test_saving_usd": 0.16590120000000008,
+     "test_saving_usd": 0.13814880000000007,
      "train_known": true,
-     "train_saving_usd": 1.1850912
+     "train_saving_usd": 0.9841571999999998
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x6",
      "test_known": true,
-     "test_saving_usd": 0.16590120000000008,
+     "test_saving_usd": 0.12889800000000007,
      "train_known": true,
-     "train_saving_usd": 1.1850912
+     "train_saving_usd": 0.9171792000000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x7",
      "test_known": true,
-     "test_saving_usd": 0.16590120000000008,
+     "test_saving_usd": 0.11964720000000012,
      "train_known": true,
-     "train_saving_usd": 1.1850912
+     "train_saving_usd": 0.8502011999999999
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x8",
      "test_known": true,
-     "test_saving_usd": 0.16590120000000008,
+     "test_saving_usd": 0.21657360000000003,
      "train_known": true,
-     "train_saving_usd": 1.1850912
+     "train_saving_usd": 0.7832232000000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x9",
      "test_known": true,
-     "test_saving_usd": 0.16590120000000008,
+     "test_saving_usd": 0.21657360000000003,
      "train_known": true,
-     "train_saving_usd": 1.1850912
+     "train_saving_usd": 0.7162451999999999
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x10",
      "test_known": true,
-     "test_saving_usd": 0.16590120000000008,
+     "test_saving_usd": 0.21657360000000003,
      "train_known": true,
-     "train_saving_usd": 1.1850912
+     "train_saving_usd": 0.6492672000000002
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x11",
      "test_known": true,
-     "test_saving_usd": 0.16590120000000008,
+     "test_saving_usd": 0.21657360000000003,
      "train_known": true,
-     "train_saving_usd": 1.1850912
+     "train_saving_usd": 0.5822892
     },
     {
      "chosen": false,
@@ -1103,7 +1103,7 @@
      "test_known": true,
      "test_saving_usd": 0.1347264,
      "train_known": true,
-     "train_saving_usd": -0.0191268
+     "train_saving_usd": -0.1041048
     },
     {
      "chosen": false,
@@ -1111,7 +1111,7 @@
      "test_known": true,
      "test_saving_usd": 0.1347264,
      "train_known": true,
-     "train_saving_usd": -0.0191268
+     "train_saving_usd": -0.1890828
     },
     {
      "chosen": false,
@@ -1119,7 +1119,7 @@
      "test_known": true,
      "test_saving_usd": 0.1347264,
      "train_known": true,
-     "train_saving_usd": -0.0191268
+     "train_saving_usd": -0.2740608
     },
     {
      "chosen": false,
@@ -1127,7 +1127,7 @@
      "test_known": true,
      "test_saving_usd": 0.1347264,
      "train_known": true,
-     "train_saving_usd": -0.0191268
+     "train_saving_usd": -0.3590388
     },
     {
      "chosen": false,
@@ -1135,7 +1135,7 @@
      "test_known": true,
      "test_saving_usd": 0.1347264,
      "train_known": true,
-     "train_saving_usd": -0.0191268
+     "train_saving_usd": -0.4440168
     },
     {
      "chosen": false,
@@ -1143,7 +1143,7 @@
      "test_known": true,
      "test_saving_usd": 0.1347264,
      "train_known": true,
-     "train_saving_usd": -0.0191268
+     "train_saving_usd": -0.5289948
     },
     {
      "chosen": false,
@@ -1151,7 +1151,7 @@
      "test_known": true,
      "test_saving_usd": 0.1347264,
      "train_known": true,
-     "train_saving_usd": -0.0191268
+     "train_saving_usd": -0.6139728
     },
     {
      "chosen": false,
@@ -1159,7 +1159,7 @@
      "test_known": true,
      "test_saving_usd": 0.1347264,
      "train_known": true,
-     "train_saving_usd": -0.0191268
+     "train_saving_usd": -0.6989508
     },
     {
      "chosen": false,
@@ -1167,7 +1167,7 @@
      "test_known": true,
      "test_saving_usd": 0.1347264,
      "train_known": true,
-     "train_saving_usd": -0.0191268
+     "train_saving_usd": -0.7839288
     },
     {
      "chosen": false,
@@ -1310,7 +1310,7 @@
      "test_known": true,
      "test_saving_usd": 0.4432094999999996,
      "train_known": true,
-     "train_saving_usd": 1.1468967
+     "train_saving_usd": 1.0938339
     },
     {
      "chosen": false,
@@ -1318,7 +1318,7 @@
      "test_known": true,
      "test_saving_usd": 0.4432094999999996,
      "train_known": true,
-     "train_saving_usd": 1.1468967
+     "train_saving_usd": 1.0407711
     },
     {
      "chosen": false,
@@ -1326,7 +1326,7 @@
      "test_known": true,
      "test_saving_usd": 0.4432094999999996,
      "train_known": true,
-     "train_saving_usd": 1.1468967
+     "train_saving_usd": 0.9877083
     },
     {
      "chosen": false,
@@ -1334,7 +1334,7 @@
      "test_known": true,
      "test_saving_usd": 0.4432094999999996,
      "train_known": true,
-     "train_saving_usd": 1.1468967
+     "train_saving_usd": 0.9346455
     },
     {
      "chosen": false,
@@ -1342,7 +1342,7 @@
      "test_known": true,
      "test_saving_usd": 0.4432094999999996,
      "train_known": true,
-     "train_saving_usd": 1.1468967
+     "train_saving_usd": 0.8815827
     },
     {
      "chosen": false,
@@ -1350,7 +1350,7 @@
      "test_known": true,
      "test_saving_usd": 0.4432094999999996,
      "train_known": true,
-     "train_saving_usd": 1.1468967
+     "train_saving_usd": 0.8285198999999999
     },
     {
      "chosen": false,
@@ -1358,7 +1358,7 @@
      "test_known": true,
      "test_saving_usd": 0.4432094999999996,
      "train_known": true,
-     "train_saving_usd": 1.1468967
+     "train_saving_usd": 0.7754571000000001
     },
     {
      "chosen": false,
@@ -1366,7 +1366,7 @@
      "test_known": true,
      "test_saving_usd": 0.4432094999999996,
      "train_known": true,
-     "train_saving_usd": 1.1468967
+     "train_saving_usd": 0.7223942999999999
     },
     {
      "chosen": false,
@@ -1374,7 +1374,7 @@
      "test_known": true,
      "test_saving_usd": 0.4432094999999996,
      "train_known": true,
-     "train_saving_usd": 1.1468967
+     "train_saving_usd": 0.6693315000000002
     },
     {
      "chosen": false,
@@ -1517,7 +1517,7 @@
      "test_known": true,
      "test_saving_usd": 1.2171689999999997,
      "train_known": true,
-     "train_saving_usd": -0.1367256000000001
+     "train_saving_usd": -0.20508839999999995
     },
     {
      "chosen": false,
@@ -1525,7 +1525,7 @@
      "test_known": true,
      "test_saving_usd": 1.2171689999999997,
      "train_known": true,
-     "train_saving_usd": -0.1367256000000001
+     "train_saving_usd": -0.2734512
     },
     {
      "chosen": false,
@@ -1533,7 +1533,7 @@
      "test_known": true,
      "test_saving_usd": 1.2171689999999997,
      "train_known": true,
-     "train_saving_usd": -0.1367256000000001
+     "train_saving_usd": -0.34181400000000006
     },
     {
      "chosen": false,
@@ -1541,7 +1541,7 @@
      "test_known": true,
      "test_saving_usd": 1.2171689999999997,
      "train_known": true,
-     "train_saving_usd": -0.1367256000000001
+     "train_saving_usd": -0.4101767999999999
     },
     {
      "chosen": false,
@@ -1549,7 +1549,7 @@
      "test_known": true,
      "test_saving_usd": 1.2171689999999997,
      "train_known": true,
-     "train_saving_usd": -0.1367256000000001
+     "train_saving_usd": -0.47853959999999995
     },
     {
      "chosen": false,
@@ -1557,7 +1557,7 @@
      "test_known": true,
      "test_saving_usd": 1.2171689999999997,
      "train_known": true,
-     "train_saving_usd": -0.1367256000000001
+     "train_saving_usd": -0.5469024
     },
     {
      "chosen": false,
@@ -1565,7 +1565,7 @@
      "test_known": true,
      "test_saving_usd": 1.2171689999999997,
      "train_known": true,
-     "train_saving_usd": -0.1367256000000001
+     "train_saving_usd": -0.6152652000000001
     },
     {
      "chosen": false,
@@ -1573,7 +1573,7 @@
      "test_known": true,
      "test_saving_usd": 1.2171689999999997,
      "train_known": true,
-     "train_saving_usd": -0.1367256000000001
+     "train_saving_usd": -0.6836279999999999
     },
     {
      "chosen": false,
@@ -1581,7 +1581,7 @@
      "test_known": true,
      "test_saving_usd": 1.2171689999999997,
      "train_known": true,
-     "train_saving_usd": -0.1367256000000001
+     "train_saving_usd": -0.7519907999999997
     },
     {
      "chosen": false,
@@ -1932,7 +1932,7 @@
      "test_known": true,
      "test_saving_usd": 0.34521299999999966,
      "train_known": true,
-     "train_saving_usd": 1.1148306000000003
+     "train_saving_usd": 1.0170234000000002
     },
     {
      "chosen": false,
@@ -1940,7 +1940,7 @@
      "test_known": true,
      "test_saving_usd": 0.34521299999999966,
      "train_known": true,
-     "train_saving_usd": 1.1148306000000003
+     "train_saving_usd": 0.9192162000000001
     },
     {
      "chosen": false,
@@ -1948,7 +1948,7 @@
      "test_known": true,
      "test_saving_usd": 0.34521299999999966,
      "train_known": true,
-     "train_saving_usd": 1.1148306000000003
+     "train_saving_usd": 0.8214090000000005
     },
     {
      "chosen": false,
@@ -1956,7 +1956,7 @@
      "test_known": true,
      "test_saving_usd": 0.34521299999999966,
      "train_known": true,
-     "train_saving_usd": 1.1148306000000003
+     "train_saving_usd": 0.7236018
     },
     {
      "chosen": false,
@@ -1964,7 +1964,7 @@
      "test_known": true,
      "test_saving_usd": 0.34521299999999966,
      "train_known": true,
-     "train_saving_usd": 1.1148306000000003
+     "train_saving_usd": 0.6257946000000003
     },
     {
      "chosen": false,
@@ -1972,7 +1972,7 @@
      "test_known": true,
      "test_saving_usd": 0.34521299999999966,
      "train_known": true,
-     "train_saving_usd": 1.1148306000000003
+     "train_saving_usd": 1.0461084
     },
     {
      "chosen": false,
@@ -1980,7 +1980,7 @@
      "test_known": true,
      "test_saving_usd": 0.34521299999999966,
      "train_known": true,
-     "train_saving_usd": 1.1148306000000003
+     "train_saving_usd": 0.9934452
     },
     {
      "chosen": false,
@@ -1988,7 +1988,7 @@
      "test_known": true,
      "test_saving_usd": 0.34521299999999966,
      "train_known": true,
-     "train_saving_usd": 1.1148306000000003
+     "train_saving_usd": 0.940782
     },
     {
      "chosen": false,
@@ -1996,7 +1996,7 @@
      "test_known": true,
      "test_saving_usd": 0.34521299999999966,
      "train_known": true,
-     "train_saving_usd": 1.1148306000000003
+     "train_saving_usd": 0.8881187999999995
     },
     {
      "chosen": false,
@@ -2139,7 +2139,7 @@
      "test_known": true,
      "test_saving_usd": 1.2101759999999997,
      "train_known": true,
-     "train_saving_usd": 1.2465168
+     "train_saving_usd": 1.1668536
     },
     {
      "chosen": false,
@@ -2147,7 +2147,7 @@
      "test_known": true,
      "test_saving_usd": 1.2101759999999997,
      "train_known": true,
-     "train_saving_usd": 1.2465168
+     "train_saving_usd": 1.0871904000000001
     },
     {
      "chosen": false,
@@ -2155,7 +2155,7 @@
      "test_known": true,
      "test_saving_usd": 1.2101759999999997,
      "train_known": true,
-     "train_saving_usd": 1.2465168
+     "train_saving_usd": 1.0075272
     },
     {
      "chosen": false,
@@ -2163,7 +2163,7 @@
      "test_known": true,
      "test_saving_usd": 1.2101759999999997,
      "train_known": true,
-     "train_saving_usd": 1.2465168
+     "train_saving_usd": 0.927864
     },
     {
      "chosen": false,
@@ -2171,7 +2171,7 @@
      "test_known": true,
      "test_saving_usd": 1.2101759999999997,
      "train_known": true,
-     "train_saving_usd": 1.2465168
+     "train_saving_usd": 0.8482007999999999
     },
     {
      "chosen": false,
@@ -2179,7 +2179,7 @@
      "test_known": true,
      "test_saving_usd": 1.2101759999999997,
      "train_known": true,
-     "train_saving_usd": 1.2465168
+     "train_saving_usd": 0.7685376000000002
     },
     {
      "chosen": false,
@@ -2187,7 +2187,7 @@
      "test_known": true,
      "test_saving_usd": 1.2101759999999997,
      "train_known": true,
-     "train_saving_usd": 1.2465168
+     "train_saving_usd": 0.6888744
     },
     {
      "chosen": false,
@@ -2195,7 +2195,7 @@
      "test_known": true,
      "test_saving_usd": 1.2101759999999997,
      "train_known": true,
-     "train_saving_usd": 1.2465168
+     "train_saving_usd": 0.6092111999999998
     },
     {
      "chosen": false,
@@ -2203,7 +2203,7 @@
      "test_known": true,
      "test_saving_usd": 1.2101759999999997,
      "train_known": true,
-     "train_saving_usd": 1.2465168
+     "train_saving_usd": 0.5295479999999997
     },
     {
      "chosen": false,
@@ -2346,7 +2346,7 @@
      "test_known": true,
      "test_saving_usd": 0.8649630000000004,
      "train_known": true,
-     "train_saving_usd": -0.14162400000000008
+     "train_saving_usd": -0.21243599999999996
     },
     {
      "chosen": false,
@@ -2354,7 +2354,7 @@
      "test_known": true,
      "test_saving_usd": 0.8649630000000004,
      "train_known": true,
-     "train_saving_usd": -0.14162400000000008
+     "train_saving_usd": -0.28324800000000006
     },
     {
      "chosen": false,
@@ -2362,7 +2362,7 @@
      "test_known": true,
      "test_saving_usd": 0.8649630000000004,
      "train_known": true,
-     "train_saving_usd": -0.14162400000000008
+     "train_saving_usd": -0.35405999999999993
     },
     {
      "chosen": false,
@@ -2370,7 +2370,7 @@
      "test_known": true,
      "test_saving_usd": 0.8649630000000004,
      "train_known": true,
-     "train_saving_usd": -0.14162400000000008
+     "train_saving_usd": -0.424872
     },
     {
      "chosen": false,
@@ -2378,7 +2378,7 @@
      "test_known": true,
      "test_saving_usd": 0.8649630000000004,
      "train_known": true,
-     "train_saving_usd": -0.14162400000000008
+     "train_saving_usd": -0.4956840000000001
     },
     {
      "chosen": false,
@@ -2386,7 +2386,7 @@
      "test_known": true,
      "test_saving_usd": 0.8649630000000004,
      "train_known": true,
-     "train_saving_usd": -0.14162400000000008
+     "train_saving_usd": -0.566496
     },
     {
      "chosen": false,
@@ -2394,7 +2394,7 @@
      "test_known": true,
      "test_saving_usd": 0.8649630000000004,
      "train_known": true,
-     "train_saving_usd": -0.14162400000000008
+     "train_saving_usd": -0.6373079999999999
     },
     {
      "chosen": false,
@@ -2402,7 +2402,7 @@
      "test_known": true,
      "test_saving_usd": 0.8649630000000004,
      "train_known": true,
-     "train_saving_usd": -0.14162400000000008
+     "train_saving_usd": -0.70812
     },
     {
      "chosen": false,
@@ -2410,7 +2410,7 @@
      "test_known": true,
      "test_saving_usd": 0.8649630000000004,
      "train_known": true,
-     "train_saving_usd": -0.14162400000000008
+     "train_saving_usd": -0.7789320000000001
     },
     {
      "chosen": false,
@@ -2551,73 +2551,73 @@
      "chosen": false,
      "strategy": "keepalive-5m-x3",
      "test_known": true,
-     "test_saving_usd": -0.018435000000000007,
+     "test_saving_usd": -0.027652499999999997,
      "train_known": true,
-     "train_saving_usd": 0.20673645000000007
+     "train_saving_usd": 0.19778535000000008
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x4",
      "test_known": true,
-     "test_saving_usd": -0.018435000000000007,
+     "test_saving_usd": -0.036869999999999986,
      "train_known": true,
-     "train_saving_usd": 0.20673645000000007
+     "train_saving_usd": 0.1888342500000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x5",
      "test_known": true,
-     "test_saving_usd": -0.018435000000000007,
+     "test_saving_usd": -0.0460875,
      "train_known": true,
-     "train_saving_usd": 0.20673645000000007
+     "train_saving_usd": 0.1798831500000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x6",
      "test_known": true,
-     "test_saving_usd": -0.018435000000000007,
+     "test_saving_usd": -0.05530499999999999,
      "train_known": true,
-     "train_saving_usd": 0.20673645000000007
+     "train_saving_usd": 0.17093205000000006
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x7",
      "test_known": true,
-     "test_saving_usd": -0.018435000000000007,
+     "test_saving_usd": -0.06452249999999998,
      "train_known": true,
-     "train_saving_usd": 0.20673645000000007
+     "train_saving_usd": 0.16198095000000007
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x8",
      "test_known": true,
-     "test_saving_usd": -0.018435000000000007,
+     "test_saving_usd": -0.07373999999999997,
      "train_known": true,
-     "train_saving_usd": 0.20673645000000007
+     "train_saving_usd": 0.25576050000000006
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x9",
      "test_known": true,
-     "test_saving_usd": -0.018435000000000007,
+     "test_saving_usd": -0.08295749999999999,
      "train_known": true,
-     "train_saving_usd": 0.20673645000000007
+     "train_saving_usd": 0.25576050000000006
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x10",
      "test_known": true,
-     "test_saving_usd": -0.018435000000000007,
+     "test_saving_usd": -0.092175,
      "train_known": true,
-     "train_saving_usd": 0.20673645000000007
+     "train_saving_usd": 0.25576050000000006
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x11",
      "test_known": true,
-     "test_saving_usd": -0.018435000000000007,
+     "test_saving_usd": -0.1013925,
      "train_known": true,
-     "train_saving_usd": 0.20673645000000007
+     "train_saving_usd": 0.25576050000000006
     },
     {
      "chosen": false,
@@ -2758,73 +2758,73 @@
      "chosen": false,
      "strategy": "keepalive-5m-x3",
      "test_known": true,
-     "test_saving_usd": -0.022035,
+     "test_saving_usd": -0.033052499999999985,
      "train_known": true,
-     "train_saving_usd": 0.29823975
+     "train_saving_usd": 0.1916167500000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x4",
      "test_known": true,
-     "test_saving_usd": -0.022035,
+     "test_saving_usd": -0.04407,
      "train_known": true,
-     "train_saving_usd": 0.29823975
+     "train_saving_usd": 0.0849937500000002
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x5",
      "test_known": true,
-     "test_saving_usd": -0.022035,
+     "test_saving_usd": -0.055087499999999984,
      "train_known": true,
-     "train_saving_usd": 0.29823975
+     "train_saving_usd": -0.02162924999999971
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x6",
      "test_known": true,
-     "test_saving_usd": -0.022035,
+     "test_saving_usd": -0.06610499999999997,
      "train_known": true,
-     "train_saving_usd": 0.29823975
+     "train_saving_usd": -0.12825225000000007
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x7",
      "test_known": true,
-     "test_saving_usd": -0.022035,
+     "test_saving_usd": -0.07712249999999998,
      "train_known": true,
-     "train_saving_usd": 0.29823975
+     "train_saving_usd": -0.23487524999999998
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x8",
      "test_known": true,
-     "test_saving_usd": -0.022035,
+     "test_saving_usd": -0.08814,
      "train_known": true,
-     "train_saving_usd": 0.29823975
+     "train_saving_usd": 0.16704899999999956
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x9",
      "test_known": true,
-     "test_saving_usd": -0.022035,
+     "test_saving_usd": -0.09915749999999998,
      "train_known": true,
-     "train_saving_usd": 0.29823975
+     "train_saving_usd": 0.10473749999999926
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x10",
      "test_known": true,
-     "test_saving_usd": -0.022035,
+     "test_saving_usd": -0.11017499999999997,
      "train_known": true,
-     "train_saving_usd": 0.29823975
+     "train_saving_usd": 0.04242599999999941
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x11",
      "test_known": true,
-     "test_saving_usd": -0.022035,
+     "test_saving_usd": -0.12119249999999998,
      "train_known": true,
-     "train_saving_usd": 0.29823975
+     "train_saving_usd": -0.019885500000000444
     },
     {
      "chosen": false,
@@ -2967,7 +2967,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.13362300000000005
+     "train_saving_usd": -0.20043450000000007
     },
     {
      "chosen": false,
@@ -2975,7 +2975,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.13362300000000005
+     "train_saving_usd": -0.2672460000000001
     },
     {
      "chosen": false,
@@ -2983,7 +2983,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.13362300000000005
+     "train_saving_usd": -0.3340575000000001
     },
     {
      "chosen": false,
@@ -2991,7 +2991,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.13362300000000005
+     "train_saving_usd": -0.40086900000000014
     },
     {
      "chosen": false,
@@ -2999,7 +2999,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.13362300000000005
+     "train_saving_usd": -0.46768050000000017
     },
     {
      "chosen": false,
@@ -3007,7 +3007,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.13362300000000005
+     "train_saving_usd": 0.23280525000000019
     },
     {
      "chosen": false,
@@ -3015,7 +3015,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.13362300000000005
+     "train_saving_usd": 0.23280525000000019
     },
     {
      "chosen": false,
@@ -3023,7 +3023,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.13362300000000005
+     "train_saving_usd": 0.23280525000000019
     },
     {
      "chosen": false,
@@ -3031,7 +3031,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.13362300000000005
+     "train_saving_usd": 0.23280525000000019
     },
     {
      "chosen": false,
@@ -3175,7 +3175,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.5949757500000004
+     "train_saving_usd": 0.48913425000000044
     },
     {
      "chosen": false,
@@ -3183,7 +3183,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.5949757500000004
+     "train_saving_usd": 0.3832927500000003
     },
     {
      "chosen": false,
@@ -3191,7 +3191,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.5949757500000004
+     "train_saving_usd": 0.27745125000000037
     },
     {
      "chosen": false,
@@ -3199,7 +3199,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.5949757500000004
+     "train_saving_usd": 0.17160975000000045
     },
     {
      "chosen": false,
@@ -3207,7 +3207,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.5949757500000004
+     "train_saving_usd": 0.06576825000000053
     },
     {
      "chosen": false,
@@ -3215,7 +3215,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.5949757500000004
+     "train_saving_usd": 0.46464450000000035
     },
     {
      "chosen": false,
@@ -3223,7 +3223,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.5949757500000004
+     "train_saving_usd": 0.4027815000000001
     },
     {
      "chosen": false,
@@ -3231,7 +3231,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.5949757500000004
+     "train_saving_usd": 0.3409184999999999
     },
     {
      "chosen": false,
@@ -3239,7 +3239,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.5949757500000004
+     "train_saving_usd": 0.2790555000000001
     },
     {
      "chosen": false,
@@ -3381,73 +3381,73 @@
      "chosen": false,
      "strategy": "keepalive-5m-x3",
      "test_known": true,
-     "test_saving_usd": -0.09328500000000006,
+     "test_saving_usd": -0.13992749999999998,
      "train_known": true,
-     "train_saving_usd": 0.7148977499999996
+     "train_saving_usd": 0.5362717499999996
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x4",
      "test_known": true,
-     "test_saving_usd": -0.09328500000000006,
+     "test_saving_usd": -0.18657000000000012,
      "train_known": true,
-     "train_saving_usd": 0.7148977499999996
+     "train_saving_usd": 0.35764574999999965
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x5",
      "test_known": true,
-     "test_saving_usd": -0.09328500000000006,
+     "test_saving_usd": -0.23321250000000004,
      "train_known": true,
-     "train_saving_usd": 0.7148977499999996
+     "train_saving_usd": 0.1790197499999997
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x6",
      "test_known": true,
-     "test_saving_usd": -0.09328500000000006,
+     "test_saving_usd": -0.27985499999999996,
      "train_known": true,
-     "train_saving_usd": 0.7148977499999996
+     "train_saving_usd": 0.00039374999999974847
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x7",
      "test_known": true,
-     "test_saving_usd": -0.09328500000000006,
+     "test_saving_usd": -0.3264974999999999,
      "train_known": true,
-     "train_saving_usd": 0.7148977499999996
+     "train_saving_usd": -0.17823225000000065
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x8",
      "test_known": true,
-     "test_saving_usd": -0.09328500000000006,
+     "test_saving_usd": 0.16221375000000005,
      "train_known": true,
-     "train_saving_usd": 0.7148977499999996
+     "train_saving_usd": 0.560324249999999
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x9",
      "test_known": true,
-     "test_saving_usd": -0.09328500000000006,
+     "test_saving_usd": 0.16221375000000005,
      "train_known": true,
-     "train_saving_usd": 0.7148977499999996
+     "train_saving_usd": 0.4615612499999986
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x10",
      "test_known": true,
-     "test_saving_usd": -0.09328500000000006,
+     "test_saving_usd": 0.16221375000000005,
      "train_known": true,
-     "train_saving_usd": 0.7148977499999996
+     "train_saving_usd": 0.3627982499999982
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x11",
      "test_known": true,
-     "test_saving_usd": -0.09328500000000006,
+     "test_saving_usd": 0.16221375000000005,
      "train_known": true,
-     "train_saving_usd": 0.7148977499999996
+     "train_saving_usd": 0.2640352499999987
     },
     {
      "chosen": false,
@@ -3590,7 +3590,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.032169
+     "train_saving_usd": -0.048253500000000005
     },
     {
      "chosen": false,
@@ -3598,7 +3598,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.032169
+     "train_saving_usd": -0.064338
     },
     {
      "chosen": false,
@@ -3606,7 +3606,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.032169
+     "train_saving_usd": -0.08042250000000001
     },
     {
      "chosen": false,
@@ -3614,7 +3614,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.032169
+     "train_saving_usd": -0.09650700000000001
     },
     {
      "chosen": false,
@@ -3622,7 +3622,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.032169
+     "train_saving_usd": -0.11259150000000001
     },
     {
      "chosen": false,
@@ -3630,7 +3630,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.032169
+     "train_saving_usd": -0.128676
     },
     {
      "chosen": false,
@@ -3638,7 +3638,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.032169
+     "train_saving_usd": -0.14476050000000001
     },
     {
      "chosen": false,
@@ -3646,7 +3646,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.032169
+     "train_saving_usd": -0.16084500000000002
     },
     {
      "chosen": false,
@@ -3654,7 +3654,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.032169
+     "train_saving_usd": -0.17692950000000002
     },
     {
      "chosen": false,
@@ -3796,73 +3796,73 @@
      "chosen": false,
      "strategy": "keepalive-5m-x3",
      "test_known": true,
-     "test_saving_usd": 0.16877535,
+     "test_saving_usd": 0.05780565000000015,
      "train_known": true,
-     "train_saving_usd": 0.35127284999999997
+     "train_saving_usd": 0.24616395000000013
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x4",
      "test_known": true,
-     "test_saving_usd": 0.16877535,
+     "test_saving_usd": -0.05316404999999991,
      "train_known": true,
-     "train_saving_usd": 0.35127284999999997
+     "train_saving_usd": 0.14105504999999985
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x5",
      "test_known": true,
-     "test_saving_usd": 0.16877535,
+     "test_saving_usd": -0.16413374999999997,
      "train_known": true,
-     "train_saving_usd": 0.35127284999999997
+     "train_saving_usd": 0.03594615000000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x6",
      "test_known": true,
-     "test_saving_usd": 0.16877535,
+     "test_saving_usd": -0.27510345,
      "train_known": true,
-     "train_saving_usd": 0.35127284999999997
+     "train_saving_usd": -0.06916274999999983
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x7",
      "test_known": true,
-     "test_saving_usd": 0.16877535,
+     "test_saving_usd": -0.3860731500000001,
      "train_known": true,
-     "train_saving_usd": 0.35127284999999997
+     "train_saving_usd": -0.1742716500000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x8",
      "test_known": true,
-     "test_saving_usd": 0.16877535,
+     "test_saving_usd": 0.14180744999999995,
      "train_known": true,
-     "train_saving_usd": 0.35127284999999997
+     "train_saving_usd": 0.22150769999999964
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x9",
      "test_known": true,
-     "test_saving_usd": 0.16877535,
+     "test_saving_usd": 0.08649795000000005,
      "train_known": true,
-     "train_saving_usd": 0.35127284999999997
+     "train_saving_usd": 0.16004430000000003
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x10",
      "test_known": true,
-     "test_saving_usd": 0.16877535,
+     "test_saving_usd": 0.031188450000000145,
      "train_known": true,
-     "train_saving_usd": 0.35127284999999997
+     "train_saving_usd": 0.09858089999999997
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x11",
      "test_known": true,
-     "test_saving_usd": 0.16877535,
+     "test_saving_usd": -0.024121049999999755,
      "train_known": true,
-     "train_saving_usd": 0.35127284999999997
+     "train_saving_usd": 0.037117499999999914
     },
     {
      "chosen": false,
@@ -4003,73 +4003,73 @@
      "chosen": false,
      "strategy": "keepalive-5m-x3",
      "test_known": true,
-     "test_saving_usd": 0.38997674999999976,
+     "test_saving_usd": 0.24785774999999965,
      "train_known": true,
-     "train_saving_usd": 1.0431807000000002
+     "train_saving_usd": 0.9754173000000002
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x4",
      "test_known": true,
-     "test_saving_usd": 0.38997674999999976,
+     "test_saving_usd": 0.10573874999999955,
      "train_known": true,
-     "train_saving_usd": 1.0431807000000002
+     "train_saving_usd": 0.9076539000000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x5",
      "test_known": true,
-     "test_saving_usd": 0.38997674999999976,
+     "test_saving_usd": -0.036380250000000114,
      "train_known": true,
-     "train_saving_usd": 1.0431807000000002
+     "train_saving_usd": 0.8398905000000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x6",
      "test_known": true,
-     "test_saving_usd": 0.38997674999999976,
+     "test_saving_usd": -0.17849925000000022,
      "train_known": true,
-     "train_saving_usd": 1.0431807000000002
+     "train_saving_usd": 0.7721271000000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x7",
      "test_known": true,
-     "test_saving_usd": 0.38997674999999976,
+     "test_saving_usd": -0.3206182500000003,
      "train_known": true,
-     "train_saving_usd": 1.0431807000000002
+     "train_saving_usd": 0.7043637000000005
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x8",
      "test_known": true,
-     "test_saving_usd": 0.38997674999999976,
+     "test_saving_usd": 0.3275369999999991,
      "train_known": true,
-     "train_saving_usd": 1.0431807000000002
+     "train_saving_usd": 0.6366003
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x9",
      "test_known": true,
-     "test_saving_usd": 0.38997674999999976,
+     "test_saving_usd": 0.25422749999999894,
      "train_known": true,
-     "train_saving_usd": 1.0431807000000002
+     "train_saving_usd": 0.5688369000000004
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x10",
      "test_known": true,
-     "test_saving_usd": 0.38997674999999976,
+     "test_saving_usd": 0.1809179999999988,
      "train_known": true,
-     "train_saving_usd": 1.0431807000000002
+     "train_saving_usd": 0.5010735
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x11",
      "test_known": true,
-     "test_saving_usd": 0.38997674999999976,
+     "test_saving_usd": 0.10760849999999911,
      "train_known": true,
-     "train_saving_usd": 1.0431807000000002
+     "train_saving_usd": 0.43331010000000036
     },
     {
      "chosen": false,
@@ -4418,73 +4418,73 @@
      "chosen": false,
      "strategy": "keepalive-5m-x3",
      "test_known": true,
-     "test_saving_usd": 0.13818390000000005,
+     "test_saving_usd": 0.12889980000000006,
      "train_known": true,
-     "train_saving_usd": 0.3907113000000001
+     "train_saving_usd": 0.3819600000000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x4",
      "test_known": true,
-     "test_saving_usd": 0.13818390000000005,
+     "test_saving_usd": 0.11961570000000005,
      "train_known": true,
-     "train_saving_usd": 0.3907113000000001
+     "train_saving_usd": 0.37320870000000006
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x5",
      "test_known": true,
-     "test_saving_usd": 0.13818390000000005,
+     "test_saving_usd": 0.11033160000000006,
      "train_known": true,
-     "train_saving_usd": 0.3907113000000001
+     "train_saving_usd": 0.36445740000000004
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x6",
      "test_known": true,
-     "test_saving_usd": 0.13818390000000005,
+     "test_saving_usd": 0.10104750000000007,
      "train_known": true,
-     "train_saving_usd": 0.3907113000000001
+     "train_saving_usd": 0.3557061
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x7",
      "test_known": true,
-     "test_saving_usd": 0.13818390000000005,
+     "test_saving_usd": 0.09176340000000005,
      "train_known": true,
-     "train_saving_usd": 0.3907113000000001
+     "train_saving_usd": 0.3469548
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x8",
      "test_known": true,
-     "test_saving_usd": 0.13818390000000005,
+     "test_saving_usd": 0.08247930000000006,
      "train_known": true,
-     "train_saving_usd": 0.3907113000000001
+     "train_saving_usd": 0.3382035000000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x9",
      "test_known": true,
-     "test_saving_usd": 0.13818390000000005,
+     "test_saving_usd": 0.07319520000000007,
      "train_known": true,
-     "train_saving_usd": 0.3907113000000001
+     "train_saving_usd": 0.3294522000000001
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x10",
      "test_known": true,
-     "test_saving_usd": 0.13818390000000005,
+     "test_saving_usd": 0.06391110000000005,
      "train_known": true,
-     "train_saving_usd": 0.3907113000000001
+     "train_saving_usd": 0.32070090000000007
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x11",
      "test_known": true,
-     "test_saving_usd": 0.13818390000000005,
+     "test_saving_usd": 0.05462700000000004,
      "train_known": true,
-     "train_saving_usd": 0.3907113000000001
+     "train_saving_usd": 0.31194960000000005
     },
     {
      "chosen": false,
@@ -4625,73 +4625,73 @@
      "chosen": false,
      "strategy": "keepalive-5m-x3",
      "test_known": true,
-     "test_saving_usd": 0.08860784999999993,
+     "test_saving_usd": 0.07482374999999991,
      "train_known": true,
-     "train_saving_usd": 0.5710583999999996
+     "train_saving_usd": 0.4460003999999995
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x4",
      "test_known": true,
-     "test_saving_usd": 0.08860784999999993,
+     "test_saving_usd": 0.061039649999999945,
      "train_known": true,
-     "train_saving_usd": 0.5710583999999996
+     "train_saving_usd": 0.32094239999999985
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x5",
      "test_known": true,
-     "test_saving_usd": 0.08860784999999993,
+     "test_saving_usd": 0.047255549999999924,
      "train_known": true,
-     "train_saving_usd": 0.5710583999999996
+     "train_saving_usd": 0.19588439999999974
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x6",
      "test_known": true,
-     "test_saving_usd": 0.08860784999999993,
+     "test_saving_usd": 0.03347144999999996,
      "train_known": true,
-     "train_saving_usd": 0.5710583999999996
+     "train_saving_usd": 0.07082640000000007
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x7",
      "test_known": true,
-     "test_saving_usd": 0.08860784999999993,
+     "test_saving_usd": 0.019687349999999937,
      "train_known": true,
-     "train_saving_usd": 0.5710583999999996
+     "train_saving_usd": -0.054231600000000046
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x8",
      "test_known": true,
-     "test_saving_usd": 0.08860784999999993,
+     "test_saving_usd": 0.005903249999999971,
      "train_known": true,
-     "train_saving_usd": 0.5710583999999996
+     "train_saving_usd": 0.43658369999999946
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x9",
      "test_known": true,
-     "test_saving_usd": 0.08860784999999993,
+     "test_saving_usd": -0.007880849999999995,
      "train_known": true,
-     "train_saving_usd": 0.5710583999999996
+     "train_saving_usd": 0.36518789999999957
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x10",
      "test_known": true,
-     "test_saving_usd": 0.08860784999999993,
+     "test_saving_usd": -0.021664950000000016,
      "train_known": true,
-     "train_saving_usd": 0.5710583999999996
+     "train_saving_usd": 0.29379209999999967
     },
     {
      "chosen": false,
      "strategy": "keepalive-5m-x11",
      "test_known": true,
-     "test_saving_usd": 0.08860784999999993,
+     "test_saving_usd": -0.03544905000000004,
      "train_known": true,
-     "train_saving_usd": 0.5710583999999996
+     "train_saving_usd": 0.22239629999999933
     },
     {
      "chosen": false,
@@ -4780,7 +4780,7 @@
   "Both windows read Sunday-Thursday only and are replayed per hour-of-day in UTC, exactly as the live suggester does — see dash/kvcachesuggest.go."
  ],
  "retention_known": true,
- "retention_pct": 33.19053794240646,
+ "retention_pct": 32.94344611727241,
  "test_scanned": 281,
  "test_since": 1767949200001,
  "test_total": 281,
@@ -4788,8 +4788,8 @@
  "test_until": 1768467600000,
  "time_zone": "UTC",
  "total_cells": 23,
- "total_test_saving_usd": 2.9695100999999986,
- "total_train_saving_usd": 8.946857399999997,
+ "total_test_saving_usd": 2.9953916999999985,
+ "total_train_saving_usd": 9.092526899999998,
  "train_scanned": 310,
  "train_since": 1767603600000,
  "train_total": 310,

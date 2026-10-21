@@ -454,8 +454,8 @@ func TestTheKPingArmsAreKeepAliveWithABudget(t *testing.T) {
 	if two.TotalUSD != x2.TotalUSD || two.Pings != x2.Pings {
 		t.Errorf("x2 = $%.6f/%d pings, keepalive-5m at MaxPings 2 = $%.6f/%d", x2.TotalUSD, x2.Pings, two.TotalUSD, two.Pings)
 	}
-	// MaxPings bounds every arm; raise it so the arm's own budget is what binds.
-	cfg.MaxPings = MaxKeepAlivePings
+	// The arm's own budget binds whatever the window's MaxPings (here the default), so a sweep at
+	// the default scores x5 as five pings, as the campaign enforces it.
 	prev := int64(-1)
 	for k := 1; k <= MaxKeepAlivePings; k++ {
 		r := run(StrategyKeepAlive5mPingsPrefix + strconv.Itoa(k))
@@ -501,5 +501,19 @@ func TestStopReasonGatedKeepsItsBudgetUnderARaisedMaxPings(t *testing.T) {
 	if lo, hi := at(DefaultMaxPings), at(MaxKeepAlivePings); lo.Pings != hi.Pings || lo.TotalUSD != hi.TotalUSD {
 		t.Errorf("stop-reason-gated: %d pings at MaxPings %d, %d at %d; its live budget is %d either way",
 			lo.Pings, DefaultMaxPings, hi.Pings, MaxKeepAlivePings, DefaultMaxPings)
+	}
+}
+
+// A K-ping arm is scored at K whatever Config.MaxPings is, because the campaign enforces K.
+func TestAKPingArmIgnoresTheWindowsMaxPings(t *testing.T) {
+	reqs, cfg := dataset(t)
+	score := func(maxPings int) int64 {
+		c := cfg
+		c.MaxPings = maxPings
+		s, _ := NewStrategy("keepalive-5m-x"+strconv.Itoa(MaxKeepAlivePings), reqs, c)
+		return Simulate(reqs, s, c).Pings
+	}
+	if lo, hi := score(DefaultMaxPings), score(MaxKeepAlivePings); lo != hi {
+		t.Errorf("x%d spent %d pings at MaxPings %d but %d at %d", MaxKeepAlivePings, lo, DefaultMaxPings, hi, MaxKeepAlivePings)
 	}
 }
