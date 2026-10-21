@@ -41,7 +41,10 @@ async function refresh($: Engine): Promise<void> {
 async function load($: Engine): Promise<void> {
   const doc = await helper($, ['cachestate', '--json', '--session', await $.session.id()])
   const now = await $.clock.now()
-  const snap: Snapshot | null = doc ? { at: now, doc } : null
+  // `cg.py cachestate --json` prints the raw /api/cachestate entry (+ age_s, stale), or {"error": ...}.
+  // The dashboard is the loopback proxy this session is routed through; anything else shows no link.
+  const base = /^(https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?)/.exec((await $.env.get('ANTHROPIC_BASE_URL')) ?? '')
+  const snap: Snapshot | null = doc ? { at: now, url: base ? `${base[1]}/` : '', doc } : null
   // Redraw only when what the band says changes: the words, not the seconds.
   const sig = signature(view(snap, now))
   if (sig === seen) return
@@ -167,35 +170,12 @@ export const register: Register = on => {
     if (!v || !snap) {
       return <Text dimColor>No Context Guru data for this session yet. Send a prompt, or check /context-guru:doctor.</Text>
     }
-    const stats = (snap.doc.stats ?? {}) as { waterfall?: { key: string; label?: string; delta_usd: number }[]; manual_pings?: { count?: number; ping_usd?: number; saved_usd?: number } }
-    const cats = [
-      ...(stats.waterfall ?? []).map(w => ({ name: w.label ?? w.key, usd: -w.delta_usd })),
-      ...(stats.manual_pings ? [{ name: 'Manual pings', usd: stats.manual_pings.saved_usd ?? 0 }] : []),
-    ].filter(c => Math.abs(c.usd) >= 0.005)
-    const top = Math.max(0.01, ...cats.map(c => Math.abs(c.usd)))
-    const width = Math.max(8, Math.min(24, (e.props.bodyColumns ?? 60) - 36))
-
     return (
       <Box flexDirection="column" gap={1}>
         <Box columnGap={2}>
           <Text bold color="claude">Context Guru</Text>
           {v.url !== '' && <Link href={v.url.replace('127.0.0.1', 'localhost')} label="open dashboard" />}
           {v.saved !== undefined && <Text>saved <Text bold color="success">{usd(v.saved)}</Text></Text>}
-        </Box>
-
-        <Box flexDirection="column">
-          <Text bold>Savings by category</Text>
-          {cats.length === 0 && <Text dimColor>Nothing saved yet.</Text>}
-          {cats.map(c => (
-            <Text key={c.name}>
-              {c.name.padEnd(26).slice(0, 26)} {usd(c.usd).padStart(8)} <Text color={c.usd >= 0 ? 'success' : 'error'}>{'█'.repeat(Math.max(0, Math.round((Math.abs(c.usd) / top) * width)))}</Text>
-            </Text>
-          ))}
-          {stats.manual_pings && (stats.manual_pings.count ?? 0) > 0 && (
-            <Text dimColor>
-              {stats.manual_pings.count} manual ping{stats.manual_pings.count === 1 ? '' : 's'}, cost {usd(stats.manual_pings.ping_usd ?? 0)}
-            </Text>
-          )}
         </Box>
 
         <Box flexDirection="column">

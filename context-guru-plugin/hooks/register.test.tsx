@@ -3,19 +3,17 @@ import { expect, mock, test } from 'claude-code/testing'
 const NOW = 1_800_000_000_000
 const entry = (end: number, extra = {}) => ({ end_ts: end, ttl_s: 300, prefix_tokens: 90000, rewrite_usd: 0.5, next_warm_usd: 0.04, next_cold_usd: 0.5, ...extra })
 const doc = (warm: boolean) => ({
-  ok: true,
-  dashboard_url: 'http://127.0.0.1:8787/',
+  ...entry(warm ? NOW - 60_000 : NOW - 900_000),
+  last_ts: warm ? NOW - 60_000 : NOW - 900_000,
   now_ms: NOW,
   age_s: 0,
-  session: {
-    ...entry(warm ? NOW - 60_000 : NOW - 900_000),
-    threads: [
-      { id: 'main', main: true, ...entry(warm ? NOW - 60_000 : NOW - 900_000) },
-      { id: 'explorer', main: false, ...entry(NOW - 30_000) },
-      { id: 'reviewer', main: false, ...entry(NOW - 900_000) },
-    ],
-  },
-  stats: { saved_usd: 1.234, manual_pings: { count: 2, ping_usd: 0.01, saved_usd: 0.4 } },
+  stale: false,
+  money: { main: { saved_usd: 1.0 }, others: { saved_usd: 0.234 } },
+  threads: [
+    { id: 'main', main: true, ...entry(warm ? NOW - 60_000 : NOW - 900_000) },
+    { id: 'explorer', main: false, ...entry(NOW - 30_000) },
+    { id: 'reviewer', main: false, ...entry(NOW - 900_000) },
+  ],
 })
 
 const BAND = {
@@ -31,6 +29,7 @@ async function boot($: any, on: any, warm: boolean, calls: string[][] = []) {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.id', () => ({ value: 'sess-1' }))
   clock = mock.clock(on, { now: NOW })
+  on('env.get', () => ({ value: 'http://127.0.0.1:8787/anthropic' }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.render', ($: any, e: any) => {
@@ -115,4 +114,5 @@ test('/ping answers with text alone and starts no turn', async ($, on) => {
   expect(r.context).toBeUndefined() // nothing is recorded for the model
   expect(calls.some(c => c.includes('ping'))).toBe(true)
   expect(started).toEqual([])
+  expect(calls.filter(c => c.includes('ping')).length).toBe(1) // the helper ran once
 })

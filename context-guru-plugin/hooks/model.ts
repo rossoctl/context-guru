@@ -53,9 +53,9 @@ function thread(e: Entry, now: number, fallbackId: string): ThreadView {
 /** What the band shows at local time `nowLocal`, or null when there is nothing to show (no data, not routed). */
 export function view(snap: Snapshot | null, nowLocal: number): View | null {
   const doc = snap?.doc
-  if (!snap || !doc || doc.ok === false || !doc.session) return null
+  if (!snap || !doc || doc.error || !doc.last_ts) return null
   const server = (num(doc.now_ms) ?? snap.at) + (num(doc.age_s) ?? 0) * 1000 + (nowLocal - snap.at)
-  const s = doc.session as Entry & { threads?: Entry[] }
+  const s = doc as Entry & { threads?: Entry[] }
   const list = s.threads ?? []
   const main = list.find(t => t.main) ?? s
   const subs = list
@@ -63,13 +63,12 @@ export function view(snap: Snapshot | null, nowLocal: number): View | null {
     .map((t, i) => thread(t, server, `agent${i + 1}`))
     .filter(t => t.isWarm || t.leftMs === 0)
   const m = thread(main, server, 'main')
-  const stats = (doc.stats ?? {}) as { saved_usd?: number; total_saved_usd?: number; manual_pings?: { count?: number; saved_usd?: number } }
+  const money = doc.money
   return {
-    url: doc.dashboard_url || '',
+    url: snap.url,
     main: m,
     subs,
-    saved: num(stats.saved_usd) ?? num(stats.total_saved_usd),
-    manual: stats.manual_pings && (num(stats.manual_pings.saved_usd) ?? 0) > 0 ? stats.manual_pings : undefined,
+    saved: money ? (money.main?.saved_usd ?? 0) + (money.others?.saved_usd ?? 0) : undefined,
   }
 }
 

@@ -13,20 +13,22 @@ export type View = {
   url: string
   main: ThreadView
   subs: ThreadView[]
+  /** The session's saved $ (main thread and the rest). */
   saved?: number
-  manual?: { count?: number; saved_usd?: number }
 }
 
-/** One `cg.py cachestate --json` document and the local time it was read at. */
+/** One `cg.py cachestate --json` document (the raw /api/cachestate entry plus age_s, stale) and when it was read. */
 export type Snapshot = {
   at: number
+  url: string
   doc: {
-    ok?: boolean
-    dashboard_url?: string
+    error?: string
+    last_ts?: number
     now_ms?: number
     age_s?: number
-    session?: unknown
-    stats?: unknown
+    threads?: unknown[]
+    money?: { main?: { saved_usd?: number }; others?: { saved_usd?: number } }
+    [key: string]: unknown
   }
 }
 
