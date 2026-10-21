@@ -896,6 +896,16 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 			// asker's own reported coverage (components.PrefixCoverage); an asker that does not
 			// implement it is trusted as before — this guard exists to catch a NEW failure
 			// mode, not to narrow who may answer.
+			// Check and ask on ONE read of the stash when the asker can: this call runs detached,
+			// and the thread's next request can replace the stashed body between a separate
+			// CoversSpan and Ask.
+			if ca, ok := asker.(components.PrefixCoveredAsker); ok {
+				if !rawOK {
+					return "", components.ErrStalePrefix
+				}
+				reply, _, err := ca.AskCovered(ctx, session, requiredCount, requiredHash, instructionText)
+				return reply, err
+			}
 			if pc, ok := asker.(components.PrefixCoverage); ok &&
 				(!rawOK || !pc.CoversSpan(session, requiredCount, requiredHash)) {
 				return "", components.ErrStalePrefix
