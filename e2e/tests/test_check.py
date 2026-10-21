@@ -1,4 +1,5 @@
 import copy
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -265,6 +266,55 @@ class TestCheck(unittest.TestCase):
     def test_low_contrast_fails(self):
         ui = {"pages": {"p": {"errors": [], "values": {}, "overflow": [], "contrast": {"headline": 2.1}}}}
         self.assertEqual(verdicts(ui=ui)["U.contrast.p"], "FAIL")
+
+class TestUnusedBuiltins(unittest.TestCase):
+    def test_unused_builtin_with_scope_none_is_not_an_extra_item(self):
+        api = copy.deepcopy(API)
+        for k in ("", "/s/alpha"):
+            api["insights"][k]["items"].append(dict(item("Grep", usd=0.01, scope="none"), kind="tool"))
+        v = verdicts(api)
+        self.assertEqual(v["C.unused_set./s/alpha"], "PASS")
+
+    def test_unused_removable_extra_still_fails(self):
+        api = copy.deepcopy(API)
+        api["insights"]["/s/alpha"]["items"].append(item("mcp__extra__x"))
+        self.assertEqual(verdicts(api)["C.unused_set./s/alpha"], "FAIL")
+
+
+class TestSuiteChecks(unittest.TestCase):
+    def test_one_fail_per_failing_package(self):
+        log = "ok  \tm/a\t1s\nFAIL\tm/b\t2s\nFAIL\tm/c [build failed]\nFAIL\n"
+        got = {r["id"]: r["verdict"] for r in check.suite_checks(log, 1)}
+        self.assertEqual(got, {"G.go_test.m/b": "FAIL", "G.go_test.m/c": "FAIL"})
+
+    def test_one_fail_per_failing_test_named_under_its_package(self):
+        # go test prints a package's --- FAIL lines before that package's FAIL line; a pre-existing failure can
+        # then be labelled KNOWN without hiding a new one in the same package.
+        log = ("--- FAIL: TestX (0.1s)\n    x_test.go:3: boom\nFAIL\nFAIL\tm/b\t2s\n"
+               "ok  \tm/a\t1s\n--- FAIL: TestY (0s)\n--- FAIL: TestZ (0s)\nFAIL\nFAIL\tm/c\t1s\n")
+        got = {r["id"]: r["verdict"] for r in check.suite_checks(log, 1)}
+        self.assertEqual(got, {"G.go_test.m/b.TestX": "FAIL", "G.go_test.m/c.TestY": "FAIL",
+                               "G.go_test.m/c.TestZ": "FAIL"})
+
+    def test_nonzero_exit_without_a_package_line_still_fails(self):
+        got = check.suite_checks("make: *** boom\n", 2)
+        self.assertEqual([(r["id"], r["verdict"]) for r in got], [("G.go_test.suite", "FAIL")])
+
+    def test_clean_run_passes(self):
+        got = check.suite_checks("ok  \tm/a\t1s\n", 0)
+        self.assertEqual([(r["id"], r["verdict"]) for r in got], [("G.go_test.suite", "PASS")])
+
+    def test_no_suite_run_adds_nothing(self):
+        self.assertEqual(check.suite_checks(None, None), [])
+
+    def test_the_suite_tier_judges_only_the_suite_and_needs_no_oracle(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d); (p / "logs").mkdir()
+            (p / "logs" / "suite.log").write_text("--- FAIL: TestX (0s)\nFAIL\nFAIL\tm/b\t1s\n")
+            (p / "suite.exit").write_text("1\n")
+            rc = check.main(["--results", d, "--tier", "suite"])
+            got = [(r["id"], r["verdict"]) for r in json.loads((p / "verdicts.json").read_text())]
+        self.assertEqual((rc, got), (1, [("G.go_test.m/b.TestX", "FAIL")]))
 
 
 if __name__ == "__main__":

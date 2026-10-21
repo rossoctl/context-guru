@@ -4,8 +4,9 @@ WORKDIR /src
 COPY . .
 # The proxy is built with the repo's own `make build` (version ldflags from git describe),
 # so the image runs the shipped artifact, not a bare `go build` reporting "dev".
+# cg-import-history is new in the PR; main (the KNOWN baseline, suite tier only) does not have it.
 RUN mkdir -p /out && make build && cp bin/context-guru-proxy /out/ && \
-    CGO_ENABLED=0 go build -o /out/cg-import-history ./cmd/cg-import-history
+    if [ -d cmd/cg-import-history ]; then CGO_ENABLED=0 go build -o /out/cg-import-history ./cmd/cg-import-history; fi
 
 FROM golang:1.26-bookworm
 # go stays in the image: tier 2 runs `make test` against /src.

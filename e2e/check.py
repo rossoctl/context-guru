@@ -54,8 +54,9 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
          not set(picker) & set(exp["cleanup"]["not_in_picker"]),
          "absent: " + ", ".join(exp["cleanup"]["not_in_picker"]), picker)
     _rec(out, "S5.picker_folds_subfolder", "cleanup",
-         all(not any(p != r and p.startswith(r + "/") for p in picker) for r in exp["cleanup"]["picker"]),
-         "no subfolder of a root listed", picker)
+         all(not any(p != r and p.startswith(r + "/") and p not in exp["cleanup"]["picker"] for p in picker)
+             for r in exp["cleanup"]["picker"]),
+         "no subfolder of a root listed (unless the oracle lists it as its own root)", picker)
     port = re.findall(r"127\.0\.0\.1:(\d+)/dashboard", api.get("skill", {}).get("stdout", ""))
     sk = api.get("skill", {})
     _rec(out, "S7.skill_port", "skill",
@@ -102,7 +103,11 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
     for root in exp["cleanup"]["picker"]:
         doc = ins.get(root, {})
         items = doc.get("items", [])
-        unused = sorted(i["name"] for i in _unused(items))
+        # Unused built-ins are listed by design with scope "none" (not removable at any scope); the oracle's
+        # unused set is what the user CAN remove, so judge those, and judge the built-ins separately.
+        unused = sorted(i["name"] for i in _unused(items) if i.get("scope") != "none")
+        offered = sorted(i["name"] for i in _unused(items) if i.get("scope") == "none" and i.get("kind") != "tool")
+        _rec(out, f"C.builtin_never_offered.{root}", "cleanup", not offered, "no removable-looking built-in", offered)
         _rec(out, f"C.unused_set.{root}", "cleanup", sorted(exp["cleanup"]["unused"][root]) == unused,
              sorted(exp["cleanup"]["unused"][root]), unused,
              "exact: a missing item hides waste, an extra one accuses the user of waste for something they use")
@@ -192,6 +197,27 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
     return out
 
 
+def suite_checks(log, rc) -> list:
+    """The PR's own `go test` result, one check per failing test (per package when no test is named, e.g. a
+    build failure). A red package is a finding against the PR, not a crashed harness phase. None means the
+    suite was not run (smoke)."""
+    if log is None or rc is None:
+        return []
+    ids, tests = [], []
+    for l in log.splitlines():
+        if l.startswith("--- FAIL: "):  # top-level only; subtests are indented
+            tests.append(l.split()[2])
+        elif l.startswith("FAIL\t") or l.startswith("FAIL ") and len(l.split()) > 1 and "/" in l.split()[1]:
+            pkg = l.split()[1]
+            ids += [f"{pkg}.{t}" for t in tests] or [pkg]
+            tests = []
+    if ids:
+        return [{"id": f"G.go_test.{i}", "area": "suite", "verdict": "FAIL", "expected": "ok", "actual": "FAIL",
+                 "detail": "see logs/suite.log", "snapshot": ""} for i in sorted(set(ids))]
+    return [{"id": "G.go_test.suite", "area": "suite", "verdict": "PASS" if rc == 0 else "FAIL",
+             "expected": 0, "actual": rc, "detail": "make test exit code", "snapshot": ""}]
+
+
 def _load(path):
     return json.loads(path.read_text()) if path.exists() else None
 
@@ -202,15 +228,27 @@ def main(argv=None) -> int:
     ap.add_argument("--tier", required=True)
     a = ap.parse_args(argv)
     d = pathlib.Path(a.results)
-    probes = {k: v for k, v in (("shutdown", _load(d / "shutdown-probe.json")),
-                                ("unpriced", _load(d / "unpriced-probe.json"))) if v}
-    db = d / "db" / "dashboard-8788.db"
-    v = run(json.loads((d / "expected.json").read_text()), json.loads((d / "actual-api.json").read_text()),
-            _load(d / "actual-ui.json"), a.tier, probes=probes, db=str(db) if db.exists() else None)
+    sl, sx = d / "logs" / "suite.log", d / "suite.exit"
+    suite = suite_checks(sl.read_text() if sl.exists() and sx.exists() else None,
+                         int(sx.read_text().strip()) if sx.exists() else None)
+    if a.tier == "suite":  # `make test` only (the KNOWN baseline on main, which has no History tab to judge)
+        v = suite
+    else:
+        v = _judge(d, a.tier) + suite
+    for r in v:
+        r["tier"] = a.tier
     (d / "verdicts.json").write_text(json.dumps(v, indent=1))
     c = {k: sum(r["verdict"] == k for r in v) for k in ("PASS", "FAIL", "BLOCKED")}
     print(" ".join(f"{k} {n}" for k, n in c.items()))
     return 1 if c["FAIL"] else 0
+
+
+def _judge(d: pathlib.Path, tier: str) -> list:
+    probes = {k: v for k, v in (("shutdown", _load(d / "shutdown-probe.json")),
+                                ("unpriced", _load(d / "unpriced-probe.json"))) if v}
+    db = d / "db" / "dashboard-8788.db"
+    return run(json.loads((d / "expected.json").read_text()), json.loads((d / "actual-api.json").read_text()),
+               _load(d / "actual-ui.json"), tier, probes=probes, db=str(db) if db.exists() else None)
 
 
 if __name__ == "__main__":
