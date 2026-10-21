@@ -3,7 +3,10 @@
 Every family here has a test that makes it FAIL, so a check that cannot fail is caught before the
 harness is trusted. KNOWN is not assigned here: run.sh re-runs a failure on main to decide it.
 A check that cannot be judged (no priced items, no probe, no DB) is BLOCKED, never PASS or FAIL: a
-property over an empty set proves nothing, and a FAIL is a finding against the PR."""
+property over an empty set proves nothing, and a FAIL is a finding against the PR.
+
+Exit codes: 0 PASS or INCOMPLETE (a BLOCKED check outside report.BY_DESIGN_BLOCKED; judged, but not a pass),
+1 FAIL, 3 the judge itself crashed."""
 from __future__ import annotations
 
 import argparse
@@ -12,6 +15,9 @@ import pathlib
 import re
 import sqlite3
 import sys
+import traceback
+
+from e2e import report
 
 UNATTRIBUTED = ("", "(unattributed)", "none", "(none)")
 
@@ -253,8 +259,10 @@ def main(argv=None) -> int:
         r["tier"] = a.tier
     (d / "verdicts.json").write_text(json.dumps(v, indent=1))
     c = {k: sum(r["verdict"] == k for r in v) for k in ("PASS", "FAIL", "BLOCKED")}
-    print(" ".join(f"{k} {n}" for k, n in c.items()))
-    return 1 if c["FAIL"] else 0
+    h = report.headline(v, [])
+    print(f"{h}: " + " ".join(f"{k} {n}" for k, n in c.items()))
+    # 1 is FAIL. INCOMPLETE exits 0: it is a judged result, carried by the printed line and the report headline.
+    return 1 if h == "FAIL" else 0
 
 
 def _judge(d: pathlib.Path, tier: str) -> list:
@@ -266,4 +274,8 @@ def _judge(d: pathlib.Path, tier: str) -> list:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:  # a judge that crashed is not a FAIL (exit 1): exit 3 so p_assert reports a crashed phase
+        traceback.print_exc()
+        sys.exit(3)

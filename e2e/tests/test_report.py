@@ -75,13 +75,29 @@ class TestReport(unittest.TestCase):
                                capture_output=True, text=True)
             self.assertEqual((r.returncode != 0, r.stdout), (True, ""))
 
-    def test_verdict_is_pass_with_only_known_and_blocked(self):
+    def test_verdict_is_pass_with_only_known_and_by_design_blocked(self):
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d)
-            (p / "verdicts.json").write_text(json.dumps([_v("C", "KNOWN"), _v("D", "BLOCKED")]))
+            (p / "verdicts.json").write_text(json.dumps([_v("C", "KNOWN"), _v("K.inventory_survives_shutdown", "BLOCKED")]))
             (p / "phases.jsonl").write_text("")
             report.build(d)
             self.assertTrue((p / "summary.md").read_text().startswith("# PR #578 e2e review: PASS"))
+
+    def test_headline_is_incomplete_when_a_check_could_not_be_judged(self):
+        self.assertEqual(report.headline([_v("A", "PASS"), _v("D", "BLOCKED")], []), "INCOMPLETE")
+
+    def test_headline_fail_wins_over_blocked_and_a_crashed_phase_is_fail(self):
+        self.assertEqual((report.headline([_v("B", "FAIL"), _v("D", "BLOCKED")], []),
+                          report.headline([_v("A", "PASS")], [{"phase": "ui", "status": "crashed"}])),
+                         ("FAIL", "FAIL"))
+
+    def test_incomplete_headline_reaches_the_summary(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d)
+            (p / "verdicts.json").write_text(json.dumps([_v("A", "PASS"), _v("D", "BLOCKED")]))
+            (p / "phases.jsonl").write_text("")
+            report.build(d)
+            self.assertTrue((p / "summary.md").read_text().startswith("# PR #578 e2e review: INCOMPLETE"))
 
     def test_known_findings_section_rendered_from_file(self):
         with tempfile.TemporaryDirectory() as d:

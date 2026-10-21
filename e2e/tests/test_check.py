@@ -3,8 +3,11 @@ import copy
 import io
 import json
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from e2e import check
@@ -330,6 +333,31 @@ class TestUnusedBuiltins(unittest.TestCase):
         api = copy.deepcopy(API)
         api["insights"]["/s/alpha"]["items"].append(item("mcp__extra__x"))
         self.assertEqual(verdicts(api)["C.unused_set./s/alpha"], "FAIL")
+
+
+class TestMain(unittest.TestCase):
+    def _main(self, rows):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d); (p / "logs").mkdir()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), unittest.mock.patch.object(check, "_judge", return_value=rows):
+                rc = check.main(["--results", d, "--tier", "smoke"])
+            return rc, out.getvalue()
+
+    def test_main_prints_incomplete_and_exits_zero_when_a_check_is_blocked(self):
+        rc, out = self._main([{"id": "U.contrast.p", "verdict": "BLOCKED"}, {"id": "A", "verdict": "PASS"}])
+        self.assertEqual((rc, out), (0, "INCOMPLETE: PASS 1 FAIL 0 BLOCKED 1\n"))
+
+    def test_main_exits_one_on_a_fail(self):
+        rc, out = self._main([{"id": "A", "verdict": "FAIL"}, {"id": "U.contrast.p", "verdict": "BLOCKED"}])
+        self.assertEqual((rc, out), (1, "FAIL: PASS 0 FAIL 1 BLOCKED 1\n"))
+
+    def test_a_judge_traceback_exits_three_not_one(self):
+        # 1 is FAIL, a judged result; p_assert must be able to tell a crashed judge from it.
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run([sys.executable, "-m", "e2e.check", "--results", d, "--tier", "smoke"],
+                               capture_output=True, text=True)
+        self.assertEqual((r.returncode, "FileNotFoundError" in r.stderr), (3, True))
 
 
 class TestSuiteChecks(unittest.TestCase):

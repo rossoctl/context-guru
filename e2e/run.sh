@@ -2,6 +2,8 @@
 # Host entry for the PR #578 review. Builds the sandbox image from this checkout and runs a tier.
 set -uo pipefail
 # known <full-results-dir> re-runs only the main baseline and the KNOWN relabelling on an existing full run.
+# Exit: non-zero on any FAIL or crashed phase. INCOMPLETE (a check BLOCKED outside report.BY_DESIGN_BLOCKED) exits
+# 0; it is a judged run that proved less than a PASS, and the report's headline says INCOMPLETE.
 TIER="${1:?usage: e2e/run.sh smoke|full|stress [--keep] | known <full-results-dir>}"; KEEP="${2:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

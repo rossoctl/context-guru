@@ -10,6 +10,18 @@ import sys
 
 ORDER = ("FAIL", "BLOCKED", "KNOWN", "PASS")
 DEFAULT_KNOWN = pathlib.Path(__file__).with_name("known-findings.txt")
+# BLOCKED by design: the shutdown probe usually misses finding #1's race, which the Go reproducer proves instead.
+BY_DESIGN_BLOCKED = ("K.inventory_survives_shutdown",)
+
+
+def headline(v: list, phases: list) -> str:
+    """FAIL on any FAIL or crashed phase; else INCOMPLETE if a check outside BY_DESIGN_BLOCKED could not be
+    judged (an unjudged check is not a pass); else PASS."""
+    if any(r["verdict"] == "FAIL" for r in v) or any(p["status"] != "ok" for p in phases):
+        return "FAIL"
+    if any(r["verdict"] == "BLOCKED" and r["id"] not in BY_DESIGN_BLOCKED for r in v):
+        return "INCOMPLETE"
+    return "PASS"
 
 
 def explains(finding: tuple, row: dict) -> bool:
@@ -53,7 +65,7 @@ def build(results_dir: str, known_findings: str | None = None) -> None:
     v = json.loads((d / "verdicts.json").read_text())
     phases = [json.loads(l) for l in (d / "phases.jsonl").read_text().splitlines() if l.strip()]
     counts = {k: sum(r["verdict"] == k for r in v) for k in ORDER}
-    overall = "FAIL" if counts["FAIL"] or any(p["status"] != "ok" for p in phases) else "PASS"
+    overall = headline(v, phases)
     mut = None
     for m in sorted(d.parent.glob("*-mutation/mutation.json")):
         mut = json.loads(m.read_text())
