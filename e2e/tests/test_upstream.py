@@ -17,6 +17,7 @@ class TestUpstream(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
 
     def _post(self, body, headers=None):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}/v1/messages",
@@ -50,7 +51,8 @@ class TestUpstream(unittest.TestCase):
             self.fail("Expected HTTPError")
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 400)
-            body = json.loads(e.read().decode())
+            with e:
+                body = json.loads(e.read().decode())
             self.assertEqual(body["type"], "error")
             self.assertIn("bad X-E2E-Usage", body["error"]["message"])
             self.assertIn("1,2,3", body["error"]["message"])
@@ -61,7 +63,8 @@ class TestUpstream(unittest.TestCase):
             self.fail("Expected HTTPError")
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 400)
-            body = json.loads(e.read().decode())
+            with e:
+                body = json.loads(e.read().decode())
             self.assertEqual(body["type"], "error")
             self.assertIn("bad X-E2E-Usage", body["error"]["message"])
 
@@ -78,7 +81,8 @@ class TestUpstream(unittest.TestCase):
             self.fail("Expected HTTPError")
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 400)
-            body = json.loads(e.read().decode())
+            with e:
+                body = json.loads(e.read().decode())
             self.assertEqual(body["type"], "error")
             self.assertIn("bad X-E2E-Usage", body["error"]["message"])
             self.assertIn("-1,0,0,1", body["error"]["message"])

@@ -30,6 +30,7 @@ class TestCollect(unittest.TestCase):
                                   skill_cmd=None)
         finally:
             srv.shutdown()
+            srv.server_close()
         self.assertIn("", got["insights"], "pooled view collected")
         self.assertIn("project=%2Fsandbox%2Fwork%2Falpha", got["insights"]["/sandbox/work/alpha"]["path"])
         self.assertIn("measured=1", got["facets_measured"]["path"])
@@ -46,6 +47,7 @@ class TestCollect(unittest.TestCase):
                           "--add-unpriced-probe", str(d / "probe.json")])
         finally:
             srv.shutdown()
+            srv.server_close()
         got = json.loads((d / "api.json").read_text())
         self.assertEqual(got["history"], {"keep": 1})
         self.assertIn("/api/insights?session=alpha-s01-x-unpriced-probe", got["unpriced_probe"]["path"])

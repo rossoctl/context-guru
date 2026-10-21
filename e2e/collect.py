@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import subprocess
 import sys
 import urllib.parse
@@ -42,13 +43,14 @@ def main(argv=None) -> int:
     ap.add_argument("--add-unpriced-probe", default="",
                     help="probe file: add /api/insights for its session to the existing --out and stop")
     a = ap.parse_args(argv)
+    rd = lambda p: json.loads(pathlib.Path(p).read_text())
     if a.add_unpriced_probe:
-        got = json.load(open(a.out))
+        got = rd(a.out)
         got["unpriced_probe"] = _get(a.base, "/api/insights?session="
-                                     + urllib.parse.quote(json.load(open(a.add_unpriced_probe))["session_id"], safe=""))
+                                     + urllib.parse.quote(rd(a.add_unpriced_probe)["session_id"], safe=""))
     else:
-        got = collect(a.base, json.load(open(a.expected)), [a.skill, "--no-open"] if a.skill else None)
-    json.dump(got, open(a.out, "w"), indent=1, sort_keys=True)
+        got = collect(a.base, rd(a.expected), [a.skill, "--no-open"] if a.skill else None)
+    pathlib.Path(a.out).write_text(json.dumps(got, indent=1, sort_keys=True))
     return 0
 
 
