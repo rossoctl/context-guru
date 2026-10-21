@@ -157,8 +157,9 @@ func Run(in Inputs) (*Result, error) {
 	if len(arms) == 0 {
 		arms = DefaultArms()
 	}
-	// MaxPings is the simulator's ceiling on EVERY arm; it must be at least the largest K-ping
-	// budget, or keepalive-5m-x11 would silently be scored as x2 (the default ceiling).
+	// Simulate runs a keepalive-5m-xK arm at exactly K whatever MaxPings is, and caps stop-reason-gated
+	// at its live budget. MaxPings still has to reach the largest K-ping budget: it is the ceiling of
+	// the optimum (kvcache.NewOptimal), and at the default of 2 an x11 arm could beat its own "ceiling".
 	cfg := dash.KVCacheSimConfig{Baseline: in.Baseline, Semantics: kvcache.DefaultSemantics(),
 		Strategies: arms, MaxPings: kvcache.MaxKeepAlivePings}
 
@@ -251,7 +252,14 @@ func Run(in Inputs) (*Result, error) {
 			Kind: "segmented", CostUSD: win, SavingUSD: base - win, SavingPct: pct(base-win, base)}, rep.Policies))
 		rep.Breakdowns[seg.name] = segmentBreakdown(sc, winners(cells))
 	}
-	sort.Slice(rep.Policies, func(i, j int) bool { return rep.Policies[i].CostUSD < rep.Policies[j].CostUSD })
+	// Ties break on name: policies come from a map, and equal costs would otherwise reorder per run.
+	sort.Slice(rep.Policies, func(i, j int) bool {
+		a, b := rep.Policies[i], rep.Policies[j]
+		if a.CostUSD != b.CostUSD {
+			return a.CostUSD < b.CostUSD
+		}
+		return a.Name < b.Name
+	})
 
 	rep.Breakdowns["account"] = breakdown(cells, func(c cellCosts) string { return c.user })
 	rep.Breakdowns["hour_utc"] = breakdown(cells, func(c cellCosts) string { return fmt.Sprintf("%02d", c.hour) })

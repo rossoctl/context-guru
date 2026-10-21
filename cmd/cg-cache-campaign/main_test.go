@@ -222,6 +222,45 @@ func TestTheUploadIsAValidSuggestPayload(t *testing.T) {
 	}
 }
 
+// The upload is accepted by the create route's own decoder: it wraps the file as
+// {name, source: "upload", suggest} and rejects unknown fields.
+func TestTheUploadDecodesStrictlyInTheCreateEnvelope(t *testing.T) {
+	res, _ := run(t)
+	b, err := json.Marshal(map[string]any{"name": "t", "source": "upload", "suggest": res.Campaign})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env struct {
+		Name    string                   `json:"name"`
+		Source  string                   `json:"source"`
+		Suggest *dash.KVCacheSuggestions `json:"suggest"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Suggest == nil || len(env.Suggest.Cells) != len(res.Campaign.Cells) {
+		t.Fatalf("cells lost in the envelope: %+v", env.Suggest)
+	}
+}
+
+// Two runs over the same history write the same report, policy order included.
+func TestThePolicyOrderIsDeterministic(t *testing.T) {
+	a, _ := run(t)
+	for i := 0; i < 5; i++ {
+		b, _ := run(t)
+		if len(a.Report.Policies) != len(b.Report.Policies) {
+			t.Fatal("policy count differs between runs")
+		}
+		for j := range a.Report.Policies {
+			if a.Report.Policies[j].Name != b.Report.Policies[j].Name {
+				t.Fatalf("policy %d is %s in one run and %s in another", j, a.Report.Policies[j].Name, b.Report.Policies[j].Name)
+			}
+		}
+	}
+}
+
 // The report renders, and names every policy kind.
 func TestTheMarkdownNamesEveryPolicy(t *testing.T) {
 	res, _ := run(t)
