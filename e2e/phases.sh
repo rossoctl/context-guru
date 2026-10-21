@@ -215,7 +215,8 @@ p_endpoints() {
     printf '{"endpoint":"%s","ms":%s}\n' "$ep" "${out#* }" >>"$R/stress-endpoints.jsonl"
   done
 }
-p_assert() { python3 -m e2e.check --results "$R" --tier "$TIER"; return 0; }  # a FAIL is a result, not a crash
+# A FAIL (1) is a result, not a crash; any other non-zero code is a judge that crashed (check.py exits 3 on a traceback).
+p_assert() { python3 -m e2e.check --results "$R" --tier "$TIER"; local rc=$?; [ $rc -le 1 ] || return $rc; }
 
 cd /src
 case "$TIER" in
