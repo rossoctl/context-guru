@@ -620,6 +620,9 @@ const additiveDDL2 = `
 -- in both directions: it would delete another account's inventory, and it would DECLINE to
 -- delete this account's (the WHEN clause still sees the other account's request rows), so a
 -- purged tenant's tool names would outlive its request rows.
+-- The project filter on requests. Here and not in additiveDDL: that phase runs BEFORE addColumns,
+-- so on an existing database the column the index names does not exist yet.
+CREATE INDEX IF NOT EXISTS idx_requests_project ON requests(project, ts);
 CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
 WHEN NOT EXISTS (SELECT 1 FROM requests
   WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
@@ -753,6 +756,7 @@ func migrateToolUsesProject(db *sql.DB) error {
 		// No such table yet: `ddl` will create it with the column already in place.
 		return nil
 	}
+	cols := 0
 	for rows.Next() {
 		var cid int
 		var name, typ string
@@ -762,6 +766,7 @@ func migrateToolUsesProject(db *sql.DB) error {
 			rows.Close()
 			return err
 		}
+		cols++
 		if name == "project" {
 			has = true
 		}
@@ -770,7 +775,10 @@ func migrateToolUsesProject(db *sql.DB) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if has {
+	// PRAGMA table_info on a missing table yields zero rows, not an error. Rebuilding from a table
+	// that is not there would fail the open, and the proxy answers a failed open with an
+	// in-memory database -- history gone, dashboard looking healthy.
+	if has || cols == 0 {
 		return nil
 	}
 

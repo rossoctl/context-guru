@@ -119,7 +119,7 @@ func ProjectPath(s string) string {
 	if s == "" {
 		return ""
 	}
-	if RedactContent(s, 0) != s || !projectPathShape.MatchString(s) {
+	if RedactContent(s, 0) != s || !projectPathShape.MatchString(s) || hasDotDot(s) {
 		return Redacted
 	}
 	return s
@@ -209,4 +209,15 @@ func redactConfig(v any, openNames bool) any {
 	default:
 		return v
 	}
+}
+
+// hasDotDot reports a `..` path segment. Such a path is not a canonical launch directory, and as
+// a group key it would name a folder the agent was never in.
+func hasDotDot(s string) bool {
+	for _, seg := range strings.Split(s, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }

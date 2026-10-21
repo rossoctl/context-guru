@@ -165,3 +165,15 @@ func TestWorkingDirOfRefusesAnAbsurdlyLongPath(t *testing.T) {
 		t.Errorf("got a %d-character path; want it refused", len(got))
 	}
 }
+
+// S6: a `..` segment is not a canonical launch directory; it is refused like other odd paths.
+func TestCleanWorkingDirRefusesDotDotSegments(t *testing.T) {
+	for _, in := range []string{"/a/../../etc", "/a/..", "/../x"} {
+		if got := cleanWorkingDir(in); got != "" {
+			t.Errorf("cleanWorkingDir(%q) = %q; want refused", in, got)
+		}
+	}
+	if got := cleanWorkingDir("/a/b..c/d"); got != "/a/b..c/d" {
+		t.Errorf("a name merely containing dots was refused: %q", got)
+	}
+}

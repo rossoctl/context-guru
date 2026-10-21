@@ -17,6 +17,7 @@ package dash
 // otherwise collapse to a single row whose project is whichever folder was written last.
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -795,5 +796,28 @@ func TestBackfillIsDryUnlessApplied(t *testing.T) {
 	db.sql.QueryRow(`SELECT COUNT(*) FROM tool_uses WHERE project='/Users/v/p'`).Scan(&rows)
 	if rows != 1 {
 		t.Errorf("apply wrote %d rows; want 1", rows)
+	}
+}
+
+// S3c: the project filter on requests has an index, so a single-tenant, unbounded query is not a
+// table scan.
+func TestRequestsProjectIsIndexed(t *testing.T) {
+	db := openTestDB(t)
+	var n int
+	db.sql.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_requests_project'`).Scan(&n)
+	if n != 1 {
+		t.Error("idx_requests_project is missing")
+	}
+}
+
+// S2(2): the rebuild must not fail the open when tool_uses has no columns to probe.
+func TestMigrateToolUsesProjectWithoutTableIsANoop(t *testing.T) {
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "x.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if err := migrateToolUsesProject(raw); err != nil {
+		t.Fatalf("migrating a database with no tool_uses failed: %v", err)
 	}
 }
