@@ -97,3 +97,22 @@ test('pressing Ping runs the helper with the session id and toasts the saving', 
   expect(toasts.join('\n')).toMatch(/kept warm .* saved \$0\.460 .* ping \$0\.040/)
   await ui.unmount()
 })
+
+test('/ping answers with text alone and starts no turn', async ($, on) => {
+  const calls: string[][] = []
+  const started: string[] = []
+  on('turn.start', (_: any, e: any) => {
+    started.push('turn')
+    return e
+  })
+  on('prompt.submit', (_: any, e: any) => {
+    started.push('prompt')
+    return e
+  })
+  await boot($, on, true, calls)
+  const r = await $.command.run({ command: 'ping', args: '' })
+  expect(r.text).toMatch(/kept warm .* saved \$0\.460 .* ping \$0\.040/)
+  expect(r.context).toBeUndefined() // nothing is recorded for the model
+  expect(calls.some(c => c.includes('ping'))).toBe(true)
+  expect(started).toEqual([])
+})

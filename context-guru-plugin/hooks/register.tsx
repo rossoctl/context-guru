@@ -55,17 +55,22 @@ function status(v: View | null): string | undefined {
   return v.main.isWarm ? `cache warm ${v.main.left}` : 'cache cold'
 }
 
-async function ping($: Engine): Promise<void> {
-  if (await read($, isPinging)) return
+/** One explicit ping through the helper; resolves the one-line outcome. Never starts a model turn. */
+async function pingNow($: Engine): Promise<string> {
+  if (await read($, isPinging)) return 'a ping is already in flight'
   await update($, isPinging, () => true)
   try {
     const r = await helper($, ['ping', '--session', await $.session.id(), '--json'])
-    $.ui.toast(pingToast(r ?? { status: 0, error: 'no answer from the helper' }), { timeoutMs: 6000 })
+    return pingToast(r ?? { status: 0, error: 'no answer from the helper' })
   } finally {
     await update($, isPinging, () => false)
     seen = ''
     await refresh($)
   }
+}
+
+async function ping($: Engine): Promise<void> {
+  $.ui.toast(await pingNow($), { timeoutMs: 6000 })
 }
 
 export const register: Register = on => {
@@ -74,6 +79,9 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    // /ping is answered by the hook below with `{ text }` alone: the engine prints it as the command's output
+    // and sends nothing to the model (no `context`, so no hidden user message either), so no turn starts.
+    await $.command.register({ name: 'ping', description: 'Keep this session\'s prompt cache warm with one ping now' })
     await $.command.register({ name: 'context-guru', description: 'Open the Context Guru pane: savings, cache timeline, subagents' })
     void refresh($)
     $.clock.every(POLL_MS, () => void refresh($))
@@ -84,6 +92,8 @@ export const register: Register = on => {
     void refresh($) // a turn touched the cache: the countdown restarted
     return next(e)
   })
+
+  on('command.run', { command: 'ping' }, async $ => ({ text: await pingNow($) }))
 
   on('command.run', { command: 'context-guru' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Context Guru', focus: true })

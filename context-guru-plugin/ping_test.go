@@ -95,7 +95,7 @@ func TestModShips(t *testing.T) {
 	if len(h.Modules) != 1 || len(h.Hooks) == 0 {
 		t.Fatalf("hooks.json must carry both command hooks and one module: %s", b)
 	}
-	for _, f := range []string{filepath.Join("hooks", h.Modules[0]), "hooks/model.ts", "types/index.d.ts", "skills/ping/SKILL.md"} {
+	for _, f := range []string{filepath.Join("hooks", h.Modules[0]), "hooks/model.ts", "types/index.d.ts"} {
 		if _, err := os.Stat(f); err != nil {
 			t.Errorf("%s does not ship: %v", f, err)
 		}
