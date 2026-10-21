@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
+	"modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
 )
 
 // memSeq names in-memory databases uniquely. See Open.
@@ -304,7 +305,7 @@ func OpenReadOnly(path string) (*DB, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
-	sdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)")
+	sdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)&cg_ro=1")
 	if err != nil {
 		return nil, err
 	}
@@ -321,17 +322,49 @@ func OpenReadOnly(path string) (*DB, error) {
 		sdb.Close()
 		return nil, &versionMismatch{have: have}
 	}
-	// A read-only handle cannot ALTER, and the ledgers read manual_ping. A file from a proxy that
-	// predates the Ping button lacks it, so say so now, in words, instead of failing every query
-	// with "no such column". Starting a current proxy on the file migrates it.
-	for _, col := range []string{"manual_ping", "manual_saved_usd"} {
-		var n int
-		if err := sdb.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name = ?`, col).Scan(&n); err != nil || n == 0 {
-			sdb.Close()
-			return nil, fmt.Errorf("dash: read-only open: %s predates the column requests.%s; run a current proxy on it once to migrate it", path, col)
-		}
-	}
 	return &DB{sql: sdb, path: path, readOnly: true, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+}
+
+// A read-only handle cannot ALTER, and the ledgers read requests.manual_ping and manual_saved_usd,
+// which a file written by a proxy from before the Ping button lacks. Failing every query with "no
+// such column" would break a reader (the cache-campaign tool opens live databases this way), so each
+// read-only connection gets a TEMP view named `requests` that adds the two columns as constants.
+// Temp objects are searched before main, so every unqualified `requests` resolves to the shim; the
+// view is per connection and writes nothing to the file. A file that has the columns gets no shim.
+// query_only is switched on last, because it forbids creating even a temp object.
+//
+// The hook is the driver's process-wide one, so it acts only on DSNs carrying cg_ro=1.
+func init() {
+	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
+		if !strings.Contains(dsn, "cg_ro=1") {
+			return nil
+		}
+		ctx := context.Background()
+		rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info('requests') WHERE name IN ('manual_ping','manual_saved_usd')`, nil)
+		if err != nil {
+			return err
+		}
+		have := 0
+		vals := make([]driver.Value, 1)
+		for rows.Next(vals) == nil {
+			have++
+		}
+		rows.Close()
+		if have < 2 {
+			// SELECT * would hide a column the file has but the shim re-adds: name only the missing ones.
+			extra := ""
+			if have == 0 {
+				extra = ", 0 AS manual_ping, 0.0 AS manual_saved_usd"
+			} else {
+				return fmt.Errorf("dash: read-only open: requests has only one of manual_ping and manual_saved_usd")
+			}
+			if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW requests AS SELECT *`+extra+` FROM main.requests`, nil); err != nil {
+				return err
+			}
+		}
+		_, err = conn.ExecContext(ctx, `PRAGMA query_only = 1`, nil)
+		return err
+	})
 }
 
 // sanitizeVersion keeps a version string safe to embed in a filename.
