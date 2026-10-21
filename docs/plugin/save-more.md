@@ -9,6 +9,7 @@
 | `/context-guru:save-more` | both reports, a combined summary, one question at the end |
 | `/context-guru:save-more config` | every shipped preset; `--custom` also searches single components, their combinations and their order |
 | `/context-guru:save-more cache` | every keep-alive strategy, with the savings by day of week and hour |
+| `/context-guru:save-more settings` | only the "Settings that cost you money" card |
 | `/context-guru:save-more apply <config\|cache> <option>@<basis>` | make a change the screen offered (after a yes) |
 | `/context-guru:save-more revert <config\|cache>` | undo the last change made here |
 
@@ -214,6 +215,62 @@ Apply anyway, although that check failed: /context-guru:save-more apply cache by
 ```
 
 The words may come in either order (`apply cache X` or `apply X cache`). A change typed under a read command (`save-more revert config`, `config revert`) is not run; the command prints the exact one to run instead.
+
+## Settings that cost you money
+
+The default `save-more` also checks your own Claude Code settings for ones that make you pay for something you could get free. It shows a card only for the checks that fire. `save-more settings` shows just that card.
+
+```text
+╭─ Settings that cost you money ──────────────────────────────────────────────────────────────────╮
+│ CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 turns off the free server-side check in auto mode, so  │
+│ Claude Code sends its own classifier requests and you pay for them.                             │
+│   Set in: your user settings, ~/.claude/settings.json                                           │
+│   Cost: about $249.52 over the last 30 days (6,016 requests)                                    │
+│         also, classifier stage 2 (probably): $3.50, 12 requests, not added to the figure above  │
+│   Fix: remove it. Do not add CLAUDE_CODE_AUTO_MODE_SERVER: the default already asks the server. │
+│   Takes effect at the next Claude Code session.                                                 │
+│   Risk: A gateway that rejects beta fields may return 400 errors. Claude Code 2.1.304 and later │
+│   retries some of them itself. If errors start, undo this and run /context-guru:doctor.         │
+│   Also changes: Tool search halves the tools field (58.5 KB to 28.6 KB), and context_management │
+│   turns on.                                                                                     │
+│                                                                                                 │
+│ Session recap (awaySummaryEnabled) makes a model call for a one-line summary each time you come │
+│ back after a few minutes away.                                                                  │
+│   Set in: not set anywhere (on by default)                                                      │
+│   Cost: not measured yet                                                                        │
+│   Fix: set "awaySummaryEnabled": false. Takes effect at the next Claude Code session.           │
+│   Risk: You no longer see the recap line when you come back.                                    │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+Apply it? Say yes, or run: /context-guru:save-more apply settings disable-experimental-betas
+Apply it? Say yes, or run: /context-guru:save-more apply settings session-recap
+```
+
+Each check shows the setting, **where it is set**, what it cost in hindsight, the fix and the risk.
+
+| Check | Fires when | Fix | Cost comes from |
+|---|---|---|---|
+| `disable-experimental-betas` | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` is `1` or `true` in the environment or in a settings `env` block | remove the key from the file it is in | proxy rows with the classifier shape (Sonnet, no tools, 3 system blocks, `max_tokens` 64, not streamed, 2 messages). A second shape (`max_tokens` 2112) shows apart as "probably classifier stage 2" and is not added |
+| `session-recap` | `awaySummaryEnabled` is unset or true, and `CLAUDE_CODE_ENABLE_AWAY_SUMMARY` is not `0` or `false` | set `"awaySummaryEnabled": false` in `~/.claude/settings.json` | not measured yet: the request shape of the recap call is not known. It says "not measured yet", never $0 |
+
+How it works:
+
+- **The plugin reads your settings on your machine.** It reads `~/.claude/settings.json`, `~/.claude/settings.local.json`, the project's `.claude/settings.json` and `.claude/settings.local.json`, managed settings, and the process environment. It reads only the keys a check names. It prints no other value and reads no secret.
+- **The proxy prices them.** `GET /api/adapt/settings?since=&until=` returns, per check, the request count and summed `cost_usd` of your rows with that check's request shape. It uses columns only (model, tool count, system blocks, `max_tokens`, stream, message count). It reads no request text. A check with no known shape returns `null`.
+- **An old proxy still works.** If the route answers 404, the settings still show, with "not measured yet".
+- **The list of checks is one file**, `context-guru-plugin/scripts/costly_settings.json`. A Go test keeps the proxy's price shapes equal to it.
+
+Apply and undo use the same two commands as the other changes, and only after a yes:
+
+```text
+/context-guru:save-more apply settings disable-experimental-betas
+/context-guru:save-more revert settings disable-experimental-betas
+```
+
+- **Apply backs up first.** It writes `settings.json.<timestamp>.bak` next to the file, edits only that one key, keeps the file mode (0600 stays 0600) and writes atomically.
+- **Revert restores the exact previous value** from a record the apply wrote. It refuses, and writes nothing, if that key in the file is not what the apply wrote.
+- **Some values cannot be changed here.** A value from managed settings or from your shell environment shows "Cannot change" or an administrator note, and has no `Apply it?` line.
+- **Changes take effect at the next Claude Code session.**
+- A read never writes. The skill pre-approves reads only.
 
 ## When it cannot run
 

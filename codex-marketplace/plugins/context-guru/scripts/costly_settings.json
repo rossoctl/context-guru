@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "about": "The checks behind 'Settings that cost you money' (/context-guru:save-more settings). ONE list: costly.py (the plugin) reads it, and proxy/dash must keep the same price shapes (dash/costlysettings.go; a Go test compares them). Metadata only: a price shape is request columns (model, tools, system_blocks, max_tokens, stream, messages), never request text. The dashboard counts the system prompt as a message, so messages here is the wire count plus 1.",
+  "checks": [
+    {
+      "id": "disable-experimental-betas",
+      "title": "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1",
+      "what": "turns off the free server-side check in auto mode, so Claude Code sends its own classifier requests and you pay for them",
+      "reads": {"env": ["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"], "keys": []},
+      "detect": {"kind": "env_truthy", "name": "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "truthy": ["1", "true"]},
+      "price": {
+        "shapes": [
+          {"id": "classifier", "label": "classifier requests", "model_contains": "sonnet", "tools": 0, "system_blocks": 3, "max_tokens": 64, "stream": 0, "messages": 2}
+        ],
+        "also": [
+          {"id": "classifier-stage-2", "label": "probably classifier stage 2", "model_contains": null, "tools": 0, "system_blocks": 3, "max_tokens": 2112, "stream": null, "messages": 2}
+        ]
+      },
+      "fix": {"kind": "remove_env", "name": "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "done": "removed CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "text": "remove it. Do not add CLAUDE_CODE_AUTO_MODE_SERVER: the default already asks the server.", "effect": "Takes effect at the next Claude Code session."},
+      "risk": "A gateway that rejects beta fields may return 400 errors. Claude Code 2.1.304 and later retries some of them itself. If errors start, undo this and run /context-guru:doctor.",
+      "also_changes": "Tool search halves the tools field (58.5 KB to 28.6 KB), and context_management turns on.",
+      "applicable": true
+    },
+    {
+      "id": "session-recap",
+      "title": "Session recap (awaySummaryEnabled)",
+      "what": "makes a model call for a one-line summary each time you come back after a few minutes away",
+      "reads": {"env": ["CLAUDE_CODE_ENABLE_AWAY_SUMMARY"], "keys": ["awaySummaryEnabled"]},
+      "detect": {"kind": "on_by_default", "key": "awaySummaryEnabled", "off_env": "CLAUDE_CODE_ENABLE_AWAY_SUMMARY", "off_values": ["0", "false"]},
+      "price": {"shapes": [], "todo": "TODO: the request shape of the recap call is not known yet. Capture one and add it here and in dash/costlysettings.go. Until then the cost is 'not measured', never 0."},
+      "fix": {"kind": "set_false", "key": "awaySummaryEnabled", "done": "set awaySummaryEnabled to false", "text": "set \"awaySummaryEnabled\": false.", "effect": "Takes effect at the next Claude Code session."},
+      "risk": "You no longer see the recap line when you come back.",
+      "also_changes": null,
+      "applicable": true
+    }
+  ]
+}

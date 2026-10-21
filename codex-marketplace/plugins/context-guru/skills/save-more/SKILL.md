@@ -10,7 +10,7 @@ directory and print its output exactly as it is in one code block:
 python3 ../../scripts/cg.py save-more
 ```
 
-Append `config` or `cache` if the user named one, `--custom` to also search custom combinations, `details` for more.
+Append `config`, `cache` or `settings` if the user named one (`settings` lists client settings that cost money; it replays nothing), `--custom` to also search custom combinations, `details` for more.
 In the output, read `/context-guru:save-more` as this skill.
 
 If the output has no `Apply it?` line, stop. Otherwise, after printing it, ask ONE question and wait: with two
@@ -19,6 +19,7 @@ If the output has no `Apply it?` line, stop. Otherwise, after printing it, ask O
 `python3 ../../scripts/cg.py` followed by every word after `/context-guru:save-more` on its `Apply it?` line,
 unchanged, with `sandbox_permissions="require_escalated"` (it changes the proxy's configuration), and print the
 output. On anything else say "Nothing changed." and stop. Never apply without a yes.
+A "Settings that cost you money" card has its own `Apply it?` lines (`apply settings <check-id>`): ask one yes/no question per check, quoting its `Fix:`, `Risk:` and `Cost:` lines, then run `python3 ../../scripts/cg.py apply settings <check-id>` the same way.
 If the user typed `apply <kind> <token>` or `revert <kind>` themselves, that is their yes: run
 `python3 ../../scripts/cg.py apply <kind> <token>` (or `revert <kind>`), also with `sandbox_permissions="require_escalated"`.
 If an output is a single `Run this instead ...` line, run that command the same way.

@@ -146,8 +146,8 @@ func runCGCode(t *testing.T, base string, env []string, args ...string) (string,
 	cmd := exec.Command("python3", append([]string{filepath.Join("scripts", "cg.py")}, append(args,
 		"--now", "2026-10-08T15:30:00Z", "--tz-offset-min", "0")...)...)
 	cfg := t.TempDir()
-	os.WriteFile(filepath.Join(cfg, "settings.json"), []byte(`{"statusLine":{"type":"command","command":"python3 x/statusline.py","refreshInterval":5}}`), 0o644) //nolint:errcheck
-	cmd.Env = append(os.Environ(), "NO_COLOR=1", "COLUMNS=100", "CG_ASCII=", "CLAUDE_CONFIG_DIR="+cfg, "CLAUDE_CODE_SESSION_ID=session-A",
+	os.WriteFile(filepath.Join(cfg, "settings.json"), []byte(`{"awaySummaryEnabled":false,"statusLine":{"type":"command","command":"python3 x/statusline.py","refreshInterval":5}}`), 0o644) //nolint:errcheck
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "COLUMNS=100", "CG_ASCII=", "CLAUDE_CONFIG_DIR="+cfg, "CLAUDE_PROJECT_DIR="+t.TempDir(), "CG_MANAGED_SETTINGS="+filepath.Join(cfg, "no-managed.json"), "CONTEXT_GURU_STATE="+t.TempDir(), "CLAUDE_CODE_SESSION_ID=session-A",
 		"ANTHROPIC_BASE_URL="+base+"/anthropic", "TZ=UTC")
 	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()
@@ -577,7 +577,7 @@ func TestCGCachestateJSONNoSession(t *testing.T) {
 // The Codex plugin ships the same two scripts, because plugin directories are installed apart and
 // cannot import from each other. They are copies, and this keeps them identical.
 func TestCGScriptsAreVendoredIntoCodex(t *testing.T) {
-	for _, f := range []string{"cg.py", "cgcost.py", "cgcache.py"} {
+	for _, f := range []string{"cg.py", "cgcost.py", "cgcache.py", "costly.py", "costly_settings.json"} {
 		a, err := os.ReadFile(filepath.Join("scripts", f))
 		if err != nil {
 			t.Fatal(err)
@@ -596,7 +596,7 @@ func TestDocsExamplesAreTheGoldens(t *testing.T) {
 		"home": "status", "savings": "savings", "cache-warm": "cache", "cache-cold": "cache",
 		"session": "session", "doctor": "doctor",
 		"save-more": "save-more", "save-more-ascii-80": "save-more", "apply-config": "save-more", "revert-config": "save-more",
-		"apply-gate":            "save-more",
+		"apply-gate":            "save-more", "save-more-settings": "save-more",
 		"remove-mcp-and-skills": "remove-mcp-and-skills", "apply-tools-async": "remove-mcp-and-skills", "insights": "insights",
 	} {
 		g := strings.TrimRight(string(cgRead(t, "cg", golden+".golden")), "\n")
