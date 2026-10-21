@@ -6,8 +6,10 @@ turn's invocations as tool_use blocks, so the proxy's capture path is exercised 
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import dataclasses
 import json
+import signal
 import pathlib
 import sys
 import time
@@ -102,6 +104,7 @@ def run(m: mf.Manifest, base_url: str, which: str = "post", limit=None, stamps=N
 
 
 def main(argv=None) -> int:
+    faulthandler.register(signal.SIGUSR1, all_threads=True)  # `kill -USR1` dumps stacks for a hung phase
     ap = argparse.ArgumentParser()
     ap.add_argument("--tier", required=True)
     ap.add_argument("--base", required=True)

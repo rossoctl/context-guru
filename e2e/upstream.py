@@ -5,8 +5,10 @@ exactly between runs. Streams can be cut short to exercise the proxy's capture o
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import http.server
 import json
+import signal
 import sys
 
 
@@ -92,6 +94,7 @@ def serve(port: int) -> http.server.ThreadingHTTPServer:
 
 
 def main(argv=None) -> int:
+    faulthandler.register(signal.SIGUSR1, all_threads=True)  # `kill -USR1` dumps stacks for a hung phase
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=9000)
     serve(ap.parse_args(argv).port).serve_forever()
