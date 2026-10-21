@@ -184,3 +184,26 @@ func TestPingNowReportsAnUpstreamTransportFailure(t *testing.T) {
 		t.Error("a ping that never got an answer wrote a row")
 	}
 }
+
+// Pingable is exactly PingNow's ErrNotHeld condition, so a button gated on it never meets a 409.
+func TestPingableAgreesWithPingNowNotHeld(t *testing.T) {
+	k, _, _ := manualKeeper(t)
+	if !k.Pingable("t1", false, sess1.Session)[""] {
+		t.Fatal("a held thread must be pingable")
+	}
+	if got := k.Pingable("t2", false, sess1.Session); len(got) != 0 {
+		t.Errorf("another tenant sees %v", got)
+	}
+	if got := k.Pingable("", true, sess1.Session); !got[""] {
+		t.Errorf("all-tenants scope = %v, want the held thread", got)
+	}
+	// A thread the keeper stopped is not pingable, and PingNow says ErrNotHeld for it.
+	fakeOf(k).setResp(func(DispatchRequest) (Usage, int, error) { return Usage{}, http.StatusBadRequest, nil })
+	_, _ = k.PingNow(ManualRequest{Key: sess1})
+	if k.Pingable("t1", false, sess1.Session)[""] {
+		t.Error("a stopped thread is reported pingable")
+	}
+	if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {
+		t.Errorf("PingNow = %v, want ErrNotHeld", err)
+	}
+}

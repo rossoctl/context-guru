@@ -607,6 +607,7 @@ func main() {
 		h.API().SetWindows(windows)
 		// The keeper's ping plan, so /api/cachestate can say how long a cache is held warm.
 		h.API().SetKeepAlivePlans(h.KeepAlivePlans)
+		h.API().SetPingable(h.KeepAlivePingable)
 		// The configuration the adapt reports compare against: each account's in hosted mode, this
 		// proxy's own (with any applied override) otherwise.
 		h.API().SetAdaptCompactionConfig(h.DashAdaptConfig())

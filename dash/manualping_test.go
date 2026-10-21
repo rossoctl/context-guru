@@ -251,3 +251,32 @@ func TestManualPingColumnsAreAddedToAnOlderDatabase(t *testing.T) {
 		t.Fatalf("rows after migration = %d, err %v", n, err)
 	}
 }
+
+// pingable is stated per thread when the host can say, and left out when it cannot.
+func TestCacheStateStatesWhichThreadsArePingable(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	main := mkEvent(now-100_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+	main.Status, main.CacheRead = 200, 5000
+	sub := mkEvent(now-40_000, "s1", "aws/claude-haiku-5", 1000, 800)
+	sub.Status, sub.ThreadID, sub.CacheRead = 200, "a:X", 300
+	seed(t, rec, main, sub)
+
+	_, body := get(t, a, "/api/cachestate?session=s1", "")
+	if _, ok := body["pingable"]; ok {
+		t.Errorf("no keeper wired, yet pingable is stated: %v", body["pingable"])
+	}
+	a.SetPingable(func(_ string, _ bool, session string) map[string]bool {
+		return map[string]bool{"": true}
+	})
+	_, body = get(t, a, "/api/cachestate?session=s1", "")
+	if body["pingable"] != true {
+		t.Errorf("session pingable = %v, want true (main is held)", body["pingable"])
+	}
+	for _, th := range body["threads"].([]any) {
+		th := th.(map[string]any)
+		if want := th["main"] == true; th["pingable"] != want {
+			t.Errorf("thread %v pingable = %v, want %v", th["id"], th["pingable"], want)
+		}
+	}
+}

@@ -49,7 +49,9 @@ type API struct {
 	// decision. Supplied by the host in hosted mode.
 	tenantCapture func(tenantID string) bool
 	// kaPlans reads the keep-alive keeper's per-thread plan for /api/cachestate. nil = no plans.
-	kaPlans func(tenantID string, allTenants bool, session string) map[string]KeepAlivePlan
+	// pingable says per thread whether a manual ping can be sent. nil = never stated.
+	pingable func(tenantID string, allTenants bool, session string) map[string]bool
+	kaPlans  func(tenantID string, allTenants bool, session string) map[string]KeepAlivePlan
 	// pricer values the pre-instrumentation split figure on read. nil = that figure is omitted.
 	pricer modelinfo.Pricer
 	// windows resolves a model's context window, and is separate from pricer because the two

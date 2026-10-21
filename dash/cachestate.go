@@ -41,6 +41,10 @@ type CacheState struct {
 	// existed falls back to RewriteUSD for the cold case.
 	NextWarmUSD *float64 `json:"next_warm_usd,omitempty"`
 	NextColdUSD *float64 `json:"next_cold_usd,omitempty"`
+	// Pingable is true when the proxy holds this session's main thread's body and key, so POST
+	// /api/me/cache/ping can work (with keep-alive off it holds nothing and answers 409 "not
+	// held"). Omitted when the host cannot say, so a client treats absence as "unknown".
+	Pingable *bool `json:"pingable,omitempty"`
 	// Window is the served context window for Model, Exact=false when it is a guess.
 	Window      int  `json:"window"`
 	WindowExact bool `json:"window_exact"`
@@ -69,6 +73,8 @@ type ThreadCache struct {
 	// NextWarmUSD and NextColdUSD: see CacheState.
 	NextWarmUSD *float64 `json:"next_warm_usd,omitempty"`
 	NextColdUSD *float64 `json:"next_cold_usd,omitempty"`
+	// Pingable: see CacheState.
+	Pingable *bool `json:"pingable,omitempty"`
 	// PingsLeft is how many keep-alive pings the proxy still plans for this thread, and
 	// HeldUntilMS when its cache goes cold if no real request arrives first: the last planned
 	// ping's start plus the TTL. Both omitted when no ping is planned.
@@ -106,6 +112,12 @@ func (p KeepAlivePlan) heldUntil(ttlS int64) int64 {
 // dash holds no keep-alive state of its own; nil means no plan is ever shown.
 func (a *API) SetKeepAlivePlans(fn func(tenantID string, allTenants bool, session string) map[string]KeepAlivePlan) {
 	a.kaPlans = fn
+}
+
+// SetPingable supplies, per thread of one session, whether the keeper holds what a manual ping
+// needs. dash keeps no keep-alive state; nil means pingable is never stated.
+func (a *API) SetPingable(fn func(tenantID string, allTenants bool, session string) map[string]bool) {
+	a.pingable = fn
 }
 
 // maxDurationMS bounds the upstream time trusted for EndTS: a bogus value must not hold a dead
@@ -393,6 +405,15 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 			}
 			s.PingsLeft, s.HeldUntilMS = p.PingsLeft, p.heldUntil(ttl)
 		}
+	}
+	if a.pingable != nil {
+		held := a.pingable(f.Tenant, f.TenantAll, f.Session)
+		for i := range s.Threads {
+			v := held[s.Threads[i].ID]
+			s.Threads[i].Pingable = &v
+		}
+		v := held[""]
+		s.Pingable = &v
 	}
 	s.Window, s.WindowExact, _ = modelinfo.Exact(a.windows, r.Context(), s.Model)
 	writeJSON(w, s)

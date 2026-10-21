@@ -170,6 +170,25 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	return res, nil
 }
 
+// Pingable reports, per thread ("" = main) of one session, whether PingNow would find something
+// held to ping with: an entry exists and the keeper has not stopped it. It is PingNow's ErrNotHeld
+// test and nothing else, so a client can hide a Ping button that would only answer 409. all drops
+// the tenant filter, as Plans does.
+func (k *Keeper) Pingable(tenant string, all bool, session string) map[string]bool {
+	if k == nil || session == "" {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	out := map[string]bool{}
+	for _, e := range k.live {
+		if e.session == session && (all || e.tenant == tenant) && !e.stopped {
+			out[e.thread] = true
+		}
+	}
+	return out
+}
+
 // ManualStrategyID is the keepalive_strategy_id a manual ping's row carries. It names no real
 // strategy, so no strategy ledger matches it.
 const ManualStrategyID = "manual"

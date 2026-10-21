@@ -340,3 +340,23 @@ func TestManualPingAcceptsTheAccountsProxyToken(t *testing.T) {
 	}
 	_ = b
 }
+
+// The handler's pingable answer is the endpoint's own "not held" test: a button gated on it
+// never meets a 409.
+func TestKeepAlivePingableMatchesTheEndpointsNotHeld(t *testing.T) {
+	m := newManualHost(t)
+	m.hold(t, "", "sess-a", "", 50*time.Second)
+	if !m.h.KeepAlivePingable("", true, "sess-a")[""] {
+		t.Fatal("a held thread is not pingable")
+	}
+	m.h.keeper.RetireSession("", "sess-a")
+	if m.h.KeepAlivePingable("", true, "sess-a")[""] {
+		t.Error("a retired thread is pingable")
+	}
+	if w, out := m.post(`{"session":"sess-a"}`); w.Code != http.StatusConflict || out["error"] != "not held" {
+		t.Errorf("endpoint = %d %v, want 409 not held", w.Code, out)
+	}
+	if (*Handler)(nil).KeepAlivePingable("", true, "x") != nil {
+		t.Error("a nil handler states something")
+	}
+}
