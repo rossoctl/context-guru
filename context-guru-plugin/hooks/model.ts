@@ -84,6 +84,7 @@ export const pingToast = (r: { status?: number; error?: string; saved_usd?: numb
   if (r.status === 200) return `kept warm — saved ${usd(r.saved_usd ?? 0)} − ping ${usd(r.ping_usd ?? 0)}`
   if (r.status === 409 && r.error === 'not held') return 'keep-alive is off for this account \u2014 turn it on in the dashboard to ping'
   if (r.status === 409 && r.error === 'busy') return 'a request is running; it refreshes the cache itself'
+  if (r.status === 409 && r.error === 'over budget') return 'one ping would cost more than the per-ping ceiling \u2014 not sent'
   if (r.status === 409) return 'cache already cold \u2014 nothing to keep warm'
   if (r.status === 404 && r.error === 'unknown session') return 'this session is not known to the server yet'
   if (r.status === 404 || r.status === 405) return 'this Context Guru server does not support manual pings yet \u2014 update the proxy'

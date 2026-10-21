@@ -147,6 +147,7 @@ test('warm but not pingable: a dim hint instead of the Ping button; an absent fi
 for (const [status, error, want] of [
   [409, 'not held', /keep-alive is off/],
   [409, 'busy', /request is running/],
+  [409, 'over budget', /per-ping ceiling/],
   [409, 'cold', /already cold/],
   [429, 'no spare capacity', /no spare capacity/],
   [502, 'upstream', /upstream model refused/],

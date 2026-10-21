@@ -1187,6 +1187,8 @@ def ping_lines(code: int, doc: dict | None) -> list[str]:
         return ["Keep-alive is off for this account. Turn it on in the dashboard to ping."]
     if code == 409 and err == "busy":
         return ["A request is running; it refreshes the cache itself."]
+    if code == 409 and err == "over budget":
+        return ["One ping on this thread would cost more than the per-ping ceiling, so it was not sent."]
     if code == 409:  # "cold"
         return ["The cache is already cold, so there is nothing to keep warm. The next request rewrites it."]
     if code == 404 and err == "unknown session":
