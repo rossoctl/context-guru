@@ -41,9 +41,32 @@ class TestReport(unittest.TestCase):
     def test_unknown_fails_lists_only_fails_no_known_finding_explains(self):
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d)
-            (p / "verdicts.json").write_text(json.dumps([_v("U.x.a", "FAIL"), _v("Z", "FAIL"), _v("Y", "PASS")]))
-            kf = p / "known.txt"; kf.write_text("U.x.*  # known\n")
+            (p / "verdicts.json").write_text(json.dumps([_v("U.x.a", "FAIL", act=["undefined tools"]), _v("Z", "FAIL"),
+                                                         _v("Y", "PASS")]))
+            kf = p / "known.txt"; kf.write_text("U.x.* | undefined  # known\n")
             self.assertEqual(report.unknown_fails(d, str(kf)), ["Z"])
+
+    def test_a_fail_with_the_right_id_but_other_evidence_is_unknown(self):
+        # A new defect under an old check id must not ride through the gate on the old finding's line.
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d)
+            (p / "verdicts.json").write_text(json.dumps([_v("U.x.a", "FAIL", act=["undefined tools"]),
+                                                         _v("U.x.b", "FAIL", act=["NaN tok/req"])]))
+            kf = p / "known.txt"; kf.write_text("U.x.* | undefined  # known\n")
+            self.assertEqual(report.unknown_fails(d, str(kf)), ["U.x.b"])
+
+    def test_explains_requires_the_id_and_the_evidence(self):
+        f = ("U.x.* R.y", "scratch-w", "why")
+        self.assertEqual([report.explains(f, _v(i, "FAIL", act=a)) for i, a in
+                          (("U.x.a", ["/tmp/scratch-w"]), ("R.y", "/tmp/scratch-w"), ("U.x.a", ["/tmp/other"]),
+                           ("Q.z", ["/tmp/scratch-w"]))],
+                         [True, True, False, False])
+
+    def test_a_known_findings_line_without_evidence_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            kf = pathlib.Path(d) / "known.txt"; kf.write_text("U.x.*  # no evidence\n")
+            with self.assertRaises(ValueError):
+                report.known(kf)
 
     def test_unknown_fails_cli_exits_nonzero_when_it_cannot_judge(self):
         # The smoke gate reads this; an exception must close the gate, never print nothing and open it.
@@ -66,23 +89,24 @@ class TestReport(unittest.TestCase):
             (p / "verdicts.json").write_text(json.dumps([_v("A", "PASS")]))
             (p / "phases.jsonl").write_text("")
             kf = p / "known.txt"
-            kf.write_text("U.x.y  # undefined text in cleanup card\n# comment only\n")
+            kf.write_text("U.x.y | undefined  # undefined text in cleanup card\n# comment only\n")
             report.build(d, known_findings=str(kf))
             s = (p / "summary.md").read_text()
             self.assertIn("## Known PR findings", s)
-            self.assertIn("| undefined text in cleanup card | U.x.y | 0 |", s)
+            self.assertIn("| undefined text in cleanup card | U.x.y | undefined | 0 |", s)
 
     def test_a_known_finding_lists_its_globs_and_the_checks_it_explains(self):
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d)
             (p / "verdicts.json").write_text(json.dumps([
-                _v("U.x.a", "FAIL"), _v("U.x.b", "FAIL"), _v("R.y", "KNOWN"), _v("U.x.c", "PASS"), _v("Z", "FAIL")]))
+                _v("U.x.a", "FAIL", act="e"), _v("U.x.b", "FAIL", act="e"), _v("R.y", "KNOWN", act="e"),
+                _v("U.x.c", "PASS", act="e"), _v("Z", "FAIL", act="e")]))
             (p / "phases.jsonl").write_text("")
             kf = p / "known.txt"
-            kf.write_text("U.x.* R.y  # one finding, two kinds of check\n")
+            kf.write_text("U.x.* R.y | e  # one finding, two kinds of check\n")
             report.build(d, known_findings=str(kf))
             s = (p / "summary.md").read_text()
-            self.assertIn("| one finding, two kinds of check | U.x.* R.y | 3 |", s)
+            self.assertIn("| one finding, two kinds of check | U.x.* R.y | e | 3 |", s)
             self.assertIn("Not explained by a known finding: Z", s)
 
     def test_notes_md_in_the_results_dir_is_included_verbatim(self):

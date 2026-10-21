@@ -12,12 +12,15 @@ ORDER = ("FAIL", "BLOCKED", "KNOWN", "PASS")
 DEFAULT_KNOWN = pathlib.Path(__file__).with_name("known-findings.txt")
 
 
-def explains(patterns: str, check_id: str) -> bool:
-    """A known-findings line's check globs (space-separated) match the check id."""
-    return any(fnmatch.fnmatchcase(check_id, g) for g in patterns.split())
+def explains(finding: tuple, row: dict) -> bool:
+    """A known finding explains a verdict row when one of its check globs matches the id AND its evidence
+    substring is in the row's actual value: a new defect under an old check id is not the old finding."""
+    globs, evidence = finding[0], finding[1]
+    return any(fnmatch.fnmatchcase(row["id"], g) for g in globs.split()) and evidence in json.dumps(row["actual"])
 
 
-def known(path) -> list[tuple[str, str]]:
+def known(path) -> list[tuple[str, str, str]]:
+    """(check globs, evidence substring, why) per line of `<globs> | <evidence>  # why`."""
     p = pathlib.Path(path)
     if not p.exists():
         return []
@@ -26,8 +29,11 @@ def known(path) -> list[tuple[str, str]]:
         body = line.strip()
         if not body or body.startswith("#"):
             continue
-        cid, _, why = body.partition("#")
-        out.append((cid.strip(), why.strip()))
+        head, _, why = body.partition(" # ")
+        globs, bar, evidence = head.partition("|")
+        if not bar or not globs.strip() or not evidence.strip():
+            raise ValueError(f"known finding without `<globs> | <evidence>`: {line!r}")
+        out.append((globs.strip(), evidence.strip(), why.strip()))
     return out
 
 
@@ -35,7 +41,7 @@ def unknown_fails(results_dir, known_findings=DEFAULT_KNOWN) -> list[str]:
     """FAIL ids no known-findings line explains: what the smoke gate stops on."""
     kn = known(known_findings)
     v = json.loads((pathlib.Path(results_dir) / "verdicts.json").read_text())
-    return [r["id"] for r in v if r["verdict"] == "FAIL" and not any(explains(c, r["id"]) for c, _ in kn)]
+    return [r["id"] for r in v if r["verdict"] == "FAIL" and not any(explains(f, r) for f in kn)]
 
 
 def _cell(x, n=120) -> str:
@@ -64,10 +70,10 @@ def build(results_dir: str, known_findings: str | None = None) -> None:
         lines.append(f"| {r['id']} | {r['verdict']} | {_cell(r['expected'])} | {_cell(r['actual'])} | {r['snapshot']} |")
     kfind = known(known_findings or DEFAULT_KNOWN)
     if kfind:
-        bad = [r["id"] for r in v if r["verdict"] in ("FAIL", "KNOWN")]
-        lines += ["", "## Known PR findings", "", "| finding | checks | FAIL/KNOWN here |", "|---|---|---|"]
-        lines += [f"| {w} | {c} | {sum(explains(c, i) for i in bad)} |" for c, w in kfind]
-        rest = [i for i in bad if not any(explains(c, i) for c, _ in kfind)]
+        bad = [r for r in v if r["verdict"] in ("FAIL", "KNOWN")]
+        lines += ["", "## Known PR findings", "", "| finding | checks | evidence | FAIL/KNOWN here |", "|---|---|---|---|"]
+        lines += [f"| {f[2]} | {f[0]} | {f[1]} | {sum(explains(f, r) for r in bad)} |" for f in kfind]
+        rest = [r["id"] for r in bad if not any(explains(f, r) for f in kfind)]
         lines += ["", "Not explained by a known finding: " + (", ".join(rest) if rest else "none")]
     notes = (d / "notes.md").read_text() if (d / "notes.md").exists() else ""
     if notes:

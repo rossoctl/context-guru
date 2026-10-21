@@ -214,17 +214,17 @@ def suite_checks(log, rc) -> list:
     suite was not run (smoke)."""
     if log is None or rc is None:
         return []
-    ids, tests = [], []
+    ids, tests = {}, []  # id -> the log line that failed it (the evidence known-findings.txt matches)
     for l in log.splitlines():
         if l.startswith("--- FAIL: "):  # top-level only; subtests are indented
-            tests.append(l.split()[2])
+            tests.append((l.split()[2], l))
         elif l.startswith("FAIL\t") or l.startswith("FAIL ") and len(l.split()) > 1 and "/" in l.split()[1]:
             pkg = l.split()[1]
-            ids += [f"{pkg}.{t}" for t in tests] or [pkg]
+            ids.update({f"{pkg}.{t}": tl for t, tl in tests} or {pkg: l})
             tests = []
     if ids:
-        return [{"id": f"G.go_test.{i}", "area": "suite", "verdict": "FAIL", "expected": "ok", "actual": "FAIL",
-                 "detail": "see logs/suite.log", "snapshot": ""} for i in sorted(set(ids))]
+        return [{"id": f"G.go_test.{i}", "area": "suite", "verdict": "FAIL", "expected": "ok", "actual": ids[i],
+                 "detail": "see logs/suite.log", "snapshot": ""} for i in sorted(ids)]
     return [{"id": "G.go_test.suite", "area": "suite", "verdict": "PASS" if rc == 0 else "FAIL",
              "expected": 0, "actual": rc, "detail": "make test exit code", "snapshot": ""}]
 

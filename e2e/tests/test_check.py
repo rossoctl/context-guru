@@ -340,6 +340,12 @@ class TestSuiteChecks(unittest.TestCase):
         self.assertEqual(got, {"G.go_test.m/b.TestX": "FAIL", "G.go_test.m/c.TestY": "FAIL",
                                "G.go_test.m/c.TestZ": "FAIL"})
 
+    def test_a_failing_test_records_its_own_fail_line_as_evidence(self):
+        # known-findings.txt matches on the actual value, so it must name the test, not just say FAIL.
+        log = "--- FAIL: TestX (0.1s)\nFAIL\nFAIL\tm/b\t2s\nFAIL\tm/c [build failed]\n"
+        got = {r["id"]: r["actual"] for r in check.suite_checks(log, 1)}
+        self.assertEqual(got, {"G.go_test.m/b.TestX": "--- FAIL: TestX (0.1s)", "G.go_test.m/c": "FAIL\tm/c [build failed]"})
+
     def test_nonzero_exit_without_a_package_line_still_fails(self):
         got = check.suite_checks("make: *** boom\n", 2)
         self.assertEqual([(r["id"], r["verdict"]) for r in got], [("G.go_test.suite", "FAIL")])

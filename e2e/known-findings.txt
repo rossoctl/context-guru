@@ -1,10 +1,14 @@
-# Known PR #578 findings, one line each: <check-id globs, space-separated>  # finding
-# run.sh's smoke gate lets a FAIL through to the full tier only if a line here explains it; report.py lists
-# each finding with how many FAIL/KNOWN checks it explains, and names any FAIL nothing here explains.
-K.inventory_survives_shutdown  # #1 (pre-existing) tool inventory lost on shutdown: invWriter is not drained on Close; the e2e race is rarely hit (BLOCKED), see the Go reproducer
-U.no_undefined_text.*  # #2 cleanup card reads "undefined tools": dash/ui/insights.js:674 reads o.tools, the owner object has no tools field
-U.no_overflow.*  # #3 .ins-why inherits `.tbl td { white-space: nowrap }` (dash/ui/style.css:671-673) and overflows its cell
-C.picker_set R.requests./sandbox/work/wanderer U.no_js_errors.cleanup-wanderer-*  # R9 dash/projectgroups.go names a project after its MOST-active cwd: mock wanderer (331 turns in /tmp/scratch-w, 329 in its root) lists as /tmp/scratch-w; its root's count reads 329 vs 660
-G.go_test.*/dash.TestTheHistoryReportsWhatWasInvokedAndWhen  # test bug (new in the PR): the fixture never installs the skill it expects; passes on a dev host only by reading the host's real home
-G.go_test.*/context-guru-plugin.TestSessionsFlagWindowsTheReportAndIsVisibleOnTheWire  # data race in TEST code (new in the PR): context-guru-plugin/insights_test.go:188 vs :205
-G.go_test.*/dash.TestCalculatorPricesFromTheRowsModelNotABlend  # pre-existing on main: exact float equality on a computed price
+# Known PR #578 findings, one line each: <check-id globs, space-separated> | <evidence>  # finding
+# A line explains a FAIL only if a glob matches its id AND <evidence> is a substring of json.dumps(its actual
+# value), so a new defect under an old check id is not waved through on an old finding. run.sh's smoke gate lets a
+# FAIL through to the full tier only if a line here explains it; report.py lists each finding with how many
+# FAIL/KNOWN checks it explains, and names any FAIL nothing here explains.
+K.inventory_survives_shutdown | 0  # #1 (pre-existing) tool inventory lost on shutdown: invWriter is not drained on Close; the e2e race is rarely hit (BLOCKED), see the Go reproducer
+U.no_undefined_text.cleanup-* | undefined  # #2 cleanup card reads "undefined tools": dash/ui/insights.js:674 reads o.tools, the owner object has no tools field
+U.no_overflow.cleanup-* | ins-why  # #3 .ins-why inherits `.tbl td { white-space: nowrap }` (dash/ui/style.css:671-673) and overflows its cell
+C.picker_set | /tmp/scratch-w  # R9 dash/projectgroups.go names a project after its MOST-active cwd: mock wanderer (331 turns in /tmp/scratch-w, 329 in its root) lists as /tmp/scratch-w
+R.requests./sandbox/work/wanderer | 329  # R9, same cause: the wanderer root's request count reads the 329 turns run in the root, not all 660 (count from the 20261020 manifest)
+U.no_js_errors.cleanup-wanderer-* | after project change  # R9, same cause: the picker never offers /sandbox/work/wanderer, so the snapper's project change never lands
+G.go_test.*/dash.TestTheHistoryReportsWhatWasInvokedAndWhen | TestTheHistoryReportsWhatWasInvokedAndWhen  # test bug (new in the PR): the fixture never installs the skill it expects; passes on a dev host only by reading the host's real home
+G.go_test.*/context-guru-plugin.TestSessionsFlagWindowsTheReportAndIsVisibleOnTheWire | TestSessionsFlagWindowsTheReportAndIsVisibleOnTheWire  # data race in TEST code (new in the PR): context-guru-plugin/insights_test.go:188 vs :205
+G.go_test.*/dash.TestCalculatorPricesFromTheRowsModelNotABlend | TestCalculatorPricesFromTheRowsModelNotABlend  # pre-existing on main: exact float equality on a computed price
