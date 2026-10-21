@@ -389,6 +389,11 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	}
 	if h.rec != nil {
 		h.api = dash.NewAPI(h.rec)
+		// A write to an account or to the keep-alive strategies drops the cached dashboard reads that
+		// include that state, so a toggle shows on the next load and not after the stale window.
+		if reg := h.registry(); reg != nil {
+			reg.SetOnChange(h.api.InvalidateStateCaches)
+		}
 		// Publish the off-path pool's counters to the dashboard, the same layering /stats
 		// uses: the pool lives in `modes`, which sits above both `metrics` and `dash`, so
 		// the host is the only place that can join them. Read at serve time, not captured

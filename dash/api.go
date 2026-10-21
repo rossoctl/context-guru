@@ -109,13 +109,16 @@ const dashCacheTTL = 30 * time.Second
 // dashCacheStale is how far PAST the TTL a body may still be served while its replacement is being
 // computed. Beyond it a reader waits for fresh numbers instead.
 //
-// The cap is what keeps stale-while-revalidate honest. Without one, a deployment that goes quiet
-// serves the last body it ever built, indefinitely, and the page reports it as current — the
-// dashboard's freshness line is stamped when the BROWSER fetched, so it cannot see server-side
-// staleness. 30s past a 30s TTL bounds the worst case at one minute, which is smaller than the
-// client's own refresh interval, so no reader can be shown anything older than they would have
-// been shown anyway by not clicking refresh.
-const dashCacheStale = 30 * time.Second
+// This is the cap that keeps stale-while-revalidate honest, and it was 30s, which was SHORTER THAN
+// THE WORK AGAIN: an all-time stats read takes about 6s warm and 35s on a cold process on a 3.6 GB
+// database, so a reader who came back after a minute found nothing to serve and paid the whole
+// query, every time. Ten minutes covers the gap between two looks at a dashboard.
+//
+// The honesty that the old comment asked of the cap now comes from the response instead of from a
+// short cap: every cached body carries an Age header (seconds since it was computed), the page
+// subtracts it from "Updated N ago", and the reader sees the age of the data rather than the age of
+// the request. Nothing is served older than this, and nothing is shown as newer than it is.
+const dashCacheStale = 10 * time.Minute
 
 // dashHandlerTimeout bounds every dashboard read except the four in unboundedRoutes. It used to
 // bound three of them, named by hand at their route entries — see Mount, which now applies it by
@@ -178,11 +181,51 @@ type jsonCache struct {
 	// serveJSON — which is both wasted work and the thing that was turning an isolated ~1s query
 	// into a 40s one under real concurrent load.
 	refreshing map[string]bool
+	// gen counts clear() calls; see generation.
+	gen uint64
 }
 
 type jsonCacheEntry struct {
 	at   time.Time
 	body []byte
+}
+
+// clear drops every entry. A refresh already in flight is allowed to finish; it stores a body computed
+// after the clear began only if it started after, so the claim is released but the old entry is gone.
+func (c *jsonCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = nil
+	c.gen++
+}
+
+// generation is read before a compute starts and handed to setIfCurrent after it: a compute that began
+// before a clear read state that has since changed, and its body must not be stored as current.
+func (c *jsonCache) generation() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gen
+}
+
+// setIfCurrent stores body only if no clear() has happened since gen was read. The check and the store are
+// ONE lock hold: with two, a clear landing between them put the old body back.
+func (c *jsonCache) setIfCurrent(key string, body []byte, gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen == gen {
+		c.setLocked(key, body)
+	}
+}
+
+// age is how long ago the entry for key was computed; 0 when there is none.
+func (c *jsonCache) age(key string) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return 0
+	}
+	return time.Since(e.at)
 }
 
 func (c *jsonCache) get(key string) ([]byte, bool) {
@@ -206,17 +249,24 @@ func (c *jsonCache) get(key string) ([]byte, bool) {
 // endRefresh runs (via defer) the moment it returns either way, so this cannot serve a body
 // forever — only up to dashCacheTTL+dashCacheStale+dashComputeTimeout past when it was written.
 func (c *jsonCache) load(key string) (body []byte, fresh bool) {
+	body, fresh, _ = c.loadAged(key)
+	return body, fresh
+}
+
+// loadAged is load plus the entry's age, read under the same lock hold as the body so the pair is
+// consistent: a clear between two separate reads made an old body report an age of 0.
+func (c *jsonCache) loadAged(key string) (body []byte, fresh bool, age time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[key]
 	if !ok {
-		return nil, false
+		return nil, false, 0
 	}
-	age := time.Since(e.at)
+	age = time.Since(e.at)
 	if age >= dashCacheTTL+dashCacheStale && !c.refreshing[key] {
-		return nil, false
+		return nil, false, 0
 	}
-	return e.body, age < dashCacheTTL
+	return e.body, age < dashCacheTTL, age
 }
 
 // beginRefresh claims the right to refresh key, returning false if another refresh for it is
@@ -244,6 +294,10 @@ func (c *jsonCache) endRefresh(key string) {
 func (c *jsonCache) set(key string, body []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.setLocked(key, body)
+}
+
+func (c *jsonCache) setLocked(key string, body []byte) {
 	if c.entries == nil {
 		c.entries = make(map[string]jsonCacheEntry)
 	}
@@ -268,17 +322,20 @@ func (c *jsonCache) set(key string, body []byte) {
 // that no code change produced. The header costs one line per response and makes the harness
 // able to tell the two apart.
 func serveCached(w http.ResponseWriter, c *jsonCache, key string) bool {
-	if body, ok := c.get(key); ok {
-		writeCachedJSON(w, body, "hit")
+	if body, fresh, age := c.loadAged(key); body != nil && fresh {
+		writeCachedJSON(w, body, "hit", age)
 		return true
 	}
 	w.Header().Set("X-Cache", "miss")
 	return false
 }
 
-func writeCachedJSON(w http.ResponseWriter, body []byte, state string) {
+func writeCachedJSON(w http.ResponseWriter, body []byte, state string, age time.Duration) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", state)
+	// Age (RFC 9111) is how old the body is, so the UI can say how old the figures are. 0 for a body
+	// computed for this request.
+	w.Header().Set("Age", strconv.FormatInt(int64(age/time.Second), 10))
 	_, _ = w.Write(body)
 }
 
@@ -306,9 +363,9 @@ func writeCachedJSON(w http.ResponseWriter, body []byte, state string) {
 // be killed instantly and the entry could never become fresh again.
 func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, key string,
 	compute func(db *DB) ([]byte, error)) {
-	if body, fresh := c.load(key); body != nil {
+	if body, fresh, age := c.loadAged(key); body != nil {
 		if fresh {
-			writeCachedJSON(w, body, "hit")
+			writeCachedJSON(w, body, "hit", age)
 			return
 		}
 		// Only the first stale reader for this key starts a refresh; every other concurrent
@@ -321,10 +378,11 @@ func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, ke
 		if c.beginRefresh(key) {
 			go a.refreshJSON(c, key, compute)
 		}
-		writeCachedJSON(w, body, "stale")
+		writeCachedJSON(w, body, "stale", age)
 		return
 	}
 	w.Header().Set("X-Cache", "miss")
+	w.Header().Set("Age", "0")
 	// The shared computation is DETACHED from every caller, and that is deliberate rather than
 	// careless. Bound to the leader's r.Context() it inherits the leader's deadline and the leader's
 	// abandonment: when the leader timed out, compute failed with a cancelled context and
@@ -342,9 +400,10 @@ func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, ke
 	v, err, _ := a.jsonInflight.Do(fmt.Sprintf("%p\x00%s", c, key), func() (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), dashComputeTimeout)
 		defer cancel()
+		gen := c.generation()
 		body, err := compute(a.rec.DB().WithContext(ctx))
 		if err == nil {
-			c.set(key, body)
+			c.setIfCurrent(key, body, gen)
 		}
 		return body, err
 	})
@@ -392,6 +451,20 @@ func (c *capture) WriteHeader(code int)        { c.code = code }
 // on each tab switch and on its five-minute refresh; none of them existed in a cache before, so
 // a reader paid the full price every time. The key is the caller's principal plus the full query
 // string (cacheKey), so two accounts never share a body, and the path, so two routes never do.
+// InvalidateStateCaches drops cached reads that include state a user can edit, so a change shows on
+// the next load instead of after the stale window. kind is the tenant package's ChangeAccount (an
+// account's configuration, which holds the tool and skill removal list) or ChangeStrategy (keep-alive
+// strategies and campaigns). Read-only aggregates (stats, series, sessions) are left to the stale-while-
+// revalidate path: nothing a user can edit appears in them.
+func (a *API) InvalidateStateCaches(kind string) {
+	a.toolsCache.clear()
+	a.toolFilterCache.clear()
+	a.promptCache.clear()
+	if kind == "strategy" {
+		a.routeCache.clear()
+	}
+}
+
 func (a *API) cachedRoute(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p := Principal{Manager: true}
@@ -427,6 +500,7 @@ func (a *API) refreshJSON(c *jsonCache, key string, compute func(db *DB) ([]byte
 	defer c.endRefresh(key)
 	ctx, cancel := context.WithTimeout(context.Background(), dashComputeTimeout)
 	defer cancel()
+	gen := c.generation()
 	body, err := compute(a.rec.DB().WithContext(ctx))
 	if err != nil {
 		// Keep the stale entry: it is still servable and still inside its cap. Dropping it would
@@ -435,7 +509,7 @@ func (a *API) refreshJSON(c *jsonCache, key string, compute func(db *DB) ([]byte
 			"err", err)
 		return
 	}
-	c.set(key, body)
+	c.setIfCurrent(key, body, gen)
 }
 
 // cacheKey scopes a cache entry to the actual caller, not just the URL: a manager and a
