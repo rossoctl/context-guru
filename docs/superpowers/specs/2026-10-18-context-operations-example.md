@@ -95,10 +95,11 @@ it is written. The change saves 7,000 × $3.75 = **$0.02625**. The rates are in 
 
 ## 2. The same change on hot and cold requests
 
-Two more requests follow. Each adds new messages at the end, and the operator reports the same
+Request 1 is 10 seconds after request 0. Request 2 follows 1 minute later, and request 3 follows
+20 minutes after that. Each adds new messages at the end, and the operator reports the same
 `rewrite` again. Each request is priced from its own cache state (see the [setup](#setup)).
 
-![The same 7,000 tokens are saved in all three requests](2026-10-18-context-operations-example-1-2.svg)
+![The same 7,000 tokens are saved in all three requests](2026-10-18-context-operations-example-2.svg)
 
 The hatched block is the 7,000 removed tokens. Orange means they would have been written, blue
 means they would have been read.
@@ -184,18 +185,19 @@ A summarizer replaces messages 0 to 2 (10,000 tokens) with one 500-token summary
 The savings use the agent model's rates, because the removed tokens would have been billed to the
 agent's requests. The call uses the summarizer model's rates (see the [setup](#setup)).
 
-![Summarization: the call costs money first, then each request saves 9,500 tokens](2026-10-18-context-operations-example-2-1.svg)
+![Summarization: the call costs money first, then each request saves 9,500 tokens](2026-10-18-context-operations-example-4.svg)
 
-- **Summarizer call:** costs $0.01250 (reported; or 10,000 × $1.00 + 500 × $5.00), so the balance starts below zero.
-- **Request A** (hot): the summary changes the start of the prompt, so nothing in the cache
-  matches. The summary and the tail are written (orange). The saving is small: 10,000 × $0.30 −
-  500 × $3.75 = +$0.00113. The break costs more: the tail would have been read, and is written.
-  3,000 × ($3.75 − $0.30) = −$0.01035. Request A is a net **−$0.00922**.
+- **Summarizer call:** costs $0.01250 = 10,000 × $1.00 + 500 × $5.00, so the balance starts below
+  zero. The response also reported `costUSD` 0.0125.
+- **Request A** (hot): the summary saves 9,500 tokens that would have been read: 9,500 × $0.30 =
+  +$0.00285. But the summary changes the start of the prompt, so nothing in the cache matches. The
+  summary and the tail (3,500 tokens) are written, not read (orange). The break costs
+  3,500 × ($3.75 − $0.30) = −$0.01208. Request A is a net **−$0.00923**.
 - **Request B** (hot): the summary is cached now, so the 9,500 tokens would have been read.
   Saving: 9,500 × $0.30 = +$0.00285.
 - **Request C** (cold, 15 minutes after B): the cache expired, so the 9,500 tokens would have been
   written. Saving: 9,500 × $3.75 = +$0.03563. One cold request saves 12.5 times more than a hot one,
-  and the balance goes above zero. The total after three requests is **+$0.01676**.
+  and the balance goes above zero. The total after three requests is **+$0.01675**.
 
 **The operations.** Three operations describe the change. The `spend` and the `rewrite` carry the
 same `changeId`, so the host can add the cost and the saving together.
@@ -204,7 +206,7 @@ same `changeId`, so the host can add the cost and the saving together.
 
    ```json
    {"id": "op1", "kind": "spend", "operator": "context-guru.summarize",
-    "call": {"model": "small-model", "params": {"effort": "low"},
+    "call": {"model": "summarizer-model", "params": {"effort": "low"},
              "usage": {"input": 10000, "cacheRead": 0, "cacheWrite": 0, "output": 500,
                        "costUSD": 0.0125}},
     "changeId": "cg:summarize:5d21"}
@@ -240,8 +242,9 @@ same `changeId`, so the host can add the cost and the saving together.
 - `rewrite` is the summary. `messageSplice` says 3 messages became 1, so later positions move up by 2.
   The `spend` and the `rewrite` are the same on A, B and C. Only the cache state changes the saving.
 - A break (`cacheChange`) moves tokens that follow the break from cache read to cache write. This is the
-  **penalty**: tail tokens × ($3.75 − $0.30). Here the tail is 3,000 tokens, so the penalty is
-  −$0.01035. It is larger than the saving on A, so the first request with a summary costs money.
+  **penalty**: the forwarded tokens between what the provider still read and B\*, × ($3.75 − $0.30).
+  Here they are the summary and the 3,000-token tail, so the penalty is −$0.01208. It is larger than
+  the saving on A, so the first request with a summary costs money.
   Requests B and C have no break, so they pay no penalty.
 
 ---
@@ -310,10 +313,22 @@ without the operations minus the bill with them (design §6.3, "Conservation").
 The body the **client** sends is 71,000 tokens. The diagram shows it, section by section, in the
 top row. The bottom row is the body the operators forward.
 
+| Section | Client tokens | Forwarded tokens |
+|---|---|---|
+| `tools` | 20,000 | 12,300 (3 declarations removed, `expand` added) |
+| `system` | 3,000 | 3,000 |
+| messages 0 to 2 | 10,000 | 10,000 |
+| message 3 | 4,000 | 60 |
+| message 4 | 1,000 | 1,000 |
+| message 5 | 20,000 | 20,000 |
+| messages 6 to 8 | 5,000 | 5,000 |
+| message 9 (new) | 8,000 | 900 |
+| **Total** | **71,000** | **52,260** |
+
 ![Turn 5: four operations, each priced at its own position](2026-10-18-context-operations-example-6.svg)
 
 Hatched blocks are what the operators removed. Blue is billed at the cache-read rate, and orange at
-the cache-write rate. The block with a dark outline is the tool that `expand` added.
+the cache-write rate. The block marked with brackets is the tool that `expand` added.
 
 State from earlier turns:
 
@@ -403,7 +418,15 @@ The `tools` section sizes are not on any operation. They are given to the sum ch
 The diagram shows the bill and the saving of each operation. The question for each operation
 (design §6.2): *if this change had never been made, how would the provider have billed these tokens
 on this request?* The answer depends on the position of the tokens: read at or before B\*, written
-after B\* up to `L`, input after `L`. The total for turn 5 is **+$0.03012**.
+after B\* up to `L`, input after `L`.
+
+| Operation | Tokens | Tier | Calculation | Result |
+|---|---|---|---|---|
+| `tool-prune` | −8,000 | read | 8,000 × $0.30 | +$0.00240 |
+| `expand` | +300 | read | 300 × $0.30 | −$0.00009 |
+| `mask` | −3,940 | read | 3,940 × $0.30 | +$0.00118 |
+| `cmdfilter` | −7,100 | write | 7,100 × $3.75 | +$0.02663 |
+| **Turn 5** | | | $0.04890 − $0.01878 | **+$0.03012** |
 
 ---
 
@@ -424,6 +447,27 @@ good change. It is not, because message 5 is inside the cached prefix.
 The provider reads the cache only up to a breakpoint. The last breakpoint before `messages[5]` is
 the end of `system`. So the provider reads `tools` and `system` (15,300 tokens). It writes
 **everything** after them again, including messages 0 to 4, which `coref` did not touch.
+
+| | Without `coref` | With `coref` |
+|---|---|---|
+| `tools` | 12,300 | 12,300 |
+| `system` | 3,000 | 3,000 |
+| messages 0 to 4 | 11,060 | 11,060 |
+| message 5 | 20,000 | 50 |
+| messages 6 to 11 | 7,900 | 7,900 |
+| new messages | 2,000 | 2,000 |
+| **Total** | **56,260** | **36,310** |
+
+| Item | Calculation | Result |
+|---|---|---|
+| Saving (`rewrite`) | 19,950 × $0.30 | +$0.00599 |
+| Break (`cacheChange`) | 19,010 × ($3.75 − $0.30) | −$0.06558 |
+| **Turn 7** | $0.02378 − $0.08338 | **−$0.05960** |
+
+The 19,010 tokens are messages 0 to 4, the 50-token marker and messages 6 to 11
+(11,060 + 50 + 7,900). Without `coref` the provider would have read them. With it, it writes them.
+The 2,000 new tokens are written in both bills, so they cancel out. Only `coref` is shown. The other
+operations of the request are the same as in example 6.
 
 If the client had a breakpoint on `messages[4]`, the penalty would start at message 5. It would be
 7,950 tokens, and costs 7,950 × $3.45 = $0.02743. The net is $0.00599 − $0.02743 = −$0.02144. The breakpoints, not the size of the change, decide most of the

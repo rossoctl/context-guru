@@ -138,4 +138,5 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 <rect class="read" x="24" y="496" width="18" height="12" rx="2"/><text class="t" x="50" y="506" font-size="12">cache read</text>
 <rect class="write" x="150" y="496" width="18" height="12" rx="2"/><text class="t" x="176" y="506" font-size="12">cache write</text>
 <line class="red" x1="290" y1="502" x2="320" y2="502"/><text class="t" x="330" y="506" font-size="12">the cache entry is still valid</text>
+<rect class="last" x="560" y="496" width="18" height="12" rx="2"/><text class="t" x="586" y="506" font-size="12">the last message of turn 9</text>
 </svg>
