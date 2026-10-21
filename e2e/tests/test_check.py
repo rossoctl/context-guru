@@ -1,4 +1,6 @@
+import contextlib
 import copy
+import io
 import json
 import sqlite3
 import tempfile
@@ -76,6 +78,14 @@ class TestCheck(unittest.TestCase):
     def test_picker_folds_subfolder_can_fail(self):
         a = copy.deepcopy(API); a["facets_measured"]["project"].append("/s/alpha/sub")
         self.assertEqual(verdicts(a)["S5.picker_folds_subfolder"], "FAIL")
+
+    def test_picker_folds_subfolder_passes_for_a_subfolder_the_oracle_lists_as_a_root(self):
+        a, e = copy.deepcopy(API), copy.deepcopy(EXP)
+        a["facets_measured"]["project"].append("/s/alpha/sub"); e["cleanup"]["picker"].append("/s/alpha/sub")
+        a["insights"]["/s/alpha/sub"] = copy.deepcopy(a["insights"]["/s/alpha"])
+        for k in ("unused", "used"):
+            e["cleanup"][k]["/s/alpha/sub"] = e["cleanup"][k]["/s/alpha"]
+        self.assertEqual(verdicts(a, e)["S5.picker_folds_subfolder"], "PASS")
 
     def test_picker_has_no_unattributed_entry_can_fail(self):
         a = copy.deepcopy(API); a["facets_measured"]["project"].append("(unattributed)")
@@ -275,6 +285,16 @@ class TestUnusedBuiltins(unittest.TestCase):
         v = verdicts(api)
         self.assertEqual(v["C.unused_set./s/alpha"], "PASS")
 
+    def test_builtin_never_offered_passes_for_an_unused_builtin_tool(self):
+        api = copy.deepcopy(API)
+        api["insights"]["/s/alpha"]["items"].append(dict(item("Grep", scope="none"), kind="tool"))
+        self.assertEqual(verdicts(api)["C.builtin_never_offered./s/alpha"], "PASS")
+
+    def test_builtin_never_offered_fails_for_an_unused_scope_none_skill(self):
+        api = copy.deepcopy(API)
+        api["insights"]["/s/alpha"]["items"].append(dict(item("bundled-x", scope="none"), kind="skill"))
+        self.assertEqual(verdicts(api)["C.builtin_never_offered./s/alpha"], "FAIL")
+
     def test_unused_removable_extra_still_fails(self):
         api = copy.deepcopy(API)
         api["insights"]["/s/alpha"]["items"].append(item("mcp__extra__x"))
@@ -312,7 +332,8 @@ class TestSuiteChecks(unittest.TestCase):
             p = Path(d); (p / "logs").mkdir()
             (p / "logs" / "suite.log").write_text("--- FAIL: TestX (0s)\nFAIL\nFAIL\tm/b\t1s\n")
             (p / "suite.exit").write_text("1\n")
-            rc = check.main(["--results", d, "--tier", "suite"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = check.main(["--results", d, "--tier", "suite"])
             got = [(r["id"], r["verdict"]) for r in json.loads((p / "verdicts.json").read_text())]
         self.assertEqual((rc, got), (1, [("G.go_test.m/b.TestX", "FAIL")]))
 

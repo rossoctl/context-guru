@@ -34,7 +34,7 @@ phase() {  # phase <name> <function>; a phase over its budget is CRASHED (status
   run_bounded "$budget" "$fn" "$R/logs/$name.log" "capture_hang $name"; rc=$?
   local st=ok; [ $rc -eq 0 ] || st=crashed
   local why=""; [ $rc -eq 124 ] && why=',"reason":"timeout"'
-  [ $rc -ne 0 ] && [ -s /tmp/crash-reason ] && why=",\"reason\":\"$(head -1 /tmp/crash-reason)\""
+  [ $rc -ne 0 ] && [ -s /tmp/crash-reason ] && why=",\"reason\":$(head -1 /tmp/crash-reason | jq -Rs 'rtrimstr("\n")')"
   printf '{"phase":"%s","status":"%s","seconds":%d%s}\n' "$name" "$st" $(( $(date +%s) - t0 )) "$why" >>"$R/phases.jsonl"
   if [ $rc -ne 0 ]; then echo "!! $name crashed (rc=$rc); tail:"; tail -20 "$R/logs/$name.log"; exit 3; fi
 }
@@ -206,15 +206,22 @@ p_ui() {
 # dashboard.sh exits non-zero when nothing answers on its port; that is the product's behaviour and a
 # result for S7.skill_port (collect.py records the exit code), not a crashed phase.
 p_skill() { "$PLUG/scripts/dashboard.sh" --no-open 2>&1 | tee "$R/logs/skill.out"; return 0; }
+# Endpoint timings at stress scale. A non-200 or a timeout is a crashed phase, never a 0 ms timing.
+p_endpoints() {
+  local ep out
+  for ep in /api/history "/api/facets?measured=1" "/api/insights?timeline=1"; do
+    out="$(curl -s -o /dev/null --max-time 60 -w '%{http_code} %{time_total}' "$BASE$ep")"
+    [ "${out%% *}" = 200 ] || { echo "$ep answered '${out%% *}'" >/tmp/crash-reason; cat /tmp/crash-reason; return 1; }
+    printf '{"endpoint":"%s","ms":%s}\n' "$ep" "${out#* }" >>"$R/stress-endpoints.jsonl"
+  done
+}
 p_assert() { python3 -m e2e.check --results "$R" --tier "$TIER"; return 0; }  # a FAIL is a result, not a crash
 
 cd /src
 case "$TIER" in
   # Stress is about time, not correctness: transcripts precede import because the importer reads them.
   stress) for ph in preflight generate install replay transcripts import; do phase "$ph" "p_$ph"; done
-          for ep in /api/history "/api/facets?measured=1" "/api/insights?timeline=1"; do
-            curl -s -o /dev/null -w "{\"endpoint\":\"$ep\",\"ms\":%{time_total}}\n" "$BASE$ep" >>"$R/stress-endpoints.jsonl"
-          done ;;
+          phase endpoints p_endpoints ;;
   # The KNOWN baseline on main: the Go suite only (main has no History tab, so the other phases cannot run).
   suite)  phase suite p_suite; phase assert p_assert ;;
   full)   phase suite p_suite

@@ -15,6 +15,7 @@ IMG_OUT="$ROOT/e2e/results/$STAMP-build"
 IGN=""; docker --version 2>/dev/null | grep -qi podman && IGN="--ignorefile $ROOT/e2e/build.ignore"
 # Podman maps the bind mount to root inside the container; keep-id makes it writable by `sandbox`.
 EXTRA=""; docker --version 2>/dev/null | grep -qi podman && EXTRA="--userns=keep-id"
+command -v rsync >/dev/null || { echo "run.sh needs rsync on the host (main baseline copy)"; exit 2; }
 if [ "$TIER" != known ]; then
   mkdir -p "$IMG_OUT"
   docker build $IGN -f "$ROOT/e2e/Dockerfile.e2e" -t cg-e2e:pr578 "$ROOT" >"$IMG_OUT/build.log" 2>&1 ||
@@ -31,15 +32,8 @@ run_tier() {  # run_tier <tier> [image] [outdir] -> sets OUTDIR; returns the con
 }
 fails() { python3 -c "import json,sys;print(sum(r['verdict']=='FAIL' for r in json.load(open(sys.argv[1]+'/verdicts.json'))))" "$1"; }
 # FAIL ids that are not in the known-findings allow-list (empty output = none).
-unknown_fails() { (cd "$ROOT" && python3 - "$1" "$KNOWN_FILE" <<'PY'
-import json, sys
-from e2e import report
-known = report._known(sys.argv[2])
-for r in json.load(open(sys.argv[1] + "/verdicts.json")):
-    if r["verdict"] == "FAIL" and not any(report.explains(c, r["id"]) for c, _ in known):
-        print(r["id"])
-PY
-); }
+# Exits non-zero when it cannot judge (no verdicts, bad JSON), and the gate then treats smoke as failed.
+unknown_fails() { (cd "$ROOT" && python3 -m e2e.report --unknown-fails "$1" "$KNOWN_FILE"); }
 
 # KNOWN: a failure that also fails on main is not the PR's doing. The worktree is always removed.
 MAINWT=/tmp/cg-e2e-main
@@ -49,7 +43,8 @@ label_known() {  # label_known <full results dir>
   [ "$(fails "$FULL")" != 0 ] || return 0
   trap cleanup_wt EXIT
   cleanup_wt
-  MAINOUT="$FULL/on-main"; mkdir -p "$MAINOUT"
+  # A stale baseline from an earlier `known` run must not relabel anything if this build fails.
+  MAINOUT="$FULL/on-main"; rm -rf "$MAINOUT"; mkdir -p "$MAINOUT"
   if git -C "$ROOT" worktree add -q --detach "$MAINWT" main &&
      mkdir -p "$MAINWT/e2e" && rsync -a --exclude results --exclude __pycache__ "$ROOT/e2e/" "$MAINWT/e2e/" &&
      docker build $IGN -q -f "$MAINWT/e2e/Dockerfile.e2e" -t cg-e2e:main "$MAINWT" >"$MAINOUT/build.log" 2>&1; then
@@ -87,9 +82,10 @@ if [ "$TIER" = smoke ]; then
 fi
 
 # Gate: only the known PR findings may FAIL, and no phase may have crashed.
-if [ ! -f "$SMOKE/verdicts.json" ] || grep -q crashed "$SMOKE/phases.jsonl" || [ -n "$(unknown_fails "$SMOKE")" ]; then
+UNKNOWN="$(unknown_fails "$SMOKE")"; GATE_RC=$?
+if [ ! -f "$SMOKE/verdicts.json" ] || grep -q crashed "$SMOKE/phases.jsonl" || [ $GATE_RC -ne 0 ] || [ -n "$UNKNOWN" ]; then
   echo "smoke gate failed; not running the full tier. results: $SMOKE"
-  [ -f "$SMOKE/verdicts.json" ] && { unknown_fails "$SMOKE"; rebuild "$SMOKE"; }
+  [ -n "$UNKNOWN" ] && echo "$UNKNOWN"; [ -f "$SMOKE/verdicts.json" ] && rebuild "$SMOKE"
   exit 1
 fi
 

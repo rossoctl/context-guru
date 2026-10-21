@@ -1,5 +1,7 @@
 import json
 import pathlib
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -25,7 +27,8 @@ class TestReport(unittest.TestCase):
             self.assertIn("3", s)
             self.assertIn("4", s)
             h = (p / "report.html").read_text()
-            self.assertNotIn("http://", h.replace("http://127.0.0.1", ""), "report must load nothing remote")
+            for scheme in ("http://", "https://"):
+                self.assertNotIn(scheme, h.replace("http://127.0.0.1", ""), "report must load nothing remote")
 
     def test_verdict_is_fail_when_any_check_fails(self):
         with tempfile.TemporaryDirectory() as d:
@@ -34,6 +37,20 @@ class TestReport(unittest.TestCase):
             (p / "phases.jsonl").write_text("")
             report.build(d)
             self.assertTrue((p / "summary.md").read_text().startswith("# PR #578 e2e review: FAIL"))
+
+    def test_unknown_fails_lists_only_fails_no_known_finding_explains(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d)
+            (p / "verdicts.json").write_text(json.dumps([_v("U.x.a", "FAIL"), _v("Z", "FAIL"), _v("Y", "PASS")]))
+            kf = p / "known.txt"; kf.write_text("U.x.*  # known\n")
+            self.assertEqual(report.unknown_fails(d, str(kf)), ["Z"])
+
+    def test_unknown_fails_cli_exits_nonzero_when_it_cannot_judge(self):
+        # The smoke gate reads this; an exception must close the gate, never print nothing and open it.
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run([sys.executable, "-m", "e2e.report", "--unknown-fails", d],
+                               capture_output=True, text=True)
+            self.assertEqual((r.returncode != 0, r.stdout), (True, ""))
 
     def test_verdict_is_pass_with_only_known_and_blocked(self):
         with tempfile.TemporaryDirectory() as d:

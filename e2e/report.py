@@ -17,7 +17,7 @@ def explains(patterns: str, check_id: str) -> bool:
     return any(fnmatch.fnmatchcase(check_id, g) for g in patterns.split())
 
 
-def _known(path) -> list[tuple[str, str]]:
+def known(path) -> list[tuple[str, str]]:
     p = pathlib.Path(path)
     if not p.exists():
         return []
@@ -29,6 +29,13 @@ def _known(path) -> list[tuple[str, str]]:
         cid, _, why = body.partition("#")
         out.append((cid.strip(), why.strip()))
     return out
+
+
+def unknown_fails(results_dir, known_findings=DEFAULT_KNOWN) -> list[str]:
+    """FAIL ids no known-findings line explains: what the smoke gate stops on."""
+    kn = known(known_findings)
+    v = json.loads((pathlib.Path(results_dir) / "verdicts.json").read_text())
+    return [r["id"] for r in v if r["verdict"] == "FAIL" and not any(explains(c, r["id"]) for c, _ in kn)]
 
 
 def _cell(x, n=120) -> str:
@@ -55,12 +62,12 @@ def build(results_dir: str, known_findings: str | None = None) -> None:
         if r["verdict"] == "PASS":
             continue
         lines.append(f"| {r['id']} | {r['verdict']} | {_cell(r['expected'])} | {_cell(r['actual'])} | {r['snapshot']} |")
-    known = _known(known_findings or DEFAULT_KNOWN)
-    if known:
+    kfind = known(known_findings or DEFAULT_KNOWN)
+    if kfind:
         bad = [r["id"] for r in v if r["verdict"] in ("FAIL", "KNOWN")]
         lines += ["", "## Known PR findings", "", "| finding | checks | FAIL/KNOWN here |", "|---|---|---|"]
-        lines += [f"| {w} | {c} | {sum(explains(c, i) for i in bad)} |" for c, w in known]
-        rest = [i for i in bad if not any(explains(c, i) for c, _ in known)]
+        lines += [f"| {w} | {c} | {sum(explains(c, i) for i in bad)} |" for c, w in kfind]
+        rest = [i for i in bad if not any(explains(c, i) for c, _ in kfind)]
         lines += ["", "Not explained by a known finding: " + (", ".join(rest) if rest else "none")]
     notes = (d / "notes.md").read_text() if (d / "notes.md").exists() else ""
     if notes:
@@ -114,4 +121,8 @@ pre{{white-space:pre-wrap;font-size:12px}}img{{max-width:320px;border:1px solid 
 
 
 if __name__ == "__main__":
-    build(sys.argv[1])
+    # --unknown-fails <dir> [known-file]: one id per line; any error exits non-zero so the gate closes.
+    if sys.argv[1] == "--unknown-fails":
+        print("\n".join(unknown_fails(*sys.argv[2:4])))
+    else:
+        build(sys.argv[1])

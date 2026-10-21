@@ -1,4 +1,5 @@
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -26,8 +27,11 @@ class TestStackDumpOnSigusr1(unittest.TestCase):
         self.assertIn("serve_forever", err)
 
     def test_replay_dumps_its_stack(self):
-        # 10.255.255.1 is unroutable: the connect blocks, so the process is alive and inside the send loop.
-        err = self._dumps(["e2e.replay", "--tier", "smoke", "--home", "/tmp/cg-e2e-dump", "--base", "http://10.255.255.1:9"])
+        # A local listener that accepts and never answers: replay blocks inside its send loop, on any network.
+        with socket.socket() as srv:
+            srv.bind(("127.0.0.1", 0)); srv.listen(8)
+            port = srv.getsockname()[1]
+            err = self._dumps(["e2e.replay", "--tier", "smoke", "--home", "/tmp/cg-e2e-dump", "--base", f"http://127.0.0.1:{port}"])
         self.assertIn("in run", err)
 
 
