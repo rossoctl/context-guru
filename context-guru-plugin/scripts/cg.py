@@ -10,6 +10,7 @@
     doctor    is it set up right
     save-more              which config and keep-alive strategy would have cost least on my own history
     remove-mcp-and-skills  which MCP servers and skills I carry and never use, and what removing them saves
+    ping      keep this session's cache warm with one ping right now (POST /api/me/cache/ping)
     cache-campaign         build, compare and switch a keep-alive campaign for a tenant (manager login; docs/plugin/cache-campaign.md)
 
 Read-only: GETs against the local proxy, except `apply`, `revert` and `cache-campaign build | mode`, which the user confirms first. Output is
@@ -1175,6 +1176,41 @@ CMDS = {"home": cmd_home, "insights": cmd_insights, "savings": cmd_savings, "cac
         "session": cmd_session, "doctor": cmd_doctor, "cache-campaign": cmd_campaign}
 
 
+def ping_lines(code: int, doc: dict | None) -> list[str]:
+    """The one-line answer of POST /api/me/cache/ping, whatever the status."""
+    doc = doc or {}
+    if code == 200 and doc.get("sent"):
+        return [f"Kept warm: saved {dollars(doc.get('saved_usd', 0))} (a rewrite would have cost {dollars(doc.get('rewrite_usd', 0))}, "
+                f"the ping {dollars(doc.get('ping_usd', 0))})."]
+    if code == 409:
+        return ["The cache is already cold, so there is nothing to keep warm. The next request rewrites it."]
+    if code == 404:
+        return ["This server does not know that session yet. Send a prompt first."]
+    if code == 429:
+        return [f"Pinged a moment ago. Try again in {doc.get('retry_after_s', 30)}s."]
+    if code == 0:
+        return ["The Context Guru server did not answer."]
+    if code == -1:
+        return ["The Context Guru server timed out."]
+    return [f"The ping failed (HTTP {code}): {doc.get('error', 'no detail')}."]
+
+
+def ping_main(api: Api, sid: str | None, thread: str | None, as_json: bool) -> int:
+    sid = sid or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid:
+        print(json.dumps({"status": 0, "error": "no session"}) if as_json else "No session id: pass --session ID.")
+        return 1
+    body: dict = {"session": sid}
+    if thread:
+        body["thread"] = thread
+    code, doc = api.send("POST", "/api/me/cache/ping", body=body, timeout=20)
+    if as_json:  # the mod reads this: the HTTP status beside the server's own document
+        print(json.dumps({"status": code, **(doc or {})}))
+    else:
+        print("\n".join(ping_lines(code, doc)))
+    return 0 if code == 200 else 1
+
+
 def run(cmd: str, api: Api, opts: dict) -> str:
     o = {"now": int(time.time() * 1000), "tz_min": 0, "days": 0, "details": False, "session": None, "args": [], "force": False,
          "campaign": {"scope": "tenant", "id": "", "window": "30d"}, **opts}
@@ -1186,13 +1222,14 @@ def run(cmd: str, api: Api, opts: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES, "cachestate"]))
+    ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES, "cachestate", "ping"]))
     ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; save-more [config|cache]; apply <kind> <option>@<basis>; revert <kind>")
     ap.add_argument("--custom", action="store_true", help="save-more config: also search custom combinations, not only the shipped presets")
     ap.add_argument("--force", action="store_true", help="apply: go ahead although the proxy's own check failed (asked separately); "
                     "cache-campaign mode ... active: go live although the build did not recommend it")
     ap.add_argument("--days", type=int, default=0)
     ap.add_argument("--port")
+    ap.add_argument("--thread", help="ping: the thread id (default: the main thread)")
     ap.add_argument("--session")
     ap.add_argument("--json", action="store_true", help="print the raw documents of one command")
     ap.add_argument("--fixture", help="read a captured bundle of API responses from this file (tests, demos)")
@@ -1220,7 +1257,7 @@ def main(argv: list[str] | None = None) -> int:
         with open(a.fixture, encoding="utf-8") as f:
             api = Api("", json.load(f))
     else:
-        adapt = a.cmd in (*READS, *WRITES)
+        adapt = a.cmd in (*READS, *WRITES, "ping")
         base = proxy_base(a.port) or (hosted_base() if adapt else None) or ("http://127.0.0.1:0" if a.mock else None)
         if not base and a.cmd == "cachestate":
             print(json.dumps({"error": "no proxy routing this session"}))
@@ -1229,6 +1266,8 @@ def main(argv: list[str] | None = None) -> int:
             print(NO_PROXY)
             return 1 if adapt else 0  # a read that showed no report must not count as run (the skills chain on it)
         api = Api(base, token=cg_token() if adapt else None)
+    if a.cmd == "ping":
+        return ping_main(api, a.session, a.thread, a.json)
     if a.cmd in (*READS, *WRITES):
         return adapt_main(api, a.cmd, opts)
     if a.cmd == "cachestate":  # for the mods: JSON only, from the shared cache, exit 1 when there is nothing

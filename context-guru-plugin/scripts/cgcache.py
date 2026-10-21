@@ -10,6 +10,7 @@ import-cheap: the status line has a 50 ms budget.
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import time
@@ -79,16 +80,18 @@ def take_slot(path: str, window: float) -> bool:
     """True for exactly ONE caller per `window` seconds, however many start at once. The lock file's
     name carries the window number and is made with O_EXCL, so creating it is the election: no
     check-then-write gap, and no stale lock to clear (a crashed holder's belongs to an earlier
-    window and stops mattering). The previous window's file is removed best effort."""
+    window and stops mattering). Every EARLIER window's file is removed best effort, not just the previous
+    one: after an idle gap the older ones would otherwise never be deleted and pile up per session."""
     slot = int(time.time() // window)
     try:
         os.close(os.open(f"{path}.lock.{slot}", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
     except OSError:
         return False  # someone else holds this window, or the cache cannot be written: better no fetch than a storm
-    for old in (f"{path}.lock.{slot - 1}", path + ".lock"):
+    for old in [*glob.glob(glob.escape(path) + ".lock.*"), path + ".lock"]:
         try:
-            os.unlink(old)
-        except OSError:
+            if old.endswith(".lock") or int(old.rsplit(".", 1)[1]) < slot:
+                os.unlink(old)
+        except (OSError, ValueError):
             pass
     return True
 

@@ -56,5 +56,6 @@
       "description": "Sends the proxy a content-free event (session id, event name, reason) when you exit a session (/exit, Ctrl-C, Ctrl-D, closing the terminal, /clear, logout), compact it or resume it, so the keep-alive stops spending on a cache you will not come back to. `auto` (the default) sends only to a context-guru proxy: this plugin's local one, or a hosted service you reach with an x-context-guru-token header. `on` sends to any base URL; `off` sends nothing. The proxy acts on it whenever its keep-alive runs (CONTEXT_GURU_CLIENT_SIGNALS=off turns that off).",
       "default": "auto"
     }
-  }
+  },
+  "types": "./types/index.d.ts"
 }
