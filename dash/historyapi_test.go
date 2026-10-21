@@ -53,7 +53,12 @@ func TestTheHistoryReportsWhatWasInvokedAndWhen(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	mux := projectAPI(t, db)
+	// The skill has to be INSTALLED for it to count (a skill this machine does not have is not in
+	// the page's population), so the test builds its own home rather than depending on whatever
+	// the host happens to have under ~/.claude.
+	home := t.TempDir()
+	mkSkill(t, home, "superpowers", "brainstorming")
+	mux := projectAPIWithHome(t, db, home)
 	doc := historyFor(t, mux, "")
 
 	byName := map[string]HistoryUse{}

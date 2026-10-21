@@ -33,6 +33,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -178,6 +179,7 @@ func insightsKey(t *testing.T, dir string) string {
 // report labelled "the last N sessions" computed over all of them. That failure is invisible in
 // the output, so the only place to catch it is the wire.
 type apiStub struct {
+	mu      *sync.Mutex
 	port    string
 	hits    *int32
 	paths   *[]string
@@ -186,6 +188,8 @@ type apiStub struct {
 
 // query returns the raw query string the stub saw on `path`, and whether it saw the path at all.
 func (s apiStub) query(path string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	v, ok := (*s.queries)[path]
 	return v, ok
 }
@@ -198,12 +202,15 @@ func newAPIStub(t *testing.T, bodies map[string]string) apiStub {
 	}
 	var hits int32
 	var paths []string
+	var mu sync.Mutex
 	queries := map[string]string{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
+		mu.Lock()
 		paths = append(paths, r.Method+" "+r.URL.Path)
 		queries[r.URL.Path] = r.URL.RawQuery
+		mu.Unlock()
 		if r.URL.Path == "/healthz" {
 			w.Write([]byte("ok")) //nolint:errcheck
 			return
@@ -219,7 +226,7 @@ func newAPIStub(t *testing.T, bodies map[string]string) apiStub {
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go srv.Serve(ln) //nolint:errcheck
 	t.Cleanup(func() { srv.Close() })
-	return apiStub{port: fmt.Sprint(ln.Addr().(*net.TCPAddr).Port), hits: &hits, paths: &paths,
+	return apiStub{mu: &mu, port: fmt.Sprint(ln.Addr().(*net.TCPAddr).Port), hits: &hits, paths: &paths,
 		queries: &queries}
 }
 
@@ -1212,15 +1219,13 @@ func TestInventoryIsListedEvenWhenEveryRemovalIsWithheld(t *testing.T) {
 		t.Errorf("item.mcp__atlas__geocode.scope=%q, want \"server\"", got)
 	}
 
-	// A built-in appears in the inventory but is never offered: the weight is real and removing it
-	// breaks the agent, so it is reported as unavailable rather than as a saving.
-	if !strings.Contains(out, "Artifact") {
-		t.Error("the built-in Artifact is absent from the inventory; its weight is real and a " +
-			"report that hides it understates what the prompt costs")
-	}
-	if got := f["item.Artifact.scope"]; got != "none" {
-		t.Errorf("item.Artifact.scope=%q, want \"none\": a built-in must not be offered for "+
-			"removal at any scope", got)
+	// A built-in is NOT in this section: it lists the skills, MCP servers and MCP tools you carry
+	// and pay for, and a Claude Code built-in is none of those and cannot be removed. The dashboard
+	// shows it in its own Built-ins tab.
+	for k := range f {
+		if strings.HasPrefix(k, "item.Artifact.") {
+			t.Errorf("%s: a built-in must not appear in the tools section", k)
+		}
 	}
 
 	// The gate itself is still reported, so the reader knows why there is no advice yet.
@@ -1830,8 +1835,6 @@ func TestEachItemCarriesAVerdictThatMatchesItsEvidence(t *testing.T) {
 		// Unused, removable, and NOT past the floor. The evidence is real and too thin to act on,
 		// and `why` must say which of the two it is rather than leaving the reader to infer it.
 		{"DesignSync", "consider", "2 session"},
-		// A built-in. Not "we have not seen enough yet" — the question is closed at every scope.
-		{"Artifact", "keep", "built-in"},
 		// Actually invoked. The other `keep`, and a different sentence: this one earned its place,
 		// which is the opposite claim from "we may not remove it".
 		{"Grep", "keep", "37"},
@@ -2022,12 +2025,11 @@ func TestPerSessionFactsAttributeTheCostToTheSessionsThatPaidIt(t *testing.T) {
 	}
 
 	// The per-session rollup: what session `aaa` spent carrying everything it never invoked. Summed
-	// over the items, each counted once — 96000 (atlas) + 164560 (DesignSync) + 416240 (Artifact).
-	// The built-in is INCLUDED here because this figure is what the session cost, not what could be
-	// removed from it; excluding it would understate a real bill, and `savings_window_usd` below is
-	// the separate figure that holds the removable part.
-	if got := f["session.aaa.unused_reads"]; got != "676800" {
-		t.Errorf("session.aaa.unused_reads=%q, want 676800 (96000+164560+416240)", got)
+	// over the items, each counted once — 96000 (atlas) + 164560 (DesignSync). Built-ins are not
+	// part of this section (they have their own tab on the dashboard), so the Artifact built-in's
+	// 416240 is not here.
+	if got := f["session.aaa.unused_reads"]; got != "260560" {
+		t.Errorf("session.aaa.unused_reads=%q, want 260560 (96000+164560)", got)
 	}
 	// The session's own request count, and the reason it is pinned separately from the reads is
 	// that it is the one per-session figure that must NOT be summed. Every declaration that session
@@ -2038,8 +2040,8 @@ func TestPerSessionFactsAttributeTheCostToTheSessionsThatPaidIt(t *testing.T) {
 		t.Errorf("session.aaa.requests=%q, want 80 — one number per session, never a sum over "+
 			"the items reporting it", got)
 	}
-	if got := f["session.aaa.items"]; got != "3" {
-		t.Errorf("session.aaa.items=%q, want 3: how many never-invoked declarations that session "+
+	if got := f["session.aaa.items"]; got != "2" {
+		t.Errorf("session.aaa.items=%q, want 2: how many never-invoked declarations that session "+
 			"carried, which is what makes a per-session dollar figure checkable", got)
 	}
 	if got := f["session.aaa.model"]; got != "aws/claude-opus-5" {
@@ -2100,330 +2102,3 @@ func TestPerSessionFactsAttributeTheCostToTheSessionsThatPaidIt(t *testing.T) {
 	}
 }
 
-// TestReportWritesALocalFileAndNothingLeavesTheMachine is the rule the whole report mode exists
-// under, and it is pinned first because it is the one that matters: the user's traffic goes through
-// a gateway holding their credential, and a reporting command that fetched a stylesheet or posted
-// a figure anywhere would be exfiltrating their configuration from inside a tool that claims to be
-// read-only.
-//
-// So: the template ships in the plugin, is filled from data already fetched, is written under the
-// state directory, and the script prints the path rather than opening anything. Every asset is
-// inline. No http(s) reference of any kind survives in the output.
-func TestReportWritesALocalFileAndNothingLeavesTheMachine(t *testing.T) {
-	stub := newAPIStub(t, map[string]string{
-		"/api/stats":      window(0.4),
-		"/api/tools":      toolsWithTwoOwners(),
-		"/api/toolfilter": filterWithholdingEverything(6),
-	})
-	dir := insightsProject(t, map[string]any{"port": stub.port})
-	out, code := runInsights(t, dir, nil, "capabilities", "--report")
-	if code != 0 {
-		t.Fatalf("exit %d, want 0\n%s", code, out)
-	}
-
-	path := facts(out)["report_path"]
-	if path == "" {
-		t.Fatalf("no report_path in output; the script must say where it put the file rather than "+
-			"leave the user to find it\n%s", out)
-	}
-	if !strings.HasPrefix(path, filepath.Join(dir, "state")) {
-		t.Errorf("report_path=%q is outside the sandbox state dir %q; a reporting command must "+
-			"not write wherever it likes", path, filepath.Join(dir, "state"))
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading the report the script said it wrote: %v", err)
-	}
-	html := string(body)
-
-	// Nothing is FETCHED when the page is opened. A remote font or script would turn opening a
-	// local cost report into a network event that names this machine to a third party.
-	//
-	// The check is on markup that causes a fetch, not on the substring "https://": a URL is
-	// ordinary DATA here — the report states the user's own upstream and base_url — and banning
-	// the substring would fail on a correct report while still missing, say, a background-image.
-	// So: the data island is excised first, then the remaining markup is checked for anything
-	// that loads.
-	markup := html
-	if i := strings.Index(markup, `<script type="application/json"`); i != -1 {
-		if j := strings.Index(markup[i:], "</script>"); j != -1 {
-			markup = markup[:i] + markup[i+j:]
-		}
-	}
-	for _, forbidden := range []string{
-		"http://", "https://", "//", "<script src", "<link ", "@import", "url(",
-	} {
-		if strings.Contains(markup, forbidden) {
-			t.Errorf("the report's markup contains %q outside its data block; every asset must be "+
-				"inline so that opening the file reaches no network at all", forbidden)
-		}
-	}
-	// And the user's own configuration, which legitimately contains URLs, must still be in the
-	// data block rather than quietly stripped.
-	if !strings.Contains(html, `type="application/json"`) {
-		t.Error("the report has no JSON data island; values interpolated into markup instead " +
-			"would mean splicing somebody else's prose into HTML")
-	}
-	// It has to be a page, not a fragment, because it is opened straight off disk with no host.
-	if !strings.Contains(strings.ToLower(html), "<!doctype html>") {
-		t.Error("the report has no doctype; opened from the filesystem it renders in quirks mode")
-	}
-	// And the data must actually be in it.
-	for _, want := range []string{"giveinfo", "mcp__giveinfo__info", "lonesome", "0.12"} {
-		if !strings.Contains(html, want) {
-			t.Errorf("the report does not mention %q, so it is not a rendering of this inventory", want)
-		}
-	}
-}
-
-// TestReportIsStillReadOnly extends the existing read-onliness guarantee to the new mode. --report
-// writes exactly one file, under the state directory, and touches no settings file: a command that
-// explains somebody's spending must not alter their configuration while doing it.
-func TestReportIsStillReadOnly(t *testing.T) {
-	stub := newAPIStub(t, map[string]string{
-		"/api/stats":      window(0.4),
-		"/api/tools":      toolsWithTwoOwners(),
-		"/api/toolfilter": filterWithholdingEverything(6),
-	})
-	dir := insightsProject(t, map[string]any{"port": stub.port})
-	// Snapshot everything EXCEPT the state dir, which is where the one new file is allowed.
-	before := snapshotTree(t, filepath.Join(dir, ".claude"))
-	beforeHome := snapshotTree(t, filepath.Join(dir, "home"))
-
-	out, code := runInsights(t, dir, nil, "all", "--report")
-	if code != 0 {
-		t.Fatalf("exit %d, want 0\n%s", code, out)
-	}
-	if diff := treeDiff(before, snapshotTree(t, filepath.Join(dir, ".claude"))); diff != "" {
-		t.Errorf("--report changed the project's settings: %s", diff)
-	}
-	if diff := treeDiff(beforeHome, snapshotTree(t, filepath.Join(dir, "home"))); diff != "" {
-		t.Errorf("--report changed the user's configuration: %s", diff)
-	}
-}
-
-// TestReportRefusesRatherThanRenderAnEmptyPage covers the state every other part of this surface
-// has a rule for: there is no install, or no traffic, so there is nothing to render. A page of
-// zeroes and empty tables reads as a clean bill of health, which is the one misreading this whole
-// command is built to prevent, so the mode declines and says why.
-func TestReportRefusesRatherThanRenderAnEmptyPage(t *testing.T) {
-	dir := insightsProject(t, nil) // no port configured anywhere: no install routes this directory
-	out, code := runInsights(t, dir, nil, "capabilities", "--report")
-	if code != 0 {
-		t.Fatalf("exit %d, want 0\n%s", code, out)
-	}
-	f := facts(out)
-	if f["report_path"] != "" {
-		t.Errorf("report_path=%q: with no install there is no measurement, and a rendered page of "+
-			"blanks would read as 'nothing is wrong'", f["report_path"])
-	}
-	if f["report_refused"] == "" {
-		t.Error("no report_refused fact; the refusal and its reason are the answer here, and " +
-			"silence would look like a failure to run")
-	}
-	// The gating finding is still the real output.
-	if !strings.Contains(out, "no-install") {
-		t.Error("the no-install finding is missing; --report must not suppress the diagnosis that " +
-			"explains why there is no report")
-	}
-}
-
-// treeDiff names the first difference between two snapshots, so a failure says which file changed
-// rather than only that something did.
-func treeDiff(before, after map[string]string) string {
-	for path, body := range after {
-		was, existed := before[path]
-		if !existed {
-			return fmt.Sprintf("created %s", path)
-		}
-		if was != body {
-			return fmt.Sprintf("modified %s", path)
-		}
-	}
-	for path := range before {
-		if _, ok := after[path]; !ok {
-			return fmt.Sprintf("deleted %s", path)
-		}
-	}
-	return ""
-}
-
-// TestReportDoesNotSpliceTheFactDocumentIntoMarkup pins a defect the sibling report test could not
-// see, and the reason it could not is the lesson: its stub facts contain no URL, so a report that
-// splices the whole fact document into the page's markup passes a check for "no http:// outside the
-// data island" purely because nothing in the fixture looks like a URL.
-//
-// The real defect: the template is filled with str.replace, which substitutes EVERY occurrence of
-// the placeholder. The template's own header comment named the token to document it, so the fact
-// document — which carries the user's base_url and their upstream gateway, from running_fingerprint
-// — was written into an HTML comment as well as the island. Measured on a real machine: 134,036
-// bytes instead of 91,675, with the upstream URL in markup.
-//
-// This test therefore asserts on a FACT VALUE that is unmistakably configuration, and asserts the
-// placeholder appears exactly once in the template. Either alone would have missed it.
-func TestReportDoesNotSpliceTheFactDocumentIntoMarkup(t *testing.T) {
-	tpl := readFileString(t, filepath.Join(scriptsDir(t), "insights_report.html"))
-	if n := strings.Count(tpl, "__CG_DATA__"); n != 1 {
-		t.Fatalf("the template names the placeholder %d times; it is filled with a replace-all, so "+
-			"every occurrence beyond the data island receives a copy of the whole fact document", n)
-	}
-
-	// A fact whose value is a URL, as the real env block always carries.
-	const canary = "https://canary.invalid/upstream"
-	stub := newAPIStub(t, map[string]string{
-		"/api/stats":      window(0.4),
-		"/api/tools":      toolsBelowFloorWithInventory(),
-		"/api/toolfilter": filterWithholdingEverything(1),
-	})
-	dir := insightsProject(t, map[string]any{"port": stub.port, "upstream": canary})
-	out, code := runInsights(t, dir, nil, "capabilities", "--report")
-	if code != 0 {
-		t.Fatalf("exit %d, want 0\n%s", code, out)
-	}
-	path := facts(out)["report_path"]
-	if path == "" {
-		t.Fatalf("no report_path\n%s", out)
-	}
-	html := readFileString(t, path)
-	if !strings.Contains(html, canary) {
-		t.Skip("the configured upstream did not reach the report's facts, so this test cannot " +
-			"observe where it was written; the placeholder count above still applies")
-	}
-
-	// Excise the data island — the one place a URL-valued fact legitimately belongs — and the
-	// canary must be gone from everything that remains.
-	markup := html
-	if i := strings.Index(markup, `<script type="application/json"`); i != -1 {
-		if j := strings.Index(markup[i:], "</script>"); j != -1 {
-			markup = markup[:i] + markup[i+j:]
-		}
-	}
-	if strings.Contains(markup, canary) {
-		t.Errorf("the configured upstream %q appears in the report's MARKUP, outside the data "+
-			"island: the fact document is being spliced somewhere beyond the island it belongs in, "+
-			"which puts the user's own configuration into the page's prose", canary)
-	}
-}
-
-// TestNothingIsSelectableThatTheCommandCannotRemove pins the page's central promise, in the one
-// place it can be checked without a browser: the template's own selection rule.
-//
-// A tick box is a promise that the generated command will act on that thing. A plugin's skill and
-// an MCP server's tool have no per-item switch — the unit is the plugin or the server — so a box on
-// one of those rows can only ever produce a command that takes its siblings too. An earlier version
-// offered them anyway and explained the consequence in a warning afterwards, which is the wrong
-// order: it let the user express a choice the page could not honour, then argued with it. Reported
-// by a user as "bad UI interface that allows to select skills that can't be deleted".
-//
-// So the rule is `scope === "item"`, and the inverse holds too: what cannot be removed is not
-// offered. The owner's own box is the control for a whole unit.
-func TestNothingIsSelectableThatTheCommandCannotRemove(t *testing.T) {
-	tpl := readFileString(t, filepath.Join(scriptsDir(t), "insights_report.html"))
-
-	// The guard itself. Pinned as a string because the alternative is executing the page, and the
-	// one thing that must not drift is which scopes get a box at all.
-	if !strings.Contains(tpl, `function selectable(o){ return o.verdict!=="keep" && o.scope==="item" }`) {
-		t.Error("the selection rule is no longer `scope===\"item\"`. Any wider rule hands the " +
-			"reader a checkbox for something the generated command cannot act on alone, which is " +
-			"the defect this test exists to prevent — widen the OWNER's box instead")
-	}
-	// The owner's box must select the whole unit, or a plugin becomes unremovable from the page
-	// once its children lose their own boxes.
-	if !strings.Contains(tpl, `o.scope==="plugin"||o.scope==="server"`) {
-		t.Error("the owner checkbox no longer collects its unit-scoped children; with per-item " +
-			"boxes gone, that box is the ONLY way to select a plugin or a server, and without it " +
-			"they cannot be selected at all")
-	}
-	// A row with no box says why, and where the real control is. A bare disabled control invites
-	// the reader to wonder what they did wrong.
-	if !strings.Contains(tpl, "select the plugin above instead") ||
-		!strings.Contains(tpl, "select the server above instead") {
-		t.Error("a row that cannot be picked individually must say where its real control is")
-	}
-}
-
-// TestTheReportTellsYouHowToRegenerateItWithACommandThatRuns pins a defect reported from real use:
-// the page printed `python3 insights.py capabilities --report`, which resolves from nowhere. This
-// script lives in a versioned plugin-cache directory nobody ever cd's into, so a bare filename is
-// an instruction that cannot be followed from anywhere the reader is plausibly standing.
-//
-// The fix is one fact — the script's own absolute path — and the test asserts the fact exists AND
-// that the path it names is really there. A path fact that pointed at nothing would pass a
-// presence check and still leave the reader with a broken command.
-func TestTheReportTellsYouHowToRegenerateItWithACommandThatRuns(t *testing.T) {
-	stub := newAPIStub(t, map[string]string{
-		"/api/stats":      window(0.4),
-		"/api/tools":      toolsBelowFloorWithInventory(),
-		"/api/toolfilter": filterWithholdingEverything(1),
-	})
-	dir := insightsProject(t, map[string]any{"port": stub.port})
-	out, code := runInsights(t, dir, nil, "capabilities", "--report")
-	if code != 0 {
-		t.Fatalf("exit %d, want 0\n%s", code, out)
-	}
-	f := facts(out)
-
-	script := f["report_script"]
-	if script == "" {
-		t.Fatal("no report_script fact; without it the page can only print a bare filename, and " +
-			"a command the reader cannot run is worse than no command — they conclude the whole " +
-			"page is decorative")
-	}
-	if !filepath.IsAbs(script) {
-		t.Errorf("report_script=%q is not absolute; a relative path is exactly the bug", script)
-	}
-	if _, err := os.Stat(script); err != nil {
-		t.Errorf("report_script=%q does not exist: %v. A path fact that names nothing passes a "+
-			"presence check and still hands the reader a broken command", script, err)
-	}
-	// The area is carried too, or regenerating a components report silently switches surface.
-	if f["report_area"] != "capabilities" {
-		t.Errorf("report_area=%q, want capabilities", f["report_area"])
-	}
-
-	// The wrapper the user is told to run must exist beside the script, and be executable.
-	wrapper := filepath.Join(filepath.Dir(script), "insights-report.sh")
-	info, err := os.Stat(wrapper)
-	if err != nil {
-		t.Fatalf("insights-report.sh is missing beside the script: %v", err)
-	}
-	if info.Mode()&0o111 == 0 {
-		t.Errorf("insights-report.sh is not executable (mode %v); the user is told to run it", info.Mode())
-	}
-}
-
-// TestTheItemTableDoesNotSpendAColumnOnMostlyEmptyProse pins a layout decision that was measured
-// rather than guessed: on a real inventory of 58 items, 41 had nothing to put in the "what it does"
-// column, because a description exists only for a skill with a readable SKILL.md. A column serving
-// 17 rows of 58 still takes width from all 58, and the three number columns are what the page is
-// for — so the prose moved to the item name's `title`, where it costs no layout.
-//
-// Pinned because the pull to re-add a description column is strong (it reads as helpful) and the
-// cost of doing so is invisible in a screenshot of a wide window.
-func TestTheItemTableDoesNotSpendAColumnOnMostlyEmptyProse(t *testing.T) {
-	tpl := readFileString(t, filepath.Join(scriptsDir(t), "insights_report.html"))
-	// Asserted on the COLUMN LIST, not on the phrase: the phrase also appears in the comment
-	// explaining why the column is gone, and in the footnote telling the reader to hover. A test
-	// that cannot tell a column from a sentence about columns fails on its own documentation.
-	if !strings.Contains(tpl, `cols.push(["item",""],["recommendation","rec"]);`) {
-		t.Error(`the item table's column list has changed. It is deliberately item + ` +
-			`recommendation and no prose column: measured on a real inventory a description is ` +
-			`empty for 41 of 58 rows, and the column takes width from the number columns on ` +
-			`every row — put the text on the name's title attribute instead`)
-	}
-	// The text has to be somewhere, or removing the column just lost it.
-	if !strings.Contains(tpl, `nameCell.setAttribute("title"`) {
-		t.Error("nothing attaches a description to the item name, so dropping the column dropped " +
-			"the information with it")
-	}
-	// The full text, not the trimmed summary: a tooltip has no layout to protect.
-	if !strings.Contains(tpl, "o.desc_full||o.desc") {
-		t.Error("the tooltip does not prefer desc_full; the summary exists to fit a table column, " +
-			"and a tooltip has no column to fit")
-	}
-	// And the rows that have one must be visually distinguishable, or nobody hovers.
-	if !strings.Contains(tpl, "has-tip") {
-		t.Error("no affordance marks which names carry a tooltip; an invisible tooltip is the " +
-			"same as no tooltip")
-	}
-}

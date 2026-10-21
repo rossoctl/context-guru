@@ -88,6 +88,7 @@ validation:
 exclude_docs: |
   superpowers/
   proposals/
+  plans/
 
 # Nav mirrors how people arrive: install it the easy way and see what it saves
 # (Get started) → run it yourself instead of the plugin (Advanced /
