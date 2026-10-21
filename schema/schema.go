@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -52,6 +53,46 @@ func CloneMessages(in []schemas.ChatMessage) []schemas.ChatMessage {
 	if in == nil {
 		return nil
 	}
+	// A plain text message (the bulk of any transcript) is copied directly: the round trip
+	// below re-encodes and re-parses every byte of every message, which dominated the pipeline's
+	// per-request cost on a large transcript. Anything else goes through the round trip, so its
+	// semantics (cache_control, citations, cachePoint) are unchanged.
+	out := make([]schemas.ChatMessage, len(in))
+	var slow []int
+	for i := range in {
+		if m, ok := clonePlainText(in[i]); ok {
+			out[i] = m
+		} else {
+			slow = append(slow, i)
+		}
+	}
+	if len(slow) == 0 {
+		return out
+	}
+	sub := make([]schemas.ChatMessage, len(slow))
+	for j, i := range slow {
+		sub[j] = in[i]
+	}
+	for j, m := range cloneViaJSON(sub) {
+		out[slow[j]] = m
+	}
+	return out
+}
+
+// clonePlainText deep-copies a message that is nothing but a role and a text string. It
+// declines (ok=false) for every other shape, and for text the JSON round trip would rewrite
+// (invalid UTF-8), so the result is always what the round trip would have produced.
+func clonePlainText(m schemas.ChatMessage) (schemas.ChatMessage, bool) {
+	if m.Name != nil || m.ChatToolMessage != nil || m.ChatAssistantMessage != nil ||
+		m.Content == nil || m.Content.ContentStr == nil || m.Content.ContentBlocks != nil ||
+		!utf8.ValidString(*m.Content.ContentStr) || !utf8.ValidString(string(m.Role)) {
+		return schemas.ChatMessage{}, false
+	}
+	str := *m.Content.ContentStr
+	return schemas.ChatMessage{Role: m.Role, Content: &schemas.ChatMessageContent{ContentStr: &str}}, true
+}
+
+func cloneViaJSON(in []schemas.ChatMessage) []schemas.ChatMessage {
 	b, err := json.Marshal(in)
 	if err != nil {
 		return fallbackClone(in, err)

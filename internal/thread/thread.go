@@ -570,28 +570,62 @@ func fingerprint(body []byte) ([]uint64, []int, bool) {
 func canon(h hash.Hash64, v gjson.Result) {
 	switch {
 	case v.IsObject():
-		switch v.Get("type").String() {
+		// One pass over the object. Looking the discriminating keys up with Get scanned the whole
+		// object (past every long string in it) once per key before the real walk started, and a
+		// message is mostly one long string. A key that repeats keeps its FIRST value, as Get does.
+		var typ, role, toolUseID, callID, toolCallID string
+		var seenTyp, seenRole, seenTU, seenCall, seenTC bool
+		type kv struct{ k, val gjson.Result }
+		fields := make([]kv, 0, 4)
+		v.ForEach(func(k, val gjson.Result) bool {
+			fields = append(fields, kv{k, val})
+			switch k.Str {
+			case "type":
+				if !seenTyp {
+					typ, seenTyp = val.String(), true
+				}
+			case "role":
+				if !seenRole {
+					role, seenRole = val.String(), true
+				}
+			case "tool_use_id":
+				if !seenTU {
+					toolUseID, seenTU = val.String(), true
+				}
+			case "call_id":
+				if !seenCall {
+					callID, seenCall = val.String(), true
+				}
+			case "tool_call_id":
+				if !seenTC {
+					toolCallID, seenTC = val.String(), true
+				}
+			}
+			return true
+		})
+		switch typ {
 		case "thinking", "redacted_thinking", "reasoning":
 			h.Write([]byte("~"))
 			return
 		case "tool_result":
 			h.Write([]byte("tool_result:"))
-			h.Write([]byte(v.Get("tool_use_id").String()))
+			h.Write([]byte(toolUseID))
 			return
 		case "function_call_output": // Responses
 			h.Write([]byte("function_call_output:"))
-			h.Write([]byte(v.Get("call_id").String()))
+			h.Write([]byte(callID))
 			return
 		}
-		if v.Get("role").String() == "tool" { // OpenAI chat
+		if role == "tool" { // OpenAI chat
 			h.Write([]byte("tool:"))
-			h.Write([]byte(v.Get("tool_call_id").String()))
+			h.Write([]byte(toolCallID))
 			return
 		}
 		h.Write([]byte("{"))
-		v.ForEach(func(k, val gjson.Result) bool {
+		for _, f := range fields {
+			k, val := f.k, f.val
 			if k.Str == "cache_control" {
-				return true
+				continue
 			}
 			h.Write([]byte(k.Str))
 			h.Write([]byte(":"))
@@ -602,18 +636,22 @@ func canon(h hash.Hash64, v gjson.Result) {
 				// provider normalizes both to one text block and its cache still hits, so
 				// this package must agree: hash the string exactly as it would hash
 				// [{"type":"text","text":<the string>}] — val.Raw is already the properly
-				// quoted/escaped JSON string literal, so splicing it in produces byte-for-
+				// quoted/escaped JSON string literal, so writing it in produces byte-for-
 				// byte the same canon() output a genuine one-text-block array would. Scoped
 				// to the "content" key only, and only this one direction (string ->
 				// canonical array shape): a content array is left exactly as canon already
 				// handles it, whether it holds one block or many.
-				canon(h, gjson.Parse(`[{"type":"text","text":`+val.Raw+`}]`))
+				//
+				// Written out directly: this is what canon emits for that array, without
+				// building and re-parsing a copy of the (long) string to get there.
+				h.Write([]byte(`[{type:"text",text:`))
+				h.Write([]byte(val.Raw))
+				h.Write([]byte(`,},]`))
 			} else {
 				canon(h, val)
 			}
 			h.Write([]byte(","))
-			return true
-		})
+		}
 		h.Write([]byte("}"))
 	case v.IsArray():
 		h.Write([]byte("["))
