@@ -20,7 +20,8 @@ For the calling account, over its own history in the dashboard DB:
    of that gain (`heatmap`, one per option under `option_heatmaps`) in the account's strategy timezone (`heatmap_tz`: the zone of the
    account's keep-alive strategy windows, `tenant.DefaultStrategyTZ` when it has none), so a cell is the span of a window the user would set;
    every hour and day the user reads is in that zone too (`display_tz`): the by_dow / by_hour options' `plan`, their labels and the
-   change line. Display only: those rules run live on UTC days and hours;
+   change line. Display only: those rules run live on UTC days and hours. Spans use the offset as of the window end
+   (`display_tz_note` names the date), so across a daylight-saving change inside the window the earlier hours read one hour off;
 4. what the keep-alive actually did (`observed`: real pings, their cost, the misses they avoided, from the dashboard's ledger);
 5. a choice: keep the default, or enforce an adapted option through the campaign builder.
 
