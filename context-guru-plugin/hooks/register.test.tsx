@@ -24,7 +24,7 @@ const BAND = {
 
 let clock: ReturnType<typeof mock.clock>
 
-async function boot($: any, on: any, warm: boolean, calls: string[][] = []) {
+async function boot($: any, on: any, warm: boolean, calls: string[][] = [], pingOut: object = { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 }) {
   on('command.register', () => ({ value: { command: 'context-guru' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.id', () => ({ value: 'sess-1' }))
@@ -39,7 +39,7 @@ async function boot($: any, on: any, warm: boolean, calls: string[][] = []) {
   on('process.run', (_: any, e: any) => {
     calls.push([...e.argv])
     const ping = e.argv.includes('ping')
-    const out = ping ? { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 } : doc(warm)
+    const out = ping ? pingOut : doc(warm)
     return { value: { exitCode: 0, stdout: JSON.stringify(out) + '\n', stderr: '' } }
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -115,4 +115,21 @@ test('/ping answers with text alone and starts no turn', async ($, on) => {
   expect(calls.some(c => c.includes('ping'))).toBe(true)
   expect(started).toEqual([])
   expect(calls.filter(c => c.includes('ping')).length).toBe(1) // the helper ran once
+})
+
+test('a server without the ping route is not blamed on the session', async ($, on) => {
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  // The helper reports Go's plain-text 404 as a status with no error field.
+  await boot($, on, true, [], { status: 404 })
+  const r = await $.command.run({ command: 'ping', args: '' })
+  expect(r.text).toMatch(/does not support manual pings yet/)
+  expect(r.text).not.toMatch(/not known/)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'ping' })
+  expect(toasts.join('\n')).toMatch(/does not support manual pings yet/)
+  await ui.unmount()
 })

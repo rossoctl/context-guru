@@ -1184,8 +1184,10 @@ def ping_lines(code: int, doc: dict | None) -> list[str]:
                 f"the ping {dollars(doc.get('ping_usd', 0))})."]
     if code == 409:
         return ["The cache is already cold, so there is nothing to keep warm. The next request rewrites it."]
-    if code == 404:
+    if code == 404 and doc.get("error") == "unknown session":
         return ["This server does not know that session yet. Send a prompt first."]
+    if code in (404, 405) and not doc.get("error"):  # the mux's plain-text "404 page not found": the route does not exist
+        return ["This Context Guru server does not support manual pings yet. Update the proxy."]
     if code == 429:
         return [f"Pinged a moment ago. Try again in {doc.get('retry_after_s', 30)}s."]
     if code == 0:

@@ -82,6 +82,7 @@ export const pingToast = (r: { status?: number; error?: string; saved_usd?: numb
   if (r.status === 200) return `kept warm — saved ${usd(r.saved_usd ?? 0)} − ping ${usd(r.ping_usd ?? 0)}`
   if (r.status === 409) return 'cache already cold — nothing to keep warm'
   if (r.status === 429) return `pinged a moment ago — try again in ${r.retry_after_s ?? 30}s`
-  if (r.status === 404) return 'this session is not known to the server yet'
+  if (r.status === 404 && r.error === 'unknown session') return 'this session is not known to the server yet'
+  if (r.status === 404 || r.status === 405) return 'this Context Guru server does not support manual pings yet \u2014 update the proxy'
   return `ping failed${r.error ? `: ${r.error}` : ''}`
 }
