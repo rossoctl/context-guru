@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 560" width="1300" height="560" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 600" width="1300" height="600" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title id="t">Turn 7: coref saves $0.00599 and breaks the cache for $0.06558</title>
 <desc id="d">Two rows show the prompt of turn 7, left to right: tools and system 15,300 tokens, messages 0 to 4 11,060, message 5 20,000, messages 6 to 11 7,900, new messages 2,000. Without coref the cache is read up to the end of message 11, 54,260 tokens, and 2,000 are written: 0.02378 dollars. With coref, message 5 becomes 50 tokens. The forwarded body differs from turn 6 at message 5, which is after the last breakpoint before it, the end of system. The provider reads only 15,300 tokens and writes 21,010: 0.08338 dollars. The 19,950 removed tokens save 0.00599 dollars. The 19,010 tokens written instead of read cost 0.06558 dollars. The net on turn 7 is minus 0.05960 dollars.</desc>
 <style>
@@ -20,7 +20,7 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 <pattern id="hr" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hr" x1="0" y1="0" x2="0" y2="8"/></pattern>
 <pattern id="hw" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hw" x1="0" y1="0" x2="0" y2="8"/></pattern>
 </defs>
-<rect class="bg" width="1300" height="560"/>
+<rect class="bg" width="1300" height="600"/>
 <text class="t" x="24" y="30" font-size="17" font-weight="600">Turn 7: coref saves $0.00599 and breaks the cache for $0.06558</text>
 <text class="t2" x="24" y="50" font-size="12">Each row is the prompt, left to right; widths are in tokens. The hatched block is what coref removed.</text>
 <text class="t" x="265.1" y="80" font-size="11" text-anchor="middle" font-weight="600">tools</text>
@@ -72,29 +72,32 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 <text class="t" x="479.2" y="342" font-size="11" font-weight="600">cache break: written instead of read</text>
 <text class="t2" x="479.2" y="355" font-size="10">messages 0 to 4 and 6 to 11, plus the 50-token marker: 19,010</text>
 <text class="t" x="1075" y="234" font-size="11" fill="none"></text>
-<text class="t2" x="1075" y="234" font-size="11">operation</text><text class="t2" x="1160" y="234" font-size="11">saving</text>
-<text class="t" x="1075" y="255" font-size="12" font-weight="600">coref</text>
-<text class="t" x="1160" y="255" font-size="12">+$0.00599</text>
-<text class="t2" x="1075" y="267" font-size="10">19,950 × $0.30 · message 5, before B*: read</text>
-<text class="t" x="1075" y="285" font-size="12" font-weight="600">cacheBreak</text>
-<text class="t" x="1160" y="285" font-size="12">−$0.06558</text>
-<text class="t2" x="1075" y="297" font-size="10">19,010 × ($3.75 − $0.30) · written instead of read</text>
-<text class="t2" x="1075" y="324" font-size="11">bill $0.08338:</text>
-<text class="t2" x="1075" y="338" font-size="11">15,300 × $0.30 + 21,010 × $3.75</text>
-<line class="axis" x1="170" y1="402" x2="1039.8" y2="402"/>
-<line class="axis" x1="170.0" y1="402" x2="170.0" y2="408"/>
-<text class="t2" x="170.0" y="422" font-size="11" text-anchor="middle">0</text>
-<line class="axis" x1="479.2" y1="402" x2="479.2" y2="408"/>
-<text class="t2" x="479.2" y="422" font-size="11" text-anchor="middle">20k</text>
-<line class="axis" x1="788.4" y1="402" x2="788.4" y2="408"/>
-<text class="t2" x="788.4" y="422" font-size="11" text-anchor="middle">40k</text>
-<line class="axis" x1="1039.8" y1="402" x2="1039.8" y2="408"/>
-<text class="t2" x="1039.8" y="422" font-size="11" text-anchor="middle">56k</text>
-<text class="t2" x="604.9" y="442" font-size="11" text-anchor="middle">position in the body without coref, in tokens (k = 1,000)</text>
-<line class="axis" x1="1075" y1="368" x2="1275" y2="368"/>
-<text class="t2" x="1075" y="382" font-size="11">net on turn 7: $0.02378 − $0.08338</text>
-<text class="t" x="1075" y="402" font-size="16" font-weight="600">−$0.05960</text>
-<rect class="read" x="170" y="464" width="22" height="12" rx="2"/><text class="t" x="202" y="474" font-size="12">cache read: $0.30 per million tokens (up to B*)</text>
-<rect class="write" x="560" y="464" width="22" height="12" rx="2"/><text class="t" x="592" y="474" font-size="12">cache write: $3.75 per million tokens (after B*, up to L)</text>
-<rect class="ghost-read" x="170" y="490" width="22" height="12" rx="2"/><text class="t" x="202" y="500" font-size="12">tokens coref removed, at the rate they would have been billed at</text>
+<text class="t2" x="1075" y="234" font-size="11">operation</text><text class="t2" x="1200" y="234" font-size="11">saving</text>
+<rect x="1075" y="244" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
+<text class="t" x="1108.2" y="258" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
+<text class="t" x="1200" y="258" font-size="12">+$0.00599</text>
+<text class="t" x="1075" y="276" font-size="11" font-weight="600">coref</text>
+<text class="t2" x="1075" y="289" font-size="10">19,950 × $0.30 · message 5, before B*: read</text>
+<rect x="1075" y="294" width="88.0" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
+<text class="t" x="1119.0" y="308" font-size="12" text-anchor="middle" font-weight="600">cacheBreak</text>
+<text class="t" x="1200" y="308" font-size="12">−$0.06558</text>
+<text class="t2" x="1075" y="326" font-size="10">19,010 × ($3.75 − $0.30) · written instead of read</text>
+<text class="t2" x="1075" y="354" font-size="11">bill $0.08338:</text>
+<text class="t2" x="1075" y="368" font-size="11">15,300 × $0.30 + 21,010 × $3.75</text>
+<line class="axis" x1="170" y1="442" x2="1039.8" y2="442"/>
+<line class="axis" x1="170.0" y1="442" x2="170.0" y2="448"/>
+<text class="t2" x="170.0" y="462" font-size="11" text-anchor="middle">0</text>
+<line class="axis" x1="479.2" y1="442" x2="479.2" y2="448"/>
+<text class="t2" x="479.2" y="462" font-size="11" text-anchor="middle">20k</text>
+<line class="axis" x1="788.4" y1="442" x2="788.4" y2="448"/>
+<text class="t2" x="788.4" y="462" font-size="11" text-anchor="middle">40k</text>
+<line class="axis" x1="1039.8" y1="442" x2="1039.8" y2="448"/>
+<text class="t2" x="1039.8" y="462" font-size="11" text-anchor="middle">56k</text>
+<text class="t2" x="604.9" y="482" font-size="11" text-anchor="middle">position in the body without coref, in tokens (k = 1,000)</text>
+<line class="axis" x1="1075" y1="408" x2="1275" y2="408"/>
+<text class="t2" x="1075" y="422" font-size="11">net on turn 7: $0.02378 − $0.08338</text>
+<text class="t" x="1075" y="442" font-size="16" font-weight="600">−$0.05960</text>
+<rect class="read" x="170" y="504" width="22" height="12" rx="2"/><text class="t" x="202" y="514" font-size="12">cache read: $0.30 per million tokens (up to B*)</text>
+<rect class="write" x="560" y="504" width="22" height="12" rx="2"/><text class="t" x="592" y="514" font-size="12">cache write: $3.75 per million tokens (after B*, up to L)</text>
+<rect class="ghost-read" x="170" y="530" width="22" height="12" rx="2"/><text class="t" x="202" y="540" font-size="12">tokens coref removed, at the rate they would have been billed at</text>
 </svg>

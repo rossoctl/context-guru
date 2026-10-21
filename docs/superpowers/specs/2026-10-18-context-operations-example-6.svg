@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 570" width="1300" height="570" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 660" width="1300" height="660" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title id="t">Turn 5: four operations, each priced at its own position</title>
 <desc id="d">Two rows show the prompt of turn 5, left to right: tools 20,000 tokens, system 3,000, then messages. The cache is hot and reaches the end of message 8, so everything up to there is read at 0.30 dollars per million tokens, and message 9 is written at 3.75. The first row is the client body, 71,000 tokens, and costs 0.04890 dollars. The second row is the forwarded body, 52,260 tokens, and costs 0.01878 dollars. Hatched blocks are what the operators removed: tool-prune removed 3 tool declarations, 8,000 tokens, read, saving 0.00240; mask removed 3,940 tokens from message 3, read, saving 0.00118; cmdfilter removed 7,100 tokens from message 9, written, saving 0.02663. expand added a 300-token tool, read, costing 0.00009. The saving on turn 5 is 0.03012 dollars.</desc>
 <style>
@@ -20,7 +20,7 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 <pattern id="hr" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hr" x1="0" y1="0" x2="0" y2="8"/></pattern>
 <pattern id="hw" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hw" x1="0" y1="0" x2="0" y2="8"/></pattern>
 </defs>
-<rect class="bg" width="1300" height="570"/>
+<rect class="bg" width="1300" height="660"/>
 <text class="t" x="24" y="30" font-size="17" font-weight="600">Turn 5: four operations, each priced at its own position</text>
 <text class="t2" x="24" y="50" font-size="12">Each row is the prompt, left to right, message by message; widths are in tokens. The hatched blocks are what the operators removed.</text>
 <text class="t" x="292.0" y="80" font-size="11" text-anchor="middle" font-weight="600">tools</text>
@@ -115,37 +115,45 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 <polygon class="t" points="410.8,292 420.8,292 415.8,285"/>
 <text class="t" x="415.8" y="296" font-size="11" text-anchor="middle" font-weight="600">expand</text>
 <text class="t2" x="415.8" y="309" font-size="10" text-anchor="middle">new tool, +300</text>
-<text class="t2" x="1075" y="234" font-size="11">operation</text><text class="t2" x="1160" y="234" font-size="11">saving</text>
-<text class="t" x="1075" y="255" font-size="12" font-weight="600">tool-prune</text>
-<text class="t" x="1160" y="255" font-size="12">+$0.00240</text>
-<text class="t2" x="1075" y="267" font-size="10">8,000 × $0.30 · tools, before B*: read</text>
-<text class="t" x="1075" y="285" font-size="12" font-weight="600">mask</text>
-<text class="t" x="1160" y="285" font-size="12">+$0.00118</text>
-<text class="t2" x="1075" y="297" font-size="10">3,940 × $0.30 · message 3, before B*: read</text>
-<text class="t" x="1075" y="315" font-size="12" font-weight="600">cmdfilter</text>
-<text class="t" x="1160" y="315" font-size="12">+$0.02663</text>
-<text class="t2" x="1075" y="327" font-size="10">7,100 × $3.75 · message 9, after B*, at L: write</text>
-<text class="t" x="1075" y="345" font-size="12" font-weight="600">expand</text>
-<text class="t" x="1160" y="345" font-size="12">−$0.00009</text>
-<text class="t2" x="1075" y="357" font-size="10">300 × $0.30 · tools, before B*: read</text>
-<text class="t2" x="1075" y="380" font-size="11">bill $0.01878: 51,360 × $0.30 + 900 × $3.75</text>
-<line class="axis" x1="170" y1="412" x2="1036.2" y2="412"/>
-<line class="axis" x1="170.0" y1="412" x2="170.0" y2="418"/>
-<text class="t2" x="170.0" y="432" font-size="11" text-anchor="middle">0</text>
-<line class="axis" x1="414.0" y1="412" x2="414.0" y2="418"/>
-<text class="t2" x="414.0" y="432" font-size="11" text-anchor="middle">20k</text>
-<line class="axis" x1="658.0" y1="412" x2="658.0" y2="418"/>
-<text class="t2" x="658.0" y="432" font-size="11" text-anchor="middle">40k</text>
-<line class="axis" x1="902.0" y1="412" x2="902.0" y2="418"/>
-<text class="t2" x="902.0" y="432" font-size="11" text-anchor="middle">60k</text>
-<line class="axis" x1="1036.2" y1="412" x2="1036.2" y2="418"/>
-<text class="t2" x="1036.2" y="432" font-size="11" text-anchor="middle">71k</text>
-<text class="t2" x="603.1" y="452" font-size="11" text-anchor="middle">position in the client body, in tokens (k = 1,000)</text>
-<line class="axis" x1="1075" y1="398" x2="1275" y2="398"/>
-<text class="t2" x="1075" y="412" font-size="11">saving on turn 5: $0.04890 − $0.01878</text>
-<text class="t" x="1075" y="434" font-size="16" font-weight="600">+$0.03012</text>
-<rect class="read" x="170" y="474" width="22" height="12" rx="2"/><text class="t" x="202" y="484" font-size="12">cache read: $0.30 per million tokens (up to B*)</text>
-<rect class="write" x="560" y="474" width="22" height="12" rx="2"/><text class="t" x="592" y="484" font-size="12">cache write: $3.75 per million tokens (after B*, up to L)</text>
-<rect class="ghost-write" x="170" y="500" width="22" height="12" rx="2"/><rect class="ghost-read" x="196" y="500" width="22" height="12" rx="2"/><text class="t" x="228" y="510" font-size="12">tokens an operator removed, at the rate they would have been billed at</text>
-<text class="t2" x="170" y="536" font-size="11">The 3 removed tool declarations are not next to each other. Each is its own span of the tool-prune operation.</text>
+<text class="t2" x="1075" y="234" font-size="11">operation</text><text class="t2" x="1180" y="234" font-size="11">saving</text>
+<rect x="1075" y="244" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
+<text class="t" x="1108.2" y="258" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
+<text class="t" x="1180" y="258" font-size="12">+$0.00240</text>
+<text class="t" x="1075" y="276" font-size="11" font-weight="600">tool-prune</text>
+<text class="t2" x="1075" y="289" font-size="10">8,000 × $0.30 · tools, before B*: read</text>
+<rect x="1075" y="294" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
+<text class="t" x="1108.2" y="308" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
+<text class="t" x="1180" y="308" font-size="12">+$0.00118</text>
+<text class="t" x="1075" y="326" font-size="11" font-weight="600">mask</text>
+<text class="t2" x="1075" y="339" font-size="10">3,940 × $0.30 · message 3, before B*: read</text>
+<rect x="1075" y="344" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
+<text class="t" x="1108.2" y="358" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
+<text class="t" x="1180" y="358" font-size="12">+$0.02663</text>
+<text class="t" x="1075" y="376" font-size="11" font-weight="600">cmdfilter</text>
+<text class="t2" x="1075" y="389" font-size="10">7,100 × $3.75 · message 9, after B*, at L: write</text>
+<rect x="1075" y="394" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
+<text class="t" x="1108.2" y="408" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
+<text class="t" x="1180" y="408" font-size="12">−$0.00009</text>
+<text class="t" x="1075" y="426" font-size="11" font-weight="600">expand</text>
+<text class="t2" x="1075" y="439" font-size="10">300 × $0.30 · tools, before B*: read</text>
+<text class="t2" x="1075" y="464" font-size="11">bill $0.01878: 51,360 × $0.30 + 900 × $3.75</text>
+<line class="axis" x1="170" y1="496" x2="1036.2" y2="496"/>
+<line class="axis" x1="170.0" y1="496" x2="170.0" y2="502"/>
+<text class="t2" x="170.0" y="516" font-size="11" text-anchor="middle">0</text>
+<line class="axis" x1="414.0" y1="496" x2="414.0" y2="502"/>
+<text class="t2" x="414.0" y="516" font-size="11" text-anchor="middle">20k</text>
+<line class="axis" x1="658.0" y1="496" x2="658.0" y2="502"/>
+<text class="t2" x="658.0" y="516" font-size="11" text-anchor="middle">40k</text>
+<line class="axis" x1="902.0" y1="496" x2="902.0" y2="502"/>
+<text class="t2" x="902.0" y="516" font-size="11" text-anchor="middle">60k</text>
+<line class="axis" x1="1036.2" y1="496" x2="1036.2" y2="502"/>
+<text class="t2" x="1036.2" y="516" font-size="11" text-anchor="middle">71k</text>
+<text class="t2" x="603.1" y="536" font-size="11" text-anchor="middle">position in the client body, in tokens (k = 1,000)</text>
+<line class="axis" x1="1075" y1="482" x2="1275" y2="482"/>
+<text class="t2" x="1075" y="496" font-size="11">saving on turn 5: $0.04890 − $0.01878</text>
+<text class="t" x="1075" y="518" font-size="16" font-weight="600">+$0.03012</text>
+<rect class="read" x="170" y="558" width="22" height="12" rx="2"/><text class="t" x="202" y="568" font-size="12">cache read: $0.30 per million tokens (up to B*)</text>
+<rect class="write" x="560" y="558" width="22" height="12" rx="2"/><text class="t" x="592" y="568" font-size="12">cache write: $3.75 per million tokens (after B*, up to L)</text>
+<rect class="ghost-write" x="170" y="584" width="22" height="12" rx="2"/><rect class="ghost-read" x="196" y="584" width="22" height="12" rx="2"/><text class="t" x="228" y="594" font-size="12">tokens an operator removed, at the rate they would have been billed at</text>
+<text class="t2" x="170" y="620" font-size="11">The 3 removed tool declarations are not next to each other. Each is its own span of the tool-prune operation.</text>
 </svg>
