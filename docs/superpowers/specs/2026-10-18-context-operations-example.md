@@ -44,8 +44,8 @@ again.
 on the **last message**. So the provider can read or write the cache at two points only: the end of
 `system`, and the end of the body.
 
-**Session and thread.** Examples 6 to 8 follow session `s1`, thread `main`. Every operation carries
-both IDs. To keep the JSON short, the examples show them once, in `RequestOps`.
+**Session and thread.** Examples 6 to 8 follow session `s1`, thread `main`. Both IDs are on the
+request. The examples show them once, in `RequestOps`.
 
 **Pipeline** of examples 6 to 8, in order:
 
@@ -359,7 +359,7 @@ and prices each operation in it.
 ```json
 {
   "version": 1, "requestId": "req-5", "session": "s1",
-  "thread": {"id": "main", "source": "header"},
+  "thread": {"id": "main"},
   "ops": [
     {
       "id": "op1", "kind": "rewrite",
@@ -496,22 +496,21 @@ value of the window together. A window whose ping rescued nothing has only the `
 total is negative.
 
 1. **`spend`, reported once, by the keeper.** A ping is an ordinary `spend` operation (design §4.2
-   rule 6). **It is not related to any real request.** The agent did not send it, and no turn
+   rule 5). **It is not related to any real request.** The agent did not send it, and no turn
    carries it. It is its own `RequestOps`, with its own `requestId` (`ping-p1`). It only costs money:
    it has no saving of its own.
 
    ```json
    {
      "version": 1, "requestId": "ping-p1", "session": "s1",
-     "thread": {"id": "main", "source": "header"},
+     "thread": {"id": "main"},
      "billing": {"mode": "api"},
      "ops": [
        { "id": "op1", "kind": "spend", "operator": "keeper",
          "changeId": "ka:main:w1",
          "call": {
            "host": "api.anthropic.com", "model": "agent-model",
-           "usage": {"input": 10, "cacheRead": 10000, "cacheWrite": 0, "output": 1},
-           "status": 200
+           "usage": {"input": 10, "cacheRead": 10000, "cacheWrite": 0, "output": 1}
          } }
      ]
    }
