@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
+	"modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
 )
 
 // memSeq names in-memory databases uniquely. See Open.
@@ -304,7 +305,7 @@ func OpenReadOnly(path string) (*DB, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
-	sdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)")
+	sdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)&cg_ro=1")
 	if err != nil {
 		return nil, err
 	}
@@ -322,6 +323,59 @@ func OpenReadOnly(path string) (*DB, error) {
 		return nil, &versionMismatch{have: have}
 	}
 	return &DB{sql: sdb, path: path, readOnly: true, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+}
+
+// A read-only handle cannot ALTER, and the queries read every column of additiveColumns, which a
+// file written by an older proxy may lack (the Ping button's manual_ping among them). Failing each
+// query with "no such column" would break a reader (the cache-campaign tool opens live databases
+// this way, and operators mix tool and proxy versions), so each read-only connection gets a TEMP
+// view named `requests` that adds every missing column as its default. Temp objects are searched
+// before main, so every unqualified `requests` resolves to the shim; the view is per connection and
+// writes nothing to the file. A file with all its columns gets no shim. query_only is switched on
+// last, because it forbids creating even a temp object.
+//
+// The hook is the driver's process-wide one, so it acts only on DSNs carrying cg_ro=1.
+func init() {
+	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
+		if !strings.Contains(dsn, "cg_ro=1") {
+			return nil
+		}
+		ctx := context.Background()
+		rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info('requests')`, nil)
+		if err != nil {
+			return err
+		}
+		have := map[string]bool{}
+		vals := make([]driver.Value, 1)
+		for rows.Next(vals) == nil {
+			if n, ok := vals[0].(string); ok {
+				have[n] = true
+			}
+		}
+		rows.Close()
+		var extra string
+		for _, c := range additiveColumns {
+			if c.table == "requests" && !have[c.column] {
+				extra += ", " + additiveDefault(c.ddl) + " AS " + c.column
+			}
+		}
+		if extra != "" && len(have) > 0 {
+			if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW requests AS SELECT *`+extra+` FROM main.requests`, nil); err != nil {
+				return err
+			}
+		}
+		_, err = conn.ExecContext(ctx, `PRAGMA query_only = 1`, nil)
+		return err
+	})
+}
+
+// additiveDefault is the literal a missing additive column reads as: its DEFAULT, else NULL (a
+// column declared without one, like keepalive_strategy_id, reads NULL on an old row).
+func additiveDefault(ddl string) string {
+	if _, def, ok := strings.Cut(ddl, "DEFAULT "); ok {
+		return strings.TrimSpace(def)
+	}
+	return "NULL"
 }
 
 // sanitizeVersion keeps a version string safe to embed in a filename.
@@ -404,10 +458,10 @@ func (d *DB) insertBatch(evs []*Event) error {
 		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
 		keepalive_strategy_id, billed_token_factor, thread_id,
 		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms,
-		agent_compaction, cache_miss_cause
+		agent_compaction, cache_miss_cause, manual_ping, manual_saved_usd
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -471,7 +525,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.StopReason,
 			strategyID, e.BilledTokenFactor, e.ThreadID,
 			e.WaitingFor, e.WaitTool, e.WakeCause, e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs,
-			boolInt(e.AgentCompaction), e.CacheMissCause,
+			boolInt(e.AgentCompaction), e.CacheMissCause, boolInt(e.ManualPing), e.ManualSavedUSD,
 		)
 		if err != nil {
 			return err

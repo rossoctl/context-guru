@@ -3,6 +3,9 @@
   {
    "builtin": true,
    "calls": 96,
+   "carry_priced": false,
+   "carry_reads": 28440,
+   "carry_usd": 0.08188199999999998,
    "has_text": false,
    "kind": "tool",
    "name": "Bash",
@@ -127,6 +130,9 @@
  "servers": [
   {
    "calls": 16,
+   "carry_priced": false,
+   "carry_reads": 174736,
+   "carry_usd": 0.5028989999999999,
    "priced": false,
    "server": "alpha",
    "sessions_declared": 24,
@@ -135,10 +141,13 @@
    "tools": 2,
    "tools_used": 1,
    "unused_reads": 152056,
-   "unused_usd": 0.4712032499999997
+   "unused_usd": 0.47120324999999974
   },
   {
    "calls": 0,
+   "carry_priced": false,
+   "carry_reads": 118500,
+   "carry_usd": 0.3411749999999998,
    "priced": false,
    "server": "beta",
    "sessions_declared": 24,
@@ -147,7 +156,7 @@
    "tools": 1,
    "tools_used": 0,
    "unused_reads": 118500,
-   "unused_usd": 0.341175
+   "unused_usd": 0.34117499999999995
   }
  ],
  "skills": {
@@ -159,6 +168,9 @@
    {
     "builtin": false,
     "calls": 0,
+    "carry_priced": false,
+    "carry_reads": 11440,
+    "carry_usd": 0.04728899999999999,
     "has_text": false,
     "kind": "skill",
     "name": "skill-1",
@@ -175,13 +187,16 @@
     "share_pct": 9.695901278096077,
     "tokens": 220,
     "unused_reads": 11440,
-    "unused_usd": 0.04728899999999999,
-    "unused_usd_high": 0.047288999999999984,
-    "unused_usd_low": 0.047288999999999984
+    "unused_usd": 0.047289,
+    "unused_usd_high": 0.047288999999999956,
+    "unused_usd_low": 0.047288999999999956
    },
    {
     "builtin": false,
     "calls": 0,
+    "carry_priced": false,
+    "carry_reads": 10780,
+    "carry_usd": 0.036069,
     "has_text": false,
     "kind": "skill",
     "name": "skill-4",
@@ -199,12 +214,15 @@
     "tokens": 220,
     "unused_reads": 10780,
     "unused_usd": 0.036069,
-    "unused_usd_high": 0.036068999999999976,
-    "unused_usd_low": 0.036068999999999976
+    "unused_usd_high": 0.03606899999999996,
+    "unused_usd_low": 0.03606899999999996
    },
    {
     "builtin": false,
     "calls": 0,
+    "carry_priced": false,
+    "carry_reads": 10560,
+    "carry_usd": 0.026498999999999995,
     "has_text": false,
     "kind": "skill",
     "name": "skill-2",
@@ -221,13 +239,16 @@
     "share_pct": 9.695901278096077,
     "tokens": 220,
     "unused_reads": 10560,
-    "unused_usd": 0.026498999999999995,
+    "unused_usd": 0.026499,
     "unused_usd_high": 0.026499,
     "unused_usd_low": 0.026499
    },
    {
     "builtin": false,
     "calls": 0,
+    "carry_priced": false,
+    "carry_reads": 9680,
+    "carry_usd": 0.026136,
     "has_text": false,
     "kind": "skill",
     "name": "skill-0",
@@ -251,6 +272,9 @@
    {
     "builtin": false,
     "calls": 0,
+    "carry_priced": false,
+    "carry_reads": 9680,
+    "carry_usd": 0.014123999999999998,
     "has_text": false,
     "kind": "skill",
     "name": "skill-3",
@@ -275,12 +299,15 @@
   "state": "ok",
   "unknown_sessions": 0,
   "unused_listing_reads": 213300,
-  "unused_listing_usd": 0.6141149999999999
+  "unused_listing_usd": 0.6141149999999997
  },
  "tools": [
   {
    "builtin": false,
    "calls": 0,
+   "carry_priced": false,
+   "carry_reads": 118500,
+   "carry_usd": 0.3411749999999998,
    "has_text": false,
    "kind": "mcp_tool",
    "name": "mcp__beta__x",
@@ -299,13 +326,16 @@
    "share_pct": 22.036139268400177,
    "tokens": 500,
    "unused_reads": 118500,
-   "unused_usd": 0.341175,
-   "unused_usd_high": 0.34117499999999973,
-   "unused_usd_low": 0.34117499999999973
+   "unused_usd": 0.34117499999999995,
+   "unused_usd_high": 0.3411749999999996,
+   "unused_usd_low": 0.3411749999999996
   },
   {
    "builtin": false,
    "calls": 0,
+   "carry_priced": false,
+   "carry_reads": 97170,
+   "carry_usd": 0.2797634999999998,
    "has_text": false,
    "kind": "mcp_tool",
    "name": "mcp__alpha__write",
@@ -324,13 +354,16 @@
    "share_pct": 18.069634200088146,
    "tokens": 410,
    "unused_reads": 97170,
-   "unused_usd": 0.2797634999999997,
-   "unused_usd_high": 0.2797635000000001,
-   "unused_usd_low": 0.2797635000000001
+   "unused_usd": 0.2797634999999998,
+   "unused_usd_high": 0.2797635,
+   "unused_usd_low": 0.2797635
   },
   {
    "builtin": false,
    "calls": 16,
+   "carry_priced": false,
+   "carry_reads": 77566,
+   "carry_usd": 0.22313550000000007,
    "has_text": false,
    "kind": "mcp_tool",
    "name": "mcp__alpha__read",
@@ -367,7 +400,7 @@
   "unused_reads": 483856,
   "unused_tokens": 2028,
   "unused_usd": 1.4264932499999996,
-  "unused_usd_high": 1.4264932499999994,
-  "unused_usd_low": 1.4264932499999994
+  "unused_usd_high": 1.426493249999999,
+  "unused_usd_low": 1.426493249999999
  }
 }

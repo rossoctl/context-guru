@@ -1688,6 +1688,7 @@ function renderSavedLedger(o, ka, partial) {
     ? ka.latency.per_miss_ms * o.keepalive_misses_avoided : null;
   const kaRan = o.keepalive_pings > 0 || o.keepalive_net_usd;
   const filterRan = o.decl_filter_requests > 0;
+  const manualRan = !!(o.manual_pings && o.manual_pings.count > 0);
   const parts = savedParts(o);
   const levers = [
     {
@@ -1715,6 +1716,15 @@ function renderSavedLedger(o, ka, partial) {
       extra: filterRan ? num(o.decl_filter_requests) + ' requests had tools filtered' : '',
       kind: 'Estimated', note: 'saved when tools are left out of the prompt',
     },
+    // The Ping button. Its own row and not a part of the cache strategy: a person pressed it, the strategy did not decide it.
+    // Hidden until a ping has been pressed, so a user who never uses the button sees no empty row.
+    ...(manualRan ? [{
+      id: 'manual', tid: 'saved-manual', name: 'Manual pings', href: '#/keepalive', more: 'Cache strategy tab',
+      what: 'Cache rewrites avoided because you pressed Ping to keep a warm cache warm.',
+      ran: true, usd: parts.manual, tok: null,
+      extra: num(o.manual_pings.count) + (o.manual_pings.count === 1 ? ' ping' : ' pings') + ' cost ' + usd(o.manual_pings.ping_usd),
+      kind: 'Upper bound', note: 'after the pings cost ' + usd(o.manual_pings.ping_usd) + '. May overlap the cache strategy when its automatic pings are on.',
+    }] : []),
   ];
   const head = el('div', { class: 'ledger-head', 'aria-hidden': 'true' },
     el('span'), el('span', { text: 'Money' }), el('span', { text: 'Tokens' }));
@@ -1760,12 +1770,14 @@ function renderSavedLedger(o, ka, partial) {
     // Two parts, never one blended figure: the preset and filter savings are estimates, the cache strategy
     // part is an upper bound, and the Cache strategy tab may say it does not pay off.
     const est = parts.compaction + parts.filter;
+    // Manual pings join the cache part: both are cache rewrites avoided, and both are bounds, not measurements.
+    const cacheAll = parts.cache + parts.manual;
     host.appendChild(el('div', { class: 'ledger-total', 'data-testid': 'saved-total' },
       el('span', { text: 'Together' }),
       el('span', {}, el('strong', { text: usd(est) }), el('span', { class: 'lv-of', text: ' estimated saved' })),
-      parts.cache >= 0
-        ? el('span', {}, el('strong', { class: 'bound', text: 'up to ' + usd(parts.cache) }), el('span', { class: 'lv-of', text: ' more, from your cache strategy (an upper bound)' }))
-        : el('span', {}, el('strong', { class: 'bound', text: usd(parts.cache) }), el('span', { class: 'lv-of', text: ' from your cache strategy: it cost more than it saved' })),
+      cacheAll >= 0
+        ? el('span', {}, el('strong', { class: 'bound', text: 'up to ' + usd(cacheAll) }), el('span', { class: 'lv-of', text: ' more, from your cache strategy' + (parts.manual ? ' and manual pings' : '') + ' (an upper bound)' }))
+        : el('span', {}, el('strong', { class: 'bound', text: usd(cacheAll) }), el('span', { class: 'lv-of', text: ' from your cache strategy: it cost more than it saved' })),
       el('span', { class: 'lv-of', text: 'of ' + usd(spent) + ' spent' })));
   }
   const note = $('#ov-saved-note');

@@ -152,11 +152,11 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason,
 	r.thread_id,
 	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms,
-	r.agent_compaction, r.cache_miss_cause`
+	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
-	var byp, ca, stream, keepAlive, agentComp int
+	var byp, ca, stream, keepAlive, agentComp, manual int
 	var temp, topP sql.NullFloat64
 	var waitingFor, waitTool, wakeCause sql.NullString
 	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
@@ -173,13 +173,14 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason,
 		&e.ThreadID,
 		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs,
-		&agentComp, &e.CacheMissCause)
+		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD)
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64
 	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
 	e.AgentCompaction = agentComp != 0
 	e.KeepAlive = keepAlive != 0
+	e.ManualPing = manual != 0
 	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one
 	// that set nothing must not read the same on the row.
 	if temp.Valid {
@@ -650,7 +651,7 @@ type pingCount struct {
 // pingsBySession groups the ping rows by session. The caller passes a filter that INCLUDES them.
 func (d *DB) pingsBySession(cond string, args []any) (map[string]pingCount, error) {
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
-		FROM requests r WHERE `+cond+` AND r.keepalive = 1 GROUP BY 1`, args...)
+		FROM requests r WHERE `+cond+` AND `+autoPing+` GROUP BY 1`, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -445,3 +445,52 @@ func TestAdaptToolsSavedItemsAndTotalAgree(t *testing.T) {
 		}
 	}
 }
+
+// carry_* is priced on the SAME per-request path as unused_*: each request at its own model and
+// tier, and only on requests whose declaration set carried the item. seedAdapt has two models and
+// a subagent set that omits every MCP tool, so a per-session basis would overstate.
+func TestToolReportCarryIsPricedPerRequestLikeUnused(t *testing.T) {
+	rep, err := seedAdapt(t).ToolReportFor(Filter{Tenant: "t1"}, adaptPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]ToolStat{}
+	for _, s := range rep.Tools {
+		by[s.Name] = s
+	}
+	y, x := by["mcp__used__y"], by["mcp__used__x"]
+	// Never used: carry IS unused, to the cent and the read.
+	if y.UnusedReads == 0 || y.CarryReads != y.UnusedReads || math.Abs(y.CarryUSD-y.UnusedUSD) > 1e-9 {
+		t.Errorf("a never-used tool: carry %d/%v != unused %d/%v", y.CarryReads, y.CarryUSD, y.UnusedReads, y.UnusedUSD)
+	}
+	// Used: it wasted nothing, and carried on the same requests as y at 200 tokens against 300.
+	if x.UnusedUSD != 0 || x.CarryReads*3 != y.CarryReads*2 || math.Abs(x.CarryUSD*3-y.CarryUSD*2) > 1e-9 {
+		t.Errorf("a used tool: x %+v, y carry %d/%v", x, y.CarryReads, y.CarryUSD)
+	}
+	// The subagent request (3 of 7) carried no MCP tool: a per-session basis would count it.
+	if y.CarryReads != 300*4 { // r1, r2, r4 and r7 carried the main set
+		t.Errorf("y carry reads = %d, want 300 x 4 carrying requests", y.CarryReads)
+	}
+	// The mystery-model request has no rates: carry says so, on the used tool too.
+	if x.CarryPriced || y.CarryPriced {
+		t.Errorf("carry_priced = %v/%v, want false (one carrying request has no rates)", x.CarryPriced, y.CarryPriced)
+	}
+	for _, sv := range rep.Servers {
+		if sv.Server == "used" && (sv.CarryReads != x.CarryReads+y.CarryReads || sv.CarryPriced) {
+			t.Errorf("server rollup %+v is not the sum of its tools", sv)
+		}
+	}
+}
+
+// Priced carry says so.
+func TestToolReportCarryPricedWhenEveryCarryingRequestHasRates(t *testing.T) {
+	rep, err := seedReport(t).ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range append(append([]ToolStat{}, rep.Tools...), rep.Aside...) {
+		if !s.CarryPriced {
+			t.Errorf("%s: carry_priced false with every model priced", s.Name)
+		}
+	}
+}

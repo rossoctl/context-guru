@@ -607,6 +607,7 @@ func main() {
 		h.API().SetWindows(windows)
 		// The keeper's ping plan, so /api/cachestate can say how long a cache is held warm.
 		h.API().SetKeepAlivePlans(h.KeepAlivePlans)
+		h.API().SetPingable(h.KeepAlivePingable)
 		// The configuration the adapt reports compare against: each account's in hosted mode, this
 		// proxy's own (with any applied override) otherwise.
 		h.API().SetAdaptCompactionConfig(h.DashAdaptConfig())
@@ -844,6 +845,9 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 		KeepAliveStrategyID: r.Strategy,
 	}
 	ev.SessionID, ev.ThreadID = r.Session, r.Thread
+	// A ping the user asked for stays a keepalive row (real spend, a real refresh) but is flagged,
+	// so no strategy ledger counts it; the write it avoided is stored beside its cost.
+	ev.ManualPing, ev.ManualSavedUSD = r.Manual, r.RewriteUSD
 	ev.Lifecycle = d.rec.PingLifecycle(r.Pings)
 	ev.Agent = dash.AgentFor(r.Agent)
 	ev.FreshInput, ev.CacheRead = r.FreshInput, r.CacheRead

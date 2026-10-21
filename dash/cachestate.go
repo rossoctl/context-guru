@@ -35,6 +35,16 @@ type CacheState struct {
 	// (0 with Priced=false) when the model has no price: unknown, never free.
 	RewriteUSD float64 `json:"rewrite_usd"`
 	Priced     bool    `json:"priced"`
+	// NextWarmUSD and NextColdUSD price the next request's cached prefix both ways: read from a
+	// warm cache (PrefixTokens x the cache-read rate), or rewritten into a cold one (the same
+	// as RewriteUSD). Both omitted when the model has no price. A client built before they
+	// existed falls back to RewriteUSD for the cold case.
+	NextWarmUSD *float64 `json:"next_warm_usd,omitempty"`
+	NextColdUSD *float64 `json:"next_cold_usd,omitempty"`
+	// Pingable is true when the proxy holds this session's main thread's body and key, so POST
+	// /api/me/cache/ping can work (with keep-alive off it holds nothing and answers 409 "not
+	// held"). Omitted when the host cannot say, so a client treats absence as "unknown".
+	Pingable *bool `json:"pingable,omitempty"`
 	// Window is the served context window for Model, Exact=false when it is a guess.
 	Window      int  `json:"window"`
 	WindowExact bool `json:"window_exact"`
@@ -60,6 +70,11 @@ type ThreadCache struct {
 	PrefixTokens int64   `json:"prefix_tokens"`
 	RewriteUSD   float64 `json:"rewrite_usd"`
 	Priced       bool    `json:"priced"`
+	// NextWarmUSD and NextColdUSD: see CacheState.
+	NextWarmUSD *float64 `json:"next_warm_usd,omitempty"`
+	NextColdUSD *float64 `json:"next_cold_usd,omitempty"`
+	// Pingable: see CacheState.
+	Pingable *bool `json:"pingable,omitempty"`
 	// PingsLeft is how many keep-alive pings the proxy still plans for this thread, and
 	// HeldUntilMS when its cache goes cold if no real request arrives first: the last planned
 	// ping's start plus the TTL. Both omitted when no ping is planned.
@@ -97,6 +112,20 @@ func (p KeepAlivePlan) heldUntil(ttlS int64) int64 {
 // dash holds no keep-alive state of its own; nil means no plan is ever shown.
 func (a *API) SetKeepAlivePlans(fn func(tenantID string, allTenants bool, session string) map[string]KeepAlivePlan) {
 	a.kaPlans = fn
+}
+
+// SetPingable supplies, per thread of one session, whether the keeper holds what a manual ping
+// needs. dash keeps no keep-alive state; nil means pingable is never stated.
+func (a *API) SetPingable(fn func(tenantID string, allTenants bool, session string) map[string]bool) {
+	a.pingable = fn
+}
+
+// pingableFor is the host's per-thread answer, nil when it cannot say (no source, or no keeper).
+func (a *API) pingableFor(f Filter) map[string]bool {
+	if a.pingable == nil {
+		return nil
+	}
+	return a.pingable(f.Tenant, f.TenantAll, f.Session)
 }
 
 // maxDurationMS bounds the upstream time trusted for EndTS: a bogus value must not hold a dead
@@ -137,16 +166,17 @@ func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, 
 			model                                sql.NullString
 			prefix                               sql.NullInt64
 			base, cost, cgllm, split, kaSv, ping float64
+			manualSaved, manualCost              float64
 		)
 		if err := rows.Scan(&t.ID, &last, &ms, &model, &prefix,
-			&base, &cost, &cgllm, &split, &kaSv, &ping); err != nil {
+			&base, &cost, &cgllm, &split, &kaSv, &ping, &manualSaved, &manualCost); err != nil {
 			return nil, nil, err
 		}
 		t.TTLSeconds = 300
 		if ttl, ok := ttls[t.ID]; ok {
 			t.TTLSeconds = ttl
 		}
-		t.SavedUSD, t.BaselineUSD = threadMoney(base, cost, cgllm, split, kaSv, ping)
+		t.SavedUSD, t.BaselineUSD = threadMoney(base, cost, cgllm, split, kaSv, ping, manualSaved, manualCost)
 		m := &money.Others
 		if t.ID == "" {
 			m = &money.Main
@@ -226,7 +256,9 @@ func cacheThreadsQuery(f Filter) (string, []any) {
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cg_llm_cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cachesplit_saved_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN ` + kaSaved("r.") + ` ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
+		COALESCE(SUM(CASE WHEN ` + autoPing + ` THEN r.cost_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN ` + manualPing + ` THEN r.manual_saved_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN ` + manualPing + ` THEN r.cost_usd ELSE 0 END),0)
 		FROM requests r WHERE ` + cond + ` GROUP BY r.thread_id`, args
 }
 
@@ -237,9 +269,12 @@ func cacheThreadsQuery(f Filter) (string, []any) {
 // and x is the same net as savingsArithmetic's total. Only savings written per request are in it;
 // the two credits priced on read (CachesplitHistoricalUSD, an estimate, and DeclFilterSavings,
 // which needs Go-side pricing per row) are not.
-func threadMoney(baseline, cost, cgllm, split, kaSv, ping float64) (saved, base float64) {
-	_, _, saved = savingsArithmetic(cost, baseline, cgllm, split, kaSv, ping)
-	return saved, baseline + split + kaSv
+//
+// The user's own pings join both sides: the write they avoided raises y, and their cost lowers x
+// like any other spend, so pressing Ping moves `saved` by (avoided - cost).
+func threadMoney(baseline, cost, cgllm, split, kaSv, ping, manualSaved, manualCost float64) (saved, base float64) {
+	_, _, saved = savingsArithmetic(cost, baseline, cgllm, split, kaSv, ping, manualSaved-manualCost)
+	return saved, baseline + split + kaSv + manualSaved
 }
 
 // SessionMoney is a session's `saved $x of $y` split into the main thread and the sum of every
@@ -283,6 +318,32 @@ func (d *DB) CacheStateFor(f Filter) (*CacheState, error) {
 	return &s, nil
 }
 
+// NextRequestUSD prices a cached prefix of `tokens` for the next request: warm is a cache read, cold
+// is a rewrite at the write rate of the tier the cache was written at (2.0x input on the 1h tier;
+// same derivation as CostWithCacheWrite1h). One definition for /api/cachestate and the manual ping,
+// so the "kept warm" credit is the cold figure the status line already showed.
+func NextRequestUSD(p modelinfo.Price, tokens, ttlS int64) (warm, cold float64) {
+	if ttlS == 3600 {
+		return float64(tokens) * p.CacheRead, float64(tokens) * p.Input * 2.0
+	}
+	return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite
+}
+
+// rewrite is next's cold half, the figure RewriteUSD has always carried.
+func rewrite(next func(string, int64, int64) (float64, float64, bool), model string, tokens, ttl int64) (float64, bool) {
+	_, cold, ok := next(model, tokens, ttl)
+	return cold, ok
+}
+
+// nextPtrs is next as the two omit-when-unpriced response fields.
+func nextPtrs(next func(string, int64, int64) (float64, float64, bool), model string, tokens, ttl int64) (warm, cold *float64) {
+	w, c, ok := next(model, tokens, ttl)
+	if !ok {
+		return nil, nil
+	}
+	return &w, &c
+}
+
 func (a *API) cacheStateRoutes() []route {
 	return []route{{"GET /api/cachestate", scopeTenant, a.cacheState}}
 }
@@ -313,24 +374,26 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 	}
 	s.NowMS = time.Now().UnixMilli()
 	pf := a.priceFn(r)
-	rewrite := func(model string, tokens, ttl int64) (usd float64, ok bool) {
+	// next prices a cached prefix of `tokens` for the NEXT request: cold is the rewrite (the cache
+	// write rate, 2.0x input on the 1h tier), warm is the cache-read rate.
+	next := func(model string, tokens, ttl int64) (warm, cold float64, ok bool) {
 		if pf == nil {
-			return 0, false
+			return 0, 0, false
 		}
 		p, ok := pf(model)
 		if !ok {
-			return 0, false
+			return 0, 0, false
 		}
-		if ttl == 3600 { // 1h write = 2.0x input; same derivation as CostWithCacheWrite1h
-			return float64(tokens) * p.Input * 2.0, true
-		}
-		return float64(tokens) * p.CacheWrite, true
+		warm, cold = NextRequestUSD(p, tokens, ttl)
+		return warm, cold, true
 	}
-	s.RewriteUSD, s.Priced = rewrite(s.Model, s.PrefixTokens, s.TTLSeconds)
+	s.RewriteUSD, s.Priced = rewrite(next, s.Model, s.PrefixTokens, s.TTLSeconds)
+	s.NextWarmUSD, s.NextColdUSD = nextPtrs(next, s.Model, s.PrefixTokens, s.TTLSeconds)
 	if ths, money, err := a.db(r).ThreadsFor(f, s.NowMS-2*3600*1000); err == nil {
 		s.Money = money
 		for i := range ths {
-			ths[i].RewriteUSD, ths[i].Priced = rewrite(ths[i].Model, ths[i].PrefixTokens, ths[i].TTLSeconds)
+			ths[i].RewriteUSD, ths[i].Priced = rewrite(next, ths[i].Model, ths[i].PrefixTokens, ths[i].TTLSeconds)
+			ths[i].NextWarmUSD, ths[i].NextColdUSD = nextPtrs(next, ths[i].Model, ths[i].PrefixTokens, ths[i].TTLSeconds)
 		}
 		s.Threads = ths
 	}
@@ -350,6 +413,14 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 			}
 			s.PingsLeft, s.HeldUntilMS = p.PingsLeft, p.heldUntil(ttl)
 		}
+	}
+	if held := a.pingableFor(f); held != nil {
+		for i := range s.Threads {
+			v := held[s.Threads[i].ID]
+			s.Threads[i].Pingable = &v
+		}
+		v := held[""]
+		s.Pingable = &v
 	}
 	s.Window, s.WindowExact, _ = modelinfo.Exact(a.windows, r.Context(), s.Model)
 	writeJSON(w, s)
