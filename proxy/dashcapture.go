@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -256,6 +257,21 @@ func (c *capture) noteInventory(provider string, body []byte) {
 // Breakpoint counts are NOT read here: the pipeline already counts them to respect the
 // provider's cap of four, and they reach the event on the trace for free (see FromTrace).
 func metaFromBody(body []byte) dash.Meta {
+	m := metaFromBodyRefs(body)
+	// COPY EVERY STRING OUT OF THE BODY. gjson's String() returns a substring of `body` without
+	// copying, so a Meta built from it holds the WHOLE request body alive for as long as the Meta
+	// lives — and it lives far past the request: the event carries it to the writer, and the SSE
+	// hub keeps the last 256 events for late subscribers. On CG2, 256 kept events from
+	// 1,000-message sessions held 1-20 MB bodies each: four OOM kills at the 8 GiB limit on
+	// 2026-10-19/20. strings.Clone makes each field a few bytes of its own.
+	m.ReasoningEffort = strings.Clone(m.ReasoningEffort)
+	m.ThinkingMode = strings.Clone(m.ThinkingMode)
+	m.ToolChoice = strings.Clone(m.ToolChoice)
+	return m
+}
+
+// metaFromBodyRefs reads the fields. Its strings ALIAS body; only metaFromBody may return them.
+func metaFromBodyRefs(body []byte) dash.Meta {
 	var m dash.Meta
 	gjson.ParseBytes(body).ForEach(func(k, v gjson.Result) bool {
 		switch k.Str {
