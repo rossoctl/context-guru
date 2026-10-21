@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -126,7 +127,7 @@ func settingsInDir(t *testing.T, state, home, dir string, args ...string) (map[s
 func sandboxEnv(t *testing.T, extra ...string) []string {
 	t.Helper()
 	sandboxed := map[string]bool{
-		"HOME": true, "XDG_STATE_HOME": true, "CONTEXT_GURU_STATE": true, "CLAUDE_CONFIG_DIR": true,
+		"HOME": true, "XDG_STATE_HOME": true, "XDG_CONFIG_HOME": true, "CONTEXT_GURU_STATE": true, "CLAUDE_CONFIG_DIR": true,
 		"CONTEXT_GURU_BIN": true, "ANTHROPIC_BASE_URL": true, "ANTHROPIC_UPSTREAM": true,
 		"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true, "ANTHROPIC_CUSTOM_HEADERS": true,
 	}
@@ -148,6 +149,8 @@ func sandboxEnv(t *testing.T, extra ...string) []string {
 	env = append(env,
 		"HOME="+root,
 		"XDG_STATE_HOME="+filepath.Join(root, "xdg-state"),
+		"XDG_CONFIG_HOME="+filepath.Join(root, "xdg-config"),
+		leakMark(t), // whatever these commands leave running is stopped when t ends (leak_test.go)
 	)
 	return append(env, extra...)
 }
@@ -2076,7 +2079,7 @@ func runStatusline(t *testing.T, env map[string]string, stdin string, args ...st
 	t.Helper()
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "statusline.py")}, args...)...)
-	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir())
+	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=200")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -2176,7 +2179,9 @@ func statsStubCapturingQuery(t *testing.T, body string, gotQuery *string) (port 
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
-		*gotQuery = r.URL.RawQuery
+		if !strings.Contains(r.URL.RawQuery, "since=") { // the "day" read is asserted elsewhere
+			*gotQuery = r.URL.RawQuery
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(body))
 	})
@@ -2269,7 +2274,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 
 	// Priming call: the stub is still answering, so this both renders the live figure and
 	// writes it to this script's own on-disk /api/stats cache.
-	if got := run(); !strings.Contains(got, "$0.03/12.0k saved") {
+	if got := run(); !strings.Contains(got, "saved $0.03") {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
@@ -2285,7 +2290,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 
 	stall() // same port, same cache key — now it accepts and never answers
 	got := run()
-	if !strings.Contains(got, "$0.03/12.0k saved") {
+	if !strings.Contains(got, "saved $0.03") {
 		t.Errorf("got %q; want the cached savings figure still rendered from the earlier fetch", got)
 	}
 	if !strings.Contains(got, "⏳") {
@@ -2325,7 +2330,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 		return strings.TrimSpace(string(out))
 	}
 
-	if got := run(); !strings.Contains(got, "$0.03/12.0k saved") {
+	if got := run(); !strings.Contains(got, "saved $0.03") {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
@@ -2369,32 +2374,32 @@ print(int(getattr(m, sys.argv[2])))
 	return n
 }
 
-// TestStatuslineTreatsAConnectPhaseTimeoutAsATimeoutNotDown is the review's third finding,
-// first half: a timeout during urlopen's CONNECT phase reaches Python wrapped as
-// urllib.error.URLError(reason=socket.timeout(...)) rather than raised directly the way a
-// READ-phase timeout is (the shape every other test in this file exercises, via toggleStub/
-// stallingPort, both of which accept the TCP connection first). Reproducing a genuine
-// connect-phase timeout needs an unroutable network path, which is not reliable to construct in
-// a test — so this drives the real _fetch_stats function with urlopen replaced by a stub that
-// raises exactly the shape urllib actually raises there, and checks the real except clauses
-// route it to STATS_TIMEOUT rather than STATS_DOWN.
+// TestStatuslineTreatsAConnectPhaseTimeoutAsATimeoutNotDown: a timeout while CONNECTING (a
+// saturated accept queue on a healthy-but-overloaded proxy) is raised by socket.create_connection
+// itself, a different place from a READ-phase timeout (the shape every other test here exercises
+// via toggleStub/stallingPort, which accept the TCP connection first). A genuine connect timeout
+// needs an unroutable network path, which is not reliable to construct in a test, so this drives
+// the real _fetch_stats with create_connection replaced by one that raises it, and checks the real
+// except clauses route it to STATS_TIMEOUT rather than STATS_DOWN.
 func TestStatuslineTreatsAConnectPhaseTimeoutAsATimeoutNotDown(t *testing.T) {
 	py := requireTool(t, "python3")
 	script := `
-import importlib.util, sys, socket, urllib.error
+import importlib.util, sys, socket
 spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
-def fake_urlopen(url, timeout=None):
-    raise urllib.error.URLError(socket.timeout("timed out"))
+def fake_connect(addr, timeout=None):
+    raise socket.timeout("timed out")
 
-m.urllib.request.urlopen = fake_urlopen
+m.socket.create_connection = fake_connect
 stats, status = m._fetch_stats("9", None)
 assert stats is None, stats
 print(status)
 `
-	out, err := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	cmd := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py"))
+	cmd.Env = append(sandboxEnv(t), "NO_COLOR=1")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("running the stub: %v\n%s", err, out)
 	}
@@ -2414,8 +2419,8 @@ func TestStatuslineNeverFailsOnAConnectionRefusal(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d; must never fail a render", code)
 	}
-	if strings.TrimSpace(out) != "cg!" {
-		t.Errorf("got %q, want %q", strings.TrimSpace(out), "cg!")
+	if strings.TrimSpace(out) != "cg ✕ proxy offline" {
+		t.Errorf("got %q, want %q", strings.TrimSpace(out), "cg ✕ proxy offline")
 	}
 }
 
@@ -2449,10 +2454,10 @@ func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d; must never fail a render", code)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(out), "cache 1:") {
+	if !strings.HasPrefix(strings.TrimSpace(out), "cache ● ██") || !strings.Contains(out, " 1:") {
 		t.Errorf("got %q; the cache stopper must still render off a malformed /api/stats body", out)
 	}
-	if strings.Contains(out, "saved") {
+	if strings.Contains(out, " of $") {
 		t.Errorf("a savings segment appeared from an unparseable stats body: %q", out)
 	}
 }
@@ -2463,11 +2468,13 @@ func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 // flaky by construction, not a property of the script.
 func parseCacheSeconds(t *testing.T, seg string) int {
 	t.Helper()
-	m, s := 0, 0
-	if _, err := fmt.Sscanf(seg, "cache %d:%d", &m, &s); err != nil {
+	var bar string
+	var m, sec int
+	// `● ██████ 4:48` (warm) or `◐ ░░░░░░ 0:42` (last minute): a six-cell draining bar, then M:SS.
+	if _, err := fmt.Sscanf(seg, "%s %s %s %d:%d", new(string), new(string), &bar, &m, &sec); err != nil {
 		t.Fatalf("%q does not parse as a cache countdown: %v", seg, err)
 	}
-	return m*60 + s
+	return m*60 + sec
 }
 
 // TestStatuslineCacheCountdownMath is the boundary table for the TTL "stopper" — the single most
@@ -2495,21 +2502,27 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("exit %d", code)
 			}
-			got := strings.SplitN(strings.TrimSpace(out), " | ", 2)[0]
+			got := strings.SplitN(strings.TrimSpace(out), " │ ", 2)[0]
 			if c.wantCold {
-				if got != "cache cold" {
-					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache cold")
+				if got != "cache ○ ░░░░░░ cold" {
+					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache ○ ░░░░░░ cold")
 				}
 				return
 			}
-			if got == "cache cold" {
+			if got == "cache ○ ░░░░░░ cold" {
 				t.Fatalf("remaining=%.0fs: reported cold while still positive", c.remainingSec)
 			}
 			gotSec := parseCacheSeconds(t, got)
 			// Truncation only ever rounds DOWN (never up, never negative here), so the tolerance
 			// is asymmetric: at most the subprocess's own wall-clock overhead behind the expected
 			// value, never ahead of it.
-			if gotSec > int(c.remainingSec) || gotSec < int(c.remainingSec)-2 {
+			// Minutes are shown whole above EXPIRING_SECONDS (a calm, non-ticking figure), so the
+			// tolerance there is a whole minute, rounded down.
+			tol := 2
+			if c.remainingSec > 60 {
+				tol = 60
+			}
+			if gotSec > int(c.remainingSec) || gotSec < int(c.remainingSec)-tol {
 				t.Errorf("remaining=%.0fs: got %q (%ds), want within 2s below that", c.remainingSec, got, gotSec)
 			}
 		})
@@ -2534,16 +2547,19 @@ spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m.time.time = lambda: 1_700_000_000.0
-print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.0}}))        # remaining == 0
-print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.5}}))        # remaining +0.5s
-print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.0 - 0.5}}))  # remaining -0.5s
+seg = lambda e: m._cache_segment(m._cache_view({"prompt_cache": {"expires_at": e}}, None, 0))
+print(seg(1_700_000_000.0))        # remaining == 0
+print(seg(1_700_000_000.5))        # remaining +0.5s
+print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 `
-	out, err := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	cmd := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py"))
+	cmd.Env = append(sandboxEnv(t), "NO_COLOR=1")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("running the boundary check: %v\n%s", err, out)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	want := []string{"cache cold", "cache 0:00", "cache cold"}
+	want := []string{"cache ○ ░░░░░░ cold", "cache ◐ ░░░░░░ 0:00!", "cache ○ ░░░░░░ cold"}
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
 	}
@@ -2561,8 +2577,8 @@ func TestStatuslineOmitsPromptCacheWhenAbsent(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "cache –" {
-		t.Errorf("got %q, want the neutral placeholder %q", strings.TrimSpace(out), "cache –")
+	if strings.TrimSpace(out) != "◌ no cache yet" {
+		t.Errorf("got %q, want the neutral placeholder %q", strings.TrimSpace(out), "◌ no cache yet")
 	}
 }
 
@@ -2577,7 +2593,7 @@ func TestStatuslineOmitsZeroSavings(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "cache –" {
+	if strings.TrimSpace(out) != "◌ no cache yet" {
 		t.Errorf("got %q, want only the neutral cache placeholder (no session totals to show, no "+
 			"keep-alive pings to report)", out)
 	}
@@ -2586,8 +2602,8 @@ func TestStatuslineOmitsZeroSavings(t *testing.T) {
 // TestStatuslineDefaultSegmentZeroTotal is the "a brand-new session divides by nothing" case
 // called out by name: cost.total_cost_usd and context_window's token pair are all explicitly 0,
 // exactly like Claude Code's own real payload before the first response has anything to track
-// (confirmed by a live capture — see report-pr217.md). Must render nothing, never "$0.00/0 saved
-// of $0.00/0", a crash, or a NaN/Inf from a division this must never even attempt.
+// (confirmed by a live capture — see report-pr217.md). Must render nothing, never "$0.00 of $0.00
+// (-0)", a crash, or a NaN/Inf from a division this must never even attempt.
 func TestStatuslineDefaultSegmentZeroTotal(t *testing.T) {
 	port := statsStub(t, `{"total_saved_usd": 0, "saved_unique": 0}`)
 	stdin := `{"session_id":"sess-zero","cost":{"total_cost_usd":0},` +
@@ -2596,8 +2612,8 @@ func TestStatuslineDefaultSegmentZeroTotal(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "" {
-		t.Errorf("got %q, want nothing — a zero session total is a fresh session, not a fault", out)
+	if strings.Contains(out, "saved") {
+		t.Errorf("got %q, want no saving claim — a zero session total is a fresh session, not a fault", out)
 	}
 	if strings.Contains(strings.ToLower(out), "nan") || strings.Contains(strings.ToLower(out), "inf") {
 		t.Fatalf("a zero-total render produced %q — this must never divide by the total at all", out)
@@ -2605,8 +2621,8 @@ func TestStatuslineDefaultSegmentZeroTotal(t *testing.T) {
 }
 
 // TestStatuslineDefaultShowsOnlySavings is the shape the feature is FOR: real, non-trivial
-// session totals (matching the live capture) paired with a real savings figure, and — with
-// neither --cache nor --keepalive passed — nothing else in the line at all. This is also the
+// session totals (matching the live capture) paired with a real savings figure, and no
+// detailed-only segment. The session's keep-alive pings are part of the default since #510's PR. This is also the
 // positive control for TestStatuslineOmitsZeroSavings above: without a working default segment,
 // that test's "" assertion (once --cache/--keepalive are added there) would pass for the wrong
 // reason — a statusline.py that rendered NO segment ever would look identical.
@@ -2618,17 +2634,20 @@ func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 	got := strings.TrimSpace(out)
-	if got != "$0.03/12.0k saved of $0.41/187.0k" {
-		t.Errorf("got %q, want the savings-vs-session-total segment exactly", got)
+	if !strings.HasPrefix(got, "saved $0.03") {
+		t.Errorf("got %q, want the labelled, estimated saving first", got)
 	}
-	if strings.Contains(got, "cache") || strings.Contains(got, "ka ") {
-		t.Errorf("got %q — an extra segment appeared without its flag", got)
+	if strings.Contains(got, "proxy:") || strings.Contains(got, "upstream") {
+		t.Errorf("got %q — a detailed-layout/opt-in segment appeared in the balanced layout", got)
+	}
+	if !strings.Contains(got, "ka 4 pings") {
+		t.Errorf("got %q, want the session's keep-alive pings in the balanced layout", got)
 	}
 }
 
 // TestStatuslineExtrasHiddenByDefault is the OTHER half of the toggle: the same conditions that
 // would make each extra segment render (a real prompt_cache in stdin, real keepalive_pings in
-// stats) must produce NEITHER of them without the flag that turns them on — proven alongside
+// stats) must produce NEITHER of them once --hide turns them off — proven alongside
 // TestStatuslineExtrasShownWhenEnabled below so that "hidden by default" cannot pass merely
 // because the segment is broken.
 func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
@@ -2637,15 +2656,15 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
 		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
-	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--hide=cache,ka")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.Contains(out, "cache") {
-		t.Errorf("got %q — the cache segment showed without --cache", out)
+	if strings.Contains(out, "warm") {
+		t.Errorf("got %q — the cache segment showed despite --hide=cache", out)
 	}
 	if strings.Contains(out, "ka ") {
-		t.Errorf("got %q — the keep-alive segment showed without --keepalive", out)
+		t.Errorf("got %q — the keep-alive segment showed despite --hide=ka", out)
 	}
 }
 
@@ -2654,23 +2673,22 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 // would be indistinguishable from "permanently broken".
 func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4,
-		"keepalive_net_usd": 0.07, "keepalive_misses_avoided": 4}`)
+		"keepalive_ping_usd": 0.02, "keepalive_net_usd": 0.07, "keepalive_misses_avoided": 4}`)
 	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
 		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
-	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache", "--keepalive")
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--layout=minimal", "--cache", "--keepalive")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "cache 1:") {
+	if !strings.Contains(out, "cache ● ██") || !strings.Contains(out, " 1:") {
 		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
 	}
-	// The keep-alive segment now shows the NET dollar figure and the misses it prevented, not the
-	// raw ping count — see statusline.py's _keepalive_segment.
-	if !strings.Contains(out, "ka ≤4miss $0.07") {
-		t.Errorf("got %q, want %q with --keepalive passed", out, "ka ≤4miss $0.07")
+	// The keep-alive segment is this session's ping count and ping spend — see _keepalive_segment.
+	if !strings.Contains(out, "ka 4 pings $0.02") {
+		t.Errorf("got %q, want %q with --keepalive passed", out, "ka 4 pings $0.02")
 	}
-	if !strings.Contains(out, "$0.03/12.0k saved of $0.41/187.0k") {
+	if !strings.Contains(out, "saved $0.03") {
 		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
 	}
 }
@@ -2687,7 +2705,7 @@ func TestStatuslineShowsANegativeNetHonestly(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "$-0.05/0 saved of $1.00/41.0k") {
+	if !strings.Contains(out, "saved -$0.05") {
 		t.Errorf("got %q, want a segment showing the negative net, not an omission", out)
 	}
 }
@@ -2710,11 +2728,10 @@ func TestStatuslineScopesStatsToItsOwnSession(t *testing.T) {
 	}
 }
 
-// TestStatuslineAlwaysRequestsTheLeanPath proves ?lean=1 is sent even with no session_id to
-// scope to — the fast path (dash/api.go's statsLean) answers from Overview() alone, skipping
-// the three priced aggregates that measured 38-45s on a production-sized dashboard DB and were
-// the actual cause of this script's timeouts, and there is no reason this script would ever
-// want the slow, full response: it reads nothing those three aggregates add.
+// TestStatuslineAlwaysRequestsTheLeanPath: with no session_id to scope to, the status line makes
+// no /api/stats read at all. The only unscoped read is the whole proxy's total, which the full
+// handler answers since #510: no session's number, and the dearest read there is. It probes
+// /healthz instead, so the offline notices still work.
 func TestStatuslineAlwaysRequestsTheLeanPath(t *testing.T) {
 	var gotQuery string
 	port := statsStubCapturingQuery(t, `{"total_saved_usd": 0.01, "saved_unique": 1}`, &gotQuery)
@@ -2724,8 +2741,8 @@ func TestStatuslineAlwaysRequestsTheLeanPath(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if gotQuery != "lean=1" {
-		t.Errorf("got query %q, want %q", gotQuery, "lean=1")
+	if gotQuery != "" {
+		t.Errorf("got /api/stats?%s, want no stats read without a session to scope it to", gotQuery)
 	}
 }
 
@@ -2751,8 +2768,8 @@ func TestStatuslineDefaultSegmentRequiresStats(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "" {
-		t.Errorf("got %q, want nothing — a real session total with no savings figure to pair "+
+	if strings.Contains(out, "saved") {
+		t.Errorf("got %q, want no saving claim — a real session total with no savings figure to pair "+
 			"it with must not render half a claim", out)
 	}
 }
@@ -2773,9 +2790,8 @@ func TestStatuslineRejectsAMalformedSessionId(t *testing.T) {
 	if strings.Contains(gotQuery, "someone-elses-session") {
 		t.Fatalf("got query %q — an unsanitised session_id reached the request", gotQuery)
 	}
-	if gotQuery != "lean=1" {
-		t.Errorf("got query %q, want an unscoped request (just lean=1, no &session=) for a "+
-			"session_id this script does not trust", gotQuery)
+	if gotQuery != "" {
+		t.Errorf("got /api/stats?%s, want no stats read for a session_id this script does not trust", gotQuery)
 	}
 }
 
@@ -2798,6 +2814,8 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 			w.Write([]byte(`{"total_saved_usd": 0.01, "saved_unique": 100}`))
 		case "lean=1&session=sess-b":
 			w.Write([]byte(`{"total_saved_usd": 9.99, "saved_unique": 9000}`))
+		case "lean=1&since=" + r.URL.Query().Get("since"): // the unscoped "day" and lifetime (since=0) reads
+			w.Write([]byte(`{"total_saved_usd": 0}`))
 		default:
 			t.Errorf("unexpected query %q", r.URL.RawQuery)
 		}
@@ -2823,11 +2841,11 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 	}
 	a := run("sess-a")
 	b := run("sess-b")
-	if !strings.Contains(a, "$0.01/100 saved") {
-		t.Errorf("session a: got %q, want its own $0.01/100 saved", a)
+	if !strings.Contains(a, "saved $0.01") {
+		t.Errorf("session a: got %q, want its own saved $0.01", a)
 	}
-	if !strings.Contains(b, "$9.99/9.0k saved") {
-		t.Errorf("session b: got %q, want its own $9.99/9.0k saved — not session a's cached figure", b)
+	if !strings.Contains(b, "saved $9.99") {
+		t.Errorf("session b: got %q, want its own saved $9.99 — not session a's cached figure", b)
 	}
 }
 
@@ -2841,8 +2859,10 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt64(&hits, 1)
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.RawQuery, "since=") { // the day and lifetime reads have their own caches
+			atomic.AddInt64(&hits, 1)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"total_saved_usd": 0.01, "saved_unique": 1}`))
 	})
@@ -2861,7 +2881,7 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 			"CLAUDE_PLUGIN_OPTION_PORT="+port)
-		cmd.Stdin = strings.NewReader("{}")
+		cmd.Stdin = strings.NewReader(`{"session_id":"sess-cache"}`)
 		b, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("statusline.py: %v (%s)", err, b)
@@ -3716,7 +3736,8 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 	dir := t.TempDir()
 	argvFile := filepath.Join(dir, "argv")
 	fake := filepath.Join(dir, "fake-proxy")
-	body := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > " + argvFile + "\nprintenv PRESET >> " +
+	body := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n%s\\n' \"$*\" \"$PRESET\" > " + argvFile + ".tmp && mv " + argvFile + ".tmp " +
 		argvFile + "\nsleep 30\n"
 	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -3739,7 +3760,16 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("must never fail a session: %v\n%s", err, out)
 	}
-	got, rerr := os.ReadFile(argvFile)
+	// start-proxy.sh returns once the proxy has been LAUNCHED, not once the fake has written its file.
+	// The fake publishes argv and PRESET in one rename, so a reader sees both lines or no file; wait
+	// for the file instead of reading it once (#560).
+	var got []byte
+	var rerr error
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if got, rerr = os.ReadFile(argvFile); rerr == nil {
+			break
+		}
+	}
 	if rerr != nil {
 		t.Fatalf("the proxy never ran: %v\n%s", rerr, out)
 	}
@@ -5450,9 +5480,34 @@ var portTestBaseCounter atomic.Int64
 // that both scan for a port cannot collide with EACH OTHER either.
 func portScanBase(t *testing.T) {
 	t.Helper()
-	base := 39000 + int(portTestBaseCounter.Add(1))*100
-	t.Setenv("CONTEXT_GURU_PORT_BASE", strconv.Itoa(base))
+	t.Setenv("CONTEXT_GURU_PORT_BASE", nextPortBase())
 }
+
+// nextPortBase is the next scan base: a 64-port window that no other call in this process and no
+// other `go test` run on the same box (CI, another session) is scanning at the same time. Calls are
+// 400 ports apart, and each process holds one of four 100-port lanes for its lifetime (an exclusive
+// lock on a lane file, so two concurrent runs never share one), so windows never overlap; the 50
+// slots are reused in turn (-count runs), long after their test cleaned up. All of it stays below
+// 32768, the kernel's ephemeral range, so it never meets a port freePort or an outgoing connection
+// was just given.
+func nextPortBase() string {
+	return strconv.Itoa(10000 + int(portTestBaseCounter.Add(1)%50)*400 + portLane()*100)
+}
+
+var portLane = sync.OnceValue(func() int {
+	for lane := 0; lane < 4; lane++ {
+		f, err := os.OpenFile(filepath.Join(os.TempDir(), fmt.Sprintf("context-guru-plugin-test-lane-%d", lane)),
+			os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			continue
+		}
+		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			return lane // the file stays open, and so locked, until this test process exits
+		}
+		f.Close()
+	}
+	return os.Getpid() % 4 // more than four runs at once: share a lane, as before
+})
 
 // TestPortAllocAssignsDistinctPortsAndIsIdempotent: two fresh projects get two different ports,
 // scanning up from the default; re-running `alloc` for either one returns the SAME port rather
@@ -6864,6 +6919,18 @@ func routeEnv(t *testing.T, home, state, extraPath string) []string {
 	path := os.Getenv("PATH")
 	if extraPath != "" {
 		path = extraPath + string(os.PathListSeparator) + path
+		// A proxy that never answers fails the health check whatever the wait: wait 1 s, not the
+		// product's 15 (CONTEXT_GURU_HEALTH_BUDGET, which start-proxy.sh already honours).
+		if _, err := os.Stat(filepath.Join(extraPath, neverAnswers)); err == nil {
+			env = append(env, "CONTEXT_GURU_HEALTH_BUDGET=1")
+		}
+	}
+	// Every route test that installs scans for a port. Unpinned, the scan starts at the real 8787 on
+	// a box shared with live proxies, so a port taken between --plan and --route (by anything) fails
+	// the test with port_changed_since_plan, and one taken after it fails the healthz wait. A test that
+	// pinned its own base keeps it.
+	if os.Getenv("CONTEXT_GURU_PORT_BASE") == "" {
+		env = append(env, "CONTEXT_GURU_PORT_BASE="+nextPortBase())
 	}
 	return append(env,
 		"HOME="+home,
@@ -7146,11 +7213,19 @@ func TestRouteAttachModeSkipsInstallAndStart(t *testing.T) {
 // It MUST answer --version and exit: install.sh probes the installed version by running the binary,
 // and the first version of this fixture served forever on that probe, hanging the run before a
 // single assertion could fail. A fake that does not exit where the real one does is not a fake.
+// neverAnswers marks a fakeProxyDir whose proxy starts and never answers /healthz.
+const neverAnswers = "never-answers"
+
 func fakeProxyDir(t *testing.T, port string, listen bool) string {
 	t.Helper()
 	py := requireTool(t, "python3")
 	dir := t.TempDir()
 	body := "sleep 300\n"
+	if !listen { // routeEnv reads this: waiting the installer's full 15 s on it proves nothing more than 1 s
+		if err := os.WriteFile(filepath.Join(dir, neverAnswers), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if listen {
 		body = "exec " + py + " -c '\n" +
 			"import http.server\n" +

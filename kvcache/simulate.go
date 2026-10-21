@@ -204,6 +204,13 @@ type Result struct {
 	Requests      int64 `json:"requests"`
 	Conversations int64 `json:"conversations"`
 
+	// NoOps is requests the replay did not touch the cache for: no token accounting and nothing
+	// cached (a 4xx/5xx the provider rejected before it read a prefix). They bill nothing and
+	// leave the provider's entry exactly as it was, so replaying them as a cache event ("this
+	// request cached 0 tokens") erased a live entry and billed the next request a full rewrite.
+	// On the production snapshot that was +$1.0k (2.7%) of the fixed-5m replay's gap to the bill.
+	NoOps int64 `json:"-"` // not on the wire: wire_test.go pins the key set
+
 	// The cost decomposition. TotalUSD is their sum and is the figure a comparison uses.
 	TotalUSD      float64 `json:"total_usd"`
 	FreshInputUSD float64 `json:"fresh_input_usd"`
@@ -379,7 +386,11 @@ type groupAcc struct{ g Group }
 // request's own successor. It is not mutated.
 func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 	cfg = cfg.withDefaults(reqs)
-	if pc, ok := s.(PingCapper); ok {
+	if ka, ok := s.(KeepAlive); ok && ka.Pings > 0 {
+		// An exact-budget arm runs its own K live whatever the window's MaxPings: the campaign
+		// enforces K, so scoring it at min(K, MaxPings) would price a schedule nobody runs.
+		cfg.MaxPings = ka.Pings
+	} else if pc, ok := s.(PingCapper); ok {
 		if n := pc.PingCap(); n > 0 && n < cfg.MaxPings {
 			cfg.MaxPings = n
 		}
@@ -436,6 +447,10 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 	})
 
 	for _, r := range order {
+		if r.noOp() {
+			out.NoOps++
+			continue
+		}
 		key := r.Key()
 		st := states[key]
 		if st == nil {
@@ -476,7 +491,7 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 
 		// ── 2. hit or miss, under THIS strategy's own history ───────────────
 		alive := st.tokens > 0 && r.TS < st.expires
-		forced := r.MissReason == "prefix_change" || r.MissReason == "cold_start"
+		forced := ForcedMiss(r.MissReason)
 		if forced {
 			out.ForcedMisses++
 		}

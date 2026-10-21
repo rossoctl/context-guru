@@ -230,6 +230,11 @@ func uiHandler() http.Handler {
 		if name == "" {
 			name = "index.html"
 		}
+		// A short-lived five-page home was served at home.html; send an old bookmark to the dashboard.
+		if name == "home.html" {
+			http.Redirect(w, r, "index.html", http.StatusMovedPermanently)
+			return
+		}
 		switch name {
 		case "index.html":
 			w.Header().Set("Cache-Control", "no-cache")

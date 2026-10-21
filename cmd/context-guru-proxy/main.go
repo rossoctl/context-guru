@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,13 +27,12 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
-	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/proxy"
 	"github.com/rossoctl/context-guru/store"
@@ -121,6 +119,8 @@ func main() {
 			"capture before/after message text for the diff view; stores arbitrary agent output on disk (scrubbed of known credential shapes and size-capped first), so it is opt-in")
 		dashContentCap = flag.Int("dashboard-content-cap", envInt("DASHBOARD_CONTENT_CAP", 16<<10),
 			"maximum bytes stored per captured before/after blob")
+		dashLifecycle = flag.Bool("dashboard-lifecycle-signals", envBool("DASHBOARD_LIFECYCLE_SIGNALS", true),
+			"record into request_lifecycle the signals no other column holds: gap since the previous response ended, granted cache TTL tier, tool_result count/bytes/error flag, keep-alive ping ordinal (counts and sizes only)")
 		dashQueue = flag.Int("dashboard-queue", envInt("DASHBOARD_QUEUE", 4096),
 			"capture channel depth; a full channel DROPS events (counted, and shown in the UI) rather than delaying a request")
 		dashCIDRs = flag.String("dashboard-trusted-cidrs", envOr("DASHBOARD_TRUSTED_CIDRS", ""),
@@ -204,11 +204,15 @@ func main() {
 			"hosted mode: max in-flight requests per tenant (0 = unlimited)")
 		cheapConcurrent = flag.Int("cheap-model-concurrent", envInt("CHEAP_MODEL_CONCURRENT", 4),
 			"process-wide cap on concurrent compaction-model calls, so one tenant's extract_llm cannot stall everyone's agents (0 = unlimited)")
-
-		dashBench = flag.String("dashboard-bench-dirs", envOr("DASHBOARD_BENCH_DIRS", ""),
-			"comma-separated directories of benchmark runs (each with summary.json + rows-*.json) to ingest")
+		// The Benchmarks tab is gone. The flag stays as a no-op so an existing unit file or
+		// environment that still passes it starts instead of exiting on an unknown flag.
+		dashBenchIgnored = flag.String("dashboard-bench-dirs", envOr("DASHBOARD_BENCH_DIRS", ""),
+			"deprecated and ignored: the dashboard no longer has a Benchmarks tab")
 	)
 	flag.Parse()
+	if *dashBenchIgnored != "" {
+		slog.Warn("--dashboard-bench-dirs / DASHBOARD_BENCH_DIRS is ignored: the dashboard no longer has a Benchmarks tab")
+	}
 
 	// --version before anything else: an installer asks a binary what it is, and it must be
 	// able to ask without starting a server or needing a config. buildinfo.Version was already
@@ -317,14 +321,14 @@ func main() {
 	var rec *dash.Recorder
 	if *dashOn {
 		opts := dash.Options{
-			DBPath:         *dashDB,
-			RetentionAge:   *dashRetain,
-			RetentionBytes: *dashMaxBytes,
-			CaptureContent: *dashContent,
-			ContentCap:     *dashContentCap,
-			QueueSize:      *dashQueue,
-			TrustedCIDRs:   splitComma(*dashCIDRs),
-			BenchDirs:      splitComma(*dashBench),
+			DBPath:           *dashDB,
+			RetentionAge:     *dashRetain,
+			RetentionBytes:   *dashMaxBytes,
+			CaptureContent:   *dashContent,
+			ContentCap:       *dashContentCap,
+			QueueSize:        *dashQueue,
+			LifecycleSignals: *dashLifecycle,
+			TrustedCIDRs:     splitComma(*dashCIDRs),
 
 			DiskHighWatermark: *dashDiskHigh,
 			DiskLowWatermark:  *dashDiskLow,
@@ -375,31 +379,6 @@ func main() {
 				"session will be reported as a cold start", "err", err)
 		} else {
 			slog.Info("dashboard: recovered session recency across the restart", "sessions", n)
-		}
-		if runs, tasks := rec.DB().IngestBenchRoots(opts.BenchDirs); runs > 0 {
-			slog.Info("dashboard: ingested benchmark runs", "runs", runs, "tasks", tasks)
-		} else if len(opts.BenchDirs) > 0 {
-			// Asked to ingest and found nothing. Say so: ingestion runs ONCE at startup,
-			// so a silent zero means the Benchmarks tab stays empty forever with no clue
-			// why, and the most likely cause is invisible from inside the process.
-			//
-			// That cause is PrivateTmp. The shipped unit sets PrivateTmp=true, so the
-			// service gets its OWN empty /tmp — a directory that plainly exists in the
-			// operator's shell is simply not there for this process. Pointing
-			// DASHBOARD_BENCH_DIRS at /tmp/<anything> therefore looks correct, changes
-			// nothing, and reports nothing. Naming the path we actually looked at is what
-			// makes that diagnosable in one glance at the log.
-			hint := ""
-			for _, d := range opts.BenchDirs {
-				if strings.HasPrefix(filepath.Clean(d), "/tmp/") {
-					hint = "a /tmp path is NOT visible to this process when the unit sets " +
-						"PrivateTmp=true; copy the run directory somewhere readable " +
-						"(e.g. under the state dir) and point DASHBOARD_BENCH_DIRS there"
-					break
-				}
-			}
-			slog.Warn("dashboard: no benchmark runs ingested; the Benchmarks tab will be empty",
-				"dirs", strings.Join(opts.BenchDirs, ","), "hint", hint)
 		}
 		slog.Info("dashboard enabled", "url", "http://"+addr+"/dashboard/", "db", rec.DB().Path(),
 			"content_capture", *dashContent)
@@ -473,12 +452,10 @@ func main() {
 			}
 			return t.MaxRows
 		})
-		// A tenant's own configuration must never be able to spend the server's ambient
-		// provider credential: a `model:` block that names a model but no api_key would
-		// otherwise fall back to this process's ANTHROPIC_API_KEY / OPENAI_API_KEY. In
-		// hosted mode that is exactly the billing defect this deployment removes, so the
-		// fallback is switched off and such a block simply has no client (fail open).
-		offload.AllowEnvModelKey = false
+		// A tenant's own configuration can no longer carry a credential at all — the
+		// component model: block names only a source and a model id (components/offload/
+		// modelcfg.go) — so the billing defect this comment used to guard (a tenant's
+		// config spending the server's ambient provider credential) cannot occur.
 		slog.Info("context-guru: HOSTED multi-tenant mode",
 			"control_db", *controlDB, "upstreams", len(upstreams),
 			"register_domains", *registerDomains, "manager", *managerEmail != "")
@@ -542,10 +519,25 @@ func main() {
 		}
 	}
 
+	// What /api/adapt/* applies on top of on a single-tenant proxy: the document it was started
+	// with, rebuilt by the same builder hosted accounts use, with the applied override kept beside
+	// the dashboard database so each proxy (one per project for the plugin) has its own.
+	baseConfig, adaptOverride := "preset: "+*preset+"\n", ""
+	if *cfgPath != "" {
+		if b, err := os.ReadFile(*cfgPath); err == nil {
+			baseConfig = string(b)
+		}
+	}
+	if tenants == nil && *dashOn && *dashDB != ":memory:" && *dashDB != "" {
+		adaptOverride = *dashDB + ".adapt.json"
+	}
 	h := proxy.New(pipe, cfg.NewStore(), agg, proxy.Options{
-		Tenants:      tenants,   // nil => single-tenant, unchanged behaviour
-		Upstreams:    upstreams, // the allow-list; a tenant picks a name, never a URL
-		MetricsToken: *metricsToken,
+		BaseConfig:    baseConfig,
+		BuildConfig:   buildTenantConfig,
+		AdaptOverride: adaptOverride,
+		Tenants:       tenants,   // nil => single-tenant, unchanged behaviour
+		Upstreams:     upstreams, // the allow-list; a tenant picks a name, never a URL
+		MetricsToken:  *metricsToken,
 		// Both come from the dashboard's store, so both are nil when the dashboard is
 		// off — with no request rows there is nothing to price a cap against and nothing
 		// to roll up per tenant.
@@ -613,6 +605,11 @@ func main() {
 		// through modelinfo.Exact on the dash side, which is what keeps the last-resort
 		// substring table's 200,000-for-every-Opus out of a span measurement.
 		h.API().SetWindows(windows)
+		// The keeper's ping plan, so /api/cachestate can say how long a cache is held warm.
+		h.API().SetKeepAlivePlans(h.KeepAlivePlans)
+		// The configuration the adapt reports compare against: each account's in hosted mode, this
+		// proxy's own (with any applied override) otherwise.
+		h.API().SetAdaptCompactionConfig(h.DashAdaptConfig())
 	}
 
 	// One identity resolver for both halves of the dashboard: the read routes (dash)
@@ -633,6 +630,10 @@ func main() {
 		// Read-only here: the WRITE goes through the control plane (POST /api/toolfilter), which
 		// is where the validation, the audit entry and the manager gate for a compaction
 		// configuration already live.
+		h.API().SetToolFilterState(h.DashToolFilter())
+	}
+	if tenants == nil && rec != nil {
+		// Single-tenant: the removal list the running pipeline filters, for /api/adapt/tools.
 		h.API().SetToolFilterState(h.DashToolFilter())
 	}
 
@@ -842,7 +843,8 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 		// tagged on the ping's own row, never on the real request it later rescues.
 		KeepAliveStrategyID: r.Strategy,
 	}
-	ev.SessionID = r.Session
+	ev.SessionID, ev.ThreadID = r.Session, r.Thread
+	ev.Lifecycle = d.rec.PingLifecycle(r.Pings)
 	ev.Agent = dash.AgentFor(r.Agent)
 	ev.FreshInput, ev.CacheRead = r.FreshInput, r.CacheRead
 	ev.CacheWrite, ev.OutputTokens = r.CacheWrite, r.Output
@@ -1270,11 +1272,14 @@ func modelWindows() modelinfo.Resolver {
 		return chain
 	}
 	url := strings.TrimSpace(os.Getenv("MODEL_INFO_URL"))
-	live := modelinfo.NewLiteLLM(url, nil, 0)
+	live := litellm.NewLiteLLM(url, nil, 0)
 	if url == "" {
 		// The public map. A fetch failure here is a network inconvenience, not a misconfiguration, so
 		// the embedded table remains the right answer and the chain keeps its fallback.
-		return append(chain, live, modelinfo.DefaultStatic())
+		// Builtin sits between the map and the table so a listed model stays exact while the map is
+		// not loaded (#515). It is NOT added behind an explicit MODEL_INFO_URL below: that document
+		// is the operator's authority, and a built-in figure must not answer past it.
+		return append(chain, modelinfo.NewChain(live)...)
 	}
 	// AN EXPLICIT MODEL_INFO_URL IS AN AUTHORITY THE OPERATOR NAMED, and guessing past it is wrong for
 	// the same reason MODEL_PRICES is fatal rather than skipped a few lines up: a silently-absent
@@ -1306,22 +1311,26 @@ func modelWindows() modelinfo.Resolver {
 //	CHEAP_MODEL_BASE      upstream base URL (default: the matching provider default)
 //	CHEAP_MODEL_KEY       API key (default: ANTHROPIC_API_KEY / OPENAI_API_KEY)
 //	CHEAP_MODEL_AUTH      anthropic auth scheme: x-api-key (default) | bearer
-func cheapModelFromEnv() components.Model {
+func cheapModelFromEnv() *proxy.CheapModelConfig {
 	model := os.Getenv("CHEAP_MODEL")
 	if model == "" {
 		return nil
 	}
-	switch envOr("CHEAP_MODEL_PROVIDER", "anthropic") {
-	case "openai":
-		return cheapmodel.OpenAI{
-			BaseURL: os.Getenv("CHEAP_MODEL_BASE"), Model: model,
-			APIKey: envOr("CHEAP_MODEL_KEY", os.Getenv("OPENAI_API_KEY")),
-		}
-	default:
-		return cheapmodel.Anthropic{
-			BaseURL: os.Getenv("CHEAP_MODEL_BASE"), Model: model,
-			APIKey:     envOr("CHEAP_MODEL_KEY", os.Getenv("ANTHROPIC_API_KEY")),
-			AuthScheme: os.Getenv("CHEAP_MODEL_AUTH"),
-		}
+	provider := envOr("CHEAP_MODEL_PROVIDER", "anthropic")
+	key := os.Getenv("CHEAP_MODEL_KEY")
+	if provider == "openai" {
+		return &proxy.CheapModelConfig{Provider: "openai", BaseURL: os.Getenv("CHEAP_MODEL_BASE"),
+			Model: model, APIKey: envOr0(key, os.Getenv("OPENAI_API_KEY"))}
 	}
+	return &proxy.CheapModelConfig{Provider: "anthropic", BaseURL: os.Getenv("CHEAP_MODEL_BASE"),
+		Model: model, APIKey: envOr0(key, os.Getenv("ANTHROPIC_API_KEY")), Auth: os.Getenv("CHEAP_MODEL_AUTH")}
+}
+
+// envOr0 is envOr for a value already read rather than an env var name, so cheapModelFromEnv does
+// not read CHEAP_MODEL_KEY twice.
+func envOr0(v, fallback string) string {
+	if v != "" {
+		return v
+	}
+	return fallback
 }

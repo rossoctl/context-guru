@@ -288,3 +288,53 @@ func TestReformatKeysAreOnePerRewrittenMessage(t *testing.T) {
 		t.Fatalf("want 2 distinct keys for 2 folded messages, got %v", keys)
 	}
 }
+
+// lossyDrop is an Offload under marker_mode summary/off: it drops content on purpose, stashes
+// nothing and says so with rep.Irreversible, so it returns no keys of its own.
+type lossyDrop struct{}
+
+func (lossyDrop) Name() string      { return "lossydrop" }
+func (lossyDrop) Enabled(*Ctx) bool { return true }
+func (lossyDrop) Offload(req *schemas.BifrostChatRequest, rep *Report, _ *Ctx) ([]string, error) {
+	setText(&req.Input[0], "<<cg:gone>>")
+	rep.Irreversible = true
+	return nil, nil
+}
+
+// TestIrreversibleOffloadGetsContentDerivedCacheKeys: an Offload that stashes nothing had no key,
+// so every consumer of CacheKeys (metrics' SavedUnique, dash.Recorder.MarkUnique, the Cortex
+// plugin) counted its saving as new content on EVERY turn. Hosts that cap marker_mode at summary
+// (Cortex has no expand loop) run dedup and extract_llm that way, and a 24-turn run reported
+// 933k of their 934k saved tokens as unique against 48k for the same engine in full mode. The
+// pipeline now keys such a run the way it keys a Reformat: one key per changed message, from its
+// text before the component ran.
+func TestIrreversibleOffloadGetsContentDerivedCacheKeys(t *testing.T) {
+	var first []string
+	for turn := 0; turn < 3; turn++ {
+		req := reqWith("the same tool output, re-sent on every turn")
+		rr := NewPipeline([]Component{lossyDrop{}}, nil).Run(req, testCtx())
+		rep := rr.Components[0]
+		if rep.Reverted || len(rep.CacheKeys) != 1 {
+			t.Fatalf("turn %d: want a surviving run with 1 key, got reverted=%v keys=%v", turn, rep.Reverted, rep.CacheKeys)
+		}
+		if turn == 0 {
+			first = rep.CacheKeys
+			continue
+		}
+		if rep.CacheKeys[0] != first[0] {
+			t.Fatalf("turn %d key %q != turn 0 key %q: a repeat must dedup", turn, rep.CacheKeys[0], first[0])
+		}
+	}
+	other := NewPipeline([]Component{lossyDrop{}}, nil).Run(reqWith("a different tool output, long enough to be worth dropping"), testCtx())
+	if got := other.Components[0].CacheKeys; len(got) != 1 || got[0] == first[0] {
+		t.Fatalf("different content must get a different key: %v vs %v", got, first)
+	}
+}
+
+// An Offload that stashed keeps its own keys: they are the store keys the expand loop resolves.
+func TestStashingOffloadKeepsItsOwnKeys(t *testing.T) {
+	rr := NewPipeline([]Component{dropStash{}}, nil).Run(reqWith("original content here"), testCtx())
+	if got := rr.Components[0].CacheKeys; len(got) != 1 || got[0] != "k1" {
+		t.Fatalf("stash keys were replaced: %v", got)
+	}
+}

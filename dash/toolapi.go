@@ -22,6 +22,7 @@ package dash
 import (
 	"database/sql"
 	"encoding/json"
+	"golang.org/x/sync/errgroup"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -48,7 +49,11 @@ type ToolStat struct {
 	// Omitted (with Priced=false) when the model's rates are unknown — an unpriced number
 	// must not read as "this cost nothing".
 	UnusedUSD float64 `json:"unused_usd"`
-	Priced    bool    `json:"priced"`
+	// UnusedUSDLow/High bound UnusedUSD over the declaration sets a request without a recorded
+	// one could have carried; equal to it when every request recorded its set.
+	UnusedUSDLow  float64 `json:"unused_usd_low"`
+	UnusedUSDHigh float64 `json:"unused_usd_high"`
+	Priced        bool    `json:"priced"`
 	// Builtin marks one of Claude Code's OWN tools. Derived on read from a name allowlist
 	// (see IsBuiltinTool), because the stored taxonomy cannot tell them from a user's own
 	// client-side tools — both are KindTool. It exists so the UI can put them in their own
@@ -222,7 +227,10 @@ type ToolTotals struct {
 	// spent carrying never-invoked declarations, and their price.
 	UnusedReads int64   `json:"unused_reads"`
 	UnusedUSD   float64 `json:"unused_usd"`
-	Priced      bool    `json:"priced"`
+	// UnusedUSDLow/High bound UnusedUSD; see ToolStat.
+	UnusedUSDLow  float64 `json:"unused_usd_low"`
+	UnusedUSDHigh float64 `json:"unused_usd_high"`
+	Priced        bool    `json:"priced"`
 	// AsideTokens is the per-session mean weight of the declarations kept OUT of every figure
 	// above: Claude Code's own tools, another agent's client tools, the provider's. Reported so
 	// the page can state what it left out and how large it is, instead of leaving a reader to
@@ -312,6 +320,9 @@ type ToolReport struct {
 	SelfRemoved []SelfRemoval `json:"self_removed,omitempty"`
 	// Prompt is the system prompt's weight and how much of the prefix can be shown as text.
 	Prompt PromptStat `json:"prompt"`
+	// Carried is how the unused figures were priced: requests matched to the declaration set they
+	// carried, by recorded digest or by tool count, and how many of those matches were ambiguous.
+	Carried *AdaptToolsCoverage `json:"carried,omitempty"`
 }
 
 // sessionLengths is the per-session request count over the CAPTURED sessions only, which is
@@ -453,6 +464,12 @@ func (d *DB) RecentSessions(f Filter, n int) ([]string, error) {
 }
 
 func (d *DB) ToolReportFor(f Filter, price func(string) (modelinfo.Price, bool)) (*ToolReport, error) {
+	return d.toolReportFor(f, price, &declScanOnce{d: d, f: f})
+}
+
+// toolReportFor is ToolReportFor with the table pass it may need supplied by the caller, so a
+// request that also needs the observation windows shares one.
+func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool), scan *declScanOnce) (*ToolReport, error) {
 	where, args := f.where()
 	// Sessions in scope, their re-read multiplier and the tiers they paid. tools>0
 	// because a request that declared nothing has no inventory to be missing.
@@ -500,15 +517,101 @@ func (d *DB) ToolReportFor(f Filter, price func(string) (modelinfo.Price, bool))
 		return rep, nil
 	}
 
-	decls, err := d.scopedDecls(f, where, args)
-	if err != nil {
-		return nil, err
-	}
 	uses, err := d.scopedUses(f, where, args)
 	if err != nil {
 		return nil, err
 	}
-	return buildToolReport(sessions, decls, uses, f.PerSession), nil
+	// The per-request pricing reads the table its own way, so it runs beside the inventory read
+	// rather than after it: the page waits for the slower of the two, not their sum.
+	var carriedRes *carriedScan
+	var g errgroup.Group
+	g.Go(func() error {
+		var err error
+		carriedRes, err = d.carriedCost(f, price, unusedKeyOf(usedBySession(uses)), carriedOpts{})
+		return err
+	})
+	var decls []declRow
+	if len(sessions) >= declScanMinSessions {
+		// Broad scope: one concurrent pass over the table instead of a probe per session (declfacts.go).
+		decls, err = d.scopedDeclsScan(scan, func(s string) bool { return sessions[s] != nil })
+	} else {
+		decls, err = d.scopedDecls(f, where, args)
+	}
+	if werr := g.Wait(); err == nil {
+		err = werr
+	}
+	if err != nil {
+		return nil, err
+	}
+	rep = buildToolReport(sessions, decls, uses, f.PerSession)
+	repriceCarried(rep, carriedRes)
+	return rep, nil
+}
+
+// repriceCarried replaces the report's unused-carry figures with the per-request pricing
+// /api/adapt/tools uses (carriedCost). buildToolReport's own figures bill a declaration on EVERY
+// request of a session that declared it, at the session's first model; a session holds several
+// declaration sets (a subagent with a narrower tool list, a server added mid-session) and often
+// two models, so that overstated what was carried, on real traffic several times over for
+// skills, which a subagent's set usually does not carry. Here each request is priced on the set
+// it carried, at its own model and tier, and a request without a recorded set gets bounds
+// (UnusedUSDLow/High) rather than a guess shown as a fact. "Unused" keeps its per-session
+// meaning: an item is billed in a session that did not use it.
+func repriceCarried(rep *ToolReport, scan *carriedScan) {
+	set := func(rows []ToolStat) {
+		for i := range rows {
+			st := &rows[i]
+			st.UnusedReads, st.UnusedUSD, st.UnusedUSDLow, st.UnusedUSDHigh = 0, 0, 0, 0
+			if c := scan.Items[st.Kind+"\x00"+st.Name]; c != nil {
+				st.UnusedReads, st.UnusedUSD, st.UnusedUSDLow, st.UnusedUSDHigh = c.Reads, c.USD(), c.USDLow, c.USDHigh
+				st.Priced = !c.Unpriced
+			}
+		}
+	}
+	set(rep.Tools)
+	set(rep.Aside)
+	set(rep.Skills.Skills)
+	t := &rep.Totals
+	rep.Skills.UnusedListingReads, rep.Skills.UnusedListingUSD = 0, 0
+	t.UnusedReads, t.UnusedUSD, t.UnusedUSDLow, t.UnusedUSDHigh = 0, 0, 0, 0
+	if c := scan.Items[carriedListing]; c != nil {
+		rep.Skills.UnusedListingReads, rep.Skills.UnusedListingUSD = c.Reads, c.USD()
+		t.UnusedReads, t.UnusedUSD, t.UnusedUSDLow, t.UnusedUSDHigh = c.Reads, c.USD(), c.USDLow, c.USDHigh
+	}
+	// Totals over the controllable set, as buildToolReport defines them: tools, not the skill
+	// entries (slices of the listing, counted once above) and not the aside group.
+	for _, st := range rep.Tools {
+		t.UnusedReads += st.UnusedReads
+		t.UnusedUSD += st.UnusedUSD
+		t.UnusedUSDLow += st.UnusedUSDLow
+		t.UnusedUSDHigh += st.UnusedUSDHigh
+	}
+	rep.Servers = serverRollup(rep.Tools)
+	sortStats(rep.Tools)
+	sortStats(rep.Skills.Skills)
+	sortStats(rep.Aside)
+	rep.Carried = &scan.Coverage
+}
+
+// carriedListing is the skills listing's key: one block of prose, billed whole.
+const carriedListing = "\x00listing"
+
+// unusedKeyOf bills a declaration in a session that did not use it, which is what the Inventory
+// tab's "unused" means; the listing is waste only in a session that invoked no skill. Read-only
+// on usedIn, so safe for carriedSets' concurrent calls.
+func unusedKeyOf(usedIn map[string]map[statKey]int) func(session, kind, name, server string) string {
+	return func(s, kind, name, _ string) string {
+		if kind == KindSkillListing {
+			if usedSkill(usedIn[s]) == 0 {
+				return carriedListing
+			}
+			return ""
+		}
+		if usedIn[s][statKey{kind, name}] > 0 {
+			return ""
+		}
+		return kind + "\x00" + name
+	}
 }
 
 // declRow / useRow are the scoped raw rows, one per session and name.
@@ -590,6 +693,53 @@ func (d *DB) scopedUses(f Filter, where string, args []any) ([]useRow, error) {
 	return out, rows.Err()
 }
 
+// usedBySession is which capabilities each session invoked. A skill counts as used under its
+// own name, and the Skill tool counts as used by any skill call.
+func usedBySession(uses []useRow) map[string]map[statKey]int {
+	usedIn := map[string]map[statKey]int{}
+	for _, u := range uses {
+		m := usedIn[u.session]
+		if m == nil {
+			m = map[statKey]int{}
+			usedIn[u.session] = m
+		}
+		m[statKey{KindTool, u.name}] += u.calls
+		if _, _, ok := SplitMCPName(u.name); ok {
+			m[statKey{KindMCPTool, u.name}] += u.calls
+		} else {
+			m[statKey{KindServerTool, u.name}] += u.calls
+		}
+		if u.skill != "" {
+			m[statKey{KindSkill, u.skill}] += u.calls
+		}
+	}
+	return usedIn
+}
+
+// lastUsedOf is the most recent invocation per capability, across every session in scope.
+// Session-agnostic on purpose: "when was this last reached for" is the question, and which
+// session it happened in is exactly the detail that made a window necessary.
+func lastUsedOf(uses []useRow) map[statKey]int64 {
+	lastUsed := map[statKey]int64{}
+	note := func(k statKey, ts int64) {
+		if ts > lastUsed[k] {
+			lastUsed[k] = ts
+		}
+	}
+	for _, u := range uses {
+		note(statKey{KindTool, u.name}, u.lastTS)
+		if _, _, ok := SplitMCPName(u.name); ok {
+			note(statKey{KindMCPTool, u.name}, u.lastTS)
+		} else {
+			note(statKey{KindServerTool, u.name}, u.lastTS)
+		}
+		if u.skill != "" {
+			note(statKey{KindSkill, u.skill}, u.lastTS)
+		}
+	}
+	return lastUsed
+}
+
 // statKey identifies one declared capability across sessions.
 type statKey struct{ kind, name string }
 
@@ -599,38 +749,8 @@ type statKey struct{ kind, name string }
 func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []useRow,
 	perSession bool) *ToolReport {
 	rep := &ToolReport{}
-	// Which capabilities each session invoked. A skill counts as used under its own name,
-	// and the Skill tool counts as used by any skill call.
-	usedIn := map[string]map[statKey]int{}
-	// The most recent invocation per capability, across every session in scope. Session-agnostic
-	// on purpose: "when was this last reached for" is the question, and which session it happened
-	// in is exactly the detail that made a window necessary.
-	lastUsed := map[statKey]int64{}
-	note := func(k statKey, ts int64) {
-		if ts > lastUsed[k] {
-			lastUsed[k] = ts
-		}
-	}
-	for _, u := range uses {
-		m := usedIn[u.session]
-		if m == nil {
-			m = map[statKey]int{}
-			usedIn[u.session] = m
-		}
-		m[statKey{KindTool, u.name}] += u.calls
-		note(statKey{KindTool, u.name}, u.lastTS)
-		if _, _, ok := SplitMCPName(u.name); ok {
-			m[statKey{KindMCPTool, u.name}] += u.calls
-			note(statKey{KindMCPTool, u.name}, u.lastTS)
-		} else {
-			m[statKey{KindServerTool, u.name}] += u.calls
-			note(statKey{KindServerTool, u.name}, u.lastTS)
-		}
-		if u.skill != "" {
-			m[statKey{KindSkill, u.skill}] += u.calls
-			note(statKey{KindSkill, u.skill}, u.lastTS)
-		}
-	}
+	usedIn := usedBySession(uses)
+	lastUsed := lastUsedOf(uses)
 
 	stats := map[statKey]*ToolStat{}
 	captured := map[string]bool{}
@@ -1016,6 +1136,8 @@ func (a *API) toolRoutes() []route {
 		// The prompt TEXT behind those weights — the one route here that serves content, and
 		// so the one gated on transcript-capture consent as well as on scope. See promptapi.go.
 		{"GET /api/prompt", scopeTenant, a.prompt},
+		// What the caller declared and never used, priced per carrying request (adapttools.go).
+		{"GET /api/adapt/tools", scopeTenant, a.adaptTools},
 	}
 }
 
@@ -1061,22 +1183,37 @@ func (a *API) tools(w http.ResponseWriter, r *http.Request) {
 				f.SessionIn = []string{""}
 			}
 		}
-		rep, err := db.ToolReportFor(f, price)
-		if err != nil {
-			return nil, err
-		}
+		// The report and the user's own removal credit read the declarations independently, so they
+		// are read together; only the assignment of one onto the other waits.
+		var rep *ToolReport
+		var sr []SelfRemoval
+		var srErr error
+		var g errgroup.Group
+		g.Go(func() error {
+			var err error
+			rep, err = db.ToolReportFor(f, price)
+			return err
+		})
 		// Credit for what the USER removed themselves. Best-effort and non-fatal: it is an
 		// addition to the report, so a deployment where it fails still gets the inventory rather
 		// than an error page. Needs a pricer to put a dollar on, and the token counts stand
 		// without one.
 		if price != nil {
-			// The account's own server-side removal list, so a reduction that the tool filter is
-			// ALREADY credited for can be marked as overlapping instead of counted twice.
-			sr, err := db.SelfRemovals(f, price, a.toolFilterStateForScope(f).Removed)
-			if err != nil {
+			g.Go(func() error {
+				// The account's own server-side removal list, so a reduction that the tool filter is
+				// ALREADY credited for can be marked as overlapping instead of counted twice.
+				sr, srErr = db.SelfRemovals(f, price, a.toolFilterStateForScope(f).Removed)
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return nil, err
+		}
+		if price != nil {
+			if srErr != nil {
 				// Non-fatal, but never silent: swallowing this returned an empty list that was
 				// indistinguishable from "the account removed nothing", which is a claim.
-				slog.Warn("dash: self-removal credit unavailable", "err", err)
+				slog.Warn("dash: self-removal credit unavailable", "err", srErr)
 			}
 			rep.SelfRemoved = sr
 		}

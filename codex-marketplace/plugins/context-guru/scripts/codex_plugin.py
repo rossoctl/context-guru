@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import shutil
 import signal
 import socket
@@ -562,6 +563,33 @@ def serve(_args):
     os.execv(executable, proxy_command(executable, port, record.get("upstream")))
 
 
+SIGNAL_EVENTS = {"SessionEnd": "reason", "SessionStart": "source"}
+
+
+def signal_hook(_args):
+    """SessionEnd / SessionStart hook: tell the proxy the session ended or was compacted.
+
+    Content-free: of the hook payload only the session id, the event name and its reason or source
+    are sent. Never fails: a lost event leaves the keep-alive as it is without signals.
+    """
+    try:
+        payload = json.load(sys.stdin)
+        event = payload.get("hook_event_name", "")
+        session = payload.get("session_id", "")
+        kind = payload.get(SIGNAL_EVENTS.get(event, ""), "")
+        port = int(read_record().get("port", 0))
+        if event not in SIGNAL_EVENTS or not port or not isinstance(kind, str) or \
+                not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session or ""):
+            return 0
+        body = json.dumps({"session": session, "event": event, "kind": kind}).encode()
+        request = urllib.request.Request(f"http://127.0.0.1:{port}/signal", data=body, method="POST",
+                                         headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(request, timeout=1).close()
+    except Exception:
+        pass
+    return 0
+
+
 def status(args):
     record = read_record()
     port = int(record.get("port", 0))
@@ -717,6 +745,7 @@ def main():
     status_parser.add_argument("--stats", action="store_true")
     commands.add_parser("ensure")
     commands.add_parser("serve")
+    commands.add_parser("signal")
     upgrade = commands.add_parser("update")
     mode = upgrade.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
@@ -728,7 +757,7 @@ def main():
     settings.add_argument("--preset", choices=("off", "conservative", "medium", "high", "xhigh"))
     settings.add_argument("--cache-strategy", choices=("none", "30-min-ping"))
     args = parser.parse_args()
-    return {"setup": setup, "status": status, "ensure": ensure, "serve": serve,
+    return {"setup": setup, "status": status, "ensure": ensure, "serve": serve, "signal": signal_hook,
             "update": update, "uninstall": uninstall, "configure": configure}[args.command](args)
 
 

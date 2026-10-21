@@ -23,8 +23,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cgenv  # base URLs and credentials for both the hosted and the local deployment
 
-CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
-HARBOR = Path("/home/vpcuser/projects/context-engineering/harbor")
+CG = Path(__file__).resolve().parents[2]   # this checkout
+HARBOR = Path(os.environ.get("HARBOR_DIR", CG.parent / "harbor"))
 BIN = "/tmp/cg-runs/cg-proxy-d1"          # stable snapshot; override with --bin
 RUNS = Path("/tmp/cg-runs")
 CSV_PATH = RUNS / "sweep-results.csv"

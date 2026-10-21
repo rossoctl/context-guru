@@ -96,8 +96,7 @@ func asTenant(id string, manager bool) func(*http.Request) (Principal, bool) {
 // Every MOUNTED route is checked against the scoping decision it declared, by walking
 // the route table Mount itself uses.
 //
-// The list used to be hand-written here, which is why /api/benchmarks,
-// /api/benchmarks/{id}/tasks and /api/capture shipped with no auth and no scoping at
+// The list used to be hand-written here, which is why /api/capture shipped with no auth and no scoping at
 // all: they were never in the list, so nothing noticed. Iterating the real table means
 // a new route either declares a class and is checked, or fails here.
 func TestAPIScopesEveryRouteToTheCaller(t *testing.T) {
@@ -329,8 +328,7 @@ func TestSingleTenantAPIUnchanged(t *testing.T) {
 	// The routes that grew a manager gate in hosted mode must be exactly as open as they
 	// always were here: there is nobody to authenticate on a developer's laptop, and the
 	// full capture counters are the local operator's own numbers.
-	for _, path := range []string{"/api/benchmarks", "/api/benchmarks/1/tasks",
-		"/api/benchmarks?refresh=1", "/api/capture"} {
+	for _, path := range []string{"/api/capture"} {
 		if code, body := f.get(t, path); code != http.StatusOK {
 			t.Errorf("single-tenant %s = %d, want 200: %s", path, code, body)
 		}

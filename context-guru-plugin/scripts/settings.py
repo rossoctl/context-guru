@@ -40,6 +40,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 KEY = "ANTHROPIC_BASE_URL"
 # The second key, written only when the proxy has to chain behind an existing gateway. It lives in
@@ -96,6 +97,16 @@ def is_ours(data: dict, url: str) -> bool:
     return False
 
 
+# Re-run the status line this often (seconds), on top of Claude Code's own event-driven redraws,
+# so the cache countdown keeps draining while nothing is happening. Claude Code 2.1.296 honours
+# `refreshInterval` (minimum 1); an older one ignores the key and only redraws on events.
+STATUSLINE_REFRESH_SECONDS = 1
+
+
+def _statusline_value(command: str) -> dict:
+    return {"type": "command", "command": command, "refreshInterval": STATUSLINE_REFRESH_SECONDS}
+
+
 def is_ours_statusline(data: dict, current: object) -> bool:
     """Did WE write the CURRENT statusLine value? Same shape as is_ours() above and for the same
     reason: answered from a record of what we wrote, never from guessing at the value's shape —
@@ -104,7 +115,10 @@ def is_ours_statusline(data: dict, current: object) -> bool:
     """
     meta = data.get(META)
     if isinstance(meta, dict) and meta.get(STATUSLINE_META):
-        return current == {"type": "command", "command": meta[STATUSLINE_META]}
+        # Ours whatever refreshInterval says: older installs wrote none, and a user may tune it.
+        return (isinstance(current, dict) and current.get("type") == "command"
+                and current.get("command") == meta[STATUSLINE_META]
+                and set(current) <= {"type", "command", "refreshInterval"})
     return False
 
 
@@ -116,8 +130,10 @@ def apply_statusline(data: dict, command: str) -> None:
     """
     if not command:
         return
-    desired = {"type": "command", "command": command}
+    desired = _statusline_value(command)
     current = data.get(STATUSLINE_KEY)
+    if is_ours_statusline(data, current) and isinstance(current, dict) and "refreshInterval" in current:
+        desired["refreshInterval"] = current["refreshInterval"]  # keep a value the user tuned
     if current == desired:
         return
     meta = data.setdefault(META, {})
@@ -127,6 +143,52 @@ def apply_statusline(data: dict, command: str) -> None:
     meta[STATUSLINE_META] = command
 
 
+# The path of a plugin's statusline.py inside Claude Code's plugin cache: `.../plugins/cache/
+# <marketplace>/<plugin>/<version>/scripts/statusline.py`, inside the double quotes install.sh wraps
+# around it. Anything else (a dev checkout, a hand-written path) does not match and is left alone.
+_CACHED_STATUSLINE = re.compile(
+    r'"(?P<path>[^"]*/plugins/cache/(?P<market>[^/"]+)/(?P<plugin>[^/"]+)/(?P<version>[^/"]+)/scripts/statusline\.py)"')
+
+
+def _version_tuple(text: str) -> tuple | None:
+    """`0.5.1` -> (0, 5, 1). None for anything that is not dotted digits: a version we cannot order
+    is a version we do not move a status line away from."""
+    parts = text.split(".")
+    if not parts or not all(p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+def repoint_statusline(data: dict, running: str) -> bool:
+    """Move OUR statusLine to the running plugin's `statusline.py`, in place. True if it changed.
+
+    install.sh writes the absolute, versioned path of the plugin that ran the install (a settings
+    file cannot use ${CLAUDE_PLUGIN_ROOT}), and the old version stays in the cache, so after a
+    plugin update the old path keeps working and nothing ever reports that it is stale (#551).
+
+    Moves only when ALL of these hold; anything else returns False and changes nothing:
+      * the current value is ours by record (is_ours_statusline), never by the look of the path;
+      * it names a cached `statusline.py` of the SAME plugin (marketplace and name) as the running one;
+      * that version is strictly OLDER than the running one, so an older session (or a second
+        Claude Code install) never drags a newer status line back.
+    Only the path inside the command changes: flags and `refreshInterval` stay as they were.
+    """
+    current = data.get(STATUSLINE_KEY)
+    if not is_ours_statusline(data, current):
+        return False
+    new = _CACHED_STATUSLINE.fullmatch('"' + running + '"')
+    old = _CACHED_STATUSLINE.search(current["command"])
+    if not new or not old or (old.group("market"), old.group("plugin")) != (new.group("market"), new.group("plugin")) or old.group("path") == running:
+        return False
+    old_v, new_v = _version_tuple(old.group("version")), _version_tuple(new.group("version"))
+    if old_v is None or new_v is None or not old_v < new_v:
+        return False
+    command = current["command"].replace('"' + old.group("path") + '"', '"' + running + '"')
+    current["command"] = command
+    data[META][STATUSLINE_META] = command
+    return True
+
+
 def remove_statusline_only(data: dict) -> tuple[bool, str]:
     """Undo exactly what apply_statusline wrote, and nothing else — never touches `env`/routing.
     Returns (changed, restored_json). Shared by `off` (always this, regardless of whether routing
@@ -134,7 +196,7 @@ def remove_statusline_only(data: dict) -> tuple[bool, str]:
     """
     meta = data.get(META)
     recorded = meta.get(STATUSLINE_META) if isinstance(meta, dict) else None
-    if not recorded or data.get(STATUSLINE_KEY) != {"type": "command", "command": recorded}:
+    if not recorded or not is_ours_statusline(data, data.get(STATUSLINE_KEY)):
         return False, ""
     restored = ""
     del data[STATUSLINE_KEY]
@@ -700,6 +762,36 @@ def state_dir() -> str:
         return override
     base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
     return os.path.join(base, "context-guru")
+
+
+RECORDED_COMMANDS = ("save-more", "remove-mcp-and-skills")
+
+
+def cmd_record_run(args: argparse.Namespace) -> int:
+    """Record that one of the commands the status line's weekly tip names just ran: its epoch
+    seconds under its name in `<state dir>/last-run.json`, merged into what is there and replaced
+    atomically. The status line only reads the file (statusline.py _tip_segment).
+
+    Silent on success: the commands chain this after their own report, which the skill shows the
+    user verbatim, so it must add nothing to it. A failure goes to stderr with exit 1."""
+    path = os.path.join(state_dir(), "last-run.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            runs = json.load(fh)
+    except (OSError, ValueError):
+        runs = {}
+    runs = runs if isinstance(runs, dict) else {}
+    runs[args.name] = int(time.time())
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(runs, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"record-run: could not write {path}: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def user_scope_files() -> list[str]:
@@ -2699,7 +2791,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     # the WHOLE call, including the base_url side, rather than writing half an install and
     # reporting success. It is a TOP-LEVEL key (see apply_statusline), so it cannot join
     # `desired`/`env` above; this is its own gate.
-    sl_desired = {"type": "command", "command": sl_command} if sl_command else None
+    sl_desired = _statusline_value(sl_command) if sl_command else None
     if sl_command:
         existing_sl = data.get(STATUSLINE_KEY)
         if existing_sl is not None and not is_ours_statusline(data, existing_sl) and not args.force:
@@ -2850,6 +2942,44 @@ def cmd_add(args: argparse.Namespace) -> int:
     emit(result="added", file=args.file, base_url=args.url,
          replaced=current if current else "", backup=saved or "(new file)",
          other_env_keys=len([k for k in env if k not in OURS]))
+    return 0
+
+
+def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
+    """SessionStart step: point a status line we installed at the plugin that is running now (#551).
+
+    Looks at the three scopes the plugin installs into, but only at files that already hold our
+    ownership record, and rewrites only that record and the command. Never fails: a file that is
+    missing, unreadable, malformed or unwritable stays as it was, and the exit code is always 0.
+    """
+    running = os.path.join(os.path.dirname(os.path.realpath(__file__)), "statusline.py")
+    base = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    files = [user_scope_files()[0],
+             os.path.join(base, ".claude", "settings.json"),
+             os.path.join(base, ".claude", "settings.local.json")]
+    try:
+        scopes = _read_install_scopes()
+        for key in (user_scope_key(), project_key(base)):
+            row = scopes.get(key)
+            if isinstance(row, dict) and isinstance(row.get("file"), str):
+                files.append(row["file"])
+    except Exception:
+        pass
+    seen: set = set()
+    for path in files:
+        real = os.path.realpath(path)
+        if real in seen or not os.path.isfile(real):
+            continue
+        seen.add(real)
+        try:
+            with open(real, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict) or not repoint_statusline(data, running):
+                continue
+            save(real, data)
+            print(f"context-guru: status line updated to this plugin version ({real})")
+        except Exception:
+            continue
     return 0
 
 
@@ -3024,7 +3154,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
     if isinstance(_meta, dict):
         recorded_sl = _meta.get(STATUSLINE_META) or ""
     restored_sl = ""
-    if recorded_sl and data.get(STATUSLINE_KEY) == {"type": "command", "command": recorded_sl}:
+    if recorded_sl and is_ours_statusline(data, data.get(STATUSLINE_KEY)):
         del data[STATUSLINE_KEY]
         if isinstance(_meta, dict) and _meta.get(STATUSLINE_PREV_META):
             data[STATUSLINE_KEY] = _meta[STATUSLINE_PREV_META]
@@ -3227,14 +3357,14 @@ STRATEGIES: dict[str, dict] = {
         # cannot silently re-tune an already-armed install.
         "cache": {
             "keepalive": True,
-            "keepalive_idle_seconds": 280,
+            "keepalive_idle_seconds": 270,
             "keepalive_max_pings": 2,
-            "keepalive_max_usd_per_ping": 0.25,
-            "keepalive_min_prefix_tokens": 20000,
+            "keepalive_max_usd_per_ping": 0.50,
+            "keepalive_min_prefix_tokens": 80000,
         },
         "spends": True,
-        "desc": "an idle ping just under the provider's 5-minute TTL (280s, at most 2 per "
-                "idle span, >=20k-token prefix, <=$0.25/ping). SPENDS THE CALLER'S CREDENTIAL "
+        "desc": "an idle ping just under the provider's 5-minute TTL (270s, at most 2 per "
+                "idle span, >=80k-token prefix, <=$0.50/ping). SPENDS THE CALLER'S CREDENTIAL "
                 "while nobody is at the keyboard.",
     },
     "1-hour-head": {
@@ -3599,8 +3729,9 @@ PRESETS: dict[str, str] = {
     "conservative": "trims obvious waste from tool output (repeats, dead runs) — deterministic, "
                      "no model calls, the safe first step into carrying less",
     "medium": "conservative plus a cheap model that keeps only what looks relevant in recent "
-              "tool output — the first tier that can spend on its own",
-    "high": "medium plus a summarizer that compacts older turns once the context window is "
+              "tool output, and a summary prepared in the background that is used only if you "
+              "come back after the cache expired — the first tier that can spend on its own",
+    "high": "medium, but the summary of older turns is used as soon as the context window is "
             "nearly full",
     "xhigh": "high plus a periodic deep-adjudication sweep over turns whose prompt cache has "
              "already gone cold — the deepest cut this picker offers",
@@ -3950,6 +4081,9 @@ def main() -> int:
              "with no question asked (see the module comment above cmd_gitignore_ensure)")
     gi.add_argument("--file", required=True)
 
+    sub.add_parser("statusline-repoint",
+                   help="SessionStart: point a status line we installed at the running plugin version")
+
     st = sub.add_parser("strategy")
     st.add_argument("op", choices=("list", "show", "set", "clear", "sync"))
     st.add_argument("--name", default="",
@@ -4020,6 +4154,9 @@ def main() -> int:
 
     # The proxy-binary release-notice surface: separate from `strategy`/`preset` because it is
     # machine-wide (one binary on PATH) rather than per-port or per-project.
+    rr = sub.add_parser("record-run", help="note that a command the status line tip names just ran")
+    rr.add_argument("name", choices=RECORDED_COMMANDS)
+
     uc = sub.add_parser("update-check")
     uc.add_argument("op", choices=("show", "stamp", "notify", "answer"))
     uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp`")
@@ -4039,14 +4176,14 @@ def main() -> int:
             ap.error("strategy set needs --name; one of " + ", ".join(STRATEGIES))
     if args.cmd == "preset" and args.op == "set" and not args.name:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
-    rc = {"add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
+    rc = {"statusline-repoint": cmd_statusline_repoint, "add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
           "enable-plugin": cmd_enable_plugin,
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
           "project-key": cmd_project_key, "scopes": cmd_scopes,
           "strategy": cmd_strategy, "preset": cmd_preset, "port": cmd_port,
           "owner-token": cmd_owner_token,
           "check-url": cmd_check_url, "update-check": cmd_update_check,
-          "gitignore-ensure": cmd_gitignore_ensure}[args.cmd](args)
+          "gitignore-ensure": cmd_gitignore_ensure, "record-run": cmd_record_run}[args.cmd](args)
 
     # The hatch facts are printed HERE rather than from inside save(), so the `result=` line the
     # caller keys on stays first, and so every writing path reports them without six call sites

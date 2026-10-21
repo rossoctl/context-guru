@@ -1,0 +1,16 @@
+Cache misses cost you about $21.89 in the last 28 days. Costliest hour: Thu
+13:00 ($2.00).
+
+    0     3     6     9     12    15    18    21
+Mon                   ░░  ░░  ▓▓    ░░                  $2.73
+Tue                   ░░  ░░  ▓▓░░  ░░                  $2.73
+Wed                   ░░  ░░  ▓▓░░  ░░                  $2.73
+Thu                   ░░  ░░░░████░░░░                  $5.54
+Fri                   ░░  ░░  ▓▓    ░░                  $2.73
+Sat                   ░░  ░░  ▓▓    ░░                  $2.73
+Sun                   ░░  ░░  ▓▓    ░░                  $2.73
+
+Scale    ░░▒▒▓▓██  $0 to $2.00 per hour; blank = no miss
+
+Do: before Thu 13:00, run /compact if you will step away.
+Hours are local time (UTC+00:00). 88 misses; extra cost is an estimate.

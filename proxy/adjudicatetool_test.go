@@ -140,12 +140,12 @@ func TestAdjudicateToolAdvertisedOnEveryTurn(t *testing.T) {
 	}
 }
 
-// A bypassed compaction request must not get it, for the same reason expand skips one: bypass promises
-// a byte-identical forward.
-func TestAdjudicateToolNotAdvertisedOnAnAgentCompaction(t *testing.T) {
+// A compaction request is not bypassed, so it carries the tool like every earlier turn of its thread.
+// Dropping it there would change the tools array, which hashes ahead of messages, and miss the cache.
+func TestAdjudicateToolAdvertisedOnAnAgentCompaction(t *testing.T) {
 	got := forwardedBody(t, toolsRequest(t, map[string]any{"role": "user", "content": ccCompactPrompt}))
-	if strings.Contains(string(got), adjudicate.ToolName) {
-		t.Errorf("injected into a bypassed compaction, which must forward byte-identically: %s", got)
+	if !strings.Contains(string(got), adjudicate.ToolName) {
+		t.Errorf("not injected into a compaction request, which is no longer bypassed: %s", got)
 	}
 }
 

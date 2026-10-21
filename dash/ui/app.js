@@ -119,6 +119,15 @@ function pct(v, digits = 1) { return v === null || v === undefined ? '—' : v.t
  * Returns a Node, not a string, because the reason has to reach a screen reader as well as a
  * pointer.
  */
+/**
+ * term wraps a word that needs a plain-words definition: dotted underline, definition on hover and
+ * on keyboard focus. Use it the first time a piece of jargon appears in a section, and write the
+ * definition for someone who has never used the product.
+ */
+function term(word, definition) {
+  return el('span', { class: 'term', tabindex: '0' }, word,
+    el('span', { class: 'tip', role: 'tooltip', text: definition }));
+}
 function usdOrNA(v, known, reason) {
   if (known) return document.createTextNode(usd(v));
   if (!reason) throw new Error('usdOrNA(): an n/a without a reason is indistinguishable from a bug');
@@ -132,6 +141,13 @@ function ms(v) {
 // Timestamps are epoch ms on the wire and formatted here, in the VIEWER's locale.
 // The server never stores or sends a formatted date — a locale string cannot be
 // range-queried, sorted, or bucketed.
+// One short form for table cells: today shows the time, older rows "Oct 13 11:21".
+function whenShort(tsMs) {
+  if (!tsMs) return '—';
+  const d = new Date(tsMs);
+  if (d.toDateString() === new Date().toDateString()) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+}
 function when(tsMs) {
   if (!tsMs) return '—';
   const d = new Date(tsMs);
@@ -303,6 +319,10 @@ async function api(path, extra) {
     try { const j = await res.json(); if (j.error) msg = j.error; } catch (_) { /* not json */ }
     const e = new Error(msg); e.status = res.status; throw e;
   }
+  // The server may answer from a cache that is up to ten minutes old (stale-while-revalidate) and
+  // says how old in the Age header. Keep it per endpoint so a page can show the age of its DATA.
+  const age = Number(res.headers.get('Age')) || 0;
+  (state.ageMs ||= {})[path] = age * 1000;
   return res.json();
 }
 
@@ -548,7 +568,7 @@ function barRows(host, rows, opts = {}) {
       class: 'bar-row' + (r.onclick ? ' clickable' : ''), title: r.title || null,
       onclick: r.onclick || null,
     },
-      el('div', { class: 'bar-label', text: r.label }),
+      el('div', { class: 'bar-label' }, r.term ? term(r.label, r.term) : r.label),
       // `ratio` drops the fill: a figure over 100% is not a share, and this track is a 100%
       // scale, so any bar drawn for it is a bar that disagrees with its own label. The empty
       // track keeps the three-column grid intact.
@@ -731,7 +751,7 @@ function renderCacheDetail(o) {
   clear(host);
 
   // 1. The tier split — the one number that explains every small percentage on this dashboard.
-  host.appendChild(el('h3', {}, 'What the provider billed, by tier'));
+  host.appendChild(el('h3', {}, 'What the provider billed, by price tier'));
   const inputTotal = o.cache_read + o.cache_write + o.fresh_input;
   stackedShare(host.appendChild(el('div')), [
     { label: 'Cache reads', value: o.cache_read, note: 'about a tenth of full rate' },
@@ -747,7 +767,7 @@ function renderCacheDetail(o) {
   // 2. Placement BY LOCATION. Aggregated for the first time.
   const bp = o.breakpoints || {};
   const bpTotal = (bp.system || 0) + (bp.tools || 0) + (bp.messages || 0) + (bp.blocks || 0);
-  host.appendChild(el('h3', {}, 'Where the cache breakpoints sit'));
+  host.appendChild(el('h3', {}, 'Where the cache markers sit in your prompts'));
   if (!bpTotal) {
     emptyState(host.appendChild(el('div')), 'No breakpoints recorded in this window',
       'These requests carried no prompt-cache breakpoints, or predate the placement capture.');
@@ -772,7 +792,7 @@ function renderCacheDetail(o) {
   }
 
   // 3. The TTL tier. Newly captured, so coverage is stated before any share is.
-  host.appendChild(el('h3', {}, 'Which cache lifetime was requested'));
+  host.appendChild(el('h3', {}, 'How long the cache was asked to keep your prompt'));
   const ttl = o.cache_ttl || {};
   if (!o.cache_ttl_recorded) {
     emptyState(host.appendChild(el('div')), 'Not recorded for these requests yet',
@@ -783,8 +803,8 @@ function renderCacheDetail(o) {
       + 'history would be reporting the absence of a measurement as a measurement.');
   } else {
     stackedShare(host.appendChild(el('div')), [
-      { label: 'ephemeral_5m', value: ttl.ephemeral_5m || 0, note: "Anthropic's default tier" },
-      { label: 'ephemeral_1h', value: ttl.ephemeral_1h || 0, note: 'the extended tier, written at a premium' },
+      { label: '5-minute cache', value: ttl.ephemeral_5m || 0, note: 'the default, kept for about 5 minutes' },
+      { label: '1-hour cache', value: ttl.ephemeral_1h || 0, note: 'kept for an hour, costs more to write' },
       { label: 'no caching asked for', value: ttl[''] || 0, note: 'body carried no cache_control' },
     ], { testid: 'cache-ttl-share', format: num,
       note: 'Recorded on ' + num(o.cache_ttl_recorded) + ' of ' + num(o.requests)
@@ -794,10 +814,10 @@ function renderCacheDetail(o) {
 
   // 4. Why the cache missed, and what each miss cost. The distribution already exists on
   // Overview; what is new here is that a miss is priced.
-  host.appendChild(el('h3', {}, 'Why the cache missed'));
+  host.appendChild(el('h3', {}, 'Why the cache sometimes missed'));
   renderDistribution('#cache-miss-detail', o.cache_miss, {
-    hit: 'hit', cold_start: 'cold start (not a failure)', ttl_expiry: 'TTL expiry',
-    prefix_change: 'prefix change', unknown: 'unknown', '': 'no cache data',
+    hit: 'hit', cold_start: 'first request (not a failure)', ttl_expiry: 'cache expired while idle',
+    prefix_change: 'start of prompt changed', unknown: 'unknown', '': 'no cache data',
   }, 'Every request carries an attribution once one has been captured.');
 }
 
@@ -832,19 +852,19 @@ const TILE_INFO = {
   'total-saved-usd': {
     what: 'The money context-guru avoided in total, after paying for itself. This is the '
       + 'one number to look at if you only look at one.',
-    how: 'Four savings added together. First, what compaction avoided: what this traffic '
+    how: 'Four savings added together. First, what your preset avoided: what this traffic '
       + 'would have cost had we removed nothing, minus what it actually cost, minus what '
       + "context-guru's own model calls cost. Second, what the prefix-cache split avoided. "
-      + 'Third, the idle keep-alive\u2019s NET \u2014 what it avoided minus what its pings cost. '
+      + 'Third, your cache strategy\u2019s NET \u2014 what it avoided minus what its pings cost. '
       + 'Fourth, the tool, MCP and skill declarations the removal filter stopped sending, counted '
       + 'from what the filter itself recorded on each request it acted on. The four touch '
       + 'different tokens, so adding them does not count anything twice.',
     catch: 'It can be NEGATIVE, and it is shown in red when it is \u2014 that means context-guru '
       + 'spent more on its own model calls than it saved you. Nothing here is hidden when '
-      + 'the answer is unflattering. The keep-alive contributes its NET, not its saving: the '
+      + 'the answer is unflattering. Your cache strategy contributes its NET, not its saving: the '
       + 'pings it sent are real spend on your key, that spend is inside this figure, and it is '
       + 'NOT in the billed-cost line above \u2014 a ping is not traffic your agent produced, so '
-      + 'it is excluded from the request count and every average. And the keep-alive\u2019s '
+      + 'it is excluded from the request count and every average. And the cache strategy\u2019s '
       + 'saving half is a CEILING: the provider\u2019s cache is keyed on content, so another '
       + 'session sending a byte-identical prompt would have refreshed the same entry for free. '
       + 'What is NOT in here is anything YOU removed by hand \u2014 an MCP server you dropped, a '
@@ -855,7 +875,7 @@ const TILE_INFO = {
   // Every one of these carries the same two disclosures: the saving is a CEILING, and a zero
   // may be an absence rather than a measurement.
   'ka-position': {
-    what: 'Whether the idle keep-alive is ahead or behind on YOUR traffic over this window.',
+    what: 'Whether your cache strategy is ahead or behind on YOUR traffic over this window.',
     how: 'Your own net: what the pings this service sent on your behalf cost, subtracted from '
       + 'the prefix re-creations they avoided. "No pings yet" means it has not run for you, '
       + 'which is different from having broken even.',
@@ -865,7 +885,7 @@ const TILE_INFO = {
       + 'that spread, not a promise about your next session.',
   },
   'ka-net': {
-    what: 'What the keep-alive has actually earned you: the re-creations it avoided, minus the '
+    what: 'What your cache strategy has actually earned you: the re-creations it avoided, minus the '
       + 'pings that bought them.',
     how: 'Both halves come from real rows. Every ping is its own dashboard row priced from its '
       + 'own usage; every credit sits on the real request that resumed from a cache that would '
@@ -880,7 +900,7 @@ const TILE_INFO = {
     what: 'How many minimal requests this service sent on your behalf while you were away, and '
       + 'what they cost.',
     how: 'One row per ping, in your own request log, billed to your own credential and priced '
-      + 'from the usage the provider reported. Filter the Requests tab by keep-alive to read '
+      + 'from the usage the provider reported. Filter the Requests tab by cache strategy to read '
       + 'them one at a time.',
     catch: 'This is money spent while nobody was at the keyboard, which is why the mechanism is '
       + 'opt-in and why this figure is beside the saving rather than behind it. Ping cost is '
@@ -957,8 +977,8 @@ const TILE_INFO = {
   },
   'estimator-divergence-compacted': {
     what: 'The same over-the-provider ratio as the tile beside it, but measured on the '
-      + 'requests where compaction actually removed something.',
-    how: 'Median of (provider-billed input ÷ our own token count) over compacted requests.',
+      + 'requests where your preset actually removed something.',
+    how: 'Median of (provider-billed input ÷ our own token count) over requests your preset trimmed.',
     catch: 'This is a LEVEL, not a correction factor for the savings. A level carries the '
       + 'system prompt, the tool declarations and the JSON envelope, none of which any '
       + 'component removes — so it is 3-4x while the correction the savings actually need is '
@@ -978,8 +998,8 @@ const TILE_INFO = {
       + 'overstatement.',
   },
   'saved-usd': {
-    what: 'What compaction alone avoided, after paying for the model calls context-guru '
-      + 'made to do the compacting.',
+    what: 'What your preset alone avoided, after paying for the model calls context-guru '
+      + 'made to trim your prompts.',
     how: 'Baseline cost − actual cost − our own LLM cost. The baseline is what the very '
       + 'same requests would have been billed if context-guru had removed nothing.',
     catch: 'It differs from "Total dollars avoided" only by the prefix-cache saving, which '
@@ -1061,7 +1081,7 @@ const TILE_INFO = {
       + 'paid. But a ratio of exactly 1.0 does NOT mean every removal was new content: it also '
       + 'happens when a component reports no content fingerprint at all, in which case there '
       + 'is nothing to deduplicate against and the figure is not a measurement. Every '
-      + 'reformatter is currently in that position — the Components tab marks them.',
+      + 'reformatter is currently in that position — the Preset steps tab marks them.',
   },
 
   'billed-input': {
@@ -1088,7 +1108,7 @@ const TILE_INFO = {
       + "unaffected — they come from the provider's own reported usage, not from this counter.",
   },
   'attempted-tokens': {
-    what: 'The part of each conversation compaction was actually allowed to rewrite.',
+    what: 'The part of each conversation your preset was actually allowed to rewrite.',
     how: 'The uncached tail of the request when running cache-aware; the whole request when '
       + 'there is no cache to protect.',
     catch: 'This is the denominator of the headline savings percentage, and it had no tile '
@@ -1141,8 +1161,8 @@ const TILE_INFO = {
       + 'them as a like-for-like pair would be wrong. What IS comparable is the experience — '
       + 'on measured traffic a buffered response leaves the user staring at nothing for about '
       + '21 seconds longer, on roughly a third of responses. That is far more user-visible '
-      + 'delay than compaction itself adds, though it is a property of how the response is '
-      + 'handled rather than of compaction.',
+      + 'delay than your preset itself adds, though it is a property of how the response is '
+      + 'handled rather than of your preset.',
   },
 
   // ── amortization ──────────────────────────────────────────────────────────
@@ -1198,13 +1218,13 @@ const TILE_INFO = {
       + 'cannot price. A row can be in either, or both.',
   },
   'cost-cg': {
-    what: "What context-guru's own model calls cost you. Compacting with an LLM is not "
+    what: "What context-guru's own model calls cost you. Trimming with an LLM is not "
       + 'free, and this is the bill for it.',
     how: 'The cost of every extraction and summarisation call context-guru made, priced '
       + 'from the gateway’s own rates.',
     catch: 'This is already subtracted from every net and total on this page. On some '
-      + 'component configurations it EXCEEDS what the compaction saved — check the '
-      + "Components tab, which shows each component's net separately.",
+      + 'component configurations it EXCEEDS what the preset saved — check the '
+      + "Preset steps tab, which shows each component's net separately.",
   },
   'total-reduced-usd': {
     what: 'How much smaller this bill got in total \u2014 what context-guru avoided PLUS what you '
@@ -1284,7 +1304,7 @@ const TILE_INFO = {
     what: "What the model's replies cost. Nothing context-guru does can reduce this.",
     how: 'Output tokens at today’s rate for each model.',
     catch: 'Shown precisely so the percentages on this page can be read in proportion: if '
-      + 'this is most of your bill, even perfect compaction is a small percentage of it.',
+      + 'this is most of your bill, even a perfect preset is a small percentage of it.',
   },
   'tier-reconcile': {
     what: 'A consistency check between the four-tier breakdown above and the bill.',
@@ -1300,7 +1320,7 @@ const TILE_INFO = {
     what: 'Requests where the prompt actually got split into a stable and a volatile half.',
     how: 'Counted from the requests where the split component changed something.',
     catch: 'This component MOVES tokens out of the expensive cache-creation tier rather than '
-      + 'removing any, so on the Components tab it correctly reports zero "acted" (which counts '
+      + 'removing any, so on the Preset steps tab it correctly reports zero "acted" (which counts '
       + 'removed tokens) alongside a large "structural" count. That is not a broken component '
       + 'and not a component doing nothing — the structural column is its real fire count. '
       + 'Separately, zero HERE with a large run count means these prompts carry no volatile '
@@ -1405,27 +1425,6 @@ const TILE_INFO = {
   },
 };
 
-/**
- * countUp animates a tile's value from 0 up to its real figure, formatted with the same
- * function the tile itself used. Pure polish: it runs once after the tile is already on
- * screen with its real, correct value, and simply repaints the same node a few times on
- * the way there — a failed or skipped animation leaves the correct number showing, never a
- * wrong one.
- */
-function countUp(key, target, formatter, durationMs = 700) {
-  if (typeof target !== 'number' || !isFinite(target)) return;
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const node = document.querySelector(`[data-testid="tile-${key}-value"]`);
-  if (!node) return;
-  const start = performance.now();
-  function frame(now) {
-    const t = Math.min(1, (now - start) / durationMs);
-    const eased = 1 - (1 - t) ** 3;
-    node.textContent = formatter(target * eased);
-    if (t < 1) requestAnimationFrame(frame);
-  }
-  requestAnimationFrame(frame);
-}
 
 /**
  * tile renders one figure, and — when TILE_INFO has an entry for its key — an "i" that
@@ -1501,490 +1500,6 @@ function costCoverage(o) {
   return { complete, requests, pct: requests > 0 ? (100 * complete) / requests : 0 };
 }
 
-/** costNote appends the coverage to a dollar tile's sub-line. Kept as a suffix rather than a
- *  separate line so the qualifier cannot be laid out away from the number it qualifies. */
-function costNote(o, sub) {
-  const c = costCoverage(o);
-  if (!c.requests) return sub;
-  return sub + ' · priced on ' + num(c.complete) + ' of ' + num(c.requests) + ' requests ('
-    + pct(c.pct, 1) + ')';
-}
-
-function renderTiles(o) {
-  const host = clear($('#tiles'));
-  const exact = (o.accounting && o.accounting.complete) || 0;
-  const costKnown = exact > 0;
-
-  // A request forwarded with NO compaction because this account's own stored configuration
-  // failed to build — proxy/tenancy.go fails open on purpose rather than taking the account
-  // offline over a bad config row, but until this banner existed that fact lived ONLY in the
-  // proxy's own log. Shown above the headline, not folded into Diagnostics: the number it
-  // reports is "your bill was bigger than it needed to be, right now", which is exactly what
-  // this page exists to prevent from going unnoticed.
-  // Gated on the RECENT count, not the window's total, and that distinction is the whole point.
-  // The default view has no time filter, so a total keeps reporting an incident forever after it
-  // is fixed: this deployment carried 1,752 such requests from one afternoon and then told every
-  // viewer for days to go and fix a configuration that was already correct. The banner asks a
-  // present-tense question, so it reads a present-tense number and clears itself once someone
-  // fixes the config — see InvalidConfigRecent in dash/overview.go.
-  if (o.invalid_config_recent > 0) {
-    host.appendChild(el('div', { class: 'banner bad', 'data-testid': 'invalid-config' },
-      el('div', {}, el('strong', {}, num(o.invalid_config_recent) + ' request'
-        + (o.invalid_config_recent === 1 ? '' : 's') + ' ran with NO compaction in the last hour. '),
-        'This account’s stored configuration failed to build, so every one of them was ' +
-        'forwarded as-is instead — traffic kept working, but none of it was compacted. ' +
-        'Open Settings, fix the configuration, and save it again.')));
-  }
-
-  // The headline row answers the only question someone opening this page has: did it
-  // save money, did it save tokens, and over how much traffic. Everything else is the
-  // evidence for those three, so it sits below them in labelled groups rather than
-  // beside them at the same weight.
-  // A tile's sub-line is kept only where it carries a FACT the label cannot: a formula, a
-  // second number, or the distinguisher between two tiles that would otherwise read the
-  // same ("gross" vs "unique"). Anything that only restated the label is gone — "Tokens
-  // before / content tokens in" was a caption explaining a caption.
-  host.appendChild(tileGroup(null, null, [
-    // Our two savings, added: compaction's and the prefix components'. Both are ours and
-    // the token sets are disjoint. The provider's own cache saving is much larger and is
-    // NOT in here — it was, under the label "compaction + provider cache", and a headline
-    // number that mostly measures somebody else's mechanism is not a headline number.
-    tile('total-saved-usd', 'Total dollars avoided', costKnown ? usd(o.total_saved_usd) : 'unknown',
-      costNote(o, 'compaction + prefix cache + keep-alive + declarations dropped'),
-      costKnown ? (o.total_saved_usd < 0 ? 'bad' : 'good') : ''),
-    // The second total, beside the first and only when they differ. It is the SAME money plus
-    // what the account removed itself — an MCP server they dropped, a skill they switched off.
-    // Two tiles rather than one because they answer different questions ("how much smaller did
-    // my bill get" against "how much of that did this product do") and folding the user's own
-    // work into the figure we claim credit for would be taking it.
-    costKnown && Math.abs(o.total_reduced_usd - o.total_saved_usd) > 0.00005
-      ? tile('total-reduced-usd', 'Total the bill came down', usd(o.total_reduced_usd),
-        costNote(o, 'ours + ' + usd(o.self_removed_usd) + ' you removed yourself'),
-        o.total_reduced_usd < 0 ? 'bad' : 'good')
-      : null,
-    tile('saved-usd', 'Net dollars saved', costKnown ? usd(o.net_saved_usd) : 'unknown',
-      costNote(o, 'baseline − actual − our spend'),
-      costKnown ? (o.net_saved_usd < 0 ? 'bad' : 'good') : ''),
-    tile('saved-unique', 'Tokens saved (unique)', compact(o.saved_unique),
-      compact(o.replay_tokens) + ' re-earned on later turns', 'accent'),
-    // Risk beside value, at the SAME altitude, because on this traffic it is 22x larger than
-    // the savings two tiles to the left and it used to sit below the fold as a diagnostic
-    // paragraph. It is subtracted from nothing (mutation is not randomly assigned; see the
-    // note under the cache-miss chart) — but a page that shows a $7 saving in 48-point type
-    // and a $157 exposure in a folded footnote is not honest about which number is bigger.
-    tile('prefix-change-exposure', 'Prefix-change exposure',
-      costKnown ? usd(o.prefix_change_cost_all_usd) : 'unknown',
-      costNote(o, num(o.prefix_change_requests_all) + ' turns re-billed · not netted'),
-      o.prefix_change_cost_all_usd > 0 ? 'bad' : ''),
-    tile('requests', 'Requests', num(o.requests), num(o.sessions) + ' sessions'),
-  ], 'headline dense'));
-
-  // Count up to the headline dollar/token figures instead of painting them already
-  // settled — pure polish, skipped entirely for anyone who asked the OS not to animate.
-  if (costKnown) {
-    countUp('total-saved-usd', o.total_saved_usd, usd);
-    countUp('saved-usd', o.net_saved_usd, usd);
-  }
-  countUp('saved-unique', o.saved_unique, (v) => compact(Math.round(v)));
-
-  // Groups collapsed into one "Diagnostics" section below rather than shown at the same
-  // weight as the headline and Cost/Addressable-spend groups above: real, correct, and
-  // still one click away, but token-accounting internals and tier breakdowns are not what
-  // answers "is this worth it" for the person who opens this page most days.
-  const diagnostics = [];
-
-  diagnostics.push(tileGroup('Content tokens',
-    'our own count, over message text only — NOT billed tokens; see "Provider-billed input"', [
-    tile('tokens-before', 'Tokens before', compact(o.tokens_before)),
-    tile('tokens-after', 'Tokens after', compact(o.tokens_after)),
-    // The unit check, and it belongs in this group rather than a footnote. Every token figure
-    // to the left is our own tokenizer over message TEXT — no system prompt, no tool schemas,
-    // no JSON envelope — and the provider bills a superset with its own tokenizer. Measured on
-    // this corpus the two differ by 3.2x. Without this tile beside them, four token counts and
-    // a "% saved" invite being read against an invoice they are not denominated in.
-    // ONE POPULATION, and the sub-line says which. The numerator is contributed only by rows
-    // where the provider reported usage — it is identically 0 elsewhere — so dividing it by
-    // tokens_before summed over ALL rows invented a ratio across two populations and understated
-    // it by exactly the share of unmeasured rows. It printed "0.6× our count", i.e. "the
-    // provider bills LESS than we count", directly above a tooltip in the same tile saying the
-    // figure is "about three times larger". Both server sums were individually correct.
-    tile('billed-input', 'Provider-billed input', compact(o.billed_input_tokens),
-      o.tokens_before_billed > 0
-        ? (o.billed_input_tokens / o.tokens_before_billed).toFixed(2) + '× our count, on the '
-          + num(o.billed_input_rows) + ' requests reporting provider usage'
-        : 'fresh + cache reads + writes — no request in this window reported provider usage'),
-    // The check itself, as a figure rather than a footnote. A ratio of sums (the tile to the
-    // left) is dominated by the largest requests; this is the median per-request ratio over the
-    // only population where the two counts describe the SAME prompt — requests where nothing
-    // was removed. It is the honest answer to "how wrong is the number in front of me".
-    tile('estimator-divergence', 'Our estimate runs low by',
-      o.estimator_divergence ? o.estimator_divergence.toFixed(2) + '×' : '—',
-      o.estimator_divergence_rows
-        ? 'median over ' + num(o.estimator_divergence_rows) + ' uncompacted requests'
-        : 'no comparable requests in this window',
-      o.estimator_divergence > 1.5 ? 'bad' : ''),
-    // The SAME ratio over the rows that actually produced the savings above. The tile to the
-    // left is measured on requests where nothing was removed — the strict complement — and
-    // reading one as a correction for the other is the mistake #240 was filed on. Both, or
-    // neither.
-    tile('estimator-divergence-compacted', 'Same, on compacted requests',
-      o.estimator_divergence_compacted ? o.estimator_divergence_compacted.toFixed(2) + '×' : '—',
-      o.estimator_divergence_compacted_rows
-        ? 'median over ' + num(o.estimator_divergence_compacted_rows) + ' COMPACTED requests · a level, not a correction'
-        : 'nothing compacted in this window'),
-    // The #240 boundary. Shown only when this window actually straddles it, because on a
-    // deployment with no pre-correction history it is noise.
-    o.pre_correction_saving_rows
-      ? tile('pre-correction', 'Savings on the OLD arithmetic',
-          usd(o.pre_correction_saved_usd),
-          num(o.pre_correction_saving_rows) + ' of '
-            + num(o.pre_correction_saving_rows + o.corrected_saving_rows)
-            + ' saving requests predate the #240 tokenizer correction and were NOT re-priced',
-          'warn-text')
-      : null,
-    tile('saved-gross', 'Saved (gross)', compact(o.saved_gross), 'recounts re-sent history'),
-    // The label has to name the UNIQUE calculation, which dominates this figure, and not
-    // only the restore subtraction, which is usually zero: sitting between "Saved (gross)
-    // 17k" and "Overcount 1.7×", "Saved (net of restores)" invited reading it as
-    // gross-minus-restores and made a 10k number look like an arithmetic error.
-    tile('saved-adjusted', 'Saved (unique − restores)', compact(o.saved_adjusted),
-      compact(o.expand_tokens) + ' asked back', o.saved_adjusted < 0 ? 'bad' : ''),
-    // Was "Overcount ratio · gross ÷ unique", i.e. the replay presented as a discount
-    // against us. It is the opposite: a reduction frozen at turn N is still absent from every
-    // later turn the agent re-sends, so it is EARNED again on each of them — and that replay
-    // is already priced per turn into baseline_cost_usd and into every component's saved_usd,
-    // at the tier each turn actually paid. Same arithmetic, correct direction.
-    tile('overcount', 'Each reduction re-earned', o.overcount_ratio ? o.overcount_ratio.toFixed(1) + '×' : '—',
-      'gross ÷ unique · already priced in'),
-  ]));
-
-  // The replay, and the ceiling on it. Both were absent: the realized figure was labelled as
-  // an over-count, and how much replay the cache-safety freeze forgoes had no number at all.
-  diagnostics.push(tileGroup('Amortization', 'what the freeze forgoes', [
-    tile('replay-realized', 'Replay realized', compact(o.replay_tokens),
-      'reductions re-earned on later turns'),
-    tile('replay-projected', 'Replay ceiling', compact(o.replay_projected_tokens),
-      'if each survived to end of session'),
-    tile('replay-pct', 'Of that ceiling', o.replay_projected_tokens
-      ? pct(o.replay_realized_pct, 1) : '—',
-      compact(o.frozen_tokens) + ' tok frozen for cache safety',
-      o.replay_projected_tokens && o.replay_realized_pct < 25 ? 'bad' : ''),
-    // The ceiling above assumes a session runs to its end with every removal intact. This is
-    // how often that assumption breaks, and it is why the ceiling is a ceiling.
-    tile('compaction-resets', 'Context resets', num(o.compaction_resets),
-      o.requests ? pct((100 * o.compaction_resets) / o.requests, 1) + ' of turns' : ''),
-  ]));
-
-  // What compaction was ALLOWED to touch, and what it was forbidden from touching. The two
-  // absolutes behind the page's headline ratio: the numerator has had a tile since the
-  // beginning and neither denominator did, so "1.7% of what we tried to compact" could not be
-  // sized by anyone reading it. The frozen figure is the more interesting of the two — at ~48%
-  // of attempted it is the single largest constraint on this product, and it was a sub-line.
-  diagnostics.push(tileGroup('What compaction could reach', 'the cost of cache safety', [
-    tile('attempted-tokens', 'Attempted', compact(o.attempted_tokens),
-      'the uncached tail we may rewrite'),
-    tile('frozen-tokens', 'Frozen for cache safety', compact(o.frozen_tokens),
-      o.attempted_tokens + o.frozen_tokens > 0
-        ? pct((100 * o.frozen_tokens) / (o.attempted_tokens + o.frozen_tokens), 0)
-          + ' of the context is off-limits'
-        : '', 'accent'),
-  ]));
-
-  // The whole group's coverage in the group note rather than five identical tile suffixes:
-  // every figure below is summed over the window unrestricted, so each of them is a partial
-  // total and the share is the same for all of them.
-  host.appendChild(tileGroup('Cost', costKnown
-    ? costNote(o, 'billed, and the counterfactual')
-    : 'no priced requests in this window', [
-    tile('cost-baseline', 'Baseline cost', costKnown ? usd(o.baseline_cost_usd) : 'unknown',
-      costKnown ? 'without context-guru' : 'needs all four tiers'),
-    tile('cost-actual', 'Actual cost', costKnown ? usd(o.cost_usd) : 'unknown',
-      costKnown ? 'as billed' : 'needs all four tiers'),
-    tile('cost-cg', 'Our own LLM cost', costKnown ? usd(o.cg_llm_cost_usd) : 'unknown',
-      'extract_llm, summarize'),
-    // The cache saving this project claims, and the only one. Three conditions per request:
-    // the volatile-tail split ran, the provider then READ that prefix from cache, and the
-    // snapshot had MOVED since this session's previous request — the turn that would otherwise
-    // have missed. (This comment said "the session's FIRST request" long after that gate was
-    // replaced, as did the waterfall description and the schema comment. Event.cachesplitSavedUSD
-    // is the authority.) And the amount is the stable half the split moved, not the whole
-    // cache_read: the cachesplit-off control arm still read 45,805 tokens, so only the
-    // 8,499-token difference was ever ours.
-    //
-    // What was here before was the provider's whole cache saving ("Prompt-cache savings")
-    // plus the subset that merely co-occurred with our components. On the traffic that
-    // measured this, 23x larger — and neither of them a thing we did.
-    // Measured + the pre-instrumentation window, added, because the question "what has this
-    // component earned" is about the whole history and the split of it into measured and
-    // valued-on-read is an implementation detail of when we started recording. The
-    // decomposition is one group down, and the historical half is absent (not zero) when it
-    // could not be priced.
-    tile('cachesplit-saved', 'Prefix-cache savings',
-      costKnown ? usd(o.cachesplit_saved_usd + histUSD(o)) : 'unknown',
-      num(o.split_credited) + ' of ' + num(o.split_tail_moved) + ' moved-snapshot turns'
-        + (histRequests(o) ? ' + ' + num(histRequests(o)) + ' earlier' : ''),
-      costKnown && (o.cachesplit_saved_usd + histUSD(o)) > 0 ? 'good' : ''),
-    // The keep-alive's net, with both halves in the subtitle. Shown only once it has done
-    // something: a row of zeroes on a deployment nobody opted into reads as a broken feature.
-    // The net is what a decision rests on, so it is the number on the tile — presenting the
-    // saving alone would be exactly the half-truth this ledger exists to prevent.
-    (o.keepalive_pings || o.keepalive_saved_usd)
-      ? kaOverviewTile(o, costKnown)
-      : null,
-    // Declarations no longer sent, MEASURED half. It is a saving of ours that reached no total on
-    // this page until now, and the reason was mechanical rather than a judgement: the savings walk
-    // is built on tokens_before, which counts message text only, and a tool schema lives in the
-    // top-level `tools` array. So the largest lever in the product — 82.7% of a declared catalogue
-    // is never invoked — moved none of the figures beside it.
-    o.decl_filter_requests
-      ? tile('decl-filter-saved', 'Declarations not sent',
-        o.decl_credit_priced ? usd(o.decl_filter_usd) : compact(o.decl_filter_reads) + ' tok',
-        num(o.decl_filter_requests) + ' requests sent without them',
-        o.decl_filter_usd > 0 ? 'good' : '')
-      : null,
-    // And the MODELLED half, in its own tile, labelled as the user's rather than ours. It is in
-    // total_reduced above and not in total_saved.
-    o.self_removed_items
-      ? tile('self-removed', 'Removed by you, not by us',
-        o.decl_credit_priced ? usd(o.self_removed_usd) : compact(o.self_removed_reads) + ' tok',
-        num(o.self_removed_items) + ' item' + (o.self_removed_items === 1 ? '' : 's')
-          + ' · modelled, see Inventory'
-          + (o.self_removed_overlap ? ' · ' + num(o.self_removed_overlap) + ' excluded as overlap' : ''),
-        'accent')
-      : null,
-  ]));
-
-  // The bill, split by the tier it was charged on, and the only defensible denominator for a
-  // compaction percentage. There were no cost columns here at all — only token counts — so
-  // "0.28% of spend" was silently divided by a bill that is two-thirds OUTPUT tokens, which no
-  // input-side transformation can reach. Absent, not zeroed, when the rates are unknown.
-  if (o.tier_costs) {
-    const t = o.tier_costs;
-    const addrPct = t.total_usd > 0 ? (100 * t.addressable_usd) / t.total_usd : null;
-    host.appendChild(tileGroup('Addressable spend', 'the part of the bill compaction can reach', [
-      tile('addressable', 'Addressable spend', usd(t.addressable_usd),
-        addrPct === null ? 'input side (derived)' : 'input side · ' + pct(addrPct, 0)
-          + ' of the bill, derived', 'accent'),
-      tile('saved-of-addressable', 'Saved, of addressable',
-        t.addressable_usd > 0 ? pct((100 * o.total_saved_usd) / t.addressable_usd, 2) : '—',
-        'not of the whole bill', o.total_saved_usd < 0 ? 'bad' : ''),
-      tile('cost-output', 'Output tokens cost', usd(t.output_usd),
-        'nothing here is reachable'),
-      // The reconciliation. These four tiers are priced at TODAY's rates while cost_usd was
-      // priced when each request was served, so the two disagree by whatever the rates moved
-      // over the window. Showing both is the only way a reader can tell a rate change from an
-      // arithmetic error, and hiding the derived total would have been the dishonest option.
-      // The reconciliation, and it is load-bearing rather than decorative. These four tiers
-      // are priced at TODAY's rates over tokens billed at whatever the rate was then, so a
-      // gateway price change inside the window makes the split drift from the bill. Measured
-      // on production: two distinct rate regimes per model, so the drift is real and it is
-      // ~15%. A split that disagrees with the bill by more than a rounding error must SAY it
-      // is an estimate; the alternative is a reader treating "8% of the bill is output" as a
-      // measurement when it is a derivation.
-      tile('tier-reconcile', 'At today\'s rates', usd(t.total_usd),
-        'billed ' + usd(t.stored_usd)
-          + (t.stored_usd > 0 && Math.abs(t.total_usd - t.stored_usd) / t.stored_usd > 0.05
-            ? ' · ' + pct((100 * (t.total_usd - t.stored_usd)) / t.stored_usd, 0) + ' rate drift'
-            : '')
-          + (t.uncovered_requests ? ' · ' + num(t.uncovered_requests) + ' unpriced' : ''),
-        t.stored_usd > 0 && Math.abs(t.total_usd - t.stored_usd) / t.stored_usd > 0.05 ? 'bad' : ''),
-    ]));
-  }
-
-  // Why the figure above is the size it is. Without these three counts a small number is
-  // indistinguishable from a broken component — which is exactly what happened: gated on the
-  // session's first request it read ~$0, and the reason (1,105 of 1,127 session starts had no
-  // cache to hit) was invisible.
-  // The honest framing of a $0.03 figure. The credit fires only when the environment snapshot
-  // MOVED, and on real Claude Code traffic it does not move within a session — one distinct
-  // tail hash across the 257 turns of the largest measured session, because the snapshot is
-  // captured once per process. So the mechanism is verified and its measured value on this
-  // traffic is ~$0. The −34.1% that the A/B measured was CROSS-SESSION reuse, which this
-  // per-request credit condition cannot see, and inventing a number for it here would be
-  // worse than reporting the zero.
-  diagnostics.push(tileGroup('Prefix split',
-    'mechanism verified; the credit only fires when the snapshot MOVES, and it does not move '
-    + 'within a session — the A/B measured cross-session reuse, which this cannot see', [
-    // "acted on", not "ran on": the component runs on every request and does nothing on most.
-    // Three of this deployment's largest accounts have it running on 125, 1,035 and 1,972
-    // requests and acting on NONE of them — their system prompts carry no volatile tail to
-    // split. All zeros here with a nonzero run count on the Components tab is that case, and
-    // it is a fact about their prompt, not a fault.
-    tile('split-requests', 'Requests it acted on', num(o.split_requests),
-      o.split_requests === 0 ? 'no volatile tail to split' : ''),
-    // ONE definition of "moved", shared with the write path: differs from the last non-zero
-    // tail hash recorded for the session, and a session with no earlier one counts as moved.
-    // This tile used to compare against the previous ROW's hash including 0 — where 0 means
-    // "nothing was split on that turn" — while the credit used a map that only remembered
-    // non-zero hashes, so the page read 844 acted / 314 moved / 3 credited and looked broken.
-    tile('split-tail-moved', 'Snapshot had moved', num(o.split_tail_moved),
-      'the turns it can earn on'),
-    tile('split-credited', 'Served from cache', num(o.split_credited),
-      'the turns it did earn on'),
-    // The reconciliation, and it is not decoration. A credited turn the recomputation does not
-    // call moved was credited because the write-time map had FORGOTTEN a session it had seen
-    // (proxy restart, or eviction) and read a first sighting where there was none. On the
-    // stored corpus that is all three of them. The write path no longer does this, so a gap
-    // here means pre-fix rows are still inside the window — not that the recount is wrong.
-    tile('split-credited-moved', 'Credited and moved', num(o.split_credited_moved),
-      o.split_credited > o.split_credited_moved
-        ? num(o.split_credited - o.split_credited_moved) + ' credited before the write-path fix'
-        : 'the two definitions agree',
-      o.split_credited > o.split_credited_moved ? 'bad' : ''),
-    tile('split-hit-rate', 'Of moved snapshots', o.split_tail_moved > 0
-      ? pct((100 * o.split_credited) / o.split_tail_moved) : '—',
-      'kept out of the write tier'),
-    // The pre-instrumentation window, valued on read and never stored. Its own tile so the
-    // measured figure above is never confused with an estimate — and "—" when it could not be
-    // priced, because an unpriced number must not read as "saved nothing".
-    tile('split-historical', 'Before we recorded it',
-      o.cachesplit_historical ? usd(o.cachesplit_historical.usd) : '—',
-      o.cachesplit_historical
-        ? num(o.cachesplit_historical.requests) + ' session starts, valued on read'
-        : 'no rates for these models'),
-  ]));
-
-  // Tokens AND what each tier cost. The cost half was missing entirely, which is why the one
-  // fact that explains every small percentage on this page — most of the bill is output —
-  // could only be inferred by dividing columns by hand.
-  const tc = o.tier_costs;
-  diagnostics.push(tileGroup('Billed tokens', 'the four tiers the provider charges on', [
-    tile('cache-read', 'Cache reads', compact(o.cache_read), tc ? usd(tc.cache_read_usd) : null),
-    tile('cache-write', 'Cache writes', compact(o.cache_write),
-      tc ? usd(tc.cache_write_usd) + ' · ~12.5× a read' : '~12.5× a read'),
-    tile('fresh-input', 'Fresh input', compact(o.fresh_input), tc ? usd(tc.fresh_usd) : null),
-    tile('output', 'Output tokens', compact(o.output_tokens), tc ? usd(tc.output_usd) : null),
-  ]));
-
-  // The streaming split. `sse_recorded === 0` over a window that HAS streaming requests means
-  // the columns are newer than the rows — reported as "not recorded yet", never as 0%, because
-  // a history of defaults must not read as a measurement. This is the largest user-visible
-  // latency on the page when it is populated: ~21 s of extra wait on a third of responses,
-  // against the 154 ms the pipeline itself adds two tiles to the left.
-  const sseKnown = o.sse_recorded > 0;
-  diagnostics.push(tileGroup('Response streaming',
-    sseKnown ? 'where the user-visible time actually goes'
-      : 'newly captured — these fill in from the next streamed response', [
-    tile('sse-buffered', 'Responses buffered', sseKnown ? pct(o.sse_buffered_pct, 1) : 'not recorded yet',
-      sseKnown ? num(o.sse_buffered) + ' of ' + num(o.sse_buffered + o.sse_streamed) + ' streamed responses'
-        : num(o.sse_stream_rows) + ' streaming requests predate this capture',
-      sseKnown && o.sse_buffered_pct > 10 ? 'bad' : ''),
-    tile('ttfb-streamed', 'Time to first byte, streamed', sseKnown ? ms(o.ttfb_ms_avg_streamed) : '—',
-      'measured first byte · the good path'),
-    // NOT called a "time to first byte". On a buffered response there is no earlier byte to
-    // measure — the value is the whole response time — so labelling it as a TTFB beside the
-    // streamed figure would present two different measurements as one comparable pair. It is
-    // still the honest number for what a user experiences, because nothing reaches them until
-    // the response is complete.
-    tile('ttfb-buffered', 'Wait for the whole response, buffered',
-      sseKnown ? ms(o.total_ms_avg_buffered) : '—',
-      sseKnown && o.ttfb_ms_avg_streamed > 0 && o.total_ms_avg_buffered > 0
-        ? ms(o.total_ms_avg_buffered - o.ttfb_ms_avg_streamed) + ' longer before anything appears'
-        : 'nothing appears until the whole response arrives',
-      sseKnown && o.total_ms_avg_buffered > o.ttfb_ms_avg_streamed * 2 ? 'bad' : ''),
-  ]));
-
-  diagnostics.push(tileGroup('Latency and safety', 'the price of compaction', [
-    tile('cg-latency', 'context-guru latency', ms(o.cg_latency_ms_avg), 'p95 ' + ms(o.cg_latency_ms_p95)),
-    tile('upstream-latency', 'Upstream latency', ms(o.upstream_ms_avg), 'p95 ' + ms(o.upstream_ms_p95)),
-    tile('expands', 'Restorations', num(o.expands),
-      pct(o.expand_rate * 100) + ' of requests · ' + compact(o.expand_tokens) + ' tok',
-      o.expands > 0 ? 'bad' : ''),
-    tile('reverts', 'Reverts', num(o.reverts), 'never-worse guard'),
-    tile('passthroughs', 'Not compacted', num(o.passthroughs)),
-  ]));
-
-  // Collapsed, not deleted: every figure above is real and still one click away, just not
-  // at the same weight as "is this worth it" — see the comment where `diagnostics` starts.
-  const details = el('details', { class: 'panel' });
-  details.appendChild(el('summary', {},
-    'Diagnostics: token accounting, amortization, prefix split, billed tiers, streaming, latency'));
-  for (const group of diagnostics) details.appendChild(group);
-  host.appendChild(details);
-}
-
-function renderDenominators(o) {
-  barRows($('#denominators'), (o.denominators || []).map((d) => ({
-    label: d.label,
-    // Over 100% the figure is a RATIO, not a share, and the track is a share scale by
-    // construction — so the bar pinned full while the number beside it said 158.17%, each
-    // contradicting the other. The arithmetic is right (see the gross-over-attempted
-    // description: the denominator is re-counted every turn), so only the presentation
-    // changes: no track, and a multiple rather than a percentage. The three ratios that ARE
-    // shares keep their bar.
-    ratio: d.available && d.percent > 100,
-    value: d.available ? d.percent : 0,
-    max: 100,
-    display: !d.available ? 'n/a'
-      : d.percent > 100 ? (d.percent / 100).toFixed(2) + '×' : pct(d.percent, 2),
-    available: d.available,
-    // The divisor is what makes these four bars four different measurements, so it is the
-    // half that stays visible. The prose folds.
-    formula: d.available
-      ? `${compact(d.numerator)} ÷ ${compact(d.denominator)} tokens`
-      : 'inputs unavailable in this window',
-    desc: d.description,
-    descSummary: 'Why this denominator',
-  })), { emptyDetail: 'No requests match the filter.' });
-  renderFrozenCeiling(o);
-}
-
-/**
- * renderFrozenCeiling states the cache-frozen share as what it is: the explanation for the
- * savings percentages directly above it. ~86% of a warm agent transcript sits in the prompt
- * prefix the provider already cached, and compaction is forbidden to touch it (invariant 5) —
- * which is why those bars read as low as they do. Until now that share appeared only as a
- * COST row in the safety panel, with nothing connecting it to the ratios it caps.
- *
- * No new capture: both figures already ride on /api/overview and are already tiled under
- * "What compaction could reach". This is the same quotient, named as a ceiling.
- *
- * Zero frozen tokens is NOT rendered as "0% frozen". A window can read zero either because
- * nothing was frozen or because the requests were not cache-aware at all (compaction is then
- * allowed the whole request), and /api/overview carries no cache-awareness aggregate that
- * would separate them — so it says it cannot compute the ceiling instead of claiming there
- * is none.
- */
-function renderFrozenCeiling(o) {
-  const host = $('#frozen-ceiling');
-  if (!host) return;
-  const reach = (o.attempted_tokens || 0) + (o.frozen_tokens || 0);
-  if (!reach || !o.frozen_tokens) {
-    host.textContent = reach
-      ? 'No tokens were frozen in this window, so no cache-safety ceiling is computable — '
-        + 'either nothing was frozen or these requests did not run cache-aware.'
-      : 'No cache-safety ceiling computable: this window records neither attempted nor frozen '
-        + 'tokens.';
-    return;
-  }
-  const touchable = (100 * o.attempted_tokens) / reach;
-  host.textContent = `Compaction was allowed to touch ${pct(touchable, 1)} of these tokens; the `
-    + `other ${pct(100 - touchable, 1)} sat in the already-cached prefix `
-    + `(${compact(o.frozen_tokens)} frozen ÷ ${compact(reach)} attempted + frozen).`;
-}
-
-function renderWaterfall(o) {
-  const host = clear($('#waterfall'));
-  const steps = o.waterfall || [];
-  if (!steps.length || !o.baseline_cost_usd) {
-    emptyState(host, 'No priced requests yet',
-      'The waterfall needs provider usage data (all four token tiers) and a known model price.');
-    return;
-  }
-  const max = Math.max(...steps.map((s) => Math.abs(s.delta_usd)), 0.0001);
-  const wrap = el('div', { class: 'bars' });
-  for (const s of steps) {
-    const color = s.total ? SERIES[0] : s.delta_usd < 0 ? 'var(--good)' : 'var(--bad)';
-    wrap.appendChild(el('div', { class: 'bar-row' },
-      el('div', { class: 'bar-label', text: s.label }),
-      el('div', { class: 'bar-track' }, el('div', {
-        class: 'bar-fill', style: `width:${(Math.abs(s.delta_usd) / max) * 100}%;background:${color}`,
-      })),
-      el('div', { class: 'bar-val', text: (s.delta_usd < 0 ? '−' : s.total ? '' : '+') + usd(Math.abs(s.delta_usd)) })));
-    wrap.appendChild(whyBlock('', s.description, 'Why: ' + s.label));
-  }
-  host.appendChild(wrap);
-}
 
 function renderDistribution(hostSel, map, labels, detail) {
   const host = clear($(hostSel));
@@ -1993,84 +1508,14 @@ function renderDistribution(hostSel, map, labels, detail) {
   entries.sort((a, b) => b[1] - a[1]);
   const total = entries.reduce((n, [, v]) => n + v, 0);
   barRows(host, entries.map(([k, v]) => ({
-    label: (labels && labels[k]) || (k === '' ? 'compacted' : k),
+    label: (labels && labels[k]) || (k === '' ? 'trimmed' : k),
     value: v, max: total,
     display: num(v) + '  (' + pct((v / total) * 100, 0) + ')',
   })));
 }
 
-function renderSafety(o) {
-  const s = o.safety_cost || {};
-  $('#safety-note').textContent = s.description || '';
-  // These five rows are five different units (tokens, runs, ms, dollars), so the bar
-  // lengths are a rough sense of scale within each row's own description and nothing
-  // more. One hue throughout, because five hues would imply five plotted series;
-  // the one row that is a genuine PENALTY rather than a price gets the status colour.
-  barRows($('#safety'), [
-    // The benefit half, in dollars. This row has always PROMISED it in prose — "its benefit is
-    // the cache reads it preserved" — and never computed it, so 396.5M frozen tokens sat here
-    // as a cost with no counterpart. Two figures, because one would have been ambiguous: what
-    // the frozen prefix was billed as at the read rate, and what re-creating it at the write
-    // rate instead would have added. The second is the freeze's actual purchase.
-    { label: 'Frozen for cache safety', value: s.frozen_tokens || 0, display: compact(s.frozen_tokens) + ' tok',
-      formula: s.priced
-        ? 'billed ' + usd(s.frozen_read_usd) + ' as reads · avoided ' + usd(s.frozen_write_risk_usd)
-          + ' of re-creation'
-        : 'unpriced — no rates for these models',
-      desc: 'Compaction we deliberately did NOT do on the already-cached prefix, because '
-            + 'rewriting a cached prefix re-bills the whole suffix at the creation rate. '
-            + (s.priced
-              ? 'Those ' + compact(s.frozen_tokens) + ' tokens were billed as cache reads for '
-                + usd(s.frozen_read_usd) + '; re-creating them instead would have added '
-                + usd(s.frozen_write_risk_usd) + ', which is what the freeze bought. The cost '
-                + 'is the compaction not done — see the amortization ceiling above.'
-              : 'The benefit cannot be priced in this window: no rates for these models. '
-                + 'Reported as unpriced rather than as zero.') },
-    { label: 'Restored after offload', value: s.restored_tokens || 0, display: compact(s.restored_tokens) + ' tok',
-      color: 'var(--bad)', formula: 'paid for twice',
-      desc: 'Content we removed and the model asked back for — a premature offload, paid for twice.' },
-    { label: 'Reverted component runs', value: s.reverted_runs || 0, display: num(s.reverted_runs) + ' runs',
-      desc: 'The never-worse guard rolling a component back. Safety working, and its cost is the ' +
-            'latency of the attempt.' },
-    { label: "context-guru's own latency", value: s.cg_latency_ms_total || 0, display: dur(s.cg_latency_ms_total),
-      desc: 'Total wall time context-guru itself added across the window.' },
-    { label: "context-guru's own LLM spend", value: (s.cg_llm_cost_usd || 0) * 1000, display: usd(s.cg_llm_cost_usd),
-      formula: 'paid out of the savings above',
-      desc: "context-guru's own model calls (extract_llm, summarize), paid out of the savings above." },
-  ]);
-}
-
-/**
- * renderPrefixChangeCost surfaces prefix_change_cost_usd, beside the prefix_change bucket it
- * is computed from — and says in the sentence itself that it is a DIAGNOSTIC that is
- * subtracted from nothing.
- *
- * It is not a tile and it is not summed into any saving: components act where there is
- * something to act on, which are also the long churny turns most likely to break a prefix on
- * their own, so mutation is not randomly assigned and this is observational. Netting it would
- * book a correlation as a debt. It is nonetheless larger than every saving on this page on
- * some corpora, so hiding it would be the dishonest option.
- */
-function renderPrefixChangeCost(o) {
-  const n = $('#prefix-change-note');
-  if (!n) return;
-  const v = o.prefix_change_cost_usd, all = o.prefix_change_cost_all_usd;
-  // Shown whenever EITHER figure exists. It used to hide on the conditional one alone, so a
-  // window with a large prefix-change bill and no mutation adjacent to it said nothing at all.
-  n.hidden = !v && !all;
-  if (n.hidden) return;
-  clear(n);
-  n.appendChild(el('strong', { text: 'Diagnostic, not netted: ' + usd(all)
-    + ' over ' + num(o.prefix_change_requests_all) + ' turns' }));
-  n.appendChild(document.createTextNode(
-    ' re-billed a whole prompt on a changed prefix — the failure mode this project exists to '
-    + 'avoid, and larger than every saving on this page. Of that, ' + usd(v) + ' over '
-    + num(o.prefix_change_requests) + ' turns'
-    + ' was billed on turns whose cache missed directly after a turn we '
-    + 'mutated. That is where "we rewrote history and the next turn re-billed the whole '
-    + 'prompt" is a live hypothesis — but components act on exactly the long, churny turns '
-    + 'most likely to break a prefix by themselves, so this is a correlation. It is '
-    + 'subtracted from no savings figure on this dashboard; settling it needs the A/B.'));
+function renderWaterfall(o) {
+  CGCharts.savingsBars($('#waterfall'), o);
 }
 
 function renderLive() {
@@ -2102,403 +1547,294 @@ function renderLive() {
 }
 
 async function loadOverview(opts = {}) {
-  // The skeleton is for the FIRST paint, where there is nothing on screen and the reader
-  // needs to see that something is coming. On a repaint it was actively harmful: it
-  // replaced the whole tile column with four short rows, so the document shrank, the
-  // browser clamped the scroll offset, and anyone reading below the tiles was thrown back
-  // up the page. A repaint now swaps the tiles in place — the numbers change and nothing
-  // moves. `silent` is implicit rather than a caller's flag: having data already IS the
-  // condition, so no call site has to remember.
+  // The skeleton is for the FIRST paint only. A repaint swaps the numbers in place, so the
+  // document does not shrink and the scroll offset is not clamped under a reader.
   const first = !state.overview;
   state.loadingOverview = true;
-  if (first) loadingState($('#tiles'), 4);
+  if (first) loadingState($('#tiles'), 3);
   const scroll = window.scrollY;
   try {
     // Snapshotted BEFORE the fetch: an event that lands while the request is in flight is about
     // data this response does not contain, so clearing the flag afterwards would drop it.
     const wasDirty = state.dirty;
-    const [o, s] = await Promise.all([api('stats'), api('series', { bucket: bucketFor() })]);
-    state.overview = o;
-    state.loadedAt = Date.now();
+    // Two reads of the same endpoint. ?lean=1 answers the figures the three savings rows need at
+    // full precision without the slow parts of the full read, so the rows paint first; the full
+    // read follows and fills in the tools and skills filter row and the plots. The net and total
+    // dollars do not change when it lands: both reads apply the same caps (dash/api.go, pinned by
+    // TestLeanStatsMatchFullForTheSameWindow).
+    const lean = await api('stats', { lean: 1 });
+    state.overview = lean;
+    state.overviewFull = false;
+    // "Updated N ago" is the age of the DATA: a body served from the server's stale cache is older
+    // than the moment it arrived (see the Age header read in api()).
+    state.loadedAt = Date.now() - ((state.ageMs && state.ageMs.stats) || 0);
     if (state.dirty === wasDirty) {
       state.dirty = false;
       $('#refresh-now').classList.remove('has-new');
     }
-    renderTiles(o);
-    renderDenominators(o);
-    renderWaterfall(o);
-    renderSafety(o);
-    renderDistribution('#cachemiss', o.cache_miss, {
-      hit: 'cache hit', cold_start: 'cold start (not a failure)', ttl_expiry: 'TTL expiry',
-      prefix_change: 'prefix change', unknown: 'unknown', '': 'no cache data',
-    }, 'Every request carries a cache attribution once one has been captured in this window.');
-    renderPrefixChangeCost(o);
-    // "below every trigger" is gone. The label named components.Trigger, which is not
-    // consulted in that decision at all — and it was believed: it was reported upward as
-    // "$744.62 of spend was gated by the trigger" and cost an investigation to disprove. The
-    // real cause is that every deployed component rewrites `role == tool` content and nothing
-    // else, so a request with no tool output has nothing any of them can touch. The legacy
-    // slug is mapped to the same words as its replacement so one history reads as one cause.
-    renderDistribution('#reasons', o.uncompressed, {
-      '': 'compacted', bypassed: 'bypassed by header',
-      no_tool_output: 'no tool output to rewrite',
-      no_candidate: 'no candidate in the eligible tail',
-      below_trigger: 'no candidate in the eligible tail (pre-rename)',
-      cache_frozen: 'frozen for cache safety', found_nothing: 'nothing to remove',
-      reverted: 'all components reverted', no_messages: 'no messages',
-    }, 'Nothing was skipped — every captured request in this window was compacted.');
-    renderDistribution('#accounting', o.accounting, {
-      complete: 'exact (all four tiers)', partial: 'estimated', missing: 'unmeasured',
-    }, 'Fills in from the first captured request: every row is counted as exact, estimated or unmeasured.');
-    renderSeries(s.buckets || []);
-    // Kept for renderOverviewBrief's latency-trend sentence, computed once loadUserInsights
-    // (below) resolves — no separate fetch, this is the same series /api/series just returned.
-    state.overviewBuckets = s.buckets || [];
+    renderSavedLedger(lean, state.keepAliveLedger, true);
     paintFreshness();
-    // Not awaited: its own request, on its own failure path, so a slow or failed
-    // keep-alive ledger never delays or blanks the rest of Overview.
+    // Not awaited, each on its own failure path: a slow or failed read must never blank the
+    // savings above it.
     loadOverviewKeepAlive();
-    // Same reasoning: a slow or failed components read must not blank the totals above it.
-    loadValueBreakdown();
-    // Same reasoning again: the plain-account summary (latency, inventory, session usage,
-    // recommendations) reuses two other endpoints and must not delay or blank the totals.
-    loadUserInsights();
-    // Restore the offset after the repaint. Even swapping in place, a group that gained or
-    // lost a tile changes the document height by a row, and the reader should not have to
-    // find their place again because a number rolled over.
+    loadOverviewTools();
+    loadOverviewIdentity();
+    const o = await api('stats');
+    state.overview = o;
+    state.overviewFull = true;
+    // Past the 30 s freshness window the server is recomputing behind a stale answer, so look again once,
+    // shortly, and the page converges on current figures unasked.
+    const dataAge = (state.ageMs && state.ageMs.stats) || 0;
+    state.loadedAt = Date.now() - dataAge;
+    if (dataAge > 45000 && !state.staleRetry) {
+      state.staleRetry = setTimeout(() => { state.staleRetry = 0; if (state.view === 'overview') loadOverview(); }, 10000);
+    }
+    renderSavedLedger(o, state.keepAliveLedger, false);
+    if ($('#overview-diagnostics').open) renderDiagnostics();
+    else state.diagStale = true;
     if (!first && window.scrollY !== scroll) window.scrollTo({ top: scroll });
   } catch (err) {
     if (aborted(err)) return;
-    // An error on a REPAINT must not destroy a page that is still perfectly readable —
-    // the old code replaced the tiles with an error state, so one blip wiped the numbers.
+    // An error on a REPAINT must not destroy a page that is still perfectly readable.
     if (!first) { markDirty(); return; }
     errorState($('#tiles'), 'Could not load statistics', err);
   } finally {
-    // In `finally`, so a failure and an abort pace the timer exactly like a success does. Every
-    // early `return` above — including the abort check at the top of the catch — passes through
-    // here, which is the point: there is no exit from this function that leaves the timer believing
-    // no attempt was made.
     state.loadingOverview = false;
     state.lastTryAt = Date.now();
   }
 }
 
-/**
- * loadOverviewKeepAlive is the Overview tab's small keep-alive callout, for every user —
- * not just managers. It reuses the account's own already-computed GET /api/keepalive
- * ledger (the same one the Keep-alive tab's verdict panel reads): no new backend call,
- * no arithmetic here.
- *
- * Hidden until the mechanism has actually run on this account (keepalive_recorded_from):
- * a zero on a callout nobody can dismiss is worse than no callout, and this dashboard's
- * own rule is that a zero must never be shown where it could be an absence.
- */
-async function loadOverviewKeepAlive() {
-  const panel = $('#overview-keepalive-panel');
-  if (!panel) return;
+/** The plots are inside a fold that starts closed, so their data (the time series, one of the larger
+ *  reads) is fetched only when the reader opens it, and again on a refresh while it stays open. */
+function loadScriptOnce(src) {
+  if (!loadScriptOnce.p) loadScriptOnce.p = {};
+  return loadScriptOnce.p[src] ||= new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = resolve; s.onerror = () => { loadScriptOnce.p[src] = null; reject(new Error('Could not load ' + src)); };
+    document.head.appendChild(s);
+  });
+}
+
+async function renderDiagnostics() {
+  state.diagStale = false;
+  // The plots' code is fetched with the fold, not with the page.
+  try { await loadScriptOnce('charts.js'); } catch (e) { for (const id of ['#chart-cost', '#waterfall', '#chart-tokens', '#chart-cache', '#chart-latency', '#chart-volume']) errorState($(id), 'Could not load this plot', e); return; }
+  const o = state.overview;
+  if (!o || !state.overviewFull) { state.diagStale = true; return; }
   try {
-    const o = await api('keepalive');
-    if (!o.keepalive_recorded_from) { panel.hidden = true; return; }
-    panel.hidden = false;
-    const host = clear($('#overview-keepalive-tiles'));
-    host.appendChild(tileGroup(null, null, [
-      tile('ov-ka-pings', 'Keep-alive pings', num(o.pings), usd(o.ping_usd) + ' spent on your key'),
-      tile('ov-ka-saved', 'Re-creations avoided', usd(o.saved_usd), 'a ceiling — see the Keep-alive tab',
-        o.saved_usd > 0 ? 'good' : ''),
-      tile('ov-ka-net', 'Net', usd(o.net_usd), 'avoided − spent', o.net_usd < 0 ? 'bad' : 'good'),
-      o.latency && o.latency.known
-        ? tile('ov-ka-latency', 'Latency, large requests', Math.round(o.latency.per_miss_ms) + 'ms faster',
-          'cache hit vs. write, this window', 'good')
-        : null,
-    ]));
-  } catch (e) {
-    if (!aborted(e)) panel.hidden = true; // best-effort: Overview must not depend on this
+    const s = await api('series', { bucket: bucketFor() });
+    renderWaterfall(o);
+    renderSeries(s.buckets || []);
+    state.overviewBuckets = s.buckets || [];
+  } catch (err) {
+    if (!aborted(err)) for (const id of ['#chart-cost', '#waterfall', '#chart-tokens', '#chart-cache', '#chart-latency', '#chart-volume']) errorState($(id), 'Could not load this plot', err);
   }
 }
 
 /**
- * loadValueBreakdown renders one line per component that actually ran, plus keep-alive and
- * the declaration filter — the two real levers Overview's own total already counts
- * (keepalive_net_usd, decl_filter_usd) that are not components. No arithmetic here: every
- * figure is what /api/components and /api/stats already computed. A component's net (or
- * keep-alive's) can read negative and is shown as such — this is the "where is the value
- * actually coming from" answer, and hiding an underwater lever would be the same mistake as
- * hiding a bad total.
+ * The three savings, one row each: money and tokens, both set against what was spent.
+ *
+ * Every figure is one the server already computed (GET /api/stats, and the keep-alive ledger
+ * for the waiting time); the only arithmetic here is a ratio of two of them. A lever with
+ * nothing recorded says so in words instead of printing a zero that could be an absence.
  */
-async function loadValueBreakdown() {
-  const panel = $('#value-breakdown-panel');
+/** The names a reader knows their setup by. The preset is the one the window's requests mostly ran under; the
+ *  cache strategy is read from the signed-in account's own configuration, and is not guessed for a manager looking
+ *  at everyone. Both stay empty until known, and the row title then reads without a name. */
+function presetName() {
+  const g = (state.identity && state.identity.presets) || [];
+  const live = g.filter((x) => x.key).sort((a, b) => b.requests - a.requests);
+  if (!live.length) return '';
+  const total = live.reduce((n, x) => n + x.requests, 0);
+  return live[0].requests / total >= 0.9 || live.length === 1 ? live[0].key : 'mostly ' + live[0].key;
+}
+function strategyName() {
+  const t = account && account.tenant;
+  if (!t || t.role === 'manager') return '';
+  const c = (t.effective_config && t.effective_config.cache) || {};
+  return c.keepalive ? 'warm after ' + (c.keepalive_idle_seconds || 270) + ' s idle' : 'off';
+}
+async function loadOverviewIdentity() {
+  try {
+    const r = await api('breakdown', { dim: 'preset' });
+    state.identity = { presets: r.groups || [] };
+    if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger, !state.overviewFull);
+  } catch (e) { /* the rows read fine without the name */ }
+}
+
+const KIND_TIP = {
+  'Estimated': 'Priced against what the removed text would have cost. It cannot be read off a bill.',
+  'Upper bound': 'The most it could have saved: another session may have kept the same cache warm.',
+};
+/** Waiting time in the unit that matches its size, so 411 ms never reads as "nothing". */
+function waitText(msv) {
+  if (msv < 1000) return (msv / 1000).toFixed(2) + ' s';
+  if (msv < 60000) return (msv / 1000).toFixed(1) + ' s';
+  return dur(msv);
+}
+function renderSavedLedger(o, ka, partial) {
+  const host = clear($('#tiles'));
+  const priced = ((o.accounting && o.accounting.complete) || 0) > 0;
+  const spent = (o.cost_usd || 0) + (o.cg_llm_cost_usd || 0) + (o.keepalive_ping_usd || 0);
+  const input = (o.cache_read || 0) + (o.cache_write || 0) + (o.fresh_input || 0);
+  // Tokens a keep-alive ping kept as cheap reads instead of expensive rewrites. The ledger holds
+  // dollars only, so this is the dollar figure divided by the per-token price gap, with the input
+  // price recovered from the provider-cache line (cache_saved = reads x 0.9 x input price) and
+  // the write premium taken as 1.15x input (1.25 write less 0.10 read). Labelled "about".
+  const providerSaved = o.cache_saved_usd || 0;
+  const inPrice = o.cache_read > 0 && providerSaved > 0 ? providerSaved / (0.9 * o.cache_read) : 0;
+  const kaTokens = inPrice > 0 && o.keepalive_saved_usd > 0 ? o.keepalive_saved_usd / (1.15 * inPrice) : null;
+  const waited = ka && ka.latency && ka.latency.known && o.keepalive_misses_avoided > 0
+    ? ka.latency.per_miss_ms * o.keepalive_misses_avoided : null;
+  const kaRan = o.keepalive_pings > 0 || o.keepalive_net_usd;
+  const filterRan = o.decl_filter_requests > 0;
+  const parts = savedParts(o);
+  const levers = [
+    {
+      id: 'cache', tid: 'saved-cache', name: 'Cache strategy', named: strategyName, href: '#/keepalive', more: 'Cache strategy tab',
+      what: 'Keeps your prompt cache warm while you think, so the next turn is not billed in full.',
+      ran: kaRan || parts.reorder !== 0, usd: parts.cache, tok: kaTokens, approx: true,
+      // The cache row is keep-alive plus the cache-reorder credit; both are shown so the row can be checked.
+      parts: parts.reorder !== 0 ? [['cache strategy', parts.keepalive, true], ['cache reorder', parts.reorder, false]] : null,
+      extra: waited ? 'about ' + waitText(waited) + ' of waiting avoided over ' + num(o.keepalive_misses_avoided) + ' rewrites' : '',
+      kind: 'Upper bound', note: 'after its warm-up requests cost ' + usd(o.keepalive_ping_usd),
+      // The Keep-alive tab replays your own idle gaps to say whether to turn it on; the figure on this
+      // row is what already ran. Say so here, so the two cannot be read as a contradiction.
+      forecast: 'Whether a cache strategy pays off is a forecast from your own history. See the Cache strategy tab.',
+    },
+    {
+      id: 'compaction', tid: 'saved-compaction', name: 'Your preset', named: presetName, href: '#/components', more: 'Preset steps tab',
+      what: 'Old tool output and repeated text your preset removes before it reaches the model.',
+      ran: o.requests > 0, usd: parts.compaction, tok: o.saved_unique, of: o.tokens_before,
+      extra: '', kind: 'Estimated', note: 'after our own model calls', cap: capNote(o, usd),
+    },
+    {
+      id: 'filter', tid: 'saved-filter', name: 'Tools and skills filter', href: '#/tools', more: 'Inventory tab',
+      what: 'Tool and skill definitions the model never needed, left out of the prompt.',
+      ran: filterRan, usd: parts.filter, tok: o.decl_filter_reads, idle: partial ? 'Checking…' : 'Starts when tools and skills are left out of the prompt. The list below is how.',
+      extra: filterRan ? num(o.decl_filter_requests) + ' requests had tools filtered' : '',
+      kind: 'Estimated', note: 'saved when tools are left out of the prompt',
+    },
+  ];
+  const head = el('div', { class: 'ledger-head', 'aria-hidden': 'true' },
+    el('span'), el('span', { text: 'Money' }), el('span', { text: 'Tokens' }));
+  host.appendChild(head);
+  for (const lv of levers) {
+    const share = priced && spent > 0 && lv.usd > 0 ? (100 * lv.usd) / spent : 0;
+    const bar = el('span', { class: 'lv-bar' + (lv.kind === 'Upper bound' ? ' bound' : ''), role: 'img',
+      'aria-label': share ? pct(share, share < 10 ? 1 : 0) + ' of spend' : 'nothing saved yet' }, el('i'));
+    // A style ATTRIBUTE would be blocked by the page's CSP; the CSSOM is not.
+    bar.firstChild.style.width = Math.max(share, share > 0 ? 1.5 : 0) + '%';
+    const ofTok = lv.of || input;
+    const money = !lv.ran || !priced
+      ? el('div', { class: 'lv-money lv-none' }, lv.ran ? 'Not priced yet' : (lv.idle || 'Nothing recorded yet'))
+      : el('div', { class: 'lv-money' },
+        // The keep-alive figure is the ledger's credit: the rewrites its pings may have avoided, minus what the
+        // pings cost. Other sessions can keep the same cache warm, so it is a ceiling and not a measured saving.
+        // It is said that way and drawn in the warning colour, not the savings green.
+        el('div', { class: 'lv-big' }, el('strong', { class: (lv.usd < 0 ? 'neg ' : '') + (lv.kind === 'Upper bound' ? 'bound' : ''),
+          text: (lv.kind === 'Upper bound' && lv.usd >= 0 ? 'up to ' : '') + usd(lv.usd) }),
+          el('span', { class: 'lv-of', text: (lv.kind === 'Upper bound' ? ' possible, of ' : ' saved of ') + usd(spent) + ' spent' })),
+        bar,
+        el('div', { class: 'lv-sub' }, el('span', { class: 'kind-badge ' + lv.kind.replace(' ', '-').toLowerCase(), title: KIND_TIP[lv.kind], text: lv.kind }),
+          ' ' + (share ? pct(share, share < 10 ? 1 : 0) + ' of spend · ' : '') + lv.note),
+        lv.parts ? el('div', { class: 'lv-sub lv-parts' }, lv.parts.filter((p) => p[1] !== 0 || p[2]).map((p, i) => el('span', {},
+          (i ? ' · ' : 'of which ') + p[0] + ' ' + usd(p[1]) + (p[2] ? ' (upper bound)' : ''))) ) : null,
+        lv.forecast ? el('div', { class: 'lv-sub' }, lv.forecast) : null,
+        lv.cap ? el('div', { class: 'lv-sub lv-capped', 'data-testid': 'replay-capped', text: lv.cap }) : null);
+    const tokens = lv.tok === null || lv.tok === undefined || !lv.ran
+      ? el('div', { class: 'lv-tokens lv-none' }, '—')
+      : el('div', { class: 'lv-tokens' },
+        el('div', { class: 'lv-big', title: lv.approx ? 'Estimated from the dollar figure at this window\'s average prices, assuming 5-minute cache writes. 1-hour writes make it an overestimate.' : null }, el('strong', { text: (lv.approx ? '≈ ' : '') + compact(lv.tok) }),
+          el('span', { class: 'lv-of', text: ' tokens of ' + compact(ofTok) })),
+        lv.extra ? el('div', { class: 'lv-sub', text: lv.extra }) : null);
+    host.appendChild(el('div', { class: 'ledger-row', 'data-lever': lv.id, 'data-testid': lv.tid },
+      el('div', { class: 'lv-name' },
+        el('h3', {}, el('a', { href: lv.href, title: 'Open the ' + lv.more }, lv.name), lv.named && lv.named() ? el('span', { class: 'lv-id', text: ' (' + lv.named() + ')' }) : null),
+        el('p', { text: lv.what })),
+      money, tokens));
+  }
+  // The three rows together; this equals the server's total_saved_usd (dash/savings.test.mjs). Held back
+  // until the full read lands, because the lean read does not carry the tools and skills filter.
+  if (!partial && priced) {
+    // Two parts, never one blended figure: the preset and filter savings are estimates, the cache strategy
+    // part is an upper bound, and the Cache strategy tab may say it does not pay off.
+    const est = parts.compaction + parts.filter;
+    host.appendChild(el('div', { class: 'ledger-total', 'data-testid': 'saved-total' },
+      el('span', { text: 'Together' }),
+      el('span', {}, el('strong', { text: usd(est) }), el('span', { class: 'lv-of', text: ' estimated saved' })),
+      parts.cache >= 0
+        ? el('span', {}, el('strong', { class: 'bound', text: 'up to ' + usd(parts.cache) }), el('span', { class: 'lv-of', text: ' more, from your cache strategy (an upper bound)' }))
+        : el('span', {}, el('strong', { class: 'bound', text: usd(parts.cache) }), el('span', { class: 'lv-of', text: ' from your cache strategy: it cost more than it saved' })),
+      el('span', { class: 'lv-of', text: 'of ' + usd(spent) + ' spent' })));
+  }
+  const note = $('#ov-saved-note');
+  if (note) {
+    note.textContent = 'Spent = what the provider billed, plus our own model calls and cache-strategy requests.'
+      + (providerSaved > 0 ? ' Not counted: the provider\u2019s own cache discount (' + usd(providerSaved) + '), which you get with or without us.' : '');
+  }
+}
+
+/** Keep-alive's waiting-time figure comes from the keep-alive ledger. Best-effort and separate. */
+/** The keep-alive ledger is read by both the Overview and the Keep-alive tab. Share one request for a
+ *  few seconds, so opening the tab right after the Overview does not ask the server for it twice. */
+function keepAliveLedger() {
+  const now = Date.now();
+  // Keyed by the whole query (tenant, window, filters): a change of scope must not get the old scope's ledger.
+  const key = qs({});
+  if (!state.kaLedgerP || now - state.kaLedgerAt > 15000 || state.kaLedgerKey !== key) {
+    state.kaLedgerAt = now;
+    state.kaLedgerKey = key;
+    state.kaLedgerP = api('keepalive').catch((e) => { state.kaLedgerP = null; throw e; });
+  }
+  return state.kaLedgerP;
+}
+async function loadOverviewKeepAlive() {
+  try {
+    state.keepAliveLedger = await keepAliveLedger();
+    if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger, !state.overviewFull);
+  } catch (e) { /* the savings are already on screen without the waiting time */ }
+}
+
+/**
+ * Tools and skills worth removing, ranked by what they cost to carry, with the command that
+ * does it. Reuses the Inventory tab's own GET /api/tools; nothing about caching lives here.
+ */
+async function loadOverviewTools() {
+  const panel = $('#inventory-panel');
   if (!panel) return;
   try {
-    const { components: raw } = await api('components');
-    const active = (raw || []).filter((c) => c.runs > 0);
-    const o = state.overview;
-    const hasKeepAlive = o && (o.keepalive_pings > 0 || o.keepalive_net_usd);
-    const hasDeclFilter = o && o.decl_filter_requests > 0;
-    if (!active.length && !hasKeepAlive && !hasDeclFilter) {
-      panel.hidden = true;
+    const rep = await api('tools');
+    if (!rep.coverage || !rep.coverage.captured) { panel.hidden = true; return; }
+    panel.hidden = false;
+    const host = clear($('#recommendations'));
+    const servers = (rep.servers || []).filter((s) => s.tools_used === 0 && s.unused_usd > 0)
+      .map((s) => ({ kind: 'MCP server', name: s.server, usd: s.unused_usd, tools: s.tools, sessions: s.sessions_declared }));
+    const skills = ((rep.skills && rep.skills.skills) || []).filter((t) => t.sessions_used === 0 && t.unused_usd > 0)
+      .map((t) => ({ kind: 'Skill', name: t.name, usd: t.unused_usd, sessions: t.sessions_declared }));
+    const rows = [...servers, ...skills].sort((a, b) => b.usd - a.usd).slice(0, 5);
+    if (!rows.length) {
+      host.appendChild(el('p', { class: 'empty-line', text: 'Nothing to remove. Every tool server and skill you added was used at least once in this window.' }));
       return;
     }
-    panel.hidden = false;
-    // Same priced-ness fallback as the declaration-filter tile below: an unpriced model must
-    // not make a real saving read as "$0.00" in --good. A component with unpriceable rows
-    // states the tokens it removed, with no tone — "unknown" is not "worthless".
-    const tiles = active.map((c) => (c.saved_usd_unpriced_rows > 0
-      ? tile('vb-' + c.component, c.component, compact(c.saved_unique) + ' tok',
-        num(c.runs) + ' runs', '')
-      : tile('vb-' + c.component, c.component, usd(c.net_usd_with_estimate),
-        num(c.runs) + ' runs', c.net_usd_with_estimate < 0 ? 'bad' : 'good')));
-    if (hasKeepAlive) {
-      tiles.push(tile('vb-keepalive', 'Keep-alive (net)', usd(o.keepalive_net_usd),
-        num(o.keepalive_pings) + ' pings', o.keepalive_net_usd < 0 ? 'bad' : 'good'));
+    const list = el('ol', { class: 'reco-list' });
+    for (const r of rows) {
+      list.appendChild(el('li', { class: 'reco-row' },
+        el('span', { class: 'reco-kind', text: r.kind }),
+        el('span', { class: 'reco-name', text: r.name }),
+        el('span', { class: 'reco-note', text: (r.tools ? r.tools + ' tools, ' : '') + 'never used in ' + num(r.sessions) + ' sessions' }),
+        el('span', { class: 'reco-usd', text: usd(r.usd), title: 'Estimated cost of carrying it in this window' })));
     }
-    if (hasDeclFilter) {
-      // Same fallback as the Cost group's own decl-filter-saved tile: an unpriced model must
-      // not make a real saving read as "$0.00".
-      tiles.push(tile('vb-declfilter', 'Declarations filtered',
-        o.decl_credit_priced ? usd(o.decl_filter_usd) : compact(o.decl_filter_reads) + ' tok',
-        num(o.decl_filter_requests) + ' requests', o.decl_filter_usd > 0 ? 'good' : ''));
-    }
-    clear($('#value-breakdown-tiles')).appendChild(tileGroup(null, null, tiles));
+    host.appendChild(list);
+    host.appendChild(el('p', { class: 'note reco-note-foot', text: 'Dollars are what carrying each one cost in the period selected above. The Tools and skills filter row is a separate, automatic saving; removing these is up to you.' }));
+    const cmd = (c, why) => el('div', { class: 'cmd-line' }, el('code', { text: c }), copyButton(c), el('span', { class: 'cmd-why', text: why }));
+    host.appendChild(el('div', { class: 'cmd-box' },
+      el('p', { text: 'In Claude Code, run:' }),
+      cmd('/context-guru:remove-mcp-and-skills', 'removes the ones you pick'),
+      cmd('/context-guru:insights tools', 'shows the details for each one')));
   } catch (e) {
     if (!aborted(e)) panel.hidden = true; // best-effort: Overview must not depend on this
   }
-}
-
-/**
- * loadUserInsights fills the three plain-account panels below the headline tiles: latency
- * (latest session vs. this window's average), your own tools/skills with removal advice,
- * and how many of your sessions actually did something. All three reuse endpoints the
- * Sessions and Inventory tabs already call — GET /api/sessions and GET /api/tools — so
- * this adds no new backend read.
- *
- * One fetch pair feeds all three panels; a failure hides them rather than blanking the
- * totals above, the same best-effort rule as loadOverviewKeepAlive and loadValueBreakdown.
- */
-async function loadUserInsights() {
-  try {
-    const [sessions, report, kv] = await Promise.all([
-      api('sessions', { limit: 500 }),
-      api('tools'),
-      api('kvcache'),
-    ]);
-    renderLatencyPanel(sessions);
-    renderSessionUsagePanel(sessions);
-    renderInventoryPanel(report);
-    renderCachingInsights(kv);
-    renderOverviewBrief(sessions, report);
-  } catch (e) {
-    if (aborted(e)) return;
-    for (const id of ['#latency-panel', '#inventory-panel', '#session-usage-panel', '#caching-insights-panel', '#overview-brief']) {
-      const p = $(id);
-      if (p) p.hidden = true;
-    }
-  }
-}
-
-/**
- * renderOverviewBrief is the "here's what happened" lead: up to four sentences, each with a
- * real number inline, synthesized from data this page has already fetched. No arithmetic
- * happens on anything NOT already computed by the backend, and each sentence is independently
- * gated — a claim with insufficient support (too little history, nothing recorded yet) is
- * omitted rather than hedged, per the same rule the rest of Overview already follows
- * (Denominator.available, KeepAliveCoverage.recorded_from).
- */
-function renderOverviewBrief(sessions, report) {
-  const host = $('#overview-brief');
-  if (!host) return;
-  const o = state.overview;
-  const rows = (sessions && sessions.sessions) || [];
-  const items = report ? [...(report.tools || []), ...(report.skills && report.skills.skills || [])] : [];
-  const out = [];
-
-  // Keep-alive's share of total savings — only once the ledger has actually run
-  // (keepalive_pings mirrors KeepAliveCoverage.recorded_from on Overview itself) and there is
-  // a positive total to take a share of.
-  if (o && o.keepalive_pings > 0 && o.total_saved_usd > 0) {
-    const share = pct((100 * o.keepalive_net_usd) / o.total_saved_usd, 0);
-    out.push([o.keepalive_net_usd < 0 ? 'warn' : 'good', usd(o.keepalive_net_usd), 'from keep-alive',
-      o.keepalive_net_usd < 0
-        ? `Keep-alive cost you ${usd(-o.keepalive_net_usd)} net this window — its pings outspent what they avoided.`
-        : `Keep-alive drove ${usd(o.keepalive_net_usd)} of this window's ${usd(o.total_saved_usd)} in savings — ${share} of the total.`]);
-  }
-
-  // Unused MCP servers/skills — only once the inventory read is actually captured.
-  if (report && report.coverage && report.coverage.captured && items.length) {
-    const unused = items.filter((t) => t.sessions_used === 0);
-    if (unused.length) {
-      out.push(['warn', `${unused.length} of ${items.length}`, 'unused',
-        `${unused.length} of your ${items.length} tools & skills haven't been called in this window` +
-        (unused.length <= 3 ? ` — ${unused.map((t) => t.name).join(', ')}.` : '.')]);
-    }
-  }
-
-  // Latency trend — only with enough daily history to say anything about a trend at all
-  // (5, the same minimum this codebase already uses for kvSuggestMinRequests-style gates).
-  const buckets = (state.overviewBuckets || []).filter((b) => b.cg_latency_ms_avg > 0);
-  if (buckets.length >= 5) {
-    const half = Math.floor(buckets.length / 2);
-    const first = buckets.slice(0, half).reduce((a, b) => a + b.cg_latency_ms_avg, 0) / half;
-    const second = buckets.slice(half).reduce((a, b) => a + b.cg_latency_ms_avg, 0) / (buckets.length - half);
-    if (first > 0) {
-      const delta = pct((100 * (second - first)) / first, 0);
-      const dropped = second < first;
-      out.push([dropped ? 'good' : 'warn', (dropped ? '−' : '+') + Math.abs(parseFloat(delta)) + '%', 'latency',
-        `Average latency ${dropped ? 'dropped' : 'rose'} ${Math.abs(parseFloat(delta))}% ` +
-        `(${ms(first)} → ${ms(second)}) over this window.`]);
-    }
-  }
-
-  // Multi- vs single-turn share — only once there is at least one sampled session.
-  if (rows.length) {
-    const used = rows.filter((s) => s.turns > 1).length;
-    const share = pct((100 * used) / rows.length, 0);
-    out.push(['neutral', share, 'multi-turn',
-      `${share} of your sessions are multi-turn (a follow-up, not just one message) — ` +
-      `keep-alive and summarization earn their keep on exactly these.`]);
-  }
-
-  clear(host);
-  if (!out.length) { host.hidden = true; return; }
-  host.hidden = false;
-  for (const [tone, num_, , sentence] of out.slice(0, 4)) {
-    host.appendChild(el('div', { class: 'insight-row ' + tone },
-      el('div', { class: 'num' }, num_),
-      el('p', { text: sentence })));
-  }
-}
-
-/**
- * renderCachingInsights keeps keep-alive's own $ apart from cache-reuse behaviour in general —
- * a dollar saved by not letting the cache lapse is a different lever than the cache simply
- * being hit — reusing GET /api/kvcache (KVCacheAnalysis, the same read the KV-cache tab itself
- * analyses) and the keepalive_* fields already on /api/stats. No arithmetic beyond what those
- * two reads already computed.
- */
-function renderCachingInsights(kv) {
-  const panel = $('#caching-insights-panel');
-  if (!panel) return;
-  const o = state.overview;
-  const cards = kv && kv.cards;
-  const coverage = kv && kv.coverage;
-  if (!cards || !cards.requests) { panel.hidden = true; return; }
-  panel.hidden = false;
-  const host = clear($('#caching-insights-tiles'));
-  const stat = (k, v, s, cls) => el('div', { class: 'stat' },
-    el('div', { class: 'k' }, k), el('div', { class: 'v ' + (cls || '') }, v),
-    s ? el('div', { class: 's' }, s) : null);
-  host.appendChild(stat('Cache-reuse rate', pct(cards.hit_rate_pct, 0), num(cards.hits) + ' of ' + num(cards.requests) + ' requests', 'good'));
-  host.appendChild(stat('Reused within 1h', pct(cards.within_1h_pct, 0), num(cards.within_1h) + ' of ' + num(cards.with_next) + ' with a follow-up'));
-  if (coverage) {
-    host.appendChild(stat('TTL known from config', num(coverage.ttl_configured),
-      'vs. ' + num(coverage.ttl_observed) + ' observed, ' + num(coverage.ttl_unknown) + ' unknown'));
-    host.appendChild(stat('Single-shot conversations', num(coverage.single_request_conversations),
-      'of ' + num(cards.conversations) + ' — no reuse was possible'));
-  }
-  // Keep-alive's own $, deliberately separate from the cache-reuse figures above: this is
-  // the mechanism that PREVENTS a lapse, not the reuse that happens anyway inside a TTL.
-  if (o && o.keepalive_pings > 0) {
-    host.appendChild(stat('Keep-alive $ saved', usd(o.keepalive_net_usd),
-      num(o.keepalive_pings) + ' pings · ' + usd(o.keepalive_ping_usd) + ' spent — kept apart from the savings above',
-      o.keepalive_net_usd < 0 ? 'bad' : 'good'));
-  }
-}
-
-/**
- * renderLatencyPanel answers two different questions with two different tiles: "is it fast
- * right now" (the most recent session's own average — /api/sessions is already sorted
- * most-recently-active first) and "is it fast overall" (this window's average, already on
- * /api/stats). Blending them into one number would answer neither.
- */
-function renderLatencyPanel(sessions) {
-  const panel = $('#latency-panel');
-  const rows = (sessions && sessions.sessions) || [];
-  const o = state.overview;
-  if (!panel || !o || !rows.length) { if (panel) panel.hidden = true; return; }
-  panel.hidden = false;
-  const latest = rows[0];
-  clear($('#latency-tiles')).appendChild(tileGroup(null, null, [
-    tile('latency-latest', 'Latest session', ms(latest.cg_latency_ms_avg), 'most recent session’s own average'),
-    tile('latency-window-avg', 'Average, this window', ms(o.cg_latency_ms_avg), num(o.requests) + ' requests'),
-  ], 'headline dense'));
-}
-
-/**
- * renderSessionUsagePanel counts multi-turn sessions apart from single-turn ones — the
- * closest this data can come to "opened vs. actually used".
- *
- * It CANNOT be exactly that: a session that never sent a message never reaches the proxy
- * at all, so "opened and abandoned" leaves no row anywhere in this database — every session
- * here already sent at least one message and got a response. A single-turn session is the
- * best available proxy for "opened it, tried one thing, moved on" and a multi-turn one for
- * "actually worked in it", and the note below says so rather than overclaiming.
- *
- * Sampled over the most recent 500 sessions (the read's own cap) — noted in the caption
- * when the account has more than that, so the split is never presented as exact past that
- * size.
- */
-function renderSessionUsagePanel(sessions) {
-  const panel = $('#session-usage-panel');
-  const rows = (sessions && sessions.sessions) || [];
-  if (!panel || !rows.length) { if (panel) panel.hidden = true; return; }
-  panel.hidden = false;
-  const used = rows.filter((s) => s.turns > 1).length;
-  const total = sessions.total || rows.length;
-  clear($('#session-usage-tiles')).appendChild(tileGroup(null, null, [
-    tile('sessions-total', 'Sessions', num(total)),
-    tile('sessions-used', 'Multi-turn (engaged)', num(used), pct(rows.length ? (100 * used) / rows.length : 0, 0) + ' of sampled', 'good'),
-    tile('sessions-single', 'Single-turn only', num(rows.length - used), 'one message, no follow-up'),
-  ], 'dense'));
-  const note = $('#session-usage-note');
-  note.textContent = 'A session that never sent a message never reaches context-guru at all, so '
-    + '“opened but never used” cannot be measured here — this compares single-turn '
-    + 'sessions against ones with a follow-up, over your'
-    + (total > rows.length ? ' most recent ' + num(rows.length) + ' sessions' : ' ' + num(rows.length) + ' sessions') + '.';
-}
-
-/**
- * renderInventoryPanel is the plain-account glance version of the Inventory tab: counts of
- * what you actually added (never Claude Code's own built-ins — ToolReport.Tools/Servers/
- * Skills already exclude those, see dash/toolapi.go), plus the strongest removal candidate
- * and the strongest "keep this" case, both straight from the same Removal/UnusedUSD figures
- * the Inventory tab renders in full.
- */
-function renderInventoryPanel(rep) {
-  const panel = $('#inventory-panel');
-  if (!panel || !rep) { if (panel) panel.hidden = true; return; }
-  const items = [...(rep.tools || []), ...(rep.skills && rep.skills.skills || [])];
-  if (!rep.coverage || !rep.coverage.captured) { panel.hidden = true; return; }
-  panel.hidden = false;
-  clear($('#inventory-tiles')).appendChild(tileGroup(null, null, [
-    tile('inv-servers', 'MCP servers', num((rep.servers || []).length)),
-    tile('inv-skills', 'Skills', num(rep.skills ? rep.skills.declared : 0)),
-    tile('inv-unused-usd', 'Spent carrying unused ones', rep.totals && rep.totals.priced ? usd(rep.totals.unused_usd) : 'unknown',
-      'this window', rep.totals && rep.totals.unused_usd > 0 ? 'bad' : ''),
-  ], 'dense'));
-  const host = clear($('#recommendations'));
-  if (!items.length) return;
-  // Strongest removal case: never invoked, ranked by what it costs to keep carrying.
-  const removable = items.filter((t) => t.sessions_used === 0 && t.unused_usd > 0)
-    .sort((a, b) => b.unused_usd - a.unused_usd).slice(0, 2);
-  // Strongest keep case: the one earning the most, by the same dollar measure everything
-  // else on this panel uses.
-  const keepers = items.filter((t) => t.sessions_used > 0)
-    .sort((a, b) => b.sessions_used - a.sessions_used).slice(0, 1);
-  const rows = [];
-  for (const t of removable) {
-    rows.push(['bad', 'Consider removing', t, 'never used · costs ' + usd(t.unused_usd) + ' this window']);
-  }
-  for (const t of keepers) {
-    rows.push(['good', 'Keep', t, 'used in ' + num(t.sessions_used) + ' of ' + num(t.sessions_declared) + ' sessions']);
-  }
-  if (!rows.length) return;
-  const list = el('div', { class: 'reco-list' });
-  for (const [tone, verdict, t, note] of rows) {
-    list.appendChild(el('div', { class: 'reco-row' },
-      el('span', { class: 'pill ' + tone, text: verdict }),
-      el('span', { class: 'reco-name', text: t.name }),
-      el('span', { class: 'reco-note', text: note })));
-  }
-  host.appendChild(list);
 }
 
 function bucketFor() {
@@ -2517,59 +1853,24 @@ function renderSeries(buckets) {
     }
     return;
   }
-  // Cumulative NET SAVING, not the two cost lines it is the difference of.
-  //
-  // This used to draw baseline and actual and tell the reader "the area between the lines is
-  // the money". On real traffic those lines are 0.28% apart, so there was no visible area and
-  // the caption described something the chart could not show. The saving itself is the series
-  // worth plotting: it starts at zero, so its own scale is the scale of the money, and it
-  // crosses below zero exactly when our own spend overtakes what compaction avoided — which is
-  // the one event this chart should make impossible to miss. The two cost totals are still on
-  // the page, as tiles, where a number that differs in the third decimal belongs.
-  let cumBase = 0, cumAct = 0;
-  const saved = [];
-  for (const b of buckets) {
-    cumBase += b.baseline_cost_usd;
-    cumAct += b.cost_usd + b.cg_llm_cost_usd;
-    saved.push([b.ts, cumBase - cumAct]);
-  }
-  const anyCost = cumBase > 0 || cumAct > 0;
-  if (anyCost) {
-    lineChart($('#chart-cost'), [
-      { name: 'Cumulative net saving (baseline − billed − our own spend)',
-        color: SERIES[0], points: saved, area: true },
-    ], { yFmt: usd, tipFmt: usd,
-      label: 'cumulative net saving; below zero means context-guru cost more than it saved' });
-  } else {
-    emptyState($('#chart-cost'), 'No priced requests yet',
-      'Cost needs provider usage data (all four token tiers) and a known model price. Token charts below still work.');
-  }
-
-  // Hue assignment is by ENTITY and holds across all five charts: blue is always the
-  // with-context-guru / primary measure, orange always the baseline it is compared
-  // against, aqua always the third measure.
-  lineChart($('#chart-tokens'), [
-    { name: 'Tokens before', color: SERIES[1], points: buckets.map((b) => [b.ts, b.tokens_before]) },
-    { name: 'Tokens after', color: SERIES[0], points: buckets.map((b) => [b.ts, b.tokens_after]), area: true },
-    { name: 'Saved (unique)', color: SERIES[2], points: buckets.map((b) => [b.ts, b.saved_unique]) },
-  ], { label: 'content tokens over time' });
-
-  lineChart($('#chart-cache'), [
-    { name: 'Cache reads', color: SERIES[0], points: buckets.map((b) => [b.ts, b.cache_read]), area: true },
-    { name: 'Cache writes', color: SERIES[1], points: buckets.map((b) => [b.ts, b.cache_write]) },
-    { name: 'Fresh input', color: SERIES[2], points: buckets.map((b) => [b.ts, b.fresh_input]) },
-  ], { label: 'cache reads versus writes over time' });
-
-  lineChart($('#chart-latency'), [
-    { name: 'context-guru added (avg)', color: SERIES[0], points: buckets.map((b) => [b.ts, b.cg_latency_ms_avg]) },
-    { name: 'Upstream round-trip (avg)', color: SERIES[1], points: buckets.map((b) => [b.ts, b.upstream_ms_avg]), dashed: true },
-  ], { yFmt: ms, tipFmt: ms, label: 'latency over time' });
-
-  lineChart($('#chart-volume'), [
-    { name: 'Requests', color: SERIES[0], points: buckets.map((b) => [b.ts, b.requests]), area: true },
-    { name: 'Restorations (expands)', color: SERIES[1], points: buckets.map((b) => [b.ts, b.expands]) },
-    { name: 'Cache misses', color: SERIES[2], points: buckets.map((b) => [b.ts, b.cache_misses]) },
-  ], { yFmt: num, label: 'request volume and restorations' });
+  // The five plots live in charts.js (CGCharts): one idea each, labelled on the plot, exact figures on hover.
+  CGCharts.netSaving($('#chart-cost'), buckets);
+  CGCharts.columns($('#chart-tokens'), buckets, {
+    key: 'saved_unique', sum: ['saved_unique'], color: SERIES[0], fmt: compact, empty: 'No tokens were removed in this window',
+    label: 'Tokens removed per period',
+    rows: (bins) => (i) => [['Tokens removed', compact(bins[i].saved_unique), SERIES[0]]],
+  });
+  CGCharts.cacheShare($('#chart-cache'), buckets);
+  const lat = clear($('#chart-latency'));
+  const a = el('div'), b = el('div');
+  lat.append(el('p', { class: 'plot-sub', text: 'Added by context-guru' }), a, el('p', { class: 'plot-sub', text: 'Taken by the provider' }), b);
+  CGCharts.trend(a, buckets, { key: 'cg_latency_ms_avg', color: SERIES[0], fmt: ms, name: 'Added by context-guru', label: 'Time context-guru added to each request' });
+  CGCharts.trend(b, buckets, { key: 'upstream_ms_avg', color: SERIES[1], fmt: ms, name: 'Provider round trip', label: 'Time the provider took per request' });
+  CGCharts.columns($('#chart-volume'), buckets, {
+    key: 'requests', sum: ['requests', 'cache_misses', 'expands'], part: 'cache_misses', color: SERIES[0], partColor: SERIES[1],
+    fmt: num, label: 'Requests per period, and how many missed the cache',
+    rows: (bins) => (i) => [['Requests', num(bins[i].requests), SERIES[0]], ['Missed the cache', num(bins[i].cache_misses), SERIES[1]], ['Text restored on request', num(bins[i].expands)]],
+  });
 }
 
 // ── components ─────────────────────────────────────────────────────────────
@@ -2676,6 +1977,32 @@ const DIM_LABELS = {
   stream: 'streaming',
 };
 
+/** dailyColumns: one column per UTC day (spent), the period total in one sentence above. */
+function dailyColumns(host, totalHost, buckets) {
+  clear(host);
+  if (!buckets.length) { totalHost.textContent = ''; emptyState(host, 'No days in this window', 'Send traffic through the proxy, or widen the time range.'); return; }
+  const spent = (b) => b.cost_usd + b.cg_llm_cost_usd;
+  const sum = (f) => buckets.reduce((n, b) => n + f(b), 0);
+  const priced = buckets.some((b) => !(b.baseline_cost_usd === 0 && b.cost_usd === 0));
+  totalHost.textContent = priced
+    ? 'You spent ' + usd(sum(spent)) + ' over ' + num(buckets.length) + ' days and saved ' + usd(sum((b) => b.saved_usd)) + ' against the same work without context-guru.'
+    : 'No priced days in this window, so spend and savings are unknown.';
+  const max = Math.max(...buckets.map(spent), Number.MIN_VALUE);
+  const cols = el('div', { class: 'daycols' }, el('span', { class: 'daycols-max', text: usd(max) }));
+  for (const b of buckets) {
+    const day = new Date(b.ts).toISOString().slice(0, 10);
+    cols.appendChild(el('span', {
+      class: 'daycol', tabindex: '0',
+      title: day + ': spent ' + usd(spent(b)) + ', saved ' + usd(b.saved_usd) + ', ' + num(b.requests) + ' requests',
+    }, el('i', { style: 'height:' + Math.max(2, (spent(b) / max) * 100) + '%;background:' + SERIES_SPENT })));
+  }
+  host.appendChild(cols);
+  host.appendChild(el('div', { class: 'daycols-axis' },
+    el('span', { text: new Date(buckets[0].ts).toISOString().slice(0, 10) }),
+    el('span', { text: 'tallest day ' + usd(max) }),
+    el('span', { text: new Date(buckets[buckets.length - 1].ts).toISOString().slice(0, 10) })));
+}
+
 async function loadUsage() {
   const dayHost = $('#chart-daily');
   const breakHost = $('#chart-breakdown');
@@ -2694,18 +2021,7 @@ async function loadUsage() {
       api('stats'),
     ]);
     renderCacheDetail(o);
-    pairedBars(dayHost, (buckets || []).map((b) => ({
-      label: new Date(b.ts).toISOString().slice(0, 10),
-      note: num(b.requests) + ' requests · ' + compact(b.tokens_before) + ' → ' + compact(b.tokens_after) + ' tokens',
-      a: b.cost_usd + b.cg_llm_cost_usd,
-      b: b.saved_usd,
-      aDisplay: usd(b.cost_usd + b.cg_llm_cost_usd),
-      bDisplay: usd(b.saved_usd),
-      unknown: b.baseline_cost_usd === 0 && b.cost_usd === 0,
-    })), {
-      empty: 'No days in this window',
-      emptyDetail: 'Send traffic through the proxy, or widen the time range.',
-    });
+    dailyColumns(dayHost, $('#daily-total'), buckets || []);
 
     syncDimPicker(bd.dimensions || []);
     $('#breakdown-key-head').textContent = DIM_LABELS[bd.dim] || bd.dim;
@@ -2716,31 +2032,28 @@ async function loadUsage() {
       emptyState(breakHost, 'Nothing to break down', 'No requests match the current filters.');
       return;
     }
-    pairedBars(breakHost, groups.map((g) => ({
-      label: g.key || '(not set)',
-      note: num(g.requests) + ' requests',
-      a: g.spent_usd,
-      b: g.saved_usd,
-      aDisplay: usd(g.spent_usd),
-      bDisplay: usd(g.saved_usd),
-      // Every row unpriced means the money figures for this bar are unknown, not zero.
-      unknown: g.incomplete_rows >= g.requests,
-    })));
+    // One stacked bar of spend by group (top 4, the tail folded), then the table.
+    const ranked = groups.filter((g) => g.incomplete_rows < g.requests && g.spent_usd > 0)
+      .sort((x, y) => y.spent_usd - x.spent_usd);
+    const rows = ranked.slice(0, 4).map((g) => ({ label: g.key || '(not set)', value: g.spent_usd }));
+    const tail = ranked.slice(4).reduce((n, g) => n + g.spent_usd, 0);
+    if (tail > 0) rows.push({ label: 'other', value: tail, color: 'var(--fg-faint)' });
+    stackedShare(breakHost, rows, { format: usd, empty: 'No priced spend', emptyDetail: 'Every group here is unpriced.' });
     for (const g of groups) {
       const unpriced = g.incomplete_rows >= g.requests;
       body.appendChild(el('tr', {},
         el('td', { text: g.key || '(not set)' }),
         el('td', { class: 'num', text: num(g.requests) }),
-        el('td', { class: 'num', text: compact(g.tokens_before) }),
-        el('td', { class: 'num', text: compact(g.tokens_after) }),
-        el('td', { class: 'num', text: compact(g.saved_unique) }),
         el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.spent_usd) }),
         el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.saved_usd) }),
+        el('td', { class: 'num more', text: compact(g.tokens_before) }),
+        el('td', { class: 'num more', text: compact(g.tokens_after) }),
+        el('td', { class: 'num more', text: compact(g.saved_unique) }),
         // Ours, not the provider's: this column used to carry cache_saved_usd, which made
         // every model look like a large cache saving we had nothing to do with.
-        el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.cachesplit_saved_usd) }),
-        el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.total_saved_usd) }),
-        el('td', { class: 'num', text: num(g.incomplete_rows) })));
+        el('td', { class: 'num more' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.cachesplit_saved_usd) }),
+        el('td', { class: 'num more' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.total_saved_usd) }),
+        el('td', { class: 'num more', text: num(g.incomplete_rows) })));
     }
   } catch (err) {
     if (aborted(err)) return;
@@ -2751,10 +2064,6 @@ async function loadUsage() {
   }
 }
 
-/** histUSD and histRequests read the pre-instrumentation split figure, which the API OMITS
- *  rather than zeroes when it cannot price it — so every read of it has to tolerate absence. */
-function histUSD(o) { return (o.cachesplit_historical || {}).usd || 0; }
-function histRequests(o) { return (o.cachesplit_historical || {}).requests || 0; }
 
 /** syncDimPicker fills the dimension picker from what the SERVER says it can group by,
  *  so the options can never name a dimension the query would reject. */
@@ -2789,16 +2098,16 @@ function activitySummary(gates, events) {
     if (!m) return;
     const all = Object.entries(m).sort((a, b) => b[1] - a[1]);
     if (!all.length) return;
-    const shown = all.slice(0, 2).map(([k, v]) => k + ' ' + num(v)).join(' · ');
+    const shown = all.slice(0, 2).map(([k, v]) => reasonText(k) + ' ' + num(v)).join(' · ');
     const rest = all.length > 2 ? ' +' + (all.length - 2) : '';
     parts.push(el('div', {
       class: cls,
-      title: label + '\n' + all.map(([k, v]) => k + ' ' + num(v)).join('\n'),
+      title: label + '\n' + all.map(([k, v]) => reasonText(k) + ' ' + num(v) + ' (' + k + ')').join('\n'),
       text: shown + rest,
     }));
   };
   add('did', events, 'did');
-  add('declined', gates, 's');
+  add('skipped', gates, 's');
   // Absent BOTH maps means the row predates the columns — "unknown", not "nothing happened". An
   // empty pair means the component genuinely recorded neither, which is a dash. Conflating those
   // two is the mistake the gates column's own comment records having made once.
@@ -2810,13 +2119,61 @@ function activitySummary(gates, events) {
 }
 
 /**
+ * STEP_INFO: plain name and one-clause job per component; the raw name stays in a title.
+ * REASON_TEXT: plain phrases for gate/event codes. An unknown code prints with spaces, never dropped.
+ */
+const STEP_INFO = {
+  cachesplit: ['Cache placement', 'moves the cache breakpoint so more of the prompt is reused'],
+  cacheinject: ['Cache marker', 'adds cache markers to the request'],
+  cmdfilter: ['Command output trimmer', 'cuts noise out of shell command output'],
+  dedup: ['Duplicate remover', 'drops text the prompt already contains'],
+  extract: ['Content extractor', 'keeps the relevant part of long tool output'],
+  extract_llm: ['Model-based extractor', 'asks a cheap model to keep only what matters in long output'],
+  extract_llm_sweep: ['Old-output sweep', 'has a cheap model shrink old outputs after the cache has gone cold'],
+  failed_run: ['Failed-run trimmer', 'shortens output from commands that failed'],
+  format: ['Format compactor', 'rewrites JSON and similar text in a shorter form'],
+  linecap: ['Line limiter', 'caps very long lines and outputs'],
+  searchfold: ['Search folder', 'folds repeated search results into one'],
+  summarize: ['Chat summarizer', 'replaces old turns with a summary'],
+  textclean: ['Text cleaner', 'removes blank space, colour codes and other clutter'],
+  toolfilter: ['Tool list filter', 'drops tool definitions the agent is unlikely to use'],
+  toolschema: ['Tool schema trimmer', 'shortens tool definitions'],
+  toon: ['Compact data format', 'rewrites tabular JSON in a denser format'],
+  agent_compaction: ['Agent summary', "the agent's own summary of its earlier turns"],
+};
+function stepInfo(name) {
+  // An unknown step shows its name and no description: an empty hint reads better than "no description recorded".
+  return STEP_INFO[name] || [String(name).replace(/_/g, ' '), ''];
+}
+const REASON_TEXT = {
+  below_min_size: 'text too short to bother', below_min_tokens: 'text too short to bother',
+  below_max_tokens: 'prompt still small enough', below_output_floor: 'output too short to bother',
+  below_request_trigger: 'prompt not big enough yet', request_trigger_not_fired: 'trigger not reached',
+  not_frozen: 'was not in the cached part', already_set: 'already set',
+  already_clean: 'already clean', already_compact: 'already compact', already_dense: 'already dense',
+  offloaded: 'moved out to storage', break_even: 'would not pay for itself',
+  economic_gate: 'not worth the cost', economic_gate_advisory: 'not worth the cost',
+  no_filter_match: 'no rule matched', filter_matched_no_change: 'rule matched, nothing to cut',
+  no_model: 'no model known', not_json_shaped: 'not JSON', marker_present: 'already marked',
+  empty: 'nothing there', cached_prefix: 'inside the cached part', reapplied_same_session: 'applied again in the same session',
+  sweep_dropped: 'old output dropped', sweep_kept: 'old output kept', sweep_offered: 'offered for removal',
+  sweep_adjudicated: 'judged by the model', char_window: 'cut to a character window',
+  over_per_request_cap: 'over the per-request limit', over_per_session_cap: 'over the per-session limit',
+  non_text_blocks: 'not plain text', no_repeated_prefix: 'no repeated start',
+};
+function reasonText(k) {
+  return REASON_TEXT[k] || String(k).replace(/_/g, ' ');
+}
+
+/**
  * COMPONENT_SORT is one field per column of the components table, in column order. null is
  * a column with nothing orderable in it (the gate summary, the verdict prose).
  */
-const COMPONENT_SORT = ['component', 'kind', 'runs', 'acted_tokens', 'acted_structural',
+const COMPONENT_SORT = ['component', 'saved_usd', 'llm_cost_usd', 'net_usd_with_estimate',
+  'kind', 'runs', 'acted_tokens', 'acted_structural',
   'act_rate', null, 'reverted',
   'saved_unique', 'saved_gross', 'overcount_ratio', 'duration_ms_total', 'duration_ms_avg',
-  'llm_calls', 'llm_cost_usd', 'saved_usd', 'net_usd_with_estimate',
+  'llm_calls',
   'net_usd_first_removal', 'replay_multiple', 'errors', null];
 
 /**
@@ -2839,7 +2196,7 @@ function renderNetReconcile(components) {
   host.hidden = !priced.length;
   if (host.hidden) return;
   clear(host);
-  host.appendChild(el('h2', {}, 'Two verdicts, reconciled'));
+  host.appendChild(el('h2', {}, 'What did each step save, net of what it cost?'));
 
   const decomp = priced.reduce((n, c) => n + c.saved_usd_decomposed, 0);
   const first = priced.reduce((n, c) => n + c.saved_usd_first_removal, 0);
@@ -2847,8 +2204,10 @@ function renderNetReconcile(components) {
   const llm = components.reduce((n, c) => n + (c.llm_cost_usd || 0), 0);
 
   host.appendChild(el('p', { class: 'note' },
-    'Every dollar on this tab can be counted two ways, and they answer different questions. '
-    + 'Both are below. Neither is the "real" one.'));
+    'Dollars saved by all steps, minus what the steps themselves spent on model calls. '
+    + 'The top bar counts each removed piece of text once (the cautious figure). The bottom bar also '
+    + 'counts the later turns it stayed removed for. Both are real; they answer different questions.'));
+  const tech = el('details', { class: 'why', 'data-testid': 'net-technical' }, el('summary', {}, 'Technical details'));
 
   // The part of the "credited once" figure that is not a dedup measurement at all.
   //
@@ -2866,25 +2225,25 @@ function renderNetReconcile(components) {
   const unsure = priced.filter((c) => uniqueState(c) === 'unknown');
   const unsureUSD = unsure.reduce((n, c) => n + c.saved_usd_first_removal, 0);
   barRows($('#net-reconcile-bars') || host.appendChild(el('div', { id: 'net-reconcile-bars' })), [
-    { label: 'Credited once per piece of content', value: first, max: Math.max(decomp, 0.0001),
+    { label: 'Counting each removal once', value: first, max: Math.max(decomp, 0.0001),
       display: usd(first),
       formula: 'minus ' + usd(llm) + ' of our own LLM spend = ' + usd(first - llm) + ' net',
-      desc: 'Each piece of removed content valued ONCE, at the cache-write rate it would have '
+      term: 'Each piece of removed content valued ONCE, at the cache-write rate it would have '
         + 'entered the prompt at. This answers "did the work of removing it pay for itself?" '
         + "It is the figure the proxy's own /stats endpoint reports, and it is the "
         + 'conservative one.' },
-    { label: 'Credited on every turn it stayed removed', value: decomp, max: Math.max(decomp, 0.0001),
+    { label: 'Counting every turn it stayed removed', value: decomp, max: Math.max(decomp, 0.0001),
       color: SERIES_SAVED, display: usd(decomp),
       formula: 'minus ' + usd(llm) + ' of our own LLM spend = ' + usd(decomp - llm) + ' net',
-      desc: 'The same removals, plus ' + usd(replay) + ' for every later turn they were still '
+      term: 'The same removals, plus ' + usd(replay) + ' for every later turn they were still '
         + 'absent from. The agent re-sends its whole transcript each turn, so content removed '
         + 'at turn 5 is genuinely still absent at turns 6, 7, 8… and each of those turns was '
         + 'billed less because of it. This answers "has this component paid for itself across '
         + 'the sessions it ran in?" It is the figure the tiles on this page show.' },
-  ], { descSummary: 'What this counts' });
+  ]);
 
   if (unkeyedUSD > 0) {
-    host.appendChild(el('div', { class: 'state blocked', 'data-testid': 'net-unkeyed' },
+    tech.appendChild(el('div', { class: 'state blocked', 'data-testid': 'net-unkeyed' },
       el('div', { class: 'state-body' },
         el('strong', {}, usd(unkeyedUSD) + ' of the "credited once" figure — '
           + pct((100 * unkeyedUSD) / Math.max(first, 1e-12), 0)
@@ -2902,7 +2261,7 @@ function renderNetReconcile(components) {
   }
 
   if (unsureUSD > 0) {
-    host.appendChild(el('div', { class: 'state', 'data-testid': 'net-unsure' },
+    tech.appendChild(el('div', { class: 'state', 'data-testid': 'net-unsure' },
       el('div', { class: 'state-body' },
         el('strong', {}, usd(unsureUSD) + ' more cannot be judged in this window'),
         el('span', {}, unsure.map((c) => c.component + ' (' + num(c.unique_diff_rows) + '/'
@@ -2928,7 +2287,7 @@ function renderNetReconcile(components) {
         + c.replay_multiple.toFixed(1) + '× as much later traffic. Both are true. Which one '
         + 'you should act on depends on whether that later traffic is going to keep happening.'));
     }
-    host.appendChild(box);
+    tech.appendChild(box);
   }
 
   // The cross-check, and an honest account of how much of the figure it actually checks.
@@ -2945,7 +2304,8 @@ function renderNetReconcile(components) {
   const coverage = 'Genuinely cross-checked: ' + usd(stDecomp) + ' of ' + usd(decomp) + ' ('
     + pct(covered * 100, 0) + '). The rest is valued on read by the same formula the '
     + 'decomposition uses, so it agrees by arithmetic and corroborates nothing.';
-  host.appendChild(el('p', { class: 'hint' + (drift > 0.02 ? ' warn-text' : '') },
+  host.appendChild(tech);
+  tech.appendChild(el('p', { class: 'hint' + (drift > 0.02 ? ' warn-text' : '') },
     !stored
       ? 'Nothing here can be cross-checked: no row in this window carries a recorded '
         + 'per-component dollar figure, so every figure above is valued on read.'
@@ -3126,9 +2486,27 @@ function renderUnpricedNote(components) {
       el('strong', {}, structural.map((c) => c.component).join(', ')
         + (structural.length === 1 ? ' removes' : ' remove') + ' no content'),
       ' — ' + (structural.length === 1 ? 'its' : 'their') + ' work is where the cache breakpoint '
-      + 'goes, which this table measures in the Structural column and cannot value in dollars. '
+      + 'goes, which this table measures in the Rearranged column and cannot value in dollars. '
       + 'The saving is recorded per request and appears on Overview as the prefix-cache figure.'));
   }
+}
+
+/** The fold for steps this page has no description for, kept next to the Preset steps table. */
+function renderUndescribedSteps(rows) {
+  const table = $('[data-testid=components-table]');
+  if (!table) return;
+  const wrap = table.closest('.tblwrap') || table;
+  let host = $('#components-undescribed');
+  if (!host) {
+    host = el('details', { class: 'why', id: 'components-undescribed', 'data-testid': 'components-undescribed' });
+    wrap.after(host);
+  }
+  clear(host);
+  host.hidden = !rows.length;
+  if (!rows.length) return;
+  host.appendChild(el('summary', { text: 'Other steps in the history (' + rows.length + '), without a description here' }));
+  host.appendChild(el('ul', { class: 'plain-list' }, rows.map((c) => el('li', {},
+    el('strong', { text: String(c.component).replace(/_/g, ' ') }), ' ran ' + num(c.runs) + ' times and removed ' + compact(c.saved_unique) + ' tokens'))));
 }
 
 async function loadComponents() {
@@ -3138,7 +2516,13 @@ async function loadComponents() {
     const { components: raw } = await api('components');
     // /api/components has no LIMIT — every component that ran in the window is in this
     // array — so sorting it here IS a global sort, not a sort of one page.
-    const components = state.sort ? sortRows(raw, state.sort, state.dir) : raw;
+    const all = state.sort ? sortRows(raw, state.sort, state.dir) : raw;
+    // Steps the page can describe are listed; any other name in the history (a step that has since left the
+    // product, say) goes into a fold under the table so no recorded figure is dropped, and the table is not
+    // padded with rows nobody can explain.
+    const components = all.filter((c) => STEP_INFO[c.component]);
+    const undescribed = all.filter((c) => !STEP_INFO[c.component]);
+    renderUndescribedSteps(undescribed);
     syncSortHeads('[data-testid=components-table]', COMPONENT_SORT);
     clear(body);
     if (!components.length) {
@@ -3150,8 +2534,43 @@ async function loadComponents() {
     }
     for (const c of components) {
       const [vtext, vcls] = verdict(c);
-      body.appendChild(el('tr', { class: 'click', onclick: () => { setFilter('component', c.component, { quiet: true }); go('requests'); } },
-        el('td', {}, el('code', { text: c.component })),
+      const tr = el('tr', { class: 'click', onclick: () => { setFilter('component', c.component, { quiet: true }); go('requests'); } },
+        el('td', { title: c.component }, el('strong', { text: stepInfo(c.component)[0] }),
+          stepInfo(c.component)[1] ? el('div', { class: 'hint', text: stepInfo(c.component)[1] }) : null),
+        // A cost never travels alone. saved_usd is what this component's removals were
+        // worth over the window — summed per turn, so a frozen reduction replaying across a
+        // session is already amortized into it — and net_usd is the verdict. Both from the
+        // server, priced at the model this deployment actually bills.
+        // saved_usd is stored per request; saved_usd_estimated is the same arithmetic applied
+        // on READ to the rows written before that column existed. Without the second half this
+        // column showed $0.00 for every component over all history predating the last restart
+        // — 6 populated rows out of 100,579 on production — and the most-read tab in the
+        // dashboard therefore said the product was worthless. The dagger says how much of the
+        // figure is valued rather than recorded; it is never silently merged.
+        el('td', { class: 'num', title: savedKnown(c) ? savedTitle(c) : '' },
+          usdOrNA(compSaved(c), savedKnown(c), savedNAReason(c)),
+          savedKnown(c) && c.saved_usd_estimated ? '†' : null),
+        // ONE price for our own model calls, on every tab. This cell used to show the
+        // component's self-reported figure while Overview showed the proxy's gateway-priced
+        // one — 31.6% apart on measured traffic, with nothing saying which to believe. The
+        // gateway figure is what the invoice is denominated in, so it is what shows, and the
+        // gap is named in the tooltip rather than hidden by the choice.
+        el('td', {
+          class: 'num',
+          title: !c.llm_calls ? 'this component makes no model calls of its own' : llmCostTitle(c),
+        }, c.llm_calls ? usd(c.llm_cost_usd) + (llmCostGap(c) ? '‡' : '') : '—'),
+        // A net whose benefit half is unknown is unknown too: subtracting a real cost from an
+        // unpriceable saving produced `$0` for searchfold and `-$0.00` for anything with a
+        // sliver of LLM cost, both of which read as measurements.
+        el('td', {
+          class: 'num' + (savedKnown(c) && c.net_usd_with_estimate < 0 ? ' warn-text' : ''),
+          title: !savedKnown(c) ? '' : 'AMORTIZED verdict: saved ' + usd(compSaved(c))
+            + ' across every turn those removals stayed removed for, − own LLM cost '
+            + usd(c.llm_cost_usd || 0)
+            + '. The per-turn column beside this one is the same verdict without the repeat '
+            + 'business, and it can have the opposite sign.',
+        }, usdOrNA(c.net_usd_with_estimate, savedKnown(c),
+          'the saving half of this net is not a number — ' + savedNAReason(c))),
         el('td', { text: c.kind || '—' }),
         el('td', { class: 'num', text: num(c.runs) }),
         // Two columns, because "acted" meant "removed tokens" and a component whose whole job
@@ -3187,40 +2606,6 @@ async function loadComponents() {
         el('td', { class: 'num', text: dur(c.duration_ms_total) }),
         el('td', { class: 'num', text: ms(c.duration_ms_avg) }),
         el('td', { class: 'num', text: c.llm_calls ? num(c.llm_calls) : '—' }),
-        // ONE price for our own model calls, on every tab. This cell used to show the
-        // component's self-reported figure while Overview showed the proxy's gateway-priced
-        // one — 31.6% apart on measured traffic, with nothing saying which to believe. The
-        // gateway figure is what the invoice is denominated in, so it is what shows, and the
-        // gap is named in the tooltip rather than hidden by the choice.
-        el('td', {
-          class: 'num',
-          title: !c.llm_calls ? 'this component makes no model calls of its own' : llmCostTitle(c),
-        }, c.llm_calls ? usd(c.llm_cost_usd) + (llmCostGap(c) ? '‡' : '') : '—'),
-        // A cost never travels alone. saved_usd is what this component's removals were
-        // worth over the window — summed per turn, so a frozen reduction replaying across a
-        // session is already amortized into it — and net_usd is the verdict. Both from the
-        // server, priced at the model this deployment actually bills.
-        // saved_usd is stored per request; saved_usd_estimated is the same arithmetic applied
-        // on READ to the rows written before that column existed. Without the second half this
-        // column showed $0.00 for every component over all history predating the last restart
-        // — 6 populated rows out of 100,579 on production — and the most-read tab in the
-        // dashboard therefore said the product was worthless. The dagger says how much of the
-        // figure is valued rather than recorded; it is never silently merged.
-        el('td', { class: 'num', title: savedKnown(c) ? savedTitle(c) : '' },
-          usdOrNA(compSaved(c), savedKnown(c), savedNAReason(c)),
-          savedKnown(c) && c.saved_usd_estimated ? '†' : null),
-        // A net whose benefit half is unknown is unknown too: subtracting a real cost from an
-        // unpriceable saving produced `$0` for searchfold and `-$0.00` for anything with a
-        // sliver of LLM cost, both of which read as measurements.
-        el('td', {
-          class: 'num' + (savedKnown(c) && c.net_usd_with_estimate < 0 ? ' warn-text' : ''),
-          title: !savedKnown(c) ? '' : 'AMORTIZED verdict: saved ' + usd(compSaved(c))
-            + ' across every turn those removals stayed removed for, − own LLM cost '
-            + usd(c.llm_cost_usd || 0)
-            + '. The per-turn column beside this one is the same verdict without the repeat '
-            + 'business, and it can have the opposite sign.',
-        }, usdOrNA(c.net_usd_with_estimate, savedKnown(c),
-          'the saving half of this net is not a number — ' + savedNAReason(c))),
         // The same verdict with replay excluded — the number /stats reports. It is here
         // BESIDE the amortized one, not instead of it, because the two answer different
         // questions and a component can be genuinely positive on one and negative on the
@@ -3259,7 +2644,9 @@ async function loadComponents() {
               + 'errors only above ' + pct(ERROR_RATE_BAD * 100, 0) + '.'
             : 'no run of this component failed in this window',
         }, c.errors ? num(c.errors) + ' (' + pct(errRate(c) * 100, 2) + ')' : '0'),
-        el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext }))));
+        el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext })));
+      [...tr.children].slice(4).forEach((td) => td.classList.add('more'));
+      body.appendChild(tr);
     }
     renderUnpricedNote(components);
     renderNetReconcile(components);
@@ -3268,12 +2655,12 @@ async function loadComponents() {
     // different series and repainted them all whenever a filter changed the order.
     const top = components.filter((c) => c.saved_unique > 0).slice(0, 12);
     barRows($('#chart-comp'), top.map((c) => ({
-      label: c.component, value: c.saved_unique, display: compact(c.saved_unique) + ' tok',
+      label: stepInfo(c.component)[0], value: c.saved_unique, display: compact(c.saved_unique) + ' tok',
       // Figures, not prose, so they go in the always-visible slot rather than behind a
       // disclosure: eight collapsed glyphs would each hide four numbers and cost a line to
       // do it.
-      formula: `${num(c.runs)} runs · acted ${pct(c.act_rate * 100, 1)} · own latency ${dur(c.duration_ms_total)} · ` +
-            `overcount ${c.overcount_ratio ? c.overcount_ratio.toFixed(1) + '×' : 'n/a'}`,
+      formula: `${num(c.runs)} runs · removed text in ${pct(c.act_rate * 100, 1)} · time added ${dur(c.duration_ms_total)} · ` +
+            `${c.overcount_ratio ? c.overcount_ratio.toFixed(1) + '× recounted' : ''}`,
     })), { emptyDetail: 'No component saved any content tokens in this window.' });
   } catch (err) {
     if (aborted(err)) return;
@@ -3312,7 +2699,7 @@ async function loadCompactionEpisodes() {
     const groups = out.by_provenance || [];
     clear(body);
     if (!groups.length) {
-      tableMessage(body, EPISODE_COLS, 'No compaction episodes yet',
+      tableMessage(body, EPISODE_COLS, 'No preset-step episodes yet',
         'An episode needs a summary followed by 10% more of the window being spent. Nothing in '
         + 'this time range has both.');
     }
@@ -3366,7 +2753,7 @@ async function loadCompactionEpisodes() {
     cov.hidden = true;
     asm.hidden = true;
     $('#episodes-exposure').hidden = true;
-    tableMessage(body, EPISODE_COLS, 'Could not load compaction episodes',
+    tableMessage(body, EPISODE_COLS, 'Could not load preset-step episodes',
       String(err.message || err), { error: true });
   }
 }
@@ -3405,7 +2792,7 @@ function renderEpisodeExposure(node, groups) {
       + num(openTurns) + ' turn(s), currently '));
     parts.push(el('strong', { class: openUSD >= 0 ? 'good-text' : 'bad-text' }, usd(openUSD)));
     parts.push(document.createTextNode('. That is money committed whose payoff is still arriving, '
-      + 'not a loss: the compaction turn pays a model call and a cache write up front while the '
+      + 'not a loss: the summary turn pays a model call and a cache write up front while the '
       + 'saving accrues turn by turn afterwards'));
   }
   if (voided) {
@@ -3510,7 +2897,7 @@ async function loadSessions() {
   const cols = wide ? 15 : 14;
   loadingRows(body, cols);
   try {
-    const { sessions, total } = await api('sessions', { limit: 25, offset: state.sessOffset });
+    const { sessions, total } = await api('sessions', { limit: 25, offset: state.sessOffset, sort: state.sessSort === 'cost' ? 'cost' : '' });
     clear(body);
     if (!sessions.length) {
       if (activeFilters().length) renderNoMatch(body, cols, 'sessions');
@@ -3534,22 +2921,11 @@ async function loadSessions() {
                    + 'incomplete amortization, not a verdict.',
             }, 'in flight')
             : null),
-        wide ? el('td', {}, el('span', { class: 'trunc', title: s.tenant_id, text: s.tenant_id || '—' })) : null,
-        el('td', { title: s.models || '', text: s.primary_model || firstOf(s.models) }),
-        el('td', { text: firstOf(s.agents) }),
-        el('td', { text: firstOf(s.presets) }),
+        wide ? el('td', { class: 'narrow-hide' }, el('span', { title: s.tenant_id, text: s.tenant_id ? s.tenant_id.slice(0, 6) : '—' })) : null,
+        el('td', { class: 'narrow-hide', text: whenShort(s.start) }),
         el('td', { class: 'num', text: num(s.turns) }),
-        el('td', { class: 'num', text: compact(s.tokens_before) }),
-        // BOTH denominators, in one cell rather than a 16th column, and in the order the
-        // <details> above the table explains them. Gross alone was the only savings figure
-        // on this row and it overstates by 27.7x overall / up to 572.9x on one session.
-        el('td', {
-          class: 'num',
-          title: 'gross ' + num(s.saved) + ' tokens: a removed span counted once per turn it '
-            + 'was absent from. unique ' + num(s.saved_unique) + ' tokens: the same text '
-            + 'counted once. Gross is the size of every request we sent; unique is how much '
-            + 'distinct text was dropped.',
-        }, compact(s.saved) + ' / ' + compact(s.saved_unique)),
+        el('td', { class: 'num' },
+          usdOrNA(s.cost_usd + s.cg_llm_cost_usd, !!s.baseline_cost_usd, 'no turn in this session reported the provider usage a cost needs')),
         // A dollar figure over a session whose turns are not all priced is a figure with
         // a different denominator from the token columns beside it: it covers the priced
         // turns only. The dagger says so rather than letting the two read as one total.
@@ -3569,23 +2945,36 @@ async function loadSessions() {
                      ' priced turns only — the token columns cover all of them.',
             }, ' †')
             : null),
-        el('td', { class: 'num', text: compact(s.cache_read) + ' / ' + compact(s.cache_write) }),
+        el('td', { class: 'more', title: s.models || '', text: s.primary_model || firstOf(s.models) }),
+        el('td', { class: 'more', text: firstOf(s.agents) }),
+        el('td', { class: 'more', text: firstOf(s.presets) }),
+        el('td', { class: 'num more', text: compact(s.tokens_before) }),
+        // BOTH denominators, in one cell rather than a 16th column, and in the order the
+        // <details> above the table explains them. Gross alone was the only savings figure
+        // on this row and it overstates by 27.7x overall / up to 572.9x on one session.
+        el('td', {
+          class: 'num more',
+          title: 'gross ' + num(s.saved) + ' tokens: a removed span counted once per turn it '
+            + 'was absent from. unique ' + num(s.saved_unique) + ' tokens: the same text '
+            + 'counted once. Gross is the size of every request we sent; unique is how much '
+            + 'distinct text was dropped.',
+        }, compact(s.saved) + ' / ' + compact(s.saved_unique)),
+        el('td', { class: 'num more', text: compact(s.cache_read) + ' / ' + compact(s.cache_write) }),
         // The keep-alive's net for this session, from its own ping rows. `n/a` rather than $0
         // where it never ran — a zero would read as "it broke even here", which it did not do —
         // and rather than the `—` that was here, which carried the reason only in a title.
         el('td', {
-          class: 'num ' + (s.keepalive_net_usd < 0 ? 'bad-text' : s.keepalive_net_usd > 0 ? 'good-text' : ''),
+          class: 'num more ' + (s.keepalive_net_usd < 0 ? 'bad-text' : s.keepalive_net_usd > 0 ? 'good-text' : ''),
           title: s.keepalive_pings || s.keepalive_saved_usd
             ? `${num(s.keepalive_pings)} pings cost ${usd(s.keepalive_ping_usd)}; `
               + `${usd(s.keepalive_saved_usd)} of re-creations avoided (a ceiling)`
             : '',
         }, usdOrNA(s.keepalive_net_usd,
           !!(s.keepalive_pings || s.keepalive_saved_usd),
-          'the keep-alive did not run on this session, so it neither spent nor avoided anything '
+          'your cache strategy did not run on this session, so it neither spent nor avoided anything '
           + 'here — this is an absence, not a break-even')),
-        el('td', { class: 'num', text: num(s.expands) }),
-        el('td', { class: 'num', text: ms(s.cg_latency_ms_avg) }),
-        el('td', { text: when(s.start) }),
+        el('td', { class: 'num more', text: num(s.expands) }),
+        el('td', { class: 'num more', text: ms(s.cg_latency_ms_avg) }),
         // stopPropagation: the row itself navigates to this session's requests, and a
         // click that does two things is a click that does the wrong one.
         el('td', {}, el('button', {
@@ -3618,25 +3007,25 @@ async function loadRequests() {
     for (const e of page.requests) {
       body.appendChild(el('tr', { class: 'click', 'data-testid': 'request-row', onclick: () => openRequest(e.id) },
         el('td', { text: e.id }),
-        el('td', { text: when(e.ts) }),
+        el('td', { text: whenShort(e.ts) }),
         el('td', {}, el('span', { class: 'trunc', title: e.session_id, text: e.session_id || '—' })),
-        wide ? el('td', {}, el('span', { class: 'trunc', title: e.tenant_id, text: e.tenant_id || '—' })) : null,
-        el('td', { text: e.model || '—' }),
+        wide ? el('td', {}, el('span', { title: e.tenant_id, text: e.tenant_id ? e.tenant_id.slice(0, 6) : '—' })) : null,
+        el('td', { class: 'more', text: e.model || '—' }),
         el('td', {}, el('span', { class: 'pill neutral', text: modeLabel(e.mode) })),
-        el('td', { class: 'num', text: compact(e.tokens_before) }),
+        el('td', { class: 'num more', text: compact(e.tokens_before) }),
         el('td', { class: 'num', text: compact(e.tokens_after) }),
-        el('td', { class: 'num', text: compact(e.tokens_before - e.tokens_after) }),
-        el('td', { class: 'num', text: compact(e.cache_read) + ' / ' + compact(e.cache_write) }),
+        el('td', { class: 'num more', text: compact(e.tokens_before - e.tokens_after) }),
+        el('td', { class: 'num more', text: compact(e.cache_read) + ' / ' + compact(e.cache_write) }),
         el('td', { class: 'num', text: e.token_accounting === 'complete' ? usd(e.cost_usd) : '—' }),
-        el('td', { class: 'num', text: ms(e.cg_latency_ms) }),
+        el('td', { class: 'num more', text: ms(e.cg_latency_ms) }),
         // A keep-alive ping is not agent traffic, and the consent copy promises it is
         // identifiable here. Without the badge the row reads as a mysterious one-token request
         // the user did not make, which is worse than not showing it at all.
         el('td', {}, e.keepalive
-          ? el('span', { class: 'pill neutral', title: 'a keep-alive ping context-guru sent to '
-              + 'refresh this session\u2019s cached prompt', text: 'keep-alive' })
+          ? el('span', { class: 'pill neutral', title: 'a ping your cache strategy sent to '
+              + 'refresh this session\u2019s cached prompt', text: 'cache strategy' })
           : el('span', { class: 'pill ' + (e.cache_miss_reason || 'neutral'), text: e.cache_miss_reason || '—' })),
-        el('td', {}, el('span', { class: 'pill ' + e.token_accounting, text: e.token_accounting }))));
+        el('td', { class: 'more' }, el('span', { class: 'pill ' + e.token_accounting, text: e.token_accounting }))));
     }
     $('#req-page').textContent = `${num(page.requests.length)} shown of ${num(page.total)} matching`;
     $('#req-next').disabled = !page.next_cursor;
@@ -3774,8 +3163,8 @@ function renderOneSide(host, rows, side) {
 function renderSide(host, rows) {
   const grid = el('div', { class: 'side', 'data-testid': 'side-grid' });
   // Headers are the grid's first row so they sit above their own column.
-  grid.appendChild(el('div', { class: 'side-h side-l', text: 'Before compaction' }));
-  grid.appendChild(el('div', { class: 'side-h side-r', text: 'After compaction' }));
+  grid.appendChild(el('div', { class: 'side-h side-l', text: 'Before your preset' }));
+  grid.appendChild(el('div', { class: 'side-h side-r', text: 'After your preset' }));
   let dels = [], adds = [];
   const cell = (side, cls, text) => el('div', { class: 'side-' + side + ' sl ' + cls, text: text });
   const pair = (l, r) => { grid.appendChild(l); grid.appendChild(r); };
@@ -3991,8 +3380,6 @@ function attributionChips(c, components) {
 
 function kv(k, v) { return el('div', {}, el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v })); }
 
-/** kvNode is kv() for a value that is a NODE rather than a string (the breakpoint chips). */
-function kvNode(k, node) { return el('div', {}, el('div', { class: 'k', text: k }), el('div', { class: 'v' }, node)); }
 
 /**
  * kvUnset prints a value the client never set as the WORD "unset", styled as absent.
@@ -4187,40 +3574,40 @@ async function openRequest(id, fromURL) {
       kv('Model', e.model || '—'),
       kv('Provider', e.provider || '—'),
       kv('Agent', e.agent || '—'),
-      kv('Preset', e.preset || '—'),
-      kv('Mode', modeLabel(e.mode)),
-      kv('Upstream status', e.status || '—'),
+      kv(term('Preset', 'A named bundle of settings for your preset steps.'), e.preset || '—'),
+      kv(term('Mode', 'How context-guru handled this request: changed it, passed it through, or only measured it.'), modeLabel(e.mode)),
+      kv(term('Upstream status', 'The HTTP status the AI provider returned.'), e.status || '—'),
       kv('Messages', num(e.messages))));
 
     body.appendChild(kvBand('Tokens', 'detail-tokens',
-      kv('Before → after', compact(e.tokens_before) + ' → ' + compact(e.tokens_after)),
-      kv('Saved (gross / unique)', compact(e.tokens_before - e.tokens_after) + ' / ' + compact(e.saved_unique)),
-      kv('Attempted (eligible)', compact(e.attempted_tokens)),
-      kv('Frozen for cache safety', compact(e.frozen_tokens)),
-      kv('Fresh / read / write / out',
+      kv(term('Before → after', 'Tokens received from the agent, then tokens actually sent to the provider.'), compact(e.tokens_before) + ' → ' + compact(e.tokens_after)),
+      kv(term('Removed (this request / distinct text)', 'First: tokens removed from this request. Second: distinct text removed, counted once even if it was also removed from earlier requests.'), compact(e.tokens_before - e.tokens_after) + ' / ' + compact(e.saved_unique)),
+      kv(term('Eligible to remove', 'Tokens context-guru was allowed to try to shrink.'), compact(e.attempted_tokens)),
+      kv(term('Left alone for cache', 'Tokens not touched because changing them would break the provider prompt cache.'), compact(e.frozen_tokens)),
+      kv(term('New / cache read / cache write / output', 'Tokens billed at full price / read from the prompt cache / written to it / generated by the model.'),
         [e.fresh_input, e.cache_read, e.cache_write, e.output_tokens].map(compact).join(' / ')),
-      kv('Token accounting', e.token_accounting)));
+      kv(term('Usage data', 'complete: the provider reported all token counts. partial or missing: some are unknown, so no dollar figure is shown.'), e.token_accounting)));
 
     body.appendChild(kvBand('Cost and latency', 'detail-cost',
       kv('Cost (actual / baseline)', priced ? usd(e.cost_usd) + ' / ' + usd(e.baseline_cost_usd) : 'not priced'),
-      kv('Our own LLM cost', priced ? usd(e.cg_llm_cost_usd) : '—'),
+      kv(term('context-guru model cost', 'Cost of any model calls context-guru made itself.'), priced ? usd(e.cg_llm_cost_usd) : '—'),
       // Directly beneath the cost, because the cost on its own is the figure that makes
       // readers conclude the product is worthless: baseline − actual − our own spend is
       // what this one turn was actually worth.
-      kv('Net after our cost',
+      kv(term('Net saving', 'Baseline cost minus actual cost minus context-guru model cost.'),
         priced ? usd(e.baseline_cost_usd - e.cost_usd - e.cg_llm_cost_usd) : '—'),
       // On a turn whose cache HIT this is usually the largest money figure on the row,
       // and it was not reported anywhere: the cache reads this request was billed for,
       // against the fresh rate they would have cost without the cache.
-      kv('Prefix-cache saved (ours)', priced ? usd(e.cachesplit_saved_usd) : '—'),
-      kv('Prefix half we moved', e.split_stable_tokens ? compact(e.split_stable_tokens) + ' tok' : '—'),
-      kv('Provider cache saved', priced ? usd(e.cache_saved_usd) : '—'),
-      kv('context-guru latency', ms(e.cg_latency_ms)),
-      kv('Upstream latency', ms(e.upstream_ms)),
-      kv('Restorations', num(e.expands) + ' (' + compact(e.expand_tokens) + ' tok)'),
-      kv('Reverts', num(e.reverts)),
-      kv('Cache attribution', e.cache_miss_reason || '—'),
-      kv('Compaction outcome', e.uncompressed_reason || 'compacted')));
+      kv(term('Cache reorder saving', 'Dollars saved by moving the stable part of the prompt first so the provider cache could reuse it.'), priced ? usd(e.cachesplit_saved_usd) : '—'),
+      kv('Stable part moved', e.split_stable_tokens ? compact(e.split_stable_tokens) + ' tok' : '—'),
+      kv(term('Provider cache saving', 'Dollars the provider prompt cache saved on this request.'), priced ? usd(e.cache_saved_usd) : '—'),
+      kv('Delay added by context-guru', ms(e.cg_latency_ms)),
+      kv('Provider response time', ms(e.upstream_ms)),
+      kv(term('Restores', 'Times the agent asked for removed text to be put back.'), num(e.expands) + ' (' + compact(e.expand_tokens) + ' tok)'),
+      kv(term('Reverts', 'Times a change was undone and the original request sent.'), num(e.reverts)),
+      kv(term('Cache result', 'Why the provider cache did or did not hit.'), e.cache_miss_reason || '—'),
+      kv(term('Why your preset left it alone', 'The reason nothing was removed, or "trimmed" if something was.'), e.uncompressed_reason || 'trimmed')));
 
     // The request's own metadata: what the client ASKED for. Separate from the bands above,
     // which are what happened to it. kvMaybe() prints an absent value as "unset" and a zero
@@ -4249,13 +3636,13 @@ async function openRequest(id, fromURL) {
       // Full width: four labelled slots do not fit a 184px grid cell, and wrapped over
       // three lines they stopped reading as four separate measurements.
       el('div', { class: 'kv-wide' },
-        el('div', { class: 'k', text: 'cache_control breakpoints · ' + num(bpTotal) + ' of the provider’s 4' }),
+        el('div', { class: 'k', text: 'Cache markers (cache_control) · ' + num(bpTotal) + ' of the provider’s 4' }),
         el('div', { class: 'v' }, el('div', { class: 'bp', 'data-testid': 'detail-breakpoints' },
           el('span', { class: e.cache_bp_system ? 'on' : '' }, 'system ', el('b', { text: num(e.cache_bp_system) })),
           el('span', { class: e.cache_bp_tools ? 'on' : '' }, 'tools ', el('b', { text: num(e.cache_bp_tools) })),
           el('span', { class: e.cache_bp_messages ? 'on' : '' }, 'messages ', el('b', { text: num(e.cache_bp_messages) })),
           el('span', { class: e.cache_bp_blocks ? 'on' : '' }, 'blocks ', el('b', { text: num(e.cache_bp_blocks) }))))),
-      kv('Tenant id', e.tenant_id || '— (single-tenant)')));
+      kv('Account id', e.tenant_id || '— (single account)')));
 
     // The log lines this request emitted. Text, not a link: Grafana binds loopback on the
     // box (see renderLogsHelp).
@@ -4295,7 +3682,7 @@ async function openRequest(id, fromURL) {
     // table has no dollars at all, so an expensive component could never be shown to be
     // underwater on a particular KIND of call.
     if (e.extractions && e.extractions.length) {
-      body.appendChild(el('h2', { text: 'Compaction model calls' }));
+      body.appendChild(el('h2', { text: 'Preset model calls' }));
       const perTok = savedPerTok(e);
       const net = perTok === null ? null
         : e.extractions.reduce((a, x) => a + netUSD(x, perTok), 0);
@@ -4408,7 +3795,7 @@ async function openRequest(id, fromURL) {
  *  compacted: the change happened, only its text is missing. */
 function compactedAnywayNote() {
   return el('span', { class: 'warn-text', text:
-    'This request was compacted all the same — the component rows above are what ran and ' +
+    'This request was trimmed all the same — the component rows above are what ran and ' +
     'what each one removed. What is missing here is the stored before/after text, not the ' +
     'change itself.' });
 }
@@ -4579,7 +3966,7 @@ async function openSessionDiff(session, fetchCold, fromURL, page) {
   if (diffPager.session !== session) diffPager = { session, pages: [{ cursor: '', offset: 0 }], page: 0 };
   if (page != null) diffPager.page = page;
   const at = diffPager.pages[diffPager.page] || diffPager.pages[0];
-  const body = openDrawer('Compaction diff · ' + (session || '(no session id)'), null);
+  const body = openDrawer('Preset diff · ' + (session || '(no session id)'), null);
   loadingState(body, 5);
   let out;
   try {
@@ -4741,7 +4128,7 @@ function renderSessionDiff(body, session, out, offset = 0) {
   const withContent = reqs.filter((e) => (e.content || []).length);
   if (!withContent.length) {
     if (st === 'hot' || st === 'fetched' || st === 'nothing_changed') {
-      body.appendChild(el('h2', { text: 'What compaction changed' }));
+      body.appendChild(el('h2', { text: 'What your preset changed' }));
       // Same rule as the single request: only the component rows may say "nothing was
       // rewritten". With no stored text and turns that WERE rewritten, the honest answer
       // is about storage.
@@ -4750,7 +4137,7 @@ function renderSessionDiff(body, session, out, offset = 0) {
         // Own box: emptyState clears its host, and given `body` it wiped the session
         // summary and the component table above it.
         emptyState(body.appendChild(el('div')), 'Nothing was rewritten in this session',
-          'Every turn passed through unchanged. The per-request rows say why under "compaction outcome".');
+          'Every turn passed through unchanged. The per-request rows say why under "preset outcome".');
       }
     }
     return;
@@ -4770,7 +4157,7 @@ function renderSessionDiff(body, session, out, offset = 0) {
           'their metrics and component rows are complete either way.' }))));
   }
 
-  body.appendChild(el('h2', { text: 'What compaction changed, oldest turn first' }));
+  body.appendChild(el('h2', { text: 'What your preset changed, oldest turn first' }));
   body.appendChild(el('p', { class: 'note', text:
     'Each block is one message context-guru rewrote. This is the set of spans we touched — ' +
     'not a reconstructed transcript: the messages we left alone were never captured, so ' +
@@ -4850,337 +4237,6 @@ function renderSessionDiff(body, session, out, offset = 0) {
   if (botPager) body.appendChild(botPager);
 }
 
-// ── benchmarks ─────────────────────────────────────────────────────────────
-/** BENCH_BASELINE is the harness's name for the no-compaction arm, in every run dir it
- *  writes (`rows-off.json`). It is the arm every delta on this tab is measured against. */
-const BENCH_BASELINE = 'off';
-
-/** benchOrder puts the baseline first and leaves the rest alphabetical. A comparison table
- *  whose reference row sorts into the middle makes the reader do the subtraction. */
-function benchOrder(arms) {
-  return arms.slice().sort((a, b) => (a.arm === BENCH_BASELINE ? -1 : b.arm === BENCH_BASELINE ? 1
-    : a.arm < b.arm ? -1 : a.arm > b.arm ? 1 : 0));
-}
-
-/** benchCostKnown: did the ingester find a cost on ANY of this arm's tasks? See
- *  BenchArm.CostRows — a zero here is an unparsed key far more often than a free run. */
-function benchCostKnown(a) { return (a.cost_rows || 0) > 0; }
-
-function benchCostNAReason(a) {
-  return 'none of this arm’s ' + num(a.tasks) + ' task rows carried a cost the ingester could '
-    + 'read. It reads the per-task cost from an "agent_cost" key; a rows file naming it '
-    + 'otherwise parses to zero, which would render this arm as the cheapest in the study.';
-}
-
-/**
- * benchDeltaCell is the signed difference from the baseline arm, in the cell (docs/RESULTS.md's
- * own shape). Solve rate in percentage POINTS, cost as a percentage of the baseline's own cost —
- * two different units, so the caller names which, and a `pt`/`%` suffix is on the value.
- *
- * A sign and an arrow, never colour alone (DESIGN §2.5). Direction is per-measure: more solves
- * is good, more dollars is not.
- */
-function benchDeltaCell(a, base, isBase, key, unit) {
-  if (isBase) return el('td', { class: 'num muted', text: '—' });
-  if (!base) {
-    return el('td', { class: 'num' }, el('span', {
-      class: 'na', title: 'not available: this run has no "' + BENCH_BASELINE + '" arm, so there '
-        + 'is nothing to compare against',
-      'aria-label': 'not available: this run has no baseline arm to compare against',
-    }, 'n/a'));
-  }
-  const costLike = unit === '%';
-  if (costLike && !(benchCostKnown(a) && benchCostKnown(base))) {
-    return el('td', { class: 'num' }, el('span', {
-      class: 'na', title: 'not available: a cost delta needs a parseable cost on both this arm '
-        + 'and the baseline',
-      'aria-label': 'not available: a cost delta needs a parseable cost on both arms',
-    }, 'n/a'));
-  }
-  let d, txt;
-  if (costLike) {
-    const b = base[key] || 0;
-    if (!b) return el('td', { class: 'num muted', text: '—' });
-    d = (100 * ((a[key] || 0) - b)) / b;
-    txt = (d > 0 ? '+' : '−') + Math.abs(d).toFixed(2) + '%';
-  } else {
-    d = 100 * ((a[key] || 0) - (base[key] || 0));
-    txt = (d > 0 ? '+' : '−') + Math.abs(d).toFixed(1) + ' pt';
-  }
-  // Cheaper is better; more solved is better. One flag, both directions.
-  const good = costLike ? d < 0 : d > 0;
-  const arrow = d === 0 ? '' : d > 0 ? ' ▲' : ' ▼';
-  return el('td', {
-    class: 'num ' + (Math.abs(d) < 0.005 ? '' : good ? 'good-text' : 'bad-text'),
-    title: 'against the "' + base.arm + '" baseline' + (costLike
-      ? ' (normalised cost basis)' : ' (percentage points of solve rate)'),
-    text: Math.abs(d) < 0.005 ? '±0' : txt + arrow,
-  });
-}
-
-async function loadBenchmarks() {
-  const host = clear($('#bench-list'));
-  loadingState(host, 3);
-  try {
-    const { runs } = await api('benchmarks');
-    clear(host);
-    if (!runs || !runs.length) {
-      // The flag is --dashboard-bench-dirs (cmd/context-guru-proxy/main.go:166). This string
-      // said --dash-bench-dirs, which does not exist anywhere in the repo, and an unknown flag
-      // makes the proxy EXIT — so the tab's only instruction killed the process of anyone who
-      // followed it. This empty state is the tab's primary surface: bench_runs is 0 on a
-      // 133k-request production deployment.
-      emptyState(host, 'No benchmark runs ingested',
-        'Point --dashboard-bench-dirs at a harness jobs root (a directory of runs, each with '
-        + 'summary.json and rows-*.json), restart, and press Re-scan. Re-scan reports what it '
-        + 'found, including the directories it looked in.');
-      return;
-    }
-    // 42 ingested runs rendered flat is 40k pixels of table. Collapse each run and
-    // open only the newest, so the view opens on the run you just finished.
-    runs.forEach((run, runIdx) => {
-      const sec = el('details', { class: 'panel diff', 'data-testid': 'bench-run' });
-      if (runIdx === 0) sec.open = true;
-      const armNames = (run.arms || []).map((a) => a.arm).join(', ');
-      sec.appendChild(el('summary', {},
-        el('strong', { text: run.name }),
-        '  ' + [run.dataset, run.model, armNames && 'arms: ' + armNames,
-          when(run.ts)].filter(Boolean).join(' · ')));
-      const inner = el('div', { style: 'padding:12px 14px' });
-      // BASELINE FIRST, and the delta column exists. The server orders by arm name
-      // (dash/bench.go benchArms), so `off` sorted third of four alphabetically and a reader had
-      // to compute the one number this tab exists to produce — the difference from baseline —
-      // in their head across four rows. docs/RESULTS.md:11-14 puts baseline first with the
-      // deltas in-cell; this matches it.
-      const arms = benchOrder(run.arms || []);
-      const base = arms.find((a) => a.arm === BENCH_BASELINE) || null;
-      const tbl = el('table', { class: 'tbl' }, el('thead', {}, el('tr', {},
-        el('th', { text: 'Arm' }), el('th', { class: 'num', text: 'Tasks' }),
-        // Scored is the DENOMINATOR of Solve rate, and it was in BenchArm without being a
-        // column. Four arms printed rates off four different denominators (60, 59, 57, 57) with
-        // Tasks — which is not the denominator — beside them, and the only clue was Exceptions,
-        // eleven columns right and off-screen below 1100 px. Both now sit next to the rate.
-        el('th', { class: 'num', title: 'tasks that produced a score: tasks − exceptions. This '
-          + 'is the denominator of Solve rate; Tasks is not.', text: 'Scored' }),
-        el('th', { class: 'num', text: 'Exceptions' }),
-        el('th', { class: 'num', text: 'Solved' }),
-        el('th', { class: 'num', text: 'Solve rate' }),
-        el('th', { class: 'num', text: 'vs baseline' }),
-        el('th', { class: 'num', text: 'Mean reward' }), el('th', { class: 'num', text: 'Mean steps' }),
-        // Two bases, both named. bench.go computes TotalNormCostUSD and the UI rendered
-        // neither basis by name — `grep -n norm_cost dash/ui/app.js` was zero hits, so the tab
-        // showed the agent-reported basis while the published claim (docs/RESULTS.md) is the
-        // normalised one, unlabelled and differing by over a point.
-        el('th', { class: 'num', title: 'as the agent harness reported it', text: 'Total cost (agent)' }),
-        el('th', { class: 'num', title: 'every arm re-priced from its own token counts at one '
-          + 'rate card — the basis docs/RESULTS.md quotes', text: 'Total cost (normalised)' }),
-        el('th', { class: 'num', text: 'vs baseline' }),
-        el('th', { class: 'num', text: 'Cost / task' }),
-        el('th', { class: 'num', text: '$ per solve' }),
-        el('th', { class: 'num', text: 'Cache hit' }), el('th', { class: 'num', text: 'Mean wall' }))));
-      const tb = el('tbody');
-      for (const a of arms) {
-        const isBase = base && a.arm === base.arm;
-        const known = benchCostKnown(a);
-        const perSolve = a.solved > 0 && known ? a.total_cost_usd / a.solved : null;
-        tb.appendChild(el('tr', { class: 'click' + (isBase ? ' is-current' : ''),
-          onclick: () => toggleBenchTasks(inner, run.id, a.arm) },
-          el('td', {}, el('code', { text: a.arm }),
-            isBase ? el('span', { class: 'pill neutral', text: 'baseline' }) : null),
-          el('td', { class: 'num', text: num(a.tasks) }),
-          el('td', { class: 'num', text: num(a.scored) }),
-          el('td', { class: 'num', text: num(a.exceptions) }),
-          el('td', { class: 'num', text: num(a.solved) }),
-          // The denominator travels with the rate, in the same cell. codesmart 40/60 and rtk
-          // 38/57 both print 66.7% and are not the same measurement.
-          el('td', { class: 'num', title: num(a.solved) + ' of ' + num(a.scored) + ' scored tasks'
-            + (a.exceptions ? ' (' + num(a.exceptions) + ' excluded as infrastructure exceptions)' : '') },
-          a.scored > 0 ? pct(a.solve_rate * 100) + ' of ' + num(a.scored) : 'n/a'),
-          benchDeltaCell(a, base, isBase, 'solve_rate', 'pt'),
-          el('td', { class: 'num', text: a.mean_reward.toFixed(3) }),
-          el('td', { class: 'num', text: a.mean_steps.toFixed(1) }),
-          el('td', { class: 'num', title: known ? '' : '' },
-            usdOrNA(a.total_cost_usd, known, benchCostNAReason(a))),
-          el('td', { class: 'num' },
-            usdOrNA(a.total_norm_cost_usd, known, benchCostNAReason(a))),
-          benchDeltaCell(a, base, isBase, 'total_norm_cost_usd', '%'),
-          el('td', { class: 'num' }, usdOrNA(a.mean_cost_usd, known, benchCostNAReason(a))),
-          el('td', { class: 'num', text: perSolve === null ? (known ? '—' : 'n/a') : usd(perSolve) }),
-          // Same shape as the cost cells: BenchArm.CacheHitRate is left at 0 when the arm
-          // reported no token counts at all (benchArms guards `total > 0`), and `0.00%` there is
-          // a claim about a cache that was never measured. The token sums are already on the
-          // wire, so the distinction costs nothing.
-          el('td', { class: 'num' }, a.cache_read + a.cache_write + a.fresh_input > 0
-            ? pct(a.cache_hit_rate * 100, 2)
-            : el('span', {
-              class: 'na',
-              title: 'not available: this arm’s rows carry no cache_read / cache_write / '
-                + 'fresh_input counts, so its cache behaviour was not measured',
-              'aria-label': 'not available: this arm reported no token counts, so its cache '
-                + 'hit rate was not measured',
-            }, 'n/a')),
-          el('td', { class: 'num', text: dur(a.mean_wall_s * 1000) })));
-      }
-      tbl.appendChild(tb);
-      inner.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
-      inner.appendChild(el('p', { class: 'note', text: 'Cost per solve is the number that matters: an arm that spends less by solving fewer tasks has not saved anything. Solve rate is over SCORED tasks, so two arms with the same rate off different denominators are not the same measurement — the denominator is in the cell. Click an arm for its per-task rows.' }));
-      if (arms.some((a) => !benchCostKnown(a))) {
-        inner.appendChild(el('p', { class: 'hint' },
-          el('strong', {}, 'One or more arms report no cost on any task. '),
-          'Those cells read ', el('span', { class: 'na' }, 'n/a'),
-          ' rather than $0, because the ingester reads the per-task cost from an ',
-          el('code', {}, 'agent_cost'),
-          ' key and a rows file naming it something else parses to zero silently — which would '
-          + 'render as the cheapest arm in the study. Check the rows file’s cost key.'));
-      }
-      // Cost-vs-reward scatter: the visualization the issue asks for.
-      inner.appendChild(el('h2', { text: 'Cost vs reward, by arm' }));
-      const scatter = el('div', { class: 'chart', 'data-testid': 'bench-scatter' });
-      inner.appendChild(scatter);
-      sec.appendChild(inner);
-      host.appendChild(sec);
-      renderScatter(scatter, run.arms || []);
-    });
-  } catch (err) {
-    if (aborted(err)) return;
-    errorState(host, 'Could not load benchmarks', err);
-  }
-}
-
-/**
- * rescanBenchmarks fires the re-scan and SAYS WHAT IT FOUND.
- *
- * The click handler used to `await fetch(...)` and discard the response, so a mistyped path and
- * a correct scan of an empty directory rendered identically — the tab simply stayed empty —
- * while the server was returning real counts the whole time. It now also reports the
- * directories, because "scanned nothing because none are configured" is a different problem
- * from "scanned two and found no runs" and only one of them is fixed by editing a path.
- */
-async function rescanBenchmarks() {
-  const host = $('#bench-list');
-  try {
-    const r = await fetch('/api/benchmarks?refresh=1');
-    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + r.statusText);
-    const out = await r.json();
-    const dirs = out.dirs || [];
-    if (out.ingested_runs > 0) {
-      $('#bench-scan').textContent = 'Scanned ' + dirs.length + ' director'
-        + (dirs.length === 1 ? 'y' : 'ies') + ': ingested ' + num(out.ingested_runs)
-        + ' run' + (out.ingested_runs === 1 ? '' : 's') + ', ' + num(out.ingested_tasks)
-        + ' task rows.';
-    } else if (!dirs.length) {
-      $('#bench-scan').textContent = 'Nothing was scanned: no --dashboard-bench-dirs is '
-        + 'configured on this proxy, so Re-scan has no directory to look in. Restart with the '
-        + 'flag pointing at a jobs root.';
-    } else {
-      $('#bench-scan').textContent = 'Scanned ' + dirs.join(', ') + ' and found no run '
-        + 'directory (a run needs summary.json and at least one rows-*.json). 0 runs, 0 tasks '
-        + 'ingested.';
-    }
-    $('#bench-scan').hidden = false;
-    loadBenchmarks();
-  } catch (err) {
-    if (aborted(err)) return;
-    errorState(host, 'Re-scan failed', err);
-  }
-}
-
-function renderScatter(host, arms) {
-  clear(host);
-  const pts = arms.filter((a) => a.tasks > 0);
-  if (!pts.length) { emptyState(host, 'No arms to plot', 'An arm appears here once it has at least one task.'); return; }
-  const { w, h, pad } = geom(host);
-  const xMax = Math.max(...pts.map((a) => a.mean_cost_usd)) * 1.15 || 1;
-  const svg = svgEl('svg', { viewBox: `0 0 ${w} ${h}`, role: 'img' });
-  svg.setAttribute('aria-label', 'mean cost per task versus solve rate, by arm');
-  const px = (v) => pad.l + (v / xMax) * (w - pad.l - pad.r);
-  const py = (v) => h - pad.b - v * (h - pad.t - pad.b);
-  for (const t of [0, 0.25, 0.5, 0.75, 1]) {
-    svg.appendChild(svgEl('line', { class: 'gridline', x1: pad.l, x2: w - pad.r, y1: py(t), y2: py(t) }));
-    const lab = svgEl('text', { class: 'axis-text', x: pad.l - 6, y: py(t) + 3, 'text-anchor': 'end' });
-    lab.textContent = (t * 100).toFixed(0) + '%';
-    svg.appendChild(lab);
-  }
-  svg.appendChild(svgEl('line', { class: 'axis', x1: pad.l, x2: w - pad.r, y1: h - pad.b, y2: h - pad.b }));
-  // Snapped ticks here as well as on the line charts: dividing the range in half gave
-  // "$0 / $2.38 / $4.76", three numbers nobody compares at a glance.
-  for (const t of ticks(0, xMax, 4)) {
-    if (t > xMax) continue;
-    const lab = svgEl('text', { class: 'axis-text', x: px(t), y: h - pad.b + 14, 'text-anchor': 'middle' });
-    lab.textContent = usd(t);
-    svg.appendChild(lab);
-  }
-  // Direct labels are the only identity cue on this chart, so they must not overlap.
-  // Two arms within a label's width of each other used to print on top of each other,
-  // which at 620px turned "codesmart" and "off" into one unreadable smear.
-  // Every MARK is an obstacle too: a label that clears its neighbours' labels can still
-  // land under a neighbour's dot, which is what turned two arms into one smear at 620px.
-  const placed = pts.map((a) => ({ x0: px(a.mean_cost_usd) - 8, x1: px(a.mean_cost_usd) + 8, y: py(a.solve_rate) + 4 }));
-  pts.forEach((a, i) => {
-    const cx = px(a.mean_cost_usd), cy = py(a.solve_rate);
-    // Every arm is directly labelled, so identity never depends on the fill. Past the
-    // four validated hues the marks go neutral rather than cycling back to blue and
-    // making two different arms look like the same one.
-    svg.appendChild(svgEl('circle', {
-      cx, cy, r: 6, fill: i < SERIES.length ? SERIES[i] : 'var(--fg-muted)',
-      stroke: 'var(--bg-raised)', 'stroke-width': 2,
-    }));
-    const wid = a.arm.length * 6.5;                 // ~6.5px per char at 11px
-    const flip = cx + wid + 11 > w - pad.r;         // near the right edge: label to the left
-    const x0 = flip ? cx - 11 - wid : cx + 11;
-    let ly = cy + 4;
-    // Nudge upward until this label's own box clears every box already placed. Comparing
-    // the drawn interval, not the mark's x, is what makes it work for flipped labels too.
-    while (placed.some((p) => x0 < p.x1 && p.x0 < x0 + wid && Math.abs(p.y - ly) < 13)) ly -= 13;
-    placed.push({ x0, x1: x0 + wid, y: ly });
-    const lab = svgEl('text', {
-      class: 'mark-label', x: flip ? cx - 11 : cx + 11, y: ly,
-      'text-anchor': flip ? 'end' : 'start',
-    });
-    lab.textContent = a.arm;
-    svg.appendChild(lab);
-  });
-  host.appendChild(svg);
-  host.appendChild(el('div', { class: 'legend' },
-    el('span', { text: 'x: mean billed cost per task  ·  y: solve rate  ·  up and to the left is better' })));
-}
-
-async function toggleBenchTasks(sec, runID, arm) {
-  const existing = sec.querySelector('[data-tasks="' + arm + '"]');
-  if (existing) { existing.remove(); return; }
-  const host = el('div', { class: 'tblwrap', tabindex: '0', 'data-tasks': arm, 'data-testid': 'bench-tasks' });
-  sec.appendChild(host);
-  loadingState(host, 2);
-  try {
-    const { tasks } = await api('benchmarks/' + runID + '/tasks', { arm });
-    clear(host);
-    const tbl = el('table', { class: 'tbl compact' }, el('thead', {}, el('tr', {},
-      el('th', { text: 'Task' }), el('th', { class: 'num', text: 'Reward' }),
-      el('th', { class: 'num', text: 'Steps' }), el('th', { class: 'num', text: 'Cache r/w' }),
-      el('th', { class: 'num', text: 'Fresh' }), el('th', { class: 'num', text: 'Out' }),
-      el('th', { class: 'num', text: 'Cost' }), el('th', { class: 'num', text: 'Wall' }), el('th', { text: '' }))));
-    const tb = el('tbody');
-    for (const t of tasks) {
-      tb.appendChild(el('tr', {},
-        el('td', {}, el('span', { class: 'trunc', title: t.task, text: t.task })),
-        el('td', { class: 'num', text: t.reward.toFixed(2) }),
-        el('td', { class: 'num', text: num(t.steps) }),
-        el('td', { class: 'num', text: compact(t.cache_read) + ' / ' + compact(t.cache_write) }),
-        el('td', { class: 'num', text: compact(t.fresh_input) }),
-        el('td', { class: 'num', text: compact(t.completion_tokens) }),
-        el('td', { class: 'num', text: usd(t.cost_usd) }),
-        el('td', { class: 'num', text: dur(t.wall_s * 1000) }),
-        el('td', {}, t.exception ? el('span', { class: 'pill missing', text: 'exception' })
-          : t.reward >= 1 ? el('span', { class: 'pill complete', text: 'solved' })
-            : el('span', { class: 'pill neutral', text: 'unsolved' }))));
-    }
-    tbl.appendChild(tb);
-    host.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
-  } catch (err) {
-    errorState(host, 'Could not load tasks', err);
-  }
-}
-
 // ── config ─────────────────────────────────────────────────────────────────
 function renderTree(v, key) {
   if (v === null || v === undefined) return el('div', { class: 'v', text: '—' });
@@ -5243,14 +4299,11 @@ function renderTenantConfig() {
       el('strong', {}, own ? 'This account runs its own configuration'
         : 'This account follows the hosted default'),
       el('span', {}, own
-        ? 'Every value below comes from the document saved on your Settings page. It '
-          + 'overrides the hosted default entirely — the two are not merged, so nothing here '
-          + 'is inherited.'
-        : 'You have not saved a configuration of your own, so every value below is the '
-          + 'hosted default. Saving anything on the Settings page replaces this whole '
-          + 'document rather than overriding single keys.'),
-      el('span', {}, 'The panel below this one is what the proxy PROCESS resolved at startup. '
-        + 'It is a different document and it is not what compacted your traffic.'))));
+        ? 'These values come from the settings you saved. They replace the shared default completely.'
+        : 'You have not saved settings of your own, so these are the shared defaults. '
+          + 'Saving on the Settings page replaces all of them, not just one.'),
+      el('span', {}, 'The panel below is the proxy server\'s own startup settings. '
+        + 'It is not what was applied to your traffic.'))));
   if (t.effective_config) {
     host.appendChild(renderTree(t.effective_config));
   } else if (t.effective_config_yaml) {
@@ -5276,13 +4329,14 @@ async function loadConfig() {
     clear(host);
     // The caveat that matters stays in the layout; the server's full explanation folds.
     host.appendChild(el('p', { class: 'note', 'data-testid': 'config-scope', text:
-      'Scope: ' + (cfg.scope || 'server') + ' — what this PROXY PROCESS resolved at startup'
+      'Scope: ' + (cfg.scope || 'server') + ' — the values the proxy server started with'
       + (account.hosted
-        ? ". NOT your account's configuration: yours is in the panel above, and it is the "
-          + 'one that compacted your traffic.'
-        : ', which on this single-tenant deployment is also what every request ran through.') }));
-    if (cfg.description) host.appendChild(whyBlock('Why those can differ', cfg.description));
-    host.appendChild(renderTree(cfg.config || cfg));
+        ? ". These are not your account's settings; yours are in the panel above."
+        : ', which on this single-account setup is also what every request used.') }));
+    if (cfg.description) host.appendChild(whyBlock('Technical details: why the two can differ', cfg.description));
+    const tree = cfg.config || cfg;
+    if (!tree || !Object.keys(tree).length) emptyState(host, 'No settings reported', 'The proxy returned an empty configuration.');
+    else host.appendChild(renderTree(tree));
   } catch (err) {
     if (aborted(err)) return;
     emptyState(host, err.status === 403 ? 'Configuration is not visible from this address'
@@ -5299,11 +4353,12 @@ async function loadConfig() {
   try {
     const { capture: c, description } = await api('capture');
     chost.appendChild(el('div', { class: 'kv' },
-      kv('Captured', num(c.captured)), kv('Written', num(c.written)),
-      kv('Dropped', num(c.dropped)), kv('Insert errors', num(c.errors)),
-      kv('Queue', c.queued + ' / ' + c.queue_cap), kv('SSE clients', num(c.sse_clients)),
+      kv('Received', num(c.captured)), kv('Saved', num(c.written)),
+      kv('Dropped', num(c.dropped)), kv('Save errors', num(c.errors)),
+      kv(term('Waiting', 'Requests waiting to be saved / the most the queue can hold.'), c.queued + ' / ' + c.queue_cap),
+      kv(term('Live viewers', 'Browsers currently receiving live updates from this proxy.'), num(c.sse_clients)),
       kv('Database', c.db_path || '(in memory — history is lost on restart)'),
-      kv('Database size', compact(c.db_bytes) + ' B')));
+      kv('Database size', compact(c.db_bytes).replace(/(\d)([KMGT]?)$/, (_, n, u) => n + ' ' + u + 'B'))));
     // A non-zero drop count is the one thing worth saying out loud here, because it means
     // every number on the Overview under-reports. The definitions fold.
     if (c.dropped > 0) {
@@ -5311,7 +4366,7 @@ async function loadConfig() {
         num(c.dropped) + ' events dropped — every figure on this dashboard under-reports by ' +
         'that much. Raise the queue size or lower the traffic before drawing conclusions.' }));
     }
-    if (description) chost.appendChild(whyBlock('What these counters mean', description));
+    if (description) chost.appendChild(whyBlock('Technical details: what these counters mean', description));
   } catch (err) {
     errorState(chost, 'Could not load capture health', err);
   }
@@ -5336,7 +4391,7 @@ async function checkCapture() {
       const q = c.observe_queue;
       let text = 'You are currently in OBSERVE mode. context-guru did not modify any request: ' +
         'every request above was forwarded to the provider untouched, and the pipeline ran ' +
-        'off-path on a copy. Savings shown here are what compaction WOULD have achieved, ' +
+        'off-path on a copy. Savings shown here are what your preset WOULD have achieved, ' +
         'not what it did.';
       if (q) {
         text += ` Off-path queue: ${num(q.processed)} measured, ${num(q.pending)} in flight`;
@@ -5359,7 +4414,7 @@ const loaders = {
   // compaction-episode panel. Awaited together so one failing does not blank the other.
   components: async () => { await Promise.allSettled([loadComponents(), loadCompactionEpisodes()]); },
   sessions: loadSessions,
-  requests: loadRequests, benchmarks: loadBenchmarks, config: loadConfig,
+  requests: loadRequests, config: loadConfig,
   keepalive: loadKeepAlive,
   // Registered by insights.js, which mounts its own tab; named here because `loaders` is the
   // single map the router consults and a view absent from it renders an empty section forever.
@@ -5389,11 +4444,92 @@ const loaders = {
  */
 const GROUPS = [
   ['overview', ['overview']],
-  ['savings', ['usage', 'benchmarks']],
-  ['behaviour', ['components', 'keepalive']],
+  ['savings', ['keepalive', 'usage']],
   ['traffic', ['sessions', 'requests']],
   ['admin', ['config', 'strategies', 'tenants', 'setup', 'settings', 'archive', 'feedback']],
+  // Operator and research views: real, and not what a user opens this page for.
+  ['advanced', ['components']],
 ];
+/**
+ * TAB_INFO is the one place that says, in plain words, what each tab is for. It feeds three
+ * things: the heading and one-line intro at the top of every tab (ensureIntro), the "About the
+ * other tabs" list on Overview (renderTabMap), and nothing else, so the wording cannot drift.
+ * Written for someone who has never seen this dashboard: no component names, no jargon.
+ */
+const TAB_INFO = {
+  overview: { short: 'Savings and what to remove', title: 'Overview', what: 'Is context-guru saving you money? The three savings it makes, in dollars and tokens, and what to remove next.' },
+  keepalive: { short: 'Does your cache strategy pay off', title: 'Cache strategy', what: 'Whether your cache strategy (keeping the prompt cache warm while you think) paid for itself, and which one to use.',
+    see: 'The verdict first, then who gained and who lost, how long your sessions sit idle, and a calculator. (Also called keep-alive.)' },
+  tools: { short: 'Tools and skills you never use', title: 'Inventory', what: 'Every tool server and skill your requests carry, and the ones that were never used.',
+    see: 'Ranked cards with the cost of carrying each one and the command to remove it.' },
+  usage: { short: 'Spend by day and by model', title: 'Usage', what: 'What you spent each day and on which models, and how much the provider cache covered.',
+    see: 'A day-by-day chart, a split by model or agent, and how often requests found their prompt already cached.' },
+  sessions: { short: 'One row per working session', title: 'Sessions', what: 'One row per working session: what it cost, how long it ran and what was saved.',
+    see: 'A sortable table. Open a row to see its requests.' },
+  requests: { short: 'Every single request', title: 'Requests', what: 'Every single request, newest first.',
+    see: 'Open one to see what it contained, what was removed from it and what the provider billed.' },
+  components: { short: 'How each step of your preset did', title: 'Preset steps', what: 'How each step of your preset performed: what it removed, what it cost and whether it paid off.',
+    see: 'One row per step with its net result, plus a table of the ways it chose to do nothing.' },
+  kvcache: { short: 'How long your cache stays warm', title: 'Cache detail', what: 'How long your prompt cache stays warm between requests, and what other timings would cost. (Also called the KV-cache view.)',
+    see: 'Idle-gap charts, a price table and a replay of different cache strategies on your own history.' },
+  campaigns: { short: 'Cache strategies in bulk', title: 'Strategy campaigns', what: 'Create cache strategies for many sessions at once, then check them on data they have not seen.',
+    see: 'A form to create rules and a table of the ones you made.' },
+  config: { short: 'How this proxy is set up', title: 'Config', what: 'The settings this proxy is running with, and whether it is recording requests properly.',
+    see: 'The effective configuration, recording health and recent log lines.' },
+  strategies: { short: 'Saved cache strategies', title: 'Cache strategies', what: 'The cache strategies you saved and what each has done so far.',
+    see: 'A form to add a rule and a table of existing ones.' },
+  tenants: { short: 'Accounts and A/B groups', title: 'Tenants', what: 'The accounts on this proxy, and the A/B groups they are split into.',
+    see: 'Account list, spend per account and the A/B comparison.' },
+  setup: { short: 'Connect Claude Code to it', title: 'Setup', what: 'How to point Claude Code or Codex at this proxy.',
+    see: 'Copy-paste settings for your token.' },
+  settings: { short: 'Your account and tokens', title: 'Settings', what: 'Your account: preset settings, access tokens, password and machines.',
+    see: 'Forms you can change, and an audit trail of past changes.' },
+  archive: { short: 'Old sessions in storage', title: 'Archive', what: 'Old sessions moved to cold storage to save disk.',
+    see: 'A list of archived sessions; open one to read it.' },
+  feedback: { short: 'Tell us what to fix', title: 'Feedback', what: 'Tell us what is working and what is not.',
+    see: 'A short form, and for managers a summary of what people said.' },
+};
+
+/** ensureIntro gives a view its heading and one-line "what this tab shows", once. Overview ships
+ *  its own heading in the markup; every other view gets one prepended here. */
+function ensureIntro(view) {
+  const panel = document.getElementById('view-' + view);
+  const info = TAB_INFO[view];
+  if (!panel || !info) return;
+  let head = document.querySelector(`.page-head[data-view="${view}"]`);
+  if (!head) {
+    head = el('div', { class: 'page-head', 'data-view': view },
+      el('h1', { class: 'page-title', text: info.title }),
+      el('p', { class: 'tab-intro', text: info.what }));
+    // A sibling ABOVE the panel (and above its bottom-line banner, if one is already there),
+    // not a child: Inventory and KV-cache rebuild their whole panel on every load.
+    const prev = panel.previousElementSibling;
+    (prev && prev.classList.contains('bl') ? prev : panel).before(head);
+  }
+}
+
+/** The "About the other tabs" list: one entry per tab this viewer can open, in nav order. */
+function renderTabMap() {
+  const host = $('#tab-map');
+  if (!host) return;
+  clear(host);
+  // Grouped exactly like the nav, in the nav's own names. Walk the live nav rather than GROUPS:
+  // Inventory, KV-cache and Campaigns mount themselves.
+  const groups = new Map();
+  for (const tab of $$('.viewtabs .tab')) {
+    const info = TAB_INFO[tab.dataset.view];
+    if (!info || !reachable(tab)) continue;
+    const g = tab.closest('.viewtabs').dataset.group;
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push([tab.dataset.view, info]);
+  }
+  for (const [g, items] of groups) {
+    const label = ($(`.groups [data-group="${g}"]`) || {}).textContent || g;
+    host.appendChild(el('div', { class: 'tab-group' }, el('dt', { text: label }),
+      ...items.map(([view, info]) => el('dd', {}, el('a', { href: '#/' + view, text: info.title }), el('span', { text: info.short })))));
+  }
+}
+
 /** GROUP_OF maps a view onto its group. mountTab adds to it, which is how a self-mounted
  *  view gets a group without this file naming it. */
 const GROUP_OF = new Map(GROUPS.flatMap(([g, views]) => views.map((v) => [v, g])));
@@ -5612,6 +4748,9 @@ function go(view, push = true) {
   state.group = GROUP_OF.get(view) || 'overview';
   syncNav();
   for (const s of $$('.view')) s.hidden = s.id !== 'view-' + view;
+  ensureIntro(view);
+  for (const h of $$('.page-head[data-view]')) h.hidden = h.dataset.view !== view;
+  if (view === 'overview') renderTabMap();
   // A filter bar over a view with nothing to filter is thirteen controls inviting clicks
   // that change nothing — and on Settings it sat directly above a form, so the two read as
   // one set of inputs. These four views read no filter at all (see refresh).
@@ -5724,7 +4863,7 @@ function sortable(tableSel, keys) {
     if (!th || !key) return;
     const label = th.textContent;
     clear(th).appendChild(el('button', {
-      class: 'sort', title: 'Sort by ' + label, onclick: () => toggleSort(key),
+      class: 'sort', title: 'Sort by ' + label + (th.title ? '. ' + th.title : ''), onclick: () => toggleSort(key),
     }, label));
   });
   syncSortHeads(tableSel, keys);
@@ -5793,6 +4932,8 @@ function refresh() {
   // changed with an idle proxy would leave the disclaimer out.
   if (state.view === 'overview') renderLive();
   loaders[state.view]();
+  // The per-tab bottom-line banners are retired: each tab now opens with its own heading and intro,
+  // and a second headline above it contradicted the tab's own verdict.
   if (state.view !== 'setup' && state.view !== 'settings') loadFacets();
 }
 
@@ -5842,10 +4983,13 @@ function navPath(view) {
  * written is one segment, including the two the SERVER writes (dash/kvcache.go:510-511),
  * so that branch is not a compatibility shim to be removed later — it is half the traffic.
  */
+const FIVE_PAGE_ALIAS = { home: 'overview', cache: 'keepalive' }; // #savings already opens the Savings group
 function resolveNav(path) {
   const seg = String(path || '').split('/').filter(Boolean);
   const view = seg[seg.length - 1] || '';
   if (GROUP_OF.has(view)) return view;
+  // Links to the short-lived five-page home (#home, #cache; #savings, #tools and #sessions already resolve) land on the nearest tab.
+  if (seg.length === 1 && FIVE_PAGE_ALIAS[seg[0]]) return FIVE_PAGE_ALIAS[seg[0]];
   // Only a group name survived (`#/admin`, or `#/savings/typo`): open its first tab.
   const g = GROUPS.find(([n]) => n === seg[0]);
   return (g && firstView(g[0])) || 'overview';
@@ -6133,7 +5277,7 @@ function initTheme() {
   const label = () => {
     const cur = document.documentElement.getAttribute('data-theme') || 'auto';
     const face = cur === 'dark' ? 'Dark' : cur === 'light' ? 'Light' : 'Auto';
-    btn.textContent = face;
+    btn.textContent = 'Theme: ' + face;
     btn.setAttribute('aria-label', 'Colour theme: ' + face.toLowerCase() + '. Activate to change.');
     btn.title = btn.getAttribute('aria-label');
   };
@@ -6150,6 +5294,11 @@ function initTheme() {
 
 function init() {
   initTheme();
+  $('#overview-diagnostics').addEventListener('toggle', (ev) => { if (ev.target.open && (state.diagStale || !state.diagDrawn)) { state.diagDrawn = true; renderDiagnostics(); } });
+  $('#filters-toggle').addEventListener('click', (ev) => {
+    const open = $('#filters').classList.toggle('open');
+    ev.currentTarget.setAttribute('aria-expanded', String(open));
+  });
   // Delegated, not one listener per tab: the three self-mounting views add their tabs
   // while this file is still being parsed, so a per-tab loop here would either miss them
   // or have to be re-run. A group button opens that group's first usable tab.
@@ -6197,10 +5346,13 @@ function init() {
     state.reqCursor = state.reqStack.pop() || 0;
     loadRequests();
   });
+  $('#break-more').addEventListener('change', (e) => $('[data-testid=breakdown-table]').classList.toggle('show-more', e.target.checked));
+  document.addEventListener('change', (e) => { if (e.target.id === 'comp-more') $('[data-testid=components-table]').classList.toggle('show-more', e.target.checked); });
+  $('#req-more').addEventListener('change', (e) => $('[data-testid=requests-table]').classList.toggle('show-more', e.target.checked));
+  $('#sess-more').addEventListener('change', (e) => $('[data-testid=sessions-table]').classList.toggle('show-more', e.target.checked));
+  $('#sess-sort').addEventListener('change', (ev) => { state.sessSort = ev.target.value; state.sessOffset = 0; loadSessions(); });
   $('#sess-prev').addEventListener('click', () => { state.sessOffset = Math.max(0, state.sessOffset - 25); loadSessions(); });
   $('#sess-next').addEventListener('click', () => { state.sessOffset += 25; loadSessions(); });
-  // Benchmarks is manager-only and its markup is now a <template> until revealed, so
-  // #bench-refresh is wired from wireManagerView instead of here — see revealManagerTemplates.
   $('#drawer-close').addEventListener('click', closeDrawer);
   // Forward wrap: reaching the sentinel means the last real stop is behind us.
   $('#drawer-end').addEventListener('focus', () => { $('#drawer-close').focus(); });
@@ -6686,8 +5838,8 @@ async function applyAccount() {
   await maybeLoadManagerScript();
   // data-manager is "hosted managers only". data-local-ok marks the ones that are also
   // fine on a single-tenant proxy, where there is no principal and nothing to scope:
-  // /api/benchmarks is manager-gated in hosted mode but open locally, and hiding the tab
-  // there would break the local dev path.
+  // The Components and Config tabs are manager-gated in hosted mode but open locally, and
+  // hiding them there would break the local dev path.
   //
   // In HOSTED mode a non-manager still sees nothing: that is a permissions boundary over
   // somebody else's data. In single-tenant local mode there is no other tenant to protect,
@@ -6709,7 +5861,7 @@ function isManager() { return !!(account.tenant && account.tenant.role === 'mana
 // hidden elements. `localOk` mirrors data-local-ok: true for the views a single-tenant
 // proxy — which has no principal to protect — may use even signed out.
 const MANAGER_ONLY_VIEWS = [
-  ['config', true], ['benchmarks', true], ['components', true],
+  ['config', true], ['components', true],
   ['strategies', false], ['tenants', false],
 ];
 /** Clone each manager-only template into the live DOM once its viewer is entitled to it. */
@@ -6728,7 +5880,6 @@ function revealManagerTemplates() {
 // deferred here because their targets did not exist in the DOM until just now.
 function wireManagerView(view) {
   if (view === 'components') sortable('[data-testid=components-table]', COMPONENT_SORT);
-  else if (view === 'benchmarks') $('#bench-refresh').addEventListener('click', rescanBenchmarks);
   else if (view === 'tenants') $('#ab-range').addEventListener('change', loadVariants);
 }
 // campaigns.js is manager-only (see its own header) with no local-ok exemption, so it is
@@ -6817,14 +5968,38 @@ async function loadOptions() {
 // line that silently cannot work.
 const TOKEN_SLOT = 'cg_live_YOUR_TOKEN_HERE';
 
-/** claudeSettings is the WHOLE env block a Claude Code user ends up with — not a diff.
- *  A beginner cannot apply a diff, and the two keys are the entire change. */
+/** claudeSettings is the WHOLE settings a Claude Code user ends up with — not a diff.
+ *  A beginner cannot apply a diff. The env block is the routing; the hooks tell the
+ *  keep-alive when a session ends (exit, Ctrl-C, closing the terminal, /clear, logout) or is
+ *  compacted, so it stops pinging a cache nobody will read. The hook sends only the session
+ *  id, event and reason, and a failed post changes nothing. */
 function claudeSettings(base, tok) {
+  // Only the session id, event name and reason/source leave the machine: the hook picks them out
+  // of Claude Code's payload (restricted to id characters, so nothing else can ride along) instead
+  // of forwarding it, which also holds the working directory and the transcript path. The token
+  // never reaches an argv (/proc/<pid>/cmdline is world-readable): printf is a shell builtin, and
+  // sed and curl read it on stdin as curl config lines.
+  const signal = String.raw`P=$(cat); f() { printf '%s' "$P" | tr -d '\n' | sed -n "s/.*\"$1\" *: *\"\([A-Za-z0-9._:-]*\)\".*/\1/p"; }; `
+    + String.raw`printf '%s\n' "$ANTHROPIC_CUSTOM_HEADERS" | sed 's/^/header = "/; s/$/"/' `
+    + String.raw`| curl -s -o /dev/null -m 2 -K - -H 'Content-Type: application/json' `
+    + String.raw`--data "{\"session_id\":\"$(f session_id)\",\"hook_event_name\":\"$(f hook_event_name)\",\"reason\":\"$(f reason)\",\"source\":\"$(f source)\"}" `
+    + `${base}/signal || true`;
+  const hook = (matcher) => [
+    `      { ${matcher}"hooks": [ { "type": "command", "command": ${JSON.stringify(signal)}, "timeout": 5 } ] }`,
+  ];
   return [
     '{',
     '  "env": {',
     `    "ANTHROPIC_BASE_URL": "${base}/anthropic",`,
     `    "ANTHROPIC_CUSTOM_HEADERS": "x-context-guru-token: ${tok}"`,
+    '  },',
+    '  "hooks": {',
+    '    "SessionEnd": [',
+    ...hook(''),
+    '    ],',
+    '    "SessionStart": [',
+    ...hook('"matcher": "compact", '),
+    '    ]',
     '  }',
     '}',
   ];
@@ -6974,8 +6149,10 @@ function loadSetup() {
         'Your token is already filled in.'), copyButton(settings.join('\n'))),
       el('pre', { class: 'code', 'data-testid': 'setup-claude' }, settings.join('\n')),
       el('p', { class: 'hint' },
-        'Already have an "env" block? Add just those two lines inside it. Leave every '
-        + 'other key alone.')),
+        'Already have an "env" or "hooks" block? Add just these entries inside it. Leave '
+        + 'every other key alone. The hooks tell us when a session ends or is compacted, so '
+        + 'your cache strategy stops; they send only the session id, the event name and its '
+        + 'reason. Remove the "hooks" block to opt out.')),
     step(3, 'Keep your own key where it is',
       el('p', { class: 'hint' },
         'ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN stays yours: we forward it, so your '
@@ -7158,7 +6335,7 @@ function loadSettings() {
     if (!mgr) {
       host.appendChild(el('div', { class: 'cfg-state', 'data-testid': 'cfg-state-managed' },
         el('div', {},
-          el('strong', {}, 'Your manager sets the compaction.'),
+          el('strong', {}, 'Your manager sets your preset.'),
           ' Ask them for a change; everything else on this page is yours.')));
     }
 
@@ -7167,7 +6344,7 @@ function loadSettings() {
       ? el('div', { class: 'cfg-state', 'data-testid': 'cfg-state-inherited' },
         el('div', {},
           el('strong', {}, 'Following the server default.'),
-          ' The pipeline below is what your traffic runs now. It changes when the ' +
+          ' The steps below are what your traffic uses now. They change when the ' +
           'operator changes the default.'),
         el('button', {
           class: 'ghost small', 'data-testid': 'cfg-customise',
@@ -7195,21 +6372,21 @@ function loadSettings() {
     // The option text names the value a captured request will SHOW, because these are the
     // same dimension under two names: the config says sync, the request rows say active.
     const modeSel = el('select', { id: 'set-mode', 'data-testid': 'set-mode' },
-      el('option', { value: 'sync' }, 'sync — compaction is applied (requests show Mode "active")'),
+      el('option', { value: 'sync' }, 'sync — your preset is applied (requests show Mode "active")'),
       el('option', { value: 'observe' }, 'observe — measure only, requests untouched (Mode "observe")'));
     modeSel.value = cfg.mode === 'observe' ? 'observe' : 'sync';
     modeSel.disabled = inherited;
     if (mgr) {
       host.appendChild(el('div', { class: 'field' },
-        el('label', { for: 'set-mode' }, 'Mode'), modeSel,
+        el('label', { for: 'set-mode' }, term('Mode', 'sync removes text from requests; observe only measures.')), modeSel,
         el('p', { class: 'hint' },
-          'observe is the safe way to try a configuration: nothing is rewritten.')));
+          'Observe is the safe way to try settings: nothing is changed.')));
     }
 
     // Upstreams, one per dialect, from the operator's allow-list.
     const ups = (opts && opts.upstreams) || [];
-    for (const [key, label] of [['up_anthropic', 'Anthropic-dialect upstream'],
-      ['up_openai', 'OpenAI-dialect upstream'], ['up_bob', 'Bob upstream']]) {
+    for (const [key, label] of [['up_anthropic', 'Anthropic provider address'],
+      ['up_openai', 'OpenAI provider address'], ['up_bob', 'Bob provider address']]) {
       const sel = el('select', { id: 'set-' + key, 'data-testid': 'set-' + key },
         el('option', { value: '' }, '— none —'),
         ...ups.map((u) => el('option', { value: u.name }, `${u.name} (${u.dialect})`)));
@@ -7230,21 +6407,21 @@ function loadSettings() {
       // fields editable — and unticking it is what clears them on save.
       cb.addEventListener('change', () => drawComps());
       const warn = name === 'extract_llm'
-        ? ' — calls a compaction model on the request path (+117ms typical, up to ~945ms on file reads) and bills to the shared credential'
+        ? ' — calls a preset model on the request path (+117ms typical, up to ~945ms on file reads) and bills to the shared credential'
         : '';
       grid.appendChild(el('label', { class: 'comp', for: id }, cb,
         el('span', { class: 'comp-name' }, name),
         warn ? el('span', { class: 'comp-warn' }, warn) : null));
     }
     if (mgr) host.appendChild(el('div', { class: 'field' },
-      el('label', {}, 'Pipeline components'), grid,
-      el('p', { class: 'hint' }, 'What runs, in the order shown.'),
+      el('label', {}, term('Preset steps', 'Each step removes one kind of waste from requests. Tick the ones you want.')), grid,
+      el('p', { class: 'hint' }, 'Ticked steps run in the order shown.'),
       whyBlock('What saving changes',
         'A newly enabled component is appended at the end of the pipeline. Ticking one here ' +
         'is what makes its fields below editable, and unticking one CLEARS the keys it has ' +
         'in your document — a block is configuration, not enablement, so leaving a block ' +
         'behind for a component that does not run is the state nobody can read back. ' +
-        'Saving rebuilds your pipeline and discards frozen compaction decisions, so the ' +
+        'Saving rebuilds your pipeline and discards frozen preset decisions, so the ' +
         'next turn will not be cache-warm.')));
 
     // Idle keep-alive consent. Its own consent control, beside the transcript one, for the
@@ -7265,18 +6442,16 @@ function loadSettings() {
         el('span', { class: 'comp-name' },
           'Keep my prompt cache warm while I am away')),
       el('p', { class: 'hint' },
-        'Spends a small amount to avoid a much larger cache-recreation charge. After '
-        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 280)) + 's idle, up to '
-        + (((cfg.cache && cfg.cache.keepalive_max_pings) || 2)) + ' minimal requests re-read '
-        + 'your cached prompt so the provider refreshes its 5-minute lifetime for free. '
-        + 'Only on sessions with a large enough cached prompt to be worth it, and never on a '
-        + 'session\u2019s first request. Billed to your own key.'),
+        'Sends tiny requests while you are idle so the provider keeps your prompt cached, '
+        + 'which is cheaper than rebuilding it. After '
+        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 270)) + 's idle, up to '
+        + (((cfg.cache && cfg.cache.keepalive_max_pings) || 2)) + ' pings. Billed to your own key.'),
       whyBlock('What it costs and what it saves',
         'A cache read costs 0.1x base input; re-creating a lapsed prefix costs 1.25x, so one '
         + 'ping buys back about 11.5 of itself. On this service\u2019s traffic, requests that '
         + 'resumed after the 5-minute window cost 8.5x a request that hit, and they were 23.6% '
         + 'of all spend. It is off by default because it is your money and nobody asked for it '
-        + 'to be spent. Every ping is a row on your Requests tab marked keep-alive with its own '
+        + 'to be spent. Every ping is a row on your Requests tab marked cache strategy with its own '
         + 'cost, and the Overview ledger shows pings, ping cost, misses avoided and the net. '
         + 'It also RETAINS, in memory only, your provider key and that session\u2019s last '
         + 'request \u2014 which includes its conversation content \u2014 for the length of the '
@@ -7303,12 +6478,12 @@ function loadSettings() {
           'This is ', el('strong', {}, 'on'), ' for your account, set by a manager, and it '
           + 'spends your own key while you are away. You can switch it off here — turning '
           + 'it back on is a manager’s change, because the setting lives in the '
-          + 'configuration document. See the Keep-alive tab for what it has cost and avoided '
+          + 'configuration document. See the Cache strategy tab for what it has cost and avoided '
           + 'on your traffic.'),
         el('div', { class: 'actions' }, el('button', {
           class: 'ghost', 'data-testid': 'set-keepalive-off',
           onclick: async () => {
-            if (!confirm('Switch the keep-alive off for your account? Every armed session is '
+            if (!confirm('Switch your cache strategy off for your account? Every armed session is '
               + 'disarmed and anything held for you is released immediately.')) return;
             try {
               await ctl('/api/me/keepalive', { method: 'DELETE' });
@@ -7316,7 +6491,7 @@ function loadSettings() {
               loadSettings();
             } catch (e) { alert(e.message); }
           },
-        }, 'Turn keep-alive off'))));
+        }, 'Turn your cache strategy off'))));
     }
 
     // Content capture consent.
@@ -7366,15 +6541,13 @@ function loadSettings() {
       host.appendChild(el('div', { class: 'field' },
         el('label', {}, 'Component configuration'),
         el('p', { class: 'hint' },
-          'Every key each component reads, from the server\u2019s own declarations. A field '
-          + 'left empty is UNSET: the key is removed from your document and the component\u2019s '
-          + 'default decides, which is not the same thing as writing that default down.'),
+          'One group of options per step. A field left empty uses that step\'s built-in default.'),
         whyBlock('What happens when you save',
           'These fields are applied to your configuration on the server with a YAML library '
           + 'and the result is built once before it is stored, so a value that would not work '
           + 'is a refusal naming the field rather than a surprise on your next turn. A key you '
           + 'leave empty is REMOVED from the document and the component\u2019s own default '
-          + 'takes over. Saving rebuilds your pipeline and discards frozen compaction '
+          + 'takes over. Saving rebuilds your pipeline and discards frozen preset '
           + 'decisions, so the next turn will not be cache-warm.')));
       host.appendChild(compHost);
       drawComps();
@@ -7403,7 +6576,7 @@ function loadSettings() {
     host.appendChild(el('div', { class: 'actions' },
       el('button', { class: 'primary', 'data-testid': 'settings-save', onclick: saveSettings }, 'Save')));
     // What a save DOES to the document, beside the button that does it. The page already warns
-    // that saving discards frozen compaction decisions; this is the other half, and it is here
+    // that saving discards frozen preset decisions; this is the other half, and it is here
     // because an operator lost 36 comment lines to a save and had no way to know they would.
     // Comment and key-order preservation is deliberately not built — it means rewriting the
     // exact code whose two previous rewrites each shipped a data-loss bug — so the honest
@@ -7738,7 +6911,7 @@ function renderComponentFields(name, fields, values, disabled, ctx) {
     const noStatic = fd.key === 'model.source' && opts && opts.compaction_model === false;
     return field(fd, sel, noStatic
       ? el('p', { class: 'hint warn-text' },
-        'THIS DEPLOYMENT HAS NO CONFIGURED COMPACTION MODEL — it deliberately does not spend '
+        'THIS DEPLOYMENT HAS NO CONFIGURED PRESET MODEL — it deliberately does not spend '
         + 'the operator’s credential on your traffic. So "config" here means the '
         + 'component has no model and never makes a call, however else it is configured.')
       : null);
@@ -8000,8 +7173,8 @@ async function loadTenants() {
     }
     const tbl = el('table', { class: 'grid' },
       el('thead', {}, el('tr', {},
-        el('th', {}, 'Account'), el('th', {}, 'Role'), el('th', {}, 'Variant'), el('th', {}, 'Spend'),
-        el('th', {}, 'Last seen'), el('th', {}, 'Transcripts'), el('th', {}, 'Configuration'),
+        el('th', {}, 'Account'), el('th', {}, 'Role'), el('th', {}, term('Group', 'The A/B test group this account was put in, if any.')), el('th', {}, 'Spend'),
+        el('th', {}, 'Last seen'), el('th', {}, term('Transcripts', 'Whether the text of this account\'s requests is being stored for the diff view.')), el('th', {}, 'Configuration'),
         el('th', {}, el('span', { class: 'vh' }, 'Row actions')))));
     const body = el('tbody');
     for (const t of rows) {
@@ -8164,8 +7337,8 @@ function renderTenantEditor(host, t) {
 
   const ups = (account.options && account.options.upstreams) || [];
   const upSel = {};
-  for (const [key, text] of [['up_anthropic', 'Anthropic-dialect upstream'],
-    ['up_openai', 'OpenAI-dialect upstream'], ['up_bob', 'Bob upstream']]) {
+  for (const [key, text] of [['up_anthropic', 'Anthropic provider address'],
+    ['up_openai', 'OpenAI provider address'], ['up_bob', 'Bob provider address']]) {
     const sel = el('select', { id: 'acct-' + key, 'data-testid': 'acct-' + key },
       el('option', { value: '' }, '— none —'),
       ...ups.map((u) => el('option', { value: u.name }, u.name + ' (' + u.dialect + ')')));
@@ -8203,7 +7376,7 @@ function renderTenantEditor(host, t) {
     el('p', { class: 'hint' }, 'Pipeline, per-component settings and mode. Validated on '
       + 'save by the same loader the proxy builds with, so a typo is a refusal naming the '
       + 'key rather than a surprise at request time. Saving rebuilds their pipeline, which '
-      + 'discards their frozen compaction decisions — their next turn will not be cache-warm.')));
+      + 'discards their frozen preset decisions — their next turn will not be cache-warm.')));
 
   fields.appendChild(el('div', { class: 'actions' },
     el('button', {
@@ -8506,7 +7679,7 @@ async function loadArchive() {
     const rowRemote = rows.length ? rows[0].remote : '';
     $('#archive-remote').textContent = out.remote ? 'stored in ' + out.remote
       : rowRemote ? 'stored in ' + rowRemote + ' — not configured on this deployment now'
-        : 'cold storage is not configured on this deployment';
+        : 'archive storage is not configured on this deployment';
     clear(host);
     if (!rows.length) {
       emptyState(host, 'Nothing archived yet',
@@ -8517,8 +7690,8 @@ async function loadArchive() {
     }
     const tbl = el('table', { class: 'grid' },
       el('thead', {}, el('tr', {},
-        el('th', {}, 'Session'), el('th', {}, 'Requests'), el('th', {}, 'Active'),
-        el('th', {}, 'Archived'), el('th', {}, 'Size'), el('th', {}, 'What moved'), el('th', {}, el('span', { class: 'vh' }, 'Row actions')))));
+        el('th', {}, 'Session'), el('th', {}, 'Requests'), el('th', {}, 'Active between'),
+        el('th', {}, 'Archived on'), el('th', {}, 'Size'), el('th', {}, 'What was moved'), el('th', {}, el('span', { class: 'vh' }, 'Row actions')))));
     const body = el('tbody');
     for (const a of rows) {
       const kind = a.full_path ? 'whole session' : 'transcripts only';
@@ -8619,9 +7792,9 @@ function buildStrategyForm(form) {
   $('#strategy-form-title').textContent = 'New strategy';
 
   const name = el('input', { type: 'text', id: 'sf-name', maxlength: '64', required: 'required' });
-  const idle = el('input', { type: 'number', id: 'sf-idle', value: '280', min: '1' });
+  const idle = el('input', { type: 'number', id: 'sf-idle', value: '270', min: '1' });
   const pings = el('input', { type: 'number', id: 'sf-pings', value: '1', min: '1' });
-  const prefix = el('input', { type: 'number', id: 'sf-prefix', value: '20000', min: '0' });
+  const prefix = el('input', { type: 'number', id: 'sf-prefix', value: '80000', min: '0' });
   const usdCap = el('input', { type: 'number', id: 'sf-usd', value: '0', min: '0', step: '0.01' });
   const active = el('input', { type: 'checkbox', id: 'sf-active', checked: 'checked' });
 
@@ -8642,7 +7815,7 @@ function buildStrategyForm(form) {
   const targetAll = el('input', { type: 'radio', name: 'sf-target-mode', value: 'all', checked: 'checked' });
   const targetList = el('input', { type: 'radio', name: 'sf-target-mode', value: 'list' });
   const targetIDs = el('select', {
-    id: 'sf-target-ids', 'data-testid': 'sf-target-ids', multiple: 'multiple', size: '5', disabled: 'disabled',
+    id: 'sf-target-ids', 'data-testid': 'sf-target-ids', multiple: 'multiple', size: '3', disabled: 'disabled',
   }, ...strategyForm.tenants.map((t) => el('option', { value: t.id }, t.label ? `${t.email} · ${t.label}` : t.email)));
   const syncTargetDisabled = () => { targetIDs.disabled = !targetList.checked; };
   targetAll.addEventListener('change', syncTargetDisabled);
@@ -8680,7 +7853,11 @@ function buildStrategyForm(form) {
       }
       fieldError(windowsField, '');
       strategyForm.windows.push({
-        days, start: winStart.value, end: winEnd.value, tz: winTZ.value.trim() || 'Asia/Jerusalem',
+        // A time input tops out at 23:59, and the server's window end is exclusive, so a window
+        // ending 23:59 would leave that last minute of the day uncovered. Send the end-of-day
+        // spelling instead.
+        days, start: winStart.value, end: winEnd.value === '23:59' ? '24:00' : winEnd.value,
+        tz: winTZ.value.trim() || 'Asia/Jerusalem',
       });
       // Days are per-window, not sticky across additions — a manager building "9-12
       // weekdays" and "14-18 weekends" would otherwise have the second Add silently
@@ -8706,15 +7883,15 @@ function buildStrategyForm(form) {
   }, 'Cancel edit');
 
   form.appendChild(el('div', { class: 'field' }, el('label', { for: 'sf-name' }, 'Name'), name));
-  form.appendChild(el('div', { class: 'field' }, el('label', { for: 'sf-idle' }, 'Idle seconds'), idle));
-  form.appendChild(el('div', { class: 'field' }, el('label', { for: 'sf-pings' }, 'Max pings'), pings));
+  form.appendChild(el('div', { class: 'field' }, el('label', { for: 'sf-idle' }, term('Idle seconds', 'How long a session must sit quiet before the first ping is sent. Keep it under 300, the cache lifetime.')), idle));
+  form.appendChild(el('div', { class: 'field' }, el('label', { for: 'sf-pings' }, term('Max pings', 'The most pings sent in a row for one idle spell. More pings keep the cache alive longer but cost more.')), pings));
   form.appendChild(el('div', { class: 'field' },
-    el('label', { for: 'sf-prefix' }, 'Min prefix tokens'), prefix));
+    el('label', { for: 'sf-prefix' }, term('Min prefix tokens', 'Only sessions whose cached prompt is at least this many tokens are pinged. Small prompts are cheap to rewrite, so pinging them rarely pays.')), prefix));
   form.appendChild(el('div', { class: 'field' },
-    el('label', { for: 'sf-usd' }, 'Max $/ping (0 = default)'), usdCap));
+    el('label', { for: 'sf-usd' }, 'Max $/ping (0 = default)'), usdCap, el('p', { class: 'hint' }, 'Skips a ping that would cost more than this.')));
   form.appendChild(el('div', { class: 'field' }, el('label', {}, active, ' Active')));
   form.appendChild(el('fieldset', { class: 'field' },
-    el('legend', {}, 'Predictor gate (optional, in addition to the windows below)'),
+    el('legend', {}, term('Predictor gate', 'An extra check that only pings when the session looks likely to come back soon. Optional, and applied on top of the time windows.'), ' (optional, in addition to the windows below)'),
     el('label', { for: 'sf-predictor' }, 'Predictor'), predictor,
     el('label', { for: 'sf-predictor-threshold' }, 'Minimum probability'), predictorThreshold));
   form.appendChild(el('fieldset', { class: 'field' },
@@ -8830,7 +8007,7 @@ async function openStrategyLedger(s) {
     body.appendChild(el('p', { class: 'note' },
       'Saved is only the credit THIS strategy’s own pings earned — a request rescued by a ' +
       'different strategy, or by account config or a session override with no strategy at ' +
-      'all, is not counted here. This ledger is ALL TIME — unlike Overview or the Keep-Alive ' +
+      'all, is not counted here. This ledger is ALL TIME — unlike Overview or the Cache strategy ' +
       'tab, it ignores whatever date range the dashboard is set to, so a lower or higher ' +
       'number here than those pages show is not a discrepancy.'));
     // Pings > 0 with Saved stuck at exactly $0 is not a broken calculation — it is what a
@@ -8880,12 +8057,10 @@ function renderStrategiesList(host, rows) {
     emptyState(host, 'No strategies yet', 'Create one above.');
     return;
   }
-  host.appendChild(el('p', { class: 'note' },
-    'Each strategy’s “Stats” drawer shows pings, cost, and Saved — all exact and additive ' +
-    'across strategies, no double-counting. They will not sum to the Overview or ' +
-    'Keep-Alive tab’s total, though: a credit whose ping matched no strategy (plain ' +
-    'account config or a session override) belongs to none of these rows and only shows ' +
-    'up in the account-wide total.'));
+  host.appendChild(el('p', { class: 'hint' },
+    'One row per rule. Open “Stats” on a row to see what it spent and saved. ' +
+    'These do not add up to the Overview or Cache strategy totals, because pings sent under plain account ' +
+    'settings or a per-session override belong to no rule.'));
   const tbl = el('table', { class: 'grid' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Name'), el('th', {}, 'Windows'), el('th', {}, 'Target'),
@@ -9553,8 +8728,17 @@ async function loadKeepAlive() {
   // "is this costing me money".
   const host = clear($('#ka-tiles'));
   loadingState(host, 2);
+  // The ledger and the recommendation start together; the other panels start as soon as the ledger is
+  // back. The recommendation (about nine seconds) used to wait behind the ledger, which put it on the
+  // critical path; starting EVERYTHING at once was measured worse still, because six heavy reads
+  // contending for the database slowed every one of them (the ledger took twice as long). Each panel
+  // still fills from its own request, so one slow query never blanks another.
+  const ledger = keepAliveLedger();
+  loadKARecommend();
+  const rest = () => { loadKASessions(); loadKALive(); loadKABehaviour(); loadKACalc(); loadKAArmed(); };
   try {
-    kaState.ledger = await api('keepalive');
+    kaState.ledger = await ledger;
+    rest();
     renderKAVerdict(kaState.ledger);
     // The decision row paints immediately with the ledger half, and again when the
     // counterfactual lands. The ledger must not wait on a window function; the row must not
@@ -9562,17 +8746,10 @@ async function loadKeepAlive() {
     renderKADecision(kaState.ledger, kaState.recommend);
     renderKADownside(kaState.ledger);
   } catch (e) {
+    rest();
     if (aborted(e)) return;
-    errorState(host, 'Could not read the keep-alive ledger', e);
-    return;
+    errorState(host, 'Could not read the cache strategy ledger', e);
   }
-  // The rest, each from its own request: one slow panel must not blank the others.
-  loadKASessions();
-  loadKALive();
-  loadKABehaviour();
-  loadKACalc();
-  loadKAArmed();
-  loadKARecommend();
 }
 
 /**
@@ -9587,7 +8764,7 @@ function renderKACoverage(o) {
   const host = clear($('#ka-coverage'));
   if (!o.keepalive_recorded_from) {
     host.appendChild(el('div', { class: 'banner', 'data-testid': 'ka-never-ran' },
-      el('strong', {}, 'The keep-alive has not run on this account in this window. '),
+      el('strong', {}, 'Your cache strategy has not run on this account in this window. '),
       'The figures below are what it would have had to work with, not a measurement of it. ' +
       'Nothing here is a $0 saving — it is an absence.'));
     return;
@@ -9596,7 +8773,7 @@ function renderKACoverage(o) {
     host.appendChild(el('div', { class: 'banner warn', 'data-testid': 'ka-partial' },
       `Recorded on ${num(o.keepalive_recorded_rows)} of ${num(o.requests)} requests in this ` +
       `window — it started running ${when(o.keepalive_recorded_from)}. Rows before that carry ` +
-      'no keep-alive columns at all, so they are absent from these figures rather than zero.'));
+      'no cache-strategy columns at all, so they are absent from these figures rather than zero.'));
   }
 }
 
@@ -9631,50 +8808,43 @@ function renderKACoverage(o) {
 function renderKADecision(o, rec) {
   const host = clear($('#ka-decision'));
   const ledgerNet = o && o.keepalive_recorded_from ? o.net_usd : null;
-  // The three-part row: benefit, cost, signed net. A renderer that can emit one without the
-  // other is a bug, so all three come from one call.
-  const rows = [];
-  if (rec && !rec.refused && rec.lo_usd !== undefined) {
-    const mid = (rec.lo_usd + rec.hi_usd) / 2;
-    rows.push(['DECISION — expected across all your traffic',
-      usd(rec.lo_usd) + ' to ' + usd(rec.hi_usd),
-      '90% interval over ' + num(rec.n) + ' expiries in ' + num(rec.sessions) + ' sessions, at '
-      + rec.idle_seconds + 's / ' + rec.max_pings + ' pings',
-      mid < 0 ? 'bad' : 'good']);
-  } else if (rec && rec.refused) {
-    rows.push(['DECISION — expected across all your traffic',
-      rec.service_lo_usd !== undefined && rec.n
-        ? 'below zero'
-        : 'not computable',
-      rec.refused, 'bad']);
-  }
-  if (ledgerNet !== null) {
-    rows.push(['Measured on the sessions it already fired on', usd(ledgerNet),
-      num(o.sessions_touched) + ' of the sessions in this window · the saving half is a CEILING, '
-      + 'so this is an upper bound and it is not the decision',
-      '']);
-  }
-  if (!rows.length) { host.hidden = true; return; }
+  if (!rec && ledgerNet === null) { host.hidden = true; return; }
   host.hidden = false;
-  host.appendChild(el('div', { class: 'panel', 'data-testid': 'ka-decision-panel' },
-    el('h2', {}, 'Which number is the decision?'),
-    el('p', { class: 'note' },
-      'These two answer different questions and the tab used to show them 2,900 px apart with '
-      + 'nothing saying which to act on. The ', el('strong', {}, 'first'), ' is the one a '
-      + 'decision rests on: it replays the gated policy over ',
-      el('strong', {}, 'every'), ' session in this window. The second is what the policy '
-      + 'actually did on the subset of sessions it fired on, which is a selected population and '
-      + 'a ceiling. The K ladder further down is the same counterfactual, per rung.'),
-    // Inside its own overflow-x wrapper: the third column is a sentence, and at 390 px an
-    // unwrapped 3-column table pushed the BODY sideways (DESIGN §3.1 — the page body never
-    // scrolls horizontally, the table does).
-    el('div', { class: 'tblwrap', tabindex: '0' },
-    el('table', { class: 'grid', 'data-testid': 'ka-decision-table' },
-      el('tbody', {}, ...rows.map(([label, value, note, cls]) => el('tr', {},
-        el('td', {}, el('strong', {}, label)),
-        el('td', { class: 'num ' + (cls === 'bad' ? 'bad-text' : cls === 'good' ? 'good-text' : ''),
-          style: 'font-weight:600' }, value),
-        el('td', { class: 'small' }, note))))))));
+  // One verdict, one number, one sentence, then the setting. The forecast (replay over every
+  // session in the window) decides; the measured figure is a labelled upper bound beneath it.
+  let verdict, big, cls, sentence, setting;
+  if (!rec) {
+    verdict = 'Working it out'; big = '\u2026'; cls = '';
+    sentence = 'Replaying your past idle gaps to see whether a cache strategy would have paid.';
+  } else if (rec.refused) {
+    const wouldCost = rec.refused.indexOf('COST') >= 0;
+    verdict = wouldCost ? 'No, it would cost you money' : 'Too early to say';
+    big = wouldCost ? 'Below $0' : 'Not enough data';
+    cls = wouldCost ? 'bad' : '';
+    sentence = rec.refused + '.';
+    setting = wouldCost ? 'Leave your cache strategy off. If you turn one on anyway, use the default: 270 s idle, 2 pings.'
+      : 'Use the default for now: 270 s idle, 2 pings.';
+  } else {
+    const mid = (rec.lo_usd + rec.hi_usd) / 2;
+    verdict = mid < 0 ? 'No, it would cost you money' : 'Yes, it should pay for itself';
+    big = usd(rec.lo_usd) + ' to ' + usd(rec.hi_usd);
+    cls = mid < 0 ? 'bad' : 'good';
+    sentence = 'Expected over a window like this one, from ' + num(rec.n) + ' times a cache ran out in '
+      + num(rec.sessions) + ' sessions (90% range).';
+    setting = mid < 0 ? 'Leave your cache strategy off.'
+      : 'Setting to use: ping after ' + rec.idle_seconds + ' s idle, at most ' + rec.max_pings + ' pings in a row.';
+  }
+  host.appendChild(el('div', { class: 'ka-hero', 'data-testid': 'ka-decision-panel' },
+    el('div', { class: 'ka-kicker' }, 'Forecast for all your traffic'),
+    el('div', { class: 'ka-verdict' + (cls ? ' ' + cls : ''), 'data-testid': 'ka-verdict' }, verdict),
+    el('div', { class: 'ka-big ' + cls, 'data-testid': 'ka-forecast' }, big),
+    el('p', { class: 'ka-sentence' }, sentence),
+    setting ? el('p', { class: 'ka-setting', 'data-testid': 'ka-setting' }, setting) : null,
+    ledgerNet !== null ? el('p', { class: 'ka-measured', 'data-testid': 'ka-measured' },
+      el('strong', {}, 'Measured on the sessions where it ran: ' + usd(ledgerNet)),
+      ' on ' + num(o.sessions_touched) + ' sessions. This is an ',
+      term('upper bound', 'The most it could have saved. The provider keeps one cache per identical prompt start, so another session may have kept the same cache warm for free.'),
+      ', so it is not the number to decide on.') : null));
 }
 
 /** renderKAVerdict is panel 1: a handful of headline numbers, as tiles. Not a bar chart of four
@@ -9688,32 +8858,52 @@ function renderKAVerdict(o) {
   // it outright. The position now states which population it describes, and the judgement — the
   // --good/--bad colour — is deferred to the decision row above, which has the counterfactual.
   const position = !ran || !o.pings ? 'No pings yet' : (o.net_usd < 0 ? 'Behind' : 'Ahead');
-  host.appendChild(tileGroup(null, null, [
+  const moreTiles = tileGroup(null, null, [
     // The words are beside the colour, always: a status must never rest on hue alone.
     tile('ka-position', 'Where it stands so far', position,
       ran ? num(o.sessions_touched) + ' sessions touched — see the decision row above'
         : 'nothing to judge yet', ran ? 'accent' : ''),
-    tile('ka-net', 'Keep-alive net, measured', ran ? usd(o.net_usd) : '—',
+    tile('ka-net', 'Cache strategy net, measured', ran ? usd(o.net_usd) : '—',
       'avoided − spent, on the sessions it fired on — an upper bound, not the decision',
       ran ? (o.net_usd < 0 ? 'bad' : '') : ''),
-    tile('ka-pings', 'Pings sent', ran ? num(o.pings) : '—',
+    tile('ka-pings', 'Cache-strategy requests sent', ran ? num(o.pings) : '—',
       ran ? usd(o.ping_usd) + ' spent on your key' : 'none'),
-    tile('ka-saved', 'Re-creations avoided', ran ? usd(o.saved_usd) : '—',
+    tile('ka-saved', 'Cache rewrites avoided (upper bound)', ran ? usd(o.saved_usd) : '—',
       ran ? num(o.misses_avoided) + ' requests rescued · a CEILING' : 'none',
       ran && o.saved_usd > 0 ? 'good' : ''),
-    tile('ka-addressable', 'Still on the table', usd(o.addressable_usd),
+    tile('ka-addressable', 'Expiries still worth acting on', usd(o.addressable_usd),
       num(o.addressable_misses) + ' cache expiries worth acting on', 'accent'),
-    tile('ka-rowgrowth', 'Ping rows on disk', o.pings_per_day > 0
+    tile('ka-rowgrowth', 'Log growth from cache-strategy requests', o.pings_per_day > 0
       ? compact(o.bytes_per_day) + 'B/day' : '—',
-      o.pings_per_day > 0 ? o.pings_per_day.toFixed(0) + ' pings/day × ~400 B' : 'no pings'),
+      o.pings_per_day > 0 ? o.pings_per_day.toFixed(0) + ' requests/day × ~400 B' : 'no cache-strategy requests'),
     // Absent, not zero, below the sample-size gate — kvcache.MeasureLatency's own rule: a
     // difference of two means from a handful of rows is not a measurement.
     o.latency && o.latency.known
-      ? tile('ka-latency', 'Large-context requests: cache hit vs. write',
-        Math.round(o.latency.per_miss_ms) + 'ms faster',
+      ? tile('ka-latency', 'Large requests: cache hit vs. rewrite',
+        Math.round(o.latency.per_miss_ms) + ' ms faster per request',
         `n=${num(o.latency.hit_n)} hits vs n=${num(o.latency.miss_n)} writes this window`, 'good')
       : null,
-  ]));
+  ]);
+  const rows = [];
+  const row = (label, value, note) => rows.push(el('div', { class: 'ka-fact' },
+    el('div', { class: 'ka-fl' }, label), el('div', { class: 'ka-fv' }, value), el('div', { class: 'ka-fn' }, note)));
+  if (ran) {
+    row('Cache-strategy requests sent', num(o.pings) + ' for ' + usd(o.ping_usd),
+      ['Each ', term('ping', 'A tiny request sent just before the cache would be forgotten, to keep it warm.'), ' is billed to your own key.']);
+    row('Cache rewrites avoided', 'up to ' + usd(o.saved_usd),
+      [num(o.misses_avoided) + ' requests rescued from a full rewrite. An upper bound.']);
+  }
+  if (o.latency && o.latency.known) {
+    row('Time saved per avoided rewrite', 'about ' + Math.round(o.latency.per_miss_ms) + ' ms',
+      'Large requests answered from a warm cache are faster than ones that rewrite it.');
+  }
+  if (o.pings_per_day > 0) {
+    row('Disk used by cache-strategy logs', 'about ' + compact(o.bytes_per_day) + 'B a day',
+      'Cache-strategy requests add about ' + compact(o.bytes_per_day) + ' B of logs a day.');
+  }
+  if (rows.length) host.appendChild(el('div', { class: 'ka-facts', 'data-testid': 'ka-facts' }, ...rows));
+  host.appendChild(el('details', { class: 'why', 'data-testid': 'ka-more' },
+    el('summary', {}, 'More figures'), moreTiles));
 }
 
 /**
@@ -9763,7 +8953,7 @@ function renderKADownside(o) {
       el('button', {
         class: 'ghost small', 'data-testid': 'ka-turn-off-btn',
         onclick: async () => {
-          if (!confirm('Switch the keep-alive off for this account? Every armed session is ' +
+          if (!confirm('Switch your cache strategy off for this account? Every armed session is ' +
             'disarmed and anything held for you is released immediately.')) return;
           try {
             await ctl('/api/me/keepalive', { method: 'DELETE' });
@@ -9771,7 +8961,7 @@ function renderKADownside(o) {
             loadKeepAlive();
           } catch (e) { alert(e.message); }
         },
-      }, 'Turn keep-alive off')));
+      }, 'Turn your cache strategy off')));
   }
 }
 
@@ -10003,14 +9193,12 @@ function renderKALive() {
   // between them named for what it is.
   const led = kaState.ledger || {};
   $('#ka-live-hint').textContent =
-    `Realised so far in this window: ${usd(led.saved_usd || 0)} of re-creations avoided against `
-    + `${usd(led.ping_usd || 0)} of pings, a net of ${usd(led.net_usd || 0)}. `
-    + `Still open: these ${num(rows.length)} sessions hold ${usd(live.potential_usd)} of write `
-    + 'premium that '
-    + 'a lapse would charge. Those two figures are not the same KIND of number — the first is '
-    + 'measured on requests that happened, the second is a ceiling on requests that may not, and '
-    + 'it is only earned by a session that resumes AFTER its entry would have gone. PINGS PER '
-    + 'LAPSE is the one to decide on: below it, arming is cheaper than the lapse it prevents.';
+    `So far in this window: ${usd(led.saved_usd || 0)} of rewrites avoided against `
+    + `${usd(led.ping_usd || 0)} of pings, a net of ${usd(led.net_usd || 0)} (measured). `
+    + `Still open: these ${num(rows.length)} sessions hold ${usd(live.potential_usd)} of rewrite `
+    + 'cost a lapse would charge. That is a CEILING, not a measurement: it is only earned by a '
+    + 'session that resumes AFTER its cache would have gone. PINGS PER LAPSE is the one to decide '
+    + 'on: below it, pinging is cheaper than the lapse it prevents.';
 }
 
 /**
@@ -10113,11 +9301,11 @@ async function loadKABehaviour() {
   // 3b: the gap bands, in EDGE ORDER — the order is the meaning, so they are never sorted by
   // size — with everything beyond the current coverage in the de-emphasis gray.
   $('#ka-gap-note').textContent =
-    `p10 ${b.gap_p10.toFixed(0)}s · p50 ${b.gap_p50.toFixed(0)}s · p90 ${b.gap_p90.toFixed(0)}s. ` +
+    'Each bar is a range of idle time before the cache ran out; longer bars mean more expiries. ' +
+    `Half the gaps were under ${b.gap_p50.toFixed(0)}s (10% under ${b.gap_p10.toFixed(0)}s, 90% under ${b.gap_p90.toFixed(0)}s). ` +
     `At ${kaState.x}s idle and ${kaState.k} ping${kaState.k === 1 ? '' : 's'} the cache stays ` +
-    `alive for ${b.coverage_seconds.toFixed(0)}s, so the greyed bands are the expiries this ` +
-    `policy cannot reach. ${num(b.phantom_ttl_rows)} further ttl_expiry rows wrote nothing and ` +
-    'are excluded: there was no prefix to protect.';
+    `alive for ${b.coverage_seconds.toFixed(0)}s, so grey bars are expiries this ` +
+    `setting cannot reach. ${num(b.phantom_ttl_rows)} further ttl_expiry rows are left out: they wrote nothing, so there was nothing to protect.`;
   barRows($('#ka-gap-bands'), (b.gap_bands || []).map((g) => ({
     label: g.label + (g.beyond ? ' (beyond coverage)' : ''),
     value: g.n, display: num(g.n) + ' · ' + usd(g.usd),
@@ -10131,9 +9319,10 @@ async function loadKABehaviour() {
   const above = b.addressable_misses > 0
     ? pct(100 * b.prefix_above_20k / b.addressable_misses, 0) : '—';
   $('#ka-prefix-note').textContent =
-    `p10 ${compact(b.prefix_p10)} · p50 ${compact(b.prefix_p50)} · p90 ${compact(b.prefix_p90)} ` +
-    `tokens. ${above} of them were already past 20k, which is why the default "only sessions ` +
-    'with a large cached prompt" gate costs almost nothing.';
+    'Each bar is a range of cached-prompt sizes at the moment the cache ran out. ' +
+    `Half were under ${compact(b.prefix_p50)} tokens (10% under ${compact(b.prefix_p10)}, 90% under ${compact(b.prefix_p90)}). ` +
+    `${above} were already past 20k tokens, so the default "only sessions ` +
+    'with a large cached prompt" filter costs almost nothing.';
   barRows($('#ka-prefix-bands'), (b.prefix_bands || []).map((g) => ({
     label: g.label + ' tokens', value: g.n, display: num(g.n) + ' · ' + usd(g.usd),
     color: SERIES[0], title: `${g.n} expiries costing ${usd(g.usd)}`,
@@ -10147,8 +9336,8 @@ async function loadKABehaviour() {
     String(Math.floor(Math.abs(offMin) / 60)).padStart(2, '0') +
     ':' + String(Math.abs(offMin) % 60).padStart(2, '0');
   $('#ka-hour-note').textContent =
-    `Bucketed by the hour the cache lapsed, labelled in your own timezone (${offLabel}). ` +
-    'Working-hours shaped on this service: the peak is about eight times the trough.';
+    `Each bar is one hour of the day when the cache ran out, in your timezone (${offLabel}). ` +
+    'On this service the busiest hour has about eight times the expiries of the quietest.';
   const bins = (b.hour_bins || []).map((h) => {
     const start = (Number(h.label) * 60 + offMin + 1440) % 1440;
     const hh = String(Math.floor(start / 60)).padStart(2, '0');
@@ -10292,15 +9481,16 @@ async function loadKACalc() {
     title: `${r.convertible_misses} of ${c.addressable_misses} expiries reachable`,
   })), {});
   host.appendChild(el('p', { class: 'hint' },
-    'PINGS is every ping the shipped policy would have sent over this window — gated as the ' +
-    'request path gates (past the session’s first request, cached prompt over 20k tokens) and ' +
-    'INCLUDING the pings a session’s last request attracts, because a live policy cannot know a ' +
-    'session has ended and sends its full K anyway. Counting only the gaps BETWEEN two requests, ' +
-    'and counting them ungated, charged a different population from the one this column names. ' +
-    'A replay of your own past gaps, not a forecast — and it counts only expiries that were ' +
-    'addressable (the provider wrote a prefix that a ping could have refreshed). Reach grows ' +
-    'sharply from one ping to two and then flattens while ping cost keeps climbing, which is ' +
-    'why cost and reach are shown together and not reach alone.'));
+    'Each row is one cap on pings. Reading across: how many of your expiries it would have caught, ' +
+    'what they cost, and what the pings cost. A replay of your past gaps, not a forecast. ' +
+    'Catching grows sharply from one ping to two, then flattens while ping cost keeps climbing.'));
+  host.appendChild(el('details', { class: 'why' }, el('summary', {}, 'Technical details'),
+    el('p', {},
+    'PINGS is every ping the shipped policy would have sent over this window, gated as the ' +
+    'request path gates (past the session\u2019s first request, cached prompt over 20k tokens) and ' +
+    'including the pings a session\u2019s last request attracts, because a live policy cannot know a ' +
+    'session has ended and sends its full K anyway. It counts only expiries that were ' +
+    'addressable (the provider wrote a prefix that a ping could have refreshed).')));
 }
 
 /**
@@ -10325,7 +9515,8 @@ async function loadKARecommend() {
   // Same payload, two places: the decision row above (which is what a reader acts on) and the
   // detail below. Rendering it only here is how the refusal came to sit 2,900 px under a green
   // "Winner" tile that contradicted it.
-  renderKADecision(kaState.ledger, rec);
+  // If the ledger has not landed yet, its own handler renders the decision row with this payload.
+  if (kaState.ledger) renderKADecision(kaState.ledger, rec);
   clear(host);
   if (rec.refused) {
     // Two different refusals, and only one of them is about thin history: "your own gaps are
@@ -10340,7 +9531,7 @@ async function loadKARecommend() {
       el('div', { class: 'small' },
         `For scale: measured over 357 cache expiries across this whole service, the 90% `
         + `interval on this policy is ${usd(rec.service_lo_usd)} to ${usd(rec.service_hi_usd)}. `
-        + 'Use the default (280 s idle, 2 pings) or arm a single session above and read your '
+        + 'Use the default (270 s idle, 2 pings) or arm a single session above and read your '
         + 'own ledger.')));
     return;
   }
@@ -10378,31 +9569,7 @@ async function loadKARecommend() {
     },
   }, 'Use these values in Settings')));
   host.appendChild(el('p', { class: 'hint' },
-    'Nothing is ever applied for you. One ping is never suggested because it reaches 9.7 ' +
-    'minutes where two reach 14.3 \u2014 K\u00d7280s plus the five-minute lifetime the last ' +
-    'ping itself refreshes, which is the K ladder\u2019s own COVERAGE column. One ping is not ' +
-    'a loss; it is a smaller win. Compare the rungs on your own gaps above rather than taking ' +
-    'a number from us.'));
+    'Nothing is applied for you. One ping is never suggested: it covers 9.7 minutes of idle time where two ' +
+    'cover 14.3. One ping is not a loss, just a smaller win. Compare the rows above on your own gaps.'));
 }
 
-/**
- * kaOverviewTile is the Overview's keep-alive tile: the net, both halves in the sub-line, and a
- * way through to the tab that explains it.
- *
- * A separate function only because it is the one tile on that row that is a LINK. The net is the
- * figure on the face of it — presenting the saving alone would be exactly the half-truth the
- * ledger exists to prevent — and the sub-line carries the spend beside it.
- */
-function kaOverviewTile(o, costKnown) {
-  const t = tile('keepalive-net', 'Keep-alive net',
-    costKnown ? usd(o.keepalive_net_usd) : 'unknown',
-    num(o.keepalive_pings) + ' pings ' + usd(o.keepalive_ping_usd) + ' · '
-      + num(o.keepalive_misses_avoided) + ' rescued ' + usd(o.keepalive_saved_usd)
-      + ' (a ceiling)',
-    costKnown ? (o.keepalive_net_usd < 0 ? 'bad' : 'good') : '');
-  t.appendChild(el('div', { class: 'actions' }, el('button', {
-    class: 'ghost small', 'data-testid': 'keepalive-net-open',
-    onclick: () => go('keepalive'),
-  }, 'Who won and who paid')));
-  return t;
-}

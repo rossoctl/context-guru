@@ -88,7 +88,7 @@ func (a *API) keepAliveStrategyRoutes() []route {
 }
 
 // keepAliveStrategyLedger serves one strategy's ledger. Not tenant-scoped by a.scope —
-// like /api/config and /api/benchmarks, this is a server-wide view spanning every
+// like /api/config, this is a server-wide view spanning every
 // tenant a strategy touched, not one tenant's own data.
 func (a *API) keepAliveStrategyLedger(w http.ResponseWriter, r *http.Request) {
 	if !a.requireManager(w, r, "a strategy's ledger") {

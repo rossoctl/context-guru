@@ -3,13 +3,17 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/predictive"
 	"github.com/tidwall/gjson"
 )
 
@@ -55,6 +59,27 @@ type capture struct {
 	tenant string
 	// meta is the request's own metadata, read once off the pristine inbound body.
 	meta dash.Meta
+	// predArrival is set by the handler when a cache campaign tracks this tenant (see LiveFacts.Arrival).
+	predArrival *predictive.Arrival
+	// thread is the session thread this request belongs to (see internal/thread), set by
+	// noteThread once the session id is known. "" is the primary thread. inherits/hasInherit
+	// name the thread a NEW thread continues by content (thread.Result.Inherits).
+	thread     string
+	agentComp  bool
+	inherits   string
+	hasInherit bool
+	// Issue #424's RECORD half. waits is the handler's shared tracker (nil-checked like
+	// everything else here); waitBody is the PRISTINE request body, stashed by noteWaitBody —
+	// a plain slice-header copy, no scan. finish() builds a CLOSURE around both of these
+	// (plus the response's own facts) and hands it to the dash.Event as Event.WaitCause,
+	// which the dashboard's WRITER goroutine invokes — never finish() itself, and never
+	// anything on the request path: the actual rescan (waitcause.Tracker.Observe, ~11ms on
+	// a 783 KB body) running inside finish() was measured adding exactly that much latency
+	// to the NEXT request on a keep-alive connection, because finish() runs on the
+	// handler's own defer, before the handler returns (same reason dash.Event.Redact runs
+	// on the writer goroutine, not here). See dash/capture.go's write().
+	waits    *waitcause.Tracker
+	waitBody []byte
 	// kaPings / kaRefreshed / kaStrategy are what the idle keep-alive did during the span
 	// this request just ended: how many pings it sent, how many tokens the last of them
 	// read from cache, and which manager-controlled strategy (if any) resolved the policy
@@ -64,6 +89,8 @@ type capture struct {
 	kaPings     int
 	kaRefreshed int64
 	kaStrategy  string
+	// kaRefreshedAt is when the provider's entry was last known refreshed (see kaArrival).
+	kaRefreshedAt time.Time
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
 	// weights) plus the tool calls of its last tool-using turn — nil when the request
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
@@ -90,6 +117,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		agent: r.UserAgent(), start: time.Now(),
 		llm:    &cheapmodel.Sink{},
 		unique: map[string]int{},
+		waits:  h.waits,
 	}
 }
 
@@ -137,6 +165,34 @@ func (c *capture) noteTrace(tr apply.Trace) {
 		if saved := rep.Saved(); saved > 0 && !rep.Reverted && !rep.Skipped {
 			c.unique[rep.Component] = c.rec.MarkUnique(c.tenant, rep.Component, rep.CacheKeys, saved)
 		}
+	}
+}
+
+// noteAgentCompaction records that this request is the agent's own compaction request.
+func (c *capture) noteAgentCompaction(v bool) {
+	if c != nil {
+		c.agentComp = v
+	}
+}
+
+// noteThread records which thread of the session this request belongs to.
+func (c *capture) noteThread(res thread.Result) {
+	if c != nil {
+		c.thread = res.ID
+		c.inherits, c.hasInherit = res.InheritsFrom()
+	}
+}
+
+// noteWaitBody stashes the PRISTINE request body for issue #424's RECORD half, so finish()
+// can scan it (waitcause.Tracker.Observe) after the request has already gone upstream. This
+// is a slice-header copy — the request path pays nothing beyond this one field write, however
+// large the body: see internal/waitcause's own benchmark for what the scan itself costs, and
+// why that cost belongs on finish()'s side of the line, not here. Call site: proxy.go, right
+// after noteThread, with `orig` — the body as the agent sent it, before any pipeline rewrite,
+// the same body threadFor already matches on.
+func (c *capture) noteWaitBody(body []byte) {
+	if c != nil {
+		c.waitBody = body
 	}
 }
 
@@ -212,6 +268,21 @@ func (c *capture) noteInventory(provider string, body []byte) {
 // Breakpoint counts are NOT read here: the pipeline already counts them to respect the
 // provider's cap of four, and they reach the event on the trace for free (see FromTrace).
 func metaFromBody(body []byte) dash.Meta {
+	m := metaFromBodyRefs(body)
+	// COPY EVERY STRING OUT OF THE BODY. gjson's String() returns a substring of `body` without
+	// copying, so a Meta built from it holds the WHOLE request body alive for as long as the Meta
+	// lives — and it lives far past the request: the event carries it to the writer, and the SSE
+	// hub keeps the last 256 events for late subscribers. On CG2, 256 kept events from
+	// 1,000-message sessions held 1-20 MB bodies each: four OOM kills at the 8 GiB limit on
+	// 2026-10-19/20. strings.Clone makes each field a few bytes of its own.
+	m.ReasoningEffort = strings.Clone(m.ReasoningEffort)
+	m.ThinkingMode = strings.Clone(m.ThinkingMode)
+	m.ToolChoice = strings.Clone(m.ToolChoice)
+	return m
+}
+
+// metaFromBodyRefs reads the fields. Its strings ALIAS body; only metaFromBody may return them.
+func metaFromBodyRefs(body []byte) dash.Meta {
 	var m dash.Meta
 	gjson.ParseBytes(body).ForEach(func(k, v gjson.Result) bool {
 		switch k.Str {
@@ -300,9 +371,10 @@ func (c *capture) noteUpstream(ms float64, status int) {
 }
 
 // noteKeepAlive records what the idle keep-alive did during the span this request ended.
-func (c *capture) noteKeepAlive(pings int, refreshed int64, strategyID string) {
+func (c *capture) noteKeepAlive(ka kaArrival) {
 	if c != nil {
-		c.kaPings, c.kaRefreshed, c.kaStrategy = pings, refreshed, strategyID
+		c.kaPings, c.kaRefreshed, c.kaStrategy = ka.pings, ka.refreshed, ka.strategyID
+		c.kaRefreshedAt = ka.refreshedAt
 	}
 }
 
@@ -355,9 +427,68 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.Project = c.project
 	e.Meta = c.meta
 	e.FromTrace(c.trace, c.unique)
+	e.ThreadID = c.thread
+	e.AgentCompaction = c.agentComp
 	// The provider's terminal reason, off the same response bytes the token tiers came
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason
+	// Issue #424's RECORD half: a CLOSURE, not a call. The body scan (waitcause.Tracker.
+	// Observe, ~11ms on a 783 KB body) must NOT run here — finish() runs on the handler's
+	// own defer, before the handler returns, so anything synchronous here delays the NEXT
+	// request on a keep-alive connection (measured: that is exactly what calling Observe
+	// inline here used to add). The dashboard's writer goroutine invokes this closure right
+	// before the insert, the same place and for the same reason e.Redact() already runs
+	// there — see dash/capture.go's write(). Everything the closure needs is captured by
+	// value/reference now, cheaply: no scan happens until the writer calls it.
+	//
+	// RecordOutcome (this request's own status + message count, for the NEXT request's
+	// retry check) is folded into the SAME closure rather than called separately on the
+	// request path, so it still runs strictly after Observe reads the PREVIOUS state —
+	// exactly the ordering the retry rule depends on — and in the same relative order
+	// requests arrived in (the writer processes one channel, FIFO, same as the order
+	// Record() was called in). The trade-off: if this row is ever DROPPED (a full capture
+	// channel under heavy load — see dash.Recorder.Record's own doc), RecordOutcome never
+	// runs for it either, so a retry right after a dropped row could be missed. Fail-open,
+	// consistent with every other field here: a missed retry reads as a fresh wake, not a
+	// wrong one.
+	//
+	// failed is this proxy's own analogue of a transcript's isApiErrorMessage: a call that
+	// never completed with a 2xx. status 0 (never reached an upstream) is deliberately NOT
+	// "failed" — ClassifyWaitingFor's own !usageOK-and-no-stop-reason fallback already reads
+	// that case as WaitingUnknown rather than WaitingRetry.
+	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
+	toolUseNames, stopReason := usage.ToolUseNames, usage.StopReason
+	failedCall := status != 0 && status/100 != 2
+	provider := bschemas.ModelProvider(c.provider)
+	// Both closures run on the writer goroutine, one after the other: normalize once, lazily.
+	var normMsgs []bschemas.ChatMessage
+	var normDone bool
+	norm := func() []bschemas.ChatMessage {
+		if !normDone {
+			normMsgs, normDone = apply.NormalizeMessages(provider, waitBody), true
+		}
+		return normMsgs
+	}
+	if c.rec.LifecycleOn() {
+		ts, endTS, cacheW, cacheW1h := e.TS, time.Now().UnixMilli(), usage.CacheWrite-usage.CacheWrite1h, usage.CacheWrite1h
+		rec := c.rec
+		e.LifecycleFn = func() *dash.LifecycleRow {
+			return rec.ObserveLifecycle(tenantID, sessionID, threadID, ts, endTS,
+				scanLifecycle(norm, waitBody), cacheW, cacheW1h)
+		}
+	}
+	e.BypassCount, e.BypassBytes = c.trace.BypassCount, len(waitBody)
+	e.WaitCause = func() dash.WaitCauseResult {
+		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm)
+		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
+		waitingFor, waitTool := waitcause.ClassifyWaitingFor(
+			toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
+		return dash.WaitCauseResult{
+			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
+			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,
+			MonitorExpiryMs: obs.MonitorExpiryMs,
+		}
+	}
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
@@ -392,12 +523,56 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Cache attribution, with a cold start treated as the non-failure it is. BEFORE
 	// pricing, because whether this is the session's first request is an input to a dollar
 	// figure and not only to a label — see Event.cachesplitSavedUSD.
-	seenSession, seenModel, sinceMs, tailChanged := c.rec.ObserveSplit(
-		e.TenantID, e.SessionID, e.Model, e.TS, e.SplitTailHash)
+	//
+	// Per THREAD (#423). Keyed on the session alone, a subagent's requests reset the main
+	// thread's idle gap, so the main thread's TTL expiries fell through to prefix_change — on
+	// one long session, 46 of 65 prefix_change rows ($70.27) were exactly that.
+	//
+	// A NEW thread whose content is mostly a known thread's is that conversation with a changed
+	// prefix (a rewind, an edit, a fork): by the mass it shares it is not a cold start.
+	observe := c.rec.ObserveThread
+	if c.hasInherit {
+		observe = func(tenant, session, threadID, model string, now int64, tail uint64) (bool, bool, int64, bool) {
+			return c.rec.ObserveThreadFrom(tenant, session, threadID, c.inherits, model, now, tail)
+		}
+	}
+	seenSession, seenModel, sinceMs, tailChanged := observe(
+		e.TenantID, e.SessionID, e.ThreadID, e.Model, e.TS, e.SplitTailHash)
 	// Only a known expiry can establish ttl_expiry. OpenAI's 30m is a
 	// minimum guarantee, so a later miss cannot be attributed to expiry alone.
-	e.AttributeCache(seenSession, seenModel, sinceMs,
-		cacheAttributionTTLMs(e.Provider, e.Model), e.CacheWrite > 0)
+	//
+	//
+	// The cause comes from a measured comparison with this thread's previous request, not from
+	// CacheWrite > 0 (issue #600). A miss with nothing measured reads unknown.
+	if c.inv != nil && c.inv.System != nil {
+		e.SystemHash = c.inv.System.Hash
+	}
+	if c.inv != nil {
+		e.DeclDigest = c.inv.Digest
+	}
+	//
+	// The gap for the TTL test is measured from the last request on the SAME model: a cache entry
+	// belongs to one model, so a request on another model between two requests on this one does
+	// not refresh it. SinceLastMs below keeps the per-thread gap.
+	cause, modelGap, known, lastWasSame := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
+		dash.FactsOf(e), e.Status >= 200 && e.Status < 300)
+	//
+	// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
+	// measured from the last real request, so without this a 297 s gap with a ping at 289 s
+	// reads as an expiry on a turn that came 8 s after the refresh.
+	age := sinceMs
+	if known {
+		age = modelGap
+		// A ping refreshed the entry of the model that last ran in the thread. Cut the age only
+		// when that was this model. This holds after a failed request too, when the gap since
+		// the last good request differs from sinceMs.
+		if lastWasSame {
+			age = entryAgeMs(modelGap, e.TS, c.kaRefreshedAt)
+		}
+	} else {
+		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
+	}
+	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model), cause)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
 	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
@@ -469,10 +644,43 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	c.rec.Record(e)
 }
 
+// entryAgeMs is how old the provider's cache entry was when the request arrived: the gap since
+// the last real request, cut short by a ping that refreshed the entry later than that request.
+func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
+	if refreshedAt.IsZero() || sinceMs <= 0 {
+		return sinceMs
+	}
+	if age := tsMs - refreshedAt.UnixMilli(); age >= 0 && age < sinceMs {
+		return age
+	}
+	return sinceMs
+}
+
 func cacheAttributionTTLMs(provider, model string) int64 {
 	ttl, kind := apply.CacheLifetime(bschemas.ModelProvider(provider), model, nil)
 	if kind != apply.CacheLifetimeExact {
 		return 0
 	}
 	return ttl.Milliseconds()
+}
+
+// LiveFacts are the request-side inputs of a learned keep-alive campaign, taken from the same places the dashboard row is filled from, so
+// a campaign sees at serve time the values it was trained on.
+type LiveFacts struct {
+	Messages, Tools, SystemBlocks, MaxTokens int
+	Effort, Thinking, CacheTTL, Agent        string
+	Stream                                   bool
+	TTFBMs                                   float64
+	// Arrival is this request's identity in a learned campaign's tracker (nil when no campaign applies). It travels with the request, not with its thread,
+	// because requests overlap on a thread.
+	Arrival *predictive.Arrival
+}
+
+// liveFacts reads them off the capture (nil-safe). ttfbMs is the streamed first-byte delay, 0 on buffered responses, as the dashboard records it.
+func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
+	if c == nil {
+		return nil
+	}
+	return &LiveFacts{Messages: c.trace.Messages, Tools: c.meta.Tools, SystemBlocks: c.meta.SystemBlocks, MaxTokens: c.meta.MaxTokens,
+		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
 }

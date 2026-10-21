@@ -1,12 +1,13 @@
 ---
 name: context-guru-insights-capabilities
-description: Deterministically report unused tools and capabilities measured by context-guru.
+description: Moved to the insights skill (`tools`). Kept for one release so existing habits still work.
 ---
 
-# Analyze carried capabilities
+This command moved to `context-guru-insights` (`tools`). Say so in one line, then run the new one from this skill directory and print its output exactly as it is in one code block:
 
-Run `python3 ../../scripts/insights.py capabilities`. Present the findings in their emitted order,
-including their basis and exact fix. Never calculate a cost or infer that an unpriced item is free.
-If it reports `proxy_unavailable`, retry the same read-only command with
-`sandbox_permissions="require_escalated"`, explaining that loopback access is needed. If the retry
-cannot run, say the measurements are unverified rather than claiming the proxy is unavailable.
+```bash
+python3 ../../scripts/cg.py insights tools
+```
+
+If loopback access is blocked, retry the same read-only command with `sandbox_permissions="require_escalated"`.
+If it still cannot run, say proxy state is unverified rather than guessing.

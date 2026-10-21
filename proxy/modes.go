@@ -9,6 +9,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
+	"github.com/rossoctl/context-guru/internal/thread"
 )
 
 // Operating modes on the request path (#31).
@@ -57,7 +58,7 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 		Provider: r.provider, API: r.api, Body: r.body, Session: r.session, Tenant: r.tn.ID, Bypass: r.bypassed,
 		Models: r.models, Window: r.window, WindowExact: r.windowExact, CacheMode: h.opts.CacheMode,
 		CompactionPoint: r.compactionPoint, CompactionPointSource: r.compactionPointSource,
-		SelfRates: r.rates, RatesFor: h.ratesFor(r.ctx),
+		SelfRates: r.rates, RatesFor: h.ratesFor(r.ctx), ThreadOf: r.threadOf,
 		HeadTTL1h:        headTTL1h,
 		HeadTTLMinTokens: headTTLMinTokens,
 		Mode:             mode, Tracker: h.tracker,
@@ -77,6 +78,9 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 // Bundled because an off-path run outlives the *http.Request it came from and must
 // therefore hold a copy of everything, never a pointer into request-scoped state.
 type reqInfo struct {
+	// threadOf resolves the request's session thread once apply knows the session id; see
+	// apply.Opts.ThreadOf. nil leaves the request to be resolved after the pipeline.
+	threadOf func(session string) thread.Result
 	ctx      context.Context
 	provider bschemas.ModelProvider
 	api      string

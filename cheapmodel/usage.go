@@ -1,0 +1,326 @@
+package cheapmodel
+
+import (
+	"context"
+	"os"
+	"strconv"
+	"sync/atomic"
+)
+
+// Usage tracks cumulative token usage of the cheap (config-source) model across
+// all NeedsModel component calls in this process. It is the basis for reporting
+// the CONTEXT-GURU components' OWN LLM cost (e.g. extract:code's Starlark-writer
+// calls) separately from the agent's cost — the proxy exposes it at /stats and the
+// benchmark prices it. Process-global (there is a single cheap model per proxy);
+// per-component attribution would need the Model interface to carry a label, a
+// deferred refinement — today the LLM component in a config is extract, so the
+// global total is that component's cost.
+//
+// The cache tiers are tracked separately because they are the whole question behind
+// issue #28's part A: a preamble breakpoint below the model's minimum cacheable prefix
+// is silently ignored, so cacheRead staying at 0 across many calls is the ONLY
+// evidence that the split is not paying off. Never infer a cache win from placement.
+var (
+	llmCalls        atomic.Int64
+	llmInputTokens  atomic.Int64
+	llmOutputTokens atomic.Int64
+	llmCacheWrite   atomic.Int64
+	llmCacheRead    atomic.Int64
+	// llmCacheWrite1h is the SUBSET of llmCacheWrite billed at the one-hour TTL premium rather
+	// than the default five-minute rate — see Sink.cacheWrite1h for why this has to be tracked
+	// apart from the combined figure at all.
+	llmCacheWrite1h atomic.Int64
+)
+
+// Sink accumulates the cheap-model usage of ONE scope — in the proxy, one request. The
+// totals above are a per-PROCESS fact and stay that way (/stats and the benchmark read
+// them); a per-request bill cannot be derived from them by subtraction, because on a
+// multi-tenant proxy any other tenant's call landing inside the subtraction window is
+// billed to whoever happens to be in flight. That was the cg_llm_cost_usd defect: it
+// propagated into tenant_spend and month-to-date spend, and let a tenant infer other
+// tenants' compaction activity from its own rows.
+//
+// Carried on the CONTEXT rather than as a components.Ctx field, because the context is
+// what already reaches every model call: apply builds components.Ctx from it, components
+// derive their timeouts from it, and internal/extract sees only a context.Context. One
+// plumbing point, and no call path can silently miss it.
+type Sink struct {
+	// model is the id the calls in this scope were made with, so the request's own bill can
+	// be priced at THAT model's rate. Before this, our compaction spend was priced at the
+	// AGENT's rate on the theory that a configured cheap model was "close enough": haiku
+	// tokens billed as opus tokens, roughly 15x over, which made a configuration that pays
+	// look like one that loses $0.28 a session. A cost figure used to decide whether to run
+	// a component cannot be off by an order of magnitude in the pessimistic direction any
+	// more than in the optimistic one.
+	model      atomic.Value // string
+	calls      atomic.Int64
+	in, out    atomic.Int64
+	cacheWrite atomic.Int64
+	cacheRead  atomic.Int64
+	// cacheWrite1h is the part of cacheWrite the provider billed at the one-hour write premium —
+	// a SUBSET of cacheWrite, never an addition to it, mirroring proxy.Usage.CacheWrite1h's own
+	// relationship to CacheWrite. Needed so a caller pricing a cheap-model call with
+	// modelinfo.Price.CostWithCacheWrite1h (cache_aware_summarizer's keep-alive substitute is the
+	// first one to) can price the 1h tier at its own premium instead of silently folding it into
+	// the 5-minute rate — see KeepAliveSummaryResult.CacheWrite1h.
+	cacheWrite1h atomic.Int64
+	// parent is the sink this one nests inside, so a narrower scope can be measured without
+	// hiding the call from the wider one. The proxy installs a per-REQUEST sink; a component
+	// that wants per-CALL numbers installs a child for the duration of one call, and the
+	// usage must reach both or the request's own bill silently loses those tokens.
+	parent *Sink
+}
+
+// Totals returns this scope's usage so far, at the same shape as Usage().
+// Model reports the model these calls were made with, or "" when nothing was recorded or the
+// scope mixed several (in which case no single rate is honest and the caller must fall back).
+func (s *Sink) Model() string {
+	if s == nil {
+		return ""
+	}
+	m, _ := s.model.Load().(string)
+	if m == mixedModels {
+		return ""
+	}
+	return m
+}
+
+// mixedModels marks a sink whose calls used more than one model. Distinct from "" so a mixed
+// scope is not silently priced as the first model seen.
+const mixedModels = "\x00mixed"
+
+func (s *Sink) Totals() (calls, inTokens, outTokens int64) {
+	if s == nil {
+		return 0, 0, 0
+	}
+	return s.calls.Load(), s.in.Load(), s.out.Load()
+}
+
+// CacheTotals returns this scope's cache-tier tokens (write, read).
+func (s *Sink) CacheTotals() (cacheWrite, cacheRead int64) {
+	if s == nil {
+		return 0, 0
+	}
+	return s.cacheWrite.Load(), s.cacheRead.Load()
+}
+
+// CacheWrite1h returns the SUBSET of CacheTotals' cacheWrite this scope billed at the one-hour
+// write premium, never an addition to it. 0 on every backend but Anthropic, and 0 there too
+// unless the call actually requested a 1h TTL breakpoint.
+func (s *Sink) CacheWrite1h() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.cacheWrite1h.Load()
+}
+
+type sinkKey struct{}
+
+// WithSink scopes cheap-model accounting for everything done under ctx to s. A call made
+// under a context with no sink still counts toward the process totals — nothing is lost,
+// it is simply not attributable to one request.
+func WithSink(ctx context.Context, s *Sink) context.Context {
+	if s == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, sinkKey{}, s)
+}
+
+// WithCallSink scopes a NARROWER accounting window inside whatever sink already scopes ctx,
+// returning the child so the caller can read exactly one call's usage. Usage recorded under
+// the child also reaches every ancestor, so installing one never costs the request its own
+// attribution.
+func WithCallSink(ctx context.Context) (context.Context, *Sink) {
+	child := &Sink{parent: SinkFrom(ctx)}
+	return context.WithValue(ctx, sinkKey{}, child), child
+}
+
+// add records one call's usage on this sink and every sink it nests inside.
+func (s *Sink) add(model string, inTok, outTok, cacheWrite, cacheRead, cacheWrite1h int) {
+	// Nil receiver is the common case: a call made with no sink installed counts toward the
+	// process totals only, which is correct — it is simply not attributable to one request.
+	for cur := s; cur != nil; cur = cur.parent {
+		if model != "" {
+			if prev, ok := cur.model.Load().(string); !ok || prev == "" {
+				cur.model.Store(model)
+			} else if prev != model {
+				cur.model.Store(mixedModels)
+			}
+		}
+		cur.calls.Add(1)
+		cur.in.Add(int64(inTok))
+		cur.out.Add(int64(outTok))
+		cur.cacheWrite.Add(int64(cacheWrite))
+		cur.cacheRead.Add(int64(cacheRead))
+		cur.cacheWrite1h.Add(int64(cacheWrite1h))
+	}
+}
+
+// SinkFrom returns the sink scoping ctx, or nil.
+func SinkFrom(ctx context.Context) *Sink {
+	if ctx == nil {
+		return nil
+	}
+	s, _ := ctx.Value(sinkKey{}).(*Sink)
+	return s
+}
+
+// recordUsageCache adds one call's token usage to the process totals and to the calling
+// scope's sink, split by cache tier. inTok is FRESH (uncached) input on both backends —
+// see openai.go for why that needs normalizing there.
+func recordUsageCache(ctx context.Context, model string, inTok, outTok, cacheWrite, cacheRead int) {
+	recordUsageCacheWithTTL(ctx, model, inTok, outTok, cacheWrite, cacheRead, 0)
+}
+
+// recordUsageCacheWithTTL is recordUsageCache plus the one-hour SUBSET of cacheWrite, for the
+// one caller (Anthropic's prefixed completion, so far) that can tell the two tiers apart in the
+// response it reads. Every other caller goes through recordUsageCache, which is this with 0.
+func recordUsageCacheWithTTL(ctx context.Context, model string, inTok, outTok, cacheWrite, cacheRead, cacheWrite1h int) {
+	llmCalls.Add(1)
+	llmInputTokens.Add(int64(inTok))
+	llmOutputTokens.Add(int64(outTok))
+	llmCacheWrite.Add(int64(cacheWrite))
+	llmCacheRead.Add(int64(cacheRead))
+	llmCacheWrite1h.Add(int64(cacheWrite1h))
+	SinkFrom(ctx).add(model, inTok, outTok, cacheWrite, cacheRead, cacheWrite1h)
+}
+
+// Usage returns the cumulative cheap-model usage (calls, input tokens, output
+// tokens) since process start. Kept at this exact signature for backward
+// compatibility — /stats' existing three fields are parsed by deploy/harbor/*.py.
+func Usage() (calls, inTokens, outTokens int64) {
+	return llmCalls.Load(), llmInputTokens.Load(), llmOutputTokens.Load()
+}
+
+// CacheUsage returns the cumulative cache-tier token counts (write, read) for the
+// cheap model. read==0 after many calls means the preamble breakpoint is inert.
+func CacheUsage() (cacheWrite, cacheRead int64) {
+	return llmCacheWrite.Load(), llmCacheRead.Load()
+}
+
+// Pricing is the per-million-token price of the extraction model, in dollars. The
+// economic gate needs the real cost of a call, not a hard-coded "$0.012" — that figure
+// was one workload's average, and it changes with the model, the gateway's contract, and
+// the prompt size. Rates come from the environment so an operator prices their own
+// deployment without a rebuild; the defaults are claude-haiku-4-5 list rates.
+type Pricing struct {
+	InputPerMTok      float64
+	OutputPerMTok     float64
+	CacheWritePerMTok float64
+	CacheReadPerMTok  float64
+}
+
+// HaikuPricing is the default: claude-haiku-4-5 list rates ($1/$5 per MTok), with the
+// standard Anthropic cache multipliers (write 1.25x input, read 0.1x input).
+func HaikuPricing() Pricing {
+	return Pricing{InputPerMTok: 1.00, OutputPerMTok: 5.00, CacheWritePerMTok: 1.25, CacheReadPerMTok: 0.10}
+}
+
+// PricingConfigured reports whether the operator priced the cheap model at all, i.e. whether
+// any CHEAP_MODEL_PRICE_* is set to a usable value.
+//
+// It exists so a caller can SAY SO when it is spending against a list price nobody confirmed.
+// MEASURED on this deployment: none of the four variables is set, so the economic gate priced
+// every call at haiku LIST ($1.00/$5.00 per MTok) while the request-level figure on the
+// dashboard came from the operator's own card ($0.80/$4.00) — about 25% apart, in the
+// numerator of every allow/suppress decision, with nothing anywhere reporting the divergence.
+// A silent 25% is worse than a wrong 25%: the wrong one can be corrected.
+func PricingConfigured() bool {
+	_, ok := pricingFromEnv()
+	return ok
+}
+
+// PricingFromEnv returns HaikuPricing overridden by any of CHEAP_MODEL_PRICE_IN,
+// _OUT, _CACHE_WRITE, _CACHE_READ (dollars per million tokens). An unparseable or
+// absent value leaves the default — pricing must never fail a request. Use
+// PricingConfigured to find out whether the result is the operator's card or our guess.
+func PricingFromEnv() Pricing {
+	p, _ := pricingFromEnv()
+	return p
+}
+
+func pricingFromEnv() (Pricing, bool) {
+	p := HaikuPricing()
+	set := false
+	for _, f := range []struct {
+		env string
+		dst *float64
+	}{
+		{"CHEAP_MODEL_PRICE_IN", &p.InputPerMTok},
+		{"CHEAP_MODEL_PRICE_OUT", &p.OutputPerMTok},
+		{"CHEAP_MODEL_PRICE_CACHE_WRITE", &p.CacheWritePerMTok},
+		{"CHEAP_MODEL_PRICE_CACHE_READ", &p.CacheReadPerMTok},
+	} {
+		if v, err := strconv.ParseFloat(os.Getenv(f.env), 64); err == nil && v >= 0 {
+			*f.dst, set = v, true
+		}
+	}
+	return p, set
+}
+
+// Cost prices one call's token usage in dollars.
+func (p Pricing) Cost(inTok, outTok, cacheWrite, cacheRead int64) float64 {
+	const perM = 1_000_000.0
+	return (float64(inTok)*p.InputPerMTok +
+		float64(outTok)*p.OutputPerMTok +
+		float64(cacheWrite)*p.CacheWritePerMTok +
+		float64(cacheRead)*p.CacheReadPerMTok) / perM
+}
+
+// AvgCallCost returns the OBSERVED mean dollar cost of one extraction call so far, and
+// whether there is any observation yet. This is what the economic gate should spend
+// against: it reflects this deployment's real prompt sizes, this model's real pricing,
+// and whether the preamble cache is actually working — none of which a constant can.
+// Callers must handle ok==false (no calls yet) with a prior estimate.
+func AvgCallCost(p Pricing) (float64, bool) {
+	calls := llmCalls.Load()
+	if calls == 0 {
+		return 0, false
+	}
+	total := p.Cost(llmInputTokens.Load(), llmOutputTokens.Load(),
+		llmCacheWrite.Load(), llmCacheRead.Load())
+	return total / float64(calls), true
+}
+
+// ReplayUsage attributes usage that was INCURRED EARLIER, ELSEWHERE, to the sink scoping ctx.
+//
+// It exists for exactly one caller and the reason is worth stating, because a general "add
+// arbitrary usage" function is otherwise an invitation to double-count. summarize produces its
+// summary on a DETACHED goroutine so that a slow model call cannot hold a request past its own
+// prompt-cache lifetime. That goroutine outlives the request that started it, so by the time it
+// knows what the call cost, that request's row has already been written and its
+// `cg_llm_cost_usd` is 0 — measured, and caught by proxy's own
+// TestCGLLMCostIsChargedToTheRequestThatSpentIt.
+//
+// Leaving it there was not an option: the compaction-episode measurement charges the summarizer's
+// spend as a DEBIT, so a missing cost makes the panel overstate its own saving, which is the one
+// direction a savings figure must never lean.
+//
+// So the goroutine records what it used, and the NEXT turn of the same session replays it here.
+// The attribution is one turn late by construction — the same deliberate lag Ctx.PrevBilledInput
+// carries, and for the same reason: a figure that arrives slightly late is worth far more than one
+// that never arrives. The whole-process totals were never wrong; only the per-request row was.
+//
+// Replaying twice would double-count, so the caller must delete its record before replaying — see
+// summarize's takeDeferredUsage.
+func ReplayUsage(ctx context.Context, model string, inTok, outTok, cacheWrite, cacheRead int) {
+	SinkFrom(ctx).add(model, inTok, outTok, cacheWrite, cacheRead, 0)
+}
+
+// WithDetachedSink installs a sink that does NOT chain to whatever sink already scopes ctx,
+// returning it so the caller can read its usage and attribute it deliberately later.
+//
+// It exists because WithCallSink's chaining — normally the right behaviour, since a narrower
+// window should still credit its request — is a DOUBLE-COUNT hazard for work that outlives the
+// request that started it. summarize's detached summarizer inherits the commissioning request's
+// context, so a chained sink reaches that request's row: if the call happens to finish before that
+// row is written, the cost lands there AND is replayed onto the next turn, charging one call
+// twice. Measured, at exactly 2x, by proxy's TestOurOwnSpendCountsTheCacheTiersToo.
+//
+// Detaching makes the attribution single-valued: the commissioning row can never see this usage,
+// and exactly one later turn replays it. Process-wide totals are unaffected — those are counted by
+// the model wrapper itself, not by walking the sink chain.
+func WithDetachedSink(ctx context.Context) (context.Context, *Sink) {
+	s := &Sink{} // no parent, deliberately
+	return context.WithValue(ctx, sinkKey{}, s), s
+}

@@ -12,12 +12,13 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/schema"
 	"gopkg.in/yaml.v3"
@@ -1284,6 +1285,10 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		// not fire a second time for the same call. Without it a failed ask both fell back AND then
 		// reported a zero cache read, double-counting one event as two.
 		fellBack bool
+		// attemptedPrefixAsk records whether the prefix-ask leg actually ran, for foldFallback's
+		// Strategy naming below. Separate from `c.PrefixAsk != nil`, which the stale-prefix guard can
+		// now be true for while the ask itself never runs.
+		attemptedPrefixAsk bool
 		// The ask's own totals, accumulated PER LEG. An adjudication is not one model call: the
 		// prefix ask and the fallback are two, on two prompts, and either can be the only one that
 		// happens. See recordLeg.
@@ -1357,25 +1362,87 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		r.rec.CacheRead = int64(usage.CacheRead + fbUsage.CacheRead)
 		r.rec.CacheWrite = int64(usage.CacheWrite + fbUsage.CacheWrite)
 		r.rec.CostUSD = askCost + fbCost
-		// Name what actually ran. On the no-asker route the prefix ask never happens, so calling
-		// the row "prefix_ask+fallback" would report a leg that did not exist.
-		if c.PrefixAsk == nil {
-			r.rec.Strategy = "fallback"
-		} else {
+		// Name what actually ran. On the no-asker route AND the stale-prefix route the prefix ask
+		// never happens, so calling the row "prefix_ask+fallback" would report a leg that did not
+		// exist.
+		if attemptedPrefixAsk {
 			r.rec.Strategy = "prefix_ask+fallback"
+		} else {
+			r.rec.Strategy = "fallback"
+		}
+	}
+	// STALE-PREFIX GUARD, the sweep's version of cache_aware_summarizer's own guard in
+	// cache_aware_async.go. The ask below reads this session's STASHED body (proxy's sentStash,
+	// through PrefixAsker.Ask) and appends askPrompt to it — the same construction, the same
+	// stash, and so the same risk: a stash that holds something but not everything the ask is
+	// about to claim was read.
+	//
+	// Checked against the DEEPEST AT-DEPTH candidate only — i <= c.MaxCachedIdx, i.e. a candidate
+	// this component itself believes sits inside the already-cached prefix a PRIOR turn forwarded
+	// (!c.TailOnly(i), the same test `sweep_candidate_at_depth` above uses). NOT against every
+	// candidate: this turn's own tail — new content added since the last forwarded turn, which is
+	// most of an ordinary turn's inventory — is never in the stash yet, by construction, because
+	// the stash only gets THIS turn's body after Offload returns and the host forwards it. Checking
+	// the whole candidate set would make the guard fire on every ordinary turn with any depth
+	// beyond the previous turn's prefix, not only a genuinely stale one — the exact trap
+	// cache_aware_summarizer's own guard comment warns about. A tail candidate the ask cannot
+	// verify either way is the pre-existing, separately tracked gap (#122), not this guard's job.
+	usePrefixAsk := c.PrefixAsk != nil
+	stalePrefix := false
+	// The span the guard verified, kept so the ask below can check it again on the SAME read of the
+	// stash it asks over (PrefixCoveredAsker) instead of trusting that the stash did not change
+	// between the check above and the ask.
+	haveCover, coverCount, coverHash := false, 0, ""
+	if usePrefixAsk {
+		if pc, ok := c.PrefixAsk.(components.PrefixCoverage); ok && c.MaxCachedIdx >= 0 {
+			deepest := -1
+			for _, cd := range cands {
+				if cd.i <= c.MaxCachedIdx && cd.i > deepest {
+					deepest = cd.i
+				}
+			}
+			if deepest >= 0 {
+				requiredCount := deepest + 1
+				// rawSpanForHash, not req.Input[:requiredCount]: CoversSpan compares against the
+				// host's PRE-pipeline stash, and req.Input here is already whatever ran before this
+				// component in the configured pipeline (textclean, format, dedup, … in housellm/
+				// xhigh) — see rawSpanForHash's own comment and PR #431 round 1.
+				//
+				// thread.Key(c.Session, c.Thread), not bare c.Session: the host's stash (proxy's
+				// sentStash) is keyed per thread (#423), and the Ask call just below already reads
+				// it that way. Checking coverage under the plain session would almost always MISS
+				// for a non-primary thread — CoversSpan's own missing-key convention then reports
+				// "covered" and this guard would never fire for any thread but the first.
+				if span, ok := rawSpanForHash(c, req, requiredCount); !ok ||
+					!pc.CoversSpan(thread.Key(c.Session, c.Thread), requiredCount, components.SpanHash(span)) {
+					stalePrefix = true
+				} else {
+					haveCover, coverCount, coverHash = true, requiredCount, components.SpanHash(span)
+				}
+			}
 		}
 	}
 	// One arming point for all four exits that can carry a fallback — the three error returns and
 	// the happy path. A per-site call was what left the error paths uncovered, and a fifth site
 	// added later would have been missed the same way.
 	defer foldFallback()
-	if c.PrefixAsk == nil {
-		// No asker at all: a non-Anthropic route, or no incoming client. Not a failure of the ask —
-		// there was nothing to ask through — so it takes the same fork as a missed read.
-		r.gate("sweep_no_asker")
+	if !usePrefixAsk || stalePrefix {
+		// No asker at all (a non-Anthropic route, or no incoming client) and a stale stash take the
+		// same fork, because both mean there is nothing SAFE to ask through — one has nothing
+		// stashed, the other has the wrong thing. Gated separately so a run showing
+		// sweep_stale_prefix, rather than sweep_no_asker, says which one happened.
+		if stalePrefix {
+			r.gate("sweep_stale_prefix")
+		} else {
+			r.gate("sweep_no_asker")
+		}
 		if e.effectiveBlockFallback(c) {
 			r.gate("sweep_fallback_blocked")
-			r.rec.Rejection = "no prefix asker on this route and block_fallback is set"
+			if stalePrefix {
+				r.rec.Rejection = "stashed prefix does not cover the candidates offered and block_fallback is set"
+			} else {
+				r.rec.Rejection = "no prefix asker on this route and block_fallback is set"
+			}
 			return nil, r
 		}
 		if reply, err = runFallback(); err != nil {
@@ -1383,6 +1450,7 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		}
 		fellBack = true
 	} else {
+		attemptedPrefixAsk = true
 		askStart := time.Now()
 		// NAMED rather than inlined, so the dump records the prompt AS SENT. A dump that rebuilt the
 		// prompt from `items` would be a reconstruction, and the whole point of capturing it is to be
@@ -1400,13 +1468,18 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 				}
 			}
 		}
-		reply, usage, err = c.PrefixAsk.Ask(ctx, c.Session, askPrompt)
+		// The THREAD's stashed body (#423), not whichever thread of the session spoke last.
+		if ca, ok := c.PrefixAsk.(components.PrefixCoveredAsker); ok && haveCover {
+			reply, usage, err = ca.AskCovered(ctx, thread.Key(c.Session, c.Thread), coverCount, coverHash, askPrompt)
+		} else {
+			reply, usage, err = c.PrefixAsk.Ask(ctx, thread.Key(c.Session, c.Thread), askPrompt)
+		}
 		askMs = float64(time.Since(askStart).Milliseconds())
 		// ErrNoPrefix is refused LOCALLY — there is no stashed body to append to, so no request
 		// leaves the process. Booking it as a call would put a 0 ms, $0 sample into the mean that
 		// the exploration brake reads, and inflate `calls` with work that by definition did not
 		// happen. Every other outcome, transport failure included, went to the provider.
-		if !errors.Is(err, components.ErrNoPrefix) {
+		if !errors.Is(err, components.ErrNoPrefix) && !errors.Is(err, components.ErrStalePrefix) {
 			askCost = recordLeg(askMs, usage)
 		}
 	}
@@ -1436,6 +1509,11 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		// and which needs no attention, and the other is "the read failed", which does.
 		if errors.Is(err, components.ErrNoPrefix) {
 			r.gate("sweep_no_prefix")
+		} else if errors.Is(err, components.ErrStalePrefix) {
+			// The stash changed between the guard above and the ask, and AskCovered refused to ask
+			// over a body the guard had not approved. Counted as the stale prefix it is, not as a
+			// failed call: no request left the process.
+			r.gate("sweep_stale_prefix")
 		} else {
 			r.gate("sweep_ask_failed")
 			// The provider's error text otherwise survives only in r.rec.Rejection, which is set

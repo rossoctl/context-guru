@@ -61,13 +61,36 @@ Choose your setup. Each button opens only the instructions for that path.
   </tbody>
 </table>
 
-For local Codex use, register only the marketplace paths Codex needs; cloning the whole monorepo
-can exceed Codex's marketplace timeout:
+## What's cool
 
-```sh
-codex plugin marketplace add rossoctl/context-guru --sparse .agents --sparse codex-marketplace
-codex plugin add context-guru@context-guru
-```
+**The status line shows your savings live, for the main session and for every subagent.** It also shows the cache
+clock, the context fill and the keep-alive pings. This frame comes from a real, week-long release session:
+
+<p align="center">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/img/readme/statusline-subagents-dark.svg">
+<img alt="The status line: dollars saved for the session and for its subagents, the cache clock, context fill and keep-alive pings" src="docs/img/readme/statusline-subagents-light.svg" width="760">
+</picture>
+</p>
+
+**`/context-guru:insights` tells you what you saved, what your cache costs you, and what you carry and never use.**
+Real output, 7 days of one developer's work:
+
+<p align="center">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/img/readme/insights-dark.svg">
+<img alt="/context-guru:insights: savings by lever, cache misses by cause, and unused tools with what they cost" src="docs/img/readme/insights-light.svg" width="760">
+</picture>
+</p>
+
+More:
+
+- **[Save more](docs/plugin/save-more.md)**: replay your own history and find the config that costs least.
+- **[Remove tools](docs/plugin/remove-mcp-and-skills.md)**: find the MCP servers and skills you never use, and remove them.
+- **[Dashboard](docs/dashboard.md)**: every request, every saving, in your browser.
+
+Every command: **[docs/plugin/commands.md](docs/plugin/commands.md)**. Full guide, every status line state and
+troubleshooting: **[rossoctl.github.io/context-guru/plugin](https://rossoctl.github.io/context-guru/plugin/)**.
 
 ## Presets
 
@@ -77,8 +100,8 @@ It's an effort ladder — each tier is everything in the one before it, plus mor
 |---|---|---|
 | `off` | nothing — requests forwarded untouched (the default; only keep-alive spends, if that's on) | no |
 | `conservative` | deterministic trimming of tool output (repeats, dead runs) — no model calls | no |
-| `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output | yes |
-| `high` | `medium` plus a summarizer that compacts older turns once the context window is nearly full | yes |
+| `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output, and a summary prepared in the background that is used only if you come back after the cache expired | yes |
+| `high` | `medium`, but the summary of older turns is used as soon as the context window is nearly full | yes |
 | `xhigh` | `high` plus a periodic deep-adjudication sweep over turns whose prompt cache has gone cold — the deepest cut | yes |
 
 Run the picker any time to switch tiers—it explains each one before asking which to set:

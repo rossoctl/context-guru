@@ -1,0 +1,9 @@
+All 7 checks pass.
+
+  ✓ This session is routed through a local proxy
+  ✓ The proxy answers
+  ✓ Dashboard API is on (these commands need it)
+  ✓ Prices are loaded (dollars are real, not zero)
+  ✓ Context Guru status line is installed
+  ✓ Status line refreshes on a timer (live cache countdown)
+  ✓ Cache mode is set

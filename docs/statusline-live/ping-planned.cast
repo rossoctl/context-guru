@@ -1,0 +1,2 @@
+{"version": 2, "width": 80, "height": 8, "timestamp": 1792010900, "title": "statusline"}
+[0.3, "o", "\u001b[H\u001b[J$ statusline\r\nsaved $18.60 \u001b[2mof\u001b[0m $61.40 \u001b[2msession\u001b[0m\r\n\u001b[2mcache\u001b[0m \u001b[32m●\u001b[0m \u001b[32m█\u001b[2m░░░░░\u001b[0m \u001b[32m10:00 ↻\u001b[0m \u001b[2m│\u001b[0m \u001b[2mctx\u001b[0m \u001b[32m███\u001b[2m░░░░░\u001b[0m \u001b[32m41%\u001b[0m\r\n"]

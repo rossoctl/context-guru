@@ -62,6 +62,21 @@ CREATE TABLE IF NOT EXISTS requests (
   -- request, so a crafted ?tenant= cannot widen a view.
   tenant_id          TEXT    NOT NULL DEFAULT '',
   session_id         TEXT    NOT NULL DEFAULT '',
+  -- The thread of the session ('' = the primary thread: the main agent, the first thread with no
+  -- agent header that declares tools). See Event.ThreadID.
+  thread_id          TEXT    NOT NULL DEFAULT '',
+  -- Issue #424's RECORD half (see Event.WaitingFor's own comment for what each one means).
+  -- Nullable with NO default, unlike every other column above: a row written before this
+  -- feature existed has nothing to read here, and NULL says so, rather than '' or 0 (which
+  -- waitcause's own enums deliberately keep distinct from "never computed" by producing
+  -- "unknown"/0 themselves on a row this DID run on but found nothing — see internal/waitcause).
+  waiting_for        TEXT,
+  wait_tool          TEXT,
+  wake_cause         TEXT,
+  open_background    INTEGER,
+  open_teammate      INTEGER,
+  monitor_expiry_ms  INTEGER,
+  agent_compaction   INTEGER NOT NULL DEFAULT 0, -- the agent's own compaction request (proxy isAgentCompaction); 0 on rows written before it
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)
@@ -174,6 +189,10 @@ CREATE TABLE IF NOT EXISTS requests (
   -- saving for a request the filter had declined to touch. 0 therefore means "nothing was
   -- removed here", which is the honest reading on every row that predates the feature.
   filtered_decl_tokens INTEGER NOT NULL DEFAULT 0,
+  -- The digest of the declaration SET this request carried (tool_declarations.digest), so a
+  -- declaration's cost can be priced on exactly the requests that carried it. '' on rows
+  -- written before it existed, where the set is inferred from the tool count instead.
+  decl_digest TEXT NOT NULL DEFAULT '',
   -- Which prompt-cache TTL TIER this request asked for: 'ephemeral_5m', 'ephemeral_1h', or ''
   -- for a body carrying no cache_control at all. The pipeline always computed this and threw
   -- it away, so nothing could group by it and a 1h prompt was priced at the 5m write rate.
@@ -195,6 +214,7 @@ CREATE TABLE IF NOT EXISTS requests (
   reverts            INTEGER NOT NULL DEFAULT 0,
   token_accounting   TEXT    NOT NULL DEFAULT 'missing', -- complete|partial|missing
   cache_miss_reason  TEXT    NOT NULL DEFAULT '',        -- cold_start|ttl_expiry|prefix_change|unknown|hit
+  cache_miss_cause   TEXT    NOT NULL DEFAULT '',        -- what changed on a miss; see Cause* in event.go
   uncompressed_reason TEXT   NOT NULL DEFAULT '',        -- why we did not compact: '' = we did
   -- Request metadata: the knobs the CLIENT chose, normalized across the Anthropic and
   -- OpenAI dialects at the capture site, plus the provider's terminal stop reason. Real
@@ -337,32 +357,6 @@ CREATE TABLE IF NOT EXISTS tenant_spend (
   PRIMARY KEY (tenant_id, month)
 );
 
--- Ingested benchmark runs (deploy/harbor's summary.json + rows-*.json).
-CREATE TABLE IF NOT EXISTS bench_runs (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  name     TEXT NOT NULL UNIQUE,   -- run directory name, so re-ingesting replaces
-  ts       INTEGER NOT NULL,
-  dataset  TEXT NOT NULL DEFAULT '',
-  model    TEXT NOT NULL DEFAULT '',
-  summary  TEXT NOT NULL DEFAULT '{}'
-);
-CREATE TABLE IF NOT EXISTS bench_tasks (
-  run_id            INTEGER NOT NULL REFERENCES bench_runs(id) ON DELETE CASCADE,
-  arm               TEXT    NOT NULL,   -- config name: off|codesmart|headroom|rtk|…
-  task              TEXT    NOT NULL,
-  reward            REAL    NOT NULL DEFAULT 0,
-  steps             INTEGER NOT NULL DEFAULT 0,
-  prompt_tokens     INTEGER NOT NULL DEFAULT 0,
-  completion_tokens INTEGER NOT NULL DEFAULT 0,
-  cache_read        INTEGER NOT NULL DEFAULT 0,
-  cache_write       INTEGER NOT NULL DEFAULT 0,
-  fresh_input       INTEGER NOT NULL DEFAULT 0,
-  cost_usd          REAL    NOT NULL DEFAULT 0,
-  norm_cost_usd     REAL    NOT NULL DEFAULT 0,
-  wall_s            REAL    NOT NULL DEFAULT 0,
-  exception         INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_bt_run ON bench_tasks(run_id, arm);
 `
 
 // additiveDDL holds tables that can be created on an EXISTING database without touching
@@ -377,6 +371,21 @@ CREATE INDEX IF NOT EXISTS idx_bt_run ON bench_tasks(run_id, arm);
 // index, a different type — still requires a version bump, because an old file would
 // otherwise be read with the wrong shape.
 const additiveDDL = `
+-- Lifecycle signals (issue #424/#427), written only with the lifecycle flag on: the facts no
+-- requests column holds. One row per request, and one per keep-alive ping (ping_n > 0; its
+-- thread is the ping's own requests.thread_id, its outcome and cost the same row's cache and
+-- cost columns). A side table so requests is untouched. Counts, byte lengths and a tier label
+-- only. since_prev_end_ms is -1 when unknown, never 0.
+CREATE TABLE IF NOT EXISTS request_lifecycle (
+  request_id        INTEGER PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+  result_count      INTEGER NOT NULL DEFAULT 0,  -- tool_results on the incoming request
+  result_bytes      INTEGER NOT NULL DEFAULT 0,
+  result_error      INTEGER NOT NULL DEFAULT 0,
+  since_prev_end_ms INTEGER NOT NULL DEFAULT -1, -- previous response END on this thread -> this start
+  granted_ttl       TEXT    NOT NULL DEFAULT '', -- 5m|1h|mixed from the response's cache-write tiers
+  ping_n            INTEGER NOT NULL DEFAULT 0
+);
+
 -- One row per LLM call an expensive component made, with what it cost and what it bought.
 --
 -- Separate from request_components because the relationship is one-to-many and the columns
@@ -677,6 +686,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "split_stable_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "split_tail_hash", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "decl_digest", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},
@@ -688,6 +698,23 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// #240's correction factor. Additive with a default of 0, which doubles as the marker for
 	// "written before the correction existed" — see the column comment in ddl above.
 	{"requests", "billed_token_factor", "REAL NOT NULL DEFAULT 0"},
+	// #423: the thread of the session. '' on old rows, which is the primary thread — exactly
+	// how those rows were keyed when they were written.
+	{"requests", "thread_id", "TEXT NOT NULL DEFAULT ''"},
+	// #424's RECORD half. Nullable, no default — see the ddl block's own comment on these
+	// six columns for why NULL (never computed) must stay distinct from a real "unknown".
+	{"requests", "waiting_for", "TEXT"},
+	{"requests", "wait_tool", "TEXT"},
+	{"requests", "wake_cause", "TEXT"},
+	{"requests", "open_background", "INTEGER"},
+	{"requests", "open_teammate", "INTEGER"},
+	{"requests", "monitor_expiry_ms", "INTEGER"},
+	// The agent's own compaction request, no longer bypassed (it used to be marked `bypassed`). The
+	// replay cap reads Bypassed || AgentCompaction as the evidence of a client compaction. 0 on old
+	// rows, which were bypassed for exactly this reason.
+	{"requests", "agent_compaction", "INTEGER NOT NULL DEFAULT 0"},
+	// What changed on a miss, from the per-thread prefix comparison. '' on old rows.
+	{"requests", "cache_miss_cause", "TEXT NOT NULL DEFAULT ''"},
 	// The project dimension. Additive with a '' default, which doubles as "unattributed": a row
 	// that predates the column cannot be back-filled, because the body it came from is long gone.
 	{"requests", "project", "TEXT NOT NULL DEFAULT ''"},

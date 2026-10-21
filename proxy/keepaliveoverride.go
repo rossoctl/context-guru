@@ -174,7 +174,7 @@ func validOverride(session string, idle time.Duration, pings, minPrefix int,
 // override is armed for it.
 //
 // The ONE hook this feature has in the request path, called from record. Everything downstream
-// — pol.on(), pingable(), the hard deadline, the per-ping cost guard, the kill switch, the
+// — pol.On(), pingable(), the hard deadline, the per-ping cost guard, the kill switch, the
 // no-audit-sink refusal — reads the returned policy and is otherwise untouched.
 func (k *keeper) overrideFor(tenantID, session string, pol CachePolicy) CachePolicy {
 	o, ok := k.activeOverride(tenantID, session)
@@ -276,8 +276,9 @@ func (k *keeper) disarm(tenantID, session string) bool {
 	_, had := k.overrides[key]
 	delete(k.overrides, key)
 	k.mu.Unlock()
-	// Outside the lock: retire takes it itself.
-	k.retire(key)
+	// Outside the lock: retireSession takes it itself. Every thread of the session, because the
+	// override authorized the hold for all of them.
+	k.retireSession(tenantID, session)
 	return had
 }
 

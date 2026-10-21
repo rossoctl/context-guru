@@ -52,6 +52,12 @@ var statsGoldenTopLevel = []string{
 	"cache_aware_summarizer_profile_fallbacks",
 	"cache_aware_summarizer_async_started",
 	"cache_aware_summarizer_async_committed",
+	"cache_aware_summarizer_no_prefix",
+	"cache_aware_summarizer_stale_prefix",
+	"cache_aware_summarizer_prefix_ask_used",
+	"cache_aware_summarizer_cache_read_tokens",
+	"cache_aware_summarizer_cache_write_tokens",
+	"cache_aware_summarizer_truncated",
 
 	"agentdiet_errors",
 	"agentdiet_timeouts",

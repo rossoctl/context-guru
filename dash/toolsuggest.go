@@ -163,10 +163,8 @@ type ToolFilterState struct {
 // aggregate can express that without either picking one model or blending rates that belong
 // to none.
 func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bool)) (*DeclFilterSaving, error) {
-	where, args := f.where()
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.ts FROM requests r
-		WHERE `+where+` AND r.filtered_decl_tokens > 0`, args...)
+	q, args := declFilterSavingsQuery(f)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -175,11 +173,11 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 	sessions := map[string]bool{}
 	for rows.Next() {
 		var session, model string
-		var tok, cacheRead, cacheWrite, ts int64
-		if err := rows.Scan(&session, &model, &tok, &cacheRead, &cacheWrite, &ts); err != nil {
+		var tok, cacheRead, cacheWrite, cacheWrite1h, ts int64
+		if err := rows.Scan(&session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts); err != nil {
 			return nil, err
 		}
-		accumulateDeclFilterRow(out, sessions, session, model, tok, cacheRead, cacheWrite, ts, price)
+		accumulateDeclFilterRow(out, sessions, session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, price)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -188,12 +186,23 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 	return out, nil
 }
 
+// declFilterSavingsQuery builds the SQL and args DeclFilterSavings executes — pulled out for
+// #502's EXPLAIN-plan test, same reason as cachesplitHistoricalQuery (dash/cachehistory.go).
+// Bounded by `cond` directly: a session's own index for session scope, the ts range for a
+// time window, neither for `since=0` — which is why OverviewLean never calls this unscoped.
+func declFilterSavingsQuery(f Filter) (string, []any) {
+	where, args := f.where()
+	return `SELECT r.session_id, r.model, r.filtered_decl_tokens,
+		r.cache_read, r.cache_write, r.cache_write_1h, r.ts FROM requests r
+		WHERE ` + where + ` AND r.filtered_decl_tokens > 0`, args
+}
+
 // accumulateDeclFilterRow folds one filtered_decl_tokens>0 row into a running total — the one
 // piece of DeclFilterSavings that has to run in Go rather than SQL, since each row prices at
 // ITS OWN model's rate and cache tier. Shared with DeclFilterSavingsByTenant so the two never
 // drift on how a row is priced.
 func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
-	session, model string, tok, cacheRead, cacheWrite, ts int64, price func(string) (modelinfo.Price, bool)) {
+	session, model string, tok, cacheRead, cacheWrite, cacheWrite1h, ts int64, price func(string) (modelinfo.Price, bool)) {
 	out.Requests++
 	sessions[session] = true
 	out.Reads += tok
@@ -218,6 +227,11 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 		// have cost the creation rate (1.25x fresh).
 		out.CacheWriteTokens += tok
 		rate = p.CacheWrite
+		// A one-hour breakpoint precedes every 5-minute one, so a request that wrote any 1h tokens
+		// wrote the declarations at the head at the 1h rate: 2x input. (The same rule as carriedCost.)
+		if cacheWrite1h > 0 {
+			rate = 2 * p.Input
+		}
 	default:
 		out.FreshTokens += tok
 		rate = p.Input
@@ -235,7 +249,7 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinfo.Price, bool)) (map[string]*DeclFilterSaving, error) {
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.ts FROM requests r
+		r.cache_read, r.cache_write, r.cache_write_1h, r.ts FROM requests r
 		WHERE `+cond+` AND r.filtered_decl_tokens > 0`, args...)
 	if err != nil {
 		return nil, err
@@ -245,8 +259,8 @@ func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinf
 	sessions := map[string]map[string]bool{}
 	for rows.Next() {
 		var tenant, session, model string
-		var tok, cacheRead, cacheWrite, ts int64
-		if err := rows.Scan(&tenant, &session, &model, &tok, &cacheRead, &cacheWrite, &ts); err != nil {
+		var tok, cacheRead, cacheWrite, cacheWrite1h, ts int64
+		if err := rows.Scan(&tenant, &session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts); err != nil {
 			return nil, err
 		}
 		s, ok := out[tenant]
@@ -255,7 +269,7 @@ func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinf
 			out[tenant] = s
 			sessions[tenant] = map[string]bool{}
 		}
-		accumulateDeclFilterRow(s, sessions[tenant], session, model, tok, cacheRead, cacheWrite, ts, price)
+		accumulateDeclFilterRow(s, sessions[tenant], session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, price)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -276,8 +290,45 @@ type declWindow struct {
 // declWindows reads the per-item observation window for a scope. Separate from the report's
 // own aggregation because the report answers "what does this cost" and this answers "how
 // much do we actually know" — and only the second may authorise a removal.
-func (d *DB) declWindows(f Filter) (map[statKey]declWindow, error) {
+func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, error) {
 	where, args := f.where()
+	if sessions, err := d.declSessionSet(f); err != nil {
+		return nil, err
+	} else if len(sessions) >= declScanMinSessions {
+		// Broad scope: fold the facts from one concurrent pass over the table (declfacts.go)
+		// instead of probing it once per session. First/last are the MIN/MAX of ts over every
+		// row, and the session count is distinct sessions per (kind, name) across servers.
+		scan, err := h.get()
+		if err != nil {
+			return nil, err
+		}
+		seen := map[statKey]map[string]bool{}
+		out := map[statKey]declWindow{}
+		for k, v := range scan.facts {
+			if !sessions[k.session] {
+				continue
+			}
+			sk := statKey{k.kind, k.name}
+			if seen[sk] == nil {
+				seen[sk] = map[string]bool{}
+			}
+			seen[sk][k.session] = true
+			w, ok := out[sk]
+			if !ok || v.first < w.first {
+				w.first = v.first
+			}
+			if !ok || v.last > w.last {
+				w.last = v.last
+			}
+			out[sk] = w
+		}
+		for sk, set := range seen {
+			w := out[sk]
+			w.sessions = len(set)
+			out[sk] = w
+		}
+		return out, nil
+	}
 	q := `SELECT d.kind, d.name, COUNT(DISTINCT d.session_id), MIN(d.ts), MAX(d.ts)
 		FROM tool_declarations d WHERE d.session_id IN
 		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
@@ -342,7 +393,8 @@ type ToolFilterDoc struct {
 // which is a deployment with no per-account configuration: the analysis is served and the
 // control is reported unavailable.
 func (d *DB) ToolFilterDocFor(f Filter, price func(string) (modelinfo.Price, bool), state ToolFilterState) (*ToolFilterDoc, error) {
-	rep, err := d.ToolReportFor(f, price)
+	scan := &declScanOnce{d: d, f: f}
+	rep, err := d.toolReportFor(f, price, scan)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +402,7 @@ func (d *DB) ToolFilterDocFor(f Filter, price func(string) (modelinfo.Price, boo
 	if err != nil {
 		return nil, err
 	}
-	win, err := d.declWindows(f)
+	win, err := d.declWindows(f, scan)
 	if err != nil {
 		return nil, err
 	}
