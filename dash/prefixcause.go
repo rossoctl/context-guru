@@ -15,6 +15,8 @@ type PrefixFacts struct {
 	Thinking     string
 	Budget       int
 	Bypassed     bool
+	// Messages is the message count of the request. 0 means it was not read.
+	Messages int
 	// Rewrote says context-guru shortened this request (tokens_after < tokens_before).
 	Rewrote bool
 	// TS is the request time in epoch ms.
@@ -30,8 +32,8 @@ func FactsOf(e *Event) PrefixFacts {
 		TS: e.TS, Model: e.Model, DeclDigest: e.DeclDigest, Tools: e.Tools,
 		SystemHash: e.SystemHash, SystemBlocks: e.SystemBlocks,
 		Effort: e.ReasoningEffort, Thinking: e.ThinkingMode, Budget: e.ThinkingBudget,
-		Bypassed: e.Bypassed,
-		Rewrote:  !e.Bypassed && e.TokensAfter < e.TokensBefore,
+		Bypassed: e.Bypassed, Messages: e.Messages,
+		Rewrote: !e.Bypassed && e.TokensAfter < e.TokensBefore,
 	}
 }
 
@@ -48,9 +50,14 @@ func FactsOf(e *Event) PrefixFacts {
 //   - known: false when the thread has no facts at all. The caller then keeps the gap it
 //     measured itself (a restart forgets facts but not recency).
 //
-// A thread whose earlier requests were all on another model reads CauseModelChanged. That is a
-// miss no TTL can rescue, and it is a choice the agent made, so it stays visible as a
-// prefix_change rather than hiding in cold_start.
+// A thread whose earlier requests were all on another model reads CauseModelChanged, with two
+// exceptions that read CauseFirstOnModel (stored as cold_start). Both are a first request on
+// this model, and not a switch the user made:
+//
+//   - the request is short (1 to shortFirstMessages messages). Claude Code sends small helper
+//     requests on another model; they are not a /model switch.
+//   - an earlier request on this model failed. A failed request writes no cache entry, so the
+//     next success starts cold. Only a 2xx request counts as "seen" for a model.
 //
 // commit says whether cur becomes the thread's new baseline. A failed request must not: its
 // tools or effort would then stand in for the last request that really reached the cache.
@@ -79,7 +86,13 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 	// The thread's latest committed request was on this model, so a keep-alive ping after it
 	// refreshed THIS model's entry.
 	lastWasSame = hadAny && last.Model == cur.Model
+	failedKey := perModel(key) + "\x00failed"
+	_, failedSame := any(failedKey)
+	if !commit {
+		r.lastFacts[failedKey] = cur
+	}
 	if commit {
+		delete(r.lastFacts, failedKey)
 		// A bypassed request re-writes the original history into the cache, which ends the
 		// effect of an earlier rewrite.
 		cur.RewroteEarlier = same && !cur.Bypassed && (prev.RewroteEarlier || prev.Rewrote)
@@ -90,11 +103,17 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 	case same:
 		gap := cur.TS - prev.TS
 		return prefixCause(prev, cur, gap), gap, true, lastWasSame
+	case failedSame, hadAny && cur.Messages > 0 && cur.Messages <= shortFirstMessages:
+		return CauseFirstOnModel, -1, hadAny, false
 	case hadAny:
 		return CauseModelChanged, -1, true, false
 	}
 	return "", 0, false, false
 }
+
+// shortFirstMessages is the largest message count of a request that counts as a short first
+// request on a model.
+const shortFirstMessages = 2
 
 // prefixCause compares two consecutive requests of one thread. The first difference wins, in
 // the order of the Cause* constants. Both requests are on one model (ObservePrefix picks them

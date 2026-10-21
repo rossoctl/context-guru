@@ -3,6 +3,7 @@ package kvcache
 import (
 	"context"
 	"math"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -702,5 +703,25 @@ func TestStepCostTreatsAnUnexplainedMissAsAMiss(t *testing.T) {
 	}
 	if math.Abs(unknown-forced) > 1e-12 {
 		t.Errorf("unknown = %.6f, prefix_change = %.6f; they must price the same", unknown, forced)
+	}
+}
+
+// Issue #611 moves rows from prefix_change to cold_start. Both are forced misses, so every
+// figure of every arm must stay the same.
+func TestRelabellingPrefixChangeAsColdStartChangesNoFigure(t *testing.T) {
+	build := func(reason string) []*Request {
+		rows := chain("u", "s", "m", base, 10_000, 10_000, 10_000)
+		rows[1].MissReason = reason
+		return rows
+	}
+	for _, s := range []Strategy{Fixed5m(), Fixed1h(), alwaysDo{ActionPing1h}} {
+		a := Simulate(build("prefix_change"), s, Config{Prices: testPrices()})
+		b := Simulate(build("cold_start"), s, Config{Prices: testPrices()})
+		if a.ForcedMisses != 1 || b.ForcedMisses != 1 {
+			t.Fatalf("%s: forced_misses = %d / %d, want 1 / 1", s.Name(), a.ForcedMisses, b.ForcedMisses)
+		}
+		if !reflect.DeepEqual(a, b) {
+			t.Errorf("%s: result differs after relabelling\nprefix_change: %+v\ncold_start:    %+v", s.Name(), a, b)
+		}
 	}
 }
