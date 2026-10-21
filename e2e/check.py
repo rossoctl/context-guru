@@ -122,6 +122,11 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
              all(i.get("usd", 0) > 0 for i in _unused(priced)), "usd > 0 for every priced unused item",
              [i["name"] for i in _unused(priced) if not i.get("usd", 0) > 0],
              detail="no priced unused items" if no_priced_unused else "", blocked=no_priced_unused)
+        # An invoked item is not waste: any usd on it would be counted as money the user could save.
+        inv = [i for i in items if i.get("invoked")]
+        _rec(out, f"C.money.used_is_zero.{root}", "money", all(i.get("usd", 0) == 0 for i in inv),
+             "usd == 0 (or absent) for every invoked item", [i["name"] for i in inv if i.get("usd", 0) != 0],
+             detail="no invoked items" if not inv else "", blocked=not inv)
         # dash/insightsshape.go: removable_usd only accumulates items whose scope != "none"
         total = round(sum(i.get("usd", 0) for i in _unused(items) if i.get("scope") != "none"), 6)
         _rec(out, f"C.money.total_is_sum.{root}", "money", abs(total - doc.get("removable_usd", 0)) < 1e-6,

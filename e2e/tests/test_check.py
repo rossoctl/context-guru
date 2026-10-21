@@ -31,8 +31,8 @@ API = {
                 "self_excluded": {"items": 2}, "used": [{"name": "a:y", "skill": True}]},
     "facets_measured": {"project": ["/s/alpha"]},
     "insights": {"/s/hist": {"items": [], "timeline": {"buckets": []}},
-                 "": {"items": [item("mcp__d__s"), item("Bash", usd=0.1, scope="none", invoked=True)], "removable_usd": 0.4},
-                 "/s/alpha": {"items": [item("mcp__d__s"), item("Bash", usd=0.1, scope="none", invoked=True)],
+                 "": {"items": [item("mcp__d__s"), item("Bash", usd=0, scope="none", invoked=True)], "removable_usd": 0.4},
+                 "/s/alpha": {"items": [item("mcp__d__s"), item("Bash", usd=0, scope="none", invoked=True)],
                               "removable_usd": 0.4, "timeline": {"buckets": [1]}}},
     "stats": {"/s/alpha": {"requests": 12}},
     "unpriced_probe": {"items": [item("mcp__d__s", usd=0, priced=False)]},
@@ -177,6 +177,21 @@ class TestCheck(unittest.TestCase):
         v = verdicts(a)
         for k in ("C.money.unused_positive./s/alpha", "C.money.total_is_sum./s/alpha", "C.money.pooled_ge_project"):
             self.assertEqual(v[k], "BLOCKED", k)
+
+    def test_used_is_zero_fails_for_an_invoked_item_with_a_cost(self):
+        a = copy.deepcopy(API); a["insights"]["/s/alpha"]["items"][1]["usd"] = 0.1
+        r = {x["id"]: x for x in check.run(EXP, a, None, "full", probes=PROBES)}["C.money.used_is_zero./s/alpha"]
+        self.assertEqual((r["verdict"], r["actual"]), ("FAIL", ["Bash"]))
+
+    def test_used_is_zero_passes_for_zero_or_absent_usd(self):
+        a = copy.deepcopy(API); del a["insights"]["/s/alpha"]["items"][1]["usd"]
+        self.assertEqual(verdicts()["C.money.used_is_zero./s/alpha"], "PASS")
+        self.assertEqual(verdicts(a)["C.money.used_is_zero./s/alpha"], "PASS")
+
+    def test_used_is_zero_blocked_when_nothing_was_invoked(self):
+        a = copy.deepcopy(API); a["insights"]["/s/alpha"]["items"] = [item("mcp__d__s")]
+        r = {x["id"]: x for x in check.run(EXP, a, None, "full", probes=PROBES)}["C.money.used_is_zero./s/alpha"]
+        self.assertEqual((r["verdict"], r["detail"]), ("BLOCKED", "no invoked items"))
 
     def test_pooled_less_than_project_fails(self):
         a = copy.deepcopy(API); a["insights"][""]["removable_usd"] = 0.1
