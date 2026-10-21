@@ -8,8 +8,9 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 )
 
 // AskCovered checks coverage and asks on ONE read of the stash, so the body that goes out is the
@@ -21,7 +22,7 @@ func TestAskCoveredAsksOnTheBodyItChecked(t *testing.T) {
 	stash.put(session, bschemas.Anthropic, []byte(prefixBodyFixture), []byte(prefixBodyFixture))
 	norm := apply.NormalizeMessages(bschemas.Anthropic, []byte(prefixBodyFixture))
 	hash := components.SpanHash(norm[:1])
-	a := prefixAsker{stash: stash, cli: cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "m", APIKey: "k"}}
+	a := prefixAsker{stash: stash, cli: newCoveredCli(srv)}
 
 	if _, _, err := a.AskCovered(context.Background(), session, 1, hash, "THE-ASK"); err != nil {
 		t.Fatalf("AskCovered over a covering stash: %v", err)
@@ -34,7 +35,7 @@ func TestAskCoveredAsksOnTheBodyItChecked(t *testing.T) {
 func TestAskCoveredDeclinesStaleAndMissingWithoutACall(t *testing.T) {
 	srv := newCapturePrefixed(t, 1)
 	stash := newSentStash()
-	a := prefixAsker{stash: stash, cli: cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "m", APIKey: "k"}}
+	a := prefixAsker{stash: stash, cli: newCoveredCli(srv)}
 
 	if _, _, err := a.AskCovered(context.Background(), "never-seen", 1, "h", "ask"); err != components.ErrNoPrefix {
 		t.Errorf("missing stash: err = %v, want ErrNoPrefix", err)
@@ -62,7 +63,7 @@ func TestAskCoveredRefusesAHashFromAReplacedBody(t *testing.T) {
 	oldHash := components.SpanHash(apply.NormalizeMessages(bschemas.Anthropic, []byte(prefixBodyFixture))[:1])
 	other := strings.Replace(prefixBodyFixture, "find the flaky test", "write the release notes", 1)
 	stash.put(session, bschemas.Anthropic, []byte(other), []byte(other))
-	a := prefixAsker{stash: stash, cli: cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "m", APIKey: "k"}}
+	a := prefixAsker{stash: stash, cli: newCoveredCli(srv)}
 
 	if _, _, err := a.AskCovered(context.Background(), session, 1, oldHash, "ask"); err != components.ErrStalePrefix {
 		t.Fatalf("err = %v, want ErrStalePrefix for a hash computed over the replaced body", err)
@@ -89,4 +90,9 @@ func TestSnapshotCoveringReturnsTheEntryItChecked(t *testing.T) {
 	if !strings.Contains(string(body), "find the flaky test") || strings.Contains(string(body), "release notes") {
 		t.Fatalf("the snapshot is not the entry that was checked: %q", body)
 	}
+}
+
+func newCoveredCli(srv *capturePrefixed) cheapmodel.Anthropic {
+	d, ref := dispatchtest.HTTP(srv.srv.URL, dispatchtest.AnthropicAuth("k", ""))
+	return cheapmodel.Anthropic{D: d, Ref: ref, Model: "m"}
 }
