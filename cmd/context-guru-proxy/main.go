@@ -135,6 +135,8 @@ func main() {
 		routingPath = flag.String("routing", envOr("CG_ROUTING_FILE", ""),
 			"path to the model routing table YAML (feature -> model/key/base-URL env var NAMES, dialect, optional prices). "+
 				"Unset = no routing. A row with a missing env var or a bad base URL is inactive and logged; it never stops the proxy")
+		classifierBudget = flag.Duration("classifier-budget", envDuration("CG_CLASSIFIER_BUDGET", 8*time.Second),
+			"total time the classifier redirect may spend retrying the routed model before the original request is forwarded")
 		controlDB = flag.String("control-db", envOr("CONTROL_DB", "./context-guru-control.db"),
 			"hosted mode: path to the control database (tenants, tokens, per-tenant config). "+
 				"Kept separate from the dashboard DB, which is a derived view that may be rebuilt or pruned")
@@ -547,13 +549,14 @@ func main() {
 		}
 	}
 	h := proxy.New(pipe, cfg.NewStore(), agg, proxy.Options{
-		Routing:       routingRows,
-		BaseConfig:    baseConfig,
-		BuildConfig:   buildTenantConfig,
-		AdaptOverride: adaptOverride,
-		Tenants:       tenants,   // nil => single-tenant, unchanged behaviour
-		Upstreams:     upstreams, // the allow-list; a tenant picks a name, never a URL
-		MetricsToken:  *metricsToken,
+		Routing:          routingRows,
+		ClassifierBudget: *classifierBudget,
+		BaseConfig:       baseConfig,
+		BuildConfig:      buildTenantConfig,
+		AdaptOverride:    adaptOverride,
+		Tenants:          tenants,   // nil => single-tenant, unchanged behaviour
+		Upstreams:        upstreams, // the allow-list; a tenant picks a name, never a URL
+		MetricsToken:     *metricsToken,
 		// Both come from the dashboard's store, so both are nil when the dashboard is
 		// off — with no request rows there is nothing to price a cap against and nothing
 		// to roll up per tenant.

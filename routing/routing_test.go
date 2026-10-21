@@ -10,7 +10,7 @@ import (
 
 const bobYAML = `
 routes:
-  - feature: example_feature
+  - feature: classifier
     model_name_env: T_MODEL
     key_env: T_KEY
     base_url_env: T_URL
@@ -43,7 +43,7 @@ func TestActiveRowAndLookup(t *testing.T) {
 	p := &pinned{}
 	tb := Build(rows, env(map[string]string{"T_MODEL": "bob-fast", "T_KEY": "sekret",
 		"T_URL": "https://api.example.com/"}), p.pin, nil)
-	r, ok := tb.Lookup("example_feature")
+	r, ok := tb.Lookup("classifier")
 	if !ok || r.Model != "bob-fast" || r.Ref != "r1" || r.Path != "/inference/v1/chat/completions" {
 		t.Fatalf("route=%+v ok=%v", r, ok)
 	}
@@ -77,7 +77,7 @@ func TestInactiveRows(t *testing.T) {
 	for name, e := range cases {
 		p := &pinned{}
 		tb := Build(rows, env(e), p.pin, nil)
-		if _, ok := tb.Lookup("example_feature"); ok || len(p.eps) != 0 {
+		if _, ok := tb.Lookup("classifier"); ok || len(p.eps) != 0 {
 			t.Errorf("%s: row must be inactive and pin nothing", name)
 		}
 		st := tb.Stats()
@@ -87,7 +87,7 @@ func TestInactiveRows(t *testing.T) {
 	}
 	// localhost over http is allowed.
 	full["T_URL"] = "http://localhost:8080"
-	if _, ok := Build(rows, env(full), (&pinned{}).pin, nil).Lookup("example_feature"); !ok {
+	if _, ok := Build(rows, env(full), (&pinned{}).pin, nil).Lookup("classifier"); !ok {
 		t.Error("http://localhost must be active")
 	}
 	// A reason names the env var, never the value.
@@ -123,10 +123,10 @@ func TestCountersAndNilTable(t *testing.T) {
 	rows, _ := Parse([]byte(bobYAML))
 	tb := Build(rows, env(map[string]string{"T_MODEL": "m", "T_KEY": "k", "T_URL": "https://h.example.com"}),
 		(&pinned{}).pin, nil)
-	tb.Record("example_feature", Routed, 0.25)
-	tb.Record("example_feature", Routed, 0.5)
-	tb.Record("example_feature", FellBack, 0)
-	tb.Record("example_feature", NotDetected, 0)
+	tb.Record("classifier", Routed, 0.25)
+	tb.Record("classifier", Routed, 0.5)
+	tb.Record("classifier", FellBack, 0)
+	tb.Record("classifier", NotDetected, 0)
 	s := tb.Stats()[0]
 	if s.Calls != 3 || s.Routed != 2 || s.FellBack != 1 || s.NotDetected != 1 || s.SavedUSD != 0.75 {
 		t.Fatalf("stats=%+v", s)

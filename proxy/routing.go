@@ -3,12 +3,17 @@ package proxy
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"strings"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/context-guru/classifier"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dispatch"
+	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/routing"
 )
 
@@ -27,6 +32,71 @@ func (h *Handler) buildRouting() {
 		}
 		return d.Pin(e.BaseURL, AuthHeader(prov, e.Key, ""))
 	}, slog.Default())
+}
+
+// routeClassifier answers an auto-mode classifier request with the routed model, and reports
+// whether it did. false means "carry on with the normal path", and the request is untouched: with
+// no active `classifier` row it returns before reading anything, so a proxy without a routing file
+// forwards byte for byte what it did before this feature.
+//
+// It runs before the pipeline on purpose. A classifier request is tiny and the pipeline has
+// nothing to offer it, but the dashboard row is still written (cp), so the request does not
+// vanish from the cost view.
+//
+// FAIL OPEN: a panic, a conversion error or an inaccessible route all return false, and the
+// original request goes upstream unchanged. Nothing is written to w until the answer is in hand.
+func (h *Handler) routeClassifier(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider,
+	api string, tn *Tenancy, body []byte) (served bool) {
+	if provider != bschemas.Anthropic || api != "" {
+		return false
+	}
+	route, ok := h.routes.Lookup(classifier.Feature)
+	if !ok {
+		return false
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			logging.From(r.Context()).Error("cg.classifier: recovered from panic; sending original", "panic", rec)
+			h.routes.Record(classifier.Feature, routing.FellBack, 0)
+			served = false
+		}
+	}()
+	if !classifier.Detect(r.Header, body) {
+		h.routes.Record(classifier.Feature, routing.NotDetected, 0)
+		return false
+	}
+	lg := logging.From(r.Context())
+	start := time.Now()
+	res, err := classifier.Redirect(r.Context(), h.dispatcher(), route, body, classifier.Options{
+		Budget: h.opts.ClassifierBudget})
+	if err != nil {
+		// A line without the content, the key or the URL: the error names a status or a transport
+		// cause only.
+		lg.Warn("cg.classifier: routed model unusable; sending original", "model", route.Model,
+			"ms", msSince(start, time.Time{}), "err", err)
+		h.routes.Record(classifier.Feature, routing.FellBack, 0)
+		return false
+	}
+	orig := gjson.GetBytes(body, "model").String()
+	saved := h.routedSaving(r.Context(), orig, RoutedUsage(res.Usage), route.Price)
+	h.routes.Record(classifier.Feature, routing.Routed, saved)
+	lg.Info("cg.classifier", "routed_model", route.Model, "original_model", orig,
+		"attempts", res.Attempts, "ms", msSince(start, time.Time{}), "saved_usd", saved)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(res.Body)
+
+	// The dashboard row: the routed model and its tokens. Its cost is whatever the price table
+	// knows for that model; the saving is on /stats only (see routedSaving).
+	cp := h.newCapture(r, string(provider), "/v1/messages", tn)
+	cp.noteModel(route.Model)
+	cp.noteMeta(metaFromBody(body))
+	cp.noteUpstream(float64(time.Since(start).Microseconds())/1000.0, http.StatusOK)
+	cp.finish(Usage{FreshInput: res.Usage.Fresh, CacheRead: res.Usage.CacheRead,
+		CacheWrite: res.Usage.CacheWrite, Output: res.Usage.Output,
+		StopReason: gjson.GetBytes(res.Body, "stop_reason").String()},
+		true, false, h.contentCap(), h.contentMax())
+	return true
 }
 
 // RoutedUsage is the token counts of one routed call, as the routed endpoint billed them.
