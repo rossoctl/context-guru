@@ -77,6 +77,7 @@ func TestAModelSwitchIsNamed(t *testing.T) {
 	causeMiss(r, "s1", "", t0, base())
 	b := base()
 	b.Model = "m2"
+	b.Messages = 40
 	r.seenModel["t1\x00m2"] = true // m2 ran in another session, so this is not a cold start
 	e := causeMiss(r, "s1", "", t0+60_000, b)
 	if e.CacheMissReason != CachePrefixChange || e.CacheMissCause != CauseModelChanged {
@@ -278,5 +279,88 @@ func TestOverviewPrefixChangeCostCountsOnlyMeasuredRows(t *testing.T) {
 	}
 	if o.PrefixChangeRequestsAll != 1 || math.Abs(o.PrefixChangeCostAll-0.50) > 1e-12 {
 		t.Errorf("prefix_change all = %d rows $%.2f, want 1 row $0.50", o.PrefixChangeRequestsAll, o.PrefixChangeCostAll)
+	}
+}
+
+// Issue #611. A short first request on a model is a cold start, not a model switch.
+func TestAShortFirstRequestOnAModelIsColdStart(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	for _, tc := range []struct {
+		messages   int
+		wantReason string
+		wantCause  string
+	}{
+		{1, CacheColdStart, ""},
+		{2, CacheColdStart, ""},
+		{3, CachePrefixChange, CauseModelChanged},
+		{40, CachePrefixChange, CauseModelChanged},
+	} {
+		r := newFactsRecorder()
+		r.seenModel["t1\x00m2"] = true // another session ran m2: only the thread rule applies
+		causeMiss(r, "s1", "", t0, base())
+		b := base()
+		b.Model, b.Messages = "m2", tc.messages
+		e := causeMiss(r, "s1", "", t0+60_000, b)
+		if e.CacheMissReason != tc.wantReason || e.CacheMissCause != tc.wantCause {
+			t.Errorf("%d messages: %q/%q, want %q/%q", tc.messages, e.CacheMissReason, e.CacheMissCause, tc.wantReason, tc.wantCause)
+		}
+	}
+}
+
+// A short request on a model the thread already ran, inside the TTL, is an ordinary miss.
+func TestAShortRequestOnAKnownModelIsNotColdStart(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	r := newFactsRecorder()
+	a := base()
+	a.Messages = 30
+	causeMiss(r, "s1", "", t0, a)
+	b := base()
+	b.Messages = 2
+	b.Tools = 21
+	e := causeMiss(r, "s1", "", t0+60_000, b)
+	if e.CacheMissReason != CachePrefixChange || e.CacheMissCause != CauseToolsChanged {
+		t.Errorf("short request on a known model = %q/%q, want prefix_change/tools_changed", e.CacheMissReason, e.CacheMissCause)
+	}
+	if e := causeMissWith(r, "s1", "", t0+120_000, b, 5000, 200); e.CacheMissReason != CacheHit {
+		t.Errorf("short request with a read = %q, want hit", e.CacheMissReason)
+	}
+}
+
+// Issue #611, second case. A failed request writes no cache entry. The first success after it
+// on that model is a cold start, however long the request is.
+func TestTheFirstSuccessAfterAFailureIsColdStart(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	for _, status := range []int{400, 502} {
+		r := newFactsRecorder()
+		r.seenModel["t1\x00m2"] = true
+		first := base()
+		first.Messages = 100
+		causeMiss(r, "s1", "", t0, first)
+		long := base()
+		long.Model, long.Messages = "m2", 178
+		causeMissWith(r, "s1", "", t0+60_000, long, 0, status)
+		e := causeMiss(r, "s1", "", t0+120_000, long)
+		if e.CacheMissReason != CacheColdStart || e.CacheMissCause != "" {
+			t.Errorf("status %d: first success = %q/%q, want cold_start", status, e.CacheMissReason, e.CacheMissCause)
+		}
+		// The success is now seen. A later miss is an ordinary one again.
+		long.Tools = 21
+		if e := causeMiss(r, "s1", "", t0+180_000, long); e.CacheMissReason != CachePrefixChange || e.CacheMissCause != CauseToolsChanged {
+			t.Errorf("status %d: later miss = %q/%q, want prefix_change/tools_changed", status, e.CacheMissReason, e.CacheMissCause)
+		}
+	}
+}
+
+// A failure AFTER a success on the same model does not erase that success.
+func TestAFailureAfterASuccessKeepsTheModelSeen(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	r := newFactsRecorder()
+	a := base()
+	a.Messages = 50
+	causeMiss(r, "s1", "", t0, a)
+	causeMissWith(r, "s1", "", t0+60_000, a, 0, 502)
+	a.Tools = 21
+	if e := causeMiss(r, "s1", "", t0+120_000, a); e.CacheMissReason != CachePrefixChange || e.CacheMissCause != CauseToolsChanged {
+		t.Errorf("after success then failure = %q/%q, want prefix_change/tools_changed", e.CacheMissReason, e.CacheMissCause)
 	}
 }

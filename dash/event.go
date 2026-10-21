@@ -56,6 +56,10 @@ const (
 	// concurrentGapMs ago. A cache entry is readable only after the first response starts,
 	// so parallel sub-agent requests miss. The reason is "unknown", not "prefix_change".
 	CauseConcurrent = "concurrent"
+	// CauseFirstOnModel: no successful earlier request of the thread ran this model, and the
+	// request is short or an earlier one failed. It is not stored as a cause: the reason is
+	// cold_start. ObservePrefix returns it so AttributeCache agrees with the thread facts.
+	CauseFirstOnModel = "first_on_model"
 )
 
 // concurrentGapMs is the gap below which an unexplained miss reads as concurrent. Time to
@@ -1139,7 +1143,7 @@ func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, t
 	switch {
 	case e.CacheRead > 0:
 		e.CacheMissReason = CacheHit
-	case !seenSession || !seenModel:
+	case !seenSession || !seenModel || cause == CauseFirstOnModel:
 		e.CacheMissReason = CacheColdStart
 	case ttlMs > 0 && sinceLastMs > ttlMs:
 		e.CacheMissReason = CacheTTLExpiry
