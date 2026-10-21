@@ -25,7 +25,7 @@ func TestOpenReadOnlyReadsAFileThatPredatesTheManualPingColumns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, col := range []string{"manual_ping", "manual_saved_usd"} {
+	for _, col := range []string{"manual_ping", "manual_saved_usd", "cache_miss_cause", "agent_compaction", "billed_token_factor"} {
 		if _, err := raw.Exec(`ALTER TABLE requests DROP COLUMN ` + col); err != nil {
 			t.Fatal(err)
 		}
@@ -48,8 +48,14 @@ func TestOpenReadOnlyReadsAFileThatPredatesTheManualPingColumns(t *testing.T) {
 	if _, err := ro.KeepAliveLedger(Filter{TenantAll: true}); err != nil {
 		t.Fatalf("KeepAliveLedger: %v", err)
 	}
-	if p, err := ro.Requests(Filter{TenantAll: true}, 0, 10); err != nil || len(p.Requests) != 2 {
+	p, err := ro.Requests(Filter{TenantAll: true}, 0, 10)
+	if err != nil || len(p.Requests) != 2 {
 		t.Fatalf("Requests = %v, %v", p, err)
+	}
+	for _, e := range p.Requests {
+		if e.ManualPing || e.ManualSavedUSD != 0 {
+			t.Errorf("a row from before the columns reads manual_ping=%v saved=%v, want the defaults", e.ManualPing, e.ManualSavedUSD)
+		}
 	}
 	// Still read-only: no write gets through, and the file kept its old shape.
 	if _, err := ro.sql.Exec(`DELETE FROM main.requests`); err == nil {

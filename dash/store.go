@@ -325,13 +325,14 @@ func OpenReadOnly(path string) (*DB, error) {
 	return &DB{sql: sdb, path: path, readOnly: true, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
 }
 
-// A read-only handle cannot ALTER, and the ledgers read requests.manual_ping and manual_saved_usd,
-// which a file written by a proxy from before the Ping button lacks. Failing every query with "no
-// such column" would break a reader (the cache-campaign tool opens live databases this way), so each
-// read-only connection gets a TEMP view named `requests` that adds the two columns as constants.
-// Temp objects are searched before main, so every unqualified `requests` resolves to the shim; the
-// view is per connection and writes nothing to the file. A file that has the columns gets no shim.
-// query_only is switched on last, because it forbids creating even a temp object.
+// A read-only handle cannot ALTER, and the queries read every column of additiveColumns, which a
+// file written by an older proxy may lack (the Ping button's manual_ping among them). Failing each
+// query with "no such column" would break a reader (the cache-campaign tool opens live databases
+// this way, and operators mix tool and proxy versions), so each read-only connection gets a TEMP
+// view named `requests` that adds every missing column as its default. Temp objects are searched
+// before main, so every unqualified `requests` resolves to the shim; the view is per connection and
+// writes nothing to the file. A file with all its columns gets no shim. query_only is switched on
+// last, because it forbids creating even a temp object.
 //
 // The hook is the driver's process-wide one, so it acts only on DSNs carrying cg_ro=1.
 func init() {
@@ -340,24 +341,25 @@ func init() {
 			return nil
 		}
 		ctx := context.Background()
-		rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info('requests') WHERE name IN ('manual_ping','manual_saved_usd')`, nil)
+		rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info('requests')`, nil)
 		if err != nil {
 			return err
 		}
-		have := 0
+		have := map[string]bool{}
 		vals := make([]driver.Value, 1)
 		for rows.Next(vals) == nil {
-			have++
+			if n, ok := vals[0].(string); ok {
+				have[n] = true
+			}
 		}
 		rows.Close()
-		if have < 2 {
-			// SELECT * would hide a column the file has but the shim re-adds: name only the missing ones.
-			extra := ""
-			if have == 0 {
-				extra = ", 0 AS manual_ping, 0.0 AS manual_saved_usd"
-			} else {
-				return fmt.Errorf("dash: read-only open: requests has only one of manual_ping and manual_saved_usd")
+		var extra string
+		for _, c := range additiveColumns {
+			if c.table == "requests" && !have[c.column] {
+				extra += ", " + additiveDefault(c.ddl) + " AS " + c.column
 			}
+		}
+		if extra != "" && len(have) > 0 {
 			if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW requests AS SELECT *`+extra+` FROM main.requests`, nil); err != nil {
 				return err
 			}
@@ -365,6 +367,15 @@ func init() {
 		_, err = conn.ExecContext(ctx, `PRAGMA query_only = 1`, nil)
 		return err
 	})
+}
+
+// additiveDefault is the literal a missing additive column reads as: its DEFAULT, else NULL (a
+// column declared without one, like keepalive_strategy_id, reads NULL on an old row).
+func additiveDefault(ddl string) string {
+	if _, def, ok := strings.Cut(ddl, "DEFAULT "); ok {
+		return strings.TrimSpace(def)
+	}
+	return "NULL"
 }
 
 // sanitizeVersion keeps a version string safe to embed in a filename.
