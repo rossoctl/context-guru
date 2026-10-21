@@ -41,7 +41,7 @@ func quietRecLog() *slog.Logger {
 func newTestRecorder(t *testing.T) (*sessionRecorder, string) {
 	t.Helper()
 	dir := t.TempDir()
-	r, err := newSessionRecorder(dir, 1<<20, 8<<20, 64, quietRecLog())
+	r, err := newSessionRecorder(dir, "", 1<<20, 8<<20, 64, quietRecLog())
 	if err != nil {
 		t.Fatalf("newSessionRecorder: %v", err)
 	}
@@ -115,14 +115,46 @@ func ccBodyNoTools(prompt string) []byte {
 	return b
 }
 
+// traceFiles converts the recorder's OTLP files in dir into corpus files, the way
+// cg-record-convert does, and returns their paths. Tests read the corpus that way so that
+// every assertion about a trace file also covers export -> OTLP JSON -> conversion.
 func traceFiles(t *testing.T, dir string) []string {
 	t.Helper()
-	f, err := filepath.Glob(filepath.Join(dir, "*.otel.json"))
+	in, err := filepath.Glob(filepath.Join(dir, "*.otlp.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	sort.Strings(f)
-	return f
+	out := filepath.Join(dir, "corpus")
+	var spans []record.ReadSpan
+	for _, f := range in {
+		r, err := os.Open(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := record.ReadOTLP(r)
+		r.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		spans = append(spans, got...)
+	}
+	var files []string
+	for _, sess := range record.GroupSessions(spans) {
+		b, err := record.ConvertSession(sess, time.Now()).Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(out, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(out, record.SafeFileName(sess.ID)+".otel.json")
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, p)
+	}
+	sort.Strings(files)
+	return files
 }
 
 // chatSpans returns only the OBSERVED model-call spans, dropping the derived-turn spans the
@@ -480,7 +512,7 @@ func TestRecorderWritesOneFilePerSession(t *testing.T) {
 	}
 
 	// The two-turn session must thread its spans: turn 2's parent is turn 1.
-	f, allSpans := readTrace(t, filepath.Join(dir, testSessionUUID+".otel.json"))
+	f, allSpans := readTrace(t, filepath.Join(dir, "corpus", testSessionUUID+".otel.json"))
 	spans := chatSpans(t, allSpans)
 	if len(spans) != 2 {
 		t.Fatalf("want 2 chat spans for the 2-turn session, got %d", len(spans))
@@ -685,38 +717,26 @@ func TestNilRecorderIsInert(t *testing.T) {
 	if r.Dir() != "" {
 		t.Error("nil Dir should be empty")
 	}
-	got, err := newSessionRecorder("", 0, 0, 0, quietRecLog())
+	got, err := newSessionRecorder("", "", 0, 0, 0, quietRecLog())
 	if got != nil || err != nil {
 		t.Errorf("an empty dir must yield (nil, nil), got (%v, %v)", got, err)
 	}
 }
 
-// A file already on disk for this session must not be overwritten. A session spanning a proxy
-// restart would otherwise lose everything: the new process starts with an empty span list, and
-// its first flush would replace a complete trace with a one-span one.
-func TestRecorderDoesNotClobberAnExistingTrace(t *testing.T) {
+// A proxy restart in the middle of a session must not lose the earlier half: the new process
+// APPENDS to the session's file, and the converter reads both halves as one session.
+func TestRecorderRestartAppendsToTheSessionFile(t *testing.T) {
 	dir := t.TempDir()
-	existing := filepath.Join(dir, testSessionUUID+".otel.json")
-	const marker = "pretend this is a long completed session"
-	if err := os.WriteFile(existing, []byte(`{"spans":["`+marker+`"]}`), 0o600); err != nil {
-		t.Fatal(err)
+	for i := 0; i < 2; i++ { // two processes, one after the other
+		r, err := newSessionRecorder(dir, "", 1<<20, 8<<20, 16, quietRecLog())
+		if err != nil {
+			t.Fatal(err)
+		}
+		recordAndClose(t, r, baseEvent(testSessionUUID, []byte(testSSE), true))
 	}
-	r, err := newSessionRecorder(dir, 1<<20, 8<<20, 16, quietRecLog())
-	if err != nil {
-		t.Fatal(err)
-	}
-	recordAndClose(t, r, baseEvent(testSessionUUID, []byte(testSSE), true))
-
-	raw, err := os.ReadFile(existing)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(raw), marker) {
-		t.Fatal("the pre-existing trace file was overwritten: a proxy restart would destroy " +
-			"the earlier half of a session")
-	}
-	if files := traceFiles(t, dir); len(files) != 2 {
-		t.Errorf("want the original plus a pid-suffixed sibling, got %v", files)
+	spans := chatSpans(t, readOneTrace(t, dir))
+	if len(spans) != 2 {
+		t.Fatalf("want both processes' turns in one session, got %d chat spans", len(spans))
 	}
 }
 
@@ -793,109 +813,32 @@ func TestRecorderEmitsDerivedTurnSpans(t *testing.T) {
 	}
 }
 
-// A periodic flush rewrites the whole file every 10 s, so spansWithDerivedTurns is called
-// again and again over a growing span list. Derived spans must be REPLACED, not accumulated,
-// and each turn must keep its id -- otherwise a session flushed for an hour carries 360
-// copies of turn 1, each under a new id, and a consumer diffing two reads sees churn where
-// nothing changed. This is why the derived spans are composed at write time and never stored.
-func TestDerivedTurnSpansAreIdempotentAcrossFlushes(t *testing.T) {
-	r, _ := newTestRecorder(t)
-	defer r.Close()
+// Converting a session twice must give the same derived-turn ids, so a consumer diffing two
+// conversions of one recording sees no churn. The ids come from the session, the conversation
+// root and the sequence number, never from a random source.
+func TestDerivedTurnIDsAreStableAcrossConversions(t *testing.T) {
+	r, dir := newTestRecorder(t)
+	e1 := baseEvent(testSessionUUID, []byte(testSSE), true)
+	e2 := baseEvent(testSessionUUID, []byte(testSSE), true)
+	e2.reqBody = ccBodyTurns("fix the failing test", "now add a regression test")
+	recordAndClose(t, r, e1, e2)
 
-	// Spare capacity, as a real session's append-grown span list has. Noted because it was
-	// checked: aliasing the stored slice (out := s.spans) is a latent hazard -- it scribbles
-	// into the backing array past len -- but it does NOT duplicate, because the stored header's
-	// length never moves, so the next flush recomposes from the same spans. No behavioural
-	// test can catch it, and this one does not claim to.
-	s := &recSession{traceID: testSessionUUID, spans: make([]record.Span, 0, 16)}
-	for _, body := range [][]byte{
-		ccBody("fix the failing test"),
-		ccBodyTurns("fix the failing test", "now add a regression test"),
-	} {
-		e := baseEvent(testSessionUUID, []byte(testSSE), true)
-		e.reqBody = body
-		turn, err := r.buildTurn(e, "")
-		if err != nil {
-			t.Fatalf("buildTurn: %v", err)
+	ids := func() []string {
+		var out []string
+		for _, sp := range derivedTurnSpans(t, readOneTrace(t, dir)) {
+			out = append(out, sp["span_id"].(string))
 		}
-		s.spans = append(s.spans, turn.ToSpan())
+		return out
 	}
-
-	// Flush 1, then flush 2 with nothing new observed in between. The second must produce
-	// exactly the first -- same count, same ids, same order. Anything else means a session
-	// flushed every 10 s for an hour accumulates 360 copies of turn 1, or re-ids it so a
-	// consumer diffing two reads sees churn where nothing changed.
-	first := append([]record.Span(nil), r.spansWithDerivedTurns(s)...)
-	second := r.spansWithDerivedTurns(s)
-
-	if len(first) != 4 {
-		t.Fatalf("want 2 observed + 2 derived = 4 spans, got %d", len(first))
-	}
-	if len(first) != len(second) {
-		t.Fatalf("the second flush produced a different span count: %d then %d; derived spans "+
-			"are being accumulated instead of recomposed", len(first), len(second))
+	first, second := ids(), ids()
+	if len(first) != 2 {
+		t.Fatalf("want 2 derived turns, got %d", len(first))
 	}
 	for i := range first {
-		if first[i].SpanID != second[i].SpanID || first[i].Name != second[i].Name {
-			t.Errorf("span %d differs between flushes: %q/%q then %q/%q",
-				i, first[i].Name, first[i].SpanID, second[i].Name, second[i].SpanID)
+		if first[i] != second[i] {
+			t.Errorf("turn %d id changed between conversions: %q then %q", i+1, first[i], second[i])
 		}
 	}
-	if n := len(derivedSpansOf(first)); n != 2 {
-		t.Errorf("want 2 derived spans in a flush, got %d", n)
-	}
-
-	// Now the case the periodic flush really is: a THIRD call arrives and the session is
-	// flushed again. The derived set must be 3 -- recomposed -- not 2+3=5 accumulated, and
-	// the two turns already written must keep the ids they had.
-	e := baseEvent(testSessionUUID, []byte(testSSE), true)
-	e.reqBody = ccBodyTurns("fix the failing test", "now add a regression test", "and ship it")
-	turn, err := r.buildTurn(e, "")
-	if err != nil {
-		t.Fatalf("buildTurn: %v", err)
-	}
-	s.spans = append(s.spans, turn.ToSpan())
-
-	third := r.spansWithDerivedTurns(s)
-	gotD := derivedSpansOf(third)
-	if len(gotD) != 3 {
-		t.Fatalf("after a 3rd call the flush has %d derived spans, want 3 (accumulated rather "+
-			"than recomposed?)", len(gotD))
-	}
-	if len(third) != 6 {
-		t.Errorf("want 3 observed + 3 derived = 6 spans, got %d", len(third))
-	}
-	wasD := derivedSpansOf(first)
-	for i := range wasD {
-		if wasD[i].SpanID != gotD[i].SpanID {
-			t.Errorf("turn %d was re-identified when a later turn arrived: %q then %q; a "+
-				"consumer diffing two reads would see churn where nothing changed",
-				i+1, wasD[i].SpanID, gotD[i].SpanID)
-		}
-	}
-	// Distinct ids, or two turns collapse into one row downstream.
-	ids := map[string]bool{}
-	for _, sp := range first {
-		if sp.SpanID == "" {
-			t.Fatal("a span has no id")
-		}
-		if ids[sp.SpanID] {
-			t.Errorf("duplicate span id %q", sp.SpanID)
-		}
-		ids[sp.SpanID] = true
-	}
-}
-
-// derivedSpansOf filters record.Span values (the in-memory form), as opposed to
-// derivedTurnSpans which filters the decoded JSON a test read back off disk.
-func derivedSpansOf(spans []record.Span) []record.Span {
-	var out []record.Span
-	for _, sp := range spans {
-		if sp.Name == record.SpanDerivedTurn {
-			out = append(out, sp)
-		}
-	}
-	return out
 }
 
 // Fail open: a session whose calls advertise no tools has no conversation anchor, so

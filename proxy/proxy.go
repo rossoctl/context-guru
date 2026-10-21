@@ -124,9 +124,10 @@ type Options struct {
 	// request is captured off the hot path into a durable store and the dashboard UI
 	// + API are mounted. nil = the proxy behaves exactly as before.
 	Dashboard *dash.Recorder
-	// Record, when non-nil, writes claude-record-shaped *.otel.json trace files -- one per
-	// Claude Code session -- into its output directory. nil = no recording, and every
-	// touchpoint is nil-guarded, so the default path costs one nil check per request.
+	// Record, when non-nil, records one OTLP span per proxied turn: exported to a collector
+	// (--record-otlp), written as OTLP JSON one file per session (--record), or both. nil = no
+	// recording, and every touchpoint is nil-guarded, so the default path costs one nil check
+	// per request.
 	//
 	// This writes MORE than Dashboard content capture does: the whole pristine request body
 	// and every tool result, redacted on a best-effort denylist. That is the right trade for

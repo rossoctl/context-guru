@@ -1,6 +1,6 @@
 package proxy
 
-// sessionRecorder writes claude-record-shaped trace files for --record.
+// sessionRecorder records one OTLP span per proxied turn, for --record and --record-otlp.
 //
 // WHY THIS LIVES IN package proxy AND NOT internal/record. internal/record is a pure
 // translation library: no I/O, no proxy imports, unit-testable on byte slices alone, and
@@ -24,16 +24,13 @@ package proxy
 import (
 	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,19 +44,6 @@ import (
 	"github.com/rossoctl/context-guru/internal/record"
 	"github.com/rossoctl/context-guru/session"
 )
-
-// recordFlushEvery is how often a dirty session is rewritten to disk.
-//
-// Neither extreme works. Rewriting per turn is O(N^2) bytes over an N-turn session, and a
-// long agent session is exactly the case this exists to capture. Buffering until Close
-// loses everything to a kill -9, which on Windows is how a proxy normally stops -- and the
-// session we most want is the long one that ends that way. claude-record also writes
-// periodically, so matching it keeps the comparison honest about durability too.
-const recordFlushEvery = 10 * time.Second
-
-// recordFlushSpans forces a flush mid-interval once a session has this many unwritten
-// spans, so a burst does not sit in memory for the rest of the tick.
-const recordFlushSpans = 8
 
 // Defaults for the --record flags, applied when a caller passes a non-positive value so the
 // recorder is never constructed in a degenerate state.
@@ -101,18 +85,17 @@ type recEvent struct {
 	errMsg     string
 }
 
-// recSession accumulates one session's spans. Owned exclusively by the writer goroutine,
-// so it needs no mutex.
+// recSession is the one thing the writer keeps per session: the last span id, the parent of the
+// next turn, which is what threads a session together in a trace view. No spans are kept --
+// each is written once, as it is built -- so memory no longer grows with the length of a
+// session, as it did with the file writer this replaces.
 type recSession struct {
-	traceID  string
-	file     string // resolved once, so a restart collision is decided once
-	spans    []record.Span
-	lastSpan string // parent of the next turn: what threads a session together
-	dirty    int    // spans added since the last flush
+	lastSpan string
 }
 
 type sessionRecorder struct {
-	dir     string
+	dir     string     // local OTLP JSON files, one per session; "" when only exporting
+	exp     *recExport // OTLP/HTTP exporter; nil when only writing files
 	bodyCap int
 	teeCap  int
 	log     *slog.Logger
@@ -127,22 +110,41 @@ type sessionRecorder struct {
 	warnedDrop                         atomic.Bool
 }
 
-// newSessionRecorder returns nil when dir is empty, matching newCapture's nil-means-off
-// contract so every call site is one nil check on the default path.
+// newSessionRecorder returns nil when both dir and endpoint are empty, matching newCapture's
+// nil-means-off contract so every call site is one nil check on the default path.
 //
-// MkdirAll happens HERE rather than at first write: a bad --record path must fail loudly at
-// startup, not silently per request for the length of a session someone believed was being
-// recorded.
-func newSessionRecorder(dir string, bodyCap, teeCap, queue int, log *slog.Logger) (*sessionRecorder, error) {
-	if strings.TrimSpace(dir) == "" {
+// Two outputs, either or both:
+//
+//   - endpoint (--record-otlp): OTLP/HTTP to a collector such as Phoenix, Jaeger or an OTel
+//     collector. Each span is sent once, batched, off the writer goroutine.
+//   - dir (--record): the same spans as OTLP JSON lines, one file per session. That is the
+//     OTel collector file exporter's format, so the offline converter (cmd/cg-record-convert)
+//     reads either. It is what a laptop run without a collector uses.
+//
+// MkdirAll and the endpoint check happen HERE rather than at first write: a bad path or URL must
+// fail loudly at startup, not silently per request for the length of a session someone believed
+// was being recorded.
+func newSessionRecorder(dir, endpoint string, bodyCap, teeCap, queue int, log *slog.Logger) (*sessionRecorder, error) {
+	dir, endpoint = strings.TrimSpace(dir), strings.TrimSpace(endpoint)
+	if dir == "" && endpoint == "" {
 		return nil, nil
 	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, fmt.Errorf("record dir %q: %w", dir, err)
+	var abs string
+	if dir != "" {
+		var err error
+		if abs, err = filepath.Abs(dir); err != nil {
+			return nil, fmt.Errorf("record dir %q: %w", dir, err)
+		}
+		if err := os.MkdirAll(abs, 0o700); err != nil {
+			return nil, fmt.Errorf("record dir %q: %w", abs, err)
+		}
 	}
-	if err := os.MkdirAll(abs, 0o700); err != nil {
-		return nil, fmt.Errorf("record dir %q: %w", abs, err)
+	var exp *recExport
+	if endpoint != "" {
+		var err error
+		if exp, err = newRecExport(endpoint); err != nil {
+			return nil, err
+		}
 	}
 	if bodyCap <= 0 {
 		bodyCap = defaultRecordBodyCap
@@ -157,7 +159,7 @@ func newSessionRecorder(dir string, bodyCap, teeCap, queue int, log *slog.Logger
 		log = slog.Default()
 	}
 	r := &sessionRecorder{
-		dir: abs, bodyCap: bodyCap, teeCap: teeCap, log: log,
+		dir: abs, exp: exp, bodyCap: bodyCap, teeCap: teeCap, log: log,
 		ch:       make(chan *recEvent, queue),
 		done:     make(chan struct{}),
 		sessions: make(map[string]*recSession),
@@ -189,13 +191,17 @@ func (r *sessionRecorder) Record(e *recEvent) {
 	}
 }
 
-// Close drains what is queued, flushes every dirty session, and reports the counters.
+// Close drains what is queued, sends what the exporter still holds, and reports the counters.
 func (r *sessionRecorder) Close() error {
 	if r == nil {
 		return nil
 	}
 	close(r.done)
 	r.wg.Wait()
+	// After the writer has stopped, so every span it built is in the exporter's queue.
+	if err := r.exp.Shutdown(); err != nil {
+		r.log.Warn("cg.record: could not send every span to the collector", "err", err)
+	}
 	r.log.Info("cg.record: stopped", "dir", r.dir,
 		"turns_captured", r.captured.Load(), "turns_written", r.written.Load(),
 		"turns_dropped", r.dropped.Load(), "errors", r.errors.Load())
@@ -215,23 +221,18 @@ func (r *sessionRecorder) run() {
 				"for the rest of this process", "panic", rec)
 		}
 	}()
-	tick := time.NewTicker(recordFlushEvery)
-	defer tick.Stop()
 	for {
 		select {
 		case e := <-r.ch:
 			r.handle(e)
-		case <-tick.C:
-			r.flushAll(false)
 		case <-r.done:
-			// Drain what is already queued before the final flush: these are turns that
-			// really happened, and the process is going away.
+			// Drain what is already queued: these are turns that really happened, and the
+			// process is going away.
 			for {
 				select {
 				case e := <-r.ch:
 					r.handle(e)
 				default:
-					r.flushAll(true)
 					return
 				}
 			}
@@ -252,19 +253,12 @@ func (r *sessionRecorder) handle(e *recEvent) {
 	if e == nil {
 		return
 	}
-	// Keyed by tenant AND session: two tenants can never share a file, even if a client
-	// sent another tenant's session UUID.
+	// Keyed by tenant AND session: two tenants never share a parent chain or a file, even if a
+	// client sent another tenant's session UUID.
 	key := e.tenantID + "\x00" + e.traceID
 	s := r.sessions[key]
 	if s == nil {
-		file, err := r.fileFor(e.tenantID, e.traceID)
-		if err != nil {
-			r.errors.Add(1)
-			r.log.Warn("cg.record: could not create the tenant's trace directory; turn dropped",
-				"err", err, "tenant", e.tenantID)
-			return
-		}
-		s = &recSession{traceID: e.traceID, file: file}
+		s = &recSession{}
 		r.sessions[key] = s
 	}
 	turn, err := r.buildTurn(e, s.lastSpan)
@@ -274,13 +268,21 @@ func (r *sessionRecorder) handle(e *recEvent) {
 		return
 	}
 	turn.Redact(r.bodyCap)
-	s.spans = append(s.spans, turn.ToSpan())
-	s.lastSpan = turn.SpanID
-	s.dirty++
-	r.written.Add(1)
-	if s.dirty >= recordFlushSpans {
-		r.flush(s)
+	span := turn.ToOTLP()
+	if r.exp != nil {
+		if err := r.exp.export(e.tenantID, span); err != nil {
+			r.errors.Add(1)
+			r.log.Warn("cg.record: could not export a turn", "err", err, "trace_id", e.traceID)
+		}
 	}
+	if r.dir != "" {
+		if err := r.appendLocal(e.tenantID, e.traceID, span); err != nil {
+			r.errors.Add(1)
+			r.log.Warn("cg.record: could not write a turn", "err", err, "trace_id", e.traceID)
+		}
+	}
+	s.lastSpan = turn.SpanID
+	r.written.Add(1)
 }
 
 // buildTurn fills record.Turn from one event. Everything expensive is here, on the writer.
@@ -375,174 +377,50 @@ func (r *sessionRecorder) fillResponse(turn *record.Turn, e *recEvent) {
 	turn.MarkIncomplete(record.IncompleteNoBody)
 }
 
-// flush writes one session's file. Atomic: a reader (or a crash) sees either the previous
-// complete file or the new complete one, never a half-written JSON document.
-func (r *sessionRecorder) flush(s *recSession) {
-	if s == nil || s.dirty == 0 || len(s.spans) == 0 {
-		return
-	}
-	b, err := record.NewFile(s.traceID, r.spansWithDerivedTurns(s), time.Now()).Marshal()
-	if err != nil {
-		r.errors.Add(1)
-		r.log.Warn("cg.record: could not marshal a trace file", "err", err, "trace_id", s.traceID)
-		return
-	}
-	tmp := s.file + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		r.errors.Add(1)
-		r.log.Warn("cg.record: could not write a trace file", "err", err, "path", s.file)
-		return
-	}
-	// Windows will not rename onto an existing file.
-	_ = os.Remove(s.file)
-	if err := os.Rename(tmp, s.file); err != nil {
-		r.errors.Add(1)
-		r.log.Warn("cg.record: could not rename a trace file", "err", err, "path", s.file)
-		_ = os.Remove(tmp)
-		return
-	}
-	s.dirty = 0
-}
-
-// spansWithDerivedTurns returns the session's observed spans followed by one derived-turn span
-// per reconstructed human turn.
+// appendLocal appends one span to the session's local OTLP JSON file, as one line.
 //
-// WHY THIS IS COMPOSED AT WRITE TIME AND NOT STORED. ReconstructTurns needs EVERY call in the
-// session at once: it groups calls by advertised tool set, drops roots below RootShare, and
-// de-duplicates turns that later calls replay. None of that is decidable per-turn, so there is
-// nothing correct to append as turns arrive. Recomputing from s.spans on each flush also makes
-// the periodic flush idempotent by construction -- derived spans are never stored, so they can
-// never be duplicated or left stale by a later flush.
+// APPEND, NOT REWRITE. The file writer this replaces rewrote the whole session file every 10 s,
+// which costs O(N^2) bytes over a long session. Each span is now written once. A crash can lose
+// at most the line being written, and the converter reports a broken line rather than skipping
+// it silently.
 //
-// Span ids are DERIVED FROM THE SEQUENCE NUMBER, not random. A flush every 10 s with random ids
-// would give the same turn a different id on every write, so a consumer diffing two reads of a
-// live file would see churn where nothing changed.
-//
-// Fails open, like everything else here: on any trouble the observed spans are returned
-// unchanged. A trace file missing its derived turns is a degraded file; a missing file is a
-// lost session.
-func (r *sessionRecorder) spansWithDerivedTurns(s *recSession) []record.Span {
-	defer func() {
-		if v := recover(); v != nil {
-			r.errors.Add(1)
-			r.log.Warn("cg.record: turn reconstruction panicked; wrote observed spans only",
-				"panic", v, "trace_id", s.traceID)
-		}
-	}()
-	if len(s.spans) == 0 {
-		return s.spans
-	}
-	calls := make([]record.Call, 0, len(s.spans))
-	for _, sp := range s.spans {
-		if sp.Attributes == nil {
-			continue
-		}
-		raw, _ := sp.Attributes[record.AttrInputMsgs].(string)
-		if raw == "" {
-			continue
-		}
-		var msgs []record.Message
-		if err := json.Unmarshal([]byte(raw), &msgs); err != nil {
-			continue
-		}
-		defs, _ := sp.Attributes[record.AttrToolDefs].(string)
-		// Order must sort chronologically: the span's own start time does, and it is also the
-		// closest thing to a timestamp a reconstructed turn can honestly carry.
-		calls = append(calls, record.Call{Order: sp.StartTime, Messages: msgs, ToolDefs: defs})
-	}
-	turns := record.ReconstructTurns(calls)
-	if len(turns) == 0 {
-		return s.spans
-	}
-	out := make([]record.Span, 0, len(s.spans)+len(turns))
-	out = append(out, s.spans...)
-	for _, t := range turns {
-		start, err := time.Parse(time.RFC3339Nano, t.FirstSeen)
-		if err != nil {
-			// FirstSeen is a span start time this function wrote, so a parse failure means the
-			// format changed underneath us. Skip the turn rather than invent a timestamp.
-			continue
-		}
-		out = append(out, record.DerivedTurnSpan(
-			s.traceID, derivedSpanID(s.traceID, t.Sequence, t.Root), "", t, start))
-	}
-	return out
-}
-
-// derivedSpanID is a stable 8-byte id for one reconstructed turn. Deterministic in the session,
-// the root and the sequence number, so a turn keeps its id across flushes.
-func derivedSpanID(traceID string, seq int, root string) string {
-	sum := sha256.Sum256([]byte(traceID + "\x00" + root + "\x00" + strconv.Itoa(seq)))
-	return hex.EncodeToString(sum[:8])
-}
-
-func (r *sessionRecorder) flushAll(final bool) {
-	for _, s := range r.sessions {
-		r.flush(s)
-	}
-	if final {
-		r.sessions = make(map[string]*recSession)
-	}
-}
-
-// fileFor resolves a session's path, once.
-//
-// It REFUSES TO OVERWRITE a file this process did not write. A session that spans a proxy
-// restart would otherwise be truncated silently: the new process starts with an empty span
-// list and its first flush replaces a complete file with a one-span one. The analysis side
-// globs *.otel.json, so a second file for the same session still loads; a clobbered one is
-// unrecoverable.
-//
-// In hosted mode each tenant's files go in their own subdirectory, created owner-only, so
-// one person's traces are never mixed with another's and can be handed over, or deleted,
-// as a unit. Single-tenant (tenantID ""), files go in the record root as before.
-func (r *sessionRecorder) fileFor(tenantID, traceID string) (string, error) {
+// In hosted mode each tenant's files go in their own subdirectory, created owner-only, so one
+// person's traces are never mixed with another's and can be handed over, or deleted, as a unit.
+// A proxy restart in the middle of a session appends to the same file, so nothing an earlier
+// process wrote is ever overwritten.
+func (r *sessionRecorder) appendLocal(tenantID, traceID string, span record.OTLPSpan) error {
 	dir := r.dir
 	if tenantID != "" {
 		dir = filepath.Join(r.dir, sanitizeTraceID(tenantID))
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return "", err
+			return err
 		}
 	}
-	safe := sanitizeTraceID(traceID)
-	base := filepath.Join(dir, safe+".otel.json")
-	if _, err := os.Stat(base); err != nil {
-		return base, nil
+	line, err := record.EncodeOTLPLine(record.Resource(tenantID), span)
+	if err != nil {
+		return err
 	}
-	alt := filepath.Join(dir, fmt.Sprintf("%s.%d.otel.json", safe, os.Getpid()))
-	r.log.Info("cg.record: a trace file for this session already exists (a restart, most likely); "+
-		"writing alongside it rather than over it", "existing", base, "writing", alt)
-	return alt, nil
+	path := filepath.Join(dir, sanitizeTraceID(traceID)+".otlp.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(line); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // sanitizeTraceID makes a session id safe as a filename.
 //
 // THE TRAP IS NTFS-SPECIFIC AND SILENT. apply.SessionIDFor returns a tenant-scoped
-// "tenant:base" form, and on NTFS "foo:bar.otel.json" does not create a file called that --
+// "tenant:base" form, and on NTFS "foo:bar.otlp.jsonl" does not create a file called that --
 // it creates an alternate data stream on a file called "foo". No error, no visible file, no
 // clue. Claude Code's own UUIDs are already safe; the fallback ids are what make this
-// necessary.
-func sanitizeTraceID(id string) string {
-	id = strings.TrimSpace(id)
-	var b strings.Builder
-	b.Grow(len(id))
-	for _, ch := range id {
-		switch {
-		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9',
-			ch == '.', ch == '_', ch == '-':
-			b.WriteRune(ch)
-		default:
-			b.WriteByte('_')
-		}
-	}
-	s := b.String()
-	// "." and ".." are directory entries, not names; an empty id would yield ".otel.json",
-	// a hidden file that also merges every unkeyed session into one.
-	if s == "" || strings.TrimLeft(s, ".") == "" {
-		return "cg-unkeyed"
-	}
-	return s
-}
+// necessary. The rule lives in record.SafeFileName, which the offline converter shares, so
+// a session's input and output files are always named alike.
+func sanitizeTraceID(id string) string { return record.SafeFileName(id) }
 
 func randomSpanID() (string, error) {
 	var b [8]byte
@@ -613,8 +491,8 @@ func (h *Handler) newRecCtx(r *http.Request, provider bschemas.ModelProvider, or
 		}
 	}
 	if id == "" {
-		// Never empty: an empty id yields ".otel.json", a hidden file that also merges every
-		// unkeyed session into one.
+		// Never empty: an empty id yields a hidden ".otlp.jsonl" file, and merges every unkeyed
+		// session into one trace.
 		id = "cg-unkeyed-" + unkeyedSuffix()
 	}
 	// bytes.Clone, not an alias: the pipeline owns `body` from here and a future refactor that
@@ -699,8 +577,8 @@ func firstByteOrZero(start, first time.Time) int64 {
 // The type stays unexported: it is proxy-internal machinery reached only through
 // Options.Record, and main needs exactly two things from it -- construction and the resolved
 // directory for the startup log.
-func NewSessionRecorder(dir string, bodyCap, teeCap, queue int, log *slog.Logger) (*sessionRecorder, error) {
-	return newSessionRecorder(dir, bodyCap, teeCap, queue, log)
+func NewSessionRecorder(dir, endpoint string, bodyCap, teeCap, queue int, log *slog.Logger) (*sessionRecorder, error) {
+	return newSessionRecorder(dir, endpoint, bodyCap, teeCap, queue, log)
 }
 
 // Dir is the absolute output directory, for the startup log. Resolved in the constructor, so
