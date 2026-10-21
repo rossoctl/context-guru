@@ -24,7 +24,7 @@ const BAND = {
 
 let clock: ReturnType<typeof mock.clock>
 
-async function boot($: any, on: any, warm: boolean, calls: string[][] = [], pingOut: object = { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 }) {
+async function boot($: any, on: any, warm: boolean, calls: string[][] = [], pingOut: object = { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 }, mainExtra: object = {}) {
   on('command.register', () => ({ value: { command: 'context-guru' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.id', () => ({ value: 'sess-1' }))
@@ -39,7 +39,8 @@ async function boot($: any, on: any, warm: boolean, calls: string[][] = [], ping
   on('process.run', (_: any, e: any) => {
     calls.push([...e.argv])
     const ping = e.argv.includes('ping')
-    const out = ping ? pingOut : doc(warm)
+    const base = doc(warm)
+    const out = ping ? (pingOut ?? { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 }) : { ...base, threads: base.threads.map((t: any) => (t.main ? { ...t, ...mainExtra } : t)) }
     return { value: { exitCode: 0, stdout: JSON.stringify(out) + '\n', stderr: '' } }
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -133,3 +134,26 @@ test('a server without the ping route is not blamed on the session', async ($, o
   expect(toasts.join('\n')).toMatch(/does not support manual pings yet/)
   await ui.unmount()
 })
+
+test('warm but not pingable: a dim hint instead of the Ping button; an absent field keeps the button', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pingable: false })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /keep-alive off/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /cache warm/ })).toBeDefined()
+  await ui.unmount()
+})
+
+for (const [status, error, want] of [
+  [409, 'not held', /keep-alive is off/],
+  [409, 'busy', /request is running/],
+  [409, 'cold', /already cold/],
+  [429, 'no spare capacity', /no spare capacity/],
+  [502, 'upstream', /upstream model refused/],
+] as const) {
+  test(`/ping says the right thing for ${status} ${error}`, async ($, on) => {
+    await boot($, on, true, [], { status, error })
+    const r = await $.command.run({ command: 'ping', args: '' })
+    expect(r.text).toMatch(want)
+  })
+}

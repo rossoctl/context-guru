@@ -1,6 +1,8 @@
 export type ThreadView = {
   id: string
   isWarm: boolean
+  /** False only when the server says the proxy holds nothing to ping with (keep-alive off). */
+  isPingable: boolean
   /** Coarse words for the time left ("4m"). */
   left: string
   leftMs: number

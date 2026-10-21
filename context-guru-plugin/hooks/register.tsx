@@ -138,7 +138,8 @@ export const register: Register = on => {
           )}
           {cost}
           {v.saved !== undefined && <Text>saved <Text bold color="success">{usd(v.saved)}</Text></Text>}
-          {m.isWarm && (
+          {m.isWarm && !m.isPingable && <Text dimColor>keep-alive off</Text>}
+          {m.isWarm && m.isPingable && (
             <Button
               key="ping"
               label={busy ? 'Pinging…' : 'Ping'}
@@ -189,7 +190,7 @@ export const register: Register = on => {
           ))}
         </Box>
 
-        {v.main.isWarm && <Button key="ping" label="Ping now" variant="primary" hotkey="p" onPress={() => ping($)} />}
+        {v.main.isWarm && v.main.isPingable && <Button key="ping" label="Ping now" variant="primary" hotkey="p" onPress={() => ping($)} />}
       </Box>
     )
   })

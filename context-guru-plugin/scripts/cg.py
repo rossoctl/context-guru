@@ -1182,14 +1182,23 @@ def ping_lines(code: int, doc: dict | None) -> list[str]:
     if code == 200 and doc.get("sent"):
         return [f"Kept warm: saved {dollars(doc.get('saved_usd', 0))} (a rewrite would have cost {dollars(doc.get('rewrite_usd', 0))}, "
                 f"the ping {dollars(doc.get('ping_usd', 0))})."]
-    if code == 409:
+    err = doc.get("error")
+    if code == 409 and err == "not held":
+        return ["Keep-alive is off for this account. Turn it on in the dashboard to ping."]
+    if code == 409 and err == "busy":
+        return ["A request is running; it refreshes the cache itself."]
+    if code == 409:  # "cold"
         return ["The cache is already cold, so there is nothing to keep warm. The next request rewrites it."]
-    if code == 404 and doc.get("error") == "unknown session":
+    if code == 404 and err == "unknown session":
         return ["This server does not know that session yet. Send a prompt first."]
-    if code in (404, 405) and not doc.get("error"):  # the mux's plain-text "404 page not found": the route does not exist
+    if code in (404, 405) and not err:  # the mux's plain-text "404 page not found": the route does not exist
         return ["This Context Guru server does not support manual pings yet. Update the proxy."]
+    if code == 429 and err == "no spare capacity":
+        return [f"No spare capacity right now. Try again in {doc.get('retry_after_s', 5)}s."]
     if code == 429:
         return [f"Pinged a moment ago. Try again in {doc.get('retry_after_s', 30)}s."]
+    if code == 502:
+        return ["The upstream model refused the ping."]
     if code == 0:
         return ["The Context Guru server did not answer."]
     if code == -1:

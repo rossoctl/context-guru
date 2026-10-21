@@ -48,6 +48,10 @@ func TestPing(t *testing.T) {
 		{"unknown", 404, `{"error":"unknown session"}`, "does not know that session", 1},
 		{"no route", 404, `404 page not found`, "does not support manual pings yet", 1}, // Go's mux for a missing route: no JSON
 		{"method not allowed", 405, ``, "does not support manual pings yet", 1},
+		{"keep-alive off", 409, `{"error":"not held","detail":"x"}`, "Keep-alive is off", 1},
+		{"busy", 409, `{"error":"busy"}`, "refreshes the cache itself", 1},
+		{"no capacity", 429, `{"error":"no spare capacity","retry_after_s":5}`, "No spare capacity", 1},
+		{"upstream", 502, `{"error":"upstream","status":529}`, "upstream model refused", 1},
 		{"too soon", 429, `{"error":"too soon","retry_after_s":17}`, "again in 17s", 1},
 	}
 	for _, c := range cases {
