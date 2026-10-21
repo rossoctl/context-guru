@@ -49,6 +49,13 @@ type ToolStat struct {
 	// Omitted (with Priced=false) when the model's rates are unknown — an unpriced number
 	// must not read as "this cost nothing".
 	UnusedUSD float64 `json:"unused_usd"`
+	// CarryReads and CarryUSD are the same measure over EVERY captured session that declared this,
+	// used or not: Tokens x the requests that re-read it, and that priced at each request's tier.
+	// UnusedUSD answers "what did carrying it for nothing cost"; these answer "what does carrying
+	// it cost", so a declaration the user does use still shows its price. CarryUSD is 0 when
+	// unpriced (see Priced).
+	CarryReads int64   `json:"carry_reads"`
+	CarryUSD   float64 `json:"carry_usd"`
 	// UnusedUSDLow/High bound UnusedUSD over the declaration sets a request without a recorded
 	// one could have carried; equal to it when every request recorded its set.
 	UnusedUSDLow  float64 `json:"unused_usd_low"`
@@ -142,6 +149,8 @@ type ServerStat struct {
 	Calls            int     `json:"calls"`
 	UnusedReads      int64   `json:"unused_reads"`
 	UnusedUSD        float64 `json:"unused_usd"`
+	CarryReads       int64   `json:"carry_reads"`
+	CarryUSD         float64 `json:"carry_usd"`
 	Priced           bool    `json:"priced"`
 }
 
@@ -714,6 +723,10 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		case !skillEntry:
 			declTok[dr.session] += dr.tokens
 		}
+		st.CarryReads += int64(dr.tokens) * int64(sc.requests())
+		if sc.priced {
+			st.CarryUSD += sc.usd(dr.tokens)
+		}
 		calls := usedIn[dr.session][k]
 		if calls > 0 {
 			st.SessionsUsed++
@@ -943,6 +956,8 @@ func serverRollup(tools []ToolStat) []ServerStat {
 		s.Calls += t.Calls
 		s.UnusedReads += t.UnusedReads
 		s.UnusedUSD += t.UnusedUSD
+		s.CarryReads += t.CarryReads
+		s.CarryUSD += t.CarryUSD
 		if t.SessionsUsed > 0 {
 			s.ToolsUsed++
 		}
