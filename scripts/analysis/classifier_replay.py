@@ -39,7 +39,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 def is_classifier(rec, max_tokens=(64,)):
-    """True for a classifier-shaped Anthropic request: 0 tools, 2 messages, 3 system blocks,
+    """True for a classifier-shaped Anthropic request: 0 tools, 1 message, 3 system blocks,
     the given max_tokens, not streaming, with stop_sequences. Never reads message text."""
     if rec.get("provider") != "anthropic":
         return False
@@ -47,7 +47,7 @@ def is_classifier(rec, max_tokens=(64,)):
     sys_blocks = b.get("system")
     return (
         not b.get("tools")
-        and len(b.get("messages") or []) == 2
+        and len(b.get("messages") or []) == 1
         and isinstance(sys_blocks, list)
         and len(sys_blocks) == 3
         and b.get("max_tokens") in max_tokens

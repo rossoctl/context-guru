@@ -29,7 +29,7 @@ func classifierBody() []byte {
 		"system": []map[string]any{
 			{"type": "text", "text": "s1"}, {"type": "text", "text": "s2"}, {"type": "text", "text": "s3"}},
 		"messages": []map[string]any{
-			{"role": "user", "content": "context"}, {"role": "user", "content": "action?"}},
+			{"role": "user", "content": "context"}},
 	})
 	return b
 }

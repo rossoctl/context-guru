@@ -997,7 +997,7 @@ Claude Code's auto mode sends a small classifier request before most tool calls.
   is forwarded byte for byte as before.
 - **Detection uses metadata only.** It never reads message text. A request matches when the
   `x-claude-code-request-class` header contains `classifier` (the exact value is not yet confirmed
-  on the wire), or when it has this shape: Anthropic `/v1/messages`, 0 tools, 2 messages, 3 system
+  on the wire), or when it has this shape: Anthropic `/v1/messages`, 0 tools, 1 message, 3 system
   blocks, `max_tokens` 64, no streaming, `stop_sequences` set, a Sonnet model. A streaming request
   is never redirected. The Opus `max_tokens` 2112 shape is not routed.
 - **Redirect.** For `openai` and `bob`, the system blocks become one system message and the text

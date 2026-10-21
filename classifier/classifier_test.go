@@ -26,8 +26,7 @@ func req(mut func(m map[string]any)) []byte {
 		"system": []map[string]any{
 			{"type": "text", "text": "s1"}, {"type": "text", "text": "s2"}, {"type": "text", "text": "s3"}},
 		"messages": []map[string]any{
-			{"role": "user", "content": []map[string]any{{"type": "text", "text": "ctx"}}},
-			{"role": "user", "content": "action?"}},
+			{"role": "user", "content": []map[string]any{{"type": "text", "text": "ctx"}}}},
 	}
 	if mut != nil {
 		mut(m)
@@ -53,7 +52,9 @@ func TestDetectShape(t *testing.T) {
 		{"opus 2112 shape", func(m map[string]any) { m["model"] = "claude-opus-5-5"; m["max_tokens"] = 2112 }, false},
 		{"no stop_sequences", func(m map[string]any) { delete(m, "stop_sequences") }, false},
 		{"empty stop_sequences", func(m map[string]any) { m["stop_sequences"] = []string{} }, false},
-		{"1 message", func(m map[string]any) { m["messages"] = []map[string]any{{"role": "user", "content": "a"}} }, false},
+		{"2 messages", func(m map[string]any) {
+			m["messages"] = []map[string]any{{"role": "user", "content": "a"}, {"role": "user", "content": "b"}}
+		}, false},
 		{"3 messages", func(m map[string]any) {
 			m["messages"] = []map[string]any{{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}, {"role": "user", "content": "c"}}
 		}, false},
@@ -145,7 +146,7 @@ func TestRedirectConvertsBothWays(t *testing.T) {
 		t.Fatalf("request=%+v", sent)
 	}
 	b := sent.Body
-	if gjson.GetBytes(b, "model").String() != "bob-fast" || gjson.GetBytes(b, "messages.#").Int() != 3 ||
+	if gjson.GetBytes(b, "model").String() != "bob-fast" || gjson.GetBytes(b, "messages.#").Int() != 2 ||
 		gjson.GetBytes(b, "messages.0.role").String() != "system" ||
 		gjson.GetBytes(b, "messages.0.content").String() != "s1\n\ns2\n\ns3" ||
 		gjson.GetBytes(b, "messages.1.content").String() != "ctx" ||
@@ -287,5 +288,30 @@ func TestAnthropicDialectKeepsShape(t *testing.T) {
 		gjson.GetBytes(f.last.Body, "stop_sequences.0").String() != "</block>" ||
 		gjson.GetBytes(res.Body, "content.0.text").String() != "yes" || res.Usage.Fresh != 7 {
 		t.Fatalf("err=%v sent=%s got=%s", err, f.last.Body, res.Body)
+	}
+}
+
+// TestDetectsTheCapturedWireShape pins the shape of a classifier request captured on the wire
+// from Claude Code 2.1.305 (field names and types only, no text): 1 user message of 5 text
+// blocks, 3 system blocks with cache_control on the second, thinking disabled, metadata.user_id,
+// no stream field at all. A detector written from the dashboard's columns expected 2 messages
+// and matched nothing real.
+func TestDetectsTheCapturedWireShape(t *testing.T) {
+	text := func() map[string]any { return map[string]any{"type": "text", "text": "x"} }
+	b, _ := json.Marshal(map[string]any{
+		"model":      "claude-sonnet-5",
+		"max_tokens": 64,
+		"system": []map[string]any{
+			text(),
+			{"type": "text", "text": "x", "cache_control": map[string]any{"type": "ephemeral"}},
+			text()},
+		"messages": []map[string]any{
+			{"role": "user", "content": []map[string]any{text(), text(), text(), text(), text()}}},
+		"stop_sequences": []string{"</block>"},
+		"thinking":       map[string]any{"type": "disabled"},
+		"metadata":       map[string]any{"user_id": "u"},
+	})
+	if !Detect(http.Header{}, b) {
+		t.Fatalf("captured wire shape not detected: %+v", ShapeOf(b))
 	}
 }

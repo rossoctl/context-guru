@@ -40,11 +40,13 @@ type Shape struct {
 	HasStopSequences bool
 }
 
-// The classifier shape measured on production traffic (#614): Sonnet, no tools, 2 messages,
-// 3 system blocks, max_tokens 64, no stream, stop sequences set. The Opus max_tokens 2112 shape
+// The classifier shape (#614): Sonnet, no tools, 1 message, 3 system blocks, max_tokens 64, no
+// stream, stop sequences set. 1 message is what a captured request carries on the wire
+// (Claude Code 2.1.305). The dashboard's `messages` column reads 2 for the same request because
+// it counts the normalized transcript, which holds the system prompt as a message of its own. The Opus max_tokens 2112 shape
 // is an open question and is NOT matched.
 const (
-	wantMessages     = 2
+	wantMessages     = 1
 	wantSystemBlocks = 3
 	wantMaxTokens    = 64
 )
