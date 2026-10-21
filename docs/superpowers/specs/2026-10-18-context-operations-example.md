@@ -3,8 +3,8 @@
 **Status:** draft, for the context-operations design. Not yet approved.
 
 The examples are a sequence, from the simplest to the most complex. Each one adds one idea to the
-ones before it. Examples 1 to 5 are small and self-contained. Examples 6 to 8 follow one session
-from turn 5 to turn 13.
+ones before it. Examples 1 to 5 and 8 are small and self-contained. Examples 6 and 7 follow one session, turn 5
+and turn 7.
 
 **Index**
 
@@ -40,20 +40,23 @@ requests. The summarizer model prices the summarizer call.
 minutes ago. It is **cold** if not. A hot request reads the cached prefix. A cold request writes it
 again.
 
+**The collector.** An operator reports `rewrite`, `spend` and `setting` operations. It never reports a
+`cacheChange`. The host's collector adds each `cacheChange`: a break, with the `changeId` of its cause,
+and a rescue (design §4.4).
+
 **Breakpoints.** The client is Claude Code. It sets a 5m breakpoint at the end of `system`, and one
 on the **last message**. So the provider can read or write the cache at two points only: the end of
 `system`, and the end of the body.
 
-**Session and thread.** Examples 6 to 8 follow session `s1`, thread `main`. Both IDs are on the
-request. The examples show them once, in `RequestOps`.
+**Session and thread.** Examples 6 to 8 use session `s1`, thread `main`. Both IDs are on the request, and the examples
+show them once, in `RequestOps`.
 
-**Pipeline** of examples 6 to 8, in order:
+**Pipeline** of examples 6 and 7, in order:
 
 | Order | Operator | What it does |
 |---|---|---|
 | 1 | `tool-prune` | Removes 3 tool declarations the account does not use |
-| 2 | `context-guru` | `mask`, `cmdfilter`, `coref`, `summarize`; adds the `context_guru_expand` tool |
-| — | keeper | Sends keep-alive pings between turns (not in the pipeline) |
+| 2 | `context-guru` | `mask`, `cmdfilter`, `coref`; adds the `context_guru_expand` tool |
 
 ---
 
@@ -90,8 +93,7 @@ it is written. The change saves 7,000 × $3.75 = **$0.02625**. The rates are in 
 ## 2. The same change on hot and cold requests
 
 Two more requests follow. Each adds new messages at the end, and the operator reports the same
-`rewrite` again. Each request is priced from its own cache state: **hot** if the previous request
-was less than 5 minutes ago, **cold** if not.
+`rewrite` again. Each request is priced from its own cache state (see the [setup](#setup)).
 
 ![The same 7,000 tokens are saved in all three requests](2026-10-18-context-operations-example-1-2.svg)
 
@@ -111,15 +113,8 @@ The total for the change is **$0.05460**.
 **The operations.** One operation, **reported 3 times**. It is the `rewrite` from the operations
 of [example 1](#1-the-idea-in-one-change), with no change in the JSON. The operator reports it on
 requests 1, 2 and 3. The position, the tokens and the `changeId` are the same each time, so the
-host adds the three savings together. The operation is a fact about tokens. Only the cache state
-changes the saving.
-
-### What to take from it
-
-1. The operation is a **fact** about tokens. It has no price.
-2. The **same change** is worth $0.02625 on request 1, $0.00210 on request 2, and $0.02625 on
-   request 3. The cache state decides.
-3. The total for a change is the **sum over the requests** that carry it.
+host adds the three savings together. The operation is a fact about tokens, and it has no price:
+the cache state decides the price.
 
 ---
 
@@ -225,8 +220,7 @@ same `changeId`, so the host can add the cost and the saving together.
    ```
 
 3. **`cacheChange`, a break, on request A only, not reported by the operators.** The summary is at the start of
-   the prompt, so nothing in the cache matches. A break is added, with the `changeId` of the `rewrite` (for
-   example, by the host's collector; where it is added is an implementation decision). B and C
+   the prompt, so nothing in the cache matches. The collector adds a break, with the `changeId` of the `rewrite`. B and C
    have no break: on B the summary is already cached, and on C the cache expired.
 
    ```json
@@ -240,11 +234,7 @@ same `changeId`, so the host can add the cost and the saving together.
   reported. It is kept as a fact and is not used in pricing.
 - `changeId` is the change that the call created. It is the same as the `changeId` of the `rewrite`,
   so the cost and the saving are added together.
-- `rewrite` is the summary. `messageSplice` says 3 messages became 1, so later messages move up by 2.
-  The library needs this because an operator reports positions in its own output. An operator that
-  ran before the summary reported a position that has since moved. The library maps it to the
-  forwarded body, and compares it with the cache boundary to choose the tier. This example has no
-  earlier operator, so no figure here depends on it.
+- `rewrite` is the summary. `messageSplice` says 3 messages became 1, so later positions move up by 2.
   The `spend` and the `rewrite` are the same on A, B and C. Only the cache state changes the saving.
 - A break (`cacheChange`) moves tokens that follow the break from cache read to cache write. This is the
   **penalty**: tail tokens × ($3.75 − $0.30). Here the tail is 3,000 tokens, so the penalty is
@@ -283,9 +273,7 @@ so the break carries the `changeId` of the decision. It does not say which setti
                   "effort": {"from": "high",        "to": "low"}} }
    ```
 
-2. **`cacheChange`, a break, not reported by the operators.** A break is added, with the `changeId` of `op1`. A
-   component that sees the whole request adds it (for example, the host's collector; where it is
-   added is an implementation decision).
+2. **`cacheChange`, a break, not reported by the operators.** The collector adds a break, with the `changeId` of `op1`.
 
    ```json
    { "id": "op2", "kind": "cacheChange",
@@ -303,17 +291,15 @@ so the break carries the `changeId` of the decision. It does not say which setti
 observation, and the cache break with its cause. It shows **no saving** for the move to a smaller
 model, because the design does not compute one.
 
-**An open point.** The 40,000 tokens move from read to write. The rates for that move could be the
-large model's or the small model's. The host prices a request at that request's model, which is the
-small model. The counterfactual request would have used the large model. The design does not decide
-this, so this case gives no dollars.
+**The rates.** The 40,000 tokens move from read to write. The host prices them at the request's model,
+which is the small model.
 
 ---
 
 ## 6. One request in detail
 
-Examples 6 to 8 follow one session from turn 5 to turn 13, with the [setup](#setup) above. This
-example prices one request. A script computed every figure. For each request, the operations add up to the bill
+Examples 6 and 7 follow one session, with the [setup](#setup) above. This example prices one
+request. A script computed every figure. For each request, the operations add up to the bill
 without the operations minus the bill with them (design §6.3, "Conservation").
 
 ### The context
@@ -341,10 +327,11 @@ The new message on turn 5:
 
 ### The cache state
 
-The cache state is found from turn 4's fingerprint. The gap is 1 minute, inside the 5m TTL:
+The cache state is found from turn 4's fingerprint. The gap is 1 minute, inside the 5m TTL, so the
+state is hot:
 
 ```json
-"state": {"cachePhase": "hot", "extent": {"section": "messages", "index": 8}, "gap": "1m", "ttl": "5m"}
+"state": {"cachePhase": "hot", "extent": {"section": "messages", "index": 8}}
 ```
 
 So B\* = `messages[8]`.
@@ -379,7 +366,7 @@ and prices each operation in it.
     {
       "id": "op2", "kind": "rewrite",
       "operator": "context-guru.expand",
-      "at": {"section": "tools", "index": 18},
+      "at": {"section": "tools", "index": 27},
       "sizeBefore": {"tokens": 0}, "sizeAfter": {"tokens": 300},
       "changeId": "cg:expand-tool:v3"
     },
@@ -439,7 +426,7 @@ If the client had a breakpoint on `messages[4]`, the penalty would start at mess
 7,950 tokens, and costs 7,950 × $3.45 = $0.02743. The net is $0.00599 − $0.02743 = −$0.02144. The breakpoints, not the size of the change, decide most of the
 cost.
 
-On each later hot turn, `coref` saves +$0.00599 again. A summary on turn 12 ends it.
+On each later hot turn, `coref` saves +$0.00599 again.
 
 ### The operations
 
@@ -457,7 +444,7 @@ Two operations describe the change.
    }
    ```
 
-2. **`cacheChange`, a break, not reported by the operators.** It is added, with the `changeId` of op12.
+2. **`cacheChange`, a break, not reported by the operators.** The collector adds it, with the `changeId` of op12.
 
    ```json
    { "id": "op13", "kind": "cacheChange",
