@@ -2,20 +2,46 @@
 # In-container phase runner for the PR #578 review. One function per phase; a phase that crashes
 # stops the run (exit 3), a check that fails does not -- checks are judged later, by check.py.
 set -uo pipefail
-TIER="${1:?tier: smoke|full|stress}"
+TIER="${1:?tier: smoke|full|stress|suite}"
 R=/results; mkdir -p "$R/logs" "$R/snapshots"
 PORT=8788; UP=9000; BASE="http://127.0.0.1:${PORT}"
 PLUG=/src/context-guru-plugin
 
-phase() {  # phase <name> <function>
-  local name="$1" fn="$2" t0 rc; t0=$(date +%s)
-  echo "== $name"; "$fn" >"$R/logs/$name.log" 2>&1; rc=$?
+source /src/e2e/timeout.sh
+
+# Evidence of a hung phase, taken while everything is still alive. Python stacks and fd/socket counts first;
+# the proxy's goroutine dump last, because SIGQUIT makes Go print every goroutine and then exit.
+capture_hang() {  # capture_hang <phase>
+  local ev="$R/logs/hang-$1.txt" p pid
+  {
+    echo "== hang evidence for phase $1 (budget exceeded)"; ps -eo pid,ppid,stat,etimes,args
+    echo "== /proc/net/tcp lines: $(wc -l </proc/net/tcp)"
+    awk 'NR>1{print $4}' /proc/net/tcp | sort | uniq -c   # socket states, hex (01 ESTABLISHED, 08 CLOSE_WAIT, 06 TIME_WAIT)
+    for p in proxy upstream; do
+      pid="$(cat /tmp/$p.pid 2>/dev/null)" || continue
+      echo "== $p pid $pid fds: $(ls /proc/$pid/fd 2>/dev/null | wc -l)"
+    done
+    for pid in $(pgrep -f 'e2e\.(upstream|replay)'); do echo "== SIGUSR1 -> $pid (stacks go to that process's log)"; kill -USR1 "$pid"; done
+    sleep 2
+    pid="$(cat /tmp/proxy.pid 2>/dev/null)" && kill -0 "$pid" 2>/dev/null &&
+      { echo "== SIGQUIT -> proxy $pid (goroutine dump goes to logs/proxy.log)"; kill -QUIT "$pid"; sleep 3; }
+  } >"$ev" 2>&1
+}
+
+phase() {  # phase <name> <function>; a phase over its budget is CRASHED (status timeout), with evidence
+  local name="$1" fn="$2" t0 rc budget; t0=$(date +%s); budget=$(phase_budget "$TIER" "$name")
+  echo "== $name (budget ${budget}s)"
+  run_bounded "$budget" "$fn" "$R/logs/$name.log" "capture_hang $name"; rc=$?
   local st=ok; [ $rc -eq 0 ] || st=crashed
-  printf '{"phase":"%s","status":"%s","seconds":%d}\n' "$name" "$st" $(( $(date +%s) - t0 )) >>"$R/phases.jsonl"
+  local why=""; [ $rc -eq 124 ] && why=',"reason":"timeout"'
+  [ $rc -ne 0 ] && [ -s /tmp/crash-reason ] && why=",\"reason\":\"$(head -1 /tmp/crash-reason)\""
+  printf '{"phase":"%s","status":"%s","seconds":%d%s}\n' "$name" "$st" $(( $(date +%s) - t0 )) "$why" >>"$R/phases.jsonl"
   if [ $rc -ne 0 ]; then echo "!! $name crashed (rc=$rc); tail:"; tail -20 "$R/logs/$name.log"; exit 3; fi
 }
 
 p_preflight() {
+  # run.sh passes the host's clock: a VM clock far off it is stepped by chronyd mid-run (seen: +64,957s).
+  check_clock "${HOST_EPOCH:-}" 120 >/tmp/crash-reason || { cat /tmp/crash-reason; return 1; }
   [ "$HOME" = /sandbox ] || { echo "HOME is $HOME, not /sandbox"; return 1; }
   case "$(cd ~ && pwd -P)" in /sandbox) ;; *) echo "HOME resolves outside /sandbox"; return 1;; esac
   for p in $PORT $UP; do
@@ -25,7 +51,8 @@ p_preflight() {
   go vet ./dash/ ./proxy/ ./cmd/... && go build ./...
 }
 
-p_suite() { CGO_ENABLED=1 make test; }
+# A red package is a result (check.py reads suite.exit), not a crashed phase.
+p_suite() { CGO_ENABLED=1 make test; echo $? >"$R/suite.exit"; return 0; }
 
 p_generate() {
   python3 -m e2e.gen.inventory --tier "$TIER" --home "$HOME" &&
@@ -182,6 +209,16 @@ p_skill() { "$PLUG/scripts/dashboard.sh" --no-open 2>&1 | tee "$R/logs/skill.out
 p_assert() { python3 -m e2e.check --results "$R" --tier "$TIER"; return 0; }  # a FAIL is a result, not a crash
 
 cd /src
-[ "$TIER" = smoke ] || phase suite p_suite
-for ph in preflight generate install replay transcripts import api skill ui assert; do phase "$ph" "p_$ph"; done
+case "$TIER" in
+  # Stress is about time, not correctness: transcripts precede import because the importer reads them.
+  stress) for ph in preflight generate install replay transcripts import; do phase "$ph" "p_$ph"; done
+          for ep in /api/history "/api/facets?measured=1" "/api/insights?timeline=1"; do
+            curl -s -o /dev/null -w "{\"endpoint\":\"$ep\",\"ms\":%{time_total}}\n" "$BASE$ep" >>"$R/stress-endpoints.jsonl"
+          done ;;
+  # The KNOWN baseline on main: the Go suite only (main has no History tab, so the other phases cannot run).
+  suite)  phase suite p_suite; phase assert p_assert ;;
+  full)   phase suite p_suite
+          for ph in preflight generate install replay transcripts import api skill ui assert; do phase "$ph" "p_$ph"; done ;;
+  smoke)  for ph in preflight generate install replay transcripts import api skill ui assert; do phase "$ph" "p_$ph"; done ;;
+esac
 echo "== phases complete"

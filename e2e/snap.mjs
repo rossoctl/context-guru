@@ -26,10 +26,10 @@ await new Promise((r) => (ws.onopen = r));
 await send('Runtime.enable'); await send('Page.enable'); await send('Network.enable'); await send('Log.enable');
 const evalJS = async (expr) => (await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })).result?.value;
 
-// Poll until expr is truthy; false on timeout (the caller records the error, never throws).
-async function waitFor(expr, ms = 10000) {
-  const t0 = Date.now();
-  while (Date.now() - t0 < ms) { if (await evalJS(expr)) return true; await sleep(150); }
+// Poll until expr is truthy; false on timeout (the caller records the error, never throws). Counted in polls,
+// not Date.now(): a host sleep steps the VM clock forward on resume, which would time out a page that never ran.
+async function waitFor(expr, ms = 30000) {
+  for (let i = 0; i * 150 < ms; i++) { if (await evalJS(expr)) return true; await sleep(150); }
   return false;
 }
 
