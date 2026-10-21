@@ -1055,6 +1055,11 @@ type KeepAliveReport struct {
 	// sink can record what was requested rather than reading as a request with no output
 	// budget at all.
 	MaxTokens int
+	// Manual marks a ping the USER asked for (keepalive.Keeper.PingNow), not one the keeper
+	// scheduled; Strategy is then "manual". RewriteUSD is the cache write it avoided, 0 when it
+	// read nothing. A sink keeps both off every strategy's ledger.
+	Manual     bool
+	RewriteUSD float64
 }
 
 // KeepAliveEmitter is an OPTIONAL capability an Emitter implementation may add. Most Emitter

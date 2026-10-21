@@ -343,6 +343,13 @@ type Event struct {
 	// keepalive_strategy_id column — so a row from before this feature existed is
 	// distinguishable from one deliberately attributed to nothing.
 	KeepAliveStrategyID string `json:"keepalive_strategy_id,omitempty"`
+	// ManualPing marks a keep-alive row the USER asked for (POST /api/me/cache/ping). It stays a
+	// KeepAlive row — real spend, a real refresh of the provider's entry — and carries strategy id
+	// "manual"; this flag is what every strategy ledger filters on, so a button press never lands
+	// in a strategy's net. ManualSavedUSD is the cache write it avoided (gross; 0 when the ping
+	// read nothing). Its cost is CostUSD, as for any ping.
+	ManualPing     bool    `json:"manual_ping,omitempty"`
+	ManualSavedUSD float64 `json:"manual_saved_usd,omitempty"`
 	// SinceLastMs is the gap from this session's previous REAL request, in milliseconds.
 	// Not persisted — AttributeCache already turns it into cache_miss_reason — but the
 	// keep-alive credit needs the raw number: the whole claim is that the gap exceeded the

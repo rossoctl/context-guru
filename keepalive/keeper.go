@@ -317,6 +317,8 @@ type Keeper struct {
 	// session id and is cleared wholesale at the bound; give it an LRU only if session churn
 	// is ever shown to cost real pings.
 	turns map[string]int
+	// manualAt is when each thread was last manually pinged, for PingNow's rate limit (manual.go).
+	manualAt map[string]time.Time
 
 	// Counters, for /stats and for the honest question "is this thing spending money and
 	// getting nothing?". Every one of them is a way the mechanism can be useless.
@@ -1253,11 +1255,6 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	model, provider, route, preset, agent := e.model, e.provider, e.route, e.preset, e.agent
 	appliedStrategy, endpoint, prefix := e.tag, e.endpoint, e.prefix
 	k.mu.Unlock()
-	var price Price
-	priced := false
-	if model != "" {
-		price, priced = k.price(endpoint, model, prefix)
-	}
 	// A ping is not agent traffic, so it gets no cache-miss attribution and never touches
 	// the session-recency map: doing so would re-date the session and make the NEXT real
 	// request's gap read as four minutes instead of the twenty it actually was, hiding the
@@ -1291,14 +1288,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	if status >= 200 && status < 300 && u.CacheRead > 0 {
 		apply.RecordCacheTouch(j.st, j.tenant, j.raw, provider, startedAt.UnixMilli())
 	}
-	// The same gate dash.Event.Price used to apply before pricing anything: no cost without a
-	// usable rate, and no cost claimed for a ping whose usage reported nothing at all.
-	var cost float64
-	if priced && !price.Zero() && (u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0) {
-		// See modelinfo.Price.CostWithCacheWrite1h for the one-hour write premium this folds
-		// in — the same helper dash.Event.Price uses, so the two cannot drift apart again.
-		cost = price.CostWithCacheWrite1h(u.FreshInput, u.CacheRead, u.CacheWrite, u.Output, u.CacheWrite1h)
-	}
+	cost, _ := k.pingCost(endpoint, model, prefix, u)
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
@@ -1306,12 +1296,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 		e.refreshedAt = startedAt
 	}
 	k.mu.Unlock()
-	for {
-		old := k.spentUSD.Load()
-		if k.spentUSD.CompareAndSwap(old, math.Float64bits(math.Float64frombits(old)+cost)) {
-			break
-		}
-	}
+	k.addSpent(cost)
 	if ka, ok := j.emitter.(components.KeepAliveEmitter); ok {
 		ka.KeepAlivePing(components.KeepAliveReport{
 			Tenant: j.tenant, Session: j.session, Thread: j.thread, Model: model, Provider: string(provider),
@@ -1331,6 +1316,35 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 		})
 	}
 	return cost
+}
+
+// pingCost prices one ping's usage. The same gate dash.Event.Price used to apply before pricing
+// anything: no cost without a usable rate, and no cost claimed for a ping whose usage reported
+// nothing at all. priced is false when the model has no rate.
+func (k *Keeper) pingCost(endpoint, model string, prefix int64, u Usage) (cost float64, priced bool) {
+	if model == "" {
+		return 0, false
+	}
+	price, ok := k.price(endpoint, model, prefix)
+	if !ok || price.Zero() {
+		return 0, false
+	}
+	if u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0 {
+		// See modelinfo.Price.CostWithCacheWrite1h for the one-hour write premium this folds
+		// in — the same helper dash.Event.Price uses, so the two cannot drift apart again.
+		cost = price.CostWithCacheWrite1h(u.FreshInput, u.CacheRead, u.CacheWrite, u.Output, u.CacheWrite1h)
+	}
+	return cost, true
+}
+
+// addSpent adds one ping's cost to the process-wide counter.
+func (k *Keeper) addSpent(cost float64) {
+	for {
+		old := k.spentUSD.Load()
+		if k.spentUSD.CompareAndSwap(old, math.Float64bits(math.Float64frombits(old)+cost)) {
+			return
+		}
+	}
 }
 
 // Stats is the keeper's own ledger, for /stats. Every field is a way the mechanism

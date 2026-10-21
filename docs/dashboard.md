@@ -122,6 +122,24 @@ that minus what was paid, context-guru's own model calls and pings included, so 
 keep-alive still plans to ping also carries `pings_left` and `held_until_ms`: when its cache goes
 cold if nothing else is sent (the last planned ping's start plus the cache lifetime).
 
+The session and each thread also carry `next_warm_usd` and `next_cold_usd`: what the next request
+costs for the cached prefix if the cache is still warm (a cache read) or already cold (a rewrite;
+the same number as `rewrite_usd`). Both are left out when the model has no price.
+
+`POST /api/me/cache/ping` with `{"session": "<id>", "thread": "<id, optional>"}` is the Ping
+button. It sends **one** keep-alive ping on that thread now, with the same request and the same
+price as a scheduled ping. It answers `200` with `cache_read`, `cache_write`, `ping_usd`,
+`rewrite_usd`, `saved_usd` (the write it avoided minus the ping) and `warm_until_ms`. Other answers:
+`409 cold` (nothing left to keep warm), `409 not held` (keep-alive is off, so the proxy keeps no
+body or key to ping with), `404 unknown session`, and `429 too soon` (one press per thread every
+30 seconds). It reaches only the caller's own sessions. The caller is the same as for
+`/api/adapt/*`: the dashboard cookie, the account's own proxy token, or a direct loopback request
+to a single-tenant proxy.
+
+Its row is a keep-alive row with `manual_ping` set. `GET /api/stats` reports these rows as
+`manual_pings` (`count`, `ping_usd`, and `saved_usd` net of the pings' cost). They are a savings
+category of their own: they join `total_saved_usd`, and no cache strategy's ledger counts them.
+
 Top to bottom, the panel shows:
 
 - **Headline tiles and gauge** — declared vs. invoked tokens, over the *controllable*
