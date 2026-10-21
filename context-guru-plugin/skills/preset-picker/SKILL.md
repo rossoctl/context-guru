@@ -37,13 +37,13 @@ a fault, just unset.
 | `conservative` | trims obvious waste — the safe first step into "carry less" |
 | `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output, and a summary prepared in the background that is used only if you come back after the cache expired |
 | `high` | `medium`, but the summary of older turns is used as soon as the context window is nearly full |
-| `xhigh` | `high` plus a deep-adjudication sweep over turns whose cache has already gone cold — the deepest cut |
+| `xhigh` | the same as `high` in this release. The deep-adjudication sweep is off until it is ready |
 
 Recommend `conservative` to someone who wants to carry less context but hasn't said they want an
 LLM pass: it is deterministic, so nothing about the request path depends on a model call
-succeeding. `medium`, `high` and `xhigh` are an escalating ladder — each is a strict superset of
-the one below it — so "somewhere in between" usually means one tier up from wherever they are now,
-not a custom mix.
+succeeding. `conservative`, `medium` and `high` are an escalating ladder — each is a strict superset of
+the one below it. `xhigh` is the same as `high` in this release, not a superset. So "somewhere in
+between" usually means one tier up from wherever they are now, not a custom mix.
 
 ## 3. Switch
 

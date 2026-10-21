@@ -127,7 +127,7 @@ These are the presets in the Claude Code plugin picker.
 | `conservative` | ✅ Works, no `expand` | ✅ Works, no `expand` | ✅ Works |
 | `medium` | ❌ **Does not work.** `extract_llm` pays for a model call on each new large output, and the rewrite lasts one turn. The summary is never made. | ❌ The same as Off | ✅ Works |
 | `high` | ❌ **Does not work.** The same as `medium`. | ❌ The same as `medium`. On OpenAI it also pays for a summary every turn and throws it away. | ✅ Works |
-| `xhigh` | ❌ **Does not work.** The same as `high`. The sweep also pays full price to ask which outputs to remove, and the removals last one turn. | ❌ The same as Off | ✅ Works |
+| `xhigh` | ❌ **Does not work.** The same as `high`. | ❌ The same as `high` | ✅ Works |
 
 **With storage off, use `conservative`.** It is the only plugin preset that saves anything.
 

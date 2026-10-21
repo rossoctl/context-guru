@@ -3733,8 +3733,8 @@ PRESETS: dict[str, str] = {
               "come back after the cache expired — the first tier that can spend on its own",
     "high": "medium, but the summary of older turns is used as soon as the context window is "
             "nearly full",
-    "xhigh": "high plus a periodic deep-adjudication sweep over turns whose prompt cache has "
-             "already gone cold — the deepest cut this picker offers",
+    "xhigh": "the same as high in this release; the deep-adjudication sweep is off until it is "
+             "ready",
 }
 DEFAULT_PRESET = "off"
 

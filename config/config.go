@@ -507,7 +507,7 @@ var presets = map[string][]string{
 
 	// conservative/medium/high/xhigh: the effort ladder the Claude Code plugin's preset picker
 	// offers (context-guru-plugin/skills/preset-picker), replacing the old off/cache/house/
-	// codesmart/housellm chooser. Each tier is a strict superset of the one below it (#417):
+	// codesmart/housellm chooser. Each tier up to high is a strict superset of the one below it (#417); xhigh equals high in 0.5.3:
 	//   conservative = house, verbatim. No summarizer.
 	//   medium       = housellm minus extract_llm_sweep, plus cache_aware_summarizer with
 	//                  cache_state: pre_expiry — the conservative mode. It prepares a summary in
@@ -516,7 +516,9 @@ var presets = map[string][]string{
 	//                  changes the history while the user is working.
 	//   high         = medium with cache_aware_summarizer at its own default cache_state (`any`):
 	//                  summarize at 0.9 of the window and use the summary on the next request.
-	//   xhigh        = high + extract_llm_sweep — i.e. housellm + the cache-reusing summarizer.
+	//   xhigh        = high, in 0.5.3 (#652). It was high + extract_llm_sweep. The sweep is off
+	//                  here because it is still under work (#508). It returns to xhigh when #508
+	//                  lands. The name stays, so a stored config that names it still loads.
 	// `summarize` is no longer in any picker tier. It stays available by name for the cases
 	// where it is the better choice (a much cheaper summary model than the agent's; a route with
 	// no stored request; a gateway that rejects the reused-request shape) — see
@@ -529,7 +531,7 @@ var presets = map[string][]string{
 	"conservative": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"medium":       {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 	"high":         {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
-	"xhigh":        {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	"xhigh":        {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
@@ -786,9 +788,11 @@ components:
     strategy: code
     trigger:
       min_request_tokens: 3000`,
-	// xhigh = high + extract_llm_sweep. Same summarizer settings as high: model.source: incoming,
-	// trigger at the component's own defaults (min_request_frac 0.9, cache_state any).
-	"xhigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+	// xhigh = high in 0.5.3 (#652). It was high + extract_llm_sweep. The sweep is off because it
+	// is still under work (#508); it returns here when #508 lands. Same summarizer settings as
+	// high: model.source: incoming, trigger at the component's own defaults (min_request_frac
+	// 0.9, cache_state any). A separate entry, so the name still loads.
+	"xhigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
 components:
   cache_aware_summarizer:
     model:
@@ -810,9 +814,7 @@ components:
       source: incoming
     strategy: code
     trigger:
-      min_request_tokens: 3000
-  extract_llm_sweep:
-    min_tokens: 1000`,
+      min_request_tokens: 3000`,
 	// (a=2, b=1, θ=500) and the authors' artifact apply-gate (saved >= 400 || keep <
 	// 0.8). Routed to the CHEAP model because the method's economics depend on the
 	// reflection model being much cheaper than the agent's — the paper's own choice was
