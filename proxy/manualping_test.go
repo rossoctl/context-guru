@@ -360,3 +360,41 @@ func TestKeepAlivePingableMatchesTheEndpointsNotHeld(t *testing.T) {
 		t.Error("a nil handler states something")
 	}
 }
+
+// A manager's ?tenant= widens the dashboard's reads, but a ping spends the named account's key:
+// the route acts on the caller's own account only.
+func TestManualPingIgnoresTheManagersTenantParameter(t *testing.T) {
+	f := newMgrFixture(t)
+	f.h.API().SetAuth(f.h.DashAuth())
+	clock := &testClock{at: time.Now()}
+	fs := &fakeSender{}
+	useFakeUpstream(f.h, fs, clock)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	_, aID := f.signUpJar(t, "a@ibm.com")
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	r.Header.Set("Authorization", "Bearer sk-a")
+	for i := 0; i < 2; i++ {
+		f.h.keeper.record(&Tenancy{ID: aID, Cache: kaPolicy()}, aID+":s1", "", clock.now().Add(time.Duration(i-60)*time.Second),
+			[]byte(kaBody), upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages",
+			http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+	}
+	f.rec.Record(&dash.Event{TS: clock.now().Add(-60 * time.Second).UnixMilli(), TenantID: aID, SessionID: aID + ":s1",
+		Model: "aws/claude-sonnet-5", Status: 200, CacheRead: 48576, CacheWrite: 1200, UpstreamMs: 1000})
+	waitForRows(t, f.rec, 1)
+	for _, q := range []string{"", "?tenant=" + aID, "?tenant=*"} {
+		if w, _ := f.do(t, "POST", "/api/me/cache/ping"+q, `{"session":"`+aID+`:s1"}`, mgrJar); w.Code != http.StatusNotFound {
+			t.Errorf("manager pinging a's session%s = %d %s, want 404", q, w.Code, w.Body)
+		}
+	}
+	if fs.n() != 0 {
+		t.Errorf("%d pings were sent on another account's key", fs.n())
+	}
+}
+
+// With no keeper the handler cannot say, so pingable is left out rather than stated false.
+func TestKeepAlivePingableIsUnknownWithoutAKeeper(t *testing.T) {
+	h := &Handler{}
+	if h.KeepAlivePingable("", true, "s") != nil {
+		t.Error("no keeper must be unknown (nil), not an empty answer")
+	}
+}

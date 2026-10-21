@@ -139,6 +139,12 @@ to a single-tenant proxy.
 Its row is a keep-alive row with `manual_ping` set. `GET /api/stats` reports these rows as
 `manual_pings` (`count`, `ping_usd`, and `saved_usd` net of the pings' cost). They are a savings
 category of their own: they join `total_saved_usd`, and no cache strategy's ledger counts them.
+The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive, so with
+automatic pings on it can overlap the keep-alive credit for the same avoided write. `saved_usd` is
+`avoided - ping` summed over all presses, so a ping that missed shows as a loss; the per-press
+`saved_usd` in the reply is never below 0, so the two need not match. A press is refused with
+`409 too costly` when one ping would cost more than the per-ping ceiling, and `?tenant=` is ignored:
+it pings only the caller's own account.
 
 Top to bottom, the panel shows:
 

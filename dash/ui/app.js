@@ -1723,7 +1723,7 @@ function renderSavedLedger(o, ka, partial) {
       what: 'Cache rewrites avoided because you pressed Ping to keep a warm cache warm.',
       ran: true, usd: parts.manual, tok: null,
       extra: num(o.manual_pings.count) + (o.manual_pings.count === 1 ? ' ping' : ' pings') + ' cost ' + usd(o.manual_pings.ping_usd),
-      kind: 'Upper bound', note: 'after the pings cost ' + usd(o.manual_pings.ping_usd),
+      kind: 'Upper bound', note: 'after the pings cost ' + usd(o.manual_pings.ping_usd) + '. May overlap the cache strategy when its automatic pings are on.',
     }] : []),
   ];
   const head = el('div', { class: 'ledger-head', 'aria-hidden': 'true' },

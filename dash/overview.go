@@ -1345,7 +1345,10 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"press is credited the cache write it avoided on the context as it stood, priced at " +
 				"the tier the cache was written at, minus the ping's own cost; a ping that read " +
 				"nothing is credited nothing. A ceiling, like the keep-alive saving: another session " +
-				"sending the same prefix would have refreshed it for free."},
+				"sending the same prefix would have refreshed it for free. It also overlaps the " +
+				"keep-alive credit when automatic pings are on, because a press is only possible " +
+				"while the proxy holds the thread for keep-alive, and an automatic ping would " +
+				"often have refreshed the cache anyway."},
 		{Key: "decl_filter_saved", Label: "Declarations no longer sent", DeltaUSD: -o.DeclFilterUSD,
 			Description: "Tool and MCP schemas, and skill listing entries, that the declaration " +
 				"filter stopped sending — measured on requests that were really sent, from the " +

@@ -120,6 +120,14 @@ func (a *API) SetPingable(fn func(tenantID string, allTenants bool, session stri
 	a.pingable = fn
 }
 
+// pingableFor is the host's per-thread answer, nil when it cannot say (no source, or no keeper).
+func (a *API) pingableFor(f Filter) map[string]bool {
+	if a.pingable == nil {
+		return nil
+	}
+	return a.pingable(f.Tenant, f.TenantAll, f.Session)
+}
+
 // maxDurationMS bounds the upstream time trusted for EndTS: a bogus value must not hold a dead
 // cache "warm" for hours.
 const maxDurationMS = 15 * 60 * 1000
@@ -406,8 +414,7 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 			s.PingsLeft, s.HeldUntilMS = p.PingsLeft, p.heldUntil(ttl)
 		}
 	}
-	if a.pingable != nil {
-		held := a.pingable(f.Tenant, f.TenantAll, f.Session)
+	if held := a.pingableFor(f); held != nil {
 		for i := range s.Threads {
 			v := held[s.Threads[i].ID]
 			s.Threads[i].Pingable = &v

@@ -1,6 +1,7 @@
 package keepalive
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sync"
@@ -121,14 +122,54 @@ func TestPingNowRefusesWhatTheKeeperDoesNotHold(t *testing.T) {
 	}
 }
 
-func TestPingNowRefusesAThreadTheKeeperStopped(t *testing.T) {
-	k, _, _ := manualKeeper(t)
+// A refused manual ping is reported, but one button press must not switch off the thread's whole
+// automatic schedule: stopping is the scheduled path's call.
+func TestPingNowRefusalDoesNotStopTheAutomaticSchedule(t *testing.T) {
+	k, _, clock := manualKeeper(t)
 	fakeOf(k).setResp(func(DispatchRequest) (Usage, int, error) { return Usage{}, http.StatusBadRequest, nil })
-	if _, err := k.PingNow(ManualRequest{Key: sess1}); err == nil {
-		t.Fatal("a refused ping must be an error")
+	var up *UpstreamError
+	if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.As(err, &up) || up.Status != 400 {
+		t.Fatalf("PingNow = %v, want *UpstreamError 400", err)
 	}
-	if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {
-		t.Errorf("after the upstream refused, a second manual ping = %v, want ErrNotHeld", err)
+	if e, _ := k.Entry(sess1); e.Stopped {
+		t.Error("a manual 400 stopped the thread's automatic pings")
+	}
+	fakeOf(k).setResp(okPing)
+	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
+		t.Errorf("the automatic ping did not fire after a refused manual one (%d)", n)
+	}
+}
+
+// The scheduled path refuses a ping dearer than the policy's per-ping ceiling; a press is held to
+// the same cap, so a huge prefix cannot be pinged 16 threads x every 30 s past it.
+func TestPingNowHonoursThePerPingCeiling(t *testing.T) {
+	k, _, _ := manualKeeper(t)
+	k.mu.Lock()
+	for _, e := range k.live {
+		e.pingUSD = e.pol.Ceiling() + 1
+	}
+	k.mu.Unlock()
+	if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrTooCostly) {
+		t.Errorf("PingNow = %v, want ErrTooCostly", err)
+	}
+	if fakeOf(k).n() != 0 {
+		t.Error("a ping over the ceiling was sent")
+	}
+	if _, ok := k.Pingable("t1", false, sess1.Session)[""]; !ok {
+		t.Error("too costly is not the same as not held")
+	}
+}
+
+// After a timeout the request may still have been billed, so the gap stays claimed.
+func TestPingNowKeepsTheGapAfterATimeout(t *testing.T) {
+	k, _, _ := manualKeeper(t)
+	fakeOf(k).setResp(func(DispatchRequest) (Usage, int, error) { return Usage{}, 0, context.DeadlineExceeded })
+	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second}); err == nil {
+		t.Fatal("want an error")
+	}
+	var soon *TooSoonError
+	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second}); !errors.As(err, &soon) {
+		t.Errorf("after a timeout the retry = %v, want *TooSoonError", err)
 	}
 }
 
@@ -197,13 +238,26 @@ func TestPingableAgreesWithPingNowNotHeld(t *testing.T) {
 	if got := k.Pingable("", true, sess1.Session); !got[""] {
 		t.Errorf("all-tenants scope = %v, want the held thread", got)
 	}
-	// A thread the keeper stopped is not pingable, and PingNow says ErrNotHeld for it.
-	fakeOf(k).setResp(func(DispatchRequest) (Usage, int, error) { return Usage{}, http.StatusBadRequest, nil })
-	_, _ = k.PingNow(ManualRequest{Key: sess1})
+	// A thread the keeper no longer holds is not pingable, and PingNow says ErrNotHeld for it.
+	k.RetireSession("t1", sess1.Session)
 	if k.Pingable("t1", false, sess1.Session)[""] {
-		t.Error("a stopped thread is reported pingable")
+		t.Error("a retired thread is reported pingable")
 	}
 	if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {
 		t.Errorf("PingNow = %v, want ErrNotHeld", err)
 	}
+	// And one the scheduled path stopped agrees too.
+	k2, _, _ := manualKeeper(t)
+	k2.mu.Lock()
+	for _, e := range k2.live {
+		e.stopped = true
+	}
+	k2.mu.Unlock()
+	if k2.Pingable("t1", false, sess1.Session)[""] {
+		t.Error("a stopped thread is reported pingable")
+	}
+	if _, err := k2.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {
+		t.Errorf("PingNow on a stopped thread = %v, want ErrNotHeld", err)
+	}
+}
 }

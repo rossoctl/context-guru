@@ -237,7 +237,7 @@
   },
   {
    "delta_usd": -0,
-   "description": "Cache rewrites avoided because YOU pressed Ping (the dashboard or the plugin button), net of what those pings cost. Its own line, outside the cache strategy: a person decided it, the strategy did not, so it never moves a strategy's net. Each press is credited the cache write it avoided on the context as it stood, priced at the tier the cache was written at, minus the ping's own cost; a ping that read nothing is credited nothing. A ceiling, like the keep-alive saving: another session sending the same prefix would have refreshed it for free.",
+   "description": "Cache rewrites avoided because YOU pressed Ping (the dashboard or the plugin button), net of what those pings cost. Its own line, outside the cache strategy: a person decided it, the strategy did not, so it never moves a strategy's net. Each press is credited the cache write it avoided on the context as it stood, priced at the tier the cache was written at, minus the ping's own cost; a ping that read nothing is credited nothing. A ceiling, like the keep-alive saving: another session sending the same prefix would have refreshed it for free. It also overlaps the keep-alive credit when automatic pings are on, because a press is only possible while the proxy holds the thread for keep-alive, and an automatic ping would often have refreshed the cache anyway.",
    "key": "manual_pings",
    "label": "Manual pings",
    "total": false

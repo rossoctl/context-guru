@@ -68,7 +68,12 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 		ctlErr(w, http.StatusNotFound, "unknown session")
 		return
 	}
+	// The caller's OWN account, always. adaptPrincipal lets a manager name another account with
+	// ?tenant=; a ping spends that account's key, so the query parameter is ignored here.
 	tenantID := who.TenantID
+	if who.actor != nil {
+		tenantID = who.actor.ID
+	}
 	scoped := scopedSession(tenantID, in.Session)
 
 	// What the dashboard knows about that thread's cache: when it last was touched, the tier it
@@ -123,6 +128,10 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, keepalive.ErrBusy):
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "busy",
 			"detail": "a request is in flight on this thread, and it refreshes the cache itself"})
+		return
+	case errors.Is(err, keepalive.ErrTooCostly):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "too costly",
+			"detail": "one ping on this thread would cost more than the per-ping ceiling"})
 		return
 	case errors.Is(err, keepalive.ErrLimited):
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "no spare capacity", "retry_after_s": 5})

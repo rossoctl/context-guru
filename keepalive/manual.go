@@ -32,6 +32,9 @@ var (
 	ErrBusy = errors.New("keepalive: a request is in flight on this thread")
 	// ErrLimited means the tenant has no spare rate or concurrency for a ping right now.
 	ErrLimited = errors.New("keepalive: no spare capacity for a ping")
+	// ErrTooCostly means one ping on this thread would cost more than the policy's per-ping
+	// ceiling, the same guard the scheduled path applies (Policy.Ceiling).
+	ErrTooCostly = errors.New("keepalive: a ping on this thread costs more than the per-ping ceiling")
 )
 
 // TooSoonError is the per-thread rate limit: the thread was manually pinged less than MinGap ago.
@@ -94,6 +97,12 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		k.mu.Unlock()
 		return ManualResult{}, &TooSoonError{RetryAfter: r.MinGap - now.Sub(last)}
 	}
+	// The scheduled path's cost guard applies to a press too: with no limiter configured the
+	// per-thread gap is the only other brake, and a huge prefix would pass it every 30 s.
+	if e.pingUSD > e.pol.Ceiling() {
+		k.mu.Unlock()
+		return ManualResult{}, ErrTooCostly
+	}
 	// Claimed under the lock, so two presses racing each other send one ping, not two.
 	k.noteManualLocked(id, now, r.MinGap)
 	// Copied out under the lock for the reason pingJob is: the entry may be retired, its body and
@@ -126,7 +135,11 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	cancel()
 	zero(body)
 	if err != nil {
-		k.unclaimManual(id, now) // nothing reached the provider as far as we know; let them retry
+		// A deadline or cancel may have left a billed request behind, so the gap stays claimed.
+		// Any other transport error means nothing reached the provider: let them retry.
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			k.unclaimManual(id, now)
+		}
 		return ManualResult{}, err
 	}
 	u := PingUsage(resp.Body)
@@ -135,9 +148,9 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	case resp.Status == http.StatusTooManyRequests || resp.Status >= 500:
 		return res, &UpstreamError{Status: resp.Status}
 	case resp.Status >= 400:
-		// The same verdict a scheduled ping reaches: this body is not one the provider accepts, and
-		// repeating it cannot help. The route breaker is the scheduled path's business, not a button's.
-		k.markStopped(e)
+		// Reported, not acted on. A scheduled ping stops its thread on a 4xx; a button press must not
+		// switch off the whole automatic schedule over one answer (a proxy hiccup is enough to give a
+		// 400). The route breaker and the stop are the scheduled path's business.
 		return res, &UpstreamError{Status: resp.Status}
 	case u.FreshInput == 0 && u.CacheRead == 0 && u.CacheWrite == 0:
 		return res, &UpstreamError{Status: resp.Status}
@@ -176,11 +189,11 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 // the tenant filter, as Plans does.
 func (k *Keeper) Pingable(tenant string, all bool, session string) map[string]bool {
 	if k == nil || session == "" {
-		return nil
+		return nil // cannot say
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	out := map[string]bool{}
+	out := map[string]bool{} // non-nil even when empty: "nothing is held" is an answer
 	for _, e := range k.live {
 		if e.session == session && (all || e.tenant == tenant) && !e.stopped {
 			out[e.thread] = true
@@ -202,13 +215,11 @@ func (k *Keeper) noteManualLocked(id string, at time.Time, gap time.Duration) {
 		k.manualAt = map[string]time.Time{}
 	}
 	if len(k.manualAt) >= manualAtMax {
+		// Only expired claims go: dropping a live one would reset its gap.
 		for key, t := range k.manualAt {
 			if at.Sub(t) >= gap {
 				delete(k.manualAt, key)
 			}
-		}
-		if len(k.manualAt) >= manualAtMax {
-			k.manualAt = map[string]time.Time{}
 		}
 	}
 	k.manualAt[id] = at
