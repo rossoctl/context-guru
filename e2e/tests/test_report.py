@@ -62,6 +62,11 @@ class TestReport(unittest.TestCase):
                            ("Q.z", ["/tmp/scratch-w"]))],
                          [True, True, False, False])
 
+    def test_numeric_evidence_matches_the_whole_value_not_a_substring(self):
+        f = ("R.y", "329", "why")
+        self.assertEqual([report.explains(f, _v("R.y", "FAIL", act=a)) for a in (329, 3290, 1329, 329.5)],
+                         [True, False, False, False])
+
     def test_a_known_findings_line_without_evidence_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             kf = pathlib.Path(d) / "known.txt"; kf.write_text("U.x.*  # no evidence\n")

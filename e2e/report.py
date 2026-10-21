@@ -28,7 +28,11 @@ def explains(finding: tuple, row: dict) -> bool:
     """A known finding explains a verdict row when one of its check globs matches the id AND its evidence
     substring is in the row's actual value: a new defect under an old check id is not the old finding."""
     globs, evidence = finding[0], finding[1]
-    return any(fnmatch.fnmatchcase(row["id"], g) for g in globs.split()) and evidence in json.dumps(row["actual"])
+    act = row["actual"]
+    # A number is the whole value: "329" must not explain 3290. Text and lists match by substring.
+    num = isinstance(act, (int, float)) and not isinstance(act, bool)
+    found = evidence == str(act) if num else evidence in json.dumps(act)
+    return any(fnmatch.fnmatchcase(row["id"], g) for g in globs.split()) and found
 
 
 def known(path) -> list[tuple[str, str, str]]:
