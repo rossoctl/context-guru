@@ -429,12 +429,7 @@ class Report:
             self.facts[key] = value
 
     def document(self) -> dict:
-        """The assembled report, which is the ONE source every output mode renders.
-
-        Split out from emit so `--report` cannot drift from `--json`: a second traversal of the
-        facts to build the page would be a second idea of what the report says, and the two would
-        disagree the first time either changed.
-        """
+        """The assembled report: the one document both output modes render."""
         return {
             "result": "ok",
             "facts": self.facts,

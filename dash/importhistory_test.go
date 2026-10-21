@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -315,5 +316,33 @@ func TestAReRunHealsMissingUsesAndNeverDoublesThem(t *testing.T) {
 	}
 	if calls() != 2 {
 		t.Errorf("after a third run calls = %d; want still 2", calls())
+	}
+}
+
+// S4: a re-run that sees FEWER turns for a (session, project, name) than are stored must not
+// lower the stored count. History can shrink under it (a trimmed transcript, a narrower -since)
+// and an absolute write would silently undercount.
+func TestAReRunWithLessHistoryNeverLowersACount(t *testing.T) {
+	db := openTestDB(t)
+	home := t.TempDir()
+	path := writeJSONL(t, home, "-p", "s1",
+		turnLineCalling("s1", "/Users/v/p", daysAgo(9), `{"type":"tool_use","name":"Bash","input":{}}`),
+		turnLineCalling("s1", "/Users/v/p", daysAgo(8), `{"type":"tool_use","name":"Bash","input":{}}`),
+		turnLineCalling("s1", "/Users/v/p", daysAgo(7), `{"type":"tool_use","name":"Bash","input":{}}`))
+	if _, err := db.ImportHistory(home, ImportOptions{Apply: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The transcript later holds only one turn.
+	if err := os.WriteFile(path, []byte(turnLineCalling("s1", "/Users/v/p", daysAgo(7),
+		`{"type":"tool_use","name":"Bash","input":{}}`)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ImportHistory(home, ImportOptions{Apply: true}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	db.sql.QueryRow(`SELECT calls FROM tool_uses WHERE name='Bash'`).Scan(&n)
+	if n != 3 {
+		t.Errorf("calls = %d after a re-run with less history; want 3, never lowered", n)
 	}
 }

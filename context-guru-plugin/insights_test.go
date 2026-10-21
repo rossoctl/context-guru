@@ -2101,4 +2101,3 @@ func TestPerSessionFactsAttributeTheCostToTheSessionsThatPaidIt(t *testing.T) {
 			"the verdict rests on the floor and the call counts, not on the breakdown", got)
 	}
 }
-
