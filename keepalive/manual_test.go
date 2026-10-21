@@ -260,4 +260,3 @@ func TestPingableAgreesWithPingNowNotHeld(t *testing.T) {
 		t.Errorf("PingNow on a stopped thread = %v, want ErrNotHeld", err)
 	}
 }
-}
