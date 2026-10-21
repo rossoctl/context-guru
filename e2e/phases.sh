@@ -97,7 +97,8 @@ start_proxy() {
   local pid=$!; echo $pid >/tmp/proxy.pid
   for _ in $(seq 1 60); do
     kill -0 $pid 2>/dev/null || { echo "proxy pid $pid exited"; return 1; }
-    curl -fsS -o /dev/null "$BASE/api/history" && return 0; sleep 0.5
+    # /dashboard/ (embedded assets, no DB, no response cache): probing a timed endpoint would warm its cache.
+    curl -fsS -o /dev/null "$BASE/dashboard/" && return 0; sleep 0.5
   done
   echo "proxy did not come up"; return 1
 }
@@ -206,13 +207,17 @@ p_ui() {
 # dashboard.sh exits non-zero when nothing answers on its port; that is the product's behaviour and a
 # result for S7.skill_port (collect.py records the exit code), not a crashed phase.
 p_skill() { "$PLUG/scripts/dashboard.sh" --no-open 2>&1 | tee "$R/logs/skill.out"; return 0; }
-# Endpoint timings at stress scale. A non-200 or a timeout is a crashed phase, never a 0 ms timing.
+# Endpoint timings at stress scale. A non-200, a timeout or a cache hit is a crashed phase, never a timing: the
+# dashboard caches these reads (dash/api.go), and a hit times a map lookup, not the query.
 p_endpoints() {
-  local ep out
+  local ep out code t xc
   for ep in /api/history "/api/facets?measured=1" "/api/insights?timeline=1"; do
-    out="$(curl -s -o /dev/null --max-time 60 -w '%{http_code} %{time_total}' "$BASE$ep")"
-    [ "${out%% *}" = 200 ] || { echo "$ep answered '${out%% *}'" >/tmp/crash-reason; cat /tmp/crash-reason; return 1; }
-    printf '{"endpoint":"%s","ms":%s}\n' "$ep" "${out#* }" >>"$R/stress-endpoints.jsonl"
+    out="$(curl -s -o /dev/null -D - --max-time 60 -w '\n%{http_code} %{time_total}' "$BASE$ep")"
+    read -r code t <<<"$(tail -1 <<<"$out")"
+    xc="$(tr -d '\r' <<<"$out" | sed -n 's/^[Xx]-[Cc]ache: *//p' | tr 'A-Z' 'a-z')"
+    [ "$code" = 200 ] || { echo "$ep answered '$code'" >/tmp/crash-reason; cat /tmp/crash-reason; return 1; }
+    [ "$xc" != hit ] || { echo "$ep answered from cache (X-Cache: hit)" >/tmp/crash-reason; cat /tmp/crash-reason; return 1; }
+    printf '{"endpoint":"%s","ms":%s%s}\n' "$ep" "$t" "${xc:+,\"x_cache\":\"$xc\"}" >>"$R/stress-endpoints.jsonl"
   done
 }
 # A FAIL (1) is a result, not a crash; any other non-zero code is a judge that crashed (check.py exits 3 on a traceback).
