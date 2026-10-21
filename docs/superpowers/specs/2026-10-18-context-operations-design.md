@@ -181,7 +181,7 @@ The numbers are the order in which the requirements were found, so they are not 
 R35 to R39 were added after the first review, R40 to R43 for subscription plans, R44 and R45 after a
 second review that checked the model against the real engine and both hosts (§13), and R46 and R47
 from a request to trace every figure to its rules and to cover every model call.
-**R13 is withdrawn** (see D). **R10 is withdrawn.** It asked for a flag that separates a replay from a fresh act. The position chooses
+**R13 is withdrawn** (see D). **R48 is withdrawn.** It asked for an `external` kind for changes that no operator made. **R10 is withdrawn.** It asked for a flag that separates a replay from a fresh act. The position chooses
 the tier, so no flag is needed (§4.2 rule 3).
 
 ### A. Boundary
@@ -202,11 +202,6 @@ the tier, so no flag is needed (§4.2 rule 3).
 
 - **R4.** Every operation that changes money is covered, not only reductions: reductions,
   additions, cache breaks, model calls, restores.
-- **R48.** An operation that no operator in the pipeline made is also recorded. Example: the
-  client's own compaction. It is logged **once**, as an `external` operation with its own ID.
-  Operations it affects refer to it by that ID. It is not copied per affected operation, so a total
-  counts it once. The model can only infer it (the body shrank with no matching operation), so it
-  is marked as inferred.
 - **R49.** A `spend` operation names the model the call used. It can differ from the agent's model.
   If the call's response states a dollar cost, the operation carries it as reported, inside the
   call's usage, beside the tokens. The host uses the reported cost when it is present, and prices the tokens with its own
@@ -408,7 +403,7 @@ type Thread struct {
 
 type Operation struct {
     ID        string // unique inside the request only; across requests, use ChangeID (R6)
-    Kind      Kind   // rewrite | cacheChange | spend | setting | external
+    Kind      Kind   // rewrite | cacheChange | spend | setting
 
     // Session and Thread are copied from RequestOps by the framework. They are on every operation
     // so a store of operations can be summed for one session or one thread with no join.
@@ -442,9 +437,6 @@ type Operation struct {
     // kind = spend
     Call     *ModelCall // the call, with the provider's billed usage (wiring document)
     Produced []string   // ChangeIDs this call created
-
-    // kind = external: an operation the pipeline did not make, logged once; others refer to its ID
-    Inferred bool
 
     // kind = setting: one decision, any number of settings. The key is the setting name: model,
     // host, or a key of Params (effort, thinking, ...). One key cannot appear twice.
@@ -498,7 +490,7 @@ type CacheState struct {
     Lifetime LifetimeKind
 }
 
-type Kind string          // rewrite | cacheChange | spend | setting | external
+type Kind string          // rewrite | cacheChange | spend | setting
 type Phase string         // hot | cold | unknown
 type LifetimeKind string  // exact | minimum | unknown — see apply.CacheLifetimeKind
 type ThreadSource string  // header | prefix | new
@@ -1169,6 +1161,9 @@ the `ops` module and pass the list.
   causes is priced; the change in output tokens is shown as an observation, not as a saving.
 - A measured saving of a param change. It needs a control that keeps the old setting.
 - Persisting fingerprints across a restart.
+- A change that no operator in the pipeline made, such as the client's own compaction. It is not
+  recorded as an operation. A client edit that breaks the cache appears as a `cacheChange` with
+  `cause: client` (§5.4).
 - **Known limitation: the payer of a call is the payer of its request.** A `spend` operation has
   no payer of its own. It is priced with the `Billing` of its request. If an operator calls a model
   on another credential (for example a summarizer on the deployer's API key, in a session on the
@@ -1288,7 +1283,7 @@ drops the combinations that cannot occur, and states the reason for each drop in
    (if any) still priced (R44).
 5. Each `Unpriced` reason, and each `CheckFailure`.
 6. `Saving.Changes` over the limit, which becomes an `Aggregate` (wiring document).
-7. `spend`, `setting` and `external` operations, which pass through unpriced.
+7. `spend` and `setting` operations, which pass through unpriced.
 8. Keep-alive: a window that rescued its request; a window whose pings did not stop the expiry; a
    gap inside the TTL, where the ping is not credited; two threads with their own windows.
 9. `cachesplit` and `breakpointTTL`, with the current `cachesplitSavedUSD` as the source.
