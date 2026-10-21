@@ -116,4 +116,7 @@ PY
 label_known "$FULL"
 rebuild "$FULL"
 echo "results: $FULL"; echo "report:  $FULL/report.html"
-[ "$(fails "$FULL")" = 0 ]
+# Exit 0 only on PASS: 1 on FAIL, 4 on INCOMPLETE (a check could not be judged, so it proved less than a pass).
+case "$(head -1 "$FULL/summary.md")" in
+  *": PASS") exit 0 ;; *": INCOMPLETE") echo "INCOMPLETE: some checks were BLOCKED; see summary.md"; exit 4 ;; *) exit 1 ;;
+esac
