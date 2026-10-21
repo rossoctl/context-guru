@@ -236,8 +236,8 @@ same `changeId`, so the host can add the cost and the saving together.
    ```
 
 - `spend` is the call. It names its model, because the summarizer can use a cheaper model than the
-  agent. `costUSD` is the cost that the response reported. If a response reports no cost, the host
-  prices the tokens.
+  agent. The host prices its tokens. `costUSD` is the cost that the response
+  reported. It is kept as a fact and is not used in pricing.
 - `changeId` is the change that the call created. It is the same as the `changeId` of the `rewrite`,
   so the cost and the saving are added together.
 - `rewrite` is the summary. `messageSplice` says 3 messages became 1, so later messages move up by 2.
@@ -436,7 +436,7 @@ the end of `system`. So the provider reads `tools` and `system` (15,300 tokens).
 **everything** after them again, including messages 0 to 4, which `coref` did not touch.
 
 If the client had a breakpoint on `messages[4]`, the penalty would start at message 5. It would be
-7,950 tokens, and the net −$0.02743. The breakpoints, not the size of the change, decide most of the
+7,950 tokens, and costs 7,950 × $3.45 = $0.02743. The net is $0.00599 − $0.02743 = −$0.02144. The breakpoints, not the size of the change, decide most of the
 cost.
 
 On each later hot turn, `coref` saves +$0.00599 again. A summary on turn 12 ends it.
@@ -517,13 +517,12 @@ total is negative.
    }
    ```
 
-2. **`cacheChange`, a rescue, on turn 10.** It is added after the four conditions of design §4.4 are checked.
+2. **`cacheChange`, a rescue, on turn 10, not reported by the operators.** The collector adds it after the four conditions of design §4.4 are checked.
    Turn 9 forwarded messages 0 to 5, so the extent is `messages[5]`.
 
    ```json
    {
      "id": "op20", "kind": "cacheChange",
-     "operator": "keeper",
      "cacheBefore": {"cachePhase": "cold"},
      "cacheAfter": {"cachePhase": "hot", "extent": {"section": "messages", "index": 5}},
      "sizeBefore": {"tokens": 10000}, "sizeAfter": {"tokens": 10000},
