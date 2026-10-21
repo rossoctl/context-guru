@@ -131,10 +131,10 @@ func main() {
 			"capture channel depth; a full channel DROPS events (counted, and shown in the UI) rather than delaying a request")
 		dashCIDRs = flag.String("dashboard-trusted-cidrs", envOr("DASHBOARD_TRUSTED_CIDRS", ""),
 			"comma-separated CIDRs allowed to view per-request CONTENT and the effective config (loopback always is; aggregates are open)")
-		// --record: write claude-record-shaped trace files, one per Claude Code session.
-		//
-		// It is the OUTPUT DIRECTORY, not a bool, so "--record set but no directory given"
-		// is not a state that exists. Empty means off.
+		// --record / --record-otlp: record one OTLP span per proxied turn, for replayable traces.
+		// --record is a DIRECTORY of OTLP JSON files, one per session; --record-otlp is a
+		// collector URL (Phoenix, Jaeger, an OTel collector). Either or both. Both empty means off.
+		// The claude-record corpus files are made offline from either, by cmd/cg-record-convert.
 		//
 		// The help text says "every request and response body" in as many words on purpose.
 		// This writes MORE than --dashboard-content does -- the whole pristine request body
@@ -143,9 +143,11 @@ func main() {
 		// caveat --dashboard-content carries, and for the same reason). An operator must not
 		// be able to turn this on without being told that.
 		recordDir = flag.String("record", envOr("CG_RECORD_DIR", ""),
-			"directory for *.otel.json trace files (empty = off); writes every request and response body to disk, redacted on a best-effort pattern denylist, so it is for corpus collection on your own traffic")
+			"directory for *.otlp.jsonl trace files, one per session (empty = off); records every request and response body, redacted on a best-effort pattern denylist, so it is for corpus collection on traffic whose owners opted in")
+		recordOTLP = flag.String("record-otlp", envOr("CG_RECORD_OTLP", ""),
+			"OTLP/HTTP traces URL to export recorded spans to, e.g. http://localhost:6006/v1/traces for Phoenix (empty = off); same content as --record")
 		recordBodyCap = flag.Int("record-body-cap", envInt("CG_RECORD_BODY_CAP", 1<<20),
-			"maximum bytes PER BODY written to a trace file, after redaction")
+			"maximum bytes PER BODY recorded, after redaction")
 		recordTeeCap = flag.Int("record-tee-cap", envInt("CG_RECORD_TEE_CAP", 8<<20),
 			"maximum bytes RETAINED PER IN-FLIGHT RESPONSE while streaming; the memory ceiling is roughly this times the number of concurrent requests")
 		recordQueue = flag.Int("record-queue", envInt("CG_RECORD_QUEUE", 256),
@@ -415,7 +417,7 @@ func main() {
 	// BEGINS, before in-flight requests drain, so a flush there would miss the last turns of
 	// every live session. This defer runs after the server has returned -- the same reason
 	// the dashboard recorder's Close is deferred here rather than registered.
-	traceRec, err := proxy.NewSessionRecorder(*recordDir, *recordBodyCap, *recordTeeCap,
+	traceRec, err := proxy.NewSessionRecorder(*recordDir, *recordOTLP, *recordBodyCap, *recordTeeCap,
 		*recordQueue, slog.Default())
 	if err != nil {
 		// Fatal, not a warning. Somebody who passed --record believes their session is being
@@ -427,8 +429,8 @@ func main() {
 		defer traceRec.Close()
 		// Unmissable, and it says what reaches disk. An operator must never be unsure whether
 		// this is on, and must not learn what it captures by reading the source.
-		slog.Warn("RECORDING ENABLED: writing every request and response body to disk",
-			"dir", traceRec.Dir(), "body_cap", *recordBodyCap, "tee_cap", *recordTeeCap,
+		slog.Warn("RECORDING ENABLED: recording every request and response body",
+			"dir", traceRec.Dir(), "otlp", *recordOTLP, "body_cap", *recordBodyCap, "tee_cap", *recordTeeCap,
 			"note", "bodies are redacted on a best-effort pattern denylist, which is not a guarantee",
 			"hosted", "only accounts that opted in on their settings page are recorded, each under dir/<account id>/")
 	}
