@@ -1,13 +1,12 @@
-// Package record turns one proxied inference turn into one OTel-shaped span, in the
-// exact on-disk format the existing claude-record analysis pipeline already consumes.
+// Package record turns one proxied inference turn into one span, in two renderings.
 //
-// WHY THIS FORMAT AND NOT OTLP. The consumer is an existing corpus of trace files and the
-// scripts built on them, not a collector. Those files are NOT standard OTLP: there is no
-// resourceSpans/scopeSpans nesting, `attributes` is a flat JSON object rather than a list
-// of {key,value:{stringValue}} entries, and timestamps are ISO-8601 strings rather than
-// epoch nanoseconds. Emitting real OTLP here would be more correct in the abstract and
-// would silently break every analysis script, so this package matches the corpus and says
-// so. A converter to OTLP is a separate, later, additive thing.
+// The proxy EXPORTS standard OTLP (otlp.go, otlpjson.go), which Phoenix, Jaeger and other
+// collectors read. This file defines the OTHER rendering: the flat claude-record corpus shape
+// that Inference-Perf's OTel trace replay and the analysis scripts read. It is not OTLP: there
+// is no resourceSpans/scopeSpans nesting, `attributes` is a flat JSON object rather than a list
+// of {key,value:{stringValue}} entries, and timestamps are ISO-8601 strings rather than epoch
+// nanoseconds. Corpus files are made OFFLINE from the exported spans (convert.go,
+// cmd/cg-record-convert), so the proxy sends each span once and never rewrites a file.
 //
 // WHY THE SPAN NAME IS `chat <model>`. The analysis scripts select turns with
 // `name.startswith("chat ")`. A span named plain `chat` is invisible to them -- a trap
