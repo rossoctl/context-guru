@@ -37,6 +37,7 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cgcache  # noqa: E402  (the on-disk request budget the status line shares)
 import cgcost as C  # noqa: E402  (usd, spark, bar, table, recommendations, unused_items ...)
 import tvlib as T  # noqa: E402  (Env: colour, ASCII fallback, width; cols, fit, clip)
 
@@ -193,6 +194,44 @@ def cache_state(api: Api, session: str | None) -> dict | None:
     return cs if cs and not cs.get("none") and cs.get("last_ts") else None
 
 
+CACHESTATE_TTL_SECONDS = 10.0  # CONTRACT section 4; the status line uses the same
+
+
+def cachestate_cached(base: str, session: str, fetch=None) -> dict:
+    """The session's /api/cachestate through the status line's own cache file (same key, same TTL,
+    same single flight, same back-off), so a mod calling this and the status line rendering never
+    both hit the network. Adds `age_s` (how old the copy is) and `stale` (served without a refresh).
+    At most one request. {"error": ...} when there is nothing to show."""
+    port = base.rsplit(":", 1)[-1].split("/")[0]
+    path = os.path.join(cgcache.cache_dir(), f"context-guru-statusline-{port}-cs-{session}.json")
+    cached, age = cgcache.read_json(path), cgcache.age_of(path)
+    if cached is not None and age is not None and age < CACHESTATE_TTL_SECONDS:
+        return {**cached, "age_s": round(age, 1), "stale": False}
+    # Past the TTL: one caller per window refreshes; the rest, and anyone inside a back-off, serve the old copy.
+    may_fetch = not cgcache.backoff(path) and (cached is None or cgcache.take_slot(path, CACHESTATE_TTL_SECONDS))
+    if may_fetch:
+        doc = (fetch or (lambda: Api(base).get("/api/cachestate", {"session": session}, timeout=5)))()
+        if isinstance(doc, dict):
+            cgcache.write_atomic(path, json.dumps(doc).encode())
+            cgcache.clear_failure(path)
+            return {**doc, "age_s": 0.0, "stale": False}
+        cgcache.record_failure(path, "error")
+    if cached is not None:
+        return {**cached, "age_s": round(age or 0.0, 1), "stale": True}
+    return {"error": "proxy not answering"}
+
+
+def cmd_cachestate(api: Api, o: dict) -> list[str]:
+    sid = o["session"] or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid or not re.match(r"^[A-Za-z0-9_-]{1,128}$", sid):
+        doc, code = {"error": "no session"}, 1
+    else:
+        doc = cachestate_cached(api.base, sid)
+        code = 1 if "error" in doc else 0
+    o["exit"] = code
+    return [json.dumps(doc, separators=(",", ":"))]
+
+
 def remaining(cs: dict) -> float:
     return (cs["last_ts"] + cs["ttl_s"] * 1000 - cs["now_ms"]) / 1000
 
@@ -252,6 +291,10 @@ def cmd_savings(api: Api, o: dict) -> list[str]:
          f"({share(saved, st.get('baseline_cost_usd') or bill)} of the {dollars(st.get('baseline_cost_usd') or bill)} "
          f"the same work would have cost)."]
     lv = levers(st)
+    mp = st.get("manual_pings") if isinstance(st.get("manual_pings"), dict) else {}
+    if mp.get("count"):  # the Ping button / command: net of the ping's own cost, kept apart from every strategy
+        n = int(mp["count"])
+        lv.append((f"Manual pings ({n} ping{'s' if n != 1 else ''}, cost {dollars(mp.get('ping_usd') or 0.0)})", mp.get("saved_usd") or 0.0))
     top = max([abs(v) for _, v in lv] + [0.01])
     L += ["", f"✓ Saved   (vs the same requests without Context Guru, at gateway prices)  {C.spark(daily(api, since, now, 'saved_usd'))}"]
     L += C.table([[n, dollars(v), cells(max(v, 0) / top)] for n, v in lv] or [["Nothing saved yet", "", ""]], "lrl")
@@ -434,25 +477,64 @@ def cmd_campaign(api: Api, o: dict) -> list[str]:
 # ---------------------------------------------------------------------------------------------
 # /context-guru:waste
 
+def _cost(row: dict) -> tuple[float, bool]:
+    """(dollars, is the whole carry). carry_usd is everything the declaration cost to carry; an older proxy only
+    has unused_usd, the part carried while nothing called it."""
+    if isinstance(row.get("carry_usd"), (int, float)):
+        return float(row["carry_usd"]), True
+    return float(row.get("unused_usd") or 0.0), False
+
+
+def tools_carried(tools: dict, details: bool) -> list[str]:
+    """MCP servers (each with its tools underneath) and skills, with what carrying them cost. Claude Code's
+    own tools and Context Guru's own components are left out: nobody removes those."""
+    keep = lambda r: not r.get("builtin") and not C.OWN.search(r.get("name") or r.get("server") or "") and r.get("priced")  # noqa: E731
+    by_server: dict[str, list[dict]] = {}
+    for t in tools.get("tools") or []:
+        m = re.match(r"mcp__(.+?)__", t.get("name", ""))
+        if t.get("kind") == "mcp_tool" and keep(t) and m:
+            by_server.setdefault(t.get("server") or m.group(1), []).append(t)
+    servers = sorted((s for s in tools.get("servers") or [] if keep({**s, "name": s["server"]})), key=lambda s: -_cost(s)[0])
+    skills = sorted((k for k in (tools.get("skills") or {}).get("skills", []) if keep(k)), key=lambda k: -_cost(k)[0])
+    if not servers and not skills:
+        return []
+    whole = all(_cost(r)[1] for r in [*servers, *skills])
+    L = ["What you carry (MCP servers, their tools and skills; Claude Code's built-in tools are not listed)" if whole else
+         "What you carry (MCP servers, their tools and skills; this proxy reports only the part carried while unused)"]
+    rows = []
+    for sv in servers[: None if details else 5]:
+        calls = f"{sv['calls']} calls" if sv.get("calls") else "never called"
+        rows.append([f"MCP server  {sv['server']}", f"{sv['tools']} tools", calls, dollars(_cost(sv)[0])])
+        for t in sorted(by_server.get(sv["server"], []), key=lambda t: -_cost(t)[0])[: None if details else 3]:
+            rows.append([f"    {t['name'].split('__', 2)[-1]}", "", f"{t['calls']} calls" if t.get("calls") else "never called", dollars(_cost(t)[0])])
+    for k in skills[: None if details else 5]:
+        rows.append([f"skill       {k['name']}", "", f"{k['calls']} calls" if k.get("calls") else "never called", dollars(_cost(k)[0])])
+    L += C.table(rows, "lrrr")
+    if not details and (len(servers) > 5 or len(skills) > 5):
+        L.append(f"  ... {max(0, len(servers) - 5)} more servers, {max(0, len(skills) - 5)} more skills with details")
+    return L
+
+
 def cmd_waste(api: Api, o: dict) -> list[str]:
     d = o["days"] or 7
     tools, last = tools_doc(api, o, d)
     if not tools or not tools.get("totals"):
         return ["No tool inventory yet. The proxy records it per session; try again after a few sessions."]
-    items = C.unused_items(tools, last)
+    carried_rows = tools_carried(tools, o["details"])
+    items = [i for i in C.unused_items(tools, last) if i["kind"] != "client tool"]  # a built-in cannot be removed
     if not items:
-        return ["Nothing wasted: every tool, MCP server and skill you carry was used in this window."]
+        return [*carried_rows, *([""] if carried_rows else []), "Nothing wasted: every MCP server and skill you carry was used in this window."]
     carried = sum(i["usd"] for i in items)
     per_month = carried / d * 30
-    L = [f"{len(items)} things you carry were never used: {dollars(carried)} in {d} days, "
+    L = [*carried_rows, *([""] if carried_rows else []),
+         f"{len(items)} things you carry were never used: {dollars(carried)} in {d} days, "
          f"about {dollars(per_month)} a month.", ""]
     top = items[:5]
-    kind = lambda k: "built-in tool" if k == "client tool" else k  # noqa: E731
-    L += [f"Top {len(top)} of {len(items)}:"] + C.table([[kind(i["kind"]), i["name"], dollars(i["usd"]), cells(i["usd"] / items[0]["usd"], 10)] for i in top], "llrl")
+    L += [f"Top {len(top)} of {len(items)}:"] + C.table([[i["kind"], i["name"], dollars(i["usd"]), cells(i["usd"] / items[0]["usd"], 10)] for i in top], "llrl")
     L += ["", "Remove the first:", f"  {top[0]['cmd']}"]
     if o["details"]:
         L += ["", "All of them, with the command that removes each:"]
-        L += C.table([[kind(i["kind"]), i["name"], dollars(i["usd"]), i["cmd"]] for i in items], "llrl")
+        L += C.table([[i["kind"], i["name"], dollars(i["usd"]), i["cmd"]] for i in items], "llrl")
     L += ["", f"Measured carry; the monthly figure is an estimate that assumes your usage stays the same."]
     return L
 
@@ -1104,7 +1186,7 @@ def run(cmd: str, api: Api, opts: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES]))
+    ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES, "cachestate"]))
     ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; save-more [config|cache]; apply <kind> <option>@<basis>; revert <kind>")
     ap.add_argument("--custom", action="store_true", help="save-more config: also search custom combinations, not only the shipped presets")
     ap.add_argument("--force", action="store_true", help="apply: go ahead although the proxy's own check failed (asked separately); "
@@ -1140,12 +1222,19 @@ def main(argv: list[str] | None = None) -> int:
     else:
         adapt = a.cmd in (*READS, *WRITES)
         base = proxy_base(a.port) or (hosted_base() if adapt else None) or ("http://127.0.0.1:0" if a.mock else None)
+        if not base and a.cmd == "cachestate":
+            print(json.dumps({"error": "no proxy routing this session"}))
+            return 1
         if not base:
             print(NO_PROXY)
             return 1 if adapt else 0  # a read that showed no report must not count as run (the skills chain on it)
         api = Api(base, token=cg_token() if adapt else None)
     if a.cmd in (*READS, *WRITES):
         return adapt_main(api, a.cmd, opts)
+    if a.cmd == "cachestate":  # for the mods: JSON only, from the shared cache, exit 1 when there is nothing
+        o = {"session": a.session}
+        print(cmd_cachestate(api, o)[0])
+        return o["exit"]
     print(run(a.cmd, api, opts))
     return 0
 

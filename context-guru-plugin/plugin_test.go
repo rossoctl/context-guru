@@ -2079,7 +2079,7 @@ func runStatusline(t *testing.T, env map[string]string, stdin string, args ...st
 	t.Helper()
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "statusline.py")}, args...)...)
-	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=200")
+	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "XDG_CACHE_HOME="+t.TempDir(), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=200")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -2260,7 +2260,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 	py := requireTool(t, "python3")
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp)
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp)
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -2278,12 +2278,12 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
-	// Backdate the cache file past STATS_CACHE_TTL_SECONDS (2s) so the next call actually
+	// Backdate the cache file past STATS_CACHE_TTL_SECONDS (30s) so the next call actually
 	// attempts a fresh fetch instead of serving the just-written in-TTL copy — but still well
 	// inside STALE_STATS_MAX_AGE_SECONDS (600s), matching "a cache a few renders old", not "a
 	// cache from an hour ago".
-	cachePath := filepath.Join(tmp, fmt.Sprintf("context-guru-statusline-%s-sess-stale.json", port))
-	old := time.Now().Add(-5 * time.Second)
+	cachePath := filepath.Join(tmp, "context-guru", fmt.Sprintf("context-guru-statusline-%s-sess-stale.json", port))
+	old := time.Now().Add(-40 * time.Second)
 	if err := os.Chtimes(cachePath, old, old); err != nil {
 		t.Fatalf("backdating the stats cache file: %v", err)
 	}
@@ -2318,7 +2318,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 	py := requireTool(t, "python3")
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp)
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp)
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -2337,7 +2337,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 	// Backdate well past STALE_STATS_MAX_AGE_SECONDS (read from the script itself, not retyped
 	// here, so the two cannot silently drift apart).
 	maxAge := statslineConstInt(t, "STALE_STATS_MAX_AGE_SECONDS")
-	cachePath := filepath.Join(tmp, fmt.Sprintf("context-guru-statusline-%s-sess-hung.json", port))
+	cachePath := filepath.Join(tmp, "context-guru", fmt.Sprintf("context-guru-statusline-%s-sess-hung.json", port))
 	old := time.Now().Add(-time.Duration(maxAge+60) * time.Second)
 	if err := os.Chtimes(cachePath, old, old); err != nil {
 		t.Fatalf("backdating the stats cache file: %v", err)
@@ -2829,7 +2829,7 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 	tmp := t.TempDir() // shared TMPDIR on purpose: this is what could let the cache files collide
 	run := func(sessionID string) string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 			"CLAUDE_PLUGIN_OPTION_PORT="+port)
 		cmd.Stdin = strings.NewReader(statuslinePayload(sessionID, 1.00, 10000, 1000))
@@ -2878,7 +2878,7 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 	tmp := t.TempDir()
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 			"CLAUDE_PLUGIN_OPTION_PORT="+port)
 		cmd.Stdin = strings.NewReader(`{"session_id":"sess-cache"}`)

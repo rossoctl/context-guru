@@ -438,10 +438,141 @@ func TestSaveMoreSkillsRecordTheirRuns(t *testing.T) {
 	}
 }
 
+// CONTRACT section 1/6: /api/stats' manual_pings is a savings category of its own, "Manual pings",
+// shown in savings and insights only once there is one. Existing goldens (no manual pings) stay as they are.
+func TestCGSavingsShowsManualPings(t *testing.T) {
+	stats := func(extra string) map[string]any {
+		var st map[string]any
+		doc := `{"total_saved_usd":41.2,"cost_usd":856.85,"baseline_cost_usd":898.05,"waterfall":[{"key":"compaction","delta_usd":-33.9}]` + extra + `}`
+		if err := json.Unmarshal([]byte(doc), &st); err != nil {
+			t.Fatal(err)
+		}
+		return map[string]any{"/api/stats": st}
+	}
+	write := func(m map[string]any) string {
+		b, _ := json.Marshal(m)
+		f := filepath.Join(t.TempDir(), "fx.json")
+		if err := os.WriteFile(f, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	with := runCG(t, "http://127.0.0.1:1", nil, "savings", "--fixture", write(stats(`,"manual_pings":{"count":3,"ping_usd":0.06,"saved_usd":0.84}`)))
+	if !strings.Contains(with, "Manual pings") || !strings.Contains(with, "$0.84") {
+		t.Errorf("want a Manual pings row with $0.84 saved, got\n%s", with)
+	}
+	if !strings.Contains(with, "3 pings") || !strings.Contains(with, "$0.06") {
+		t.Errorf("want the count and the ping cost beside it, got\n%s", with)
+	}
+	for name, extra := range map[string]string{"absent": "", "zero": `,"manual_pings":{"count":0,"ping_usd":0,"saved_usd":0}`} {
+		if out := runCG(t, "http://127.0.0.1:1", nil, "savings", "--fixture", write(stats(extra))); strings.Contains(out, "Manual pings") {
+			t.Errorf("%s: no Manual pings row expected, got\n%s", name, out)
+		}
+	}
+}
+
+// CONTRACT section 7: the tools part of insights lists skills, MCP servers and MCP tools with their
+// cost, per-tool rows under each server, and never Claude Code's built-in tools. The cost is the
+// whole carry (carry_usd) when the proxy reports it, else what was carried for nothing (unused_usd).
+func TestCGInsightsToolsListsServersSkillsAndToolsWithoutBuiltins(t *testing.T) {
+	tools := `{"totals":{"priced":true,"unused_usd":9},
+	 "tools":[
+	  {"kind":"mcp_tool","name":"mcp__github__create_issue","server":"github","tokens":900,"calls":5,"carry_usd":4.0,"unused_usd":0,"priced":true},
+	  {"kind":"mcp_tool","name":"mcp__github__list_prs","server":"github","tokens":700,"calls":0,"carry_usd":3.0,"unused_usd":3.0,"priced":true},
+	  {"kind":"mcp_tool","name":"mcp__sentry__search","server":"sentry","tokens":400,"calls":0,"carry_usd":2.0,"unused_usd":2.0,"priced":true},
+	  {"kind":"tool","name":"Read","tokens":300,"calls":90,"carry_usd":7.0,"unused_usd":0,"builtin":true,"priced":true},
+	  {"kind":"tool","name":"Bash","tokens":800,"calls":40,"carry_usd":8.0,"unused_usd":0,"builtin":true,"priced":true}],
+	 "servers":[
+	  {"server":"github","tools":2,"tools_used":1,"tokens":1600,"calls":5,"carry_usd":7.0,"unused_usd":3.0,"priced":true},
+	  {"server":"sentry","tools":1,"tools_used":0,"tokens":400,"calls":0,"carry_usd":2.0,"unused_usd":2.0,"priced":true}],
+	 "skills":{"state":"ok","skills":[
+	  {"kind":"skill","name":"pdf","tokens":310,"calls":3,"carry_usd":1.5,"unused_usd":0,"priced":true},
+	  {"kind":"skill","name":"brand-voice","tokens":420,"calls":0,"carry_usd":1.6,"unused_usd":1.6,"priced":true}]},
+	 "aside":[]}`
+	fx := map[string]any{"/api/tools": json.RawMessage(tools), "/api/tools/last-used": json.RawMessage(`{"tools":[]}`)}
+	b, _ := json.Marshal(fx)
+	f := filepath.Join(t.TempDir(), "fx.json")
+	if err := os.WriteFile(f, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := runCG(t, "http://127.0.0.1:1", nil, "insights", "tools", "--fixture", f)
+	for _, want := range []string{"github", "sentry", "pdf", "brand-voice", "create_issue", "list_prs", "$7.00", "$1.50"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+	for _, banned := range []string{"Read", "Bash"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("built-in tool %q must not be listed:\n%s", banned, out)
+		}
+	}
+	// per-tool rows sit under their own server, in order
+	gh, ci, lp, se := strings.Index(out, "github"), strings.Index(out, "create_issue"), strings.Index(out, "list_prs"), strings.Index(out, "sentry")
+	if !(gh < ci && ci < se && gh < lp && lp < se) {
+		t.Errorf("github's tool rows must sit between github and sentry:\n%s", out)
+	}
+	// An older proxy without carry_usd: the unused cost is what there is, and the output says so.
+	old := strings.ReplaceAll(tools, `"carry_usd"`, `"x_carry"`)
+	b, _ = json.Marshal(map[string]any{"/api/tools": json.RawMessage(old), "/api/tools/last-used": json.RawMessage(`{"tools":[]}`)})
+	if err := os.WriteFile(f, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out = runCG(t, "http://127.0.0.1:1", nil, "insights", "tools", "--fixture", f)
+	if !strings.Contains(out, "github") || !strings.Contains(out, "never used") {
+		t.Errorf("an older proxy must still list servers with the unused cost:\n%s", out)
+	}
+}
+
+// `cg.py cachestate --json` is what the mods call: it prints the cachestate from the status line's own
+// on-disk cache (CONTRACT section 4), so the first call fetches once and the next ones, from either
+// script, make no request.
+func TestCGCachestateJSONSharesTheStatuslineCache(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"session-A","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,"priced":true,`+
+		`"rewrite_usd":0.3,"threads":[{"id":"","main":true,"last_ts":%d,"end_ts":%d,"ttl_s":300,"prefix_tokens":52000}]}`, now-60_000, now, now-60_000, now-60_000)
+	port, hits := statuslineCounting(t, cache, nil)
+	xdg := t.TempDir()
+	env := []string{"XDG_CACHE_HOME=" + xdg}
+	base := "http://127.0.0.1:" + port
+	var doc map[string]any
+	for i := 0; i < 3; i++ {
+		out := runCG(t, base, env, "cachestate", "--json")
+		if err := json.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatalf("not JSON: %v\n%s", err, out)
+		}
+	}
+	if n := hitCount(hits, "cachestate"); n != 1 {
+		t.Errorf("3 calls fetched cachestate %d times; the shared 10 s cache must make it 1", n)
+	}
+	if doc["session"] != "session-A" || doc["threads"] == nil {
+		t.Errorf("want the cachestate body back, got %v", doc)
+	}
+	if _, ok := doc["age_s"]; !ok {
+		t.Errorf("want age_s so a mod can tell stale from fresh, got %v", doc)
+	}
+	// The status line, given the same cache directory, must reuse that very file.
+	stdin := `{"session_id":"session-A","context_window":{"total_input_tokens":52000,"context_window_size":200000}}`
+	senv := routedEnv(port)
+	senv["XDG_CACHE_HOME"] = xdg
+	runStatusline(t, senv, stdin, "--layout=balanced")
+	if n := hitCount(hits, "cachestate"); n != 1 {
+		t.Errorf("the status line refetched cachestate (%d); it must read the file cg.py wrote", n)
+	}
+}
+
+// With nothing routed and no session there is nothing to read: a clear JSON error, not a traceback.
+func TestCGCachestateJSONNoSession(t *testing.T) {
+	out, code := runCGCode(t, "http://127.0.0.1:1", []string{"CLAUDE_CODE_SESSION_ID="}, "cachestate", "--json")
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &doc); err != nil || doc["error"] == nil || code == 0 {
+		t.Errorf("want a JSON {error} and a non-zero exit, got code %d: %s", code, out)
+	}
+}
+
 // The Codex plugin ships the same two scripts, because plugin directories are installed apart and
 // cannot import from each other. They are copies, and this keeps them identical.
 func TestCGScriptsAreVendoredIntoCodex(t *testing.T) {
-	for _, f := range []string{"cg.py", "cgcost.py"} {
+	for _, f := range []string{"cg.py", "cgcost.py", "cgcache.py"} {
 		a, err := os.ReadFile(filepath.Join("scripts", f))
 		if err != nil {
 			t.Fatal(err)
