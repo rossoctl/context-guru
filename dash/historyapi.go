@@ -116,7 +116,7 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 	doc := &HistoryDoc{Used: []HistoryUse{}, NeverUsed: []string{}, Projects: []HistoryProject{}}
 	// Read once: every folder in this document resolves through the same grouping, and
 	// ProjectGroups parses every transcript on disk.
-	groups := ProjectGroups(home)
+	groups := CachedProjectGroups(home)
 	// This tool's own capabilities, gathered from the used list and the installed inventory
 	// alike. A set rather than a counter because the two overlap -- see SelfExcluded.
 	selfOwned := map[string]bool{}
@@ -154,6 +154,12 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 	// remain in the unscoped view, where a figure nobody can attribute belongs.
 	useWhere := `u.session_id IN (SELECT DISTINCT r.session_id FROM requests r WHERE ` + where + `)`
 	useArgs := args
+	if !f.TenantAll {
+		// Session ids are client-supplied, so the session filter alone would let one tenant name
+		// another's session and read its invocations. The row's own tenant has to match too.
+		useWhere += ` AND u.tenant_id = ?`
+		useArgs = append(append([]any{}, args...), f.Tenant)
+	}
 	if f.Project != "" {
 		// EVERY FOLDER THAT ROLLS UP TO THE SELECTED PROJECT, not just the project's own path.
 		// A reader selecting `notes` is asking about the work done in `notes/server` too —
@@ -168,7 +174,7 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 			pre[i] = fo
 		}
 		useWhere = `u.project IN (` + strings.Join(ph, ",") + `) AND ` + useWhere
-		useArgs = append(pre, args...)
+		useArgs = append(pre, useArgs...)
 	}
 	rows, err := d.sql.Query(`SELECT
 		CASE WHEN u.skill <> '' THEN u.skill ELSE u.name END AS cap,
@@ -227,7 +233,7 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 	//
 	// The two scopes are stated in Basis, because two figures from different scopes sitting
 	// side by side are read as sharing one unless something says otherwise.
-	calledAnywhere, err := d.calledAnywhere()
+	calledAnywhere, err := d.calledAnywhereFor(f)
 	if err != nil {
 		return nil, err
 	}
@@ -381,9 +387,14 @@ func (d *DB) HistoryDocFor(f Filter, home string) (*HistoryDoc, error) {
 // UNSCOPED BY DESIGN — see the NeverUsed comment above. It answers "has this ever been reached
 // for", which is the only question whose answer makes "never used" a finding rather than a
 // statement about which folder the reader happens to have selected.
-func (d *DB) calledAnywhere() (map[string]bool, error) {
-	rows, err := d.sql.Query(`SELECT DISTINCT
-		CASE WHEN skill <> '' THEN skill ELSE name END FROM tool_uses`)
+func (d *DB) calledAnywhereFor(f Filter) (map[string]bool, error) {
+	q := `SELECT DISTINCT CASE WHEN skill <> '' THEN skill ELSE name END FROM tool_uses`
+	var args []any
+	if !f.TenantAll {
+		q += ` WHERE tenant_id = ?`
+		args = append(args, f.Tenant)
+	}
+	rows, err := d.sql.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -409,7 +420,7 @@ func (a *API) history(w http.ResponseWriter, r *http.Request) {
 	a.serveJSON(w, r, &a.historyCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
 		// skillDescriptions' home rules apply: "" means this machine's own, and a hosted proxy
 		// finds nothing, which is correct rather than degraded.
-		doc, err := db.HistoryDocFor(f, a.home)
+		doc, err := db.HistoryDocFor(f, a.diskHome())
 		if err != nil {
 			return nil, err
 		}

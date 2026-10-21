@@ -85,9 +85,6 @@ type API struct {
 	// control -- without it the project rollup is reachable through the HTTP surface but not
 	// assertable there, and that rollup is exactly the behaviour that was silently missing.
 	home string
-	// pg / pgOnce cache the transcript project grouping; see projectGroups.
-	pg     *ProjectGroup
-	pgOnce sync.Once
 	// historyCache covers GET /api/history, which reads the invocation table and the installed
 	// inventory off disk. Its own cache rather than sharing the insights one: the two answer
 	// different questions over different sources, so an invalidation that matters to one is
@@ -673,6 +670,9 @@ func (a *API) whoamiHandler(w http.ResponseWriter, r *http.Request) {
 // The grouping is read from this machine's transcripts; a hosted proxy finds none and the filter
 // passes through unchanged, which degrades to exact-folder matching rather than to nothing.
 func (a *API) expandProject(f Filter) Filter {
+	if f.Project == "" {
+		return f // no project selected: nothing to roll up, and no transcript parse to pay for
+	}
 	return ExpandProjectFilter(f, a.projectGroups())
 }
 
@@ -684,8 +684,18 @@ func (a *API) expandProject(f Filter) Filter {
 // cache has not seen falls through to exact-folder matching until the process restarts. That is
 // the same degradation a hosted proxy lives with permanently.
 func (a *API) projectGroups() *ProjectGroup {
-	a.pgOnce.Do(func() { a.pg = ProjectGroups(a.home) })
-	return a.pg
+	return CachedProjectGroups(a.diskHome())
+}
+
+// diskHome is the home directory whose transcripts and plugin inventory this API may read: the
+// local machine's own, or nothing. A deployment with authentication is multi-tenant, and its
+// $HOME belongs to the server's user -- reading it would hand every tenant the server's plugin
+// names and project paths. a.home overrides only for tests.
+func (a *API) diskHome() string {
+	if a.auth != nil {
+		return noHome
+	}
+	return a.home
 }
 
 // scope authenticates the request and returns the filter to query with. The tenant
@@ -1767,7 +1777,7 @@ func (a *API) facets(w http.ResponseWriter, r *http.Request) {
 		// FacetsFor, not Facets: the project column holds every working directory a session
 		// was launched in -- 40 folders for six projects on a measured machine -- and the
 		// picker has to offer projects. See FacetsFor.
-		f, err := db.FacetsFor(flt, a.home)
+		f, err := db.FacetsFor(flt, a.diskHome())
 		if err != nil {
 			return nil, err
 		}
