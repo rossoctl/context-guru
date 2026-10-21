@@ -224,8 +224,9 @@ case "$TIER" in
           phase endpoints p_endpoints ;;
   # The KNOWN baseline on main: the Go suite only (main has no History tab, so the other phases cannot run).
   suite)  phase suite p_suite; phase assert p_assert ;;
-  full)   phase suite p_suite
-          for ph in preflight generate install replay transcripts import api skill ui assert; do phase "$ph" "p_$ph"; done ;;
+  # Preflight first: a skewed clock or a busy port must stop the run before ten minutes of `make test`.
+  full)   phase preflight p_preflight; phase suite p_suite
+          for ph in generate install replay transcripts import api skill ui assert; do phase "$ph" "p_$ph"; done ;;
   smoke)  for ph in preflight generate install replay transcripts import api skill ui assert; do phase "$ph" "p_$ph"; done ;;
 esac
 echo "== phases complete"
