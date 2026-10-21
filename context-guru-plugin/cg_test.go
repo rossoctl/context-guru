@@ -511,6 +511,16 @@ func TestCGInsightsToolsListsServersSkillsAndToolsWithoutBuiltins(t *testing.T) 
 	if !(gh < ci && ci < se && gh < lp && lp < se) {
 		t.Errorf("github's tool rows must sit between github and sentry:\n%s", out)
 	}
+	// carry_priced:false means carry_usd is short (a carrying request had no known rates): never shown as a cost.
+	short := strings.Replace(tools, `"name":"mcp__sentry__search","server":"sentry","tokens":400,"calls":0,"carry_usd":2.0,`, `"name":"mcp__sentry__search","server":"sentry","tokens":400,"calls":0,"carry_usd":0,"carry_priced":false,`, 1)
+	short = strings.Replace(short, `{"server":"sentry","tools":1,"tools_used":0,"tokens":400,"calls":0,"carry_usd":2.0,`, `{"server":"sentry","tools":1,"tools_used":0,"tokens":400,"calls":0,"carry_usd":0,"carry_priced":false,`, 1)
+	b, _ = json.Marshal(map[string]any{"/api/tools": json.RawMessage(short), "/api/tools/last-used": json.RawMessage(`{"tools":[]}`)})
+	if err := os.WriteFile(f, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if o := runCG(t, "http://127.0.0.1:1", nil, "insights", "tools", "--fixture", f); strings.Contains(strings.SplitN(o, "\n\n", 2)[0], "sentry") || !strings.Contains(o, "github") {
+		t.Errorf("an unpriced-carry server must not appear as a $0 cost:\n%s", o)
+	}
 	// An older proxy without carry_usd: the unused cost is what there is, and the output says so.
 	old := strings.ReplaceAll(tools, `"carry_usd"`, `"x_carry"`)
 	b, _ = json.Marshal(map[string]any{"/api/tools": json.RawMessage(old), "/api/tools/last-used": json.RawMessage(`{"tools":[]}`)})

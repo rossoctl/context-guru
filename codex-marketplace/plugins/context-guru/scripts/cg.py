@@ -480,7 +480,7 @@ def cmd_campaign(api: Api, o: dict) -> list[str]:
 def _cost(row: dict) -> tuple[float, bool]:
     """(dollars, is the whole carry). carry_usd is everything the declaration cost to carry; an older proxy only
     has unused_usd, the part carried while nothing called it."""
-    if isinstance(row.get("carry_usd"), (int, float)):
+    if isinstance(row.get("carry_usd"), (int, float)) and row.get("carry_priced", row.get("priced")) is not False:
         return float(row["carry_usd"]), True
     return float(row.get("unused_usd") or 0.0), False
 
@@ -488,7 +488,7 @@ def _cost(row: dict) -> tuple[float, bool]:
 def tools_carried(tools: dict, details: bool) -> list[str]:
     """MCP servers (each with its tools underneath) and skills, with what carrying them cost. Claude Code's
     own tools and Context Guru's own components are left out: nobody removes those."""
-    keep = lambda r: not r.get("builtin") and not C.OWN.search(r.get("name") or r.get("server") or "") and r.get("priced")  # noqa: E731
+    keep = lambda r: not r.get("builtin") and not C.OWN.search(r.get("name") or r.get("server") or "") and (r.get("carry_priced") if "carry_priced" in r else r.get("priced"))  # noqa: E731
     by_server: dict[str, list[dict]] = {}
     for t in tools.get("tools") or []:
         m = re.match(r"mcp__(.+?)__", t.get("name", ""))
