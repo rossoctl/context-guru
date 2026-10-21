@@ -237,6 +237,13 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(verdicts(db=None)["K.inventory_survives_shutdown"], "BLOCKED")
         self.assertEqual(verdicts(db="/nonexistent/x.db")["K.inventory_survives_shutdown"], "BLOCKED")
 
+    def test_inventory_survives_shutdown_says_the_harness_probe_is_supporting_evidence_only(self):
+        why = "verified outside the harness (Go reproducer, 22/50 runs lost the inventory); in-harness probe is supporting evidence only"
+        sid = PROBES["shutdown"]["session_id"]
+        for db in (make_db([sid]), make_db([])):
+            r = {x["id"]: x for x in check.run(EXP, API, None, "full", probes=PROBES, db=db)}["K.inventory_survives_shutdown"]
+            self.assertIn(why, r["detail"])
+
     def test_skill_port_can_fail(self):
         a = copy.deepcopy(API); a["skill"]["stdout"] = "http://127.0.0.1:8787/dashboard/"
         self.assertEqual(verdicts(a)["S7.skill_port"], "FAIL")

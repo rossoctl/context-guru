@@ -164,20 +164,23 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
          exp["import"]["valid_pre_install_turns"], h.get("imported_requests"))
 
     # --- known finding #1 ---------------------------------------------------------------------
+    # The finding stands on the Go reproducer; this probe is too racy to prove or clear it on its own.
+    k1 = ("verified outside the harness (Go reproducer, 22/50 runs lost the inventory); "
+          "in-harness probe is supporting evidence only")
     sp = probes.get("shutdown")
     got = _shutdown_rows(db, sp["session_id"]) if sp else None
     if got is None:
         _rec(out, "K.inventory_survives_shutdown", "known", False, "tool_declarations rows for the probe session",
-             "n/a", detail="no shutdown probe or no DB copy", blocked=True)
+             "n/a", detail=f"no shutdown probe or no DB copy; {k1}", blocked=True)
     elif got[0] == 0:
         _rec(out, "K.inventory_survives_shutdown", "known", False, "a request row for the probe session", 0,
-             detail="probe request not recorded", blocked=True)
+             detail=f"probe request not recorded; {k1}", blocked=True)
     elif got[1] > 0:
         _rec(out, "K.inventory_survives_shutdown", "known", False, "rows present", got[1],
-             detail="race not hit; see the Go reproducer", blocked=True)
+             detail=f"race not hit; {k1}", blocked=True)
     else:
         _rec(out, "K.inventory_survives_shutdown", "known", False, "tool_declarations rows for the probe session", 0,
-             detail="request row present, inventory writer not drained on Close (dash/toolinventory.go)")
+             detail=f"request row present, inventory writer not drained on Close (dash/toolinventory.go); {k1}")
 
     # --- ui -----------------------------------------------------------------------------------
     for name, p in pages.items():

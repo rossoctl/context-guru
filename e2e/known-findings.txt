@@ -3,7 +3,7 @@
 # value), so a new defect under an old check id is not waved through on an old finding. run.sh's smoke gate lets a
 # FAIL through to the full tier only if a line here explains it; report.py lists each finding with how many
 # FAIL/KNOWN checks it explains, and names any FAIL nothing here explains.
-K.inventory_survives_shutdown | 0  # #1 (pre-existing) tool inventory lost on shutdown: invWriter is not drained on Close; the e2e race is rarely hit (BLOCKED), see the Go reproducer
+K.inventory_survives_shutdown | 0  # #1 (pre-existing) tool inventory lost on shutdown: invWriter is not drained on Close; verified outside the harness (Go reproducer, 22/50 runs lost the inventory); in-harness probe is supporting evidence only
 U.no_undefined_text.cleanup-* | undefined  # #2 cleanup card reads "undefined tools": dash/ui/insights.js:674 reads o.tools, the owner object has no tools field
 U.no_overflow.cleanup-* | ins-why  # #3 .ins-why inherits `.tbl td { white-space: nowrap }` (dash/ui/style.css:671-673) and overflows its cell
 C.picker_set | /tmp/scratch-w  # R9 dash/projectgroups.go names a project after its MOST-active cwd: mock wanderer (331 turns in /tmp/scratch-w, 329 in its root) lists as /tmp/scratch-w
