@@ -94,7 +94,7 @@ engine's own usage accounting is not used, because under Cortex it is zero (2026
 **A detached call.** A summarizer call can finish after its request was answered. Its `spend`
 operation then cannot travel in that request's `apply.Result`. The engine sends it through
 `OpsEmitter`, as a standalone `RequestOps` with `Detached = true` on the operation, and
-`Session`/`Thread` from the request that caused the call. Its `Produced` names the change it made,
+`Session`/`Thread` from the request that caused the call. Its `ChangeID` is the change it made,
 so the cost is still joined to that change.
 
 **A prefix ask.** `extract_llm_sweep` asks the request's own model a question, as a separate
@@ -167,11 +167,11 @@ sequenceDiagram
     Note over Pipeline,Store: request N already answered<br/>its RequestOps/event.Saving already recorded
     Plugin->>Model: summarizer call (async)
     Model-->>Plugin: response + billed usage
-    Plugin->>Plugin: build standalone RequestOps<br/>Session/Thread from request N (kept)<br/>Billing from the call's credential, one spend op (Detached=true, Call, Produced)
+    Plugin->>Plugin: build standalone RequestOps<br/>Session/Thread from request N (kept)<br/>Billing from the call's credential, one spend op (Detached=true, Call, ChangeID)
     Plugin->>Emitter: Ops(RequestOps)
     Emitter->>Settle: RequestOps
     Settle->>Settle: price Call.Usage with pricing.Resolver<br/>(same path as a request's Saved/Caused)
-    Settle->>Store: event.Saving (joined to the change via Produced)
+    Settle->>Store: event.Saving (joined to the change via ChangeID)
 ```
 
 **C. A standalone keep-alive ping.** No request is open at all; the keeper acts between turns.
@@ -211,7 +211,6 @@ reaches the session store, `:9094`, and the archive:
 | `PenaltyUSD` | `Caused`, priced, plus the attributed `cacheChange` operations |
 | `Tier` | the tier with the largest `Saved` |
 | `Projected` | `Projected` |
-| `DiscardedCount` (new, additive) | per (operator, component), the count of operations with `Discarded = true` on this request (R44, §5.1a) — never priced, surfaced for diagnosis the way `Report.Discarded` is today |
 | `Estimated` | any operation `Estimated` |
 | `OpsVersion` (new, additive) | `Result.Version`, the version of the `ops` rules (R46) |
 

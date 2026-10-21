@@ -62,50 +62,26 @@ both IDs. To keep the JSON short, the examples show them once, in `RequestOps`.
 A context operator shortens one tool output. We want to know how much money that saved. The answer is
 not one number, because the provider bills the same tokens at different rates on different requests.
 
-The rates are in the [setup](#setup): input $3.00, cache write $3.75, cache read $0.30, per million
-tokens.
+The agent has a conversation of 30,000 tokens (messages 0 to 8). The previous request cached it. On
+request 1, a **new message** arrives: message 9, the output of a test run, 8,000 tokens. The
+`cmdfilter` operator shortens it to 1,000 tokens. It removes **7,000 tokens**.
 
-**The prompt.** The agent has a conversation of 30,000 tokens (messages 0 to 8). The previous
-request, request 0, sent it and the provider cached it. On request 1, a **new message** arrives at the
-end: message 9, the output of a test run, 8,000 tokens. The client puts its cache breakpoint at the
-end of the body.
+![The prompt of request 1 without and with the change](2026-10-18-context-operations-example-1.svg)
 
-```
-request 0 (already cached by the provider)
-  messages[0..8]   the conversation so far                 [30,000]
-
-request 1 (10 seconds later; the new part)
-  messages[9]      tool_result: test-run output            [ 8,000]   ← breakpoint
-
-                                                  total    [38,000]
-```
-
-**The change.** The `cmdfilter` operator shortens message 9 from 8,000 tokens to 1,000, so the
-request has 31,000 tokens, not 38,000. It saves **7,000 tokens**.
-
-**How the saving is calculated.** The saving is the bill we would have paid without the change,
-minus the bill we paid. This is the counterfactual. On request 1 the cache is hot: the provider
-holds the first 30,000 tokens, and message 9 is new.
-
-| | Without the change | With the change |
-|---|---|---|
-| Messages 0 to 8 (cached) | 30,000 × $0.30 (cache read) = $0.00900 | 30,000 × $0.30 = $0.00900 |
-| Message 9 (new, written to the cache) | 8,000 × $3.75 (cache write) = $0.03000 | 1,000 × $3.75 = $0.00375 |
-| **Bill for the prompt** | **$0.03900** | **$0.01275** |
-
-**Saving = $0.03900 − $0.01275 = $0.02625**, which is the 7,000 tokens that did not need to be
-written: 7,000 × $3.75.
+**The saving** is the bill we would have paid without the change, minus the bill we paid. This is
+the counterfactual. The cache is hot, so messages 0 to 8 are read in both bills. Message 9 is new, so
+it is written. The change saves 7,000 × $3.75 = **$0.02625**. The rates are in the [setup](#setup).
 
 **The operations.** One operation describes the change. The operator reports it as a `rewrite`:
 
 ```json
 {"kind": "rewrite", "operator": "context-guru.cmdfilter",
  "at": {"section": "messages", "index": 9},
- "before": {"tokens": 8000}, "after": {"tokens": 1000},
+ "sizeBefore": {"tokens": 8000}, "sizeAfter": {"tokens": 1000},
  "changeId": "cg:cmdfilter:c40e"}
 ```
 
-- `at` is the message that changed. `before` and `after` are its tokens.
+- `at` is the message that changed. `sizeBefore` and `sizeAfter` are its tokens.
 - `changeId` names the change, so the same change can be added up across requests.
 - There is no money in it. The library works out the money from the cache state.
 
@@ -186,15 +162,15 @@ each tool. It is one operation, because it is one decision:
 {"kind": "rewrite", "operator": "tool-prune",
  "at": {"section": "tools", "index": 2},
  "spans": [
-   {"section": "tools", "from": 2,  "to": 2,  "before": {"tokens": 3500}, "after": {"tokens": 0}},
-   {"section": "tools", "from": 9,  "to": 9,  "before": {"tokens": 2000}, "after": {"tokens": 0}},
-   {"section": "tools", "from": 15, "to": 15, "before": {"tokens": 2500}, "after": {"tokens": 0}}],
- "before": {"tokens": 8000}, "after": {"tokens": 0},
+   {"section": "tools", "from": 2,  "to": 2,  "sizeBefore": {"tokens": 3500}, "sizeAfter": {"tokens": 0}},
+   {"section": "tools", "from": 9,  "to": 9,  "sizeBefore": {"tokens": 2000}, "sizeAfter": {"tokens": 0}},
+   {"section": "tools", "from": 15, "to": 15, "sizeBefore": {"tokens": 2500}, "sizeAfter": {"tokens": 0}}],
+ "sizeBefore": {"tokens": 8000}, "sizeAfter": {"tokens": 0},
  "changeId": "tp:decl-set-7f3a"}
 ```
 
-- `spans` lists each touched range with its own `before` and `after`. The operation's `before` and
-  `after` are the sums: 3,500 + 2,000 + 2,500 = 8,000.
+- `spans` lists each touched range with its own `sizeBefore` and `sizeAfter`. The operation's `sizeBefore` and
+  `sizeAfter` are the sums: 3,500 + 2,000 + 2,500 = 8,000.
 - There is no `messageSplice`. The message list does not change.
 - The library prices each span on its own, because two spans can sit on different sides of the
   cache boundary. Here they do not.
@@ -233,7 +209,7 @@ same `changeId`, so the host can add the cost and the saving together.
     "call": {"model": "small-model", "params": {"effort": "low"},
              "usage": {"input": 10000, "cacheRead": 0, "cacheWrite": 0, "output": 500,
                        "costUSD": 0.0125}},
-    "produced": ["cg:summarize:5d21"]}
+    "changeId": "cg:summarize:5d21"}
    ```
 
 2. **`rewrite`, reported 3 times.** The client sends messages 0 to 2 again on every request. The
@@ -243,27 +219,27 @@ same `changeId`, so the host can add the cost and the saving together.
    ```json
    {"id": "op2", "kind": "rewrite", "operator": "context-guru.summarize",
     "at": {"section": "messages", "index": 0},
-    "before": {"tokens": 10000}, "after": {"tokens": 500},
+    "sizeBefore": {"tokens": 10000}, "sizeAfter": {"tokens": 500},
     "changeId": "cg:summarize:5d21",
     "messageSplice": {"at": 0, "removed": 3, "inserted": 1}}
    ```
 
 3. **`cacheChange`, a break, on request A only, not reported by the operators.** The summary is at the start of
-   the prompt, so nothing in the cache matches. A break is added, attributed to the `rewrite` (for
+   the prompt, so nothing in the cache matches. A break is added, with the `changeId` of the `rewrite` (for
    example, by the host's collector; where it is added is an implementation decision). B and C
    have no break: on B the summary is already cached, and on C the cache expired.
 
    ```json
-   {"id": "op3", "kind": "cacheChange", "cause": "operator",
-    "stateFrom": {"phase": "hot"}, "stateTo": {"phase": "cold"},
-    "at": {"section": "messages", "index": 0}, "attributedTo": "op2"}
+   {"id": "op3", "kind": "cacheChange",
+    "cacheBefore": {"cachePhase": "hot"}, "cacheAfter": {"cachePhase": "cold"},
+    "at": {"section": "messages", "index": 0}, "changeId": "cg:summarize:5d21"}
    ```
 
 - `spend` is the call. It names its model, because the summarizer can use a cheaper model than the
   agent. `costUSD` is the cost that the response reported. If a response reports no cost, the host
   prices the tokens.
-- `produced` lists the changes that the call created. A call that created nothing, such as a
-  keep-alive ping, leaves it empty.
+- `changeId` is the change that the call created. It is the same as the `changeId` of the `rewrite`,
+  so the cost and the saving are added together.
 - `rewrite` is the summary. `messageSplice` says 3 messages became 1, so later messages move up by 2.
   The library needs this because an operator reports positions in its own output. An operator that
   ran before the summary reported a position that has since moved. The library maps it to the
@@ -293,7 +269,7 @@ effort. And the effect depends on the task.
 
 **The cache break.** The provider keeps its cache for a model, so the new model starts cold. Request
 5 reads 0 tokens from the cache, where request 4 left 40,000 cached. Both settings changed together,
-so the break is attributed to the decision. It does not say which setting caused it.
+so the break carries the `changeId` of the decision. It does not say which setting caused it.
 
 **The operations.** Two operations describe the change.
 
@@ -302,17 +278,18 @@ so the break is attributed to the decision. It does not say which setting caused
 
    ```json
    { "id": "op1", "kind": "setting", "operator": "inference-router",
+     "changeId": "rt:model-7c1a",
      "settings": {"model":  {"from": "large-model", "to": "small-model"},
                   "effort": {"from": "high",        "to": "low"}} }
    ```
 
-2. **`cacheChange`, a break, not reported by the operators.** A break is added, attributed to `op1`. A
+2. **`cacheChange`, a break, not reported by the operators.** A break is added, with the `changeId` of `op1`. A
    component that sees the whole request adds it (for example, the host's collector; where it is
    added is an implementation decision).
 
    ```json
-   { "id": "op2", "kind": "cacheChange", "cause": "setting",
-     "stateFrom": {"phase": "hot"}, "stateTo": {"phase": "cold"}, "attributedTo": "op1" }
+   { "id": "op2", "kind": "cacheChange",
+     "cacheBefore": {"cachePhase": "hot"}, "cacheAfter": {"cachePhase": "cold"}, "changeId": "rt:model-7c1a" }
    ```
 
 **What the library returns** (tokens, no dollars):
@@ -367,7 +344,7 @@ The new message on turn 5:
 The cache state is found from turn 4's fingerprint. The gap is 1 minute, inside the 5m TTL:
 
 ```json
-"state": {"phase": "hot", "extent": {"section": "messages", "index": 8}, "gap": "1m", "ttl": "5m"}
+"state": {"cachePhase": "hot", "extent": {"section": "messages", "index": 8}, "gap": "1m", "ttl": "5m"}
 ```
 
 So B\* = `messages[8]`.
@@ -390,34 +367,34 @@ and prices each operation in it.
       "at": {"section": "tools", "index": 2},
       "spans": [
         {"section": "tools", "from": 2,  "to": 2,
-         "before": {"tokens": 3500}, "after": {"tokens": 0}},
+         "sizeBefore": {"tokens": 3500}, "sizeAfter": {"tokens": 0}},
         {"section": "tools", "from": 9,  "to": 9,
-         "before": {"tokens": 2000}, "after": {"tokens": 0}},
+         "sizeBefore": {"tokens": 2000}, "sizeAfter": {"tokens": 0}},
         {"section": "tools", "from": 15, "to": 15,
-         "before": {"tokens": 2500}, "after": {"tokens": 0}}
+         "sizeBefore": {"tokens": 2500}, "sizeAfter": {"tokens": 0}}
       ],
-      "before": {"tokens": 8000}, "after": {"tokens": 0},
+      "sizeBefore": {"tokens": 8000}, "sizeAfter": {"tokens": 0},
       "changeId": "tp:decl-set-7f3a"
     },
     {
       "id": "op2", "kind": "rewrite",
       "operator": "context-guru.expand",
       "at": {"section": "tools", "index": 18},
-      "before": {"tokens": 0}, "after": {"tokens": 300},
+      "sizeBefore": {"tokens": 0}, "sizeAfter": {"tokens": 300},
       "changeId": "cg:expand-tool:v3"
     },
     {
       "id": "op3", "kind": "rewrite",
       "operator": "context-guru.mask",
       "at": {"section": "messages", "index": 3},
-      "before": {"tokens": 4000}, "after": {"tokens": 60},
+      "sizeBefore": {"tokens": 4000}, "sizeAfter": {"tokens": 60},
       "changeId": "cg:mask:91ab"
     },
     {
       "id": "op4", "kind": "rewrite",
       "operator": "context-guru.cmdfilter",
       "at": {"section": "messages", "index": 9},
-      "before": {"tokens": 8000}, "after": {"tokens": 900},
+      "sizeBefore": {"tokens": 8000}, "sizeAfter": {"tokens": 900},
       "changeId": "cg:cmdfilter:c40e"
     }
   ]
@@ -449,8 +426,8 @@ good change. It is not, because message 5 is inside the cached prefix.
 
 - Turn 6 cached through `messages[11]`, so B\* = `messages[11]`.
 - The client did not change. The forwarded body first differs from turn 6's at `messages[5]`.
-- So the change itself breaks the cache. The collector adds a `cacheChange`, attributed to the
-  `coref` operation.
+- So the change itself breaks the cache. The collector adds a `cacheChange` with the `changeId` of
+  the `coref` operation.
 
 ![Turn 7: coref saves $0.00599 and breaks the cache for $0.06558](2026-10-18-context-operations-example-7.svg)
 
@@ -475,18 +452,18 @@ Two operations describe the change.
      "id": "op12", "kind": "rewrite",
      "operator": "context-guru.coref",
      "at": {"section": "messages", "index": 5},
-     "before": {"tokens": 20000}, "after": {"tokens": 50},
+     "sizeBefore": {"tokens": 20000}, "sizeAfter": {"tokens": 50},
      "changeId": "cg:coref:5e2d"
    }
    ```
 
-2. **`cacheChange`, a break, not reported by the operators.** It is added, attributed to op12.
+2. **`cacheChange`, a break, not reported by the operators.** It is added, with the `changeId` of op12.
 
    ```json
-   { "id": "op13", "kind": "cacheChange", "cause": "operator",
-     "stateFrom": {"phase": "hot"}, "stateTo": {"phase": "cold"},
+   { "id": "op13", "kind": "cacheChange",
+     "cacheBefore": {"cachePhase": "hot"}, "cacheAfter": {"cachePhase": "cold"},
      "at": {"section": "messages", "index": 5},
-     "attributedTo": "op12" }
+     "changeId": "cg:coref:5e2d" }
    ```
 
    `at` is the first position where the forwarded body differs from turn 6's. It is not the start of
@@ -547,9 +524,9 @@ total is negative.
    {
      "id": "op20", "kind": "cacheChange",
      "operator": "keeper",
-     "stateFrom": {"phase": "cold"},
-     "stateTo": {"phase": "hot", "extent": {"section": "messages", "index": 5}},
-     "before": {"tokens": 10000}, "after": {"tokens": 10000},
+     "cacheBefore": {"cachePhase": "cold"},
+     "cacheAfter": {"cachePhase": "hot", "extent": {"section": "messages", "index": 5}},
+     "sizeBefore": {"tokens": 10000}, "sizeAfter": {"tokens": 10000},
      "changeId": "ka:main:w1"
    }
    ```
