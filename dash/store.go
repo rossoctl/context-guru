@@ -28,6 +28,9 @@ var memSeq atomic.Uint64
 type DB struct {
 	sql  *sql.DB
 	path string // "" for the in-memory store
+	// readOnly is set by OpenReadOnly. Every write the handle could make on its own (checkpoint)
+	// checks it; SQLite's mode=ro and query_only refuse any other.
+	readOnly bool
 	// ctx bounds the READS made through this handle, so a request the caller has abandoned stops
 	// costing the process. nil means context.Background().
 	//
@@ -278,6 +281,47 @@ func openDSN(d, path string) (*DB, error) {
 		return nil, err
 	}
 	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+}
+
+// OpenReadOnly opens an EXISTING dashboard database for reading only — for analysis tools that run
+// beside a live proxy, which owns the file.
+//
+// Open is not safe for that: it migrates the schema (additive DDL, new columns), stamps the
+// version, checkpoints the WAL, and on a version mismatch RENAMES the file aside. Any of those
+// against a database a serving process holds is a write the operator never asked for. This opens
+// with SQLite's mode=ro and query_only, runs none of them, and REFUSES a database whose schema
+// version is not this build's: a reader cannot migrate, and a query written for one schema read
+// against another returns wrong numbers rather than an error.
+//
+// mode=ro still reads the -wal, so rows the live writer has committed but not yet checkpointed
+// are visible. A missing file is an error, not a fresh database. With NO live writer, SQLite
+// still creates an empty -wal and the -shm index beside a WAL database to read it, so the
+// directory must be writable; the database file itself is never modified.
+func OpenReadOnly(path string) (*DB, error) {
+	if path == "" || path == ":memory:" {
+		return nil, errors.New("dash: OpenReadOnly needs a database file")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	sdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)")
+	if err != nil {
+		return nil, err
+	}
+	// A reader beside a live proxy: a handful of connections, never the 100 the writer's pool
+	// holds, so an analysis cannot crowd the serving process off its own file.
+	sdb.SetMaxOpenConns(4)
+	sdb.SetMaxIdleConns(4)
+	var have string
+	if err := sdb.QueryRow(`SELECT value FROM meta WHERE key='schema_version'`).Scan(&have); err != nil {
+		sdb.Close()
+		return nil, fmt.Errorf("dash: read-only open: %w", err)
+	}
+	if have != fmt.Sprint(schemaVersion) {
+		sdb.Close()
+		return nil, &versionMismatch{have: have}
+	}
+	return &DB{sql: sdb, path: path, readOnly: true, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
 }
 
 // sanitizeVersion keeps a version string safe to embed in a filename.
@@ -672,7 +716,7 @@ func (d *DB) reclaim() error {
 // checkpoint folds the write-ahead log into the main database and truncates it.
 // Best-effort: a busy checkpoint is not a failure, only a deferral.
 func (d *DB) checkpoint() {
-	if d.path == "" || d.path == ":memory:" {
+	if d.readOnly || d.path == "" || d.path == ":memory:" {
 		return
 	}
 	_, _ = d.sql.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
