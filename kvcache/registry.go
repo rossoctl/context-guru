@@ -406,6 +406,12 @@ func NewOptimal(reqs []*Request, cfg Config) *Optimal {
 	cfg = cfg.withDefaults(reqs)
 	byConv := map[Conversation][]*Request{}
 	for _, r := range reqs {
+		// A no-op row is not a step. Simulate never bills it and never lets it touch the entry, so
+		// a trajectory that kept it planned around a turn that does not exist — and a plain
+		// keep-alive then beat this "ceiling" on real traffic.
+		if r.noOp() {
+			continue
+		}
 		byConv[r.Key()] = append(byConv[r.Key()], r)
 	}
 	keys := make([]Conversation, 0, len(byConv))
