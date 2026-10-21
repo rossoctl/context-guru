@@ -130,7 +130,7 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 			"detail": "a request is in flight on this thread, and it refreshes the cache itself"})
 		return
 	case errors.Is(err, keepalive.ErrTooCostly):
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "too costly",
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "over budget",
 			"detail": "one ping on this thread would cost more than the per-ping ceiling"})
 		return
 	case errors.Is(err, keepalive.ErrLimited):

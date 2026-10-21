@@ -938,7 +938,7 @@ func TestToolReportCarriesTheCostOfUsedDeclarationsToo(t *testing.T) {
 			bash = s
 		}
 	}
-	if bash.UnusedUSD != 0 || bash.CarryReads != 1000 || bash.CarryUSD < 0.0000999 || bash.CarryUSD > 0.0001001 {
+	if bash.UnusedUSD != 0 || bash.CarryReads != 1000 || !near(bash.CarryUSD, 0.0001) {
 		t.Errorf("Bash = unused %v carry_reads %d carry_usd %v, want 0 / 1000 / 0.0001", bash.UnusedUSD, bash.CarryReads, bash.CarryUSD)
 	}
 	for _, s := range rep.Tools {

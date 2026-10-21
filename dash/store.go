@@ -321,6 +321,16 @@ func OpenReadOnly(path string) (*DB, error) {
 		sdb.Close()
 		return nil, &versionMismatch{have: have}
 	}
+	// A read-only handle cannot ALTER, and the ledgers read manual_ping. A file from a proxy that
+	// predates the Ping button lacks it, so say so now, in words, instead of failing every query
+	// with "no such column". Starting a current proxy on the file migrates it.
+	for _, col := range []string{"manual_ping", "manual_saved_usd"} {
+		var n int
+		if err := sdb.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name = ?`, col).Scan(&n); err != nil || n == 0 {
+			sdb.Close()
+			return nil, fmt.Errorf("dash: read-only open: %s predates the column requests.%s; run a current proxy on it once to migrate it", path, col)
+		}
+	}
 	return &DB{sql: sdb, path: path, readOnly: true, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
 }
 

@@ -25,6 +25,8 @@ type manualHost struct {
 	fs    *fakeSender
 	clock *testClock
 	sink  *reportSink
+	// polCeiling overrides the policy's MaxUSDPerPing when set.
+	polCeiling float64
 }
 
 // reportSink is the tenant's emitter: it keeps every keep-alive report.
@@ -66,6 +68,9 @@ func (m *manualHost) hold(t *testing.T, tenantID, session, thread string, ago ti
 	t.Helper()
 	at := m.clock.now().Add(-ago)
 	pol := kaPolicy()
+	if m.polCeiling > 0 {
+		pol.MaxUSDPerPing = m.polCeiling
+	}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 	r.Header.Set("Authorization", "Bearer sk-caller-secret")
 	for i := 0; i < 2; i++ {
@@ -396,5 +401,22 @@ func TestKeepAlivePingableIsUnknownWithoutAKeeper(t *testing.T) {
 	h := &Handler{}
 	if h.KeepAlivePingable("", true, "s") != nil {
 		t.Error("no keeper must be unknown (nil), not an empty answer")
+	}
+}
+
+// A thread whose ping would cost more than the policy's per-ping ceiling is never held at all
+// (the scheduled path's own gate), so a press on it is "not held" and sends nothing. Pingable says
+// the same, so the button is hidden. ErrTooCostly covers a ceiling tightened after the entry was held
+// (keepalive.TestPingNowHonoursThePerPingCeiling); the handler maps it to 409 "over budget".
+func TestManualPingOnAThreadOverTheCeilingIsNeverHeld(t *testing.T) {
+	m := newManualHost(t)
+	m.polCeiling = 1e-9
+	m.hold(t, "", "sess-a", "", 50*time.Second)
+	if m.h.KeepAlivePingable("", true, "sess-a")[""] {
+		t.Error("a thread over the ceiling is reported pingable")
+	}
+	w, out := m.post(`{"session":"sess-a"}`)
+	if w.Code != http.StatusConflict || out["error"] != "not held" || m.fs.n() != 0 {
+		t.Fatalf("over the ceiling = %d %v (sent %d), want 409 not held and nothing sent", w.Code, out, m.fs.n())
 	}
 }

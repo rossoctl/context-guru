@@ -54,8 +54,14 @@ type ToolStat struct {
 	// UnusedUSD answers "what did carrying it for nothing cost"; these answer "what does carrying
 	// it cost", so a declaration the user does use still shows its price. CarryUSD is 0 when
 	// unpriced (see Priced).
-	CarryReads int64   `json:"carry_reads"`
-	CarryUSD   float64 `json:"carry_usd"`
+	// CarryPriced is false when some request that carried it had no known rates, so CarryUSD is
+	// short. Separate from Priced, which describes the unused figure.
+	//
+	// Skill rows are slices of the skills listing, so summing carry across them counts the
+	// listing's prose more than once; there is no carry total for that reason.
+	CarryReads  int64   `json:"carry_reads"`
+	CarryUSD    float64 `json:"carry_usd"`
+	CarryPriced bool    `json:"carry_priced"`
 	// UnusedUSDLow/High bound UnusedUSD over the declaration sets a request without a recorded
 	// one could have carried; equal to it when every request recorded its set.
 	UnusedUSDLow  float64 `json:"unused_usd_low"`
@@ -151,6 +157,7 @@ type ServerStat struct {
 	UnusedUSD        float64 `json:"unused_usd"`
 	CarryReads       int64   `json:"carry_reads"`
 	CarryUSD         float64 `json:"carry_usd"`
+	CarryPriced      bool    `json:"carry_priced"`
 	Priced           bool    `json:"priced"`
 }
 
@@ -450,11 +457,23 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 	}
 	// The per-request pricing reads the table its own way, so it runs beside the inventory read
 	// rather than after it: the page waits for the slower of the two, not their sum.
-	var carriedRes *carriedScan
+	var carriedRes, carryRes *carriedScan
 	var g errgroup.Group
 	g.Go(func() error {
 		var err error
 		carriedRes, err = d.carriedCost(f, price, unusedKeyOf(usedBySession(uses)), carriedOpts{})
+		return err
+	})
+	// What carrying costs, used or not: the same per-request pricing, billing every declared item
+	// under its own name (the skills listing is left out; see ToolStat.CarryReads).
+	g.Go(func() error {
+		var err error
+		carryRes, err = d.carriedCost(f, price, func(_, kind, name, _ string) string {
+			if kind == KindSkillListing {
+				return ""
+			}
+			return kind + "\x00" + name
+		}, carriedOpts{})
 		return err
 	})
 	var decls []declRow
@@ -471,7 +490,7 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 		return nil, err
 	}
 	rep = buildToolReport(sessions, decls, uses)
-	repriceCarried(rep, carriedRes)
+	repriceCarried(rep, carriedRes, carryRes)
 	return rep, nil
 }
 
@@ -484,7 +503,7 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 // it carried, at its own model and tier, and a request without a recorded set gets bounds
 // (UnusedUSDLow/High) rather than a guess shown as a fact. "Unused" keeps its per-session
 // meaning: an item is billed in a session that did not use it.
-func repriceCarried(rep *ToolReport, scan *carriedScan) {
+func repriceCarried(rep *ToolReport, scan, carry *carriedScan) {
 	set := func(rows []ToolStat) {
 		for i := range rows {
 			st := &rows[i]
@@ -492,6 +511,11 @@ func repriceCarried(rep *ToolReport, scan *carriedScan) {
 			if c := scan.Items[st.Kind+"\x00"+st.Name]; c != nil {
 				st.UnusedReads, st.UnusedUSD, st.UnusedUSDLow, st.UnusedUSDHigh = c.Reads, c.USD(), c.USDLow, c.USDHigh
 				st.Priced = !c.Unpriced
+			}
+			// Carry is on the same per-request basis, so for a never-used item it equals unused.
+			st.CarryReads, st.CarryUSD, st.CarryPriced = 0, 0, true
+			if c := carry.Items[st.Kind+"\x00"+st.Name]; c != nil {
+				st.CarryReads, st.CarryUSD, st.CarryPriced = c.Reads, c.USD(), !c.Unpriced
 			}
 		}
 	}
@@ -723,10 +747,6 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		case !skillEntry:
 			declTok[dr.session] += dr.tokens
 		}
-		st.CarryReads += int64(dr.tokens) * int64(sc.requests())
-		if sc.priced {
-			st.CarryUSD += sc.usd(dr.tokens)
-		}
 		calls := usedIn[dr.session][k]
 		if calls > 0 {
 			st.SessionsUsed++
@@ -948,7 +968,7 @@ func serverRollup(tools []ToolStat) []ServerStat {
 		}
 		s := by[t.Server]
 		if s == nil {
-			s = &ServerStat{Server: t.Server, Priced: true}
+			s = &ServerStat{Server: t.Server, Priced: true, CarryPriced: true}
 			by[t.Server] = s
 		}
 		s.Tools++
@@ -958,6 +978,9 @@ func serverRollup(tools []ToolStat) []ServerStat {
 		s.UnusedUSD += t.UnusedUSD
 		s.CarryReads += t.CarryReads
 		s.CarryUSD += t.CarryUSD
+		if !t.CarryPriced {
+			s.CarryPriced = false
+		}
 		if t.SessionsUsed > 0 {
 			s.ToolsUsed++
 		}
