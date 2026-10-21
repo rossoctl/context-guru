@@ -7,11 +7,14 @@ const exp = JSON.parse(readFileSync(expectedPath, 'utf8'));
 mkdirSync(`${outDir}/snapshots`, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const tab = await (await fetch('http://127.0.0.1:9222/json/new?about:blank', { method: 'PUT' })).json();
-const ws = new WebSocket(tab.webSocketDebuggerUrl);
-const urls = new Map(); let id = 0; const pending = new Map(); let errors = [];
+// ONE TAB PER PAGE. Reusing a tab leaves each old page's /api/events stream holding one of Chrome's six
+// connections per host for a while; after a few reloads the page's own fetches queue behind them and it sits
+// on "Loading…" (reproduced: 4/20 loads stuck reusing a tab, 0/20 with a fresh one). A user opening the
+// dashboard gets a fresh page, so that is what is measured.
+let ws = null, tab = null, id = 0, errors = [], emulation = [];
+const urls = new Map(), pending = new Map();
 const send = (method, params = {}) => new Promise((res) => { const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
-ws.onmessage = (m) => {
+function onMessage(m) {
   const msg = JSON.parse(m.data);
   if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg.result); pending.delete(msg.id); }
   const m_ = msg.method, pr = msg.params;
@@ -21,9 +24,15 @@ ws.onmessage = (m) => {
   if (m_ === 'Log.entryAdded' && pr.entry.level === 'error') errors.push(`log.error: ${pr.entry.text} ${pr.entry.url || ''}`.trim());
   if (msg.method === 'Runtime.exceptionThrown') errors.push(msg.params.exceptionDetails.exception?.description || msg.params.exceptionDetails.text);
   if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') errors.push('console.error: ' + msg.params.args.map((a) => a.value ?? a.description).join(' '));
-};
-await new Promise((r) => (ws.onopen = r));
-await send('Runtime.enable'); await send('Page.enable'); await send('Network.enable'); await send('Log.enable');
+}
+async function newTab() {
+  if (tab) { ws.close(); await fetch(`http://127.0.0.1:9222/json/close/${tab.id}`); }
+  tab = await (await fetch('http://127.0.0.1:9222/json/new?about:blank', { method: 'PUT' })).json();
+  ws = new WebSocket(tab.webSocketDebuggerUrl); ws.onmessage = onMessage; pending.clear();
+  await new Promise((r) => (ws.onopen = r));
+  await send('Runtime.enable'); await send('Page.enable'); await send('Network.enable'); await send('Log.enable');
+  for (const [m, p] of emulation) await send(m, p);
+}
 const evalJS = async (expr) => (await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })).result?.value;
 
 // Poll until expr is truthy; false on timeout (the caller records the error, never throws). Counted in polls,
@@ -86,14 +95,15 @@ async function shoot(name, timedOut) {
 
 // Load a route from a blank page so every page is a fresh render and its errors are its own.
 async function open(route) {
-  await send('Page.navigate', { url: 'about:blank' });
+  await newTab();
   errors = [];
   await send('Page.navigate', { url: `${base}/dashboard/#${route}` });
 }
 
 for (const theme of themes) for (const [wname, w] of widths) {
-  await send('Emulation.setDeviceMetricsOverride', { width: w, height: 1600, deviceScaleFactor: 1, mobile: w < 600 });
-  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
+  // Applied by newTab() to every tab opened for this theme and width.
+  emulation = [['Emulation.setDeviceMetricsOverride', { width: w, height: 1600, deviceScaleFactor: 1, mobile: w < 600 }],
+               ['Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] }]];
   await open('behaviour/history');
   const hSel = '#history-body .ins-total';
   const hOk = await waitFor(`!!document.querySelector(${JSON.stringify(hSel)})`);
@@ -121,4 +131,4 @@ for (const theme of themes) for (const [wname, w] of widths) {
   }
 }
 writeFileSync(`${outDir}/actual-ui.json`, JSON.stringify({ pages }, null, 1));
-ws.close(); process.exit(0);
+ws.close(); await fetch(`http://127.0.0.1:9222/json/close/${tab.id}`); process.exit(0);
