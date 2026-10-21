@@ -88,6 +88,9 @@ type Options struct {
 	// proxy behaves exactly as before. RoutingEnv reads an env var by name (nil: os.Getenv).
 	Routing    []routing.Row
 	RoutingEnv func(string) string
+	// ClassifierBudget is the TOTAL time the classifier redirect may spend on its retries before
+	// the original request goes upstream (0 = classifier.DefaultBudget).
+	ClassifierBudget time.Duration
 	// Windows resolves a model's context window (max input tokens) so fraction-based
 	// Trigger thresholds scale with the model. nil => window unknown (0), fractions
 	// ignored, absolutes apply. Built in main from internal/modelinfo.
@@ -1129,6 +1132,11 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// external evaluator can REPLAY the exact traffic through any pipeline via
 		// /compact — identical requests, no agent nondeterminism, no repeated LLM spend.
 		captureRequest(string(provider), body)
+		// The auto-mode classifier redirect (routing table row "classifier"). Returns false, and
+		// touches nothing, unless the row is active and the request matches.
+		if h.routeClassifier(w, r, provider, api, tn, body) {
+			return
+		}
 		// Rewrite the messages via the shared apply path; fail open. Supply the
 		// LLM clients NeedsModel components may call: the per-request "incoming"
 		// model (the route's upstream + the gateway's real key + the request's

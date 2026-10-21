@@ -867,6 +867,7 @@ for every component's config block.
 | `--bob-upstream` / `BOB_UPSTREAM` | — | Bob (BobShell) backend base. Setting it mounts the [Bob gateway routes](#bob-bobshell-gateway-routes); unset, an unknown path 404s as before. |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | — | Real key injected on forward (gateway mode); empty = pass client auth through. |
 | `--routing` / `CG_ROUTING_FILE` | — | Path to the [model routing table](#model-routing-table). Unset = no routing. An unreadable file turns routing off and is logged; it does not stop the proxy. |
+| `--classifier-budget` / `CG_CLASSIFIER_BUDGET` | `8s` | Total time the classifier redirect may spend on retries before the original request is forwarded. |
 | `CHEAP_MODEL` (+ `CHEAP_MODEL_BASE` / `_KEY` / `_AUTH` / `_PROVIDER`) | — | Dedicated cheap model for the LLM components (`extract_llm`, `summarize`) — the `model.source: config` client. Without it they no-op. |
 | `FORCE_MODEL` | — | Overwrite the request `model` (eval-containers uses `EVAL_MODEL`). |
 | `INJECT_EXPAND` | `auto` | Whether the `context_guru_expand` tool is advertised: `auto` (whenever the request declares tools, the store persists, **and the pipeline contains at least one Offload** — all three session-stable, so the `tools` array never changes shape mid-session and the prompt-cache prefix survives) \| `always` (unconditional, including when the request declares no tools) \| `never`. The pipeline condition exists because a pipeline that mints no markers would be advertising a tool whose every call must fail. |
@@ -958,10 +959,10 @@ feature adds one row. It does not add env vars. Example: `deploy/routing/routing
 
 ```yaml
 routes:
-  - feature: example_feature
-    model_name_env: EXAMPLE_MODEL  # env var NAMES. Never values.
-    key_env: EXAMPLE_API_KEY
-    base_url_env: EXAMPLE_BASE_URL
+  - feature: classifier
+    model_name_env: BOB_MODEL      # env var NAMES. Never values.
+    key_env: BOB_API_KEY
+    base_url_env: BOB_BASE_URL
     dialect: bob                   # anthropic | openai | bob
     price_input: 0.5               # optional. USD per million tokens. Missing = $0.
     price_output: 2.0
@@ -986,6 +987,33 @@ routes:
   row's price. Both use the routed call's token counts. An original model with no known price
   saves 0. It is on `/stats` only, not on the dashboard row. The dashboard row shows the routed
   model and its tokens.
+
+#### Classifier redirect (`feature: classifier`)
+
+Claude Code's auto mode sends a small classifier request before most tool calls. With an active
+`classifier` row, the proxy answers those requests with the routed model.
+
+- **Off by default.** It runs only when the `classifier` row is active. With no row, every request
+  is forwarded byte for byte as before.
+- **Detection uses metadata only.** It never reads message text. A request matches when the
+  `x-claude-code-request-class` header contains `classifier` (the exact value is not yet confirmed
+  on the wire), or when it has this shape: Anthropic `/v1/messages`, 0 tools, 1 message, 3 system
+  blocks, `max_tokens` 64, no streaming, `stop_sequences` set, a Sonnet model. A streaming request
+  is never redirected. The Opus `max_tokens` 2112 shape is not routed.
+- **Redirect.** For `openai` and `bob`, the system blocks become one system message and the text
+  blocks become text. The answer returns as an Anthropic Messages response. If the original had
+  `stop_sequences` and the text holds one, the text is cut there and `stop_reason` is
+  `stop_sequence`. A request with a non-text block is not redirected.
+- **Fallback.** Inaccessible means: transport error, timeout, 5xx, 401, 403, 404, 429, or an empty
+  or unreadable answer. The proxy tries up to 3 times inside one total budget
+  (`--classifier-budget`, 8 s). Then it forwards the original request unchanged. A verdict
+  (allow or block) is never a failure. Any panic or error also sends the original.
+- **Safety.** The classifier is a safety check. A cheaper model can allow an action that the
+  original model would block, and a wrong "allow" can run a destructive command without asking.
+  Replay real classifier requests to both models and compare the verdicts before you turn this on.
+- **Data.** The request content (user messages, tool calls, `CLAUDE.md`) goes to the routed
+  endpoint, which can be another provider. Context Guru stores nothing new. See
+  [Data dependence](../data-dependence.md).
 
 ### Dashboard
 

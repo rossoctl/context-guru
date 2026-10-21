@@ -14,18 +14,19 @@
 # Prices are USD per MILLION tokens and optional. A missing price is $0 for the routed model.
 # /stats uses them to show saved_usd = cost at the original model's price - cost at this row's.
 #
-# DATA: a feature that uses a row sends its request content to that endpoint, which can be
-# another provider. Read the feature's documentation before you add a row.
+# SAFETY: the classifier is a safety check. A cheaper model can allow an action the original
+# model would block. Compare verdicts on replayed requests before you turn this on.
 #
-# A feature with no row keeps its default behaviour. This file ships with no active row.
-# routes:
-#   - feature: example_feature        # the name the feature asks for
-#     model_name_env: EXAMPLE_MODEL
-#     key_env: EXAMPLE_API_KEY
-#     base_url_env: EXAMPLE_BASE_URL
-#     dialect: anthropic              # anthropic | openai | bob
-#     # price_input: 0.0
-#     # price_output: 0.0
-#     # price_cache_read: 0.0
-#     # price_cache_write: 0.0
-routes: []
+# DATA: the classifier request (user messages, tool calls, CLAUDE.md) is sent to this endpoint.
+routes:
+  - feature: classifier
+    model_name_env: BOB_MODEL
+    key_env: BOB_API_KEY
+    base_url_env: BOB_BASE_URL
+    # The first test model (GLM 5.3 on the RITS litellm gateway) speaks the Anthropic
+    # Messages shape, so the dialect is anthropic. Use bob for Bob's /inference endpoint.
+    dialect: anthropic
+    # price_input: 0.0
+    # price_output: 0.0
+    # price_cache_read: 0.0
+    # price_cache_write: 0.0
