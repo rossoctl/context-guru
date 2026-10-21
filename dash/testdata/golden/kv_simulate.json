@@ -37,6 +37,83 @@
    "unreachable": false
   },
   {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 1 keep-alive(s) per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-x1",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 2 keep-alive(s) per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-x2",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 3 keep-alive(s) per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-x3",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 4 keep-alive(s) per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-x4",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 5 keep-alive(s) per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-x5",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 6 keep-alive(s) per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-x6",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 7 keep-alive(s) per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-x7",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 8 keep-alive(s) per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-x8",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 9 keep-alive(s) per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-x9",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 10 keep-alive(s) per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-x10",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
+   "description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 11 keep-alive(s) per idle span, then lets the entry lapse.",
+   "name": "keepalive-5m-x11",
+   "needs_dataset": false,
+   "selectable": true,
+   "unreachable": false
+  },
+  {
    "description": "Hold every prefix at the 1-hour tier and refresh it with keep-alives while idle. Costs 2.0x input to create, and needs one twelfth as many refreshes as the 5-minute arm to hold the same span.",
    "name": "keepalive-1h",
    "needs_dataset": false,
