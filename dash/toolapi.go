@@ -1036,6 +1036,8 @@ func (a *API) toolRoutes() []route {
 		{"GET /api/prompt", scopeTenant, a.prompt},
 		// What the caller declared and never used, priced per carrying request (adapttools.go).
 		{"GET /api/adapt/tools", scopeTenant, a.adaptTools},
+		// What the client settings that cost money have cost: counts and dollars of rows by request shape (costlysettings.go).
+		{"GET /api/adapt/settings", scopeTenant, a.costlySettings},
 	}
 }
 
