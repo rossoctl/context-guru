@@ -96,7 +96,7 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
          he["owner_total"], sum(got_owners.values()))
     _rec(out, "H.self_excluded", "history", (h.get("self_excluded") or {}).get("items") == he["self_excluded"],
          he["self_excluded"], (h.get("self_excluded") or {}).get("items"))
-    used_names = {u["name"] for u in h.get("used", []) if u.get("skill")}
+    used_names = {u["name"] for u in h.get("used", [])}  # by name: a bundled skill must not be listed under any flag
     _rec(out, "H.bundled_not_used", "history", not used_names & set(he["bundled_absent"]),
          "absent: " + ", ".join(he["bundled_absent"]), sorted(used_names & set(he["bundled_absent"])))
 

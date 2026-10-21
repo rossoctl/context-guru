@@ -98,6 +98,11 @@ class TestCheck(unittest.TestCase):
         a = copy.deepcopy(API); a["history"]["used"].append({"name": "chartmaker", "skill": True})
         self.assertEqual(verdicts(a)["H.bundled_not_used"], "FAIL")
 
+    def test_bundled_in_used_list_fails_whatever_its_skill_flag(self):
+        for extra in ({"name": "chartmaker", "skill": False}, {"name": "chartmaker"}):
+            a = copy.deepcopy(API); a["history"]["used"].append(extra)
+            self.assertEqual(verdicts(a)["H.bundled_not_used"], "FAIL", extra)
+
     def test_never_used_set_and_owner_counts_can_fail(self):
         a = copy.deepcopy(API); a["history"]["never_used"] = ["a:x", "z"]
         self.assertEqual(verdicts(a)["H.never_used_set"], "FAIL")
