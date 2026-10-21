@@ -35,6 +35,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/proxy"
+	"github.com/rossoctl/context-guru/routing"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 )
@@ -131,6 +132,9 @@ func main() {
 		upstreamsPath = flag.String("upstreams", envOr("UPSTREAMS", ""),
 			"path to the upstream allow-list YAML; SET THIS TO ENABLE HOSTED MULTI-TENANT MODE "+
 				"(every request then needs a context-guru token, and each tenant's own config applies)")
+		routingPath = flag.String("routing", envOr("CG_ROUTING_FILE", ""),
+			"path to the model routing table YAML (feature -> model/key/base-URL env var NAMES, dialect, optional prices). "+
+				"Unset = no routing. A row with a missing env var or a bad base URL is inactive and logged; it never stops the proxy")
 		controlDB = flag.String("control-db", envOr("CONTROL_DB", "./context-guru-control.db"),
 			"hosted mode: path to the control database (tenants, tokens, per-tenant config). "+
 				"Kept separate from the dashboard DB, which is a derived view that may be rebuilt or pruned")
@@ -531,7 +535,19 @@ func main() {
 	if tenants == nil && *dashOn && *dashDB != ":memory:" && *dashDB != "" {
 		adaptOverride = *dashDB + ".adapt.json"
 	}
+	var routingRows []routing.Row
+	if *routingPath != "" {
+		// Unlike --upstreams, a file that cannot be read or parsed does not stop the proxy: routing
+		// is an optional saving, and the proxy without it is the proxy as it always was.
+		rows, err := routing.Load(*routingPath)
+		if err != nil {
+			slog.Error("routing: file unusable; routing is off", "path", *routingPath, "err", err)
+		} else {
+			routingRows = rows
+		}
+	}
 	h := proxy.New(pipe, cfg.NewStore(), agg, proxy.Options{
+		Routing:       routingRows,
 		BaseConfig:    baseConfig,
 		BuildConfig:   buildTenantConfig,
 		AdaptOverride: adaptOverride,
