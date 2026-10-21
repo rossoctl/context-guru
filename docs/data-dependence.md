@@ -225,6 +225,7 @@ One row for each registered component. The test `components/all/datadep_test.go`
 | Wait-cause and lifecycle signals | metadata | ❌ Off (it needs the dashboard) | 🟡 Works, metadata | 🟡 Works, metadata | To tell why the agent paused, it reads the request once. It keeps only counts and ids. |
 | Metrics (`/stats`, `/metrics`) | metadata | 🟡 Works, metadata | 🟡 Works, metadata | 🟡 Works, metadata | Totals and rates need only numbers. |
 | Accounts (hosted) | account data | ✅ Works | ✅ Works | ✅ Works | This is the account system: who you are, your settings and your consent flag. It holds no transcripts. |
+| **Trace recording** (`--record`, `--record-otlp`) | content | ❌ Off | ❌ **Cannot work.** A trace without bodies cannot be replayed. | ✅ Works, only for accounts that opted in. Off for every account until its owner turns it on. | It records the full request and response of each call, redacted, so a replay tool can send the real prompts again and reproduce real prefix-cache behaviour. It is all content, so it is a deliberate exception to the metadata-only rule. **Awaiting a decision (#649).** |
 
 ## What "metadata only" would need
 
