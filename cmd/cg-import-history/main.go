@@ -58,13 +58,17 @@ func main() {
 	defer d.Close()
 
 	if *backfill {
-		n, err := d.BackfillUseProjects(*home)
+		n, err := d.BackfillUseProjects(*home, *apply)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "backfill: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("BACKFILL — %d invocations re-attributed to the folder they happened in\n", n)
-		fmt.Println("no request rows were written, so nothing about spend changed")
+		if *apply {
+			fmt.Printf("BACKFILL APPLIED — %d invocations re-attributed to the folder they happened in\n", n)
+			fmt.Println("no request rows were written, so nothing about spend changed")
+		} else {
+			fmt.Printf("DRY RUN — %d invocations would be re-attributed; nothing was written (add -apply)\n", n)
+		}
 		return
 	}
 
@@ -97,6 +101,9 @@ func main() {
 	}
 	if out.SkippedAlready > 0 {
 		fmt.Printf("skipped, already imported   : %d (a previous run)\n", out.SkippedAlready)
+	}
+	if out.Truncated > 0 {
+		fmt.Printf("WARNING: %d transcript(s) were cut short by an oversized line; their later turns are not counted\n", out.Truncated)
 	}
 	if out.SkippedOld > 0 {
 		fmt.Printf("skipped, older than -since  : %d\n", out.SkippedOld)

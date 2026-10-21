@@ -30,7 +30,7 @@ func TestAnImportStopsWhereMeasuredDataBegins(t *testing.T) {
 
 	// The proxy measured day 5 onward.
 	if err := db.insertBatch([]*Event{
-		{TS: daysAgo(5), SessionID: "measured", Model: "m", TokensBefore: 10},
+		{TS: daysAgo(5), SessionID: "s-span", Model: "m", TokensBefore: 10},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -259,5 +259,61 @@ func TestAnImportRecordsWhatWasCalled(t *testing.T) {
 	if _, bad := got.Called["Skill"]; bad {
 		t.Error("a skill was recorded against the `Skill` tool, which collapses every skill in " +
 			"the user's history into one name")
+	}
+}
+
+// S4.1: one measured request in one session must not hide another session's older or newer
+// history. The cutoff is per session.
+func TestAMeasuredSessionDoesNotHideOtherSessionsHistory(t *testing.T) {
+	db := openTestDB(t)
+	home := t.TempDir()
+	if err := db.insertBatch([]*Event{
+		{TS: daysAgo(20), SessionID: "measured", Model: "m", TokensBefore: 10},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONL(t, home, "-p", "other",
+		turnLine("other", "/Users/v/other", daysAgo(5), 100, 10),
+		turnLine("other", "/Users/v/other", daysAgo(3), 100, 10))
+	got, err := db.ImportHistory(home, ImportOptions{Apply: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Imported != 2 || got.SkippedOverlap != 0 {
+		t.Errorf("imported %d, overlap %d; want 2 and 0", got.Imported, got.SkippedOverlap)
+	}
+}
+
+// S4.2/S4.4: an interrupted import (requests written, uses lost) heals on the next run, and a
+// re-run never lowers or doubles a count.
+func TestAReRunHealsMissingUsesAndNeverDoublesThem(t *testing.T) {
+	db := openTestDB(t)
+	home := t.TempDir()
+	writeJSONL(t, home, "-p", "s1",
+		turnLineCalling("s1", "/Users/v/p", daysAgo(9), `{"type":"tool_use","name":"Bash","input":{}}`),
+		turnLineCalling("s1", "/Users/v/p", daysAgo(8), `{"type":"tool_use","name":"Bash","input":{}}`))
+	if _, err := db.ImportHistory(home, ImportOptions{Apply: true}); err != nil {
+		t.Fatal(err)
+	}
+	calls := func() int {
+		var n int
+		db.sql.QueryRow(`SELECT COALESCE(SUM(calls),0) FROM tool_uses WHERE name='Bash'`).Scan(&n)
+		return n
+	}
+	if calls() != 2 {
+		t.Fatalf("calls = %d; want 2", calls())
+	}
+	db.sql.Exec(`DELETE FROM tool_uses`) // the lost half of an interrupted run
+	if _, err := db.ImportHistory(home, ImportOptions{Apply: true}); err != nil {
+		t.Fatal(err)
+	}
+	if calls() != 2 {
+		t.Errorf("after healing calls = %d; want 2", calls())
+	}
+	if _, err := db.ImportHistory(home, ImportOptions{Apply: true}); err != nil {
+		t.Fatal(err)
+	}
+	if calls() != 2 {
+		t.Errorf("after a third run calls = %d; want still 2", calls())
 	}
 }

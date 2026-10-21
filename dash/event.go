@@ -509,6 +509,9 @@ func (m *Meta) redact() {
 // Idempotent, so a double call cannot corrupt a row.
 func (e *Event) Redact() {
 	e.Meta.redact()
+	// The launch directory is client-chosen; sanitise the field itself so the feed and the
+	// inventory writer see what the requests table stores.
+	e.Project = ProjectPath(e.Project)
 	for i := range e.Content {
 		e.Content[i].Before = RedactContent(e.Content[i].Before, e.ContentCap)
 		e.Content[i].After = RedactContent(e.Content[i].After, e.ContentCap)

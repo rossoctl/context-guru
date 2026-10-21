@@ -3,6 +3,7 @@ package dash
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,6 +43,11 @@ import (
 type TranscriptTurn struct {
 	TS        int64 // epoch ms
 	SessionID string
+	// MessageID is the provider's id for the response. Claude Code writes one transcript line per
+	// content block of a streamed message, every one carrying the same usage, so the id is what
+	// makes a billed request a single turn instead of one per block. Empty on an entry that has
+	// none, which is then taken as its own turn.
+	MessageID string
 	Model     string
 	// Project is the directory the agent was started in, sanitised exactly as a live request's is.
 	Project string
@@ -74,6 +80,7 @@ type transcriptEntry struct {
 	Cwd       string `json:"cwd"`
 	Timestamp string `json:"timestamp"`
 	Message   *struct {
+		ID    string `json:"id"`
 		Model string `json:"model"`
 		Usage *struct {
 			InputTokens         int64 `json:"input_tokens"`
@@ -107,9 +114,30 @@ const transcriptMaxLine = 16 << 20
 // writing, so each is skipped and the rest is returned — a partial read of a live session is the
 // correct answer, not a failure.
 func ReadTranscript(path string) ([]TranscriptTurn, error) {
+	turns, _, err := ReadTranscriptChecked(path)
+	return turns, err
+}
+
+// ReadTranscriptChecked is ReadTranscript plus whether the read stopped early. A line past
+// transcriptMaxLine aborts the scanner, and everything after it is lost; returning that as a flag
+// lets the importer say "this file was cut short" rather than quietly undercounting.
+//
+// ONE TURN PER MESSAGE ID. Claude Code writes a line per content block of a streamed message
+// (text, then each tool_use), all with the same message.id and the same usage, milliseconds
+// apart. Counting each line billed one request several times: measured on a real transcript,
+// 7,680 usage lines for 5,038 distinct ids, cache_read overstated by 52%. The last line of an id
+// carries the final usage; Called is the union of the tool_use blocks across all of its lines.
+//
+// Only a regular file is read. A symlink under the projects directory could point anywhere.
+func ReadTranscriptChecked(path string) (turns []TranscriptTurn, truncated bool, err error) {
+	if fi, lerr := os.Lstat(path); lerr != nil {
+		return nil, false, lerr
+	} else if !fi.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("%s is not a regular file", path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer f.Close()
 
@@ -117,32 +145,57 @@ func ReadTranscript(path string) ([]TranscriptTurn, error) {
 	sc.Buffer(make([]byte, 0, 64<<10), transcriptMaxLine)
 
 	var out []TranscriptTurn
+	byID := map[string]int{}
 	for sc.Scan() {
 		var e transcriptEntry
 		if json.Unmarshal(sc.Bytes(), &e) != nil {
 			continue
 		}
-		if e.Type != "assistant" || e.Message == nil || e.Message.Usage == nil {
-			continue
-		}
-		u := e.Message.Usage
-		total := u.InputTokens + u.CacheReadInputToks + u.CacheCreationInToks + u.OutputTokens
-		// NOT A BILLED REQUEST. A turn with no usage at all is synthetic or interrupted, and
-		// counting it would inflate the request total with entries that cost nothing — which
-		// would then understate the per-request cost of everything else.
-		if total == 0 {
+		if e.Type != "assistant" || e.Message == nil {
 			continue
 		}
 		called, skills := transcriptCalled(&e)
-		ts, err := time.Parse(time.RFC3339Nano, e.Timestamp)
-		if err != nil {
+		u := e.Message.Usage
+		var total int64
+		if u != nil {
+			total = u.InputTokens + u.CacheReadInputToks + u.CacheCreationInToks + u.OutputTokens
+		}
+		// A line of a known id may carry only tool_use blocks (no usage yet): its calls still
+		// belong to that turn.
+		if i, ok := byID[e.Message.ID]; ok && e.Message.ID != "" {
+			t := &out[i]
+			for _, n := range called {
+				if !containsStr(t.Called, n) {
+					t.Called = append(t.Called, n)
+				}
+			}
+			for n := range skills {
+				t.Skills[n] = true
+			}
+			if total > 0 {
+				t.FreshInput, t.CacheRead = u.InputTokens, u.CacheReadInputToks
+				t.CacheWrite, t.Output = u.CacheCreationInToks, u.OutputTokens
+			}
+			continue
+		}
+		// NOT A BILLED REQUEST. A turn with no usage at all is synthetic or interrupted, and
+		// counting it would inflate the request total with entries that cost nothing.
+		if total == 0 {
+			continue
+		}
+		ts, perr := time.Parse(time.RFC3339Nano, e.Timestamp)
+		if perr != nil {
 			// A turn with no usable timestamp cannot be placed on any axis, and guessing one
 			// would put real spend on a day it did not happen.
 			continue
 		}
+		if e.Message.ID != "" {
+			byID[e.Message.ID] = len(out)
+		}
 		out = append(out, TranscriptTurn{
 			TS:        ts.UnixMilli(),
 			SessionID: e.SessionID,
+			MessageID: e.Message.ID,
 			Model:     e.Message.Model,
 			// Through the same gate a live request's directory goes through: it is a
 			// client-chosen string either way, and a folder named after a token must not reach
@@ -156,9 +209,16 @@ func ReadTranscript(path string) ([]TranscriptTurn, error) {
 			Skills:     skills,
 		})
 	}
-	// A scanner error mid-file still yields what was read: half a transcript is worth more than
-	// none, and the commonest cause is a line longer than the buffer in a file we do not own.
-	return out, nil
+	return out, sc.Err() != nil, nil
+}
+
+func containsStr(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // transcriptCalled lists what a turn invoked, with skills under their own names.
@@ -205,7 +265,16 @@ func TranscriptFiles(home string) []string {
 		}
 		home = h
 	}
-	paths, _ := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", "*.jsonl"))
+	all, _ := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", "*.jsonl"))
+	// Regular files only: a symlink under the projects directory could point anywhere.
+	var paths []string
+	for _, p := range all {
+		fi, err := os.Lstat(p)
+		di, derr := os.Lstat(filepath.Dir(p))
+		if err == nil && derr == nil && fi.Mode().IsRegular() && di.IsDir() {
+			paths = append(paths, p)
+		}
+	}
 	// Oldest first, so a progress report reads chronologically and an interrupted import has
 	// covered a contiguous span rather than a scatter.
 	sort.Slice(paths, func(i, j int) bool {

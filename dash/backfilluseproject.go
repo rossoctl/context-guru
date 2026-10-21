@@ -11,13 +11,14 @@ package dash
 // So this re-reads the transcripts and writes to `tool_uses` ALONE. It never touches `requests`,
 // because the one thing a repair must not do is change what the history says was spent.
 
-// BackfillUseProjects fills in the folder on imported invocation rows, returning how many rows it
-// wrote.
+// BackfillUseProjects fills in the folder on imported invocation rows, returning how many
+// invocations it re-attributed (or, when apply is false, would). Dry by default at every call
+// site: nothing is written unless apply is true.
 //
 // `home` overrides the home directory, for tests. Idempotent: it recomputes each row from the
 // transcripts and writes the same answer every time, so an operator can run it after any upgrade
 // without having to know whether it has run before.
-func (d *DB) BackfillUseProjects(home string) (int, error) {
+func (d *DB) BackfillUseProjects(home string, apply bool) (int, error) {
 	// WHICH SESSIONS HAVE IMPORTED ROWS, and from when each one's measured traffic begins.
 	//
 	// THE UNIT IS THE INVOCATION, NOT THE SESSION. An earlier rule here skipped any session that
@@ -101,6 +102,9 @@ func (d *DB) BackfillUseProjects(home string) (int, error) {
 	// before the column existed — and deleting those would destroy counts the proxy observed
 	// itself, replacing them with whatever the transcript happens to say. Observed doing exactly
 	// that: a measured row of 99 calls was replaced by a transcript-derived 1.
+	if !apply {
+		return len(uses), nil
+	}
 	type pair struct{ session, name, skill string }
 	clear := map[pair]bool{}
 	for _, u := range uses {
@@ -110,29 +114,28 @@ func (d *DB) BackfillUseProjects(home string) (int, error) {
 		}
 		clear[pair{u.session, name, skill}] = true
 	}
+	// ONE TRANSACTION for the delete and the re-insert: a crash or lock error between two of them
+	// used to lose the rows.
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return 0, err
 	}
+	defer tx.Rollback()
 	del, err := tx.Prepare(`DELETE FROM tool_uses
 		WHERE project = '' AND session_id = ? AND name = ? AND skill = ?`)
 	if err != nil {
-		tx.Rollback()
 		return 0, err
 	}
+	defer del.Close()
 	for p := range clear {
 		if _, err := del.Exec(p.session, p.name, p.skill); err != nil {
-			del.Close()
-			tx.Rollback()
 			return 0, err
 		}
 	}
-	del.Close()
-	if err := tx.Commit(); err != nil {
+	if err := insertImportedUsesTx(tx, uses); err != nil {
 		return 0, err
 	}
-
-	if err := d.insertImportedUses(uses); err != nil {
+	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return len(uses), nil
