@@ -513,3 +513,44 @@ func TestTheOptInHeaderIsNeverForwardedUpstream(t *testing.T) {
 		t.Errorf("forwarded headers = %v", dst)
 	}
 }
+
+// A manual-only hold has no schedule, so /api/cachestate must not say it is being pinged: the
+// status line draws "being pinged" from held_until_ms and pings_left. Only pingable reflects the hold.
+func TestAManualOnlyHoldSetsNeitherHeldUntilNorPingsLeft(t *testing.T) {
+	m := newManualHost(t)
+	m.h.API().SetKeepAlivePlans(m.h.KeepAlivePlans)
+	m.h.API().SetPingStates(m.h.KeepAlivePingStates)
+	m.holdOff(t, "sess-off", "1")
+	get := func() map[string]any {
+		r := httptest.NewRequest(http.MethodGet, "/api/cachestate?session=sess-off", nil)
+		r.RemoteAddr = "127.0.0.1:4000"
+		w := httptest.NewRecorder()
+		m.h.Mux().ServeHTTP(w, r)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+	check := func(label string, d map[string]any) {
+		t.Helper()
+		if d["pingable"] != true {
+			t.Fatalf("%s: pingable = %v, want true (the hold)", label, d["pingable"])
+		}
+		for _, k := range []string{"held_until_ms", "pings_left"} {
+			if _, ok := d[k]; ok {
+				t.Errorf("%s: %s = %v is set for a thread that is only held for the button", label, k, d[k])
+			}
+		}
+		if v, ok := d["keepalive"]; ok && v != false { // only the session entry carries it
+			t.Errorf("%s: keepalive = %v, but no ping was sent", label, v)
+		}
+	}
+	doc := get()
+	check("session", doc)
+	for _, th := range doc["threads"].([]any) {
+		check("thread", th.(map[string]any))
+	}
+	// And no tick of the sweep changes that, with or without a press in between.
+	m.clock.advance(100 * time.Second)
+	m.h.keeper.Sweep(m.clock.now())
+	check("after a sweep", get())
+}
