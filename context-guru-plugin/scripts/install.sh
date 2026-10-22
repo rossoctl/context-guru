@@ -1234,7 +1234,46 @@ any other project, since the machine-wide install has its own record and port."
   route_install_statusline
   route_enable_plugin "$ares"
   route_ensure_gitignore
+  route_import_history
   route_report
+}
+
+# ---- pre-install history, once per install ---------------------------------------------------
+# A new install starts with an empty dashboard, although Claude Code's own transcripts already hold
+# months of history: what each request cost and which skills and tools it called. That history is
+# imported ONCE, here, at the end of a successful install, into THIS install's dashboard DB (the
+# path start-proxy.sh passes as --dashboard-db). The proxy itself never imports: it reads the user's
+# filesystem, a different source from the traffic every other figure comes from.
+#
+# Once per DATABASE: the marker sits beside the DB it describes (<db>.history-imported), so it lives
+# exactly as long as the history it records. A re-install keeps both and does not re-read every
+# transcript (that would be harmless, as the import dedupes, but slow on a large history). Deleting
+# the DB, or the whole state dir, which uninstall offers, removes both, and the next install
+# imports again. A marker rather than "the DB holds imported rows": a user with no history must not
+# re-import on every install.
+#
+# Never fatal, like the statusline and gitignore steps: routing is written and health-checked by
+# now, and a missing history is a smaller problem than a failed install. A failure writes no
+# marker, so the next install retries, and hands back the command to run by hand.
+# Local mode only: in attach mode the proxy and its DB are somewhere else.
+route_import_history() {
+  [ "$R_MODE" = local ] || { emit "history_import=skipped"; emit "history_import_reason=attach_mode"; return 0; }
+  local st marker db bin iout
+  st=$(route_state_dir)
+  db="$st/dashboard-${R_PORT}.db"
+  marker="${db}.history-imported"
+  if [ -f "$marker" ]; then emit "history_import=already_done"; return 0; fi
+  bin="${R_BIN:-${CONTEXT_GURU_BIN:-context-guru-proxy}}"
+  if iout=$("$bin" import-history -apply -db "$db" 2>&1); then
+    : >"$marker" 2>/dev/null || true
+    emit "history_import=done"
+    emit "history_import_summary=$(printf '%s\n' "$iout" | head -1)"
+  else
+    emit "history_import=failed"
+    emit "history_import_error=$(printf '%s\n' "$iout" | tail -1)"
+    emit "history_import_retry=$(shq "$bin") import-history -apply -db $(shq "$db")"
+  fi
+  return 0
 }
 
 # ---- enablement, machine-wide installs only (#318) -------------------------------------------

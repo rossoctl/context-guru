@@ -7622,9 +7622,12 @@ func TestInstallSkillDelegatesRatherThanReimplementing(t *testing.T) {
 	//
 	// Raised 235 -> 238 for `plugin_enabled=` (#318): a machine-wide install's outcome for the plugin's
 	// own enablement, which the skill relays and never decides.
-	if n := strings.Count(body, "\n"); n > 238 {
+	//
+	// Raised 238 -> 242 for `history_import=`: the one-time import of pre-install history, whose
+	// outcome (done / already_done / skipped / failed + retry command) the skill relays and never runs.
+	if n := strings.Count(body, "\n"); n > 242 {
 		t.Errorf("the install skill is %d lines; it delegates the mechanism now, so it should be "+
-			"well under 238", n)
+			"well under 242", n)
 	}
 }
 
