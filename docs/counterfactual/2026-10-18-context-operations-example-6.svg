@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 660" width="1300" height="660" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title id="t">Turn 5: four operations, each priced at its own position</title>
-<desc id="d">Two rows show the prompt of turn 5, left to right: tools 20,000 tokens, system 3,000, then messages. The cache is hot and reaches the end of message 8, so everything up to there is read at 0.30 dollars per million tokens, and message 9 is written at 3.75. The first row is the client body, 71,000 tokens, and costs 0.04890 dollars. The second row is the forwarded body, 52,260 tokens, and costs 0.01878 dollars. Hatched blocks are what the operators removed: tool-prune removed 3 tool declarations, 8,000 tokens, read, saving 0.00240; mask removed 3,940 tokens from message 3, read, saving 0.00118; cmdfilter removed 7,100 tokens from message 9, written, saving 0.02663. expand added a 300-token tool, read, costing 0.00009. The saving on turn 5 is 0.03012 dollars.</desc>
+<desc id="d">Two rows show the prompt of turn 5, left to right: tools 20,000 tokens, system 3,000, then messages. The cache is hot and reaches the end of message 8, so everything up to there is read at 0.30 dollars per million tokens, and message 9 is written at 3.75. The first row is the client body, 71,000 tokens, and costs 0.04890 dollars. The second row is the forwarded body, 52,260 tokens, and costs 0.01878 dollars. Hatched blocks are what the context operators removed: tool-prune removed 3 tool declarations, 8,000 tokens, read, saving 0.00240; mask removed 3,940 tokens from message 3, read, saving 0.00118; cmdfilter removed 7,100 tokens from message 9, written, saving 0.02663. expand added a 300-token tool, read, costing 0.00009. The saving on turn 5 is 0.03012 dollars.</desc>
 <style>
 svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6;--write:#eb6834}
 @media (prefers-color-scheme: dark){svg{--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#3a3a37;--read:#3987e5;--write:#d95926}}
@@ -22,7 +22,7 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 </defs>
 <rect class="bg" width="1300" height="660"/>
 <text class="t" x="24" y="30" font-size="17" font-weight="600">Turn 5: four operations, each priced at its own position</text>
-<text class="t2" x="24" y="50" font-size="12">Each row is the prompt, left to right, message by message; widths are in tokens. The hatched blocks are what the operators removed.</text>
+<text class="t2" x="24" y="50" font-size="12">Each row is the prompt, left to right, message by message; widths are in tokens. The hatched blocks are what the context operators removed.</text>
 <text class="t" x="292.0" y="80" font-size="11" text-anchor="middle" font-weight="600">tools</text>
 <text class="t2" x="292.0" y="93" font-size="10" text-anchor="middle">30 declarations · 20,000</text>
 <text class="t" x="432.3" y="80" font-size="11" text-anchor="middle" font-weight="600">system</text>
@@ -154,6 +154,6 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 <text class="t" x="1075" y="518" font-size="16" font-weight="600">+$0.03012</text>
 <rect class="read" x="170" y="558" width="22" height="12" rx="2"/><text class="t" x="202" y="568" font-size="12">cache read: $0.30 per million tokens (up to B*)</text>
 <rect class="write" x="560" y="558" width="22" height="12" rx="2"/><text class="t" x="592" y="568" font-size="12">cache write: $3.75 per million tokens (after B*, up to L)</text>
-<rect class="ghost-write" x="170" y="584" width="22" height="12" rx="2"/><rect class="ghost-read" x="196" y="584" width="22" height="12" rx="2"/><text class="t" x="228" y="594" font-size="12">tokens an operator removed, at the rate they would have been billed at</text>
+<rect class="ghost-write" x="170" y="584" width="22" height="12" rx="2"/><rect class="ghost-read" x="196" y="584" width="22" height="12" rx="2"/><text class="t" x="228" y="594" font-size="12">tokens a context operator removed, at the rate they would have been billed at</text>
 <text class="t2" x="170" y="620" font-size="11">The 3 removed tool declarations are not next to each other. Each is its own span of the tool-prune operation.</text>
 </svg>

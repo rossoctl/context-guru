@@ -10,11 +10,11 @@ and turn 7.
 
 - [Setup](#setup): rates, cache state, breakpoints, session and pipeline
 1. [The idea in one change](#1-the-idea-in-one-change): one change, priced on one request
-2. [The same change on hot and cold requests](#2-the-same-change-on-hot-and-cold-requests): one operation, three requests, three prices
+2. [The same change on hot and cold requests](#2-the-same-change-on-hot-and-cold-requests): one context operation, three requests, three prices
 3. [A rewrite of the tools](#3-a-rewrite-of-the-tools): a change to the tools section; `spans`
 4. [A change that costs money first: summarization](#4-a-change-that-costs-money-first-summarization): a model call that costs money first; `spend` and `rewrite`
 5. [A change of settings](#5-a-change-of-settings): a model and an effort change; the cache break
-6. [One request in detail](#6-one-request-in-detail): the full flow: context, cache state, operations, tiers, price
+6. [One request in detail](#6-one-request-in-detail): the full flow: context, cache state, context operations, tiers, price
 7. [A change inside the cached prefix](#7-a-change-inside-the-cached-prefix): a cache break and why the breakpoints matter
 8. [A keep-alive ping](#8-a-keep-alive-ping): a ping and the request it rescues
 
@@ -43,7 +43,7 @@ differ by $0.00001 from the sum of the rounded figures.
 minutes ago. It is **cold** if not. A hot request reads the cached prefix. A cold request writes it
 again.
 
-**The collector.** An operator reports `rewrite`, `spend` and `setting` operations. It never reports a
+**The collector.** A context operator reports `rewrite`, `spend` and `setting` context operations. It never reports a
 `cacheChange`. The host's collector adds each `cacheChange`: a break, with the `changeId` of its cause,
 and a rescue (design §4.4).
 
@@ -56,7 +56,7 @@ show them once, in `RequestOps`.
 
 **Pipeline** of examples 6 and 7, in order:
 
-| Order | Operator | What it does |
+| Order | Context operator | What it does |
 |---|---|---|
 | 1 | `tool-prune` | Removes 3 tool declarations the account does not use |
 | 2 | `context-guru` | `mask`, `cmdfilter`, `coref`; adds the `context_guru_expand` tool |
@@ -70,7 +70,7 @@ not one number, because the provider bills the same tokens at different rates on
 
 The agent has a conversation of 30,000 tokens (messages 0 to 8). The previous request cached it. On
 request 1, a **new message** arrives: message 9, the output of a test run, 8,000 tokens. The
-`cmdfilter` operator shortens it to 1,000 tokens. It removes **7,000 tokens**.
+`cmdfilter` context operator shortens it to 1,000 tokens. It removes **7,000 tokens**.
 
 ![The prompt of request 1 without and with the change](2026-10-18-context-operations-example-1.svg)
 
@@ -78,7 +78,7 @@ request 1, a **new message** arrives: message 9, the output of a test run, 8,000
 the counterfactual. The cache is hot, so messages 0 to 8 are read in both bills. Message 9 is new, so
 it is written. The change saves 7,000 × $3.75 = **$0.02625**. The rates are in the [setup](#setup).
 
-**The operations.** One operation describes the change. The operator reports it as a `rewrite`:
+**The context operations.** One context operation describes the change. The context operator reports it as a `rewrite`:
 
 ```json
 {"kind": "rewrite", "operator": "context-guru.cmdfilter",
@@ -96,8 +96,8 @@ it is written. The change saves 7,000 × $3.75 = **$0.02625**. The rates are in 
 ## 2. The same change on hot and cold requests
 
 Request 1 is 10 seconds after request 0. Request 2 follows 1 minute later, and request 3 follows
-20 minutes after that. Each adds new messages at the end, and the operator reports the same
-`rewrite` again. Each request is priced from its own cache state (see the [setup](#setup)).
+20 minutes after that. Each adds new messages at the end. The context operator reports the `rewrite` once, on request 1.
+`Compute` applies it again on requests 2 and 3. Each request is priced from its own cache state (see the [setup](#setup)).
 
 ![The same 7,000 tokens are saved in all three requests](2026-10-18-context-operations-example-2.svg)
 
@@ -114,19 +114,19 @@ means they would have been read.
 New messages are billed the same with and without the change, so they cancel out.
 The total for the change is **$0.05460**.
 
-**The operations.** One operation, **reported 3 times**. It is the `rewrite` from the operations
-of [example 1](#1-the-idea-in-one-change), with no change in the JSON. The operator reports it on
-requests 1, 2 and 3. The position, the tokens and the `changeId` are the same each time, so the
-host adds the three savings together. The operation is a fact about tokens, and it has no price:
+**The context operations.** One context operation, **reported once**. It is the `rewrite` from the context operations
+of [example 1](#1-the-idea-in-one-change), with no change in the JSON. The context operator reports it on
+request 1 only. `Compute` applies it again on requests 2 and 3, with the same position, tokens and
+`changeId`, so the host adds the three savings together. The context operation is a fact about tokens, and it has no price:
 the cache state decides the price.
 
 ---
 
 ## 3. A rewrite of the tools
 
-An operator can rewrite the `tools` section, not only the messages. Here the `tool-prune` operator removes 3
+A context operator can rewrite the `tools` section, not only the messages. Here the `tool-prune` context operator removes 3
 tool declarations that the account does not use. The client declares 30 tools (20,000 tokens). The
-operator forwards 27 (12,000 tokens). It removes the same 3 declarations on every request.
+context operator forwards 27 (12,000 tokens). It removes the same 3 declarations on every request.
 The tokens removed are the sum of the 3 declarations: 3,500 + 2,000 + 2,500 = **8,000 tokens**.
 
 ```
@@ -140,7 +140,7 @@ messages   ...
 
 **The price.** The provider hashes `tools` first, then `system`, then `messages`. So the tools are
 always at the start of the cached prefix. **B\*** is the position where the provider's cache would
-have ended on this request, if no operator had changed anything. On a hot request the tools are
+have ended on this request, if no context operator had changed anything. On a hot request the tools are
 before B\*, and the 8,000 tokens would have been read. On a cold request B\* is 0, and they would have been
 written.
 
@@ -149,13 +149,13 @@ written.
 | hot | the prefix is cached | cache read | 8,000 × $0.30 = **+$0.00240** |
 | cold | the cache expired | cache write | 8,000 × $3.75 = **+$0.03000** |
 
-The operator removes the same tools on every request, so the forwarded prefix does not change and
+The context operator removes the same tools on every request, so the forwarded prefix does not change and
 there is no cache break. The saving is small on a hot request, and 12.5 times larger on a cold one.
 
-**The operations.** One operation, reported on every request.
+**The context operations.** One context operation, reported once, on the first request.
 
-The 3 tools are not next to each other, so the operator reports one `rewrite` with one span for
-each tool. It is one operation, because it is one decision:
+The 3 tools are not next to each other, so the context operator reports one `rewrite` with one span for
+each tool. It is one context operation, because it is one decision:
 
 ```json
 {"kind": "rewrite", "operator": "tool-prune",
@@ -168,7 +168,7 @@ each tool. It is one operation, because it is one decision:
  "changeId": "tp:decl-set-7f3a"}
 ```
 
-- `spans` lists each touched range with its own `sizeBefore` and `sizeAfter`. The operation's `sizeBefore` and
+- `spans` lists each touched range with its own `sizeBefore` and `sizeAfter`. The context operation's `sizeBefore` and
   `sizeAfter` are the sums: 3,500 + 2,000 + 2,500 = 8,000.
 - There is no `messageSplice`. The message list does not change.
 - The library prices each span on its own, because two spans can sit on different sides of the
@@ -199,32 +199,32 @@ agent's requests. The call uses the summarizer model's rates (see the [setup](#s
   written. Saving: 9,500 × $3.75 = +$0.03563. One cold request saves 12.5 times more than a hot one,
   and the balance goes above zero. The total after three requests is **+$0.01675**.
 
-**The operations.** Three operations describe the change. The `spend` and the `rewrite` carry the
+**The context operations.** Three context operations describe the change. The `spend` and the `rewrite` carry the
 same `changeId`, so the host can add the cost and the saving together.
 
-1. **`spend`, reported once.** The operator reports it with the summarizer call.
+1. **`spend`, reported once.** The context operator reports it with the summarizer call.
 
    ```json
-   {"id": "op1", "kind": "spend", "operator": "context-guru.summarize",
+   {"id": "op1", "kind": "spend", "context operator": "context-guru.summarize",
     "call": {"model": "summarizer-model", "params": {"effort": "low"},
              "usage": {"input": 10000, "cacheRead": 0, "cacheWrite": 0, "output": 500,
                        "costUSD": 0.0125}},
     "changeId": "cg:summarize:5d21"}
    ```
 
-2. **`rewrite`, reported 3 times.** The client sends messages 0 to 2 again on every request. The
-   operator re-emits the stored summary, with no new call, and reports the same `rewrite` on
-   requests A, B and C.
+2. **`rewrite`, reported once.** The client sends messages 0 to 2 again on every request. The
+   context operator re-emits the stored summary, with no new call. It reports the `rewrite` on
+   request A only. `Compute` applies it again on requests B and C.
 
    ```json
-   {"id": "op2", "kind": "rewrite", "operator": "context-guru.summarize",
+   {"id": "op2", "kind": "rewrite", "context operator": "context-guru.summarize",
     "at": {"section": "messages", "index": 0},
     "sizeBefore": {"tokens": 10000}, "sizeAfter": {"tokens": 500},
     "changeId": "cg:summarize:5d21",
     "messageSplice": {"at": 0, "removed": 3, "inserted": 1}}
    ```
 
-3. **`cacheChange`, a break, on request A only, not reported by the operators.** The summary is at the start of
+3. **`cacheChange`, a break, on request A only, not reported by the context operators.** The summary is at the start of
    the prompt, so nothing in the cache matches. The collector adds a break, with the `changeId` of the `rewrite`. B and C
    have no break: on B the summary is already cached, and on C the cache expired.
 
@@ -241,7 +241,7 @@ same `changeId`, so the host can add the cost and the saving together.
 - `changeId` is the change that the call created. It is the same as the `changeId` of the `rewrite`,
   so the cost and the saving are added together.
 - `rewrite` is the summary. `messageSplice` says 3 messages became 1, so later positions move up by 2.
-  The `spend` and the `rewrite` are the same on A, B and C. Only the cache state changes the saving.
+  The `spend` and the `rewrite` are reported once, on A. `Compute` applies the `rewrite` again on B and C. Only the cache state changes the saving.
 - A break (`cacheChange`) moves tokens that follow the break from cache read to cache write. This is the
   **penalty**: the forwarded tokens between the two extents of the break, × ($3.75 − $0.30).
   Here they are the summary and the 3,000-token tail, so the penalty is −$0.01208. It is larger than
@@ -252,7 +252,7 @@ same `changeId`, so the host can add the cost and the saving together.
 
 ## 5. A change of settings
 
-An operator can change the settings of a request, not only its content. Here a router moves request 5
+A context operator can change the settings of a request, not only its content. Here a router moves request 5
 to a smaller model at a lower effort. The numbers are made up for this case.
 
 | Request | Model | Effort | Cache before the request |
@@ -273,19 +273,19 @@ effort. And the effect depends on the task.
 5 reads 0 tokens from the cache, where request 4 left 40,000 cached. Both settings changed together,
 so the break carries the `changeId` of the decision. It does not say which setting caused it.
 
-**The operations.** Two operations describe the change.
+**The context operations.** Two context operations describe the change.
 
 1. **`setting`, reported by the router.** It holds both changes in a map, because they are one
    decision. The key is the setting name. It has no tokens and no price.
 
    ```json
-   { "id": "op1", "kind": "setting", "operator": "inference-router",
+   { "id": "op1", "kind": "setting", "context operator": "inference-router",
      "changeId": "rt:model-7c1a",
      "settings": {"model":  {"from": "large-model", "to": "small-model"},
                   "effort": {"from": "high",        "to": "low"}} }
    ```
 
-2. **`cacheChange`, a break, not reported by the operators.** The collector adds a break, with the `changeId` of `op1`.
+2. **`cacheChange`, a break, not reported by the context operators.** The collector adds a break, with the `changeId` of `op1`.
 
    ```json
    { "id": "op2", "kind": "cacheChange",
@@ -311,13 +311,13 @@ above.
 ## 6. One request in detail
 
 Examples 6 and 7 follow one session, with the [setup](#setup) above. This example prices one
-request. A script computed every figure. For each request, the operations add up to the bill
-without the operations minus the bill with them (design §6.3, "Conservation").
+request. A script computed every figure. For each request, the context operations add up to the bill
+without the context operations minus the bill with them (design §6.3, "Conservation").
 
 ### The context
 
 The body the **client** sends is 71,000 tokens. The diagram shows it, section by section, in the
-top row. The bottom row is the body the operators forward.
+top row. The bottom row is the body the context operators forward.
 
 | Section | Client tokens | Forwarded tokens |
 |---|---|---|
@@ -331,9 +331,9 @@ top row. The bottom row is the body the operators forward.
 | message 9 (new) | 8,000 | 900 |
 | **Total** | **71,000** | **52,260** |
 
-![Turn 5: four operations, each priced at its own position](2026-10-18-context-operations-example-6.svg)
+![Turn 5: four context operations, each priced at its own position](2026-10-18-context-operations-example-6.svg)
 
-Hatched blocks are what the operators removed. Blue is billed at the cache-read rate, and orange at
+Hatched blocks are what the context operators removed. Blue is billed at the cache-read rate, and orange at
 the cache-write rate. The block marked with brackets is the tool that `expand` added.
 
 State from earlier turns:
@@ -360,12 +360,12 @@ state is hot:
 
 So B\* = `messages[8]`.
 
-### The operations
+### The context operations
 
-Earlier examples showed single operations. This time the JSON is the whole report for one request, the
+Earlier examples showed single context operations. This time the JSON is the whole report for one request, the
 **envelope**. The envelope names the request (`requestId`), the session and the thread. It holds all
-the operations of the request in `ops`, in pipeline order. The library reads the envelope
-and prices each operation in it.
+the context operations of the request in `context_counterfactual`, in pipeline order. The library reads the envelope
+and prices each context operation in it.
 
 ```json
 {
@@ -412,21 +412,21 @@ and prices each operation in it.
 }
 ```
 
-op1 is the same operation as in example 3: **one** operation for 3 declarations, because tool-prune
+op1 is the same context operation as in example 3: **one** context operation for 3 declarations, because tool-prune
 removes one account list in one decision (design §4.2 rule 1). To keep the example short, bytes and
 the cg tokenizer name are left out.
 
-The `tools` section sizes are not on any operation. They are given to the sum check
+The `tools` section sizes are not on any context operation. They are given to the sum check
 (design §6.5): 20,000 − 8,000 (op1) + 300 (op2) = 12,300 forwarded.
 
 ### The price
 
-The diagram shows the bill and the saving of each operation. The question for each operation
+The diagram shows the bill and the saving of each context operation. The question for each context operation
 (design §6.2): *if this change had never been made, how would the provider have billed these tokens
 on this request?* The answer depends on the position of the tokens: read at or before B\*, written
 after B\* up to `L`, input after `L`.
 
-| Operation | Tokens | Tier | Calculation | Result |
+| Context operation | Tokens | Tier | Calculation | Result |
 |---|---|---|---|---|
 | `tool-prune` | −8,000 | read | 8,000 × $0.30 | +$0.00240 |
 | `expand` | +300 | read | 300 × $0.30 | −$0.00009 |
@@ -446,7 +446,7 @@ good change. It is not, because message 5 is inside the cached prefix.
 - Turn 6 cached through `messages[11]`, so B\* = `messages[11]`.
 - The client did not change. The forwarded body first differs from turn 6's at `messages[5]`.
 - So the change itself breaks the cache. The collector adds a `cacheChange` with the `changeId` of
-  the `coref` operation.
+  the `coref` context operation.
 
 ![Turn 7: coref saves $0.00599 and breaks the cache for $0.06558](2026-10-18-context-operations-example-7.svg)
 
@@ -473,7 +473,7 @@ the end of `system`. So the provider reads `tools` and `system` (15,300 tokens).
 The 19,010 tokens are messages 0 to 4, the 50-token marker and messages 6 to 11
 (11,060 + 50 + 7,900). Without `coref` the provider would have read them. With it, it writes them.
 The 2,000 new tokens are written in both bills, so they cancel out. Only `coref` is shown. The other
-operations of the request are the same as in example 6.
+context operations of the request are the same as in example 6.
 
 If the client had a breakpoint on `messages[4]`, the penalty would start at message 5. It would be
 7,950 tokens, and costs 7,950 × $3.45 = $0.02743. The net is $0.00599 − $0.02743 = −$0.02144. The breakpoints, not the size of the change, decide most of the
@@ -481,23 +481,23 @@ cost.
 
 On each later hot turn, `coref` saves +$0.00599 again.
 
-### The operations
+### The context operations
 
-Two operations describe the change.
+Two context operations describe the change.
 
 1. **`rewrite`, reported by `coref`.**
 
    ```json
    {
      "id": "op12", "kind": "rewrite",
-     "operator": "context-guru.coref",
+     "context operator": "context-guru.coref",
      "at": {"section": "messages", "index": 5},
      "sizeBefore": {"tokens": 20000}, "sizeAfter": {"tokens": 50},
      "changeId": "cg:coref:5e2d"
    }
    ```
 
-2. **`cacheChange`, a break, not reported by the operators.** The collector adds it, with the `changeId` of op12.
+2. **`cacheChange`, a break, not reported by the context operators.** The collector adds it, with the `changeId` of op12.
 
    ```json
    { "id": "op13", "kind": "cacheChange",
@@ -529,14 +529,14 @@ The diagram shows two cases. Across is the prompt, in tokens. Down is time, in m
 
 ![Without a ping the cache expires before turn 10. With a ping it is still hot](2026-10-18-context-operations-example-8.svg)
 
-### The operations
+### The context operations
 
-Two operations describe the keep-alive window `ka:main:w1`. Both carry the same `changeId`. It links
+Two context operations describe the keep-alive window `ka:main:w1`. Both carry the same `changeId`. It links
 the ping (the cost) to the request it rescued (the saving). So a report can show the cost and the
 value of the window together. A window whose ping rescued nothing has only the `spend`, and its
 total is negative.
 
-1. **`spend`, reported once, by the keeper.** A ping is an ordinary `spend` operation (design §4.2
+1. **`spend`, reported once, by the keeper.** A ping is an ordinary `spend` context operation (design §4.2
    rule 5). **It is not related to any real request.** The agent did not send it, and no turn
    carries it. It is its own `RequestOps`, with its own `requestId` (`ping-p1`). It only costs money:
    it has no saving of its own.
@@ -547,7 +547,7 @@ total is negative.
      "thread": {"id": "main"},
      "billing": {"mode": "api"},
      "ops": [
-       { "id": "op1", "kind": "spend", "operator": "keeper",
+       { "id": "op1", "kind": "spend", "context operator": "keeper",
          "changeId": "ka:main:w1",
          "call": {
            "host": "api.anthropic.com", "model": "agent-model",
@@ -557,7 +557,7 @@ total is negative.
    }
    ```
 
-2. **`cacheChange`, a rescue, on turn 10, not reported by the operators.** The collector adds it after the four conditions of design §4.4 are checked.
+2. **`cacheChange`, a rescue, on turn 10, not reported by the context operators.** The collector adds it after the four conditions of design §4.4 are checked.
    Turn 9 forwarded messages 0 to 5, so the extent is `messages[5]`.
 
    ```json
@@ -572,7 +572,7 @@ total is negative.
 
 ### The price
 
-| Operation | Calculation | Result |
+| Context operation | Calculation | Result |
 |---|---|---|
 | Ping (`spend`) | 10,000 read + 10 input + 1 output | −$0.00305 |
 | Rescue (`cacheChange`, cold to hot) | 10,000 × ($3.75 − $0.30) | +$0.03450 |
@@ -581,6 +581,6 @@ total is negative.
 The ping re-sends the 10,000 cached tokens, so they are billed as a read. The 10 input tokens are
 the small part of the ping that is not cached. The 1 output token is the reply.
 
-The ping has no request of its own, so the totals add up operations, not requests. The ping and
+The ping has no request of its own, so the totals add up context operations, not requests. The ping and
 the rescue both carry session `s2` and thread `main`. The host adds both to the totals of that
 session and that thread: −$0.00305 + $0.03450 = **+$0.03145**.
