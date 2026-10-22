@@ -823,7 +823,7 @@ func (k *Keeper) Record(r Record) {
 	}
 	// The automatic gates decide whether this thread is pinged on a schedule. A request that opted in
 	// to the button and fails them (or has no schedule at all) is still held, as a manual-only entry:
-	// no schedule, a hard 300 s life. Only the cost ceiling is kept, because a press spends money too.
+	// no schedule, a hard life of 300 s (59 min on a one-hour thread). Only the cost ceiling is kept, because a press spends money too.
 	if !pol.On() || !e.pingable() {
 		if !pol.ManualHold {
 			reason := ReasonBelowLimits

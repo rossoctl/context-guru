@@ -166,7 +166,7 @@ write routing while no proxy answers.
 
 - `result=routed` — done. `settings_result=` says which: `added`, `unchanged` (already correct),
   `completed` (a repair of an earlier partial attempt — report it as success, not "nothing to do"),
-  or `repointed` (moved to a new port). Relay `ping_note=` verbatim: the server keeps the latest request and key in memory up to 5 min so Ping works, never pings automatically for it, drops the copy 5 min after the last request; `--no-ping-header` opts out.
+  or `repointed` (moved to a new port). Relay `ping_note=` verbatim: the server keeps the latest request and key in memory so Ping works (5 min after the last request on a 5-minute cache, up to 59 min on a 1-hour cache), never pings automatically for it, and drops the copy at that time; `--no-ping-header` opts out.
 - `result=error reason=health_check_failed` — **no routing was written**, so the project is unrouted,
   which is a working project. Say what the log shows rather than guessing, and do **not** say
   "nothing happened": check `proxy_started=`, and if `true` a proxy IS still listening — say so and

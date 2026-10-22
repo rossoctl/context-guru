@@ -56,7 +56,7 @@ BIN_KEY = "CONTEXT_GURU_BIN"
 OURS = (KEY, UPSTREAM_KEY, BIN_KEY)
 
 # The header that opts a session in to MANUAL pings (the Ping button and /context-guru:ping) when keep-alive is
-# off: the proxy holds that session's cache request for at most 300 s, for a manual ping only. It rides in
+# off: the proxy holds that session's cache request for a manual ping only: at most 300 s on a 5-minute cache, at most 59 min on a 1-hour cache. It rides in
 # ANTHROPIC_CUSTOM_HEADERS, which Claude Code reads as `Name: Value` lines separated by NEWLINES (verified on
 # 2.1.307: a comma-joined value arrives as one corrupted header). The user's own headers, a hosted install's
 # `x-context-guru-token` included, share that variable, so the line is appended and removed, never overwritten.

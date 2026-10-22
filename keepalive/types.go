@@ -159,7 +159,7 @@ type Policy struct {
 	// ManualHold is the host's reading of an opt-in on THIS request (the proxy: the
 	// x-context-guru-ping header): keep this thread for the Ping button even though no automatic
 	// ping will be sent for it. It never turns the schedule on, and never widens what is held: the
-	// entry lives ManualHoldMax and is released and zeroized then. See manualhold.go.
+	// entry lives ManualHoldMax (ManualHoldMax1h on a one-hour thread) and is released and zeroized then. See manualhold.go.
 	ManualHold bool
 }
 
