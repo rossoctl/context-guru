@@ -110,6 +110,26 @@ class TestGenerators(unittest.TestCase):
             ok += e.get("type") == "assistant"
         self.assertEqual(ok, len(s.turns) - 1)
 
+    def test_pre_install_only_writes_exactly_the_turns_install_will_import(self):
+        # Install imports before any traffic, so whatever is on disk then is what it imports: every
+        # pre-install turn, the truncated one minus its cut line, and no post-install turn at all.
+        from e2e import oracle
+        for tier in ("smoke", "full"):
+            with self.subTest(tier=tier), tempfile.TemporaryDirectory() as home:
+                m = mf.build(tier, home=home)
+                transcripts.write(m, home, pre_install_only=True)
+                n = post = 0
+                for f in (pathlib.Path(home) / ".claude" / "projects").glob("*/*.jsonl"):
+                    for l in f.read_text().splitlines():
+                        try:
+                            e = json.loads(l)
+                        except ValueError:
+                            continue
+                        if e.get("type") == "assistant":
+                            n += 1
+                            post += e["timestamp"] >= transcripts._iso(m.install_ms)
+                self.assertEqual((n, post), (oracle.expected(m)["import"]["valid_pre_install_turns"], 0))
+
     def test_assistant_line_message_model_is_priced_model(self):
         """Assistant line's message.model should use the priced model constant."""
         transcripts.write(self.m, self.home)

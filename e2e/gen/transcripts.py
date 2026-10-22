@@ -30,9 +30,9 @@ def _blocks(t: mf.Turn, caps: dict) -> list:
     return out
 
 
-def _lines(s: mf.Session, caps: dict, m: mf.Manifest, stamps) -> list:
+def _lines(s: mf.Session, caps: dict, m: mf.Manifest, stamps, turns=None) -> list:
     out = [json.dumps({"type": "ai-title", "sessionId": s.id, "aiTitle": "work"})]
-    for t in s.turns:
+    for t in (s.turns if turns is None else turns):
         ts = t.ts
         if stamps is not None and mf.measured(t, m):
             # The proxy stamped this request's row with its real arrival time; the transcript of the
@@ -54,30 +54,40 @@ def _lines(s: mf.Session, caps: dict, m: mf.Manifest, stamps) -> list:
     return out
 
 
-def write(m: mf.Manifest, home: str, stamps: dict | None = None) -> dict:
+def write(m: mf.Manifest, home: str, stamps: dict | None = None, pre_install_only: bool = False) -> dict:
+    """pre_install_only writes what is on disk the moment the plugin is installed: every turn before
+    install_ms and none after, so the install-time import has exactly the pre-install history to read.
+    A later full write rewrites each file with the whole session, as Claude Code keeps appending."""
     caps = {c.name: c for c in m.capabilities}
     projs = {p.key: p for p in m.projects}
     base = pathlib.Path(home) / ".claude" / "projects"
-    turns = 0
+    files = turns = cut = 0
     truncated = m.sessions[mf.TRUNCATED_SESSION_INDEX]
     for s in m.sessions:
+        keep = [t for t in s.turns if not (pre_install_only and mf.measured(t, m))]
+        if not keep:
+            continue  # a session that only started after install has no file yet
         d = base / projs[s.project].transcript_dir
         d.mkdir(parents=True, exist_ok=True)
-        lines = _lines(s, caps, m, stamps)
-        if s is truncated:
+        lines = _lines(s, caps, m, stamps, keep)
+        # Cut only where the final turn is in this write: a pre-install write of a session whose last
+        # turn is post-install has not reached the line that gets cut.
+        if s is truncated and keep[-1] is s.turns[-1]:
+            cut = 1
             # Killed mid-write: the final assistant line is cut to its first half and ends the file.
             lines = lines[:-1]  # no last-prompt bookkeeping line
             body = "\n".join(lines[:-1]) + "\n" + lines[-1][: len(lines[-1]) // 2]
         else:
             body = "\n".join(lines) + "\n"
         (d / f"{s.id}.jsonl").write_text(body)
-        turns += len(s.turns)
+        files += 1
+        turns += len(keep)
     for p in m.projects:  # folders that exist on disk; deleted-proj stays absent
         if p.exists and p.root.startswith(home):
             for f in p.folders:
                 if f.startswith(home):
                     pathlib.Path(f).mkdir(parents=True, exist_ok=True)
-    return {"files": len(m.sessions), "turns": turns, "truncated_lines": 1}
+    return {"files": files, "turns": turns, "truncated_lines": cut}
 
 
 def main(argv=None) -> int:
@@ -85,9 +95,10 @@ def main(argv=None) -> int:
     ap.add_argument("--tier", required=True)
     ap.add_argument("--home", required=True)
     ap.add_argument("--stamps", default="", help="replay's send-time map; post-install turns take these times")
+    ap.add_argument("--pre-install-only", action="store_true", help="write only what exists before install")
     a = ap.parse_args(argv)
     stamps = json.load(open(a.stamps)) if a.stamps else None
-    print(json.dumps(write(mf.build(a.tier, home=a.home), a.home, stamps)))
+    print(json.dumps(write(mf.build(a.tier, home=a.home), a.home, stamps, a.pre_install_only)))
     return 0
 
 
