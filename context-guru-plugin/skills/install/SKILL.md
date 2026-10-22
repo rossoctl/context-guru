@@ -166,7 +166,7 @@ write routing while no proxy answers.
 
 - `result=routed` — done. `settings_result=` says which: `added`, `unchanged` (already correct),
   `completed` (a repair of an earlier partial attempt — report it as success, not "nothing to do"),
-  or `repointed` (moved to a new port).
+  or `repointed` (moved to a new port). Relay `ping_note=` verbatim when present: it is the consent line for the `x-context-guru-ping` header.
 - `result=error reason=health_check_failed` — **no routing was written**, so the project is unrouted,
   which is a working project. Say what the log shows rather than guessing, and do **not** say
   "nothing happened": check `proxy_started=`, and if `true` a proxy IS still listening — say so and

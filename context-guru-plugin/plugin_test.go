@@ -7820,11 +7820,12 @@ func TestRouteConfirmCommandCarriesEveryDecision(t *testing.T) {
 	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
 		"--i-understand-machine-wide", "--on-conflict", "chain", "--cache-strategy", "none",
 		"--upstream", "https://gw.example/v1", "--health-url", "http://127.0.0.1:9/healthz",
-		"--no-health-check")
+		"--no-health-check", "--no-ping-header")
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
 	for _, want := range []string{
+		"--no-ping-header", // the opt-out is a decision, so it travels in the printed command
 		"--scope user",
 		"--on-conflict chain",
 		"--i-understand-machine-wide",

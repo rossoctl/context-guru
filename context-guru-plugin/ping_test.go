@@ -235,7 +235,8 @@ func TestPingReasonWords(t *testing.T) {
 	requireTool(t, "python3")
 	for reason, want := range map[string]string{
 		"below limits": "below its minimum size", "pings used": "pings have run out", "stopped": "stopped keeping this thread warm",
-		"no entry": "knows nothing about this session", "expired": "cache already cold", "too large": "too large to hold",
+		"no entry": "knows nothing about this session", "unavailable": "route or credential is failing",
+		"not opted in": "restart Claude Code after the plugin update", "expired": "cache already cold", "too large": "too large to hold",
 		"unsupported": "extended thinking", "over budget": "per-ping limit", "from-the-future": "cannot ping this session right now",
 	} {
 		t.Run(reason, func(t *testing.T) {

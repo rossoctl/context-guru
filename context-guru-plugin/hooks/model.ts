@@ -129,6 +129,7 @@ const REASONS: Record<string, string> = {
   stopped: 'the proxy stopped keeping this thread warm after a miss or a refused ping',
   expired: 'cache already cold',
   'no entry': 'the server knows nothing about this session yet; send a prompt first',
+  unavailable: 'the upstream route or credential is failing right now, try again shortly',
 }
 
 /** A code from a newer server is never shown raw. */

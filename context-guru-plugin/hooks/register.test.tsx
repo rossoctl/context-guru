@@ -204,6 +204,11 @@ for (const [reason, want] of [
   ['pings used', /pings have run out/],
   ['stopped', /stopped keeping this thread warm/],
   ['no entry', /knows nothing about this session/],
+  ['unavailable', /route or credential is failing/],
+  ['over budget', /per-ping limit/],
+  ['too large', /too large to hold/],
+  ['unsupported', /extended thinking/],
+  ['expired', /already cold/],
   ['some-future-code', /cannot ping this session right now/],
 ] as const) {
   test(`/ping words ping_reason ${reason}`, async ($, on) => {

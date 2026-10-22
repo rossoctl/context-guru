@@ -62,7 +62,7 @@ route_here() { CDPATH= cd -- "$(dirname -- "$0")" && pwd -P; }
 
 # Every fact the plan and the confirm both report. Kept in one place so `--plan` cannot describe a
 # different install from the one `--confirm` performs.
-R_MODE=local R_SCOPE=project R_ONCONFLICT= R_BASEURL= R_HEALTHURL= R_NOHEALTH=0
+R_MODE=local R_SCOPE=project R_ONCONFLICT= R_BASEURL= R_HEALTHURL= R_NOHEALTH=0 R_NOPING=0
 R_STRATEGY= R_UPSTREAM= R_USERSCOPE=0 R_PLAN=0 R_CONFIRM=0 R_NOSTATUSLINE=0 R_NOGITIGNORE=0
 R_PORT= R_PRESET= R_IDLE= R_BIN= R_ONPATH= R_FILE= R_EXISTING= R_CHAINED=false
 # Set by step 0 once the port record is actually written, and read only by route_unwind_port.
@@ -425,6 +425,7 @@ route_confirm_command() {
   [ -n "$R_UPSTREAM" ] && c="$c --upstream $(shq "$R_UPSTREAM")"
   [ -n "$R_HEALTHURL" ] && c="$c --health-url $(shq "$R_HEALTHURL")"
   [ "$R_NOHEALTH" = 1 ] && c="$c --no-health-check"
+  [ "$R_NOPING" = 1 ] && c="$c --no-ping-header"
   [ "$R_NOGITIGNORE" = 1 ] && c="$c --no-gitignore-check"
   [ "$R_USERSCOPE" = 1 ] && c="$c --i-understand-machine-wide"
   [ -n "$R_ONEXISTING" ] && c="$c --on-existing-projects $(shq "$R_ONEXISTING")"
@@ -1067,6 +1068,7 @@ proxy is a broken one."
   local add=("$(route_here)/settings.py" add --file "$R_FILE" --url "$(route_url)")
   [ -n "$R_UPSTREAM" ] && add+=(--upstream "$R_UPSTREAM")
   [ -n "$R_BIN" ] && add+=(--bin "$R_BIN")
+  [ "$R_NOPING" = 1 ] && add+=(--no-ping-header)
   [ "$R_SCOPE" = user ] && add+=(--user-scope)
   # BOTH decisions overwrite the routing key - that is what routing through a proxy means. `chain`
   # differs from `replace` only in ADDITIONALLY recording the old value as the upstream, which the
@@ -1231,6 +1233,11 @@ any other project, since the machine-wide install has its own record and port."
   emit "backup=$(kv "$aout" backup)"
   emit "reset_hatch=$(kv "$aout" reset_hatch)"
   emit "replaced=$(kv "$aout" replaced)"
+  # Consent for the manual-ping opt-in header (x-context-guru-ping: 1): said every time it is written, so the user
+  # hears what the proxy keeps and for how long, and how to turn it off.
+  if [ "$R_NOPING" != 1 ]; then
+    emit "ping_note=Ping works with keep-alive off: the Context Guru server keeps your latest request and key in memory for up to 5 minutes so the Ping button and /context-guru:ping can work. It never pings automatically for this, and drops the copy after 5 minutes. To opt out, re-run the install with --no-ping-header."
+  fi
   route_install_statusline
   route_enable_plugin "$ares"
   route_ensure_gitignore
@@ -1379,6 +1386,7 @@ if [ "${1:-}" = --route ]; then
       --health-url) route_need_value --health-url "${2:-}"; R_HEALTHURL="$2"; shift ;;
       --upstream) route_need_value --upstream "${2:-}"; R_UPSTREAM="$2"; shift ;;
       --no-health-check) R_NOHEALTH=1 ;;
+      --no-ping-header) R_NOPING=1 ;;
       --no-statusline) R_NOSTATUSLINE=1 ;;
       --no-gitignore-check) R_NOGITIGNORE=1 ;;
       --i-understand-machine-wide) R_USERSCOPE=1 ;;

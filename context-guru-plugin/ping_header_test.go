@@ -6,7 +6,10 @@
 package plugin
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -102,5 +105,50 @@ func TestARoutedInstallGetsThePingHeaderOnARerun(t *testing.T) {
 	}
 	if got, _ := headersOf(t, path); got != "x-context-guru-ping: 1" {
 		t.Errorf("headers = %q", got)
+	}
+}
+
+// The install says what the opt-in means (consent), writes the header, and --no-ping-header turns both off.
+func TestInstallSaysWhatThePingHeaderMeans(t *testing.T) {
+	for _, optOut := range []bool{false, true} {
+		name := "default"
+		if optOut {
+			name = "opted out"
+		}
+		t.Run(name, func(t *testing.T) {
+			home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+			port := freePort(t)
+			writePluginOptions(t, home, map[string]any{"port": port})
+			env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+			args := consentOK()
+			if optOut {
+				args = append(args, "--no-ping-header")
+			}
+			facts, code := runRoute(t, proj, env, args...)
+			t.Cleanup(func() {
+				if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+					exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+				}
+			})
+			if code != 0 || facts["result"] != "routed" {
+				t.Fatalf("exit %d: %v", code, facts)
+			}
+			got, has := headersOf(t, filepath.Join(proj, ".claude", "settings.local.json"))
+			note := facts["ping_note"]
+			if optOut {
+				if has || note != "" {
+					t.Errorf("opted out, yet headers=%q ping_note=%q", got, note)
+				}
+				return
+			}
+			if got != "x-context-guru-ping: 1" {
+				t.Errorf("headers = %q", got)
+			}
+			for _, want := range []string{"up to 5 minutes", "never pings automatically", "drops the copy", "--no-ping-header"} {
+				if !strings.Contains(note, want) {
+					t.Errorf("ping_note is missing %q: %q", want, note)
+				}
+			}
+		})
 	}
 }
