@@ -222,12 +222,30 @@ def cachestate_cached(base: str, session: str, fetch=None) -> dict:
     return {"error": "proxy not answering"}
 
 
+def name_agents(doc: dict, transcript: str) -> None:
+    """Adds `name` to each real sub-agent thread (`a:` ids) of a cachestate doc, with the status line's own
+    naming (Claude Code's agents list, read from <transcript>/subagents/*.meta.json). One copy of that logic:
+    statusline.py. Threads without a name get none, and the mod shows nothing for them."""
+    try:
+        import statusline as sl  # noqa: PLC0415  (lazy: the other commands do not pay for it)
+        ids = sl._agent_ids(doc)
+        names = sl._agent_names({"transcript_path": transcript}, ids)
+        rows = {r["id"]: r["name"] for r in sl._agent_rows(doc, float(doc.get("age_s") or 0), names)}
+    except Exception:  # noqa: BLE001  (a name is decoration: never fail the read over it)
+        return
+    for t in doc.get("threads") or []:
+        if isinstance(t, dict) and rows.get(t.get("id")):
+            t["name"] = rows[t["id"]]
+
+
 def cmd_cachestate(api: Api, o: dict) -> list[str]:
     sid = o["session"] or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not sid or not re.match(r"^[A-Za-z0-9_-]{1,128}$", sid):
         doc, code = {"error": "no session"}, 1
     else:
         doc = cachestate_cached(api.base, sid)
+        if o.get("transcript") and "error" not in doc:
+            name_agents(doc, o["transcript"])
         code = 1 if "error" in doc else 0
     o["exit"] = code
     return [json.dumps(doc, separators=(",", ":"))]
@@ -1243,6 +1261,7 @@ def main(argv: list[str] | None = None) -> int:
                     "cache-campaign mode ... active: go live although the build did not recommend it")
     ap.add_argument("--days", type=int, default=0)
     ap.add_argument("--port")
+    ap.add_argument("--transcript", help="cachestate: this session's transcript path, to name its sub-agents")
     ap.add_argument("--thread", help="ping: the thread id (default: the main thread)")
     ap.add_argument("--session")
     ap.add_argument("--json", action="store_true", help="print the raw documents of one command")
@@ -1285,7 +1304,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd in (*READS, *WRITES):
         return adapt_main(api, a.cmd, opts)
     if a.cmd == "cachestate":  # for the mods: JSON only, from the shared cache, exit 1 when there is nothing
-        o = {"session": a.session}
+        o = {"session": a.session, "transcript": a.transcript}
         print(cmd_cachestate(api, o)[0])
         return o["exit"]
     print(run(a.cmd, api, opts))

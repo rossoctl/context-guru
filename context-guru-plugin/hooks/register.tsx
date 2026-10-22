@@ -1,5 +1,6 @@
-// Context Guru mod: a band above the prompt (dashboard link, cache warm/cold, next-request cost, saved $,
-// a Ping button while the cache is warm, one chip per subagent) and an optional pane (/context-guru:pane).
+// Context Guru mod: a band above the prompt (brand, dashboard link, the main cache as a gauge with its time left,
+// next-request cost, saved $, a Ping button while the cache is warm, one chip per named sub-agent, one tip) and an
+// optional pane (/context-guru:context-guru). A cold cache shows nothing: the user knows.
 //
 // The mod never touches the network. Every read and the one write go through scripts/cg.py, which owns
 // auth, the routed port and TLS trust:
@@ -9,7 +10,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
 import type { Snapshot, View } from '../types'
-import { pingToast, signature, span, usd, view } from './model'
+import { TIPS, gauge, pingToast, signature, usd, view } from './model'
 
 const PANE = 'context-guru'
 const POLL_MS = 15_000
@@ -19,6 +20,7 @@ const isPinging = atom({ plugin: 'context-guru', key: 'isPinging' } as const, fa
 const isHidden = atom({ plugin: 'context-guru', key: 'isHidden' } as const, false)
 
 let seen = ''
+let transcript = '' // this session's transcript path, from the classic hooks: it names the sub-agents
 
 async function helper($: Engine, args: string[]): Promise<Record<string, any> | null> {
   try {
@@ -39,12 +41,12 @@ async function refresh($: Engine): Promise<void> {
 }
 
 async function load($: Engine): Promise<void> {
-  const doc = await helper($, ['cachestate', '--json', '--session', await $.session.id()])
+  const doc = await helper($, ['cachestate', '--json', '--session', await $.session.id(), ...(transcript ? ['--transcript', transcript] : [])])
   const now = await $.clock.now()
   // `cg.py cachestate --json` prints the raw /api/cachestate entry (+ age_s, stale), or {"error": ...}.
-  // The dashboard is the loopback proxy this session is routed through; anything else shows no link.
+  // The dashboard is the loopback proxy this session is routed through (http://localhost:PORT/dashboard/); anything else shows no link.
   const base = /^(https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?)/.exec((await $.env.get('ANTHROPIC_BASE_URL')) ?? '')
-  const snap: Snapshot | null = doc ? { at: now, url: base ? `${base[1]}/` : '', doc } : null
+  const snap: Snapshot | null = doc ? { at: now, url: base ? `${base[1].replace('127.0.0.1', 'localhost')}/dashboard/` : '', doc } : null
   // Redraw only when what the band says changes: the words, not the seconds.
   const sig = signature(view(snap, now))
   if (sig === seen) return
@@ -77,6 +79,16 @@ async function ping($: Engine): Promise<void> {
 }
 
 export const register: Register = on => {
+  // The envelope of the classic hooks carries the transcript path; sub-agent names live beside it.
+  on('classic.SessionStart', ($, e, next) => {
+    transcript = e.transcript_path
+    return next(e)
+  })
+  on('classic.UserPromptSubmit', ($, e, next) => {
+    transcript = e.transcript_path
+    return next(e)
+  })
+
 
 
 
@@ -106,59 +118,78 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const snap = await read($, snapshot)
-    const v = view(snap, await $.clock.now())
+    const now = await $.clock.now()
+    const v = view(snap, now)
     if (e.props.hasSurvey || !v || (await read($, isHidden))) return next(e)
 
     const { Box, Text, Button, Link } = $.ui.resolve(e)
     const busy = await read($, isPinging)
     const m = v.main
     const rows = e.props.maxRows
-
-    const cost = (
-      <Text dimColor>
-        {m.warmUsd !== undefined && m.coldUsd !== undefined ? (
-          <Text>
-            next request <Text color="success">{usd(m.warmUsd)} warm</Text> vs <Text color="warning">{usd(m.coldUsd)} cold</Text>
-          </Text>
-        ) : m.coldUsd !== undefined ? (
-          <Text>a cold restart would cost {usd(m.coldUsd)}</Text>
-        ) : null}
-      </Text>
-    )
+    const colour = m.isPinged ? 'cyan' : m.isLastMinute ? 'warning' : 'success'
+    const bar = <Text dimColor>{' │ '}</Text>
+    const tip = TIPS[v.tip % TIPS.length]
 
     return (
-      <Box flexDirection="column" paddingX={1}>
-        <Box flexWrap="wrap" columnGap={2}>
+      <Box flexDirection="column" paddingX={1} marginTop={1}>
+        <Box flexWrap="wrap">
           <Text bold color="claude">{'◆'} Context Guru</Text>
-          {v.url !== '' && <Link href={v.url.replace('127.0.0.1', 'localhost')} label="dashboard ↗" />}
-          {m.isWarm ? (
-            <Text color="success">{'●'} cache warm {m.left}</Text>
-          ) : (
-            <Text color="warning">{'○'} cache cold</Text>
+          {m.isWarm && (
+            <Text>
+              {bar}
+              <Text color={colour}>{gauge(m.frac)} {m.left}{m.isPinged ? ' ↻' : ''}</Text>
+            </Text>
           )}
-          {cost}
-          {v.saved !== undefined && <Text>saved <Text bold color="success">{usd(v.saved)}</Text></Text>}
-          {m.isWarm && !m.isPingable && <Text dimColor>keep-alive off</Text>}
-          {m.isWarm && m.isPingable && (
-            <Button
-              key="ping"
-              label={busy ? 'Pinging…' : 'Ping'}
-              variant="primary"
-              hotkey="p"
-              onPress={() => (busy ? undefined : ping($))}
-            />
+          {m.isWarm && m.warmUsd !== undefined && m.coldUsd !== undefined && (
+            <Text>
+              {bar}
+              <Text dimColor>next </Text>
+              <Text color="success">{usd(m.warmUsd)}</Text>
+              <Text dimColor> vs {usd(m.coldUsd)} if cold</Text>
+            </Text>
           )}
-          <Button key="hide" label="Hide" plain dimColor onPress={() => update($, isHidden, () => true)} />
+          {v.saved !== undefined && v.saved > 0 && (
+            <Text>
+              {bar}
+              <Text dimColor>saved </Text>
+              <Text bold color="success">{usd(v.saved)}</Text>
+            </Text>
+          )}
+          {m.isWarm && (
+            <Box>
+              {bar}
+              <Button
+                key="ping"
+                label={busy ? 'Pinging…' : 'Ping'}
+                variant="primary"
+                hotkey="p"
+                onPress={() => (busy ? undefined : ping($))}
+              />
+            </Box>
+          )}
+          {v.url !== '' && (
+            <Box>
+              {bar}
+              <Link href={v.url} label="dashboard ↗" />
+            </Box>
+          )}
+          <Text> </Text>
+          <Button key="hide" label="hide" plain dimColor onPress={() => update($, isHidden, () => true)} />
         </Box>
-        {v.subs.length > 0 && rows > 1 && (
+        {v.subs.length > 0 && rows > 2 && (
           <Box flexWrap="wrap" columnGap={2}>
-            <Text dimColor>subagents</Text>
+            <Text dimColor>{'└'} agents</Text>
             {v.subs.map(t => (
-              <Text key={t.id} color={t.isWarm ? 'success' : 'warning'}>
-                {t.isWarm ? '●' : '○'} {t.id.slice(0, 12)} {t.isWarm ? t.left : 'cold'}
+              <Text key={t.id} color={t.isPinged ? 'cyan' : t.isLastMinute ? 'warning' : 'success'}>
+                {t.name} <Text dimColor>{gauge(t.frac, 4)}</Text> {t.left}{t.isPinged ? ' ↻' : ''}
               </Text>
             ))}
           </Box>
+        )}
+        {rows > 3 && (
+          <Text dimColor>
+            save more: <Text color="suggestion">{tip.cmd}</Text> {'—'} {tip.why}
+          </Text>
         )}
       </Box>
     )
@@ -171,26 +202,61 @@ export const register: Register = on => {
     if (!v || !snap) {
       return <Text dimColor>No Context Guru data for this session yet. Send a prompt, or check /context-guru:doctor.</Text>
     }
+    const m = v.main
+    const colour = (t: { isPinged: boolean; isLastMinute: boolean }) => (t.isPinged ? 'cyan' : t.isLastMinute ? 'warning' : 'success')
+    const wide = Math.min(24, Math.max(8, (e.props.bodyColumns ?? 60) - 40))
+
     return (
-      <Box flexDirection="column" gap={1}>
+      <Box flexDirection="column" gap={1} paddingX={1}>
         <Box columnGap={2}>
-          <Text bold color="claude">Context Guru</Text>
-          {v.url !== '' && <Link href={v.url.replace('127.0.0.1', 'localhost')} label="open dashboard" />}
-          {v.saved !== undefined && <Text>saved <Text bold color="success">{usd(v.saved)}</Text></Text>}
+          <Text bold color="claude">{'◆'} Context Guru</Text>
+          {v.url !== '' && <Link href={v.url} label="open dashboard ↗" />}
         </Box>
 
+        {v.saved !== undefined && (
+          <Box flexDirection="column">
+            <Text dimColor>SAVED THIS SESSION</Text>
+            <Text bold color="success">{usd(v.saved)}</Text>
+          </Box>
+        )}
+
         <Box flexDirection="column">
-          <Text bold>Cache</Text>
-          {[{ ...v.main, id: 'main' }, ...v.subs].map(t => (
-            <Text key={t.id}>
-              <Text color={t.isWarm ? 'success' : 'warning'}>{t.isWarm ? '● warm' : '○ cold'}</Text> {t.id.slice(0, 14).padEnd(14)} {t.isWarm ? `${t.left} left` : 'rewrite on next send'}
-              {t.tokens !== undefined && <Text dimColor>  {Math.round(t.tokens / 1000)}k tokens</Text>}
-              {t.warmUsd !== undefined && t.coldUsd !== undefined && <Text dimColor>  {usd(t.warmUsd)} warm / {usd(t.coldUsd)} cold</Text>}
+          <Text dimColor>MAIN CACHE</Text>
+          {m.isWarm ? (
+            <Text>
+              <Text color={colour(m)}>{gauge(m.frac, wide)} {m.left} left{m.isPinged ? ' ↻ kept warm by pings' : ''}</Text>
+              {m.tokens !== undefined && <Text dimColor>  {Math.round(m.tokens / 1000)}k tokens</Text>}
+            </Text>
+          ) : (
+            <Text dimColor>nothing held; the next request writes it again</Text>
+          )}
+          {m.warmUsd !== undefined && m.coldUsd !== undefined && (
+            <Text dimColor>next request {usd(m.warmUsd)} warm, {usd(m.coldUsd)} cold</Text>
+          )}
+        </Box>
+
+        {v.subs.length > 0 && (
+          <Box flexDirection="column">
+            <Text dimColor>AGENTS</Text>
+            {v.subs.map(t => (
+              <Text key={t.id}>
+                {t.name?.padEnd(18).slice(0, 18)} <Text color={colour(t)}>{gauge(t.frac, Math.min(wide, 12))} {t.left}{t.isPinged ? ' ↻' : ''}</Text>
+                {t.saved !== undefined && t.saved > 0 && <Text dimColor>  saved {usd(t.saved)}</Text>}
+              </Text>
+            ))}
+          </Box>
+        )}
+
+        <Box flexDirection="column">
+          <Text dimColor>SAVE MORE</Text>
+          {TIPS.map(t => (
+            <Text key={t.cmd}>
+              <Text color="suggestion">{t.cmd}</Text> <Text dimColor>{t.why}</Text>
             </Text>
           ))}
         </Box>
 
-        {v.main.isWarm && v.main.isPingable && <Button key="ping" label="Ping now" variant="primary" hotkey="p" onPress={() => ping($)} />}
+        {m.isWarm && <Button key="ping" label="Ping now" variant="primary" hotkey="p" onPress={() => ping($)} />}
       </Box>
     )
   })
