@@ -43,7 +43,7 @@ type StrategyLedgerView struct {
 func (d *DB) StrategyLedger(strategyID string) (*StrategyLedgerView, error) {
 	out := &StrategyLedgerView{StrategyID: strategyID, Tenants: []StrategyLedgerRow{}}
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT tenant_id, COUNT(*), COALESCE(SUM(cost_usd),0)
-		FROM requests WHERE keepalive = 1 AND keepalive_strategy_id = ?
+		FROM requests WHERE keepalive = 1 AND manual_ping = 0 AND keepalive_strategy_id = ?
 		GROUP BY tenant_id ORDER BY 3 DESC`, strategyID)
 	if err != nil {
 		return nil, err

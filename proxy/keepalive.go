@@ -449,6 +449,15 @@ func (h *Handler) PendingPings() int {
 	return h.keeper.pendingPings()
 }
 
+// KeepAlivePingable says, per thread of one session, whether the keeper holds what a manual ping
+// needs (dash.API.SetPingable). It is keepalive.Keeper.Pingable behind the nil checks.
+func (h *Handler) KeepAlivePingable(tenantID string, allTenants bool, session string) map[string]bool {
+	if h == nil || h.keeper == nil {
+		return nil
+	}
+	return h.keeper.Keeper.Pingable(tenantID, allTenants, session)
+}
+
 // KeepAlivePlans is the keeper's ping plan for one session's threads, keyed by thread id, for the
 // status line's "held warm until" (dash.API.SetKeepAlivePlans). Only an entry that will still be
 // pinged has a plan (keepalive.Keeper.Plans). allTenants matches the session in any tenant, for a

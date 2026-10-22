@@ -585,7 +585,8 @@ const (
 // invWriters holds one writer per Recorder, created on first use. A package-level map
 // rather than a Recorder field so this feature is additive to the capture pipeline
 // instead of a change to it; the writer still shuts down with its recorder (it selects
-// on the recorder's own done channel).
+// on the recorder's own done channel), and Close waits for its final flush before closing
+// the database (startInBackground).
 var invWriters sync.Map // *Recorder -> *invWriter
 
 // RecordInventory hands one request's declared/used inventory to the inventory writer.
@@ -604,8 +605,9 @@ func (r *Recorder) RecordInventory(tenant, session string, ts int64, inv *Invent
 		nw := &invWriter{db: r.db, ch: make(chan invMsg, invQueue), seen: map[string]*invSession{}}
 		var loaded bool
 		w, loaded = invWriters.LoadOrStore(r, nw)
-		if !loaded {
-			go nw.run(r)
+		if !loaded && !r.startInBackground(func() { nw.run(r) }) {
+			invWriters.Delete(r) // closing: nothing will drain this writer, so nothing may queue on it
+			return
 		}
 	}
 	select {

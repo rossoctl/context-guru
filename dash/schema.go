@@ -182,6 +182,15 @@ CREATE TABLE IF NOT EXISTS requests (
   -- is never backfilled — there is no way to know which pre-feature pings would have
   -- matched a strategy that did not exist yet.
   keepalive_strategy_id TEXT,
+  -- A ping the USER asked for (the dashboard or the plugin's Ping button), as opposed to one the
+  -- keeper scheduled. Still a keepalive=1 row, because it is real spend on the caller's key and
+  -- it refreshes the provider's entry; this flag is what keeps it out of every strategy's ledger
+  -- (a person pressing a button is not the strategy's decision). 0 on every earlier row.
+  manual_ping INTEGER NOT NULL DEFAULT 0,
+  -- On a manual ping row: the cache write it avoided on the current context, priced at the write
+  -- rate (0 when the ping read nothing, because then it avoided nothing). Gross; the ping's own
+  -- cost is cost_usd on the same row. Its net joins total_saved_usd.
+  manual_saved_usd REAL NOT NULL DEFAULT 0,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -698,6 +707,8 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "keepalive_pings", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "keepalive_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	{"requests", "keepalive_strategy_id", "TEXT"},
+	{"requests", "manual_ping", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "manual_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	// #240's correction factor. Additive with a default of 0, which doubles as the marker for
 	// "written before the correction existed" — see the column comment in ddl above.
 	{"requests", "billed_token_factor", "REAL NOT NULL DEFAULT 0"},

@@ -61,6 +61,9 @@ import sys
 import threading
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cgcache  # noqa: E402  (the shared on-disk request budget; stdlib only, import-cheap)
+
 # How long the whole script may run before its own backstop fires. Generous relative to the
 # urlopen timeout below (0.6s) so that timeout is what normally fires first; this is the net
 # under it, covering a stuck stdin read or anything else unaccounted for.
@@ -83,7 +86,7 @@ SLOW_UPSTREAM_MS = 3000  # the detailed layout names the provider only when it i
 # How long a cached /api/stats response is reused before a fresh fetch is attempted. Claude Code
 # can re-render on every token during a stream, and this is what stops that from becoming a
 # request-per-render storm against the proxy.
-STATS_CACHE_TTL_SECONDS = 2.0
+STATS_CACHE_TTL_SECONDS = 30.0  # CONTRACT section 4: at least 30 s
 
 # How long a cached response may still be shown, marked stale, when a fresh fetch TIMES OUT rather
 # than being refused outright. The proxy's own aggregate endpoint can legitimately take tens of
@@ -338,8 +341,10 @@ def _human(n: float) -> str:
 
 
 def _tmpdir() -> str:
-    # tempfile.gettempdir() without importing tempfile (~11 ms of a render that has a 50 ms budget).
-    return os.environ.get("TMPDIR") or "/tmp"
+    """Where this script keeps its cache files: the private per-user `${XDG_CACHE_HOME:-~/.cache}/context-guru/`
+    (0700), never a shared /tmp path (foreign files there break things on shared hosts). The name is
+    historical."""
+    return cgcache.cache_dir()
 
 
 class _HTTPError(OSError):
@@ -478,6 +483,13 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     except (OSError, ValueError):
         cached, cached_age = None, None  # no usable cache; fetch for real
 
+    wait = cgcache.backoff(cache_path)
+    if wait:  # a recent failure: no request, and say what the last one said
+        if wait.get("kind") == STATS_DOWN:
+            return None, STATS_DOWN
+        if wait.get("kind") == STATS_EMPTY:
+            return None, STATS_EMPTY
+        return _timeout_result(cached, cached_age)
     url = "/api/stats?lean=1&session=" + _quote(session_id)
     try:
         body = _http_get(port, url)
@@ -491,10 +503,13 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
         # minutes, every one a timeout at exactly HTTP_TIMEOUT_SECONDS with the proxy otherwise
         # healthy, no connection ever refused. This is the READ-phase timeout — urlopen raises it
         # directly once the connection succeeded but no response arrived in time.
+        cgcache.record_failure(cache_path, STATS_TIMEOUT)
         return _timeout_result(cached, cached_age)
     except _HTTPError:
+        cgcache.record_failure(cache_path, STATS_EMPTY)
         return None, STATS_EMPTY  # reached the proxy; it just has nothing (e.g. --dashboard is off)
     except OSError:
+        cgcache.record_failure(cache_path, STATS_DOWN)
         return None, STATS_DOWN  # anything else unreachable: the proxy really is down
 
     try:
@@ -504,13 +519,8 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     if not isinstance(stats, dict):
         return None, STATS_EMPTY
 
-    try:
-        tmp = cache_path + f".{os.getpid()}.tmp"
-        with open(tmp, "wb") as fh:
-            fh.write(body)
-        os.replace(tmp, cache_path)
-    except OSError:
-        pass  # caching is an optimization; failing to write one is not this script's problem
+    cgcache.write_atomic(cache_path, body)  # caching is an optimization; failing to write one is not this script's problem
+    cgcache.clear_failure(cache_path)
     return stats, STATS_OK
 
 
@@ -672,8 +682,8 @@ def _keepalive_segment(stats: dict) -> str | None:
 # proxy's lean /api/stats (this session) and /api/cachestate (server cache truth).
 LAYOUTS = {
     "minimal": ("save", "cache"),
-    "balanced": ("update", "save", "cache", "agents", "ctx", "ka", "tip"),
-    "detailed": ("update", "save", "spend", "cache", "agents", "ctx", "ka", "latency", "tools", "tip"),
+    "balanced": ("update", "save", "cache", "next", "agents", "ctx", "ka", "tip"),
+    "detailed": ("update", "save", "spend", "cache", "next", "agents", "ctx", "ka", "latency", "tools", "tip"),
     # The terminal views as one glanceable line (row 0) over the cache clock (row 1).
     "spark": ("spark", "cache"),   # saved today + 14 days of saving
     "strip": ("strip", "cache"),   # the last 20 requests as hit / partial / miss
@@ -684,7 +694,7 @@ LAYOUTS = {
 ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka"}
 # Dropped/shrunk first to last when a line is wider than the terminal. The tip goes first (its short
 # form, then the line): it is the least urgent thing on the line.
-DEGRADE = (("tip", 1), ("tip", None), ("tools", None), ("latency", None), ("ka", None), ("spend", None), ("update", None),
+DEGRADE = (("tip", 1), ("tip", None), ("tools", None), ("next", 1), ("next", None), ("latency", None), ("ka", None), ("spend", None), ("update", None),
            ("spark", 1), ("strip", 1), ("heat", 1), ("fill", 1), ("wagents", 1),
            ("agents", 1), ("agents", 2), ("save", 1), ("ctx", 1), ("save", 2), ("cache", 1), ("agents", None), ("ctx", None),
            ("save", None))
@@ -696,7 +706,7 @@ SPEND_RATE_MIN_SECONDS = 300  # a $/h figure over less than five minutes of wall
 HINT_FULL_FRACTION = 0.85  # the context bar's `⚠ rewrite near` from here
 TIP_DAYS = 7  # a command not run for this long is named in the tip
 TIP_COMMANDS = ("save-more", "remove-mcp-and-skills")
-CACHESTATE_TTL_SECONDS = 2.0
+CACHESTATE_TTL_SECONDS = 10.0  # CONTRACT section 4: at least 10 s
 # A cachestate read that misses the render budget starts at most one detached refresher per this
 # many seconds, so the copy a slow proxy leaves stays about this fresh (#570).
 CACHESTATE_REFRESH_WINDOW_SECONDS = 5.0
@@ -709,7 +719,7 @@ REQUESTS_TTL_SECONDS = 4.0
 STRIP_REQUESTS = 20
 # Which line each element sits on in a two-line layout. `minimal` ignores this: it is one line.
 ROW = {"spark": 0, "strip": 0, "heat": 0, "fill": 0, "clock0": 0, "wagents": 1,
-       "update": 0, "save": 0, "spend": 0, "cache": 1, "agents": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1, "tip": 2}
+       "update": 0, "save": 0, "spend": 0, "cache": 1, "next": 1, "agents": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1, "tip": 2}
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
@@ -822,22 +832,21 @@ def _fetch_json(port: str, query: str, tag: str, ttl: float,
             return cached, age
     except (OSError, ValueError):
         cached = None
+    if cgcache.backoff(path):  # failing lately: serve what we have, ask nothing
+        return (cached, age) if cached is not None and age < STALE_STATS_MAX_AGE_SECONDS else (None, 0.0)
     try:
         body = _http_get(port, query)
         obj = json.loads(body)
         if not isinstance(obj, dict):
             raise ValueError
-    except Exception:  # noqa: BLE001 - any failure means "use what we have"
-        if refresh_window:
+    except Exception as exc:  # noqa: BLE001 - any failure means "use what we have"
+        slow = isinstance(exc, (socket.timeout, TimeoutError))
+        cgcache.record_failure(path, "timeout" if slow else "error")
+        if refresh_window and slow:  # only a SLOW answer can land later; an error would just fail again, a second request
             _spawn_refresh(port, query, path, refresh_window)
         return (cached, age) if cached is not None and age < STALE_STATS_MAX_AGE_SECONDS else (None, 0.0)
-    try:
-        tmp = path + f".{os.getpid()}.tmp"
-        with open(tmp, "wb") as fh:
-            fh.write(body)
-        os.replace(tmp, path)
-    except OSError:
-        pass
+    cgcache.write_atomic(path, body)
+    cgcache.clear_failure(path)
     return obj, 0.0
 
 
@@ -910,12 +919,14 @@ def _refresh(port: str, query: str, path: str, timeout: float = 60.0) -> None:
     global HTTP_TIMEOUT_SECONDS, RENDER_BUDGET_SECONDS
     if timeout:
         HTTP_TIMEOUT_SECONDS, RENDER_BUDGET_SECONDS = timeout, 1e9  # the detached refresher is patient
-    body = _http_get(port, query, None if timeout else COLD_READ_SECONDS)
-    json.loads(body)
-    tmp = path + f".{os.getpid()}.tmp"
-    with open(tmp, "wb") as fh:
-        fh.write(body)
-    os.replace(tmp, path)
+    try:
+        body = _http_get(port, query, None if timeout else COLD_READ_SECONDS)
+        json.loads(body)
+    except Exception:
+        cgcache.record_failure(path, "error")
+        raise
+    cgcache.write_atomic(path, body)
+    cgcache.clear_failure(path)
     if timeout:
         _sweep_tmp(path)
 
@@ -991,6 +1002,12 @@ def _main_cs(cs: dict | None) -> dict | None:
     for k in ("model", "last_ts", "end_ts", "ttl_s", "prefix_tokens", "rewrite_usd", "priced"):
         if k in main:
             merged[k] = main[k]
+    if main.get("last_ts") != cs.get("last_ts") and main.get("model") != cs.get("model"):
+        # window/window_exact belong to the model of the latest touch, here a sub-agent's on another model;
+        # against the main thread's prompt they made the context bar read 100%. Unknown for the main
+        # model, so Claude Code's own size is used.
+        merged.pop("window", None)
+        merged.pop("window_exact", None)
     merged.pop("held_until_ms", None)  # the main thread's own plan, or none: never a sub-agent's
     if "held_until_ms" in main:
         merged["held_until_ms"] = main["held_until_ms"]
@@ -1141,13 +1158,19 @@ def _cache_view(payload: dict, cs: dict | None, cs_age: float) -> dict:
     srv, tokens, usd, ping = None, _num(pc, "recache_tokens_if_cold"), None, False
     ttl = 3600.0 if pc.get("ttl") == "1h" else 300.0
     srv = remaining_seconds(cs, cs_age)
+    cold_usd = warm_usd = None
     if srv is not None:
         tokens = _num(cs, "prefix_tokens") or tokens
         usd = _num(cs, "rewrite_usd") if cs.get("priced") else None
+        # CONTRACT section 2. An older proxy has neither field: the cold price is then rewrite_usd and the warm one unknown.
+        cold_usd = _num(cs, "next_cold_usd") if cs.get("priced") else None
+        warm_usd = _num(cs, "next_warm_usd") if cs.get("priced") else None
+        if cold_usd is None:
+            cold_usd = usd
         ttl, ping = ttl if ttl_s_bad(cs) else cs["ttl_s"], bool(cs.get("keepalive"))
     if srv is not None and (cs_age <= 3 or cli is None or srv >= cli):
         return {"remaining": srv, "source": "proxy", "tokens": tokens, "usd": usd, "ttl": ttl, "ping": ping,
-                "model": cs.get("model"), "held": held_seconds(cs, cs.get("now_ms"), cs_age)}
+                "warm_usd": warm_usd, "cold_usd": cold_usd, "model": cs.get("model"), "held": held_seconds(cs, cs.get("now_ms"), cs_age)}
     if cli is not None:
         return {"remaining": cli, "source": "client", "tokens": tokens, "usd": None, "ttl": ttl, "ping": False}
     return {"remaining": None, "source": None, "tokens": tokens, "usd": usd, "ttl": ttl, "ping": False}
@@ -1185,6 +1208,27 @@ def _cache_segment(view: dict, level: int | None = 0) -> str | None:
         return f"{DIM}cache{RESET} {colour}{glyph} {clock}{ping}{RESET}"
     bar = f"{colour}{'█' * cells}{DIM}{'░' * (CACHE_BAR_CELLS - cells)}{RESET}"
     return f"{DIM}cache{RESET} {colour}{glyph}{RESET} {bar} {colour}{clock}{ping}{RESET}"
+
+
+def _next_money(x: float) -> str:
+    return "<$0.01" if 0 < x < 0.005 else _money(x)
+
+
+def _next_segment(view: dict, level: int | None = 0) -> str | None:
+    """What the NEXT request costs for the cached prefix: `next $0.03 warm · $0.30 cold` while the
+    cache is warm (so the value of keeping it warm is on the line), just `next $0.30` once it is cold
+    (the only price left). A proxy that predates the warm figure gives `next $0.30 if cold`. Nothing
+    when the price is unknown: unknown is not $0.00."""
+    cold, warm, rem = view.get("cold_usd"), view.get("warm_usd"), view.get("remaining")
+    if level is None or cold is None or rem is None:
+        return None
+    if rem <= 0:
+        return f"{DIM}next{RESET} {_next_money(cold)}"
+    if warm is None:
+        return f"{DIM}next{RESET} {_next_money(cold)} {DIM}if cold{RESET}"
+    if level == 1:
+        return f"{DIM}next{RESET} {_next_money(warm)}{DIM}/{RESET}{_next_money(cold)}"
+    return f"{DIM}next{RESET} {_next_money(warm)} {DIM}warm ·{RESET} {_next_money(cold)} {DIM}cold{RESET}"
 
 
 _AGENT_STYLE = {"cold": (RED, "○"), "critical": (RED, "◐"), "expiring": (YELLOW, "◐"), "warm": (GREEN, "●")}
@@ -1580,6 +1624,7 @@ def main() -> None:
         "update": lambda lv: update_seg if lv == 0 else None,
         "save": lambda lv: _save_segment(stats, (cs or {}).get("money"), lv, _fresh_session(payload)),
         "cache": lambda lv: _cache_segment(view, lv),
+        "next": lambda lv: _next_segment(view, lv),
         "agents": lambda lv: _agents_segment(agent_rows, lv),
         "spark": lambda lv: _spark_row(day, got.get("series", (None,))[0], lv, *_tv(width)),
         "strip": lambda lv: _strip_row(got.get("reqs", (None,))[0], got.get("spend", (None,))[0], lv, *_tv(width)),
@@ -1595,7 +1640,7 @@ def main() -> None:
         "tip": lambda lv: tips.get(lv),
     }
     order = [e for e in ("update", "save", "spend", "spark", "strip", "heat", "fill", "clock0", "wagents", "cache",
-                         "agents", "ctx", "ka", "latency", "tools", "tip") if e in on]
+                         "next", "agents", "ctx", "ka", "latency", "tools", "tip") if e in on]
     level: dict[str, int | None] = {e: 0 for e in order}
     tips = {lv: _tip_segment(lv) for lv in (0, 1)} if "tip" in on and not _tips_off() else {}
     if layout in ("minimal", "watch"):

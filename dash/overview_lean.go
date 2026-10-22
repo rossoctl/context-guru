@@ -63,15 +63,19 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 	o := &Overview{Since: f.Since, Until: f.Until}
 	q, args := leanWindowMainQuery(f)
 	var upAvg, cgAvg sql.NullFloat64
-	if err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(
+	var manual manualAgg
+	if err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(append([]any{
 		&o.Requests, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD, &o.CachesplitSavedUSD,
-		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &cgAvg, &o.KeepAlivePingUSD, &o.KeepAlivePings); err != nil {
+		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &cgAvg, &o.KeepAlivePingUSD, &o.KeepAlivePings},
+		manual.dest()...)...); err != nil {
 		return nil, err
 	}
+	o.ManualPings = manual.pings()
 	o.UpstreamMsAvg, o.CGLatencyMsAvg = upAvg.Float64, cgAvg.Float64
 	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
-		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD)
+		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
+		o.ManualPings.SavedUSD)
 	o.TotalReducedUSD = o.TotalSavedUSD
 	return o, nil
 }
@@ -109,7 +113,8 @@ func leanWindowMainQuery(f Filter) (string, []any) {
 			COALESCE(SUM(CASE WHEN ` + agent + ` AND ` + kaSaved("r.") + ` > 0 THEN 1 ELSE 0 END),0),
 			AVG(CASE WHEN ` + agent + ` THEN r.upstream_ms END),
 			AVG(CASE WHEN ` + agent + ` THEN r.cg_latency_ms END),
-			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0),
-			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0)
+			COALESCE(SUM(CASE WHEN ` + autoPing + ` THEN r.cost_usd ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN ` + autoPing + ` THEN 1 ELSE 0 END),0),
+			` + manualSelect + `
 		FROM requests r WHERE ` + cond, args
 }

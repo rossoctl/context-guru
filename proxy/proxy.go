@@ -480,6 +480,8 @@ func (h *Handler) Mux() *http.ServeMux {
 		m.HandleFunc("POST /api/adapt/compaction/apply", h.adaptCompactionApply)
 		m.HandleFunc("POST /api/save-more/config/apply", h.saveMoreConfigApply)
 		m.HandleFunc("POST /api/adapt/tools/apply", h.adaptToolsApply)
+		// The Ping button (manualping.go): same principal as /api/adapt/*, so a single-tenant proxy has it too.
+		h.mountManualPing(m)
 	}
 	// Bob (BobShell) gateway. Bob is OpenAI-compatible but calls Bob-specific
 	// paths: its model call is POST /inference/v1/chat/completions (reduced like
