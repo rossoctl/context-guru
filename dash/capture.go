@@ -178,6 +178,11 @@ type Recorder struct {
 	// sync mode. A func rather than a value so the counters are read at serve time.
 	observeQueue atomic.Pointer[func() QueueStats]
 
+	// startMu orders a goroutine started on first use (the inventory writer) against Close: it is
+	// added to wg only while the recorder is open, so Close's wg.Wait covers it and never races an Add.
+	startMu sync.Mutex
+	closed  bool
+
 	// Cache-attribution state: the last time we saw each session and whether we
 	// have seen each model, so a cold start is never reported as a bust.
 	mu        sync.Mutex
@@ -336,10 +341,26 @@ func (r *Recorder) Record(e *Event) {
 }
 
 // Close stops the writer after draining what is already queued.
+// startInBackground runs fn on its own goroutine counted in r.wg, so Close waits for it, unless the
+// recorder is already closing, in which case it starts nothing and returns false.
+func (r *Recorder) startInBackground(fn func()) bool {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	if r.closed {
+		return false
+	}
+	r.wg.Add(1)
+	go func() { defer r.wg.Done(); fn() }()
+	return true
+}
+
 func (r *Recorder) Close() error {
 	if r == nil {
 		return nil
 	}
+	r.startMu.Lock()
+	r.closed = true
+	r.startMu.Unlock()
 	close(r.done)
 	r.wg.Wait()
 	r.hub.Close()
