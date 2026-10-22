@@ -202,7 +202,9 @@
    the largest group red teaches the reader to ignore red. */
 .ins-vd.keep     { background: var(--bg-sunken); color: var(--ins-vd-keep);     border-color: transparent; }
 .ins-vd.unknown  { background: var(--bg-sunken); color: var(--fg-faint); }
-.ins-why { display: block; color: var(--fg-muted); font-size: var(--t-small); line-height: 1.35; margin-top: 3px; max-width: 46ch; }
+/* white-space: normal because .tbl td is nowrap (style.css): a sentence that inherits it runs past its
+   cell instead of wrapping at max-width. */
+.ins-why { display: block; color: var(--fg-muted); font-size: var(--t-small); line-height: 1.35; margin-top: 3px; max-width: 46ch; white-space: normal; }
 
 /* ── the item name ─────────────────────────────────────────────────────────
  * Descriptions are on the name's title rather than in a column: measured on a real inventory, 41
