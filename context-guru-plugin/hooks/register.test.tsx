@@ -188,3 +188,12 @@ for (const [status, error, want] of [
   })
 }
 
+
+test('a refused press explains itself with the server\'s ping_reason', async ($, on) => {
+  await boot($, on, true, [], { status: 409, error: 'not held' }, { pingable: false, ping_reason: 'too large' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeDefined() // still visible
+  const r = await $.command.run({ command: 'ping', args: '' })
+  expect(r.text).toMatch(/can't ping: this context is too large/)
+  await ui.unmount()
+})

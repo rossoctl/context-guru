@@ -118,8 +118,30 @@ export const signature = (v: View | null): string =>
         v.subs.map(t => [t.id, t.name, t.left, t.isPinged]),
       ])
 
-export const pingToast = (r: { status?: number; error?: string; saved_usd?: number; ping_usd?: number; retry_after_s?: number }): string => {
+/** Why the server holds nothing to ping with (cachestate `ping_reason`), in words. */
+export const reasonWords = (reason: string): string =>
+  reason === 'too large'
+    ? 'this context is too large to hold for a manual ping'
+    : reason === 'not opted in'
+      ? 'this session did not opt in to manual pings'
+      : reason === 'expired'
+        ? 'the held copy expired \u2014 send a prompt, then ping again'
+        : reason
+
+/** The main thread's `ping_reason` from the last cachestate read, when the server gave one. */
+export function pingReason(snap: Snapshot | null): string | undefined {
+  const doc = snap?.doc as { ping_reason?: unknown; threads?: { main?: boolean; ping_reason?: unknown }[] } | undefined
+  const main = doc?.threads?.find(t => t.main)
+  const r = main?.ping_reason ?? doc?.ping_reason
+  return typeof r === 'string' && r !== '' ? r : undefined
+}
+
+export const pingToast = (
+  r: { status?: number; error?: string; saved_usd?: number; ping_usd?: number; retry_after_s?: number },
+  reason?: string,
+): string => {
   if (r.status === 200) return `kept warm — saved ${usd(r.saved_usd ?? 0)} net (ping cost ${usd(r.ping_usd ?? 0)})`
+  if (r.status === 409 && r.error === 'not held' && reason) return `can't ping: ${reasonWords(reason)}`
   if (r.status === 409 && r.error === 'not held') return 'keep-alive is off for this account — turn it on in the dashboard to ping'
   if (r.status === 409 && r.error === 'busy') return 'a request is running; it refreshes the cache itself'
   if (r.status === 409 && (r.error === 'over budget' || r.error === 'too costly')) {

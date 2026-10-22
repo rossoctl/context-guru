@@ -10,7 +10,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
 import type { Snapshot, View } from '../types'
-import { TIPS, gauge, pingToast, signature, usd, view } from './model'
+import { TIPS, gauge, pingReason, pingToast, signature, usd, view } from './model'
 
 const PANE = 'context-guru'
 const POLL_MS = 15_000
@@ -66,7 +66,7 @@ async function pingNow($: Engine): Promise<string> {
   await update($, isPinging, () => true)
   try {
     const r = await helper($, ['ping', '--session', await $.session.id(), '--json'])
-    return pingToast(r ?? { status: 0, error: 'no answer from the helper' })
+    return pingToast(r ?? { status: 0, error: 'no answer from the helper' }, pingReason(await read($, snapshot)))
   } finally {
     await update($, isPinging, () => false)
     seen = ''
