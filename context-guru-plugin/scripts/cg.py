@@ -334,7 +334,7 @@ def cmd_savings(api: Api, o: dict) -> list[str]:
 # /context-guru:insights cache
 
 CAUSES = {"idle_expiry": "You paused longer than the cache lasts", "prefix_change": "Settings or tools changed mid-session",
-          "cold_start": "A new session started", "new_thread": "A helper agent started",
+          "cold_start": "A new session started", "new_thread": "A subagent or side request started",
           "history_rewrite": "The conversation was rewound or compacted"}
 
 
