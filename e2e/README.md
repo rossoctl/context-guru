@@ -17,7 +17,8 @@ Nothing leaves the machine. There is no real model, no real key and no cost. `HO
 | `make e2e-full` | ~45 min | smoke, then the full regression tier, then a 10x stress tier |
 | `make e2e-mutate` | ~12 min | breaks the product five ways; each break must turn its check red |
 
-Exit codes for `e2e/run.sh` (what the Make targets call):
+Exit codes for `e2e/run.sh`. Call it directly when the code matters: `make` turns any failing recipe into its
+own exit 2, and prints the script's real code as `Error N`.
 
 - **0** PASS
 - **1** FAIL, or a phase crashed
