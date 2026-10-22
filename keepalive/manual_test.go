@@ -155,7 +155,7 @@ func TestPingNowHonoursThePerPingCeiling(t *testing.T) {
 	if fakeOf(k).n() != 0 {
 		t.Error("a ping over the ceiling was sent")
 	}
-	if _, ok := k.Pingable("t1", false, sess1.Session)[""]; !ok {
+	if !k.PingStates("t1", false, sess1.Session).For("").Pingable {
 		t.Error("too costly is not the same as not held")
 	}
 }
@@ -227,20 +227,20 @@ func TestPingNowReportsAnUpstreamTransportFailure(t *testing.T) {
 }
 
 // Pingable is exactly PingNow's ErrNotHeld condition, so a button gated on it never meets a 409.
-func TestPingableAgreesWithPingNowNotHeld(t *testing.T) {
+func TestPingStatesAgreeWithPingNowNotHeld(t *testing.T) {
 	k, _, _ := manualKeeper(t)
-	if !k.Pingable("t1", false, sess1.Session)[""] {
+	if !k.PingStates("t1", false, sess1.Session).For("").Pingable {
 		t.Fatal("a held thread must be pingable")
 	}
-	if got := k.Pingable("t2", false, sess1.Session); len(got) != 0 {
+	if got := k.PingStates("t2", false, sess1.Session); len(got) != 0 {
 		t.Errorf("another tenant sees %v", got)
 	}
-	if got := k.Pingable("", true, sess1.Session); !got[""] {
+	if got := k.PingStates("", true, sess1.Session); !got.For("").Pingable {
 		t.Errorf("all-tenants scope = %v, want the held thread", got)
 	}
 	// A thread the keeper no longer holds is not pingable, and PingNow says ErrNotHeld for it.
 	k.RetireSession("t1", sess1.Session)
-	if k.Pingable("t1", false, sess1.Session)[""] {
+	if k.PingStates("t1", false, sess1.Session).For("").Pingable {
 		t.Error("a retired thread is reported pingable")
 	}
 	if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {
@@ -253,7 +253,7 @@ func TestPingableAgreesWithPingNowNotHeld(t *testing.T) {
 		e.stopped = true
 	}
 	k2.mu.Unlock()
-	if k2.Pingable("t1", false, sess1.Session)[""] {
+	if k2.PingStates("t1", false, sess1.Session).For("").Pingable {
 		t.Error("a stopped thread is reported pingable")
 	}
 	if _, err := k2.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {

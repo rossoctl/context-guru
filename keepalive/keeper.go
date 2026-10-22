@@ -144,6 +144,14 @@ type kaEntry struct {
 	// proxy/keepalivestrategy.go — and tagged onto the ping's own dash.Event by record1, never onto
 	// the real request it rescues.
 	tag string
+	// manualOnly marks an entry held only for the Ping button (manualhold.go): nothing pings it,
+	// plans it or counts it as pending, and it lives ManualHoldMax from startedAt.
+	manualOnly bool
+	// holdFor is how long a manual-only entry lives from startedAt (ManualHoldMax).
+	holdFor time.Duration
+	// ceiling is the per-ping ceiling this entry was admitted under, kept because a manual-only entry's
+	// pol is zeroed.
+	ceiling float64
 	// timer is the HARD retention deadline. A scheduled deadline rather than a check inside the
 	// sweep, because the requirement is that a quiet process still drops the credential on
 	// time: with no request and no other activity the sweep is the only thing that would ever
@@ -162,7 +170,7 @@ type kaEntry struct {
 // eviction then threw away the entries that were about to pay, cutting conversions from 153 to
 // 69. Gating at record keeps nothing we will not use.
 func (e *kaEntry) due(now time.Time) bool {
-	return !e.stopped && e.pol.On() && e.pings < e.pol.MaxPings &&
+	return !e.stopped && !e.manualOnly && e.pol.On() && e.pings < e.pol.MaxPings &&
 		!now.Before(e.startedAt.Add(e.pol.Idle))
 }
 
@@ -317,6 +325,10 @@ type Keeper struct {
 	// session id and is cleared wholesale at the bound; give it an LRU only if session churn
 	// is ever shown to cost real pings.
 	turns map[string]int
+	// manualHoldMax overrides ManualHoldMax in tests that need a real, short timer; zero means the constant.
+	manualHoldMax time.Duration
+	// reasons records why a thread is NOT held (manualhold.go), for the button's explanation.
+	reasons map[string]refusal
 	// manualAt is when each thread was last manually pinged, for PingNow's rate limit (manual.go).
 	manualAt map[string]time.Time
 
@@ -602,6 +614,7 @@ func (k *Keeper) Record(r Record) {
 		(r.Client != "" && k.endedAfterLocked(r.Key.Tenant, r.Client, startedAt))
 	if ended {
 		k.retireLocked(key)
+		k.setReasonLocked(r.Key, ReasonNoEntry) // the client said the session is over: nothing is held
 	}
 	k.mu.Unlock()
 	if ended {
@@ -621,9 +634,22 @@ func (k *Keeper) Record(r Record) {
 	// instead is dropped by the hard deadline below, within (K+1)x X.
 	pol := r.Policy
 	model := gjson.GetBytes(body, "model").String()
-	if !pol.On() {
+	// A request that opted in to the Ping button (Policy.ManualHold) is held even where the schedule
+	// is off, or where the schedule's own gates refuse the thread; it just never gets a schedule.
+	// manualOnly is decided once the gates below have run, so every refusal can name its reason.
+	if !pol.On() && !pol.ManualHold {
+		k.mu.Lock()
+		k.setReasonLocked(r.Key, ReasonNotOptedIn)
+		k.mu.Unlock()
 		k.retire(key)
 		return
+	}
+	refuse := func(reason string) {
+		if pol.ManualHold {
+			k.mu.Lock()
+			k.setReasonLocked(r.Key, reason)
+			k.mu.Unlock()
+		}
 	}
 	// The route breaker and the dead-credential mark (main #527, see breaker.go) refuse a
 	// NEW hold outright: a route failing in a row, or a credential already marked dead on
@@ -641,6 +667,9 @@ func (k *Keeper) Record(r Record) {
 	credDead := k.credIsDeadLocked(r.Key.Tenant, r.Cred, model, now)
 	if routeTripped || credDead {
 		k.retireLocked(key)
+		if pol.ManualHold {
+			k.setReasonLocked(r.Key, ReasonUnavailable)
+		}
 	}
 	k.mu.Unlock()
 	if routeTripped || credDead {
@@ -650,6 +679,7 @@ func (k *Keeper) Record(r Record) {
 		return
 	}
 	if len(body) > MaxBodyBytes {
+		refuse(ReasonTooLarge)
 		k.retire(key)
 		k.skipped.Add(1)
 		return
@@ -658,10 +688,12 @@ func (k *Keeper) Record(r Record) {
 	// request actually established or read an entry. A request that wrote and read nothing
 	// has no prefix worth a ping.
 	if !eligible(provider, model, route) || !relayServesClaude(provider, r.Endpoint, model) {
+		refuse(ReasonUnsupported)
 		k.retire(key)
 		return
 	}
 	if usageOK && u.CacheRead == 0 && u.CacheWrite == 0 {
+		refuse(ReasonNoEntry) // nothing was cached by this request, so there is nothing to keep warm
 		k.retire(key)
 		return
 	}
@@ -676,6 +708,7 @@ func (k *Keeper) Record(r Record) {
 	// Measured exposure of refusing these: of the 357 addressable misses in the production
 	// window, 17 had a predecessor with thinking enabled, worth $14.29 of $732 — 2.0%.
 	if gjson.GetBytes(body, "thinking.type").String() == "enabled" {
+		refuse(ReasonUnsupported)
 		k.retire(key)
 		k.skipped.Add(1)
 		return
@@ -726,22 +759,49 @@ func (k *Keeper) Record(r Record) {
 		prev.clear()
 		delete(k.live, key)
 	}
-	if !e.pingable() {
-		k.skipped.Add(1)
-		e.clear() // hold no body and no credential for a session we will not ping
-		return
+	// The automatic gates decide whether this thread is pinged on a schedule. A request that opted in
+	// to the button and fails them (or has no schedule at all) is still held, as a manual-only entry:
+	// no schedule, a hard 300 s life. Only the cost ceiling is kept, because a press spends money too.
+	if !pol.On() || !e.pingable() {
+		if !pol.ManualHold {
+			reason := ReasonBelowLimits
+			if e.pingUSD > pol.Ceiling() {
+				reason = ReasonOverBudget
+			}
+			k.setReasonLocked(r.Key, reason)
+			k.skipped.Add(1)
+			e.clear() // hold no body and no credential for a session we will not ping
+			return
+		}
+		if e.pingUSD > pol.Ceiling() {
+			k.setReasonLocked(r.Key, ReasonOverBudget)
+			k.skipped.Add(1)
+			e.clear()
+			return
+		}
+		e.manualOnly = true
+		e.holdFor = k.holdMax()
+		e.ceiling = pol.Ceiling()
+		e.pol = Policy{ManualHold: true} // off: due, Plans, PendingPings and Sweep all read pol.On()
 	}
+	k.clearReasonLocked(r.Key)
 	k.live[key] = e
 	k.bytes += int64(len(owned))
 	if r.Hold != nil {
 		e.ref = r.Hold()
 		e.held = true
 	}
+	if e.manualOnly {
+		e.timer = time.AfterFunc(k.holdMax(), func() { k.expireManual(key) })
+		k.evictManualLocked(r.Key.Tenant)
+		k.evictLocked()
+		return
+	}
 	// The hard deadline. (K+1) x Idle is the longest the policy could ever still want this
 	// entry: K pings each restarting the clock, plus one final Idle to notice the last one
 	// bought nothing. After that there is no legitimate use, so the material goes whether or not
 	// anything else in this process is awake.
-	e.timer = time.AfterFunc(time.Duration(e.pol.MaxPings+1)*e.pol.Idle, func() { k.retire(key) })
+	e.timer = time.AfterFunc(time.Duration(e.pol.MaxPings+1)*e.pol.Idle, func() { k.expireAuto(key) })
 	k.evictLocked()
 }
 
@@ -885,6 +945,7 @@ func (k *Keeper) Forget(tenantID string) {
 	// Client lifecycle end marks (see lifecycle.go) are bucketed by tenant already, so this is
 	// a single delete rather than a prefix scan.
 	delete(k.ended, tenantID)
+	k.dropReasonsLocked(tenantID, "")
 	// The route breaker and dead-credential marks are also keyed with the tenant first (see
 	// breaker.go), so they are cleared the same way: nothing of this tenant's survives Forget.
 	for r := range k.routeFails {
@@ -913,11 +974,17 @@ func (k *Keeper) Forget(tenantID string) {
 // — the ones with the longest still to wait, and therefore the least imminent value.
 func (k *Keeper) evictLocked() {
 	for len(k.live) > MaxSessions || k.bytes > MaxBytes {
+		// Manual-only holds go before any automatic one, whichever tenant's: they have no schedule and
+		// protect nothing a ping is doing. Among the candidates the entry whose ping is least imminent
+		// goes, as before.
 		var worstKey string
 		var worst time.Time
+		var worstManual bool
 		for key, e := range k.live {
-			if worstKey == "" || e.startedAt.After(worst) {
-				worstKey, worst = key, e.startedAt
+			better := worstKey == "" || (e.manualOnly && !worstManual) ||
+				(e.manualOnly == worstManual && e.startedAt.After(worst))
+			if better {
+				worstKey, worst, worstManual = key, e.startedAt, e.manualOnly
 			}
 		}
 		if worstKey == "" {
@@ -955,8 +1022,21 @@ func (k *Keeper) Sweep(now time.Time) int {
 		// on schedule whether or not this loop is running; this is the earlier of the two, and
 		// having both is deliberate — a security bound must not depend on a liveness loop, and a
 		// liveness loop should not wait for the security bound.
+		if e.manualOnly {
+			// Never pinged. Released at its deadline, here as well as by its own timer.
+			if e.manualExpired(now) {
+				k.setReasonLocked(e.key, ReasonExpired)
+				k.bytes -= int64(len(e.body))
+				k.releaseLocked(e)
+				e.clear()
+				delete(k.live, key)
+				offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
+			}
+			continue
+		}
 		if e.stopped || e.pings >= e.pol.MaxPings || !e.pingable() {
 			if !now.Before(e.startedAt.Add(e.pol.Idle)) {
+				k.setReasonLocked(e.key, e.autoReleaseReason())
 				k.bytes -= int64(len(e.body))
 				k.releaseLocked(e)
 				e.clear()

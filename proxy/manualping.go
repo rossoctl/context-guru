@@ -30,6 +30,17 @@ import (
 // only while keep-alive is on for the account, and pinging needs both, so with it off the answer
 // is a distinct 409 "not held" rather than a ping that cannot be sent.
 
+// ManualHoldHeader is how a client opts a request in to being held for the Ping button. Claude
+// Code sends it from ANTHROPIC_CUSTOM_HEADERS (the plugin writes it into settings env); it is an
+// x-context-guru-* header, so copyHeaders never forwards it upstream.
+const ManualHoldHeader = "x-context-guru-ping"
+
+// wantsManualHold reads the opt-in. Only the exact value "1" counts: a header present with another
+// value is a client that did not mean it.
+func wantsManualHold(r *http.Request) bool {
+	return r != nil && strings.TrimSpace(r.Header.Get(ManualHoldHeader)) == "1"
+}
+
 // manualPingMinGap is the least time between two manual pings of the same thread.
 const manualPingMinGap = 30 * time.Second
 

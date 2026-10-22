@@ -357,11 +357,15 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 				string(provider), startedAt, body, r.UserAgent(), u)
 		}
 		pol, applied = k.resolvePolicy(tn, session, provider, pol, pdec, pdecOK)
+		// The Ping button's opt-in (manualping.go): this REQUEST asked to be held for it. Set only here,
+		// on the path that already passed the no-audit-sink rule, the client-ended check and the kill
+		// switch, so the header can never widen what those refuse. It does not turn the schedule on.
+		pol.ManualHold = tracked && !keepAliveDisabled() && provider != bschemas.OpenAI && wantsManualHold(r)
 	}
 	// The credential id only matters for a hold the core may keep, so it is not computed (an
 	// HMAC over the masked auth headers) for any other request.
 	cred := ""
-	if tracked && pol.On() {
+	if tracked && (pol.On() || pol.ManualHold) {
 		cred = credKey(up, r.Header)
 	}
 	key := keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}
@@ -449,13 +453,21 @@ func (h *Handler) PendingPings() int {
 	return h.keeper.pendingPings()
 }
 
-// KeepAlivePingable says, per thread of one session, whether the keeper holds what a manual ping
-// needs (dash.API.SetPingable). It is keepalive.Keeper.Pingable behind the nil checks.
-func (h *Handler) KeepAlivePingable(tenantID string, allTenants bool, session string) map[string]bool {
+// KeepAlivePingStates is the keeper's per-thread ping state for one session (dash.API.SetPingStates):
+// whether a manual ping can work, and when not, why. nil when there is no keeper.
+func (h *Handler) KeepAlivePingStates(tenantID string, allTenants bool, session string) map[string]dash.PingState {
 	if h == nil || h.keeper == nil {
 		return nil
 	}
-	return h.keeper.Keeper.Pingable(tenantID, allTenants, session)
+	in := h.keeper.Keeper.PingStates(tenantID, allTenants, session)
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]dash.PingState, len(in))
+	for th, s := range in {
+		out[th] = dash.PingState{Pingable: s.Pingable, Reason: s.Reason}
+	}
+	return out
 }
 
 // KeepAlivePlans is the keeper's ping plan for one session's threads, keyed by thread id, for the

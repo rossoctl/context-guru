@@ -346,22 +346,21 @@ func TestManualPingAcceptsTheAccountsProxyToken(t *testing.T) {
 	_ = b
 }
 
-// The handler's pingable answer is the endpoint's own "not held" test: a button gated on it
-// never meets a 409.
-func TestKeepAlivePingableMatchesTheEndpointsNotHeld(t *testing.T) {
+// The handler's ping state is the endpoint's own "not held" test: a button gated on it never meets a 409.
+func TestKeepAlivePingStatesMatchTheEndpointsNotHeld(t *testing.T) {
 	m := newManualHost(t)
 	m.hold(t, "", "sess-a", "", 50*time.Second)
-	if !m.h.KeepAlivePingable("", true, "sess-a")[""] {
+	if !m.h.KeepAlivePingStates("", true, "sess-a")[""].Pingable {
 		t.Fatal("a held thread is not pingable")
 	}
 	m.h.keeper.RetireSession("", "sess-a")
-	if m.h.KeepAlivePingable("", true, "sess-a")[""] {
+	if m.h.KeepAlivePingStates("", true, "sess-a")[""].Pingable {
 		t.Error("a retired thread is pingable")
 	}
 	if w, out := m.post(`{"session":"sess-a"}`); w.Code != http.StatusConflict || out["error"] != "not held" {
 		t.Errorf("endpoint = %d %v, want 409 not held", w.Code, out)
 	}
-	if (*Handler)(nil).KeepAlivePingable("", true, "x") != nil {
+	if (*Handler)(nil).KeepAlivePingStates("", true, "x") != nil {
 		t.Error("a nil handler states something")
 	}
 }
@@ -397,9 +396,9 @@ func TestManualPingIgnoresTheManagersTenantParameter(t *testing.T) {
 }
 
 // With no keeper the handler cannot say, so pingable is left out rather than stated false.
-func TestKeepAlivePingableIsUnknownWithoutAKeeper(t *testing.T) {
+func TestKeepAlivePingStatesAreUnknownWithoutAKeeper(t *testing.T) {
 	h := &Handler{}
-	if h.KeepAlivePingable("", true, "s") != nil {
+	if h.KeepAlivePingStates("", true, "s") != nil {
 		t.Error("no keeper must be unknown (nil), not an empty answer")
 	}
 }
@@ -412,11 +411,146 @@ func TestManualPingOnAThreadOverTheCeilingIsNeverHeld(t *testing.T) {
 	m := newManualHost(t)
 	m.polCeiling = 1e-9
 	m.hold(t, "", "sess-a", "", 50*time.Second)
-	if m.h.KeepAlivePingable("", true, "sess-a")[""] {
+	if m.h.KeepAlivePingStates("", true, "sess-a")[""].Pingable {
 		t.Error("a thread over the ceiling is reported pingable")
 	}
 	w, out := m.post(`{"session":"sess-a"}`)
 	if w.Code != http.StatusConflict || out["error"] != "not held" || m.fs.n() != 0 {
 		t.Fatalf("over the ceiling = %d %v (sent %d), want 409 not held and nothing sent", w.Code, out, m.fs.n())
 	}
+}
+
+// ---- the opt-in header (x-context-guru-ping: 1) on an account with NO automatic keep-alive ----
+
+// holdOff records two requests on an account whose keep-alive policy is off, with or without the header.
+func (m *manualHost) holdOff(t *testing.T, session string, header string) {
+	t.Helper()
+	at := m.clock.now().Add(-40 * time.Second)
+	for i := 0; i < 2; i++ {
+		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+		r.Header.Set("Authorization", "Bearer sk-caller-secret")
+		if header != "" {
+			r.Header.Set(ManualHoldHeader, header)
+		}
+		m.h.keeper.record(&Tenancy{ID: "", Cache: CachePolicy{}, Pipe: components.NewPipeline(nil, m.sink)}, session, "",
+			at.Add(time.Duration(i)*time.Second), []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"},
+			r, bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+	}
+	m.rec.Record(&dash.Event{TS: at.UnixMilli(), TenantID: "", SessionID: session, Model: "aws/claude-sonnet-5",
+		Provider: "anthropic", Status: 200, CacheRead: 48576, CacheWrite: 1200, UpstreamMs: 1000,
+		TokenAccounting: dash.AccountingComplete})
+	waitForRows(t, m.rec, m.rowsSoFar()+1)
+	rowsWritten[m.rec]++
+}
+
+func TestTheHeaderHoldsAThreadOnAnAccountWithKeepAliveOffAndAPressWorks(t *testing.T) {
+	m := newManualHost(t)
+	m.holdOff(t, "sess-off", "1")
+	if st := m.h.KeepAlivePingStates("", true, "sess-off")[""]; !st.Pingable {
+		t.Fatalf("state = %+v, want pingable", st)
+	}
+	w, out := m.post(`{"session":"sess-off"}`)
+	if w.Code != http.StatusOK || out["sent"] != true {
+		t.Fatalf("press = %d %v, want 200 sent", w.Code, out)
+	}
+	if m.fs.n() != 1 {
+		t.Errorf("upstream saw %d requests, want the one manual ping", m.fs.n())
+	}
+	sent := m.fs.calls[0].body
+	if gjson.GetBytes(sent, "max_tokens").Int() != 1 || gjson.GetBytes(sent, "stream").Bool() {
+		t.Errorf("not the ordinary ping shape: %s", sent)
+	}
+	if r := m.sink.all(); len(r) != 1 || !r[0].Manual {
+		t.Errorf("reports = %+v, want one manual ping", r)
+	}
+	// The header never reaches the provider, and no automatic ping ever follows.
+	if m.h.keeper.PendingPings() != 0 {
+		t.Error("a manual-only hold is counted as a pending ping")
+	}
+	m.clock.advance(10 * time.Minute)
+	m.h.keeper.Sweep(m.clock.now())
+	if m.fs.n() != 1 {
+		t.Errorf("an automatic ping followed (%d requests)", m.fs.n())
+	}
+}
+
+func TestWithoutTheHeaderNothingIsHeldAndTheEndpointSaysNotHeld(t *testing.T) {
+	m := newManualHost(t)
+	for _, v := range []string{"", "0", "true", "yes", "2"} {
+		m.holdOff(t, "sess-"+v+"x", v)
+		id := "sess-" + v + "x"
+		st := m.h.KeepAlivePingStates("", true, id)[""]
+		if st.Pingable || st.Reason != "not opted in" {
+			t.Errorf("header %q: state = %+v, want not pingable, not opted in", v, st)
+		}
+		if w, out := m.post(`{"session":"` + id + `"}`); w.Code != http.StatusConflict || out["error"] != "not held" {
+			t.Errorf("header %q: press = %d %v, want 409 not held", v, w.Code, out)
+		}
+	}
+	if m.fs.n() != 0 {
+		t.Errorf("%d requests reached the provider", m.fs.n())
+	}
+	if st := m.h.keeper.Stats(); st.Live != 0 {
+		t.Errorf("%d entries held without the header", st.Live)
+	}
+}
+
+// The header is honoured only where retention is already allowed: no dashboard recorder, no hold.
+func TestTheHeaderCannotWidenTheNoAuditSinkRule(t *testing.T) {
+	m := newManualHost(t)
+	m.h.rec = nil
+	m.holdOff(t, "sess-x", "1")
+	if st := m.h.keeper.Stats(); st.Live != 0 {
+		t.Errorf("held %d entries with no audit sink", st.Live)
+	}
+}
+
+func TestTheOptInHeaderIsNeverForwardedUpstream(t *testing.T) {
+	dst := http.Header{}
+	src := http.Header{ManualHoldHeader: {"1"}, "Authorization": {"Bearer x"}}
+	copyHeaders(dst, src)
+	if dst.Get(ManualHoldHeader) != "" || dst.Get("Authorization") == "" {
+		t.Errorf("forwarded headers = %v", dst)
+	}
+}
+
+// A manual-only hold has no schedule, so /api/cachestate must not say it is being pinged: the
+// status line draws "being pinged" from held_until_ms and pings_left. Only pingable reflects the hold.
+func TestAManualOnlyHoldSetsNeitherHeldUntilNorPingsLeft(t *testing.T) {
+	m := newManualHost(t)
+	m.h.API().SetKeepAlivePlans(m.h.KeepAlivePlans)
+	m.h.API().SetPingStates(m.h.KeepAlivePingStates)
+	m.holdOff(t, "sess-off", "1")
+	get := func() map[string]any {
+		r := httptest.NewRequest(http.MethodGet, "/api/cachestate?session=sess-off", nil)
+		r.RemoteAddr = "127.0.0.1:4000"
+		w := httptest.NewRecorder()
+		m.h.Mux().ServeHTTP(w, r)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+	check := func(label string, d map[string]any) {
+		t.Helper()
+		if d["pingable"] != true {
+			t.Fatalf("%s: pingable = %v, want true (the hold)", label, d["pingable"])
+		}
+		for _, k := range []string{"held_until_ms", "pings_left"} {
+			if _, ok := d[k]; ok {
+				t.Errorf("%s: %s = %v is set for a thread that is only held for the button", label, k, d[k])
+			}
+		}
+		if v, ok := d["keepalive"]; ok && v != false { // only the session entry carries it
+			t.Errorf("%s: keepalive = %v, but no ping was sent", label, v)
+		}
+	}
+	doc := get()
+	check("session", doc)
+	for _, th := range doc["threads"].([]any) {
+		check("thread", th.(map[string]any))
+	}
+	// And no tick of the sweep changes that, with or without a press in between.
+	m.clock.advance(100 * time.Second)
+	m.h.keeper.Sweep(m.clock.now())
+	check("after a sweep", get())
 }

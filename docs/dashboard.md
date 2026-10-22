@@ -136,6 +136,30 @@ body or key to ping with), `404 unknown session`, and `429 too soon` (one press 
 `/api/adapt/*`: the dashboard cookie, the account's own proxy token, or a direct loopback request
 to a single-tenant proxy.
 
+`pingable` and `ping_reason` on `/api/cachestate` say whether a press can work. `pingable` is true only
+while the proxy holds the thread. When it is false, `ping_reason` is one of:
+`not opted in` (no keep-alive for the account and the request did not carry the header),
+`below limits` (keep-alive is on, but the thread is under its minimum prefix or fails its gates),
+`over budget` (one ping would cost more than the per-ping cost ceiling),
+`too large` (the body is over 8 MiB), `unsupported` (extended thinking, or a route that cannot be pinged cheaply),
+`unavailable` (the route is failing in a row, or the provider refused this credential),
+`pings used` (the planned pings ran out and the proxy let go of the thread),
+`stopped` (the proxy stopped the thread after a miss, a refused ping or a failure),
+`expired` (a manual-only hold ran out) and
+`no entry` (nothing is known about the thread: the proxy restarted, or has seen no request on it since).
+While a thread whose planned pings ran out is still held and its cache can still be warm, a press is allowed,
+under the same cost ceiling and 30-second gap. A press stays refused after a miss or a refused ping.
+
+**Ping with keep-alive off.** A request that carries `x-context-guru-ping: 1` is held for the button
+even when the account has no automatic keep-alive. Nothing is pinged for it. The proxy keeps the body and
+the key for at most 300 seconds from the start of the LAST REAL request, even for a one-hour cache, then
+releases and zeroes them. Only a new request starts the 300 seconds again. A press never does, so pressing
+cannot keep a credential held. The usual limits still apply: 8 MiB per body, 512 threads, 128 MiB in all, and
+the per-ping cost ceiling. One account may hold at most 16 such threads and 32 MiB, and they are released
+before any automatic keep-alive hold, so a client that sends the header cannot starve other accounts. Claude Code sends the
+header when `ANTHROPIC_CUSTOM_HEADERS` in its settings `env` contains `x-context-guru-ping: 1` (one `Name: Value`
+per line when there are several headers). The proxy never forwards it upstream.
+
 Its row is a keep-alive row with `manual_ping` set. `GET /api/stats` reports these rows as
 `manual_pings` (`count`, `ping_usd`, and `saved_usd` net of the pings' cost). They are a savings
 category of their own: they join `total_saved_usd`, and no cache strategy's ledger counts them.
