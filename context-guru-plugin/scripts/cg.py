@@ -1188,12 +1188,34 @@ CMDS = {"home": cmd_home, "insights": cmd_insights,
         "session": cmd_session, "doctor": cmd_doctor, "cache-campaign": cmd_campaign}
 
 
-def ping_lines(code: int, doc: dict | None) -> list[str]:
-    """The one-line answer of POST /api/me/cache/ping, whatever the status."""
+# Why the server holds nothing to ping with (cachestate `ping_reason`), in words. The mod's toast says the same.
+PING_REASONS = {
+    "not opted in": "turn on Ping: reload Claude Code after updating the plugin",
+    "too large": "context too large to hold for Ping",
+    "expired": "cache already cold",
+    "over budget": "one ping would cost more than the per-ping limit",
+    "unsupported": "this session cannot be pinged (extended thinking)",
+}
+
+
+def ping_reason(cs: dict | None) -> str:
+    """The main thread's `ping_reason` from a cachestate doc, else the session entry's, else ""."""
+    if not isinstance(cs, dict):
+        return ""
+    main = next((t for t in cs.get("threads") or [] if isinstance(t, dict) and t.get("main")), {})
+    r = main.get("ping_reason") or cs.get("ping_reason")
+    return r if isinstance(r, str) else ""
+
+
+def ping_lines(code: int, doc: dict | None, reason: str = "") -> list[str]:
+    """The one-line answer of POST /api/me/cache/ping, whatever the status. `reason` is the cachestate's
+    ping_reason, which says WHY a 409 "not held" happened."""
     doc = doc or {}
     if code == 200 and doc.get("sent"):
         return [f"Kept warm: saved {dollars(doc.get('saved_usd', 0))} net (ping cost {dollars(doc.get('ping_usd', 0))})."]
     err = doc.get("error")
+    if code == 409 and err == "not held" and reason:
+        return [f"Can't ping: {PING_REASONS.get(reason, reason)}."]
     if code == 409 and err == "not held":
         return ["Keep-alive is off for this account. Turn it on in the dashboard to ping."]
     if code == 409 and err == "busy":
@@ -1230,10 +1252,13 @@ def ping_main(api: Api, sid: str | None, thread: str | None, as_json: bool) -> i
     if thread:
         body["thread"] = thread
     code, doc = api.send("POST", "/api/me/cache/ping", body=body, timeout=20)
+    reason = ""
+    if code == 409 and (doc or {}).get("error") == "not held" and api.fixture is None:
+        reason = ping_reason(cachestate_cached(api.base, sid))  # the shared cache first: at most one fetch, only on this refusal
     if as_json:  # the mod reads this: the HTTP status beside the server's own document
-        print(json.dumps({"status": code, **(doc or {})}))
+        print(json.dumps({"status": code, **(doc or {}), **({"ping_reason": reason} if reason else {})}))
     else:
-        print("\n".join(ping_lines(code, doc)))
+        print("\n".join(ping_lines(code, doc, reason)))
     return 0 if code == 200 else 1
 
 

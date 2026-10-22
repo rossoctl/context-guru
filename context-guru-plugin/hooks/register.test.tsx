@@ -194,6 +194,6 @@ test('a refused press explains itself with the server\'s ping_reason', async ($,
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await ui.find({ key: 'ping' })).toBeDefined() // still visible
   const r = await $.command.run({ command: 'ping', args: '' })
-  expect(r.text).toMatch(/can't ping: this context is too large/)
+  expect(r.text).toMatch(/can't ping: context too large to hold for Ping/)
   await ui.unmount()
 })

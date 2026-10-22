@@ -120,13 +120,17 @@ export const signature = (v: View | null): string =>
 
 /** Why the server holds nothing to ping with (cachestate `ping_reason`), in words. */
 export const reasonWords = (reason: string): string =>
-  reason === 'too large'
-    ? 'this context is too large to hold for a manual ping'
-    : reason === 'not opted in'
-      ? 'this session did not opt in to manual pings'
+  reason === 'not opted in'
+    ? 'turn on Ping: reload Claude Code after updating the plugin'
+    : reason === 'too large'
+      ? 'context too large to hold for Ping'
       : reason === 'expired'
-        ? 'the held copy expired \u2014 send a prompt, then ping again'
-        : reason
+        ? 'cache already cold'
+        : reason === 'over budget'
+          ? 'one ping would cost more than the per-ping limit'
+          : reason === 'unsupported'
+            ? 'this session cannot be pinged (extended thinking)'
+            : reason
 
 /** The main thread's `ping_reason` from the last cachestate read, when the server gave one. */
 export function pingReason(snap: Snapshot | null): string | undefined {

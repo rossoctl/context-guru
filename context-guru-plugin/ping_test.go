@@ -195,3 +195,37 @@ func TestCachestateNamesSubAgentsFromTheTranscript(t *testing.T) {
 		t.Errorf("names = %v, want only a:abc123 -> Explore", names)
 	}
 }
+
+// A 409 "not held" says WHY when the cachestate does: cg.py ping reads ping_reason from the shared cache.
+func TestPingExplainsAnUnheldCache(t *testing.T) {
+	requireTool(t, "python3")
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/me/cache/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"error":"not held"}`)) //nolint:errcheck
+	})
+	now := time.Now().UnixMilli()
+	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"session": "S1", "last_ts": now, "end_ts": now, "now_ms": now, "ttl_s": 300, "pingable": false,
+			"ping_reason": "not opted in",
+			"threads":     []any{map[string]any{"id": "main", "main": true, "pingable": false, "ping_reason": "not opted in"}},
+		})
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	env := []string{"XDG_CACHE_HOME=" + t.TempDir()}
+	out, code := runCGCode(t, "http://"+ln.Addr().String(), env, "ping", "--session", "S1")
+	if code != 1 || !strings.Contains(out, "Can't ping: turn on Ping: reload Claude Code") {
+		t.Errorf("exit %d:\n%s", code, out)
+	}
+	js, _ := runCGCode(t, "http://"+ln.Addr().String(), env, "ping", "--session", "S1", "--json")
+	if !strings.Contains(js, `"ping_reason": "not opted in"`) {
+		t.Errorf("json = %s", js)
+	}
+}
