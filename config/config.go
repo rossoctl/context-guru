@@ -529,7 +529,9 @@ var presets = map[string][]string{
 	"conservative": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"medium":       {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 	"high":         {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
-	"xhigh":        {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+
+	// Sweep off for 0.5.3 (#652); restore with #508.
+	"xhigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
@@ -788,7 +790,8 @@ components:
       min_request_tokens: 3000`,
 	// xhigh = high + extract_llm_sweep. Same summarizer settings as high: model.source: incoming,
 	// trigger at the component's own defaults (min_request_frac 0.9, cache_state any).
-	"xhigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+	// Sweep off for 0.5.3 (#652); restore with #508.
+	"xhigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
 components:
   cache_aware_summarizer:
     model:
@@ -810,9 +813,7 @@ components:
       source: incoming
     strategy: code
     trigger:
-      min_request_tokens: 3000
-  extract_llm_sweep:
-    min_tokens: 1000`,
+      min_request_tokens: 3000`,
 	// (a=2, b=1, θ=500) and the authors' artifact apply-gate (saved >= 400 || keep <
 	// 0.8). Routed to the CHEAP model because the method's economics depend on the
 	// reflection model being much cheaper than the agent's — the paper's own choice was

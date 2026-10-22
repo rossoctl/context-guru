@@ -61,44 +61,36 @@ Choose your setup. Each button opens only the instructions for that path.
   </tbody>
 </table>
 
-For local Codex use, register only the marketplace paths Codex needs; cloning the whole monorepo
-can exceed Codex's marketplace timeout:
+## What's cool
 
-```sh
-codex plugin marketplace add rossoctl/context-guru --sparse .agents --sparse codex-marketplace
-codex plugin add context-guru@context-guru
-```
-
-## Claude Code plugin
-
-The plugin answers three questions in the terminal: **how much am I saving, is my cache about to cost me, what should I do?**
-
-```
-/plugin marketplace add rossoctl/context-guru
-/plugin install context-guru@context-guru
-```
+**The status line shows your savings live, for the main session and for every subagent.** It also shows the cache
+clock, the context fill and the keep-alive pings. This frame comes from a real, week-long release session:
 
 <p align="center">
 <picture>
-<source media="(prefers-color-scheme: dark)" srcset="docs/statusline-live/warm-dark.svg">
-<img alt="The status line: dollars saved, a draining cache clock, context fill" src="docs/statusline-live/warm-light.svg" width="760">
+<source media="(prefers-color-scheme: dark)" srcset="docs/img/readme/statusline-subagents-dark.svg">
+<img alt="The status line: dollars saved for the session and for its subagents, the cache clock, context fill and keep-alive pings" src="docs/img/readme/statusline-subagents-light.svg" width="760">
 </picture>
 </p>
 
-Each command opens with one line that answers its question, then a small picture; add `details` for the tables.
+**`/context-guru:insights` tells you what you saved, what your cache costs you, and what you carry and never use.**
+Real output, 7 days of one developer's work:
 
-| Command | The question | Example first line |
-|---|---|---|
-| `/context-guru:status` | Is it working, how am I doing, what next? | Saved $41.20 in 7 days (4.6% of what the same work would have cost). |
-| `/context-guru:savings` | How much did it save? | Saved $41.20 in 7 days, net of Context Guru's own spend (4.6% of the $898.05 the same work would have cost). |
-| `/context-guru:cache` | Is my cache about to cost me? | Cache is warm for 2:41 more. If it lapses, the next message costs $1.91 extra. |
-| `/context-guru:waste` | What do I carry and never use? | 6 things you carry were never used: $37.70 in 7 days, about $161.57 a month. |
-| `/context-guru:session` | What happened in this session? | In the last 4 hours of this session (9h20m long), cache misses cost you about $4.20 of the $13.50 billed (2 misses in 31 messages). |
-| `/context-guru:doctor` | Is it set up right? | All 7 checks pass. |
+<p align="center">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/img/readme/insights-dark.svg">
+<img alt="/context-guru:insights: savings by lever, cache misses by cause, and unused tools with what they cost" src="docs/img/readme/insights-light.svg" width="760">
+</picture>
+</p>
 
-Five more views draw in the terminal (`watch`, `timeline`, `chart`, `heatmap`, `fill`).
+More:
 
-Full guide, every status line state and troubleshooting: **[rossoctl.github.io/context-guru/plugin](https://rossoctl.github.io/context-guru/plugin/)**.
+- **[Save more](docs/plugin/save-more.md)**: replay your own history and find the config that costs least.
+- **[Remove tools](docs/plugin/remove-mcp-and-skills.md)**: find the MCP servers and skills you never use, and remove them.
+- **[Dashboard](docs/dashboard.md)**: every request, every saving, in your browser.
+
+Every command: **[docs/plugin/commands.md](docs/plugin/commands.md)**. Full guide, every status line state and
+troubleshooting: **[rossoctl.github.io/context-guru/plugin](https://rossoctl.github.io/context-guru/plugin/)**.
 
 ## Presets
 

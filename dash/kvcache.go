@@ -61,6 +61,13 @@ import (
 // is a branch no test reaches.
 var kvCacheMaxRows = 200_000
 
+// SetKVCacheMaxRows lowers the row cap for a test in another package and returns the restore. It changes a global: not for parallel tests.
+func SetKVCacheMaxRows(n int) (restore func()) {
+	old := kvCacheMaxRows
+	kvCacheMaxRows = n
+	return func() { kvCacheMaxRows = old }
+}
+
 // kvCacheMaxConcurrent bounds how many analysis reads run at once, which is the half of the
 // ceiling kvCacheMaxRows does not cover.
 //
@@ -134,6 +141,9 @@ type KVCacheOptions struct {
 	// nobody came back to" is a population an operator asks about directly — and it is the
 	// population every average on this page has to exclude.
 	HasNext string
+	// ByThread links each request to the next one on its own THREAD (requests.thread_id) as well as its conversation: a subagent's
+	// request is not the successor of the main thread's. Rows recorded before threads existed have thread_id '' and link as before.
+	ByThread bool
 }
 
 // kvCacheSortKeys maps a sort key to its ORDER BY body, with one %s for the direction.
@@ -271,7 +281,7 @@ const kvCacheCTE = `WITH s AS (SELECT r.id, r.ts, r.tenant_id, r.session_id, r.m
 		r.provider, r.agent, r.preset, r.mode, r.token_accounting, r.reasoning_effort,
 		r.thinking_mode, r.status, r.stop_reason, r.uncompressed_reason, r.cache_ttl, r.keepalive,
 		r.fresh_input, r.output_tokens, r.cache_read, r.cache_write, r.cache_write_1h,
-		r.cache_miss_reason, r.cost_usd, r.upstream_ms,
+		r.cache_miss_reason, r.cost_usd, r.upstream_ms, r.thread_id,
 		LEAD(r.ts) OVER w AS next_ts, LEAD(r.id) OVER w AS next_id
 	FROM requests r WHERE %s
 	WINDOW w AS (PARTITION BY r.tenant_id, r.session_id, r.model ORDER BY r.ts, r.id))`
@@ -302,7 +312,11 @@ func kvCacheQueryShard(f Filter, o KVCacheOptions, projection string, shard, n i
 	}
 	outCond, outArgs := f.where()
 	conds, derivedArgs := kvCacheDerivedPreds(o)
-	q := strings.Replace(kvCacheCTE, "%s", inCond, 1) +
+	cte := kvCacheCTE
+	if o.ByThread {
+		cte = strings.Replace(cte, "PARTITION BY r.tenant_id, r.session_id, r.model", "PARTITION BY r.tenant_id, r.session_id, r.model, r.thread_id", 1)
+	}
+	q := strings.Replace(cte, "%s", inCond, 1) +
 		" SELECT " + projection + " FROM s r WHERE " + outCond
 	for _, c := range conds {
 		q += " AND " + c
@@ -354,7 +368,7 @@ func bucketHours(b kvcache.Bucket) (lo, hi int, ok bool) {
 const kvCacheCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r.agent,
 	r.cache_ttl, r.fresh_input, r.output_tokens, r.cache_read, r.cache_write, r.cache_write_1h,
 	r.cache_miss_reason, r.token_accounting, r.cost_usd, r.upstream_ms, r.keepalive,
-	r.stop_reason, r.next_ts, r.next_id, r.status`
+	r.stop_reason, r.next_ts, r.next_id, r.status, r.thread_id`
 
 // scanKVCacheRequest reads one row and fills everything derived from it.
 //
@@ -371,7 +385,7 @@ func scanKVCacheRequest(rows interface{ Scan(...any) error }) (*kvcache.Request,
 	if err := rows.Scan(&r.ID, &r.TS, &r.User, &r.ConversationID, &r.Model, &r.Provider,
 		&r.Agent, &cacheTTL, &r.InputTokens, &r.OutputTokens, &r.CacheRead, &r.CacheWrite,
 		&r.CacheWrite1h, &missReason, &accounting, &r.CostUSD, &r.UpstreamMs, &keepAlive,
-		&r.StopReason, &nextTS, &nextID, &status); err != nil {
+		&r.StopReason, &nextTS, &nextID, &status, &r.ThreadID); err != nil {
 		return nil, err
 	}
 	r.KeepAlive = keepAlive != 0

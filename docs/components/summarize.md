@@ -179,12 +179,8 @@ of the normalized list, so it is asserted on the raw body instead (`apply/toolro
 | `custom_prompt` | *(none)* | A deployment-specific instruction appended last to the summarizer prompt, framed as operator guidance that takes precedence over the trajectory but not over the anti-fabrication rule or the `<summary>` output format. |
 | `resummarize_tokens` | 6000 | Tail growth that triggers rolling the checkpoint forward. |
 | `start_from_message` | 6 | Legacy message-count gate, folded into `trigger.min_messages` when that is unset. Prefer `trigger.min_messages`; this key is still read so old documents keep working. |
-| `model.source` | `incoming` | LLM source: `incoming` (proxied model+key) or `config` (cheap model). |
+| `model.source` | `incoming` | LLM source: `incoming` (proxied model+key) or `config` (cheap model). The endpoint and credential for `config` are the host's own (`CHEAP_MODEL*` env vars on the standalone proxy); this block never names one. |
 | `model.model` | *the source's own model* | The model to summarize WITH, on that source's endpoint and credential. |
-| `model.provider` | `anthropic` | Wire dialect for a config-pinned endpoint: `anthropic` \| `openai`. |
-| `model.base_url` | *the provider's public API* | Pin a dedicated endpoint as a full URL. |
-| `model.api_key` | *the process env key* | **Credential** for the pinned endpoint; empty falls back to the provider env key, which a hosted deployment refuses. Write-only on the settings page. |
-| `model.auth` | `x-api-key` | Anthropic only: `x-api-key` \| `bearer`. |
 | `trigger.min_request_frac` | **0.9** | Summarize only once the session has been billed at least this fraction of the model's context window. Measured from the provider's own input count for the previous turn — see below. |
 | `trigger.cache_state` | **`any`** | No cache constraint: at 0.9 fill, compaction is worth doing whatever the cache is doing. `pre_expiry` restricts firing to a turn whose cached prefix is within `pre_expiry_seconds` of expiring — useful only for a summarizer whose model call reuses that prefix, which this one does not. `cold` and `pre_expiry_or_cold` are **withdrawn** and refused at config time. See below. |
 | `trigger.pre_expiry_seconds` | 60 | How wide "about to expire" is. Must stay below the shortest prompt-cache lifetime (300s) or every warm turn counts as pre-expiry; refused at config time above that. |
@@ -348,7 +344,7 @@ message text) is the size gate.
 
 ## Measuring what it earned
 
-The Components tab carries a **What each summary earned** panel, which follows every summary for
+The Preset steps tab (Components) carries a **What each summary earned** panel, which follows every summary for
 **10% more of the model's context window** and reports what happened over that span:
 
 | Column | What it is |
@@ -372,10 +368,30 @@ have paid for a summary — sound, but deduced. It exists because the marker is 
 the only way to see what the **old size-only trigger** achieved, and therefore the only available
 comparison.
 
-**Spans that are `open` or `voided` are counted and not totalled.** Open means the span had not
-finished inside the time range being viewed; voided means the client compacted its own transcript
-part-way through, which is the very thing this trigger tries to get ahead of, so the remainder is
-not comparable.
+**A span that is `open` is counted and not totalled.** Open means the span had not finished inside
+the time range being viewed. A span the **client** ended is totalled: when the client compacts its
+own transcript inside the span (state `closed_client_compaction`), both worlds carry a summary from
+that turn on, so nothing later is ours. The credit earned *before* that turn counts. It used to be
+voided and counted as $0.
+
+**One rule sets the credit everywhere.** Summarize fires at 0.90 of the window. Without it, the
+client compacts at about 1.00. So credit is ours only inside that 0.10 span. The episode view, the
+Components tab and the headline "net from compaction" all read the same ledger (`ledger` in the
+episode response, `summarize_correction_usd` on `/api/stats`):
+
+- A first removal is priced at the rate the previous turn paid for that content. A read, when its
+  cache was live. It was a cache write.
+- A replay turn inside the span counts at the rate its own turn paid.
+- A replay turn after the span ended (it closed, or the client compacted) is not credited.
+- A replay turn that missed because the prompt changed (`prefix_change`) inside a span is not
+  credited. Its cache write is charged instead.
+- A second summary inside an open span rolls the span forward. It does not start a new one, and its
+  cost is charged to the same episode.
+- A conversation with summarize credit and no summary event before it anchors a span at the first
+  turn we can see. It is bounded like any other, but it is not listed as an episode.
+
+Summarize's own model spend (`llm_calls`, `llm_cost_usd` on the Components tab) is the
+`cg_llm_cost_usd` of requests where summarize ran and no extraction call owns the cost.
 
 !!! note "Expect the settled total to be empty on a young session, by design"
     The span is 10% of the window's worth of **new** content, and a summarized session adds new

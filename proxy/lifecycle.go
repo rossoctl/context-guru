@@ -5,7 +5,6 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
-	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/schema"
 )
@@ -15,12 +14,14 @@ import (
 // assistant turn. Count and bytes come from there; is_error is the one thing the normalizer
 // drops, so it is read straight off the last Anthropic user message. Runs on the dashboard
 // writer goroutine, never the request path.
-func scanLifecycle(provider bschemas.ModelProvider, body []byte) (q dash.LifecycleReq) {
+// norm yields the normalized conversation (shared with waitcause so the body is normalized
+// once per request).
+func scanLifecycle(norm func() []bschemas.ChatMessage, body []byte) (q dash.LifecycleReq) {
 	defer func() { recover() }() //nolint:errcheck // fail open: a body it cannot read yields no facts
 	if gjson.GetBytes(body, "previous_response_id").String() != "" {
 		return q // server-held history: `input` is only the newest turn
 	}
-	msgs := apply.NormalizeMessages(provider, body)
+	msgs := norm()
 	last := -1
 	for i, m := range msgs {
 		if m.Role == bschemas.ChatMessageRoleAssistant {

@@ -30,6 +30,14 @@
  "episodes": null,
  "first_ts": 1767603620000,
  "last_ts": 1768249460000,
+ "ledger": {
+  "first_removal_usd": 0,
+  "past_span_usd": 0,
+  "prefix_change_usd": 0,
+  "replay_usd": 0,
+  "rows": 0,
+  "stored_usd": 0
+ },
  "pricing": {
   "models": [
    {
@@ -74,6 +82,13 @@
    "write_1h": 2,
    "write_5m": 1.25
   }
+ },
+ "replay_ledger": {
+  "by_component": {},
+  "closed_client_compaction": 0,
+  "closed_counterfactual": 0,
+  "conversations": 0,
+  "window_unknown_conversations": 0
  },
  "scanned": 591
 }

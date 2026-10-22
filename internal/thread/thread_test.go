@@ -312,7 +312,7 @@ func TestNoMessageListFallsBackToTheSession(t *testing.T) {
 
 func TestValidHeaderID(t *testing.T) {
 	for v, want := range map[string]bool{
-		"a9b99ca1f8284c823": true, "agent_1.x:y-z": true,
+		"a9b99ca1f8284c823": true, "agent_1.x:y-z": true, "researcher@session-ab47f1d6": true,
 		"": false, "has space": false, "new\nline": false, "nul\x00": false,
 		string(make([]byte, maxHeaderID+1)): false,
 	} {
@@ -500,8 +500,9 @@ func TestAToolLessAgentCompactionDoesNotSplitTheMainThread(t *testing.T) {
 		t.Fatalf("compaction request got %q, want primary", compact.ID)
 	}
 	// The post-compaction request starts from a summary: it matches no thread by prefix, and
-	// must inherit the main thread's id via the `compacting` flag the request above set.
-	post := tr.Resolve("t\x00s", "", conv("summary of everything", "continue"), false)
+	// must inherit the main thread's id via the `compacting` flag the request above set. It
+	// declares tools, as Claude Code's does: it is the main agent's next turn.
+	post := tr.Resolve("t\x00s", "", withTools(conv("summary of everything", "continue")), false)
 	if post.ID != Primary {
 		t.Fatalf("post-compaction request got %q, want primary (the compaction request's thread)", post.ID)
 	}
@@ -540,5 +541,324 @@ func TestTheMainAgentGetsThePrimaryEvenWhenAnAuxiliaryRequestComesFirst(t *testi
 	tr2.Resolve("t\x00s", "", conv("other chat"), false)
 	if id := tr2.Resolve("t\x00s", "", conv("chat", "a", "u"), false).ID; id != Primary {
 		t.Fatalf("tool-less client: first thread got %q, want the primary", id)
+	}
+}
+
+// ccTurn is one message in the shape Claude Code 2.1.296 sends: content blocks, and a role that
+// may be "system" (it ends every request with a `<total_tokens>` system message).
+type ccTurn struct {
+	role   string
+	blocks []string
+}
+
+func ccBody(tools bool, turns ...ccTurn) []byte {
+	msgs := make([]any, len(turns))
+	for i, t := range turns {
+		blocks := make([]any, len(t.blocks))
+		for j, b := range t.blocks {
+			blocks[j] = map[string]any{"type": "text", "text": b}
+		}
+		msgs[i] = map[string]any{"role": t.role, "content": blocks}
+	}
+	m := map[string]any{"model": "claude-sonnet-5-5", "system": "sys", "messages": msgs}
+	if tools {
+		m["tools"] = []any{map[string]any{"name": "Read", "input_schema": map[string]any{"type": "object"}}}
+	}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// #518, in the request shapes recorded from Claude Code 2.1.296. Its compaction request does
+// NOT extend the main thread: it has the same messages as the turn before, with the prompt added
+// as a second text block of the last user message, and the trailing system message still after
+// it. Then a tool-less side request, then the next turn, which starts from the summary. The main
+// thread must keep the primary id through all of it, or the status line, keep-alive and
+// summarizer follow a thread that died at the compaction.
+func TestAClaudeCodeCompactionKeepsTheMainThread(t *testing.T) {
+	read := ccTurn{"user", []string{"read README.md"}}
+	sys := ccTurn{"system", []string{"<total_tokens>15000000 tokens left</total_tokens>"}}
+	answer := ccTurn{"assistant", []string{"it is a proxy"}}
+	ask := ccTurn{"user", []string{"name 1 command"}}
+	compactAsk := ccTurn{"user", []string{"name 1 command", "CRITICAL: Respond with TEXT ONLY. Your task is to create a detailed summary of this conversation."}}
+	post := ccTurn{"user", []string{"This session is being continued from a previous conversation."}}
+
+	run := func(agentCompaction bool) (compaction, side, next string) {
+		tr := testTracker()
+		if id := tr.Resolve("t\x00s", "", ccBody(true, read, sys), false).ID; id != Primary {
+			t.Fatalf("precondition: first turn got %q", id)
+		}
+		if id := tr.Resolve("t\x00s", "", ccBody(true, read, sys, answer, ask, sys), false).ID; id != Primary {
+			t.Fatalf("precondition: second turn got %q", id)
+		}
+		compaction = tr.Resolve("t\x00s", "", ccBody(true, read, sys, answer, compactAsk, sys), agentCompaction).ID
+		side = tr.Resolve("t\x00s", "", ccBody(false, ccTurn{"user", []string{"a side task"}}), false).ID
+		next = tr.Resolve("t\x00s", "", ccBody(true, post, sys), false).ID
+		return
+	}
+	compaction, side, next := run(true)
+	if compaction != Primary {
+		t.Fatalf("compaction request got %q, want the main thread's id", compaction)
+	}
+	if side == Primary {
+		t.Fatal("the tool-less side request after the compaction took the main thread's id")
+	}
+	if next != Primary {
+		t.Fatalf("turn after the compaction got %q, want the main thread's id", next)
+	}
+	// Control: without the compaction mark, the request after the compaction splits the thread.
+	// Otherwise the assertions above could pass for a reason that has nothing to do with
+	// compaction. (The unmarked compaction request itself still joins the main thread: it repeats
+	// the main thread's last request except its last two messages, see the rewritten-tail tests.)
+	if _, _, next := run(false); next == Primary {
+		t.Fatalf("control: the unmarked post-compaction request kept the main thread")
+	}
+}
+
+// A compaction request that shares its leading messages with both the main thread and a
+// tool-less side thread (a title request carries the main prefix plus its own message) belongs
+// to the main thread, even when the side thread spoke last.
+func TestACompactionPrefersTheThreadThatDeclaresTools(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withTools(conv("fix the bug", "a1", "u2")), false)
+	if id := tr.Resolve("t\x00s", "", conv("fix the bug", "a1", "u2", "a2", "write a title"), false).ID; id == Primary {
+		t.Fatal("precondition: the side request took the main thread's id")
+	}
+	compact := withTools(conv("fix the bug", "a1", "u2 + Your task is to create a detailed summary of this conversation."))
+	if id := tr.Resolve("t\x00s", "", compact, true).ID; id != Primary {
+		t.Fatalf("compaction request got %q, want the main thread's id", id)
+	}
+}
+
+// withModel sets the request's model.
+func withModel(body []byte, model string) []byte {
+	var m map[string]any
+	_ = json.Unmarshal(body, &m)
+	m["model"] = model
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// When two threads tie on shared messages and on tools, a compaction request joins the one on
+// its own model, even when the other spoke last. Here a second conversation on another model,
+// which shares only the first two messages, is the more recent.
+func TestACompactionTieGoesToTheThreadOnTheSameModel(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withModel(withTools(conv("task", "a1", "u2", "a2", "u3", "a3")), "opus"), false)
+	if id := tr.Resolve("t\x00s", "", withModel(withTools(conv("task", "a1", "other", "b2", "v3", "b3")), "sonnet"), false).ID; id == Primary {
+		t.Fatal("precondition: the second conversation took the main thread's id")
+	}
+	compact := withModel(withTools(conv("task", "a1", "u2 + Your task is to create a detailed summary of this conversation.")), "opus")
+	if id := tr.Resolve("t\x00s", "", compact, true).ID; id != Primary {
+		t.Fatalf("compaction request got %q, want the thread on its own model", id)
+	}
+}
+
+// With two threads compacting at once, the post-compaction request takes the one on its own
+// model, even when the other compacted later. Without a model match, the later one still wins
+// (TestTwoCompactingThreadsTheLaterOneIsTheSuccessor).
+func TestTwoCompactingThreadsTheSameModelIsTheSuccessor(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withModel(withTools(conv("first conversation", "a", "u")), "opus"), false)
+	second := tr.Resolve("t\x00s", "", withModel(withTools(conv("second conversation", "a", "u")), "sonnet"), false).ID
+	if second == Primary {
+		t.Fatal("precondition: the second conversation took the primary id")
+	}
+	tr.Resolve("t\x00s", "", withModel(withTools(conv("first conversation", "a", "u", "summarize")), "opus"), true)
+	tr.Resolve("t\x00s", "", withModel(withTools(conv("second conversation", "a", "u", "summarize")), "sonnet"), true)
+	if id := tr.Resolve("t\x00s", "", withModel(withTools(conv("summary of the first", "go on")), "opus"), false).ID; id != Primary {
+		t.Fatalf("post-compaction request got %q, want the primary, the thread on its own model", id)
+	}
+}
+
+// A model change does not split a thread: Opus plan mode plans on one model and works on another
+// in the same conversation.
+func TestAModelChangeKeepsTheThread(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", withModel(withTools(conv("plan the fix")), "opus"), false)
+	if id := tr.Resolve("t\x00s", "", withModel(withTools(conv("plan the fix", "a1", "now do it")), "sonnet"), false).ID; id != Primary {
+		t.Fatalf("the turn on another model got %q, want the main thread's id", id)
+	}
+}
+
+// #518, seen live: at a turn start Claude Code changed the last user message, or dropped the
+// trailing system message, instead of only appending. The request matches no thread by prefix,
+// yet it is the main thread's next turn.
+func TestARewrittenTailKeepsTheMainThread(t *testing.T) {
+	read := ccTurn{"user", []string{"read README.md"}}
+	sys := ccTurn{"system", []string{"<total_tokens>15000000 tokens left</total_tokens>"}}
+	answer := ccTurn{"assistant", []string{"it is a proxy"}}
+	ask := ccTurn{"user", []string{"name 1 command"}}
+	for name, next := range map[string][]ccTurn{
+		"last user message changed": {read, sys, answer, {"user", []string{"name 1 command", "a background task finished"}}, sys},
+		"trailing system dropped":   {read, sys, answer, ask, {"assistant", []string{"done"}}, {"user", []string{"thanks"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tr := testTracker()
+			tr.Resolve("t\x00s", "", ccBody(true, read, sys), false)
+			if id := tr.Resolve("t\x00s", "", ccBody(true, read, sys, answer, ask, sys), false).ID; id != Primary {
+				t.Fatalf("precondition: second turn got %q", id)
+			}
+			if id := tr.Resolve("t\x00s", "", ccBody(true, next...), false).ID; id != Primary {
+				t.Fatalf("rewritten turn got %q, want the main thread's id", id)
+			}
+		})
+	}
+	// Control: a header-less request that shares only the first message is a fork, not the same
+	// conversation, and keeps its own thread — also against a thread so short that "all but the
+	// last two messages" would be nothing.
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", ccBody(true, read, sys), false)
+	if id := tr.Resolve("t\x00s", "", ccBody(true, read, ccTurn{"assistant", []string{"another way"}}, ccTurn{"user", []string{"go"}}, sys), false).ID; id == Primary {
+		t.Fatal("control: a fork that shares only the first message joined the main thread")
+	}
+}
+
+// #518, seen live: Claude Code's auto-mode classifier sends the session transcript in one tool-less
+// message. When the transcript quotes the compaction prompt, the classifier request is flagged as
+// a compaction and its thread is marked compacting. A later main-agent request that matches no
+// thread must not take that thread's id.
+func TestAToolLessCompactingThreadDoesNotTakeTheMainAgent(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", ccBody(true, ccTurn{"user", []string{"fix the bug"}}), false)
+	classifier := tr.Resolve("t\x00s", "", ccBody(false, ccTurn{"user", []string{"<transcript> ... Your task is to create a detailed summary of the conversation so far ..."}}), true).ID
+	if classifier == Primary {
+		t.Fatal("precondition: the classifier took the main thread's id")
+	}
+	if id := tr.Resolve("t\x00s", "", ccBody(true, ccTurn{"user", []string{"a new conversation"}}, ccTurn{"system", []string{"x"}}), false).ID; id == classifier {
+		t.Fatalf("a main-agent request took the tool-less classifier thread %q", id)
+	}
+}
+
+// texts builds n message texts m0..m(n-1).
+func texts(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("m%d", i)
+	}
+	return out
+}
+
+func with(prefix []string, more ...string) []string {
+	return append(append([]string{}, prefix...), more...)
+}
+
+// #519 review: a forked subagent names itself with the agent header and carries its parent's
+// messages plus its own. A header-less main turn whose tail was rewritten shares as much with the
+// fork as with the main thread, and must still stay on the main thread.
+func TestARewrittenTailDoesNotJoinAHeaderThread(t *testing.T) {
+	tr := testTracker()
+	main := texts(10)
+	tr.Resolve("t\x00s", "", withTools(conv(main...)), false)
+	if id := tr.Resolve("t\x00s", "f1", withTools(conv(with(main, "directive")...)), false).ID; id != "a:f1" {
+		t.Fatalf("precondition: fork got %q", id)
+	}
+	if id := tr.Resolve("t\x00s", "", withTools(conv(with(main[:9], "m9 rewritten", "x")...)), false).ID; id != Primary {
+		t.Fatalf("main turn with a rewritten tail got %q, want the main thread's id", id)
+	}
+}
+
+// The same for a compaction: it must not mark the fork compacting, or the post-compaction request
+// takes the fork's id.
+func TestACompactionDoesNotMarkAHeaderThread(t *testing.T) {
+	tr := testTracker()
+	main := texts(8)
+	tr.Resolve("t\x00s", "", withTools(conv(main...)), false)
+	tr.Resolve("t\x00s", "f1", withTools(conv(with(main, "directive")...)), false)
+	if id := tr.Resolve("t\x00s", "", withTools(conv(with(main[:7], "m7 + the compaction prompt")...)), true).ID; id != Primary {
+		t.Fatalf("compaction request got %q, want the main thread's id", id)
+	}
+	if id := tr.Resolve("t\x00s", "", withTools(conv("This session is being continued", "ok", "go")), false).ID; id != Primary {
+		t.Fatalf("post-compaction request got %q, want the main thread's id", id)
+	}
+}
+
+// The rewritten-tail rule is for the main agent only: a tool-less request that repeats the main
+// thread's last request with a changed last message is a side request, not the main thread's turn.
+func TestAToolLessRewrittenTailDoesNotJoinTheMainThread(t *testing.T) {
+	tr := testTracker()
+	main := texts(6)
+	tr.Resolve("t\x00s", "", withTools(conv(main...)), false)
+	if id := tr.Resolve("t\x00s", "", conv(with(main[:5], "a side task")...), false).ID; id == Primary {
+		t.Fatal("a tool-less request joined the main thread through the rewritten-tail rule")
+	}
+}
+
+// "All but the last one or two messages" is the bound: a request that shares all but three is not
+// the same conversation, even when it shares more than half.
+func TestARequestSharingAllButThreeMessagesIsANewThread(t *testing.T) {
+	tr := testTracker()
+	main := texts(8)
+	tr.Resolve("t\x00s", "", withTools(conv(main...)), false)
+	if id := tr.Resolve("t\x00s", "", withTools(conv(with(main[:5], "x5", "x6", "x7")...)), false).ID; id == Primary {
+		t.Fatal("a request sharing 5 of 8 messages joined the main thread")
+	}
+}
+
+// convTail builds a conversation whose last message is a volatile system reminder that the next
+// turn replaces, as Claude Code sends it: texts are the stable messages, reminder is the trailing
+// message. It declares tools, as every real Claude Code main-agent request does.
+func convTail(reminder string, texts ...string) []byte {
+	msgs := make([]any, 0, len(texts)+1)
+	for i, t := range texts {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		msgs = append(msgs, map[string]any{"role": role, "content": []any{map[string]any{"type": "text", "text": t}}})
+	}
+	msgs = append(msgs, map[string]any{"role": "system", "content": []any{map[string]any{"type": "text", "text": reminder, "cache_control": map[string]any{"type": "ephemeral"}}}})
+	b, _ := json.Marshal(map[string]any{
+		"model": "claude-sonnet-5", "system": "sys", "messages": msgs,
+		"tools": []any{map[string]any{"name": "Bash", "input_schema": map[string]any{"type": "object"}}},
+	})
+	return b
+}
+
+// A replaced trailing system message (#519) keeps a growing conversation on one thread.
+func TestAReplacedTrailingSystemReminderKeepsTheThread(t *testing.T) {
+	tr := testTracker()
+	var ids []string
+	for n := 3; n <= 9; n += 2 { // a conversation growing by a user/assistant pair each turn
+		texts := make([]string, n)
+		for i := range texts {
+			texts[i] = fmt.Sprintf("message %d", i)
+		}
+		ids = append(ids, tr.Resolve("s", "", convTail(fmt.Sprintf("reminder for turn %d", n), texts...), false).ID)
+	}
+	for i, id := range ids {
+		if id != ids[0] {
+			t.Fatalf("turn %d resolved to thread %q, the first turn to %q: a replaced trailing reminder split the conversation", i, id, ids[0])
+		}
+	}
+}
+
+// convTools is conv with a tools declaration, as every real Claude Code main-agent request has.
+func convTools(texts ...string) []byte {
+	var m map[string]any
+	_ = json.Unmarshal(conv(texts...), &m)
+	m["tools"] = []any{map[string]any{"name": "Bash", "input_schema": map[string]any{"type": "object"}}}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// Two conversations that only share their first message are two threads: a rewritten tail may
+// replace the last message or two, but not everything after the first. (Tolerating only the last
+// message, as #499 did, joins [hello hi] and [hello other x] into one thread.)
+func TestTwoConversationsSharingOnlyTheFirstMessageStayTwoThreads(t *testing.T) {
+	tr := testTracker()
+	a := tr.Resolve("s", "", convTools("hello", "hi"), false)
+	b := tr.Resolve("s", "", convTools("hello", "other", "x"), false)
+	if a.ID == b.ID {
+		t.Fatalf("conversations sharing only their first message share thread %q", a.ID)
+	}
+}
+
+// Conversations that share nothing are separate threads.
+func TestUnrelatedConversationsWithTrailingRemindersStayTwoThreads(t *testing.T) {
+	tr := testTracker()
+	a := tr.Resolve("s", "", convTail("r1", "alpha one", "alpha two", "alpha three"), false)
+	b := tr.Resolve("s", "", convTail("r2", "beta one", "beta two", "beta three"), false)
+	if a.ID == b.ID {
+		t.Fatalf("two conversations that share no messages must not share a thread (both %q)", a.ID)
 	}
 }

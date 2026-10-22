@@ -12,9 +12,9 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
@@ -1389,6 +1389,10 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 	// verify either way is the pre-existing, separately tracked gap (#122), not this guard's job.
 	usePrefixAsk := c.PrefixAsk != nil
 	stalePrefix := false
+	// The span the guard verified, kept so the ask below can check it again on the SAME read of the
+	// stash it asks over (PrefixCoveredAsker) instead of trusting that the stash did not change
+	// between the check above and the ask.
+	haveCover, coverCount, coverHash := false, 0, ""
 	if usePrefixAsk {
 		if pc, ok := c.PrefixAsk.(components.PrefixCoverage); ok && c.MaxCachedIdx >= 0 {
 			deepest := -1
@@ -1412,6 +1416,8 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 				if span, ok := rawSpanForHash(c, req, requiredCount); !ok ||
 					!pc.CoversSpan(thread.Key(c.Session, c.Thread), requiredCount, components.SpanHash(span)) {
 					stalePrefix = true
+				} else {
+					haveCover, coverCount, coverHash = true, requiredCount, components.SpanHash(span)
 				}
 			}
 		}
@@ -1463,13 +1469,17 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 			}
 		}
 		// The THREAD's stashed body (#423), not whichever thread of the session spoke last.
-		reply, usage, err = c.PrefixAsk.Ask(ctx, thread.Key(c.Session, c.Thread), askPrompt)
+		if ca, ok := c.PrefixAsk.(components.PrefixCoveredAsker); ok && haveCover {
+			reply, usage, err = ca.AskCovered(ctx, thread.Key(c.Session, c.Thread), coverCount, coverHash, askPrompt)
+		} else {
+			reply, usage, err = c.PrefixAsk.Ask(ctx, thread.Key(c.Session, c.Thread), askPrompt)
+		}
 		askMs = float64(time.Since(askStart).Milliseconds())
 		// ErrNoPrefix is refused LOCALLY — there is no stashed body to append to, so no request
 		// leaves the process. Booking it as a call would put a 0 ms, $0 sample into the mean that
 		// the exploration brake reads, and inflate `calls` with work that by definition did not
 		// happen. Every other outcome, transport failure included, went to the provider.
-		if !errors.Is(err, components.ErrNoPrefix) {
+		if !errors.Is(err, components.ErrNoPrefix) && !errors.Is(err, components.ErrStalePrefix) {
 			askCost = recordLeg(askMs, usage)
 		}
 	}
@@ -1499,6 +1509,11 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		// and which needs no attention, and the other is "the read failed", which does.
 		if errors.Is(err, components.ErrNoPrefix) {
 			r.gate("sweep_no_prefix")
+		} else if errors.Is(err, components.ErrStalePrefix) {
+			// The stash changed between the guard above and the ask, and AskCovered refused to ask
+			// over a body the guard had not approved. Counted as the stale prefix it is, not as a
+			// failed call: no request left the process.
+			r.gate("sweep_stale_prefix")
 		} else {
 			r.gate("sweep_ask_failed")
 			// The provider's error text otherwise survives only in r.rec.Rejection, which is set

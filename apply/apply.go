@@ -103,10 +103,11 @@ func logDecisions(lg *slog.Logger, rr *components.RunReport) {
 			"saved", rep.Saved(), "duration_ms", rep.DurationMs,
 			"changed_msgs", len(rep.ChangedIdx),
 		}
-		// "stashed" only for an Offload: a Reformat's CacheKeys are dedup keys over
-		// content it did NOT stash (see components.reformatKeys), and labelling those
-		// "stashed" would read as a reversibility claim the fold never makes.
-		if rep.Kind == "offload" {
+		// "stashed" only for an Offload that stashed: a Reformat's CacheKeys, and an
+		// Irreversible Offload's, are dedup keys over content it did NOT stash (see
+		// components.reformatKeys), and labelling those "stashed" would read as a
+		// reversibility claim the run never makes.
+		if rep.Kind == "offload" && !rep.Irreversible {
 			attrs = append(attrs, "stashed", len(rep.CacheKeys))
 		} else {
 			attrs = append(attrs, "dedup_keys", len(rep.CacheKeys))
@@ -190,6 +191,11 @@ type slot struct {
 	path    string // sjson path: "messages.<i>" (whole) or "messages.<i>.content.<b>.content" (tool text)
 	pre     []byte // canonical marshal of the original (normalized) message
 	preText string // anthropicToolText: original tool-output text (change detection)
+	// tail is the run of trailing <system-reminder> blocks split off an anthropicToolText
+	// output before the components saw it (#556). preText still holds the WHOLE original, and
+	// writeback appends tail to whatever the components left, so preText == text+tail means
+	// unchanged.
+	tail string
 	// raw is the BODY message's original bytes — for a tool-text slot, the whole user
 	// message the tool_result block lives in, so several slots can share one raw.
 	//
@@ -217,8 +223,13 @@ type Trace struct {
 	Thread         thread.Result
 	ThreadResolved bool
 	Bypassed       bool
-	CacheAware     bool
-	MaxCachedIdx   int
+	// BypassCount, set only on a bypassed request, returns the token figures the pipeline would
+	// have reported for it: the message tokens before (and, nothing having run, after) and
+	// AttemptedTokens. It tokenizes the whole transcript, so it must never be called on the
+	// request path; the dashboard's count worker calls it.
+	BypassCount  func() (before, attempted int)
+	CacheAware   bool
+	MaxCachedIdx int
 	// Messages is the normalized message count this request carried.
 	Messages int
 	// AttemptedTokens is the token count of the messages age/supersession
@@ -621,12 +632,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// bypass passed through as mutable tail and rewrites them, diverging from the
 		// prefix the provider just cached and forcing a full cache-write of the suffix.
 		//
-		// So the cost of a bypass is not confined to the bypassed request, which is what
-		// the anti-latching argument in proxy/agentcompaction.go used to claim. It lands
-		// on the following turn, and it is a cache-write rather than lost savings. That
-		// matters because a false-positive bypass is reachable: the detector's phrase is
-		// quoted verbatim in this repo's own docs/how-to/agent-compaction.md, so an agent
-		// that reads that page gets it into a trailing tool_result.
+		// So the cost of a bypass is not confined to the bypassed request. It lands on the
+		// following turn, and it is a cache-write rather than lost savings. A request is
+		// bypassed only by the x-context-guru-bypass header, or when it is an agent
+		// compaction body over the size ceiling (see proxy.chat).
 		//
 		// Recording is safe in both directions. On a genuine agent compaction the next
 		// turn is shorter, so modes.Boundary resets anyway and this record is discarded.
@@ -720,7 +729,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// The eligible (attempted) denominator: what age/supersession offloaders were
 	// allowed to touch. Everything before MaxCachedIdx is frozen for cache safety —
 	// the cost of that mechanism, reported next to its benefit.
-	tr.AttemptedTokens = attemptedTokens(norm, c)
+	// A bypassed request is not compacted and counting its text is the slow part (see
+	// Pipeline.Run), so it is counted later, off the request path, through Trace.BypassCount.
+	if !bypass {
+		tr.AttemptedTokens = attemptedTokens(norm, c)
+	}
 
 	// From here on, everything this request logs carries the RESOLVED session. The
 	// caller (the proxy) already put tenant and route on the context logger; the session
@@ -746,6 +759,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// already in slot.pre, filled by normalize. Marshalling every message a second time
 	// here was pure duplicate work on every request, for a path only summarize takes.
 
+	if bypass {
+		tr.BypassCount = func() (before, attempted int) {
+			return schema.MessagesTokens(chat), attemptedTokens(norm, c)
+		}
+	}
 	rr := pipe.Run(chat, c)
 	tr.Run = rr
 	if debug && rr != nil {
@@ -789,6 +807,18 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Exact attribution for the diff view: which components rewrote each message, in
 	// order. Built once from the run report the pipeline already produced.
 	touched := touchedBy(rr)
+	// A message no surviving component changed re-marshals to exactly its normalized form, so the
+	// comparison below can skip it: changedIdx (reflect.DeepEqual before/after, per component) is
+	// what says "changed". It is only trusted when nothing was reverted, because a revert installs
+	// a clone of the snapshot, which is equal in content but not proven equal in bytes.
+	trustTouched := rr != nil
+	if rr != nil {
+		for _, rep := range rr.Components {
+			if rep.Reverted {
+				trustTouched = false
+			}
+		}
+	}
 	// Per-message count of changes this writeback threw away, attributed back to the
 	// components that made them once the loop is done.
 	discarded := map[int]int{}
@@ -816,7 +846,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// exactly as they arrived. Never written back, so never counted as a change.
 			continue
 		case anthropicToolText:
-			newText := schema.MessageText(chat.Input[i])
+			newText := schema.MessageText(chat.Input[i]) + s.tail
 			if newText == s.preText {
 				continue
 			}
@@ -834,6 +864,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			changed = true
 			changes = append(changes, mkChange(s.path, s.preText, newText, touched[i]))
 		default: // wholeMessage
+			if _, was := touched[i]; trustTouched && !was {
+				continue // no component changed it: keep the original bytes verbatim (I1)
+			}
 			post, err := json.Marshal(chat.Input[i])
 			if err != nil {
 				res.Body = body
@@ -1157,6 +1190,13 @@ func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration
 // wrongly restrict offloaders to the tail on a non-caching backend). A key inside a
 // JSON string value never matches these paths.
 func hasCacheBreakpoint(body []byte) bool {
+	// Every path below ends in a key spelled cache_control or cachePoint, so a body with neither
+	// "cache" nor a \u escape anywhere in it (a key could be spelled with one) cannot match, and
+	// five full structural walks of a large body are skipped. Exact, unlike a prefilter that
+	// assumes keys are never escaped.
+	if !bytes.Contains(body, []byte("cache")) && !bytes.Contains(body, []byte(`\u`)) {
+		return false
+	}
 	paths := []string{
 		"messages.#.content.#.cache_control",
 		"messages.#.cache_control",
@@ -1319,6 +1359,25 @@ func SessionIDFor(tenant, explicitSess string, provider bschemas.ModelProvider, 
 		return ""
 	}
 	return sessionIDFrom(tenant, explicitSess, body, norm)
+}
+
+// ProjectFor returns the directory the agent was started in, as stated in the request's own
+// prompt, or "" when the request does not state one.
+//
+// Here rather than in the caller because the normalization it needs — one provider-agnostic
+// message slice out of an Anthropic or OpenAI body — is this package's job and is unexported.
+// SessionIDFor is the same shape for the same reason, and the two share
+// normalizeSessionMessages so that a body shape one accepts is a body shape the other accepts.
+//
+// It must be given the PRISTINE inbound body. A rewritten transcript may have had the
+// environment block compacted out of it, and the project would then flip to unattributed on
+// exactly the requests the pipeline acted on — the ones whose cost is most worth attributing.
+func ProjectFor(provider bschemas.ModelProvider, body []byte) string {
+	norm := normalizeSessionMessages(provider, body)
+	if len(norm) == 0 {
+		return ""
+	}
+	return schema.WorkingDirOf(norm)
 }
 
 // RecordBilledInput stores the provider's own input-token count for a finished turn, so the NEXT
@@ -1545,11 +1604,12 @@ func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bsch
 					case "tool_result":
 						add := func(text, path string) {
 							handled = true
-							tm := toolMessage(text, blk.Get("tool_use_id").String())
+							out, tail := splitTrailingReminders(text)
+							tm := toolMessage(out, blk.Get("tool_use_id").String())
 							pre, _ := json.Marshal(tm)
 							norm = append(norm, tm)
 							slots = append(slots, slot{
-								kind: anthropicToolText, path: path, preText: text, pre: pre, raw: m.Raw,
+								kind: anthropicToolText, path: path, preText: text, tail: tail, pre: pre, raw: m.Raw,
 							})
 						}
 						base := "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".content"
@@ -1846,7 +1906,7 @@ func writeBackToolText(body []byte, orig []gjson.Result, slots []slot,
 		if !ok {
 			continue
 		}
-		txt := schema.MessageText(out[i])
+		txt := schema.MessageText(out[i]) + slots[k].tail
 		if txt == slots[k].preText {
 			continue // unchanged; the original bytes already carry it
 		}

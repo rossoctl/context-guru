@@ -12,9 +12,10 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/extract"
 )
 
@@ -82,7 +83,8 @@ const prefixBodyFixture = `{"model":"claude-sonnet-5","stream":true,` +
 // this whole mechanism exists for.
 func TestCompletePrefixedAppendsWithoutDisturbingThePrefix(t *testing.T) {
 	srv := newCapturePrefixed(t, 19595)
-	cli := cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "claude-sonnet-5", APIKey: "k"}
+	d, ref := dispatchtest.HTTP(srv.srv.URL, dispatchtest.AnthropicAuth("k", ""))
+	cli := cheapmodel.Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}
 	reply, u, err := cli.CompletePrefixed(context.Background(), []byte(prefixBodyFixture), "ASK-TEXT")
 	if err != nil {
 		t.Fatalf("CompletePrefixed: %v", err)
@@ -174,7 +176,8 @@ func TestCompletePrefixedPrefersOurToolInputOverText(t *testing.T) {
 			`"cache_read_input_tokens":8268}}`))
 	}))
 	t.Cleanup(srv.Close)
-	cli := cheapmodel.Anthropic{BaseURL: srv.URL, Model: "claude-sonnet-5", APIKey: "k"}
+	d, ref := dispatchtest.HTTP(srv.URL, dispatchtest.AnthropicAuth("k", ""))
+	cli := cheapmodel.Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}
 	reply, u, err := cli.CompletePrefixed(context.Background(), []byte(prefixBodyFixture), "ASK")
 	if err != nil {
 		t.Fatalf("CompletePrefixed: %v", err)
@@ -208,7 +211,8 @@ func TestCompletePrefixedPrefersOurToolInputOverText(t *testing.T) {
 // untouched by this change, and a model that answers in prose anyway is read exactly as before.
 func TestCompletePrefixedStillReadsTextWhenNoToolWasCalled(t *testing.T) {
 	srv := newCapturePrefixed(t, 8268)
-	cli := cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "m", APIKey: "k"}
+	d, ref := dispatchtest.HTTP(srv.srv.URL, dispatchtest.AnthropicAuth("k", ""))
+	cli := cheapmodel.Anthropic{D: d, Ref: ref, Model: "m"}
 	reply, u, err := cli.CompletePrefixed(context.Background(), []byte(prefixBodyFixture), "ASK")
 	// And the shape is reported as PROSE, so the two counters cannot both be inflated by the same
 	// reply. A ViaTool that defaulted to true would make every prose answer look like a tool answer,
@@ -228,7 +232,8 @@ func TestCompletePrefixedStillReadsTextWhenNoToolWasCalled(t *testing.T) {
 // sending something that reads no cache.
 func TestCompletePrefixedRefusesABodyWithNoMessages(t *testing.T) {
 	srv := newCapturePrefixed(t, 0)
-	cli := cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "m", APIKey: "k"}
+	d, ref := dispatchtest.HTTP(srv.srv.URL, dispatchtest.AnthropicAuth("k", ""))
+	cli := cheapmodel.Anthropic{D: d, Ref: ref, Model: "m"}
 	if _, _, err := cli.CompletePrefixed(context.Background(), []byte(`{"model":"m"}`), "ask"); err == nil {
 		t.Fatal("a body with no messages array was accepted")
 	}
@@ -260,8 +265,9 @@ func TestAskUsesTheStashedBodyForThatSession(t *testing.T) {
 	srv := newCapturePrefixed(t, 4242)
 	h := &Handler{sent: newSentStash()}
 	h.sent.put("scoped-session-1", bschemas.Anthropic, []byte(prefixBodyFixture), []byte(prefixBodyFixture))
+	d, ref := dispatchtest.HTTP(srv.srv.URL, dispatchtest.AnthropicAuth("k", ""))
 	a := prefixAsker{stash: h.sent,
-		cli: cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "claude-sonnet-5", APIKey: "k"}}
+		cli: cheapmodel.Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}}
 	_, u, err := a.Ask(context.Background(), "scoped-session-1", "THE-ASK")
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
@@ -339,7 +345,8 @@ func TestResponsesPrefixAskerUsesOnlyItsSessionAndReportsMissingPrefix(t *testin
 	defer srv.Close()
 	stash := newSentStash()
 	stash.put("one", bschemas.OpenAI, []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"ONLY-ONE"}]}`), []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"ONLY-ONE"}]}`))
-	a := responsesPrefixAsker{stash: stash, cli: cheapmodel.OpenAI{BaseURL: srv.URL, Model: "gpt-5.6", APIKey: "k"}}
+	d, ref := dispatchtest.HTTP(srv.URL, dispatchtest.BearerAuth("k"))
+	a := responsesPrefixAsker{stash: stash, cli: cheapmodel.OpenAI{D: d, Ref: ref, Model: "gpt-5.6"}}
 	if _, _, err := a.Ask(context.Background(), "two", "ask"); err != components.ErrNoPrefix || got != nil {
 		t.Fatalf("missing session used another prefix: err=%v body=%s", err, got)
 	}

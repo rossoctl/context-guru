@@ -91,8 +91,13 @@ func TestOptionsServesTheFieldContractTheSettingsPageDraws(t *testing.T) {
 		t.Errorf("strategy options %v omit deterministic, which the engine accepts — the "+
 			"omission is what silently rewrote a stored LLM-free config to `code`", x["strategy"].Options)
 	}
-	if !x["model.api_key"].Secret {
-		t.Error("model.api_key is not marked secret, so the page would echo a credential back")
+	// model.api_key is retired: a component config block names a source, never a credential
+	// (components/offload/modelcfg.go) — credentials and their transport are the host's own
+	// business (dispatch.Dispatcher). If this reappears, it must be Secret, like the field it
+	// replaced.
+	if fd, ok := x["model.api_key"]; ok {
+		t.Errorf("model.api_key is offered again (%+v); a component config block must not "+
+			"carry a credential", fd)
 	}
 	if x["min_tokens"].Min != 1 {
 		t.Error("min_tokens accepts 0, which removes the only content gate fire_on: size has")

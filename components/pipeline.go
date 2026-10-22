@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"reflect"
+	"regexp"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/schema"
@@ -66,7 +67,7 @@ func (p *Pipeline) Names() []string {
 // report. req is mutated; on any per-component failure that component's changes
 // are rolled back, so the returned request is never worse than the input.
 func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
-	rr := &RunReport{Session: c.Session, TokensBefore: schema.MessagesTokens(req), Mode: c.effMode()}
+	rr := &RunReport{Session: c.Session, Mode: c.effMode()}
 	// Hand cmdfilter its per-family ledger sink when the emitter implements one, so no
 	// host has to thread a second field through every Ctx construction site.
 	if c.FilterStats == nil {
@@ -75,19 +76,24 @@ func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
 		}
 	}
 	if c.Bypass {
-		rr.TokensAfter = rr.TokensBefore
+		// A bypassed request is forwarded untouched, so there is nothing to compare and the token
+		// count is left at zero: counting the whole transcript here cost ~0.35 s per MiB on the
+		// request path (a 33 MiB compaction request took ~12 s before it was forwarded). The
+		// dashboard writer counts it off the request path (Event.BypassTokens).
 		return rr
 	}
+	rr.TokensBefore = schema.MessagesTokens(req)
 	// ONE snapshot for the whole run, kept in step with req.Input as components land
 	// (see runOne). Cloning the entire transcript per component was ~20% of the rewrite
 	// path's CPU on real 600 KB Claude Code requests, and all but a handful of its
 	// messages were re-cloned unchanged six times over.
 	snap := schema.CloneMessages(req.Input)
+	own := ownOutputs(req)
 	for _, comp := range p.comps {
 		if !comp.Enabled(c) {
 			continue
 		}
-		rep := p.runOne(comp, req, c, &snap)
+		rep := p.runOne(comp, req, c, &snap, own)
 		rr.Components = append(rr.Components, rep)
 		rr.DurationMs += rep.DurationMs
 		safeEmit(func() { p.emitter.Component(rep) })
@@ -111,7 +117,7 @@ func safeEmit(fn func()) {
 // snap is the run's live snapshot: on entry it holds an independent deep copy of
 // req.Input, and runOne leaves it holding one of req.Input on exit (re-cloning only
 // what changed, or the lot after a revert or a count change).
-func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx, snap *[]schemas.ChatMessage) (rep Report) {
+func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx, snap *[]schemas.ChatMessage, own map[int]bool) (rep Report) {
 	rep = Report{Component: comp.Name(), Mode: c.effMode()}
 	before := *snap
 	// revert installs the snapshot and re-establishes an independent one, because
@@ -187,12 +193,19 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		rep.Reverted = true
 		rep.TokensBefore, rep.TokensAfter = baseline, baseline
 	default:
-		rep.TokensBefore, rep.TokensAfter = baseline, after
 		// Only a change that SURVIVED can be discarded by the writeback layer. Recording
 		// it in the revert branches above would charge a rolled-back component for a
 		// discard it never caused.
 		rep.ChangedIdx = changedIdx(before, req.Input)
-		if rep.Kind == "reformat" {
+		if restoreOwn(&rep, before, req.Input, own) {
+			after = tokensOf(req.Input)
+		}
+		rep.TokensBefore, rep.TokensAfter = baseline, after
+		// A Reformat stashes nothing, and neither does an Offload that dropped content on purpose
+		// (rep.Irreversible: marker_mode summary/off). Without a key, every consumer of CacheKeys
+		// counts the run's saving as new content on every turn it is re-applied, so derive the
+		// keys from the content instead. An Offload that stashed keeps its own: they are store keys.
+		if rep.Kind == "reformat" || (rep.Irreversible && len(rep.CacheKeys) == 0) {
 			rep.CacheKeys = reformatKeys(before, rep.ChangedIdx)
 		}
 		resync(snap, req.Input, rep.ChangedIdx)
@@ -247,6 +260,65 @@ func resync(snap *[]schemas.ChatMessage, live []schemas.ChatMessage, changed []i
 	for _, i := range changed {
 		(*snap)[i] = schema.CloneMessages(live[i : i+1])[0]
 	}
+}
+
+// ownOutput matches a tool call that runs one of context-guru's own READ commands: the plugin's
+// `scripts/cg.py <read subcommand>` or `scripts/tv.py`, matched by the script and the
+// subcommand rather than the directory, because the directory is not ours to name (an installed
+// Claude Code plugin lives under …/<version>/, a --plugin-dir one under any name, and the Codex
+// skills run `python3 ../../scripts/cg.py …` relative to the skill). Nothing else is exempt: not
+// another plugin's script, not a path that happens to contain "context-guru", and not cg.py's
+// apply/revert, which change a setting rather than report one. Matched against the call's JSON
+// arguments, so a quote may arrive escaped.
+var ownOutput = regexp.MustCompile(`(^|[\s"'/])scripts/(cg\.py(\\?["'])?\s+(adapt|home|savings|cache|waste|session|doctor)(\s|\\?["']|$)|tv\.py\b)`)
+
+// toolCallsOf is schema.ToolCalls, a variable so a test can make it panic.
+var toolCallsOf = schema.ToolCalls
+
+// ownOutputs are the tool results our own plugin commands produced. They are the product's
+// answer to the user — a report, a cost table, the question it is about to ask — and the agent
+// is told to print them verbatim, so no component may change a byte of one: a compacted
+// report is a wrong report.
+func ownOutputs(req *schemas.BifrostChatRequest) (out map[int]bool) {
+	// Runs before any component, outside runOne's recover: a panic here exempts nothing rather
+	// than failing the request.
+	defer func() {
+		if recover() != nil {
+			out = nil
+		}
+	}()
+	for i, tc := range toolCallsOf(req) {
+		if ownOutput.MatchString(tc.Args) {
+			if out == nil {
+				out = map[int]bool{}
+			}
+			out[i] = true
+		}
+	}
+	return out
+}
+
+// restoreOwn puts back any of our own outputs a component changed, so the rest of its work
+// stands. It reports whether it restored anything. A count change (a summarizer) has no
+// per-message diff to restore and is left alone.
+func restoreOwn(rep *Report, before, live []schemas.ChatMessage, own map[int]bool) bool {
+	if len(own) == 0 || len(before) != len(live) {
+		return false
+	}
+	kept, restored := rep.ChangedIdx[:0], false
+	for _, i := range rep.ChangedIdx {
+		if own[i] {
+			live[i] = schema.CloneMessages(before[i : i+1])[0]
+			restored = true
+			continue
+		}
+		kept = append(kept, i)
+	}
+	if restored {
+		rep.ChangedIdx = kept
+		rep.Gate("own_output")
+	}
+	return restored
 }
 
 func tokensOf(msgs []schemas.ChatMessage) int {

@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -733,6 +733,19 @@ func (h *Handler) renderMetrics() string {
 	promLine(&b, "cg_llm_failures_total", `kind="timeout"`, float64(offload.LLMTimeouts()))
 	promLine(&b, "cg_llm_failures_total", `kind="error"`, float64(offload.LLMErrors()))
 
+	// The silence guard (upstreamsilence.go). Exported rather than absorbed: a resend that
+	// succeeds is invisible to the client, so without these a gateway hanging one request in
+	// ten would look exactly like a healthy one.
+	promHeader(&b, "cg_upstream_silent_resends_total",
+		"Streaming upstream requests the upstream accepted but never answered within the silence timeout, and that were therefore resent once on a new connection.", "counter")
+	promLine(&b, "cg_upstream_silent_resends_total", "", float64(upstreamSilenceResends.Load()))
+	promHeader(&b, "cg_upstream_silent_failures_total",
+		"Streaming upstream requests whose resend was silent too; these became a 502.", "counter")
+	promLine(&b, "cg_upstream_silent_failures_total", "", float64(upstreamSilenceFailures.Load()))
+	promHeader(&b, "cg_upstream_dropped_reuse_resends_total",
+		"Upstream requests resent on a new connection because the upstream closed their reused keep-alive connection without sending a byte of response (Go reports this as EOF; it used to be a 502).", "counter")
+	promLine(&b, "cg_upstream_dropped_reuse_resends_total", "", float64(upstreamDroppedReuseResends.Load()))
+
 	// extract_llm economics. The one component that SPENDS money, so gross savings can look
 	// impressive while it is underwater — measured live at a NET of -$0.7085, and until these
 	// series existed that number appeared nowhere a monitor could reach it (only in /stats,
@@ -784,6 +797,9 @@ func (h *Handler) renderMetrics() string {
 		// Dropped events mean the capture queue filled — observability degrading under
 		// load, which is exactly when it is most wanted. Worth an alert.
 		promLine(&b, "cg_dash_events_total", `disposition="dropped"`, float64(st.Dropped))
+		promHeader(&b, "cg_bypass_count_dropped_total",
+			"Bypassed requests whose token count was skipped because the count worker's queue was full; their rows keep tokens_before 0.", "counter")
+		promLine(&b, "cg_bypass_count_dropped_total", "", float64(st.CountsDropped))
 		promHeader(&b, "cg_dash_db_bytes", "Size of the local dashboard database, write-ahead log included.", "gauge")
 		promLine(&b, "cg_dash_db_bytes", "", float64(h.rec.DBSizeBytes()))
 		promHeader(&b, "cg_dash_disk_used_ratio",

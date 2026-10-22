@@ -212,6 +212,7 @@ type Request struct {
 	ID             int64  `json:"id"`
 	User           string `json:"user"`
 	ConversationID string `json:"conversation_id"`
+	ThreadID       string `json:"-"`  // the request's thread within its session ("" = the main thread, or recorded before threads)
 	TS             int64  `json:"ts"` // epoch ms, UTC
 	HourUTC        int    `json:"hour_utc"`
 	Bucket         Bucket `json:"bucket"`
@@ -299,6 +300,12 @@ func (r *Request) Key() Conversation {
 	return Conversation{User: r.User, Conversation: r.ConversationID, Model: r.Model}
 }
 
+// noOp reports a row that is not a turn: the upstream rejected it, its cost is unknown, and it
+// carried no prefix, so the provider read nothing and the cache entry is untouched. Simulate skips
+// it and so must NewOptimal — one predicate, so the ceiling and the arms it bounds cannot be
+// computed over different trajectories.
+func (r *Request) noOp() bool { return r.Rejected && !r.CostKnown && r.CachedContext == 0 }
+
 // Idle is the idle duration and whether there is one at all. The only way to read it: a
 // caller that dereferences IdleMs without checking HasNext is the bug this returns two
 // values to prevent.
@@ -377,4 +384,12 @@ func Derive(reqs []*Request) {
 		}
 		return a.ID < b.ID
 	})
+}
+
+// ForcedMiss says whether a recorded miss reason is one no TTL could have rescued: the content
+// moved (prefix_change), there was no entry (cold_start), or the dashboard could not explain the
+// miss (unknown). A miss we cannot explain is never counted as rescuable. Treating it as a live
+// entry would turn every unexplained miss into a simulated hit and raise every arm's hit rate.
+func ForcedMiss(reason string) bool {
+	return reason == "prefix_change" || reason == "cold_start" || reason == "unknown"
 }

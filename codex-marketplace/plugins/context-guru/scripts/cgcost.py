@@ -276,7 +276,7 @@ def cmd_cold(spend: dict, o: dict, S: Style, proj: Projects) -> list[str]:
         L += table([[g["band"], f"{g['n']}x", usd(g["usd"]), bar(g["usd"] / gtot)] for g in gaps], "lrrl")
         reach = sum(g["usd"] for g in gaps if g["band"] in ("5-10m", "10-30m", "30-60m"))
         L.append(S.dim(f"  Estimate: {usd(reach)} followed pauses of 5-60 min, the range a 1-hour cache lifetime would cover; "
-                       "a longer lifetime or pings cost money too - see /context-guru:insights-idle for the net."))
+                       "a longer lifetime or pings cost money too - see /context-guru:insights cache for the net."))
     L += ["", S.b("Costliest rewrites")]
     L += table([[dt.datetime.fromtimestamp(e["ts"] / 1000, tz=o["tz"]).strftime("%a %H:%M"), proj.name(e["session"]),
                  short_model(e["model"]), ktok(e["context"]) + " ctx", ("after " + fmt_dur(e["gap_s"])) if e["gap_s"] >= 0 else "first message",
@@ -428,7 +428,7 @@ def recommendations(spend: dict, tools: dict | None, days: float) -> list[dict]:
         recs.append({"usd": rw["idle_expiry"]["usd"], "cls": "measured",
                      "short": f"You paused longer than the cache lasts, {rw['idle_expiry']['n']} times", "do": "run /compact before a long break",
                      "what": f"{rw['idle_expiry']['n']} pauses outlived the cache; each re-sent the whole conversation. "
-                             "Compact or /clear before a long break (see /context-guru:cache)."})
+                             "Compact or /clear before a long break (see /context-guru:insights cache)."})
     other = sum(rw[k]["usd"] for k in ("prefix_change", "history_rewrite", "new_thread") if k in rw)
     if other:
         recs.append({"usd": other, "cls": "measured",
@@ -438,8 +438,8 @@ def recommendations(spend: dict, tools: dict | None, days: float) -> list[dict]:
     carried = sum(i["usd"] for i in unused_items(tools, None)) if tools and tools.get("totals") else 0.0
     if carried:
         recs.append({"usd": carried, "cls": "measured carry; saving is an estimate",
-                     "short": "Add-ons you never use", "do": "remove them, /context-guru:waste lists them",
-                     "what": "MCP servers, skills and tools carried and never called (/context-guru:waste lists them with the command that removes each)."})
+                     "short": "Add-ons you never use", "do": "remove them, /context-guru:insights tools lists them",
+                     "what": "MCP servers, skills and tools carried and never called (/context-guru:insights tools lists them with the command that removes each)."})
     ping = L.get("ping_usd", 0.0)
     if ping and ping > L.get("ping_saved_usd", 0.0):
         recs.append({"usd": ping - L.get("ping_saved_usd", 0.0), "cls": "measured cost vs modelled saving",

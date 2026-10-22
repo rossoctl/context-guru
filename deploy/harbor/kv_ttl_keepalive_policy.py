@@ -786,9 +786,9 @@ class _History:
         return hits / len(cell), len(cell)
 
 
-#: A successor that could not have read the entry however warm it was. The same two reasons
+#: A successor that could not have read the entry however warm it was. The same reasons
 #: kvcache's stepCost excludes from `hit`, so a "rescue" here means what it means there.
-_FULL_MISS = ("prefix_change", "cold_start")
+_FULL_MISS = ("prefix_change", "cold_start", "unknown")
 
 
 def load_spans(db_path: str, prices_path: str, *, since_ms: int | None = None,

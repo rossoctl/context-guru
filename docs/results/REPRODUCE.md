@@ -16,8 +16,8 @@ cache-aware token/cost metrics.
 - **Python 3.13** + [`uv`](https://docs.astral.sh/uv/) (Harbor needs ≥3.12).
 - **Docker** (each task builds a container). Use it via `sg docker -c '...'` — do **not**
   loosen the socket permissions.
-- **Harbor** checked out at `/home/vpcuser/projects/context-engineering/harbor`
-  (`uv sync` in it).
+- **Harbor** checked out beside this repository (`uv sync` in it). Below, `$CG` is this
+  repository's checkout and `$HARBOR` is Harbor's (`export CG=... HARBOR=...`).
 - **Model gateway creds** in `~/.claude/settings.json` under `env`
   (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`) — the IBM LiteLLM gateway exposing
   `aws/claude-sonnet-5` (agent) and `aws/claude-haiku-4-5` (context-guru's cheap
@@ -56,7 +56,7 @@ runs. (Optionally `gh auth login` for `ghcr.io`, but the SWE images are not mirr
 ## 2. Build context-guru
 
 ```
-cd /home/vpcuser/projects/context-engineering/context-guru
+cd "$CG"
 CGO_ENABLED=1 go build -tags cg_skeleton -o /tmp/cg-runs/cg-proxy-d1 ./cmd/context-guru-proxy
 CGO_ENABLED=1 go test -tags cg_skeleton ./...      # all green
 ```
@@ -69,7 +69,7 @@ cache-aware config), points Harbor at it (`ANTHROPIC_BASE_URL=http://$CG_LAN:400
 runs the tasks, and writes `summary.json` + `rows-*.json`.
 
 ```
-cd /home/vpcuser/projects/context-engineering/context-guru
+cd "$CG"
 # baseline + context-guru, 50 tasks, 2 trials each, dump context-guru's change log:
 nohup python3 -u deploy/harbor/swebench.py \
   --tasks /tmp/cg-runs/swe50.txt \
@@ -157,7 +157,7 @@ env var — `--auto-patch` is **required** headless, else the piped-stdin patch 
 **3) Run the 50 tasks** (starts the `off` proxy, runs `-a claude-code-rtk`):
 
 ```
-cd /home/vpcuser/projects/context-engineering/context-guru
+cd "$CG"
 RTK_BIN_HOST=/tmp/rtk-runs/rtk python3 -u deploy/harbor/swebench_rtk.py \
   --tasks /tmp/cg-runs/swe50.txt --jobs-root /tmp/rtk-runs/swe50 --n 2
 ```
@@ -204,7 +204,7 @@ Harness: [`deploy/harbor/terminalbench.py`](https://github.com/rossoctl/context-
 (a thin adaptation of `swebench.py` with `-d terminal-bench@2.0`).
 
 ```
-cd /home/vpcuser/projects/context-engineering/context-guru
+cd "$CG"
 # task list: all 89 task names from the terminal-bench registry entry (see below)
 # baseline (off passthrough), parallel:
 python3 -u deploy/harbor/terminalbench.py \
@@ -215,8 +215,8 @@ python3 -u deploy/harbor/terminalbench.py \
 Build the 89-task list from the registry:
 ```
 python3 - <<'PY'
-import json
-d=json.load(open('/home/vpcuser/projects/context-engineering/harbor/registry.json'))
+import json, os
+d=json.load(open(os.path.expandvars('$HARBOR/registry.json')))
 def find(o):
     r=[]
     if isinstance(o,list):
@@ -280,10 +280,10 @@ alongside the raw total — per-arm sums hide this entirely. See the
 Analyze → doc (totals, cache-aware cost, by-difficulty/category, timeouts, per-task):
 ```
 # task metadata (difficulty/category) from Harbor's task cache — needs py3.11+ (tomllib):
-/home/vpcuser/projects/context-engineering/harbor/.venv/bin/python - <<'PY'
+"$HARBOR"/.venv/bin/python - <<'PY'
 import glob, json, os, tomllib
 names=set(l.strip() for l in open('/tmp/tb-runs/tb89.txt') if l.strip()); meta={}
-for f in glob.glob('/home/vpcuser/.cache/harbor/tasks/*/*/task.toml'):
+for f in glob.glob(os.path.expanduser('~/.cache/harbor/tasks/*/*/task.toml')):
     t=os.path.basename(os.path.dirname(f))
     if t not in names: continue
     d=tomllib.load(open(f,'rb')); m=d.get('metadata',{})
@@ -310,7 +310,7 @@ for why this is fair vs the baseline's mixed budget), `n=12` (headroom + rtk in 
 their separate ports 4010/4000; context-guru on 4000):
 
 ```
-cd /home/vpcuser/projects/context-engineering/context-guru
+cd "$CG"
 # context-guru (codesmart) — dumps the change log for the per-component analysis
 python3 -u deploy/harbor/terminalbench.py --tasks /tmp/tb-runs/tb89.txt --configs codesmart \
   --jobs-root /tmp/tb-runs/cg --n 12 --agent-mult 4.0 --max-retries 4 --dump-configs codesmart

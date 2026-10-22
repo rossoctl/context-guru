@@ -10,38 +10,47 @@ context-guru-proxy --preset general --dashboard
 # open http://localhost:4000/dashboard/
 ```
 
-`/dashboard/` opens the five-page home: Home, Savings, Cache, Tools & context and Sessions, each with a
-bottom line first. The full dashboard described below (every view, settings, admin) is at
-`/dashboard/index.html`, and old links such as `/dashboard/#/savings/usage` open it there.
+`/dashboard/` opens the **Overview**. The older links `/dashboard/#home` and `/dashboard/#cache` open
+Overview and Cache strategy, and `/dashboard/home.html` redirects to the dashboard.
+
+The dashboard uses the words *preset* and *cache strategy*. The older names, compaction and keep-alive, mean the same things.
 
 It is **off by default**. Turning it on adds `/dashboard/` and `/api/*`; every existing
 route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
 
 !!! info "No CDN, no build step, no network"
-    The whole UI is three files (`index.html`, `style.css`, `app.js`) embedded in the
+    The whole UI is a handful of static files (`index.html`, `style.css`, `app.js`, `charts.js`,
+    `tools.js`, `kvcache.js`, `campaigns.js` and one bundled font) embedded in the
     binary with `go:embed`. Charts are hand-drawn SVG — no chart library, no framework.
     The page fetches nothing off-origin, so it works in a VPC or fully air-gapped.
 
-!!! note "Screenshots"
-    The UI was recently redesigned. Updated screenshots are coming soon.
+!!! tip "New to the dashboard?"
+    [The dashboard, tab by tab](how-to/dashboard-guide.md) walks through every tab with a
+    screenshot and a plain-words explanation. This page is the reference.
 
 ## What you'll see
 
-- **Overview** — the headline numbers: tokens before/after, dollars saved, and the
-  honesty machinery behind them (gross vs. unique savings, what got frozen for cache
-  safety, what our own compaction calls cost). One view, no sub-nav.
-- **Savings** — where the money went: usage over time, per-account campaigns, and the
-  benchmark evidence behind the headline numbers.
-- **Behaviour** — what the proxy actually did to your traffic: per-component economics
-  (which ones earn their place), the [tool inventory](#tool-inventory-panel), keep-alive,
-  and [KV-cache behavior](#kv-cache-panel).
-- **Traffic** — per-session and per-request detail, including a git-style diff of
-  exactly what was rewritten on the wire.
-- **Admin** — configuration, tenants, and the capture pipeline's own health.
+- **Overview** — "What context-guru saved": three rows (Cache strategy, Your preset, Tools and
+  skills filter), each in dollars and tokens against what you spent, with an *Estimated* or
+  *Upper bound* badge. The cache strategy row notes that whether to keep it on is a forecast (see
+  the Cache strategy tab), and a note says the provider's own cache discount is not counted. Below: "Tools and
+  skills to remove" (a ranked list, with `/context-guru:remove-mcp-and-skills` and
+  `/context-guru:insights tools`), "About the other tabs", and one closed "Detailed diagnostics"
+  section with five plots (net saving over time; money saved and added, where an outlined bar is an
+  upper bound; tokens removed; where input tokens went, as 100% columns of cache read, cache write
+  and fresh; time added per request and requests with cache misses) and a live requests table.
+  Every plot shows exact figures on hover.
+- **Savings** — Cache strategy (also called keep-alive), Inventory (the [tool inventory](#tool-inventory-panel)) and Usage over time.
+- **Traffic** — Sessions (newest or costliest first; six columns, more with a checkbox) and
+  Requests, including a git-style diff of exactly what was rewritten on the wire.
+- **Admin** — Config, Cache strategies, Tenants, Setup, Settings, Archive and Feedback
+  (some of these appear only in a [hosted service](hosted.md)).
+- **Advanced** — Preset steps (per-component economics), [Cache detail](#kv-cache-panel) (the KV-cache view),
+  and Strategy campaigns (per-account cache strategies).
 
-Each group opens on the view a manager would read first; depth is further in. Dark mode,
-small viewports, and empty states (a blank dashboard explains *why* each panel is
-blank) are all handled.
+Every tab starts with a title and one line saying what it shows. Dark mode, small
+viewports, and empty states (a blank dashboard explains *why* each panel is blank) are
+all handled.
 
 ## Honest-metrics rules
 
@@ -94,12 +103,72 @@ Code traffic, roughly 80% of declared tokens are typically never invoked in a se
 Reading it: `GET /api/tools` for the rollup, `GET /api/prompt` for one session's actual
 prefix text. See [Config & routes reference](reference/reference.md) for both routes.
 
-Two read-only routes serve the plugin's cost commands (`/context-guru:cost-today` and its
-siblings): `GET /api/spend/explain?since=&tz=` prices the window at the configured gateway
+Two read-only routes serve the plugin's cost commands (`/context-guru:insights` and
+`/context-guru:status`): `GET /api/spend/explain?since=&tz=` prices the window at the configured gateway
 rates by token type, classifies full-prefix cache rewrites from the token columns
 (`cache_write >= 0.8 x context`; the cause is inferred from the idle gap and message count),
 and reports live session cache state and Context Guru's own ledger; `GET /api/tools/last-used`
 returns when each tool or skill was last called (names and times only).
+
+Two more serve the status line. `GET /api/stats?lean=1&session=<id>` is one session's totals from a
+single indexed read, including `keepalive_pings` and `keepalive_ping_usd`; `lean=1` with no session
+and no `since`/`until` is answered by the full handler. `GET /api/cachestate?session=<id>` is the
+session's live cache state per thread (`threads[]`, `a:<agent id>` for a sub-agent), and its money
+in one read: `money.main` for the main thread and `money.others` summed over every other thread,
+each `saved_usd` of `baseline_usd`. `baseline_usd` is what those requests would have cost without
+context-guru (the uncompacted baseline plus the cache-split and keep-alive savings); `saved_usd` is
+that minus what was paid, context-guru's own model calls and pings included, so it never exceeds
+`baseline_usd`. Each listed thread carries its own pair. A thread the
+keep-alive still plans to ping also carries `pings_left` and `held_until_ms`: when its cache goes
+cold if nothing else is sent (the last planned ping's start plus the cache lifetime).
+
+The session and each thread also carry `next_warm_usd` and `next_cold_usd`: what the next request
+costs for the cached prefix if the cache is still warm (a cache read) or already cold (a rewrite;
+the same number as `rewrite_usd`). Both are left out when the model has no price.
+
+`POST /api/me/cache/ping` with `{"session": "<id>", "thread": "<id, optional>"}` is the Ping
+button. It sends **one** keep-alive ping on that thread now, with the same request and the same
+price as a scheduled ping. It answers `200` with `cache_read`, `cache_write`, `ping_usd`,
+`rewrite_usd`, `saved_usd` (the write it avoided minus the ping) and `warm_until_ms`. Other answers:
+`409 cold` (nothing left to keep warm), `409 not held` (keep-alive is off, so the proxy keeps no
+body or key to ping with), `404 unknown session`, and `429 too soon` (one press per thread every
+30 seconds). It reaches only the caller's own sessions. The caller is the same as for
+`/api/adapt/*`: the dashboard cookie, the account's own proxy token, or a direct loopback request
+to a single-tenant proxy.
+
+`pingable` and `ping_reason` on `/api/cachestate` say whether a press can work. `pingable` is true only
+while the proxy holds the thread. When it is false, `ping_reason` is one of:
+`not opted in` (no keep-alive for the account and the request did not carry the header),
+`below limits` (keep-alive is on, but the thread is under its minimum prefix or fails its gates),
+`over budget` (one ping would cost more than the per-ping cost ceiling),
+`too large` (the body is over 8 MiB), `unsupported` (extended thinking, or a route that cannot be pinged cheaply),
+`unavailable` (the route is failing in a row, or the provider refused this credential),
+`pings used` (the planned pings ran out and the proxy let go of the thread),
+`stopped` (the proxy stopped the thread after a miss, a refused ping or a failure),
+`expired` (a manual-only hold ran out) and
+`no entry` (nothing is known about the thread: the proxy restarted, or has seen no request on it since).
+While a thread whose planned pings ran out is still held and its cache can still be warm, a press is allowed,
+under the same cost ceiling and 30-second gap. A press stays refused after a miss or a refused ping.
+
+**Ping with keep-alive off.** A request that carries `x-context-guru-ping: 1` is held for the button
+even when the account has no automatic keep-alive. Nothing is pinged for it. The proxy keeps the body and
+the key for at most 300 seconds from the start of the LAST REAL request, even for a one-hour cache, then
+releases and zeroes them. Only a new request starts the 300 seconds again. A press never does, so pressing
+cannot keep a credential held. The usual limits still apply: 8 MiB per body, 512 threads, 128 MiB in all, and
+the per-ping cost ceiling. One account may hold at most 16 such threads and 32 MiB, and they are released
+before any automatic keep-alive hold, so a client that sends the header cannot starve other accounts. Claude Code sends the
+header when `ANTHROPIC_CUSTOM_HEADERS` in its settings `env` contains `x-context-guru-ping: 1` (one `Name: Value`
+per line when there are several headers). The proxy never forwards it upstream.
+
+Its row is a keep-alive row with `manual_ping` set. `GET /api/stats` reports these rows as
+`manual_pings` (`count`, `ping_usd`, and `saved_usd` net of the pings' cost). They are a savings
+category of their own: they join `total_saved_usd`, and no cache strategy's ledger counts them.
+The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive, so with
+automatic pings on it can overlap the keep-alive credit for the same avoided write. `saved_usd` is
+`avoided - ping` summed over all presses, so a ping that missed shows as a loss; the per-press
+`saved_usd` in the reply is never below 0, so the two need not match. A press is refused with
+`409 over budget` when one ping would cost more than the per-ping ceiling, and `?tenant=` is ignored:
+it pings only the caller's own account.
 
 Top to bottom, the panel shows:
 
@@ -138,7 +207,7 @@ still works; only the text is withheld.
 at that idle profile, and what a different TTL policy would have cost on the same
 history.*
 
-The tab sits next to **Keep-alive** — both answer "what is the prompt cache doing to my
+The tab sits next to **Cache strategy** — both answer "what is the prompt cache doing to my
 bill." It respects the shared filter bar (time range, model, agent, account), plus
 three narrowings that exist only here because they're derived rather than stored
 columns: time-of-day band, observed TTL tier, and whether a request has a successor at

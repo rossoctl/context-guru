@@ -162,17 +162,17 @@ func TestARealRequestsKeepAliveCandidateSurvivesAndAPingDispatchesIt(t *testing.
 	// bounded well under the test timeout.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if h.keeper.summarySubstituted.Load() > 0 {
+		if h.keeper.Stats().SummarySubstituted > 0 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if got := h.keeper.summarySubstituted.Load(); got == 0 {
+	if got := h.keeper.Stats().SummarySubstituted; got == 0 {
 		t.Fatalf("summarySubstituted = %d after %v — the following ping never dispatched the "+
 			"candidate (noCandidate=%d checkpointExists=%d phaseMismatch=%d overBudget=%d failed=%d)",
 			got, 10*time.Second,
-			h.keeper.summarySubstituteNoCandidate.Load(), h.keeper.summarySubstituteCheckpointExists.Load(),
-			h.keeper.summarySubstitutePhaseMismatch.Load(), h.keeper.summarySubstituteOverBudget.Load(),
-			h.keeper.summarySubstituteFailed.Load())
+			h.keeper.Stats().SummarySubstituteNoCandidate, h.keeper.Stats().SummarySubstituteCheckpointExists,
+			h.keeper.Stats().SummarySubstitutePhaseMismatch, h.keeper.Stats().SummarySubstituteOverBudget,
+			h.keeper.Stats().SummarySubstituteFailed)
 	}
 }

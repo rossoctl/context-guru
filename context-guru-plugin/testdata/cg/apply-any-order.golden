@@ -1,0 +1,2 @@
+Applied: cache strategy set to adaptive (takes effect at the next proxy restart).
+Undo: /context-guru:save-more apply cache 5-min-ping@77b0c2e1

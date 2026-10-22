@@ -76,9 +76,24 @@ CREATE TABLE IF NOT EXISTS requests (
   open_background    INTEGER,
   open_teammate      INTEGER,
   monitor_expiry_ms  INTEGER,
+  agent_compaction   INTEGER NOT NULL DEFAULT 0, -- the agent's own compaction request (proxy isAgentCompaction); 0 on rows written before it
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)
+  -- The directory the agent was started in, which is what a user means by "project". Read from
+  -- the request body (schema.WorkingDirOf) and sanitized before it gets here (ProjectPath),
+  -- because it is a client-chosen string that could be named after a credential.
+  --
+  -- '' means UNATTRIBUTED, not "no project": every row written before this column existed reads
+  -- as '', and so does every request from a client that does not state a working directory. The
+  -- dashboard reports that as its own group rather than folding it into any real folder.
+  project            TEXT    NOT NULL DEFAULT '',
+  -- How this row came to exist: '' if the proxy measured the request as it passed, 'imported' if
+  -- it was recovered from a Claude Code transcript afterwards. An imported row carries the usage
+  -- the provider billed and NOT the tools the request declared, because a transcript does not
+  -- record them -- so it can report spend and can never support a waste verdict. '' rather than
+  -- a word for measured, since every row written before this column existed is measured.
+  source             TEXT    NOT NULL DEFAULT '',
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -167,6 +182,15 @@ CREATE TABLE IF NOT EXISTS requests (
   -- is never backfilled — there is no way to know which pre-feature pings would have
   -- matched a strategy that did not exist yet.
   keepalive_strategy_id TEXT,
+  -- A ping the USER asked for (the dashboard or the plugin's Ping button), as opposed to one the
+  -- keeper scheduled. Still a keepalive=1 row, because it is real spend on the caller's key and
+  -- it refreshes the provider's entry; this flag is what keeps it out of every strategy's ledger
+  -- (a person pressing a button is not the strategy's decision). 0 on every earlier row.
+  manual_ping INTEGER NOT NULL DEFAULT 0,
+  -- On a manual ping row: the cache write it avoided on the current context, priced at the write
+  -- rate (0 when the ping read nothing, because then it avoided nothing). Gross; the ping's own
+  -- cost is cost_usd on the same row. Its net joins total_saved_usd.
+  manual_saved_usd REAL NOT NULL DEFAULT 0,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -174,6 +198,10 @@ CREATE TABLE IF NOT EXISTS requests (
   -- saving for a request the filter had declined to touch. 0 therefore means "nothing was
   -- removed here", which is the honest reading on every row that predates the feature.
   filtered_decl_tokens INTEGER NOT NULL DEFAULT 0,
+  -- The digest of the declaration SET this request carried (tool_declarations.digest), so a
+  -- declaration's cost can be priced on exactly the requests that carried it. '' on rows
+  -- written before it existed, where the set is inferred from the tool count instead.
+  decl_digest TEXT NOT NULL DEFAULT '',
   -- Which prompt-cache TTL TIER this request asked for: 'ephemeral_5m', 'ephemeral_1h', or ''
   -- for a body carrying no cache_control at all. The pipeline always computed this and threw
   -- it away, so nothing could group by it and a 1h prompt was priced at the 5m write rate.
@@ -195,6 +223,7 @@ CREATE TABLE IF NOT EXISTS requests (
   reverts            INTEGER NOT NULL DEFAULT 0,
   token_accounting   TEXT    NOT NULL DEFAULT 'missing', -- complete|partial|missing
   cache_miss_reason  TEXT    NOT NULL DEFAULT '',        -- cold_start|ttl_expiry|prefix_change|unknown|hit
+  cache_miss_cause   TEXT    NOT NULL DEFAULT '',        -- what changed on a miss; see Cause* in event.go
   uncompressed_reason TEXT   NOT NULL DEFAULT '',        -- why we did not compact: '' = we did
   -- Request metadata: the knobs the CLIENT chose, normalized across the Anthropic and
   -- OpenAI dialects at the capture site, plus the provider's terminal stop reason. Real
@@ -337,32 +366,6 @@ CREATE TABLE IF NOT EXISTS tenant_spend (
   PRIMARY KEY (tenant_id, month)
 );
 
--- Ingested benchmark runs (deploy/harbor's summary.json + rows-*.json).
-CREATE TABLE IF NOT EXISTS bench_runs (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  name     TEXT NOT NULL UNIQUE,   -- run directory name, so re-ingesting replaces
-  ts       INTEGER NOT NULL,
-  dataset  TEXT NOT NULL DEFAULT '',
-  model    TEXT NOT NULL DEFAULT '',
-  summary  TEXT NOT NULL DEFAULT '{}'
-);
-CREATE TABLE IF NOT EXISTS bench_tasks (
-  run_id            INTEGER NOT NULL REFERENCES bench_runs(id) ON DELETE CASCADE,
-  arm               TEXT    NOT NULL,   -- config name: off|codesmart|headroom|rtk|…
-  task              TEXT    NOT NULL,
-  reward            REAL    NOT NULL DEFAULT 0,
-  steps             INTEGER NOT NULL DEFAULT 0,
-  prompt_tokens     INTEGER NOT NULL DEFAULT 0,
-  completion_tokens INTEGER NOT NULL DEFAULT 0,
-  cache_read        INTEGER NOT NULL DEFAULT 0,
-  cache_write       INTEGER NOT NULL DEFAULT 0,
-  fresh_input       INTEGER NOT NULL DEFAULT 0,
-  cost_usd          REAL    NOT NULL DEFAULT 0,
-  norm_cost_usd     REAL    NOT NULL DEFAULT 0,
-  wall_s            REAL    NOT NULL DEFAULT 0,
-  exception         INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_bt_run ON bench_tasks(run_id, arm);
 `
 
 // additiveDDL holds tables that can be created on an EXISTING database without touching
@@ -547,12 +550,30 @@ CREATE TABLE IF NOT EXISTS tool_uses (
   calls      INTEGER NOT NULL DEFAULT 0,
   first_ts   INTEGER NOT NULL DEFAULT 0,
   last_ts    INTEGER NOT NULL DEFAULT 0,
+  -- project is the folder the invocation happened in. '' means UNKNOWN -- a row written before
+  -- this column existed -- which is a different claim from "outside any project" and is reported
+  -- as unknown rather than as a folder.
+  project    TEXT    NOT NULL DEFAULT '',
   -- tenant_id LEADS the key, as on tool_declarations: without it the upsert below
   -- (calls = calls + excluded.calls) ADDS one account's call counts to another account's
   -- row whenever a session id is shared, which is a cross-account write.
-  PRIMARY KEY (tenant_id, session_id, name, skill)
+  --
+  -- project IS IN THE KEY, and that is not cosmetic. One Claude Code session works in several
+  -- folders -- measured on a live store, 8 sessions spanned more than one and one spanned 14 --
+  -- so without it the same capability invoked in two folders collapses into one row whose
+  -- project is whichever folder was written last. That is exactly the defect this column exists
+  -- to fix: every project reported the same usage because the per-project query had to select
+  -- whole sessions instead.
+  PRIMARY KEY (tenant_id, session_id, project, name, skill)
 );
 CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts DESC);
+-- The idx_tooluses_project index is deliberately NOT here. additiveDDL runs on every open,
+-- BEFORE migrateToolUsesProject, and CREATE TABLE IF NOT EXISTS is a no-op on an existing
+-- database -- so an index over the project column here runs against the OLD table and fails
+-- with "no such column: project". That fails the open, and the proxy then falls back to an
+-- in-memory database: the dashboard comes up looking healthy with every row of history gone.
+-- Observed doing exactly that. The index is created by the migration, which is the only place
+-- that knows the column exists.
 
 -- One row per DISTINCT piece of stored prompt text, keyed by its content hash.
 --
@@ -608,6 +629,9 @@ const additiveDDL2 = `
 -- in both directions: it would delete another account's inventory, and it would DECLINE to
 -- delete this account's (the WHEN clause still sees the other account's request rows), so a
 -- purged tenant's tool names would outlive its request rows.
+-- The project filter on requests. Here and not in additiveDDL: that phase runs BEFORE addColumns,
+-- so on an existing database the column the index names does not exist yet.
+CREATE INDEX IF NOT EXISTS idx_requests_project ON requests(project, ts);
 CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
 WHEN NOT EXISTS (SELECT 1 FROM requests
   WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
@@ -674,6 +698,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "split_stable_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "split_tail_hash", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "decl_digest", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},
@@ -682,6 +707,8 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "keepalive_pings", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "keepalive_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	{"requests", "keepalive_strategy_id", "TEXT"},
+	{"requests", "manual_ping", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "manual_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	// #240's correction factor. Additive with a default of 0, which doubles as the marker for
 	// "written before the correction existed" — see the column comment in ddl above.
 	{"requests", "billed_token_factor", "REAL NOT NULL DEFAULT 0"},
@@ -696,6 +723,18 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "open_background", "INTEGER"},
 	{"requests", "open_teammate", "INTEGER"},
 	{"requests", "monitor_expiry_ms", "INTEGER"},
+	// The agent's own compaction request, no longer bypassed (it used to be marked `bypassed`). The
+	// replay cap reads Bypassed || AgentCompaction as the evidence of a client compaction. 0 on old
+	// rows, which were bypassed for exactly this reason.
+	{"requests", "agent_compaction", "INTEGER NOT NULL DEFAULT 0"},
+	// What changed on a miss, from the per-thread prefix comparison. '' on old rows.
+	{"requests", "cache_miss_cause", "TEXT NOT NULL DEFAULT ''"},
+	// The project dimension. Additive with a '' default, which doubles as "unattributed": a row
+	// that predates the column cannot be back-filled, because the body it came from is long gone.
+	{"requests", "project", "TEXT NOT NULL DEFAULT ''"},
+	// Measured-vs-imported. Additive with a '' default, which doubles as "measured": a row that
+	// predates the column saw the proxy, by definition.
+	{"requests", "source", "TEXT NOT NULL DEFAULT ''"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
@@ -707,6 +746,100 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
 }
 
+// migrateToolUsesProject adds tool_uses.project and puts it in the primary key.
+//
+// A TABLE REBUILD RATHER THAN AN ALTER, because SQLite cannot add a column to a primary key and
+// the column is useless outside it: one session working in two folders would collapse to a single
+// row recording whichever folder was written last. That is the reported defect -- every project
+// showed the same usage figures -- so a migration that added the column alone would look applied
+// and change nothing.
+//
+// Not in additiveColumns for the same reason: that path is for a column a plain ALTER can add.
+// A version bump is also wrong here, since it renames the database aside and discards every row,
+// including the thousands of invocations imported from the user's own history -- which is the
+// data this whole surface exists to show.
+//
+// Idempotent: migrations run on every open, so it probes for the column and returns if present.
+func migrateToolUsesProject(db *sql.DB) error {
+	var has bool
+	rows, err := db.Query(`PRAGMA table_info(tool_uses)`)
+	if err != nil {
+		// No such table yet: `ddl` will create it with the column already in place.
+		return nil
+	}
+	cols := 0
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		cols++
+		if name == "project" {
+			has = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// PRAGMA table_info on a missing table yields zero rows, not an error. Rebuilding from a table
+	// that is not there would fail the open, and the proxy answers a failed open with an
+	// in-memory database -- history gone, dashboard looking healthy.
+	if has || cols == 0 {
+		return nil
+	}
+
+	// One transaction: an interrupted rebuild must not leave the table missing or half-copied.
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// EXISTING ROWS COPY WITH project = '' -- unknown. Their folder is not recoverable: the
+	// request body they came from is long gone. Guessing one would attribute a user's work to a
+	// project they may never have touched.
+	for _, stmt := range []string{
+		`CREATE TABLE tool_uses_new (
+			tenant_id  TEXT    NOT NULL DEFAULT '',
+			session_id TEXT    NOT NULL DEFAULT '',
+			name       TEXT    NOT NULL DEFAULT '',
+			server     TEXT    NOT NULL DEFAULT '',
+			skill      TEXT    NOT NULL DEFAULT '',
+			calls      INTEGER NOT NULL DEFAULT 0,
+			first_ts   INTEGER NOT NULL DEFAULT 0,
+			last_ts    INTEGER NOT NULL DEFAULT 0,
+			project    TEXT    NOT NULL DEFAULT '',
+			PRIMARY KEY (tenant_id, session_id, project, name, skill)
+		)`,
+		`INSERT INTO tool_uses_new(
+			tenant_id, session_id, name, server, skill, calls, first_ts, last_ts, project)
+		 SELECT tenant_id, session_id, name, server, skill, calls, first_ts, last_ts, ''
+		 FROM tool_uses`,
+		// THE TRIGGER HAS TO GO FIRST. trg_tool_inventory_gc names tool_uses in its body, and
+		// SQLite refuses to drop a table a trigger references. Missing this failed the open on a
+		// real database -- and the proxy answers that by falling back to in-memory, so the
+		// dashboard came up healthy-looking with every row of history gone.
+		`DROP TRIGGER IF EXISTS trg_tool_inventory_gc`,
+		`DROP TABLE tool_uses`,
+		`ALTER TABLE tool_uses_new RENAME TO tool_uses`,
+		`CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_tooluses_project ON tool_uses(tenant_id, project)`,
+		// THE GC TRIGGER NEEDS NO RESTORE HERE, verified rather than assumed: it is defined in
+		// additiveDDL2, which migrate() executes on BOTH paths (already-at-version and fresh)
+		// after this migration runs, so it is recreated on the same open that drops it. Checked by
+		// removing it from this list and confirming the trigger was still present afterwards.
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // migrate creates the schema and validates its version. A version mismatch is
 // reported to the caller, which renames the old file aside and retries — see Open.
 func migrate(db *sql.DB) error {
@@ -716,6 +849,12 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := addColumns(db); err != nil {
+		return err
+	}
+	// The tool_uses rebuild. After addColumns and on every open, like the additive phases: an
+	// existing database at the current version returns early below, so a migration placed after
+	// that check would never run on exactly the databases that need it.
+	if err := migrateToolUsesProject(db); err != nil {
 		return err
 	}
 	var have string

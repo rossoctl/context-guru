@@ -243,6 +243,16 @@ type PrefixCoverage interface {
 	CoversSpan(session string, count int, hash string) bool
 }
 
+// PrefixCoveredAsker, when a PrefixAsker also implements it, checks coverage and asks on ONE
+// snapshot of the stash. PrefixCoverage.CoversSpan followed by Ask reads the stash twice: when the
+// call runs detached, the thread's next request can replace the stashed body between the two
+// reads, and the ask then goes out over a body the check never approved. AskCovered returns
+// ErrStalePrefix when the snapshot does not cover the first `count` normalized messages hashed to
+// `hash`, ErrNoPrefix when nothing is stashed, and otherwise asks on exactly the body it checked.
+type PrefixCoveredAsker interface {
+	AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, PrefixUsage, error)
+}
+
 // ErrNoPrefix is what Ask returns on the FIRST turn of a session: nothing has been forwarded yet, so
 // there is no cached prefix to append to.
 //
@@ -745,7 +755,9 @@ type Report struct {
 	// Reformat stashes nothing, so the PIPELINE fills them from the pre-fold text of each
 	// message it rewrote — without that, every Reformat took metrics' keyless fallback and
 	// reported SavedUnique == Saved by construction (overcount_ratio 1.0 for
-	// format/textclean/toon/searchfold, against a measured token replay of 10x-95x).
+	// format/textclean/toon/searchfold, against a measured token replay of 10x-95x). The
+	// pipeline does the same for an Irreversible Offload that returned no keys (marker_mode
+	// summary/off), whose keys are then dedup keys only, not store keys.
 	CacheKeys    []string
 	Skipped      bool // component ran but chose not to act
 	Reverted     bool // pipeline reverted it (error/panic/never-worse)
@@ -1053,6 +1065,11 @@ type KeepAliveReport struct {
 	// sink can record what was requested rather than reading as a request with no output
 	// budget at all.
 	MaxTokens int
+	// Manual marks a ping the USER asked for (keepalive.Keeper.PingNow), not one the keeper
+	// scheduled; Strategy is then "manual". RewriteUSD is the cache write it avoided, 0 when it
+	// read nothing. A sink keeps both off every strategy's ledger.
+	Manual     bool
+	RewriteUSD float64
 }
 
 // KeepAliveEmitter is an OPTIONAL capability an Emitter implementation may add. Most Emitter

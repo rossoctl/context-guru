@@ -707,6 +707,11 @@ func (h *Handler) statsTrusted(r *http.Request) bool {
 	if h.opts.StatsTrusted != nil {
 		return h.opts.StatsTrusted(r)
 	}
+	return directLoopback(r)
+}
+
+// directLoopback is a loopback peer that relayed nobody: see statsTrusted.
+func directLoopback(r *http.Request) bool {
 	ip := net.ParseIP(clientIP(r))
 	if ip == nil || !ip.IsLoopback() {
 		return false
@@ -722,7 +727,7 @@ func (h *Handler) statsTrusted(r *http.Request) bool {
 // tenancyFor resolves the caller's tenancy, or the static single-tenant one.
 func (h *Handler) tenancyFor(r *http.Request) (*Tenancy, error) {
 	if h.opts.Tenants == nil {
-		return h.static, nil
+		return h.static.Load(), nil
 	}
 	return h.opts.Tenants.Resolve(r)
 }

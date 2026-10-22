@@ -74,6 +74,11 @@ func (h *Hub) Publish(e *Event) {
 	// Summary only: strip content before it can reach a live-feed client.
 	sum := *e
 	sum.Content = nil
+	// And drop every closure. Each one captures its request's WHOLE body (the wait-cause rescan,
+	// the lifecycle scan, the bypass count), the writer has already run the first two, and the
+	// count queue holds its own reference. Kept here, the ring's 256 events pinned 256 bodies —
+	// the CG2 OOM kills of 2026-10-19/20. A feed client reads only the plain fields.
+	sum.WaitCause, sum.LifecycleFn, sum.BypassCount = nil, nil, nil
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()

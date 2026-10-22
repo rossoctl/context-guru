@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -262,5 +263,42 @@ func TestKeepAliveRecommendedDefaults(t *testing.T) {
 		r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveMaxUSDPerPing != 0.50 {
 		t.Errorf("Resolved() = idle %d, K %d, floor %d, ceiling %v; want 270, 2, 80000, 0.50",
 			r.KeepAliveIdleSeconds, r.KeepAliveMaxPings, r.KeepAliveMinPrefixTokens, r.KeepAliveMaxUSDPerPing)
+	}
+}
+
+// In 0.5.3 xhigh is the same as high (#652): the sweep is off until #508 lands. The name still
+// loads, so a stored config that names it keeps working.
+func TestXHighPresetHasNoSweepAndEqualsHigh(t *testing.T) {
+	load := func(name string) *Config {
+		t.Helper()
+		c, err := LoadBytes([]byte("preset: " + name + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Build(components.NopEmitter{}); err != nil {
+			t.Fatalf("%s does not build: %v", name, err)
+		}
+		return c
+	}
+	xhigh, high := load("xhigh"), load("high")
+	for _, name := range xhigh.Pipeline {
+		if name == "extract_llm_sweep" {
+			t.Fatalf("xhigh still runs extract_llm_sweep: %v", xhigh.Pipeline)
+		}
+	}
+	if !reflect.DeepEqual(xhigh.Pipeline, high.Pipeline) {
+		t.Errorf("xhigh pipeline = %v, want the same as high: %v", xhigh.Pipeline, high.Pipeline)
+	}
+	if _, ok := xhigh.Components["extract_llm_sweep"]; ok {
+		t.Error("xhigh still carries an extract_llm_sweep config block")
+	}
+	// The short preset list (PresetPipeline) must agree with the full config.
+	list, ok := PresetPipeline("xhigh")
+	if !ok {
+		t.Fatal("xhigh is not in the preset list")
+	}
+	highList, _ := PresetPipeline("high")
+	if !reflect.DeepEqual(list, highList) {
+		t.Errorf("xhigh preset list = %v, want the same as high: %v", list, highList)
 	}
 }

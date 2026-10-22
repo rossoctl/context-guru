@@ -14,9 +14,10 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -140,7 +141,8 @@ func runSweepGuardTurn2(t *testing.T, pipelineYAML string, upstreamURL string, s
 	raw := make([]bschemas.ChatMessage, len(norm))
 	copy(raw, norm)
 	req := &bschemas.BifrostChatRequest{Input: norm}
-	cli := cheapmodel.Anthropic{BaseURL: upstreamURL, Model: "claude-sonnet-5", APIKey: "k"}
+	d, ref := dispatchtest.HTTP(upstreamURL, dispatchtest.AnthropicAuth("k", ""))
+	cli := cheapmodel.Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}
 	cli.MaxTokens = cheapmodel.PrefixAskMaxTokens
 	ctx := &components.Ctx{
 		Ctx: context.Background(), Session: session, Store: store.NewMemory(store.Options{}),

@@ -12,12 +12,31 @@ smaller request, so the reported usage is smaller and the threshold arrives late
 figures themselves are never touched — the response is replayed to the agent byte for
 byte, so `/cost`, the statusline and your provider bill all still agree.
 
-**It never compacts the compaction request.** The agent's summarization request demands
-verbatim fidelity over the whole transcript, so the pipeline steps aside for it and
-forwards it untouched. Detection is a match on the opening of the agent's own
-summarization prompt in the last message of the request, and it covers Claude Code and Bob
-Shell (`proxy/agentcompaction.go`). Nothing else the agent sends to the same endpoint is
-treated specially.
+**It treats the compaction request like any other request.** The pipeline runs on it, so the
+request keeps the same tool list and the same rewritten history as the turns before it. This
+keeps the provider cache warm. Measured on production traffic, a request that bypassed the
+pipeline missed the cache 31% of the time. A request that did not bypass missed 1.6% of the time.
+The trade-off: the summary model sees the rewritten history (shortened tool outputs and
+`<<cg:HASH>>` markers), not the full original. Detection is a match on the opening of the
+agent's own summarization prompt in the last message of the request, and it covers Claude Code
+and Bob Shell (`proxy/agentcompaction.go`). Detection only feeds thread identification, the
+larger size limit below, the dashboard row, and the `agent_compaction` counter in `/stats`. To
+skip the pipeline for one request, send `x-context-guru-bypass: true`. A compaction body over
+32 MiB is bypassed without the header, because the pipeline costs about 0.35 s per MiB.
+
+**The summary request carries the expand tool, and two cases can leak a tool call.** The request
+keeps the same tool list as the turns before it, so the cache stays warm. The prompt tells the
+model to call no tool. If the model calls `context_guru_expand` anyway:
+
+- Claude Code uses the Anthropic dialect. The proxy answers the call and the client gets the
+  summary text, for JSON and for streaming.
+- **OpenAI dialect with `stream:true`:** the proxy does not inspect that stream. The client
+  receives the raw tool call and no summary.
+- **Any dialect:** if the model calls expand on every round, the client receives the raw tool call
+  after 3 continuation rounds, with no summary. That needs the model to ignore the "Do NOT call any
+  tools" instruction 4 times in a row.
+
+`proxy/compactionexpand_test.go` pins all of these.
 
 **It also lets that request through when it's the one thing that's already too large.** A
 session whose transcript grew past the [request-size ceiling](../reference/reference.md#request-size-ceiling-32-mib-by-default-128-mib-for-compaction)
@@ -62,10 +81,10 @@ usage for the *reduced* request. Any OpenAI- or Anthropic-compatible backend doe
 gateway that pre-counts or re-expands the body before billing would not. Compare the
 `input_tokens` in the response against what your agent sent to check.
 
-**One request stopped being compacted for no reason.** The compaction-detection phrase can
-appear in ordinary content — for example if the agent reads a file that quotes it. When
-that happens the request is forwarded untouched and the next turn resumes normally. The
-cost is that request's savings, nothing else.
+**The `agent_compaction` count is too high.** The compaction-detection phrase can appear in
+ordinary content — for example if the agent reads a file that quotes it. The request is still
+handled like any other. The only effects are one extra count and, for an oversized body, the
+higher size limit.
 
 **A conversation appears twice in the dashboard.** Send an explicit
 `x-context-guru-session` header. Without any agent-supplied id the fallback is a hash of
