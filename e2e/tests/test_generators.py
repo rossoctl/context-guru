@@ -65,7 +65,7 @@ class TestGenerators(unittest.TestCase):
     def test_skill_invocation_uses_the_Skill_tool_input(self):
         transcripts.write(self.m, self.home)
         text = "".join(p.read_text() for p in (pathlib.Path(self.home) / ".claude" / "projects").glob("*/*.jsonl"))
-        self.assertIn('"name": "Skill", "input": {"skill": "toolkit:planner"}', text)
+        self.assertIn('"name":"Skill","input":{"skill":"toolkit:planner"}', text)
 
     def test_generated_data_matches_the_real_shape(self):
         transcripts.write(self.m, self.home)
@@ -76,6 +76,15 @@ class TestGenerators(unittest.TestCase):
         f = next((pathlib.Path(self.home) / ".claude" / "projects").glob("*/*.jsonl"))
         f.write_text('{"type":"assistant","bogusKey":1}\n')
         self.assertTrue(shape.check(self.home, REF))
+
+    def test_shape_check_fails_on_a_spaced_line(self):
+        # Keys alone missed it: a spaced line has the real keys and the wrong bytes, and the product's
+        # byte filter skips it. The shape check must reject the byte form too.
+        transcripts.write(self.m, self.home)
+        f = next((pathlib.Path(self.home) / ".claude" / "projects").glob("*/*.jsonl"))
+        f.write_text('{"type": "assistant", "cwd": "/x"}\n')
+        self.assertEqual(len(shape.check(self.home, REF)), 1)
+        self.assertIn("not compact", shape.check(self.home, REF)[0])
 
     def test_inventory_writes_every_on_disk_skill_and_mcp_server(self):
         r = inventory.write(self.m, self.home)
@@ -129,6 +138,17 @@ class TestGenerators(unittest.TestCase):
                             n += 1
                             post += e["timestamp"] >= transcripts._iso(m.install_ms)
                 self.assertEqual((n, post), (oracle.expected(m)["import"]["valid_pre_install_turns"], 0))
+
+    def test_lines_are_compact_json_like_claude_codes(self):
+        # Claude Code writes compact JSON ("type":"assistant", no spaces; measured: 7,529 compact lines and 0
+        # spaced in real transcripts). The product's scanners filter raw bytes on the compact form before
+        # parsing (dash/projectgroups.go readCwdCounts), so a spaced fake is skipped entirely and every
+        # folder stands alone: a gamma subfolder stopped rolling up to gamma.
+        transcripts.write(self.m, self.home)
+        for f in (pathlib.Path(self.home) / ".claude" / "projects").glob("*/*.jsonl"):
+            for l in f.read_text().splitlines():
+                self.assertNotIn('": ', l, f"spaced JSON in {f.name}: {l[:80]}")
+                self.assertNotIn('", "', l, f"spaced JSON in {f.name}: {l[:80]}")
 
     def test_assistant_line_message_model_is_priced_model(self):
         """Assistant line's message.model should use the priced model constant."""

@@ -15,6 +15,12 @@ import sys
 from e2e.gen import manifest as mf
 
 
+def _line(obj) -> str:
+    """One transcript line, compact as Claude Code writes it: the product filters raw bytes on
+    `"type":"assistant"` before it parses a line, so a spaced line would be invisible to it."""
+    return json.dumps(obj, separators=(",", ":"))
+
+
 def _iso(ms: int) -> str:
     return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -31,7 +37,7 @@ def _blocks(t: mf.Turn, caps: dict) -> list:
 
 
 def _lines(s: mf.Session, caps: dict, m: mf.Manifest, stamps, turns=None) -> list:
-    out = [json.dumps({"type": "ai-title", "sessionId": s.id, "aiTitle": "work"})]
+    out = [_line({"type": "ai-title", "sessionId": s.id, "aiTitle": "work"})]
     for t in (s.turns if turns is None else turns):
         ts = t.ts
         if stamps is not None and mf.measured(t, m):
@@ -41,16 +47,16 @@ def _lines(s: mf.Session, caps: dict, m: mf.Manifest, stamps, turns=None) -> lis
             if key not in stamps:
                 raise KeyError(f"post-install turn {key} has no stamp: replay did not send it")
             ts = stamps[key]
-        out.append(json.dumps({"type": "user", "sessionId": s.id, "cwd": t.cwd, "timestamp": _iso(ts - 1000),
+        out.append(_line({"type": "user", "sessionId": s.id, "cwd": t.cwd, "timestamp": _iso(ts - 1000),
                                "isSidechain": False, "entrypoint": "cli", "gitBranch": "main",
                                "message": {"role": "user", "content": "continue"}}))
-        out.append(json.dumps({
+        out.append(_line({
             "type": "assistant", "sessionId": s.id, "cwd": t.cwd, "timestamp": _iso(ts),
             "isSidechain": False, "entrypoint": "cli", "gitBranch": "main",
             "message": {"model": mf.MODEL, "role": "assistant", "content": _blocks(t, caps),
                         "usage": {"input_tokens": t.fresh, "cache_read_input_tokens": t.cache_read,
                                   "cache_creation_input_tokens": t.cache_write, "output_tokens": t.output}}}))
-    out.append(json.dumps({"type": "last-prompt", "sessionId": s.id, "lastPrompt": "continue", "leafUuid": "x"}))
+    out.append(_line({"type": "last-prompt", "sessionId": s.id, "lastPrompt": "continue", "leafUuid": "x"}))
     return out
 
 

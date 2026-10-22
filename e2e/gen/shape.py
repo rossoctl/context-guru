@@ -1,6 +1,7 @@
 # e2e/gen/shape.py
 """Generated transcripts vs the real format: every generated entry type must exist in the reference,
-and every key a generated entry carries must be one the real format uses. Keys only."""
+every key a generated entry carries must be one the real format uses, and every line must be compact
+JSON as Claude Code writes it (the product filters raw bytes before it parses a line)."""
 from __future__ import annotations
 
 import argparse
@@ -17,6 +18,9 @@ def check(home: str, reference: dict) -> list:
                 e = json.loads(line)
             except ValueError:
                 continue  # the deliberately truncated line; the importer must skip it too
+            if line != json.dumps(e, separators=(",", ":"), ensure_ascii=False):
+                problems.append(f"{f.name}:{n} line is not compact JSON, unlike every real transcript line")
+                continue
             t = e.get("type", "?")
             if t not in reference:
                 problems.append(f"{f.name}:{n} entry type {t!r} never appears in real transcripts")
