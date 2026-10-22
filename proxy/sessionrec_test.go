@@ -187,10 +187,9 @@ func turnFromWire(t *testing.T, session string, l map[string]any) record.Turn {
 	t.Helper()
 	req, _ := l["request"].(string)
 	resp, _ := l["response"].(string)
-	inc, _ := l["cg_incomplete"].(string)
 	start := time.Unix(0, int64(l["start_unix"].(float64)*1e9))
 	tr := record.Turn{SessionID: session, Start: start,
-		End: start.Add(time.Duration(l["total_ms"].(float64) * float64(time.Millisecond))), Incomplete: inc}
+		End: start.Add(time.Duration(l["total_ms"].(float64) * float64(time.Millisecond)))}
 	if meta, err := record.RequestMeta([]byte(req)); err == nil {
 		tr.Model, tr.MaxTokens = meta.Model, meta.MaxTokens
 	}
@@ -210,9 +209,6 @@ func turnFromWire(t *testing.T, session string, l map[string]any) record.Turn {
 	}
 	if out, err := record.OutputMessages(body); err == nil && len(body) > 0 {
 		tr.ResponseBody, _ = record.MarshalMessages(out)
-	}
-	if fb, ok := l["cg_first_byte_ms"].(float64); ok {
-		tr.FirstByteMS = int64(fb)
 	}
 	// Usage as Inference-Perf's loader reads it: the prompt side from message_start, the output
 	// side from message_delta.
@@ -670,18 +666,21 @@ func TestRecordMarksIncompleteOnEachPath(t *testing.T) {
 			wantAny: []string{record.IncompleteRetainCap, record.IncompleteNoUsage},
 		},
 	}
+	// The reasons are on the translated turn, which is what the live OTLP view carries. Wire holds
+	// only what was sent, so a reader of wire sees partial data as it is: a cut body, or a stream
+	// with no message_stop, which the replay loader skips.
+	r, _ := newTestRecorder(t)
+	defer r.Close()
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			r, dir := newTestRecorder(t)
 			e := baseEvent(testSessionUUID, []byte(testSSE), true)
 			c.mutate(e)
-			recordAndClose(t, r, e)
-
-			spans := chatSpans(t, readOneTrace(t, dir))
-			if len(spans) != 1 {
-				t.Fatalf("want 1 chat span, got %d", len(spans))
+			turn, err := r.buildTurn(e, "")
+			if err != nil {
+				t.Fatal(err)
 			}
-			inc, _ := spanAttrs(t, spans[0])[record.AttrIncomplete].(string)
+			turn.Redact(r.bodyCap)
+			inc, _ := turn.ToOTLP().Attributes[record.AttrIncomplete].(string)
 			if inc == "" {
 				t.Fatal("no incomplete reason recorded: the turn silently claims to be whole")
 			}

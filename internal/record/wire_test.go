@@ -2,6 +2,7 @@ package record
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -19,15 +20,15 @@ func wireLineOf(t *testing.T, b []byte) map[string]any {
 	return m
 }
 
-// The keys the Inference-Perf loader reads, with the types it expects.
-func TestWireLineHasTheLoadersFields(t *testing.T) {
+// The keys the Inference-Perf loader reads, with the types it expects, and nothing else.
+func TestWireLineHasTheLoadersFieldsOnly(t *testing.T) {
 	start := time.Date(2026, 10, 22, 15, 0, 0, 0, time.UTC)
 	b, err := Wire(WireCall{
-		SessionID: "6d1f2a44-9e3b-4c7a-8f21-0b5d7c9e1a33", Path: "/v1/messages",
+		Path:     "/v1/messages",
+		Headers:  http.Header{"Anthropic-Version": {"2023-06-01"}},
 		Request:  []byte(`{"model":"claude-opus-5","stream":true,"messages":[]}`),
 		Response: []byte(sse("hi")), ResponseSSE: true,
 		Status: 200, Start: start, End: start.Add(1500 * time.Millisecond),
-		FirstByteMS: 120, Rounds: 1,
 	}, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -48,12 +49,12 @@ func TestWireLineHasTheLoadersFields(t *testing.T) {
 	if m["start_unix"] != float64(start.Unix()) || m["total_ms"] != 1500.0 {
 		t.Errorf("timing = %v / %v", m["start_unix"], m["total_ms"])
 	}
-	h, _ := m["headers"].(map[string]any)
-	if h["session_id"] != "6d1f2a44-9e3b-4c7a-8f21-0b5d7c9e1a33" {
-		t.Errorf("headers.session_id = %v; the loader groups a session by it", h)
-	}
-	if m["cg_first_byte_ms"] != float64(120) || m["cg_recorded_by"] != WireRecordedBy {
-		t.Errorf("cg_* keys missing: %v", m)
+	allowed := map[string]bool{"path": true, "request": true, "response": true, "status": true,
+		"start_unix": true, "total_ms": true, "model": true, "headers": true}
+	for k := range m {
+		if !allowed[k] {
+			t.Errorf("key %q is not part of the wire format; the line must hold only what was sent", k)
+		}
 	}
 }
 
@@ -76,27 +77,42 @@ func TestWireRedactsBothBodies(t *testing.T) {
 	}
 }
 
-// Only the session id goes in headers. A credential header can never be written, because the
-// line has no way to carry one.
-func TestWireWritesNoCredentialHeader(t *testing.T) {
-	b, _ := Wire(WireCall{SessionID: "s", Path: "/v1/messages", Request: []byte(`{}`),
+// The client's headers are recorded as sent, except any that carries a credential. A credential
+// in a header nobody expected is still caught, by redacting every value.
+func TestWireHeadersDropCredentials(t *testing.T) {
+	key := "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-BBBB"
+	h := http.Header{
+		"Authorization":            {"Bearer " + key},
+		"X-Api-Key":                {key},
+		"Cookie":                   {"session=abc"},
+		"X-Context-Guru-Token":     {"cg_live_abcdefghijklmnopqrstuvwxyz"},
+		"X-Some-Access-Token":      {"opaque"},
+		"Anthropic-Version":        {"2023-06-01"},
+		"X-Claude-Code-Session-Id": {"6d1f2a44-9e3b-4c7a-8f21-0b5d7c9e1a33"},
+		"X-Debug-Note":             {"pasted " + key},
+	}
+	b, _ := Wire(WireCall{Path: "/v1/messages", Headers: h, Request: []byte(`{}`),
 		Response: []byte(`{}`), Status: 200, Start: time.Now(), End: time.Now()}, 0)
-	h, _ := wireLineOf(t, b)["headers"].(map[string]any)
-	if len(h) != 1 {
-		t.Errorf("headers = %v, want only session_id", h)
+	got, _ := wireLineOf(t, b)["headers"].(map[string]any)
+	for _, gone := range []string{"authorization", "x-api-key", "cookie", "x-context-guru-token", "x-some-access-token"} {
+		if _, ok := got[gone]; ok {
+			t.Errorf("credential header %q was written", gone)
+		}
+	}
+	if got["anthropic-version"] != "2023-06-01" || got["x-claude-code-session-id"] == nil {
+		t.Errorf("ordinary headers missing: %v", got)
+	}
+	if strings.Contains(string(b), key) {
+		t.Errorf("a key survived in a header value:\n%s", b)
 	}
 }
 
-// A body cut at the cap says so.
-func TestWireMarksACappedBody(t *testing.T) {
+// A body longer than the cap is cut.
+func TestWireCapsABody(t *testing.T) {
 	big := `{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("x", 500) + `"}]}`
 	b, _ := Wire(WireCall{Path: "/v1/messages", Request: []byte(big), Response: []byte(`{}`),
 		Status: 200, Start: time.Now(), End: time.Now()}, 100)
-	m := wireLineOf(t, b)
-	if r := m["request"].(string); len(r) > 100 {
+	if r := wireLineOf(t, b)["request"].(string); len(r) > 100 {
 		t.Errorf("request not capped: %d bytes", len(r))
-	}
-	if m["cg_incomplete"] != IncompleteBodyCap {
-		t.Errorf("cg_incomplete = %v, want %s", m["cg_incomplete"], IncompleteBodyCap)
 	}
 }
