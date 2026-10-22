@@ -223,6 +223,7 @@ One row for each registered component. The test `components/all/datadep_test.go`
 | Session tracker | metadata | 🟡 Works, metadata | 🟡 Works, metadata | 🟡 Works, metadata | It needs a stable label for each conversation. When the client sends none, it hashes the start of the conversation. |
 | Cache tracker | metadata | 🟡 Works, metadata | 🟡 Works, metadata | 🟡 Works, metadata | It must know how much of the conversation the provider already cached, so components never edit that part. |
 | Wait-cause and lifecycle signals | metadata | ❌ Off (it needs the dashboard) | 🟡 Works, metadata | 🟡 Works, metadata | To tell why the agent paused, it reads the request once. It keeps only counts and ids. |
+| Costly settings check (`/context-guru:save-more settings`, `GET /api/adapt/settings`) | metadata | ❌ Off (the cost needs the dashboard). The plugin still finds the settings and says "cost not measured yet". | 🟡 Works, metadata | 🟡 Works, metadata | It counts and prices dashboard rows by request shape: model name, tool count, `max_tokens` and the stream flag. It reads no request text and keeps nothing new. The plugin reads only the named keys of the user's own settings files on the user's machine, and sends none of them to the proxy (#615). |
 | Metrics (`/stats`, `/metrics`) | metadata | 🟡 Works, metadata | 🟡 Works, metadata | 🟡 Works, metadata | Totals and rates need only numbers. |
 | Accounts (hosted) | account data | ✅ Works | ✅ Works | ✅ Works | This is the account system: who you are, your settings and your consent flag. It holds no transcripts. |
 
