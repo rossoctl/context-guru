@@ -125,10 +125,10 @@ func main() {
 			"capture channel depth; a full channel DROPS events (counted, and shown in the UI) rather than delaying a request")
 		dashCIDRs = flag.String("dashboard-trusted-cidrs", envOr("DASHBOARD_TRUSTED_CIDRS", ""),
 			"comma-separated CIDRs allowed to view per-request CONTENT and the effective config (loopback always is; aggregates are open)")
-		// --record / --record-otlp: record one OTLP span per proxied turn, for replayable traces.
-		// --record is a DIRECTORY of OTLP JSON files, one per session; --record-otlp is a
-		// collector URL (Phoenix, Jaeger, an OTel collector). Either or both. Both empty means off.
-		// The claude-record corpus files are made offline from either, by cmd/cg-record-convert.
+		// --record / --record-otlp: record each proxied call, for replayable traces. --record is a
+		// DIRECTORY of wire files, one per session: the raw request and response, redacted, in the
+		// format Inference-Perf replays. --record-otlp is a collector URL (Phoenix, Jaeger, an OTel
+		// collector) for a live view. Either or both. Both empty means off.
 		//
 		// The help text says "every request and response body" in as many words on purpose.
 		// This writes MORE than --dashboard-content does -- the whole pristine request body
@@ -137,7 +137,7 @@ func main() {
 		// caveat --dashboard-content carries, and for the same reason). An operator must not
 		// be able to turn this on without being told that.
 		recordDir = flag.String("record", envOr("CG_RECORD_DIR", ""),
-			"directory for *.otlp.jsonl trace files, one per session (empty = off); records every request and response body, redacted on a best-effort pattern denylist, so it is for corpus collection on traffic whose owners opted in")
+			"directory for *.wire.jsonl files, one per session, in Inference-Perf's wire format (empty = off); records every request and response body, redacted on a best-effort pattern denylist, so it is for corpus collection on traffic whose owners opted in")
 		recordOTLP = flag.String("record-otlp", envOr("CG_RECORD_OTLP", ""),
 			"OTLP/HTTP traces URL to export recorded spans to, e.g. http://localhost:6006/v1/traces for Phoenix (empty = off); same content as --record")
 		recordBodyCap = flag.Int("record-body-cap", envInt("CG_RECORD_BODY_CAP", 1<<20),
