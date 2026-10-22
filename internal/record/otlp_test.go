@@ -29,10 +29,8 @@ func TestTraceIDForFallbackIsValidAndStable(t *testing.T) {
 	}
 }
 
-// OTLP and the corpus differ only in how a tool_call's arguments are encoded. The round trip
-// must give back exactly the corpus string, or the offline converter would write files that
-// differ from today's.
-func TestMessagesRoundTripBetweenCorpusAndOTLP(t *testing.T) {
+// OTLP and the translated form differ only in how a tool_call's arguments are encoded.
+func TestOTLPMessagesMakeArgumentsJSON(t *testing.T) {
 	corpus := `[{"role":"assistant","finish_reason":"tool_use","parts":[{"type":"text","content":"ok"},` +
 		`{"type":"tool_call","id":"toolu_1","name":"Bash","arguments":"{\"command\":\"ls\"}"}]}]`
 	otlp := OTLPMessages(corpus)
@@ -43,9 +41,6 @@ func TestMessagesRoundTripBetweenCorpusAndOTLP(t *testing.T) {
 	args := msgs[0]["parts"].([]any)[1].(map[string]any)["arguments"]
 	if _, isObject := args.(map[string]any); !isObject {
 		t.Errorf("OTLP tool_call arguments = %#v, want a JSON object", args)
-	}
-	if back := CorpusMessages(otlp); back != corpus {
-		t.Errorf("round trip changed the corpus messages\n got: %s\nwant: %s", back, corpus)
 	}
 }
 

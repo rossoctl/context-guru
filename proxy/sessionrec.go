@@ -67,6 +67,8 @@ type recEvent struct {
 	traceID  string
 	tenantID string // "" single-tenant; otherwise the file goes under <dir>/<tenantID>/
 	provider bschemas.ModelProvider
+	path     string // the API path, as the client called it; selects the wire dialect
+	status   int    // the HTTP status the client received
 
 	reqBody   []byte // PRISTINE inbound body (pre-pipeline)
 	respBody  []byte // raw: SSE event stream, or a JSON body, or nil
@@ -117,9 +119,8 @@ type sessionRecorder struct {
 //
 //   - endpoint (--record-otlp): OTLP/HTTP to a collector such as Phoenix, Jaeger or an OTel
 //     collector. Each span is sent once, batched, off the writer goroutine.
-//   - dir (--record): the same spans as OTLP JSON lines, one file per session. That is the
-//     OTel collector file exporter's format, so the offline converter (cmd/cg-record-convert)
-//     reads either. It is what a laptop run without a collector uses.
+//   - dir (--record): wire, one file per session: the raw request and response of each call,
+//     redacted, in the format Inference-Perf replays directly. This is the record of truth.
 //
 // MkdirAll and the endpoint check happen HERE rather than at first write: a bad path or URL must
 // fail loudly at startup, not silently per request for the length of a session someone believed
@@ -276,7 +277,10 @@ func (r *sessionRecorder) handle(e *recEvent) {
 		}
 	}
 	if r.dir != "" {
-		if err := r.appendLocal(e.tenantID, e.traceID, span); err != nil {
+		// The turn's reasons, not only the event's: translation adds its own (no body on this
+		// path, usage never parsed), and a wire line must say it is partial just as a span does.
+		e.incomplete = turn.Incomplete
+		if err := r.appendWire(e); err != nil {
 			r.errors.Add(1)
 			r.log.Warn("cg.record: could not write a turn", "err", err, "trace_id", e.traceID)
 		}
@@ -377,30 +381,34 @@ func (r *sessionRecorder) fillResponse(turn *record.Turn, e *recEvent) {
 	turn.MarkIncomplete(record.IncompleteNoBody)
 }
 
-// appendLocal appends one span to the session's local OTLP JSON file, as one line.
+// appendWire appends one call to the session's wire file, as one line.
 //
-// APPEND, NOT REWRITE. The file writer this replaces rewrote the whole session file every 10 s,
-// which costs O(N^2) bytes over a long session. Each span is now written once. A crash can lose
-// at most the line being written, and the converter reports a broken line rather than skipping
-// it silently.
+// The local record is WIRE: the raw request and response, redacted, in the format Inference-Perf
+// replays directly. It is the raw record, so OTLP (sent live with --record-otlp) or any other
+// format can be made from it later. The bodies come from the event, NOT from the translated turn,
+// so nothing the translation drops is lost.
 //
-// In hosted mode each tenant's files go in their own subdirectory, created owner-only, so one
-// person's traces are never mixed with another's and can be handed over, or deleted, as a unit.
-// A proxy restart in the middle of a session appends to the same file, so nothing an earlier
-// process wrote is ever overwritten.
-func (r *sessionRecorder) appendLocal(tenantID, traceID string, span record.OTLPSpan) error {
+// APPEND, NOT REWRITE: each call is written once. A crash can lose at most the line being
+// written. In hosted mode each tenant's files go in their own owner-only subdirectory, and a
+// proxy restart in the middle of a session appends to the same file.
+func (r *sessionRecorder) appendWire(e *recEvent) error {
 	dir := r.dir
-	if tenantID != "" {
-		dir = filepath.Join(r.dir, sanitizeTraceID(tenantID))
+	if e.tenantID != "" {
+		dir = filepath.Join(r.dir, sanitizeTraceID(e.tenantID))
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 	}
-	line, err := record.EncodeOTLPLine(record.Resource(tenantID), span)
+	line, err := record.Wire(record.WireCall{
+		SessionID: e.traceID, Path: e.path,
+		Request: e.reqBody, Response: e.respBody, ResponseSSE: e.respIsSSE,
+		Status: e.status, Start: e.start, End: e.end,
+		FirstByteMS: e.firstByteMS, Rounds: e.rounds, Incomplete: e.incomplete,
+	}, r.bodyCap)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, sanitizeTraceID(traceID)+".otlp.jsonl")
+	path := filepath.Join(dir, sanitizeTraceID(e.traceID)+".wire.jsonl")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -415,11 +423,10 @@ func (r *sessionRecorder) appendLocal(tenantID, traceID string, span record.OTLP
 // sanitizeTraceID makes a session id safe as a filename.
 //
 // THE TRAP IS NTFS-SPECIFIC AND SILENT. apply.SessionIDFor returns a tenant-scoped
-// "tenant:base" form, and on NTFS "foo:bar.otlp.jsonl" does not create a file called that --
+// "tenant:base" form, and on NTFS "foo:bar.wire.jsonl" does not create a file called that --
 // it creates an alternate data stream on a file called "foo". No error, no visible file, no
 // clue. Claude Code's own UUIDs are already safe; the fallback ids are what make this
-// necessary. The rule lives in record.SafeFileName, which the offline converter shares, so
-// a session's input and output files are always named alike.
+// necessary. The rule lives in record.SafeFileName.
 func sanitizeTraceID(id string) string { return record.SafeFileName(id) }
 
 func randomSpanID() (string, error) {
@@ -491,7 +498,7 @@ func (h *Handler) newRecCtx(r *http.Request, provider bschemas.ModelProvider, or
 		}
 	}
 	if id == "" {
-		// Never empty: an empty id yields a hidden ".otlp.jsonl" file, and merges every unkeyed
+		// Never empty: an empty id yields a hidden ".wire.jsonl" file, and merges every unkeyed
 		// session into one trace.
 		id = "cg-unkeyed-" + unkeyedSuffix()
 	}

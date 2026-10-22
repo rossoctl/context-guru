@@ -12,6 +12,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -24,9 +25,11 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/tidwall/gjson"
 
 	_ "github.com/rossoctl/context-guru/components/all"
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/record"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -54,7 +57,7 @@ func newTestRecorder(t *testing.T) (*sessionRecorder, string) {
 // testSSE is a realistic Anthropic event stream: what path A actually carries, and the input
 // AggregateSSE has to rebuild a message object from.
 const testSSE = "event: message_start\n" +
-	`data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-5","content":[],"stop_reason":null}}` + "\n\n" +
+	`data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-5","content":[],"stop_reason":null,"usage":{"input_tokens":12,"cache_read_input_tokens":400,"cache_creation_input_tokens":7,"output_tokens":1}}}` + "\n\n" +
 	"event: content_block_start\n" +
 	`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
 	"event: content_block_delta\n" +
@@ -115,39 +118,60 @@ func ccBodyNoTools(prompt string) []byte {
 	return b
 }
 
-// traceFiles converts the recorder's OTLP files in dir into corpus files, the way
-// cg-record-convert does, and returns their paths. Tests read the corpus that way so that
-// every assertion about a trace file also covers export -> OTLP JSON -> conversion.
-func traceFiles(t *testing.T, dir string) []string {
+// wireLines reads every wire line the recorder wrote in dir (one directory, no recursion).
+func wireLines(t *testing.T, dir string) map[string][]map[string]any {
 	t.Helper()
-	in, err := filepath.Glob(filepath.Join(dir, "*.otlp.jsonl"))
+	files, err := filepath.Glob(filepath.Join(dir, "*.wire.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := filepath.Join(dir, "corpus")
-	var spans []record.ReadSpan
-	for _, f := range in {
-		r, err := os.Open(f)
+	out := map[string][]map[string]any{}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := record.ReadOTLP(r)
-		r.Close()
-		if err != nil {
-			t.Fatalf("%s: %v", f, err)
+		for i, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(line), &m); err != nil {
+				t.Fatalf("%s line %d is not valid JSON: %v", f, i+1, err)
+			}
+			out[f] = append(out[f], m)
 		}
-		spans = append(spans, got...)
 	}
+	return out
+}
+
+// traceFiles rebuilds a translated trace file from each session's wire file, with the same
+// translation the proxy used to run inline, and returns their paths. The tests read traces that
+// way, so every assertion about a turn checks what wire actually stored.
+func traceFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	out := filepath.Join(dir, "corpus")
 	var files []string
-	for _, sess := range record.GroupSessions(spans) {
-		b, err := record.ConvertSession(sess, time.Now()).Marshal()
+	for f, lines := range wireLines(t, dir) {
+		session := strings.TrimSuffix(filepath.Base(f), ".wire.jsonl")
+		var spans []record.Span
+		parent := ""
+		for i, l := range lines {
+			turn := turnFromWire(t, session, l)
+			turn.SpanID = fmt.Sprintf("%016x", i+1)
+			turn.ParentID = parent
+			parent = turn.SpanID
+			spans = append(spans, turn.ToSpan())
+		}
+		// Turns are not stored in wire; an offline reader rebuilds them from the request bodies,
+		// with the same code. Rebuilding them here keeps the turn tests checking that wire still
+		// carries everything turn reconstruction needs.
+		spans = record.WithDerivedTurns(session, spans)
+		b, err := record.NewFile(session, spans, time.Now()).Marshal()
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := os.MkdirAll(out, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		p := filepath.Join(out, record.SafeFileName(sess.ID)+".otel.json")
+		p := filepath.Join(out, session+".otel.json")
 		if err := os.WriteFile(p, b, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -155,6 +179,59 @@ func traceFiles(t *testing.T, dir string) []string {
 	}
 	sort.Strings(files)
 	return files
+}
+
+// turnFromWire translates one wire line back into a turn. Usage comes from the response, as an
+// offline reader of wire would have to take it.
+func turnFromWire(t *testing.T, session string, l map[string]any) record.Turn {
+	t.Helper()
+	req, _ := l["request"].(string)
+	resp, _ := l["response"].(string)
+	inc, _ := l["cg_incomplete"].(string)
+	start := time.Unix(0, int64(l["start_unix"].(float64)*1e9))
+	tr := record.Turn{SessionID: session, Start: start,
+		End: start.Add(time.Duration(l["total_ms"].(float64) * float64(time.Millisecond))), Incomplete: inc}
+	if meta, err := record.RequestMeta([]byte(req)); err == nil {
+		tr.Model, tr.MaxTokens = meta.Model, meta.MaxTokens
+	}
+	if in, err := record.InputMessages([]byte(req)); err == nil {
+		tr.RequestBody, _ = record.MarshalMessages(in)
+	}
+	if defs, err := record.ToolDefinitions([]byte(req)); err == nil {
+		tr.ToolDefs = defs
+	}
+	body := []byte(resp)
+	if strings.Contains(resp, "event: ") {
+		if agg, ok := expand.AggregateSSE("anthropic", body); ok {
+			body = agg
+		} else {
+			body = nil
+		}
+	}
+	if out, err := record.OutputMessages(body); err == nil && len(body) > 0 {
+		tr.ResponseBody, _ = record.MarshalMessages(out)
+	}
+	if fb, ok := l["cg_first_byte_ms"].(float64); ok {
+		tr.FirstByteMS = int64(fb)
+	}
+	// Usage as Inference-Perf's loader reads it: the prompt side from message_start, the output
+	// side from message_delta.
+	for _, line := range strings.Split(resp, "\n") {
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		ev := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		switch ev.Get("type").String() {
+		case "message_start":
+			u := ev.Get("message.usage")
+			tr.FreshInput = int(u.Get("input_tokens").Int())
+			tr.CacheRead = int(u.Get("cache_read_input_tokens").Int())
+			tr.CacheWrite = int(u.Get("cache_creation_input_tokens").Int())
+		case "message_delta":
+			tr.Output = int(ev.Get("usage.output_tokens").Int())
+		}
+	}
+	return tr
 }
 
 // chatSpans returns only the OBSERVED model-call spans, dropping the derived-turn spans the

@@ -1,17 +1,10 @@
-// Package record turns one proxied inference turn into one span, in two renderings.
+// Package record turns one proxied call into the forms the recorder writes.
 //
-// The proxy EXPORTS standard OTLP (otlp.go, otlpjson.go), which Phoenix, Jaeger and other
-// collectors read. This file defines the OTHER rendering: the flat claude-record corpus shape
-// that Inference-Perf's OTel trace replay and the analysis scripts read. It is not OTLP: there
-// is no resourceSpans/scopeSpans nesting, `attributes` is a flat JSON object rather than a list
-// of {key,value:{stringValue}} entries, and timestamps are ISO-8601 strings rather than epoch
-// nanoseconds. Corpus files are made OFFLINE from the exported spans (convert.go,
-// cmd/cg-record-convert), so the proxy sends each span once and never rewrites a file.
-//
-// WHY THE SPAN NAME IS `chat <model>`. The analysis scripts select turns with
-// `name.startswith("chat ")`. A span named plain `chat` is invisible to them -- a trap
-// already hit once in this project. The name is built in one place, below, so it cannot
-// drift.
+// The record of truth is WIRE (wire.go): the raw request and response, redacted, in the format
+// Inference-Perf replays directly. With --record-otlp each turn is also sent live as an OTLP span
+// (otlp.go) for Phoenix and other collectors. This file defines the translated span both of those
+// views are built from, in the flat claude-record shape (span name `chat <model>`, flat
+// attributes, ISO times), which stays the reference for what a turn carries.
 package record
 
 import (
