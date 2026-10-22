@@ -189,3 +189,17 @@ func TestSpendExplainEmptyThreadIDKeepsOldBehaviour(t *testing.T) {
 		t.Errorf("causes = %v; want cold_start 1, new_thread 1, idle_expiry 1", got)
 	}
 }
+
+// A "p:" id is a fingerprint of one request, not a stable thread name (a side request that grows
+// gets a new id each turn), so it must not split a thread: a long pause stays idle_expiry.
+func TestSpendExplainSideRequestIDsDoNotSplitThreads(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	got := causeCounts(t,
+		threadEv(t0, "opus", "", 5),
+		threadEv(t0+60000, "sonnet", "p:aaa", 0),
+		threadEv(t0+20*60000, "sonnet", "p:bbb", 0),
+	)
+	if got["cold_start"] != 1 || got["new_thread"] != 1 || got["idle_expiry"] != 1 {
+		t.Errorf("causes = %v; want cold_start 1, new_thread 1, idle_expiry 1", got)
+	}
+}

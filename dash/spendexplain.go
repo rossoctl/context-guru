@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -182,7 +183,7 @@ type spendRow struct {
 
 type threadKey struct {
 	session, model string
-	thread         string // requests.thread_id: "" main, "a:<agent>" subagent, "p:<hash>" side request
+	thread         string // requests.thread_id, "a:<agent>" only; "" for main and side requests
 	tools, sys     int
 }
 
@@ -295,7 +296,13 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		counted := f.Since == 0 || r.ts >= f.Since
 		p, priced := priceOf(rates, price, r.model)
 		ctx := r.fresh + r.read + r.write
-		tk := threadKey{r.session, r.model, r.thread, r.tools, r.sysBlocks}
+		// Only an "a:" id is a stable thread name. A "p:" id is a fingerprint of one request, so
+		// keying on it would make every side request a new thread and hide real idle expiries.
+		th := ""
+		if strings.HasPrefix(r.thread, "a:") {
+			th = r.thread
+		}
+		tk := threadKey{r.session, r.model, th, r.tools, r.sysBlocks}
 		prev := threads[tk]
 		sk := r.session
 		var cause string
