@@ -18,19 +18,28 @@ package record
 //	start_unix  start time, seconds since the epoch (fractional)
 //	total_ms    duration in milliseconds
 //	model       the request's model
-//	headers     request headers; the loader takes the session id from "session_id" here
+//	headers     the request headers the client sent, credentials removed
 //
-// The cg_* keys are ours: facts only the proxy knows (time to first byte, upstream rounds, and
-// why a body is incomplete). The loader reads only the keys above, so it ignores them.
+// Nothing else: the line holds what went over the wire, and no keys of ours. Claude Code sends
+// its session id in its own header, which the loader does not look for; it then names the trace
+// after the file, and the recorder writes one file per session.
 //
 // REDACTION. Both bodies are redacted before the line is built: the request with ContentJSON
 // (string by string, so it stays valid JSON), the response with RedactSSE for a stream (across
 // event boundaries, so a secret split over two events is caught) and ContentJSON otherwise.
-// Headers are an allow-list: only the session id is written, never a credential.
+// Headers: any header that carries a credential is dropped (see dropHeader), and every other
+// value goes through Content, so a credential in an unexpected header is still caught.
+//
+// A body longer than the cap is cut after redaction. A cut request is no longer valid JSON and a
+// cut stream has no message_stop, and the loader skips both, so a partial call is never replayed
+// as a whole one.
 
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -38,16 +47,13 @@ import (
 
 // WireCall is one proxied call, as the proxy hands it over. Bodies are RAW; Wire redacts them.
 type WireCall struct {
-	SessionID   string
 	Path        string
+	Headers     http.Header // as the client sent them; Wire removes credentials
 	Request     []byte
 	Response    []byte
 	ResponseSSE bool
 	Status      int
 	Start, End  time.Time
-	FirstByteMS int64
-	Rounds      int
-	Incomplete  string
 }
 
 // wireLine is one JSONL line. Field order is the order in the file.
@@ -58,26 +64,56 @@ type wireLine struct {
 	Status     int               `json:"status"`
 	StartUnix  float64           `json:"start_unix"`
 	TotalMS    float64           `json:"total_ms"`
-	Model      string            `json:"model,omitempty"`
-	Headers    map[string]string `json:"headers,omitempty"`
-	FirstByte  int64             `json:"cg_first_byte_ms,omitempty"`
-	Rounds     int               `json:"cg_upstream_rounds,omitempty"`
-	Incomplete string            `json:"cg_incomplete,omitempty"`
-	Recorder   string            `json:"cg_recorded_by"`
+	Model     string            `json:"model,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
 }
 
-// wireSessionHeader is the request header the Inference-Perf loader reads a session id from,
-// first in its preference order.
-const wireSessionHeader = "session_id"
+// dropHeader reports whether a request header must never be written. Credentials by name, the
+// proxy's own control headers, and cookies.
+func dropHeader(name string) bool {
+	n := strings.ToLower(name)
+	switch n {
+	case "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-goog-api-key":
+		return true
+	}
+	if strings.HasPrefix(n, "x-context-guru-") {
+		return true // carries the CG token
+	}
+	for _, w := range []string{"key", "token", "secret", "auth", "password", "credential"} {
+		if strings.Contains(n, w) {
+			return true
+		}
+	}
+	return false
+}
 
-// WireRecordedBy identifies the producer on every wire line.
-const WireRecordedBy = "cg-record/0.3.0"
+// wireHeaders keeps the headers that carry no credential, values redacted, multi-valued headers
+// joined with ", " as HTTP allows.
+func wireHeaders(h http.Header) map[string]string {
+	if len(h) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(h))
+	for k := range h {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	out := map[string]string{}
+	for _, k := range names {
+		if dropHeader(k) {
+			continue
+		}
+		out[strings.ToLower(k)] = Content(strings.Join(h[k], ", "))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
 
 // Wire renders one call as a redacted JSONL line, newline included.
 //
-// bodyCap > 0 caps each body after redaction. A capped body is cut, so it is no longer valid
-// JSON or a whole stream; the line says so in cg_incomplete, and the loader skips a stream with
-// no message_stop rather than replay half a turn.
+// bodyCap > 0 caps each body after redaction (see the file comment for what a cut body means).
 func Wire(c WireCall, bodyCap int) ([]byte, error) {
 	req := ContentJSON(string(c.Request))
 	var resp string
@@ -86,29 +122,17 @@ func Wire(c WireCall, bodyCap int) ([]byte, error) {
 	} else {
 		resp = ContentJSON(string(c.Response))
 	}
-	inc := c.Incomplete
-	var hit bool
-	if req, hit = CapContent(req, bodyCap); hit {
-		inc = joinReasons(inc, IncompleteBodyCap)
-	}
-	if resp, hit = CapContent(resp, bodyCap); hit {
-		inc = joinReasons(inc, IncompleteBodyCap)
-	}
+	req, _ = CapContent(req, bodyCap)
+	resp, _ = CapContent(resp, bodyCap)
 	l := wireLine{
-		Path:       c.Path,
-		Request:    req,
-		Response:   resp,
-		Status:     c.Status,
-		StartUnix:  float64(c.Start.UnixNano()) / 1e9,
-		TotalMS:    float64(c.End.Sub(c.Start).Microseconds()) / 1e3,
-		Model:      gjson.Get(req, "model").String(),
-		FirstByte:  c.FirstByteMS,
-		Rounds:     c.Rounds,
-		Incomplete: inc,
-		Recorder:   WireRecordedBy,
-	}
-	if c.SessionID != "" {
-		l.Headers = map[string]string{wireSessionHeader: c.SessionID}
+		Path:      c.Path,
+		Request:   req,
+		Response:  resp,
+		Status:    c.Status,
+		StartUnix: float64(c.Start.UnixNano()) / 1e9,
+		TotalMS:   float64(c.End.Sub(c.Start).Microseconds()) / 1e3,
+		Model:     gjson.Get(req, "model").String(),
+		Headers:   wireHeaders(c.Headers),
 	}
 	if l.TotalMS < 0 {
 		l.TotalMS = 0
@@ -118,13 +142,4 @@ func Wire(c WireCall, bodyCap int) ([]byte, error) {
 		return nil, fmt.Errorf("record: encode wire line: %w", err)
 	}
 	return append(b, '\n'), nil
-}
-
-// IncompleteBodyCap: a body was longer than --record-body-cap and was cut after redaction.
-const IncompleteBodyCap = "body_cap_reached"
-
-func joinReasons(existing, reason string) string {
-	t := Turn{Incomplete: existing}
-	t.markIncomplete(reason)
-	return t.Incomplete
 }

@@ -67,8 +67,9 @@ type recEvent struct {
 	traceID  string
 	tenantID string // "" single-tenant; otherwise the file goes under <dir>/<tenantID>/
 	provider bschemas.ModelProvider
-	path     string // the API path, as the client called it; selects the wire dialect
-	status   int    // the HTTP status the client received
+	path     string      // the API path, as the client called it; selects the wire dialect
+	headers  http.Header // the client's request headers; credentials are removed when written
+	status   int         // the HTTP status the client received
 
 	reqBody   []byte // PRISTINE inbound body (pre-pipeline)
 	respBody  []byte // raw: SSE event stream, or a JSON body, or nil
@@ -277,9 +278,6 @@ func (r *sessionRecorder) handle(e *recEvent) {
 		}
 	}
 	if r.dir != "" {
-		// The turn's reasons, not only the event's: translation adds its own (no body on this
-		// path, usage never parsed), and a wire line must say it is partial just as a span does.
-		e.incomplete = turn.Incomplete
 		if err := r.appendWire(e); err != nil {
 			r.errors.Add(1)
 			r.log.Warn("cg.record: could not write a turn", "err", err, "trace_id", e.traceID)
@@ -400,10 +398,9 @@ func (r *sessionRecorder) appendWire(e *recEvent) error {
 		}
 	}
 	line, err := record.Wire(record.WireCall{
-		SessionID: e.traceID, Path: e.path,
+		Path: e.path, Headers: e.headers,
 		Request: e.reqBody, Response: e.respBody, ResponseSSE: e.respIsSSE,
 		Status: e.status, Start: e.start, End: e.end,
-		FirstByteMS: e.firstByteMS, Rounds: e.rounds, Incomplete: e.incomplete,
 	}, r.bodyCap)
 	if err != nil {
 		return err
