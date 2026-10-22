@@ -45,7 +45,7 @@ func TestAToolWithNoPricedRequestInScopeIsNotReportedPriced(t *testing.T) {
 func TestRepricingARowThePerRequestPassNeverSawLeavesItUnpriced(t *testing.T) {
 	rep := &ToolReport{Tools: []ToolStat{{Kind: KindMCPTool, Name: "mcp__docs__fetch", Server: "docs",
 		Priced: true, UnusedUSD: 0.42}}}
-	repriceCarried(rep, &carriedScan{Items: map[string]*carried{}}) // no priced request in scope
+	repriceCarried(rep, &carriedScan{Items: map[string]*carried{}}, &carriedScan{Items: map[string]*carried{}}) // no priced request in scope
 	if st := rep.Tools[0]; st.Priced || st.UnusedUSD != 0 {
 		t.Errorf("a row with no carried entry came back priced=%v usd=%v; want priced=false, usd=0",
 			st.Priced, st.UnusedUSD)
@@ -57,7 +57,7 @@ func TestRepricingARowThePerRequestPassNeverSawLeavesItUnpriced(t *testing.T) {
 // zero value is "no request priced this", not "priced, and free".
 func TestRepricingARowNoPricedRequestCarriedLeavesItUnpriced(t *testing.T) {
 	rep := &ToolReport{Tools: []ToolStat{{Kind: KindMCPTool, Name: "mcp__docs__fetch", Server: "docs", Priced: true}}}
-	repriceCarried(rep, &carriedScan{Items: map[string]*carried{KindMCPTool + "\x00mcp__docs__fetch": {}}})
+	repriceCarried(rep, &carriedScan{Items: map[string]*carried{KindMCPTool + "\x00mcp__docs__fetch": {}}}, &carriedScan{Items: map[string]*carried{}})
 	if rep.Tools[0].Priced {
 		t.Errorf("a row whose carried entry no request touched came back priced=true; want false")
 	}
@@ -68,7 +68,7 @@ func TestRepricingARowNoPricedRequestCarriedLeavesItUnpriced(t *testing.T) {
 // $0 unused is a measurement and the row stays priced.
 func TestRepricingAUsedToolInAPricedScopeKeepsItPriced(t *testing.T) {
 	rep := &ToolReport{Aside: []ToolStat{{Kind: KindTool, Name: "Bash", Priced: true, SessionsUsed: 60}}}
-	repriceCarried(rep, &carriedScan{Items: map[string]*carried{KindTool + "\x00Bash": {}}, pricedRequests: 591})
+	repriceCarried(rep, &carriedScan{Items: map[string]*carried{KindTool + "\x00Bash": {}}, pricedRequests: 591}, &carriedScan{Items: map[string]*carried{}})
 	if !rep.Aside[0].Priced {
 		t.Errorf("a used tool in a fully priced scope came back priced=false; its $0 unused is measured")
 	}

@@ -13,7 +13,7 @@ manage this one additional top-level key (never a second settings editor, never 
 
 ```
 saved $0.31 of $4.41 session · saved $0.12 of $0.90 subagents
-cache ● █████░ 13:40 ↻ │ agents reviewer active ● 4:58 saved $0.08 of $0.40 · Explore ◐ 0:51 saved $0.02 of $0.20 │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
+cache ● █████░ 13:40 ↻ │ next $0.03 warm · $0.30 cold │ agents reviewer active ● 4:58 saved $0.08 of $0.40 · Explore ◐ 0:51 saved $0.02 of $0.20 │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
 cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41%
 Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-skills for over a week — worth a shot.
 ```
@@ -34,6 +34,11 @@ Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-ski
   means the proxy holds the cache warm with keep-alive pings, and the clock is the time until it
   goes cold (the last planned ping plus the lifetime); `↻` on a normal clock means the last touch
   was a ping.
+- **Next request.** `next $0.03 warm · $0.30 cold`: what the next request costs for the cached
+  prefix if the cache is still warm (cache-read price) and if it has gone cold (cache-write price at
+  the cache's lifetime tier), so the value of keeping it warm is on the line. Once cold it is just
+  `next $0.30`. A proxy that predates the warm figure shows `next $0.30 if cold`; an unpriced model
+  shows nothing, never $0.00. `--hide=next` removes it.
 - **Sub-agents.** Each sub-agent's cache, by the name Claude Code's agents list shows
   (`agents reviewer active ● 4:58 · Explore ◐ 0:51 · 1 cold`), most recent first, up to five;
   `active` = a request in the last 10 s. Claude Code does not tell the status line which agent is
@@ -43,7 +48,9 @@ Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-ski
 - **Keep-alive.** `ka 3 pings $0.04`: this session's pings and their cost, after the first one.
   The main clock and the context bar follow the main thread, not whichever agent spoke last.
 - **Context.** Bar and percent against the model's context limit: the proxy's when it is a
-  measured figure for the model, else Claude Code's.
+  measured figure for the model the MAIN thread is on, else Claude Code's. (The proxy's top-level
+  window describes the latest request on any thread; a sub-agent on a smaller-window model used to
+  make a long main prompt read 100% until the main thread spoke again.)
 - **Weekly tip** (balanced and detailed, its own last line, on by default): names each of
   `/context-guru:save-more` and `/context-guru:remove-mcp-and-skills` (the ones installed) not run
   in the last 7 days, read from `<state dir>/last-run.json`, never over the network; a new install
@@ -51,6 +58,15 @@ Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-ski
   first. `statusline.py --set-tips=off` turns it off, `--hide=tip` per command.
   The status line gives no other advice: that comes from those commands and the automatic sweep.
 - A pending proxy update (`▲ update v0.3.2`) comes first so it cannot scroll off.
+
+**Request budget.** A render makes at most one round trip. Answers are cached for all renders and
+all sub-agents of a session in `${XDG_CACHE_HOME:-~/.cache}/context-guru/` (a private `0700`
+directory, never a shared `/tmp` path): cache state for 10 s, session stats for 30 s. One render
+per window refreshes, the others serve the cached copy; after a failure the next attempts back off
+exponentially (1 s, 2 s, 4 s ... 5 min) and the last good copy is shown meanwhile. The Claude Code
+mods read the same files through `cg.py cachestate --json --session <id>`, which prints the cached
+cache state (plus `age_s` and `stale`) and refreshes it under the same rules; they never call the
+proxy themselves.
 
 **Layouts and toggles.** `statusline.py --set-layout=detailed` (or `minimal`, `balanced`, `auto`) remembers a
 layout across renders without editing settings; bind it to an alias or a command. A remembered
@@ -60,7 +76,7 @@ layout outranks the installed command's flag until `auto`. Otherwise
 | layout | elements |
 |---|---|
 | minimal | saved, cache (`saved $0.31 of $4.41 │ cache ● ████░░ 3:57`) |
-| balanced | update, saved, cache, agents, ctx, ka, tip |
+| balanced | update, saved, cache, next, agents, ctx, ka, tip |
 | detailed | balanced + `spent` + `upstream slow: 7.0s` (only when slow) + least-used tool/skill (`◇ github 1% remove`) |
 | spark | `saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇` over the cache clock |
 | strip | the last 20 requests as hit `■` / partial `▨` / miss `✖`, and the dollars misses cost today |

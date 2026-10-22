@@ -120,7 +120,7 @@ func (d *DB) CampaignRealSavings(strategyIDs, tenantIDs []string, since int64) (
 		costRows, err := d.sql.QueryContext(d.readCtx(), `SELECT tenant_id,
 				CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER) h,
 				COUNT(*), COALESCE(SUM(cost_usd),0)
-			FROM requests WHERE keepalive = 1 AND keepalive_strategy_id IN (`+
+			FROM requests WHERE keepalive = 1 AND manual_ping = 0 AND keepalive_strategy_id IN (`+
 			placeholders(len(strategyIDs))+`) AND ts >= ?
 			GROUP BY tenant_id, h`, costArgs...)
 		if err != nil {

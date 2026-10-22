@@ -54,5 +54,8 @@
         ]
       }
     ]
-  }
+  },
+  "modules": [
+    "./register.tsx"
+  ]
 }
