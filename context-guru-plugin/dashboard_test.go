@@ -75,8 +75,8 @@ func TestTheDashboardOpensBothTabsOnTheResolvedPort(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, out)
 	}
 	want := []string{
-		"http://127.0.0.1:" + port + "/dashboard/#behaviour/history",
-		"http://127.0.0.1:" + port + "/dashboard/#behaviour/insights",
+		"http://127.0.0.1:" + port + "/dashboard/#savings/history",
+		"http://127.0.0.1:" + port + "/dashboard/#savings/insights",
 	}
 	if strings.Join(opened, "\n") != strings.Join(want, "\n") {
 		t.Errorf("opened %q; want exactly %q, History first", opened, want)
@@ -154,7 +154,7 @@ func TestTheDashboardCanPrintWithoutOpening(t *testing.T) {
 		lb, _ := os.ReadFile(log)
 		t.Errorf("--no-open opened %q anyway", strings.TrimSpace(string(lb)))
 	}
-	if !strings.Contains(string(b), "/dashboard/#behaviour/history") {
+	if !strings.Contains(string(b), "/dashboard/#savings/history") {
 		t.Errorf("--no-open printed no URL:\n%s", b)
 	}
 }
