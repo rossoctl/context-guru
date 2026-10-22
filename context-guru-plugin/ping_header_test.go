@@ -144,7 +144,7 @@ func TestInstallSaysWhatThePingHeaderMeans(t *testing.T) {
 			if got != "x-context-guru-ping: 1" {
 				t.Errorf("headers = %q", got)
 			}
-			for _, want := range []string{"up to 5 minutes", "never pings automatically", "drops the copy", "--no-ping-header"} {
+			for _, want := range []string{"up to 5 minutes", "never pings automatically for it", "5 minutes after your last request", "--no-ping-header"} {
 				if !strings.Contains(note, want) {
 					t.Errorf("ping_note is missing %q: %q", want, note)
 				}

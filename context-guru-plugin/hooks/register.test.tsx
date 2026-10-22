@@ -204,7 +204,7 @@ for (const [reason, want] of [
   ['pings used', /pings have run out/],
   ['stopped', /stopped keeping this thread warm/],
   ['no entry', /knows nothing about this session/],
-  ['unavailable', /route or credential is failing/],
+  ['unavailable', /route or credential is failing right now . try again shortly/],
   ['over budget', /per-ping limit/],
   ['too large', /too large to hold/],
   ['unsupported', /extended thinking/],

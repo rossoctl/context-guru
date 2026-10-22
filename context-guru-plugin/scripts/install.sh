@@ -1236,7 +1236,7 @@ any other project, since the machine-wide install has its own record and port."
   # Consent for the manual-ping opt-in header (x-context-guru-ping: 1): said every time it is written, so the user
   # hears what the proxy keeps and for how long, and how to turn it off.
   if [ "$R_NOPING" != 1 ]; then
-    emit "ping_note=Ping works with keep-alive off: the Context Guru server keeps your latest request and key in memory for up to 5 minutes so the Ping button and /context-guru:ping can work. It never pings automatically for this, and drops the copy after 5 minutes. To opt out, re-run the install with --no-ping-header."
+    emit "ping_note=Ping works with keep-alive off: the Context Guru server keeps your latest request and key in memory for up to 5 minutes so the Ping button and /context-guru:ping can work. It never pings automatically for it, and drops the copy 5 minutes after your last request. To opt out, re-run the install with --no-ping-header."
   fi
   route_install_statusline
   route_enable_plugin "$ares"

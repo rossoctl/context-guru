@@ -1199,7 +1199,7 @@ PING_REASONS = {
     "stopped": "the proxy stopped keeping this thread warm after a miss or a refused ping",
     "expired": "cache already cold",
     "no entry": "the server knows nothing about this session yet; send a prompt first",
-    "unavailable": "the upstream route or credential is failing right now, try again shortly",
+    "unavailable": "the upstream route or credential is failing right now — try again shortly",
 }
 PING_REASON_OTHER = "cannot ping this session right now"  # a code from a newer server: never shown raw
 
