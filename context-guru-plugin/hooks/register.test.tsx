@@ -194,6 +194,27 @@ test('a refused press explains itself with the server\'s ping_reason', async ($,
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await ui.find({ key: 'ping' })).toBeDefined() // still visible
   const r = await $.command.run({ command: 'ping', args: '' })
-  expect(r.text).toMatch(/can't ping: this context is too large/)
+  expect(r.text).toMatch(/can't ping: context too large to hold for Ping/)
   await ui.unmount()
 })
+
+for (const [reason, want] of [
+  ['not opted in', /restart Claude Code/],
+  ['below limits', /below its minimum/],
+  ['pings used', /pings have run out/],
+  ['stopped', /stopped keeping this thread warm/],
+  ['no entry', /knows nothing about this session/],
+  ['unavailable', /route or credential is failing right now . try again shortly/],
+  ['over budget', /per-ping limit/],
+  ['too large', /too large to hold/],
+  ['unsupported', /extended thinking/],
+  ['expired', /already cold/],
+  ['some-future-code', /cannot ping this session right now/],
+] as const) {
+  test(`/ping words ping_reason ${reason}`, async ($, on) => {
+    await boot($, on, true, [], { status: 409, error: 'not held' }, { pingable: false, ping_reason: reason })
+    const r = await $.command.run({ command: 'ping', args: '' })
+    expect(r.text).toMatch(want)
+    expect(r.text).not.toMatch(/some-future-code/)
+  })
+}

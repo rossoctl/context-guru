@@ -221,8 +221,11 @@ func TestSettingsAddPreservesEverythingElse(t *testing.T) {
 	if env["SOME_OTHER_VAR"] != "keep me" || env["ANTHROPIC_SMALL_FAST"] != "also keep me" {
 		t.Errorf("the user's own env vars were lost: %v", env)
 	}
-	if len(env) != 3 {
+	if len(env) != 4 { // the 2 originals, the base URL, and the manual-ping opt-in header
 		t.Errorf("env has %d keys, want the 2 originals plus ours: %v", len(env), env)
+	}
+	if env["ANTHROPIC_CUSTOM_HEADERS"] != "x-context-guru-ping: 1" {
+		t.Errorf("env.ANTHROPIC_CUSTOM_HEADERS = %q, want the manual-ping opt-in", env["ANTHROPIC_CUSTOM_HEADERS"])
 	}
 }
 
@@ -4830,7 +4833,8 @@ func TestAnAlreadyRoutedProjectStillGetsAHatch(t *testing.T) {
 	// recovery folder represents now (no `settings.py add` has ever run against this file).
 	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
 
-	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL)
+	// --no-ping-header: this test is about the hatch, and a pre-ping install gets its header on a re-run.
+	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL, "--no-ping-header")
 	if code != 0 || facts["result"] != "unchanged" {
 		t.Fatalf("fixture: wanted result=unchanged exit 0, got %v exit %d", facts, code)
 	}
@@ -7816,11 +7820,12 @@ func TestRouteConfirmCommandCarriesEveryDecision(t *testing.T) {
 	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
 		"--i-understand-machine-wide", "--on-conflict", "chain", "--cache-strategy", "none",
 		"--upstream", "https://gw.example/v1", "--health-url", "http://127.0.0.1:9/healthz",
-		"--no-health-check")
+		"--no-health-check", "--no-ping-header")
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
 	for _, want := range []string{
+		"--no-ping-header", // the opt-out is a decision, so it travels in the printed command
 		"--scope user",
 		"--on-conflict chain",
 		"--i-understand-machine-wide",

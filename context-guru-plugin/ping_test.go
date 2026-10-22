@@ -195,3 +195,72 @@ func TestCachestateNamesSubAgentsFromTheTranscript(t *testing.T) {
 		t.Errorf("names = %v, want only a:abc123 -> Explore", names)
 	}
 }
+
+// A 409 "not held" says WHY when the cachestate does: cg.py ping reads ping_reason from the shared cache.
+func TestPingExplainsAnUnheldCache(t *testing.T) {
+	requireTool(t, "python3")
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/me/cache/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"error":"not held"}`)) //nolint:errcheck
+	})
+	now := time.Now().UnixMilli()
+	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"session": "S1", "last_ts": now, "end_ts": now, "now_ms": now, "ttl_s": 300, "pingable": false,
+			"ping_reason": "not opted in",
+			"threads":     []any{map[string]any{"id": "main", "main": true, "pingable": false, "ping_reason": "not opted in"}},
+		})
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	env := []string{"XDG_CACHE_HOME=" + t.TempDir()}
+	out, code := runCGCode(t, "http://"+ln.Addr().String(), env, "ping", "--session", "S1")
+	if code != 1 || !strings.Contains(out, "Can't ping: restart Claude Code after the plugin update") {
+		t.Errorf("exit %d:\n%s", code, out)
+	}
+	js, _ := runCGCode(t, "http://"+ln.Addr().String(), env, "ping", "--session", "S1", "--json")
+	if !strings.Contains(js, `"ping_reason": "not opted in"`) {
+		t.Errorf("json = %s", js)
+	}
+}
+
+// Every ping_reason the server can send has words, and a code from a newer server is never shown raw.
+func TestPingReasonWords(t *testing.T) {
+	requireTool(t, "python3")
+	for reason, want := range map[string]string{
+		"below limits": "below its minimum size", "pings used": "pings have run out", "stopped": "stopped keeping this thread warm",
+		"no entry": "knows nothing about this session", "unavailable": "route or credential is failing",
+		"not opted in": "restart Claude Code after the plugin update", "expired": "cache already cold", "too large": "too large to hold",
+		"unsupported": "extended thinking", "over budget": "per-ping limit", "from-the-future": "cannot ping this session right now",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /api/me/cache/ping", func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusConflict)
+				w.Write([]byte(`{"error":"not held"}`)) //nolint:errcheck
+			})
+			now := time.Now().UnixMilli()
+			mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode(map[string]any{"session": "S1", "last_ts": now, "end_ts": now, "now_ms": now, "ttl_s": 300, //nolint:errcheck
+					"threads": []any{map[string]any{"id": "main", "main": true, "ping_reason": reason}}})
+			})
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+			go srv.Serve(ln) //nolint:errcheck
+			t.Cleanup(func() { srv.Close() })
+			out, _ := runCGCode(t, "http://"+ln.Addr().String(), []string{"XDG_CACHE_HOME=" + t.TempDir()}, "ping", "--session", "S1")
+			if !strings.Contains(out, want) || (reason == "from-the-future" && strings.Contains(out, reason)) {
+				t.Errorf("reason %q -> %q, want it to contain %q", reason, out, want)
+			}
+		})
+	}
+}

@@ -55,6 +55,35 @@ BIN_KEY = "CONTEXT_GURU_BIN"
 # keys where the user owned 1, and /context-guru:status repeated the wrong number back to them.
 OURS = (KEY, UPSTREAM_KEY, BIN_KEY)
 
+# The header that opts a session in to MANUAL pings (the Ping button and /context-guru:ping) when keep-alive is
+# off: the proxy holds that session's cache request for at most 300 s, for a manual ping only. It rides in
+# ANTHROPIC_CUSTOM_HEADERS, which Claude Code reads as `Name: Value` lines separated by NEWLINES (verified on
+# 2.1.307: a comma-joined value arrives as one corrupted header). The user's own headers, a hosted install's
+# `x-context-guru-token` included, share that variable, so the line is appended and removed, never overwritten.
+HEADERS_KEY = "ANTHROPIC_CUSTOM_HEADERS"
+PING_HEADER = "x-context-guru-ping: 1"
+PING_HEADER_META = "installed_ping_header"   # the line we added; absent when it was already there or is not ours to remove
+
+
+def _ping_line(line: str) -> bool:
+    return line.strip().lower().startswith("x-context-guru-ping")
+
+
+def with_ping_header(value: object) -> tuple[str, bool]:
+    """(the headers with our line in, whether WE added it). An existing x-context-guru-ping line, whatever its
+    value, is the user's to keep: nothing is added or changed, and the second item is False."""
+    text = value if isinstance(value, str) else ""
+    lines = [ln for ln in text.replace("\r", "").split("\n") if ln.strip()]
+    if any(_ping_line(ln) for ln in lines):
+        return text, False
+    return "\n".join([*lines, PING_HEADER]), True
+
+
+def without_ping_header(value: object) -> str:
+    """The headers with the line we added taken out and every other line kept. "" when nothing else is left."""
+    text = value if isinstance(value, str) else ""
+    return "\n".join(ln for ln in text.replace("\r", "").split("\n") if ln.strip() and ln.strip() != PING_HEADER)
+
 # statusLine is a TOP-LEVEL settings key — a sibling of `env`, not a member of it — so it needs its
 # own record rather than fitting into OURS/env above. --statusline is optional on `add`: most
 # installs never pass it, and every add/remove call that omits it must behave exactly as it did
@@ -78,6 +107,33 @@ PLUGIN_ID = "context-guru@context-guru"
 
 # Where this script records what it did, so a later run can tell its own work from the user's.
 META = "$context-guru"
+
+
+def user_env_keys(env: dict) -> int:
+    """How many env keys are the USER's: not ours, and not ANTHROPIC_CUSTOM_HEADERS when our line is all it holds."""
+    return len([k for k in env if k not in OURS and not (k == HEADERS_KEY and without_ping_header(env[k]) == "")])
+
+
+def add_ping_header(env: dict, meta: dict) -> bool:
+    """Put our line into env's ANTHROPIC_CUSTOM_HEADERS and record that we did. True when it changed."""
+    new, added = with_ping_header(env.get(HEADERS_KEY))
+    if not added:
+        return False
+    env[HEADERS_KEY] = new
+    meta[PING_HEADER_META] = PING_HEADER
+    return True
+
+
+def remove_ping_header(env: dict, meta: object) -> bool:
+    """Take back the line WE added (and only that one); the user's other headers stay. True when it changed."""
+    if not isinstance(meta, dict) or meta.get(PING_HEADER_META) != PING_HEADER or HEADERS_KEY not in env:
+        return False
+    rest = without_ping_header(env[HEADERS_KEY])
+    if rest:
+        env[HEADERS_KEY] = rest
+    else:
+        del env[HEADERS_KEY]
+    return True
 
 
 def is_ours(data: dict, url: str) -> bool:
@@ -2611,7 +2667,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         file=args.file,
         exists=str(existed).lower(),
         base_url=current if current else "(unset)",
-        other_env_keys=len([k for k in (data.get("env") or {}) if k not in OURS]),
+        other_env_keys=user_env_keys(data.get("env") or {}),
         top_level_keys=len(data),
         statusline=json.dumps(sl, sort_keys=True) if sl else "(unset)",
         # Provenance, from the record rather than the URL's shape. install.sh decided "already
@@ -2829,7 +2885,9 @@ def cmd_add(args: argparse.Namespace) -> int:
         return 0
 
     current = env.get(KEY)
-    if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged:
+    ping_on = not getattr(args, "no_ping_header", False)
+    if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged \
+            and (not ping_on or any(_ping_line(ln) for ln in str(env.get(HEADERS_KEY, "")).split("\n"))):
         record_install_scope(args.file, url=args.url)
         emit(result="unchanged", file=args.file, base_url=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
@@ -2845,6 +2903,8 @@ def cmd_add(args: argparse.Namespace) -> int:
         env.update(desired)
         data["env"] = env
         meta = data.setdefault(META, {})
+        if ping_on and add_ping_header(env, meta):
+            changed.append(HEADERS_KEY)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2865,6 +2925,8 @@ def cmd_add(args: argparse.Namespace) -> int:
         env.update(desired)   # the whole set: a port change must not drop the chaining keys
         data["env"] = env
         meta = data.setdefault(META, {})
+        if ping_on:
+            add_ping_header(env, meta)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2929,6 +2991,8 @@ def cmd_add(args: argparse.Namespace) -> int:
     # Record what we wrote, so a re-run can recognise its own work, and what we took over, so
     # uninstall can hand it back.
     meta = data.setdefault(META, {})
+    if ping_on:
+        add_ping_header(env, meta)
     meta["installed_base_url"] = args.url
     if getattr(args, "upstream", ""):
         meta["installed_upstream"] = args.upstream
@@ -2941,7 +3005,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     record_install_scope(args.file, url=args.url)
     emit(result="added", file=args.file, base_url=args.url,
          replaced=current if current else "", backup=saved or "(new file)",
-         other_env_keys=len([k for k in env if k not in OURS]))
+         other_env_keys=user_env_keys(env))
     return 0
 
 
@@ -3140,6 +3204,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         recorded_upstream = _meta.get("installed_upstream") or ""
     if recorded_upstream and env.get(UPSTREAM_KEY) == recorded_upstream:
         del env[UPSTREAM_KEY]
+    remove_ping_header(env, _meta)
     recorded_bin = ""
     if isinstance(_meta, dict):
         recorded_bin = _meta.get("installed_bin") or ""
@@ -3175,6 +3240,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         meta.pop("installed_base_url", None)
         meta.pop("installed_upstream", None)
         meta.pop("installed_bin", None)
+        meta.pop(PING_HEADER_META, None)
         meta.pop(STATUSLINE_META, None)
         meta.pop(STATUSLINE_PREV_META, None)
         if not meta:
@@ -4013,6 +4079,9 @@ def main() -> int:
         p.add_argument("--bin", default="",
                        help="also write env.CONTEXT_GURU_BIN (absolute path to the proxy), for "
                             "machines where its directory is not on PATH")
+        p.add_argument("--no-ping-header", action="store_true",
+                       help="do not add `x-context-guru-ping: 1` to env.ANTHROPIC_CUSTOM_HEADERS (the opt-in "
+                            "for manual pings when keep-alive is off)")
         p.add_argument("--upstream", default="",
                        help="also write env.ANTHROPIC_UPSTREAM, so the proxy chains behind an "
                             "existing gateway in LATER sessions too (the hook reads this block)")
