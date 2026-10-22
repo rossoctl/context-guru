@@ -30,7 +30,7 @@ Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-ski
 - **Cache clock.** A live countdown to expiry, green, amber in the last minute (a fifth of the
   lifetime on the 1h tier), red with `!` in the last 15 s. When the cache is cold the whole cache
   segment (and `next`) is left out: you already know, and it is noise. There is exactly ONE
-  clock, the main agent's, from ONE source: the proxy's whenever it has a copy no older than 11 s,
+  clock, the main agent's, from ONE source: the proxy's whenever it has a copy no older than 45 s,
   otherwise Claude Code's own (it used to hand over after 3 s and flip back at each refresh, which
   showed as two alternating timers). A cache kept warm by pings is drawn in **cyan** with `↻`. The proxy
   keeps the clock from the end of the last response, so a long answer is counted. It ticks every

@@ -113,7 +113,8 @@ GREEN_MAX = 0.50
 YELLOW_MAX = 0.70
 BAR_CELLS = 8
 RESET, GREEN, YELLOW, RED, DIM, CYAN = "\033[0m", "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[36m"
-PROXY_FRESH_SECONDS = 11.0  # a proxy copy younger than this (the cachestate TTL plus a second) is the truth; see _cache_view
+PROXY_FRESH_SECONDS = 45.0  # a proxy copy younger than this drives the clock; covers a refresh delayed by back-off or a slow server (see _cache_view)
+CTX_PROXY_FRESH_SECONDS = 11.0  # the context bar takes the proxy's token count only from a copy this young (the cachestate TTL plus a second)
 
 # How many tool_use blocks of transcript tail this reads per render, looking for unused-tool
 # usage. Bounded for the same reason _fetch_stats bounds its own read: this runs on (almost)
@@ -1306,7 +1307,7 @@ def _ctx_numbers(payload: dict, cs: dict | None, cs_age: float) -> tuple[float, 
     cw = payload.get("context_window")
     used = _num(cw, "total_input_tokens")
     window = _num(cw, "context_window_size")
-    if cs_age <= PROXY_FRESH_SECONDS and (_num(cs, "prefix_tokens") or 0) > 0:
+    if cs_age <= CTX_PROXY_FRESH_SECONDS and (_num(cs, "prefix_tokens") or 0) > 0:
         used = _num(cs, "prefix_tokens")
     if isinstance(cs, dict) and cs.get("window_exact") and (_num(cs, "window") or 0) > 0:
         window = _num(cs, "window")

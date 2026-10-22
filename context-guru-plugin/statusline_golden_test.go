@@ -279,6 +279,14 @@ print(" ".join(out))
 	if got := strings.TrimSpace(string(b)); strings.Count(got, "proxy:240") != 10 {
 		t.Errorf("the clock changed source as the copy aged:\n%s", got)
 	}
+	// A refresh delayed by back-off or a slow server leaves a copy 30 s old: the clock still follows the proxy.
+	b, err = exec.Command(py, "-c", strings.Replace(script, "range(10)", "(30, 44)", 1), filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, b)
+	}
+	if got := strings.TrimSpace(string(b)); got != "proxy:240 proxy:240" {
+		t.Errorf("a 30 s and a 44 s old copy must still drive the clock, got %s", got)
+	}
 }
 
 // V2 A.1-A.3: no cold segment, no sub-agent clocks, a pinged cache in its own colour.
