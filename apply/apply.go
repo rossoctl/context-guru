@@ -1361,6 +1361,25 @@ func SessionIDFor(tenant, explicitSess string, provider bschemas.ModelProvider, 
 	return sessionIDFrom(tenant, explicitSess, body, norm)
 }
 
+// ProjectFor returns the directory the agent was started in, as stated in the request's own
+// prompt, or "" when the request does not state one.
+//
+// Here rather than in the caller because the normalization it needs — one provider-agnostic
+// message slice out of an Anthropic or OpenAI body — is this package's job and is unexported.
+// SessionIDFor is the same shape for the same reason, and the two share
+// normalizeSessionMessages so that a body shape one accepts is a body shape the other accepts.
+//
+// It must be given the PRISTINE inbound body. A rewritten transcript may have had the
+// environment block compacted out of it, and the project would then flip to unattributed on
+// exactly the requests the pipeline acted on — the ones whose cost is most worth attributing.
+func ProjectFor(provider bschemas.ModelProvider, body []byte) string {
+	norm := normalizeSessionMessages(provider, body)
+	if len(norm) == 0 {
+		return ""
+	}
+	return schema.WorkingDirOf(norm)
+}
+
 // RecordBilledInput stores the provider's own input-token count for a finished turn, so the NEXT
 // turn of the same session can be compared against the model's context window in the units that
 // window is stated in. Call it once per response, with fresh + cache-read + cache-write.

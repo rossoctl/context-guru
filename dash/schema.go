@@ -80,6 +80,20 @@ CREATE TABLE IF NOT EXISTS requests (
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)
+  -- The directory the agent was started in, which is what a user means by "project". Read from
+  -- the request body (schema.WorkingDirOf) and sanitized before it gets here (ProjectPath),
+  -- because it is a client-chosen string that could be named after a credential.
+  --
+  -- '' means UNATTRIBUTED, not "no project": every row written before this column existed reads
+  -- as '', and so does every request from a client that does not state a working directory. The
+  -- dashboard reports that as its own group rather than folding it into any real folder.
+  project            TEXT    NOT NULL DEFAULT '',
+  -- How this row came to exist: '' if the proxy measured the request as it passed, 'imported' if
+  -- it was recovered from a Claude Code transcript afterwards. An imported row carries the usage
+  -- the provider billed and NOT the tools the request declared, because a transcript does not
+  -- record them -- so it can report spend and can never support a waste verdict. '' rather than
+  -- a word for measured, since every row written before this column existed is measured.
+  source             TEXT    NOT NULL DEFAULT '',
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -536,12 +550,30 @@ CREATE TABLE IF NOT EXISTS tool_uses (
   calls      INTEGER NOT NULL DEFAULT 0,
   first_ts   INTEGER NOT NULL DEFAULT 0,
   last_ts    INTEGER NOT NULL DEFAULT 0,
+  -- project is the folder the invocation happened in. '' means UNKNOWN -- a row written before
+  -- this column existed -- which is a different claim from "outside any project" and is reported
+  -- as unknown rather than as a folder.
+  project    TEXT    NOT NULL DEFAULT '',
   -- tenant_id LEADS the key, as on tool_declarations: without it the upsert below
   -- (calls = calls + excluded.calls) ADDS one account's call counts to another account's
   -- row whenever a session id is shared, which is a cross-account write.
-  PRIMARY KEY (tenant_id, session_id, name, skill)
+  --
+  -- project IS IN THE KEY, and that is not cosmetic. One Claude Code session works in several
+  -- folders -- measured on a live store, 8 sessions spanned more than one and one spanned 14 --
+  -- so without it the same capability invoked in two folders collapses into one row whose
+  -- project is whichever folder was written last. That is exactly the defect this column exists
+  -- to fix: every project reported the same usage because the per-project query had to select
+  -- whole sessions instead.
+  PRIMARY KEY (tenant_id, session_id, project, name, skill)
 );
 CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts DESC);
+-- The idx_tooluses_project index is deliberately NOT here. additiveDDL runs on every open,
+-- BEFORE migrateToolUsesProject, and CREATE TABLE IF NOT EXISTS is a no-op on an existing
+-- database -- so an index over the project column here runs against the OLD table and fails
+-- with "no such column: project". That fails the open, and the proxy then falls back to an
+-- in-memory database: the dashboard comes up looking healthy with every row of history gone.
+-- Observed doing exactly that. The index is created by the migration, which is the only place
+-- that knows the column exists.
 
 -- One row per DISTINCT piece of stored prompt text, keyed by its content hash.
 --
@@ -597,6 +629,9 @@ const additiveDDL2 = `
 -- in both directions: it would delete another account's inventory, and it would DECLINE to
 -- delete this account's (the WHEN clause still sees the other account's request rows), so a
 -- purged tenant's tool names would outlive its request rows.
+-- The project filter on requests. Here and not in additiveDDL: that phase runs BEFORE addColumns,
+-- so on an existing database the column the index names does not exist yet.
+CREATE INDEX IF NOT EXISTS idx_requests_project ON requests(project, ts);
 CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
 WHEN NOT EXISTS (SELECT 1 FROM requests
   WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
@@ -694,6 +729,12 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "agent_compaction", "INTEGER NOT NULL DEFAULT 0"},
 	// What changed on a miss, from the per-thread prefix comparison. '' on old rows.
 	{"requests", "cache_miss_cause", "TEXT NOT NULL DEFAULT ''"},
+	// The project dimension. Additive with a '' default, which doubles as "unattributed": a row
+	// that predates the column cannot be back-filled, because the body it came from is long gone.
+	{"requests", "project", "TEXT NOT NULL DEFAULT ''"},
+	// Measured-vs-imported. Additive with a '' default, which doubles as "measured": a row that
+	// predates the column saw the proxy, by definition.
+	{"requests", "source", "TEXT NOT NULL DEFAULT ''"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
@@ -705,6 +746,100 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
 }
 
+// migrateToolUsesProject adds tool_uses.project and puts it in the primary key.
+//
+// A TABLE REBUILD RATHER THAN AN ALTER, because SQLite cannot add a column to a primary key and
+// the column is useless outside it: one session working in two folders would collapse to a single
+// row recording whichever folder was written last. That is the reported defect -- every project
+// showed the same usage figures -- so a migration that added the column alone would look applied
+// and change nothing.
+//
+// Not in additiveColumns for the same reason: that path is for a column a plain ALTER can add.
+// A version bump is also wrong here, since it renames the database aside and discards every row,
+// including the thousands of invocations imported from the user's own history -- which is the
+// data this whole surface exists to show.
+//
+// Idempotent: migrations run on every open, so it probes for the column and returns if present.
+func migrateToolUsesProject(db *sql.DB) error {
+	var has bool
+	rows, err := db.Query(`PRAGMA table_info(tool_uses)`)
+	if err != nil {
+		// No such table yet: `ddl` will create it with the column already in place.
+		return nil
+	}
+	cols := 0
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		cols++
+		if name == "project" {
+			has = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// PRAGMA table_info on a missing table yields zero rows, not an error. Rebuilding from a table
+	// that is not there would fail the open, and the proxy answers a failed open with an
+	// in-memory database -- history gone, dashboard looking healthy.
+	if has || cols == 0 {
+		return nil
+	}
+
+	// One transaction: an interrupted rebuild must not leave the table missing or half-copied.
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// EXISTING ROWS COPY WITH project = '' -- unknown. Their folder is not recoverable: the
+	// request body they came from is long gone. Guessing one would attribute a user's work to a
+	// project they may never have touched.
+	for _, stmt := range []string{
+		`CREATE TABLE tool_uses_new (
+			tenant_id  TEXT    NOT NULL DEFAULT '',
+			session_id TEXT    NOT NULL DEFAULT '',
+			name       TEXT    NOT NULL DEFAULT '',
+			server     TEXT    NOT NULL DEFAULT '',
+			skill      TEXT    NOT NULL DEFAULT '',
+			calls      INTEGER NOT NULL DEFAULT 0,
+			first_ts   INTEGER NOT NULL DEFAULT 0,
+			last_ts    INTEGER NOT NULL DEFAULT 0,
+			project    TEXT    NOT NULL DEFAULT '',
+			PRIMARY KEY (tenant_id, session_id, project, name, skill)
+		)`,
+		`INSERT INTO tool_uses_new(
+			tenant_id, session_id, name, server, skill, calls, first_ts, last_ts, project)
+		 SELECT tenant_id, session_id, name, server, skill, calls, first_ts, last_ts, ''
+		 FROM tool_uses`,
+		// THE TRIGGER HAS TO GO FIRST. trg_tool_inventory_gc names tool_uses in its body, and
+		// SQLite refuses to drop a table a trigger references. Missing this failed the open on a
+		// real database -- and the proxy answers that by falling back to in-memory, so the
+		// dashboard came up healthy-looking with every row of history gone.
+		`DROP TRIGGER IF EXISTS trg_tool_inventory_gc`,
+		`DROP TABLE tool_uses`,
+		`ALTER TABLE tool_uses_new RENAME TO tool_uses`,
+		`CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_tooluses_project ON tool_uses(tenant_id, project)`,
+		// THE GC TRIGGER NEEDS NO RESTORE HERE, verified rather than assumed: it is defined in
+		// additiveDDL2, which migrate() executes on BOTH paths (already-at-version and fresh)
+		// after this migration runs, so it is recreated on the same open that drops it. Checked by
+		// removing it from this list and confirming the trigger was still present afterwards.
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // migrate creates the schema and validates its version. A version mismatch is
 // reported to the caller, which renames the old file aside and retries — see Open.
 func migrate(db *sql.DB) error {
@@ -714,6 +849,12 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := addColumns(db); err != nil {
+		return err
+	}
+	// The tool_uses rebuild. After addColumns and on every open, like the additive phases: an
+	// existing database at the current version returns early below, so a migration placed after
+	// that check would never run on exactly the databases that need it.
+	if err := migrateToolUsesProject(db); err != nil {
 		return err
 	}
 	var have string

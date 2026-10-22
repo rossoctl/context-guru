@@ -297,6 +297,9 @@ type carriedScan struct {
 	Items        map[string]*carried
 	RewriteUSD   float64 // the latest priced request's whole prompt at write minus read
 	rewriteTS    int64
+	// pricedRequests counts mapped requests that were billed at a known rate. Zero means nothing in
+	// this scope was priced, so a $0 figure here is an absence of measurement, not a measurement.
+	pricedRequests int
 	// Requests is every mapped, priced request, when asked for (carriedOpts.perRequest).
 	Requests     []carriedRequest
 	keepRequests bool
@@ -474,6 +477,9 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 			if r.cacheWrite1h > 0 {
 				rate = 2 * p.Input
 			}
+		}
+		if ok {
+			out.pricedRequests++
 		}
 		if ok && r.ts >= out.rewriteTS {
 			out.rewriteTS = r.ts

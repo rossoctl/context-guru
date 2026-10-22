@@ -458,10 +458,10 @@ func (d *DB) insertBatch(evs []*Event) error {
 		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
 		keepalive_strategy_id, billed_token_factor, thread_id,
 		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms,
-		agent_compaction, cache_miss_cause, manual_ping, manual_saved_usd
+		agent_compaction, cache_miss_cause, manual_ping, manual_saved_usd, project, source
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -526,6 +526,15 @@ func (d *DB) insertBatch(evs []*Event) error {
 			strategyID, e.BilledTokenFactor, e.ThreadID,
 			e.WaitingFor, e.WaitTool, e.WakeCause, e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs,
 			boolInt(e.AgentCompaction), e.CacheMissCause, boolInt(e.ManualPing), e.ManualSavedUSD,
+			// Sanitized HERE, at the write, rather than trusted from the caller: this is the last
+			// point before the value is on disk and on the SSE feed, and a path is a
+			// client-chosen string that could be named after a credential.
+			ProjectPath(e.Project),
+			/* Allow-listed rather than stored as given: this is the field every honesty rule
+			 * downstream keys off, so an unrecognised value must not quietly become a third
+			 * kind of row. Anything but the one known marker records as measured, which is the
+			 * safe direction — it claims LESS about the row. */
+			sourceOf(e.Source),
 		)
 		if err != nil {
 			return err
@@ -663,7 +672,20 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 	var deleted int64
 	if maxAge > 0 {
 		cutoff := now.Add(-maxAge).UnixMilli()
-		res, err := d.sql.Exec(`DELETE FROM requests WHERE ts < ?`, cutoff)
+		// IMPORTED HISTORY IS EXEMPT FROM THE AGE RULE, and that exemption is the difference
+		// between the import being useful and being pointless.
+		//
+		// Imported rows are old BY DEFINITION — being old is the only reason to import them — so
+		// an age rule that applies to them deletes the whole import on the next janitor pass.
+		// Observed: a live import wrote 5,379 rows and the next pass deleted 5,362, leaving the
+		// seventeen that happened to fall inside the seven-day window. The dashboard then showed
+		// a one-week span and looked as though the import had found almost nothing.
+		//
+		// Age is simply the wrong question for them. A measured row ages out because the traffic
+		// behind it keeps coming and the recent rows are the ones that matter; an imported row is
+		// a one-off recovery of something nobody can re-fetch once it is gone. The BYTE rule
+		// below still applies to both, because disk pressure is real regardless of provenance.
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE ts < ? AND source = ''`, cutoff)
 		if err != nil {
 			return deleted, err
 		}

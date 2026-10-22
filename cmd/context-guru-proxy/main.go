@@ -61,6 +61,12 @@ func listenAndAnnounce(addr string, attrs ...any) (net.Listener, error) {
 }
 
 func main() {
+	// SUBCOMMANDS, before any flag is defined: the release ships this one binary, so a one-off job the
+	// installer runs has to live in it. Only an exact first argument dispatches; every flag form
+	// (`-listen`, `--version`) still reaches the proxy's own parsing below.
+	if len(os.Args) > 1 && os.Args[1] == "import-history" {
+		os.Exit(dash.RunImportHistory(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	var (
 		// --listen, not just LISTEN_ADDR. Two reasons beyond taste: an operator reading `ps`
 		// could not tell which port an instance held (the address reached it only through the

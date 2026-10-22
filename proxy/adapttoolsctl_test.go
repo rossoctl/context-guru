@@ -28,7 +28,7 @@ func TestAdaptToolsApplyWritesOnlyTheReportedNames(t *testing.T) {
 	e.Tools = 1
 	f.rec.Record(e)
 	f.rec.RecordInventory(id, "s1", time.Now().UnixMilli(), &dash.Inventory{Digest: "d1", UseFingerprint: 1,
-		Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}, false)
+		Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}, false, "")
 	var rep map[string]any
 	waitInventory(t, f.rec, 1)
 	_, rep = f.do(t, "GET", "/api/adapt/tools", "", jar)
@@ -92,7 +92,7 @@ func TestAdaptToolsApplyOnALocalProxy(t *testing.T) {
 	e.Tools = 1
 	h.rec.Record(e)
 	h.rec.RecordInventory("", "s1", time.Now().UnixMilli(), &dash.Inventory{Digest: "d1", UseFingerprint: 1,
-		Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}, false)
+		Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}, false, "")
 	var rep map[string]any
 	waitInventory(t, h.rec, 1)
 	json.Unmarshal(do("GET", "/api/adapt/tools", "", "127.0.0.1:1").Body.Bytes(), &rep)
@@ -161,7 +161,7 @@ func TestAdaptToolsApplyForAManagerWritesOnlyTheirOwn(t *testing.T) {
 		e.Tools = 1
 		f.rec.Record(e)
 		f.rec.RecordInventory(s.id, "s-"+s.server, time.Now().UnixMilli(), &dash.Inventory{Digest: "d", UseFingerprint: 1,
-			Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__" + s.server + "__q", Server: s.server, Tokens: 100}}}, false)
+			Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__" + s.server + "__q", Server: s.server, Tokens: 100}}}, false, "")
 	}
 	var rep map[string]any
 	waitInventory(t, f.rec, 2)

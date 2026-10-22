@@ -4428,6 +4428,12 @@ const loaders = {
   sessions: loadSessions,
   requests: loadRequests, config: loadConfig,
   keepalive: loadKeepAlive,
+  // Registered by insights.js, which mounts its own tab; named here because `loaders` is the
+  // single map the router consults and a view absent from it renders an empty section forever.
+  insights: () => (typeof loadInsights === 'function' ? loadInsights() : undefined),
+  // Registered by history.js, which mounts its own tab; named here for the same reason as
+  // insights above — `loaders` is the single map the router consults.
+  history: () => (typeof loadHistory === 'function' ? loadHistory() : undefined),
 };
 
 // ── nav: two levels, five groups ───────────────────────────────────────────
@@ -9578,4 +9584,3 @@ async function loadKARecommend() {
     'Nothing is applied for you. One ping is never suggested: it covers 9.7 minutes of idle time where two ' +
     'cover 14.3. One ping is not a loss, just a smaller win. Compare the rows above on your own gaps.'));
 }
-

@@ -427,13 +427,17 @@ class Report:
         if value is not None:
             self.facts[key] = value
 
-    def emit(self, as_json: bool) -> None:
-        doc = {
+    def document(self) -> dict:
+        """The assembled report: the one document both output modes render."""
+        return {
             "result": "ok",
             "facts": self.facts,
             "unavailable": self.unavailable,
             "findings": [f.as_facts() for f in _rank(self.findings)],
         }
+
+    def emit(self, as_json: bool) -> None:
+        doc = self.document()
         if as_json:
             print(json.dumps(doc, indent=2, sort_keys=True))
             return
@@ -696,7 +700,7 @@ def collect_env(f: Fetcher, rep: Report, stats: object) -> None:
 # capabilities: MCP servers, their tools, and skills you carry and never call
 # ---------------------------------------------------------------------------
 
-def collect_capabilities(f: Fetcher, rep: Report, window: Window) -> None:
+def collect_capabilities(f: Fetcher, rep: Report, window: Window, sessions: int = 0) -> None:
     """What you declare on every request, what you never invoke, and what dropping it is worth.
 
     The two figures here are different KINDS and are never added: `unused_usd` from /api/tools is
@@ -710,8 +714,17 @@ def collect_capabilities(f: Fetcher, rep: Report, window: Window) -> None:
     with its own counts — because "we have no rows for that session" is not evidence about what
     that session did not use, and letting it stand in for one is how absence of evidence becomes
     authorisation to break somebody's agent.
+
+    `sessions` windows the whole report to the N most recently ACTIVE sessions, and it exists for
+    the one case the all-history aggregate genuinely cannot answer: three months of traffic in one
+    folder with a plugin installed three weeks ago reports that plugin's skills as nearly free,
+    because it is dividing their weight over ninety sessions that never declared them.
+    `breakdown=session` rides along with it unconditionally rather than being a flag of its own —
+    the per-session rows ARE the point of narrowing the window, and a window with no per-session
+    detail is just a smaller aggregate rather than an answer about which sessions paid.
     """
-    tools = f.get("/api/tools", heavy=True)
+    tools = f.get("/api/tools", heavy=True,
+                  params={"sessions": sessions, "breakdown": "session"} if sessions else None)
     if tools is None:
         rep.unavailable.append("capabilities")
         return
@@ -733,6 +746,31 @@ def collect_capabilities(f: Fetcher, rep: Report, window: Window) -> None:
     # and the median to 1; the sessions where the money goes run to dozens of turns.
     rep.fact("requests_per_session_typical",
              round(_num(totals.get("requests_per_session_typical")), 1))
+
+    # What the user ASKED for and what the account actually HAS, kept as two facts because on a
+    # fresh install they differ and only one of them is a sample. `--sessions 5` against a machine
+    # with one session is a report resting on one session, and labelling it with the 5 would claim
+    # evidence that does not exist.
+    if sessions:
+        rep.fact("window_session_limit", sessions)
+    rep.fact("window_sessions_analyzed", captured)
+
+    # The decision surface, read HERE rather than after the findings below, because the per-item
+    # verdict needs it: the suggestion list IS the observation floor applied — the server offers an
+    # item only once it has seen it declared across `min_sessions` sessions spanning `min_days` —
+    # and the inventory row carries a session count but no span, so this is the only place the
+    # floor can be answered from rather than guessed at. One GET either way; the ordering of the
+    # facts in the output is unchanged because Report keys insertion-order and the inventory's keys
+    # all start with `item.`/`owner.`.
+    doc = f.get("/api/toolfilter", heavy=True)
+    if doc is not None:
+        rep.fact("toolfilter_enabled", bool(_get_in(doc, "enabled")))
+        rep.fact("toolfilter_reason", _get_in(doc, "reason") or "")
+        rep.fact("suggest_min_sessions", int(_num(_get_in(doc, "min_sessions"))))
+        rep.fact("suggest_min_days", round(_num(_get_in(doc, "min_days")), 1))
+        rep.fact("suggest_withheld", int(_num(_get_in(doc, "withheld"))))
+
+    _emit_inventory(rep, tools, _qualified_keys(doc), captured)
 
     if captured == 0:
         rep.unavailable.append("capabilities:no-captured-inventory")
@@ -877,18 +915,11 @@ def collect_capabilities(f: Fetcher, rep: Report, window: Window) -> None:
             "measured over the window",
             usd_window=credited, usd_month=window.monthly(credited)))
 
-    # The decision surface: what is currently excluded, what excluding it has really saved, and
-    # what is safe to offer next.
-    doc = f.get("/api/toolfilter", heavy=True)
+    # The rest of the decision surface: what excluding something has really saved, and what is
+    # safe to offer next. `doc` was read above, where the verdict needed the floor.
     if doc is None:
         rep.unavailable.append("capability-suggestions")
         return
-
-    rep.fact("toolfilter_enabled", bool(_get_in(doc, "enabled")))
-    rep.fact("toolfilter_reason", _get_in(doc, "reason") or "")
-    rep.fact("suggest_min_sessions", int(_num(_get_in(doc, "min_sessions"))))
-    rep.fact("suggest_min_days", round(_num(_get_in(doc, "min_days")), 1))
-    rep.fact("suggest_withheld", int(_num(_get_in(doc, "withheld"))))
 
     realized = _get_in(doc, "realized")
     if isinstance(realized, dict) and _num(realized.get("usd")) > 0:
@@ -984,6 +1015,607 @@ def collect_capabilities(f: Fetcher, rep: Report, window: Window) -> None:
 def _label(kind: str) -> str:
     return {"mcp_tool": "MCP tool", "mcp_server": "MCP server", "skill": "Skill",
             "tool": "Tool", "server_tool": "Provider tool"}.get(kind, kind or "Capability")
+
+
+# The scope at which a capability can actually be removed, derived from the inventory row's own
+# `removal.kind`. This is NOT cosmetic grouping: the three values are three different commands with
+# three different blast radii, and picking the wrong one produces a fix that silently does nothing.
+#
+#   item   — removable on its own (a standalone skill, a client tool, one MCP tool denied by name)
+#   server — the MCP server is the unit; denying one tool leaves the rest declared
+#   plugin — the PLUGIN is the unit. `skillOverrides` has no effect on a plugin's skills, so a
+#            per-skill instruction here is a setting that changes nothing. This is the case that
+#            makes the field load-bearing rather than descriptive.
+#   none   — not offered at any scope. Claude Code's own built-ins: the weight is real, and
+#            removing one takes away a capability the model is expected to have.
+_REMOVAL_SCOPE = {
+    "plugin_skill": "plugin",
+    "mcp_server": "server",
+    "mcp_tool": "server",
+    "skill": "item",
+    "client_tool": "item",
+    "builtin": "none",
+}
+
+
+def _front_matter_description(path: str) -> str:
+    """The `description:` from a SKILL.md's YAML front matter, flattened to one line.
+
+    Deliberately NOT a YAML parser: PyYAML is not in the standard library and this file's whole
+    transport story is "only what python ships with". What it needs is one scalar from the top of a
+    small file, and the shapes that actually occur are a plain value, a quoted value, and a folded
+    block (`>` or `|`) whose continuation lines are indented — so those are the three it reads, and
+    anything it cannot read it reports as absent rather than guessing.
+
+    Flattening is not cosmetic. A description is prose somebody else wrote: it contains newlines,
+    and the output format here is one fact per line, so an unflattened description would split the
+    stream and every key after it would be parsed as prose.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            # The front matter is at the top and small; reading the whole of a large SKILL.md to
+            # find it would make this scale with the body rather than the header.
+            head = fh.read(8192)
+    except OSError:
+        return ""
+    if not head.startswith("---"):
+        return ""
+    end = head.find("\n---", 3)
+    block = head[3:end] if end != -1 else head[3:]
+
+    lines = block.split("\n")
+    for i, line in enumerate(lines):
+        if not line.startswith("description:"):
+            continue
+        value = line[len("description:"):].strip()
+        # A folded or literal block: the value is the indented lines that follow.
+        if value in (">", "|", ">-", "|-", ">+", "|+"):
+            parts = []
+            for nxt in lines[i + 1:]:
+                if nxt.strip() and not nxt.startswith((" ", "\t")):
+                    break
+                parts.append(nxt.strip())
+            value = " ".join(p for p in parts if p)
+        else:
+            # A plain scalar may still continue onto indented lines.
+            parts = [value]
+            for nxt in lines[i + 1:]:
+                if not nxt.strip() or not nxt.startswith((" ", "\t")):
+                    break
+                parts.append(nxt.strip())
+            value = " ".join(p for p in parts if p)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+        return " ".join(value.split())
+    return ""
+
+
+# How much description a reader will actually scan in a row beside three numbers. Not a hard
+# truncation point — _summarize cuts at a sentence boundary and only falls back to a hard cut when
+# one sentence is longer than this on its own.
+DESC_SUMMARY_CHARS = 200
+
+
+def _summarize(desc: str) -> str:
+    """The leading sentence(s) of a description, up to roughly DESC_SUMMARY_CHARS.
+
+    A skill's `description` is a TRIGGER written for a model — "use this when the user says X,
+    skip it when Y" — and its informative part is almost always the first sentence. Measured on one
+    real machine: median 278 characters, longest 1,099, with the tail being trigger phrases. In a
+    table beside tokens and dollars that tail crowds out the numbers, so this keeps the front.
+
+    Cuts on sentence boundaries so the result reads as a sentence rather than a clipped fragment,
+    and drops the model-facing trigger tail wherever a description marks it explicitly.
+    """
+    text = " ".join(desc.split())
+    if not text:
+        return ""
+    # An explicit trigger section is addressed to the model, never to the reader of a cost report.
+    for marker in ("Triggers on:", "TRIGGER —", "TRIGGER-", "Trigger:", "Use when", "Use this when"):
+        cut = text.find(marker)
+        if cut > 40:
+            text = text[:cut].strip()
+            break
+    if len(text) <= DESC_SUMMARY_CHARS:
+        return text
+    out = ""
+    for piece in re.split(r"(?<=[.!?])\s+", text):
+        if out and len(out) + 1 + len(piece) > DESC_SUMMARY_CHARS:
+            break
+        out = f"{out} {piece}".strip() if out else piece
+    # A single sentence can be longer than the whole budget — three skills on one real machine run
+    # to between 326 and 424 characters without an internal full stop — so the sentence-boundary
+    # result is still cut to the budget. Cutting at a word keeps it from ending mid-token, and the
+    # ellipsis is load-bearing: an invisible truncation reads as the author's own full stop.
+    if len(out) > DESC_SUMMARY_CHARS:
+        out = out[:DESC_SUMMARY_CHARS].rsplit(" ", 1)[0] + "…"
+    return out
+
+
+def _skill_descriptions() -> dict[str, str]:
+    """Every skill description readable on this machine, keyed as the inventory names it.
+
+    Two layouts, because a skill reaches the prompt through either: a plugin's own directory
+    (`plugins/cache/<marketplace>/<plugin>/<version>/skills/<name>`, keyed `<plugin>:<name>` to
+    match the inventory) and a marketplace's standalone skills (`plugins/marketplaces/<m>/skills/
+    <name>`, keyed `<name>`).
+
+    WHAT IS NOT HERE, and must stay absent rather than be filled in: the skills built into Claude
+    Code have no SKILL.md on disk at all. There is nothing to read, so there is no description, and
+    the inventory says `desc_unknown` for them. Inventing a plausible sentence would produce a line
+    indistinguishable from one this function read out of a file, which is the one thing this whole
+    report is built not to do.
+
+    A newer version of the same plugin wins, because that is the one Claude Code loads.
+    """
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    out: dict[str, str] = {}
+
+    cache = os.path.join(base, "plugins", "cache")
+    for marketplace in _listdir(cache):
+        for plugin in _listdir(os.path.join(cache, marketplace)):
+            for version in sorted(_listdir(os.path.join(cache, marketplace, plugin))):
+                skills = os.path.join(cache, marketplace, plugin, version, "skills")
+                for name in _listdir(skills):
+                    desc = _front_matter_description(os.path.join(skills, name, "SKILL.md"))
+                    if desc:
+                        out[f"{plugin}:{name}"] = desc
+
+    markets = os.path.join(base, "plugins", "marketplaces")
+    for marketplace in _listdir(markets):
+        skills = os.path.join(markets, marketplace, "skills")
+        for name in _listdir(skills):
+            desc = _front_matter_description(os.path.join(skills, name, "SKILL.md"))
+            if desc and name not in out:
+                out[name] = desc
+
+    return out
+
+
+def _listdir(path: str) -> list[str]:
+    """Directory entries, or nothing. A missing plugin cache is the normal state of a machine with
+    no plugins installed, not an error worth failing a cost report over."""
+    try:
+        return [e for e in os.listdir(path) if not e.startswith(".")]
+    except OSError:
+        return []
+
+
+# This plugin's own name, as it appears in a skill's `<plugin>:<name>` identifier and in the
+# `claude plugin disable <plugin>` command. Here rather than inlined because it is the one string
+# whose job is to keep the reporter out of its own report.
+SELF_PLUGIN = "context-guru"
+
+
+def _partition_self(rows: list[tuple[dict, bool]]) -> tuple[list[tuple[dict, bool]], dict]:
+    """Split this plugin's own never-invoked rows out of the inventory, and total them separately.
+
+    Matched on the `<plugin>:` prefix of a skill's name, which is how the inventory identifies a
+    plugin's skills, and not on a substring of the name: a user's own skill called
+    `context-guru-notes` is theirs and belongs in the report.
+    """
+    kept: list[tuple[dict, bool]] = []
+    agg = {"items": 0, "tokens": 0, "usd": 0.0, "command": ""}
+    for row, aside in rows:
+        name = str(row.get("name") or "")
+        if not name.startswith(SELF_PLUGIN + ":"):
+            kept.append((row, aside))
+            continue
+        # Only the unused ones are excluded-and-counted; an invoked skill of ours was never in the
+        # inventory to begin with, and reporting it as excluded would overstate the omission.
+        if _num(row.get("calls")) or _num(row.get("sessions_used")):
+            continue
+        agg["items"] += 1
+        agg["tokens"] += int(_num(row.get("tokens")))
+        if row.get("priced"):
+            agg["usd"] += _num(row.get("unused_usd"))
+        removal = row.get("removal") if isinstance(row.get("removal"), dict) else {}
+        if not agg["command"] and removal.get("command"):
+            agg["command"] = str(removal["command"])
+    return kept, agg
+
+
+def _qualified_keys(doc: object) -> set[tuple[str, str]]:
+    """The (kind, name) of every item the server has seen enough of to offer a removal for.
+
+    THE FLOOR, ANSWERED RATHER THAN REIMPLEMENTED. The rule is "declared across at least
+    `min_sessions` captured sessions spanning at least `min_days` days, invoked in none of them",
+    and the second clause needs a SPAN. An inventory row carries `sessions_declared` and no dates
+    at all, so a floor check written from the row can only test the session count — which passes
+    for five sessions in one afternoon, the exact case the day floor exists to reject, and the
+    report would read as though it had a week of evidence.
+    /api/toolfilter already applies both clauses and its suggestion list is the result, so that
+    list IS the answer. Keyed on (kind, name) and not on name alone because the two namespaces
+    overlap: `giveinfo:blah-one` the plugin skill and a tool of the same string are different rows.
+
+    An absent or unreadable document yields an EMPTY set, which demotes every verdict to
+    `consider`. That is the safe direction and it is deliberate: with no floor to check against,
+    the report must not recommend a removal, and failing the other way would hand out
+    auto-selectable `remove` verdicts precisely when the evidence for them could not be read.
+    """
+    return {(str(s.get("kind") or ""), str(s.get("name") or ""))
+            for s in (_get_in(doc, "suggestions") or []) if isinstance(s, dict)}
+
+
+# The longest `why` this will emit. It is rendered in a table cell beside three numbers and read
+# aloud by a model summarising the report, so a paragraph here buries the figures it exists to
+# support. Enforced by truncation rather than by hope, because the session counts and call counts
+# interpolated into it come from the server and nothing here bounds them.
+WHY_MAX_CHARS = 159
+
+
+# How long a capability must go unused, while still being carried, before this report calls it
+# abandoned. Mirrors dash.StaleAfter and is pinned against it by
+# TestEveryVerdictGoEmitsIsOneThePluginAlsoKnows and the equivalence test.
+#
+# Fourteen days, and it is a judgement rather than a measurement. Shorter catches a fortnight's
+# holiday or a spell on one part of a codebase, neither of which means a tool is finished with;
+# much longer and a project that changed phase a month ago still shows its old tooling as current.
+STALE_AFTER_DAYS = 14.0
+
+
+def _verdict(row: dict, aside: bool, scope: str, qualified: bool) -> tuple[str, str]:
+    """What this report is entitled to say about one item, and the evidence it rests on.
+
+    Four verdicts, and each boundary between them is a specific way the report could otherwise
+    overstate what it measured:
+
+      * `keep` for a built-in, because the question is closed — the weight is real and removing one
+        takes away a capability the model is expected to have, so no amount of further observation
+        turns it into an offer.
+      * `keep` for something invoked, which is the OPPOSITE claim and therefore a different
+        sentence: this one earned its place. Collapsing the two into one wording loses the only
+        part a reader can act on, since one says "you may not" and the other says "you would not
+        want to".
+      * `remove` only past the floor. Five sessions in one afternoon are five sessions on one task.
+      * `consider` otherwise: unused, removable, and observed too thinly to act on. The item is
+        still listed, because the floor gates the ADVICE and never the disclosure.
+
+    `why` states the EVIDENCE and not the verdict. "Remove this" is what the verdict field already
+    says; what a reader cannot get anywhere else is the n behind it, which is the only thing that
+    makes the verdict checkable.
+    """
+    calls = int(_num(row.get("calls")))
+    used = int(_num(row.get("sessions_used")))
+    declared = int(_num(row.get("sessions_declared")))
+
+    # STALE sits between "invoked" and "never invoked", and it is the state this report could not
+    # express. A user working three months in one project — planning, then development, now
+    # research — has planning skills used heavily in month one and dead since. `calls > 0` filed
+    # those under `keep`, next to a tool invoked a minute ago, so they were never mentioned.
+    #
+    # NOT solved with a session window, because a session is not a unit of time: measured on one
+    # real store, spans were 0.0h, 1.1h and 99.1h, with a single session covering four days. The
+    # gap between last-used and last-carried is a property of the ITEM, so it holds however
+    # anybody structures their work — and it names a date, which a reader can check.
+    stale_days = _stale_days(row)
+    if stale_days is not None and not aside and scope != "none":
+        when = _ts_date(_num(row.get("last_used_ts")))
+        return "stale", (f"last used {when} — {stale_days:.0f} days carried on every request "
+                         f"since, invoked in none of them")
+    if calls or used:
+        # Invoked. The call count is the evidence and it is quoted first, because "37 calls" settles
+        # the question in a way "used in 4 sessions" does not — a capability invoked once in one
+        # session is a weaker keep than one invoked constantly, and the reader can see which.
+        detail = f"{calls} call(s) in {used} session(s)" if calls else f"invoked in {used} session(s)"
+        return "keep", f"invoked: {detail}, so it earned the weight it carries"
+    if aside or scope == "none":
+        return "keep", ("built-in to Claude Code: never invoked here, but removing it takes away a "
+                        "capability the agent is expected to have")
+    if qualified:
+        return "remove", (f"never invoked, and declared across {declared} session(s) spanning "
+                          f"enough days to qualify under this proxy's own observation floor")
+    return "consider", (f"never invoked, but only {declared} session(s) of evidence — below the "
+                        f"floor, and sessions on one task say nothing about the next one")
+
+
+def _stale_days(row: dict) -> float | None:
+    """Days this capability has been carried since it was last used, or None if that is not a
+    question about it.
+
+    Both timestamps are required: without `last_used_ts` the item was never invoked, which is a
+    different verdict, and without `last_carried_ts` there is nothing to measure the gap against.
+
+    The gap runs from the last USE to the last time it was CARRIED, never to now — a report read a
+    week after the traffic stopped would otherwise accuse every capability of going stale during
+    the gap in which nothing happened at all.
+    """
+    used = _num(row.get("last_used_ts"))
+    carried = _num(row.get("last_carried_ts"))
+    if used <= 0 or carried <= 0:
+        return None
+    days = (carried - used) / 86_400_000.0
+    return days if days >= STALE_AFTER_DAYS else None
+
+
+def _ts_date(ms: float) -> str:
+    """An epoch-ms timestamp as a date a reader recognises. Local time, because the reader is at
+    this machine and comparing it against their own memory of what they were doing."""
+    import datetime
+    return datetime.datetime.fromtimestamp(ms / 1000.0).strftime("%-d %b %Y")
+
+
+def _emit_inventory(rep: Report, tools: object, qualified: set[tuple[str, str]],
+                    captured: int) -> None:
+    """Name every never-invoked capability, with its weight, its cost and its removal scope.
+
+    WHY THIS EXISTS SEPARATELY FROM THE SUGGESTIONS. /api/toolfilter withholds a removal until an
+    item has been seen unused across enough sessions and days to be sure, and that rule is right:
+    five sessions in one afternoon are five sessions on one task. But it is a rule about ADVICE,
+    and it was being applied to DISCLOSURE — below the floor the report said `suggestions=0` and
+    named nothing, so a user asking "what am I carrying and never using" got a count and no list.
+    Refusing to recommend is honest. Refusing to say what is there is just unhelpful, and the
+    inventory rows the answer needs were already fetched and then dropped.
+
+    So this emits what is MEASURED (declared, never invoked, this much weight, this much spent) and
+    leaves what is ADVISED to the suggestion path above. An item here is not a recommendation to
+    remove it; `item.<name>.scope` says what removing it would even mean, and `none` means the
+    question is closed. `item.<name>.verdict` is what the report is entitled to SAY about it, and
+    the one value a caller may act on without further checks is `remove`.
+
+    AN INVOKED ITEM GETS A VERDICT AND NOTHING ELSE. The cost columns here all mean "spent carrying
+    this for nothing", and that figure does not exist for something that was used — so an invoked
+    row carries `verdict=keep` and its `why`, and no weight, cost or removal command. The verdict
+    is emitted for it anyway because a reader looking up a capability by name is entitled to an
+    answer rather than silence, and silence here would be indistinguishable from "not declared".
+
+    Rows are indexed by name rather than by position, because a reader greps for the item they are
+    asking about and a positional index would renumber under them on the next run.
+    """
+    rows: list[tuple[dict, bool]] = []
+    for row in (_get_in(tools, "tools") or []) + (_get_in(tools, "skills", "skills") or []):
+        if isinstance(row, dict):
+            rows.append((row, False))
+    # `aside` is Claude Code's own tools, held apart by the server. They are NOT listed here: this
+    # section answers "which skills, MCP servers and MCP tools am I paying for", and a built-in is
+    # none of those, cannot be removed, and would only bury the choices. The dashboard keeps them
+    # in its own Built-ins tab, where the weight is shown with no action attached.
+    #
+    # The same rule drops a built-in that arrives among `tools` (removal.danger), invoked or not.
+    rows = [(r, a) for (r, a) in rows
+            if not (isinstance(r.get("removal"), dict) and r["removal"].get("danger"))]
+
+    descriptions = _skill_descriptions()
+
+    # OUR OWN WEIGHT IS NOT A SAVING WE RECOMMEND. Every skill this plugin ships is declared on
+    # every request like any other, and on most machines none of them is ever invoked — so left in,
+    # context-guru is one of the larger rows in its own report, and the total it tells the reader to
+    # act on is inflated by the cost of producing the report. Excluded from the inventory, from
+    # every owner rollup and from the removable total; NAMED, counted and priced in facts of its
+    # own, because a reader who sees 44 skills in /plugin and 42 here must be able to audit the
+    # difference rather than discover it. Hiding the cost would be worse than the cost.
+    rows, excluded = _partition_self(rows)
+    if excluded["items"]:
+        rep.fact("self_excluded_plugin", SELF_PLUGIN)
+        rep.fact("self_excluded_items", excluded["items"])
+        rep.fact("self_excluded_tokens", excluded["tokens"])
+        if excluded["usd"]:
+            rep.fact("self_excluded_usd", round(excluded["usd"], 4))
+        if excluded["command"]:
+            rep.fact("self_excluded_command", excluded["command"])
+
+    listed = 0
+    unused_tokens = 0
+    unused_usd = 0.0
+    removable_window_usd = 0.0
+    per_session: dict[str, dict] = {}
+    for row, aside in rows:
+        name = str(row.get("name") or "")
+        if not name:
+            continue
+        removal = row.get("removal") if isinstance(row.get("removal"), dict) else {}
+        scope = "none" if (aside or removal.get("danger")) else \
+            _REMOVAL_SCOPE.get(str(removal.get("kind") or ""), "item")
+        verdict, why = _verdict(row, aside, scope,
+                                (str(row.get("kind") or ""), name) in qualified)
+        pre = f"item.{name}"
+        rep.fact(f"{pre}.verdict", verdict)
+        rep.fact(f"{pre}.why", why[:WHY_MAX_CHARS])
+
+        # Unused means both counters are zero. Either one above zero is a capability that earned
+        # its place, and an inventory of waste that included it would be wrong about the one thing
+        # it claims to measure — so an invoked item stops here, with the verdict above and none of
+        # the cost columns, every one of which means "spent carrying this for nothing".
+        if _num(row.get("calls")) or _num(row.get("sessions_used")):
+            continue
+
+        rep.fact(f"{pre}.kind", str(row.get("kind") or ""))
+        rep.fact(f"{pre}.tokens", int(_num(row.get("tokens"))))
+        rep.fact(f"{pre}.reads", int(_num(row.get("unused_reads"))))
+        # Priced and unpriced are different claims and are kept apart: an item whose models have no
+        # known rate carries tokens and no dollar figure, rather than a zero that reads as free.
+        if row.get("priced"):
+            rep.fact(f"{pre}.usd", round(_num(row.get("unused_usd")), 4))
+        else:
+            rep.fact(f"{pre}.unpriced", True)
+        rep.fact(f"{pre}.scope", scope)
+        # What the user loses by removing it. A skill's own SKILL.md is the source; a tool has no
+        # equivalent file here, and the inventory does not invent one. `desc_unknown` states the
+        # gap, because a missing description read as "this does nothing" is the misreading that
+        # turns a cost report into bad advice.
+        if str(row.get("kind")) == "skill":
+            desc = descriptions.get(name, "")
+            if desc:
+                summary = _summarize(desc)
+                rep.fact(f"{pre}.desc", summary)
+                # The whole text, kept because the summary is for scanning and this is for
+                # deciding. A reader about to delete something is entitled to all of it, and a
+                # report that truncated with no way back would be the only copy and a lossy one.
+                if summary != desc:
+                    rep.fact(f"{pre}.desc_full", desc)
+            else:
+                rep.fact(f"{pre}.desc_unknown", True)
+        if row.get("server"):
+            rep.fact(f"{pre}.server", str(row.get("server")))
+        if scope == "plugin" and ":" in name:
+            rep.fact(f"{pre}.plugin", name.split(":", 1)[0])
+        if removal.get("command"):
+            rep.fact(f"{pre}.command", str(removal["command"]))
+
+        # WHICH SESSIONS PAID FOR IT. Present only when the window was narrowed, because that is
+        # the only time the server sends it. "This skill cost you $0.20" is a figure nobody can
+        # check; "in these two sessions it cost $0.16 and $0.04, and you never called it" is one a
+        # reader can audit against their own memory of what they were doing that day.
+        #
+        # `requests` is the multiplier and is carried rather than inferred: a 1,200-token tool in
+        # an 80-request session cost 96,000 billed tokens and the same tool in a 2-request session
+        # cost 2,400, and the per-request weight alone hides the whole of that difference.
+        for srow in (row.get("sessions") or []):
+            if not isinstance(srow, dict):
+                continue
+            sid = str(srow.get("session") or "")
+            if not sid:
+                continue
+            rep.fact(f"{pre}.session.{sid}.requests", int(_num(srow.get("requests"))))
+            rep.fact(f"{pre}.session.{sid}.reads", int(_num(srow.get("unused_reads"))))
+            if srow.get("priced"):
+                rep.fact(f"{pre}.session.{sid}.usd", round(_num(srow.get("unused_usd")), 4))
+            bucket = per_session.setdefault(sid, {"requests": 0, "reads": 0, "usd": 0.0,
+                                                  "items": 0, "model": "", "priced": True})
+            # The session's own request count, which is one number per session and NOT a sum over
+            # the items reporting it: every declaration that session carried was re-read by the
+            # same requests, so adding them would multiply the session's length by its inventory.
+            bucket["requests"] = int(_num(srow.get("requests")))
+            bucket["reads"] += int(_num(srow.get("unused_reads")))
+            bucket["items"] += 1
+            if srow.get("priced"):
+                bucket["usd"] += _num(srow.get("unused_usd"))
+            else:
+                bucket["priced"] = False
+            if not bucket["model"] and srow.get("model"):
+                bucket["model"] = str(srow.get("model"))
+
+        listed += 1
+        if scope != "none":
+            unused_tokens += int(_num(row.get("tokens")))
+            if row.get("priced"):
+                unused_usd += _num(row.get("unused_usd"))
+                removable_window_usd += _num(row.get("unused_usd"))
+
+    # Per session, across every never-invoked item it carried. The built-in's weight IS in here,
+    # because this figure answers "what did that session spend carrying things it never touched"
+    # and a session's bill does not shrink because one of its declarations was unremovable. The
+    # REMOVABLE subset is `savings_window_usd` below, which is a different question and is why the
+    # two are separate facts rather than one reused in both places.
+    for sid in sorted(per_session):
+        b = per_session[sid]
+        pre = f"session.{sid}"
+        rep.fact(f"{pre}.requests", b["requests"])
+        rep.fact(f"{pre}.unused_reads", b["reads"])
+        rep.fact(f"{pre}.unused_usd", round(b["usd"], 4))
+        rep.fact(f"{pre}.items", b["items"])
+        if b["model"]:
+            rep.fact(f"{pre}.model", b["model"])
+        rep.fact(f"{pre}.priced", b["priced"])
+
+    _emit_owners(rep, rows)
+
+    rep.fact("inventory_items", listed)
+    # The removable subtotal, which is deliberately NOT the headline `decl_unused_usd`: that figure
+    # excludes built-ins entirely, while this one excludes them from the OFFER and still counts
+    # them in the listing above. Two different questions, two different numbers, named apart.
+    rep.fact("inventory_removable_tokens", unused_tokens)
+    rep.fact("inventory_removable_usd", round(unused_usd, 4))
+    rep.fact("inventory_removable_basis", "measured over the window")
+
+    # THE PROJECT SUMMARY, and the word in it that does the work is `measured`. This is what the
+    # removable set ALREADY COST over the window, not a forecast of what dropping it will save —
+    # and the two differ, because the window's traffic is the only traffic anyone measured. The
+    # basis says so in the one place a reader or a narrating model will look.
+    #
+    # The per-session average divides by the sessions ANALYZED and not by the N requested: asking
+    # for the last five sessions on a machine that has one must not divide a real figure by five
+    # and report a fifth of it as what a session costs.
+    rep.fact("savings_window_usd", round(removable_window_usd, 4))
+    if captured > 0:
+        rep.fact("savings_per_session_avg_usd", round(removable_window_usd / captured, 4))
+    rep.fact("savings_basis", "measured over the window")
+
+
+def _emit_owners(rep: Report, rows: list[tuple[dict, bool]]) -> None:
+    """Roll each never-invoked item up to the thing that would remove it.
+
+    WHY OWNERS AND NOT JUST ITEMS. The unit of removal is not the item: a plugin's skills go
+    together because `skillOverrides` does not touch them, and an MCP server's tools go together
+    because there is no per-tool uninstall. So "what does this plugin cost me" is the question that
+    decides anything, and leaving the reader to add rows themselves is both work and a trap — this
+    report has two figures that must never be summed, and a reader in the habit of adding columns
+    will eventually add those.
+
+    AN OWNER IS NOT A NAME. `mcp__giveinfo__info` and `giveinfo:blah-one` can both exist with no
+    relationship at all: the first belongs to an MCP server, the second to a plugin, and the shared
+    word is a coincidence of naming. They are therefore keyed in separate namespaces
+    (`owner.server.*` and `owner.plugin.*`) rather than merged on the string.
+
+    WHAT IS NOT SUMMED HERE. These subtotals re-count tokens already counted per item, one level
+    up. They are a view, not an addend: `inventory_removable_usd` is computed over ITEMS, each
+    counted once, and nothing in this function contributes to it.
+    """
+    plugins: dict[str, dict] = {}
+    servers: dict[str, dict] = {}
+
+    for row, aside in rows:
+        name = str(row.get("name") or "")
+        if not name or aside:
+            continue
+        if _num(row.get("calls")) or _num(row.get("sessions_used")):
+            continue
+        removal = row.get("removal") if isinstance(row.get("removal"), dict) else {}
+        if removal.get("danger"):
+            continue
+        kind = str(row.get("kind") or "")
+        tokens = int(_num(row.get("tokens")))
+        usd = _num(row.get("unused_usd")) if row.get("priced") else 0.0
+
+        # A plugin owns an item only where the item itself says so — a `plugin_skill` removal.
+        # Deriving ownership from a colon in the name alone would invent a plugin for any skill
+        # that happened to contain one, and hand the reader a disable command for something that
+        # does not exist.
+        if str(removal.get("kind")) == "plugin_skill" and ":" in name:
+            bucket = plugins.setdefault(name.split(":", 1)[0],
+                                        {"skills": 0, "mcp": 0, "tokens": 0, "usd": 0.0,
+                                         "unpriced": 0, "command": ""})
+            bucket["skills" if kind == "skill" else "mcp"] += 1
+        elif row.get("server"):
+            bucket = servers.setdefault(str(row.get("server")),
+                                        {"tools": 0, "tokens": 0, "usd": 0.0,
+                                         "unpriced": 0, "command": ""})
+            bucket["tools"] += 1
+        else:
+            # Owned by nothing: a standalone skill or a client tool, removable on its own. It has
+            # no owner row, because an owner row implies a command that removes the group.
+            continue
+
+        bucket["tokens"] += tokens
+        bucket["usd"] += usd
+        if not row.get("priced"):
+            bucket["unpriced"] += 1
+        if not bucket["command"] and removal.get("command"):
+            bucket["command"] = str(removal["command"])
+
+    for kind, group in (("plugin", plugins), ("server", servers)):
+        for owner in sorted(group):
+            b = group[owner]
+            pre = f"owner.{kind}.{owner}"
+            if kind == "plugin":
+                rep.fact(f"{pre}.skills", b["skills"])
+                rep.fact(f"{pre}.mcp_tools", b["mcp"])
+                rep.fact(f"{pre}.items", b["skills"] + b["mcp"])
+            else:
+                rep.fact(f"{pre}.tools", b["tools"])
+                rep.fact(f"{pre}.items", b["tools"])
+            rep.fact(f"{pre}.tokens", b["tokens"])
+            rep.fact(f"{pre}.usd", round(b["usd"], 4))
+            # An owner holding an unpriced child has a subtotal that is short by an unknown
+            # amount. Saying how many rather than quietly reporting the partial sum, because a
+            # subtotal presented as complete is the kind of number this report refuses to print.
+            if b["unpriced"]:
+                rep.fact(f"{pre}.unpriced_items", b["unpriced"])
+            if b["command"]:
+                rep.fact(f"{pre}.command", b["command"])
+
+    rep.fact("owner_plugins", len(plugins))
+    rep.fact("owner_servers", len(servers))
 
 
 # ---------------------------------------------------------------------------
@@ -1387,7 +2019,17 @@ def main() -> int:
                         help="which insight to collect; `all` is every one plus the environment")
     parser.add_argument("--json", action="store_true",
                         help="print the assembled document instead of key=value lines")
+    # Windowing, and the reason it is a flag rather than the default: the all-history aggregate is
+    # the right answer for "what does my setup cost" and the wrong one for "what is this plugin I
+    # installed last week costing me", because it divides that plugin's weight over every session
+    # that predates it. A user who needs the second asks for it; a user who does not keeps the
+    # larger, steadier sample.
+    parser.add_argument("--sessions", type=int, metavar="N", default=0,
+                        help="window the capability report to the N most recently active sessions, "
+                             "with the per-session breakdown of what each one paid")
     args = parser.parse_args()
+    if args.sessions < 0:
+        parser.error("--sessions must be positive; a negative window selects nothing")
 
     port, _ = _resolve_port()
     # Fetcher is built even with no port, so collect_env stays one code path; nothing is requested
@@ -1403,6 +2045,10 @@ def main() -> int:
     stats = f.get("/api/stats", heavy=True) if port else None
     collect_env(f, rep, stats)
     if stats is None:
+        # Nothing was measured, so there is nothing to render. A page of blanks and zeroes reads as
+        # a clean bill of health, which is the single misreading this whole surface is built to
+        # prevent — so the refusal and its reason ARE the output, and the gating finding above
+        # already carries the command that fixes it.
         rep.emit(args.json)
         return 0
 
@@ -1419,7 +2065,7 @@ def main() -> int:
     # state any long-lived install reaches.
     if window.requests > 0:
         if args.area in ("all", "capabilities"):
-            collect_capabilities(f, rep, window)
+            collect_capabilities(f, rep, window, args.sessions)
         if args.area in ("all", "idle"):
             collect_idle(f, rep, window, strategy)
         if args.area in ("all", "components"):
@@ -1432,6 +2078,7 @@ def main() -> int:
 
     if not rep.findings:
         rep.fact("verdict", "nothing to fix in what could be measured")
+
     rep.emit(args.json)
     return 0
 

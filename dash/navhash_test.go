@@ -29,9 +29,29 @@ func TestNavHashCompatibility(t *testing.T) {
 		t.Fatalf("node --test navhash.test.mjs failed: %v\n%s", err, out)
 	}
 	// A pass with zero tests run is not a pass.
-	if !strings.Contains(string(out), "# fail 0") || strings.Contains(string(out), "# pass 0") {
-		t.Fatalf("unexpected node --test summary:\n%s", out)
+	//
+	// The summary line's PREFIX is not part of node's contract and changed under us: through
+	// node 22 it was "# fail 0", and from node 23 the default spec reporter writes "ℹ fail 0".
+	// Matching the prefix meant this test failed on a green run — all ten subtests passing, the
+	// wrapper reporting failure — which is the worst shape a test can have, because the reflex is
+	// to doubt the code it covers. So the counts are read with the prefix stripped.
+	summary := string(out)
+	for _, prefix := range []string{"# ", "ℹ "} {
+		summary = strings.ReplaceAll(summary, prefix, "")
 	}
+	if !strings.Contains(summary, "fail 0") || strings.Contains(summary, "pass 0") {
+		t.Fatalf("unexpected node --test summary (node %s):\n%s", nodeVersion(), out)
+	}
+}
+
+// nodeVersion reports the interpreter that produced a summary this test could not read, because
+// the next person hitting a reporter change needs to know which version to compare against.
+func nodeVersion() string {
+	out, err := exec.Command("node", "--version").Output()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // What the JS table covers, asserted statically so it holds in a run with no node: the

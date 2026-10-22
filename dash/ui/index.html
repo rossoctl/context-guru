@@ -1042,6 +1042,17 @@
 <!-- The Inventory view mounts itself: its tab, its section, its stylesheet and its loader
      registration all live in tools.js, so this feature is one line in the shared page. -->
 <script defer src="tools.js"></script>
+<!-- The cleanup view: the inventory shaped into removal advice, with its own stylesheet and tab
+     registration inside insights.js, so this feature is one line here too. -->
+<!-- Apache ECharts, vendored and embedded: the Cleanup view's activity chart is a heatmap with a
+     drag-to-select range control, and two hand-built attempts failed the same way — the gesture
+     worked and the affordance did not. ECharts ships both as configuration. See dash/ui.go for the
+     cost and the rule it excepts. BEFORE insights.js, which reads the `echarts` global at mount. -->
+<script defer src="echarts.min.js"></script>
+<script defer src="insights.js"></script>
+<!-- The History view mounts itself the same way, AFTER insights.js because it mounts its tab
+     relative to that one (`after: 'insights'`), so the tab it anchors to has to exist first. -->
+<script defer src="history.js"></script>
 <!-- The KV-cache TTL view mounts itself the same way, from kvcache.js. -->
 <script defer src="kvcache.js"></script>
 <!-- Strategy campaigns mounts itself the same way, from campaigns.js — but unlike
