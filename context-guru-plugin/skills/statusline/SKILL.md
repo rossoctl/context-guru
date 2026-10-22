@@ -12,9 +12,9 @@ manage this one additional top-level key (never a second settings editor, never 
 **What it shows, once enabled and this project is routed** (default layout `balanced`):
 
 ```
-saved $0.31 of $4.41 session · saved $0.12 of $0.90 subagents
-cache ● █████░ 13:40 ↻ │ next $0.03 warm · $0.30 cold │ agents reviewer active ● 4:58 saved $0.08 of $0.40 · Explore ◐ 0:51 saved $0.02 of $0.20 │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
-cache ○ ░░░░░░ cold 1:20 │ ctx ███░░░░░ 41%
+saved $0.31 of $4.41 session ↻ $0.84 · saved $0.12 of $0.90 subagents
+cache ● █████░ 13:40 ↻ │ next $0.03 warm · $0.30 cold │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
+ctx ███░░░░░ 41%
 Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-skills for over a week — worth a shot.
 ```
 
@@ -28,23 +28,24 @@ Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-ski
   `--layout=detailed` adds `spent $4.10 · $2.73/h · up 1h30m` (Claude Code's own running cost, the
   average rate once five minutes have passed, and the session's age).
 - **Cache clock.** A live countdown to expiry, green, amber in the last minute (a fifth of the
-  lifetime on the 1h tier), red with `!` in the last 15 s, then `cold 1:20` counting UP. The proxy
+  lifetime on the 1h tier), red with `!` in the last 15 s. When the cache is cold the whole cache
+  segment (and `next`) is left out: you already know, and it is noise. There is exactly ONE
+  clock, the main agent's, from ONE source: the proxy's whenever it has a copy no older than 45 s,
+  otherwise Claude Code's own (it used to hand over after 3 s and flip back at each refresh, which
+  showed as two alternating timers). A cache kept warm by pings is drawn in **cyan** with `↻`. The proxy
   keeps the clock from the end of the last response, so a long answer is counted. It ticks every
   second (`refreshInterval: 1`, which `settings.py` writes; a value you tuned is kept). `13:40 ↻`
   means the proxy holds the cache warm with keep-alive pings, and the clock is the time until it
   goes cold (the last planned ping plus the lifetime); `↻` on a normal clock means the last touch
-  was a ping.
+  was a ping. `saved $0.31 of $4.41 session ↻ $0.84`: the `↻ $0.84` is what this session's manual
+  pings saved (net of their own cost, `manual_pings` in /api/stats), shown once there is one.
 - **Next request.** `next $0.03 warm · $0.30 cold`: what the next request costs for the cached
   prefix if the cache is still warm (cache-read price) and if it has gone cold (cache-write price at
-  the cache's lifetime tier), so the value of keeping it warm is on the line. Once cold it is just
-  `next $0.30`. A proxy that predates the warm figure shows `next $0.30 if cold`; an unpriced model
+  the cache's lifetime tier), so the value of keeping it warm is on the line. Left out once cold. A proxy that predates the warm figure shows `next $0.30 if cold`; an unpriced model
   shows nothing, never $0.00. `--hide=next` removes it.
-- **Sub-agents.** Each sub-agent's cache, by the name Claude Code's agents list shows
-  (`agents reviewer active ● 4:58 · Explore ◐ 0:51 · 1 cold`), most recent first, up to five;
-  `active` = a request in the last 10 s. Claude Code does not tell the status line which agent is
-  selected, so the line cannot follow the selection: find the selected agent by name. A teammate in
-  its own tmux pane is its own session and its own status line shows its own cache.
-  Agents without a name on disk keep `agents 5 · soonest ◐ 0:52`.
+- **Sub-agents** are not on the line (one clock only; the Claude Code mod shows them). `--show=agents`
+  brings back the old per-agent list (`agents reviewer active ● 4:58 · Explore ◐ 0:51`), and the
+  `watch` layout is the dedicated per-agent view.
 - **Keep-alive.** `ka 3 pings $0.04`: this session's pings and their cost, after the first one.
   The main clock and the context bar follow the main thread, not whichever agent spoke last.
 - **Context.** Bar and percent against the model's context limit: the proxy's when it is a
@@ -76,7 +77,7 @@ layout outranks the installed command's flag until `auto`. Otherwise
 | layout | elements |
 |---|---|
 | minimal | saved, cache (`saved $0.31 of $4.41 │ cache ● ████░░ 3:57`) |
-| balanced | update, saved, cache, next, agents, ctx, ka, tip |
+| balanced | update, saved, cache, next, ctx, ka, tip |
 | detailed | balanced + `spent` + `upstream slow: 7.0s` (only when slow) + least-used tool/skill (`◇ github 1% remove`) |
 | spark | `saved $4.20 today · last 14 days ▂▄▅▇█▂▄▅▇█▂▄▅▇` over the cache clock |
 | strip | the last 20 requests as hit `■` / partial `▨` / miss `✖`, and the dollars misses cost today |

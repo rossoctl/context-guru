@@ -2503,9 +2503,9 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 				t.Fatalf("exit %d", code)
 			}
 			got := strings.SplitN(strings.TrimSpace(out), " │ ", 2)[0]
-			if c.wantCold {
-				if got != "cache ○ ░░░░░░ cold" {
-					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache ○ ░░░░░░ cold")
+			if c.wantCold { // cold leaves the cache segment out entirely
+				if strings.Contains(got, "cache") || strings.Contains(got, "cold") {
+					t.Errorf("remaining=%.0fs: got %q, want no cache segment", c.remainingSec, got)
 				}
 				return
 			}
@@ -2548,7 +2548,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m.time.time = lambda: 1_700_000_000.0
 seg = lambda e: m._cache_segment(m._cache_view({"prompt_cache": {"expires_at": e}}, None, 0))
-print(seg(1_700_000_000.0))        # remaining == 0
+print(seg(1_700_000_000.0))        # remaining == 0: cold, no segment
 print(seg(1_700_000_000.5))        # remaining +0.5s
 print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 `
@@ -2559,7 +2559,7 @@ print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 		t.Fatalf("running the boundary check: %v\n%s", err, out)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	want := []string{"cache ○ ░░░░░░ cold", "cache ◐ ░░░░░░ 0:00!", "cache ○ ░░░░░░ cold"}
+	want := []string{"None", "cache ◐ ░░░░░░ 0:00!", "None"} // cold has no segment
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
 	}

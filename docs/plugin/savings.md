@@ -1,6 +1,6 @@
 # Savings
 
-`/context-guru:insights savings` (was `/context-guru:savings`, which still works for one release). `/context-guru:insights` shows it together with the other two.
+`/context-guru:insights savings`. `/context-guru:insights` shows it together with the other two.
 
 **Question: how much did it save?**
 

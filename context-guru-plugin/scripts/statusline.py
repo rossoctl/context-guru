@@ -112,7 +112,9 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 GREEN_MAX = 0.50
 YELLOW_MAX = 0.70
 BAR_CELLS = 8
-RESET, GREEN, YELLOW, RED, DIM = "\033[0m", "\033[32m", "\033[33m", "\033[31m", "\033[2m"
+RESET, GREEN, YELLOW, RED, DIM, CYAN = "\033[0m", "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[36m"
+PROXY_FRESH_SECONDS = 45.0  # a proxy copy younger than this drives the clock; covers a refresh delayed by back-off or a slow server (see _cache_view)
+CTX_PROXY_FRESH_SECONDS = 11.0  # the context bar takes the proxy's token count only from a copy this young (the cachestate TTL plus a second)
 
 # How many tool_use blocks of transcript tail this reads per render, looking for unused-tool
 # usage. Bounded for the same reason _fetch_stats bounds its own read: this runs on (almost)
@@ -682,8 +684,8 @@ def _keepalive_segment(stats: dict) -> str | None:
 # proxy's lean /api/stats (this session) and /api/cachestate (server cache truth).
 LAYOUTS = {
     "minimal": ("save", "cache"),
-    "balanced": ("update", "save", "cache", "next", "agents", "ctx", "ka", "tip"),
-    "detailed": ("update", "save", "spend", "cache", "next", "agents", "ctx", "ka", "latency", "tools", "tip"),
+    "balanced": ("update", "save", "cache", "next", "ctx", "ka", "tip"),
+    "detailed": ("update", "save", "spend", "cache", "next", "ctx", "ka", "latency", "tools", "tip"),
     # The terminal views as one glanceable line (row 0) over the cache clock (row 1).
     "spark": ("spark", "cache"),   # saved today + 14 days of saving
     "strip": ("strip", "cache"),   # the last 20 requests as hit / partial / miss
@@ -691,7 +693,7 @@ LAYOUTS = {
     "fill": ("fill", "cache"),     # context: always loaded vs conversation, time to full
     "watch": ("save", "clock0", "wagents"),  # saved, main clock, a mini-bar per sub-agent
 }
-ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka"}
+ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka", "agents"}  # agents: opt-in with --show=agents; the mods show sub-agents
 # Dropped/shrunk first to last when a line is wider than the terminal. The tip goes first (its short
 # form, then the line): it is the least urgent thing on the line.
 DEGRADE = (("tip", 1), ("tip", None), ("tools", None), ("next", 1), ("next", None), ("latency", None), ("ka", None), ("spend", None), ("update", None),
@@ -729,7 +731,7 @@ def _no_color() -> bool:
 
 
 if _no_color():
-    RESET = GREEN = YELLOW = RED = DIM = ""
+    RESET = GREEN = YELLOW = RED = DIM = CYAN = ""
 
 
 def _config(argv: list[str]) -> tuple[str, set[str], int]:
@@ -1168,7 +1170,10 @@ def _cache_view(payload: dict, cs: dict | None, cs_age: float) -> dict:
         if cold_usd is None:
             cold_usd = usd
         ttl, ping = ttl if ttl_s_bad(cs) else cs["ttl_s"], bool(cs.get("keepalive"))
-    if srv is not None and (cs_age <= 3 or cli is None or srv >= cli):
+    # ONE source drives the clock at a time. The old rule gave the proxy only the first 3 s of a copy and then
+    # let Claude Code's own expiry win whenever it was later (it counts from a different start), so the
+    # clock jumped up ~10 s and back down at the next refresh: "two alternating timers".
+    if srv is not None and (cs_age <= PROXY_FRESH_SECONDS or cli is None or srv >= cli):
         return {"remaining": srv, "source": "proxy", "tokens": tokens, "usd": usd, "ttl": ttl, "ping": ping,
                 "warm_usd": warm_usd, "cold_usd": cold_usd, "model": cs.get("model"), "held": held_seconds(cs, cs.get("now_ms"), cs_age)}
     if cli is not None:
@@ -1192,6 +1197,8 @@ def _cache_segment(view: dict, level: int | None = 0) -> str | None:
         return None
     if rem is None:
         return f"{DIM}◌ no cache yet{RESET}" if level == 0 else f"{DIM}◌{RESET}"
+    if _until_cold(rem, view.get("held") if rem > 0 else None) <= 0:
+        return None  # cold is noise: the user knows, so the segment is left out entirely
     ttl = view.get("ttl") or 300.0
     cells = max(0, min(CACHE_BAR_CELLS, int(round(rem / ttl * CACHE_BAR_CELLS)))) if rem > 0 else 0
     held = view.get("held") if rem > 0 else None  # an expired entry is cold, whatever is planned
@@ -1199,6 +1206,8 @@ def _cache_segment(view: dict, level: int | None = 0) -> str | None:
     state = entry_state(rem, ttl)
     colour, glyph = _AGENT_STYLE[state]
     ping = " ↻" if (view.get("ping") or held is not None) and rem > 0 else ""
+    if ping and state != "critical":
+        colour = CYAN  # kept warm by pings: its own colour, so "pinged" reads at a glance
     if state == "cold":
         # A client-only answer knows it is cold but not since when: say so, don't invent a clock.
         clock = f"cold {_clock(-rem)}" if view.get("source") == "proxy" else "cold"
@@ -1223,7 +1232,7 @@ def _next_segment(view: dict, level: int | None = 0) -> str | None:
     if level is None or cold is None or rem is None:
         return None
     if rem <= 0:
-        return f"{DIM}next{RESET} {_next_money(cold)}"
+        return None  # cold: nothing is shown
     if warm is None:
         return f"{DIM}next{RESET} {_next_money(cold)} {DIM}if cold{RESET}"
     if level == 1:
@@ -1298,7 +1307,7 @@ def _ctx_numbers(payload: dict, cs: dict | None, cs_age: float) -> tuple[float, 
     cw = payload.get("context_window")
     used = _num(cw, "total_input_tokens")
     window = _num(cw, "context_window_size")
-    if cs_age <= 3 and (_num(cs, "prefix_tokens") or 0) > 0:
+    if cs_age <= CTX_PROXY_FRESH_SECONDS and (_num(cs, "prefix_tokens") or 0) > 0:
         used = _num(cs, "prefix_tokens")
     if isinstance(cs, dict) and cs.get("window_exact") and (_num(cs, "window") or 0) > 0:
         window = _num(cs, "window")
@@ -1330,6 +1339,13 @@ def _money_pair(x: float | None, y: float | None) -> str | None:
     return f"saved {_money(x)} {DIM}of{RESET} {_money(y)}"
 
 
+def _manual_ping_mark(stats: dict | None) -> str:
+    """` ↻ $0.84`: what this session's manual pings saved (net of their own cost), once there is one."""
+    mp = stats.get("manual_pings") if isinstance(stats, dict) else None
+    usd = _num(mp, "saved_usd")
+    return f" {CYAN}↻ {_money(usd)}{RESET}" if usd is not None and (_num(mp, "count") or 0) > 0 and usd >= 0.005 else ""
+
+
 def _save_segment(stats: dict | None, money: dict | None, level: int | None = 0, fresh: bool = False) -> str | None:
     """`saved $0.42 of $3.10 session · saved $0.10 of $0.50 subagents`. session is the main
     thread, subagents every other thread of the session together (sub-agents, teammates, and side
@@ -1356,8 +1372,8 @@ def _save_segment(stats: dict | None, money: dict | None, level: int | None = 0,
     if level == 2:
         return _money(x)
     if level == 1:
-        return head
-    out = f"{head} {DIM}session{RESET}"
+        return head + _manual_ping_mark(stats)
+    out = f"{head} {DIM}session{RESET}" + _manual_ping_mark(stats)
     others = money.get("others")
     pair = _money_pair(_num(others, "saved_usd"), _num(others, "baseline_usd"))
     if (_num(others, "threads") or 0) > 0 and pair:

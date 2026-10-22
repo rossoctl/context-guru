@@ -186,11 +186,10 @@ func TestCGGoldens(t *testing.T) {
 		rc         int
 	}{
 		{"home", warm, []string{"home"}, 0},
-		{"savings", warm, []string{"savings"}, 0},
-		{"savings-details", warm, []string{"savings", "details"}, 0},
-		{"cache-warm", warm, []string{"cache"}, 0},
-		{"cache-cold", cold, []string{"cache"}, 0},
-		{"waste", warm, []string{"waste"}, 0},
+		{"savings", warm, []string{"insights", "savings"}, 0},
+		{"savings-details", warm, []string{"insights", "savings", "details"}, 0},
+		{"cache-warm", warm, []string{"insights", "cache"}, 0},
+		{"cache-cold", cold, []string{"insights", "cache"}, 0},
 		{"session", warm, []string{"session"}, 0},
 		{"doctor", warm, []string{"doctor"}, 0},
 		{"insights", warm, []string{"insights"}, 0},
@@ -198,7 +197,6 @@ func TestCGGoldens(t *testing.T) {
 		{"insights-cache", warm, []string{"insights", "cache"}, 0},
 		{"insights-tools", warm, []string{"insights", "tools"}, 0},
 		{"insights-tools-details", warm, []string{"insights", "tools", "details"}, 0},
-		{"waste-redirect", warm, []string{"waste"}, 0},
 		{"insights-unknown", warm, []string{"insights", "nonsense"}, 0},
 		{"apply-under-insights", warm, []string{"insights", "tools", "apply", "remove-sufficient@8c21e0d4"}, 1},
 		{"save-more", warm, []string{"save-more"}, 0},
@@ -210,8 +208,6 @@ func TestCGGoldens(t *testing.T) {
 		{"remove-mcp-and-skills-details", warm, []string{"remove-mcp-and-skills", "details"}, 0},
 		{"remove-mcp-and-skills-edge", warm, []string{"remove-mcp-and-skills", "--fixture", filepath.Join("testdata", "cg", "fx_tools_edge.json")}, 0},
 		{"apply-under-remove", warm, []string{"remove-mcp-and-skills", "apply", "tools", "remove-sufficient@8c21e0d4"}, 1},
-		{"apply-under-waste", warm, []string{"waste", "apply", "remove-sufficient@8c21e0d4"}, 1},
-		{"adapt-redirect", warm, []string{"adapt", "tools"}, 0},
 		{"apply-config", warm, []string{"apply", "config", "medium@a1b2c3d4"}, 0},
 		{"apply-cache", warm, []string{"apply", "cache", "adaptive@3f9a1c"}, 0},
 		{"apply-stale", warm, []string{"apply", "cache", "adaptive@000000"}, 1},
@@ -219,7 +215,6 @@ func TestCGGoldens(t *testing.T) {
 		{"apply-under-read", warm, []string{"save-more", "cache", "apply", "adaptive@3f9a1c"}, 1},
 		{"revert-under-read", warm, []string{"save-more", "revert", "config"}, 1},
 		{"revert-kind-first", warm, []string{"config", "revert"}, 1},
-		{"revert-under-cache", warm, []string{"cache", "revert"}, 1},
 		{"revert-under-remove", warm, []string{"remove-mcp-and-skills", "revert"}, 1},
 		{"revert-config", warm, []string{"revert", "config"}, 0},
 		{"revert-old-name", warm, []string{"revert", "compaction"}, 0},
@@ -242,8 +237,8 @@ func TestCGGoldens(t *testing.T) {
 // The first line of every screen is the answer: one line, no raw token counts.
 func TestCGBottomLineFirst(t *testing.T) {
 	base := cgProxyStub(t, "cachestate_warm")
-	for _, c := range []string{"home", "savings", "cache", "waste", "session"} {
-		out := runCG(t, base, nil, c)
+	for _, c := range []string{"home", "insights savings", "insights cache", "insights tools", "session"} {
+		out := runCG(t, base, nil, strings.Fields(c)...)
 		first := strings.SplitN(out, "\n", 2)[0]
 		if len(first) < 20 || strings.Contains(first, "tokens") {
 			t.Errorf("%s: first line %q is not a bottom line in dollars", c, first)
@@ -253,7 +248,7 @@ func TestCGBottomLineFirst(t *testing.T) {
 
 func TestCGNoProxy(t *testing.T) {
 	requireTool(t, "python3")
-	cmd := exec.Command("python3", filepath.Join("scripts", "cg.py"), "savings")
+	cmd := exec.Command("python3", filepath.Join("scripts", "cg.py"), "insights", "savings")
 	cmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL=https://api.anthropic.com", "CG_URL=")
 	out, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "No Context Guru proxy") {
@@ -261,18 +256,18 @@ func TestCGNoProxy(t *testing.T) {
 	}
 }
 
-// The save-more, remove-mcp-and-skills and adapt skills pre-approve only their read. A change is a separate
+// The save-more and remove-mcp-and-skills skills pre-approve only their read. A change is a separate
 // top-level command, so Claude Code asks the user for permission to run it: a second gate behind the skill's
 // own yes/no question. No read command writes, whatever words follow it.
 func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
-	for _, c := range []string{"save-more", "remove-mcp-and-skills", "adapt"} {
+	for _, c := range []string{"save-more", "remove-mcp-and-skills"} {
 		body := readFileString(t, filepath.Join("skills", c, "SKILL.md"))
 		if !regexp.MustCompile(`(?m)^allowed-tools: Bash\(python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/cg\.py" ` + c + `:\*\)(, Bash\(python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/settings\.py" record-run ` + c + `\))?$`).MatchString(body) {
 			t.Errorf("%s must pre-approve exactly its own read, `cg.py %s:*`", c, c)
 		}
 	}
 	base := cgProxyStub(t, "cachestate_warm")
-	for _, args := range [][]string{{"adapt", "cache", "apply", "adaptive@3f9a1c"}, {"save-more", "apply", "cache", "adaptive@3f9a1c"},
+	for _, args := range [][]string{{"save-more", "apply", "cache", "adaptive@3f9a1c"},
 		{"save-more", "revert", "config"}, {"remove-mcp-and-skills", "apply", "tools", "remove-sufficient@8c21e0d4"}} {
 		if out, code := runCGCode(t, base, nil, args...); code == 0 || strings.Contains(out, "Applied") {
 			t.Errorf("%v must not write (it is inside the pre-approved prefix): exit %d\n%s", args, code, out)
@@ -281,12 +276,12 @@ func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
 }
 
 // No skill pre-approves a change. A pre-approved pattern names one READ command of cg.py (the first word picks
-// the command, so `cg.py waste:*` can only ever run the waste screen); a bare `cg.py:*` would also cover
+// the command, so `cg.py insights:*` can only ever run the insights screens); a bare `cg.py:*` would also cover
 // `cg.py apply` and `cg.py revert` while that skill is active, and skip the harness's permission prompt.
 // Codex skills pre-approve nothing, and every write they run asks for escalation.
 func TestNoSkillPreApprovesAChange(t *testing.T) {
-	reads := map[string]bool{"adapt": true, "save-more": true, "remove-mcp-and-skills": true, "cache-campaign": true, "insights": true}
-	for _, c := range []string{"home", "savings", "cache", "waste", "session", "doctor"} {
+	reads := map[string]bool{"save-more": true, "remove-mcp-and-skills": true, "cache-campaign": true, "insights": true}
+	for _, c := range []string{"home", "session", "doctor"} {
 		reads[c] = true
 	}
 	allowed := regexp.MustCompile(`(?m)^allowed-tools:(.*)$`)
@@ -457,7 +452,7 @@ func TestCGSavingsShowsManualPings(t *testing.T) {
 		}
 		return f
 	}
-	with := runCG(t, "http://127.0.0.1:1", nil, "savings", "--fixture", write(stats(`,"manual_pings":{"count":3,"ping_usd":0.06,"saved_usd":0.84}`)))
+	with := runCG(t, "http://127.0.0.1:1", nil, "insights", "savings", "--fixture", write(stats(`,"manual_pings":{"count":3,"ping_usd":0.06,"saved_usd":0.84}`)))
 	if !strings.Contains(with, "Manual pings") || !strings.Contains(with, "$0.84") {
 		t.Errorf("want a Manual pings row with $0.84 saved, got\n%s", with)
 	}
@@ -465,7 +460,7 @@ func TestCGSavingsShowsManualPings(t *testing.T) {
 		t.Errorf("want the count and the ping cost beside it, got\n%s", with)
 	}
 	for name, extra := range map[string]string{"absent": "", "zero": `,"manual_pings":{"count":0,"ping_usd":0,"saved_usd":0}`} {
-		if out := runCG(t, "http://127.0.0.1:1", nil, "savings", "--fixture", write(stats(extra))); strings.Contains(out, "Manual pings") {
+		if out := runCG(t, "http://127.0.0.1:1", nil, "insights", "savings", "--fixture", write(stats(extra))); strings.Contains(out, "Manual pings") {
 			t.Errorf("%s: no Manual pings row expected, got\n%s", name, out)
 		}
 	}
@@ -599,7 +594,7 @@ func TestCGScriptsAreVendoredIntoCodex(t *testing.T) {
 func TestDocsExamplesAreTheGoldens(t *testing.T) {
 	for golden, page := range map[string]string{
 		"home": "status", "savings": "savings", "cache-warm": "cache", "cache-cold": "cache",
-		"waste": "waste", "session": "session", "doctor": "doctor",
+		"session": "session", "doctor": "doctor",
 		"save-more": "save-more", "save-more-ascii-80": "save-more", "apply-config": "save-more", "revert-config": "save-more",
 		"apply-gate":            "save-more",
 		"remove-mcp-and-skills": "remove-mcp-and-skills", "apply-tools-async": "remove-mcp-and-skills", "insights": "insights",

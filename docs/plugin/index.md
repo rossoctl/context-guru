@@ -37,21 +37,6 @@ One command per question. Each opens with one line that answers it, then a small
 
 Five more views draw in the terminal: `/context-guru:watch`, `timeline`, `chart`, `heatmap` and `fill`. They are on [Terminal views](terminal-views.md).
 
-### Moved commands
-
-The old names keep working for one release. Each says where it moved and runs the new command.
-
-| Old | New |
-|---|---|
-| `/context-guru:savings`, `/context-guru:cache`, `/context-guru:waste` | `/context-guru:insights savings`, `insights cache`, `insights tools` |
-| `/context-guru:insights-capabilities` | `/context-guru:insights tools` |
-| `/context-guru:insights-idle` | `/context-guru:insights cache` |
-| `/context-guru:insights-components` | `/context-guru:insights savings` |
-| `/context-guru:cost-today` | `/context-guru:status` |
-| `/context-guru:cost-unused` | `/context-guru:insights tools` |
-| `/context-guru:cost-cold`, `/context-guru:cost-compact` | `/context-guru:insights cache` |
-| `/context-guru:cost-trends` | `/context-guru:insights savings` |
-
 `/context-guru:statusline` still installs, changes and removes the status line; `/context-guru:doctor` checks that it is there.
 
 ## How the screens are written

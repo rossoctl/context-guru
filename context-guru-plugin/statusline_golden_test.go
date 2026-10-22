@@ -34,6 +34,10 @@ func cgStub(t *testing.T, cache string, extra ...func(*http.ServeMux)) (port str
 			w.Write([]byte(`{"total_saved_usd": 4.2}`))
 			return
 		}
+		if statsBody != "" {
+			w.Write([]byte(statsBody)) //nolint:errcheck
+			return
+		}
 		w.Write([]byte(`{"total_saved_usd": 0.31, "cost_usd": 0.41, "cg_latency_ms_avg": 3, "upstream_ms_avg": 340}`))
 	})
 	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(cache)) })
@@ -83,11 +87,11 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 		{"warm/rewrite-near", cs(60, 300, 900000, "2.70"), full, "balanced", 200,
 			sess + "\ncache ● █████░ 4:00 │ next $2.70 if cold │ ctx ███████░ 90% ⚠ rewrite near"},
 		{"cold/balanced", cs(400, 300, 412000, "1.20"), payload, "balanced", 200,
-			sess + "\ncache ○ ░░░░░░ cold 1:40 │ next $1.20 │ ctx ███░░░░░ 41%"},
+			sess + "\nctx ███░░░░░ 41%"}, // cold: no cache segment at all
 		{"cold/minimal", cs(400, 300, 412000, "1.20"), payload, "minimal", 200,
-			"saved $0.31 of $2.10 │ cache ○ ░░░░░░ cold 1:40"},
+			"saved $0.31 of $2.10"},
 		{"cold/narrow", cs(400, 300, 412000, "1.20"), payload, "balanced", 60,
-			sess + "\ncache ○ ░░░░░░ cold 1:40 │ next $1.20 │ ctx ███░░░░░ 41%"},
+			sess + "\nctx ███░░░░░ 41%"},
 		{"warm/narrow", cs(60, 300, 52000, "0.30"), small, "balanced", 40,
 			"saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 		{"first-run", `{"session":"s","none":true,"now_ms":1}`, `{"session_id":"sess-gold"}`, "balanced", 200,
@@ -155,9 +159,9 @@ func TestStatuslineGoldenLive(t *testing.T) {
 		{"critical", body(m, 290, th("", 290, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
 			sess + "\ncache ◐ ░░░░░░ 0:10! │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
 		{"cold-counts-up", body(m, 375, th("", 375, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
-			sess + "\ncache ○ ░░░░░░ cold 1:15 │ next $1.20 │ ctx ███░░░░░ 41%"},
+			sess + "\nctx ███░░░░░ 41%"},
 		{"cold-long", body(m, 3900, th("", 3900, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
-			sess + "\ncache ○ ░░░░░░ cold 1h00m │ next $1.20 │ ctx ███░░░░░ 41%"},
+			sess + "\nctx ███░░░░░ 41%"},
 		// The latest request of the session was a sub-agent's; the main cache must still count down on its own.
 		{"main-not-reset-by-subagent", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("", 200, 300, 412000, "1.20")),
 			ctxPay(m), "balanced", 200, sess + "\ncache ● ██░░░░ 1:40 │ next $1.20 if cold │ agent ● 4:55 │ ctx ███░░░░░ 41%"},
@@ -181,7 +185,7 @@ func TestStatuslineGoldenLive(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(cgStub(t, c.cache))
 			env["CG_STATUSLINE_COLUMNS"] = fmt.Sprint(c.width)
-			out, code, _ := runStatusline(t, env, c.stdin, "--layout="+c.layout)
+			out, code, _ := runStatusline(t, env, c.stdin, "--layout="+c.layout, "--show=agents")
 			if code != 0 {
 				t.Fatalf("exit %d", code)
 			}
@@ -230,7 +234,7 @@ func TestStatuslineNextRequestCost(t *testing.T) {
 		{"both", cs(60, `"priced":true,"rewrite_usd":0.30,"next_warm_usd":0.026,"next_cold_usd":0.30,`), "balanced",
 			"cache ● █████░ 4:00 │ next $0.03 warm · $0.30 cold │ ctx ░░░░░░░░ 5%"},
 		{"cold", cs(400, `"priced":true,"rewrite_usd":0.30,"next_warm_usd":0.026,"next_cold_usd":0.30,`), "balanced",
-			"cache ○ ░░░░░░ cold 1:40 │ next $0.30 │ ctx ░░░░░░░░ 5%"},
+			"ctx ░░░░░░░░ 5%"},
 		{"older-server-falls-back-to-rewrite_usd", cs(60, `"priced":true,"rewrite_usd":0.30,`), "balanced",
 			"cache ● █████░ 4:00 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
 		{"unpriced", cs(60, `"priced":false,`), "balanced", "cache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
@@ -247,6 +251,107 @@ func TestStatuslineNextRequestCost(t *testing.T) {
 		})
 	}
 }
+
+// V2 A.2: ONE timer, the main agent's cache, and it must not flip between two values from render to
+// render. Cause: with a cachestate copy up to 10 s old, Claude Code's own prompt_cache expiry won
+// whenever it was later than the proxy's, and lost again on the next refresh (age 0), so the clock
+// alternated between two sources. Drives _cache_view over a copy ageing 0..9 s.
+func TestStatuslineMainClockDoesNotAlternateBetweenSources(t *testing.T) {
+	py := requireTool(t, "python3")
+	script := `
+import importlib.util, sys, time
+spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+now = 1_800_000_000_000
+cs = {"last_ts": now - 60000, "end_ts": now - 60000, "ttl_s": 300, "now_ms": now, "prefix_tokens": 1, "priced": True, "rewrite_usd": .3}
+pay = {"prompt_cache": {"expires_at": time.time() + 250}}  # the client's guess: 10 s later than the proxy's 240
+out = []
+for age in range(10):
+    v = m._cache_view(pay, cs, age)
+    out.append("%s:%d" % (v["source"], round(v["remaining"] + age)))
+print(" ".join(out))
+`
+	b, err := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, b)
+	}
+	// remaining+age is the clock's value at the moment the copy was taken: constant if one source drives it.
+	if got := strings.TrimSpace(string(b)); strings.Count(got, "proxy:240") != 10 {
+		t.Errorf("the clock changed source as the copy aged:\n%s", got)
+	}
+	// A refresh delayed by back-off or a slow server leaves a copy 30 s old: the clock still follows the proxy.
+	b, err = exec.Command(py, "-c", strings.Replace(script, "range(10)", "(30, 44)", 1), filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, b)
+	}
+	if got := strings.TrimSpace(string(b)); got != "proxy:240 proxy:240" {
+		t.Errorf("a 30 s and a 44 s old copy must still drive the clock, got %s", got)
+	}
+}
+
+// V2 A.1-A.3: no cold segment, no sub-agent clocks, a pinged cache in its own colour.
+func TestStatuslineV2OneTimerNoColdPingedCyan(t *testing.T) {
+	const now = 1_800_000_000_000
+	th := func(id string, agoSec, prefix int, extra string) string {
+		return fmt.Sprintf(`{"id":%q,"main":%t,"model":"m","last_ts":%d,"end_ts":%d,"ttl_s":300,"prefix_tokens":%d,"priced":true,"rewrite_usd":0.3%s}`,
+			id, id == "", now-agoSec*1000, now-agoSec*1000, prefix, extra)
+	}
+	cache := func(lastAgo int, ka string, threads ...string) string {
+		return fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"end_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,%s"priced":true,"rewrite_usd":0.3,"threads":[%s]}`,
+			now-lastAgo*1000, now-lastAgo*1000, now, ka, strings.Join(threads, ","))
+	}
+	pay := `{"session_id":"sess-gold","context_window":{"total_input_tokens":52000,"context_window_size":200000}}`
+	run := func(cs string, extra ...string) string {
+		env := routedEnv(cgStub(t, cs))
+		out, _, _ := runStatusline(t, env, pay, extra...)
+		return out
+	}
+	if out := run(cache(400, "", th("", 400, 52000, ""))); strings.Contains(out, "cache") || strings.Contains(out, "cold") || strings.Contains(out, "next") {
+		t.Errorf("a cold main cache must leave no cache or next segment, got %q", out)
+	}
+	out := run(cache(60, "", th("a:1", 5, 9000, ""), th("a:2", 250, 9000, ""), th("", 60, 52000, "")))
+	if strings.Contains(out, "agent") || strings.Count(out, "4:") != 1 {
+		t.Errorf("exactly one clock (the main agent's) and no agents segment, got %q", out)
+	}
+	// pinged: colour only shows with colour on
+	env := routedEnv(cgStub(t, cache(60, `"keepalive":true,`, th("", 60, 52000, `,"pings_left":2,"held_until_ms":`+fmt.Sprint(now+600_000)))))
+	env["NO_COLOR"] = ""
+	o, _, _ := runStatusline(t, env, pay)
+	if !strings.Contains(o, "\x1b[36m") || !strings.Contains(o, "↻") {
+		t.Errorf("a pinged cache must be cyan with ↻, got %q", o)
+	}
+	env = routedEnv(cgStub(t, cache(60, "", th("", 60, 52000, ""))))
+	env["NO_COLOR"] = ""
+	if o, _, _ = runStatusline(t, env, pay); strings.Contains(o, "\x1b[36m") || !strings.Contains(o, "\x1b[32m") {
+		t.Errorf("an unpinged warm cache stays green, got %q", o)
+	}
+}
+
+// V2 A.4: manual pings from /api/stats show as a short `↻ $x` beside the saved figure.
+func TestStatuslineShowsManualPingSavings(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"s","model":"m","money":{"main":{"saved_usd":0.31,"baseline_usd":2.10,"threads":1},"others":{"saved_usd":0,"baseline_usd":0,"threads":0}},"last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,"priced":true,"rewrite_usd":0.3}`, now-60000, now)
+	port := cgStubStats(t, cache, `{"total_saved_usd":0.31,"cost_usd":0.41,"manual_pings":{"count":3,"ping_usd":0.06,"saved_usd":0.84}}`)
+	pay := `{"session_id":"sess-gold","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000}}`
+	out, _, _ := runStatusline(t, routedEnv(port), pay)
+	if !strings.Contains(out, "saved $0.31 of $2.10 session ↻ $0.84") {
+		t.Errorf("want `↻ $0.84` after the session saving, got %q", out)
+	}
+	port = cgStubStats(t, cache, `{"total_saved_usd":0.31,"cost_usd":0.41,"manual_pings":{"count":0,"ping_usd":0,"saved_usd":0}}`)
+	if out, _, _ = runStatusline(t, routedEnv(port), pay); strings.Contains(out, "↻") {
+		t.Errorf("no manual pings, no ↻: %q", out)
+	}
+}
+
+// cgStubStats is cgStub whose session-scoped /api/stats answers `stats`.
+func cgStubStats(t *testing.T, cache, stats string) string {
+	t.Helper()
+	statsBody = stats
+	t.Cleanup(func() { statsBody = "" })
+	return cgStub(t, cache)
+}
+
+var statsBody string
 
 // statuslineCounting is cgStub that counts what each route is asked.
 func statuslineCounting(t *testing.T, cache string, fail *atomic.Bool) (port string, hits *sync.Map) {
@@ -444,14 +549,14 @@ func TestStatuslineGoldenAgentsAndKeepAlive(t *testing.T) {
 			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 13:40 ↻ │ next $0.03 if cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		// A plan cannot revive an expired entry (the ping failed or never came): cold is cold.
 		{"plan-cannot-revive-a-cold-cache", cache(th("", 320, held(500))), 200,
-			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ○ ░░░░░░ cold 0:20 │ next $0.03 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\nctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
 		{"narrow-drops-ka-first", cache(th("", 60, held(820)), th("a:ad9ba182bf3e760e6", 10, "")), 60,
 			"saved $0.31 of $2.64\ncache ● █████░ 13:40 ↻ │ agents 1 │ ctx ░░░░░░░░ 5%"}, // narrow: the main thread's figure only,
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(stub(c.cache))
 			env["CG_STATUSLINE_COLUMNS"] = fmt.Sprint(c.width)
-			out, code, _ := runStatusline(t, env, stdin, "--layout=balanced")
+			out, code, _ := runStatusline(t, env, stdin, "--layout=balanced", "--show=agents")
 			if code != 0 {
 				t.Fatalf("exit %d", code)
 			}
@@ -545,7 +650,7 @@ func TestStatuslineGoldenMoney(t *testing.T) {
 			t.Cleanup(func() { srv.Close() })
 			env := routedEnv(fmt.Sprint(ln.Addr().(*net.TCPAddr).Port))
 			env["CG_STATUSLINE_COLUMNS"] = fmt.Sprint(c.width)
-			out, code, elapsed := runStatusline(t, env, stdin, "--layout=balanced")
+			out, code, elapsed := runStatusline(t, env, stdin, "--layout=balanced", "--show=agents")
 			if code != 0 {
 				t.Fatalf("exit %d", code)
 			}
@@ -599,7 +704,7 @@ func TestStatuslineAgentNamesAreBounded(t *testing.T) {
 	env := routedEnv(cgStub(t, cache))
 	env["CG_STATUSLINE_COLUMNS"] = "300"
 	stdin := `{"session_id":"sess-big","transcript_path":"` + filepath.Join(dir, "sess-big.jsonl") + `"}`
-	out, code, elapsed := runStatusline(t, env, stdin, "--layout=balanced")
+	out, code, elapsed := runStatusline(t, env, stdin, "--layout=balanced", "--show=agents")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
