@@ -1,6 +1,6 @@
 # Permanent e2e harness — follow-up plan (not started)
 
-Status: PLAN. Agreed with the repo owner on 2026-10-21. Starts after PR #578 merges into main.
+Status: DONE on `e2e/pr578-review` (2026-10-22), except the steps marked OPEN. Lands as its own PR after #578 merges.
 
 ## Decisions
 
@@ -11,6 +11,11 @@ Status: PLAN. Agreed with the repo owner on 2026-10-21. Starts after PR #578 mer
 | Known findings | `e2e/known-findings.txt` ships empty. Every future entry must cite a GitHub issue. |
 
 ## Work
+
+Done: 2 (50bc1c6a), 3 (50bc1c6a; the baseline is `E2E_BASE`, defaulting to the merge base with main), 4 (f57af867),
+5 (ccd35ade), 6 (ccd35ade). Step 4's list is not yet empty, because its entries are PR #578 bugs and they cite
+`issue:#578` until their own issues are filed (drafts are written and await the owner's approval). OPEN: 1 (rebase
+once #578 merges), and 7 (documented in e2e/README.md "Extending it").
 
 1. Rebase `e2e/` (and only `e2e/`) onto main once #578 is in. Drop `docs/superpowers/` review artefacts
    from the PR, or keep only the spec, by the owner's choice at that point.
