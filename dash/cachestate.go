@@ -42,9 +42,12 @@ type CacheState struct {
 	NextWarmUSD *float64 `json:"next_warm_usd,omitempty"`
 	NextColdUSD *float64 `json:"next_cold_usd,omitempty"`
 	// Pingable is true when the proxy holds this session's main thread's body and key, so POST
-	// /api/me/cache/ping can work (with keep-alive off it holds nothing and answers 409 "not
-	// held"). Omitted when the host cannot say, so a client treats absence as "unknown".
-	Pingable *bool `json:"pingable,omitempty"`
+	// /api/me/cache/ping can work (with keep-alive off and no opt-in it holds nothing and answers 409
+	// "not held"). PingReason says why not, when it is false: "not opted in", "too large", "expired",
+	// "over budget" or "unsupported". Both are omitted when the host cannot say, so a client treats
+	// absence as "unknown".
+	Pingable   *bool  `json:"pingable,omitempty"`
+	PingReason string `json:"ping_reason,omitempty"`
 	// Window is the served context window for Model, Exact=false when it is a guess.
 	Window      int  `json:"window"`
 	WindowExact bool `json:"window_exact"`
@@ -73,8 +76,9 @@ type ThreadCache struct {
 	// NextWarmUSD and NextColdUSD: see CacheState.
 	NextWarmUSD *float64 `json:"next_warm_usd,omitempty"`
 	NextColdUSD *float64 `json:"next_cold_usd,omitempty"`
-	// Pingable: see CacheState.
-	Pingable *bool `json:"pingable,omitempty"`
+	// Pingable and PingReason: see CacheState.
+	Pingable   *bool  `json:"pingable,omitempty"`
+	PingReason string `json:"ping_reason,omitempty"`
 	// PingsLeft is how many keep-alive pings the proxy still plans for this thread, and
 	// HeldUntilMS when its cache goes cold if no real request arrives first: the last planned
 	// ping's start plus the TTL. Both omitted when no ping is planned.
@@ -114,14 +118,28 @@ func (a *API) SetKeepAlivePlans(fn func(tenantID string, allTenants bool, sessio
 	a.kaPlans = fn
 }
 
-// SetPingable supplies, per thread of one session, whether the keeper holds what a manual ping
-// needs. dash keeps no keep-alive state; nil means pingable is never stated.
-func (a *API) SetPingable(fn func(tenantID string, allTenants bool, session string) map[string]bool) {
+// PingState is one thread's answer to "can a manual ping work now": Pingable, or the Reason it cannot.
+type PingState struct {
+	Pingable bool
+	Reason   string
+}
+
+// SetPingStates supplies, per thread of one session, whether the keeper holds what a manual ping
+// needs and why not when it does not. dash keeps no keep-alive state; nil means it is never stated.
+func (a *API) SetPingStates(fn func(tenantID string, allTenants bool, session string) map[string]PingState) {
 	a.pingable = fn
 }
 
+// reasonIf is the reason only when the thread cannot be pinged.
+func reasonIf(st PingState) string {
+	if st.Pingable {
+		return ""
+	}
+	return st.Reason
+}
+
 // pingableFor is the host's per-thread answer, nil when it cannot say (no source, or no keeper).
-func (a *API) pingableFor(f Filter) map[string]bool {
+func (a *API) pingableFor(f Filter) map[string]PingState {
 	if a.pingable == nil {
 		return nil
 	}
@@ -415,12 +433,20 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if held := a.pingableFor(f); held != nil {
-		for i := range s.Threads {
-			v := held[s.Threads[i].ID]
-			s.Threads[i].Pingable = &v
+		// A thread the host knows nothing about was never held: "not opted in", the one reason that is
+		// always true of it.
+		state := func(id string) PingState {
+			if st, ok := held[id]; ok {
+				return st
+			}
+			return PingState{Reason: "not opted in"}
 		}
-		v := held[""]
-		s.Pingable = &v
+		for i := range s.Threads {
+			st := state(s.Threads[i].ID)
+			s.Threads[i].Pingable, s.Threads[i].PingReason = &st.Pingable, reasonIf(st)
+		}
+		st := state("")
+		s.Pingable, s.PingReason = &st.Pingable, reasonIf(st)
 	}
 	s.Window, s.WindowExact, _ = modelinfo.Exact(a.windows, r.Context(), s.Model)
 	writeJSON(w, s)

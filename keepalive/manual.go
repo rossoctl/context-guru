@@ -85,7 +85,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	now := k.now()
 	k.mu.Lock()
 	e, ok := k.live[id]
-	if !ok || e.stopped {
+	if !ok || e.stopped || e.manualExpired(now) {
 		k.mu.Unlock()
 		return ManualResult{}, ErrNotHeld
 	}
@@ -99,7 +99,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	}
 	// The scheduled path's cost guard applies to a press too: with no limiter configured the
 	// per-thread gap is the only other brake, and a huge prefix would pass it every 30 s.
-	if e.pingUSD > e.pol.Ceiling() {
+	if e.pingUSD > e.entryCeiling() {
 		k.mu.Unlock()
 		return ManualResult{}, ErrTooCostly
 	}
@@ -163,6 +163,10 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		apply.RecordCacheTouch(job.st, job.tenant, raw, job.provider, start.UnixMilli())
 		k.mu.Lock()
 		e.refreshedAt, e.startedAt = start, start
+		if e.manualOnly && e.timer != nil {
+			// The press refreshed the provider's entry, so the hold restarts with it.
+			e.timer.Reset(ManualHoldMax)
+		}
 		k.mu.Unlock()
 	}
 	k.mu.Lock()
@@ -181,25 +185,6 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		})
 	}
 	return res, nil
-}
-
-// Pingable reports, per thread ("" = main) of one session, whether PingNow would find something
-// held to ping with: an entry exists and the keeper has not stopped it. It is PingNow's ErrNotHeld
-// test and nothing else, so a client can hide a Ping button that would only answer 409. all drops
-// the tenant filter, as Plans does.
-func (k *Keeper) Pingable(tenant string, all bool, session string) map[string]bool {
-	if k == nil || session == "" {
-		return nil // cannot say
-	}
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	out := map[string]bool{} // non-nil even when empty: "nothing is held" is an answer
-	for _, e := range k.live {
-		if e.session == session && (all || e.tenant == tenant) && !e.stopped {
-			out[e.thread] = true
-		}
-	}
-	return out
 }
 
 // ManualStrategyID is the keepalive_strategy_id a manual ping's row carries. It names no real

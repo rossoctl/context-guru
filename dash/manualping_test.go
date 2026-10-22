@@ -252,8 +252,8 @@ func TestManualPingColumnsAreAddedToAnOlderDatabase(t *testing.T) {
 	}
 }
 
-// pingable is stated per thread when the host can say, and left out when it cannot.
-func TestCacheStateStatesWhichThreadsArePingable(t *testing.T) {
+// pingable and ping_reason are stated per thread when the host can say, and left out when it cannot.
+func TestCacheStateStatesWhichThreadsArePingableAndWhyNot(t *testing.T) {
 	a, rec := newTestAPI(t, Options{})
 	now := time.Now().UnixMilli()
 	main := mkEvent(now-100_000, "s1", "aws/claude-sonnet-5", 1000, 800)
@@ -266,17 +266,29 @@ func TestCacheStateStatesWhichThreadsArePingable(t *testing.T) {
 	if _, ok := body["pingable"]; ok {
 		t.Errorf("no keeper wired, yet pingable is stated: %v", body["pingable"])
 	}
-	a.SetPingable(func(_ string, _ bool, session string) map[string]bool {
-		return map[string]bool{"": true}
+	if _, ok := body["ping_reason"]; ok {
+		t.Errorf("no keeper wired, yet ping_reason is stated: %v", body["ping_reason"])
+	}
+	a.SetPingStates(func(_ string, _ bool, session string) map[string]PingState {
+		return map[string]PingState{"": {Pingable: true}, "a:X": {Reason: "too large"}}
 	})
 	_, body = get(t, a, "/api/cachestate?session=s1", "")
-	if body["pingable"] != true {
-		t.Errorf("session pingable = %v, want true (main is held)", body["pingable"])
+	if body["pingable"] != true || body["ping_reason"] != nil {
+		t.Errorf("session = pingable %v reason %v, want true and no reason", body["pingable"], body["ping_reason"])
 	}
 	for _, th := range body["threads"].([]any) {
 		th := th.(map[string]any)
-		if want := th["main"] == true; th["pingable"] != want {
-			t.Errorf("thread %v pingable = %v, want %v", th["id"], th["pingable"], want)
+		if th["main"] == true && (th["pingable"] != true || th["ping_reason"] != nil) {
+			t.Errorf("main thread = %v", th)
 		}
+		if th["id"] == "a:X" && (th["pingable"] != false || th["ping_reason"] != "too large") {
+			t.Errorf("subagent = pingable %v reason %v, want false / too large", th["pingable"], th["ping_reason"])
+		}
+	}
+	// A thread the host never heard of was never held.
+	a.SetPingStates(func(string, bool, string) map[string]PingState { return map[string]PingState{} })
+	_, body = get(t, a, "/api/cachestate?session=s1", "")
+	if body["pingable"] != false || body["ping_reason"] != "not opted in" {
+		t.Errorf("unknown thread = pingable %v reason %v, want false / not opted in", body["pingable"], body["ping_reason"])
 	}
 }

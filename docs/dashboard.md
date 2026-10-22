@@ -136,6 +136,18 @@ body or key to ping with), `404 unknown session`, and `429 too soon` (one press 
 `/api/adapt/*`: the dashboard cookie, the account's own proxy token, or a direct loopback request
 to a single-tenant proxy.
 
+`pingable` and `ping_reason` on `/api/cachestate` say whether a press can work. `pingable` is true only
+while the proxy holds the thread. When it is false, `ping_reason` is one of `not opted in`, `too large`,
+`expired`, `over budget` or `unsupported`.
+
+**Ping with keep-alive off.** A request that carries `x-context-guru-ping: 1` is held for the button
+even when the account has no automatic keep-alive. Nothing is pinged for it. The proxy keeps the body and
+the key for at most 300 seconds from the start of the request, even for a one-hour cache, then releases and
+zeroes them. A new request, or a press that read the cache, starts the 300 seconds again. The usual limits
+still apply: 8 MiB per body, 512 threads, 128 MiB in all, and the per-ping cost ceiling. Claude Code sends the
+header when `ANTHROPIC_CUSTOM_HEADERS` in its settings `env` contains `x-context-guru-ping: 1` (one `Name: Value`
+per line when there are several headers). The proxy never forwards it upstream.
+
 Its row is a keep-alive row with `manual_ping` set. `GET /api/stats` reports these rows as
 `manual_pings` (`count`, `ping_usd`, and `saved_usd` net of the pings' cost). They are a savings
 category of their own: they join `total_saved_usd`, and no cache strategy's ledger counts them.

@@ -50,7 +50,7 @@ type API struct {
 	tenantCapture func(tenantID string) bool
 	// kaPlans reads the keep-alive keeper's per-thread plan for /api/cachestate. nil = no plans.
 	// pingable says per thread whether a manual ping can be sent. nil = never stated.
-	pingable func(tenantID string, allTenants bool, session string) map[string]bool
+	pingable func(tenantID string, allTenants bool, session string) map[string]PingState
 	kaPlans  func(tenantID string, allTenants bool, session string) map[string]KeepAlivePlan
 	// pricer values the pre-instrumentation split figure on read. nil = that figure is omitted.
 	pricer modelinfo.Pricer
