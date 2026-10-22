@@ -39,6 +39,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cgcache  # noqa: E402  (the on-disk request budget the status line shares)
+import costly as S  # noqa: E402  (settings that cost money: the list, detection, apply, revert)
 import cgcost as C  # noqa: E402  (usd, spark, bar, table, recommendations, unused_items ...)
 import tvlib as T  # noqa: E402  (Env: colour, ASCII fallback, width; cols, fit, clip)
 
@@ -675,12 +676,12 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
 # each setting and returns one report per kind (contract: docs/plugin/save-more.md). This side renders it and,
 # after a yes, sends back an option id the report offered. It never composes configuration itself.
 
-KINDS = ("config", "cache", "tools")
+KINDS = ("config", "cache", "tools", "settings")
 ROUTE = {"config": "compaction", "cache": "cache", "tools": "tools"}  # the backend keeps its /api/adapt/* paths
 ALIAS = {"compaction": "config"}  # an older name, still understood
 WRITES = ("apply", "revert")  # top-level commands; no read command ever writes, so a skill may pre-approve it
 READS = ("save-more", "remove-mcp-and-skills")
-SLASH = {"config": "/context-guru:save-more", "cache": "/context-guru:save-more", "tools": "/context-guru:remove-mcp-and-skills"}
+SLASH = {"config": "/context-guru:save-more", "cache": "/context-guru:save-more", "settings": "/context-guru:save-more", "tools": "/context-guru:remove-mcp-and-skills"}
 NOUN = {"config": "config", "cache": "keep-alive strategy", "tools": "MCP servers and skills"}
 ITEM_KINDS = {"mcp_server": "MCP server", "mcp_tool": "MCP tool", "skill": "skill"}  # never a built-in tool
 ADAPT_DAYS = 30
@@ -729,18 +730,18 @@ def adapt_words(cmd: str, args: list[str], o: dict) -> tuple[str, list[str], str
         kinds = ["tools"]
     token = rest[0] if rest else None
     flags = (f" --days {o['days']}" if o["days"] else "") + (" --force" if o.get("force") else "")
-    usage = (f'Usage: python3 "{script}" save-more [config|cache] [details] [--custom] [--days N]\n'
+    usage = (f'Usage: python3 "{script}" save-more [config|cache|settings] [details] [--custom] [--days N]\n'
              f'       python3 "{script}" remove-mcp-and-skills [details] [--days N]\n'
              f'       python3 "{script}" apply <{"|".join(KINDS)}> <option>@<basis>\n'
-             f'       python3 "{script}" revert <{"|".join(KINDS)}>')
+             f'       python3 "{script}" revert <{"|".join(KINDS)}> (settings: revert settings <check-id>)')
     if len(verbs) > 1 or len(kinds) > 1 or (verb == "apply" and (not kinds or len(rest) != 1)) \
-            or (verb == "revert" and (not kinds or rest)) or (verb == "read" and rest) \
+            or (verb == "revert" and (not kinds or len(rest) != (kinds == ["settings"]))) or (verb == "read" and rest) \
             or (cmd == "remove-mcp-and-skills" and kinds != ["tools"]):
         return verb, kinds, token, usage
     if verb != "read" and cmd != verb:
         exact = f'python3 "{script}" {verb} {kinds[0]}' + (f" {shlex.quote(token)}" if token else "") + flags
         return verb, kinds, token, f"Run this instead (a change is its own command): {exact}"
-    return verb, kinds or ["config", "cache"], token, None
+    return verb, kinds or ["config", "cache", "settings"], token, None
 
 
 def money(x: float | None) -> str:
@@ -1108,8 +1109,24 @@ def read_kinds(api: Api, o: dict, kinds: list[str]) -> list[tuple[str, int, dict
     return [(k, st, rep) for k, (st, rep) in zip(kinds, got)]
 
 
+def settings_card(api: Api, o: dict, e) -> list[str]:
+    """The "Settings that cost you money" card, or nothing when no check fires. Fails open: an old proxy or no answer
+    only turns the cost into "not measured". Reads the user's own settings on this machine; writes nothing."""
+    fs = S.findings()
+    if not fs:
+        return []
+    days = o["days"] or ADAPT_DAYS
+    since, now = window(o, days)
+    return S.render(fs, S.costs(api, since, now), days, dollars, card, SLASH["settings"], e)
+
+
 def cmd_save(api: Api, o: dict, kinds: list[str], e) -> tuple[list[str], int, list[tuple[str, dict]]]:
     """(lines, exit code, (kind, report) for each report that carries a recommendation)."""
+    want_settings = "settings" in kinds
+    kinds = [k for k in kinds if k != "settings"]
+    if not kinds:  # `save-more settings` alone: no replay
+        L = settings_card(api, o, e)
+        return (L if L else ["No settings that cost you money were found."]), 0, []
     got = read_kinds(api, o, kinds)
     if o.get("json"):
         return [json.dumps({k: rep for k, _, rep in got}, indent=2)], 0, []
@@ -1137,6 +1154,9 @@ def cmd_save(api: Api, o: dict, kinds: list[str], e) -> tuple[list[str], int, li
         rc = 0 if ok else 1
     elif kinds == ["tools"] and recs:
         L.append(tools_question(recs[0][1], e))
+    if want_settings:
+        sc = settings_card(api, o, e)
+        L += (sc + [""]) if sc else []
     return L, rc, recs
 
 
@@ -1146,6 +1166,10 @@ def adapt_main(api: Api, cmd: str, opts: dict) -> int:
     if err:
         print(err)
         return 1
+    if verb != "read" and kinds[0] == "settings":  # local files, no proxy: a settings change is the user's own, after their yes
+        L, rc = S.apply(token) if verb == "apply" else S.revert(token)
+        print("\n".join(L))
+        return rc
     if verb != "read":
         L, rc = adapt_apply(api, o, kinds[0], token if verb == "apply" else "revert")
         print("\n".join(L))
@@ -1280,7 +1304,7 @@ def run(cmd: str, api: Api, opts: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES, "cachestate", "ping"]))
-    ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; save-more [config|cache]; apply <kind> <option>@<basis>; revert <kind>")
+    ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; save-more [config|cache|settings]; apply <kind> <option>@<basis>; revert <kind>")
     ap.add_argument("--custom", action="store_true", help="save-more config: also search custom combinations, not only the shipped presets")
     ap.add_argument("--force", action="store_true", help="apply: go ahead although the proxy's own check failed (asked separately); "
                     "cache-campaign mode ... active: go live although the build did not recommend it")
@@ -1300,7 +1324,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--session-end", action="store_true", help="cache-campaign build --builder auto: score as if the SessionEnd hook is installed")
     ap.add_argument("--mock", action="store_true", help="cache-campaign: use the documented sample response")
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] in ("config", "compaction", "tools"):  # `cg.py config revert`: the read side, which names the change
+    if argv and argv[0] in ("config", "compaction", "tools", "settings"):  # `cg.py config revert`: the read side, which names the change
         argv = ["save-more", *argv]
     a = ap.parse_args(argv)
     if a.cmd not in (*READS, *WRITES) and set(a.args) & set(WRITES):  # `cg.py insights tools apply X`: say the one command that does it
@@ -1321,10 +1345,15 @@ def main(argv: list[str] | None = None) -> int:
         if not base and a.cmd == "cachestate":
             print(json.dumps({"error": "no proxy routing this session"}))
             return 1
-        if not base:
+        local = adapt and "settings" in a.args and (a.cmd in WRITES or a.args[0:1] == ["settings"] and not set(a.args) & {"config", "cache"})
+        if not base and local:  # settings are read on this machine: apply and revert need no proxy; a read says "cost not measured"
+            base = "http://127.0.0.1:0"
+            api = Api(base, token=None)
+        elif not base:
             print(NO_PROXY)
             return 1 if adapt else 0  # a read that showed no report must not count as run (the skills chain on it)
-        api = Api(base, token=cg_token() if adapt else None)
+        else:
+            api = Api(base, token=cg_token() if adapt else None)
     if a.cmd == "ping":
         return ping_main(api, a.session, a.thread, a.json)
     if a.cmd in (*READS, *WRITES):
