@@ -5,7 +5,7 @@
     home      what is my situation, what should I do next
     savings   how much did Context Guru save me                  (saved and estimated kept apart)
     cache     is my cache about to cost me
-    insights  savings, cache and tools (what you carry and never use) in one place; `waste` is `insights tools`
+    insights  savings, cache and tools (what you carry and never use) in one place
     session   what happened in this session
     doctor    is it set up right
     save-more              which config and keep-alive strategy would have cost least on my own history
@@ -279,7 +279,7 @@ def cmd_home(api: Api, o: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------------
-# /context-guru:savings
+# /context-guru:insights savings
 
 def cmd_savings(api: Api, o: dict) -> list[str]:
     d = o["days"] or 7
@@ -313,7 +313,7 @@ def cmd_savings(api: Api, o: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------------
-# /context-guru:cache
+# /context-guru:insights cache
 
 CAUSES = {"idle_expiry": "You paused longer than the cache lasts", "prefix_change": "Settings or tools changed mid-session",
           "cold_start": "A new session started", "new_thread": "A helper agent started",
@@ -476,7 +476,7 @@ def cmd_campaign(api: Api, o: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------------
-# /context-guru:waste
+# /context-guru:insights tools
 
 def _cost(row: dict) -> tuple[float, bool]:
     """(dollars, is the whole carry). carry_usd is everything the declaration cost to carry; an older proxy only
@@ -659,9 +659,9 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
 
 KINDS = ("config", "cache", "tools")
 ROUTE = {"config": "compaction", "cache": "cache", "tools": "tools"}  # the backend keeps its /api/adapt/* paths
-ALIAS = {"compaction": "config", "waste": "tools"}  # older names, still understood
+ALIAS = {"compaction": "config"}  # an older name, still understood
 WRITES = ("apply", "revert")  # top-level commands; no read command ever writes, so a skill may pre-approve it
-READS = ("save-more", "remove-mcp-and-skills", "adapt")
+READS = ("save-more", "remove-mcp-and-skills")
 SLASH = {"config": "/context-guru:save-more", "cache": "/context-guru:save-more", "tools": "/context-guru:remove-mcp-and-skills"}
 NOUN = {"config": "config", "cache": "keep-alive strategy", "tools": "MCP servers and skills"}
 ITEM_KINDS = {"mcp_server": "MCP server", "mcp_tool": "MCP tool", "skill": "skill"}  # never a built-in tool
@@ -1133,11 +1133,8 @@ def adapt_main(api: Api, cmd: str, opts: dict) -> int:
         print("\n".join(L))
         return rc
     e = T.Env()
-    pre = []
-    if cmd == "adapt":  # the 0.6 name, for one release
-        pre = ["/context-guru:adapt is now /context-guru:save-more (config, cache) and /context-guru:remove-mcp-and-skills.", ""]
     L, rc, recs = cmd_save(api, o, kinds, e)
-    print("\n".join(pre + L))
+    print("\n".join(L))
     if recs and sys.stdin.isatty() and sys.stdout.isatty():
         for k, rep in recs:
             if input(f"\nApply {rep['recommendation']['change']}? [y/N] ").strip().lower() in ("y", "yes"):
@@ -1153,9 +1150,6 @@ def adapt_main(api: Api, cmd: str, opts: dict) -> int:
 # each screen is the same function as before.
 
 INSIGHTS = {"savings": cmd_savings, "cache": cmd_cache, "tools": cmd_waste}
-INSIGHT_NAME = {"savings": "insights savings", "cache": "insights cache", "waste": "insights tools"}  # the old names
-
-
 def cmd_insights(api: Api, o: dict) -> list[str]:
     unknown = [a for a in o["args"] if a not in INSIGHTS]
     if unknown:  # its own usage, not another command's
@@ -1172,7 +1166,7 @@ def cmd_insights(api: Api, o: dict) -> list[str]:
     return L + ["More: /context-guru:insights savings | cache | tools, each with details"]
 
 
-CMDS = {"home": cmd_home, "insights": cmd_insights, "savings": cmd_savings, "cache": cmd_cache, "waste": cmd_waste,
+CMDS = {"home": cmd_home, "insights": cmd_insights,
         "session": cmd_session, "doctor": cmd_doctor, "cache-campaign": cmd_campaign}
 
 
@@ -1230,7 +1224,7 @@ def run(cmd: str, api: Api, opts: dict) -> str:
          "campaign": {"scope": "tenant", "id": "", "window": "30d"}, **opts}
     L = CMDS[cmd](api, o)
     if not o["details"] and cmd not in ("doctor", "home", "insights", "cache-campaign"):
-        L += ["", f"More: /context-guru:{INSIGHT_NAME.get(cmd, cmd)} details"]
+        L += ["", f"More: /context-guru:{cmd} details"]
     return "\n".join(L)
 
 
@@ -1259,8 +1253,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] in ("config", "compaction", "tools"):  # `cg.py config revert`: the read side, which names the change
         argv = ["save-more", *argv]
     a = ap.parse_args(argv)
-    if a.cmd not in (*READS, *WRITES) and set(a.args) & set(WRITES):  # `cg.py cache revert`: say the one command that does it
+    if a.cmd not in (*READS, *WRITES) and set(a.args) & set(WRITES):  # `cg.py insights tools apply X`: say the one command that does it
         a.args, a.cmd = [a.cmd, *a.args], "save-more"
+
     opts: dict = {"days": a.days, "session": a.session, "json": a.json, "force": a.force, "custom": a.custom, "mock": a.mock,
                   "campaign": {"scope": a.scope, "id": a.id, "window": a.window, "builder": a.builder, "session_end": a.session_end},
                   "details": "details" in a.args, "args": [x for x in a.args if x != "details"],

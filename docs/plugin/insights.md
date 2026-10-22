@@ -65,5 +65,3 @@ Measured carry; the monthly figure is an estimate that assumes your usage stays 
 
 More: /context-guru:insights savings | cache | tools, each with details
 ```
-
-The old names still work for one release and say where they moved: `/context-guru:savings`, `/context-guru:cache` and `/context-guru:waste` (now `insights tools`), and the older `insights-capabilities` (tools), `insights-components` (savings) and `insights-idle` (cache).

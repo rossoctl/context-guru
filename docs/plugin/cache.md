@@ -1,6 +1,6 @@
 # Cache
 
-`/context-guru:insights cache` (was `/context-guru:cache`, which still works for one release). `/context-guru:insights` shows it together with the other two.
+`/context-guru:insights cache`. `/context-guru:insights` shows it together with the other two.
 
 **Question: is my cache about to cost me?**
 

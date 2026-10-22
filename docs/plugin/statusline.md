@@ -5,16 +5,16 @@ The status line sits under the prompt and answers two questions all the time: **
 ![Warm: green, seconds ticking down](../statusline-live/warm-dark.svg#only-dark)
 ![Warm: green, seconds ticking down](../statusline-live/warm-light.svg#only-light)
 
-The first line is money, the second is the cache clock, the sub-agents, the context bar and the session's keep-alive pings. A third line, the weekly tip, appears only when it applies:
+The first line is money, the second is the main agent's cache clock (left out when cold), the context bar and the session's keep-alive pings. A third line, the weekly tip, appears only when it applies:
 
 ```text
-saved $0.31 of $4.41 session · saved $0.12 of $0.90 subagents
-cache ● █████░ 13:40 ↻ │ next $0.03 warm · $0.30 cold │ agents reviewer active ● 4:58 saved $0.08 of $0.40 · Explore ◐ 0:51 saved $0.02 of $0.20 │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
+saved $0.31 of $4.41 session ↻ $0.84 · saved $0.12 of $0.90 subagents
+cache ● █████░ 13:40 ↻ │ next $0.03 warm · $0.30 cold │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
 ```
 
 Only savings recorded with each request count: the compaction saving (against the same request uncompacted), the cache split, and the keep-alive credit, which a request gets only when a ping that read the cache kept it warm. Two credits that the dashboard prices when it is read are left out: the estimate for requests recorded before the cache split was measured, and the tool (declaration) filter's saving. So the line can read lower than the dashboard, which adds both. A figure the proxy did not report is left out, never shown as `$0.00`. The figures are not Claude Code's own `cost` (its estimate at list prices), which `detailed` shows as `spent`.
 
-Every number is about this session. There is no today or lifetime total on the line; the dashboard and `/context-guru:savings` cover longer windows.
+Every number is about this session. There is no today or lifetime total on the line; the dashboard and `/context-guru:insights savings` cover longer windows.
 
 ## What each piece means
 
@@ -38,7 +38,8 @@ Every number is about this session. There is no today or lifetime total on the l
 | Warm | green `●` | more than 60 s left (a fifth of the lifetime on the 1 h tier) |
 | Expiring | amber `◐` | 60 s to 15 s left |
 | Critical | red `◐ 0:09!` | the last 15 s |
-| Cold | red `○ cold 1:15` | expired; counts up how long it has been cold |
+| Cold | (nothing) | expired; the cache and next segments are left out |
+| Pinged | cyan `● 13:40 ↻` | kept warm by keep-alive or manual pings |
 
 The bar drains over the cache's own lifetime: 5 minutes, or 1 hour on the 1 h tier.
 
@@ -77,6 +78,8 @@ The bar rescales to the tier's lifetime.
 ![Ping planned](../statusline-live/ping-planned-light.svg#only-light)
 
 ### <span id="sub-agents-and-the-selected-agent"></span>Sub-agents
+
+**The line shows one clock, the main agent's. The sections below describe the opt-in `--show=agents` list and the `watch` layout; the Claude Code mod shows sub-agents by default.**
 
 **Limitation: the status line cannot follow the agent you select.** Claude Code does not tell the status line command which agent is selected in its agents list; the command receives the same input whichever agent you are viewing (checked against Claude Code 2.1.296). So the line always shows the main agent's cache on the left, and every sub-agent's cache by name, the same name the agents list shows. Select `reviewer` in the list and read the `reviewer` clock.
 
@@ -138,7 +141,7 @@ A line too wide for the terminal sheds, in order: the tip, tools, latency, keep-
 | Layout | Shows |
 |---|---|
 | `minimal` | one line: saved, cache |
-| `balanced` (default) | update, saved, cache, agents, context, keep-alive pings, the weekly tip |
+| `balanced` (default) | update, saved, cache, next, context, keep-alive pings, the weekly tip |
 | `detailed` | balanced plus `spent $4.10 · $2.73/h · up 1h30m` (the rate appears after 5 minutes), a slow-upstream note (only when upstream averages 3 s or more) and the least-used tool or skill |
 
 ![Detailed layout](../statusline-live/detailed-dark.svg#only-dark)
@@ -150,7 +153,7 @@ Switch without editing settings, and keep the choice across renders:
 python3 "<plugin dir>/scripts/statusline.py" --set-layout=detailed   # or minimal, balanced, auto
 ```
 
-`auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache next agents ctx ka latency tools tip`), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`.
+`auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache next agents ctx ka latency tools tip`; `agents`, the per-agent list, is off by default), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`.
 
 ## Modes
 

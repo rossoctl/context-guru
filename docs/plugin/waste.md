@@ -1,6 +1,6 @@
 # Waste
 
-`/context-guru:insights tools` (was `/context-guru:waste`, which still works for one release). `/context-guru:insights` shows it together with the other two.
+`/context-guru:insights tools`. `/context-guru:insights` shows it together with the other two.
 
 **Question: what do I carry and never use?**
 

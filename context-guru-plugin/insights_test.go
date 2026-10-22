@@ -29,7 +29,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -290,7 +289,7 @@ func TestEveryPresetOfferedIsOneInsightsCanExplain(t *testing.T) {
 	for name := range offered {
 		if _, ok := pipelines[name]; !ok {
 			t.Errorf("settings.py offers preset %q but insights.py has no pipeline for it, so "+
-				"/context-guru:insights-components would report preset_known=false and say nothing "+
+				"/context-guru:insights savings would report preset_known=false and say nothing "+
 				"about what is switched off for anybody who selected it", name)
 		}
 	}
@@ -875,25 +874,17 @@ func TestJSONModeIsTheSameDocument(t *testing.T) {
 // The skills
 // ---------------------------------------------------------------------------
 
-// The four insights skills are redirects now. Each tells the user where the command moved and runs
-// the new one through cg.py, with nothing else it may run and no option read of its own.
-func TestInsightSkillsAreRedirects(t *testing.T) {
-	moved := map[string]string{"insights-capabilities": "insights tools", "insights-idle": "insights cache", "insights-components": "insights savings",
-		"cost-today": "status", "cost-unused": "insights tools", "cost-cold": "insights cache", "cost-compact": "insights cache",
-		"cost-trends": "insights savings", "savings": "insights savings", "cache": "insights cache", "waste": "insights tools"}
-	for name, to := range moved {
-		t.Run(name, func(t *testing.T) {
-			body := readFileString(t, filepath.Join("skills", name, "SKILL.md"))
-			if !strings.Contains(body, "moved to `/context-guru:"+to+"`") {
-				t.Errorf("does not say it moved to /context-guru:%s", to)
+// The deprecated redirect stubs are gone for good: their work lives in `insights` (savings, cache,
+// tools), `status`, `save-more` and `remove-mcp-and-skills`. A stub coming back would put a dead
+// command in the slash menu again.
+func TestDeprecatedStubSkillsStayDeleted(t *testing.T) {
+	for _, name := range []string{"savings", "cost-trends", "insights-components", "cache", "cost-cold", "cost-compact", "insights-idle",
+		"waste", "cost-unused", "insights-capabilities", "cost-today", "adapt"} {
+		for _, root := range []string{"skills", filepath.Join("..", "codex-marketplace", "plugins", "context-guru", "skills")} {
+			if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+				t.Errorf("%s/%s is a deprecated stub and must stay deleted", root, name)
 			}
-			if !regexp.MustCompile(`allowed-tools: Bash\(python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/cg\.py" [a-z]+:\*\)`).MatchString(body) {
-				t.Error("must be allowed to run only its own cg.py command")
-			}
-			if strings.Contains(body, "CLAUDE_PLUGIN_OPTION_") {
-				t.Error("must not resolve plugin options; cg.py takes the proxy from the session")
-			}
-		})
+		}
 	}
 }
 
