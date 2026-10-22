@@ -255,3 +255,117 @@ func TestManualHoldOnAnAccountWithKeepAliveOn(t *testing.T) {
 		t.Error("without the header the under-floor thread was held")
 	}
 }
+
+// ---- the reasons on an account with automatic keep-alive ON (issue #662) ----
+
+// Pings that ran out are not a failure. While the entry is still held and the cache can still be
+// warm, a press is allowed (same ceiling and 30 s gap). After the keeper lets go, the reason says so.
+func TestAPressIsAllowedOnAnEntryWhosePlannedPingsRanOut(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	start := clock.now()
+	recordOne(t, k, kaPolicy(), kaBody, start)
+	k.Sweep(start.Add(280 * time.Second))
+	k.Sweep(start.Add(560 * time.Second)) // K = 2: both used
+	clock.advance(570 * time.Second)
+	if e, _ := k.Entry(sess1); e.Pings != 2 || e.Stopped {
+		t.Fatalf("entry = %+v, want 2 pings used and not stopped", e)
+	}
+	if st := stateOf(k, sess1); !st.Pingable || st.Reason != "" {
+		t.Fatalf("state = %+v, want pingable while it is still held and warm", st)
+	}
+	before := fd.n()
+	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second}); err != nil {
+		t.Fatalf("press after the pings ran out: %v", err)
+	}
+	if fd.n() != before+1 {
+		t.Errorf("sent %d, want exactly the press", fd.n()-before)
+	}
+	// Past its release the keeper holds nothing, and says why.
+	k2, _, clock2 := testKeeper(t)
+	s2 := clock2.now()
+	recordOne(t, k2, kaPolicy(), kaBody, s2)
+	k2.Sweep(s2.Add(280 * time.Second))
+	k2.Sweep(s2.Add(560 * time.Second))
+	k2.Sweep(s2.Add(900 * time.Second))
+	if _, ok := k2.Entry(sess1); ok {
+		t.Fatal("the spent entry was not released")
+	}
+	if st := stateOf(k2, sess1); st.Pingable || st.Reason != ReasonPingsUsed {
+		t.Errorf("state = %+v, want not pingable, %q", st, ReasonPingsUsed)
+	}
+}
+
+// A miss or a refused ping stops the entry, and a press stays refused.
+func TestAnEntryStoppedByAFailureIsNotPingableAndSaysStopped(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	start := clock.now()
+	recordOne(t, k, kaPolicy(), kaBody, start)
+	fakeOf(k).setResp(func(DispatchRequest) (Usage, int, error) { return Usage{}, http.StatusBadRequest, nil })
+	k.Sweep(start.Add(280 * time.Second)) // the scheduled ping gets a 400 and stops the entry
+	if st := stateOf(k, sess1); st.Pingable || st.Reason != ReasonStopped {
+		t.Fatalf("state = %+v, want not pingable, %q", st, ReasonStopped)
+	}
+	if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {
+		t.Errorf("press on a stopped entry = %v, want ErrNotHeld", err)
+	}
+	// And after the keeper releases it, still "stopped", not "not opted in".
+	k.Sweep(start.Add(600 * time.Second))
+	if _, ok := k.Entry(sess1); ok {
+		t.Fatal("the stopped entry was not released")
+	}
+	if st := stateOf(k, sess1); st.Reason != ReasonStopped {
+		t.Errorf("after release: %+v, want %q", st, ReasonStopped)
+	}
+}
+
+// Nothing known about a thread (a restart, or no request yet) is "no entry", never "not opted in".
+func TestAThreadNothingIsKnownAboutSaysNoEntry(t *testing.T) {
+	k, _, _ := testKeeper(t)
+	if st := k.PingStates("t1", false, "never-seen").For(""); st.Pingable || st.Reason != ReasonNoEntry {
+		t.Errorf("state = %+v, want %q", st, ReasonNoEntry)
+	}
+	if st := (PingStateMap(nil)).For("a:x"); st.Reason != ReasonNoEntry {
+		t.Errorf("nil map: %+v, want %q", st, ReasonNoEntry)
+	}
+}
+
+// Keep-alive ON, no header: the automatic gates refuse a thread. That is not "not opted in".
+func TestGatedThreadsOnAnAccountWithKeepAliveOnSayWhy(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	small := kaPolicy()
+	small.MinPrefixTokens = 1 << 20
+	recordHold(k, sess1, clock.now(), kaBody, small, false)
+	if st := stateOf(k, sess1); st.Pingable || st.Reason != ReasonBelowLimits {
+		t.Errorf("under the floor, no header: %+v, want %q", st, ReasonBelowLimits)
+	}
+
+	k, fd, clock = testKeeper(t)
+	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 1e-3, Output: 1e-3, CacheRead: 1e-3, CacheWrite: 1e-3}}})
+	recordHold(k, sess1, clock.now(), kaBody, kaPolicy(), false)
+	if st := stateOf(k, sess1); st.Pingable || st.Reason != ReasonOverBudget {
+		t.Errorf("over the ceiling, no header: %+v, want %q", st, ReasonOverBudget)
+	}
+	recordHold(k, Key{Tenant: "t1", Session: "hdr"}, clock.now(), kaBody, kaPolicy(), true)
+	if st := stateOf(k, Key{Tenant: "t1", Session: "hdr"}); st.Pingable || st.Reason != ReasonOverBudget {
+		t.Errorf("over the ceiling, with the header: %+v, want %q", st, ReasonOverBudget)
+	}
+
+	// With the header, a thread under the floor IS held and pingable.
+	k, _, clock = testKeeper(t)
+	recordHold(k, sess1, clock.now(), kaBody, small, true)
+	if st := stateOf(k, sess1); !st.Pingable {
+		t.Errorf("under the floor, with the header: %+v, want pingable", st)
+	}
+	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second}); err != nil {
+		t.Errorf("press on a thread under the floor: %v", err)
+	}
+}
+
+// The truthful "not opted in": no automatic policy and no header.
+func TestNotOptedInIsOnlyForARequestThatCarriedNothing(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	recordHold(k, sess1, clock.now(), kaBody, offPolicy, false)
+	if st := stateOf(k, sess1); st.Reason != ReasonNotOptedIn {
+		t.Errorf("state = %+v, want %q", st, ReasonNotOptedIn)
+	}
+}

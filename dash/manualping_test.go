@@ -288,7 +288,7 @@ func TestCacheStateStatesWhichThreadsArePingableAndWhyNot(t *testing.T) {
 	// A thread the host never heard of was never held.
 	a.SetPingStates(func(string, bool, string) map[string]PingState { return map[string]PingState{} })
 	_, body = get(t, a, "/api/cachestate?session=s1", "")
-	if body["pingable"] != false || body["ping_reason"] != "not opted in" {
-		t.Errorf("unknown thread = pingable %v reason %v, want false / not opted in", body["pingable"], body["ping_reason"])
+	if body["pingable"] != false || body["ping_reason"] != "no entry" {
+		t.Errorf("unknown thread = pingable %v reason %v, want false / no entry", body["pingable"], body["ping_reason"])
 	}
 }

@@ -34,6 +34,12 @@ const (
 	ReasonExpired     = "expired"      // it was held, and the hold ran out
 	ReasonOverBudget  = "over budget"  // one ping would cost more than the per-ping ceiling
 	ReasonUnsupported = "unsupported"  // a shape that cannot be pinged cheaply (thinking enabled, an unsupported route)
+	// The reasons on an account whose automatic keep-alive is ON (issue #662). None of these is
+	// "not opted in": that stays for a request that carried no opt-in and met no automatic policy.
+	ReasonPingsUsed   = "pings used"   // the planned pings ran out and the keeper let go of the thread
+	ReasonStopped     = "stopped"      // the keeper stopped the thread after a miss, a refused ping or a failure
+	ReasonBelowLimits = "below limits" // the automatic gates refused it: first request, under the minimum prefix, or the predictor
+	ReasonNoEntry     = "no entry"     // nothing is known about the thread: a restart, or no request since
 )
 
 // PingState says whether a thread can be pinged right now, and if not, why.
@@ -45,12 +51,12 @@ type PingState struct {
 // PingStateMap is one session's threads ("" = main). A thread with no entry was never held.
 type PingStateMap map[string]PingState
 
-// For is the thread's state; a thread nothing is known about is "not opted in".
+// For is the thread's state; a thread nothing is known about has "no entry".
 func (m PingStateMap) For(thread string) PingState {
 	if s, ok := m[thread]; ok {
 		return s
 	}
-	return PingState{Reason: ReasonNotOptedIn}
+	return PingState{Reason: ReasonNoEntry}
 }
 
 // refusal remembers why a thread was not held, until the next request on it.
@@ -119,7 +125,7 @@ func (k *Keeper) PingStates(tenant string, all bool, session string) PingStateMa
 		}
 		switch {
 		case e.stopped:
-			out[e.thread] = PingState{Reason: ReasonNotOptedIn}
+			out[e.thread] = PingState{Reason: ReasonStopped}
 		case e.manualExpired(now):
 			out[e.thread] = PingState{Reason: ReasonExpired}
 		default:
@@ -144,4 +150,27 @@ func (e *kaEntry) entryCeiling() float64 {
 		return e.ceiling
 	}
 	return e.pol.Ceiling()
+}
+
+// autoReleaseReason is why the keeper is letting go of an AUTOMATIC entry on its own: stopped by a
+// miss or a refusal, its planned pings spent, or no longer passing the gates. Called with k.mu held.
+func (e *kaEntry) autoReleaseReason() string {
+	switch {
+	case e.stopped:
+		return ReasonStopped
+	case e.pol.MaxPings > 0 && e.pings >= e.pol.MaxPings:
+		return ReasonPingsUsed
+	default:
+		return ReasonBelowLimits
+	}
+}
+
+// expireAuto is the hard-deadline timer of an automatic entry: it records why before it lets go.
+func (k *Keeper) expireAuto(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if e, ok := k.live[key]; ok {
+		k.setReasonLocked(e.key, e.autoReleaseReason())
+	}
+	k.retireLocked(key)
 }

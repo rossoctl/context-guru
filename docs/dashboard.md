@@ -137,8 +137,17 @@ body or key to ping with), `404 unknown session`, and `429 too soon` (one press 
 to a single-tenant proxy.
 
 `pingable` and `ping_reason` on `/api/cachestate` say whether a press can work. `pingable` is true only
-while the proxy holds the thread. When it is false, `ping_reason` is one of `not opted in`, `too large`,
-`expired`, `over budget` or `unsupported`.
+while the proxy holds the thread. When it is false, `ping_reason` is one of:
+`not opted in` (no keep-alive for the account and the request did not carry the header),
+`below limits` (keep-alive is on, but the thread is under its minimum prefix or fails its gates),
+`over budget` (one ping would cost more than the per-ping cost ceiling),
+`too large` (the body is over 8 MiB), `unsupported` (extended thinking, or a route that cannot be pinged cheaply),
+`pings used` (the planned pings ran out and the proxy let go of the thread),
+`stopped` (the proxy stopped the thread after a miss, a refused ping or a failure),
+`expired` (a manual-only hold ran out) and
+`no entry` (nothing is known about the thread: the proxy restarted, or has seen no request on it since).
+While a thread whose planned pings ran out is still held and its cache can still be warm, a press is allowed,
+under the same cost ceiling and 30-second gap. A press stays refused after a miss or a refused ping.
 
 **Ping with keep-alive off.** A request that carries `x-context-guru-ping: 1` is held for the button
 even when the account has no automatic keep-alive. Nothing is pinged for it. The proxy keeps the body and

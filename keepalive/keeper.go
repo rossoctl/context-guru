@@ -755,6 +755,11 @@ func (k *Keeper) Record(r Record) {
 	// no schedule, a hard 300 s life. Only the cost ceiling is kept, because a press spends money too.
 	if !pol.On() || !e.pingable() {
 		if !pol.ManualHold {
+			reason := ReasonBelowLimits
+			if e.pingUSD > pol.Ceiling() {
+				reason = ReasonOverBudget
+			}
+			k.setReasonLocked(r.Key, reason)
 			k.skipped.Add(1)
 			e.clear() // hold no body and no credential for a session we will not ping
 			return
@@ -785,7 +790,7 @@ func (k *Keeper) Record(r Record) {
 	// entry: K pings each restarting the clock, plus one final Idle to notice the last one
 	// bought nothing. After that there is no legitimate use, so the material goes whether or not
 	// anything else in this process is awake.
-	e.timer = time.AfterFunc(time.Duration(e.pol.MaxPings+1)*e.pol.Idle, func() { k.retire(key) })
+	e.timer = time.AfterFunc(time.Duration(e.pol.MaxPings+1)*e.pol.Idle, func() { k.expireAuto(key) })
 	k.evictLocked()
 }
 
@@ -1013,6 +1018,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 		}
 		if e.stopped || e.pings >= e.pol.MaxPings || !e.pingable() {
 			if !now.Before(e.startedAt.Add(e.pol.Idle)) {
+				k.setReasonLocked(e.key, e.autoReleaseReason())
 				k.bytes -= int64(len(e.body))
 				k.releaseLocked(e)
 				e.clear()
