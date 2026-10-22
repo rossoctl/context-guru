@@ -562,13 +562,14 @@ func repriceCarried(rep *ToolReport, scan *carriedScan) {
 		for i := range rows {
 			st := &rows[i]
 			st.UnusedReads, st.UnusedUSD, st.UnusedUSDLow, st.UnusedUSDHigh = 0, 0, 0, 0
-			// Priced only where a priced request carried it. carriedCost pre-creates an entry for every
-			// declared item, and a request it skips (incomplete token accounting) never touches one, so
-			// an entry at Requests=0 -- or no entry -- is "nothing priced this", not "priced, and free".
-			st.Priced = false
-			if c := scan.Items[st.Kind+"\x00"+st.Name]; c != nil {
+			// A row no request carried as unused (a used tool, or carriedCost's pre-created entry that a
+			// skipped request never touched) has a $0 unused figure. That is a measurement only if the
+			// scope had a priced request; if nothing in scope was priced it is an absence of one, and must
+			// not read as "priced, and free".
+			st.Priced = scan.pricedRequests > 0
+			if c := scan.Items[st.Kind+"\x00"+st.Name]; c != nil && c.Requests > 0 {
 				st.UnusedReads, st.UnusedUSD, st.UnusedUSDLow, st.UnusedUSDHigh = c.Reads, c.USD(), c.USDLow, c.USDHigh
-				st.Priced = c.Requests > 0 && !c.Unpriced
+				st.Priced = !c.Unpriced
 			}
 		}
 	}
