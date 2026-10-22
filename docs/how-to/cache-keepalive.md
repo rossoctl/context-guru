@@ -62,7 +62,31 @@ cache:
   keepalive_max_pings: 2               # K
   keepalive_min_prefix_tokens: 80000   # the gate
   keepalive_max_usd_per_ping: 0.50
+  keepalive_idle_seconds_1h: 3540      # X for a 1-hour cache (59 min); must be under 3600
+  keepalive_max_pings_1h: 1            # K for a 1-hour cache
 ```
+
+### Each session follows its own cache lifetime
+
+The proxy reads the lifetime from the traffic, per session (per thread). It does not use one
+proxy-wide setting.
+
+- A thread is a **1-hour** thread when every cache breakpoint in its request asks `ttl: "1h"` **and**
+  the response billed the 1-hour tier (`ephemeral_1h_input_tokens` equals the whole cache write). A
+  turn that only reads the cache bills no write, so it keeps the thread's last billed tier.
+- The billed tier decides. A gateway can downgrade a requested `1h` to `5m` (#330), and the proxy then
+  uses the 5-minute schedule.
+- Anything else is a **5-minute** thread. That includes a mixed request (1-hour head, 5-minute tail).
+
+| Cache lifetime | `auto` (default) | `1-ping` | `2-ping` |
+|---|---|---|---|
+| 5 minutes | first ping at 270 s, at most 2 | 1 ping at 270 s | same as `auto` |
+| 1 hour | 1 ping at 59 minutes | 1 ping at 59 minutes | 2 pings, 59 minutes apart |
+
+One proxy can serve a 1-hour subscription session and a 5-minute subagent or API-key session at once.
+Each follows its own row. The 59-minute time is one constant, `AnthropicDefaultKeepAliveIdle1h` in
+`internal/modelinfo/cachefrac.go`, or `keepalive_idle_seconds_1h` in the config. The credential hold for
+a 1-hour thread is `(K+1) x 59 min`: 118 min at K=1, and at most 236 min, because `keepalive_max_pings_1h` is capped at 3. A 5-minute thread holds about 14 min. An armed session override does not change a 1-hour thread's schedule; it enables the session and sets its prefix floor. If the installed proxy binary is older than the plugin and rejects the `_1h` keys, `start-proxy.sh` re-renders the config without them and a 1-hour cache is pinged on the 5-minute schedule until the proxy is updated. The re-render is tied to the installed proxy version, so the keys come back after an update.
 
 The 270-second Anthropic interval is chosen for robustness to where the cache cliff sits (it ties
 280 on the full replay window; counterfactual, see #435), not as a measured optimum; the 1680-second

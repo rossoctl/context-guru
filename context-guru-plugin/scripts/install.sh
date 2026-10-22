@@ -222,7 +222,7 @@ route_resolve_options() {
   R_PRESET=$(kv "$cfg" option_preset);        : "${R_PRESET:=off}"
   R_IDLE=$(kv "$cfg" option_idle_exit);       : "${R_IDLE:=24h}"
   [ -z "$R_STRATEGY" ] && R_STRATEGY=$(kv "$cfg" option_cache_strategy)
-  : "${R_STRATEGY:=5-min-ping}"
+  : "${R_STRATEGY:=auto}"
   [ -z "$R_UPSTREAM" ] && R_UPSTREAM=$(kv "$cfg" option_upstream)
 }
 
@@ -698,6 +698,13 @@ $R_STRATEGY was not checked and cache_strategy= in this report may be wrong too.
 plugin install rather than a bad argument: check python3 and $(route_here)/settings.py. Nothing was \
 installed, started or written."
   fi
+  # A name from before the ping-count rename (`5-min-ping`) is accepted and mapped to its new name, so a
+  # saved option or a remembered command still installs. `aliases=` is old:new pairs.
+  local aliases pair
+  aliases=$(printf '%s\n' "$slist" | sed -n 's/^aliases=//p')
+  for pair in ${aliases//,/ }; do
+    [ "${pair%%:*}" = "$R_STRATEGY" ] && R_STRATEGY=${pair#*:}
+  done
   case ",${names}," in
     *",${R_STRATEGY},"*) : ;;
     *) route_needs "unknown_strategy" "--cache-strategy $R_STRATEGY is not a strategy. Known: \
@@ -1236,7 +1243,7 @@ any other project, since the machine-wide install has its own record and port."
   # Consent for the manual-ping opt-in header (x-context-guru-ping: 1): said every time it is written, so the user
   # hears what the proxy keeps and for how long, and how to turn it off.
   if [ "$R_NOPING" != 1 ]; then
-    emit "ping_note=Ping works with keep-alive off: the Context Guru server keeps your latest request and key in memory for up to 5 minutes so the Ping button and /context-guru:ping can work. It never pings automatically for it, and drops the copy 5 minutes after your last request. To opt out, re-run the install with --no-ping-header."
+    emit "ping_note=Ping works with keep-alive off: the Context Guru server keeps your latest request and key in memory so the Ping button and /context-guru:ping can work: for 5 minutes after your last request on a 5-minute cache, and for up to 59 minutes on a 1-hour cache. It never pings automatically for it, and drops the copy at that time. A press never extends it. To opt out, re-run the install with --no-ping-header."
   fi
   route_install_statusline
   route_enable_plugin "$ares"

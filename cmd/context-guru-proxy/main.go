@@ -1016,6 +1016,8 @@ func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
 		Idle:             time.Duration(r.KeepAliveIdleSeconds) * time.Second,
 		OpenAIIdle:       time.Duration(r.KeepAliveOpenAIIdleSeconds) * time.Second,
 		MaxPings:         r.KeepAliveMaxPings,
+		Idle1h:           time.Duration(r.KeepAliveIdleSeconds1h) * time.Second,
+		MaxPings1h:       r.KeepAliveMaxPings1h,
 		MaxUSDPerPing:    r.KeepAliveMaxUSDPerPing,
 		MinPrefixTokens:  r.KeepAliveMinPrefixTokens,
 		HeadTTL1h:        c.HeadTTL1h,

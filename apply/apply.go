@@ -1042,6 +1042,36 @@ func bodyAsksExtendedTTL(body []byte) bool {
 	return false
 }
 
+// AllBreakpointsAskExtendedTTL reports whether the body has cache breakpoints and every one of them
+// asks for the 1h tier. A single 5m breakpoint (the default when `ttl` is absent) makes it false:
+// that segment expires in five minutes whatever the others ask. The keeper uses this, with the
+// billed tier, to pick a session's keep-alive schedule.
+func AllBreakpointsAskExtendedTTL(body []byte) bool {
+	total, extended := 0, 0
+	var walk func(v gjson.Result)
+	walk = func(v gjson.Result) {
+		if v.IsArray() {
+			v.ForEach(func(_, vv gjson.Result) bool { walk(vv); return true })
+			return
+		}
+		if v.IsObject() {
+			total++
+			if v.Get("ttl").String() == "1h" {
+				extended++
+			}
+		}
+	}
+	for _, p := range []string{
+		"messages.#.content.#.cache_control",
+		"messages.#.cache_control",
+		"system.#.cache_control",
+		"tools.#.cache_control",
+	} {
+		walk(gjson.GetBytes(body, p))
+	}
+	return total > 0 && total == extended
+}
+
 // cacheIsCold reports whether this session has been idle long enough that its prompt cache
 // is certainly gone.
 //

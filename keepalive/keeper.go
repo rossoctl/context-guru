@@ -144,10 +144,16 @@ type kaEntry struct {
 	// proxy/keepalivestrategy.go — and tagged onto the ping's own dash.Event by record1, never onto
 	// the real request it rescues.
 	tag string
+	// ttl1h is the cache lifetime this thread was GRANTED: true when the provider billed the
+	// one-hour tier, false for five minutes. Set once at record time by ResolveTier. It also sets
+	// how long a manual-only hold lives (holdFor), and, for an automatic entry, pol is already the
+	// one-hour schedule (Policy.ForOneHour).
+	ttl1h bool
 	// manualOnly marks an entry held only for the Ping button (manualhold.go): nothing pings it,
-	// plans it or counts it as pending, and it lives ManualHoldMax from startedAt.
+	// plans it or counts it as pending, and it lives ManualHoldMax (ManualHoldMax1h on a one-hour
+	// thread) from startedAt.
 	manualOnly bool
-	// holdFor is how long a manual-only entry lives from startedAt (ManualHoldMax).
+	// holdFor is how long a manual-only entry lives from startedAt.
 	holdFor time.Duration
 	// ceiling is the per-ping ceiling this entry was admitted under, kept because a manual-only entry's
 	// pol is zeroed.
@@ -172,6 +178,35 @@ type kaEntry struct {
 func (e *kaEntry) due(now time.Time) bool {
 	return !e.stopped && !e.manualOnly && e.pol.On() && e.pings < e.pol.MaxPings &&
 		!now.Before(e.startedAt.Add(e.pol.Idle))
+}
+
+// hold is how long this entry may keep the caller's credential and conversation: (K+1) x X, the
+// hard deadline. About 14 min for a 5-minute thread at the defaults, 118 min for a 1-hour thread,
+// and never more than MaxHold1h (236 min) for one.
+func (e *kaEntry) hold() time.Duration {
+	return time.Duration(e.pol.MaxPings+1) * e.pol.Idle
+}
+
+// ResolveTier decides whether a thread's cache is a one-hour cache, from the traffic.
+//
+// The BILLED tier is the source of truth, not the request: a gateway can downgrade a requested 1h
+// to 5m (#330) and still answer 200. One-hour needs both halves:
+//
+//   - the request asks 1h on EVERY breakpoint. A mixed ask (the proxy's own 1h head over a 5m tail)
+//     leaves a tail that expires in five minutes, and a 59-minute ping would refresh only the head.
+//   - the response billed the one-hour tier for everything it wrote. A turn that only READS the
+//     cache (cache_write 0) bills no tier, so it inherits the thread's last billed one (prev).
+//
+// Anything else is five minutes, which is the schedule the keeper always ran. Pure, and false on
+// any doubt.
+func ResolveTier(body []byte, u Usage, usageOK, prev bool) bool {
+	if !usageOK || !apply.AllBreakpointsAskExtendedTTL(body) {
+		return false
+	}
+	if u.CacheWrite > 0 {
+		return u.CacheWrite1h >= u.CacheWrite
+	}
+	return prev
 }
 
 // pingable reports whether this session is worth holding state for at all. Every condition is
@@ -280,6 +315,7 @@ type EntryView struct {
 	PingUSD, Spent float64
 	Refreshed      int64
 	Stopped        bool
+	TTL1h          bool // the thread's cache was billed at the one-hour tier
 	Policy         Policy
 	Tag            string
 	MaskedBody     []byte // a copy, still masked; for tests and replay tooling
@@ -325,6 +361,10 @@ type Keeper struct {
 	// session id and is cleared wholesale at the bound; give it an LRU only if session churn
 	// is ever shown to cost real pings.
 	turns map[string]int
+	// tier1h remembers, per THREAD (keyed like live), that its last billed write was one-hour. A
+	// turn that only READS the cache bills no write, so it carries no tier of its own and
+	// inherits this. Written beside turns, so it is bounded and reset exactly as turns is.
+	tier1h map[string]bool
 	// manualHoldMax overrides ManualHoldMax in tests that need a real, short timer; zero means the constant.
 	manualHoldMax time.Duration
 	// reasons records why a thread is NOT held (manualhold.go), for the button's explanation.
@@ -397,7 +437,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -473,6 +513,7 @@ func (k *Keeper) Shutdown() {
 	}
 	k.bytes = 0
 	k.turns = map[string]int{}
+	k.tier1h = map[string]bool{}
 }
 
 // clear ZEROIZES an entry's body and credential and cancels its retention deadline. Called on
@@ -713,6 +754,17 @@ func (k *Keeper) Record(r Record) {
 		k.skipped.Add(1)
 		return
 	}
+	// The cache lifetime this thread was granted, from the traffic (see ResolveTier). Read here, written
+	// below beside turns: a request the gates above refuse must not grow tier1h.
+	k.mu.Lock()
+	prev1h := k.tier1h[key]
+	k.mu.Unlock()
+	ttl1h := ResolveTier(body, u, usageOK, prev1h) && provider != bschemas.OpenAI
+	// Only a policy that is ON swaps to the one-hour schedule. ForOneHour never sets KeepAlive, so
+	// `none` stays none either way; the gate keeps a manual-only hold's zero policy untouched.
+	if ttl1h && pol.On() {
+		pol = pol.ForOneHour()
+	}
 	// A keeper-OWNED copy, not the slice serve just used. It costs one allocation per tracked
 	// session — and tracked sessions are gated down to a handful — in exchange for being able to
 	// overwrite the bytes on release without corrupting anything else that might still read
@@ -736,7 +788,7 @@ func (k *Keeper) Record(r Record) {
 		st:       r.Store,
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
-		agent: r.Agent, pol: pol, prefix: prefix, stopReason: u.StopReason,
+		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, stopReason: u.StopReason,
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
 	}
@@ -748,8 +800,18 @@ func (k *Keeper) Record(r Record) {
 	// what lets a session's second request be recognised as such.
 	k.turns[key]++
 	e.turn = k.turns[key] - 1
+	// A write bills a tier; a read-only turn bills none and leaves the remembered one alone.
+	if usageOK && (u.CacheWrite > 0 || ttl1h) {
+		k.tier1h[key] = ttl1h
+	}
 	if len(k.turns) > MaxTurnKeys {
+		// Reset both, keeping the current thread: dropping its tier here would send its next
+		// read-only turn back to the 5-minute schedule.
 		k.turns = map[string]int{key: k.turns[key]}
+		k.tier1h = map[string]bool{}
+		if usageOK && (u.CacheWrite > 0 || ttl1h) {
+			k.tier1h[key] = ttl1h
+		}
 	}
 	// Drop any previous entry either way: it is stale now, and if the gate refuses this request
 	// its body and credential must not be left behind.
@@ -761,7 +823,7 @@ func (k *Keeper) Record(r Record) {
 	}
 	// The automatic gates decide whether this thread is pinged on a schedule. A request that opted in
 	// to the button and fails them (or has no schedule at all) is still held, as a manual-only entry:
-	// no schedule, a hard 300 s life. Only the cost ceiling is kept, because a press spends money too.
+	// no schedule, a hard life of 300 s (59 min on a one-hour thread). Only the cost ceiling is kept, because a press spends money too.
 	if !pol.On() || !e.pingable() {
 		if !pol.ManualHold {
 			reason := ReasonBelowLimits
@@ -780,7 +842,7 @@ func (k *Keeper) Record(r Record) {
 			return
 		}
 		e.manualOnly = true
-		e.holdFor = k.holdMax()
+		e.holdFor = k.holdFor(ttl1h)
 		e.ceiling = pol.Ceiling()
 		e.pol = Policy{ManualHold: true} // off: due, Plans, PendingPings and Sweep all read pol.On()
 	}
@@ -792,7 +854,7 @@ func (k *Keeper) Record(r Record) {
 		e.held = true
 	}
 	if e.manualOnly {
-		e.timer = time.AfterFunc(k.holdMax(), func() { k.expireManual(key) })
+		e.timer = time.AfterFunc(e.holdFor, func() { k.expireManual(key) })
 		k.evictManualLocked(r.Key.Tenant)
 		k.evictLocked()
 		return
@@ -801,7 +863,7 @@ func (k *Keeper) Record(r Record) {
 	// entry: K pings each restarting the clock, plus one final Idle to notice the last one
 	// bought nothing. After that there is no legitimate use, so the material goes whether or not
 	// anything else in this process is awake.
-	e.timer = time.AfterFunc(time.Duration(e.pol.MaxPings+1)*e.pol.Idle, func() { k.expireAuto(key) })
+	e.timer = time.AfterFunc(e.hold(), func() { k.expireAuto(key) })
 	k.evictLocked()
 }
 
@@ -940,6 +1002,7 @@ func (k *Keeper) Forget(tenantID string) {
 		e.clear()
 		delete(k.live, key)
 		delete(k.turns, key)
+		delete(k.tier1h, key)
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}
 	// Client lifecycle end marks (see lifecycle.go) are bucketed by tenant already, so this is
@@ -1593,7 +1656,7 @@ func (k *Keeper) Entry(key Key) (EntryView, bool) {
 		return EntryView{}, false
 	}
 	return EntryView{Pings: e.pings, Turn: e.turn, Prefix: e.prefix, PingUSD: e.pingUSD,
-		Spent: e.spent, Refreshed: e.refreshed, Stopped: e.stopped, Policy: e.pol, Tag: e.tag,
+		Spent: e.spent, Refreshed: e.refreshed, Stopped: e.stopped, TTL1h: e.ttl1h, Policy: e.pol, Tag: e.tag,
 		MaskedBody: append([]byte(nil), e.body...)}, true
 }
 

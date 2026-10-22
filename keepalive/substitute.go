@@ -25,12 +25,12 @@ import (
 //
 // Deliberately NOT Ctx.CachePhase itself: that function also handles CacheTTLMinimum and an
 // unknown idle time, neither of which arises here — a live kaEntry always knows its own idle
-// time exactly (now - prevStartedAt, never "unknown"), and the keeper derives the TTL tier from
-// the one policy field that controls it (pol.HeadTTL1h) rather than reading it off a request. A
+// time exactly (now - prevStartedAt, never "unknown"), and the keeper holds the TTL tier the provider
+// billed for this thread (kaEntry.ttl1h, or the host's own pol.HeadTTL1h ask). A
 // narrower function is simpler and cannot drift from a case this call site never reaches.
-func cachePhaseAt(prevStartedAt, now time.Time, headTTL1h bool, preExpiry time.Duration) components.CachePhase {
+func cachePhaseAt(prevStartedAt, now time.Time, ttl1h bool, preExpiry time.Duration) components.CachePhase {
 	ttl := 5 * time.Minute
-	if headTTL1h {
+	if ttl1h {
 		ttl = time.Hour
 	}
 	remaining := ttl - now.Sub(prevStartedAt)
@@ -87,10 +87,10 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 	}
 	e := j.e
 	k.mu.Lock()
-	model, prefix, ceiling, headTTL1h := e.model, e.prefix, e.pol.Ceiling(), e.pol.HeadTTL1h
+	model, prefix, ceiling, ttl1h := e.model, e.prefix, e.pol.Ceiling(), e.ttl1h || e.pol.HeadTTL1h
 	endpoint := e.endpoint
 	k.mu.Unlock()
-	phase := cachePhaseAt(j.prevStartedAt, k.now(), headTTL1h, preExpiryFor(info.PreExpirySeconds))
+	phase := cachePhaseAt(j.prevStartedAt, k.now(), ttl1h, preExpiryFor(info.PreExpirySeconds))
 	// A `pre_expiry` candidate asked to spend only when ITS OWN notion of the pre-expiry window
 	// is live, not merely whenever the keeper happens to be sending a ping — the two can diverge
 	// (a manager strategy's K>1 schedule, or a component configured with a narrower

@@ -82,6 +82,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/dispatch"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 )
 
@@ -125,6 +126,12 @@ type Policy struct {
 	OpenAIIdle time.Duration
 	// MaxPings is K: the most pings one idle span may send. Zero disables.
 	MaxPings int
+	// Idle1h and MaxPings1h are X and K for a thread whose cache the provider billed at the
+	// one-hour tier. Idle and MaxPings above stay the five-minute schedule. Record swaps the pair
+	// in per entry (see ForOneHour), so each thread follows the TTL it was actually granted.
+	// Zero means the shipped default (modelinfo.AnthropicDefaultKeepAliveIdle1h and MaxPings1h).
+	Idle1h     time.Duration
+	MaxPings1h int
 	// MaxUSDPerPing refuses a ping whose projected cost exceeds this. PER PING, because ping
 	// cost is bimodal (p50 $0.0004, p99 $0.2275, max $0.3780) while a per-SESSION budget
 	// truncates exactly the long large-prefix sessions holding the value — capping the
@@ -152,9 +159,41 @@ type Policy struct {
 	// ManualHold is the host's reading of an opt-in on THIS request (the proxy: the
 	// x-context-guru-ping header): keep this thread for the Ping button even though no automatic
 	// ping will be sent for it. It never turns the schedule on, and never widens what is held: the
-	// entry lives ManualHoldMax and is released and zeroized then. See manualhold.go.
+	// entry lives ManualHoldMax (ManualHoldMax1h on a one-hour thread) and is released and zeroized then. See manualhold.go.
 	ManualHold bool
 }
+
+// ForOneHour swaps in the one-hour schedule for a thread billed at the one-hour tier. Zero values
+// resolve to the shipped defaults, the same way config.CacheConfig.Resolved does for the config
+// path (strategies and overrides build a Policy without going through it).
+//
+// MaxPings is capped at modelinfo.AnthropicMaxKeepAliveMaxPings1h whatever the source, so the
+// credential hold of a one-hour thread never exceeds MaxHold1h.
+//
+// A policy whose Idle is already past the five-minute lifetime is an EXPLICIT one-hour schedule (a
+// manager strategy with HeadTTL1h, whose band allows up to 3590 s) and is left alone: no 5-minute
+// Idle can be that long, because config and the override band refuse it.
+func (p Policy) ForOneHour() Policy {
+	if p.Idle >= 300*time.Second {
+		p.MaxPings = min(p.MaxPings, modelinfo.AnthropicMaxKeepAliveMaxPings1h)
+		return p
+	}
+	// KeepAlive is deliberately NOT touched: a parked policy (keep-alive off) stays off, and a
+	// manual-only hold on a one-hour thread must never be handed a schedule.
+	p.Idle, p.MaxPings = p.Idle1h, p.MaxPings1h
+	if p.Idle <= 0 {
+		p.Idle = modelinfo.AnthropicDefaultKeepAliveIdle1h
+	}
+	if p.MaxPings <= 0 {
+		p.MaxPings = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
+	}
+	p.MaxPings = min(p.MaxPings, modelinfo.AnthropicMaxKeepAliveMaxPings1h)
+	return p
+}
+
+// MaxHold1h is the longest a one-hour thread can hold the caller's credential and conversation:
+// (cap + 1) x 59 min = 236 min. The default (1 ping) holds 118 min.
+const MaxHold1h = (modelinfo.AnthropicMaxKeepAliveMaxPings1h + 1) * modelinfo.AnthropicDefaultKeepAliveIdle1h
 
 // on reports whether this policy can ping at all.
 func (p Policy) on() bool {

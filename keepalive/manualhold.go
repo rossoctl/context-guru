@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 )
 
@@ -22,8 +23,10 @@ import (
 //     it cannot spend money and cannot keep an idle proxy awake.
 //   - It lives ManualHoldMax from the request's START, then it is released and zeroized. That is
 //     the provider's own lifetime for a 5-minute entry, so after it the cache is cold and a press
-//     would answer "cold" anyway. A 1-hour entry is capped to the same 300 s on purpose: the
-//     longer a credential is held, the more the caller has to trust.
+//     would answer "cold" anyway. A thread billed at the 1-hour tier lives ManualHoldMax1h
+//     (59 minutes) instead: capped to 300 s the button could never work on it. The longer a
+//     credential is held, the more the caller has to trust, so this is still only for a request
+//     that opted in, and still never extended by a press.
 //   - A new request on the thread replaces the entry and restarts the 300 s. A press that READ the
 //     cache refreshed the provider's entry, so it restarts it too.
 //
@@ -233,10 +236,27 @@ func (k *Keeper) dropReasonsLocked(tenant, session string) {
 	}
 }
 
-// holdMax is the manual-only hold's length: ManualHoldMax unless a test shortened it.
+// holdMax is the manual-only hold's length for a five-minute thread: ManualHoldMax unless a test
+// shortened it.
 func (k *Keeper) holdMax() time.Duration {
 	if k.manualHoldMax > 0 {
 		return k.manualHoldMax
 	}
 	return ManualHoldMax
+}
+
+// ManualHoldMax1h is the manual-only hold of a thread billed at the one-hour tier: the same
+// 59 minutes the schedule pings at. At 300 s the button would never work on a one-hour thread: its
+// cache is still warm then and a press is pointless, and by the time a press matters (near the
+// hour) the hold would be long gone. It is still measured from the last REAL request, and a press
+// does not extend it.
+const ManualHoldMax1h = modelinfo.AnthropicDefaultKeepAliveIdle1h
+
+// holdFor is the manual-only hold's length for a thread of the given tier. A test that shortened the
+// hold shortens both.
+func (k *Keeper) holdFor(ttl1h bool) time.Duration {
+	if ttl1h && k.manualHoldMax == 0 {
+		return ManualHoldMax1h
+	}
+	return k.holdMax()
 }

@@ -1,6 +1,6 @@
 ---
 name: install
-description: Install a local context-guru proxy and route this project's Claude Code sessions through it, so long sessions stop paying to re-create the prompt cache. Also installs the terminal status line, in the same scope routing uses, on by default. Use when the user asks to install, set up, enable, try or start context-guru, or to route Claude Code through it. Accepts --global to route every project on the machine instead of just this one, --cache-strategy <none|5-min-ping|1-hour-head> to override the default cache strategy, --attach <url> to point at a proxy that already exists (a gateway or shared pod) instead of starting one, and --no-statusline to skip the automatic status line install.
+description: Install a local context-guru proxy and route this project's Claude Code sessions through it, so long sessions stop paying to re-create the prompt cache. Also installs the terminal status line, in the same scope routing uses, on by default. Use when the user asks to install, set up, enable, try or start context-guru, or to route Claude Code through it. Accepts --global to route every project on the machine instead of just this one, --cache-strategy <none|auto|1-ping|2-ping|1-hour-head> to override the default cache strategy, --attach <url> to point at a proxy that already exists (a gateway or shared pod) instead of starting one, and --no-statusline to skip the automatic status line install.
 ---
 
 # Install context-guru for Claude Code
@@ -34,7 +34,7 @@ in `install.sh --route`, as line order rather than a paragraph somebody can read
 - `/context-guru:uninstall` reverses it. If routing itself breaks, no skill can run — so the install
   drops a plain-sh escape hatch outside the plugin, and step 4 tells them where.
 
-If `cache_strategy=5-min-ping` (the default), one more clause: keep-alive is on, so it spends a little
+If `cache_strategy` is `auto`, `1-ping` or `2-ping` (the default is `auto`), one more clause: keep-alive is on, so it spends a little
 of their own quota on idle turns to hold the cache warm, and `/context-guru:cache-strategy-picker`
 names the alternatives and what each costs. Do not recommend one — they differ in what they spend, and
 that is the user's call. Always, one more: a read-only status line goes on too, in the same file routing itself just used (`--no-statusline` skips it, `/context-guru:statusline off` undoes it after).
@@ -166,7 +166,7 @@ write routing while no proxy answers.
 
 - `result=routed` — done. `settings_result=` says which: `added`, `unchanged` (already correct),
   `completed` (a repair of an earlier partial attempt — report it as success, not "nothing to do"),
-  or `repointed` (moved to a new port). Relay `ping_note=` verbatim: the server keeps the latest request and key in memory up to 5 min so Ping works, never pings automatically for it, drops the copy 5 min after the last request; `--no-ping-header` opts out.
+  or `repointed` (moved to a new port). Relay `ping_note=` verbatim: the server keeps the latest request and key in memory so Ping works (5 min after the last request on a 5-minute cache, up to 59 min on a 1-hour cache), never pings automatically for it, and drops the copy at that time; `--no-ping-header` opts out.
 - `result=error reason=health_check_failed` — **no routing was written**, so the project is unrouted,
   which is a working project. Say what the log shows rather than guessing, and do **not** say
   "nothing happened": check `proxy_started=`, and if `true` a proxy IS still listening — say so and
@@ -185,7 +185,7 @@ write routing while no proxy answers.
 - `result=refused reason=consent_required` — you ran it without the flag, or without asking. Nothing
   was installed, started or written. Go back and ask; do not simply re-run it with the flag appended.
 - `result=refused reason=unknown_strategy` — the `--cache-strategy` name does not exist (e.g.
-  `5-minute-ping` for `5-min-ping`). Nothing was written; `note=` lists the real names. Ask which they
+  `5-minute-ping` for `auto`). Nothing was written; `note=` lists the real names. Ask which they
   meant — do not pick, because the names differ in whether they spend the user's quota.
 - `strategy_warning=` — the strategy could not be written even though the name was valid (usually a
   config at that path we did not write). The proxy is fine; mention it and move on.

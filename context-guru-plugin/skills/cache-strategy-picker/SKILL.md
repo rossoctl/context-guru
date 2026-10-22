@@ -1,6 +1,6 @@
 ---
 name: cache-strategy-picker
-description: Show which named cache strategy is in effect and switch between them - `none`, `5-min-ping` (the default, which spends the caller's own credential on idle pings) and `1-hour-head`. Use when the user asks which cache strategy is running, to change it, to turn idle keep-alive pings on or off, to stop spending money between turns, or to keep the cache warm.
+description: Show which named cache strategy is in effect and switch between them - `none`, `auto` (the default, which spends the caller's own credential on idle pings), `1-ping`, `2-ping` and `1-hour-head`. Use when the user asks which cache strategy is running, to change it, to turn idle keep-alive pings on or off, to stop spending money between turns, or to keep the cache warm.
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/settings.py)
 ---
 
@@ -31,7 +31,7 @@ defaulted 8787 writes `keepalive-8787.yaml` — a file nothing ever reads — an
 Read the fallback **per option**, not from `source=`: only keys the user actually set are printed,
 so somebody who set the port and never touched the preset gets a real `source=` and no
 `option_preset=` line. Any option not listed is unconfigured — use the `plugin.json` default for
-that one alone (preset `off`, cache strategy `5-min-ping`).
+that one alone (preset `off`, cache strategy `auto`).
 
 **Not for the port.** It is allocated per project rather than defaulted, so 8787 is a guess at
 another project's proxy and the whole failure above — a `keepalive-<port>.yaml` nothing reads,
@@ -85,10 +85,14 @@ actually paid for themselves, not just that they fired.
 | Name | ELI5 | Cost |
 |---|---|---|
 | `none` | no keep-alive pings, nothing extra happens | free |
-| `5-min-ping` | pings the cache now and then so it doesn't go cold while you're away | spends a little of your own credential between turns |
+| `auto` | pings the cache so it doesn't go cold while you're away. The proxy reads each session's cache lifetime from the traffic: a 5-minute cache gets up to 2 pings (first at 270 s), a 1-hour cache gets 1 ping at 59 minutes | spends a little of your own credential between turns |
+| `1-ping` | at most 1 ping per idle span, on either lifetime | same, fewer pings |
+| `2-ping` | at most 2 pings per idle span, on either lifetime (a 1-hour cache: 59 minutes, then 59 more) | same, more pings |
 | `1-hour-head` | asks the provider for a longer-lived cache instead of pinging, only on prefixes >=50k tokens | free, but on today's models it usually buys nothing — see below |
 
-**Say the cost before switching TO `5-min-ping`, once, in one line.** It spends the caller's money
+**The old name `5-min-ping` still works.** It means `auto`; `strategy set` stores `auto`.
+
+**Say the cost before switching TO `auto`, `1-ping` or `2-ping`, once, in one line.** It spends the caller's money
 (or usage-limit budget) while nobody is at the keyboard, and it applies to every session routed
 through this proxy, not just this one. It is the default because holding the cache warm across an
 idle gap is the thing most people install this for — not because it is free.
@@ -121,7 +125,7 @@ before any signal, **never** a `pkill` pattern — then:
 ```
 
 Confirm it came back and that it picked up what you wrote: the startup note now names the strategy
-(`proxy up on 127.0.0.1:<port> (preset cache, cache strategy 5-min-ping, idle-exit 24h)`), which is
+(`proxy up on 127.0.0.1:<port> (preset cache, cache strategy auto, idle-exit 24h)`), which is
 the cheapest available proof. `curl -fsS http://127.0.0.1:<port>/healthz` if you want the second one.
 
 If the user would rather not restart now, that is fine and worth stating plainly: the strategy is

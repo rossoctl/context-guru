@@ -152,8 +152,9 @@ under the same cost ceiling and 30-second gap. A press stays refused after a mis
 
 **Ping with keep-alive off.** A request that carries `x-context-guru-ping: 1` is held for the button
 even when the account has no automatic keep-alive. Nothing is pinged for it. The proxy keeps the body and
-the key for at most 300 seconds from the start of the LAST REAL request, even for a one-hour cache, then
-releases and zeroes them. Only a new request starts the 300 seconds again. A press never does, so pressing
+the key from the start of the LAST REAL request for at most 300 seconds on a 5-minute cache, and for at most
+59 minutes on a 1-hour cache (the proxy reads the tier from the traffic), then releases and zeroes them. Only a
+new request starts that time again. A press never does, so pressing
 cannot keep a credential held. The usual limits still apply: 8 MiB per body, 512 threads, 128 MiB in all, and
 the per-ping cost ceiling. One account may hold at most 16 such threads and 32 MiB, and they are released
 before any automatic keep-alive hold, so a client that sends the header cannot starve other accounts. Claude Code sends the

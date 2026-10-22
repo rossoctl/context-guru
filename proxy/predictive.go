@@ -18,6 +18,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
@@ -447,6 +448,14 @@ func (d predDecision) apply(pol CachePolicy) CachePolicy {
 		idle = campaignKeepAlive5mIdle * time.Second
 	}
 	pol.KeepAlive, pol.Idle, pol.MaxPings = true, idle, d.k
+	// A campaign is scored on five-minute economics (cfTC, PWrite5m), so its k is a count of
+	// five-minute windows. On a thread billed at the one-hour tier the keeper swaps in the one-hour
+	// schedule (Policy.ForOneHour); k then only bounds it from above, as an override's does.
+	k1h := pol.MaxPings1h
+	if k1h <= 0 {
+		k1h = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
+	}
+	pol.MaxPings1h = min(k1h, d.k)
 	pol.MinPrefixTokens, pol.PredictorID, pol.PredictorThreshold = 0, "", 0
 	return pol
 }
