@@ -26,6 +26,10 @@ func cgStub(t *testing.T, cache string, extra ...func(*http.ServeMux)) (port str
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.RawQuery, "since=1800000123000") { // the 5-hour window, tenant-wide
+			w.Write([]byte(`{"total_saved_usd": 2.1, "cost_usd": 10, "saved_unique": 85000, "replay_tokens": 1200000}`))
+			return
+		}
 		if strings.Contains(r.URL.RawQuery, "since=0") { // lifetime, tenant-wide
 			w.Write([]byte(`{"total_saved_usd": 212.4}`))
 			return
@@ -109,6 +113,51 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 			}
 			if elapsed > time.Second {
 				t.Errorf("render took %v; the status line must stay cheap", elapsed)
+			}
+		})
+	}
+}
+
+// TestStatuslineGoldenSubscription pins the subscription view: Claude Code's `rate_limits` payload
+// switches the money segments to the 5-hour window. The window stub saved 85,000 tokens once (writes) and
+// 1,200,000 on replay (reads); a past `resets_at` shows nothing. An API-key payload (no `rate_limits`) is unchanged.
+func TestStatuslineGoldenSubscription(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"now_ms":%d,"ttl_s":3600,`+
+		`"prefix_tokens":52000,"priced":true,"rewrite_usd":0.30,"window":1000000,"window_exact":true}`, now-60_000, now)
+	pay := func(limits string) string {
+		return `{"session_id":"sess-gold","cost":{"total_cost_usd":0.41},"context_window":` +
+			`{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000}` + limits + `}`
+	}
+	sub := pay(`,"rate_limits":{"five_hour":{"used_percentage":34,"resets_at":1800018123},` +
+		`"seven_day":{"used_percentage":12,"resets_at":1800400000}}`)
+	for _, c := range []struct {
+		name, stdin, layout string
+		width               int
+		want                string
+	}{
+		{"balanced", sub, "balanced", 200, "5h 34% · saved 1.2M rd / 85.0k wr\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
+		{"minimal", sub, "minimal", 200, "5h 34% · saved 1.2M rd / 85.0k wr │ cache ● ██████ 59:00"},
+		{"detailed-hides-money", sub, "detailed", 200, "5h 34% · 7d 12% · compaction saved 1.2M rd / 85.0k wr\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
+		{"narrow", sub, "balanced", 30, "5h 34%\ncache ● ██████ 59:00 │ ctx 5%"},
+		// Claude Code keeps the last block after the window ended: show nothing of it, and no money.
+		{"expired-window", pay(`,"rate_limits":{"five_hour":{"used_percentage":34,"resets_at":1799990000}}`), "balanced", 200,
+			"cache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
+		{"no-reset-time", pay(`,"rate_limits":{"five_hour":{"used_percentage":34}}`), "balanced", 200,
+			"5h 34%\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
+		{"null-limits-is-api-key", pay(`,"rate_limits":null`), "detailed", 200,
+			"saved $0.31 │ spent $0.41\ncache ● ██████ 59:00 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			env := routedEnv(cgStub(t, cache))
+			env["CG_STATUSLINE_COLUMNS"] = fmt.Sprint(c.width)
+			env["CG_STATUSLINE_NOW"] = "1800000000" // resets_at is judged against this clock
+			out, code, _ := runStatusline(t, env, c.stdin, "--layout="+c.layout)
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			if got := strings.TrimRight(out, "\n"); got != c.want {
+				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
 			}
 		})
 	}
@@ -1359,5 +1408,52 @@ print("next window", burst(4))         # one
 	want := "window 5.0\nburst 1\nsame window 0\nnext window 1"
 	if got := strings.TrimSpace(string(out)); got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestStatuslineSubscriptionShowsNoMoney feeds every money source main has (the session and
+// sub-agent saving, the next-request price, the per-agent saving, the keep-alive cost, the manual-ping
+// saving, Claude Code's own cost) into a subscription payload and checks that no layout prints a
+// dollar sign. Keep-alive stays as a plain count. The same inputs on an API key do show money.
+func TestStatuslineSubscriptionShowsNoMoney(t *testing.T) {
+	const now = 1_800_000_000_000
+	money := `"money":{"main":{"saved_usd":0.31,"baseline_usd":2.10,"threads":1},` +
+		`"others":{"saved_usd":0.12,"baseline_usd":0.90,"threads":2}},`
+	th := func(id string, agoSec int, usd string) string {
+		return fmt.Sprintf(`{"id":%q,"main":%t,"model":"m","last_ts":%d,"end_ts":%d,"ttl_s":300,"prefix_tokens":52000,`+
+			`"priced":true,"rewrite_usd":%s,"warm_usd":0.03,"cold_usd":0.30,"saved_usd":1.2,"baseline_usd":6}`,
+			id, id == "", now-agoSec*1000, now-agoSec*1000, usd)
+	}
+	cache := fmt.Sprintf(`{"session":"s","model":"m",%s"last_ts":%d,"end_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,`+
+		`"priced":true,"rewrite_usd":0.3,"warm_usd":0.03,"cold_usd":0.30,"threads":[%s,%s]}`,
+		money, now-60_000, now-60_000, now, th("", 60, "0.3"), th("a:1", 5, "0.03"))
+	stats := `{"total_saved_usd":0.31,"cost_usd":0.41,"keepalive_pings":3,"keepalive_ping_usd":0.04,` +
+		`"manual_pings":{"count":3,"ping_usd":0.06,"saved_usd":0.84}}`
+	pay := func(limits string) string {
+		return `{"session_id":"sess-gold","cost":{"total_cost_usd":0.41,"total_duration_ms":3600000},"context_window":` +
+			`{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":200000}` + limits + `}`
+	}
+	sub := pay(`,"rate_limits":{"five_hour":{"used_percentage":34,"resets_at":1800018123}}`)
+	for _, layout := range []string{"minimal", "balanced", "detailed", "spark", "strip", "heat", "fill", "watch"} {
+		t.Run(layout, func(t *testing.T) {
+			env := routedEnv(cgStubStats(t, cache, stats))
+			env["CG_STATUSLINE_COLUMNS"], env["CG_STATUSLINE_NOW"] = "200", "1800000000"
+			out, code, _ := runStatusline(t, env, sub, "--layout="+layout, "--show=agents,ka")
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			if strings.Contains(out, "$") {
+				t.Errorf("a subscription must show no dollars in %s, got %q", layout, out)
+			}
+			if layout == "balanced" && !strings.Contains(out, "ka 3 pings") {
+				t.Errorf("the keep-alive count stays on a subscription, got %q", out)
+			}
+		})
+	}
+	env := routedEnv(cgStubStats(t, cache, stats))
+	env["CG_STATUSLINE_COLUMNS"] = "200"
+	if out, _, _ := runStatusline(t, env, pay(""), "--layout=balanced"); !strings.Contains(out, "saved $0.31 of $2.10") ||
+		!strings.Contains(out, "next $0.30 if cold") || !strings.Contains(out, "ka 3 pings $0.04") {
+		t.Errorf("an API key keeps every money element, got %q", out)
 	}
 }

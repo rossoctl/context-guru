@@ -666,15 +666,16 @@ def _update_available_segment() -> str | None:
     return f"{GREEN}▲ update {latest}{RESET}"
 
 
-def _keepalive_segment(stats: dict) -> str | None:
+def _keepalive_segment(stats: dict, money: bool = True) -> str | None:
     """This session's keep-alive pings: how many the proxy sent and what they cost (`ka 3 pings
     $0.04`). Nothing until the first ping. Whether a ping is still planned, and how long that holds
-    the cache warm, is the cache element's `↻` clock, not this one."""
+    the cache warm, is the cache element's `↻` clock, not this one. On a subscription (`money` False) the pings use
+    limit, not dollars, so the count stays and the cost goes."""
     pings = _num(stats, "keepalive_pings")
     if not pings or pings < 1:
         return None
     usd = _num(stats, "keepalive_ping_usd")  # absent is unknown, not free
-    cost = "" if usd is None else " <$0.01" if 0 < usd < 0.005 else f" {_money(usd)}"  # a real cost never reads as $0.00
+    cost = "" if usd is None or not money else " <$0.01" if 0 < usd < 0.005 else f" {_money(usd)}"  # a real cost never reads as $0.00
     return f"{DIM}ka{RESET} {int(pings)} ping{'s' if pings >= 2 else ''}{cost}"
 
 
@@ -713,6 +714,7 @@ CACHESTATE_TTL_SECONDS = 10.0  # CONTRACT section 4: at least 10 s
 # many seconds, so the copy a slow proxy leaves stays about this fresh (#570).
 CACHESTATE_REFRESH_WINDOW_SECONDS = 5.0
 DAY_TTL_SECONDS = 60.0
+WINDOW_TTL_SECONDS = 30.0
 CACHE_BAR_CELLS = 6
 AGENT_ROWS = 5  # named sub-agents shown before `+N more`
 ACTIVE_SECONDS = 10  # a sub-agent whose last request ended this recently is marked `active`
@@ -1381,6 +1383,81 @@ def _save_segment(stats: dict | None, money: dict | None, level: int | None = 0,
     return out
 
 
+WINDOW_SECONDS = 5 * 3600  # the length of Claude's short usage window (the `five_hour` limit)
+
+
+def _subscription(payload: dict) -> dict | None:
+    """The `five_hour` limit block of Claude Code's stdin payload, or None. Claude Code fills
+    `rate_limits` only on a Claude subscription; with an API key, Bedrock or Vertex it is absent or
+    null, and the status line keeps its money view."""
+    limits = payload.get("rate_limits")
+    five = limits.get("five_hour") if isinstance(limits, dict) else None
+    used = _num(five, "used_percentage")
+    if used is None or not 0 <= used <= 1000:
+        return None
+    reset = five.get("resets_at")
+    if isinstance(reset, (int, float)) and not isinstance(reset, bool) and reset > 0:
+        reset = float(reset) / 1000 if reset > 1e11 else float(reset)  # epoch seconds, or milliseconds
+    else:
+        reset = None
+    week = _num(limits.get("seven_day"), "used_percentage")
+    # Claude Code can keep the last block after the window ended, until the next response replaces
+    # it. Its percentage and any totals since its start describe a window that is over.
+    return {"used": used, "reset": reset, "week": week, "expired": reset is not None and reset <= _now_s()}
+
+
+def _window_start_ms(sub: dict | None) -> int | None:
+    """When the current 5-hour window began: its reset time minus its length."""
+    reset = sub.get("reset") if sub and not sub.get("expired") else None
+    return int((reset - WINDOW_SECONDS) * 1000) if reset else None
+
+
+def _saved_tokens(win: dict | None) -> tuple[float, float] | None:
+    """(read, write) tokens compaction kept out of this window's prompts, from /api/stats fields:
+
+    * write = `saved_unique`: each distinct removal counted once. Sent as new content it would
+      have been billed as a cache WRITE (the proxy prices it at the write rate).
+    * read = `replay_tokens` (`saved_gross - saved_unique`): the same removals, absent again from
+      every later turn that re-sends the transcript. Billed as a cache READ on a hit.
+
+    These are the proxy's own token estimates, compaction only: cachesplit, keep-alive and
+    declaration-filter savings are dollar figures with no token count, so they are not here.
+    None when the fields are absent; a window with nothing saved reads (0, 0)."""
+    write, read = _num(win, "saved_unique"), _num(win, "replay_tokens")
+    if write is None and read is None:
+        return None
+    return max(read or 0.0, 0.0), max(write or 0.0, 0.0)
+
+
+def _saved_tokens_text(win: dict | None) -> str | None:
+    """`saved 1.2M rd / 85.0k wr`; a kind with nothing saved is left out; None when neither has any."""
+    tokens = _saved_tokens(win)
+    if not tokens:
+        return None
+    parts = [f"{_human(n)} {tag}" for n, tag in zip(tokens, ("rd", "wr")) if n >= 1]
+    return "saved " + " / ".join(parts) if parts else None
+
+
+def _window_segment(sub: dict, win: dict | None, level: int | None = 0, detailed: bool = False) -> str | None:
+    """`5h 34% · saved 1.2M rd / 85.0k wr` on a subscription: the real used share of the 5-hour
+    limit (Claude Code's own number), then the tokens context-guru kept out of this window, by
+    kind. Plain counts, unweighted: Anthropic does not publish how the limit weights each kind.
+    The detailed layout names what the counts cover (`compaction saved`). No money. At level 2 only
+    the 5h share stays: the counts are the proxy's estimates and go first. An ended window shows
+    nothing."""
+    if level is None or sub.get("expired"):
+        return None
+    out = f"{DIM}5h{RESET} {sub['used']:.0f}%"
+    saved = _saved_tokens_text(win)
+    if level == 2 or not saved:
+        return out
+    if detailed and level == 0:
+        if sub.get("week") is not None:
+            out += f" {DIM}·{RESET} {DIM}7d{RESET} {sub['week']:.0f}%"
+        saved = "compaction " + saved
+    return f"{out} {DIM}·{RESET} {saved}"
+
+
 def _fresh_session(payload: dict) -> bool:
     """Nothing spent and nothing sent yet: dividing a saving by that is nonsense, so say nothing.
     A real nonzero total with zero saved still prints."""
@@ -1455,17 +1532,17 @@ def tv_wide(e) -> bool:
     return e.width >= 100
 
 
-def _strip_row(reqs: dict | None, spend: dict | None, lv: int, tv, e) -> str | None:
+def _strip_row(reqs: dict | None, spend: dict | None, lv: int, tv, e, money: bool = True) -> str | None:
     rows = _rows(reqs)[-STRIP_REQUESTS:]
     if not rows:
         return None
     paint = {"hit": ("ok", e.g["hit"]), "part": ("warn", e.g["part"]), "miss": ("bad", e.g["miss"])}
     cells = "".join(e.paint(*paint[tv.kind(r)]) for r in rows)
-    lost = _lost_today(spend, _day_start_ms())
+    lost = _lost_today(spend, _day_start_ms()) if money else None
     if lost and lost >= 0.005:
         tail = f" {_money(lost)}" if lv else f"  {_money(lost)} {DIM}lost today{RESET}"
     else:
-        tail = "" if lv else f"  {DIM}no misses cost money today{RESET}"
+        tail = "" if lv or not money else f"  {DIM}no misses cost money today{RESET}"
     key = "" if lv else f"  {e.paint('bad', e.g['miss'])} {DIM}miss{RESET}" + (
         f" {e.paint('warn', e.g['part'])} {DIM}partial{RESET} {e.paint('ok', e.g['hit'])} {DIM}hit{RESET}" if tv_wide(e) else "")
     if lv:
@@ -1558,7 +1635,8 @@ def _day_start_ms(days_ago: int = 0) -> int:
     return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_ago, 0, 0, 0, 0, 0, -1)) * 1000)
 
 
-def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
+def _gather(port: str, session_id: str | None, on: set[str], win_start: int | None = None,
+            subscription: bool = False) -> dict:
     """Run the (at most three) proxy reads in parallel under one shared deadline, so the worst
     case is one HTTP_TIMEOUT_SECONDS, not three. Each read is disk-cached; a render that finds all
     three fresh makes no network call at all."""
@@ -1575,7 +1653,7 @@ def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
     if "heat" in on:
         jobs["hourly"] = lambda: _bg_json(
             port, f"/api/series?bucket=3600000&since={midnight}&until={now_ms}", "hourly", SERIES_TTL_SECONDS)
-    if on & {"strip", "heat"}:
+    if on & {"strip", "heat"} and not subscription:  # the spend explanation only feeds `lost today` dollars
         tz = time.localtime(_now_s()).tm_gmtoff // 60  # minutes east of UTC, as the spend explanation expects
         jobs["spend"] = lambda: _bg_json(
             port, f"/api/spend/explain?since={midnight}&tz={tz}&now={now_ms}", "spend-today", SERIES_TTL_SECONDS)
@@ -1588,6 +1666,9 @@ def _gather(port: str, session_id: str | None, on: set[str]) -> dict:
     if "spark" in on:
         jobs["day"] = lambda: _bg_json(
             port, f"/api/stats?lean=1&since={_day_start_ms()}", "day", DAY_TTL_SECONDS)
+    if win_start is not None and "save" in on:  # subscription: totals since this 5-hour window began
+        jobs["win"] = lambda: _bg_json(
+            port, f"/api/stats?lean=1&since={win_start}", f"win-{win_start // 1000}", WINDOW_TTL_SECONDS)
 
     def run(name, fn):
         try:
@@ -1615,7 +1696,10 @@ def main() -> None:
         session_id = None  # absent, or not the shape Claude Code actually sends: don't trust it
     layout, on, width = _config(sys.argv[1:])
 
-    got = _gather(port, session_id, on)
+    sub = _subscription(payload)
+    if sub:
+        on = on - {"spark"}  # only dollars: a subscription pays in limit, so it has no spark row
+    got = _gather(port, session_id, on, _window_start_ms(sub), sub is not None)
     stats, status = got.get("stats") or _stale_stats(port, session_id)
     update_seg = _update_available_segment()  # local file only - independent of the proxy
     notice = {
@@ -1636,25 +1720,28 @@ def main() -> None:
     cs = _main_cs(cs)
     view = _cache_view(payload, cs, cs_age)
     ctx = _ctx_numbers(payload, cs, cs_age)
+    win, _ = got.get("win", (None, 0.0))
     shown = {
         "update": lambda lv: update_seg if lv == 0 else None,
         "save": lambda lv: _save_segment(stats, (cs or {}).get("money"), lv, _fresh_session(payload)),
         "cache": lambda lv: _cache_segment(view, lv),
-        "next": lambda lv: _next_segment(view, lv),
-        "agents": lambda lv: _agents_segment(agent_rows, lv),
+        "next": lambda lv: _next_segment(view, lv) if not sub else None,
+        "agents": lambda lv: _agents_segment(agent_rows, max(lv, 1) if sub and lv is not None else lv),  # no per-agent $ on a subscription
         "spark": lambda lv: _spark_row(day, got.get("series", (None,))[0], lv, *_tv(width)),
-        "strip": lambda lv: _strip_row(got.get("reqs", (None,))[0], got.get("spend", (None,))[0], lv, *_tv(width)),
+        "strip": lambda lv: _strip_row(got.get("reqs", (None,))[0], got.get("spend", (None,))[0], lv, *_tv(width), money=not sub),
         "heat": lambda lv: _heat_row(got.get("hourly", (None,))[0], got.get("spend", (None,))[0], lv, *_tv(width)),
-        "fill": lambda lv: _fill_row(got.get("reqs", (None,))[0], ctx, lv, *_tv(width), width, view["usd"]),
+        "fill": lambda lv: _fill_row(got.get("reqs", (None,))[0], ctx, lv, *_tv(width), width, None if sub else view["usd"]),
         "clock0": lambda lv: _cache_segment(view, lv),
         "wagents": lambda lv: _wagents_row(agent_rows, lv, *_tv(width)),
-        "spend": lambda lv: _spend_segment(payload, lv) if lv == 0 else None,
+        "spend": lambda lv: _spend_segment(payload, lv) if lv == 0 and not sub else None,
         "ctx": lambda lv: _ctx_segment(*ctx, lv) if ctx else None,
-        "ka": lambda lv: (_keepalive_segment(stats) if stats and lv == 0 else None),
+        "ka": lambda lv: (_keepalive_segment(stats, not sub) if stats and lv == 0 else None),
         "latency": lambda lv: _latency_segment(stats) if lv == 0 else None,
         "tools": lambda lv: _recommend_segment(payload) if lv == 0 else None,
         "tip": lambda lv: tips.get(lv),
     }
+    if sub:  # a subscription pays in limit, not dollars: the window view replaces the money view
+        shown["save"] = lambda lv: _window_segment(sub, win, lv, layout == "detailed")
     order = [e for e in ("update", "save", "spend", "spark", "strip", "heat", "fill", "clock0", "wagents", "cache",
                          "next", "agents", "ctx", "ka", "latency", "tools", "tip") if e in on]
     level: dict[str, int | None] = {e: 0 for e in order}

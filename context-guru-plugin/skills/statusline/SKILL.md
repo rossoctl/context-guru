@@ -27,6 +27,10 @@ Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-ski
   the line can read lower than the dashboard. Session only: no today or lifetime total.
   `--layout=detailed` adds `spent $4.10 · $2.73/h · up 1h30m` (Claude Code's own running cost, the
   average rate once five minutes have passed, and the session's age).
+- **Subscription.** When Claude Code sends `rate_limits` (a Claude subscription), line 1 becomes
+  `5h 34% · saved 1.2M rd / 85.0k wr` instead of money: the real share of the 5-hour limit used, and
+  the tokens compaction kept out of this window, as would-be cache reads (`replay_tokens`) and
+  writes (`saved_unique`). Plain, unweighted counts, compaction only (`--layout=detailed` says so). `spent` and `ka $…` are hidden. An ended window shows nothing. API keys, Bedrock and Vertex keep the money view.
 - **Cache clock.** A live countdown to expiry, green, amber in the last minute (a fifth of the
   lifetime on the 1h tier), red with `!` in the last 15 s. When the cache is cold the whole cache
   segment (and `next`) is left out: you already know, and it is noise. There is exactly ONE
