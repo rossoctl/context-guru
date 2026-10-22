@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1470 714" width="1470" height="714" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="t">Summarization: the call costs money first, then each request saves 9,500 tokens</title>
+<desc id="d">Each row is a request, or the summarizer call. The horizontal axis is the prompt, in tokens, split by message. Before the summary, messages 0 to 2 are 10,000 tokens. The summarizer call reads those 10,000 tokens and costs 0.0125 dollars. In requests A, B and C the summary is 500 tokens, and the 9,500 tokens it removed are drawn as a hatched block at the same place in every request. Request A is hot, but it is the first request with the summary. It writes the 500-token summary and the 3,000-token tail (messages 3 and 4) to the cache instead of reading 13,000 tokens. It saves 0.00285 dollars and pays a cache break of 0.01208 dollars on the summary and the tail, a net of minus 0.00923. Request B is hot and saves 0.00285 dollars, at the cache read rate. Request C is cold, 15 minutes after B, and saves 0.03563 dollars at the cache write rate. The balance after three requests is a profit of 0.01675 dollars. Request A is drawn in a frame with two bars: the summarizer call (a spend context operation) and the prompt sent (a rewrite and a cacheChange). A column of reported operations lists the spend, the rewrite and the cacheChange on request A only: the rewrite is reported once, and Compute applies it again on B and C. A Compute column gives the tokens per tier of each request and the spend in dollars. The total line multiplies the tokens by the rates: read 19,000 at 0.30 dollars per million, write 9,500 at 3.75, a break of 3,500 tokens at the difference of the two, and the spend of 0.0125 dollars, for a profit of 0.01675 dollars. The time between requests is written between the bars: 1 minute and 15 minutes.</desc>
+<style>
+svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6;--write:#eb6834;--cost:#8a8984}
+@media (prefers-color-scheme: dark){svg{--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#3a3a37;--read:#3987e5;--write:#d95926;--cost:#8f8e88}}
+.bg{fill:var(--surface)}
+.read{fill:var(--read);stroke:var(--surface);stroke-width:2}
+.write{fill:var(--write);stroke:var(--surface);stroke-width:2}
+.cost{fill:var(--cost);stroke:var(--surface);stroke-width:2}
+.ghost-read{fill:url(#hr);stroke:var(--read);stroke-width:1.5;stroke-dasharray:5 3}
+.ghost-write{fill:url(#hw);stroke:var(--write);stroke-width:1.5;stroke-dasharray:5 3}
+.hr{stroke:var(--read);stroke-width:1.5}.hw{stroke:var(--write);stroke-width:1.5}
+.tw{fill:#fff}
+.t{fill:var(--ink)}.t2{fill:var(--ink2)}
+.guide{stroke:var(--ink2);stroke-width:1;stroke-dasharray:2 4;opacity:.7}
+.axis{stroke:var(--grid);stroke-width:1}
+.pill{fill:var(--surface)}
+.sep{stroke:var(--surface);stroke-width:2}
+.gap{stroke:var(--ink2);stroke-width:1.4}
+</style>
+<defs>
+<pattern id="hr" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hr" x1="0" y1="0" x2="0" y2="8"/></pattern>
+<pattern id="hw" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hw" x1="0" y1="0" x2="0" y2="8"/></pattern>
+<linearGradient id="fg"><stop offset="0.55" stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient>
+<mask id="fade" maskContentUnits="objectBoundingBox"><rect width="1" height="1" fill="url(#fg)"/></mask>
+</defs>
+<rect class="bg" width="1470" height="714"/>
+<text class="t" x="24" y="30" font-size="17" font-weight="600">Summarization: the call costs money first, then each request saves 9,500 tokens</text>
+<text class="t2" x="24" y="50" font-size="12">Each row is a request, or the summarizer call. Left to right is the prompt, message by message; widths are in tokens. The hatched block is what the summary removed.</text>
+<text class="t" x="395.0" y="84" font-size="12" text-anchor="middle" font-weight="600">messages 0 to 2</text>
+<text class="t2" x="395.0" y="98" font-size="11" text-anchor="middle">10,000 → 500 tokens (one summary)</text>
+<path d="M170 108 V101 H620.0 V108" fill="none" stroke="var(--ink2)" stroke-width="1"/>
+<text class="t" x="687.5" y="84" font-size="12" text-anchor="middle" font-weight="600">the tail</text>
+<text class="t2" x="687.5" y="98" font-size="11" text-anchor="middle">messages 3 and 4 · 3,000</text>
+<path d="M622.0 108 V101 H755.0 V108" fill="none" stroke="var(--ink2)" stroke-width="1"/>
+<text class="t" x="767.0" y="84" font-size="12" font-weight="600">later turns</text>
+<text class="t2" x="767.0" y="98" font-size="11">one new message each</text>
+<text class="t" x="1180" y="84" font-size="12" font-weight="600">Compute</text>
+<text class="t2" x="1180" y="98" font-size="11">tokens per tier · spend</text>
+<text class="t" x="1075" y="84" font-size="12" font-weight="600">operations</text>
+<text class="t2" x="1075" y="98" font-size="11">reported</text>
+<line class="guide" x1="192.5" y1="110" x2="192.5" y2="538"/>
+<line class="guide" x1="620.0" y1="110" x2="620.0" y2="538"/>
+<text class="t" x="24" y="136" font-size="14" font-weight="600">Before</text>
+<text class="t2" x="24" y="150" font-size="11">the summary</text>
+<text class="t2" x="24" y="163" font-size="11">already cached</text>
+<rect class="write" x="170.0" y="120" width="585.0" height="40" rx="3"/>
+<line class="sep" x1="305.0" y1="120" x2="305.0" y2="160"/>
+<line class="sep" x1="395.0" y1="120" x2="395.0" y2="160"/>
+<line class="sep" x1="620.0" y1="120" x2="620.0" y2="160"/>
+<line class="sep" x1="710.0" y1="120" x2="710.0" y2="160"/>
+<rect x="14" y="182" width="1442" height="162" rx="8" fill="none" stroke="var(--ink2)" stroke-width="1.5"/>
+<text class="t" x="24" y="202" font-size="14" font-weight="600">Request A</text>
+<text class="t2" x="100" y="202" font-size="11">first with the summary · hot · the summarizer call and the rewrite happen in this request</text>
+<rect class="cost" x="170.0" y="212" width="450.0" height="40" rx="3"/>
+<line class="sep" x1="305.0" y1="212" x2="305.0" y2="252"/>
+<line class="sep" x1="395.0" y1="212" x2="395.0" y2="252"/>
+<rect class="pill" x="288.0" y="223" width="214" height="18" rx="9"/>
+<text class="t" x="395.0" y="236" font-size="11" text-anchor="middle" font-weight="600">input 10,000 · output 500</text>
+<rect x="1075" y="213" width="52.0" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
+<text class="t" x="1101.0" y="227" font-size="12" text-anchor="middle" font-weight="600">spend</text>
+<text class="t" x="1180" y="228" font-size="14" font-weight="600">spend −$0.01250</text>
+<rect class="write" x="170.0" y="282" width="22.5" height="40" rx="3"/>
+<rect class="ghost-read" x="192.5" y="282" width="427.5" height="40" rx="3"/>
+<rect class="write" x="620.0" y="282" width="135.0" height="40" rx="3"/>
+<line class="sep" x1="620.0" y1="282" x2="620.0" y2="322"/>
+<line class="sep" x1="710.0" y1="282" x2="710.0" y2="322"/>
+<rect class="write" x="755.0" y="282" width="90.0" height="40" rx="3"/>
+<text class="tw" x="800.0" y="299" font-size="10" text-anchor="middle" font-weight="600">new</text>
+<text class="tw" x="800.0" y="312" font-size="10" text-anchor="middle" font-weight="600">message</text>
+<text class="t2" x="800.0" y="335" font-size="10" text-anchor="middle">+2k, msg 5</text>
+<rect class="pill" x="368.2" y="293" width="76" height="18" rx="9"/>
+<text class="t" x="406.2" y="306" font-size="11" text-anchor="middle" font-weight="600">9,500 saved</text>
+<text class="t2" x="687.5" y="335" font-size="10" text-anchor="middle">tail written, not read</text>
+<text class="t2" x="170" y="335" font-size="10">summary</text>
+<rect x="1075" y="283" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
+<text class="t" x="1108.2" y="297" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
+<rect x="1075" y="307" width="95.2" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
+<text class="t" x="1122.6" y="321" font-size="12" text-anchor="middle" font-weight="600">cacheChange</text>
+<text class="t" x="1180" y="297" font-size="14" font-weight="600">saved: read 9,500</text>
+<text class="t" x="1180" y="321" font-size="14" font-weight="600">cacheChange: 3,500 read → write</text>
+<defs><marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ink2)"/></marker></defs>
+<line class="gap" x1="178" y1="348" x2="178" y2="372" marker-end="url(#ag)"/>
+<text class="t2" x="202" y="364" font-size="11">1 min later · cache hot</text>
+<line class="gap" x1="178" y1="438" x2="178" y2="466" marker-end="url(#ag)"/>
+<text class="t2" x="202" y="456" font-size="11">15 min later · cache cold (expired)</text>
+<text class="t" x="24" y="392" font-size="14" font-weight="600">Request B</text>
+<rect class="read" x="170.0" y="376" width="22.5" height="40" rx="3"/>
+<rect class="ghost-read" x="192.5" y="376" width="427.5" height="40" rx="3"/>
+<rect class="read" x="620.0" y="376" width="135.0" height="40" rx="3"/>
+<line class="sep" x1="620.0" y1="376" x2="620.0" y2="416"/>
+<line class="sep" x1="710.0" y1="376" x2="710.0" y2="416"/>
+<rect class="read" x="755.0" y="376" width="90.0" height="40" rx="3"/>
+<rect class="write" x="845.0" y="376" width="67.5" height="40" rx="3"/>
+<text class="tw" x="878.75" y="393" font-size="10" text-anchor="middle" font-weight="600">new</text>
+<text class="tw" x="878.75" y="406" font-size="10" text-anchor="middle" font-weight="600">message</text>
+<text class="t2" x="878.8" y="429" font-size="10" text-anchor="middle">+1.5k, msg 6</text>
+<rect class="pill" x="368.2" y="387" width="76" height="18" rx="9"/>
+<text class="t" x="406.2" y="400" font-size="11" text-anchor="middle" font-weight="600">9,500 saved</text>
+<text class="t2" x="170" y="429" font-size="10">summary</text>
+<text class="t" x="1180" y="395" font-size="14" font-weight="600">saved: read 9,500</text>
+<g transform="translate(0,24)">
+<text class="t" x="24" y="462" font-size="14" font-weight="600">Request C</text>
+<rect class="write" x="170.0" y="446" width="22.5" height="40" rx="3"/>
+<rect class="ghost-write" x="192.5" y="446" width="427.5" height="40" rx="3"/>
+<rect class="write" x="620.0" y="446" width="135.0" height="40" rx="3"/>
+<line class="sep" x1="620.0" y1="446" x2="620.0" y2="486"/>
+<line class="sep" x1="710.0" y1="446" x2="710.0" y2="486"/>
+<rect class="write" x="755.0" y="446" width="90.0" height="40" rx="3"/>
+<rect class="write" x="845.0" y="446" width="67.5" height="40" rx="3"/>
+<rect class="write" x="912.5" y="446" width="45.0" height="40" rx="3"/>
+<text class="tw" x="935.0" y="463" font-size="10" text-anchor="middle" font-weight="600">new</text>
+<text class="tw" x="935.0" y="476" font-size="10" text-anchor="middle" font-weight="600">message</text>
+<text class="t2" x="935.0" y="499" font-size="10" text-anchor="middle">+1k, msg 7</text>
+<rect class="pill" x="368.2" y="457" width="76" height="18" rx="9"/>
+<text class="t" x="406.2" y="470" font-size="11" text-anchor="middle" font-weight="600">9,500 saved</text>
+<text class="t2" x="170" y="499" font-size="10">summary</text>
+<text class="t" x="1180" y="465" font-size="14" font-weight="600">saved: write 9,500</text>
+<line class="axis" x1="1180" y1="508" x2="1421" y2="508"/>
+<text class="t2" x="1180" y="522" font-size="11">total</text>
+<text class="t" x="1180" y="540" font-size="12">read 19,000 × $0.30 = +$0.00570</text>
+<text class="t" x="1180" y="556" font-size="12">write 9,500 × $3.75 = +$0.03563</text>
+<text class="t" x="1180" y="572" font-size="12">break 3,500 × ($3.75 − $0.30) = −$0.01208</text>
+<text class="t" x="1180" y="588" font-size="12">spend = −$0.01250</text>
+<text class="t" x="1180" y="612" font-size="16" font-weight="600">= +$0.01675 profit</text>
+<line class="axis" x1="170" y1="514" x2="957.5" y2="514"/>
+<line class="axis" x1="170.0" y1="514" x2="170.0" y2="520"/>
+<text class="t2" x="170.0" y="534" font-size="11" text-anchor="middle">0k</text>
+<line class="axis" x1="192.5" y1="514" x2="192.5" y2="520"/>
+<text class="t2" x="196.5" y="534" font-size="11" text-anchor="start">0.5k</text>
+<line class="axis" x1="395.0" y1="514" x2="395.0" y2="520"/>
+<text class="t2" x="395.0" y="534" font-size="11" text-anchor="middle">5k</text>
+<line class="axis" x1="620.0" y1="514" x2="620.0" y2="520"/>
+<text class="t2" x="620.0" y="534" font-size="11" text-anchor="middle">10k</text>
+<line class="axis" x1="755.0" y1="514" x2="755.0" y2="520"/>
+<text class="t2" x="755.0" y="534" font-size="11" text-anchor="middle">13k</text>
+<line class="axis" x1="957.5" y1="514" x2="957.5" y2="520"/>
+<text class="t2" x="957.5" y="534" font-size="11" text-anchor="middle">17.5k</text>
+<text class="t2" x="563.8" y="554" font-size="11" text-anchor="middle">position in the prompt, in tokens (k = 1,000). Because the summary is shorter, the later messages sit 9,500 tokens earlier.</text>
+<rect class="read" x="170" y="576" width="22" height="12" rx="2"/><text class="t" x="202" y="586" font-size="12">cache read: $0.30 per million tokens (agent model)</text>
+<rect class="write" x="560" y="576" width="22" height="12" rx="2"/><text class="t" x="592" y="586" font-size="12">cache write: $3.75 per million tokens (agent model)</text>
+<rect class="cost" x="170" y="602" width="22" height="12" rx="2"/><text class="t" x="202" y="612" font-size="12">the summarizer call, priced at summarizer-model rates</text>
+<rect class="ghost-write" x="560" y="602" width="22" height="12" rx="2"/><rect class="ghost-read" x="586" y="602" width="22" height="12" rx="2"/><text class="t" x="618" y="612" font-size="12">tokens the summary removed, at the rate they would have been billed at</text>
+<text class="t2" x="170" y="638" font-size="11">Request A is the first request with the summary. It writes the summary and the tail (orange) instead of reading the old messages. The summary and the tail are the cost of the break.</text>
+</g>
+</svg>

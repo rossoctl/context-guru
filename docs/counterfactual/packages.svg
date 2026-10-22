@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 620" width="1100" height="620" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="t">Context operations: high-level package diagram</title>
+<desc id="d">Top, the context_counterfactual library. It holds the context operation class, whose kind field is one of rewrite, cacheChange, spend or setting, the Collector class, which keeps the active context operations of one thread, and the pure function Compute, which returns tokens for each billing tier. Bottom left, the Context operators: context-guru, tool-prune, headroom and other context operators, which report context operations to the Host. The Host runs the context operators. Bottom right, the Host (examples: Cortex and cg-proxy): its pipeline adds each reported context operation to the Collector; settle calls Compute and records cost and savings. The context operators and the Host import context_counterfactual; context_counterfactual imports none of them.</desc>
+<defs>
+<marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path class="aol" d="M0,0 L10,5 L0,10"/></marker>
+<marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arf" d="M0,0 L10,5 L0,10 z"/></marker>
+<marker id="as" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path class="asl" d="M0,0 L10,5 L0,10"/></marker>
+</defs>
+<style>
+svg{--surface:#fcfcfb;--panel:#f3f2ee;--ink:#0b0b0b;--ink2:#52514e;--grid:#c9c8c2;--lib:#2a78d6;--libbg:#e6eefa;--flow:#eb6834}
+@media (prefers-color-scheme: dark){svg{--surface:#1a1a19;--panel:#242422;--ink:#f0efec;--ink2:#c3c2b7;--grid:#4a4a46;--lib:#3987e5;--libbg:#1d2a3d;--flow:#d95926}}
+.bg{fill:var(--surface)}
+.pkg{fill:var(--panel);stroke:var(--ink2);stroke-width:1.4}
+.sub{fill:var(--surface);stroke:var(--grid);stroke-width:1.3}
+.ext{fill:var(--surface);stroke:var(--ink2);stroke-width:1.2;stroke-dasharray:5 3}
+.lib{fill:var(--libbg);stroke:var(--lib);stroke-width:1.8}
+.cls{fill:var(--surface);stroke:var(--lib);stroke-width:1.3}
+.sep{stroke:var(--lib);stroke-width:1}
+.t{fill:var(--ink)}.t2{fill:var(--ink2)}.tl{fill:var(--lib)}.tf{fill:var(--flow)}
+.m{font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace}
+.imp{stroke:var(--lib);stroke-width:1.6;stroke-dasharray:7 4;fill:none}
+.rep{stroke:var(--flow);stroke-width:2.4;fill:none}
+.aol{fill:none;stroke:var(--lib);stroke-width:1.6}
+.arf{fill:var(--flow)}
+.cont{stroke:var(--ink2);stroke-width:1.5;fill:none}
+.asl{fill:none;stroke:var(--ink2);stroke-width:1.5}
+</style>
+<rect class="bg" width="1100" height="620"/>
+
+<!-- Title and legend -->
+<text class="t" x="24" y="34" font-size="18" font-weight="600">Context operations: the library, its host and its context operators</text>
+<line class="imp" x1="24" y1="60" x2="70" y2="60" marker-end="url(#ao)"/>
+<text class="t2" x="78" y="64" font-size="12">«import»</text>
+<line class="rep" x1="150" y1="60" x2="196" y2="60" marker-end="url(#ar)"/>
+<text class="t2" x="204" y="64" font-size="12">«report» context operations</text>
+<rect class="ext" x="440" y="51" width="30" height="18" rx="2"/>
+<text class="t2" x="478" y="64" font-size="12">external</text>
+
+<!-- ================= context_counterfactual ================= -->
+<path class="lib" d="M24,92 h190 v26 h-190 z"/>
+<text class="tl" x="36" y="110" font-size="13" font-weight="600">«library» context_counterfactual</text>
+<rect class="lib" x="24" y="118" width="1052" height="172"/>
+<text class="t2" x="44" y="142" font-size="12">Context operation types, a collector with state per thread, and the Compute function. Imports no host and no framework.</text>
+
+<!-- Operation class -->
+<rect class="cls" x="44" y="158" width="330" height="110"/>
+<text class="t" x="209" y="184" font-size="14" font-weight="600" text-anchor="middle">Context operation</text>
+<line class="sep" x1="44" y1="198" x2="374" y2="198"/>
+<text class="t m" x="58" y="222" font-size="12">kind: rewrite | cacheChange</text>
+<text class="t m" x="58" y="240" font-size="12">      | spend | setting</text>
+
+<!-- Collector -->
+<rect class="cls" x="394" y="158" width="330" height="110"/>
+<text class="t2" x="559" y="178" font-size="11" text-anchor="middle">«class» one for each thread</text>
+<text class="t" x="559" y="196" font-size="14" font-weight="600" text-anchor="middle">Collector</text>
+<line class="sep" x1="394" y1="206" x2="724" y2="206"/>
+<text class="t m" x="408" y="230" font-size="13" font-weight="600">Add(context operation)</text>
+<text class="t2" x="408" y="250" font-size="11">keeps the active context operations of a thread,</text>
+<text class="t2" x="408" y="263" font-size="11">in memory or persisted</text>
+
+<!-- Compute -->
+<rect class="cls" x="744" y="158" width="312" height="110"/>
+<text class="t2" x="900" y="178" font-size="11" text-anchor="middle">«function»</text>
+<text class="t" x="900" y="196" font-size="14" font-weight="600" text-anchor="middle">context_counterfactual</text>
+<line class="sep" x1="744" y1="206" x2="1056" y2="206"/>
+<text class="t m" x="758" y="230" font-size="13" font-weight="600">Compute(Input) Result</text>
+<text class="t2" x="758" y="250" font-size="11">context operations + cache facts →</text>
+<text class="t2" x="758" y="263" font-size="11">tokens per billing tier</text>
+
+<!-- ================= Reporters ================= -->
+<path class="pkg" d="M24,370 h180 v26 h-180 z"/>
+<text class="t" x="36" y="388" font-size="13" font-weight="600">Context operators</text>
+<rect class="pkg" x="24" y="396" width="500" height="200"/>
+
+<rect class="sub" x="44" y="420" width="220" height="70" rx="4"/>
+<text class="t" x="58" y="448" font-size="14" font-weight="600">context-guru</text>
+<text class="t2" x="58" y="470" font-size="12">rewrites, summaries, keep-alive</text>
+
+<rect class="sub" x="284" y="420" width="220" height="70" rx="4"/>
+<text class="t" x="298" y="448" font-size="14" font-weight="600">tool-prune</text>
+<text class="t2" x="298" y="470" font-size="12">removes unused tools</text>
+
+<rect class="ext" x="44" y="506" width="220" height="70" rx="4"/>
+<text class="t" x="58" y="534" font-size="14" font-weight="600">headroom</text>
+<text class="t2" x="58" y="556" font-size="12">context compression</text>
+
+<rect class="ext" x="284" y="506" width="220" height="70" rx="4"/>
+<text class="t" x="298" y="534" font-size="14" font-weight="600">others</text>
+<text class="t2" x="298" y="556" font-size="12">any context operator, any framework</text>
+
+<!-- ================= Host ================= -->
+<path class="pkg" d="M640,370 h250 v26 h-250 z"/>
+<text class="t" x="652" y="388" font-size="13" font-weight="600">Host. Examples: Cortex and cg-proxy</text>
+<rect class="pkg" x="640" y="396" width="436" height="130"/>
+
+<rect class="sub" x="660" y="416" width="190" height="80" rx="4"/>
+<text class="t" x="674" y="442" font-size="14" font-weight="600">pipeline</text>
+<text class="t2" x="674" y="464" font-size="12">adds each reported context</text>
+<text class="t2" x="674" y="480" font-size="12">operation to the Collector</text>
+
+<rect class="sub" x="866" y="416" width="190" height="80" rx="4"/>
+<text class="t" x="880" y="442" font-size="14" font-weight="600">settle</text>
+<text class="t2" x="880" y="464" font-size="12">calls Compute(), applies its</text>
+<text class="t2" x="880" y="480" font-size="12">own rates, records savings</text>
+
+<!-- Host runs Operators; Operators report to Host -->
+<line class="cont" x1="640" y1="440" x2="526" y2="440" marker-end="url(#as)"/>
+<text class="t2" x="583" y="430" font-size="12" text-anchor="middle">runs</text>
+<line class="rep" x1="526" y1="500" x2="638" y2="500" marker-end="url(#ar)"/>
+<text class="tf" x="582" y="490" font-size="12" text-anchor="middle">«report»</text>
+<text class="tf" x="582" y="520" font-size="11" text-anchor="middle">context operations</text>
+
+<!-- imports -->
+<line class="imp" x1="269" y1="370" x2="269" y2="292" marker-end="url(#ao)"/>
+<text class="tl" x="277" y="336" font-size="12">«import»</text>
+<text class="t2" x="277" y="352" font-size="11">builds context operations</text>
+<line class="imp" x1="700" y1="396" x2="700" y2="270" marker-end="url(#ao)"/>
+<text class="tl" x="708" y="326" font-size="12">«import»</text>
+<text class="t2" x="708" y="342" font-size="11">calls Add</text>
+<line class="imp" x1="960" y1="416" x2="960" y2="270" marker-end="url(#ao)"/>
+<text class="tl" x="968" y="326" font-size="12">«import»</text>
+<text class="t2" x="968" y="342" font-size="11">calls Compute</text>
+
+</svg>

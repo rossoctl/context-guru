@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1110 540" width="1110" height="540" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="t">Context operations: from a request to the savings</title>
+<desc id="d">An agent sends a request. Inside Cortex it passes through the plugins tool-prune, cpex, the context-guru plugin and possibly other plugins, then goes out to the upstream LLM. Each plugin reports its context operations, drawn as circles: tool-prune one, cpex one, the context-guru plugin two, and other plugins any number, drawn dashed. Cortex accumulates the context operations in one array for the request. It sends the array to the context_counterfactual Compute function, which returns tokens per tier. Cortex then computes the savings from those tokens and its own rates.</desc>
+<defs>
+<marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ahk" d="M0,0 L10,5 L0,10 z"/></marker>
+<marker id="aho" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path class="aho" d="M0,0 L10,5 L0,10 z"/></marker>
+<marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ahg" d="M0,0 L10,5 L0,10 z"/></marker>
+</defs>
+<style>
+svg{--surface:#fcfcfb;--panel:#f3f2ee;--ink:#0b0b0b;--ink2:#52514e;--grid:#c9c8c2;--lib:#2a78d6;--libbg:#e6eefa;--op:#eb6834}
+@media (prefers-color-scheme: dark){svg{--surface:#1a1a19;--panel:#242422;--ink:#f0efec;--ink2:#c3c2b7;--grid:#4a4a46;--lib:#3987e5;--libbg:#1d2a3d;--op:#d95926}}
+.bg{fill:var(--surface)}
+.host{fill:var(--panel);stroke:var(--grid);stroke-width:1.5}
+.box{fill:var(--surface);stroke:var(--grid);stroke-width:1.5}
+.boxd{fill:var(--surface);stroke:var(--ink2);stroke-width:1.5;stroke-dasharray:5 3}
+.lib{fill:var(--libbg);stroke:var(--lib);stroke-width:2}
+.t{fill:var(--ink)}.t2{fill:var(--ink2)}.tl{fill:var(--lib)}
+.req{stroke:var(--ink);stroke-width:3;fill:none}
+.actor{stroke:var(--ink);stroke-width:2.2;fill:none;stroke-linecap:round}
+.op{fill:var(--op);stroke:var(--surface);stroke-width:2}
+.opd{fill:var(--surface);stroke:var(--op);stroke-width:1.8;stroke-dasharray:3 2}
+.rep{stroke:var(--op);stroke-width:1.5;stroke-dasharray:4 3;fill:none}
+.res{stroke:var(--lib);stroke-width:2;fill:none}
+.ahk{fill:var(--ink)}.aho{fill:var(--op)}.ahg{fill:var(--lib)}
+</style>
+<rect class="bg" width="1110" height="540"/>
+
+<text class="t" x="24" y="32" font-size="18" font-weight="600">Context operations: from a request to the savings</text>
+<line class="req" x1="24" y1="56" x2="60" y2="56" marker-end="url(#ah)"/>
+<text class="t2" x="68" y="60" font-size="12">the request</text>
+<circle class="op" cx="170" cy="56" r="8"/>
+<text class="t2" x="184" y="60" font-size="12">a reported context operation</text>
+<rect class="boxd" x="400" y="47" width="30" height="18" rx="3"/>
+<text class="t2" x="438" y="60" font-size="12">a potential plugin</text>
+
+<!-- Cortex -->
+<rect class="host" x="140" y="84" width="760" height="430" rx="10"/>
+<text class="t" x="160" y="110" font-size="15" font-weight="600">Cortex</text>
+
+<!-- Plugins -->
+<rect class="box" x="170" y="134" width="150" height="80" rx="6"/>
+<text class="t" x="245" y="160" font-size="14" font-weight="600" text-anchor="middle">tool-prune</text>
+<rect class="box" x="340" y="134" width="150" height="80" rx="6"/>
+<text class="t" x="415" y="160" font-size="14" font-weight="600" text-anchor="middle">cpex</text>
+<rect class="box" x="510" y="134" width="150" height="80" rx="6"/>
+<text class="t" x="585" y="160" font-size="14" font-weight="600" text-anchor="middle">context-guru plugin</text>
+<rect class="boxd" x="680" y="134" width="150" height="80" rx="6"/>
+<text class="t2" x="755" y="160" font-size="14" font-weight="600" text-anchor="middle">other plugins …</text>
+
+<!-- Agent -->
+<circle class="actor" cx="70" cy="150" r="11"/>
+<line class="actor" x1="70" y1="161" x2="70" y2="196"/>
+<line class="actor" x1="52" y1="174" x2="88" y2="174"/>
+<line class="actor" x1="70" y1="196" x2="56" y2="220"/>
+<line class="actor" x1="70" y1="196" x2="84" y2="220"/>
+<text class="t" x="70" y="242" font-size="13" font-weight="600" text-anchor="middle">Agent</text>
+
+<!-- Upstream -->
+<rect class="box" x="940" y="144" width="146" height="80" rx="6"/>
+<text class="t" x="1013" y="180" font-size="14" font-weight="600" text-anchor="middle">Upstream</text>
+<text class="t2" x="1013" y="198" font-size="12" text-anchor="middle">LLM</text>
+
+<!-- The request passes through the plugins and goes out -->
+<line class="req" x1="94" y1="186" x2="936" y2="186" marker-end="url(#ah)"/>
+<text class="t" x="125" y="178" font-size="13" font-weight="600">request</text>
+
+<!-- Each plugin reports its operations -->
+<circle class="op" cx="245" cy="214" r="11"/>
+<circle class="op" cx="415" cy="214" r="11"/>
+<circle class="op" cx="572" cy="214" r="11"/>
+<circle class="op" cx="598" cy="214" r="11"/>
+<circle class="opd" cx="755" cy="214" r="11"/>
+<line class="rep" x1="245" y1="226" x2="350" y2="292" marker-end="url(#aho)"/>
+<line class="rep" x1="415" y1="226" x2="410" y2="292" marker-end="url(#aho)"/>
+<line class="rep" x1="572" y1="226" x2="470" y2="292" marker-end="url(#aho)"/>
+<line class="rep" x1="598" y1="226" x2="530" y2="292" marker-end="url(#aho)"/>
+<line class="rep" x1="755" y1="226" x2="590" y2="292" marker-end="url(#aho)"/>
+
+<!-- Accumulated in Cortex -->
+<rect class="lib" x="290" y="292" width="350" height="80" rx="8"/>
+<text class="tl" x="302" y="309" font-size="12" font-weight="700">context_counterfactual.Collector</text>
+<rect class="box" x="300" y="316" width="330" height="48" rx="6"/>
+<circle class="op" cx="350" cy="340" r="11"/>
+<circle class="op" cx="410" cy="340" r="11"/>
+<circle class="op" cx="470" cy="340" r="11"/>
+<circle class="op" cx="530" cy="340" r="11"/>
+<circle class="opd" cx="590" cy="340" r="11"/>
+
+<!-- To Compute -->
+<line class="res" x1="465" y1="372" x2="465" y2="398" marker-end="url(#ahg)"/>
+
+<rect class="lib" x="320" y="400" width="290" height="76" rx="8"/>
+<text class="tl" x="465" y="430" font-size="15" font-weight="700" text-anchor="middle">context_counterfactual.Compute</text>
+<text class="t" x="465" y="452" font-size="12" text-anchor="middle">library function</text>
+
+<line class="res" x1="610" y1="438" x2="688" y2="438" marker-end="url(#ahg)"/>
+<text class="tl" x="649" y="430" font-size="11" text-anchor="middle">tokens per tier</text>
+
+<rect class="box" x="690" y="400" width="200" height="76" rx="6"/>
+<text class="t" x="790" y="430" font-size="14" font-weight="600" text-anchor="middle">Savings</text>
+<text class="t2" x="790" y="452" font-size="12" text-anchor="middle">Cortex: tokens × tiers rates</text>
+</svg>

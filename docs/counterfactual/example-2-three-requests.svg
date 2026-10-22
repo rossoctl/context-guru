@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1210 550" width="1210" height="550" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="t">The 7,000 tokens saved by one change, in three requests</title>
+<desc id="d">Each row is a request. The horizontal axis is the prompt, in tokens, split by message. The 7,000 tokens that the change removed from message 9 are drawn as a hatched block in every request, at the same place. The block is blue where those tokens would have been read from the cache, and orange where they would have been written. Request 1 saves 0.02625 dollars, request 2 saves 0.00210 dollars, request 3 saves 0.02625 dollars, 0.05460 in total. A Compute column gives the tokens per tier for each request: 7,000 written, 7,000 read, 7,000 written. The total line multiplies them by the rates: 14,000 written at 3.75 dollars per million plus 7,000 read at 0.30 dollars per million is 0.05460 dollars. A column of reported context operations sits before the saving column; the rewrite is shown in the lane of request 1. The time between requests is written between the bars: 10 seconds, 1 minute and 20 minutes.</desc>
+<style>
+svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6;--write:#eb6834}
+@media (prefers-color-scheme: dark){svg{--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#3a3a37;--read:#3987e5;--write:#d95926}}
+.bg{fill:var(--surface)}
+.read{fill:var(--read);stroke:var(--surface);stroke-width:2}
+.write{fill:var(--write);stroke:var(--surface);stroke-width:2}
+.ghost-read{fill:url(#hr);stroke:var(--read);stroke-width:1.5;stroke-dasharray:5 3}
+.ghost-write{fill:url(#hw);stroke:var(--write);stroke-width:1.5;stroke-dasharray:5 3}
+.hr{stroke:var(--read);stroke-width:1.5}.hw{stroke:var(--write);stroke-width:1.5}
+.t{fill:var(--ink)}.t2{fill:var(--ink2)}
+.guide{stroke:var(--ink2);stroke-width:1;stroke-dasharray:2 4;opacity:.7}
+.axis{stroke:var(--grid);stroke-width:1}
+.pill{fill:var(--surface)}
+.sep{stroke:var(--surface);stroke-width:2}
+.gap{stroke:var(--ink2);stroke-width:1.4}
+</style>
+<defs>
+<pattern id="hr" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hr" x1="0" y1="0" x2="0" y2="8"/></pattern>
+<pattern id="hw" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hw" x1="0" y1="0" x2="0" y2="8"/></pattern>
+<marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ink2)"/></marker>
+</defs>
+<rect class="bg" width="1210" height="550"/>
+<text class="t" x="24" y="30" font-size="17" font-weight="600">One change, three requests: the same 7,000 tokens are saved every time</text>
+<text class="t2" x="24" y="50" font-size="12">Each row is a request. Left to right is the prompt, message by message; widths are in tokens. The hatched block is what the change removed.</text>
+<g transform="translate(-100,0)">
+<text class="t" x="441.4" y="84" font-size="12" text-anchor="middle" font-weight="600">messages 0 to 8</text>
+<text class="t2" x="441.4" y="98" font-size="11" text-anchor="middle">30,000 tokens, unchanged</text>
+<text class="t" x="794.3" y="72" font-size="12" text-anchor="middle" font-weight="600">message 9</text>
+<text class="t2" x="794.3" y="86" font-size="11" text-anchor="middle">8,000 → 1,000 tokens</text>
+<path d="M712.9 108 V101 H857.6 V108" fill="none" stroke="var(--ink2)" stroke-width="1"/>
+<text class="t" x="869.6" y="84" font-size="12" font-weight="600">later turns</text>
+<text class="t2" x="869.6" y="98" font-size="11">new messages</text>
+<line class="guide" x1="731.0" y1="110" x2="731.0" y2="404"/>
+<line class="guide" x1="857.6" y1="110" x2="857.6" y2="404"/>
+<text class="t" x="124" y="136" font-size="14" font-weight="600">R 0</text>
+<rect class="write" x="170.0" y="120" width="542.9" height="40" rx="3"/>
+<line class="sep" x1="215.2" y1="120" x2="215.2" y2="160"/>
+<line class="sep" x1="291.2" y1="120" x2="291.2" y2="160"/>
+<line class="sep" x1="323.8" y1="120" x2="323.8" y2="160"/>
+<line class="sep" x1="416.1" y1="120" x2="416.1" y2="160"/>
+<line class="sep" x1="470.4" y1="120" x2="470.4" y2="160"/>
+<line class="sep" x1="510.2" y1="120" x2="510.2" y2="160"/>
+<line class="sep" x1="593.4" y1="120" x2="593.4" y2="160"/>
+<line class="sep" x1="627.8" y1="120" x2="627.8" y2="160"/>
+<text class="t" x="124" y="206" font-size="14" font-weight="600">R 1</text>
+<rect class="read" x="170.0" y="190" width="542.9" height="40" rx="3"/>
+<line class="sep" x1="215.2" y1="190" x2="215.2" y2="230"/>
+<line class="sep" x1="291.2" y1="190" x2="291.2" y2="230"/>
+<line class="sep" x1="323.8" y1="190" x2="323.8" y2="230"/>
+<line class="sep" x1="416.1" y1="190" x2="416.1" y2="230"/>
+<line class="sep" x1="470.4" y1="190" x2="470.4" y2="230"/>
+<line class="sep" x1="510.2" y1="190" x2="510.2" y2="230"/>
+<line class="sep" x1="593.4" y1="190" x2="593.4" y2="230"/>
+<line class="sep" x1="627.8" y1="190" x2="627.8" y2="230"/>
+<rect class="write" x="712.9" y="190" width="18.1" height="40" rx="3"/>
+<rect class="ghost-write" x="731.0" y="190" width="126.7" height="40" rx="3"/>
+<rect class="pill" x="756.3" y="201" width="76" height="18" rx="9"/>
+<text class="t" x="794.3" y="214" font-size="11" text-anchor="middle" font-weight="600">7,000 saved</text>
+<rect x="990" y="200" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
+<text class="t" x="1023.2" y="214" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
+<text class="t" x="1140" y="217" font-size="14" font-weight="600">write 7,000</text>
+<text class="t" x="124" y="276" font-size="14" font-weight="600">R 2</text>
+<rect class="read" x="170.0" y="260" width="542.9" height="40" rx="3"/>
+<line class="sep" x1="215.2" y1="260" x2="215.2" y2="300"/>
+<line class="sep" x1="291.2" y1="260" x2="291.2" y2="300"/>
+<line class="sep" x1="323.8" y1="260" x2="323.8" y2="300"/>
+<line class="sep" x1="416.1" y1="260" x2="416.1" y2="300"/>
+<line class="sep" x1="470.4" y1="260" x2="470.4" y2="300"/>
+<line class="sep" x1="510.2" y1="260" x2="510.2" y2="300"/>
+<line class="sep" x1="593.4" y1="260" x2="593.4" y2="300"/>
+<line class="sep" x1="627.8" y1="260" x2="627.8" y2="300"/>
+<rect class="read" x="712.9" y="260" width="18.1" height="40" rx="3"/>
+<rect class="ghost-read" x="731.0" y="260" width="126.7" height="40" rx="3"/>
+<rect class="write" x="857.6" y="260" width="36.2" height="40" rx="3"/>
+<rect class="pill" x="756.3" y="271" width="76" height="18" rx="9"/>
+<text class="t" x="794.3" y="284" font-size="11" text-anchor="middle" font-weight="600">7,000 saved</text>
+<text class="t2" x="875.7" y="315" font-size="10" text-anchor="middle">+2k</text>
+<text class="t" x="1140" y="287" font-size="14" font-weight="600">read 7,000</text>
+<text class="t" x="124" y="346" font-size="14" font-weight="600">R 3</text>
+<rect class="write" x="170.0" y="330" width="542.9" height="40" rx="3"/>
+<line class="sep" x1="215.2" y1="330" x2="215.2" y2="370"/>
+<line class="sep" x1="291.2" y1="330" x2="291.2" y2="370"/>
+<line class="sep" x1="323.8" y1="330" x2="323.8" y2="370"/>
+<line class="sep" x1="416.1" y1="330" x2="416.1" y2="370"/>
+<line class="sep" x1="470.4" y1="330" x2="470.4" y2="370"/>
+<line class="sep" x1="510.2" y1="330" x2="510.2" y2="370"/>
+<line class="sep" x1="593.4" y1="330" x2="593.4" y2="370"/>
+<line class="sep" x1="627.8" y1="330" x2="627.8" y2="370"/>
+<rect class="write" x="712.9" y="330" width="18.1" height="40" rx="3"/>
+<rect class="ghost-write" x="731.0" y="330" width="126.7" height="40" rx="3"/>
+<rect class="write" x="857.6" y="330" width="36.2" height="40" rx="3"/>
+<rect class="write" x="893.8" y="330" width="27.1" height="40" rx="3"/>
+<rect class="pill" x="756.3" y="341" width="76" height="18" rx="9"/>
+<text class="t" x="794.3" y="354" font-size="11" text-anchor="middle" font-weight="600">7,000 saved</text>
+<text class="t2" x="875.7" y="385" font-size="10" text-anchor="middle">+2k</text>
+<text class="t2" x="907.4" y="385" font-size="10" text-anchor="middle">+1.5k</text>
+<text class="t" x="1140" y="357" font-size="14" font-weight="600">write 7,000</text>
+<text class="t" x="990" y="84" font-size="12" font-weight="600">operations</text>
+<text class="t2" x="990" y="98" font-size="11">reported</text>
+<text class="t" x="1140" y="84" font-size="12" font-weight="600">Compute</text>
+<text class="t2" x="1140" y="98" font-size="11">tokens per tier</text>
+<line class="gap" x1="178" y1="163" x2="178" y2="187" marker-end="url(#ag)"/>
+<text class="t2" x="188" y="179" font-size="11">10 s later</text>
+<line class="gap" x1="178" y1="233" x2="178" y2="257" marker-end="url(#ag)"/>
+<text class="t2" x="188" y="249" font-size="11">1 min later</text>
+<line class="gap" x1="178" y1="303" x2="178" y2="327" marker-end="url(#ag)"/>
+<text class="t2" x="188" y="319" font-size="11">20 min later</text>
+<line class="axis" x1="1140" y1="386" x2="1281" y2="386"/>
+<text class="t2" x="1140" y="404" font-size="11">total</text>
+<text class="t" x="1140" y="422" font-size="12">write 14,000 × $3.75 per M</text>
+<text class="t" x="1140" y="438" font-size="12">+ read 7,000 × $0.30 per M</text>
+<text class="t" x="1140" y="460" font-size="16" font-weight="600">= $0.05460</text>
+<line class="axis" x1="170.0" y1="404" x2="930.0" y2="404"/>
+<line class="axis" x1="170.0" y1="404" x2="170.0" y2="410"/>
+<text class="t2" x="170.0" y="424" font-size="11" text-anchor="middle">0k</text>
+<line class="axis" x1="351.0" y1="404" x2="351.0" y2="410"/>
+<text class="t2" x="351.0" y="424" font-size="11" text-anchor="middle">10k</text>
+<line class="axis" x1="531.9" y1="404" x2="531.9" y2="410"/>
+<text class="t2" x="531.9" y="424" font-size="11" text-anchor="middle">20k</text>
+<line class="axis" x1="712.9" y1="404" x2="712.9" y2="410"/>
+<text class="t2" x="712.9" y="424" font-size="11" text-anchor="middle">30k</text>
+<line class="axis" x1="893.8" y1="404" x2="893.8" y2="410"/>
+<text class="t2" x="893.8" y="424" font-size="11" text-anchor="middle">40k</text>
+<text class="t2" x="550.0" y="442" font-size="11" text-anchor="middle">position in the prompt, in tokens (k = 1,000). Because message 9 was shortened, the later messages sit 7,000 tokens earlier.</text>
+<rect class="read" x="170" y="460" width="22" height="12" rx="2"/><text class="t" x="202" y="470" font-size="12">cache read: $0.30 per million tokens</text>
+<rect class="write" x="170" y="486" width="22" height="12" rx="2"/><text class="t" x="202" y="496" font-size="12">cache write: $3.75 per million tokens</text>
+<rect class="ghost-write" x="170" y="512" width="22" height="12" rx="2"/><rect class="ghost-read" x="196" y="512" width="22" height="12" rx="2"/><text class="t" x="228" y="522" font-size="12">tokens the change removed, drawn at the rate they would have been billed at (orange: written, blue: read)</text>
+</g>
+</svg>
