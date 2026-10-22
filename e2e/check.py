@@ -155,15 +155,19 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
     _rec(out, "C.unused_set.pooled", "cleanup", pooled_unused == sorted(exp["cleanup"].get("unused_pooled", [])),
          sorted(exp["cleanup"].get("unused_pooled", [])), pooled_unused,
          detail="unused only where no measured project used it", blocked="unused_pooled" not in exp["cleanup"])
-    per = {r: (api.get("stats", {}).get(r) or {}).get("requests") for r in roots}
+    # Every project with requests, not only the picker's: a history-only project is not on Cleanup, but its
+    # imported requests are in the all-projects total.
+    per = {r: (api.get("stats", {}).get(r) or {}).get("requests") for r in exp["stats"]["requests"]}
     total = (api.get("stats_pooled") or {}).get("requests")
     _rec(out, "C.pooled_requests_are_the_sum", "rollup", total is not None and total == sum(v or 0 for v in per.values()),
          sum(v or 0 for v in per.values()), total, detail="all-projects requests == the sum over projects",
          blocked=total is None or any(v is None for v in per.values()))
     # Each item's carried tokens, per project, must add up to its pooled figure: a project counting another's
     # traffic makes the sum too big, a pool that drops a project makes it too small.
+    # Every project collected, not only the picker's: a leak shows up exactly in a project that should have
+    # little or nothing (history-only, a subfolder's root), which is not on the picker.
     by_name: dict = {}
-    for r in roots:
+    for r in sorted(k for k in ins if k):
         for i in _unused((ins.get(r) or {}).get("items", [])):
             by_name[i["name"]] = by_name.get(i["name"], 0) + (i.get("reads") or 0)
     pool = {i["name"]: i.get("reads") or 0 for i in _unused(pooled_doc.get("items", []))}

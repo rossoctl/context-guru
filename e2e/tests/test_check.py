@@ -437,6 +437,23 @@ class TestCrossProject(unittest.TestCase):
         api["insights"][""]["items"][0] = dict(item("mcp__d__s", usd=0.3), reads=300)  # beta's 100 missing
         self.assertEqual(self.v(exp, api)["C.pooled_carry_is_the_sum"], "FAIL")
 
+    def test_pooled_requests_include_projects_outside_the_picker(self):
+        # A history-only project is not on Cleanup's picker, but its imported requests are in the pooled
+        # total. The sum is over every project with requests, not over the picker.
+        exp, api = two_projects()
+        exp["stats"]["requests"]["/s/hist"] = 3
+        api["stats"]["/s/hist"] = {"requests": 3}
+        api["stats_pooled"]["requests"] = 20
+        self.assertEqual(self.v(exp, api)["C.pooled_requests_are_the_sum"], "PASS")
+
+    def test_a_project_outside_the_picker_showing_others_data_fails(self):
+        # The real leak: with the project scope gone, a project NOT on the picker (gamma, history-only) shows
+        # the pool's items. Its figures must still be added up, or the leak passes.
+        exp, api = two_projects()
+        exp["stats"]["requests"]["/s/hist"] = 3
+        api["insights"]["/s/hist"] = {"items": [dict(item("mcp__d__s", usd=0.4), reads=400)], "timeline": {"buckets": []}}
+        self.assertEqual(self.v(exp, api)["C.pooled_carry_is_the_sum"], "FAIL")
+
     def test_without_the_pooled_stats_the_sum_check_blocks(self):
         exp, api = two_projects()
         del api["stats_pooled"]
