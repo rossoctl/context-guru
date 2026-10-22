@@ -1855,6 +1855,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 					tenantID:  rc.tenantID,
 					provider:  provider,
 					path:      r.URL.Path,
+					headers:   r.Header.Clone(), // a copy: the writer reads it after serve returns
 					status:    status,
 					reqBody:   rc.pristine,
 					respBody:  recBody,
