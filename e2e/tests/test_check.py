@@ -61,8 +61,12 @@ def make_db(rows_for=(), requests_for=None):
     return f.name
 
 
-def verdicts(api=API, exp=EXP, ui=None, tier="full", probes=PROBES, db=None):
-    return {r["id"]: r["verdict"] for r in check.run(exp, api, ui, tier, probes=probes, db=db)}
+INSTALLS = {"install": {"result": "routed", "history_import": "done"},
+            "reinstall": {"result": "routed", "history_import": "already_done"}}
+
+
+def verdicts(api=API, exp=EXP, ui=None, tier="full", probes=PROBES, db=None, installs=INSTALLS):
+    return {r["id"]: r["verdict"] for r in check.run(exp, api, ui, tier, probes=probes, db=db, installs=installs)}
 
 
 class TestCheck(unittest.TestCase):
@@ -371,6 +375,33 @@ class TestMain(unittest.TestCase):
             r = subprocess.run([sys.executable, "-m", "e2e.check", "--results", d, "--tier", "smoke"],
                                capture_output=True, text=True)
         self.assertEqual((r.returncode, "FileNotFoundError" in r.stderr), (3, True))
+
+
+class TestInstallImportsOnce(unittest.TestCase):
+    """The real install imports the pre-install history once; a re-install must not import again."""
+
+    def _v(self, first, again):
+        return verdicts(installs={"install": {"result": "routed", "history_import": first},
+                                  "reinstall": {"result": "routed", "history_import": again}})
+
+    def test_imported_on_install_and_skipped_on_reinstall_passes(self):
+        self.assertEqual(self._v("done", "already_done")["R.install_imports_history_once"], "PASS")
+
+    def test_install_that_did_not_import_fails(self):
+        for first in ("failed", "skipped", None):
+            self.assertEqual(self._v(first, "already_done")["R.install_imports_history_once"], "FAIL", first)
+
+    def test_reinstall_that_imported_again_fails(self):
+        self.assertEqual(self._v("done", "done")["R.install_imports_history_once"], "FAIL")
+
+    def test_facts_reader_keeps_the_last_value_and_splits_only_on_the_first_equals(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "install.facts"
+            f.write_text("history_import=failed\nnoise line\nhistory_import_retry=x import-history -db=/p\nhistory_import=done\n")
+            self.assertEqual(check._facts(f), {"history_import": "done", "history_import_retry": "x import-history -db=/p"})
+
+    def test_missing_install_facts_block(self):
+        self.assertEqual(verdicts(installs={})["R.install_imports_history_once"], "BLOCKED")
 
 
 class TestSuiteChecks(unittest.TestCase):

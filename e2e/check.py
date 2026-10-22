@@ -46,7 +46,8 @@ def _shutdown_rows(db, sid):
         return None
 
 
-def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str | None = None) -> list:
+def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str | None = None,
+        installs: dict | None = None) -> list:
     probes = probes or {}
     out = []
     h, he = api.get("history", {}), exp["history"]
@@ -168,6 +169,13 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
     _rec(out, "R.import_count_equals_valid_turns", "rollup",
          h.get("imported_requests") == exp["import"]["valid_pre_install_turns"],
          exp["import"]["valid_pre_install_turns"], h.get("imported_requests"))
+    # The import is part of the install, once: the real install.sh --route reported it, and a re-install did not
+    # import again. The count it imported is judged just above, against the oracle.
+    inst = installs or {}
+    first, again = (inst.get(k, {}).get("history_import") for k in ("install", "reinstall"))
+    _rec(out, "R.install_imports_history_once", "rollup", (first, again) == ("done", "already_done"),
+         ["done", "already_done"], [first, again], detail="history_import= on install, then on a re-install",
+         blocked=not (inst.get("install") and inst.get("reinstall")))
 
     # --- known finding #1 ---------------------------------------------------------------------
     # The finding stands on the Go reproducer; this probe is too racy to prove or clear it on its own.
@@ -271,7 +279,19 @@ def _judge(d: pathlib.Path, tier: str) -> list:
                                 ("unpriced", _load(d / "unpriced-probe.json"))) if v}
     db = d / "db" / "dashboard-8788.db"
     return run(json.loads((d / "expected.json").read_text()), json.loads((d / "actual-api.json").read_text()),
-               _load(d / "actual-ui.json"), tier, probes=probes, db=str(db) if db.exists() else None)
+               _load(d / "actual-ui.json"), tier, probes=probes, db=str(db) if db.exists() else None,
+               installs={k: _facts(d / "logs" / f"{k}.facts") for k in ("install", "reinstall")
+                         if (d / "logs" / f"{k}.facts").exists()})
+
+
+def _facts(path: pathlib.Path) -> dict:
+    """install.sh's key=value lines; the last value of a key wins, as kv() in install.sh reads them."""
+    out = {}
+    for line in path.read_text().splitlines():
+        k, eq, v = line.partition("=")
+        if eq:
+            out[k.strip()] = v
+    return out
 
 
 if __name__ == "__main__":

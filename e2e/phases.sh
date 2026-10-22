@@ -61,19 +61,34 @@ p_generate() {
   cmp "$R/expected.json" "$R/expected.2.json"   # determinism
 }
 
+# THE REAL INSTALL, as /context-guru:install runs it: the plugin's port option, then install.sh --route with
+# the user's consent. It puts the binary on PATH, routes ~/.claude/settings.json, starts a proxy, and imports
+# the pre-install history once (history_import=done) -- the behaviour under test. Only the pre-install
+# transcripts exist at this point (p_history), as on a machine with months of Claude Code before install.
 p_install() {
   mkdir -p "$HOME/.local/bin" "$HOME/.claude"
   cp /opt/cg/context-guru-proxy "$HOME/.local/bin/"
+  python3 - "$HOME/.claude/settings.json" "$PORT" <<'PY2'
+import json, os, sys
+f, port = sys.argv[1], int(sys.argv[2])
+d = json.load(open(f)) if os.path.exists(f) else {}
+d.setdefault("pluginConfigs", {}).setdefault("context-guru@context-guru", {})["options"] = {"port": port}
+json.dump(d, open(f, "w"), indent=1)
+PY2
   # install.sh compares CONTEXT_GURU_VERSION to the binary's own version to take the "present" path.
   CONTEXT_GURU_VERSION="$("$HOME/.local/bin/context-guru-proxy" -version 2>&1 | awk '{print $2; exit}')" \
-    "$PLUG/scripts/install.sh" | tee "$R/logs/install.facts"
-  grep -q '^result=present' "$R/logs/install.facts" || { echo "install.sh did not take the present-binary path"; return 1; }
-  [ -f "$HOME/.claude/settings.json" ] || echo '{}' >"$HOME/.claude/settings.json"
-  "$PLUG/scripts/settings.py" add --file "$HOME/.claude/settings.json" --url "$BASE/anthropic" --user-scope \
-    | tee "$R/logs/settings-add.facts"
-  grep -qE '^result=(ok|added)' "$R/logs/settings-add.facts" || { echo "settings.py add did not report result=added|ok"; return 1; }
-  "$PLUG/scripts/settings.py" port install | tee "$R/logs/port.facts"
-  grep -q "^port=$PORT" "$R/logs/port.facts"
+    "$PLUG/scripts/install.sh" --route --scope user --upstream "http://127.0.0.1:$UP" \
+    --i-consent-to-traffic-interception | tee "$R/logs/install.facts"
+  grep -q '^result=routed' "$R/logs/install.facts" || { echo "install.sh --route did not route"; return 1; }
+  grep -q "^port=$PORT\$" "$R/logs/install.facts" || { echo "install.sh --route chose another port"; return 1; }
+  grep -q '^history_import=done$' "$R/logs/install.facts" || { echo "install did not import the history"; return 1; }
+  # The harness runs its own proxy from here (pidfile, restarts, shutdown probe; p_replay starts it): stop the
+  # one install started, by ITS pidfile, on the same port and DB.
+  local ipid; ipid="$(cat "$HOME/.local/state/context-guru/proxy-$PORT.pid" 2>/dev/null)"
+  [ -n "$ipid" ] || { echo "install.sh --route left no pidfile for port $PORT"; return 1; }
+  kill "$ipid" 2>/dev/null
+  for _ in $(seq 1 40); do kill -0 "$ipid" 2>/dev/null || return 0; sleep 0.25; done
+  echo "the proxy install started (pid $ipid) did not exit"; return 1
 }
 
 DB="$HOME/.local/state/context-guru/dashboard-$PORT.db"
@@ -165,12 +180,21 @@ p_transcripts() {
   python3 -m e2e.gen.shape --home "$HOME"
 }
 
-# The user installs, works through the proxy, and imports history afterwards. The importer writes
-# the DB directly, so the proxy is stopped around it.
-p_import() {
+# What exists on disk the moment the plugin is installed: the months of Claude Code before it.
+p_history() {
+  python3 -m e2e.gen.transcripts --tier "$TIER" --home "$HOME" --pre-install-only
+}
+
+# ONCE: a second install of the same port must not import again. Run after the traffic, as a user who
+# re-runs /context-guru:install would; the import would otherwise re-read every transcript.
+p_reinstall() {
   stop_proxy || return 1
-  /opt/cg/cg-import-history -db "$DB" -apply &&
-  /opt/cg/cg-import-history -db "$DB" -backfill-projects &&
+  CONTEXT_GURU_VERSION="$("$HOME/.local/bin/context-guru-proxy" -version 2>&1 | awk '{print $2; exit}')" \
+    "$PLUG/scripts/install.sh" --route --scope user --upstream "http://127.0.0.1:$UP" \
+    --i-consent-to-traffic-interception | tee "$R/logs/reinstall.facts"
+  grep -q '^result=routed' "$R/logs/reinstall.facts" || { echo "re-install did not route"; return 1; }
+  local ipid; ipid="$(cat "$HOME/.local/state/context-guru/proxy-$PORT.pid" 2>/dev/null)"
+  [ -n "$ipid" ] && { kill "$ipid" 2>/dev/null; for _ in $(seq 1 40); do kill -0 "$ipid" 2>/dev/null || break; sleep 0.25; done; }
   start_proxy
 }
 
@@ -233,13 +257,13 @@ p_assert() { python3 -m e2e.check --results "$R" --tier "$TIER"; local rc=$?; [ 
 cd /src
 case "$TIER" in
   # Stress is about time, not correctness: transcripts precede import because the importer reads them.
-  stress) for ph in preflight generate install replay transcripts import; do phase "$ph" "p_$ph"; done
+  stress) for ph in preflight generate history install replay transcripts reinstall; do phase "$ph" "p_$ph"; done
           phase endpoints p_endpoints ;;
   # The KNOWN baseline on main: the Go suite only (main has no History tab, so the other phases cannot run).
   suite)  phase suite p_suite; phase assert p_assert ;;
   # Preflight first: a skewed clock or a busy port must stop the run before ten minutes of `make test`.
   full)   phase preflight p_preflight; phase suite p_suite
-          for ph in generate install replay transcripts import api skill ui assert; do phase "$ph" "p_$ph"; done ;;
-  smoke)  for ph in preflight generate install replay transcripts import api skill ui assert; do phase "$ph" "p_$ph"; done ;;
+          for ph in generate history install replay transcripts reinstall api skill ui assert; do phase "$ph" "p_$ph"; done ;;
+  smoke)  for ph in preflight generate history install replay transcripts reinstall api skill ui assert; do phase "$ph" "p_$ph"; done ;;
 esac
 echo "== phases complete"
