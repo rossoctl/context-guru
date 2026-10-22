@@ -31,6 +31,14 @@ Exit codes for `e2e/run.sh` (what the Make targets call):
 - for `e2e-full`: keep the machine on power with the lid open. `run.sh` holds `caffeinate` on macOS, but a
   closed lid on battery still sleeps.
 
+**Preflight fails with `clock skew -NNNs`.** The container's clock is more than 120 s off the host's. The harness
+refuses to run then, because the importer's cutoff and the transcript timestamps depend on real time. On a Mac
+this usually means the Podman VM drifted while the host slept. Re-sync it, then run again:
+
+```
+podman machine ssh 'sudo chronyc burst 4/4; sleep 12; sudo chronyc makestep'
+```
+
 `e2e/run.sh full --keep` leaves the container running with its dashboard on `http://127.0.0.1:18788/dashboard/`.
 
 ## Read the result
