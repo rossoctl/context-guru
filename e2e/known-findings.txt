@@ -8,8 +8,4 @@
 # TEMPORARY: issue:#578 below means "found reviewing PR #578; issue not filed yet". Each is replaced by its own issue
 # number when filed (drafts: see the PR #578 review notes).
 K.inventory_survives_shutdown | 0  # tool inventory lost on shutdown: the writer is outside Recorder.wg (dash/toolinventory.go:608); pre-existing  issue:#578
-U.no_undefined_text.cleanup-* | undefined  # Cleanup MCP server rows read "undefined tools" (dash/ui/insights.js:674)  issue:#578
-U.no_overflow.cleanup-* | ins-why  # .ins-why inherits white-space: nowrap and overflows its cell (dash/ui/style.css:671-673)  issue:#578
-G.go_test.*/dash.TestTheHistoryReportsWhatWasInvokedAndWhen | TestTheHistoryReportsWhatWasInvokedAndWhen  # test reads the host's real home  issue:#578
-G.go_test.*/context-guru-plugin.TestSessionsFlagWindowsTheReportAndIsVisibleOnTheWire | TestSessionsFlagWindowsTheReportAndIsVisibleOnTheWire  # data race in test code (insights_test.go:188 vs :205)  issue:#578
 G.go_test.*/dash.TestCalculatorPricesFromTheRowsModelNotABlend | TestCalculatorPricesFromTheRowsModelNotABlend  # exact float equality on a computed price; pre-existing on main  issue:#578
