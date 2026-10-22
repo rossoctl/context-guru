@@ -78,7 +78,7 @@ PY2
   # install.sh compares CONTEXT_GURU_VERSION to the binary's own version to take the "present" path.
   CONTEXT_GURU_VERSION="$("$HOME/.local/bin/context-guru-proxy" -version 2>&1 | awk '{print $2; exit}')" \
     "$PLUG/scripts/install.sh" --route --scope user --upstream "http://127.0.0.1:$UP" \
-    --i-consent-to-traffic-interception | tee "$R/logs/install.facts"
+    --i-understand-machine-wide --i-consent-to-traffic-interception | tee "$R/logs/install.facts"
   grep -q '^result=routed' "$R/logs/install.facts" || { echo "install.sh --route did not route"; return 1; }
   grep -q "^port=$PORT\$" "$R/logs/install.facts" || { echo "install.sh --route chose another port"; return 1; }
   grep -q '^history_import=done$' "$R/logs/install.facts" || { echo "install did not import the history"; return 1; }
@@ -191,7 +191,7 @@ p_reinstall() {
   stop_proxy || return 1
   CONTEXT_GURU_VERSION="$("$HOME/.local/bin/context-guru-proxy" -version 2>&1 | awk '{print $2; exit}')" \
     "$PLUG/scripts/install.sh" --route --scope user --upstream "http://127.0.0.1:$UP" \
-    --i-consent-to-traffic-interception | tee "$R/logs/reinstall.facts"
+    --i-understand-machine-wide --i-consent-to-traffic-interception | tee "$R/logs/reinstall.facts"
   grep -q '^result=routed' "$R/logs/reinstall.facts" || { echo "re-install did not route"; return 1; }
   local ipid; ipid="$(cat "$HOME/.local/state/context-guru/proxy-$PORT.pid" 2>/dev/null)"
   [ -n "$ipid" ] && { kill "$ipid" 2>/dev/null; for _ in $(seq 1 40); do kill -0 "$ipid" 2>/dev/null || break; sleep 0.25; done; }
