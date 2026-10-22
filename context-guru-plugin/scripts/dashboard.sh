@@ -50,8 +50,8 @@ case "$PORT" in
 esac
 
 BASE="http://127.0.0.1:${PORT}/dashboard/"
-HISTORY="${BASE}#behaviour/history"
-CLEANUP="${BASE}#behaviour/insights"
+HISTORY="${BASE}#savings/history"
+CLEANUP="${BASE}#savings/insights"
 
 # /api/history rather than /dashboard/: the page shell is static and would answer even if the API
 # behind it were failing, which is the case the reader actually cares about.

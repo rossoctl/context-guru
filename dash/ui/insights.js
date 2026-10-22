@@ -31,7 +31,7 @@ document.head.appendChild(el('link', { rel: 'stylesheet', href: 'insights.css' }
  * section already appended and wired as this tab's tabpanel. Built from JS rather than markup
  * because every part of it is conditional on what the document says can be answered. */
 const insightsView = mountTab({
-  group: 'behaviour', after: 'tools', view: 'insights', label: 'Cleanup',
+  group: 'savings', after: 'tools', view: 'insights', label: 'Cleanup',
 });
 insightsView.appendChild(el('div', { id: 'insights-body' }));
 

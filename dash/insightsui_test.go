@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -354,5 +355,39 @@ func TestTheVerdictExplanationWrapsInsideItsTableCell(t *testing.T) {
 	if !regexp.MustCompile(`white-space:\s*normal`).MatchString(rule[1]) {
 		t.Errorf(".ins-why does not reset white-space, so it inherits the table cell's nowrap and "+
 			"overflows: %q", rule[1])
+	}
+}
+
+// Every self-mounting view must name a nav group that exists. mountTab throws on an unknown group, so a view
+// that names one mounts nothing and its page fails to load. Cleanup and History named `behaviour`, which the
+// redesigned nav (#564) removed; merged together, both pages threw `mountTab: no such group` on every load
+// (found by the e2e harness on the merged branch).
+func TestEverySelfMountedViewNamesANavGroupThatExists(t *testing.T) {
+	app := readUI(t, "ui/app.js")
+	decl := regexp.MustCompile(`(?s)const GROUPS = \[(.*?)\n\];`).FindStringSubmatch(app)
+	if decl == nil {
+		t.Fatal("no `const GROUPS = [...]` in app.js; update this test")
+	}
+	groups := map[string]bool{}
+	for _, m := range regexp.MustCompile(`\['(\w+)',`).FindAllStringSubmatch(decl[1], -1) {
+		groups[m[1]] = true
+	}
+	files, err := filepath.Glob("ui/*.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounted := 0
+	for _, f := range files {
+		js := readUI(t, filepath.ToSlash(f))
+		for _, m := range regexp.MustCompile(`mountTab\(\{\s*group:\s*'(\w+)'`).FindAllStringSubmatch(js, -1) {
+			mounted++
+			if !groups[m[1]] {
+				t.Errorf("%s mounts into nav group %q, which GROUPS does not define (%v): the page throws on load",
+					f, m[1], groups)
+			}
+		}
+	}
+	if mounted < 5 {
+		t.Fatalf("found only %d mountTab calls; the pattern no longer matches, update this test", mounted)
 	}
 }

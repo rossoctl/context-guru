@@ -15,11 +15,11 @@
 
 document.head.appendChild(el('link', { rel: 'stylesheet', href: 'insights.css' }));
 
-/* Behaviour group, right after Cleanup. Cleanup answers "what is this costing me"; this answers
+/* Savings group, right after Cleanup. Cleanup answers "what is this costing me"; this answers
  * "what have I ever actually used" — the question a reader asks first on install day, when
  * Cleanup has no history to reason from yet. */
 const historyView = mountTab({
-  group: 'behaviour', after: 'insights', view: 'history', label: 'History',
+  group: 'savings', after: 'insights', view: 'history', label: 'History',
 });
 historyView.appendChild(el('div', { id: 'history-body' }));
 
