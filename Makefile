@@ -22,7 +22,7 @@ export CGO_ENABLED=1
 
 .PHONY: help
 help: ## Display this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
@@ -54,6 +54,22 @@ fmt: ## Format all Go source
 lint: ## Run go vet and gofmt check
 	go vet ./...
 	@test -z "$$(gofmt -l .)" || (echo "gofmt needed:" && gofmt -l . && exit 1)
+
+.PHONY: e2e-unit
+e2e-unit: ## Run the unit tests of the e2e harness itself (host Python 3, no container)
+	python3 -W error::ResourceWarning -m unittest discover -s e2e/tests -t .
+
+.PHONY: e2e-smoke
+e2e-smoke: ## End-to-end smoke tier in a Podman/Docker sandbox (~5 min); see e2e/README.md
+	e2e/run.sh smoke
+
+.PHONY: e2e-full
+e2e-full: ## Smoke, then the full regression and 10x stress tiers (~45 min; keep the machine awake)
+	e2e/run.sh full
+
+.PHONY: e2e-mutate
+e2e-mutate: ## Mutation round: break the product five ways and confirm each break turns its check red (~12 min)
+	e2e/mutate.sh
 
 .PHONY: pre-commit
 pre-commit: ## Install pre-commit hooks

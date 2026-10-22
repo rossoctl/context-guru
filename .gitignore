@@ -198,3 +198,6 @@ CLAUDE.local.md
 *.db
 *.db-wal
 *.db-shm
+
+# e2e harness run output (local only; see e2e/README.md)
+e2e/results/
