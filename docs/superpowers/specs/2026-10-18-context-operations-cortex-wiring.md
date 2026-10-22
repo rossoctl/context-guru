@@ -254,8 +254,8 @@ would misattribute it. Keying by thread gives the right baseline for every rule 
 
 ### W5.3 Limits
 
-- **Memory:** 12 bytes for each position (`PosHash`, design §5.1). 2 bodies × 2,000 positions is about
-  48 KB for each thread. `internal/thread` caps threads at 64 for each session; a typical session
+- **Memory:** 16 bytes for each position (`PosHash`, design §5.1). 2 bodies × 2,000 positions is about
+  64 KB for each thread. `internal/thread` caps threads at 64 for each session; a typical session
   has 1 to 5. `session.max_sessions` (100) bounds the total.
 - **Restart:** fingerprints are lost. Only the next request of each thread gets `penalty_unknown`.
   They are not persisted (design §9).
@@ -292,9 +292,12 @@ New fields, all additive (the ledger rule is "add, never rename"):
 | `Event.UnattributedBreakUSD` | event | client edits and expired caches. Shown, never charged to a plugin. |
 | `Event.InteractionUSD` | event | the interaction on a rescued request (§6.2). Counted in the session total, never charged to a plugin. |
 | `Saving.Thread`, `ChangeSaving.Thread` | event and ledger | sum for each thread; a subagent's saving is separate from the main thread's |
+| `Saving.Basis` | event and ledger | `usd` or `subscriptionEquivalent` (design §7.1). A `subscriptionEquivalent` saving goes in the usage-limit column, never in a money total. |
+| `Event.Spends []SpendRecord` | event only | `{changeId, thread, costUSD}`: one for each `spend` operation of the request, priced from its `Call.Usage`. A ping is its own request, so its event holds one record. |
 
 `TotalAvoidedUSD` does not change: `max(0, USD − PenaltyUSD)` for each saving, floored at zero.
-Signed totals are out of scope (design §9).
+That floor applies to the existing ledger total only. The totals of W7.2 are signed and are folded
+from the recorded events, so a window that cost more than it saved shows as negative.
 
 **Size.** `Saving.Changes` is already small per request — one `ChangeSaving` per change touched,
 not per operation — but a request can still touch many changes (a `coref` batch cut, a wide
@@ -331,7 +334,7 @@ per-request savings and the ledger totals are correct either way.
 | Total | Sum of |
 |---|---|
 | A change | `ChangeSaving`s with one `changeId` in one thread |
-| A thread | every `Saving` of one `Thread`, plus its `spend` operations and `Event.InteractionUSD` |
+| A thread | every `Saving` of one `Thread`, plus its `Event.Spends` and `Event.InteractionUSD` |
 | A session | every thread of the session |
 | A subagent | the threads whose `Parent` chain leads to the main thread, one at a time |
 

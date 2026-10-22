@@ -369,10 +369,11 @@ numbers are not used: those requirements were dropped.
 - **R19.** The model is versioned. An unknown `Kind` is kept and reported as unpriced, never
   dropped.
 - **R20.** `RequestOps`/`Operation` is request-scoped and in-process only: input to `ops.Price`,
-  discarded once the request's `event.Saving` is written. It is never recorded (R2's `:9094` and
-  archive concern, and the session store's own size history, apply to what IS recorded —
-  `event.Saving` and `Saving.Changes`/`ChangeSaving` — not to the raw operation list). That
-  recorded summary has a size limit, with aggregation above it (wiring document).
+  discarded once the request's `event.Saving` is written. The operation list is never recorded
+  (R2's `:9094` and archive concern, and the session store's own size history, apply to what IS
+  recorded — `event.Saving`, `Saving.Changes`/`ChangeSaving` and `Event.Spends` — not to the raw
+  operation list). A `spend` is recorded as one `SpendRecord` (wiring document, W7.1), so a total
+  can add it. The recorded summary has a size limit, with aggregation above it (wiring document).
 - **R21.** Second-order effects are not operations. Example: the agent compacts later because its
   requests are smaller.
 
@@ -437,7 +438,7 @@ type Operation struct {
 
     DryRun    bool // set by the framework: computed but not sent (R12)
 
-    At     Position // first position the change touches, in this operator's output. For a break (a cacheChange from hot to cold): the first position where the forwarded body differs from the previous request's. It is a cause, not the start of the penalty (§6.2)
+    At     Position // first position the change touches, in this operator's output. Not used by a cacheChange: its range is given by the extents of CacheBefore and CacheAfter
     Spans  []Span   // every touched range, when the change is not contiguous; nil otherwise
     SizeBefore Size // what the operator received over the touched ranges; the sum over Spans
     SizeAfter  Size // what it sent on over the same ranges
@@ -445,9 +446,10 @@ type Operation struct {
     // kind = rewrite | cacheChange | spend | setting
     ChangeID     string   // the same on every request that carries this change. On a spend: the change the call created, or the keep-alive window. On a break: the change that caused it; empty when nobody did
 
-    // kind = cacheChange (§4.4): a prefix range moves from one state to another. A rescue (cold to
-    // hot) and a break (hot to cold) are both written by the collector, so neither has an operator. A
-    // rescue carries the ChangeID of the keep-alive window. A break carries the ChangeID of its cause.
+    // kind = cacheChange (§4.4): a prefix range moves from one state to another. The range is
+    // between the Extent of CacheBefore and the Extent of CacheAfter. A rescue (cold to hot) and a
+    // break (hot to cold) are both written by the collector, so neither has an operator. A rescue
+    // carries the ChangeID of the keep-alive window. A break carries the ChangeID of its cause.
     CacheBefore CacheState
     CacheAfter  CacheState
 
@@ -489,11 +491,12 @@ type Size struct {
 
 type MessageSplice struct{ At, Removed, Inserted int } // messages only
 
-// CacheState is the state of the thread's provider cache entry: its phase, and the last position
-// it covers. It is what `Price` reads, and what a `cacheChange` moves from and to.
+// CacheState is the state of the thread's provider cache entry: its phase, the last position it
+// covers, and its lifetime. It is what `Price` reads, and what a `cacheChange` moves from and to.
 type CacheState struct {
     CachePhase CachePhase // hot | cold | unknown
-    Extent     *Position  // the last position the entry covers; nil when cold or unknown
+    Extent     *Position  // the last position the entry covers; nil when nothing is covered
+    TTL        string     // "5m" | "1h": the lifetime the breakpoint asks for; empty when cold or unknown
 }
 
 // EntryFacts are the inputs of `Compare` that decide the phase. `Price` does not read them.
@@ -586,7 +589,8 @@ positions into the forwarded body.
 A `cacheChange` operation does not change the content. It changes how the provider bills content
 that is already there.
 
-A `cacheChange` carries a prefix range and two states: `CacheBefore` and `CacheAfter`. Three cases
+A `cacheChange` carries two states: `CacheBefore` and `CacheAfter`. The prefix range it covers is the
+range between the `Extent` of the two states (a nil `Extent` is the start of the prompt). Three cases
 cover it:
 
 - **A prefix is broken.** The provider no longer reads content it read before (`hot` to `cold`). The
@@ -595,7 +599,7 @@ cover it:
   ping rescued the entry (`cold` to `hot`); a split of the system block means the stable half is
   read, not written, when the volatile tail changed.
 - **A prefix is protected.** A breakpoint changes what is cached, or for how long. Example: the
-  head of the request is held for 1h, not 5m. It has **two legs:** a cost on **every request that
+  head of the request is held for 1h, not 5m. `CacheBefore.TTL` is `5m` and `CacheAfter.TTL` is `1h`. It has **two legs:** a cost on **every request that
   writes** the head at 1h (the premium), and a saving on each request that reads the 1h entry after
   a gap longer than 5m (the rescue).
 
@@ -620,7 +624,7 @@ If the model priced only the reading request, every write that never paid off wo
 the figure would overstate the bet. So, like a keep-alive window:
 
 - **On each 1h-writing request,** the collector adds a `cacheChange` for the head's breakpoint TTL
-  and only a cost: `Caused.CacheWrite1h` for the head's tokens, less the 5m write it replaced. Its
+  (`TTL` from `5m` to `1h`) and only a cost: `Caused.CacheWrite1h` for the head's tokens, less the 5m write it replaced. Its
   `ChangeID` names the head entry (`"headttl:" + Thread + ":" + head content key`).
 - **On each request that reads that entry after the 5m TTL,** the collector adds a `cacheChange` with
   the same `ChangeID` and the saving (write → read, §6.2).
@@ -747,7 +751,7 @@ type PosHash struct {
 }
 ```
 
-`PosHash` is 12 bytes. It holds hashes and sizes only (R2).
+`PosHash` is 16 bytes in memory (8 for the hash, 4 for the size, 4 of padding). It holds hashes and sizes only (R2).
 
 ### 5.2 Classifying a break
 
@@ -875,7 +879,7 @@ rule: read before B\*, write after B\* and at or before `L`, input after `L`. Th
   the forwarded positions),
 - **to** B\*, as forwarded on this request.
 
-The start is the read extent, not the position of the break (`At`, the first position that differs). The provider reads only up to a
+The start is the read extent (`CacheAfter.Extent`), not the position of the first difference. The provider reads only up to a
 breakpoint. If the last breakpoint before the break is the end of `system`, the provider reads only
 `tools` and `system`, and every message before the break is written again too. So a break deep in
 the messages costs the same as a break at `messages[0]` when there is no breakpoint between them.
@@ -1229,3 +1233,6 @@ Each has test cases that are marked `differs` or `notCovered` in `differences.js
    cost ledger have no chosen name (wiring document).
 9. **The payer of a call.** A call is priced with the billing of its request (§9, known limitation).
    A summarizer on the deployer's key, in a subscription session, is priced as the user's.
+10. **The rates of a setting break.** A break caused by a `setting` change (a new model) has no dollar
+    figure in example 5. The proposed rule: price the moved tokens at the rates of the model that
+    serves the request after the change. Not decided.

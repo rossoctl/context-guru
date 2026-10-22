@@ -51,7 +51,7 @@ and a rescue (design §4.4).
 on the **last message**. So the provider can read or write the cache at two points only: the end of
 `system`, and the end of the body.
 
-**Session and thread.** Examples 6 to 8 use session `s1`, thread `main`. Both IDs are on the request, and the examples
+**Session and thread.** Examples 6 and 7 use session `s1`, thread `main`. Example 8 uses session `s2`, thread `main`. Both IDs are on the request, and the examples
 show them once, in `RequestOps`.
 
 **Pipeline** of examples 6 and 7, in order:
@@ -230,8 +230,9 @@ same `changeId`, so the host can add the cost and the saving together.
 
    ```json
    {"id": "op3", "kind": "cacheChange",
-    "cacheBefore": {"cachePhase": "hot"}, "cacheAfter": {"cachePhase": "cold"},
-    "at": {"section": "messages", "index": 0}, "changeId": "cg:summarize:5d21"}
+    "cacheBefore": {"cachePhase": "hot",  "extent": {"section": "messages", "index": 4}},
+    "cacheAfter":  {"cachePhase": "cold", "extent": {"section": "system", "index": 0}},
+    "changeId": "cg:summarize:5d21"}
    ```
 
 - `spend` is the call. It names its model, because the summarizer can use a cheaper model than the
@@ -242,7 +243,7 @@ same `changeId`, so the host can add the cost and the saving together.
 - `rewrite` is the summary. `messageSplice` says 3 messages became 1, so later positions move up by 2.
   The `spend` and the `rewrite` are the same on A, B and C. Only the cache state changes the saving.
 - A break (`cacheChange`) moves tokens that follow the break from cache read to cache write. This is the
-  **penalty**: the forwarded tokens between what the provider still read and B\*, × ($3.75 − $0.30).
+  **penalty**: the forwarded tokens between the two extents of the break, × ($3.75 − $0.30).
   Here they are the summary and the 3,000-token tail, so the penalty is −$0.01208. It is larger than
   the saving on A, so the first request with a summary costs money.
   Requests B and C have no break, so they pay no penalty.
@@ -258,6 +259,11 @@ to a smaller model at a lower effort. The numbers are made up for this case.
 |---|---|---|---|
 | 4 | `large-model` | high | 40,000 tokens cached |
 | 5 | `small-model` | low | the router changed both settings |
+
+> **Open problem — to resolve.** The break of this example has no dollar figure. The design does not
+> say which model's rates price the 40,000 tokens that move from read to write: the large model's or
+> the small model's. The proposed rule is the model that serves the request after the change. It is
+> not decided (design §11, question 10).
 
 The router changes two settings in one decision. The library does not price a settings change
 (design R50), for four reasons. The first two: We do not know what the large model would have written at high
@@ -297,8 +303,8 @@ so the break carries the `changeId` of the decision. It does not say which setti
 observation, and the cache break with its cause. It shows **no saving** for the move to a smaller
 model, because the design does not compute one.
 
-**The rates.** The 40,000 tokens move from read to write. The host prices them at the request's model,
-which is the small model.
+**The rates.** The 40,000 tokens move from read to write. Which rates price them is the open problem
+above.
 
 ---
 
@@ -495,13 +501,14 @@ Two operations describe the change.
 
    ```json
    { "id": "op13", "kind": "cacheChange",
-     "cacheBefore": {"cachePhase": "hot"}, "cacheAfter": {"cachePhase": "cold"},
-     "at": {"section": "messages", "index": 5},
+     "cacheBefore": {"cachePhase": "hot",  "extent": {"section": "messages", "index": 11}},
+     "cacheAfter":  {"cachePhase": "cold", "extent": {"section": "system", "index": 0}},
      "changeId": "cg:coref:5e2d" }
    ```
 
-   `at` is the first position where the forwarded body differs from turn 6's. It is not the start of
-   the penalty. The provider reads only up to the last breakpoint before `at`, the end of `system`.
+   The range of the break is between the two extents. `cacheBefore` is what turn 6 left cached
+   (B\*). `cacheAfter` is what the provider still reads: only up to the last breakpoint before the
+   first change, the end of `system`.
 
 ---
 
@@ -536,7 +543,7 @@ total is negative.
 
    ```json
    {
-     "version": 1, "requestId": "ping-p1", "session": "s1",
+     "version": 1, "requestId": "ping-p1", "session": "s2",
      "thread": {"id": "main"},
      "billing": {"mode": "api"},
      "ops": [
@@ -569,11 +576,11 @@ total is negative.
 |---|---|---|
 | Ping (`spend`) | 10,000 read + 10 input + 1 output | −$0.00305 |
 | Rescue (`cacheChange`, cold to hot) | 10,000 × ($3.75 − $0.30) | +$0.03450 |
-| **Total added to session `s1`** | | **+$0.03145** |
+| **Total added to session `s2`** | | **+$0.03145** |
 
 The ping re-sends the 10,000 cached tokens, so they are billed as a read. The 10 input tokens are
 the small part of the ping that is not cached. The 1 output token is the reply.
 
 The ping has no request of its own, so the totals add up operations, not requests. The ping and
-the rescue both carry session `s1` and thread `main`. The host adds both to the totals of that
+the rescue both carry session `s2` and thread `main`. The host adds both to the totals of that
 session and that thread: −$0.00305 + $0.03450 = **+$0.03145**.
