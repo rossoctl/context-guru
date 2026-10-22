@@ -2,7 +2,7 @@
 
 **Status:** proposed. Split out of the context operations design after review of
 rossoctl/context-guru#592.
-**Companion:** `2026-10-18-context-operations-design.md` in `rossoctl/context-guru` defines the
+**Companion:** `design.md` in `rossoctl/context-guru` defines the
 method (the context operation model, the counterfactual, the tiers). This document says how Cortex and the
 context-guru proxy connect to it. Text below is moved from that design. A plain `§N` reference points at the method document, in its
 current numbering. Sections that start with `W` are this document's own.
@@ -25,7 +25,7 @@ current numbering. Sections that start with `W` are this document's own.
 
 ## W0. Overview: from a request to the savings
 
-![A request passes through the plugins, which report context operations; Cortex accumulates them, sends them to context_counterfactual.Compute, and computes the savings from the tokens per tier](2026-10-18-context-operations-components.svg)
+![A request passes through the plugins, which report context operations; Cortex accumulates them, sends them to context_counterfactual.Compute, and computes the savings from the tokens per tier](request-flow.svg)
 
 The request (black line) goes from the agent through the plugins to the upstream LLM. Each plugin
 reports the context operations it made (circles). Cortex accumulates them for the request, in pipeline

@@ -2,7 +2,7 @@
 
 **Status:** proposed.
 **Date:** 2026-10-18.
-**Worked examples:** [`2026-10-18-context-operations-example.md`](2026-10-18-context-operations-example.md).
+**Worked examples:** [`examples.md`](examples.md).
 Start with the basic example. Advanced examples follow in the same file.
 **Wiring in hosts:** how Cortex and the context-guru proxy connect to this model is in a separate
 document.
@@ -98,10 +98,10 @@ separate kind of context operation, and why we add up over the session.
 **The packages.** Context operators report context operations to a host. Cortex is the host today. The
 context operators and the host import the `context_counterfactual` library. The library imports none of them (R3).
 
-![The context_counterfactual library, Cortex as its consumer, and the context operators that report context operations](2026-10-18-context-operations-packages.svg)
+![The context_counterfactual library, Cortex as its consumer, and the context operators that report context operations](packages.svg)
 
 **Read next.** The basic example in
-[`2026-10-18-context-operations-example.md`](2026-10-18-context-operations-example.md) shows the idea
+[`examples.md`](examples.md) shows the idea
 with three requests and one change. The rest of this document is the reference: the problem (§0),
 the rules (§1 to §3), the model (§4), the calculation (§5, §6), and the checks (§8, §10).
 

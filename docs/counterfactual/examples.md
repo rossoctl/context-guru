@@ -72,7 +72,7 @@ The agent has a conversation of 30,000 tokens (messages 0 to 8). The previous re
 request 1, a **new message** arrives: message 9, the output of a test run, 8,000 tokens. The
 `cmdfilter` context operator shortens it to 1,000 tokens. It removes **7,000 tokens**.
 
-![The prompt of request 1 without and with the change](2026-10-18-context-operations-example-1.svg)
+![The prompt of request 1 without and with the change](example-1-one-change.svg)
 
 **The saving** is the bill we would have paid without the change, minus the bill we paid. This is
 the counterfactual. The cache is hot, so messages 0 to 8 are read in both bills. Message 9 is new, so
@@ -99,7 +99,7 @@ Request 1 is 10 seconds after request 0. Request 2 follows 1 minute later, and r
 20 minutes after that. Each adds new messages at the end. The context operator reports the `rewrite` once, on request 1.
 `Compute` applies it again on requests 2 and 3. Each request is priced from its own cache state (see the [setup](#setup)).
 
-![The same 7,000 tokens are saved in all three requests](2026-10-18-context-operations-example-2.svg)
+![The same 7,000 tokens are saved in all three requests](example-2-three-requests.svg)
 
 The hatched block is the 7,000 removed tokens. Orange means they would have been written, blue
 means they would have been read.
@@ -185,7 +185,7 @@ A summarizer replaces messages 0 to 2 (10,000 tokens) with one 500-token summary
 The savings use the agent model's rates, because the removed tokens would have been billed to the
 agent's requests. The call uses the summarizer model's rates (see the [setup](#setup)).
 
-![Summarization: the call costs money first, then each request saves 9,500 tokens](2026-10-18-context-operations-example-4.svg)
+![Summarization: the call costs money first, then each request saves 9,500 tokens](example-4-summarization.svg)
 
 - **Summarizer call:** costs $0.01250 = 10,000 × $1.00 + 500 × $5.00, so the balance starts below
   zero. The response also reported `costUSD` 0.0125.
@@ -331,7 +331,7 @@ top row. The bottom row is the body the context operators forward.
 | message 9 (new) | 8,000 | 900 |
 | **Total** | **71,000** | **52,260** |
 
-![Turn 5: four context operations, each priced at its own position](2026-10-18-context-operations-example-6.svg)
+![Turn 5: four context operations, each priced at its own position](example-6-four-operations.svg)
 
 Hatched blocks are what the context operators removed. Blue is billed at the cache-read rate, and orange at
 the cache-write rate. The block marked with brackets is the tool that `expand` added.
@@ -448,7 +448,7 @@ good change. It is not, because message 5 is inside the cached prefix.
 - So the change itself breaks the cache. The collector adds a `cacheChange` with the `changeId` of
   the `coref` context operation.
 
-![Turn 7: coref saves $0.00599 and breaks the cache for $0.06558](2026-10-18-context-operations-example-7.svg)
+![Turn 7: coref saves $0.00599 and breaks the cache for $0.06558](example-7-coref-break.svg)
 
 The provider reads the cache only up to a breakpoint. The last breakpoint before `messages[5]` is
 the end of `system`. So the provider reads `tools` and `system` (15,300 tokens). It writes
@@ -527,7 +527,7 @@ The diagram shows two cases. Across is the prompt, in tokens. Down is time, in m
   (10,000 tokens) and gets a 1-token reply. The entry is renewed and is valid until minute 29.
   Turn 10 reads the context of turn 9 and writes only its new message.
 
-![Without a ping the cache expires before turn 10. With a ping it is still hot](2026-10-18-context-operations-example-8.svg)
+![Without a ping the cache expires before turn 10. With a ping it is still hot](example-8-keep-alive.svg)
 
 ### The context operations
 
