@@ -1,4 +1,4 @@
-"""Expected values for the PR #578 review, from the manifest alone.
+"""Expected values for the e2e harness, from the manifest alone.
 
 INDEPENDENT BY CONSTRUCTION: this imports nothing from the PR and reads none of its output. It
 re-states the rules the PR is meant to follow, so a disagreement between this and the dashboard is

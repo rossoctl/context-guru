@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# In-container phase runner for the PR #578 review. One function per phase; a phase that crashes
+# In-container phase runner for the context-guru e2e harness. One function per phase; a phase that crashes
 # stops the run (exit 3), a check that fails does not -- checks are judged later, by check.py.
 set -uo pipefail
 TIER="${1:?tier: smoke|full|stress|suite}"

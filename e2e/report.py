@@ -6,6 +6,7 @@ import fnmatch
 import html
 import json
 import pathlib
+import re
 import sys
 
 ORDER = ("FAIL", "BLOCKED", "KNOWN", "PASS")
@@ -49,6 +50,9 @@ def known(path) -> list[tuple[str, str, str]]:
         globs, bar, evidence = head.partition("|")
         if not bar or not globs.strip() or not evidence.strip():
             raise ValueError(f"known finding without `<globs> | <evidence>`: {line!r}")
+        # Every tolerated failure names the issue tracking its fix, so the list cannot become a mute button.
+        if not re.search(r"\bissue:#\d+\b", why):
+            raise ValueError(f"known finding without `issue:#NNN` in its comment: {line!r}")
         out.append((globs.strip(), evidence.strip(), why.strip()))
     return out
 
@@ -75,7 +79,10 @@ def build(results_dir: str, known_findings: str | None = None) -> None:
         mut = json.loads(m.read_text())
     if isinstance(mut, dict):
         mut = mut.get("mutations", [])
-    lines = [f"# PR #578 e2e review: {overall}", "",
+    # revision.txt (branch@sha) is written by run.sh; the title names what was tested, not a PR.
+    rev_f = d / "revision.txt"
+    title = "context-guru e2e" + (" " + rev_f.read_text().strip() if rev_f.exists() else "")
+    lines = [f"# {title}: {overall}", "",
              " ".join(f"{k} {counts[k]}" for k in ORDER), "",
              "## Phases", "", "| phase | status | seconds |", "|---|---|---|"]
     lines += [f"| {p['phase']} | {p['status']} | {p['seconds']} |" for p in phases]
@@ -87,7 +94,7 @@ def build(results_dir: str, known_findings: str | None = None) -> None:
     kfind = known(known_findings or DEFAULT_KNOWN)
     if kfind:
         bad = [r for r in v if r["verdict"] in ("FAIL", "KNOWN")]
-        lines += ["", "## Known PR findings", "", "| finding | checks | evidence | FAIL/KNOWN here |", "|---|---|---|---|"]
+        lines += ["", "## Known findings", "", "| finding | checks | evidence | FAIL/KNOWN here |", "|---|---|---|---|"]
         lines += [f"| {f[2]} | {f[0]} | {f[1]} | {sum(explains(f, r) for r in bad)} |" for f in kfind]
         rest = [r["id"] for r in bad if not any(explains(f, r) for f in kfind)]
         lines += ["", "Not explained by a known finding: " + (", ".join(rest) if rest else "none")]
@@ -125,7 +132,7 @@ def build(results_dir: str, known_findings: str | None = None) -> None:
         for r in sorted(v, key=lambda r: ORDER.index(r["verdict"])))
     shots = "".join(f'<figure id="snap-{html.escape(p.stem)}">{img("snapshots/" + p.name)}<figcaption>{p.stem}</figcaption></figure>'
                     for p in sorted((d / "snapshots").glob("*.png")))
-    page = f"""<!doctype html><meta charset="utf-8"><title>PR 578 e2e review</title>
+    page = f"""<!doctype html><meta charset="utf-8"><title>{html.escape(title)}</title>
 <style>:root{{--bg:#fff;--fg:#1b1b1f;--bad:#b3261e;--ok:#1e6b3a;--mut:#666}}
 @media (prefers-color-scheme:dark){{:root{{--bg:#141417;--fg:#e8e8ea;--bad:#ff8a80;--ok:#7bd88f;--mut:#aaa}}}}
 body{{background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif;margin:0;padding:16px;max-width:1200px}}
@@ -133,7 +140,7 @@ table{{border-collapse:collapse;width:100%}}td,th{{border-bottom:1px solid #8884
 tr.FAIL td:nth-child(2){{color:var(--bad);font-weight:600}}tr.PASS td:nth-child(2){{color:var(--ok)}}
 pre{{white-space:pre-wrap;font-size:12px}}img{{max-width:320px;border:1px solid #8884}}figure{{display:inline-block;margin:8px}}code{{font-size:12px;word-break:break-word}}
 .f button{{margin-right:6px}}</style>
-<h1>PR #578 e2e review: {overall}</h1><p>{" · ".join(f"{k} {counts[k]}" for k in ORDER)}</p>
+<h1>{html.escape(title)}: {overall}</h1><p>{" · ".join(f"{k} {counts[k]}" for k in ORDER)}</p>
 <p class="f"><button onclick="f('')">all</button><button onclick="f('FAIL')">failures</button></p>
 <table><tr><th>check</th><th>verdict</th><th>expected</th><th>actual</th><th>snapshot</th></tr>{rows}</table>
 <h2>Summary</h2><pre>{html.escape((d / "summary.md").read_text())}</pre>

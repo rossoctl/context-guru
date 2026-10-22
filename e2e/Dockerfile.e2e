@@ -1,4 +1,4 @@
-# The PR #578 review sandbox. Built from the checkout, so it tests exactly what is on the branch.
+# The context-guru e2e sandbox. Built from the checkout, so it tests exactly what is on the branch.
 FROM golang:1.26 AS build
 WORKDIR /src
 COPY . .

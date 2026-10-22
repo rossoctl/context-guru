@@ -1,4 +1,4 @@
-"""The ground truth for the PR #578 end-to-end review.
+"""The ground truth for the context-guru end-to-end harness.
 
 Every other file in e2e/ derives from this: the transcripts, the installed inventory, the replayed
 traffic, and the expected values. Nothing here imports PR code. Seeded, so a run is reproducible.

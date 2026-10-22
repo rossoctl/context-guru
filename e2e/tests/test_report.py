@@ -36,14 +36,14 @@ class TestReport(unittest.TestCase):
             (p / "verdicts.json").write_text(json.dumps([_v("B", "FAIL", 1, 2)]))
             (p / "phases.jsonl").write_text("")
             report.build(d)
-            self.assertTrue((p / "summary.md").read_text().startswith("# PR #578 e2e review: FAIL"))
+            self.assertTrue((p / "summary.md").read_text().startswith("# context-guru e2e") and (p / "summary.md").read_text().splitlines()[0].endswith(": FAIL"))
 
     def test_unknown_fails_lists_only_fails_no_known_finding_explains(self):
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d)
             (p / "verdicts.json").write_text(json.dumps([_v("U.x.a", "FAIL", act=["undefined tools"]), _v("Z", "FAIL"),
                                                          _v("Y", "PASS")]))
-            kf = p / "known.txt"; kf.write_text("U.x.* | undefined  # known\n")
+            kf = p / "known.txt"; kf.write_text("U.x.* | undefined  # known issue:#1\n")
             self.assertEqual(report.unknown_fails(d, str(kf)), ["Z"])
 
     def test_a_fail_with_the_right_id_but_other_evidence_is_unknown(self):
@@ -52,7 +52,7 @@ class TestReport(unittest.TestCase):
             p = pathlib.Path(d)
             (p / "verdicts.json").write_text(json.dumps([_v("U.x.a", "FAIL", act=["undefined tools"]),
                                                          _v("U.x.b", "FAIL", act=["NaN tok/req"])]))
-            kf = p / "known.txt"; kf.write_text("U.x.* | undefined  # known\n")
+            kf = p / "known.txt"; kf.write_text("U.x.* | undefined  # known issue:#1\n")
             self.assertEqual(report.unknown_fails(d, str(kf)), ["U.x.b"])
 
     def test_explains_requires_the_id_and_the_evidence(self):
@@ -73,6 +73,15 @@ class TestReport(unittest.TestCase):
             with self.assertRaises(ValueError):
                 report.known(kf)
 
+    def test_a_known_findings_line_without_an_issue_is_refused(self):
+        # The list must not grow into a mute button: every tolerated failure names the issue tracking its fix.
+        with tempfile.TemporaryDirectory() as d:
+            kf = pathlib.Path(d) / "known.txt"; kf.write_text("U.x.* | undefined  # the cleanup card bug\n")
+            with self.assertRaises(ValueError):
+                report.known(kf)
+            kf.write_text("U.x.* | undefined  # the cleanup card bug issue:#123\n")
+            self.assertEqual(report.known(kf), [("U.x.*", "undefined", "the cleanup card bug issue:#123")])
+
     def test_unknown_fails_cli_exits_nonzero_when_it_cannot_judge(self):
         # The smoke gate reads this; an exception must close the gate, never print nothing and open it.
         with tempfile.TemporaryDirectory() as d:
@@ -80,13 +89,22 @@ class TestReport(unittest.TestCase):
                                capture_output=True, text=True)
             self.assertEqual((r.returncode != 0, r.stdout), (True, ""))
 
+    def test_title_names_the_revision_from_the_run_not_a_pr_number(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d)
+            (p / "verdicts.json").write_text(json.dumps([_v("A", "PASS")])); (p / "phases.jsonl").write_text("")
+            (p / "revision.txt").write_text("feat/x@abc1234\n")
+            report.build(d)
+            self.assertEqual((p / "summary.md").read_text().splitlines()[0], "# context-guru e2e feat/x@abc1234: PASS")
+            self.assertIn("<title>context-guru e2e feat/x@abc1234</title>", (p / "report.html").read_text())
+
     def test_verdict_is_pass_with_only_known_and_by_design_blocked(self):
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d)
             (p / "verdicts.json").write_text(json.dumps([_v("C", "KNOWN"), _v("K.inventory_survives_shutdown", "BLOCKED")]))
             (p / "phases.jsonl").write_text("")
             report.build(d)
-            self.assertTrue((p / "summary.md").read_text().startswith("# PR #578 e2e review: PASS"))
+            self.assertTrue((p / "summary.md").read_text().startswith("# context-guru e2e") and (p / "summary.md").read_text().splitlines()[0].endswith(": PASS"))
 
     def test_headline_is_incomplete_when_a_check_could_not_be_judged(self):
         self.assertEqual(report.headline([_v("A", "PASS"), _v("D", "BLOCKED")], []), "INCOMPLETE")
@@ -102,7 +120,7 @@ class TestReport(unittest.TestCase):
             (p / "verdicts.json").write_text(json.dumps([_v("A", "PASS"), _v("D", "BLOCKED")]))
             (p / "phases.jsonl").write_text("")
             report.build(d)
-            self.assertTrue((p / "summary.md").read_text().startswith("# PR #578 e2e review: INCOMPLETE"))
+            self.assertTrue((p / "summary.md").read_text().startswith("# context-guru e2e") and (p / "summary.md").read_text().splitlines()[0].endswith(": INCOMPLETE"))
 
     def test_known_findings_section_rendered_from_file(self):
         with tempfile.TemporaryDirectory() as d:
@@ -110,11 +128,11 @@ class TestReport(unittest.TestCase):
             (p / "verdicts.json").write_text(json.dumps([_v("A", "PASS")]))
             (p / "phases.jsonl").write_text("")
             kf = p / "known.txt"
-            kf.write_text("U.x.y | undefined  # undefined text in cleanup card\n# comment only\n")
+            kf.write_text("U.x.y | undefined  # undefined text in cleanup card issue:#1\n# comment only\n")
             report.build(d, known_findings=str(kf))
             s = (p / "summary.md").read_text()
-            self.assertIn("## Known PR findings", s)
-            self.assertIn("| undefined text in cleanup card | U.x.y | undefined | 0 |", s)
+            self.assertIn("## Known findings", s)
+            self.assertIn("| undefined text in cleanup card issue:#1 | U.x.y | undefined | 0 |", s)
 
     def test_a_known_finding_lists_its_globs_and_the_checks_it_explains(self):
         with tempfile.TemporaryDirectory() as d:
@@ -124,10 +142,10 @@ class TestReport(unittest.TestCase):
                 _v("U.x.c", "PASS", act="e"), _v("Z", "FAIL", act="e")]))
             (p / "phases.jsonl").write_text("")
             kf = p / "known.txt"
-            kf.write_text("U.x.* R.y | e  # one finding, two kinds of check\n")
+            kf.write_text("U.x.* R.y | e  # one finding, two kinds of check issue:#1\n")
             report.build(d, known_findings=str(kf))
             s = (p / "summary.md").read_text()
-            self.assertIn("| one finding, two kinds of check | U.x.* R.y | e | 3 |", s)
+            self.assertIn("| one finding, two kinds of check issue:#1 | U.x.* R.y | e | 3 |", s)
             self.assertIn("Not explained by a known finding: Z", s)
 
     def test_notes_md_in_the_results_dir_is_included_verbatim(self):

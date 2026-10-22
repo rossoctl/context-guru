@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Mutation round: break the PR in five known ways, one at a time, on the smoke tier, and confirm
+# Mutation round: break the product in five known ways, one at a time, on the smoke tier, and confirm
 # each break turns its check red versus an unmutated baseline. A break that stays green, or only crashes a
-# phase, is a harness gap, reported -- never ignored. The PR's files are always restored from git.
+# phase, is a harness gap, reported -- never ignored. The product's files are always restored from git.
 set -uo pipefail
 # (.from/.to are read with trailing newlines stripped: the repo's end-of-file hook appends one.)
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
