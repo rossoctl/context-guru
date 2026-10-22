@@ -122,3 +122,70 @@ func TestToolsLastUsed(t *testing.T) {
 		t.Errorf("tools = %v", ts)
 	}
 }
+
+// causeCounts runs the pass over rows and returns the rewrite-cause counts.
+func causeCounts(t *testing.T, evs ...*Event) map[string]float64 {
+	t.Helper()
+	a, rec := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	seed(t, rec, evs...)
+	_, body := get(t, a, "/api/spend/explain?now="+itoa(evs[len(evs)-1].TS+60000), "127.0.0.1:1")
+	got := map[string]float64{}
+	for k, v := range body["rewrites"].(map[string]any) {
+		got[k] = v.(map[string]any)["n"].(float64)
+	}
+	return got
+}
+
+func threadEv(ts int64, model, thread string, tools int) *Event {
+	e := spendEv(ts, "s", 3, 5, 0, 10000, 0)
+	e.Model, e.ThreadID, e.Tools = model, thread, tools
+	return e
+}
+
+func TestSpendExplainOtherModelInSeenSessionIsNewThread(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	got := causeCounts(t,
+		threadEv(t0, "opus", "", 5),
+		threadEv(t0+60000, "sonnet", "p:side", 5),
+	)
+	if got["cold_start"] != 1 || got["new_thread"] != 1 {
+		t.Errorf("causes = %v; want one cold_start (main) and one new_thread (side request)", got)
+	}
+}
+
+func TestSpendExplainSubagentsWithSameShapeAreSeparateThreads(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	got := causeCounts(t,
+		threadEv(t0, "opus", "", 5),
+		threadEv(t0+60000, "opus", "a:one", 9),
+		threadEv(t0+120000, "opus", "a:two", 9),
+	)
+	if got["cold_start"] != 1 || got["new_thread"] != 2 || len(got) != 2 {
+		t.Errorf("causes = %v; want cold_start 1, new_thread 2", got)
+	}
+}
+
+func TestSpendExplainSeenThreadGoingIdleStaysIdleExpiry(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	got := causeCounts(t,
+		threadEv(t0, "opus", "a:one", 9),
+		threadEv(t0+60000, "opus", "", 5),
+		threadEv(t0+20*60000, "opus", "a:one", 9),
+	)
+	if got["idle_expiry"] != 1 || got["cold_start"] != 1 || got["new_thread"] != 1 {
+		t.Errorf("causes = %v; want cold_start 1, new_thread 1, idle_expiry 1", got)
+	}
+}
+
+func TestSpendExplainEmptyThreadIDKeepsOldBehaviour(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	got := causeCounts(t,
+		threadEv(t0, "opus", "", 5),
+		threadEv(t0+60000, "opus", "", 9), // different tool count, old rows: new_thread
+		threadEv(t0+20*60000, "opus", "", 5),
+	)
+	if got["cold_start"] != 1 || got["new_thread"] != 1 || got["idle_expiry"] != 1 {
+		t.Errorf("causes = %v; want cold_start 1, new_thread 1, idle_expiry 1", got)
+	}
+}

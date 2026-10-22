@@ -35,7 +35,7 @@ Cache misses in 7 days: 377 costing $145.67 extra   (measured)
   You paused longer than the cache lasts     214x  $107.79  ███████░░░
   Settings or tools changed mid-session       23x   $14.57  █░░░░░░░░░
   A new session started                       96x   $14.57  █░░░░░░░░░
-  A helper agent started                      41x    $7.28  ░░░░░░░░░░
+  A subagent or side request started          41x    $7.28  ░░░░░░░░░░
   The conversation was rewound or compacted    3x    $1.46  ░░░░░░░░░░
 
 The cache keeps your conversation cheap to reuse for a few minutes after each message.
