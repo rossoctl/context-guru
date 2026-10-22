@@ -43,7 +43,7 @@ type StrategyLedgerView struct {
 func (d *DB) StrategyLedger(strategyID string) (*StrategyLedgerView, error) {
 	out := &StrategyLedgerView{StrategyID: strategyID, Tenants: []StrategyLedgerRow{}}
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT tenant_id, COUNT(*), COALESCE(SUM(cost_usd),0)
-		FROM requests WHERE keepalive = 1 AND keepalive_strategy_id = ?
+		FROM requests WHERE keepalive = 1 AND manual_ping = 0 AND keepalive_strategy_id = ?
 		GROUP BY tenant_id ORDER BY 3 DESC`, strategyID)
 	if err != nil {
 		return nil, err
@@ -88,7 +88,7 @@ func (a *API) keepAliveStrategyRoutes() []route {
 }
 
 // keepAliveStrategyLedger serves one strategy's ledger. Not tenant-scoped by a.scope —
-// like /api/config and /api/benchmarks, this is a server-wide view spanning every
+// like /api/config, this is a server-wide view spanning every
 // tenant a strategy touched, not one tenant's own data.
 func (a *API) keepAliveStrategyLedger(w http.ResponseWriter, r *http.Request) {
 	if !a.requireManager(w, r, "a strategy's ledger") {

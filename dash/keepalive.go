@@ -267,10 +267,10 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	// one meaning.
 	g.Go(func() error {
 		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
-		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN r.keepalive = 1 AND r.cache_read = 0 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN r.keepalive = 1 AND r.cache_write > r.cache_read THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN `+autoPing+` THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN `+autoPing+` THEN r.cost_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN `+autoPing+` AND r.cache_read = 0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN `+autoPing+` AND r.cache_write > r.cache_read THEN 1 ELSE 0 END),0),
 		MIN(CASE WHEN r.keepalive = 1 OR r.keepalive_pings > 0 OR r.keepalive_saved_usd > 0
 			THEN r.ts END)
 		FROM requests r WHERE `+kaCond, kaArgs...).Scan(
@@ -294,7 +294,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	})
 	g.Go(func() error {
 		var err error
-		spent, err = d.sumBySession(kaCond, kaArgs, "r.cost_usd", "r.keepalive = 1")
+		spent, err = d.sumBySession(kaCond, kaArgs, "r.cost_usd", autoPing)
 		return err
 	})
 	// What is still on the table: the addressable expiries in this window, and their bill.
@@ -369,7 +369,7 @@ func (d *DB) KeepAliveNetUSDByTenant(since int64) (map[string]float64, error) {
 	}
 	kaCond, kaArgs := withKeepAlive(Filter{Since: since, TenantAll: true}).where()
 	rows2, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, COALESCE(SUM(r.cost_usd),0)
-		FROM requests r WHERE `+kaCond+` AND r.keepalive = 1 GROUP BY r.tenant_id`, kaArgs...)
+		FROM requests r WHERE `+kaCond+` AND `+autoPing+` GROUP BY r.tenant_id`, kaArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -912,11 +912,11 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 		return nil, err
 	}
 	kaCond, kaArgs := withKeepAlive(f).where()
-	spent, err := d.sumBySession(kaCond, kaArgs, "r.cost_usd", "r.keepalive = 1")
+	spent, err := d.sumBySession(kaCond, kaArgs, "r.cost_usd", autoPing)
 	if err != nil {
 		return nil, err
 	}
-	pings, err := d.countBySession(kaCond, kaArgs, "r.keepalive = 1")
+	pings, err := d.countBySession(kaCond, kaArgs, autoPing)
 	if err != nil {
 		return nil, err
 	}
@@ -1138,11 +1138,11 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		return nil, err
 	}
 	kaCond, kaArgs := withKeepAlive(f).where()
-	spent, err := d.sumBySession(kaCond, kaArgs, "r.cost_usd", "r.keepalive = 1")
+	spent, err := d.sumBySession(kaCond, kaArgs, "r.cost_usd", autoPing)
 	if err != nil {
 		return nil, err
 	}
-	pings, err := d.countBySession(kaCond, kaArgs, "r.keepalive = 1")
+	pings, err := d.countBySession(kaCond, kaArgs, autoPing)
 	if err != nil {
 		return nil, err
 	}

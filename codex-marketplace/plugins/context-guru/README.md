@@ -34,6 +34,12 @@ a child of a Codex command. This lets it survive command-sandbox teardown and re
 after a failure or login. Proxy lifecycle does not depend on a `SessionStart` hook because Codex
 hooks cannot request the permissions needed to escape their command sandbox.
 
+The plugin's only hooks are `SessionEnd` and `SessionStart` (`compact`, `resume`, `clear`): each posts a
+content-free event (session id, event name, reason) to the local proxy so the cache keep-alive stops
+pinging a session you have closed or compacted. They need loopback access only, which Codex's command
+sandbox allows, and they run once you trust them in `/hooks`; until then the keep-alive behaves as it
+does without them.
+
 Codex uses OpenAI's Responses API. Content reduction defaults to `off`, so requests are forwarded
 without trimming. Cache keep-alive is enabled by default: eligible OpenAI Responses sessions are
 refreshed shortly before their 30-minute cache lifetime ends. You can opt into content reduction
@@ -41,12 +47,16 @@ separately after verifying the routed setup.
 
 Use `$context-guru-preset-picker` to inspect or change the reduction level, and
 `$context-guru-cache-strategy-picker` to inspect or change OpenAI cache keep-alive. Both preserve
-the other setting and restart the owned proxy. `$context-guru-insights` produces a deterministic,
-ranked report from measured proxy data; its cost arithmetic and exact fix commands come from code,
-not model estimation.
+the other setting and restart the owned proxy. `$context-guru-insights` shows savings, cache and tools
+(what you carry and never use) one after another, from measured proxy data; ask for `savings`, `cache` or
+`tools` for one.
 
-For a narrower report, use `$context-guru-insights-capabilities`,
-`$context-guru-insights-components`, or `$context-guru-insights-idle`.
+`$context-guru-save-more` replays your own history under every shipped config and keep-alive strategy and
+applies the recommended change only after you answer yes; `$context-guru-remove-mcp-and-skills` does the same for
+MCP servers and skills you never use. See [docs/plugin/save-more.md](../../../docs/plugin/save-more.md).
+
+The older `$context-guru-savings`, `$context-guru-cache`, `$context-guru-waste` and
+`$context-guru-insights-capabilities`/`-components`/`-idle` still work for one release and point to `$context-guru-insights`.
 
 During setup, the plugin downloads the latest `context-guru-proxy` release for the current platform,
 verifies it against the release's SHA-256 checksums, and installs it into its private state directory.

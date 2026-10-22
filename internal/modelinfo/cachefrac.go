@@ -55,7 +55,10 @@ func CacheWriteFracFor(model string) float64 {
 // multiples, named rather than repeated as bare literals in three files.
 const (
 	anthropicCacheWriteFrac = 1.25
-	anthropicCacheReadFrac  = 0.1
+	// AnthropicCacheReadFrac is the Anthropic family's published cache-READ multiple of the fresh
+	// input rate. Exported for internal/modelinfo/litellm's fallback when a price feed states no
+	// cache-read rate of its own.
+	AnthropicCacheReadFrac = 0.1
 )
 
 // chargesCacheWritePremium reports whether this model bills a per-token surcharge

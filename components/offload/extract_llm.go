@@ -13,9 +13,9 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -120,9 +120,10 @@ func init() { components.Register("extract_llm", newExtractLLM) }
 // that are still medium/large AFTER the deterministic components ran. Prior
 // compactions are reused byte-for-byte from state so the request prefix stays stable.
 type ExtractLLM struct {
-	minTokens     int
-	strategy      string
-	modelSource   string
+	minTokens   int
+	strategy    string
+	modelSource string
+	// modelClient is a test-injection seam only; see AgentDiet.modelClient.
 	modelClient   components.Model
 	trigger       components.Trigger
 	mode          markerMode
@@ -247,10 +248,11 @@ var staticWindows = modelinfo.DefaultStatic()
 // A CONFIG-PINNED client needs no correction and never reaches the effSource branch, which is worth
 // stating because it looks like a second path that could resurrect the mismatch: Offload threads
 // effSource only through the `model == nil` branch, so a client resolved from e.modelClient keeps
-// the configured source. It is safe because modelConfig.Client() requires model.model to be
-// non-empty, so e.modelName is always set whenever e.modelClient is, and the e.modelName != ""
-// branch below (the static-table lookup) short-circuits before effSource or CtxWindow is consulted.
-// Raised in review on #110; recorded here so the next reader need not re-derive it.
+// the configured source. e.modelClient is a TEST-INJECTION SEAM ONLY now — the model: block names a
+// source, never a credential (components/offload/modelcfg.go), so production never sets it. A test
+// that sets e.modelClient directly is responsible for also giving the config a non-empty model.model
+// if it wants e.modelName set to match, since nothing else enforces that pairing once Client() is
+// gone. Raised in review on #110; recorded here so the next reader need not re-derive it.
 func (e *ExtractLLM) inputLimit(c *components.Ctx, effSource string) int {
 	if effSource == "" {
 		effSource = e.modelSource
@@ -425,7 +427,7 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 			}
 		}
 	}
-	if err := components.Decode(raw, &cfg); err != nil {
+	if err := decodeWithModelHint("extract_llm", raw, &cfg); err != nil {
 		return nil, err
 	}
 	rewrite := true
@@ -478,8 +480,8 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	}
 	return &ExtractLLM{
 		minTokens: cfg.MinTokens, strategy: cfg.Strategy,
-		modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(),
-		trigger: cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode), rewrite: rewrite,
+		modelSource: cfg.Model.Source,
+		trigger:     cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode), rewrite: rewrite,
 		llmEveryN: cfg.LLMEveryN, llmMaxPerReq: cfg.LLMMaxPerReq,
 		llmMaxPerSess: cfg.LLMMaxPerSess, fireOnSize: fireOnSize, aggro: aggro,
 		ctxMode: ctxMode, ctxMessages: cfg.ContextMessages, maxChars: cfg.MaxChars,
@@ -692,7 +694,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		rep.Skipped = true
 		return nil, nil
 	}
-	model := e.modelClient
+	model := e.modelClient // test-injection seam; nil in production
 	// The source the model is ACTUALLY resolved from, which the prompt budget below must be
 	// sized against rather than the configured one — see inputLimit.
 	effSource := e.modelSource

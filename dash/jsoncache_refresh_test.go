@@ -133,6 +133,28 @@ func TestStatsLeanSkipsThePricedExtras(t *testing.T) {
 	}
 }
 
+// TestStatsLeanCountsTheSessionsPings: the status line shows this session's ping count and spend
+// from the lean read, so lean must report both, and only for the session asked about.
+func TestStatsLeanCountsTheSessionsPings(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	ping := func(ts int64, session string) *Event {
+		e := mkEvent(ts, session, "aws/claude-sonnet-5", 1000, 1000)
+		e.KeepAlive, e.CostUSD = true, 0.002
+		return e
+	}
+	seed(t, rec, mkEvent(now, "sess-1", "aws/claude-sonnet-5", 1000, 800),
+		ping(now+1, "sess-1"), ping(now+2, "sess-1"), ping(now+3, "sess-2"))
+
+	_, body := get(t, a, "/api/stats?lean=1&session=sess-1", "127.0.0.1:1")
+	if body["keepalive_pings"] != 2.0 {
+		t.Errorf("keepalive_pings = %v, want 2", body["keepalive_pings"])
+	}
+	if usd, _ := body["keepalive_ping_usd"].(float64); math.Abs(usd-0.004) > 1e-9 {
+		t.Errorf("keepalive_ping_usd = %v, want 0.004", body["keepalive_ping_usd"])
+	}
+}
+
 // TestStatsLeanIsACacheKeySeparateFromTheFullHandler guards against a lean and a non-lean
 // request for the same scope colliding on one cache entry — cacheKey includes the raw query
 // string (dash/api.go's cacheKey), so this is really a test that the ?lean=1 param survives
@@ -153,19 +175,48 @@ func TestStatsLeanIsACacheKeySeparateFromTheFullHandler(t *testing.T) {
 	}
 }
 
-// TestStatsLeanTotalSavedMatchesFullHandler is the fix for the PR #403 review's finding 1: lean
-// used to leave CachesplitHistorical.USD and the declaration-filter credit (FilterUSD) out of
-// total_saved_usd, so the status line under-reported relative to the dashboard whenever either
-// was nonzero. Both are now included — only SelfRemovals' full-tenant scan is skipped, and that
-// one was NEVER part of total_saved_usd even in the full handler (dash/declcredit.go's
-// SetDeclCredit folds SelfUSD into TotalReducedUSD only) — so lean's total_saved_usd must now
-// equal the full handler's exactly, not merely be closer to it.
+// statsLeanTotalSaved fetches total_saved_usd and decl_filter_usd from lean or full /api/stats,
+// optionally scoped to a session — shared by the two tests below.
+func statsLeanTotalSaved(t *testing.T, mux *http.ServeMux, lean bool, session string) (totalSaved, declFilterUSD float64) {
+	t.Helper()
+	q := ""
+	if lean {
+		q = "?lean=1"
+	}
+	if session != "" {
+		if q == "" {
+			q = "?session=" + session
+		} else {
+			q += "&session=" + session
+		}
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stats"+q, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/stats%s: %d", q, rec.Code)
+	}
+	var body struct {
+		TotalSavedUSD float64 `json:"total_saved_usd"`
+		DeclFilterUSD float64 `json:"decl_filter_usd"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("GET /api/stats%s body: %v\n%s", q, err, rec.Body)
+	}
+	return body.TotalSavedUSD, body.DeclFilterUSD
+}
+
+// TestStatsLeanTotalSavedMatchesFullHandlerWhenSessionScoped is the fix for the PR #403
+// review's finding 1 (lean leaving CachesplitHistorical.USD and the declaration-filter credit
+// out of total_saved_usd), kept exact for the ONE scope #502 found it can stay bounded for:
+// a single session. CachesplitHistoricalUSD's ranking and DeclFilterSavings' scan are both an
+// indexed range read when scoped to one session (dash/overview_lean.go), so lean has no reason
+// to differ from the full handler there, and must not.
 //
 // seedCredit (dash/declcredit_test.go) gives the filter-credit half; a pre-instrumentation
 // cachesplit-historical pair (same shape as TestWaterfallTotalMatchesTheHeadlineAfterAllPricedAdditions
 // in dash/declcredit_test.go) gives the historical-split half, so both of the review's named
 // amounts are actually nonzero in this fixture rather than trivially matching by both being zero.
-func TestStatsLeanTotalSavedMatchesFullHandler(t *testing.T) {
+func TestStatsLeanTotalSavedMatchesFullHandlerWhenSessionScoped(t *testing.T) {
 	db := seedCredit(t, 1000)
 	teach := mkEvent(9000, "s-hist", "aws/claude-sonnet-5", 100, 100)
 	teach.TenantID, teach.CacheRead, teach.CacheWrite, teach.SplitStableTokens = "t1", 54_304, 1_000, 5_697
@@ -190,33 +241,60 @@ func TestStatsLeanTotalSavedMatchesFullHandler(t *testing.T) {
 	mux := http.NewServeMux()
 	api.Mount(mux)
 
-	full := httptest.NewRecorder()
-	mux.ServeHTTP(full, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
-	lean := httptest.NewRecorder()
-	mux.ServeHTTP(lean, httptest.NewRequest(http.MethodGet, "/api/stats?lean=1", nil))
-	if full.Code != http.StatusOK || lean.Code != http.StatusOK {
-		t.Fatalf("full = %d, lean = %d", full.Code, lean.Code)
+	// s-new-hist is the session the cachesplit-historical credit applies to. "se" is one of
+	// seedCredit's later sessions (i>=4, see its own comment): the ones that actually carry a
+	// priced FilteredDeclTokens row, so decl_filter_usd is positive THERE — "s-unpriced" has
+	// only the one row staticPricer refuses to price, so scoped to it alone there is nothing
+	// to credit; its job (below) is proving lean does not drop a credit it DOES qualify for,
+	// not proving it exists in a scope that never had one.
+	for _, tc := range []struct {
+		session  string
+		wantDecl bool
+		wantHist bool
+	}{
+		{session: "s-new-hist", wantHist: true},
+		{session: "se", wantDecl: true},
+	} {
+		fullSaved, fullDecl := statsLeanTotalSaved(t, mux, false, tc.session)
+		leanSaved, _ := statsLeanTotalSaved(t, mux, true, tc.session)
+		if fullSaved <= 0 {
+			t.Fatalf("session=%s: full handler's total_saved_usd is not positive; the fixture is not exercising anything", tc.session)
+		}
+		if tc.wantDecl && fullDecl <= 0 {
+			t.Fatalf("session=%s: decl_filter_usd is not positive; the fixture stopped exercising the filter credit", tc.session)
+		}
+		if math.Abs(fullSaved-leanSaved) > 1e-9 {
+			t.Errorf("session=%s: lean total_saved_usd = %v, full total_saved_usd = %v — "+
+				"scoped to one session, both credits are bounded and lean must match exactly",
+				tc.session, leanSaved, fullSaved)
+		}
 	}
+}
 
-	var fullBody, leanBody struct {
-		TotalSavedUSD float64 `json:"total_saved_usd"`
-		DeclFilterUSD float64 `json:"decl_filter_usd"`
+// TestStatsLeanMatchesFullForLifetimeToo: a lean read with no session and no window (`since=0`)
+// is answered by the full handler (#510 removed the lean lifetime path), so an older plugin that
+// still asks for it gets the exact number, to the last cent.
+func TestStatsLeanMatchesFullForLifetimeToo(t *testing.T) {
+	db := seedCredit(t, 1000)
+	qualifies := mkEvent(9100, "s-new-hist", "aws/claude-sonnet-5", 100, 100)
+	qualifies.TenantID, qualifies.CacheRead, qualifies.CacheWrite = "t1", 54_304, 1_000
+	if err := db.insertBatch([]*Event{qualifies}); err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal(full.Body.Bytes(), &fullBody); err != nil {
-		t.Fatalf("full body: %v\n%s", err, full.Body)
+	rec := &Recorder{db: db, hub: NewHub(), done: make(chan struct{})}
+	t.Cleanup(func() { rec.Close() })
+	api := NewAPI(rec)
+	api.SetPricer(staticPricer{ibmSonnet})
+	mux := http.NewServeMux()
+	api.Mount(mux)
+
+	fullSaved, fullDecl := statsLeanTotalSaved(t, mux, false, "")
+	leanSaved, _ := statsLeanTotalSaved(t, mux, true, "")
+	if fullDecl <= 0 && fullSaved <= 0 {
+		t.Fatal("fixture is not exercising either credit; this test would pass for the wrong reason")
 	}
-	if err := json.Unmarshal(lean.Body.Bytes(), &leanBody); err != nil {
-		t.Fatalf("lean body: %v\n%s", err, lean.Body)
-	}
-	if fullBody.TotalSavedUSD <= 0 {
-		t.Fatal("full handler's total_saved_usd is not positive; the fixture is not exercising anything")
-	}
-	if fullBody.DeclFilterUSD <= 0 {
-		t.Fatal("decl_filter_usd is not positive; the fixture stopped exercising the filter credit")
-	}
-	if math.Abs(fullBody.TotalSavedUSD-leanBody.TotalSavedUSD) > 1e-9 {
-		t.Errorf("lean total_saved_usd = %v, full total_saved_usd = %v — lean must match exactly, "+
-			"since the only thing it skips (SelfRemovals) was never part of this field",
-			leanBody.TotalSavedUSD, fullBody.TotalSavedUSD)
+	if math.Abs(fullSaved-leanSaved) > 1e-9 {
+		t.Errorf("lean total_saved_usd = %v, full = %v — lifetime must match exactly, "+
+			"an unbounded lean read must be the full handler's answer", leanSaved, fullSaved)
 	}
 }

@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
@@ -17,10 +18,8 @@ func TestLiveExtractCodeExample(t *testing.T) {
 	if os.Getenv("CG_LIVE") == "" {
 		t.Skip("set CG_LIVE=1 CG_BASE=... CG_TOKEN=... to run the live example")
 	}
-	model := cheapmodel.Anthropic{
-		BaseURL: os.Getenv("CG_BASE"), APIKey: os.Getenv("CG_TOKEN"), AuthScheme: "bearer",
-		Model: liveModel(), MaxTokens: 4096,
-	}
+	d, ref := dispatchtest.HTTP(os.Getenv("CG_BASE"), dispatchtest.BearerAuth(os.Getenv("CG_TOKEN")))
+	model := cheapmodel.Anthropic{D: d, Ref: ref, Model: liveModel(), MaxTokens: 4096}
 	// A realistic pytest run: 1 failure + traceback buried in many PASSED lines.
 	var b strings.Builder
 	b.WriteString("============================= test session starts ==============================\n")
@@ -75,10 +74,8 @@ func TestLiveExtractCodeJSON(t *testing.T) {
 	if os.Getenv("CG_LIVE") == "" {
 		t.Skip("set CG_LIVE=1 CG_BASE=... CG_TOKEN=... to run the live example")
 	}
-	model := cheapmodel.Anthropic{
-		BaseURL: os.Getenv("CG_BASE"), APIKey: os.Getenv("CG_TOKEN"),
-		Model: "claude-sonnet-4-6", MaxTokens: 4096,
-	}
+	d, ref := dispatchtest.HTTP(os.Getenv("CG_BASE"), dispatchtest.AnthropicAuth(os.Getenv("CG_TOKEN"), ""))
+	model := cheapmodel.Anthropic{D: d, Ref: ref, Model: "claude-sonnet-4-6", MaxTokens: 4096}
 	var recs []string
 	for i := 0; i < 22; i++ {
 		p := "src/unrelated/module_" + itoa(i) + ".py"
@@ -127,10 +124,8 @@ func TestLiveExtractRewriteSummary(t *testing.T) {
 	if os.Getenv("CG_LIVE") == "" {
 		t.Skip("set CG_LIVE=1 CG_BASE=... CG_TOKEN=... to run")
 	}
-	model := cheapmodel.Anthropic{
-		BaseURL: os.Getenv("CG_BASE"), APIKey: os.Getenv("CG_TOKEN"), AuthScheme: "bearer",
-		Model: liveModel(), MaxTokens: 4096,
-	}
+	d, ref := dispatchtest.HTTP(os.Getenv("CG_BASE"), dispatchtest.BearerAuth(os.Getenv("CG_TOKEN")))
+	model := cheapmodel.Anthropic{D: d, Ref: ref, Model: liveModel(), MaxTokens: 4096}
 	var b strings.Builder
 	b.WriteString("Collecting Sphinx==4.0.0\n")
 	for i := 0; i < 40; i++ {

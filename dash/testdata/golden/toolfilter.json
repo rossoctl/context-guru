@@ -18,7 +18,7 @@
    "kind": "mcp_tool",
    "name": "mcp__alpha__write",
    "priced": false,
-   "projected_usd": 0.7214565000000002,
+   "projected_usd": 0.7214564999999994,
    "remove_as": "mcp__alpha__write",
    "server": "alpha",
    "sessions": 60,

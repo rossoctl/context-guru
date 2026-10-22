@@ -40,6 +40,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 KEY = "ANTHROPIC_BASE_URL"
 # The second key, written only when the proxy has to chain behind an existing gateway. It lives in
@@ -53,6 +54,35 @@ BIN_KEY = "CONTEXT_GURU_BIN"
 # exclude all three of ours — it excluded only the base URL, so a chained install reported 3 "other"
 # keys where the user owned 1, and /context-guru:status repeated the wrong number back to them.
 OURS = (KEY, UPSTREAM_KEY, BIN_KEY)
+
+# The header that opts a session in to MANUAL pings (the Ping button and /context-guru:ping) when keep-alive is
+# off: the proxy holds that session's cache request for at most 300 s, for a manual ping only. It rides in
+# ANTHROPIC_CUSTOM_HEADERS, which Claude Code reads as `Name: Value` lines separated by NEWLINES (verified on
+# 2.1.307: a comma-joined value arrives as one corrupted header). The user's own headers, a hosted install's
+# `x-context-guru-token` included, share that variable, so the line is appended and removed, never overwritten.
+HEADERS_KEY = "ANTHROPIC_CUSTOM_HEADERS"
+PING_HEADER = "x-context-guru-ping: 1"
+PING_HEADER_META = "installed_ping_header"   # the line we added; absent when it was already there or is not ours to remove
+
+
+def _ping_line(line: str) -> bool:
+    return line.strip().lower().startswith("x-context-guru-ping")
+
+
+def with_ping_header(value: object) -> tuple[str, bool]:
+    """(the headers with our line in, whether WE added it). An existing x-context-guru-ping line, whatever its
+    value, is the user's to keep: nothing is added or changed, and the second item is False."""
+    text = value if isinstance(value, str) else ""
+    lines = [ln for ln in text.replace("\r", "").split("\n") if ln.strip()]
+    if any(_ping_line(ln) for ln in lines):
+        return text, False
+    return "\n".join([*lines, PING_HEADER]), True
+
+
+def without_ping_header(value: object) -> str:
+    """The headers with the line we added taken out and every other line kept. "" when nothing else is left."""
+    text = value if isinstance(value, str) else ""
+    return "\n".join(ln for ln in text.replace("\r", "").split("\n") if ln.strip() and ln.strip() != PING_HEADER)
 
 # statusLine is a TOP-LEVEL settings key — a sibling of `env`, not a member of it — so it needs its
 # own record rather than fitting into OURS/env above. --statusline is optional on `add`: most
@@ -77,6 +107,33 @@ PLUGIN_ID = "context-guru@context-guru"
 
 # Where this script records what it did, so a later run can tell its own work from the user's.
 META = "$context-guru"
+
+
+def user_env_keys(env: dict) -> int:
+    """How many env keys are the USER's: not ours, and not ANTHROPIC_CUSTOM_HEADERS when our line is all it holds."""
+    return len([k for k in env if k not in OURS and not (k == HEADERS_KEY and without_ping_header(env[k]) == "")])
+
+
+def add_ping_header(env: dict, meta: dict) -> bool:
+    """Put our line into env's ANTHROPIC_CUSTOM_HEADERS and record that we did. True when it changed."""
+    new, added = with_ping_header(env.get(HEADERS_KEY))
+    if not added:
+        return False
+    env[HEADERS_KEY] = new
+    meta[PING_HEADER_META] = PING_HEADER
+    return True
+
+
+def remove_ping_header(env: dict, meta: object) -> bool:
+    """Take back the line WE added (and only that one); the user's other headers stay. True when it changed."""
+    if not isinstance(meta, dict) or meta.get(PING_HEADER_META) != PING_HEADER or HEADERS_KEY not in env:
+        return False
+    rest = without_ping_header(env[HEADERS_KEY])
+    if rest:
+        env[HEADERS_KEY] = rest
+    else:
+        del env[HEADERS_KEY]
+    return True
 
 
 def is_ours(data: dict, url: str) -> bool:
@@ -140,6 +197,52 @@ def apply_statusline(data: dict, command: str) -> None:
         meta[STATUSLINE_PREV_META] = current
     data[STATUSLINE_KEY] = desired
     meta[STATUSLINE_META] = command
+
+
+# The path of a plugin's statusline.py inside Claude Code's plugin cache: `.../plugins/cache/
+# <marketplace>/<plugin>/<version>/scripts/statusline.py`, inside the double quotes install.sh wraps
+# around it. Anything else (a dev checkout, a hand-written path) does not match and is left alone.
+_CACHED_STATUSLINE = re.compile(
+    r'"(?P<path>[^"]*/plugins/cache/(?P<market>[^/"]+)/(?P<plugin>[^/"]+)/(?P<version>[^/"]+)/scripts/statusline\.py)"')
+
+
+def _version_tuple(text: str) -> tuple | None:
+    """`0.5.1` -> (0, 5, 1). None for anything that is not dotted digits: a version we cannot order
+    is a version we do not move a status line away from."""
+    parts = text.split(".")
+    if not parts or not all(p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+def repoint_statusline(data: dict, running: str) -> bool:
+    """Move OUR statusLine to the running plugin's `statusline.py`, in place. True if it changed.
+
+    install.sh writes the absolute, versioned path of the plugin that ran the install (a settings
+    file cannot use ${CLAUDE_PLUGIN_ROOT}), and the old version stays in the cache, so after a
+    plugin update the old path keeps working and nothing ever reports that it is stale (#551).
+
+    Moves only when ALL of these hold; anything else returns False and changes nothing:
+      * the current value is ours by record (is_ours_statusline), never by the look of the path;
+      * it names a cached `statusline.py` of the SAME plugin (marketplace and name) as the running one;
+      * that version is strictly OLDER than the running one, so an older session (or a second
+        Claude Code install) never drags a newer status line back.
+    Only the path inside the command changes: flags and `refreshInterval` stay as they were.
+    """
+    current = data.get(STATUSLINE_KEY)
+    if not is_ours_statusline(data, current):
+        return False
+    new = _CACHED_STATUSLINE.fullmatch('"' + running + '"')
+    old = _CACHED_STATUSLINE.search(current["command"])
+    if not new or not old or (old.group("market"), old.group("plugin")) != (new.group("market"), new.group("plugin")) or old.group("path") == running:
+        return False
+    old_v, new_v = _version_tuple(old.group("version")), _version_tuple(new.group("version"))
+    if old_v is None or new_v is None or not old_v < new_v:
+        return False
+    command = current["command"].replace('"' + old.group("path") + '"', '"' + running + '"')
+    current["command"] = command
+    data[META][STATUSLINE_META] = command
+    return True
 
 
 def remove_statusline_only(data: dict) -> tuple[bool, str]:
@@ -715,6 +818,36 @@ def state_dir() -> str:
         return override
     base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
     return os.path.join(base, "context-guru")
+
+
+RECORDED_COMMANDS = ("save-more", "remove-mcp-and-skills")
+
+
+def cmd_record_run(args: argparse.Namespace) -> int:
+    """Record that one of the commands the status line's weekly tip names just ran: its epoch
+    seconds under its name in `<state dir>/last-run.json`, merged into what is there and replaced
+    atomically. The status line only reads the file (statusline.py _tip_segment).
+
+    Silent on success: the commands chain this after their own report, which the skill shows the
+    user verbatim, so it must add nothing to it. A failure goes to stderr with exit 1."""
+    path = os.path.join(state_dir(), "last-run.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            runs = json.load(fh)
+    except (OSError, ValueError):
+        runs = {}
+    runs = runs if isinstance(runs, dict) else {}
+    runs[args.name] = int(time.time())
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(runs, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"record-run: could not write {path}: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def user_scope_files() -> list[str]:
@@ -2534,7 +2667,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         file=args.file,
         exists=str(existed).lower(),
         base_url=current if current else "(unset)",
-        other_env_keys=len([k for k in (data.get("env") or {}) if k not in OURS]),
+        other_env_keys=user_env_keys(data.get("env") or {}),
         top_level_keys=len(data),
         statusline=json.dumps(sl, sort_keys=True) if sl else "(unset)",
         # Provenance, from the record rather than the URL's shape. install.sh decided "already
@@ -2752,7 +2885,9 @@ def cmd_add(args: argparse.Namespace) -> int:
         return 0
 
     current = env.get(KEY)
-    if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged:
+    ping_on = not getattr(args, "no_ping_header", False)
+    if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged \
+            and (not ping_on or any(_ping_line(ln) for ln in str(env.get(HEADERS_KEY, "")).split("\n"))):
         record_install_scope(args.file, url=args.url)
         emit(result="unchanged", file=args.file, base_url=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
@@ -2768,6 +2903,8 @@ def cmd_add(args: argparse.Namespace) -> int:
         env.update(desired)
         data["env"] = env
         meta = data.setdefault(META, {})
+        if ping_on and add_ping_header(env, meta):
+            changed.append(HEADERS_KEY)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2788,6 +2925,8 @@ def cmd_add(args: argparse.Namespace) -> int:
         env.update(desired)   # the whole set: a port change must not drop the chaining keys
         data["env"] = env
         meta = data.setdefault(META, {})
+        if ping_on:
+            add_ping_header(env, meta)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2852,6 +2991,8 @@ def cmd_add(args: argparse.Namespace) -> int:
     # Record what we wrote, so a re-run can recognise its own work, and what we took over, so
     # uninstall can hand it back.
     meta = data.setdefault(META, {})
+    if ping_on:
+        add_ping_header(env, meta)
     meta["installed_base_url"] = args.url
     if getattr(args, "upstream", ""):
         meta["installed_upstream"] = args.upstream
@@ -2864,7 +3005,45 @@ def cmd_add(args: argparse.Namespace) -> int:
     record_install_scope(args.file, url=args.url)
     emit(result="added", file=args.file, base_url=args.url,
          replaced=current if current else "", backup=saved or "(new file)",
-         other_env_keys=len([k for k in env if k not in OURS]))
+         other_env_keys=user_env_keys(env))
+    return 0
+
+
+def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
+    """SessionStart step: point a status line we installed at the plugin that is running now (#551).
+
+    Looks at the three scopes the plugin installs into, but only at files that already hold our
+    ownership record, and rewrites only that record and the command. Never fails: a file that is
+    missing, unreadable, malformed or unwritable stays as it was, and the exit code is always 0.
+    """
+    running = os.path.join(os.path.dirname(os.path.realpath(__file__)), "statusline.py")
+    base = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    files = [user_scope_files()[0],
+             os.path.join(base, ".claude", "settings.json"),
+             os.path.join(base, ".claude", "settings.local.json")]
+    try:
+        scopes = _read_install_scopes()
+        for key in (user_scope_key(), project_key(base)):
+            row = scopes.get(key)
+            if isinstance(row, dict) and isinstance(row.get("file"), str):
+                files.append(row["file"])
+    except Exception:
+        pass
+    seen: set = set()
+    for path in files:
+        real = os.path.realpath(path)
+        if real in seen or not os.path.isfile(real):
+            continue
+        seen.add(real)
+        try:
+            with open(real, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict) or not repoint_statusline(data, running):
+                continue
+            save(real, data)
+            print(f"context-guru: status line updated to this plugin version ({real})")
+        except Exception:
+            continue
     return 0
 
 
@@ -3025,6 +3204,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         recorded_upstream = _meta.get("installed_upstream") or ""
     if recorded_upstream and env.get(UPSTREAM_KEY) == recorded_upstream:
         del env[UPSTREAM_KEY]
+    remove_ping_header(env, _meta)
     recorded_bin = ""
     if isinstance(_meta, dict):
         recorded_bin = _meta.get("installed_bin") or ""
@@ -3060,6 +3240,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         meta.pop("installed_base_url", None)
         meta.pop("installed_upstream", None)
         meta.pop("installed_bin", None)
+        meta.pop(PING_HEADER_META, None)
         meta.pop(STATUSLINE_META, None)
         meta.pop(STATUSLINE_PREV_META, None)
         if not meta:
@@ -3989,6 +4170,9 @@ def main() -> int:
         p.add_argument("--bin", default="",
                        help="also write env.CONTEXT_GURU_BIN (absolute path to the proxy), for "
                             "machines where its directory is not on PATH")
+        p.add_argument("--no-ping-header", action="store_true",
+                       help="do not add `x-context-guru-ping: 1` to env.ANTHROPIC_CUSTOM_HEADERS (the opt-in "
+                            "for manual pings when keep-alive is off)")
         p.add_argument("--upstream", default="",
                        help="also write env.ANTHROPIC_UPSTREAM, so the proxy chains behind an "
                             "existing gateway in LATER sessions too (the hook reads this block)")
@@ -4056,6 +4240,9 @@ def main() -> int:
         help="make sure the recovery folder beside --file is git-ignored, deterministically, "
              "with no question asked (see the module comment above cmd_gitignore_ensure)")
     gi.add_argument("--file", required=True)
+
+    sub.add_parser("statusline-repoint",
+                   help="SessionStart: point a status line we installed at the running plugin version")
 
     st = sub.add_parser("strategy")
     st.add_argument("op", choices=("list", "show", "set", "clear", "sync"))
@@ -4130,6 +4317,9 @@ def main() -> int:
 
     # The proxy-binary release-notice surface: separate from `strategy`/`preset` because it is
     # machine-wide (one binary on PATH) rather than per-port or per-project.
+    rr = sub.add_parser("record-run", help="note that a command the status line tip names just ran")
+    rr.add_argument("name", choices=RECORDED_COMMANDS)
+
     uc = sub.add_parser("update-check")
     uc.add_argument("op", choices=("show", "stamp", "notify", "answer"))
     uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp`")
@@ -4149,14 +4339,14 @@ def main() -> int:
             ap.error("strategy set needs --name; one of " + ", ".join(STRATEGIES))
     if args.cmd == "preset" and args.op == "set" and not args.name:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
-    rc = {"add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
+    rc = {"statusline-repoint": cmd_statusline_repoint, "add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
           "enable-plugin": cmd_enable_plugin,
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
           "project-key": cmd_project_key, "scopes": cmd_scopes,
           "strategy": cmd_strategy, "preset": cmd_preset, "port": cmd_port,
           "owner-token": cmd_owner_token,
           "check-url": cmd_check_url, "update-check": cmd_update_check,
-          "gitignore-ensure": cmd_gitignore_ensure}[args.cmd](args)
+          "gitignore-ensure": cmd_gitignore_ensure, "record-run": cmd_record_run}[args.cmd](args)
 
     # The hatch facts are printed HERE rather than from inside save(), so the `result=` line the
     # caller keys on stays first, and so every writing path reports them without six call sites

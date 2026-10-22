@@ -21,10 +21,10 @@ Yesterday    $5.10   $118.40
 
 ≈ Estimated   (spend you could still avoid; rows overlap, do not add)
   1.  $107.79  You paused longer than the cache lasts, 214 times: run /compact before a long break
-  2.   $37.70  Add-ons you never use: remove them, /context-guru:waste lists them
+  2.   $37.70  Add-ons you never use: remove them, /context-guru:insights tools lists them
   3.   $23.31  Settings or tools changed mid-session: pick MCP servers and edit CLAUDE.md before you start
 
-/context-guru:savings  /context-guru:cache  /context-guru:waste  /context-guru:session  /context-guru:doctor
+/context-guru:insights  /context-guru:session  /context-guru:doctor  /context-guru:save-more  /context-guru:remove-mcp-and-skills
 /context-guru:watch  /context-guru:timeline  /context-guru:chart  /context-guru:heatmap  /context-guru:fill
 ```
 

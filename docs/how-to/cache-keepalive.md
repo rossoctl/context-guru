@@ -177,6 +177,26 @@ plane is what is broken. `/stats` publishes `keepalive` with `pings`, `skipped`,
 `wrote_instead_of_read` and `spend_usd`; `wrote_instead_of_read` above zero is a bug, not an
 expense.
 
+## Client lifecycle signals
+
+The proxy cannot see a user leave: a session that ended looks like one that is idle. Clients
+that run hooks tell it, on `POST /signal`, with a content-free event: the plugins and the hosted
+setup snippet send only the session id, the event name and its reason (the hook picks those out
+of Claude Code's payload, which also holds the working directory and the transcript path). This is on whenever the keep-alive runs; `CONTEXT_GURU_CLIENT_SIGNALS=off` turns it off.
+
+| event | sent when | what the keep-alive does |
+|---|---|---|
+| `SessionEnd` | `/exit`, Ctrl-C twice, Ctrl-D, closing the terminal, `/clear`, logout | releases the session's held entries; no further pings |
+| `SessionStart compact` | after `/compact` or auto-compaction | releases the entries that cache the pre-compaction prefix |
+| `SessionStart resume` / `clear`, `Notification` | | recorded only |
+
+A resumed session (`claude --resume`, same id) is tracked again from its first request after the
+end; the provider's cache entry is not touched by any signal, so a prompt resume still reads it.
+Every effect only removes spend: a lost or late event leaves the keep-alive as it is without
+signals. The Claude Code plugin sends these by default to its own local proxy and to a hosted
+service (`client_signals` option: `auto`, `on`, `off`); the hosted setup page includes the hooks;
+the Codex plugin sends `SessionEnd` and `SessionStart` once you trust its hooks (`/hooks`).
+
 ## What is held in memory, and for how long
 
 To ping a session the proxy keeps that session's last request body, and — where the upstream
@@ -208,6 +228,9 @@ of a request:
 | **Audit row per ping** | every use is a durable `requests` row: tenant, session, timestamp, cost, read-or-wrote. |
 | **Purged on revocation** | account deletion, token revocation and disablement release held material immediately. |
 | **Kill switch** | `CONTEXT_GURU_KEEPALIVE=off` stops *retention*, not merely pinging. |
+| **No ping mid-request** | a due ping waits while a request of the same thread is in flight. Other threads are not held back: a subagent's slow request never delays the main thread's ping. |
+| **Failed pings stop** | a 401 is about the key: it stops every session pinging with that credential, and only those (a teammate on the same account pings on), for an hour; a 403 (often a per-model permission or a gateway policy) does the same for that credential on that model only. A ping refused with any other non-retryable 4xx or answered 2xx with no usage at all (a translating gateway that hid an error) is counted `failed` and stops that session; 3 in a row for the same account, upstream and model switch the keep-alive off for that route, for that account only, for an hour (`route_trips` in `/stats`). A 429 or 5xx (an overload) is transient: counted `skipped`, and the next ping slot retries. A ping that lands after expiry and reads nothing is a real miss (`missed`): it re-wrote the prefix, so pinging goes on; a second miss in a row is a prefix that does not match and stops the session. |
+| **Claude models only through a relay** | native Anthropic, Bedrock and Vertex upstreams are eligible by type, whatever the deployment is called. The Anthropic route forwarded to anything else (LiteLLM, a corporate gateway) may serve another family (an OpenAI or Azure model, with no explicit cache control), so there the model name must contain `claude`, `opus`, `sonnet` or `haiku`; `CONTEXT_GURU_KEEPALIVE_MODELS=alias1,alias2` adds names for aliases that do not. |
 
 Bounded on volume too: 128 MiB across at most 512 sessions, and a single body over 8 MiB is not
 held. The masking is obfuscation at rest against an accidental-capture read (a crash dump, a
@@ -226,6 +249,50 @@ strategy can instead name a predictor — `predictor_id: "stop-reason-gated"` pl
 This is opt-in per strategy; a strategy with no `predictor_id` behaves exactly as before. Gains
 are concentrated in a few tenants, so scope it to the tenants it actually helps rather than
 applying it fleet-wide.
+
+## Client lifecycle signals (opt-in)
+
+The proxy cannot see from the request stream that a user has quit or that Claude Code has
+compacted the conversation, so by default it keeps pinging a cache nobody will read. With
+signals on, the Claude Code plugin tells the proxy, and the proxy stops holding that cache.
+
+Turn it on in two places:
+
+1. On the proxy: `CONTEXT_GURU_CLIENT_SIGNALS=on`. This enables `POST /signal`; without it the
+   route returns 404.
+2. In the plugin: set the `client_signals` option to `on` (`/plugin configure`), or export
+   `CONTEXT_GURU_CLIENT_SIGNALS=on` in the shell that runs Claude Code.
+
+| Event (hook) | What the proxy does |
+|---|---|
+| `SessionEnd` (any reason) | Retires every entry held for that session and remembers the end for up to 12 h, so a request that was still in flight when the user left is not held afterwards. A resumed session's next request starts after the mark and is held as usual. |
+| `SessionStart` with `source=compact` | Retires the entries holding the pre-compaction prefix (those whose last request started at least 2 s before the event). The session goes on and its next request is held as usual. |
+| `SessionStart` resume / clear / startup / fork, `Notification` | Recorded only. Offline replay found that acting on these earns little or loses money. |
+
+The event carries no content: the session id, the event name and a reason from a closed set.
+The hook reads the hook payload only to pick those three fields, sends them with the same
+credential Claude Code already sends to `ANTHROPIC_BASE_URL`, and never blocks or fails the
+session (2 s timeout, exit 0 on every path).
+
+**How it fails safe.** A signal can only remove spend: it retires a held entry, it never
+extends a hold or schedules a ping. A lost or late event leaves the keep-alive as it is without
+signals; a forged one can only stop pings for the sender's own sessions, because the session key
+is scoped to the authenticated tenant. End marks are capped per tenant (2,000), so one tenant
+cannot evict another's.
+
+If `ANTHROPIC_BASE_URL` points at something other than a context-guru proxy (a gateway, or a
+proxy in front of one), that host receives `POST /signal` with the token it already sees on
+every request. Leave the option off in that setup.
+
+## Predictive campaigns (opt-in, per tenant)
+
+Instead of one fixed ping count for everyone, a manager can build a **campaign** for a tenant from
+that tenant's own history: either a learned model that decides at the end of each response how
+many pings pay for themselves, or (`builder: "auto"`) the best fixed plan for that tenant, rebuilt
+daily. A campaign runs in `shadow` (scores live decisions, changes nothing) or `active` (sets the
+ping count of a keep-alive the tenant already has on). `active` is refused unless the build's own
+held-out comparison recommended it. Routes, settings and safety properties:
+`predictive/README.md` in the repository.
 
 ## Related
 

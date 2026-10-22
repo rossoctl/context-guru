@@ -43,21 +43,19 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 	// Both entry points must work and must be versioned: the plain directory URL and
 	// the explicit filename. Both serve the same markup, so `checked` — the number of
 	// local references found in it — is reused by the rewrite-count assertion below.
-	// Two documents: the five-page home (the default) and the classic dashboard. "/dashboard/" is
-	// the same markup as home.html, so `checked` counts each document's references once.
 	checked := 0
-	for _, entry := range []string{"/dashboard/", "/dashboard/home.html", "/dashboard/index.html"} {
+	for _, entry := range []string{"/dashboard/", "/dashboard/index.html"} {
 		w := get(entry)
 		if cc := w.Header().Get("Cache-Control"); cc != "no-cache" {
 			t.Errorf("%s Cache-Control = %q; the HTML must not be cached, or it cannot hand out new asset URLs", entry, cc)
 		}
-		docRefs := 0
+		checked = 0
 		for _, mm := range localRef.FindAllStringSubmatch(w.Body.String(), -1) {
 			ref := mm[1]
 			if strings.HasPrefix(ref, "data:") || strings.HasPrefix(ref, "#") || strings.Contains(ref, "://") {
 				continue
 			}
-			docRefs++
+			checked++
 			if !strings.Contains(ref, "?v="+assetVersion) {
 				t.Errorf("%s references %q with no version token — a stale cached copy of it will be paired with this HTML", entry, ref)
 				continue
@@ -70,11 +68,8 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 		// Fail loudly if the reference extraction stops finding anything: a reshaped
 		// index.html that no longer matches must break this test, not quietly ship
 		// unversioned URLs.
-		if docRefs < 4 {
-			t.Errorf("%s: found only %d local asset references; the pages reference at least four assets each", entry, docRefs)
-		}
-		if entry != "/dashboard/" {
-			checked += docRefs
+		if checked < 4 {
+			t.Errorf("%s: found only %d local asset references; index.html references at least style.css, app.js, tools.js and kvcache.js", entry, checked)
 		}
 	}
 
@@ -85,16 +80,22 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 	// later must appear here or the rewrite total will not add up.
 	runtimeRefs := []struct{ asset, ref string }{
 		{"tools.js", "tools.css"},
+		{"insights.js", "insights.css"},
+		// history.js shares insights.css rather than shipping its own: it reuses that tab's
+		// tile, table and tab styling wholesale, and a second copy of those rules would drift.
+		{"history.js", "insights.css"},
 		{"kvcache.js", "kvcache.css"},
 		// campaigns.js is manager-only and not <script>-tagged in index.html at all — see
 		// maybeLoadManagerScript — so app.js fetches it itself once a hosted manager signs in.
 		{"app.js", "campaigns.js"},
-		// The five-page home sends a signed-out visitor to the classic dashboard's sign-in.
-		{"v2.js", "index.html"},
+		// The diagnostics plots are fetched when the fold opens.
+		{"app.js", "charts.js"},
+		// The bundled serif face, named in the stylesheet's @font-face.
+		{"style.css", "fonts/source-serif-4-latin-wght-normal.woff2"},
 	}
 	for _, rr := range runtimeRefs {
 		js := get("/dashboard/" + rr.asset).Body.String()
-		if !strings.Contains(js, "'"+rr.ref+"?v="+assetVersion+"'") {
+		if !strings.Contains(js, "'"+rr.ref+"?v="+assetVersion+"'") && !strings.Contains(js, `"`+rr.ref+"?v="+assetVersion+`"`) {
 			t.Errorf("%s still asks for an unversioned %s", rr.asset, rr.ref)
 		}
 	}
@@ -121,7 +122,7 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 		rewrites += strings.Count(string(b), "?v="+assetVersion)
 	}
 	if want := checked + len(runtimeRefs); rewrites != want {
-		t.Errorf("versionedUI rewrote %d references but this test accounts for %d (%d in the two documents plus %d built at runtime) — either a quoted asset name that is not a reference is being versioned, or a reference is no longer found", rewrites, want, checked, len(runtimeRefs))
+		t.Errorf("versionedUI rewrote %d references but this test accounts for %d (%d in index.html plus %d built at runtime) — either a quoted asset name that is not a reference is being versioned, or a reference is no longer found", rewrites, want, checked, len(runtimeRefs))
 	}
 }
 

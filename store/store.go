@@ -433,7 +433,7 @@ const DefaultTTL = 10000 * time.Second
 //     not introduced here; this horizon shortens the distance to it by 5.5x.
 //
 // The residual exposure, stated rather than waved at: a turn that runs NO pipeline performs no
-// refresh (an x-context-guru-bypass request, or the agent-compaction bypass), so a long
+// refresh (an x-context-guru-bypass request), so a long
 // unbroken run of bypassed turns could outlive a payload while its marker is still live in the
 // transcript. Both are single-request events in practice. On the reapplyFrozen family the outcome
 // is then the already-reported one — stash_missing on the next replay — not a silent loss, and

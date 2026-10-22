@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -39,9 +40,9 @@ const (
 
 // Rewrite causes, ordered roughly by how avoidable they are.
 const (
-	CauseColdStart    = "cold_start"      // first request of the session for this model
+	CauseColdStart    = "cold_start"      // first request of the session
 	CauseIdleExpiry   = "idle_expiry"     // gap since the previous request exceeded the cache TTL
-	CauseNewThread    = "new_thread"      // same session, different tools/system (subagent or config change)
+	CauseNewThread    = "new_thread"      // same session, a thread not seen before (subagent, side request, other model, or config change)
 	CauseHistory      = "history_rewrite" // message count fell: compaction, rewind or edit
 	CausePrefixChange = "prefix_change"   // warm, longer history, still rewritten: tools/system/MCP changed
 )
@@ -172,7 +173,7 @@ type SpendLedger struct {
 
 type spendRow struct {
 	ts                               int64
-	session, model                   string
+	session, model, thread           string
 	tools, sysBlocks, messages       int
 	fresh, read, write, write1h, out int64
 	cost, baseline, cgllm, kaSaved   float64
@@ -182,6 +183,7 @@ type spendRow struct {
 
 type threadKey struct {
 	session, model string
+	thread         string // requests.thread_id, "a:<agent>" only; "" for main and side requests
 	tools, sys     int
 }
 
@@ -258,7 +260,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 	}
 	cond, args := warm.where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.tools, r.system_blocks,
-		r.messages, r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.output_tokens,
+		r.thread_id, r.messages, r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.output_tokens,
 		r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd, r.keepalive_saved_usd, r.keepalive,
 		r.token_accounting FROM requests r WHERE `+cond+` ORDER BY r.ts, r.id`, args...)
 	if err != nil {
@@ -269,7 +271,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 	out := &SpendExplain{Rewrites: map[string]*RewriteCause{}}
 	rates := map[string]modelinfo.Price{}
 	threads := map[threadKey]*threadState{}
-	seen := map[[2]string]bool{}
+	seen := map[string]bool{} // sessions with any earlier request, whatever the model or thread
 	models := map[string]*SpendModel{}
 	sessions := map[string]*SpendSession{}
 	days := map[int64]*SpendDay{}
@@ -285,7 +287,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		var r spendRow
 		var ka int
 		var acct string
-		if err := rows.Scan(&r.ts, &r.session, &r.model, &r.tools, &r.sysBlocks, &r.messages,
+		if err := rows.Scan(&r.ts, &r.session, &r.model, &r.tools, &r.sysBlocks, &r.thread, &r.messages,
 			&r.fresh, &r.read, &r.write, &r.write1h, &r.out, &r.cost, &r.baseline, &r.cgllm,
 			&r.kaSaved, &ka, &acct); err != nil {
 			return nil, err
@@ -294,9 +296,15 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		counted := f.Since == 0 || r.ts >= f.Since
 		p, priced := priceOf(rates, price, r.model)
 		ctx := r.fresh + r.read + r.write
-		tk := threadKey{r.session, r.model, r.tools, r.sysBlocks}
+		// Only an "a:" id is a stable thread name. A "p:" id is a fingerprint of one request, so
+		// keying on it would make every side request a new thread and hide real idle expiries.
+		th := ""
+		if strings.HasPrefix(r.thread, "a:") {
+			th = r.thread
+		}
+		tk := threadKey{r.session, r.model, th, r.tools, r.sysBlocks}
 		prev := threads[tk]
-		sk := [2]string{r.session, r.model}
+		sk := r.session
 		var cause string
 		var gap int64
 		isRewrite := r.complete && ctx >= rewriteMinCtx && float64(r.write) >= rewriteFrac*float64(ctx)

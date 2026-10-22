@@ -166,7 +166,7 @@ write routing while no proxy answers.
 
 - `result=routed` — done. `settings_result=` says which: `added`, `unchanged` (already correct),
   `completed` (a repair of an earlier partial attempt — report it as success, not "nothing to do"),
-  or `repointed` (moved to a new port).
+  or `repointed` (moved to a new port). Relay `ping_note=` verbatim: the server keeps the latest request and key in memory up to 5 min so Ping works, never pings automatically for it, drops the copy 5 min after the last request; `--no-ping-header` opts out.
 - `result=error reason=health_check_failed` — **no routing was written**, so the project is unrouted,
   which is a working project. Say what the log shows rather than guessing, and do **not** say
   "nothing happened": check `proxy_started=`, and if `true` a proxy IS still listening — say so and
@@ -190,6 +190,10 @@ write routing while no proxy answers.
 - `strategy_warning=` — the strategy could not be written even though the name was valid (usually a
   config at that path we did not write). The proxy is fine; mention it and move on.
 - `statusline=on` — also installed; mention it once, same as `recovery_dir=` (a `.gitignore`'d folder beside the routed file). `skipped` is not an install failure.
+- `history_import=done` — Claude Code's history from before this install was imported once, so History is
+  not empty on day one; quote `history_import_summary=`. It shows what was used and when, not what unused
+  tools cost (only the proxy sees that, from now on). `already_done`/`skipped` need no mention. `failed` is
+  not an install failure: give `history_import_error=` and offer `history_import_retry=` verbatim.
 
 ## 4. Then tell them
 

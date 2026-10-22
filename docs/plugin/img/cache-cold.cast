@@ -28,7 +28,7 @@
 [1.5, "o", "  You paused longer than the cache lasts     214x  $107.79  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2591\u2591\u2591\r\n"]
 [1.56, "o", "  Settings or tools changed mid-session       23x   $14.57  \u2588\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\r\n"]
 [1.62, "o", "  A new session started                       96x   $14.57  \u2588\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\r\n"]
-[1.68, "o", "  A helper agent started                      41x    $7.28  \u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\r\n"]
+[1.68, "o", "  A subagent or side request started          41x    $7.28  \u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\r\n"]
 [1.74, "o", "  The conversation was rewound or compacted    3x    $1.46  \u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\r\n"]
 [1.8, "o", "\r\n"]
 [1.86, "o", "The cache keeps your conversation cheap to reuse for a few minutes after each message.\r\n"]

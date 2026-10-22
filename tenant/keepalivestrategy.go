@@ -111,6 +111,9 @@ type StrategyPatch struct {
 // ErrNoStrategy names no keep-alive strategy.
 var ErrNoStrategy = errors.New("tenant: no such keep-alive strategy")
 
+// Zone is the IANA zone the window is evaluated in: TZ, or DefaultStrategyTZ when it is empty.
+func (w Window) Zone() string { return w.tzOrDefault() }
+
 // tzOrDefault is w.TZ, or DefaultStrategyTZ when it is empty.
 func (w Window) tzOrDefault() string {
 	if w.TZ == "" {
@@ -220,21 +223,6 @@ func (w Window) contains(now time.Time) (bool, error) {
 	//
 	// Writing 1440 for "24:00" closes it without touching exclusivity: every existing window
 	// keeps its exact meaning, and a caller who means all day can now say so.
-	// BOTH ENDS INCLUSIVE, and the end is the reason. A window is written in wall-clock
-	// minutes, so "00:00".."23:59" is how a person says "all day" — there is no "24:00" to
-	// write instead. With an exclusive end that window excluded 23:59 itself, i.e. the one
-	// minute it most obviously meant to cover, and so did every window ending on the minute
-	// somebody chose as its last.
-	//
-	// This is not a hypothetical: it made TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart
-	// fail on main for exactly one minute a day. CI hit it at 20:59:11Z, which is 23:59 in
-	// Asia/Jerusalem (DefaultStrategyTZ), so mins was 1439 and end was 1439 — and 1439 < 1439
-	// is false. One minute in 1440 is precisely how a bug like this survives review.
-	//
-	// The cost of inclusivity is that a window ending 17:00 now covers 17:00:00-17:00:59. That
-	// is the reading a person expects from a minute-granularity field, and two adjacent windows
-	// (..17:00 and 17:00..) overlapping for that minute is harmless here: InWindow is an OR over
-	// windows, so an instant covered twice is covered once.
 	return mins >= start && mins < end, nil
 }
 
@@ -271,6 +259,9 @@ func (t Target) Validate() error {
 		return fmt.Errorf("tenant: target mode must be %q or %q", TargetAll, TargetList)
 	}
 }
+
+// Covers reports whether the target includes tenantID, ignoring Active and the windows.
+func (t Target) Covers(tenantID string) bool { return t.matches(tenantID) }
 
 func (t Target) matches(tenantID string) bool {
 	switch t.Mode {
@@ -312,7 +303,7 @@ func (s Strategy) Matches(now time.Time, tenantID string) bool {
 // caller (proxy's control route) validates the numeric bounds — the keep-alive's own
 // spend-authorization limits, which this package does not know about — and every
 // window and the target before calling this.
-func (r *Registry) CreateStrategy(actorID string, s Strategy) (Strategy, error) {
+func (r *Registry) createStrategy(actorID string, s Strategy) (Strategy, error) {
 	if strings.TrimSpace(s.Name) == "" {
 		return Strategy{}, fmt.Errorf("tenant: a strategy needs a name")
 	}
@@ -343,7 +334,7 @@ func (r *Registry) CreateStrategy(actorID string, s Strategy) (Strategy, error) 
 }
 
 // UpdateStrategy applies a sparse patch and returns the resolved strategy.
-func (r *Registry) UpdateStrategy(actorID, id string, p StrategyPatch) (Strategy, error) {
+func (r *Registry) updateStrategy(actorID, id string, p StrategyPatch) (Strategy, error) {
 	s, err := r.StrategyByID(id)
 	if err != nil {
 		return Strategy{}, err
@@ -411,7 +402,7 @@ func (r *Registry) UpdateStrategy(actorID, id string, p StrategyPatch) (Strategy
 
 // DeleteStrategy removes a strategy. It does not un-ping anything already sent — there
 // is nothing to undo — it only stops the strategy matching new requests.
-func (r *Registry) DeleteStrategy(id string) error {
+func (r *Registry) deleteStrategy(id string) error {
 	res, err := r.db.Exec(`DELETE FROM keepalive_strategies WHERE id = ?`, id)
 	if err != nil {
 		return err
@@ -480,4 +471,30 @@ func scanStrategy(sc scanner) (Strategy, error) {
 	out.Active = active != 0
 	out.CreatedAt, out.UpdatedAt = msTime(createdAt), msTime(updatedAt)
 	return out, nil
+}
+
+// The three writers below commit through the unexported versions above and then tell the registry's
+// listener, so a cached dashboard read that includes strategies is dropped the moment one changes.
+func (r *Registry) CreateStrategy(actorID string, s Strategy) (Strategy, error) {
+	out, err := r.createStrategy(actorID, s)
+	if err == nil {
+		r.changed(ChangeStrategy)
+	}
+	return out, err
+}
+
+func (r *Registry) UpdateStrategy(actorID, id string, p StrategyPatch) (Strategy, error) {
+	out, err := r.updateStrategy(actorID, id, p)
+	if err == nil {
+		r.changed(ChangeStrategy)
+	}
+	return out, err
+}
+
+func (r *Registry) DeleteStrategy(id string) error {
+	err := r.deleteStrategy(id)
+	if err == nil {
+		r.changed(ChangeStrategy)
+	}
+	return err
 }

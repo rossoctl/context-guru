@@ -74,7 +74,7 @@ func goldenAPIAt(t *testing.T, path string) *API {
 				after = before - 2_500 - s
 			}
 			e := mkEvent(ts, session, model, before, after)
-			e.TenantID, e.Tools = tenant, 3+s%4
+			e.TenantID, e.Tools, e.DeclDigest = tenant, 3+s%4, "d"+fmt.Sprint(s)
 			e.Agent = []string{"claude-code", "bob"}[s%2]
 			e.CacheRead, e.CacheWrite, e.FreshInput = int64(before-600), 600, 40
 			e.CacheMissReason = CacheHit

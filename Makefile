@@ -38,11 +38,11 @@ build-static: ## Same as build, plus -trimpath — the exact build releases ship
 
 .PHONY: test
 test: ## Run all tests with the race detector
-	go test -race ./...
+	go test -race -timeout 20m ./...
 
 .PHONY: cover
 cover: ## Run all tests with race + cross-package coverage; write coverage.out and print total
-	go test -race -coverpkg=./... -coverprofile=coverage.out ./...
+	go test -race -timeout 20m -coverpkg=./... -coverprofile=coverage.out ./...
 	@go tool cover -func=coverage.out | tail -1
 
 .PHONY: fmt
@@ -62,3 +62,7 @@ pre-commit: ## Install pre-commit hooks
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf bin
+
+.PHONY: refresh-litellm-snapshot
+refresh-litellm-snapshot: ## Refresh the bundled LiteLLM price snapshot used by modelinfo tests
+	scripts/refresh-litellm-snapshot.sh

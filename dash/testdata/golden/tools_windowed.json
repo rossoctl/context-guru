@@ -3,8 +3,13 @@
   {
    "builtin": true,
    "calls": 96,
+   "carry_priced": false,
+   "carry_reads": 28440,
+   "carry_usd": 0.08188199999999998,
    "has_text": false,
    "kind": "tool",
+   "last_carried_ts": 1768027680000,
+   "last_used_ts": 1768027680000,
    "name": "Bash",
    "priced": true,
    "removal": {
@@ -21,9 +26,20 @@
    "share_pct": 5.288673424416042,
    "tokens": 120,
    "unused_reads": 0,
-   "unused_usd": 0
+   "unused_usd": 0,
+   "unused_usd_high": 0,
+   "unused_usd_low": 0
   }
  ],
+ "carried": {
+  "requests": 237,
+  "requests_ambiguous": 0,
+  "requests_exact": 237,
+  "requests_mapped": 237,
+  "requests_unpriced": 0,
+  "sessions": 24,
+  "sessions_captured": 24
+ },
  "coverage": {
   "captured": 24,
   "not_captured": 0,
@@ -116,6 +132,9 @@
  "servers": [
   {
    "calls": 16,
+   "carry_priced": false,
+   "carry_reads": 174736,
+   "carry_usd": 0.5028989999999997,
    "priced": false,
    "server": "alpha",
    "sessions_declared": 24,
@@ -124,10 +143,13 @@
    "tools": 2,
    "tools_used": 1,
    "unused_reads": 152056,
-   "unused_usd": 0.47120324999999996
+   "unused_usd": 0.47120324999999974
   },
   {
    "calls": 0,
+   "carry_priced": false,
+   "carry_reads": 118500,
+   "carry_usd": 0.3411749999999999,
    "priced": false,
    "server": "beta",
    "sessions_declared": 24,
@@ -136,7 +158,7 @@
    "tools": 1,
    "tools_used": 0,
    "unused_reads": 118500,
-   "unused_usd": 0.34117499999999995
+   "unused_usd": 0.341175
   }
  ],
  "skills": {
@@ -148,8 +170,12 @@
    {
     "builtin": false,
     "calls": 0,
+    "carry_priced": false,
+    "carry_reads": 11440,
+    "carry_usd": 0.04728899999999999,
     "has_text": false,
     "kind": "skill",
+    "last_carried_ts": 1767992780000,
     "name": "skill-1",
     "priced": false,
     "removal": {
@@ -164,13 +190,19 @@
     "share_pct": 9.695901278096077,
     "tokens": 220,
     "unused_reads": 11440,
-    "unused_usd": 0.047289
+    "unused_usd": 0.047289,
+    "unused_usd_high": 0.04728899999999999,
+    "unused_usd_low": 0.04728899999999999
    },
    {
     "builtin": false,
     "calls": 0,
+    "carry_priced": false,
+    "carry_reads": 10780,
+    "carry_usd": 0.036069,
     "has_text": false,
     "kind": "skill",
+    "last_carried_ts": 1768027680000,
     "name": "skill-4",
     "priced": false,
     "removal": {
@@ -185,13 +217,19 @@
     "share_pct": 9.695901278096077,
     "tokens": 220,
     "unused_reads": 10780,
-    "unused_usd": 0.036069
+    "unused_usd": 0.036069000000000004,
+    "unused_usd_high": 0.036069,
+    "unused_usd_low": 0.036069
    },
    {
     "builtin": false,
     "calls": 0,
+    "carry_priced": false,
+    "carry_reads": 10560,
+    "carry_usd": 0.026499,
     "has_text": false,
     "kind": "skill",
+    "last_carried_ts": 1768004280000,
     "name": "skill-2",
     "priced": false,
     "removal": {
@@ -206,13 +244,19 @@
     "share_pct": 9.695901278096077,
     "tokens": 220,
     "unused_reads": 10560,
-    "unused_usd": 0.026498999999999998
+    "unused_usd": 0.026498999999999995,
+    "unused_usd_high": 0.026499,
+    "unused_usd_low": 0.026499
    },
    {
     "builtin": false,
     "calls": 0,
+    "carry_priced": false,
+    "carry_reads": 9680,
+    "carry_usd": 0.026135999999999996,
     "has_text": false,
     "kind": "skill",
+    "last_carried_ts": 1767984880000,
     "name": "skill-0",
     "priced": false,
     "removal": {
@@ -227,13 +271,19 @@
     "share_pct": 9.695901278096077,
     "tokens": 220,
     "unused_reads": 9680,
-    "unused_usd": 0.026136
+    "unused_usd": 0.026135999999999996,
+    "unused_usd_high": 0.026136,
+    "unused_usd_low": 0.026136
    },
    {
     "builtin": false,
     "calls": 0,
+    "carry_priced": false,
+    "carry_reads": 9680,
+    "carry_usd": 0.014123999999999998,
     "has_text": false,
     "kind": "skill",
+    "last_carried_ts": 1768016020000,
     "name": "skill-3",
     "priced": false,
     "removal": {
@@ -248,20 +298,26 @@
     "share_pct": 9.695901278096077,
     "tokens": 220,
     "unused_reads": 9680,
-    "unused_usd": 0.014123999999999998
+    "unused_usd": 0.014123999999999998,
+    "unused_usd_high": 0.014123999999999998,
+    "unused_usd_low": 0.014123999999999998
    }
   ],
   "state": "ok",
   "unknown_sessions": 0,
   "unused_listing_reads": 213300,
-  "unused_listing_usd": 0.614115
+  "unused_listing_usd": 0.6141149999999999
  },
  "tools": [
   {
    "builtin": false,
    "calls": 0,
+   "carry_priced": false,
+   "carry_reads": 118500,
+   "carry_usd": 0.3411749999999999,
    "has_text": false,
    "kind": "mcp_tool",
+   "last_carried_ts": 1768027680000,
    "name": "mcp__beta__x",
    "priced": false,
    "removal": {
@@ -278,13 +334,19 @@
    "share_pct": 22.036139268400177,
    "tokens": 500,
    "unused_reads": 118500,
-   "unused_usd": 0.34117499999999995
+   "unused_usd": 0.341175,
+   "unused_usd_high": 0.34117499999999973,
+   "unused_usd_low": 0.34117499999999973
   },
   {
    "builtin": false,
    "calls": 0,
+   "carry_priced": false,
+   "carry_reads": 97170,
+   "carry_usd": 0.2797634999999997,
    "has_text": false,
    "kind": "mcp_tool",
+   "last_carried_ts": 1768027680000,
    "name": "mcp__alpha__write",
    "priced": false,
    "removal": {
@@ -301,13 +363,20 @@
    "share_pct": 18.069634200088146,
    "tokens": 410,
    "unused_reads": 97170,
-   "unused_usd": 0.27976349999999994
+   "unused_usd": 0.2797634999999997,
+   "unused_usd_high": 0.27976349999999994,
+   "unused_usd_low": 0.27976349999999994
   },
   {
    "builtin": false,
    "calls": 16,
+   "carry_priced": false,
+   "carry_reads": 77566,
+   "carry_usd": 0.22313549999999993,
    "has_text": false,
    "kind": "mcp_tool",
+   "last_carried_ts": 1768027680000,
+   "last_used_ts": 1768027680000,
    "name": "mcp__alpha__read",
    "priced": false,
    "removal": {
@@ -324,7 +393,9 @@
    "share_pct": 14.94050242397532,
    "tokens": 339,
    "unused_reads": 54886,
-   "unused_usd": 0.19143975
+   "unused_usd": 0.19143975,
+   "unused_usd_high": 0.19143975000000013,
+   "unused_usd_low": 0.19143975000000013
   }
  ],
  "totals": {
@@ -339,6 +410,8 @@
   "unused_pct": 94.87719298245614,
   "unused_reads": 483856,
   "unused_tokens": 2028,
-  "unused_usd": 1.4264932499999998
+  "unused_usd": 1.4264932499999996,
+  "unused_usd_high": 1.4264932499999996,
+  "unused_usd_low": 1.4264932499999996
  }
 }

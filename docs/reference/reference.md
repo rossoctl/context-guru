@@ -27,9 +27,12 @@ memory on a single request. Two exceptions, both because the whole point of the 
 carrying a transcript that is, by definition, already this large:
 
 - **The agent's own compaction request** (see [agent-compaction.md](../how-to/agent-compaction.md))
-  — detected the same way it already is for the pipeline bypass — may read up to 128 MiB. It
-  must be forwarded byte-identical regardless of size, so relaxing the *read* ceiling for it
-  costs nothing extra: no pipeline component runs on it either way.
+  — may read up to 128 MiB. The proxy finds it by the opening of the agent's summary prompt
+  (`isAgentCompaction`). Up to 32 MiB it runs the full pipeline, like any other request. **Over
+  32 MiB it is bypassed**: the proxy forwards it untouched, counts it as
+  `components.agent_compaction.gates.oversize_bypass`, and still marks the dashboard row
+  `agent_compaction`. The pipeline is too slow on a body that large. A measured 40 MiB body took
+  13.7 s on the request path and allocated 5.7 GiB.
 - **`/compact`** always reads up to 128 MiB, unconditionally — every caller of this endpoint
   wants exactly this: a body already larger than 32 MiB is the normal, intended input, never a
   reason to refuse up front.
@@ -446,8 +449,6 @@ table above is unchanged and every path below returns 404.
 | `GET /api/breakdown?dim=<name>` | Requests, tokens and **spent vs saved** grouped by one dimension: `model`, `provider`, `agent`, `preset`, `mode`, `reasoning_effort`, `thinking_mode`, `stop_reason`, `tool_choice`, `cache_miss_reason`, `cache_breakpoints`, `stream`. `spent_usd` is billed cost plus context-guru's own model spend; `saved_usd` is the baseline counterfactual minus that. `incomplete_rows` counts rows the provider reported no usage for, so a group with no priced rows renders as **unknown** rather than as zero. The dimension is an **allowlist**: an unknown one is a `400` naming the valid set, never a chart of some other dimension's numbers. Defaults to `model`. Per-**day** usage bars need no route of their own — they are `/api/series?bucket=86400000`, since bucketing happens in SQL at query time. |
 | `GET /api/facets` | The distinct values present for each filter dimension, so a UI shows only what the data contains. |
 | `GET /api/config` | **This proxy process's** effective (resolved, key-allowlisted) configuration, wrapped in a scope envelope — see [below](#the-config-route-serves-the-servers-configuration-not-yours). Access-gated; **manager-only** in hosted mode. |
-| `GET /api/benchmarks` | Ingested harness runs with per-arm aggregates. `?refresh=1` re-scans the configured run directories. **Manager-only** in hosted mode — the runs are the operator's own eval history, and `?refresh=1` walks the filesystem and inserts rows. |
-| `GET /api/benchmarks/{id}/tasks` | Per-task rows for a run (`?arm=<name>` to restrict). **Manager-only** in hosted mode. |
 | `GET /api/capture` | The capture pipeline's own health, **including its drop count**. The counters are process-wide, so in hosted mode a non-manager gets `mode` alone (with a `description` that says so, rather than one describing counters that are not in the payload). |
 | `GET /api/events` | SSE stream of captured requests (summary rows only — never content). Honors `Last-Event-ID` (or `?last_event_id=`) so a reconnect backfills the gap. |
 | `GET /api/kvcache` | The KV-cache analysis: summary cards, the idle histogram, the survival curve, the grouped views (observed TTL, user, model, time-of-day band), the price list and the **coverage statement**. One payload, so every figure shares its denominator. `scanned` / `total` / `truncated` say whether the read was capped (`kvCacheMaxRows`, 200,000) — a silent cap would read as "this is your whole history". |
@@ -558,7 +559,7 @@ question — a test walks the table and asserts every route's declared scope. Th
 |---|---|
 | Public — no principal at all | `/dashboard/`, `/api/whoami` |
 | Tenant — that principal's data only, and a manager may widen with `?tenant=<id>` or `?tenant=*` | every other `/api/*` data route |
-| Manager — server-wide or process-wide facts that are nobody's tenant data | `/api/config`, `/api/benchmarks`, `/api/benchmarks/{id}/tasks`, and `/api/capture`'s counters |
+| Manager — server-wide or process-wide facts that are nobody's tenant data | `/api/config` and `/api/capture`'s counters |
 
 A manager reading another tenant sees their **metrics and their transcripts** — an
 explicit owner decision. `/api/requests/{id}`, `/api/sessions/{session}/transcript` and
@@ -780,7 +781,8 @@ startup with the replacement named, rather than silently migrated to a value tha
 moment.
 
 (The agent's own compaction is a second route to the same skip — it shrinks the incoming request and
-can drop it back under `min_request_tokens` for several consecutive turns.)
+can drop it back under `min_request_tokens` for several consecutive turns. The compaction request
+itself is not skipped: it goes through the pipeline.)
 
 That is only safe because a skipped turn still **splices**. Once a checkpoint exists, every later turn
 re-emits the same summary bytes from it, with no model call, whichever gate declined and whether or
@@ -790,7 +792,7 @@ full-suffix cache-write, so under a rarely-firing trigger the component would co
 every turn to save it on a few.
 
 The exposure this leaves, stated plainly: a turn that runs **no pipeline** performs no refresh (an
-`x-context-guru-bypass` request, or the agent-compaction bypass), so an unbroken run of bypassed
+`x-context-guru-bypass` request), so an unbroken run of bypassed
 turns longer than `stash_ttl_seconds` could outlive a payload whose marker is still live. Both are
 single-request events in practice, and on the first row above the outcome is the reported one —
 `stash_missing` — not a silent loss.
@@ -879,7 +881,7 @@ Every dollar figure on the dashboard is `observed tokens × per-model rates`. Th
 from LiteLLM's public `model_prices_and_context_window.json`, which prices the **public API**.
 A gateway does not have to charge that, and two things go wrong when it does not:
 
-* **Wrong rates.** IBM's `ete-litellm` bills `aws/claude-sonnet-5` at $1.52/MTok in where
+* **Wrong rates.** IBM's `litellm-gateway` bills `aws/claude-sonnet-5` at $1.52/MTok in where
   anthropic.com bills $3.00 — so every cost, every baseline and every saving for that gateway
   read about twice the truth.
 * **No rates at all.** A model the public map has never heard of — a preview id, an internal
@@ -889,7 +891,7 @@ A gateway does not have to charge that, and two things go wrong when it does not
 
 `MODEL_PRICES=/etc/context-guru/prices.yaml` fixes both. Start from
 [`deploy/service/prices.example.yaml`](https://github.com/rossoctl/context-guru/blob/main/deploy/service/prices.example.yaml),
-which carries the whole ete-litellm table:
+which carries the whole litellm-gateway table:
 
 ```yaml
 cache_read_frac: 0.1     # fills cache_read where an entry omits it
@@ -964,7 +966,7 @@ The [dashboard](../dashboard.md) is **off by default**. Enabling it adds `/dashb
 | `--dashboard-lifecycle-signals` / `DASHBOARD_LIFECYCLE_SIGNALS` | `true` | Write one `request_lifecycle` row per request (and per keep-alive ping) with the signals no other column holds: gap from the previous response's end to this request's start on the same thread (proxy clock), granted cache TTL tier (`5m`/`1h`/`mixed`), incoming tool_result count, bytes and error flag, and the ping ordinal. Counts and sizes only. Thread id, previous stop reason and tool names are already `requests` columns. Set to `false` to turn it off. |
 | `--dashboard-queue` / `DASHBOARD_QUEUE` | `4096` | Capture-channel depth. A full channel **drops** events (counted, and shown in the UI) rather than delaying a request. |
 | `--dashboard-trusted-cidrs` / `DASHBOARD_TRUSTED_CIDRS` | — | Comma-separated CIDRs allowed to view per-request **content**, prompt text (tool schemas and the system prompt) and the effective config. Loopback always is; aggregates and token weights are open to everyone. |
-| `--dashboard-bench-dirs` / `DASHBOARD_BENCH_DIRS` | — | Comma-separated directories of benchmark runs (each with `summary.json` + `rows-*.json`) to ingest at startup. Re-ingesting replaces a run rather than duplicating it. |
+| `--dashboard-bench-dirs` / `DASHBOARD_BENCH_DIRS` | — | Deprecated and ignored. The Benchmarks tab and its routes were removed; the flag is accepted so existing command lines keep working. |
 
 !!! note "Retention is bounded by age AND size"
     Age alone cannot bound a burst of traffic; size alone silently erases a quiet week.

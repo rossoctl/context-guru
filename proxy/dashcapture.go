@@ -3,15 +3,17 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/predictive"
 	"github.com/tidwall/gjson"
 )
 
@@ -34,6 +36,7 @@ type capture struct {
 	provider  string
 	model     string
 	agent     string
+	project   string
 	start     time.Time
 	cgMs      float64
 	upstream  float64
@@ -56,10 +59,13 @@ type capture struct {
 	tenant string
 	// meta is the request's own metadata, read once off the pristine inbound body.
 	meta dash.Meta
+	// predArrival is set by the handler when a cache campaign tracks this tenant (see LiveFacts.Arrival).
+	predArrival *predictive.Arrival
 	// thread is the session thread this request belongs to (see internal/thread), set by
 	// noteThread once the session id is known. "" is the primary thread. inherits/hasInherit
 	// name the thread a NEW thread continues by content (thread.Result.Inherits).
 	thread     string
+	agentComp  bool
 	inherits   string
 	hasInherit bool
 	// Issue #424's RECORD half. waits is the handler's shared tracker (nil-checked like
@@ -83,6 +89,8 @@ type capture struct {
 	kaPings     int
 	kaRefreshed int64
 	kaStrategy  string
+	// kaRefreshedAt is when the provider's entry was last known refreshed (see kaArrival).
+	kaRefreshedAt time.Time
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
 	// weights) plus the tool calls of its last tool-using turn — nil when the request
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
@@ -160,6 +168,13 @@ func (c *capture) noteTrace(tr apply.Trace) {
 	}
 }
 
+// noteAgentCompaction records that this request is the agent's own compaction request.
+func (c *capture) noteAgentCompaction(v bool) {
+	if c != nil {
+		c.agentComp = v
+	}
+}
+
 // noteThread records which thread of the session this request belongs to.
 func (c *capture) noteThread(res thread.Result) {
 	if c != nil {
@@ -189,6 +204,16 @@ func (c *capture) noteWaitBody(body []byte) {
 func (c *capture) noteMeta(m dash.Meta) {
 	if c != nil {
 		c.meta = m
+	}
+}
+
+// noteProject records the directory the agent was started in. Called once, from the chat handler,
+// with the PRISTINE inbound body — for the same reason noteMeta is: the pipeline may compact the
+// environment block out of the transcript it forwards, and reading the project from the rewritten
+// body would record "unattributed" on exactly the requests the pipeline acted on.
+func (c *capture) noteProject(p string) {
+	if c != nil {
+		c.project = p
 	}
 }
 
@@ -243,6 +268,21 @@ func (c *capture) noteInventory(provider string, body []byte) {
 // Breakpoint counts are NOT read here: the pipeline already counts them to respect the
 // provider's cap of four, and they reach the event on the trace for free (see FromTrace).
 func metaFromBody(body []byte) dash.Meta {
+	m := metaFromBodyRefs(body)
+	// COPY EVERY STRING OUT OF THE BODY. gjson's String() returns a substring of `body` without
+	// copying, so a Meta built from it holds the WHOLE request body alive for as long as the Meta
+	// lives — and it lives far past the request: the event carries it to the writer, and the SSE
+	// hub keeps the last 256 events for late subscribers. On CG2, 256 kept events from
+	// 1,000-message sessions held 1-20 MB bodies each: four OOM kills at the 8 GiB limit on
+	// 2026-10-19/20. strings.Clone makes each field a few bytes of its own.
+	m.ReasoningEffort = strings.Clone(m.ReasoningEffort)
+	m.ThinkingMode = strings.Clone(m.ThinkingMode)
+	m.ToolChoice = strings.Clone(m.ToolChoice)
+	return m
+}
+
+// metaFromBodyRefs reads the fields. Its strings ALIAS body; only metaFromBody may return them.
+func metaFromBodyRefs(body []byte) dash.Meta {
 	var m dash.Meta
 	gjson.ParseBytes(body).ForEach(func(k, v gjson.Result) bool {
 		switch k.Str {
@@ -331,9 +371,10 @@ func (c *capture) noteUpstream(ms float64, status int) {
 }
 
 // noteKeepAlive records what the idle keep-alive did during the span this request ended.
-func (c *capture) noteKeepAlive(pings int, refreshed int64, strategyID string) {
+func (c *capture) noteKeepAlive(ka kaArrival) {
 	if c != nil {
-		c.kaPings, c.kaRefreshed, c.kaStrategy = pings, refreshed, strategyID
+		c.kaPings, c.kaRefreshed, c.kaStrategy = ka.pings, ka.refreshed, ka.strategyID
+		c.kaRefreshedAt = ka.refreshedAt
 	}
 }
 
@@ -383,9 +424,11 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		Status:   c.status,
 	}
 	e.Agent = dash.AgentFor(c.agent)
+	e.Project = c.project
 	e.Meta = c.meta
 	e.FromTrace(c.trace, c.unique)
 	e.ThreadID = c.thread
+	e.AgentCompaction = c.agentComp
 	// The provider's terminal reason, off the same response bytes the token tiers came
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason
@@ -417,16 +460,26 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	toolUseNames, stopReason := usage.ToolUseNames, usage.StopReason
 	failedCall := status != 0 && status/100 != 2
 	provider := bschemas.ModelProvider(c.provider)
+	// Both closures run on the writer goroutine, one after the other: normalize once, lazily.
+	var normMsgs []bschemas.ChatMessage
+	var normDone bool
+	norm := func() []bschemas.ChatMessage {
+		if !normDone {
+			normMsgs, normDone = apply.NormalizeMessages(provider, waitBody), true
+		}
+		return normMsgs
+	}
 	if c.rec.LifecycleOn() {
 		ts, endTS, cacheW, cacheW1h := e.TS, time.Now().UnixMilli(), usage.CacheWrite-usage.CacheWrite1h, usage.CacheWrite1h
 		rec := c.rec
 		e.LifecycleFn = func() *dash.LifecycleRow {
 			return rec.ObserveLifecycle(tenantID, sessionID, threadID, ts, endTS,
-				scanLifecycle(provider, waitBody), cacheW, cacheW1h)
+				scanLifecycle(norm, waitBody), cacheW, cacheW1h)
 		}
 	}
+	e.BypassCount, e.BypassBytes = c.trace.BypassCount, len(waitBody)
 	e.WaitCause = func() dash.WaitCauseResult {
-		obs := waits.Observe(tenantID, sessionID, threadID, provider, waitBody)
+		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm)
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
 		waitingFor, waitTool := waitcause.ClassifyWaitingFor(
 			toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
@@ -487,8 +540,39 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		e.TenantID, e.SessionID, e.ThreadID, e.Model, e.TS, e.SplitTailHash)
 	// Only a known expiry can establish ttl_expiry. OpenAI's 30m is a
 	// minimum guarantee, so a later miss cannot be attributed to expiry alone.
-	e.AttributeCache(seenSession, seenModel, sinceMs,
-		cacheAttributionTTLMs(e.Provider, e.Model), e.CacheWrite > 0)
+	//
+	//
+	// The cause comes from a measured comparison with this thread's previous request, not from
+	// CacheWrite > 0 (issue #600). A miss with nothing measured reads unknown.
+	if c.inv != nil && c.inv.System != nil {
+		e.SystemHash = c.inv.System.Hash
+	}
+	if c.inv != nil {
+		e.DeclDigest = c.inv.Digest
+	}
+	//
+	// The gap for the TTL test is measured from the last request on the SAME model: a cache entry
+	// belongs to one model, so a request on another model between two requests on this one does
+	// not refresh it. SinceLastMs below keeps the per-thread gap.
+	cause, modelGap, known, lastWasSame := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
+		dash.FactsOf(e), e.Status >= 200 && e.Status < 300)
+	//
+	// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
+	// measured from the last real request, so without this a 297 s gap with a ping at 289 s
+	// reads as an expiry on a turn that came 8 s after the refresh.
+	age := sinceMs
+	if known {
+		age = modelGap
+		// A ping refreshed the entry of the model that last ran in the thread. Cut the age only
+		// when that was this model. This holds after a failed request too, when the gap since
+		// the last good request differs from sinceMs.
+		if lastWasSame {
+			age = entryAgeMs(modelGap, e.TS, c.kaRefreshedAt)
+		}
+	} else {
+		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
+	}
+	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model), cause)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
 	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
@@ -554,8 +638,22 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// are whatever the caller wrote, up to and including something they pasted — so it rides
 	// the same captureContent decision as the transcript, and the writer stores NULL for it
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
-	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent)
+	// e.Project rides along: invocations are recorded per folder, because one session works in
+	// several and a per-session folder cannot scope a per-project report.
+	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent, e.Project)
 	c.rec.Record(e)
+}
+
+// entryAgeMs is how old the provider's cache entry was when the request arrived: the gap since
+// the last real request, cut short by a ping that refreshed the entry later than that request.
+func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
+	if refreshedAt.IsZero() || sinceMs <= 0 {
+		return sinceMs
+	}
+	if age := tsMs - refreshedAt.UnixMilli(); age >= 0 && age < sinceMs {
+		return age
+	}
+	return sinceMs
 }
 
 func cacheAttributionTTLMs(provider, model string) int64 {
@@ -564,4 +662,25 @@ func cacheAttributionTTLMs(provider, model string) int64 {
 		return 0
 	}
 	return ttl.Milliseconds()
+}
+
+// LiveFacts are the request-side inputs of a learned keep-alive campaign, taken from the same places the dashboard row is filled from, so
+// a campaign sees at serve time the values it was trained on.
+type LiveFacts struct {
+	Messages, Tools, SystemBlocks, MaxTokens int
+	Effort, Thinking, CacheTTL, Agent        string
+	Stream                                   bool
+	TTFBMs                                   float64
+	// Arrival is this request's identity in a learned campaign's tracker (nil when no campaign applies). It travels with the request, not with its thread,
+	// because requests overlap on a thread.
+	Arrival *predictive.Arrival
+}
+
+// liveFacts reads them off the capture (nil-safe). ttfbMs is the streamed first-byte delay, 0 on buffered responses, as the dashboard records it.
+func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
+	if c == nil {
+		return nil
+	}
+	return &LiveFacts{Messages: c.trace.Messages, Tools: c.meta.Tools, SystemBlocks: c.meta.SystemBlocks, MaxTokens: c.meta.MaxTokens,
+		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
 }

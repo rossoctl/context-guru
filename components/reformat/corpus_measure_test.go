@@ -3,7 +3,7 @@
 // measurement, not an assertion: captures are never committed (they hold real traffic),
 // so it skips unless pointed at one.
 //
-//	CG_CORPUS='/home/vpcuser/cg-research/bench/*.jsonl,/tmp/cg-runs/*.jsonl' \
+//	CG_CORPUS='/path/to/bench/*.jsonl,/tmp/cg-runs/*.jsonl' \
 //	  go test ./components/reformat -run CorpusMeasure -v
 //
 // It reports, per component, how often it fires across the distinct tool outputs in the

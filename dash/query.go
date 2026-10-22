@@ -35,11 +35,39 @@ type Filter struct {
 	// query per session. Mutually exclusive with Session in practice; if both are set, both
 	// apply (AND), which is never useful, so callers should pick one.
 	SessionIn []string
-	Model     string
-	Provider  string
-	Agent     string
-	Preset    string
-	Mode      string
+	// ProjectIn selects rows in ANY of these folders, which is how a project root is scoped.
+	//
+	// A PROJECT IS SEVERAL FOLDERS. Claude Code records a working directory per request, and one
+	// project produces many -- measured, one produced 14 -- so matching the root path alone would
+	// return a fraction of its traffic and selecting a project would show LESS than the pooled
+	// view. Set by ExpandProjectFilter from Project; callers set Project and let that expand it.
+	ProjectIn []string
+	// PerSession asks the tool inventory to keep its per-session cost attribution instead of
+	// collapsing it to totals. Not a row predicate — it changes the SHAPE of the response, not
+	// which rows are in it — and off by default because the breakdown is a per-row array that
+	// most readers of /api/tools do not use.
+	PerSession bool
+	Model      string
+	Provider   string
+	Agent      string
+	// Project scopes to one launch directory. Unset means EVERY project, which is the view the
+	// dashboard opens on — not "the unattributed ones", since absence is not a value.
+	Project string
+	// Source selects rows of one kind: SourceImported for recovered history. Unset means BOTH,
+	// which is the view the dashboard opens on.
+	Source string
+	// SourceMeasured selects the rows the proxy measured itself. Separate from an empty Source
+	// for the same reason ProjectNone is separate from an empty Project: a measured row stores
+	// "", so absence could not also mean "only those" without making one meaning unreachable.
+	SourceMeasured bool
+	// ProjectNone selects the rows that state NO project. Separate from an empty Project for the
+	// same reason TenantAll is separate from an empty Tenant: "" is a legitimate stored value
+	// here (it is what every pre-migration row and every client that does not state a directory
+	// records), so absence could not also mean "only those" without making one of the two
+	// meanings unreachable.
+	ProjectNone bool
+	Preset      string
+	Mode        string
 	// Component selects requests on which this component RAN.
 	Component string
 	// Reason selects requests by their uncompressed reason bucket; the sentinel
@@ -95,7 +123,7 @@ func (f Filter) where() (string, []any) {
 	}
 	for col, v := range map[string]string{
 		"r.session_id": f.Session, "r.model": f.Model, "r.provider": f.Provider,
-		"r.agent": f.Agent, "r.preset": f.Preset, "r.mode": f.Mode,
+		"r.agent": f.Agent, "r.preset": f.Preset, "r.mode": f.Mode, "r.project": f.Project,
 		"r.token_accounting": f.Accounting,
 		"r.reasoning_effort": f.Effort, "r.thinking_mode": f.Thinking,
 		"r.stop_reason": f.StopReason,
@@ -120,8 +148,29 @@ func (f Filter) where() (string, []any) {
 		}
 		add("r.session_id IN ("+strings.Join(placeholders, ",")+")", vals...)
 	}
+	if len(f.ProjectIn) > 0 {
+		placeholders := make([]string, len(f.ProjectIn))
+		vals := make([]any, len(f.ProjectIn))
+		for i, p := range f.ProjectIn {
+			placeholders[i] = "?"
+			vals[i] = p
+		}
+		add("r.project IN ("+strings.Join(placeholders, ",")+")", vals...)
+	}
 	if f.Component != "" {
 		add("EXISTS (SELECT 1 FROM request_components c WHERE c.request_id = r.id AND c.component = ?)", f.Component)
+	}
+	// The rows that state no project. A predicate of its own rather than a value in the map
+	// above, because the value it matches is "" — which in the map would be indistinguishable
+	// from the field being unset, and so would silently mean "every project".
+	if f.ProjectNone {
+		add("r.project = ''")
+	}
+	if f.Source != "" {
+		add("r.source = ?", f.Source)
+	}
+	if f.SourceMeasured {
+		add("r.source = ''")
 	}
 	if f.Q != "" {
 		like := "%" + f.Q + "%"
@@ -151,11 +200,13 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.max_tokens, r.stream, r.tool_choice, r.tools, r.system_blocks,
 	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason,
 	r.thread_id,
-	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms`
+	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms,
+	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd,
+	r.project, r.source`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
-	var byp, ca, stream, keepAlive int
+	var byp, ca, stream, keepAlive, agentComp, manual int
 	var temp, topP sql.NullFloat64
 	var waitingFor, waitTool, wakeCause sql.NullString
 	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
@@ -171,12 +222,16 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.MaxTokens, &stream, &e.ToolChoice, &e.Tools, &e.SystemBlocks,
 		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason,
 		&e.ThreadID,
-		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs)
+		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs,
+		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD,
+		&e.Project, &e.Source)
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64
 	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
+	e.AgentCompaction = agentComp != 0
 	e.KeepAlive = keepAlive != 0
+	e.ManualPing = manual != 0
 	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one
 	// that set nothing must not read the same on the row.
 	if temp.Valid {
@@ -647,7 +702,7 @@ type pingCount struct {
 // pingsBySession groups the ping rows by session. The caller passes a filter that INCLUDES them.
 func (d *DB) pingsBySession(cond string, args []any) (map[string]pingCount, error) {
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
-		FROM requests r WHERE `+cond+` AND r.keepalive = 1 GROUP BY 1`, args...)
+		FROM requests r WHERE `+cond+` AND `+autoPing+` GROUP BY 1`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -762,9 +817,19 @@ type ComponentRow struct {
 	// component, which is the point: only the components that SPEND can be net-negative,
 	// and until now the components view had no dollars in it at all, so it judged an
 	// expensive component on tokens and latency and could never say "underwater".
-	LLMCalls     int64 `json:"llm_calls"`
-	LLMCallsCold int64 `json:"llm_calls_cold"`
-	LLMCallsAcc  int64 `json:"llm_calls_accepted"`
+	LLMCalls int64 `json:"llm_calls"`
+	// SummarizeCreditPastSpanUSD / SummarizeCreditPrefixChangeUSD are stored summarize credit the
+	// attribution ledger took out of SavedUSD (see SummarizeLedger). Set on the summarize row only.
+	SummarizeCreditPastSpanUSD     float64 `json:"summarize_credit_past_span_usd,omitempty"`
+	SummarizeCreditPrefixChangeUSD float64 `json:"summarize_credit_prefix_change_usd,omitempty"`
+	// ReplayCreditPastCapUSD is stored credit the replay ledger took out of SavedUSD: turns after
+	// the counterfactual (or a real) client compaction. Set on the capped components' rows.
+	ReplayCreditPastCapUSD float64 `json:"replay_credit_past_cap_usd,omitempty"`
+	// ReplayWindowAssumed marks a row whose cap used an assumed context window for some
+	// conversations (the model's window is not exactly published).
+	ReplayWindowAssumed bool  `json:"replay_window_assumed,omitempty"`
+	LLMCallsCold        int64 `json:"llm_calls_cold"`
+	LLMCallsAcc         int64 `json:"llm_calls_accepted"`
 	// LLMCostUSD is the figure every verdict on this row is computed from, and it is the
 	// GATEWAY-priced one — see the query for why the dashboard used to carry two.
 	// LLMCostGatewayUSD and LLMCostReportedUSD are the two sources kept separable so the UI
@@ -980,6 +1045,21 @@ func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup,
 	}
 	if err := irows.Err(); err != nil {
 		return nil, nil, err
+	}
+	// A summarizer's own spend. It records no extraction_calls rows, so the loops above left it at
+	// zero calls and zero dollars while its cost sat unowned in requests.cg_llm_cost_usd.
+	for _, name := range SummarizerComponents {
+		sc, ok := byName[name]
+		if !ok {
+			continue
+		}
+		calls, usd, err := d.summarizerOwnCost(cond, args, name)
+		if err != nil {
+			return nil, nil, err
+		}
+		sc.LLMCalls += calls
+		sc.LLMCostUSD += usd
+		sc.LLMCostGatewayUSD += usd
 	}
 	// The verdict, once both halves are in. A deterministic component spends nothing, so its
 	// net is just its saving; only a component that calls a model can come out negative.
@@ -1538,6 +1618,27 @@ func (d *DB) Breakdown(f Filter, dim string) ([]*GroupRow, error) {
 	return out, rows.Err()
 }
 
+// CoverageFor is the measured/imported split of a window.
+//
+// Asked of the REQUESTS rather than of the inventory, because an inventory row has no source: the
+// declarations table is keyed by digest and shared across requests, so "was this watched" is a
+// property of the traffic and only a request query can answer it.
+func (d *DB) CoverageFor(f Filter) (*InsightsCoverage, error) {
+	where, args := f.where()
+	var out InsightsCoverage
+	err := d.sql.QueryRow(`SELECT
+		COALESCE(SUM(CASE WHEN r.source = '' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN r.source <> '' THEN 1 ELSE 0 END), 0),
+		COALESCE(COUNT(DISTINCT CASE WHEN r.source <> ''
+			THEN date(r.ts/1000, 'unixepoch', 'localtime') END), 0)
+		FROM requests r WHERE `+where, args...).
+		Scan(&out.MeasuredRequests, &out.ImportedRequests, &out.ImportedDays)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // facetQueries are the distinct-value lists that populate the filter dropdowns.
 var facetQueries = map[string]string{
 	"model":       "model",
@@ -1549,6 +1650,10 @@ var facetQueries = map[string]string{
 	"effort":      "reasoning_effort",
 	"thinking":    "thinking_mode",
 	"stop_reason": "stop_reason",
+	// The projects seen in the window, so a picker populates itself and a folder the user starts
+	// working in appears without a UI change. Facets already exclude '' — the unattributed rows
+	// are the UI's own option with its own wording, not a folder named "".
+	"project": "project",
 }
 
 // selfBlanked returns f with ONE dimension's own value cleared.
@@ -1587,8 +1692,68 @@ func selfBlanked(f Filter, dim string) Filter {
 		f.Thinking = ""
 	case "stop_reason":
 		f.StopReason = ""
+	case "project":
+		// Without this the project list is scoped by the project already chosen, so it would
+		// contain exactly one entry — the one selected — and switching projects would be
+		// impossible. A one-way door, which is what this whole function exists to prevent.
+		f.Project = ""
+		// ProjectIn is the expanded form of the same choice and shuts the same door.
+		f.ProjectIn = nil
 	}
 	return f
+}
+
+// ExpandProjectFilter turns a selected project ROOT into the set of folders that roll up to it.
+//
+// A project is several folders -- Claude Code records a working directory per request and one
+// project produced 14 of them on a measured machine -- so a query matching the root path alone
+// returns a fraction of its traffic. The picker folds subdirectories into the root, and without
+// this the query would not, which means selecting a project shows LESS than the pooled view did.
+//
+// A root the transcripts do not recognise expands to itself, so a folder with no transcript is
+// still reachable rather than silently empty.
+func ExpandProjectFilter(f Filter, g *ProjectGroup) Filter {
+	if f.Project == "" || g == nil {
+		return f
+	}
+	folders := g.FoldersOf(f.Project)
+	if len(folders) <= 1 {
+		return f // just itself: the plain Project predicate already matches it
+	}
+	f.ProjectIn = folders
+	f.Project = ""
+	return f
+}
+
+// FacetsFor is Facets with the project dimension rolled up to project roots.
+//
+// WHY A SEPARATE ENTRY POINT. Facets reads raw columns, and the project column holds every
+// working directory a session was launched in: on a real machine, 40 folders for six projects,
+// the rest being subdirectories of the same repositories and eighteen throwaway /private/tmp
+// directories. Reported as "I don't understand why I saw so many projects".
+//
+// `home` overrides the home directory, for tests. An empty transcript directory -- the normal
+// state of a hosted proxy, which cannot see the user's disk -- leaves the list unrolled, which
+// degrades to the raw folders rather than to an empty picker.
+func (d *DB) FacetsFor(f Filter, home string) (map[string][]string, error) {
+	out, err := d.Facets(f)
+	if err != nil {
+		return nil, err
+	}
+	groups := ProjectGroups(home)
+	seen := map[string]bool{}
+	var roots []string
+	for _, p := range out["project"] {
+		r := groups.Project(p)
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		roots = append(roots, r)
+	}
+	sort.Strings(roots)
+	out["project"] = roots
+	return out, nil
 }
 
 // Facets returns the distinct values available for each filter dimension, so the

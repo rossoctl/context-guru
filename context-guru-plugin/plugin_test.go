@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -149,6 +150,7 @@ func sandboxEnv(t *testing.T, extra ...string) []string {
 		"HOME="+root,
 		"XDG_STATE_HOME="+filepath.Join(root, "xdg-state"),
 		"XDG_CONFIG_HOME="+filepath.Join(root, "xdg-config"),
+		leakMark(t), // whatever these commands leave running is stopped when t ends (leak_test.go)
 	)
 	return append(env, extra...)
 }
@@ -219,8 +221,11 @@ func TestSettingsAddPreservesEverythingElse(t *testing.T) {
 	if env["SOME_OTHER_VAR"] != "keep me" || env["ANTHROPIC_SMALL_FAST"] != "also keep me" {
 		t.Errorf("the user's own env vars were lost: %v", env)
 	}
-	if len(env) != 3 {
+	if len(env) != 4 { // the 2 originals, the base URL, and the manual-ping opt-in header
 		t.Errorf("env has %d keys, want the 2 originals plus ours: %v", len(env), env)
+	}
+	if env["ANTHROPIC_CUSTOM_HEADERS"] != "x-context-guru-ping: 1" {
+		t.Errorf("env.ANTHROPIC_CUSTOM_HEADERS = %q, want the manual-ping opt-in", env["ANTHROPIC_CUSTOM_HEADERS"])
 	}
 }
 
@@ -2077,7 +2082,7 @@ func runStatusline(t *testing.T, env map[string]string, stdin string, args ...st
 	t.Helper()
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "statusline.py")}, args...)...)
-	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=200")
+	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "XDG_CACHE_HOME="+t.TempDir(), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=200")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -2258,7 +2263,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 	py := requireTool(t, "python3")
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp)
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp)
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -2276,12 +2281,12 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
-	// Backdate the cache file past STATS_CACHE_TTL_SECONDS (2s) so the next call actually
+	// Backdate the cache file past STATS_CACHE_TTL_SECONDS (30s) so the next call actually
 	// attempts a fresh fetch instead of serving the just-written in-TTL copy — but still well
 	// inside STALE_STATS_MAX_AGE_SECONDS (600s), matching "a cache a few renders old", not "a
 	// cache from an hour ago".
-	cachePath := filepath.Join(tmp, fmt.Sprintf("context-guru-statusline-%s-sess-stale.json", port))
-	old := time.Now().Add(-5 * time.Second)
+	cachePath := filepath.Join(tmp, "context-guru", fmt.Sprintf("context-guru-statusline-%s-sess-stale.json", port))
+	old := time.Now().Add(-40 * time.Second)
 	if err := os.Chtimes(cachePath, old, old); err != nil {
 		t.Fatalf("backdating the stats cache file: %v", err)
 	}
@@ -2316,7 +2321,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 	py := requireTool(t, "python3")
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp)
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp)
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -2335,7 +2340,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 	// Backdate well past STALE_STATS_MAX_AGE_SECONDS (read from the script itself, not retyped
 	// here, so the two cannot silently drift apart).
 	maxAge := statslineConstInt(t, "STALE_STATS_MAX_AGE_SECONDS")
-	cachePath := filepath.Join(tmp, fmt.Sprintf("context-guru-statusline-%s-sess-hung.json", port))
+	cachePath := filepath.Join(tmp, "context-guru", fmt.Sprintf("context-guru-statusline-%s-sess-hung.json", port))
 	old := time.Now().Add(-time.Duration(maxAge+60) * time.Second)
 	if err := os.Chtimes(cachePath, old, old); err != nil {
 		t.Fatalf("backdating the stats cache file: %v", err)
@@ -2501,9 +2506,9 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 				t.Fatalf("exit %d", code)
 			}
 			got := strings.SplitN(strings.TrimSpace(out), " │ ", 2)[0]
-			if c.wantCold {
-				if got != "cache ○ ░░░░░░ cold" {
-					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache ○ ░░░░░░ cold")
+			if c.wantCold { // cold leaves the cache segment out entirely
+				if strings.Contains(got, "cache") || strings.Contains(got, "cold") {
+					t.Errorf("remaining=%.0fs: got %q, want no cache segment", c.remainingSec, got)
 				}
 				return
 			}
@@ -2546,7 +2551,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m.time.time = lambda: 1_700_000_000.0
 seg = lambda e: m._cache_segment(m._cache_view({"prompt_cache": {"expires_at": e}}, None, 0))
-print(seg(1_700_000_000.0))        # remaining == 0
+print(seg(1_700_000_000.0))        # remaining == 0: cold, no segment
 print(seg(1_700_000_000.5))        # remaining +0.5s
 print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 `
@@ -2557,7 +2562,7 @@ print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 		t.Fatalf("running the boundary check: %v\n%s", err, out)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	want := []string{"cache ○ ░░░░░░ cold", "cache ◐ ░░░░░░ 0:00!", "cache ○ ░░░░░░ cold"}
+	want := []string{"None", "cache ◐ ░░░░░░ 0:00!", "None"} // cold has no segment
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
 	}
@@ -2619,8 +2624,8 @@ func TestStatuslineDefaultSegmentZeroTotal(t *testing.T) {
 }
 
 // TestStatuslineDefaultShowsOnlySavings is the shape the feature is FOR: real, non-trivial
-// session totals (matching the live capture) paired with a real savings figure, and — with
-// neither --cache nor --keepalive passed — nothing else in the line at all. This is also the
+// session totals (matching the live capture) paired with a real savings figure, and no
+// detailed-only segment. The session's keep-alive pings are part of the default since #510's PR. This is also the
 // positive control for TestStatuslineOmitsZeroSavings above: without a working default segment,
 // that test's "" assertion (once --cache/--keepalive are added there) would pass for the wrong
 // reason — a statusline.py that rendered NO segment ever would look identical.
@@ -2635,14 +2640,17 @@ func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
 	if !strings.HasPrefix(got, "saved $0.03") {
 		t.Errorf("got %q, want the labelled, estimated saving first", got)
 	}
-	if strings.Contains(got, "ka ") || strings.Contains(got, "proxy:") {
+	if strings.Contains(got, "proxy:") || strings.Contains(got, "upstream") {
 		t.Errorf("got %q — a detailed-layout/opt-in segment appeared in the balanced layout", got)
+	}
+	if !strings.Contains(got, "ka 4 pings") {
+		t.Errorf("got %q, want the session's keep-alive pings in the balanced layout", got)
 	}
 }
 
 // TestStatuslineExtrasHiddenByDefault is the OTHER half of the toggle: the same conditions that
 // would make each extra segment render (a real prompt_cache in stdin, real keepalive_pings in
-// stats) must produce NEITHER of them without the flag that turns them on — proven alongside
+// stats) must produce NEITHER of them once --hide turns them off — proven alongside
 // TestStatuslineExtrasShownWhenEnabled below so that "hidden by default" cannot pass merely
 // because the segment is broken.
 func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
@@ -2651,7 +2659,7 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
 		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
-	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--hide=cache")
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--hide=cache,ka")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -2659,7 +2667,7 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 		t.Errorf("got %q — the cache segment showed despite --hide=cache", out)
 	}
 	if strings.Contains(out, "ka ") {
-		t.Errorf("got %q — the keep-alive segment showed without --keepalive", out)
+		t.Errorf("got %q — the keep-alive segment showed despite --hide=ka", out)
 	}
 }
 
@@ -2668,21 +2676,20 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 // would be indistinguishable from "permanently broken".
 func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4,
-		"keepalive_net_usd": 0.07, "keepalive_misses_avoided": 4}`)
+		"keepalive_ping_usd": 0.02, "keepalive_net_usd": 0.07, "keepalive_misses_avoided": 4}`)
 	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
 		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
-	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache", "--keepalive")
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--layout=minimal", "--cache", "--keepalive")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
 	if !strings.Contains(out, "cache ● ██") || !strings.Contains(out, " 1:") {
 		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
 	}
-	// The keep-alive segment now shows the NET dollar figure and the misses it prevented, not the
-	// raw ping count — see statusline.py's _keepalive_segment.
-	if !strings.Contains(out, "ka ≤4miss $0.07") {
-		t.Errorf("got %q, want %q with --keepalive passed", out, "ka ≤4miss $0.07")
+	// The keep-alive segment is this session's ping count and ping spend — see _keepalive_segment.
+	if !strings.Contains(out, "ka 4 pings $0.02") {
+		t.Errorf("got %q, want %q with --keepalive passed", out, "ka 4 pings $0.02")
 	}
 	if !strings.Contains(out, "saved $0.03") {
 		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
@@ -2724,11 +2731,10 @@ func TestStatuslineScopesStatsToItsOwnSession(t *testing.T) {
 	}
 }
 
-// TestStatuslineAlwaysRequestsTheLeanPath proves ?lean=1 is sent even with no session_id to
-// scope to — the fast path (dash/api.go's statsLean) answers from Overview() alone, skipping
-// the three priced aggregates that measured 38-45s on a production-sized dashboard DB and were
-// the actual cause of this script's timeouts, and there is no reason this script would ever
-// want the slow, full response: it reads nothing those three aggregates add.
+// TestStatuslineAlwaysRequestsTheLeanPath: with no session_id to scope to, the status line makes
+// no /api/stats read at all. The only unscoped read is the whole proxy's total, which the full
+// handler answers since #510: no session's number, and the dearest read there is. It probes
+// /healthz instead, so the offline notices still work.
 func TestStatuslineAlwaysRequestsTheLeanPath(t *testing.T) {
 	var gotQuery string
 	port := statsStubCapturingQuery(t, `{"total_saved_usd": 0.01, "saved_unique": 1}`, &gotQuery)
@@ -2738,8 +2744,8 @@ func TestStatuslineAlwaysRequestsTheLeanPath(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if gotQuery != "lean=1" {
-		t.Errorf("got query %q, want %q", gotQuery, "lean=1")
+	if gotQuery != "" {
+		t.Errorf("got /api/stats?%s, want no stats read without a session to scope it to", gotQuery)
 	}
 }
 
@@ -2787,9 +2793,8 @@ func TestStatuslineRejectsAMalformedSessionId(t *testing.T) {
 	if strings.Contains(gotQuery, "someone-elses-session") {
 		t.Fatalf("got query %q — an unsanitised session_id reached the request", gotQuery)
 	}
-	if gotQuery != "lean=1" {
-		t.Errorf("got query %q, want an unscoped request (just lean=1, no &session=) for a "+
-			"session_id this script does not trust", gotQuery)
+	if gotQuery != "" {
+		t.Errorf("got /api/stats?%s, want no stats read for a session_id this script does not trust", gotQuery)
 	}
 }
 
@@ -2827,7 +2832,7 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 	tmp := t.TempDir() // shared TMPDIR on purpose: this is what could let the cache files collide
 	run := func(sessionID string) string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 			"CLAUDE_PLUGIN_OPTION_PORT="+port)
 		cmd.Stdin = strings.NewReader(statuslinePayload(sessionID, 1.00, 10000, 1000))
@@ -2876,10 +2881,10 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 	tmp := t.TempDir()
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 			"CLAUDE_PLUGIN_OPTION_PORT="+port)
-		cmd.Stdin = strings.NewReader("{}")
+		cmd.Stdin = strings.NewReader(`{"session_id":"sess-cache"}`)
 		b, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("statusline.py: %v (%s)", err, b)
@@ -3914,7 +3919,8 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 	dir := t.TempDir()
 	argvFile := filepath.Join(dir, "argv")
 	fake := filepath.Join(dir, "fake-proxy")
-	body := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > " + argvFile + "\nprintenv PRESET >> " +
+	body := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n%s\\n' \"$*\" \"$PRESET\" > " + argvFile + ".tmp && mv " + argvFile + ".tmp " +
 		argvFile + "\nsleep 30\n"
 	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -3937,7 +3943,16 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("must never fail a session: %v\n%s", err, out)
 	}
-	got, rerr := os.ReadFile(argvFile)
+	// start-proxy.sh returns once the proxy has been LAUNCHED, not once the fake has written its file.
+	// The fake publishes argv and PRESET in one rename, so a reader sees both lines or no file; wait
+	// for the file instead of reading it once (#560).
+	var got []byte
+	var rerr error
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if got, rerr = os.ReadFile(argvFile); rerr == nil {
+			break
+		}
+	}
 	if rerr != nil {
 		t.Fatalf("the proxy never ran: %v\n%s", rerr, out)
 	}
@@ -4998,7 +5013,8 @@ func TestAnAlreadyRoutedProjectStillGetsAHatch(t *testing.T) {
 	// recovery folder represents now (no `settings.py add` has ever run against this file).
 	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
 
-	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL)
+	// --no-ping-header: this test is about the hatch, and a pre-ping install gets its header on a re-run.
+	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL, "--no-ping-header")
 	if code != 0 || facts["result"] != "unchanged" {
 		t.Fatalf("fixture: wanted result=unchanged exit 0, got %v exit %d", facts, code)
 	}
@@ -5648,9 +5664,34 @@ var portTestBaseCounter atomic.Int64
 // that both scan for a port cannot collide with EACH OTHER either.
 func portScanBase(t *testing.T) {
 	t.Helper()
-	base := 39000 + int(portTestBaseCounter.Add(1))*100
-	t.Setenv("CONTEXT_GURU_PORT_BASE", strconv.Itoa(base))
+	t.Setenv("CONTEXT_GURU_PORT_BASE", nextPortBase())
 }
+
+// nextPortBase is the next scan base: a 64-port window that no other call in this process and no
+// other `go test` run on the same box (CI, another session) is scanning at the same time. Calls are
+// 400 ports apart, and each process holds one of four 100-port lanes for its lifetime (an exclusive
+// lock on a lane file, so two concurrent runs never share one), so windows never overlap; the 50
+// slots are reused in turn (-count runs), long after their test cleaned up. All of it stays below
+// 32768, the kernel's ephemeral range, so it never meets a port freePort or an outgoing connection
+// was just given.
+func nextPortBase() string {
+	return strconv.Itoa(10000 + int(portTestBaseCounter.Add(1)%50)*400 + portLane()*100)
+}
+
+var portLane = sync.OnceValue(func() int {
+	for lane := 0; lane < 4; lane++ {
+		f, err := os.OpenFile(filepath.Join(os.TempDir(), fmt.Sprintf("context-guru-plugin-test-lane-%d", lane)),
+			os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			continue
+		}
+		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			return lane // the file stays open, and so locked, until this test process exits
+		}
+		f.Close()
+	}
+	return os.Getpid() % 4 // more than four runs at once: share a lane, as before
+})
 
 // TestPortAllocAssignsDistinctPortsAndIsIdempotent: two fresh projects get two different ports,
 // scanning up from the default; re-running `alloc` for either one returns the SAME port rather
@@ -7062,6 +7103,18 @@ func routeEnv(t *testing.T, home, state, extraPath string) []string {
 	path := os.Getenv("PATH")
 	if extraPath != "" {
 		path = extraPath + string(os.PathListSeparator) + path
+		// A proxy that never answers fails the health check whatever the wait: wait 1 s, not the
+		// product's 15 (CONTEXT_GURU_HEALTH_BUDGET, which start-proxy.sh already honours).
+		if _, err := os.Stat(filepath.Join(extraPath, neverAnswers)); err == nil {
+			env = append(env, "CONTEXT_GURU_HEALTH_BUDGET=1")
+		}
+	}
+	// Every route test that installs scans for a port. Unpinned, the scan starts at the real 8787 on
+	// a box shared with live proxies, so a port taken between --plan and --route (by anything) fails
+	// the test with port_changed_since_plan, and one taken after it fails the healthz wait. A test that
+	// pinned its own base keeps it.
+	if os.Getenv("CONTEXT_GURU_PORT_BASE") == "" {
+		env = append(env, "CONTEXT_GURU_PORT_BASE="+nextPortBase())
 	}
 	return append(env,
 		"HOME="+home,
@@ -7344,11 +7397,19 @@ func TestRouteAttachModeSkipsInstallAndStart(t *testing.T) {
 // It MUST answer --version and exit: install.sh probes the installed version by running the binary,
 // and the first version of this fixture served forever on that probe, hanging the run before a
 // single assertion could fail. A fake that does not exit where the real one does is not a fake.
+// neverAnswers marks a fakeProxyDir whose proxy starts and never answers /healthz.
+const neverAnswers = "never-answers"
+
 func fakeProxyDir(t *testing.T, port string, listen bool) string {
 	t.Helper()
 	py := requireTool(t, "python3")
 	dir := t.TempDir()
 	body := "sleep 300\n"
+	if !listen { // routeEnv reads this: waiting the installer's full 15 s on it proves nothing more than 1 s
+		if err := os.WriteFile(filepath.Join(dir, neverAnswers), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if listen {
 		body = "exec " + py + " -c '\n" +
 			"import http.server\n" +
@@ -7745,9 +7806,12 @@ func TestInstallSkillDelegatesRatherThanReimplementing(t *testing.T) {
 	//
 	// Raised 235 -> 238 for `plugin_enabled=` (#318): a machine-wide install's outcome for the plugin's
 	// own enablement, which the skill relays and never decides.
-	if n := strings.Count(body, "\n"); n > 238 {
+	//
+	// Raised 238 -> 242 for `history_import=`: the one-time import of pre-install history, whose
+	// outcome (done / already_done / skipped / failed + retry command) the skill relays and never runs.
+	if n := strings.Count(body, "\n"); n > 242 {
 		t.Errorf("the install skill is %d lines; it delegates the mechanism now, so it should be "+
-			"well under 238", n)
+			"well under 242", n)
 	}
 }
 
@@ -7939,11 +8003,12 @@ func TestRouteConfirmCommandCarriesEveryDecision(t *testing.T) {
 	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
 		"--i-understand-machine-wide", "--on-conflict", "chain", "--cache-strategy", "none",
 		"--upstream", "https://gw.example/v1", "--health-url", "http://127.0.0.1:9/healthz",
-		"--no-health-check")
+		"--no-health-check", "--no-ping-header")
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
 	for _, want := range []string{
+		"--no-ping-header", // the opt-out is a decision, so it travels in the printed command
 		"--scope user",
 		"--on-conflict chain",
 		"--i-understand-machine-wide",

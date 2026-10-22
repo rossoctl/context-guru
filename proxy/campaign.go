@@ -142,9 +142,38 @@ func campaignArmFor(arm string) campaignArm {
 			idleSeconds: 3360, maxPings: 1, headTTLMinTokens: campaignDefaultHeadTTLMinTokens,
 			minPrefixTokens: campaignLegacyMinPrefixTokens}
 	}
+	// keepalive-5m-xK: the 5-minute keep-alive with exactly K pings per idle span. The live strategy
+	// carries K as MaxPings, which the simulator replays as the arm's own PingCap. Idle and floor are
+	// keepalive-5m's for K >= 2 (the 270 s / 80k evidence is K>=2) and keepalive-5m-once's for K = 1.
+	if k, ok := kvcache.KeepAlivePingsOf(arm); ok {
+		if k == 1 {
+			return campaignArm{activatable: true, idleSeconds: 280, maxPings: 1,
+				minPrefixTokens: campaignLegacyMinPrefixTokens}
+		}
+		return campaignArm{activatable: true, idleSeconds: campaignKeepAlive5mIdle, maxPings: k,
+			minPrefixTokens: campaignDefaultMinPrefixTokens}
+	}
 	return campaignArm{reason: fmt.Sprintf(
 		"%q has no live enforcement path yet — it is a simulation-only arm", arm)}
 }
+
+// CampaignCellOutcome is what creating a campaign would do with one uploaded suggest cell: activate
+// it (or keep it on a baseline arm), or record it with skipReason. honorsHeadTTL1h reports whether a
+// tenant's traffic honors the 1h cache tier. It is the SAME decision ctlCreateCampaign makes, so an
+// offline tool that builds an upload file can report it without a second copy of the rules.
+func CampaignCellOutcome(cell dash.KVCacheSuggestion, honorsHeadTTL1h func(tenantID string) bool) (activatable bool, skipReason string) {
+	c := resolveCampaignCell(cell, honorsHeadTTL1h)
+	return c.activatable, c.skipReason
+}
+
+// CampaignArmEnforceable reports whether a campaign can enforce arm on live traffic at all. A cell
+// can still be skipped for its own reasons (too few requests, unpriced rows, a 1h-tier arm on a
+// model that does not honor it) — CampaignCellOutcome answers that.
+func CampaignArmEnforceable(arm string) bool { return campaignArmFor(arm).activatable }
+
+// HeadTTL1hHonored reports whether model is measured to honor the 1h cache tier on this deployment —
+// the set a campaign checks before it activates a 1h-tier arm.
+func HeadTTL1hHonored(model string) bool { return headTTL1hHonoredModels[model] }
 
 // resolvedCampaignCell is one suggest cell's outcome after resolving its arm and, for a
 // 1h-tier arm, checking whether this specific tenant's traffic honors it.

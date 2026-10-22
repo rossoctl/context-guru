@@ -21,8 +21,32 @@ SPEC.loader.exec_module(PLUGIN)
 class CodexPluginTest(unittest.TestCase):
     def test_proxy_lifecycle_does_not_depend_on_a_sandboxed_session_hook(self):
         hooks_path = MODULE_PATH.parent.parent / "hooks.json"
-        hooks = json.loads(hooks_path.read_text())
-        self.assertEqual(hooks, {"hooks": {}})
+        hooks = json.loads(hooks_path.read_text())["hooks"]
+        self.assertEqual(sorted(hooks), ["SessionEnd", "SessionStart"])
+        commands = [h["command"] for groups in hooks.values() for g in groups for h in g["hooks"]]
+        self.assertTrue(all(c.endswith("codex_plugin.py\" signal") for c in commands), commands)
+
+    def test_signal_hook_sends_only_the_closed_fields(self):
+        PLUGIN.state_dir().mkdir(parents=True)
+        PLUGIN.state_dir().joinpath("install.json").write_text('{"port": 8791}')
+        payload = {"session_id": "019a-thread", "hook_event_name": "SessionEnd", "reason": "other",
+                   "cwd": "/home/u/secret", "transcript_path": "/home/u/t.jsonl"}
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch.object(PLUGIN.urllib.request, "urlopen") as send:
+            self.assertEqual(PLUGIN.signal_hook(None), 0)
+        request = send.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8791/signal")
+        self.assertEqual(json.loads(request.data),
+                         {"session": "019a-thread", "event": "SessionEnd", "kind": "other"})
+        for bad in ({"session_id": "../x", "hook_event_name": "SessionEnd"},
+                    {"session_id": "s", "hook_event_name": "Stop"}):
+            with mock.patch("sys.stdin", io.StringIO(json.dumps(bad))), \
+                 mock.patch.object(PLUGIN.urllib.request, "urlopen") as send:
+                self.assertEqual(PLUGIN.signal_hook(None), 0)
+            send.assert_not_called()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch.object(PLUGIN.urllib.request, "urlopen", side_effect=OSError("refused")):
+            self.assertEqual(PLUGIN.signal_hook(None), 0)
 
     def test_skills_cover_sandbox_boundaries(self):
         skills = MODULE_PATH.parent.parent / "skills"

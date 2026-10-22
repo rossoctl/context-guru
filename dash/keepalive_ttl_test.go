@@ -48,3 +48,35 @@ func TestKaSavedCreditsAOneHourRescue(t *testing.T) {
 		}
 	}
 }
+
+// held_until follows the thread's own TTL: a 1-hour thread with one ping at 59 min is held to the
+// ping plus an hour, and a ping that would come after the entry expired extends nothing.
+func TestHeldUntilFollowsAOneHourTTL(t *testing.T) {
+	const ttl = 3600
+	for _, c := range []struct {
+		name string
+		p    KeepAlivePlan
+		want int64
+	}{
+		{"the 59-minute ping lands in time", KeepAlivePlan{RefreshedMS: 0, NextPingMS: 3_540_000, PingsLeft: 1, IdleMS: 3_540_000}, 3_540_000 + 3_600_000},
+		{"a ping that comes too late", KeepAlivePlan{RefreshedMS: 0, NextPingMS: 3_700_000, PingsLeft: 1, IdleMS: 3_540_000}, 3_600_000},
+		{"two pings chain", KeepAlivePlan{RefreshedMS: 0, NextPingMS: 3_540_000, PingsLeft: 2, IdleMS: 3_540_000}, 2*3_540_000 + 3_600_000},
+	} {
+		if got := c.p.heldUntil(ttl); got != c.want {
+			t.Errorf("%s: heldUntil = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// The next-request cost and the manual ping's credit use the tier's write rate: 2.0x input on the
+// 1-hour tier, the 5-minute write rate otherwise.
+func TestNextRequestUSDUsesTheTiersWriteRate(t *testing.T) {
+	_, cold5 := NextRequestUSD(ibmSonnet, 1000, 300)
+	_, cold1 := NextRequestUSD(ibmSonnet, 1000, 3600)
+	if want := 1000 * ibmSonnet.CacheWrite; cold5 != want {
+		t.Errorf("5m cold = %v, want %v", cold5, want)
+	}
+	if want := 1000 * ibmSonnet.Input * 2.0; cold1 != want {
+		t.Errorf("1h cold = %v, want %v", cold1, want)
+	}
+}

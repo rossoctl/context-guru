@@ -8,6 +8,7 @@ import (
 
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -63,7 +64,7 @@ func (h *Handler) ctlKeepAliveArmed(w http.ResponseWriter, r *http.Request) {
 		"default_hours":    int(defaultOverrideUntil / time.Hour),
 		"max_hold_minutes": int(maxOverrideHold / time.Minute),
 		// A 1-hour thread follows the account's 1-hour schedule, not the override's pair.
-		"max_hold_minutes_1h": int(maxKeepAliveHold1h / time.Minute),
+		"max_hold_minutes_1h": int(keepalive.MaxHold1h / time.Minute),
 	})
 }
 

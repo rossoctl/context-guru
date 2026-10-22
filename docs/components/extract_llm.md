@@ -274,7 +274,7 @@ visible, but no code change can rescue an operator from switching the brake off 
 
 ## Accuracy of the code leg, measured (August 2026)
 
-Basis: **40 real tool outputs** captured from Claude Code traffic (`/home/vpcuser/cg-research/bench`
+Basis: **40 real tool outputs** captured from Claude Code traffic (a local capture bench
 + SWE-bench proxy captures, 563–15,473 tokens each), replayed through the code leg alone —
 `strategy: code`, no deterministic fallback, `rewrite: true`, `aggressiveness: medium`,
 compactor `claude-haiku-4-5`, real gateway. Reproduce with
@@ -777,6 +777,29 @@ and strictly-smaller; `rewrite: false` gives the full deletion-only (character-s
 guarantee. The one-line SUMMARY spliced next to the marker is clipped to 120 runes, because an
 over-long one used to abandon the whole reduction rather than truncate.
 
+## How the dashboard caps its credit { #credit-cap }
+
+A removal is replayed: every later turn that re-sends the shortened transcript earns the credit
+again. Left alone that credit has no end. The dashboard ends it where the world without
+context-guru would have stopped carrying the content:
+
+- **Counterfactual compaction.** On each turn the counterfactual transcript is what the provider
+  billed plus what the pipeline removed (`tokens_before - tokens_after`, scaled to billed tokens
+  by the measured tokenizer factor). When it reaches the client's compaction ceiling (the same
+  ceiling `summarize`'s span uses), the client of that world compacts and the credit stops.
+- **Real client compaction.** A drop in `tokens_before` after the agent's own compaction request
+  went by ends it too: both worlds carry a summarized transcript from there on.
+
+The cap does not read the real compaction to place the counterfactual one. Removals only make
+the real transcript smaller, so a rule that waited for the real client to compact would credit
+exactly the turns the removals pushed past the ceiling. The same rule caps every replaying
+component (`searchfold`, `dedup`, `extract`, ...), and one ledger feeds the headline,
+`/api/components` and the episode view (`replay_ledger`). The summarizers (`summarize`, `cache_aware_summarizer`) keep their own span and ledger.
+
+`extract_llm` keeps the stored price of a first removal (the cache-write rate), not the
+cache-read rate `summarize` gets: it fires on cold turns, where the uncompacted prefix would have
+been re-written. Credit after a close is not reopened by a later epoch, which is conservative.
+
 ## Configuration
 
 | Key | Default | Meaning |
@@ -786,11 +809,7 @@ over-long one used to abandon the whole reduction rather than truncate.
 | `min_tokens` | 300 | Output floor. The literal default is **300**; leaving it unset also means the *derived* context-pressure trigger governs when a request is worth a call, and setting it pins the floor to your number instead (it folds into `trigger.min_output_tokens`). Under `fire_on: size` an unset floor is raised to **2000**, because 300 is a threshold nearly every tool output clears — that combination is the 271-call failure mode. |
 | `strategy` | `code` | `code` \| `single` \| `rlm` \| `auto` \| `deterministic`. `deterministic` makes **no model call at all** (the projection runs locally), which is the one value the settings form used to omit — a stored `deterministic` was then not recognised and got rewritten to `code`, silently turning an LLM-free configuration into one that spends. |
 | `model.model` | *the source's own model* | The model to COMPACT with, on the source's endpoint and credential. Empty means the source's own model, which for `incoming` is the agent's frontier model — and compaction on one does not pay: a measured cold-cache sweep through the hosted service cut the provider bill by **$0.63** and spent **$1.25 of opus** doing it (net **−$0.62**). Naming a cheap model here keeps the same account and the same gateway and does the work for roughly a tenth of the call cost. On a multi-tenant deployment this is the only way to get a cheap compactor, since `source: config` has no model there. |
-| `model.source` | `incoming` | `incoming` (proxied model+key) or `config` (cheap model via `CHEAP_MODEL*`). **On a multi-tenant deployment `config` resolves to NOTHING** — `staticModel()` withholds the operator's compaction model from tenant traffic on purpose — so the component silently makes no calls however else it is configured. Measured on the hosted service: one account with `source: config`, 251 requests, zero model calls. The settings page now warns in the field itself. |
-| `model.provider` | `anthropic` | Wire dialect for a config-pinned endpoint: `anthropic` \| `openai`. |
-| `model.base_url` | *the provider's public API* | Pin a dedicated endpoint (a gateway, a self-hosted server) as a full URL. |
-| `model.api_key` | *the process env key* | **Credential** for the pinned endpoint. Empty falls back to `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `OPENAI_API_KEY`, and a **hosted** deployment refuses that fallback rather than bill a tenant's compaction to the operator (`offload.AllowEnvModelKey`). The settings page can set it and never displays it back. |
-| `model.auth` | `x-api-key` | Anthropic only: how the key is sent. `bearer` is what a LiteLLM/gateway front end expects. |
+| `model.source` | `incoming` | `incoming` (proxied model+key) or `config` (cheap model via `CHEAP_MODEL*`, the host's own endpoint and credential — this block never names one). **On a multi-tenant deployment `config` resolves to NOTHING** — `staticModel()` withholds the operator's compaction model from tenant traffic on purpose — so the component silently makes no calls however else it is configured. Measured on the hosted service: one account with `source: config`, 251 requests, zero model calls. The settings page now warns in the field itself. |
 | `model_max_input_tokens` | *derived* | The extraction model's input budget (see [Context guard](#context-guard)). Pin it for a model whose id nothing can resolve. |
 | `trigger` | *derived* | Explicit gate: `min_output_tokens`, `min_request_tokens`, `min_messages`, plus the window fractions `min_request_frac`, `min_output_frac`, `huge_output_frac`. Setting any of the absolute thresholds pins the trigger. `min_request_frac` is a separate condition from `min_request_tokens` rather than a floor on it — the two are measured on different scales (see [Components](../components.md#summary)) and both must be met. **The fraction is best-effort here:** it is compared against the provider's own count for the session's previous turn, and when that is unavailable (a first turn, or a host that does not record it) the fraction is skipped rather than refused — so it *permits* where `summarize` declines. That is deliberate: this component's real gate is the per-candidate economics, and refusing would only make it fire less on deployments that cannot report a billed figure. The per-item fractions do raise the per-item floor they resolve against. |
 | `llm_every_n_requests` | — | Fire the LLM path at most once per N requests per session. |

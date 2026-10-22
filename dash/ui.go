@@ -22,10 +22,48 @@ import (
 // in the binary, so the dashboard works with the network unplugged. headroom's
 // Alpine/Tailwind/htmx script tags are exactly what we are not doing.
 //
-// Charts are hand-drawn SVG rather than a vendored chart library: the ladder's
-// "native platform feature covers it" rung. SVG path/rect/text is a native
-// browser feature, the series here are small, and 45 KB of vendored library would
-// buy tooltips we can write in fifteen lines.
+// Charts are hand-drawn SVG rather than a vendored chart library — with ONE exception, Apache
+// ECharts, vendored for the Cleanup view's activity chart. The rule and the exception are both
+// here because a contradiction with no explanation is worse than either choice.
+//
+// THE RULE STILL HOLDS for everything else. SVG path/rect/text is a native browser feature, the
+// series on the other tabs are small, and a library would buy tooltips we can write in fifteen
+// lines. Every chart outside dash/ui/insights.js is still drawn by hand.
+//
+// THE EXCEPTION, and what changed. That reasoning was about tooltips. The Cleanup view needs a
+// capability-by-time HEATMAP with a RANGE CONTROL over it — handles you can grab, drag-to-move,
+// keyboard access, and a selection that survives leaving the plot, because the selection is what
+// every table on the page then describes. Two hand-built versions shipped before this one and
+// failed the same way: forty lines of pointer events first, then the same thing assembled from d3
+// primitives. Both times the reported failure was "it is not clear how to select" — the gesture
+// worked and the affordance did not, which is the part a library has actually solved.
+//
+// d3 was tried and removed. It is a toolkit, not a chart library: "use d3" still meant building a
+// heatmap out of rectangles from a scaleBand and approximating a range control with brushX, so the
+// affordance was still ours to get wrong, and it was still wrong. ECharts ships both as
+// configuration — series.type 'heatmap', dataZoom, visualMap, tooltips and axis pointers are the
+// library's job. insights.js is now a config object, which is the whole point of the dependency.
+//
+// What it costs, measured rather than assumed:
+//
+//   - ECharts 5.5.0, Apache-2.0, the FULL build: 1,005 KB raw and 326 KB gzipped, against a
+//     300 KB gzipped asset baseline. app.js alone is 548 KB raw. The assets are already gzipped
+//     and content-hashed, so the marginal cost is one 326 KB download per deploy.
+//
+//   - The full build and not the smaller "common" one, which was tried first and does NOT work:
+//     the heatmap series is not registered in it, and ECharts drops an unregistered series type
+//     SILENTLY — setOption throws nothing, getOption reports zero series, and the chart renders
+//     its axes with no cells. Measured in a browser rather than inferred: of heatmap, bar, line,
+//     scatter, custom, effectScatter and pictorialBar, the common build registers only bar, line
+//     and scatter. The "simple" build is smaller still and drops dataZoom as well.
+//
+//     Worth stating because it is a trap: the string "heatmap" DOES appear in the common build,
+//     in the visualMap and dataZoom plumbing, so grepping the file for it says yes while the
+//     series type is absent. The only check that means anything is calling setOption and reading
+//     the series count back.
+//
+//   - Vendored, not a CDN, because this page serves script-src 'self' and must keep working on
+//     an air-gapped install.
 //
 //go:embed ui
 var uiFS embed.FS
@@ -187,14 +225,18 @@ func uiHandler() http.Handler {
 	}
 	files := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// StripPrefix leaves "" for /dashboard/. That is the five-page home; the classic,
-		// full-detail dashboard stays at the explicit index.html.
+		// StripPrefix leaves "" for /dashboard/ and "index.html" for the explicit URL.
 		name := strings.TrimPrefix(r.URL.Path, "/")
 		if name == "" {
-			name = "home.html"
+			name = "index.html"
+		}
+		// A short-lived five-page home was served at home.html; send an old bookmark to the dashboard.
+		if name == "home.html" {
+			http.Redirect(w, r, "index.html", http.StatusMovedPermanently)
+			return
 		}
 		switch name {
-		case "index.html", "home.html":
+		case "index.html":
 			w.Header().Set("Cache-Control", "no-cache")
 		default:
 			w.Header().Set("Cache-Control", "public, max-age=3600")

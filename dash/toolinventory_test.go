@@ -366,9 +366,9 @@ func TestRecordInventoryEndToEnd(t *testing.T) {
 	}
 	inv := ScanInventory("anthropic", ccBody(t, []string{tool("Bash", "b")}, skillsReminder,
 		[]map[string]any{{"name": "Bash", "input": map[string]any{}}}))
-	rec.RecordInventory("t1", "s1", 1000, inv, true)
-	rec.RecordInventory("t1", "", 1000, inv, true) // no session: nothing to key on, dropped
-	rec.RecordInventory("t1", "s2", 1000, nil, true)
+	rec.RecordInventory("t1", "s1", 1000, inv, true, "")
+	rec.RecordInventory("t1", "", 1000, inv, true, "") // no session: nothing to key on, dropped
+	rec.RecordInventory("t1", "s2", 1000, nil, true, "")
 	db := rec.DB()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -408,14 +408,14 @@ func seedReport(t *testing.T) *DB {
 	var evs []*Event
 	for i := 0; i < 10; i++ { // 10 requests, all cache hits
 		e := mkEvent(int64(1000+i), "used", "claude", 100, 90)
-		e.TenantID, e.Tools = "t1", 4
+		e.TenantID, e.Tools, e.DeclDigest = "t1", 4, "d1" // the set each request carried
 		evs = append(evs, e)
 	}
 	e := mkEvent(2000, "nocapture", "claude", 100, 90)
 	e.TenantID, e.Tools = "t1", 4
 	evs = append(evs, e)
 	other := mkEvent(3000, "someone-else", "claude", 100, 90)
-	other.TenantID, other.Tools = "t2", 4
+	other.TenantID, other.Tools, other.DeclDigest = "t2", 4, "d2"
 	evs = append(evs, other)
 	if err := db.insertBatch(evs); err != nil {
 		t.Fatal(err)
@@ -585,7 +585,7 @@ func TestToolAPIScope(t *testing.T) {
 	// Reuse the seeded shape on the recorder's own database.
 	db := rec.DB()
 	e := mkEvent(1000, "used", "claude", 100, 90)
-	e.TenantID, e.Tools = "t1", 1
+	e.TenantID, e.Tools, e.DeclDigest = "t1", 1, "d1"
 	if err := db.insertBatch([]*Event{e}); err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +828,7 @@ func TestToolReportCountsTheSkillsListingOnce(t *testing.T) {
 	var evs []*Event
 	for i := 0; i < 10; i++ {
 		e := mkEvent(int64(1000+i), "skillsonly", "claude", 100, 90)
-		e.TenantID, e.Tools = "t1", 2 // r.tools > 0 is what makes a session eligible
+		e.TenantID, e.Tools, e.DeclDigest = "t1", 2, "d1" // r.tools > 0 is what makes a session eligible
 		evs = append(evs, e)
 	}
 	if err := db.insertBatch(evs); err != nil {
@@ -876,5 +876,79 @@ func TestToolReportCountsTheSkillsListingOnce(t *testing.T) {
 	// And the listing's own waste is still booked once, under its own name.
 	if rep.Skills.UnusedListingReads != 10_000 {
 		t.Errorf("unused listing reads = %d, want 10000", rep.Skills.UnusedListingReads)
+	}
+}
+
+// A declaration is billed on the requests that carried it, not on every request of the session
+// that declared it: here half the session's requests are a subagent's, whose set has no Workflow.
+func TestToolReportBillsOnlyTheRequestsThatCarriedIt(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := 0; i < 10; i++ {
+		e := mkEvent(int64(1000+i), "s", "claude", 100, 90)
+		e.TenantID, e.Tools, e.DeclDigest = "t1", 2, "main"
+		if i%2 == 1 {
+			e.Tools, e.DeclDigest = 1, "sub"
+		}
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	bash := Decl{Kind: KindTool, Name: "Bash", Tokens: 100}
+	if err := w.write([]invMsg{
+		{tenant: "t1", session: "s", ts: 1000, inv: &Inventory{Digest: "main", UseFingerprint: 1,
+			Decls: []Decl{bash, {Kind: KindTool, Name: "Workflow", Tokens: 5000}}}},
+		{tenant: "t1", session: "s", ts: 1000, inv: &Inventory{Digest: "sub", UseFingerprint: 1, Decls: []Decl{bash}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range rep.Tools {
+		if st.Name == "Workflow" {
+			if st.UnusedReads != 5*5000 || st.UnusedUSDLow != st.UnusedUSD || st.UnusedUSDHigh != st.UnusedUSD {
+				t.Fatalf("Workflow %+v: want 5 carrying requests x 5000 tokens, exact", st)
+			}
+			if rep.Carried == nil || rep.Carried.RequestsExact != 10 {
+				t.Fatalf("coverage %+v", rep.Carried)
+			}
+			return
+		}
+	}
+	t.Fatalf("no Workflow row: %+v", rep.Tools)
+}
+
+// carry_usd prices carrying a declaration over EVERY request that declared it, used or not, so a
+// tool the user does call still shows its price. unused_usd stays what it was.
+func TestToolReportCarriesTheCostOfUsedDeclarationsToo(t *testing.T) {
+	db := seedReport(t)
+	rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bash (a built-in, so in Aside) is called, so it wasted nothing, but 100 tokens x 10 requests
+	// at the cache-read rate ($0.1/MTok) is what carrying it cost.
+	var bash ToolStat
+	for _, s := range rep.Aside {
+		if s.Name == "Bash" {
+			bash = s
+		}
+	}
+	if bash.UnusedUSD != 0 || bash.CarryReads != 1000 || !near(bash.CarryUSD, 0.0001) {
+		t.Errorf("Bash = unused %v carry_reads %d carry_usd %v, want 0 / 1000 / 0.0001", bash.UnusedUSD, bash.CarryReads, bash.CarryUSD)
+	}
+	for _, s := range rep.Tools {
+		if s.Name == "Workflow" && (s.CarryReads != s.UnusedReads || !near(s.CarryUSD, s.UnusedUSD)) {
+			t.Errorf("a never-used tool carries exactly its unused cost: %+v", s)
+		}
+	}
+	for _, sv := range rep.Servers {
+		if sv.Server == "pw" && (sv.CarryReads != 4000 || sv.CarryUSD <= 0) {
+			t.Errorf("pw server = %+v, want carry_reads 4000 and a price", sv)
+		}
 	}
 }

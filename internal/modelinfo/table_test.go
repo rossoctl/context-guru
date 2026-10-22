@@ -131,7 +131,7 @@ func TestShippedPriceListLoads(t *testing.T) {
 	}
 }
 
-// The exact model ids ete-litellm serves, read from its /v1/models on 2026-08-19, plus
+// The exact model ids litellm-gateway serves, read from its /v1/models on 2026-08-19, plus
 // the tier names Bob puts on the wire. Every one of them must price, because an id that
 // does not is a dashboard row whose cost reads "unknown" — the Bob symptom this file
 // exists to fix. Note the gateway's own casing (`Azure/gpt-4o`) and the ids it serves

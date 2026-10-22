@@ -13,9 +13,10 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -268,7 +269,8 @@ func sweepModels(t *testing.T) components.ModelSpec {
 	if base == "" || key == "" || model == "" {
 		t.Skip("set CHEAP_MODEL, CHEAP_MODEL_BASE and CHEAP_MODEL_AUTH to sweep the LLM path")
 	}
-	m := cheapmodel.Anthropic{BaseURL: base, APIKey: key, Model: model, AuthScheme: "bearer"}
+	d, ref := dispatchtest.HTTP(base, dispatchtest.BearerAuth(key))
+	m := cheapmodel.Anthropic{D: d, Ref: ref, Model: model}
 	return components.ModelSpec{Incoming: m, Static: m}
 }
 

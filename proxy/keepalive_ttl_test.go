@@ -3,208 +3,30 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/keepalive"
 )
 
-const (
-	ttlBody1h = `{"model":"claude-sonnet-5","system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}],` +
-		`"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`
-	ttlBodyMixed = `{"model":"claude-sonnet-5","system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}],` +
-		`"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`
-)
+const ttlBody1h = `{"model":"claude-sonnet-5","system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}],` +
+	`"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`
+
+var bill1h = Usage{CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 1200}
 
 // recordUsage registers one finished request with an explicit usage, after a seeded first turn.
 func recordUsage(t *testing.T, k *keeper, pol CachePolicy, body string, at time.Time, u Usage) {
 	t.Helper()
 	tn := &Tenancy{ID: "t1", Cache: pol}
-	rec := func(at time.Time, u Usage) {
+	for _, d := range []time.Duration{-time.Second, 0} {
 		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 		r.Header.Set("Authorization", "Bearer sk-caller-secret")
-		k.record(tn, "sess-1", "", at, []byte(body), upstream{base: "http://up", path: "/v1/messages"},
+		k.record(tn, "sess-1", "", at.Add(d), []byte(body), upstream{base: "http://up", path: "/v1/messages"},
 			r, bschemas.Anthropic, "/v1/messages", http.StatusOK, u, true)
-	}
-	rec(at.Add(-time.Second), u)
-	rec(at, u)
-}
-
-func TestOneHourBilledSessionPingsOnceNear59Minutes(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
-	start := clock.now()
-	recordUsage(t, k, kaPolicy(), ttlBody1h, start, Usage{CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 1200})
-
-	for _, elapsed := range []time.Duration{270 * time.Second, 280 * time.Second, 30 * time.Minute, 3539 * time.Second} {
-		if n := k.sweep(start.Add(elapsed)); n != 0 {
-			t.Fatalf("1h session pinged after %s; the ping time is 59 min", elapsed)
-		}
-	}
-	if n := k.sweep(start.Add(59 * time.Minute)); n != 1 {
-		t.Fatalf("no ping at 59 min (fired %d)", n)
-	}
-	if n := k.sweep(start.Add(59*time.Minute + 3540*time.Second)); n != 0 {
-		t.Fatalf("second ping fired; the 1h schedule is 1 ping (%d)", n)
-	}
-}
-
-func TestOneHourScheduleIsConfigurable(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
-	start := clock.now()
-	pol := kaPolicy()
-	pol.Idle1h, pol.MaxPings1h = 50*time.Minute, 2
-	recordUsage(t, k, pol, ttlBody1h, start, Usage{CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 1200})
-	if n := k.sweep(start.Add(50 * time.Minute)); n != 1 {
-		t.Fatalf("first ping at 50 min: %d", n)
-	}
-	if n := k.sweep(start.Add(100 * time.Minute)); n != 1 {
-		t.Fatalf("second ping at 100 min: %d", n)
-	}
-}
-
-func TestFiveMinuteSessionKeepsTheFiveMinuteSchedule(t *testing.T) {
-	for name, tc := range map[string]struct {
-		body string
-		u    Usage
-	}{
-		"no ttl asked":                 {kaBody, Usage{CacheRead: 48576, CacheWrite: 1200}},
-		"1h asked, gateway downgraded": {ttlBody1h, Usage{CacheRead: 48576, CacheWrite: 1200}},
-		"mixed ask, head 1h only":      {ttlBodyMixed, Usage{CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 600}},
-		"1h asked, nothing billed":     {ttlBody1h, Usage{CacheRead: 48576}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			k, _, clock := testKeeper(t, Limits{})
-			start := clock.now()
-			recordUsage(t, k, kaPolicy(), tc.body, start, tc.u)
-			if n := k.sweep(start.Add(279 * time.Second)); n != 0 {
-				t.Fatalf("pinged early (%d)", n)
-			}
-			if n := k.sweep(start.Add(280 * time.Second)); n != 1 {
-				t.Fatalf("no ping at 280 s (%d)", n)
-			}
-			if n := k.sweep(start.Add(560 * time.Second)); n != 1 {
-				t.Fatalf("no second ping at 560 s (%d)", n)
-			}
-		})
-	}
-}
-
-func TestPureReadTurnInheritsTheBilledTier(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
-	start := clock.now()
-	pol := kaPolicy()
-	recordUsage(t, k, pol, ttlBody1h, start.Add(-time.Minute), Usage{CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 1200})
-	recordUsage(t, k, pol, ttlBody1h, start, Usage{CacheRead: 49776})
-	if n := k.sweep(start.Add(300 * time.Second)); n != 0 {
-		t.Fatalf("read-only turn on a 1h thread pinged at 5 min (%d)", n)
-	}
-	if n := k.sweep(start.Add(59 * time.Minute)); n != 1 {
-		t.Fatalf("no ping at 59 min (%d)", n)
-	}
-}
-
-func TestTwoTiersOnOneProxy(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
-	start := clock.now()
-	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
-	rec := func(session, body string, u Usage) {
-		for i := 0; i < 2; i++ {
-			r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
-			r.Header.Set("Authorization", "Bearer sk-caller-secret")
-			k.record(tn, session, "", start, []byte(body), upstream{base: "http://up", path: "/v1/messages"},
-				r, bschemas.Anthropic, "/v1/messages", http.StatusOK, u, true)
-		}
-	}
-	rec("sub", ttlBody1h, Usage{CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 1200})
-	rec("api", kaBody, Usage{CacheRead: 48576, CacheWrite: 1200})
-	if n := k.sweep(start.Add(280 * time.Second)); n != 1 {
-		t.Fatalf("at 280 s only the 5m session is due, fired %d", n)
-	}
-	if n := k.sweep(start.Add(59 * time.Minute)); n != 2 {
-		t.Fatalf("at 59 min the 1h session and the 5m session's second ping are due, fired %d", n)
-	}
-}
-
-func TestAllBreakpointsAskExtendedTTL(t *testing.T) {
-	if !apply.AllBreakpointsAskExtendedTTL([]byte(ttlBody1h)) {
-		t.Fatal("all-1h body not detected")
-	}
-	for name, b := range map[string]string{"mixed": ttlBodyMixed, "none": `{"messages":[]}`, "5m": kaBody} {
-		if apply.AllBreakpointsAskExtendedTTL([]byte(b)) {
-			t.Fatalf("%s body reported as all-1h", name)
-		}
-	}
-}
-
-// recordThread is recordUsage for an explicit session and thread, with its own seeded first turn.
-func recordThread(t *testing.T, k *keeper, tn *Tenancy, session, thread, body string, at time.Time, u Usage) {
-	t.Helper()
-	for i := 0; i < 2; i++ {
-		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
-		r.Header.Set("Authorization", "Bearer sk-caller-secret")
-		k.record(tn, session, thread, at, []byte(body), upstream{base: "http://up", path: "/v1/messages"},
-			r, bschemas.Anthropic, "/v1/messages", http.StatusOK, u, true)
-	}
-}
-
-var (
-	bill1h = Usage{CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 1200}
-	bill5m = Usage{CacheRead: 48576, CacheWrite: 1200}
-	read   = Usage{CacheRead: 49776}
-)
-
-// A 1-hour thread followed by a read-only turn whose request is a MIXED ask. The read-only turn
-// bills nothing, so only the request can tell: the tail now expires in five minutes.
-// Mutation: delete the AllBreakpointsAskExtendedTTL check in resolveTier and this fails.
-func TestMixedAskOnAReadOnlyTurnGoesBackToFiveMinutes(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
-	start := clock.now()
-	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
-	recordThread(t, k, tn, "sess-1", "", ttlBody1h, start.Add(-time.Minute), bill1h)
-	recordThread(t, k, tn, "sess-1", "", ttlBodyMixed, start, read)
-	if n := k.sweep(start.Add(280 * time.Second)); n != 1 {
-		t.Fatalf("a mixed-ask read-only turn was not back on the 5-minute schedule (fired %d)", n)
-	}
-}
-
-// The main thread is on the 1-hour tier and a subagent thread of the same session is on 5 minutes.
-// Each follows its own schedule.
-func TestMainThreadOneHourAndSubagentFiveMinutesInOneSession(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
-	start := clock.now()
-	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
-	recordThread(t, k, tn, "sess-1", "", ttlBody1h, start, bill1h)
-	recordThread(t, k, tn, "sess-1", "a:sub1", kaBody, start, bill5m)
-	if n := k.sweep(start.Add(280 * time.Second)); n != 1 {
-		t.Fatalf("at 280 s only the subagent thread is due (fired %d)", n)
-	}
-	k.mu.Lock()
-	main, sub := k.live[kaThreadKey("t1", "sess-1", "")], k.live[kaThreadKey("t1", "sess-1", "a:sub1")]
-	k.mu.Unlock()
-	if main == nil || sub == nil || !main.ttl1h || sub.ttl1h {
-		t.Fatalf("tiers wrong: main=%+v sub=%+v", main, sub)
-	}
-	if n := k.sweep(start.Add(59 * time.Minute)); n != 2 {
-		t.Fatalf("at 59 min the main thread's one ping and the subagent's second are due (fired %d)", n)
-	}
-}
-
-// `none` must stay none: no entry, no ping, however the thread was billed.
-func TestNoneStaysNoneOnAOneHourThread(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
-	start := clock.now()
-	recordUsage(t, k, CachePolicy{}, ttlBody1h, start, bill1h)
-	k.mu.Lock()
-	held := len(k.live)
-	k.mu.Unlock()
-	if held != 0 {
-		t.Fatalf("a keep-alive-off account holds %d entries for a 1h thread", held)
-	}
-	if n := k.sweep(start.Add(59 * time.Minute)); n != 0 {
-		t.Fatalf("pinged with keep-alive off (%d)", n)
 	}
 }
 
@@ -216,15 +38,14 @@ func TestOverrideOnAOneHourThreadUsesTheOneHourTimingAndBoundsTheCount(t *testin
 	k, _, clock := testKeeper(t, Limits{})
 	start := clock.now()
 	armOn(t, k, "sess-1", 120*time.Second, 4, start.Add(4*time.Hour))
-	tn := &Tenancy{ID: "t1", Cache: CachePolicy{}}
-	recordThread(t, k, tn, "sess-1", "", ttlBody1h, start, bill1h)
-	if n := k.sweep(start.Add(270 * time.Second)); n != 0 {
+	recordUsage(t, k, CachePolicy{}, ttlBody1h, start, bill1h)
+	if n := k.Sweep(start.Add(270 * time.Second)); n != 0 {
 		t.Fatalf("a 1h thread was pinged on the override's 5-minute timing (%d)", n)
 	}
-	if n := k.sweep(start.Add(59 * time.Minute)); n != 1 {
+	if n := k.Sweep(start.Add(59 * time.Minute)); n != 1 {
 		t.Fatalf("no ping at 59 min (%d)", n)
 	}
-	if n := k.sweep(start.Add(2 * time.Hour)); n != 0 {
+	if n := k.Sweep(start.Add(2 * time.Hour)); n != 0 {
 		t.Fatalf("a second ping: K=4 must not raise the account's 1h count of 1 (%d)", n)
 	}
 
@@ -233,86 +54,76 @@ func TestOverrideOnAOneHourThreadUsesTheOneHourTimingAndBoundsTheCount(t *testin
 	armOn(t, k2, "sess-1", 120*time.Second, 1, start.Add(4*time.Hour))
 	acct := kaPolicy()
 	acct.MaxPings1h = 3
-	recordThread(t, k2, &Tenancy{ID: "t1", Cache: acct}, "sess-1", "", ttlBody1h, start, bill1h)
-	if n := k2.sweep(start.Add(59 * time.Minute)); n != 1 {
+	recordUsage(t, k2, acct, ttlBody1h, start, bill1h)
+	if n := k2.Sweep(start.Add(59 * time.Minute)); n != 1 {
 		t.Fatalf("no first ping (%d)", n)
 	}
-	if n := k2.sweep(start.Add(118 * time.Minute)); n != 0 {
+	if n := k2.Sweep(start.Add(118 * time.Minute)); n != 0 {
 		t.Fatalf("override K=1 did not bound the 1h thread below the account's 3 (%d)", n)
 	}
 }
 
-// The credential hold, which is the number shown to the user.
-func TestCredentialHoldPerTier(t *testing.T) {
-	cases := []struct {
-		name string
-		pol  CachePolicy
-		want time.Duration
-	}{
-		{"5m default", kaPolicy(), 3 * 280 * time.Second},
-		{"1h default", kaPolicy().forOneHour(), 118 * time.Minute},
-		{"1h at 2 pings", func() CachePolicy { p := kaPolicy(); p.MaxPings1h = 2; return p.forOneHour() }(), 177 * time.Minute},
-		{"1h above the cap is clamped", func() CachePolicy { p := kaPolicy(); p.MaxPings1h = 100; return p.forOneHour() }(), maxKeepAliveHold1h},
-	}
-	for _, tc := range cases {
-		e := &kaEntry{pol: tc.pol}
-		if got := e.hold(); got != tc.want {
-			t.Errorf("%s: hold %s, want %s", tc.name, got, tc.want)
-		}
-	}
-	if maxKeepAliveHold1h != 236*time.Minute {
-		t.Errorf("maxKeepAliveHold1h = %s, want 236m", maxKeepAliveHold1h)
-	}
-	// And a recorded 1h entry really carries that hold.
-	k, _, clock := testKeeper(t, Limits{})
-	recordUsage(t, k, kaPolicy(), ttlBody1h, clock.now(), bill1h)
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	for _, e := range k.live {
-		if e.hold() != 118*time.Minute {
-			t.Errorf("recorded 1h entry holds %s, want 118m", e.hold())
-		}
+// The ctl API states the 1-hour hold beside the 5-minute one.
+func TestArmedStateReportsTheOneHourHold(t *testing.T) {
+	if got := int(keepalive.MaxHold1h / time.Minute); got != 236 {
+		t.Errorf("max 1h hold = %d min, want 236", got)
 	}
 }
 
-// The tier a request carried survives the bound that resets the per-thread maps, and a request the
-// gates refuse never enters the map at all.
-func TestTierMemoryIsBoundedAndKeepsTheCurrentThread(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
-	start := clock.now()
-	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
-
-	// A thinking-enabled request is refused before turns++; it must not leave a tier behind.
-	thinking := strings.Replace(ttlBody1h, `{"model"`, `{"thinking":{"type":"enabled","budget_tokens":1024},"model"`, 1)
-	recordThread(t, k, tn, "think", "", thinking, start, bill1h)
-	k.mu.Lock()
-	grew := len(k.tier1h)
-	k.mu.Unlock()
-	if grew != 0 {
-		t.Fatalf("a refused request wrote %d tier entries", grew)
-	}
-
-	once := func(session string) {
+// A manual ping on a 1-hour thread, end to end through the endpoint: the held thread lives an hour,
+// the rewrite it avoids is priced at the 1-hour write rate (2.0x input, not the 5-minute 1.25x), and
+// the cache is reported warm for an hour from the ping.
+func TestManualPingOnAOneHourThreadIsPricedAndHeldAtTheHourTier(t *testing.T) {
+	m := newManualHost(t)
+	at := m.clock.now().Add(-20 * time.Minute)
+	tn := &Tenancy{ID: "", Cache: CachePolicy{}, Pipe: components.NewPipeline(nil, m.sink)}
+	for i := 0; i < 2; i++ {
 		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 		r.Header.Set("Authorization", "Bearer sk-caller-secret")
-		k.record(tn, session, "", start, []byte(ttlBody1h), upstream{base: "http://up", path: "/v1/messages"},
-			r, bschemas.Anthropic, "/v1/messages", http.StatusOK, bill1h, true)
+		r.Header.Set(ManualHoldHeader, "1")
+		m.h.keeper.record(tn, "sess-1h", "", at.Add(time.Duration(i)*time.Second), []byte(ttlBody1h),
+			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages",
+			http.StatusOK, bill1h, true)
 	}
-	k.mu.Lock()
-	for i := 0; i < maxKeepAliveTurnKeys-1; i++ {
-		key := kaThreadKey("t1", "filler"+strconv.Itoa(i), "")
-		k.turns[key] = 1
-		k.tier1h[key] = true
+	m.rec.Record(&dash.Event{TS: at.UnixMilli(), SessionID: "sess-1h", Model: "aws/claude-sonnet-5",
+		Provider: "anthropic", Status: 200, CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 1200,
+		CacheTTL: "ephemeral_1h", UpstreamMs: 1000, TokenAccounting: dash.AccountingComplete})
+	waitForRows(t, m.rec, m.rowsSoFar()+1)
+	rowsWritten[m.rec]++
+
+	// 20 minutes after the last request: a 300 s hold would be gone, an hour-tier hold is not.
+	if st := m.h.KeepAlivePingStates("", true, "sess-1h")[""]; !st.Pingable {
+		t.Fatalf("a 1h thread 20 min after its last request is not pingable: %+v", st)
 	}
-	k.mu.Unlock()
-	once("fills-the-bound")
-	once("trips-the-reset")
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if !k.tier1h[kaThreadKey("t1", "trips-the-reset", "")] {
-		t.Error("the reset dropped the tier of the thread that triggered it")
+	w, out := m.post(`{"session":"sess-1h"}`)
+	if w.Code != http.StatusOK || out["sent"] != true {
+		t.Fatalf("press = %d %v, want 200 sent", w.Code, out)
 	}
-	if len(k.tier1h) != 1 || len(k.turns) != 1 {
-		t.Errorf("reset left turns=%d tier1h=%d, want 1 and 1", len(k.turns), len(k.tier1h))
+	// fixedPricer: input 2e-6 (x2.0 on the 1h tier = 4e-6), write 2.5e-6 (the 5-minute rate).
+	want := 49776 * 2e-6 * 2.0
+	if got := out["rewrite_usd"].(float64); got < want*0.999 || got > want*1.001 {
+		t.Errorf("rewrite_usd = %v, want %v (prefix x 2.0 x input)", got, want)
+	}
+	if got, want := int64(out["warm_until_ms"].(float64)), m.clock.now().Add(time.Hour).UnixMilli(); got != want {
+		t.Errorf("warm_until_ms = %d, want ping start + 1 h %d", got, want)
+	}
+}
+
+// An active campaign decides the ping count on five-minute economics. On a 1-hour thread it only
+// bounds the 1-hour count from above, as an override does; it never raises it, and it never sets the
+// 1-hour timing.
+func TestCampaignBoundsAOneHourThreadsPingCountDownward(t *testing.T) {
+	acct := kaPolicy()
+	acct.MaxPings1h = 3
+	got := predDecision{k: 1, idleS: 280, active: true}.apply(acct)
+	if got.MaxPings != 1 || got.MaxPings1h != 1 {
+		t.Errorf("campaign k=1: MaxPings=%d MaxPings1h=%d, want 1 and 1", got.MaxPings, got.MaxPings1h)
+	}
+	got = predDecision{k: 3, idleS: 280, active: true}.apply(kaPolicy())
+	if got.MaxPings1h != 1 {
+		t.Errorf("campaign k=3 raised the default 1h count of 1 to %d", got.MaxPings1h)
+	}
+	if got.Idle1h != 0 {
+		t.Errorf("a campaign set the 1h timing to %v; it must stay the account's", got.Idle1h)
 	}
 }

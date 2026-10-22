@@ -62,7 +62,7 @@ over a `false` you set in `/plugin` (the install then says so, and names the com
 back only if the install was the one that added it. A project that switches the plugin off in its own
 settings still wins there: the more specific scope always does.
 
-### `/plugin configure` — five options, all with working defaults
+### `/plugin configure` — six options, all with working defaults
 
 Open it, press **Save configuration**, and nothing changes. Only one of these usually needs
 setting, and only in one situation. The Preset and Cache strategy rows have their own pickers —
@@ -76,6 +76,7 @@ form has no explanation of what each choice does; use those for the two rows tha
 | **Cache strategy** | `auto` | you don't want keep-alive pings that spend a little of your own quota to keep the cache warm. `none` turns it off. `/context-guru:cache-strategy-picker` explains whether it's paying for itself on `keepalive_net_usd` |
 | **Idle exit** | `24h` | rarely — floor is `max(2 × store.ttl_seconds, 1h)` |
 | **Upstream base URL** | *(empty)* | something else is already the gateway (a corporate proxy, a hosted-agent pod) — set it to whatever `ANTHROPIC_BASE_URL` already contains so context-guru chains behind it instead of replacing it |
+| **Client signals** | `off` | you want the proxy to stop keeping a session's cache warm once you exit it or it is compacted. Needs a proxy started with `CONTEXT_GURU_CLIENT_SIGNALS=on`; see [Client lifecycle signals](cache-keepalive.md#client-lifecycle-signals-opt-in) |
 
 ## You do not need an API key
 

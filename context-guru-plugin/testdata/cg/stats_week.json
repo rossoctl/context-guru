@@ -19,7 +19,7 @@
   },
   {
    "key": "keepalive_saved",
-   "delta_usd": 9.4
+   "delta_usd": -9.4
   },
   {
    "key": "keepalive_ping",
@@ -27,7 +27,7 @@
   },
   {
    "key": "decl_filter_saved",
-   "delta_usd": 7.85
+   "delta_usd": -7.85
   },
   {
    "key": "self_removed",
