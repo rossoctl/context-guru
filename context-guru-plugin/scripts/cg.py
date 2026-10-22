@@ -1190,12 +1190,17 @@ CMDS = {"home": cmd_home, "insights": cmd_insights,
 
 # Why the server holds nothing to ping with (cachestate `ping_reason`), in words. The mod's toast says the same.
 PING_REASONS = {
-    "not opted in": "turn on Ping: reload Claude Code after updating the plugin",
-    "too large": "context too large to hold for Ping",
-    "expired": "cache already cold",
+    "not opted in": "restart Claude Code after the plugin update",
+    "below limits": "keep-alive is on, but this thread is below its minimum size or limits",
     "over budget": "one ping would cost more than the per-ping limit",
+    "too large": "context too large to hold for Ping",
     "unsupported": "this session cannot be pinged (extended thinking)",
+    "pings used": "the planned keep-alive pings have run out",
+    "stopped": "the proxy stopped keeping this thread warm after a miss or a refused ping",
+    "expired": "cache already cold",
+    "no entry": "the server knows nothing about this session yet; send a prompt first",
 }
+PING_REASON_OTHER = "cannot ping this session right now"  # a code from a newer server: never shown raw
 
 
 def ping_reason(cs: dict | None) -> str:
@@ -1215,7 +1220,7 @@ def ping_lines(code: int, doc: dict | None, reason: str = "") -> list[str]:
         return [f"Kept warm: saved {dollars(doc.get('saved_usd', 0))} net (ping cost {dollars(doc.get('ping_usd', 0))})."]
     err = doc.get("error")
     if code == 409 and err == "not held" and reason:
-        return [f"Can't ping: {PING_REASONS.get(reason, reason)}."]
+        return [f"Can't ping: {PING_REASONS.get(reason, PING_REASON_OTHER)}."]
     if code == 409 and err == "not held":
         return ["Keep-alive is off for this account. Turn it on in the dashboard to ping."]
     if code == 409 and err == "busy":

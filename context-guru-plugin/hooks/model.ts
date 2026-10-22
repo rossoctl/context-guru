@@ -119,18 +119,20 @@ export const signature = (v: View | null): string =>
       ])
 
 /** Why the server holds nothing to ping with (cachestate `ping_reason`), in words. */
-export const reasonWords = (reason: string): string =>
-  reason === 'not opted in'
-    ? 'turn on Ping: reload Claude Code after updating the plugin'
-    : reason === 'too large'
-      ? 'context too large to hold for Ping'
-      : reason === 'expired'
-        ? 'cache already cold'
-        : reason === 'over budget'
-          ? 'one ping would cost more than the per-ping limit'
-          : reason === 'unsupported'
-            ? 'this session cannot be pinged (extended thinking)'
-            : reason
+const REASONS: Record<string, string> = {
+  'not opted in': 'restart Claude Code after the plugin update',
+  'below limits': 'keep-alive is on, but this thread is below its minimum size or limits',
+  'over budget': 'one ping would cost more than the per-ping limit',
+  'too large': 'context too large to hold for Ping',
+  unsupported: 'this session cannot be pinged (extended thinking)',
+  'pings used': 'the planned keep-alive pings have run out',
+  stopped: 'the proxy stopped keeping this thread warm after a miss or a refused ping',
+  expired: 'cache already cold',
+  'no entry': 'the server knows nothing about this session yet; send a prompt first',
+}
+
+/** A code from a newer server is never shown raw. */
+export const reasonWords = (reason: string): string => REASONS[reason] ?? 'cannot ping this session right now'
 
 /** The main thread's `ping_reason` from the last cachestate read, when the server gave one. */
 export function pingReason(snap: Snapshot | null): string | undefined {
