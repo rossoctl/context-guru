@@ -6,8 +6,9 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 )
 
 // PREFIX ASKS — putting a question to the request's own model with the previous turn's SENT body as
@@ -45,46 +46,126 @@ import (
 //   - a body larger than maxSentBody is NOT stashed at all, rather than evicting others to hold it.
 //     The next turn's ask then finds nothing, reports errNoPrefix, and the sweep declines. One
 //     forgone opportunity, no wrong answer.
-//   - past maxSentSessions or maxSentBytes the WHOLE stash is dropped. Crude on purpose: a missing
-//     prefix costs one declined sweep, while an LRU here would be state to get wrong for no
-//     measurable gain. The worst case is a busy proxy that never accumulates a usable prefix, which
-//     is visible as sweep_no_prefix rather than as a silent cost.
+//   - past maxSentSessions or maxSentBytes the OLDEST entries are dropped until the new one fits.
+//     This was a wholesale drop until #423 keyed the stash by thread. Since then one Claude Code
+//     session adds a new short-lived entry on almost every turn (each auxiliary request is its own
+//     thread), so a wholesale drop would regularly throw away the main thread's body — the one the
+//     next prefix ask needs. Dropping the oldest keeps the active threads.
 //
-// 64 sessions x up to 1.5 MB is ~96 MB, which is the outer bound and why maxSentBytes states it
-// explicitly rather than leaving it to be multiplied out.
+// The entry bound counts THREADS. 256 entries is still bounded in bytes by maxSentBytes (~96 MB),
+// which is the outer bound and why it is stated explicitly rather than left to be multiplied out.
 const (
-	maxSentSessions = 64
+	maxSentSessions = 256
 	maxSentBody     = 1_500_000
 	maxSentBytes    = 96_000_000
 )
 
-// sentStash holds the last body forwarded upstream per session.
-type sentStash struct {
-	mu    sync.Mutex
-	m     map[string][]byte
-	bytes int
+// sentEntry is one session's stashed state, plus what it takes to answer
+// components.PrefixCoverage.CoversSpan for it later without re-parsing on every put.
+//
+// TWO BODIES, NOT ONE, and this is PR #414's review finding on this follow-up (which otherwise
+// only fixed #402's own re-review note). `forwarded` is what actually went upstream — the bytes
+// Ask appends its question to, because that is what the provider's prompt cache was populated
+// from. `preBody` is what the PIPELINE ITSELF received as req.Input, before cache_aware_summarizer
+// or any later component (textclean, format, dedup, …) touched it.
+//
+// Those two are NOT the same body whenever a component that runs AFTER cache_aware_summarizer in
+// the pipeline rewrites a message before forwarding — xhigh runs textclean, format, dedup, toon,
+// cmdfilter, searchfold and extract_llm after it. cache_aware_summarizer computes its own
+// requiredHash from msgs[:end], where msgs is req.Input AS THE PIPELINE RECEIVED IT this turn —
+// i.e. the same basis as preBody, never as forwarded. Checking coverage against `forwarded`
+// therefore compared the summarizer's span against a transcript a DIFFERENT component had already
+// edited, and disagreed on every turn one of them actually acted — live xhigh measured 5 of 5
+// commissions declining as stale_prefix for exactly this reason, with 0 ever committed. CoversSpan
+// below must use preBody; `forwarded` exists only for Ask, which has to append to the bytes the
+// provider's cache actually holds.
+//
+// The provider is kept so a later CoversSpan call can re-derive the same message boundaries a
+// components/offload caller computed over its own, freshly-normalized request. Both bodies are
+// re-normalized lazily, on the (rare, off the hot forwarding path) call to CoversSpan, rather than
+// eagerly on every put — put runs on every single forwarded request, CoversSpan only when a
+// component is actually about to commission a summary through this stash.
+type sentEntry struct {
+	forwarded []byte
+	preBody   []byte
+	provider  bschemas.ModelProvider
+	// seq orders entries by the time they were put, for oldest-first eviction.
+	seq uint64
 }
 
-func newSentStash() *sentStash { return &sentStash{m: map[string][]byte{}} }
+// sentStash holds the last body forwarded upstream per THREAD, keyed by thread.Key(session, thread)
+// (#423), plus the pre-pipeline body that produced it (#414/#431). Per session, a subagent's
+// request replaced the main thread's body, so a prefix ask on the main thread failed its coverage
+// check (ErrStalePrefix) or answered from the wrong conversation.
+type sentStash struct {
+	// afterEntryRead, set only by tests, runs in snapshotCovering right after the entry is read, so a
+	// test can replace the stash at the exact point a second read would have gone wrong.
+	afterEntryRead func()
+	mu             sync.Mutex
+	m              map[string]sentEntry
+	bytes          int
+	seq            uint64
+}
 
-// put records this session's forwarded body, replacing any previous one.
-func (s *sentStash) put(session string, body []byte) {
-	if s == nil || session == "" || len(body) == 0 || len(body) > maxSentBody {
+func newSentStash() *sentStash { return &sentStash{m: map[string]sentEntry{}} }
+
+// put records this session's forwarded body AND the pre-pipeline body it was built from,
+// replacing any previous entry.
+//
+// Either body over maxSentBody is NOT stashed, and this DELETES whatever was stashed for the
+// session before — see the package comment's "what happens when a bound is hit". Keeping the OLD
+// bodies used to be the behavior (before #402), on the theory that a forgone opportunity now
+// beats one later; it is not, for PrefixAsker: Ask would still find something and answer from a
+// transcript that is missing everything since, with no signal to the caller that happened, unless
+// the caller checks CoversSpan first. A stale body is worse than none — none makes Ask return
+// ErrNoPrefix, which every caller already handles; a stale one makes Ask succeed with an answer
+// about the wrong conversation. CoversSpan is the primary fix (a caller that checks it never gets
+// fooled by a stale body either way), but deleting here means a caller that does NOT check also
+// gets the safer failure mode. Checked on BOTH bodies, so an oversized preBody cannot leave a
+// forwarded body stashed with no coverage check possible against it (CoversSpan would then have
+// nothing to compare and would report "covered" by its own missing-session convention — exactly
+// the silent-wrong-answer shape #402 fixed).
+//
+// Past maxSentSessions or maxSentBytes the OLDEST entries (by seq, #423) are evicted until the new
+// one fits — never a wholesale drop, which would regularly throw away an active main thread's body
+// in favor of a short-lived subagent thread's. Both bodies' bytes are charged and released together,
+// since neither is useful without the other.
+func (s *sentStash) put(session string, provider bschemas.ModelProvider, preBody, forwarded []byte) {
+	if s == nil || session == "" || len(forwarded) == 0 {
 		return
 	}
-	cp := make([]byte, len(body))
-	copy(cp, body)
+	if len(forwarded) > maxSentBody || len(preBody) > maxSentBody {
+		s.mu.Lock()
+		if old, ok := s.m[session]; ok {
+			s.bytes -= len(old.forwarded) + len(old.preBody)
+			delete(s.m, session)
+		}
+		s.mu.Unlock()
+		return
+	}
+	cpF := make([]byte, len(forwarded))
+	copy(cpF, forwarded)
+	cpP := make([]byte, len(preBody))
+	copy(cpP, preBody)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if old, ok := s.m[session]; ok {
-		s.bytes -= len(old)
+		s.bytes -= len(old.forwarded) + len(old.preBody)
+		delete(s.m, session)
 	}
-	if len(s.m) >= maxSentSessions || s.bytes+len(cp) > maxSentBytes {
-		s.m = map[string][]byte{}
-		s.bytes = 0
+	for len(s.m) > 0 && (len(s.m) >= maxSentSessions || s.bytes+len(cpF)+len(cpP) > maxSentBytes) {
+		oldestKey, oldest := "", uint64(0)
+		for k, e := range s.m {
+			if oldestKey == "" || e.seq < oldest {
+				oldestKey, oldest = k, e.seq
+			}
+		}
+		s.bytes -= len(s.m[oldestKey].forwarded) + len(s.m[oldestKey].preBody)
+		delete(s.m, oldestKey)
 	}
-	s.m[session] = cp
-	s.bytes += len(cp)
+	s.seq++
+	s.m[session] = sentEntry{forwarded: cpF, preBody: cpP, provider: provider, seq: s.seq}
+	s.bytes += len(cpF) + len(cpP)
 }
 
 func (s *sentStash) get(session string) []byte {
@@ -93,7 +174,88 @@ func (s *sentStash) get(session string) []byte {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.m[session]
+	return s.m[session].forwarded
+}
+
+// CoversSpan implements components.PrefixCoverage: it reports whether the stashed PRE-PIPELINE
+// body for session (see sentEntry's own comment on why this is preBody, never forwarded),
+// re-normalized the same way the forwarding path itself normalizes a wire body
+// (apply.NormalizeMessages), has AT LEAST `count` messages and those first `count` messages hash
+// (components.SpanHash) to exactly `hash`.
+//
+// A MISSING session reports true — covered — rather than false. That looks backwards until
+// you read what Ask already does with it: with nothing stashed, Ask returns components.
+// ErrNoPrefix, which every existing caller already treats as the ordinary, once-per-session
+// "nothing to read yet" case (cacheAwareNoPrefix), not a failure. This method exists to catch a
+// DIFFERENT, newer failure: a stash that HOLDS something, but not enough of it, or not the right
+// bytes — put's own oversized-body path now deletes a session's entry rather than leaving a
+// stale one behind (see put's comment), specifically so that case also degrades to "missing",
+// not "wrong". So false here is reserved for the one case that is actually dangerous: a PRESENT
+// stash whose coverage falls short — see cache_aware_summarizer's own stale-prefix guard, which
+// is the only caller.
+func (s *sentStash) CoversSpan(session string, count int, hash string) bool {
+	if s == nil || session == "" || count < 0 {
+		return true
+	}
+	s.mu.Lock()
+	e, ok := s.m[session]
+	s.mu.Unlock()
+	if !ok {
+		return true
+	}
+	norm := apply.NormalizeMessages(e.provider, e.preBody)
+	if count > len(norm) {
+		return false
+	}
+	return components.SpanHash(norm[:count]) == hash
+}
+
+// snapshotCovering returns the stashed forwarded body for session if the stashed PRE-pipeline body
+// covers the first count normalized messages hashed to hash, from ONE read of the entry: the
+// returned body is the one that was checked. A missing session is components.ErrNoPrefix, a
+// present one that falls short components.ErrStalePrefix.
+func (s *sentStash) snapshotCovering(session string, count int, hash string) ([]byte, error) {
+	if s == nil || session == "" {
+		return nil, components.ErrNoPrefix
+	}
+	s.mu.Lock()
+	e, ok := s.m[session]
+	s.mu.Unlock()
+	if s.afterEntryRead != nil {
+		s.afterEntryRead()
+	}
+	if !ok || len(e.forwarded) == 0 {
+		return nil, components.ErrNoPrefix
+	}
+	// e's slices are never mutated after put (a replacement installs new ones), so reading them
+	// outside the lock is safe and is the same entry that was just selected.
+	if count >= 0 {
+		norm := apply.NormalizeMessages(e.provider, e.preBody)
+		if count > len(norm) || components.SpanHash(norm[:count]) != hash {
+			return nil, components.ErrStalePrefix
+		}
+	}
+	return e.forwarded, nil
+}
+
+// AskCovered implements components.PrefixCoveredAsker: coverage check and ask on one snapshot.
+func (p prefixAsker) AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, components.PrefixUsage, error) {
+	body, err := p.stash.snapshotCovering(session, count, hash)
+	if err != nil {
+		return "", components.PrefixUsage{}, err
+	}
+	reply, u, err := p.cli.CompletePrefixed(ctx, body, ask)
+	return reply, components.PrefixUsage(u), err
+}
+
+// AskCovered implements components.PrefixCoveredAsker for the Responses route.
+func (p responsesPrefixAsker) AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, components.PrefixUsage, error) {
+	body, err := p.stash.snapshotCovering(session, count, hash)
+	if err != nil {
+		return "", components.PrefixUsage{}, err
+	}
+	reply, u, err := p.cli.CompletePrefixedResponses(ctx, body, ask)
+	return reply, components.PrefixUsage(u), err
 }
 
 // prefixAsker is the components.PrefixAsker the pipeline receives. Created per request and holds no
@@ -117,6 +279,14 @@ func (p responsesPrefixAsker) Ask(ctx context.Context, session, ask string) (str
 	return reply, components.PrefixUsage(u), err
 }
 
+// CoversSpan implements components.PrefixCoverage by delegating to the stash this asker reads
+// through Ask — the asker value itself is what a caller type-asserts
+// (c.PrefixAsk.(components.PrefixCoverage)), so the method has to live here, not only on
+// *sentStash, or the assertion always fails and the stale-prefix guard never actually runs.
+func (p responsesPrefixAsker) CoversSpan(session string, count int, hash string) bool {
+	return p.stash.CoversSpan(session, count, hash)
+}
+
 // Ask appends the question to this session's last forwarded body and returns the model's text plus
 // what it actually cost. A missing stash is an ERROR rather than a silent empty answer, so the caller
 // can tell "there was no prefix to read" from "the model declined to act" — the distinction the
@@ -128,6 +298,13 @@ func (p prefixAsker) Ask(ctx context.Context, session, ask string) (string, comp
 	}
 	reply, u, err := p.cli.CompletePrefixed(ctx, body, ask)
 	return reply, components.PrefixUsage(u), err
+}
+
+// CoversSpan implements components.PrefixCoverage by delegating to the stash this asker reads
+// through Ask — see responsesPrefixAsker.CoversSpan's own comment for why this cannot live only
+// on *sentStash.
+func (p prefixAsker) CoversSpan(session string, count int, hash string) bool {
+	return p.stash.CoversSpan(session, count, hash)
 }
 
 // prefixAskerFor builds the asker for one request, or nil when a precondition is missing.

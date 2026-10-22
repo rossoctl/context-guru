@@ -408,14 +408,14 @@ func seedReport(t *testing.T) *DB {
 	var evs []*Event
 	for i := 0; i < 10; i++ { // 10 requests, all cache hits
 		e := mkEvent(int64(1000+i), "used", "claude", 100, 90)
-		e.TenantID, e.Tools = "t1", 4
+		e.TenantID, e.Tools, e.DeclDigest = "t1", 4, "d1" // the set each request carried
 		evs = append(evs, e)
 	}
 	e := mkEvent(2000, "nocapture", "claude", 100, 90)
 	e.TenantID, e.Tools = "t1", 4
 	evs = append(evs, e)
 	other := mkEvent(3000, "someone-else", "claude", 100, 90)
-	other.TenantID, other.Tools = "t2", 4
+	other.TenantID, other.Tools, other.DeclDigest = "t2", 4, "d2"
 	evs = append(evs, other)
 	if err := db.insertBatch(evs); err != nil {
 		t.Fatal(err)
@@ -585,7 +585,7 @@ func TestToolAPIScope(t *testing.T) {
 	// Reuse the seeded shape on the recorder's own database.
 	db := rec.DB()
 	e := mkEvent(1000, "used", "claude", 100, 90)
-	e.TenantID, e.Tools = "t1", 1
+	e.TenantID, e.Tools, e.DeclDigest = "t1", 1, "d1"
 	if err := db.insertBatch([]*Event{e}); err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +828,7 @@ func TestToolReportCountsTheSkillsListingOnce(t *testing.T) {
 	var evs []*Event
 	for i := 0; i < 10; i++ {
 		e := mkEvent(int64(1000+i), "skillsonly", "claude", 100, 90)
-		e.TenantID, e.Tools = "t1", 2 // r.tools > 0 is what makes a session eligible
+		e.TenantID, e.Tools, e.DeclDigest = "t1", 2, "d1" // r.tools > 0 is what makes a session eligible
 		evs = append(evs, e)
 	}
 	if err := db.insertBatch(evs); err != nil {
@@ -877,4 +877,47 @@ func TestToolReportCountsTheSkillsListingOnce(t *testing.T) {
 	if rep.Skills.UnusedListingReads != 10_000 {
 		t.Errorf("unused listing reads = %d, want 10000", rep.Skills.UnusedListingReads)
 	}
+}
+
+// A declaration is billed on the requests that carried it, not on every request of the session
+// that declared it: here half the session's requests are a subagent's, whose set has no Workflow.
+func TestToolReportBillsOnlyTheRequestsThatCarriedIt(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := 0; i < 10; i++ {
+		e := mkEvent(int64(1000+i), "s", "claude", 100, 90)
+		e.TenantID, e.Tools, e.DeclDigest = "t1", 2, "main"
+		if i%2 == 1 {
+			e.Tools, e.DeclDigest = 1, "sub"
+		}
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	bash := Decl{Kind: KindTool, Name: "Bash", Tokens: 100}
+	if err := w.write([]invMsg{
+		{tenant: "t1", session: "s", ts: 1000, inv: &Inventory{Digest: "main", UseFingerprint: 1,
+			Decls: []Decl{bash, {Kind: KindTool, Name: "Workflow", Tokens: 5000}}}},
+		{tenant: "t1", session: "s", ts: 1000, inv: &Inventory{Digest: "sub", UseFingerprint: 1, Decls: []Decl{bash}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range rep.Tools {
+		if st.Name == "Workflow" {
+			if st.UnusedReads != 5*5000 || st.UnusedUSDLow != st.UnusedUSD || st.UnusedUSDHigh != st.UnusedUSD {
+				t.Fatalf("Workflow %+v: want 5 carrying requests x 5000 tokens, exact", st)
+			}
+			if rep.Carried == nil || rep.Carried.RequestsExact != 10 {
+				t.Fatalf("coverage %+v", rep.Carried)
+			}
+			return
+		}
+	}
+	t.Fatalf("no Workflow row: %+v", rep.Tools)
 }

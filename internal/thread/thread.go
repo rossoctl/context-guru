@@ -1,0 +1,667 @@
+// Package thread tells apart the THREADS of one session: the main agent, each subagent, each
+// fork. Every thread has its own prompt and its own provider cache entry, so the two places that
+// reason about one cache entry — the dashboard's miss attribution and the idle keep-alive — must
+// key on session + thread, not on the session alone (issue #423).
+//
+// A thread id is found in this order:
+//
+//  1. The agent's own header. Claude Code sends `x-claude-code-agent-id` on every subagent
+//     request and omits it on the main thread (seen on the wire with 2.1.294). The proxy reads
+//     the header and passes it in as the hint.
+//  2. Prefix continuity, for every request without that header and for every agent and provider
+//     that never sends it. A request continues thread T when T's last message list is a prefix
+//     of the new request's message list — the same rule the provider cache applies, so requests
+//     are grouped exactly as the cache groups them.
+//  3. The session itself (thread id ""), when neither gives an answer. That is the behaviour
+//     before this package existed, so a wrong guess can never be worse than no guess.
+//
+// The first thread of a session without a header also gets the id "". A single-thread session —
+// every Codex or Bob Shell session, and every Claude Code session that never starts a subagent —
+// therefore keys exactly as it did before.
+//
+// "" goes to the main agent, told apart by metadata: the first header-less thread that declares
+// tools. An auxiliary request (Claude Code's security monitor, a title) declares none, so if one
+// speaks first it holds "" only until the main agent's first request, and then moves to its own
+// "p:" id (see newID). Turn count or order would not do: order is wrong when an auxiliary request
+// comes first, and choosing by turn count would re-key a live thread. One case is still open: after
+// a proxy restart mid-session, a header-less SUBAGENT that speaks before the main agent declares
+// tools too and takes "".
+package thread
+
+import (
+	"encoding/binary"
+	"encoding/hex"
+	"hash"
+	"hash/fnv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/tidwall/gjson"
+)
+
+// Primary is the id of a session's first thread, and of every request whose thread cannot be
+// told. Key(session, Primary) is the session itself.
+const Primary = ""
+
+// Key is the map key the recorder and the keeper use for one thread: the session itself for the
+// primary thread, so single-thread traffic keys exactly as it did before threads existed.
+func Key(session, thread string) string {
+	if thread == Primary {
+		return session
+	}
+	return session + "\x00" + thread
+}
+
+// Source says which rule produced a thread id.
+type Source string
+
+const (
+	SourceHeader  Source = "header"  // the agent named the thread
+	SourcePrefix  Source = "prefix"  // matched, or started, by prefix continuity
+	SourceSession Source = "session" // last resort: no usable message list
+)
+
+// Result is one request's thread.
+type Result struct {
+	ID     string
+	Source Source
+	// Disagree is set when the agent's header named a KNOWN thread but prefix continuity matched
+	// a different one. The header wins; the caller logs this so a drift between the two paths is
+	// visible rather than silent.
+	Disagree bool
+	// Inherits is set on the FIRST request of a new thread whose message content is mostly an
+	// existing thread's: it names that thread. Such a request is not a cold start. It is the
+	// existing conversation with a changed prefix — a user rewind, an edited earlier message, a
+	// fork. Attribution then treats it as that thread's next turn, so its miss reads
+	// prefix_change (or ttl_expiry), never cold_start. See inheritMass. "" otherwise.
+	Inherits string
+	// inherits is set when Inherits names the primary thread, whose id is "".
+	inherits bool
+}
+
+// InheritsFrom reports the existing thread a new thread continues by content, if any.
+func (r Result) InheritsFrom() (string, bool) { return r.Inherits, r.inherits }
+
+const (
+	// maxThreadsPerSession bounds one session's thread list. A Claude Code session makes many
+	// small auxiliary requests, each with its own first message, so without a bound the list
+	// would grow for the life of the session. The oldest thread goes first: a thread silent long
+	// enough to be the oldest of 64 has lost its provider cache anyway.
+	maxThreadsPerSession = 64
+	// maxSessions and staleAfter bound the session map the same way dash.Recorder bounds its own
+	// (by age, well past every provider cache lifetime this repo knows of).
+	maxSessions = 20000
+	staleAfter  = 2 * time.Hour
+	// maxHeaderID refuses a header value too long to be an agent id.
+	maxHeaderID = 128
+	// inheritMass is the share of a new thread's message bytes that must be a known thread's
+	// leading messages for the new thread to count as that conversation with a changed prefix,
+	// rather than a new conversation. A subagent's first request shares nothing with the main
+	// thread (its first message is its own task); a rewind or an edited earlier turn shares
+	// everything before the edit, which on a long conversation is most of it.
+	inheritMass = 0.5
+)
+
+type threadState struct {
+	id string
+	// n and sum describe the thread's LAST request: its message count and the cumulative
+	// fingerprint after its last message. A new request continues the thread when its own
+	// fingerprint after message n equals sum.
+	n   int
+	sum uint64
+	// sums is the cumulative fingerprint of every message of the last request, kept to measure
+	// how much a NEW thread's content shares with this one (see Result.Inherits).
+	sums []uint64
+	last time.Time
+	// tools is whether the thread's last request declared tools: the metadata that tells the
+	// main agent from an auxiliary request (see newID).
+	tools bool
+	// model is the model the thread's last request named. A TIE-BREAKER only (see preferOnTie):
+	// one thread can change model — `/model`, Opus plan mode, a fallback on overload — so a
+	// different model never keeps a request out of a thread.
+	model string
+	// compacting marks a thread whose last request was the agent's own compaction request. The
+	// agent's next request starts from a summary, so it matches no thread by prefix; it is still
+	// the same thread, and it inherits this id.
+	compacting bool
+}
+
+type sessionState struct {
+	threads []*threadState
+	last    time.Time
+}
+
+// Tracker holds each live session's threads. Safe for concurrent use. The zero value is not
+// usable; call New.
+type Tracker struct {
+	mu       sync.Mutex
+	sessions map[string]*sessionState
+	now      func() time.Time
+}
+
+// New returns an empty tracker.
+func New() *Tracker {
+	return &Tracker{sessions: map[string]*sessionState{}, now: time.Now}
+}
+
+// ValidHeaderID reports whether an agent-id header value is usable. Empty, over-long, or
+// containing anything outside [A-Za-z0-9_.:@-] is not: such a value falls back to prefix
+// continuity rather than becoming a key. `@` is in the set because an agent-team teammate's id is
+// `<name>@<team>` (Claude Code 2.1.296); without it every teammate fell back to prefix continuity.
+func ValidHeaderID(v string) bool {
+	if v == "" || len(v) > maxHeaderID {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '_', c == '.', c == ':', c == '-', c == '@':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// Resolve finds the thread of one request.
+//
+// scope is the tenant + session the thread belongs to. agentID is the agent's own thread header
+// ("" when absent; the caller validates it with ValidHeaderID). body is the request AS THE AGENT
+// SENT IT — before any compaction, which would otherwise break the very prefix this matches on.
+// agentCompaction marks the agent's own compaction request (see the compacting field).
+//
+// A nil tracker, and an empty scope, give the session itself.
+func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bool) Result {
+	if t == nil || scope == "" {
+		return Result{ID: Primary, Source: SourceSession}
+	}
+	sums, mass, ok := fingerprint(body)
+	hasTools := gjson.GetBytes(body, "tools.#").Int() > 0
+	model := gjson.GetBytes(body, "model").String()
+	now := t.now()
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s := t.sessions[scope]
+	if s == nil {
+		if len(t.sessions) >= maxSessions {
+			t.pruneLocked(now)
+		}
+		s = &sessionState{}
+		t.sessions[scope] = s
+	}
+	s.last = now
+
+	var match, compacted *threadState
+	if ok {
+		match = s.longestPrefix(sums)
+	}
+	// The agent's own compaction request need not EXTEND the thread it summarizes. Claude Code
+	// 2.1.296 adds its prompt as an extra text block inside the last user message (#518), so the
+	// request shares every message but that one and matches no thread. It is still that
+	// thread's request, and it must stay there: newID hands the compacting thread's id to the
+	// post-compaction request, so a compaction that got a new id here would move the main
+	// thread onto that new id for the rest of the session.
+	//
+	// The same holds for an ordinary main-agent turn whose tail Claude Code rewrote instead of
+	// extending: seen on a live session (#518), a turn start that changed the last user message or
+	// dropped the trailing system message, while the provider cache still read 99.8% of the
+	// prefix. Such a request shares every message of a tools thread's last request except the last
+	// one or two, and it is that thread's next turn. A header-less fork shares less than that.
+	switch {
+	case !ok || match != nil:
+	case agentCompaction:
+		compacted = s.compactionParent(sums, model)
+	case hasTools && agentID == "":
+		compacted = s.rewrittenTailParent(sums, model)
+	}
+
+	var res Result
+	// sideParent is set when this request is a SIDE request: tool-less, yet it extends a
+	// tools-declaring (main-agent) thread's prefix. Claude Code's title suggestion, quota check
+	// and end-of-turn note all do this — they share the main thread's prefix and append their
+	// own extra message. Matching such a request to the main thread, and then recording its
+	// extra message as the thread's new tail, is the #426 bug: the next REAL turn extends the
+	// ORIGINAL conversation, not the side request's, so it no longer matches and the main thread
+	// wrongly splits into a new id. The side request must therefore get a thread of its OWN,
+	// chained to the main thread by Inherits, so the main thread's tail, timestamp and every
+	// structure keyed by its id (keep-alive, the prefix-ask stash, wait-cause state) are left
+	// exactly as its own last request put them.
+	//
+	// agentCompaction is excluded on purpose: the agent's own compaction request can itself be
+	// tool-less (its prompt tells the model not to call any), and it is NOT a side request — it
+	// is the main thread asking for its own summary. newID's succ lookup below finds a thread by
+	// its `compacting` flag, which only a request matched to the main thread (not diverted into
+	// a side thread of its own) can set. Diverting it here would leave the main thread never
+	// marked compacting, so the post-compaction request — which matches no prefix, by design —
+	// would get yet another new id instead of the main thread's, splitting the thread on every
+	// compaction.
+	var sideParent *threadState
+	switch {
+	case agentID != "":
+		res = Result{ID: "a:" + agentID, Source: SourceHeader}
+		if known := s.find(res.ID); known != nil && match != nil && match != known {
+			res.Disagree = true
+		}
+	case !ok:
+		// No message list to match on (a server-held Responses history, an unparseable body).
+		// Today's behaviour: the session itself.
+		return Result{ID: Primary, Source: SourceSession}
+	case match != nil && match.tools && !hasTools && !agentCompaction:
+		res = Result{ID: fingerprintID(sums[len(sums)-1]), Source: SourcePrefix}
+		sideParent = match
+	case match != nil:
+		res = Result{ID: match.id, Source: SourcePrefix}
+	case compacted != nil:
+		res = Result{ID: compacted.id, Source: SourcePrefix}
+	default:
+		res = Result{ID: s.newID(sums, hasTools, model), Source: SourcePrefix}
+	}
+	if !ok {
+		// A header thread with no message list: keep its id, record nothing to match on.
+		return res
+	}
+	th := s.find(res.ID)
+	if th == nil {
+		switch {
+		case sideParent != nil:
+			res.Inherits, res.inherits = sideParent.id, true
+		default:
+			if from := s.mostShared(sums, mass); from != nil {
+				res.Inherits, res.inherits = from.id, true
+			}
+		}
+		th = &threadState{id: res.ID}
+		s.add(th)
+	}
+	// Record THIS thread's own tail — the side thread's, when sideParent != nil, never the main
+	// thread's: sideParent is a different *threadState than th, left untouched above.
+	th.n, th.sum, th.sums, th.last = len(sums), sums[len(sums)-1], sums, now
+	// Sticky: once a thread has declared tools it stays the main-agent candidate, so one
+	// tool-less request from the main agent cannot let a later thread take "" in the middle of
+	// its life. hasTools is always false here when sideParent != nil (that is what put it in the
+	// side branch); if a LATER request on this same id does declare tools, it matches as this
+	// thread's own continuation (the "match != nil" branch above) and sets th.tools true then.
+	th.tools = th.tools || hasTools
+	th.model = model
+	// A side thread cannot be a compaction continuation: compaction is the main agent's own act.
+	th.compacting = sideParent == nil && agentCompaction && res.Source == SourcePrefix
+	return res
+}
+
+// newID names a thread that matched nothing. The first thread of a session is the primary; the
+// successor of a compacting thread inherits its id; anything else is named after its own
+// fingerprint, which differs from every other thread's (a fork has its parent's prefix but not
+// its parent's full message list).
+//
+// The primary goes to the main agent, told by METADATA, not order: the main agent declares tools
+// (Claude Code's 23, Codex's exec_command), while an auxiliary request (Claude Code's security
+// monitor, a title) declares none. So a tool-less thread holds the primary id only until the first
+// thread with tools arrives; it then gets its own id. A client that never declares tools keeps
+// its first thread as the primary, exactly as before.
+func (s *sessionState) newID(sums []uint64, hasTools bool, model string) string {
+	holder := s.find(Primary)
+	switch {
+	case holder == nil && !s.hasPrefixThread():
+		return Primary
+	case holder != nil && hasTools && !holder.tools:
+		holder.id = fingerprintID(holder.sum)
+		return Primary
+	}
+	// The MOST RECENT compacting thread: the agent sends the post-compaction request right after
+	// its compaction request, so if two threads are compacting at once, the later one is the one
+	// whose summary this is. Slice order would be arbitrary.
+	// Only a request of the same kind succeeds a compacting thread: tools for a thread that
+	// declares tools, none for one that does not (#518). Claude Code sends a tool-less side
+	// request between its compaction request and its next turn, and that request must not take
+	// the main agent's id. The other way round matters too: Claude Code's auto-mode classifier
+	// sends the session transcript, which can quote the compaction prompt, so its tool-less thread
+	// can be marked compacting by mistake, and the main agent must not move onto it. Between two
+	// candidates, preferOnTie.
+	var succ *threadState
+	for _, th := range s.threads {
+		if th.compacting && hasTools == th.tools && (succ == nil || preferOnTie(th, succ, model)) {
+			succ = th
+		}
+	}
+	if succ != nil {
+		succ.compacting = false
+		return succ.id
+	}
+	// The same fingerprint as a thread that has since moved on is a resent request from that
+	// thread's past; the caller then joins it, which is right, since the prefix is the same.
+	return fingerprintID(sums[len(sums)-1])
+}
+
+// fingerprintID names a thread after a fingerprint: of its first request for a new thread, of its
+// last request for a tool-less thread that newID moves off the primary id.
+func fingerprintID(sum uint64) string {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], sum)
+	return "p:" + hex.EncodeToString(b[:6])
+}
+
+// mostShared returns the thread whose messages make up at least inheritMass of this request's
+// message bytes as a common leading run, the largest such share winning. nil when none does.
+func (s *sessionState) mostShared(sums []uint64, mass []int) *threadState {
+	total := mass[len(mass)-1]
+	if total <= 0 {
+		return nil
+	}
+	var best *threadState
+	bestShared := 0
+	for _, th := range s.threads {
+		lcp := 0
+		for lcp < len(th.sums) && lcp < len(sums) && th.sums[lcp] == sums[lcp] {
+			lcp++
+		}
+		if lcp == 0 {
+			continue
+		}
+		if shared := mass[lcp-1]; shared > bestShared {
+			best, bestShared = th, shared
+		}
+	}
+	if best == nil || float64(bestShared) < inheritMass*float64(total) {
+		return nil
+	}
+	return best
+}
+
+// compactionParent returns the thread an agent compaction request summarizes when it extends no
+// thread: the one sharing the longest run of leading messages with it, among the threads no agent
+// header named. A thread that declares tools wins over one that does not, because compaction is the main agent's act and a side
+// request can share the same leading run; then preferOnTie decides. nil when no thread shares
+// even the first message.
+func (s *sessionState) compactionParent(sums []uint64, model string) *threadState {
+	var best *threadState
+	bestLCP := 0
+	for _, th := range s.threads {
+		if headerThread(th) {
+			continue
+		}
+		lcp := 0
+		for lcp < len(th.sums) && lcp < len(sums) && th.sums[lcp] == sums[lcp] {
+			lcp++
+		}
+		if lcp == 0 {
+			continue
+		}
+		switch {
+		case best == nil,
+			th.tools && !best.tools,
+			th.tools == best.tools && lcp > bestLCP,
+			th.tools == best.tools && lcp == bestLCP && preferOnTie(th, best, model):
+			best, bestLCP = th, lcp
+		}
+	}
+	return best
+}
+
+// rewrittenTailParent returns the tools thread whose last request this request repeats except for
+// its last one or two messages: the same conversation with its tail rewritten in place (see
+// Resolve). The longest shared run wins, then preferOnTie. nil when no tools thread qualifies.
+func (s *sessionState) rewrittenTailParent(sums []uint64, model string) *threadState {
+	var best *threadState
+	bestLCP := 0
+	for _, th := range s.threads {
+		if !th.tools || th.n == 0 || headerThread(th) {
+			continue
+		}
+		lcp := 0
+		for lcp < len(th.sums) && lcp < len(sums) && th.sums[lcp] == sums[lcp] {
+			lcp++
+		}
+		// All but the last one or two messages, and more than half of them, so a short thread is
+		// not joined by a request that shares only its first message.
+		if lcp < th.n-2 || 2*lcp <= th.n {
+			continue
+		}
+		if best == nil || lcp > bestLCP || (lcp == bestLCP && preferOnTie(th, best, model)) {
+			best, bestLCP = th, lcp
+		}
+	}
+	return best
+}
+
+// headerThread reports whether the agent named this thread with its header. Both parent searches
+// above run only for a request WITHOUT that header, and such a request is never a named thread's:
+// a forked subagent carries its parent's messages plus its own, so it shares the same leading run
+// as the main thread and could otherwise win the search (#519 review).
+func headerThread(th *threadState) bool { return strings.HasPrefix(th.id, "a:") }
+
+// preferOnTie reports whether a beats b when the stronger evidence ties: the thread whose last
+// request named this request's model first, then the most recent.
+func preferOnTie(a, b *threadState, model string) bool {
+	am, bm := model != "" && a.model == model, model != "" && b.model == model
+	if am != bm {
+		return am
+	}
+	return a.last.After(b.last)
+}
+
+// hasPrefixThread reports whether the session has a thread not named by a header. Header threads
+// do not count: after a restart a subagent may speak first, and the main thread, which carries no
+// header, must still get the primary id.
+func (s *sessionState) hasPrefixThread() bool {
+	for _, th := range s.threads {
+		if !strings.HasPrefix(th.id, "a:") {
+			return true
+		}
+	}
+	return false
+}
+
+// longestPrefix returns the thread whose last message list is the longest prefix of sums, the
+// most recent on a tie. Longest, because a fork shares its parent's earlier prefix: the parent's
+// own next request matches the parent's full list, the fork's matches only the shorter one.
+func (s *sessionState) longestPrefix(sums []uint64) *threadState {
+	var best *threadState
+	for _, th := range s.threads {
+		if th.n == 0 || th.n > len(sums) || sums[th.n-1] != th.sum {
+			continue
+		}
+		if best == nil || th.n > best.n || (th.n == best.n && th.last.After(best.last)) {
+			best = th
+		}
+	}
+	return best
+}
+
+func (s *sessionState) find(id string) *threadState {
+	for _, th := range s.threads {
+		if th.id == id {
+			return th
+		}
+	}
+	return nil
+}
+
+func (s *sessionState) add(th *threadState) {
+	if len(s.threads) >= maxThreadsPerSession {
+		oldest := 0
+		for i, o := range s.threads {
+			if o.last.Before(s.threads[oldest].last) {
+				oldest = i
+			}
+		}
+		s.threads = append(s.threads[:oldest], s.threads[oldest+1:]...)
+	}
+	s.threads = append(s.threads, th)
+}
+
+// pruneLocked drops sessions silent longer than staleAfter, and empties the map if that frees
+// nothing. Caller holds t.mu.
+func (t *Tracker) pruneLocked(now time.Time) {
+	for k, s := range t.sessions {
+		if now.Sub(s.last) > staleAfter {
+			delete(t.sessions, k)
+		}
+	}
+	if len(t.sessions) >= maxSessions {
+		t.sessions = map[string]*sessionState{}
+	}
+}
+
+// Fingerprint returns the cumulative fingerprint of a request's message list: element i is the
+// hash of messages[0..i]. ok is false when the body carries no message list to match on — no
+// `messages` or `input` array, or a Responses request that continues server-held history
+// (`previous_response_id`), whose `input` is only the newest turn.
+//
+// The fingerprint covers what decides whether the agent CONTINUED a conversation, and leaves out
+// what the agent rewrites in place without starting a new one:
+//
+//   - `cache_control` markers: an agent moves its breakpoint to the newest message every turn.
+//   - thinking and reasoning blocks: their signatures and encrypted payloads carry no thread
+//     identity, and a client may drop them from earlier turns.
+//   - the CONTENT of a tool result, kept by its call id only: Claude Code clears old tool results
+//     ("microcompact") without starting a new thread.
+//   - a message's `content` sent as a plain string versus as a one-element
+//     `[{"type":"text","text":...}]` array: Claude Code sends the newest turn in the array
+//     form (to carry a cache_control breakpoint) and the SAME message as a plain string once
+//     a later turn displaces it. The provider normalizes both to one text block and its
+//     cache still hits, so this package hashes them the same way too (see canon).
+//
+// The system prompt and the tools are left out on purpose. A thread whose system prompt changes
+// is still the same thread — that change is a prefix change, and it must be labelled as one.
+func Fingerprint(body []byte) ([]uint64, bool) {
+	sums, _, ok := fingerprint(body)
+	return sums, ok
+}
+
+// fingerprint is Fingerprint plus each prefix's MASS: mass[i] is the raw byte length of
+// messages[0..i]. Raw, not canonical, because the question it answers — how much of this
+// request is an old conversation — is about content, and a tool result's content is most of it.
+func fingerprint(body []byte) ([]uint64, []int, bool) {
+	root := gjson.ParseBytes(body)
+	if !root.IsObject() || root.Get("previous_response_id").String() != "" {
+		return nil, nil, false
+	}
+	items := root.Get("messages")
+	if !items.IsArray() {
+		items = root.Get("input")
+	}
+	h := fnv.New64a()
+	switch {
+	case items.Type == gjson.String:
+		// Responses accepts a bare string as the whole input: one user message.
+		canon(h, items)
+		return []uint64{h.Sum64()}, []int{len(items.Raw)}, true
+	case !items.IsArray():
+		return nil, nil, false
+	}
+	var sums []uint64
+	var mass []int
+	total := 0
+	items.ForEach(func(_, m gjson.Result) bool {
+		h.Write([]byte{0x1e}) // record separator, so [ab][c] and [a][bc] differ
+		canon(h, m)
+		sums = append(sums, h.Sum64())
+		total += len(m.Raw)
+		mass = append(mass, total)
+		return true
+	})
+	return sums, mass, len(sums) > 0
+}
+
+// canon writes v's thread-identifying shape to h. See Fingerprint for what it leaves out.
+func canon(h hash.Hash64, v gjson.Result) {
+	switch {
+	case v.IsObject():
+		// One pass over the object. Looking the discriminating keys up with Get scanned the whole
+		// object (past every long string in it) once per key before the real walk started, and a
+		// message is mostly one long string. A key that repeats keeps its FIRST value, as Get does.
+		var typ, role, toolUseID, callID, toolCallID string
+		var seenTyp, seenRole, seenTU, seenCall, seenTC bool
+		type kv struct{ k, val gjson.Result }
+		fields := make([]kv, 0, 4)
+		v.ForEach(func(k, val gjson.Result) bool {
+			fields = append(fields, kv{k, val})
+			switch k.Str {
+			case "type":
+				if !seenTyp {
+					typ, seenTyp = val.String(), true
+				}
+			case "role":
+				if !seenRole {
+					role, seenRole = val.String(), true
+				}
+			case "tool_use_id":
+				if !seenTU {
+					toolUseID, seenTU = val.String(), true
+				}
+			case "call_id":
+				if !seenCall {
+					callID, seenCall = val.String(), true
+				}
+			case "tool_call_id":
+				if !seenTC {
+					toolCallID, seenTC = val.String(), true
+				}
+			}
+			return true
+		})
+		switch typ {
+		case "thinking", "redacted_thinking", "reasoning":
+			h.Write([]byte("~"))
+			return
+		case "tool_result":
+			h.Write([]byte("tool_result:"))
+			h.Write([]byte(toolUseID))
+			return
+		case "function_call_output": // Responses
+			h.Write([]byte("function_call_output:"))
+			h.Write([]byte(callID))
+			return
+		}
+		if role == "tool" { // OpenAI chat
+			h.Write([]byte("tool:"))
+			h.Write([]byte(toolCallID))
+			return
+		}
+		h.Write([]byte("{"))
+		for _, f := range fields {
+			k, val := f.k, f.val
+			if k.Str == "cache_control" {
+				continue
+			}
+			h.Write([]byte(k.Str))
+			h.Write([]byte(":"))
+			if k.Str == "content" && val.Type == gjson.String {
+				// Claude Code sends the newest user turn's content as a one-element block
+				// array (so it can carry a cache_control breakpoint); once that turn is no
+				// longer the newest, it resends the SAME message as a plain string. The
+				// provider normalizes both to one text block and its cache still hits, so
+				// this package must agree: hash the string exactly as it would hash
+				// [{"type":"text","text":<the string>}] — val.Raw is already the properly
+				// quoted/escaped JSON string literal, so writing it in produces byte-for-
+				// byte the same canon() output a genuine one-text-block array would. Scoped
+				// to the "content" key only, and only this one direction (string ->
+				// canonical array shape): a content array is left exactly as canon already
+				// handles it, whether it holds one block or many.
+				//
+				// Written out directly: this is what canon emits for that array, without
+				// building and re-parsing a copy of the (long) string to get there.
+				h.Write([]byte(`[{type:"text",text:`))
+				h.Write([]byte(val.Raw))
+				h.Write([]byte(`,},]`))
+			} else {
+				canon(h, val)
+			}
+			h.Write([]byte(","))
+		}
+		h.Write([]byte("}"))
+	case v.IsArray():
+		h.Write([]byte("["))
+		v.ForEach(func(_, val gjson.Result) bool {
+			canon(h, val)
+			h.Write([]byte(","))
+			return true
+		})
+		h.Write([]byte("]"))
+	default:
+		h.Write([]byte(v.Raw))
+	}
+}

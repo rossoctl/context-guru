@@ -770,17 +770,16 @@ func TestTheColdCacheKeysSurviveASaveThatDoesNotMentionThem(t *testing.T) {
 	}
 }
 
-// A credential is write-only. It is declared (the form has to be able to SET it) but never
-// echoed back, and "absent from the form" therefore cannot mean "cleared" — otherwise every
-// save would delete the stored key.
-func TestAStoredCredentialIsNeverEchoedAndNeverLost(t *testing.T) {
+// A credential is no longer a component setting: the model: block names a source, and the
+// endpoint and key live on the host (CHEAP_MODEL_*). A stored document that still carries one
+// keeps loading — a removed setting must not stop the proxy or lock the settings page — but the
+// value is never used: the form declares no such field, so it never reaches the payload, and a
+// save validates through the same path the proxy builds with, which drops it.
+func TestAStoredCredentialIsNeverEchoedAndASaveStillWorks(t *testing.T) {
 	const secret = "sk-do-not-echo-me"
 	doc := "pipeline: [extract_llm]\nmode: sync\ncomponents:\n  extract_llm:\n" +
 		"    strategy: code\n    model:\n      model: claude-haiku-4-5\n      api_key: " + secret + "\n"
 	f := mustParse(t, doc)
-	if _, ok := f.Components["extract_llm"]["model.api_key"]; ok {
-		t.Error("the parsed form carries the stored api_key")
-	}
 	blob, err := json.Marshal(f)
 	if err != nil {
 		t.Fatal(err)
@@ -788,21 +787,11 @@ func TestAStoredCredentialIsNeverEchoedAndNeverLost(t *testing.T) {
 	if strings.Contains(string(blob), secret) {
 		t.Errorf("the api_key reached the settings payload: %s", blob)
 	}
-	out, err := ApplyForm(doc, f)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := ApplyForm(doc, f); err != nil {
+		t.Fatalf("a save over a document that stores model.api_key was refused: %v", err)
 	}
-	if !strings.Contains(out, secret) {
-		t.Errorf("saving the form deleted the stored credential:\n%s", out)
-	}
-	// An explicit empty string is how it gets cleared.
-	f.Components["extract_llm"]["model.api_key"] = ""
-	out, err = ApplyForm(doc, f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(out, secret) {
-		t.Errorf("an explicit clear left the credential in place:\n%s", out)
+	if err := Validate([]byte(doc)); err != nil {
+		t.Errorf("stored-document validation refused model.api_key: %v", err)
 	}
 }
 

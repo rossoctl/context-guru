@@ -1,7 +1,7 @@
 # = configs/extract-code.yaml with triggers lowered for the small sample.
-pipeline: [extract]
+pipeline: [extract_llm]
 components:
-  extract: { strategy: code, marker_mode: "off", rewrite: false,
+  extract_llm: { strategy: code, marker_mode: "off", rewrite: false,
              trigger: { min_request_tokens: 0, min_output_tokens: 50 },
              model: { source: config } }
 store: { enabled: false }

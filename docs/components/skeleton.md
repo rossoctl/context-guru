@@ -95,7 +95,7 @@ price a removed token at **0.209× fresh ($0.6265/MTok)**, because this corpus i
 `cache_read` — pricing at 1.0× would overstate every figure below by ~4.8×.
 
 ```bash
-CG_SKEL_CAPTURE=/home/vpcuser/cg-research/bench/long.jsonl CG_SKEL_SAMPLE=1 \
+CG_SKEL_CAPTURE=/path/to/bench/long.jsonl CG_SKEL_SAMPLE=1 \
   CGO_ENABLED=1 go test -tags cg_skeleton ./components/offload -run SkeletonCapture -v
 ```
 

@@ -5,8 +5,9 @@ import (
 	"time"
 )
 
-// WaitForSummaryForTest blocks until the session's in-flight summary has landed, or the deadline
-// passes. It reports whether one landed.
+// WaitForSummaryForTest blocks until the thread's in-flight summary has landed, or the deadline
+// passes. It reports whether one landed. session is the THREAD key, thread.Key(session, thread)
+// (#430); for the primary thread that is the bare session id.
 //
 // EXPORTED AND TEST-ONLY, and it is deliberately not a `_test.go` file: components/all's tests
 // drive summarize through the registry from another package, and they need the same drain. The

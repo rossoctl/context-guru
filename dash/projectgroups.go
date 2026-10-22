@@ -1,9 +1,14 @@
 package dash
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
+	"time"
 )
 
 // Grouping the folders a session was launched in into the PROJECTS Claude Code recognises.
@@ -44,6 +49,9 @@ type ProjectGroup struct {
 // which degrades to today's behaviour rather than to an empty page.
 func ProjectGroups(home string) *ProjectGroup {
 	g := &ProjectGroup{of: map[string]string{}}
+	if home == noHome {
+		return g
+	}
 	if home == "" {
 		h, err := os.UserHomeDir()
 		if err != nil {
@@ -61,14 +69,8 @@ func ProjectGroups(home string) *ProjectGroup {
 		files, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 		turnsPer := map[string]int{}
 		for _, f := range files {
-			turns, err := ReadTranscript(f)
-			if err != nil {
-				continue
-			}
-			for _, tn := range turns {
-				if tn.Project != "" {
-					turnsPer[tn.Project]++
-				}
+			for p, n := range readCwdCounts(f) {
+				turnsPer[p] += n
 			}
 		}
 		if len(turnsPer) == 0 {
@@ -149,4 +151,75 @@ func (g *ProjectGroup) FoldersOf(project string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// noHome is the home sentinel for a deployment that must not read the server's disk. A hosted,
+// multi-tenant proxy has no business reading $HOME: the plugin names and project paths there
+// belong to the server's user, not to the tenant asking.
+const noHome = "\x00none"
+
+// readCwdCounts counts, per working directory, the assistant entries of one transcript. Lighter
+// than ReadTranscript: it needs only the folder, so it skips the usage decode and the dedupe.
+// Only a regular file is read.
+func readCwdCounts(path string) map[string]int {
+	if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), transcriptMaxLine)
+	out := map[string]int{}
+	for sc.Scan() {
+		b := sc.Bytes()
+		if !bytes.Contains(b, []byte(`"type":"assistant"`)) || !bytes.Contains(b, []byte(`"cwd"`)) {
+			continue
+		}
+		var e struct {
+			Type string `json:"type"`
+			Cwd  string `json:"cwd"`
+		}
+		if json.Unmarshal(b, &e) != nil || e.Type != "assistant" {
+			continue
+		}
+		if p := ProjectPath(e.Cwd); p != "" {
+			out[p]++
+		}
+	}
+	return out
+}
+
+// projectGroupsTTL is how long a grouping is reused. Short enough that a new project shows up
+// within a minute, long enough that scope() on every request does not reparse ~90 MB.
+const projectGroupsTTL = 60 * time.Second
+
+var pgCache struct {
+	sync.Mutex
+	m map[string]pgEntry
+}
+
+type pgEntry struct {
+	g  *ProjectGroup
+	at time.Time
+}
+
+// CachedProjectGroups is ProjectGroups behind a per-home TTL cache, shared by every call site.
+func CachedProjectGroups(home string) *ProjectGroup {
+	if home == noHome {
+		return ProjectGroups(home)
+	}
+	pgCache.Lock()
+	defer pgCache.Unlock()
+	if e, ok := pgCache.m[home]; ok && time.Since(e.at) < projectGroupsTTL {
+		return e.g
+	}
+	g := ProjectGroups(home)
+	if pgCache.m == nil {
+		pgCache.m = map[string]pgEntry{}
+	}
+	pgCache.m[home] = pgEntry{g, time.Now()}
+	return g
 }

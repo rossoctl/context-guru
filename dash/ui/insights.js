@@ -671,7 +671,7 @@ function insRender() {
       const kids = byServer[o.name] || [];
       root.appendChild(insOwnerBlock(o, kids, {
         type: 'mcp server', pill: 'removable', unit: true, unitNote: 'the server is the unit',
-        meta: o.tools + ' tools · ' + (o.tokens || 0).toLocaleString() + ' tok/req',
+        meta: (o.mcp_tools || 0) + ' tools · ' + (o.tokens || 0).toLocaleString() + ' tok/req',
         cost: usd(o.usd || 0),
         sessions: kids.some((k) => (k.sessions || []).length),
         note: 'Denying a single tool keeps the server connected and the rest of its tools ' +

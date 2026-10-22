@@ -13,7 +13,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
-// ibmSonnet is the rate ete-litellm actually bills for aws/claude-sonnet-5 — half the
+// ibmSonnet is the rate litellm-gateway actually bills for aws/claude-sonnet-5 — half the
 // public API's, which is why the operator price list exists at all.
 var ibmSonnet = modelinfo.Price{Input: 1.52e-6, Output: 7.6e-6, CacheRead: 1.52e-7, CacheWrite: 1.9e-6}
 
@@ -234,6 +234,10 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens", "project"}
+	// An old database has no project index, and SQLite refuses to drop an indexed column.
+	if _, err := raw.Exec(`DROP INDEX IF EXISTS idx_requests_project`); err != nil {
+		t.Fatal(err)
+	}
 	for _, col := range added {
 		if _, err := raw.Exec(`ALTER TABLE requests DROP COLUMN ` + col); err != nil {
 			t.Fatal(err)

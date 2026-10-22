@@ -93,5 +93,10 @@ func cleanWorkingDir(s string) string {
 	if strings.ContainsAny(s, " \t") {
 		return ""
 	}
+	for _, seg := range strings.Split(s, "/") {
+		if seg == ".." {
+			return "" // not a canonical launch directory
+		}
+	}
 	return strings.TrimRight(s, "/")
 }

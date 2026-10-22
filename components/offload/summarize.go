@@ -108,9 +108,10 @@ type Summarize struct {
 	resummarizeTokens int
 	includeToolCalls  bool
 	modelSource       string
-	modelClient       components.Model // config-pinned client (model: block), or nil
-	trigger           components.Trigger
-	mode              markerMode
+	// modelClient is a test-injection seam only; see AgentDiet.modelClient.
+	modelClient components.Model
+	trigger     components.Trigger
+	mode        markerMode
 	// summaryWaitSeconds caps how long a turn will wait for a summary another turn started.
 	// 0 = defaultSummaryWait. See summarize_async.go.
 	summaryWaitSeconds int
@@ -150,7 +151,7 @@ type summarizeConfig struct {
 
 func newSummarize(raw []byte) (components.Component, error) {
 	cfg := summarizeConfig{SummaryLevel: "regular", KeepFirst: 1, KeepLast: 3, StartFrom: 6, MinTokens: 500, ResummarizeTokens: 6000}
-	if err := components.Decode(raw, &cfg); err != nil {
+	if err := decodeWithModelHint("summarize", raw, &cfg); err != nil {
 		return nil, err
 	}
 	// Refused rather than clamped: a negative keep_first is a typo, and silently reading it as 0
@@ -170,7 +171,7 @@ func newSummarize(raw []byte) (components.Component, error) {
 	return &Summarize{
 		level: cfg.SummaryLevel, keepFirst: cfg.KeepFirst, customPrompt: cfg.CustomPrompt, keepLast: cfg.KeepLast,
 		minTokens: cfg.MinTokens, resummarizeTokens: cfg.ResummarizeTokens,
-		includeToolCalls: cfg.IncludeToolCalls, modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(), trigger: cfg.Trigger,
+		includeToolCalls: cfg.IncludeToolCalls, modelSource: cfg.Model.Source, trigger: cfg.Trigger,
 		mode: parseMarkerMode(cfg.MarkerMode), summaryWaitSeconds: cfg.SummaryWaitSeconds,
 	}, nil
 }
@@ -224,13 +225,14 @@ func newSummarize(raw []byte) (components.Component, error) {
 // raw window. Those are what made "0.9" denote anything. The gate on top of them did not.
 //
 // `pre_expiry` IS STILL THE RIGHT ANSWER FOR A DIFFERENT QUESTION, which is why the value survives —
-// but NOTHING ASKS THAT QUESTION YET, and the docstring should not imply otherwise. A summarizer
-// whose model call reuses the conversation's own prefix needs that prefix LIVE, the opposite concern
-// to this one and genuinely phase-dependent. THIS component is not one: it flattens its prompt into a
-// single string and shares no prefix with anything, so `pre_expiry` here is honoured and buys nothing
-// but a lower firing rate. cache_aware_summarizer IS the prefix-reusing one and consults neither
-// CacheAllows nor CachePhase, so the key is silently inert there — the same defect as #247. Kept
-// because no surviving value can express "is there a live prefix to hit", not because it pays today.
+// and NOW SOMETHING ASKS IT. A summarizer whose model call reuses the conversation's own prefix
+// needs that prefix LIVE, the opposite concern to this one and genuinely phase-dependent. THIS
+// component is not one: it flattens its prompt into a single string and shares no prefix with
+// anything, so `pre_expiry` here is honoured and buys nothing but a lower firing rate.
+// cache_aware_summarizer IS the prefix-reusing one, and as of the fix for #400 it consults both
+// CacheAllows and CachePhase — see its own Offload for the gate and cache_aware_cold.go for why a
+// turn that fires on `any` while the cache is COLD still never pays the double-rewrite this
+// paragraph's reasoning would otherwise predict.
 //
 // WHAT STOPS A SESSION THAT NEVER ENTERS THE WINDOW: nothing here, deliberately. The ceiling is
 // the CLIENT's — Claude Code runs its own compaction as it approaches C, and Fires now measures
@@ -272,30 +274,41 @@ const (
 	EventAwaitedCheckpoint = "awaited_checkpoint"
 )
 
-// applySummarizeTriggerDefaults installs summarize's trigger defaults for keys the operator did
-// not write, and validates cache_state.
+// triggerKeysPresent reports which keys the raw YAML document's `trigger:` block actually sets —
+// shared by every component that installs a size-threshold default onto an embedded
+// components.Trigger, because MinRequestFrac is a float64 whose zero value ("no constraint") is
+// indistinguishable from an absent key once decoded. `min_request_frac: 0` is how an operator
+// writes "fire at any size" (e.g. in the pre-expiry window), so defaulting off the zero value
+// would make that configuration unwritable — the probe is what lets an explicit zero win over the
+// default. Originally private to applySummarizeTriggerDefaults; cache_aware_summarizer needed the
+// identical probe for its own trigger defaults, and a second copy is exactly the kind of thing
+// that drifts (see Trigger.Validate's own history of drifting between components).
 //
-// IT PROBES THE RAW YAML RATHER THAN TESTING FOR THE ZERO VALUE, and it has to. MinRequestFrac is
-// a float64 whose zero means "no constraint", so `min_request_frac: 0` — the way an operator says
-// "compact in the pre-expiry window at ANY size" — is indistinguishable from an absent key once
-// decoded. Defaulting off the zero value would make that configuration unwritable. The probe is
-// the same shape newExtractSweep uses to catch its banned keys before Decode's KnownFields check.
-//
-// The probe is deliberately loose: an unparseable document has already been rejected by
+// It is the same shape newExtractSweep uses to catch its banned keys before Decode's KnownFields
+// check, and it is deliberately loose: an unparseable document has already been rejected by
 // components.Decode in the caller, so a failure here means only that the presence question cannot
-// be answered, and the default is then the safer answer.
-func applySummarizeTriggerDefaults(raw []byte, t *components.Trigger) error {
+// be answered, and treating every key as absent is then the safer reading.
+func triggerKeysPresent(raw []byte) map[string]bool {
 	present := map[string]bool{}
-	if len(raw) > 0 {
-		var probe struct {
-			Trigger map[string]yaml.Node `yaml:"trigger"`
-		}
-		if err := yaml.Unmarshal(raw, &probe); err == nil {
-			for k := range probe.Trigger {
-				present[k] = true
-			}
+	if len(raw) == 0 {
+		return present
+	}
+	var probe struct {
+		Trigger map[string]yaml.Node `yaml:"trigger"`
+	}
+	if err := yaml.Unmarshal(raw, &probe); err == nil {
+		for k := range probe.Trigger {
+			present[k] = true
 		}
 	}
+	return present
+}
+
+// applySummarizeTriggerDefaults installs summarize's trigger defaults for keys the operator did
+// not write, and validates cache_state. See triggerKeysPresent for why the defaulting has to probe
+// the raw document rather than test MinRequestFrac's zero value.
+func applySummarizeTriggerDefaults(raw []byte, t *components.Trigger) error {
+	present := triggerKeysPresent(raw)
 	if !present["min_request_frac"] {
 		t.MinRequestFrac = summarizeDefaultRequestFrac
 	}
@@ -336,7 +349,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	msgs := req.Input
 	// Keep msg0 (system/first) + the last keepLast; summarize the span between — with both
 	// boundaries aligned so neither cuts inside a tool exchange. See summarizeSpan.
-	headCount, start, end := summarizeSpan(msgs, s.keepFirst, s.keepLast)
+	headCount, start, end := summarizeSpan(msgs, s.keepFirst, s.keepLast, c.WireGroup)
 
 	// THE GATES DECIDE WHETHER TO PAY FOR A *NEW* SUMMARY. THEY DO NOT DECIDE WHETHER THE SUMMARY
 	// THIS SESSION ALREADY MADE STAYS IN THE BODY WE FORWARD. Those were one decision until the
@@ -357,7 +370,20 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// Attribute any model spend a DETACHED summarizer call incurred since this session's last
 	// turn. First thing, and unconditionally: the money was spent whatever this turn decides, and
 	// the compaction-episode panel charges it as a debit. See takeDeferredUsage.
-	takeDeferredUsage(c)
+	takeDeferredUsage(c, rep)
+	adoptParentCheckpoint(c)
+	// A non-nil WireGroup that no longer lines up with msgs means wire groups DO exist on this
+	// request (Anthropic traffic normalized at least one shared message) but an earlier
+	// component changed the message count, so their current positions are unknown. The
+	// headCount/start/end just computed above are UNALIGNED in that case (summarizeSpan's own
+	// defensive check collapsed WireGroup to nil, same as "no groups ever existed" — e.g.
+	// OpenAI-shaped traffic). Decline rather than risk splitting a wire message that is really
+	// there, just not where WireGroup says. See wireGroupsStale.
+	if wireGroupsStale(c, msgs) {
+		rep.Gate("wire_groups_stale")
+		rep.Skipped = true
+		return nil, nil
+	}
 	if end > start && c.AllowSummarySpan != nil && !c.AllowSummarySpan(start, end) {
 		rep.Gate("wire_span_unsafe")
 		rep.Skipped = true
@@ -425,7 +451,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		return reusedKeys, nil
 	}
 
-	model := s.modelClient // config-pinned client wins
+	model := s.modelClient // test-injection seam; nil in production
 	if model == nil {
 		model = c.Model.For(s.modelSource)
 	}
@@ -442,8 +468,8 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// Above the gates' effect, because a turn that lands mid-flight is usually a turn the gates
 	// DECLINE (the cache is warm again by then) and it is exactly the turn that most needs the
 	// result: without it, it forwards the full transcript at 1.25xF.
-	if _, running := inFlight.peek(c.Session); running {
-		waited, landed := inFlight.waitFor(c.Ctx, c.Session, s.summaryWait())
+	if _, running := inFlight.peek(convKey(c)); running {
+		waited, landed := inFlight.waitFor(c.Ctx, convKey(c), s.summaryWait())
 		atomic.AddInt64(&summarizeWaitedMs, waited.Milliseconds())
 		if landed {
 			// Re-read: the checkpoint the background call just wrote is the thing we waited for.
@@ -467,11 +493,16 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		}
 	}
 
-	// No new summary this turn — gated, or nothing to summarize with. Fall back to the most
-	// cache-stable shape available, which is the standing checkpoint when there is one. Both
-	// reasons take the same path because they have the same remedy; the gates above already
-	// recorded WHICH it was.
-	if !fires || model == nil {
+	// A side request replays its parent's checkpoint but never commissions one. See sideRequest.
+	side := sideRequest(c)
+	if side {
+		rep.Gate("side_request_read_only")
+	}
+	// No new summary this turn — gated, a side request, or nothing to summarize with. Fall back to
+	// the most cache-stable shape available, which is the standing checkpoint when there is one.
+	// All take the same path because they have the same remedy; the gates above already recorded
+	// WHICH it was.
+	if !fires || model == nil || side {
 		if stale {
 			return s.replayStale(c, rep, req, msgs, headCount, start, EventGatedReplayedCheckpoint)
 		}
@@ -562,8 +593,8 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// the worst case.
 	// A SESSIONLESS REQUEST IS SUMMARIZED INLINE, and that is not a concession — it is the only
 	// thing that can work. The whole async design rests on handing the result to a LATER TURN OF
-	// THE SAME SESSION: the checkpoint is keyed by session id (store.SumPrefix+session) and the
-	// single-flight registry is keyed the same way. With no session id there is no key to save
+	// THE SAME THREAD: the checkpoint is keyed by the thread of the session (sumKey(convKey(c))) and
+	// the single-flight registry is keyed the same way. With no session id there is no key to save
 	// under, nothing to single-flight on, and no later turn that could ever find it — so going
 	// async would spend a model call and discard the result, every turn, forever.
 	//
@@ -671,7 +702,7 @@ func (s *Summarize) replayStale(c *components.Ctx, rep *components.Report, req *
 			commitRefresh(c, rep, markerFull, cp.Key, string(b))
 		}
 	}
-	out, keys := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	out, keys := s.emitCheckpoint(cp, msgs, headCount, boundary, c.WireGroup)
 	if len(keys) == 0 {
 		rep.Irreversible = true
 	}
@@ -710,17 +741,19 @@ func (s *Summarize) replayStale(c *components.Ctx, rep *components.Report, req *
 // tryReuse and the refusal fallback so a replayed checkpoint is byte-identical whichever path
 // emits it — a difference between them would itself be a cache flip.
 func (s *Summarize) emitCheckpoint(cp sumCheckpoint, msgs []bschemas.ChatMessage,
-	headCount, boundary int) ([]bschemas.ChatMessage, []string) {
+	headCount, boundary int, groups []int) ([]bschemas.ChatMessage, []string) {
 	// USER for the same reason as the fresh-summary path: a system role at index 1 is rejected
 	// by the provider. The replayed checkpoint must match that shape exactly, or a replayed
 	// turn would emit different bytes from the turn that created it.
 	summaryMsg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&summaryMsg, cp.SummaryMsg)
-	// The replayed boundary must respect exchange atomicity exactly as the fresh path does,
-	// or a replayed turn emits different bytes from the turn that created it.
-	for boundary < len(msgs) && msgs[boundary].Role == bschemas.ChatMessageRoleTool {
-		boundary++
-	}
+	// The replayed boundary must respect exchange AND wire-message atomicity exactly as the
+	// fresh path does (advanceSpanBoundary — #457 round 2), or a replayed turn emits different
+	// bytes from the turn that created it. This used to be its own copy of just the role==tool
+	// half of that rule, which is exactly the shape of gap summarizeSpan had before #457: a
+	// sibling-first group lets the tail begin on the sibling (role=user) while its tool_result
+	// orphans a tool_use one slot earlier.
+	boundary = advanceSpanBoundary(msgs, groups, boundary)
 	out := make([]bschemas.ChatMessage, 0, 2+(len(msgs)-boundary))
 	out = append(out, msgs[:headCount]...)
 	out = append(out, summaryMsg)
@@ -827,7 +860,7 @@ func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []b
 			commitRefresh(c, rep, markerFull, cp.Key, string(b))
 		}
 	}
-	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary, c.WireGroup)
 	return emitted, ks, true, false
 }
 

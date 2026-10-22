@@ -33,6 +33,39 @@ const (
 	CacheUnknown      = "unknown"
 )
 
+// Cache-miss causes (requests.cache_miss_cause). cache_miss_reason keeps its five values for
+// old readers. The cause says WHAT changed, and it comes from a comparison with the previous
+// request of the same thread (see PrefixFacts), never from a guess. Only the first cause that
+// applies is stored, in this order.
+const (
+	// CauseModelChanged: the thread switched model. Each model has its own cache.
+	CauseModelChanged = "model_changed"
+	// CauseCompactionAfterRewrite: the agent sent an unmodified request (bypass) after
+	// context-guru had rewritten earlier turns of the thread. The cache holds the rewritten
+	// history. The bypass forwards the original, so the prefix differs.
+	CauseCompactionAfterRewrite = "compaction_after_rewrite"
+	// CauseBypassFlip: bypass turned on or off with no earlier rewrite to explain it.
+	CauseBypassFlip = "bypass_flip"
+	// CauseToolsChanged: the tool declarations differ (digest, or count when no digest).
+	CauseToolsChanged = "tools_changed"
+	// CauseSystemChanged: the system prompt differs (hash, or block count when no hash).
+	CauseSystemChanged = "system_changed"
+	// CauseEffortChanged: reasoning effort, thinking mode or thinking budget differs.
+	CauseEffortChanged = "effort_changed"
+	// CauseConcurrent: nothing measured changed and the previous request began less than
+	// concurrentGapMs ago. A cache entry is readable only after the first response starts,
+	// so parallel sub-agent requests miss. The reason is "unknown", not "prefix_change".
+	CauseConcurrent = "concurrent"
+	// CauseFirstOnModel: no successful earlier request of the thread ran this model, and the
+	// request is short or an earlier one failed. It is not stored as a cause: the reason is
+	// cold_start. ObservePrefix returns it so AttributeCache agrees with the thread facts.
+	CauseFirstOnModel = "first_on_model"
+)
+
+// concurrentGapMs is the gap below which an unexplained miss reads as concurrent. Time to
+// first byte on these models is a few seconds, and the cache entry exists only after it.
+const concurrentGapMs = 5000
+
 // "Why didn't you compact this?" — a first-class reason bucket, not an absence of
 // data. An empty string means we DID compact.
 const (
@@ -75,6 +108,14 @@ const (
 	ModeObserve = "observe"
 )
 
+// WaitCauseResult is issue #424's RECORD half's output for one request — see Event.WaitCause,
+// which runs the computation that fills this, off the request path.
+type WaitCauseResult struct {
+	WaitingFor, WaitTool, WakeCause string
+	OpenBackground, OpenTeammate    int
+	MonitorExpiryMs                 int64
+}
+
 // Event is one captured request, as handed to the capture channel. It is built on
 // the request goroutine from values the request path already computed (no extra
 // token counting, no extra allocation of the transcript) and is then owned
@@ -85,7 +126,67 @@ type Event struct {
 	// TenantID owns this row; "" in single-tenant deployments.
 	TenantID  string `json:"tenant_id"`
 	SessionID string `json:"session_id"`
-	Model     string `json:"model"`
+	// ThreadID names the thread of the session this request belongs to: "" for the session's
+	// primary thread — the main agent, told apart as the first thread without an agent header
+	// that declares tools (see internal/thread) — "a:<agent id>" for a subagent that named itself
+	// in a header, and "p:<fingerprint>" for a thread told apart by prefix continuity. Each thread
+	// has its own provider cache entry, so recency and miss attribution are per thread; reporting
+	// stays per session. See internal/thread and issue #423.
+	//
+	// A row keeps the id it was written with. A tool-less request that spoke before the main agent
+	// held "" at the time, so its row reads "" although the tracker later moved that thread to a
+	// "p:" id.
+	ThreadID string `json:"thread_id"`
+	// Issue #424's RECORD half: why this thread is about to wait, and why it woke up — read
+	// from the request body and the response's own tool calls/stop reason, by string match
+	// and structural tool_use reads, no LLM. See internal/waitcause, which defines every
+	// value and never guesses: a signal this proxy's client (Claude Code) does not send, or
+	// another agent/provider entirely, reads "unknown" rather than a label chosen for it.
+	// This package NEVER reads these columns to choose a keep-alive ping budget or change
+	// compaction behaviour — it only writes them, so a later change can.
+	//
+	// WaitingFor is set on the row whose OWN response ends a turn with nothing more to do
+	// right now (own_tool|human|background|teammate|retry|unknown); WaitTool is the LAST
+	// tool_use name on that response, filled only when WaitingFor is "own_tool". WakeCause
+	// is set on the row that ENDS a wait (tool_result|background|teammate|human|system|
+	// retry|unknown), read off its own last message. OpenBackground/OpenTeammate are the
+	// open-task/open-teammate counts as of THIS request's body (the "waiting_on" detail);
+	// MonitorExpiryMs is the latest known absolute Monitor expiry (epoch ms) among them, 0
+	// when none is open or none stated one. All six are "" / 0 on a row written before this
+	// column existed (see dash/schema.go's additiveColumns: nullable, no default, so an old
+	// row reads SQL NULL rather than a value this package never computed for it).
+	WaitingFor      string `json:"waiting_for"`
+	WaitTool        string `json:"wait_tool"`
+	WakeCause       string `json:"wake_cause"`
+	OpenBackground  int    `json:"open_background"`
+	OpenTeammate    int    `json:"open_teammate"`
+	MonitorExpiryMs int64  `json:"monitor_expiry_ms"`
+	// WaitCause, when set, is invoked by the WRITER goroutine (Recorder.run's write(),
+	// right beside e.Redact() and for the identical reason) to fill the six fields above —
+	// never on the request path. The actual body rescan this runs
+	// (waitcause.Tracker.Observe) measured ~11ms on a 783 KB body; called from finish()
+	// (which runs on the handler's own defer, BEFORE the handler returns) that delayed the
+	// NEXT request on a keep-alive connection by the same amount, which is exactly what
+	// this repo's own TestDashboardAddsNoRequestLatencyWithContentCapture-style tests exist
+	// to catch. nil on any row this does not apply to — a keep-alive ping's row never sets
+	// it at all, which is also how a ping is guaranteed to carry no wait-cause label (issue
+	// #424 requirement). Never serialized (there is nothing to marshal); the SIX FIELDS it
+	// fills are what reaches JSON and the database.
+	WaitCause func() WaitCauseResult `json:"-"`
+	// Lifecycle is the opt-in lifecycle-signals row (dash/lifecycle.go), nil when the flag is
+	// off; LifecycleFn fills it on the writer goroutine, for the same reason WaitCause runs
+	// there (it rescans the request body). Neither is part of the JSON event.
+	Lifecycle   *LifecycleRow        `json:"-"`
+	LifecycleFn func() *LifecycleRow `json:"-"`
+	Model       string               `json:"model"`
+	// BypassCount, when set, fills tokens_before/after, attempted_tokens and frozen_tokens of a
+	// BYPASSED request, which the pipeline does not count on the request path (counting a large
+	// transcript took ~0.35 s per MiB). It runs on the recorder's count worker, never on the
+	// writer or the request path, after the row is inserted. nil on every other row.
+	BypassCount func() (before, attempted int) `json:"-"`
+	// BypassBytes is the size of the bypassed request body BypassCount will tokenize; the count
+	// queue is bounded by the total of it (see countMaxBytes).
+	BypassBytes int `json:"-"`
 	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
 	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
 	// tokens.BilledDeltaFactor(Model), resolved once in Price.
@@ -123,9 +224,14 @@ type Event struct {
 	Route   string `json:"route"`
 	Status  int    `json:"status"`
 
-	Bypassed   bool `json:"bypassed"`
-	CacheAware bool `json:"cache_aware"`
-	Messages   int  `json:"messages"`
+	Bypassed bool `json:"bypassed"`
+	// AgentCompaction marks the agent's own compaction request. It is usually not bypassed, but it
+	// can be: a request with the bypass header, or a body over the size ceiling, carries both
+	// flags. The replay cap reads either one as the evidence that a drop in tokens_before is the
+	// client compacting.
+	AgentCompaction bool `json:"agent_compaction"`
+	CacheAware      bool `json:"cache_aware"`
+	Messages        int  `json:"messages"`
 
 	TokensBefore    int `json:"tokens_before"`
 	TokensAfter     int `json:"tokens_after"`
@@ -209,6 +315,8 @@ type Event struct {
 	// query that reads them together rather than frozen into a second column that could
 	// disagree with them. See DB.DeclFilterSavings.
 	FilteredDeclTokens int `json:"filtered_decl_tokens"`
+	// DeclDigest is the declaration set this request carried (tool_declarations.digest).
+	DeclDigest string `json:"decl_digest,omitempty"`
 
 	// KeepAlive marks a row that IS a keep-alive ping rather than agent traffic: a request
 	// context-guru sent on its own initiative, to re-read an idle session's cached prefix so
@@ -272,6 +380,11 @@ type Event struct {
 	TokenAccounting    string `json:"token_accounting"`
 	CacheMissReason    string `json:"cache_miss_reason"`
 	UncompressedReason string `json:"uncompressed_reason"`
+	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
+	// Set only from a measured comparison (Cause* constants). "" when nothing was measured.
+	CacheMissCause string `json:"cache_miss_cause,omitempty"`
+	// SystemHash is the system prompt's hash, for the prefix comparison only. Not persisted.
+	SystemHash string `json:"-"`
 
 	// Meta is the request's own knobs, embedded so the JSON stays flat.
 	Meta
@@ -396,6 +509,9 @@ func (m *Meta) redact() {
 // Idempotent, so a double call cannot corrupt a row.
 func (e *Event) Redact() {
 	e.Meta.redact()
+	// The launch directory is client-chosen; sanitise the field itself so the feed and the
+	// inventory writer see what the requests table stores.
+	e.Project = ProjectPath(e.Project)
 	for i := range e.Content {
 		e.Content[i].Before = RedactContent(e.Content[i].Before, e.ContentCap)
 		e.Content[i].After = RedactContent(e.Content[i].After, e.ContentCap)
@@ -700,19 +816,70 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	// realized turn by turn as the frozen reduction replays, not a projection.
 	for i := range e.Components {
 		c := &e.Components[i]
-		gross, unique := c.SavedGross, c.SavedUnique
-		if gross < 0 {
-			gross = 0
-		}
-		if unique > gross {
-			unique = gross // same clamp as baselineDeltaUSD: shared content keys can over-attribute
-		}
-		if unique < 0 {
-			unique = 0
-		}
-		c.SavedUSD = (float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)) *
-			e.BilledTokenFactor
+		c.SavedUSD = e.ComponentSavedUSD(p, c.Component, c.SavedGross, c.SavedUnique)
 	}
+}
+
+// ComponentSavedUSD is ONE component's share of the baseline delta on this request: the
+// single pricing path for a removal. Price stores it at write time; the read-time passes
+// (dash/summarizeattr.go) call it again on a stored row so an old row and a new row are valued
+// by the same arithmetic and cannot drift apart.
+//
+// The first (unique) removal is priced by uniqueRate, the re-sent remainder by repeatRate.
+func (e *Event) ComponentSavedUSD(p modelinfo.Price, component string, gross, unique int) float64 {
+	if gross < 0 {
+		gross = 0
+	}
+	if unique > gross {
+		unique = gross // same clamp as baselineDeltaUSD: shared content keys can over-attribute
+	}
+	if unique < 0 {
+		unique = 0
+	}
+	return (float64(unique)*e.uniqueRate(p, component) + float64(gross-unique)*e.repeatRate(p)) *
+		e.BilledTokenFactor
+}
+
+// SummarizerComponents is THE list of pipeline components whose removals are EARLIER transcript:
+// a summary replaces turns the provider has already been sent. Every place that treats a
+// component as a summarizer (the first-removal rate, the baseline split, the ledger, the cost
+// attribution, the SQL) reads this list and no other. The default preset runs "summarize"; the
+// medium, high and xhigh presets run "cache_aware_summarizer". Add a new summarizer here and
+// nowhere else.
+var SummarizerComponents = []string{"summarize", "cache_aware_summarizer"}
+
+// IsSummarizer reports whether a component name is on SummarizerComponents.
+func IsSummarizer(component string) bool {
+	for _, n := range SummarizerComponents {
+		if n == component {
+			return true
+		}
+	}
+	return false
+}
+
+// uniqueRate is what the FIRST removal of a component's content would have been billed at.
+//
+// The default is the cache-write rate: content entering a prompt for the first time is billed
+// as a write. That is wrong for a summary. What a summary removes is transcript the previous
+// turn already sent, and when that turn's cache was live the same tokens, left in, would have
+// been READ on this turn. Pricing them as a write over-credited the summary turn by the
+// write:read ratio (10x on Opus 5.5): $2.945 against a real saving of about $0.14 on request
+// 15653.
+//
+// Whether the previous turn's cache was live comes from the verdict. ttl_expiry and cold_start
+// say the entry was gone, so an uncompacted prompt would have re-created it: the write rate
+// stands. Any other verdict (hit, or prefix_change, which on a summary turn is our own rewrite
+// of a live entry) says it was live, so the counterfactual is a read.
+func (e *Event) uniqueRate(p modelinfo.Price, component string) float64 {
+	if IsSummarizer(component) {
+		switch e.CacheMissReason {
+		case CacheTTLExpiry, CacheColdStart:
+		default:
+			return p.CacheRead
+		}
+	}
+	return p.CacheWrite
 }
 
 // cachesplitSavedUSD is the cache saving this project is willing to sign its name to.
@@ -757,7 +924,7 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 //
 // And the amount is the STABLE HALF, not the request's whole cache_read. That distinction was
 // found by running the control arm rather than by reasoning about it. Real Claude Code
-// sessions against ete-litellm, each started after a fresh commit so the environment snapshot
+// sessions against litellm-gateway, each started after a fresh commit so the environment snapshot
 // genuinely differed, first request of each session:
 //
 //	                     first-request cache_read     cache_write
@@ -925,7 +1092,17 @@ func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
 	if unique < 0 {
 		unique = 0
 	}
-	raw := float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)
+	// The part of the unique removal that belongs to a summarizer is priced by its own rate (see
+	// uniqueRate); every other component's unique part stays at the write rate.
+	sumUnique := 0
+	for _, c := range e.Components {
+		if IsSummarizer(c.Component) && c.SavedUnique > 0 {
+			sumUnique += min(c.SavedUnique, max(c.SavedGross, 0))
+		}
+	}
+	sumUnique = min(sumUnique, unique)
+	raw := float64(unique-sumUnique)*p.CacheWrite + float64(sumUnique)*e.uniqueRate(p, SummarizerComponents[0]) +
+		float64(gross-unique)*e.repeatRate(p)
 	return raw * e.BilledTokenFactor
 }
 
@@ -979,18 +1156,28 @@ func (e *Event) repeatRate(p modelinfo.Price) float64 {
 // first of either is a COLD START, which is not a failure and must never be
 // reported as a bust (headroom's model-aware rule). TTL wins ties: a prefix that
 // changed after the entry had already expired was not the cause.
-func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, prefixChanged bool) {
+//
+// cause is the measured difference from the thread's previous request (Recorder.ObservePrefix):
+// "" when nothing differed. A miss with no measured difference is "unknown", not "prefix_change".
+func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, cause string) {
 	switch {
 	case e.CacheRead > 0:
 		e.CacheMissReason = CacheHit
-	case !seenSession || !seenModel:
+	case !seenSession || !seenModel || cause == CauseFirstOnModel:
 		e.CacheMissReason = CacheColdStart
 	case ttlMs > 0 && sinceLastMs > ttlMs:
 		e.CacheMissReason = CacheTTLExpiry
-	case prefixChanged:
-		e.CachePrefixChangeReason()
-	default:
+	case cause == "":
 		e.CacheMissReason = CacheUnknown
+	case cause == CauseConcurrent:
+		e.CacheMissReason, e.CacheMissCause = CacheUnknown, cause
+	case e.CacheWrite <= 0:
+		// Nothing was written, so no prefix was re-created: a changed prefix would have
+		// written it. A failed request or one with no usage lands here.
+		e.CacheMissReason = CacheUnknown
+	default:
+		e.CachePrefixChangeReason()
+		e.CacheMissCause = cause
 	}
 }
 

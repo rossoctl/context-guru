@@ -186,9 +186,9 @@ cat > "$SANDBOX/state/keepalive.yaml" <<'EOF'
 preset: cache
 cache:
   keepalive: true
-  keepalive_idle_seconds: 280
+  keepalive_idle_seconds: 270
   keepalive_max_pings: 2
-  keepalive_max_usd_per_ping: 0.25
+  keepalive_max_usd_per_ping: 0.50
   keepalive_min_prefix_tokens: 1000
 EOF
 # pass --config "$SANDBOX/state/keepalive.yaml" instead of --preset off when starting the proxy
@@ -202,7 +202,7 @@ EOF
 > 1. Turn 1 (cold write).
 > 2. Turn 2, immediately, same session (`--continue`) — this is what makes the entry live
 >    (`keepalive.live_sessions` becomes `1`).
-> 3. **Now** wait out the real idle window (`keepalive_idle_seconds`, 280s by default) — there is
+> 3. **Now** wait out the real idle window (`keepalive_idle_seconds`, 270s by default) — there is
 >    no shortcut; this really does take ~5 real minutes. Poll `/stats` rather than a fixed sleep:
 >
 >    ```sh

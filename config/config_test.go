@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/rossoctl/context-guru/components"
 )
 
 func TestLoadStrictRejectsUnknownFields(t *testing.T) {
@@ -197,5 +199,68 @@ cache:
 	// Unknown keys under `cache:` are typos and must be loud, like every other block.
 	if _, err := LoadBytes([]byte("preset: off\ncache:\n  keepalve: true\n")); err == nil {
 		t.Error("a misspelled cache key was accepted silently")
+	}
+}
+
+// The picker ladder (#417): every tier from medium up runs cache_aware_summarizer first. medium
+// pins cache_state: pre_expiry (prepare in the background, use only on a cold return); high and
+// xhigh leave it at the component default (`any`: use the summary on the next request).
+func TestPresetLadderSummarizerModes(t *testing.T) {
+	for _, tc := range []struct {
+		preset    string
+		wantState string // "" = not pinned, so the component default (`any`) applies
+	}{
+		{"medium", "pre_expiry"},
+		{"high", ""},
+		{"xhigh", ""},
+	} {
+		t.Run(tc.preset, func(t *testing.T) {
+			c, err := LoadBytes([]byte("preset: " + tc.preset + "\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(c.Pipeline) == 0 || c.Pipeline[0] != "cache_aware_summarizer" {
+				t.Fatalf("%s pipeline = %v, want cache_aware_summarizer first", tc.preset, c.Pipeline)
+			}
+			for _, name := range c.Pipeline {
+				if name == "summarize" {
+					t.Fatalf("%s still runs summarize: %v", tc.preset, c.Pipeline)
+				}
+			}
+			node, ok := c.Components["cache_aware_summarizer"]
+			if !ok {
+				t.Fatalf("%s carries no cache_aware_summarizer config", tc.preset)
+			}
+			var got struct {
+				Model struct {
+					Source string `yaml:"source"`
+				} `yaml:"model"`
+				Trigger struct {
+					CacheState string `yaml:"cache_state"`
+				} `yaml:"trigger"`
+			}
+			if err := node.Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Model.Source != "incoming" {
+				t.Errorf("%s model.source = %q, want incoming", tc.preset, got.Model.Source)
+			}
+			if got.Trigger.CacheState != tc.wantState {
+				t.Errorf("%s trigger.cache_state = %q, want %q", tc.preset, got.Trigger.CacheState, tc.wantState)
+			}
+			if _, err := c.Build(components.NopEmitter{}); err != nil {
+				t.Fatalf("%s does not build: %v", tc.preset, err)
+			}
+		})
+	}
+}
+
+// The recommended keep-alive policy (#435, B-policy-r2) is the default; pin the four knobs.
+func TestKeepAliveRecommendedDefaults(t *testing.T) {
+	r := CacheConfig{}.Resolved()
+	if r.KeepAliveIdleSeconds != 270 || r.KeepAliveMaxPings != 2 ||
+		r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveMaxUSDPerPing != 0.50 {
+		t.Errorf("Resolved() = idle %d, K %d, floor %d, ceiling %v; want 270, 2, 80000, 0.50",
+			r.KeepAliveIdleSeconds, r.KeepAliveMaxPings, r.KeepAliveMinPrefixTokens, r.KeepAliveMaxUSDPerPing)
 	}
 }

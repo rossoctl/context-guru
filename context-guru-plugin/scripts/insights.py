@@ -111,12 +111,13 @@ PRESET_PIPELINES: dict[str, tuple[str, ...]] = {
                  "extract_llm_sweep", "extract", "cachesplit", "toolfilter"),
     "conservative": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract",
                       "cachesplit", "toolfilter"),
-    "medium": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm",
-               "extract", "cachesplit", "toolfilter"),
-    "high": ("summarize", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean",
+    "medium": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold",
+               "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"),
+    "high": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean",
               "extract_llm", "extract", "cachesplit", "toolfilter"),
-    "xhigh": ("summarize", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean",
-              "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"),
+    "xhigh": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold",
+              "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit",
+              "toolfilter"),
 }
 
 # What each component this plugin can turn on actually does, in one line a developer can act on,
@@ -159,6 +160,9 @@ COMPONENTS: dict[str, dict[str, str]] = {
     "extract_llm_sweep": {"what": "a periodic second pass of extract_llm over older turns",
                           "counterfactual": "related"},
     "summarize":  {"what": "a compaction model rewrites the transcript", "counterfactual": "related"},
+    "cache_aware_summarizer": {"what": "a compaction model rewrites the transcript, reusing the "
+                                      "cached prefix instead of paying full price for it",
+                               "counterfactual": "related"},
     "smartcrush": {"what": "structure-aware compression of large outputs", "counterfactual": "none"},
     "agentdiet":  {"what": "the published AgentDiet baseline, for A/B only", "counterfactual": "none"},
     "cachesplit": {"what": "moves the cache breakpoint off the volatile tail so the prefix stays "
@@ -425,12 +429,7 @@ class Report:
             self.facts[key] = value
 
     def document(self) -> dict:
-        """The assembled report, which is the ONE source every output mode renders.
-
-        Split out from emit so `--report` cannot drift from `--json`: a second traversal of the
-        facts to build the page would be a second idea of what the report says, and the two would
-        disagree the first time either changed.
-        """
+        """The assembled report: the one document both output modes render."""
         return {
             "result": "ok",
             "facts": self.facts,
@@ -1368,12 +1367,14 @@ def _emit_inventory(rep: Report, tools: object, qualified: set[tuple[str, str]],
     for row in (_get_in(tools, "tools") or []) + (_get_in(tools, "skills", "skills") or []):
         if isinstance(row, dict):
             rows.append((row, False))
-    # `aside` is Claude Code's own tools, held apart by the server because they are the largest
-    # group by weight and removing one breaks the agent. They belong in an inventory — hiding them
-    # understates what the prompt costs — but never in an offer.
-    for row in (_get_in(tools, "aside") or []):
-        if isinstance(row, dict):
-            rows.append((row, True))
+    # `aside` is Claude Code's own tools, held apart by the server. They are NOT listed here: this
+    # section answers "which skills, MCP servers and MCP tools am I paying for", and a built-in is
+    # none of those, cannot be removed, and would only bury the choices. The dashboard keeps them
+    # in its own Built-ins tab, where the weight is shown with no action attached.
+    #
+    # The same rule drops a built-in that arrives among `tools` (removal.danger), invoked or not.
+    rows = [(r, a) for (r, a) in rows
+            if not (isinstance(r.get("removal"), dict) and r["removal"].get("danger"))]
 
     descriptions = _skill_descriptions()
 
@@ -1989,8 +1990,9 @@ def collect_components(f: Fetcher, rep: Report, window: Window, preset: str) -> 
               "from traffic they never saw. Simulating them means replaying every request, which "
               "is a benchmark, not a report.",
             "/plugin configure context-guru -> preset: conservative adds `extract` "
-            "deterministically; `medium` adds a cheap-model relevance pass; `high`/`xhigh` add a "
-            "summarizer and spend on their own. /context-guru:preset-picker explains the trade "
+            "deterministically; `medium` adds a cheap-model relevance pass and a summary kept in "
+            "reserve for a cold return; `high`/`xhigh` use that summary while you work and spend "
+            "on their own. /context-guru:preset-picker explains the trade "
             "in each.",
             "measured size of the problem, NOT a projected saving"))
     elif related:
@@ -2011,50 +2013,6 @@ def collect_components(f: Fetcher, rep: Report, window: Window, preset: str) -> 
 # main
 # ---------------------------------------------------------------------------
 
-# The template `--report` fills, beside this script inside the plugin. A file rather than a string
-# constant so the markup can be edited and reviewed as markup.
-REPORT_TEMPLATE = "insights_report.html"
-
-# The one placeholder in that template. Replaced with the SAME json document `--json` prints, so the
-# page renders from data rather than from values interpolated into markup — descriptions are prose
-# somebody else wrote, and splicing them into HTML would be an injection waiting to happen.
-REPORT_PLACEHOLDER = "__CG_DATA__"
-
-
-def _write_report(doc: dict) -> str:
-    """Fill the template with this run's data and write it under the state directory.
-
-    LOCAL, AND ONLY LOCAL. The page is written to this machine and opened from this machine; there
-    is no upload, no publish and no remote asset. That is not a default to be relaxed later: the
-    report names which tools somebody has installed and what their traffic costs, so a single remote
-    font would announce this machine to whoever served it the moment the file was opened.
-
-    The path is RETURNED rather than opened. Launching a browser out of a command somebody ran to
-    read numbers is a side effect they did not ask for, and on a headless box it is an error.
-    """
-    template = os.path.join(os.path.dirname(os.path.abspath(__file__)), REPORT_TEMPLATE)
-    try:
-        with open(template, encoding="utf-8") as fh:
-            html = fh.read()
-    except OSError as exc:
-        return f"(template unreadable: {exc})"
-
-    # `</script>` inside the JSON would close the data island early and the rest would be parsed as
-    # markup. Escaping the slash keeps it a valid JSON string and an inert one.
-    payload = json.dumps(doc, sort_keys=True).replace("</", "<\\/")
-    html = html.replace(REPORT_PLACEHOLDER, payload)
-
-    out_dir = settings.state_dir()
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-        path = os.path.join(out_dir, "insights-report.html")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(html)
-    except OSError as exc:
-        return f"(could not write the report: {exc})"
-    return path
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Read-only insights from the local context-guru proxy's own measurements.")
@@ -2062,8 +2020,6 @@ def main() -> int:
                         help="which insight to collect; `all` is every one plus the environment")
     parser.add_argument("--json", action="store_true",
                         help="print the assembled document instead of key=value lines")
-    parser.add_argument("--report", action="store_true",
-                        help="also write a local HTML report and print its path; nothing is uploaded")
     # Windowing, and the reason it is a flag rather than the default: the all-history aggregate is
     # the right answer for "what does my setup cost" and the wrong one for "what is this plugin I
     # installed last week costing me", because it divides that plugin's weight over every session
@@ -2094,8 +2050,6 @@ def main() -> int:
         # a clean bill of health, which is the single misreading this whole surface is built to
         # prevent — so the refusal and its reason ARE the output, and the gating finding above
         # already carries the command that fixes it.
-        if args.report:
-            rep.fact("report_refused", "nothing measured yet: no install routes this directory")
         rep.emit(args.json)
         return 0
 
@@ -2126,28 +2080,8 @@ def main() -> int:
     if not rep.findings:
         rep.fact("verdict", "nothing to fix in what could be measured")
 
-    if args.report:
-        # Stamped before rendering so the page can say when it was measured. A report read a week
-        # later is a report about a week-old window, and nothing else on the page would say so.
-        rep.fact("report_generated", _now_local())
-        # The script's OWN absolute path, so the page can print a command that runs. Without it
-        # the page printed `python3 insights.py …`, which resolves from nowhere: this file lives in
-        # a versioned plugin cache directory the reader has never cd'd into, so a bare filename is
-        # a command that cannot work from anywhere they are likely to be standing.
-        rep.fact("report_script", os.path.abspath(__file__))
-        rep.fact("report_area", args.area)
-        if args.sessions:
-            rep.fact("report_sessions", args.sessions)
-        rep.fact("report_path", _write_report(rep.document()))
-
     rep.emit(args.json)
     return 0
-
-
-def _now_local() -> str:
-    """Local wall-clock time, to the minute. Not UTC: this is read by the person at this machine."""
-    import datetime
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
 if __name__ == "__main__":

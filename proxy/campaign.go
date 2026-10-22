@@ -44,7 +44,17 @@ import (
 // config.DefaultKeepAliveMaxUSDPerPing. Never left at the zero value: MinPrefixTokens 0
 // on a strategy means NO floor at all — pingable() pings every session that clears
 // turn >= 1 — which is 20000x looser than the account default, not equal to it.
-const campaignDefaultMinPrefixTokens = 20000
+const campaignDefaultMinPrefixTokens = 80000
+
+// campaignLegacyMinPrefixTokens is the pre-#435 floor. The 80k evidence (analysis B-policy-r2)
+// is for K=2 ping-everyone at 270 s; the K=1 (keepalive-5m-once), stop-reason-gated and 1h-tier
+// arms have no separate evidence for it, so they keep the old 20k floor.
+const campaignLegacyMinPrefixTokens = 20000
+
+// campaignKeepAlive5mIdle mirrors config.DefaultKeepAliveIdle for the keepalive-5m arm only.
+// The once and stop-reason-gated arms stay at 280: the 270 s evidence (analysis B-policy-r2,
+// K>=2 under the response-end clock) does not cover K=1 (which prefers 280) or the gate.
+const campaignKeepAlive5mIdle = 270
 
 // campaignDefaultMaxPings mirrors config.DefaultKeepAliveMaxPings.
 const campaignDefaultMaxPings = 2
@@ -98,6 +108,7 @@ type campaignArm struct {
 	predictorThreshold float64
 	headTTL1h          bool
 	headTTLMinTokens   int
+	minPrefixTokens    int
 }
 
 // campaignArmFor is the single source of truth the create flow consults. idleSeconds/
@@ -110,25 +121,59 @@ func campaignArmFor(arm string) campaignArm {
 	case kvcache.StrategyNoCache, kvcache.StrategyFixed5m, kvcache.StrategyFixed1h:
 		return campaignArm{activatable: true, baseline: true}
 	case kvcache.StrategyKeepAlive5m:
-		return campaignArm{activatable: true, idleSeconds: 280, maxPings: campaignDefaultMaxPings}
+		return campaignArm{activatable: true, idleSeconds: campaignKeepAlive5mIdle, maxPings: campaignDefaultMaxPings,
+			minPrefixTokens: campaignDefaultMinPrefixTokens}
 	case kvcache.StrategyKeepAlive5mOnce:
-		return campaignArm{activatable: true, idleSeconds: 280, maxPings: 1}
+		return campaignArm{activatable: true, idleSeconds: 280, maxPings: 1,
+			minPrefixTokens: campaignLegacyMinPrefixTokens}
 	case kvcache.StrategyStopReasonGated:
 		return campaignArm{activatable: true, idleSeconds: 280, maxPings: campaignDefaultMaxPings,
-			predictorID: "stop-reason-gated", predictorThreshold: campaignDefaultPredictorThreshold}
+			predictorID: "stop-reason-gated", predictorThreshold: campaignDefaultPredictorThreshold,
+			minPrefixTokens: campaignLegacyMinPrefixTokens}
 	case kvcache.StrategyKeepAlive1h:
 		// 3360s = kvcache.DefaultPingIdle1h — "the same margin against the one-hour
 		// lifetime" the simulator itself ships as this arm's default cadence.
 		return campaignArm{activatable: true, needsModelHonoring: true, headTTL1h: true,
 			idleSeconds: 3360, maxPings: campaignDefaultMaxPings,
-			headTTLMinTokens: campaignDefaultHeadTTLMinTokens}
+			headTTLMinTokens: campaignDefaultHeadTTLMinTokens,
+			minPrefixTokens:  campaignLegacyMinPrefixTokens}
 	case kvcache.StrategyKeepAlive1hOnce:
 		return campaignArm{activatable: true, needsModelHonoring: true, headTTL1h: true,
-			idleSeconds: 3360, maxPings: 1, headTTLMinTokens: campaignDefaultHeadTTLMinTokens}
+			idleSeconds: 3360, maxPings: 1, headTTLMinTokens: campaignDefaultHeadTTLMinTokens,
+			minPrefixTokens: campaignLegacyMinPrefixTokens}
+	}
+	// keepalive-5m-xK: the 5-minute keep-alive with exactly K pings per idle span. The live strategy
+	// carries K as MaxPings, which the simulator replays as the arm's own PingCap. Idle and floor are
+	// keepalive-5m's for K >= 2 (the 270 s / 80k evidence is K>=2) and keepalive-5m-once's for K = 1.
+	if k, ok := kvcache.KeepAlivePingsOf(arm); ok {
+		if k == 1 {
+			return campaignArm{activatable: true, idleSeconds: 280, maxPings: 1,
+				minPrefixTokens: campaignLegacyMinPrefixTokens}
+		}
+		return campaignArm{activatable: true, idleSeconds: campaignKeepAlive5mIdle, maxPings: k,
+			minPrefixTokens: campaignDefaultMinPrefixTokens}
 	}
 	return campaignArm{reason: fmt.Sprintf(
 		"%q has no live enforcement path yet — it is a simulation-only arm", arm)}
 }
+
+// CampaignCellOutcome is what creating a campaign would do with one uploaded suggest cell: activate
+// it (or keep it on a baseline arm), or record it with skipReason. honorsHeadTTL1h reports whether a
+// tenant's traffic honors the 1h cache tier. It is the SAME decision ctlCreateCampaign makes, so an
+// offline tool that builds an upload file can report it without a second copy of the rules.
+func CampaignCellOutcome(cell dash.KVCacheSuggestion, honorsHeadTTL1h func(tenantID string) bool) (activatable bool, skipReason string) {
+	c := resolveCampaignCell(cell, honorsHeadTTL1h)
+	return c.activatable, c.skipReason
+}
+
+// CampaignArmEnforceable reports whether a campaign can enforce arm on live traffic at all. A cell
+// can still be skipped for its own reasons (too few requests, unpriced rows, a 1h-tier arm on a
+// model that does not honor it) — CampaignCellOutcome answers that.
+func CampaignArmEnforceable(arm string) bool { return campaignArmFor(arm).activatable }
+
+// HeadTTL1hHonored reports whether model is measured to honor the 1h cache tier on this deployment —
+// the set a campaign checks before it activates a 1h-tier arm.
+func HeadTTL1hHonored(model string) bool { return headTTL1hHonoredModels[model] }
 
 // resolvedCampaignCell is one suggest cell's outcome after resolving its arm and, for a
 // 1h-tier arm, checking whether this specific tenant's traffic honors it.
@@ -341,6 +386,7 @@ func tileHours(hours []int, days []time.Weekday) []tenant.Window {
 		endStr := fmt.Sprintf("%02d:00", end+1)
 		out = append(out, tenant.Window{
 			Days: days, Start: fmt.Sprintf("%02d:00", start), End: endStr,
+			TZ: "UTC", // cells are UTC hours on UTC weekdays; unset would resolve to Asia/Jerusalem
 		})
 	}
 	return out
@@ -432,7 +478,7 @@ func strategyForGroup(campaignName string, g *campaignGroup, days []time.Weekday
 		Target:             tenant.Target{Mode: tenant.TargetList, TenantIDs: g.tenantIDs},
 		IdleSeconds:        g.config.idleSeconds,
 		MaxPings:           g.config.maxPings,
-		MinPrefixTokens:    campaignDefaultMinPrefixTokens,
+		MinPrefixTokens:    g.config.minPrefixTokens,
 		PredictorID:        g.config.predictorID,
 		PredictorThreshold: g.config.predictorThreshold,
 		HeadTTL1h:          g.config.headTTL1h,

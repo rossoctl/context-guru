@@ -12,7 +12,7 @@
 # user's name. settings.py does the resolution, in the same order the hooks and the status line use.
 #
 # THE PROXY IS CHECKED BEFORE ANYTHING OPENS. A browser landing on "connection refused" reads as a
-# broken product. Unlike insights-report.sh this one does open a browser, because opening it is the
+# broken product. This one opens a browser, because opening it is the
 # whole point of the command — but the URLs are always printed too, since over SSH or on a headless
 # machine the open does nothing and the URLs are then the only way in. `--no-open` prints only.
 #

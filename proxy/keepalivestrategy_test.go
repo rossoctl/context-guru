@@ -216,21 +216,32 @@ func TestValidStrategyBounds(t *testing.T) {
 	}
 }
 
-// knownPredictorIDs and predictorFor are two separate lists by construction (a map a
-// strategy is validated against, a switch pingable() actually evaluates), and nothing
-// forces them to agree except this test — the exact drift a Strategy naming a "known"
-// predictor pingable() cannot actually run would produce.
+// knownPredictorIDs and keepalive's predictorFor are two separate lists by construction (a map a
+// strategy is validated against, a switch pingable() actually evaluates), and nothing forces them
+// to agree except this test — the exact drift a Strategy naming a "known" predictor pingable()
+// cannot actually run would produce. predictorFor is keepalive's own, so the lockstep is checked
+// through the keeper: a strategy naming a KNOWN id with threshold 0 is tracked (the gate passes every
+// prediction), and an UNKNOWN id is refused (pingable fails toward not spending).
 func TestKnownPredictorIDsMatchPredictorFor(t *testing.T) {
+	tracked := func(id string) bool {
+		k, _, clock := testKeeper(t, Limits{})
+		pol := kaPolicy()
+		pol.PredictorID = id
+		pol.PredictorThreshold = 0
+		recordOne(t, k, pol, kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+		return k.Stats().Live == 1
+	}
 	for id := range knownPredictorIDs {
-		if _, ok := predictorFor(id); !ok {
-			t.Errorf("%q is in knownPredictorIDs but predictorFor does not recognise it", id)
+		if !tracked(id) {
+			t.Errorf("%q is in knownPredictorIDs but the keeper's predictorFor does not recognise it", id)
 		}
 	}
-	for _, id := range []string{"stop-reason-gated", "not-a-real-one"} {
-		_, wantOK := knownPredictorIDs[id]
-		_, gotOK := predictorFor(id)
-		if gotOK != wantOK {
-			t.Errorf("predictorFor(%q) ok=%v, knownPredictorIDs says %v", id, gotOK, wantOK)
+	for _, id := range []string{"not-a-real-predictor", "stop_reason", "STOP-REASON-GATED"} {
+		if knownPredictorIDs[id] {
+			continue
+		}
+		if tracked(id) {
+			t.Errorf("the keeper accepted predictor %q, which knownPredictorIDs does not list", id)
 		}
 	}
 }
@@ -361,6 +372,11 @@ func TestValidPredictorRef(t *testing.T) {
 // is live" — and a manager-only gate refuses a plain user. Update and delete take
 // effect just as immediately.
 func TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart(t *testing.T) {
+	// Pinned to the last minute of the day in DefaultStrategyTZ. With the wall clock this test
+	// failed for one minute in 1440: a window ending "23:59" is exclusive and misses 23:59:xx.
+	// "24:00" is the end-of-day spelling; the fixed instant keeps that regression covered.
+	loc, _ := time.LoadLocation(tenant.DefaultStrategyTZ)
+	at := time.Date(2026, 10, 14, 23, 59, 30, 0, loc)
 	f := newMgrFixture(t)
 	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
 	userJar, userID := f.signUpJar(t, "user@ibm.com")
@@ -368,7 +384,7 @@ func TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart(t *testing.T) {
 	// A plain user may not create one.
 	body := `{"name":"biz hours","idle_seconds":280,"max_pings":2,"min_prefix_tokens":20000,
 		"max_usd_per_ping":0.25,"active":true,
-		"windows":[{"start":"00:00","end":"23:59"}],"target":{"mode":"all"}}`
+		"windows":[{"start":"00:00","end":"24:00"}],"target":{"mode":"all"}}`
 	w, _ := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, userJar)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("a plain user's create = %d, want 403: %s", w.Code, w.Body)
@@ -386,7 +402,7 @@ func TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart(t *testing.T) {
 	// Live in the keeper right now, with no restart: an all-target strategy that is
 	// active and covers this instant matches any tenant, including the one that just
 	// signed up.
-	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, time.Now()); applied != id {
+	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, at); applied != id {
 		t.Errorf("applyStrategy after create = %q, want %q", applied, id)
 	}
 
@@ -411,7 +427,7 @@ func TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("patch = %d, want 200: %s", w.Code, w.Body)
 	}
-	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, time.Now()); applied != "" {
+	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, at); applied != "" {
 		t.Errorf("a deactivated strategy still applied: %q", applied)
 	}
 
@@ -438,7 +454,7 @@ func TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("delete = %d, want 200: %s", w.Code, w.Body)
 	}
-	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, time.Now()); applied != "" {
+	if _, applied := f.h.keeper.applyStrategy(userID, CachePolicy{}, at); applied != "" {
 		t.Errorf("a deleted strategy still applied: %q", applied)
 	}
 	w, out = f.do(t, http.MethodGet, "/api/keepalive/strategies", "", mgrJar)

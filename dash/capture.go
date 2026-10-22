@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/thread"
 )
 
 // Options configures the dashboard. The zero value is usable: an in-memory
@@ -21,7 +23,8 @@ type Options struct {
 	RetentionAge   time.Duration
 	RetentionBytes int64
 	// CaptureContent enables the before/after content capture the diff view needs.
-	// Opt-OUT: it is the headline feature, so it defaults on. ContentCap bounds each
+	// Opt-IN: the zero value is off, and so is --dashboard-content, because capture writes
+	// arbitrary agent output to disk through a best-effort redactor. ContentCap bounds each
 	// captured blob (default 16 KiB); ContentMaxPerRequest bounds how many
 	// rewritten messages are captured per request (default 24).
 	CaptureContent       bool
@@ -48,9 +51,6 @@ type Options struct {
 	// /api/config. It is redacted before serving; nothing sensitive should be in
 	// here in the first place.
 	Effective map[string]any
-	// BenchDirs are directories scanned for harbor benchmark runs (summary.json +
-	// rows-*.json) at startup and on demand.
-	BenchDirs []string
 
 	// DiskHighWatermark is the fraction of the FILESYSTEM in use at which the
 	// janitor starts evicting the oldest sessions; DiskLowWatermark is where it
@@ -104,6 +104,10 @@ type Options struct {
 	// fills, which takes down every user's agent. Default false — reclaim and say
 	// loudly what was lost.
 	ArchiveRequired bool
+	// LifecycleSignals records the per-request lifecycle signals into request_lifecycle
+	// (dash/lifecycle.go). The zero value is off, but --dashboard-lifecycle-signals defaults
+	// to on: the rows hold only counts and sizes, never content.
+	LifecycleSignals bool
 }
 
 const (
@@ -177,8 +181,10 @@ type Recorder struct {
 	// Cache-attribution state: the last time we saw each session and whether we
 	// have seen each model, so a cold start is never reported as a bust.
 	mu        sync.Mutex
-	lastSeen  map[string]int64  // session -> epoch ms of previous request
-	lastTail  map[string]uint64 // session -> previous request's volatile-tail hash
+	life      *lifecycle             // nil unless Options.LifecycleSignals
+	lastSeen  map[string]int64       // thread.Key(session, thread) -> epoch ms of previous request
+	lastTail  map[string]uint64      // thread.Key(session, thread) -> previous request's volatile-tail hash
+	lastFacts map[string]PrefixFacts // thread.Key(session, thread), and that + "\x00" + model -> latest prefix facts
 	seenModel map[string]bool
 	// perComp accumulates unique-savings dedup keys so a per-request unique figure
 	// exists at capture time. Bounded; see markUnique.
@@ -188,6 +194,16 @@ type Recorder struct {
 	diskProbe func(dir string) (float64, bool)
 	// remote is cold storage, or nil.
 	remote Remote
+	// counts feeds the bypass count worker (see countLoop). Small and bounded on purpose.
+	counts chan countJob
+	// queuedCountBytes is the total body size of the jobs in counts plus the one being counted.
+	queuedCountBytes atomic.Int64
+	// countsDropped counts rows whose token count was skipped because the queue was full.
+	countsDropped atomic.Int64
+	// migrationsDone is closed when the one-time background migrations have finished or been
+	// stopped. They read and write the requests table, so a test that measures the WAL waits for
+	// it first.
+	migrationsDone chan struct{}
 	// tenantQuota reads a tenant's own row quota from the control plane (see
 	// SetTenantQuota). A func rather than a value because a manager can change it at
 	// any time, and a pointer because it is wired after the recorder starts.
@@ -216,12 +232,21 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		done:      make(chan struct{}),
 		lastSeen:  map[string]int64{},
 		lastTail:  map[string]uint64{},
+		lastFacts: map[string]PrefixFacts{},
 		seenModel: map[string]bool{},
 		seenKeys:  map[string]struct{}{},
 		remote:    opts.Remote,
+		counts:    make(chan countJob, countQueue),
+
+		migrationsDone: make(chan struct{}),
+	}
+	if opts.LifecycleSignals {
+		r.life = newLifecycle()
 	}
 	r.wg.Add(1)
 	go r.run()
+	r.wg.Add(1)
+	go r.countLoop()
 	// The archiver gets its OWN goroutine. It must never share the writer's, because
 	// an rclone round trip takes seconds and the writer owes the request path a fast
 	// insert — a blocked writer means a full queue means dropped events, which is
@@ -255,6 +280,7 @@ func NewRecorder(opts Options) (*Recorder, error) {
 // both at once still finishes well inside the time a single one used to take alone.
 func (r *Recorder) backgroundMigrations() {
 	defer r.wg.Done()
+	defer close(r.migrationsDone)
 	r.dedupeLoop()
 	r.keepAliveStrategyBackfillLoop()
 }
@@ -323,15 +349,18 @@ func (r *Recorder) Close() error {
 // Stats reports the capture pipeline's own health — including its drops, which is
 // the number that keeps every other number honest.
 type Stats struct {
-	Captured int64  `json:"captured"`
-	Written  int64  `json:"written"`
-	Dropped  int64  `json:"dropped"`
-	Errors   int64  `json:"errors"`
-	Queued   int    `json:"queued"`
-	QueueCap int    `json:"queue_cap"`
-	Clients  int    `json:"sse_clients"`
-	DBPath   string `json:"db_path"`
-	DBBytes  int64  `json:"db_bytes"`
+	Captured int64 `json:"captured"`
+	Written  int64 `json:"written"`
+	Dropped  int64 `json:"dropped"`
+	// CountsDropped is the number of bypassed requests whose token count was skipped because the
+	// count worker's queue was full; their rows keep tokens_before 0.
+	CountsDropped int64  `json:"counts_dropped"`
+	Errors        int64  `json:"errors"`
+	Queued        int    `json:"queued"`
+	QueueCap      int    `json:"queue_cap"`
+	Clients       int    `json:"sse_clients"`
+	DBPath        string `json:"db_path"`
+	DBBytes       int64  `json:"db_bytes"`
 	// Mode is the proxy's operating mode ("active" | "observe"). The UI renders an
 	// unmissable banner in observe mode: every request was forwarded UNTOUCHED, so a
 	// reader who mistakes these figures for enforced savings has drawn exactly the wrong
@@ -371,7 +400,7 @@ func (r *Recorder) Stats() Stats {
 	size, _ := r.db.sizeBytes()
 	s := Stats{
 		Captured: r.captured.Load(), Written: r.written.Load(),
-		Dropped: r.dropped.Load(), Errors: r.errors.Load(),
+		Dropped: r.dropped.Load(), Errors: r.errors.Load(), CountsDropped: r.countsDropped.Load(),
 		Queued: len(r.ch), QueueCap: cap(r.ch),
 		Clients: r.hub.Clients(), DBPath: r.db.Path(), DBBytes: size,
 		Mode: r.opts.Mode,
@@ -408,6 +437,22 @@ func (r *Recorder) run() {
 		// request). Nothing reaches the database unredacted either way — the security
 		// property is the ordering against the INSERT, which this preserves.
 		for _, e := range batch {
+			// Issue #424's RECORD half: the body rescan (waitcause.Tracker.Observe, ~11ms on
+			// a 783 KB body) runs HERE too, on this goroutine, for the exact reason Redact
+			// does — finish() runs on the handler's own defer, before the handler returns,
+			// so anything synchronous there delays the NEXT request on a keep-alive
+			// connection, which is precisely what WaitCauseAddsNoRequestLatency-style tests
+			// caught when this ran inline in finish() instead. e.WaitCause is nil on any row
+			// this feature does not apply to (a keep-alive ping's row never sets it at all,
+			// which is also how issue #424 requires a ping to carry no wait-cause label).
+			if e.WaitCause != nil {
+				wc := e.WaitCause()
+				e.WaitingFor, e.WaitTool, e.WakeCause = wc.WaitingFor, wc.WaitTool, wc.WakeCause
+				e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs = wc.OpenBackground, wc.OpenTeammate, wc.MonitorExpiryMs
+			}
+			if e.LifecycleFn != nil {
+				e.Lifecycle = e.LifecycleFn()
+			}
 			e.Redact()
 		}
 		if err := r.db.insertBatch(batch); err != nil {
@@ -422,6 +467,7 @@ func (r *Recorder) run() {
 				"written_total", r.written.Load(), "dropped_total", r.dropped.Load())
 			for _, e := range batch {
 				r.hub.Publish(e)
+				r.enqueueCount(e)
 			}
 		}
 		batch = batch[:0]
@@ -478,13 +524,42 @@ func (r *Recorder) Observe(tenant, session, model string, now int64) (seenSessio
 //
 // tailHash 0 means nothing split, and then tailChanged is false: there is no split to credit.
 func (r *Recorder) ObserveSplit(tenant, session, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
+	return r.ObserveThread(tenant, session, thread.Primary, model, now, tailHash)
+}
+
+// ObserveThread is ObserveSplit for one THREAD of the session (#423). Recency, the cold-start
+// test and the tail comparison are all per thread, because each thread has its own provider
+// cache entry: a subagent's request must not reset the main thread's idle gap, or the main
+// thread's expiry reads as a prefix change; and a subagent's first request is a cold start,
+// not a prefix change. seenSession is therefore "seen this thread". The primary thread keys on
+// the session alone, exactly as before threads existed.
+func (r *Recorder) ObserveThread(tenant, session, threadID, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
+	return r.observe(tenant, session, threadID, "", false, model, now, tailHash)
+}
+
+// ObserveThreadFrom is ObserveThread for the first request of a thread whose content is mostly
+// thread fromThread's (thread.Result.Inherits): a rewind, an edited earlier turn, a fork. Such
+// a request is that conversation's next turn with a changed prefix, not a cold start, so it is
+// observed as seen, with its gap measured from fromThread's last request. A miss on it then
+// reads prefix_change or ttl_expiry. Once the new thread has been seen, this is ObserveThread.
+func (r *Recorder) ObserveThreadFrom(tenant, session, threadID, fromThread, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
+	return r.observe(tenant, session, threadID, fromThread, true, model, now, tailHash)
+}
+
+func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom bool, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
 	if r == nil {
 		return true, true, 0, false
 	}
+	key := thread.Key(session, threadID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	mk := tenant + "\x00" + model
-	prev, seenSession := r.lastSeen[session]
+	prev, seenSession := r.lastSeen[key]
+	if !seenSession && hasFrom {
+		// The tail stays unknown for the new key, so the switch below refuses the split credit
+		// (the "seen but no tail" branch) — the safe direction.
+		prev, seenSession = r.lastSeen[thread.Key(session, fromThread)]
+	}
 	if seenSession {
 		sinceLastMs = now - prev
 	}
@@ -507,7 +582,7 @@ func (r *Recorder) ObserveSplit(tenant, session, model string, now int64, tailHa
 		r.seenModel = map[string]bool{}
 	}
 	if tailHash != 0 {
-		prevTail, had := r.lastTail[session]
+		prevTail, had := r.lastTail[key]
 		switch {
 		case had:
 			tailChanged = prevTail != tailHash
@@ -525,9 +600,9 @@ func (r *Recorder) ObserveSplit(tenant, session, model string, now int64, tailHa
 			// them moved. Refusing the credit is the only safe direction.
 			tailChanged = false
 		}
-		r.lastTail[session] = tailHash
+		r.lastTail[key] = tailHash
 	}
-	r.lastSeen[session] = now
+	r.lastSeen[key] = now
 	r.seenModel[mk] = true
 	return seenSession, seenModel, sinceLastMs, tailChanged
 }
@@ -549,8 +624,15 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 			delete(r.lastTail, k)
 		}
 	}
+	// lastFacts holds two entries per thread and model; they age out by their own request time.
+	for k, f := range r.lastFacts {
+		if now-f.TS > staleSession {
+			delete(r.lastFacts, k)
+		}
+	}
 	if len(r.lastSeen) > 20000 {
 		r.lastSeen, r.lastTail = map[string]int64{}, map[string]uint64{}
+		r.lastFacts = map[string]PrefixFacts{}
 	}
 }
 
@@ -577,9 +659,12 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	// request's gap read as four minutes instead of the twenty it actually was, which is the
 	// one thing proxy/keepalive.go promises a ping never does. It would corrupt exactly the
 	// ttl_expiry attribution the keep-alive is judged on.
-	rows, err := r.db.sql.Query(`SELECT r.session_id, r.ts, r.split_tail_hash FROM requests r
+	//
+	// Per THREAD (#423), the key ObserveThread reads: the latest row of each thread, not of each
+	// session, or a restart would re-date the main thread with a subagent's last request.
+	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.ts, r.split_tail_hash FROM requests r
 		WHERE r.ts >= ? AND r.keepalive = 0 AND r.id = (SELECT r2.id FROM requests r2
-			WHERE r2.session_id = r.session_id AND r2.keepalive = 0
+			WHERE r2.session_id = r.session_id AND r2.thread_id = r.thread_id AND r2.keepalive = 0
 			ORDER BY r2.ts DESC, r2.id DESC LIMIT 1)`,
 		now-staleSession)
 	if err != nil {
@@ -589,16 +674,17 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	seeded := map[string]int64{}
 	tails := map[string]uint64{}
 	for rows.Next() {
-		var id string
+		var sid, tid string
 		var ts, tail int64
 		// int64, not uint64: SQLite's INTEGER is signed, so a hash whose top bit is set
 		// comes back negative and scanning it straight into a uint64 fails the whole
 		// query — which it did on every start, silently costing the seeding this function
 		// exists for ("could not recover session recency" in the log). The bits are the
 		// same; only the Go type of the container differs.
-		if err := rows.Scan(&id, &ts, &tail); err != nil {
+		if err := rows.Scan(&sid, &tid, &ts, &tail); err != nil {
 			return 0, err
 		}
+		id := thread.Key(sid, tid)
 		seeded[id] = ts
 		if tail != 0 {
 			tails[id] = uint64(tail)
@@ -656,4 +742,72 @@ func (r *Recorder) MarkUnique(tenant, component string, keys []string, saved int
 		return 0
 	}
 	return saved * newKeys / len(keys)
+}
+
+// countQueue bounds the bypass token counts waiting for the count worker. A bypassed 33 MiB
+// request takes ~12 s to count, so a deeper queue would only hold transcripts in memory.
+const countQueue = 8
+
+// countMaxBytes bounds the total request-body size queued for counting. A queued job pins its
+// parsed request, a small multiple of the body, so this is what bounds the memory the worker can
+// hold. A job is always accepted when nothing is queued, so one transcript larger than this is
+// still counted.
+//
+// ponytail: the multiple (parsed request vs body) is not measured; queue the raw bytes and parse
+// in the worker if the ceiling ever needs to be exact.
+const countMaxBytes = 64 << 20
+
+type countJob struct {
+	size       int64
+	id         int64
+	accounting string
+	count      func() (before, attempted int)
+}
+
+// enqueueCount hands a just-inserted bypassed row to the count worker. Never blocks: when the
+// queue is full the row keeps tokens_before 0, which the accounting already reads as unknown.
+func (r *Recorder) enqueueCount(e *Event) {
+	if e.BypassCount == nil || e.ID == 0 {
+		return
+	}
+	size := int64(e.BypassBytes)
+	if q := r.queuedCountBytes.Load(); q > 0 && q+size > countMaxBytes {
+		r.countsDropped.Add(1)
+		return
+	}
+	r.queuedCountBytes.Add(size)
+	select {
+	case r.counts <- countJob{size, e.ID, e.TokenAccounting, e.BypassCount}:
+	default:
+		r.queuedCountBytes.Add(-size)
+		r.countsDropped.Add(1)
+	}
+}
+
+// countLoop is the ONE goroutine that counts the tokens of bypassed requests and updates their
+// rows. It is separate from the writer on purpose: the writer owes every account a fast insert,
+// and a single large count holds a goroutine for seconds.
+//
+// ponytail: one worker, so rows of big bypassed requests lag behind their request by the
+// queue's total counting time; a pool is the upgrade if that ever shows. Each queued closure pins
+// its parsed request, so the memory ceiling is countQueue (8) large transcripts; queue the raw
+// bytes instead if that matters.
+func (r *Recorder) countLoop() {
+	defer r.wg.Done()
+	for {
+		select {
+		case j := <-r.counts:
+			before, attempted := j.count()
+			r.queuedCountBytes.Add(-j.size)
+			frozen := before - attempted
+			if frozen < 0 {
+				frozen = 0
+			}
+			if err := r.db.setBypassTokens(j.id, before, attempted, frozen); err != nil {
+				slog.Warn("dash: could not store a bypassed request's token count", "id", j.id, "err", err)
+			}
+		case <-r.done:
+			return
+		}
+	}
 }

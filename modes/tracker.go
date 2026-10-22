@@ -15,8 +15,10 @@
 package modes
 
 import (
+	"hash/fnv"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // compactionResets counts, process-wide, how many turns had their cached-prefix
@@ -66,37 +68,54 @@ func Boundary(prev, n int) int {
 	return prev
 }
 
-// Tracker holds the per-session cached-prefix boundary, each session's state guarded by
-// one lock so concurrent turns cannot interleave a read and a write.
+// DefaultMaxKeys bounds the tracker so an unbounded stream of distinct keys cannot grow it
+// without limit. The key is a THREAD (thread.Key), not a session (#484), so one busy session
+// holds one entry per subagent and per side request. 4,096 entries of about 40 bytes plus the
+// key is well under 1 MB. Exported so other per-thread maps (extract_llm's growth record) use
+// the same bound.
+const DefaultMaxKeys = 4096
+
+// StaleAfter is how long a key may go without a request before the tracker may expire it. It is
+// a MEMORY bound, not a cache verdict: a keep-alive can hold a provider entry warm with no
+// request at all, so an expired key is remembered as dropped (see Tracker.dropped) and never
+// read as "nothing cached". 6 hours is far past the longest provider TTL (1 hour) plus the
+// default keep-alive span.
+const StaleAfter = 6 * time.Hour
+
+// Tracker holds the cached-prefix boundary per key (a session, or one thread of a session), each
+// key's state guarded by one lock so concurrent turns cannot interleave a read and a write.
 type Tracker struct {
 	mu  sync.Mutex
 	m   map[string]turn
-	max int // bound on tracked sessions; 0 => default
+	max int    // bound on tracked keys; 0 => default
+	seq uint64 // use counter: each turn stamps its key, and the smallest stamp is evicted first
+	// dropped holds a hash of every key the tracker evicted or expired, bounded at 4x max. A
+	// later request on such a key gets the WHOLE request as its boundary (nothing may change),
+	// not 0. 0 would let every component rewrite a prefix the provider may still hold — the
+	// same cache write a proxy restart causes. 8 bytes a key, so it outlives the records.
+	dropped map[uint64]struct{}
 }
 
-// turn is what one session's previous request left behind: how long the transcript was,
-// and WHEN it happened.
+// turn is what one key's previous request left behind: how long the transcript was, and WHEN
+// it happened.
 //
 // The timestamp is here rather than in a second map because the two are read together and
-// under the same lock, and because this is already the one place per-session request state
-// is bounded. It answers a question nothing on the request path could answer before: how
-// long has this session been idle — and therefore, given the provider's cache TTL, is the
-// prefix we are about to protect still cached at all?
+// under the same lock, and because this is already the one place per-key request state is
+// bounded. It answers a question nothing on the request path could answer before: how long
+// has this thread been idle — and therefore, given the provider's cache TTL, is the prefix we
+// are about to protect still cached at all?
 type turn struct {
-	n  int
-	at int64 // unix milliseconds; 0 = no previous turn recorded
+	n    int
+	at   int64  // unix milliseconds; 0 = no previous turn recorded
+	used uint64 // Tracker.seq at the last turn on this key
 }
 
-// defaultMaxSessions bounds the tracker so an unbounded stream of distinct sessions
-// cannot grow it without limit. Matches the store's sticky-set bound.
-const defaultMaxSessions = 1000
-
-// NewTracker returns an empty tracker. maxSessions <= 0 uses the default bound.
-func NewTracker(maxSessions int) *Tracker {
-	if maxSessions <= 0 {
-		maxSessions = defaultMaxSessions
+// NewTracker returns an empty tracker. maxKeys <= 0 uses DefaultMaxKeys.
+func NewTracker(maxKeys int) *Tracker {
+	if maxKeys <= 0 {
+		maxKeys = DefaultMaxKeys
 	}
-	return &Tracker{m: map[string]turn{}, max: maxSessions}
+	return &Tracker{m: map[string]turn{}, max: maxKeys, dropped: map[uint64]struct{}{}}
 }
 
 // Turn records that this session's current turn carries n normalized messages and
@@ -119,17 +138,47 @@ func (t *Tracker) Turn(session string, n int) (prevLen int) {
 // the bound above. A caller MUST treat that as "unknown", never as "idle forever": acting
 // on a fabricated idle time is how a warm cache gets invalidated after a proxy restart.
 func (t *Tracker) TurnAt(session string, n int, nowMs int64) (prevLen int, prevAtMs int64) {
+	return t.TurnFrom(session, "", n, nowMs)
+}
+
+// TurnFrom is TurnAt for a key that may be a NEW thread continuing another thread's prefix.
+//
+// parent is the key of the thread this one inherits from ("" for none): Claude Code's side
+// requests (title, quota check, end-of-turn note) and forks start with the main thread's whole
+// transcript, which the provider already holds. When key has no record of its own, its boundary
+// and idle clock come from parent's record, so the first request of such a thread protects the
+// cached prefix it reads. parent's record is only READ, never written: the parent's next request
+// must still be measured against its own last request (#484).
+//
+// The inherited boundary is min(parent's count, n): a fork shorter than its parent diverged
+// somewhere inside the parent's prefix, and freezing all of it is the safe direction. It is never
+// counted as a compaction.
+//
+// A key the tracker dropped (evicted or expired), or a new key whose parent was dropped, gets
+// prevLen = n: the whole request is treated as cached, so nothing changes on this one turn, and
+// the next turn has a real record again.
+func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64) (prevLen int, prevAtMs int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	prev, ok := t.m[session]
-	if !ok && len(t.m) >= t.max {
-		// ponytail: arbitrary eviction, same policy as the store's sticky sets. A dropped
-		// session restarts at 0, which means "treat everything as tail" — correct, just
-		// less saving. Add an LRU only if session churn is shown to cost real savings.
-		for k := range t.m {
-			delete(t.m, k)
-			break
+	prev, ok := t.m[key]
+	switch {
+	case ok:
+		prevLen, prevAtMs = Boundary(prev.n, n), prev.at
+	case t.wasDropped(key):
+		prevLen = n
+	case parent == "":
+	default:
+		if p, pok := t.m[parent]; pok {
+			prevLen, prevAtMs = min(p.n, n), p.at
+		} else if t.droppedLocked(parent) {
+			// The parent was evicted, but the provider may still hold the prefix this request
+			// reads: all cached, as for a dropped key of its own. Peek only, so the parent's own
+			// next request still reads as dropped too.
+			prevLen = n
 		}
+	}
+	if !ok && len(t.m) >= t.max {
+		t.pruneLocked(nowMs)
 	}
 	// Always record THIS turn's length: on growth it is the max anyway, and on a shrink
 	// it is the new prefix every later turn must be measured against.
@@ -137,8 +186,74 @@ func (t *Tracker) TurnAt(session string, n int, nowMs int64) (prevLen int, prevA
 	if nowMs > 0 {
 		at = nowMs
 	}
-	t.m[session] = turn{n: n, at: at}
-	return Boundary(prev.n, n), prev.at
+	t.seq++
+	t.m[key] = turn{n: n, at: at, used: t.seq}
+	return prevLen, prevAtMs
+}
+
+// pruneLocked makes room for one new key. It first expires every key idle past StaleAfter
+// (side-request keys are used once and land here), and only if none is stale does it evict the
+// least recently used key. Either way the key is remembered in dropped, so its next request
+// reads as "all cached", never as "nothing cached". The scans are O(n), and they run only when a
+// NEW key arrives at a full tracker.
+func (t *Tracker) pruneLocked(nowMs int64) {
+	if nowMs > 0 {
+		for k, v := range t.m {
+			if v.at > 0 && nowMs-v.at > StaleAfter.Milliseconds() {
+				t.dropLocked(k)
+			}
+		}
+		if len(t.m) < t.max {
+			return
+		}
+	}
+	var oldest string
+	var least uint64
+	first := true
+	for k, v := range t.m {
+		if first || v.used < least {
+			oldest, least, first = k, v.used, false
+		}
+	}
+	if !first {
+		t.dropLocked(oldest)
+	}
+}
+
+func (t *Tracker) dropLocked(key string) {
+	delete(t.m, key)
+	if len(t.dropped) >= 4*t.max {
+		// ponytail: arbitrary eviction. A forgotten drop reads as a new key (boundary 0), which
+		// is the old behaviour. Add order only if drops outrun 4x the live bound in practice.
+		for h := range t.dropped {
+			delete(t.dropped, h)
+			break
+		}
+	}
+	t.dropped[keyHash(key)] = struct{}{}
+}
+
+// wasDropped reports, and forgets, whether key was evicted or expired. A hash collision makes
+// a new key read as dropped, which only freezes its first request: the safe direction.
+func (t *Tracker) wasDropped(key string) bool {
+	h := keyHash(key)
+	if _, ok := t.dropped[h]; ok {
+		delete(t.dropped, h)
+		return true
+	}
+	return false
+}
+
+// droppedLocked reports whether key was evicted or expired, without forgetting it.
+func (t *Tracker) droppedLocked(key string) bool {
+	_, ok := t.dropped[keyHash(key)]
+	return ok
+}
+
+func keyHash(key string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(key))
+	return h.Sum64()
 }
 
 // Sessions reports how many sessions are tracked (test/telemetry aid).

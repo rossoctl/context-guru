@@ -727,3 +727,34 @@ func TestUnwritablePathDegradesToMemory(t *testing.T) {
 		t.Errorf("expected the in-memory fallback; got path %q", rec.DB().Path())
 	}
 }
+
+// The agent_compaction flag is stored and comes back on the read path (Requests and Request), so
+// the API field is right and not always false.
+func TestAgentCompactionRoundTripsThroughTheReadPath(t *testing.T) {
+	db := openTestDB(t)
+	a, b := mkEvent(DayMs+1, "s", "m1", 100, 90), mkEvent(DayMs+2, "s", "m1", 100, 90)
+	a.AgentCompaction = true
+	if err := db.insertBatch([]*Event{a, b}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Request(a.ID, false)
+	if err != nil || !got.AgentCompaction {
+		t.Fatalf("Request(a) AgentCompaction = %v, err %v; want true", got != nil && got.AgentCompaction, err)
+	}
+	if got, err = db.Request(b.ID, false); err != nil || got.AgentCompaction {
+		t.Fatalf("Request(b) AgentCompaction = %v, err %v; want false", got != nil && got.AgentCompaction, err)
+	}
+	page, err := db.Requests(Filter{TenantAll: true}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range page.Requests {
+		if e.AgentCompaction {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("Requests() returned %d rows with AgentCompaction, want 1", n)
+	}
+}

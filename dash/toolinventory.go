@@ -610,7 +610,7 @@ func (r *Recorder) RecordInventory(tenant, session string, ts int64, inv *Invent
 	}
 	select {
 	case w.(*invWriter).ch <- invMsg{tenant: tenant, session: session, ts: ts,
-		project: project, inv: inv, text: text}:
+		project: ProjectPath(project), inv: inv, text: text}:
 	default:
 		r.dropped.Add(1)
 	}

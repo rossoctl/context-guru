@@ -78,3 +78,7 @@ pre-commit: ## Install pre-commit hooks
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf bin
+
+.PHONY: refresh-litellm-snapshot
+refresh-litellm-snapshot: ## Refresh the bundled LiteLLM price snapshot used by modelinfo tests
+	scripts/refresh-litellm-snapshot.sh

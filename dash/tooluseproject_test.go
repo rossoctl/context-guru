@@ -17,6 +17,7 @@ package dash
 // otherwise collapse to a single row whose project is whichever folder was written last.
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -377,7 +378,7 @@ func TestBackfillingFoldersRepairsImportedInvocationsWithoutTouchingSpend(t *tes
 		t.Fatal(err)
 	}
 
-	n, err := db.BackfillUseProjects(home)
+	n, err := db.BackfillUseProjects(home, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +437,7 @@ func TestBackfillingFoldersIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		if _, err := db.BackfillUseProjects(home); err != nil {
+		if _, err := db.BackfillUseProjects(home, true); err != nil {
 			t.Fatalf("run %d: %v", i+1, err)
 		}
 	}
@@ -490,7 +491,7 @@ func TestBackfillingFoldersLeavesMeasuredInvocationsAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := db.BackfillUseProjects(home); err != nil {
+	if _, err := db.BackfillUseProjects(home, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -548,7 +549,7 @@ func TestBackfillingFoldersNeverRewritesAMeasuredInvocation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := db.BackfillUseProjects(home); err != nil {
+	if _, err := db.BackfillUseProjects(home, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -601,7 +602,7 @@ func TestBackfillingFoldersLeavesTheBoundaryTurnToTheMeasuredSide(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if _, err := db.BackfillUseProjects(home); err != nil {
+	if _, err := db.BackfillUseProjects(home, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -661,7 +662,7 @@ func TestBackfillingFoldersInventsNothingForSessionsNotInTheStore(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if _, err := db.BackfillUseProjects(home); err != nil {
+	if _, err := db.BackfillUseProjects(home, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -731,7 +732,7 @@ func TestBackfillingFoldersRepairsThePreMeasurementPartOfAMixedSession(t *testin
 		t.Fatal(err)
 	}
 
-	if _, err := db.BackfillUseProjects(home); err != nil {
+	if _, err := db.BackfillUseProjects(home, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -767,5 +768,56 @@ func TestBackfillingFoldersRepairsThePreMeasurementPartOfAMixedSession(t *testin
 		t.Errorf("the measured invocation was rewritten to folder %q calls %d; want '' and 99. "+
 			"The proxy watched that traffic and a transcript is not evidence about it",
 			got["Write"], calls["Write"])
+	}
+}
+
+// B4: a dry-run backfill reports and writes nothing.
+func TestBackfillIsDryUnlessApplied(t *testing.T) {
+	db := openTestDB(t)
+	home := t.TempDir()
+	if err := db.insertBatch([]*Event{{TS: daysAgo(9), SessionID: "s1", Model: "m",
+		Source: SourceImported}}); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONL(t, home, "-p", "s1",
+		turnLineCalling("s1", "/Users/v/p", daysAgo(9), `{"type":"tool_use","name":"Bash","input":{}}`))
+	n, err := db.BackfillUseProjects(home, false)
+	if err != nil || n != 1 {
+		t.Fatalf("dry run n=%d err=%v; want 1 reported", n, err)
+	}
+	var rows int
+	db.sql.QueryRow(`SELECT COUNT(*) FROM tool_uses`).Scan(&rows)
+	if rows != 0 {
+		t.Errorf("a dry run wrote %d tool_uses rows", rows)
+	}
+	if _, err := db.BackfillUseProjects(home, true); err != nil {
+		t.Fatal(err)
+	}
+	db.sql.QueryRow(`SELECT COUNT(*) FROM tool_uses WHERE project='/Users/v/p'`).Scan(&rows)
+	if rows != 1 {
+		t.Errorf("apply wrote %d rows; want 1", rows)
+	}
+}
+
+// S3c: the project filter on requests has an index, so a single-tenant, unbounded query is not a
+// table scan.
+func TestRequestsProjectIsIndexed(t *testing.T) {
+	db := openTestDB(t)
+	var n int
+	db.sql.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_requests_project'`).Scan(&n)
+	if n != 1 {
+		t.Error("idx_requests_project is missing")
+	}
+}
+
+// S2(2): the rebuild must not fail the open when tool_uses has no columns to probe.
+func TestMigrateToolUsesProjectWithoutTableIsANoop(t *testing.T) {
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "x.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if err := migrateToolUsesProject(raw); err != nil {
+		t.Fatalf("migrating a database with no tool_uses failed: %v", err)
 	}
 }

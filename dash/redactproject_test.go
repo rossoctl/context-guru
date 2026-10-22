@@ -76,3 +76,9 @@ func TestNoCredentialSurvivesProjectPath(t *testing.T) {
 		t.Fatalf("the canary reached the output: %q", got)
 	}
 }
+
+func TestProjectPathRefusesDotDotSegments(t *testing.T) {
+	if got := ProjectPath("/a/../../etc"); got != Redacted {
+		t.Errorf("ProjectPath with .. = %q; want %q", got, Redacted)
+	}
+}

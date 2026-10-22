@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -313,5 +314,45 @@ func TestTheChartDoesNotHideTheWasteItIsAbout(t *testing.T) {
 	if !strings.Contains(body, "carried") {
 		t.Error("insRollup no longer reads the carried series, so a carried-but-never-invoked " +
 			"capability cannot appear in the chart at all")
+	}
+}
+
+// The MCP server row's tool count must read a field the server's owner object actually carries. It read
+// `o.tools`, which InsightsOwner has never had, so every server row said "undefined tools" (found by the e2e
+// harness: U.no_undefined_text on every Cleanup page). Tied to the struct's own JSON tags so the two cannot
+// drift apart again.
+func TestTheMCPServerRowReadsTheOwnersRealToolCount(t *testing.T) {
+	js := readUI(t, "ui/insights.js")
+	tags := map[string]bool{}
+	ty := reflect.TypeOf(InsightsOwner{})
+	for i := 0; i < ty.NumField(); i++ {
+		tags[strings.Split(ty.Field(i).Tag.Get("json"), ",")[0]] = true
+	}
+	start := strings.Index(js, "type: 'mcp server'")
+	if start < 0 {
+		t.Fatal("the MCP server row is gone from insights.js; update this test")
+	}
+	block := js[start:]
+	m := regexp.MustCompile(`meta:\s*\(?o\.(\w+)(?:\s*\|\|\s*0\))?\s*\+\s*' tools`).FindStringSubmatch(block)
+	if m == nil {
+		t.Fatal("the MCP server row's tool count is not read as `o.<field> + ' tools'`; update this test")
+	}
+	if !tags[m[1]] {
+		t.Errorf("the MCP server row reads o.%s, which InsightsOwner does not serve (fields: %v), "+
+			"so the page renders \"undefined tools\"", m[1], tags)
+	}
+}
+
+// The verdict's explanation is a sentence inside a table cell, and every .tbl cell is white-space: nowrap
+// (style.css), so it inherited that and ran past its cell instead of wrapping at its max-width (found by the
+// e2e harness: U.no_overflow on every Cleanup page, worse at phone width). .ins-why must reset it itself.
+func TestTheVerdictExplanationWrapsInsideItsTableCell(t *testing.T) {
+	rule := regexp.MustCompile(`\.ins-why \{([^}]*)\}`).FindStringSubmatch(readUI(t, "ui/insights.css"))
+	if rule == nil {
+		t.Fatal("no .ins-why rule in insights.css")
+	}
+	if !regexp.MustCompile(`white-space:\s*normal`).MatchString(rule[1]) {
+		t.Errorf(".ins-why does not reset white-space, so it inherits the table cell's nowrap and "+
+			"overflows: %q", rule[1])
 	}
 }

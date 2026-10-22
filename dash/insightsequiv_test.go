@@ -141,6 +141,10 @@ func TestShapingAgreesWithThePluginsOwnRules(t *testing.T) {
 	     "sessions_declared": 9, "sessions_used": 0, "calls": 0, "unused_reads": 74400,
 	     "unused_usd": 0.0563, "priced": true,
 	     "removal": {"kind": "mcp_tool", "command": "claude mcp remove atlas"}},
+	    {"kind": "mcp_tool", "name": "mcp__atlas__search", "server": "atlas", "tokens": 300,
+	     "sessions_declared": 9, "sessions_used": 4, "calls": 12, "unused_reads": 0,
+	     "unused_usd": 0, "priced": true,
+	     "removal": {"kind": "mcp_tool", "command": "claude mcp remove atlas"}},
 	    {"kind": "tool", "name": "Bash", "tokens": 900, "sessions_declared": 9,
 	     "sessions_used": 9, "calls": 79, "unused_reads": 0, "unused_usd": 0, "priced": true,
 	     "removal": {"kind": "builtin", "danger": true}}
@@ -205,8 +209,30 @@ func TestShapingAgreesWithThePluginsOwnRules(t *testing.T) {
 	}
 	doc := ShapeInsights(&rep, InsightsOptions{Qualified: qualified})
 
+	builtin := map[string]bool{}
+	for _, r := range rep.Aside {
+		builtin[r.Name] = true
+	}
+	for _, r := range rep.Tools {
+		if r.Removal.Danger {
+			builtin[r.Name] = true
+		}
+	}
 	goItems := map[string]InsightsItem{}
 	for _, it := range doc.Items {
+		// BUILT-INS (scope none) ARE DELIBERATELY ABSENT FROM THE PLUGIN'S TOOLS SECTION: it lists
+		// skills, MCP servers and MCP tools with their cost, and a Claude Code built-in is neither
+		// removable nor something to price in a list of choices. The served page keeps them for its
+		// separate Built-ins tab, so the Go document is compared minus them, and that exclusion is
+		// asserted below rather than assumed.
+		if builtin[it.Name] {
+			for _, k := range []string{"verdict", "scope", "tokens", "usd"} {
+				if v := py["item."+it.Name+"."+k]; v != "" {
+					t.Errorf("built-in %s is in the plugin's tools output as item.%s=%q", it.Name, k, v)
+				}
+			}
+			continue
+		}
 		goItems[it.Name] = it
 	}
 

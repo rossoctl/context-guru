@@ -28,6 +28,9 @@ var memSeq atomic.Uint64
 type DB struct {
 	sql  *sql.DB
 	path string // "" for the in-memory store
+	// readOnly is set by OpenReadOnly. Every write the handle could make on its own (checkpoint)
+	// checks it; SQLite's mode=ro and query_only refuse any other.
+	readOnly bool
 	// ctx bounds the READS made through this handle, so a request the caller has abandoned stops
 	// costing the process. nil means context.Background().
 	//
@@ -36,6 +39,11 @@ type DB struct {
 	// tests, for a value only the HTTP layer can supply. The struct is two fields and holds no
 	// lock, so copying it is safe; `go vet` would say otherwise if it did.
 	ctx context.Context
+	// sizeSpread is CachesplitSizeSpread's own TTL cache (dash/cachehistory.go) — a POINTER, not
+	// an inline mutex, so WithContext's shallow copy above stays lock-free and copies the
+	// pointer, sharing one cache across every handle this *DB produces rather than giving each
+	// shallow copy its own, independently-stale one.
+	sizeSpread *cachesplitSizeSpreadCache
 }
 
 // WithContext returns a handle whose reads are cancellable, for a caller that has one.
@@ -231,8 +239,13 @@ func dsn(path string) string {
 	// SQLite can only set auto_vacuum on an EMPTY database, so this takes effect for
 	// files created from here on. An existing file keeps auto_vacuum=NONE and falls
 	// back to the full VACUUM path in Prune, which is what it did before.
-	return "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
-		"&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=auto_vacuum(2)"
+	//
+	// busy_timeout is FIRST. The driver runs these in order on every new connection, and the
+	// journal_mode statement needs a lock: with the timeout set after it, a connection opened while
+	// another held the WAL (a checkpoint, a commit) failed at once with SQLITE_BUSY instead of
+	// waiting, and a burst of concurrent reads opens a burst of connections.
+	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(1)&_pragma=auto_vacuum(2)"
 }
 
 func openDSN(d, path string) (*DB, error) {
@@ -267,7 +280,48 @@ func openDSN(d, path string) (*DB, error) {
 		sdb.Close()
 		return nil, err
 	}
-	return &DB{sql: sdb, path: path}, nil
+	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+}
+
+// OpenReadOnly opens an EXISTING dashboard database for reading only — for analysis tools that run
+// beside a live proxy, which owns the file.
+//
+// Open is not safe for that: it migrates the schema (additive DDL, new columns), stamps the
+// version, checkpoints the WAL, and on a version mismatch RENAMES the file aside. Any of those
+// against a database a serving process holds is a write the operator never asked for. This opens
+// with SQLite's mode=ro and query_only, runs none of them, and REFUSES a database whose schema
+// version is not this build's: a reader cannot migrate, and a query written for one schema read
+// against another returns wrong numbers rather than an error.
+//
+// mode=ro still reads the -wal, so rows the live writer has committed but not yet checkpointed
+// are visible. A missing file is an error, not a fresh database. With NO live writer, SQLite
+// still creates an empty -wal and the -shm index beside a WAL database to read it, so the
+// directory must be writable; the database file itself is never modified.
+func OpenReadOnly(path string) (*DB, error) {
+	if path == "" || path == ":memory:" {
+		return nil, errors.New("dash: OpenReadOnly needs a database file")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	sdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)")
+	if err != nil {
+		return nil, err
+	}
+	// A reader beside a live proxy: a handful of connections, never the 100 the writer's pool
+	// holds, so an analysis cannot crowd the serving process off its own file.
+	sdb.SetMaxOpenConns(4)
+	sdb.SetMaxIdleConns(4)
+	var have string
+	if err := sdb.QueryRow(`SELECT value FROM meta WHERE key='schema_version'`).Scan(&have); err != nil {
+		sdb.Close()
+		return nil, fmt.Errorf("dash: read-only open: %w", err)
+	}
+	if have != fmt.Sprint(schemaVersion) {
+		sdb.Close()
+		return nil, &versionMismatch{have: have}
+	}
+	return &DB{sql: sdb, path: path, readOnly: true, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
 }
 
 // sanitizeVersion keeps a version string safe to embed in a filename.
@@ -300,6 +354,9 @@ func (d *DB) Path() string { return d.path }
 
 // gzPair is one blob's before/after compression, precomputed outside the transaction.
 type gzPair struct{ before, after []byte }
+
+// InsertEvents writes events straight to the store in one transaction, without the recorder's queue. For test fixtures in other packages.
+func (d *DB) InsertEvents(evs []*Event) error { return d.insertBatch(evs) }
 
 // insertBatch writes a batch of captured events in ONE transaction — the whole
 // point of batching: a per-request fsync would make the writer the bottleneck
@@ -338,16 +395,19 @@ func (d *DB) insertBatch(evs []*Event) error {
 		messages, tokens_before, tokens_after, attempted_tokens, frozen_tokens, saved_unique,
 		fresh_input, cache_read, cache_write, output_tokens,
 		cost_usd, baseline_cost_usd, cg_llm_cost_usd, cache_saved_usd, cachesplit_saved_usd,
-		split_stable_tokens, split_tail_hash, filtered_decl_tokens,
+		split_stable_tokens, split_tail_hash, filtered_decl_tokens, decl_digest,
 		cache_ttl, sse_buffered, ttfb_ms,
 		cache_write_1h, keepalive, keepalive_pings, keepalive_saved_usd, cg_latency_ms, upstream_ms,
 		expands, expand_tokens, reverts, token_accounting, cache_miss_reason, uncompressed_reason,
 		reasoning_effort, thinking_mode, thinking_budget, temperature, top_p, max_tokens, stream,
 		tool_choice, tools, system_blocks,
 		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
-		keepalive_strategy_id, billed_token_factor, project, source
+		keepalive_strategy_id, billed_token_factor, thread_id,
+		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms,
+		agent_compaction, cache_miss_cause, project, source
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -378,6 +438,14 @@ func (d *DB) insertBatch(evs []*Event) error {
 	}
 	defer xcallStmt.Close()
 
+	lifeStmt, err := tx.Prepare(`INSERT INTO request_lifecycle(
+		request_id, result_count, result_bytes, result_error, since_prev_end_ms, granted_ttl, ping_n)
+		VALUES (?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer lifeStmt.Close()
+
 	spend := map[spendKey]float64{}
 	for idx, e := range evs {
 		// nil, not "", when no strategy applied — so the column stores SQL NULL and stays
@@ -393,7 +461,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.Messages, e.TokensBefore, e.TokensAfter, e.AttemptedTokens, e.FrozenTokens, e.SavedUnique,
 			e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens,
 			e.CostUSD, e.BaselineCostUSD, e.CGLLMCostUSD, e.CacheSavedUSD, e.CachesplitSavedUSD,
-			e.SplitStableTokens, int64(e.SplitTailHash), e.FilteredDeclTokens,
+			e.SplitStableTokens, int64(e.SplitTailHash), e.FilteredDeclTokens, e.DeclDigest,
 			e.CacheTTL, boolInt(e.SSEBuffered), e.TTFBMs,
 			e.CacheWrite1h, boolInt(e.KeepAlive), e.KeepAlivePings, e.KeepAliveSavedUSD,
 			e.CGLatencyMs, e.UpstreamMs,
@@ -401,7 +469,9 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.ReasoningEffort, e.ThinkingMode, e.ThinkingBudget, e.Temperature, e.TopP, e.MaxTokens,
 			boolInt(e.Stream), e.ToolChoice, e.Tools, e.SystemBlocks,
 			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.StopReason,
-			strategyID, e.BilledTokenFactor,
+			strategyID, e.BilledTokenFactor, e.ThreadID,
+			e.WaitingFor, e.WaitTool, e.WakeCause, e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs,
+			boolInt(e.AgentCompaction), e.CacheMissCause,
 			// Sanitized HERE, at the write, rather than trusted from the caller: this is the last
 			// point before the value is on disk and on the SSE feed, and a path is a
 			// client-chosen string that could be named after a credential.
@@ -420,6 +490,12 @@ func (d *DB) insertBatch(evs []*Event) error {
 			return err
 		}
 		e.ID = id
+		if l := e.Lifecycle; l != nil {
+			if _, err := lifeStmt.Exec(id, l.ResultCount, l.ResultBytes, boolInt(l.ResultError),
+				l.SincePrevEndMs, l.GrantedTTL, l.PingN); err != nil {
+				return err
+			}
+		}
 		for _, c := range e.Components {
 			if _, err := compStmt.Exec(id, c.Component, c.Kind,
 				boolInt(c.Acted), boolInt(c.Mutated), boolInt(c.Reverted), boolInt(c.Skipped),
@@ -662,7 +738,7 @@ func (d *DB) reclaim() error {
 // checkpoint folds the write-ahead log into the main database and truncates it.
 // Best-effort: a busy checkpoint is not a failure, only a deferral.
 func (d *DB) checkpoint() {
-	if d.path == "" || d.path == ":memory:" {
+	if d.readOnly || d.path == "" || d.path == ":memory:" {
 		return
 	}
 	_, _ = d.sql.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
@@ -782,4 +858,15 @@ func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64,
 		deleted += got
 	}
 	return deleted, nil
+}
+
+// setBypassTokens stores the token count of a bypassed request after the fact. A bypassed row
+// is forwarded untouched, so after equals before. Priced with the count still unknown, such a
+// row is labelled "missing"; with a count it is "partial", exactly as when it was counted inline.
+func (d *DB) setBypassTokens(id int64, before, attempted, frozen int) error {
+	_, err := d.sql.Exec(`UPDATE requests SET tokens_before = ?, tokens_after = ?, attempted_tokens = ?,
+		frozen_tokens = ?,
+		token_accounting = CASE WHEN token_accounting = ? AND ? > 0 THEN ? ELSE token_accounting END
+		WHERE id = ?`, before, before, attempted, frozen, AccountingMissing, before, AccountingPartial, id)
+	return err
 }

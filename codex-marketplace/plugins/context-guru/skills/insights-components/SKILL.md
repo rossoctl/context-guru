@@ -1,12 +1,13 @@
 ---
 name: context-guru-insights-components
-description: Deterministically report measured context-guru component effectiveness.
+description: Moved to the insights skill (`savings`). Kept for one release so existing habits still work.
 ---
 
-# Analyze context-reduction components
+This command moved to `context-guru-insights` (`savings`). Say so in one line, then run the new one from this skill directory and print its output exactly as it is in one code block:
 
-Run `python3 ../../scripts/insights.py components`. Present the findings in their emitted order,
-including every measurement label and exact fix. Do not perform arithmetic in prose.
-If it reports `proxy_unavailable`, retry the same read-only command with
-`sandbox_permissions="require_escalated"`, explaining that loopback access is needed. If the retry
-cannot run, say the measurements are unverified rather than claiming the proxy is unavailable.
+```bash
+python3 ../../scripts/cg.py insights savings
+```
+
+If loopback access is blocked, retry the same read-only command with `sandbox_permissions="require_escalated"`.
+If it still cannot run, say proxy state is unverified rather than guessing.

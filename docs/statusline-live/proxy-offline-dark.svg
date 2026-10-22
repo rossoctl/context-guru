@@ -1,0 +1,63 @@
+<svg class="rich-terminal" viewBox="0 0 994 98.8" xmlns="http://www.w3.org/2000/svg">
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Regular"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Regular.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Regular.woff") format("woff");
+        font-style: normal;
+        font-weight: 400;
+    }
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Bold"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Bold.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Bold.woff") format("woff");
+        font-style: bold;
+        font-weight: 700;
+    }
+
+    .terminal-52899047-matrix {
+        font-family: Fira Code, monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .terminal-52899047-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: arial;
+    }
+
+    .terminal-52899047-r1 { fill: #dcdcdc;font-weight: bold }
+.terminal-52899047-r2 { fill: #dcdcdc }
+    </style>
+
+    <defs>
+    <clipPath id="terminal-52899047-clip-terminal">
+      <rect x="0" y="0" width="975.0" height="47.8" />
+    </clipPath>
+    <clipPath id="terminal-52899047-line-0">
+    <rect x="0" y="1.5" width="976" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#1e1e1e" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="992" height="96.8" rx="8"/><text class="terminal-52899047-title" fill="#dcdcdc" text-anchor="middle" x="496" y="27">statusline</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+        
+    <g transform="translate(9, 41)" clip-path="url(#terminal-52899047-clip-terminal)">
+    
+    <g class="terminal-52899047-matrix">
+    <text class="terminal-52899047-r1" x="0" y="20" textLength="12.2" clip-path="url(#terminal-52899047-line-0)">$</text><text class="terminal-52899047-r2" x="12.2" y="20" textLength="134.2" clip-path="url(#terminal-52899047-line-0)">&#160;statusline</text><text class="terminal-52899047-r2" x="976" y="20" textLength="12.2" clip-path="url(#terminal-52899047-line-0)">
+</text><text class="terminal-52899047-r2" x="0" y="44.4" textLength="219.6" clip-path="url(#terminal-52899047-line-1)">cg&#160;✕&#160;proxy&#160;offline</text><text class="terminal-52899047-r2" x="976" y="44.4" textLength="12.2" clip-path="url(#terminal-52899047-line-1)">
+</text>
+    </g>
+    </g>
+</svg>

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/store"

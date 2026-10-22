@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,6 +48,9 @@ type ImportResult struct {
 	SkippedOverlap int
 	SkippedAlready int
 	SkippedOld     int
+	// Truncated counts transcripts whose read stopped early (a line past the buffer), so a short
+	// total is attributable rather than silent.
+	Truncated int
 	// Called counts every capability invoked across the imported span, skills under their own
 	// names. This is the one finding the import can make about capabilities, since the cost of
 	// CARRYING them is not recoverable.
@@ -67,16 +71,32 @@ type ImportResult struct {
 func (d *DB) ImportHistory(home string, opt ImportOptions) (*ImportResult, error) {
 	out := &ImportResult{Called: map[string]int{}, Projects: map[string]int{}}
 
-	// THE CUTOFF: the earliest request the proxy measured itself. Everything at or after it is
-	// already known, and better known.
-	var measuredFrom int64
-	if err := d.sql.QueryRow(
-		`SELECT COALESCE(MIN(ts), 0) FROM requests WHERE source = ''`).Scan(&measuredFrom); err != nil {
+	// THE CUTOFF, PER SESSION: the earliest request the proxy measured in that session. A turn at
+	// or after it is already known, and better known. It is per session and not global because a
+	// global minimum makes one measured request on any project hide every other project's later
+	// history for good, and reports it as "the proxy saw these itself".
+	measuredFrom := map[string]int64{}
+	crows, err := d.sql.Query(
+		`SELECT session_id, MIN(ts) FROM requests WHERE source = '' GROUP BY session_id`)
+	if err != nil {
+		return nil, err
+	}
+	for crows.Next() {
+		var sess string
+		var ts int64
+		if err := crows.Scan(&sess, &ts); err != nil {
+			crows.Close()
+			return nil, err
+		}
+		measuredFrom[sess] = ts
+	}
+	crows.Close()
+	if err := crows.Err(); err != nil {
 		return nil, err
 	}
 
-	// What is already imported, keyed by session and timestamp. A transcript turn has no id of
-	// its own, so identity is (session, ts) — the pair a second run would otherwise re-insert.
+	// What is already imported, keyed by session and timestamp. A turn's identity across runs is
+	// (session, ts of its first line); within a read, message ids already made it one turn.
 	already := map[string]bool{}
 	rows, err := d.sql.Query(`SELECT session_id, ts FROM requests WHERE source = ?`, SourceImported)
 	if err != nil {
@@ -100,13 +120,16 @@ func (d *DB) ImportHistory(home string, opt ImportOptions) (*ImportResult, error
 	var batch []*Event
 	var uses []importedUse
 	for _, f := range files {
-		turns, err := ReadTranscript(f)
+		turns, truncated, err := ReadTranscriptChecked(f)
 		if err != nil {
 			// A transcript that cannot be opened is skipped, not fatal: one unreadable file in a
 			// directory of a hundred must not cost the other ninety-nine.
 			continue
 		}
 		out.Files++
+		if truncated {
+			out.Truncated++
+		}
 		for _, tn := range turns {
 			if opt.Since > 0 && tn.TS < opt.Since {
 				out.SkippedOld++
@@ -114,11 +137,28 @@ func (d *DB) ImportHistory(home string, opt ImportOptions) (*ImportResult, error
 			}
 			// Rule 1. `>=` not `>`: a turn at exactly the measured boundary is the same request
 			// the proxy recorded.
-			if measuredFrom > 0 && tn.TS >= measuredFrom {
+			if cut := measuredFrom[tn.SessionID]; cut > 0 && tn.TS >= cut {
 				out.SkippedOverlap++
 				continue
 			}
-			if already[tn.SessionID+"@"+strconv.FormatInt(tn.TS, 10)] {
+			isNew := !already[tn.SessionID+"@"+strconv.FormatInt(tn.TS, 10)]
+			/* INVOCATIONS ARE RECOMPUTED FROM EVERY ELIGIBLE TURN, new or not. They used to be
+			 * collected only for turns not yet imported, which had two faults: a run interrupted
+			 * between the requests and the uses left requests that every later run skipped, so
+			 * their uses were never written; and a re-run with more history replaced a count with
+			 * only the new turns' share. The write is idempotent (see insertImportedUses), so
+			 * re-deriving them each run is safe and heals an interrupted one. */
+			if opt.Apply {
+				for _, name := range tn.Called {
+					uses = append(uses, importedUse{
+						session: tn.SessionID, name: name, ts: tn.TS,
+						isSkill: tn.Skills[name],
+						// The turn's own folder, which the transcript records per turn.
+						project: tn.Project,
+					})
+				}
+			}
+			if !isNew {
 				out.SkippedAlready++
 				continue
 			}
@@ -137,33 +177,11 @@ func (d *DB) ImportHistory(home string, opt ImportOptions) (*ImportResult, error
 			}
 			if opt.Apply {
 				batch = append(batch, importedEvent(tn))
-				/* INVOCATIONS TOO, not only spend.
-				 *
-				 * An import that writes `requests` and nothing else produces history that can
-				 * only make a capability look MORE abandoned than it was: the verdict logic
-				 * reads `tool_uses` to decide whether something earned its weight, so spend
-				 * without invocations is evidence of carriage with no evidence of use. Observed
-				 * on a real store — `superpowers:brainstorming` was reported as "never invoked"
-				 * while the user's own transcripts showed four calls a month earlier, and the
-				 * page was recommending its removal.
-				 *
-				 * The bias is the serious part. The error was not noise in both directions; it
-				 * pushed every imported capability toward `remove`. */
-				for _, name := range tn.Called {
-					uses = append(uses, importedUse{
-						session: tn.SessionID, name: name, ts: tn.TS,
-						isSkill: tn.Skills[name],
-						// The turn's own folder, which the transcript records per turn. Read and
-						// then discarded by an earlier version of this importer, which is why the
-						// dashboard could not scope usage to a project at all.
-						project: tn.Project,
-					})
-				}
 			}
 		}
 	}
 
-	if !opt.Apply || len(batch) == 0 {
+	if !opt.Apply {
 		return out, nil
 	}
 	// In chronological order, so an interrupted write leaves a contiguous span rather than a
@@ -205,7 +223,7 @@ type importedUse struct {
 
 // insertImportedUses records recovered invocations in tool_uses.
 //
-// WRITTEN AS AN ABSOLUTE COUNT, not accumulated. The live path upserts with
+// WRITTEN AS AN ABSOLUTE COUNT (never lowered), not accumulated. The live path upserts with
 // `calls = calls + excluded.calls`, which is right for it: each batch carries new traffic. An
 // import re-reads the SAME transcripts every run, so accumulating would make a capability look
 // twice as used after a second run — and a user who re-runs an import to pick up last week's
@@ -215,6 +233,23 @@ type importedUse struct {
 // `skill` column, a tool's in `name`. Reading a transcript, the distinction is whether the
 // invocation came through the `Skill` tool — see transcriptCalled.
 func (d *DB) insertImportedUses(uses []importedUse) error {
+	if len(uses) == 0 {
+		return nil
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := insertImportedUsesTx(tx, uses); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// insertImportedUsesTx is insertImportedUses inside the caller's transaction, so a caller that
+// deletes first can make the delete and the re-insert one atomic step.
+func insertImportedUsesTx(tx *sql.Tx, uses []importedUse) error {
 	if len(uses) == 0 {
 		return nil
 	}
@@ -251,16 +286,11 @@ func (d *DB) insertImportedUses(uses []importedUse) error {
 		}
 	}
 
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	stmt, err := tx.Prepare(`INSERT INTO tool_uses(
 		tenant_id, session_id, name, server, skill, calls, first_ts, last_ts, project
 	) VALUES ('',?,?,'',?,?,?,?,?)
 	ON CONFLICT(tenant_id, session_id, project, name, skill) DO UPDATE SET
-		calls = excluded.calls,
+		calls = MAX(calls, excluded.calls),
 		first_ts = MIN(first_ts, excluded.first_ts),
 		last_ts = MAX(last_ts, excluded.last_ts)`)
 	if err != nil {
@@ -279,7 +309,7 @@ func (d *DB) insertImportedUses(uses []importedUse) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // importedEvent is one transcript turn as a request row.

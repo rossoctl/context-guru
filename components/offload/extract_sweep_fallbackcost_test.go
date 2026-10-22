@@ -8,8 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -27,8 +28,8 @@ func billingModel(t *testing.T, reply string) (components.Model, func()) {
 			`"usage":{"input_tokens":31000,"output_tokens":420,` +
 			`"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`))
 	}))
-	return cheapmodel.Anthropic{BaseURL: srv.URL, APIKey: "k", Model: "claude-sonnet-5",
-		MaxTokens: 2048}, srv.Close
+	d, ref := dispatchtest.HTTP(srv.URL, dispatchtest.AnthropicAuth("k", ""))
+	return cheapmodel.Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5", MaxTokens: 2048}, srv.Close
 }
 
 // sweepSpend reads this component's recorded extraction economics out of /stats' breakdown.

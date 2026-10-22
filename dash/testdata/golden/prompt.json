@@ -1,0 +1,49 @@
+{
+ "captured": false,
+ "digest": "d59",
+ "regions": [
+  {
+   "has_text": false,
+   "kind": "skill_listing",
+   "name": "",
+   "server": "ok",
+   "share": 44.79840716774515,
+   "tokens": 900
+  },
+  {
+   "has_text": false,
+   "kind": "mcp_tool",
+   "name": "mcp__alpha__write",
+   "server": "alpha",
+   "share": 20.408163265306122,
+   "tokens": 410
+  },
+  {
+   "has_text": false,
+   "kind": "mcp_tool",
+   "name": "mcp__alpha__read",
+   "server": "alpha",
+   "share": 17.869586859133896,
+   "tokens": 359
+  },
+  {
+   "has_text": false,
+   "kind": "skill",
+   "name": "skill-4",
+   "share": 10.95072175211548,
+   "tokens": 220
+  },
+  {
+   "has_text": false,
+   "kind": "tool",
+   "name": "Bash",
+   "share": 5.973120955699353,
+   "tokens": 120
+  }
+ ],
+ "rows": 340,
+ "session": "t2:sess-59",
+ "text_rows": 0,
+ "tokens": 2009,
+ "ts": 1768245860000
+}

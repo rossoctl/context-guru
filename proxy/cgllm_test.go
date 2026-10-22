@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -14,12 +15,13 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -51,11 +53,14 @@ func fakeCheapModelCached(t *testing.T, in, out, cacheWrite, cacheRead int) (*ht
 
 // cgLLMHandler wires a recorder + a config whose summarizer uses the "config"-source
 // cheap model, so the request path can be made to spend our own model money on purpose.
-func cgLLMHandler(t *testing.T, upstream string, cheap components.Model) (*Handler, *dash.Recorder) {
-	return cgLLMHandlerPriced(t, upstream, cheap, fixedPricer{})
+// cheapURL/cheapModel build the Options.CheapModel config ("" cheapURL = unconfigured): the
+// endpoint and credential are the operator's own now, pinned once, not a components.Model the
+// test builds and hands in directly.
+func cgLLMHandler(t *testing.T, upstream, cheapURL, cheapModel string) (*Handler, *dash.Recorder) {
+	return cgLLMHandlerPriced(t, upstream, cheapURL, cheapModel, fixedPricer{})
 }
 
-func cgLLMHandlerPriced(t *testing.T, upstream string, cheap components.Model,
+func cgLLMHandlerPriced(t *testing.T, upstream, cheapURL, cheapModel string,
 	prices modelinfo.Pricer) (*Handler, *dash.Recorder) {
 	t.Helper()
 	cfg, err := config.LoadBytes([]byte(
@@ -76,11 +81,16 @@ func cgLLMHandlerPriced(t *testing.T, upstream string, cheap components.Model,
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { rec.Close() })
+	var cheapCfg *CheapModelConfig
+	if cheapURL != "" {
+		cheapCfg = &CheapModelConfig{Provider: "anthropic", BaseURL: cheapURL,
+			APIKey: "unused-by-the-fake", Model: cheapModel}
+	}
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{
 		AnthropicUpstream: upstream,
 		Dashboard:         rec,
 		Prices:            prices,
-		CheapModel:        cheap,
+		CheapModel:        cheapCfg,
 	})
 	t.Cleanup(h.Close)
 	return h, rec
@@ -132,7 +142,8 @@ func postChat(t *testing.T, srv *httptest.Server, session string) {
 func TestCGLLMCostIsNotChargedToAnotherTenantsRequest(t *testing.T) {
 	cheap, cheapCalls := fakeCheapModel(t, 10_000, 2_000)
 	// The other tenant's compaction client: same process, its own request context.
-	other := cheapmodel.Anthropic{BaseURL: cheap.URL, Model: "m", APIKey: "unused-by-the-fake"}
+	otherD, otherRef := dispatchtest.HTTP(cheap.URL, nil)
+	other := cheapmodel.Anthropic{D: otherD, Ref: otherRef, Model: "m"}
 
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// tenant-b's extract_llm call, mid-flight of tenant-a's request.
@@ -146,7 +157,7 @@ func TestCGLLMCostIsNotChargedToAnotherTenantsRequest(t *testing.T) {
 	defer up.Close()
 
 	// No cheap model of its own: tenant-a's pipeline cannot spend a cent here.
-	h, rec := cgLLMHandler(t, up.URL, nil)
+	h, rec := cgLLMHandler(t, up.URL, "", "")
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
@@ -185,8 +196,7 @@ func TestCGLLMCostIsChargedToTheRequestThatSpentIt(t *testing.T) {
 	up := fakeUpstream(t)
 	defer up.Close()
 
-	h, rec := cgLLMHandler(t, up.URL,
-		cheapmodel.Anthropic{BaseURL: cheap.URL, Model: "m", APIKey: "unused-by-the-fake"})
+	h, rec := cgLLMHandler(t, up.URL, cheap.URL, "m")
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
@@ -251,9 +261,7 @@ func TestOurOwnSpendIsPricedAtTheCompactionModelsRate(t *testing.T) {
 	wantCheap := 10_000*(1.0/1e6) + 2_000*(5.0/1e6)
 	wantAgent := 10_000*(15.0/1e6) + 2_000*(75.0/1e6)
 
-	h, rec := cgLLMHandlerPriced(t, up.URL,
-		cheapmodel.Anthropic{BaseURL: cheap.URL, Model: "compact-model", APIKey: "unused-by-the-fake"},
-		prices)
+	h, rec := cgLLMHandlerPriced(t, up.URL, cheap.URL, "compact-model", prices)
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 	// A SECOND TURN OF THE SAME SESSION is what attributes the cost. summarize produces its
@@ -322,8 +330,7 @@ func TestOurOwnSpendCountsTheCacheTiersToo(t *testing.T) {
 	want := price.Cost(in, cr, cw, out)
 	freshOnly := price.Cost(in, 0, 0, out)
 
-	h, rec := cgLLMHandlerPriced(t, up.URL,
-		cheapmodel.Anthropic{BaseURL: cheap.URL, Model: "compact-model", APIKey: "unused-by-the-fake"},
+	h, rec := cgLLMHandlerPriced(t, up.URL, cheap.URL, "compact-model",
 		twoModelPricer{agent: price, compact: price})
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -392,18 +399,31 @@ func TestTheCallersAuthSchemeSurvivesIntoOurOwnCalls(t *testing.T) {
 		})
 	}
 
-	// And it must reach the client incomingModel builds, not just be computable.
+	// And it must reach the client incomingModel builds, not just be computable: proven here by
+	// an actual round trip, since the scheme now lives in the Dispatcher's held credential, not
+	// in a field on the returned cheapmodel.Anthropic.
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"ok"}]}`)
+	}))
+	defer srv.Close()
 	h := &Handler{opts: Options{}}
+	h.dispatcher()
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
 	r.Header.Set("Authorization", "Bearer sk-caller-abc123456")
-	m := h.incomingModel(bschemas.Anthropic, upstream{base: "https://gw.example"},
+	m := h.incomingModel(bschemas.Anthropic, upstream{base: srv.URL},
 		[]byte(`{"model":"claude-haiku-4-5"}`), r)
 	a, ok := m.(cheapmodel.Anthropic)
 	if !ok {
 		t.Fatalf("incomingModel returned %T, want cheapmodel.Anthropic", m)
 	}
-	if a.AuthScheme != "bearer" {
-		t.Fatalf("the built client would send the caller's bearer token as %q", a.AuthScheme)
+	if _, err := a.Complete(context.Background(), "p"); err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer sk-caller-abc123456" {
+		t.Fatalf("the built client sent Authorization %q, want the caller's bearer token", gotAuth)
 	}
 }
 
