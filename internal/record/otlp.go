@@ -2,23 +2,20 @@ package record
 
 // The OTLP rendering of a recorded turn: what the proxy exports.
 //
-// WHY TWO RENDERINGS. ToSpan (otel.go) writes the flat corpus shape that Inference-Perf's OTel
-// trace replay and the existing analysis scripts read. That shape is not OTLP, so Phoenix, Jaeger
-// and other collectors cannot read it. The proxy now exports OTLP (this file), and the corpus
-// shape is produced offline from the exported spans (cmd/cg-record-convert). One recording,
-// two consumers, and the proxy sends each span exactly once.
+// WHAT THIS IS FOR. The proxy's record of truth is wire (wire.go). This file is the optional live
+// view: with --record-otlp, each turn is also sent as an OTLP span, so Phoenix, Jaeger and other
+// collectors can show a session while it runs.
 //
 // WHAT IS ADDED FOR OTLP, beyond the corpus attributes:
 //
 //   - Valid ids. OTLP needs a 16-byte trace id and an 8-byte span id. A session UUID loses its
 //     dashes; any other session key (cg-derived-..., cg-unkeyed-...) is hashed to 16 bytes. The
-//     original key goes in session.id, which is what Phoenix groups sessions by and what the
-//     offline converter maps back to the corpus trace_id.
+//     original key goes in session.id, which is what Phoenix groups sessions by.
 //   - The current semconv provider name. gen_ai.system is deprecated in favour of
 //     gen_ai.provider.name; both are written for one release.
 //   - The semconv message schema. gen_ai.input.messages / gen_ai.output.messages carry role
-//     plus typed parts, with tool_call.arguments as a JSON value rather than a string. The
-//     corpus keeps the string form; OTLPMessages converts.
+//     plus typed parts, with tool_call.arguments as a JSON value rather than a string;
+//     OTLPMessages converts from the translated form.
 //   - OpenInference attributes (openinference.span.kind, llm.*), so Phoenix shows model, token
 //     counts and messages in its LLM view instead of as raw attributes.
 //
@@ -185,34 +182,4 @@ func OTLPMessages(corpus string) string {
 		return corpus
 	}
 	return string(b)
-}
-
-// CorpusMessages is the inverse of OTLPMessages, for the offline converter: a tool_call's
-// arguments go back to a JSON string, which is what the corpus and its readers expect.
-func CorpusMessages(otlp string) string {
-	var msgs []otlpMessage
-	if err := json.Unmarshal([]byte(otlp), &msgs); err != nil {
-		return otlp
-	}
-	out := make([]Message, len(msgs))
-	for i, m := range msgs {
-		out[i] = Message{Role: m.Role, FinishReason: m.FinishReason, Content: m.Content}
-		for _, p := range m.Parts {
-			cp := Part{Type: p.Type, Content: p.Content, ID: p.ID, Name: p.Name, Response: p.Response}
-			if len(p.Arguments) > 0 {
-				var s string
-				if json.Unmarshal(p.Arguments, &s) == nil {
-					cp.Arguments = s // it was a string all along
-				} else {
-					cp.Arguments = string(p.Arguments)
-				}
-			}
-			out[i].Parts = append(out[i].Parts, cp)
-		}
-	}
-	s, err := MarshalMessages(out)
-	if err != nil {
-		return otlp
-	}
-	return s
 }

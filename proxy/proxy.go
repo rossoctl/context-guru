@@ -1854,6 +1854,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 					traceID:   rc.traceID,
 					tenantID:  rc.tenantID,
 					provider:  provider,
+					path:      r.URL.Path,
+					status:    status,
 					reqBody:   rc.pristine,
 					respBody:  recBody,
 					respIsSSE: recIsSSE,
