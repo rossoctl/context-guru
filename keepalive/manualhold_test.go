@@ -3,6 +3,7 @@ package keepalive
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -138,8 +139,8 @@ func TestManualHoldIsNotPingableAfterItsDeadlineEvenBeforeTheSweep(t *testing.T)
 	}
 }
 
-// A new request restarts the 300 s; so does a press that read the cache (it refreshed the provider's entry).
-func TestManualHoldIsRefreshedByARequestAndByAPressThatRead(t *testing.T) {
+// A new REAL request restarts the 300 s. (A press does not: TestAPressNeverExtendsTheHold.)
+func TestManualHoldIsRestartedByARequest(t *testing.T) {
 	k, _, clock := testKeeper(t)
 	start := clock.now()
 	recordHold(k, sess1, start, kaBody, offPolicy, true)
@@ -148,17 +149,9 @@ func TestManualHoldIsRefreshedByARequestAndByAPressThatRead(t *testing.T) {
 	if _, ok := k.Entry(sess1); !ok {
 		t.Fatal("a request at +200 s did not restart the hold")
 	}
-	clock.advance(450 * time.Second)
-	if _, err := k.PingNow(ManualRequest{Key: sess1}); err != nil {
-		t.Fatal(err)
-	}
-	k.Sweep(start.Add(450*time.Second + 299*time.Second))
-	if _, ok := k.Entry(sess1); !ok {
-		t.Error("a press that read the cache did not restart the hold")
-	}
-	k.Sweep(start.Add(450*time.Second + 300*time.Second))
+	k.Sweep(start.Add(500 * time.Second))
 	if _, ok := k.Entry(sess1); ok {
-		t.Error("held past 300 s from the press")
+		t.Error("held past 300 s from the last request")
 	}
 }
 
@@ -367,5 +360,249 @@ func TestNotOptedInIsOnlyForARequestThatCarriedNothing(t *testing.T) {
 	recordHold(k, sess1, clock.now(), kaBody, offPolicy, false)
 	if st := stateOf(k, sess1); st.Reason != ReasonNotOptedIn {
 		t.Errorf("state = %+v, want %q", st, ReasonNotOptedIn)
+	}
+}
+
+// ---- review-666: one tenant must not be able to starve the others ----
+
+func tenantKey(tenant, session string) Key { return Key{Tenant: tenant, Session: session} }
+
+// The caps are shared, and evictLocked drops the NEWEST entry. Manual-only holds are evicted before any
+// automatic one, and one tenant can hold only so many of them.
+func TestOneTenantsManualHoldsCannotStarveAnotherTenantsAutomaticHold(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	at := clock.now()
+	for i := 0; i < MaxSessions+50; i++ { // tenant A floods with the header, many session ids
+		recordHold(k, tenantKey("A", "flood-"+strconv.Itoa(i)), at, kaBody, offPolicy, true)
+	}
+	k.mu.Lock()
+	var aLive int
+	for _, e := range k.live {
+		if e.tenant == "A" {
+			aLive++
+		}
+	}
+	k.mu.Unlock()
+	if aLive > ManualHoldMaxPerTenant {
+		t.Errorf("tenant A holds %d manual-only entries, cap %d", aLive, ManualHoldMaxPerTenant)
+	}
+	// Tenant B's automatic keep-alive still works.
+	b := tenantKey("B", "auto")
+	recordHold(k, b, at, kaBody, kaPolicy(), false)
+	if _, ok := k.Entry(b); !ok {
+		t.Fatal("tenant B's automatic hold was refused after tenant A flooded")
+	}
+	if n := k.Sweep(at.Add(281 * time.Second)); n < 1 {
+		t.Errorf("tenant B's automatic ping did not fire (%d)", n)
+	}
+}
+
+// Even at the global cap, a NEW automatic hold displaces a manual-only one, not the other way round.
+func TestManualOnlyEntriesAreEvictedBeforeAutomaticOnes(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	at := clock.now()
+	// Fill the global entry cap from many tenants, each within its own manual cap.
+	for i := 0; i < MaxSessions; i++ {
+		recordHold(k, tenantKey("m"+strconv.Itoa(i/ManualHoldMaxPerTenant), "s"+strconv.Itoa(i)), at, kaBody, offPolicy, true)
+	}
+	if k.Stats().Live != MaxSessions {
+		t.Fatalf("setup: %d held, want %d", k.Stats().Live, MaxSessions)
+	}
+	auto := tenantKey("auto", "x")
+	recordHold(k, auto, at.Add(time.Second), kaBody, kaPolicy(), false)
+	if _, ok := k.Entry(auto); !ok {
+		t.Fatal("an automatic hold was evicted on arrival while manual-only holds sat in the map")
+	}
+	if k.Stats().Live > MaxSessions {
+		t.Errorf("%d held, cap %d", k.Stats().Live, MaxSessions)
+	}
+}
+
+// The per-tenant byte cap, with the oldest manual hold going first.
+func TestAManualFloodByBytesEvictsThatTenantsOldestHoldFirst(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	at := clock.now()
+	big := strings.Replace(kaBody, `"text":"hi"`, `"text":"`+strings.Repeat("x", 6<<20)+`"`, 1)
+	for i := 0; i < 8; i++ {
+		recordHold(k, tenantKey("A", "big"+strconv.Itoa(i)), at.Add(time.Duration(i)*time.Second), big, offPolicy, true)
+	}
+	k.mu.Lock()
+	var bytes int64
+	for _, e := range k.live {
+		if e.tenant == "A" && e.manualOnly {
+			bytes += int64(len(e.body))
+		}
+	}
+	k.mu.Unlock()
+	if bytes > ManualHoldMaxBytesPerTenant {
+		t.Errorf("tenant A holds %d manual-only bytes, cap %d", bytes, ManualHoldMaxBytesPerTenant)
+	}
+	if _, ok := k.Entry(tenantKey("A", "big0")); ok {
+		t.Error("the OLDEST hold survived; the newest should")
+	}
+	if _, ok := k.Entry(tenantKey("A", "big7")); !ok {
+		t.Error("the newest hold was evicted")
+	}
+}
+
+// ---- the 300 s is measured from the last REAL request; a press never extends it ----
+
+func TestAPressNeverExtendsTheHold(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	start := clock.now()
+	recordHold(k, sess1, start, kaBody, offPolicy, true)
+	clock.advance(250 * time.Second)
+	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second}); err != nil {
+		t.Fatalf("press at 250 s: %v", err)
+	}
+	k.Sweep(start.Add(299 * time.Second))
+	if _, ok := k.Entry(sess1); !ok {
+		t.Fatal("released before 300 s")
+	}
+	k.Sweep(start.Add(300 * time.Second))
+	if _, ok := k.Entry(sess1); ok {
+		t.Fatal("a press at 250 s extended the hold past 300 s from the last real request")
+	}
+	// Presses every 30 s cannot keep a credential held either.
+	k2, _, clock2 := testKeeper(t)
+	s2 := clock2.now()
+	recordHold(k2, sess1, s2, kaBody, offPolicy, true)
+	for i := 0; i < 12; i++ {
+		clock2.advance(30 * time.Second)
+		_, _ = k2.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second})
+	}
+	k2.Sweep(clock2.now())
+	if _, ok := k2.Entry(sess1); ok {
+		t.Error("presses every 30 s kept the credential held past 300 s")
+	}
+}
+
+// A new REAL request does restart it.
+func TestARealRequestRestartsTheHold(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	start := clock.now()
+	recordHold(k, sess1, start, kaBody, offPolicy, true)
+	recordHold(k, sess1, start.Add(200*time.Second), kaBody, offPolicy, true)
+	k.Sweep(start.Add(450 * time.Second))
+	if _, ok := k.Entry(sess1); !ok {
+		t.Fatal("a real request at +200 s did not restart the hold")
+	}
+}
+
+// The entry's own timer is what releases a quiet process, with no sweep and no request.
+func TestTheManualHoldTimerReleasesAndZeroisesWithoutASweep(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	recordHold(k, sess1, clock.now(), kaBody, offPolicy, true)
+	k.mu.Lock()
+	e := k.live[sess1.id()]
+	body := e.body
+	k.mu.Unlock()
+	clock.advance(ManualHoldMax + time.Second)
+	k.expireManual(sess1.id()) // what the timer calls
+	if _, ok := k.Entry(sess1); ok {
+		t.Fatal("still held after the timer fired")
+	}
+	for i, b := range body {
+		if b != 0 {
+			t.Fatalf("byte %d survived the timer's release", i)
+		}
+	}
+	if fd.holds(sess1) != 0 {
+		t.Error("the credential was not released")
+	}
+	// And the real timer fires on its own (a short one, injected).
+	k3, _, c3 := testKeeper(t)
+	k3.manualHoldMax = 40 * time.Millisecond
+	recordHold(k3, sess1, c3.now(), kaBody, offPolicy, true)
+	c3.advance(time.Second)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		k3.mu.Lock()
+		n := len(k3.live)
+		k3.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Error("the entry's own timer never released it")
+}
+
+// ---- nothing of a tenant survives Forget, and RetireSession clears its reasons ----
+
+func TestForgetAndRetireSessionClearTheReasons(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	recordHold(k, tenantKey("T", "s"), clock.now(), kaBody, offPolicy, false) // leaves "not opted in"
+	recordHold(k, tenantKey("U", "s"), clock.now(), kaBody, offPolicy, false)
+	k.mu.Lock()
+	if len(k.reasons) != 2 {
+		k.mu.Unlock()
+		t.Fatalf("setup: %d reasons, want 2", len(k.reasons))
+	}
+	k.mu.Unlock()
+	k.Forget("T")
+	k.mu.Lock()
+	n := len(k.reasons)
+	k.mu.Unlock()
+	if n != 1 {
+		t.Errorf("after Forget(T) %d reasons remain, want only U's", n)
+	}
+	k.RetireSession("U", "s")
+	k.mu.Lock()
+	n = len(k.reasons)
+	k.mu.Unlock()
+	if n != 0 {
+		t.Errorf("after RetireSession(U) %d reasons remain", n)
+	}
+}
+
+// ---- every refusal path says why; an opted-in user is never told "not opted in" ----
+
+func TestEveryRefusalOfAnOptedInRequestHasItsOwnReason(t *testing.T) {
+	cases := []struct {
+		name   string
+		setup  func(k *Keeper, fd *fakeDispatcher, clock *testClock)
+		record func(k *Keeper, clock *testClock)
+		want   string
+	}{
+		{"dead credential", func(k *Keeper, _ *fakeDispatcher, c *testClock) {
+			k.mu.Lock()
+			k.markCredDeadLocked("t1", "cred-x", "aws/claude-sonnet-5", 401, c.now())
+			k.mu.Unlock()
+		}, func(k *Keeper, c *testClock) {
+			for _, d := range []time.Duration{-time.Second, 0} {
+				k.Record(Record{Key: sess1, StartedAt: c.now().Add(d), Body: []byte(kaBody), Provider: bschemas.Anthropic, Route: "/v1/messages",
+					Status: 200, Usage: Usage{CacheRead: 48576, CacheWrite: 1200}, UsageOK: true, Cred: "cred-x",
+					Policy: Policy{ManualHold: true}, Header: kaHeader(), Hold: fakeOf(k).hold(sess1)})
+			}
+		}, ReasonUnavailable},
+		{"no cache usage", nil, func(k *Keeper, c *testClock) {
+			for _, d := range []time.Duration{-time.Second, 0} {
+				k.Record(Record{Key: sess1, StartedAt: c.now().Add(d), Body: []byte(kaBody), Provider: bschemas.Anthropic, Route: "/v1/messages",
+					Status: 200, Usage: Usage{FreshInput: 100}, UsageOK: true, Policy: Policy{ManualHold: true}, Header: kaHeader(), Hold: fakeOf(k).hold(sess1)})
+			}
+		}, ReasonNoEntry},
+		{"client ended", func(k *Keeper, _ *fakeDispatcher, c *testClock) {
+			k.MarkEnded("t1", sess1.Session, c.now().Add(time.Hour))
+		}, func(k *Keeper, c *testClock) { recordHold(k, sess1, c.now(), kaBody, offPolicy, true) }, ReasonNoEntry},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			k, fd, clock := testKeeper(t)
+			// A stale reason from an earlier request must not survive either.
+			k.mu.Lock()
+			k.setReasonLocked(sess1, ReasonNotOptedIn)
+			k.mu.Unlock()
+			if tc.setup != nil {
+				tc.setup(k, fd, clock)
+			}
+			tc.record(k, clock)
+			if _, ok := k.Entry(sess1); ok {
+				t.Fatal("the request was held")
+			}
+			if st := stateOf(k, sess1); st.Pingable || st.Reason != tc.want {
+				t.Errorf("state = %+v, want not pingable, %q", st, tc.want)
+			}
+		})
 	}
 }

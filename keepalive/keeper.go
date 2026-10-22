@@ -147,6 +147,8 @@ type kaEntry struct {
 	// manualOnly marks an entry held only for the Ping button (manualhold.go): nothing pings it,
 	// plans it or counts it as pending, and it lives ManualHoldMax from startedAt.
 	manualOnly bool
+	// holdFor is how long a manual-only entry lives from startedAt (ManualHoldMax).
+	holdFor time.Duration
 	// ceiling is the per-ping ceiling this entry was admitted under, kept because a manual-only entry's
 	// pol is zeroed.
 	ceiling float64
@@ -323,6 +325,8 @@ type Keeper struct {
 	// session id and is cleared wholesale at the bound; give it an LRU only if session churn
 	// is ever shown to cost real pings.
 	turns map[string]int
+	// manualHoldMax overrides ManualHoldMax in tests that need a real, short timer; zero means the constant.
+	manualHoldMax time.Duration
 	// reasons records why a thread is NOT held (manualhold.go), for the button's explanation.
 	reasons map[string]refusal
 	// manualAt is when each thread was last manually pinged, for PingNow's rate limit (manual.go).
@@ -610,6 +614,7 @@ func (k *Keeper) Record(r Record) {
 		(r.Client != "" && k.endedAfterLocked(r.Key.Tenant, r.Client, startedAt))
 	if ended {
 		k.retireLocked(key)
+		k.setReasonLocked(r.Key, ReasonNoEntry) // the client said the session is over: nothing is held
 	}
 	k.mu.Unlock()
 	if ended {
@@ -662,6 +667,9 @@ func (k *Keeper) Record(r Record) {
 	credDead := k.credIsDeadLocked(r.Key.Tenant, r.Cred, model, now)
 	if routeTripped || credDead {
 		k.retireLocked(key)
+		if pol.ManualHold {
+			k.setReasonLocked(r.Key, ReasonUnavailable)
+		}
 	}
 	k.mu.Unlock()
 	if routeTripped || credDead {
@@ -685,6 +693,7 @@ func (k *Keeper) Record(r Record) {
 		return
 	}
 	if usageOK && u.CacheRead == 0 && u.CacheWrite == 0 {
+		refuse(ReasonNoEntry) // nothing was cached by this request, so there is nothing to keep warm
 		k.retire(key)
 		return
 	}
@@ -771,6 +780,7 @@ func (k *Keeper) Record(r Record) {
 			return
 		}
 		e.manualOnly = true
+		e.holdFor = k.holdMax()
 		e.ceiling = pol.Ceiling()
 		e.pol = Policy{ManualHold: true} // off: due, Plans, PendingPings and Sweep all read pol.On()
 	}
@@ -782,7 +792,8 @@ func (k *Keeper) Record(r Record) {
 		e.held = true
 	}
 	if e.manualOnly {
-		e.timer = time.AfterFunc(ManualHoldMax, func() { k.expireManual(key) })
+		e.timer = time.AfterFunc(k.holdMax(), func() { k.expireManual(key) })
+		k.evictManualLocked(r.Key.Tenant)
 		k.evictLocked()
 		return
 	}
@@ -934,6 +945,7 @@ func (k *Keeper) Forget(tenantID string) {
 	// Client lifecycle end marks (see lifecycle.go) are bucketed by tenant already, so this is
 	// a single delete rather than a prefix scan.
 	delete(k.ended, tenantID)
+	k.dropReasonsLocked(tenantID, "")
 	// The route breaker and dead-credential marks are also keyed with the tenant first (see
 	// breaker.go), so they are cleared the same way: nothing of this tenant's survives Forget.
 	for r := range k.routeFails {
@@ -962,11 +974,17 @@ func (k *Keeper) Forget(tenantID string) {
 // — the ones with the longest still to wait, and therefore the least imminent value.
 func (k *Keeper) evictLocked() {
 	for len(k.live) > MaxSessions || k.bytes > MaxBytes {
+		// Manual-only holds go before any automatic one, whichever tenant's: they have no schedule and
+		// protect nothing a ping is doing. Among the candidates the entry whose ping is least imminent
+		// goes, as before.
 		var worstKey string
 		var worst time.Time
+		var worstManual bool
 		for key, e := range k.live {
-			if worstKey == "" || e.startedAt.After(worst) {
-				worstKey, worst = key, e.startedAt
+			better := worstKey == "" || (e.manualOnly && !worstManual) ||
+				(e.manualOnly == worstManual && e.startedAt.After(worst))
+			if better {
+				worstKey, worst, worstManual = key, e.startedAt, e.manualOnly
 			}
 		}
 		if worstKey == "" {

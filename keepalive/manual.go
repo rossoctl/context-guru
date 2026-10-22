@@ -162,10 +162,12 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		// The same rule record1 applies, and the same two clocks it moves.
 		apply.RecordCacheTouch(job.st, job.tenant, raw, job.provider, start.UnixMilli())
 		k.mu.Lock()
-		e.refreshedAt, e.startedAt = start, start
-		if e.manualOnly && e.timer != nil {
-			// The press refreshed the provider's entry, so the hold restarts with it.
-			e.timer.Reset(ManualHoldMax)
+		e.refreshedAt = start
+		// An automatic entry's schedule restarts from a ping that read the cache. A manual-only hold does
+		// NOT: its life is measured from the last real request, so a press can never extend how long a
+		// credential is held (manualhold.go).
+		if !e.manualOnly {
+			e.startedAt = start
 		}
 		k.mu.Unlock()
 	}

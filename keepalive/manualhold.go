@@ -1,6 +1,11 @@
 package keepalive
 
-import "time"
+import (
+	"time"
+
+	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/internal/thread"
+)
 
 // The manual-only hold. The Ping button (manual.go) needs the thread's body and the caller's
 // credential, and the keeper keeps those only while automatic keep-alive is on for the account.
@@ -24,8 +29,20 @@ import "time"
 //
 // The existing bounds apply unchanged: MaxBodyBytes per body, MaxSessions entries, MaxBytes in all.
 
-// ManualHoldMax is how long a manual-only hold lives, from the start of the request that made it.
+// ManualHoldMax is how long a manual-only hold lives, from the start of the last REAL request on the
+// thread. Nothing else extends it: not a press (a press every 30 s would otherwise hold a caller's
+// credential for as long as they keep pressing), not a ping. So the most a credential is held for the
+// button is ManualHoldMax after the last real request.
 const ManualHoldMax = 300 * time.Second
+
+// The caps on manual-only holds PER TENANT. The global caps (MaxSessions, MaxBytes) are shared, and a
+// header any client can send must not let one tenant fill them with many session ids and starve
+// everyone else's keep-alive. Past either cap, that tenant's OLDEST manual-only hold goes first. 16
+// threads covers a busy session and its sub-agents; 32 MiB is a few large contexts.
+const (
+	ManualHoldMaxPerTenant      = 16
+	ManualHoldMaxBytesPerTenant = 32 << 20
+)
 
 // Why a thread cannot be pinged, for the button to say. Pingable is the other half of the answer.
 const (
@@ -40,6 +57,7 @@ const (
 	ReasonStopped     = "stopped"      // the keeper stopped the thread after a miss, a refused ping or a failure
 	ReasonBelowLimits = "below limits" // the automatic gates refused it: first request, under the minimum prefix, or the predictor
 	ReasonNoEntry     = "no entry"     // nothing is known about the thread: a restart, or no request since
+	ReasonUnavailable = "unavailable"  // the route is failing in a row, or the provider refused this credential
 )
 
 // PingState says whether a thread can be pinged right now, and if not, why.
@@ -92,7 +110,7 @@ func (k *Keeper) clearReasonLocked(key Key) { delete(k.reasons, key.id()) }
 
 // manualExpired reports whether a manual-only entry is past its deadline.
 func (e *kaEntry) manualExpired(now time.Time) bool {
-	return e.manualOnly && !now.Before(e.startedAt.Add(ManualHoldMax))
+	return e.manualOnly && !now.Before(e.startedAt.Add(e.holdFor))
 }
 
 // expireManual is the entry's timer: the guarantee that a quiet process still releases the hold on
@@ -173,4 +191,52 @@ func (k *Keeper) expireAuto(key string) {
 		k.setReasonLocked(e.key, e.autoReleaseReason())
 	}
 	k.retireLocked(key)
+}
+
+// evictManualLocked enforces the per-tenant manual-only caps after e was added: while the tenant holds
+// too many entries or bytes in manual-only holds, its oldest one (by request start) is released.
+func (k *Keeper) evictManualLocked(tenant string) {
+	for {
+		var n int
+		var bytes int64
+		var oldest *kaEntry
+		var oldestKey string
+		for key, e := range k.live {
+			if !e.manualOnly || e.tenant != tenant {
+				continue
+			}
+			n++
+			bytes += int64(len(e.body))
+			if oldest == nil || e.startedAt.Before(oldest.startedAt) {
+				oldest, oldestKey = e, key
+			}
+		}
+		if oldest == nil || (n <= ManualHoldMaxPerTenant && bytes <= ManualHoldMaxBytesPerTenant) {
+			return
+		}
+		k.setReasonLocked(oldest.key, ReasonNoEntry)
+		k.bytes -= int64(len(oldest.body))
+		k.releaseLocked(oldest)
+		oldest.clear()
+		delete(k.live, oldestKey)
+		offload.ClearKeepAliveCandidate(thread.Key(oldest.session, oldest.thread))
+		k.skipped.Add(1)
+	}
+}
+
+// dropReasonsLocked forgets the refusal reasons of one tenant (session == "": all of them) or of one session.
+func (k *Keeper) dropReasonsLocked(tenant, session string) {
+	for id, r := range k.reasons {
+		if r.key.Tenant == tenant && (session == "" || r.key.Session == session) {
+			delete(k.reasons, id)
+		}
+	}
+}
+
+// holdMax is the manual-only hold's length: ManualHoldMax unless a test shortened it.
+func (k *Keeper) holdMax() time.Duration {
+	if k.manualHoldMax > 0 {
+		return k.manualHoldMax
+	}
+	return ManualHoldMax
 }

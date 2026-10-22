@@ -292,3 +292,31 @@ func TestCacheStateStatesWhichThreadsArePingableAndWhyNot(t *testing.T) {
 		t.Errorf("unknown thread = pingable %v reason %v, want false / no entry", body["pingable"], body["ping_reason"])
 	}
 }
+
+// A manual-only hold is not a scheduled ping: the status line draws "being pinged" from held_until_ms
+// and pings_left, so /api/cachestate must leave both out when the host's plan source has nothing for the thread.
+func TestCacheStateLeavesHeldUntilAndPingsLeftOutForAThreadWithNoPlan(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	main := mkEvent(now-100_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+	main.Status, main.CacheRead = 200, 5000
+	seed(t, rec, main)
+	a.SetKeepAlivePlans(func(string, bool, string) map[string]KeepAlivePlan { return map[string]KeepAlivePlan{} }) // no plan: Plans skips it
+	a.SetPingStates(func(string, bool, string) map[string]PingState { return map[string]PingState{"": {Pingable: true}} })
+	_, body := get(t, a, "/api/cachestate?session=s1", "")
+	if body["pingable"] != true {
+		t.Fatalf("pingable = %v", body["pingable"])
+	}
+	for _, k := range []string{"held_until_ms", "pings_left"} {
+		if _, ok := body[k]; ok {
+			t.Errorf("session: %s = %v for a thread held only for the button", k, body[k])
+		}
+	}
+	for _, th := range body["threads"].([]any) {
+		for _, k := range []string{"held_until_ms", "pings_left"} {
+			if v, ok := th.(map[string]any)[k]; ok {
+				t.Errorf("thread: %s = %v", k, v)
+			}
+		}
+	}
+}

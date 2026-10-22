@@ -121,5 +121,8 @@ func (k *Keeper) RetireSessionStartedBefore(tenant, session string, cutoff time.
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 		n++
 	}
+	if cutoff.IsZero() { // a full retire, not the lifecycle sweep: the reasons go with the entries
+		k.dropReasonsLocked(tenant, session)
+	}
 	return n
 }
