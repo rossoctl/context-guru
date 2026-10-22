@@ -41,7 +41,11 @@ var CostlyChecks = []CostlyCheck{
 	{
 		ID: "disable-experimental-betas",
 		Shapes: []CostlyShape{
-			{ID: "classifier", ModelContains: "sonnet", Tools: ip(0), SystemBlocks: ip(3), MaxTokens: ip(64), Stream: ip(0), Messages: ip(2)},
+			// No system_blocks or messages: the third system block ("Session Context") is not always
+			// sent, so a classifier request has 2 or 3 blocks (1 or 2 dashboard messages). Measured on
+			// a clean Claude Code 2.1.305 and on a developer's own; the 4 fields left already select no
+			// other request on either proxy.
+			{ID: "classifier", ModelContains: "sonnet", Tools: ip(0), MaxTokens: ip(64), Stream: ip(0)},
 		},
 		Also: []CostlyShape{
 			{ID: "classifier-stage-2", Tools: ip(0), SystemBlocks: ip(3), MaxTokens: ip(2112), Messages: ip(2)},

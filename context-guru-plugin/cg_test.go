@@ -596,7 +596,7 @@ func TestDocsExamplesAreTheGoldens(t *testing.T) {
 		"home": "status", "savings": "savings", "cache-warm": "cache", "cache-cold": "cache",
 		"session": "session", "doctor": "doctor",
 		"save-more": "save-more", "save-more-ascii-80": "save-more", "apply-config": "save-more", "revert-config": "save-more",
-		"apply-gate":            "save-more", "save-more-settings": "save-more",
+		"apply-gate": "save-more", "save-more-settings": "save-more",
 		"remove-mcp-and-skills": "remove-mcp-and-skills", "apply-tools-async": "remove-mcp-and-skills", "insights": "insights",
 	} {
 		g := strings.TrimRight(string(cgRead(t, "cg", golden+".golden")), "\n")

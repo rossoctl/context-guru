@@ -10,11 +10,11 @@ import (
 )
 
 type costlyRow struct {
-	model                                      string
-	tenant                                     string
-	tools, sys, maxTok, msgs                   int
-	stream                                     bool
-	cost                                       float64
+	model                    string
+	tenant                   string
+	tools, sys, maxTok, msgs int
+	stream                   bool
+	cost                     float64
 }
 
 func seedCostly(t *testing.T, rows []costlyRow) *DB {
@@ -48,9 +48,9 @@ func TestCostlySettingsMatchesTheClassifierShapeOnly(t *testing.T) {
 		{"aws/Claude-Sonnet-5", "t1", 0, 3, 64, 2, false, 0.20}, // classifier, other casing
 		{"claude-sonnet-5-5", "t1", 0, 3, 64, 2, true, 1},       // near miss: streamed
 		{"claude-sonnet-5-5", "t1", 1, 3, 64, 2, false, 1},      // near miss: a tool
-		{"claude-sonnet-5-5", "t1", 0, 2, 64, 2, false, 1},      // near miss: system blocks
+		{"claude-sonnet-5", "t1", 0, 2, 64, 1, false, 0.04},     // classifier with 2 system blocks: a clean Claude Code 2.1.305 sends this
 		{"claude-sonnet-5-5", "t1", 0, 3, 65, 2, false, 1},      // near miss: max_tokens
-		{"claude-sonnet-5-5", "t1", 0, 3, 64, 1, false, 1},      // near miss: the wire count of messages
+		{"claude-sonnet-5", "t1", 0, 3, 64, 1, false, 0.06},     // classifier, 3 blocks and 1 dashboard message
 		{"claude-opus-5-5", "t1", 0, 3, 64, 2, false, 1},        // near miss: not sonnet
 		{"claude-opus-5-5", "t1", 0, 3, 2112, 2, false, 0.50},   // stage 2, in "also"
 		{"claude-opus-5-5", "t1", 0, 3, 2112, 3, false, 1},      // near miss for stage 2
@@ -61,8 +61,8 @@ func TestCostlySettingsMatchesTheClassifierShapeOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := costlyByID(doc, "disable-experimental-betas")
-	if !c.Measured || c.Requests != 2 || c.CostUSD == nil || *c.CostUSD < 0.2999 || *c.CostUSD > 0.3001 {
-		t.Fatalf("classifier row = %+v, want 2 requests and $0.30", c)
+	if !c.Measured || c.Requests != 4 || c.CostUSD == nil || *c.CostUSD < 0.3999 || *c.CostUSD > 0.4001 {
+		t.Fatalf("classifier row = %+v, want 4 requests and $0.40", c)
 	}
 	if len(c.Also) != 1 || c.Also[0].ID != "classifier-stage-2" || c.Also[0].Requests != 1 || *c.Also[0].CostUSD != 0.5 {
 		t.Fatalf("stage 2 line = %+v, want 1 request and $0.50, apart from the main figure", c.Also)

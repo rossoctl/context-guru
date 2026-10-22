@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "The checks behind 'Settings that cost you money' (/context-guru:save-more settings). ONE list: costly.py (the plugin) reads it, and proxy/dash must keep the same price shapes (dash/costlysettings.go; a Go test compares them). Metadata only: a price shape is request columns (model, tools, system_blocks, max_tokens, stream, messages), never request text. The dashboard counts the system prompt as a message, so messages here is the wire count plus 1.",
+  "about": "The checks behind 'Settings that cost you money' (/context-guru:save-more settings). ONE list: costly.py (the plugin) reads it, and proxy/dash must keep the same price shapes (dash/costlysettings.go; a Go test compares them). Metadata only: a price shape is request columns (model, tools, system_blocks, max_tokens, stream, messages), never request text. The dashboard counts the system prompt as a message, so a messages value here is the wire count plus 1.",
   "checks": [
     {
       "id": "disable-experimental-betas",
@@ -10,7 +10,7 @@
       "detect": {"kind": "env_truthy", "name": "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "truthy": ["1", "true"]},
       "price": {
         "shapes": [
-          {"id": "classifier", "label": "classifier requests", "model_contains": "sonnet", "tools": 0, "system_blocks": 3, "max_tokens": 64, "stream": 0, "messages": 2}
+          {"id": "classifier", "label": "classifier requests", "model_contains": "sonnet", "tools": 0, "max_tokens": 64, "stream": 0, "note": "No system_blocks or messages: the third system block is not always sent, so a classifier request has 2 or 3 blocks."}
         ],
         "also": [
           {"id": "classifier-stage-2", "label": "probably classifier stage 2", "model_contains": null, "tools": 0, "system_blocks": 3, "max_tokens": 2112, "stream": null, "messages": 2}
