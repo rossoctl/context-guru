@@ -1,8 +1,10 @@
 package dash
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -50,6 +52,44 @@ func TestConcurrentColdReadsOfDifferentCachesDoNotShareAComputation(t *testing.T
 	}
 }
 
+// One cache, two different entry keys (two accounts, say), both cold and held open together, must each
+// run their own compute. A flight key made of the cache pointer alone would join them.
+func TestConcurrentColdReadsOfDifferentKeysInOneCacheDoNotShareAComputation(t *testing.T) {
+	a, _ := newTestAPI(t, Options{})
+	var cache jsonCache
+	release := make(chan struct{})
+	started := make(chan string, 2)
+	mk := func(name string) func(*DB) ([]byte, error) {
+		return func(*DB) ([]byte, error) {
+			started <- name
+			<-release
+			return []byte(`{"from":"` + name + `"}`), nil
+		}
+	}
+	got := make(chan [2]string, 2)
+	for _, name := range []string{"key-a", "key-b"} {
+		go func(name string) {
+			w := httptest.NewRecorder()
+			a.serveJSON(w, httptest.NewRequest(http.MethodGet, "/api/x", nil), &cache, name, mk(name))
+			got <- [2]string{name, w.Body.String()}
+		}(name)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the second key's compute never started: it joined the first one's flight")
+		}
+	}
+	close(release)
+	for i := 0; i < 2; i++ {
+		r := <-got
+		if r[1] != `{"from":"`+r[0]+`"}` {
+			t.Errorf("%s answered %s", r[0], r[1])
+		}
+	}
+}
+
 // The same collision, through the real routes: /api/stats and /api/tools, same account, same (empty)
 // filters, asked together. Each body must be its own report.
 func TestStatsAndToolsRequestedTogetherEachGetTheirOwnReport(t *testing.T) {
@@ -71,29 +111,23 @@ func TestStatsAndToolsRequestedTogetherEachGetTheirOwnReport(t *testing.T) {
 				return
 			}
 			defer r.Body.Close()
-			buf := make([]byte, 1<<20)
-			n, _ := r.Body.Read(buf)
-			out <- res{p, string(buf[:n])}
+			b, err := io.ReadAll(r.Body)
+			if err != nil {
+				out <- res{p, err.Error()}
+				return
+			}
+			out <- res{p, string(b)}
 		}(p)
 	}
 	for i := 0; i < 2; i++ {
 		r := <-out
-		isStats := len(r.body) > 0 && containsKey(r.body, `"tokens_before"`)
-		isTools := containsKey(r.body, `"servers"`) || containsKey(r.body, `"coverage"`)
-		if r.path == "/api/stats" && (!isStats || isTools && !isStats) {
+		isStats := strings.Contains(r.body, `"tokens_before"`)
+		isTools := strings.Contains(r.body, `"servers"`) || strings.Contains(r.body, `"coverage"`)
+		if r.path == "/api/stats" && !isStats {
 			t.Errorf("/api/stats answered with the wrong report: %.120s", r.body)
 		}
-		if r.path == "/api/tools" && isStats {
-			t.Errorf("/api/tools answered with the stats report: %.120s", r.body)
+		if r.path == "/api/tools" && (isStats || !isTools) {
+			t.Errorf("/api/tools did not answer with the tools report: %.120s", r.body)
 		}
 	}
-}
-
-func containsKey(body, key string) bool {
-	for i := 0; i+len(key) <= len(body); i++ {
-		if body[i:i+len(key)] == key {
-			return true
-		}
-	}
-	return false
 }

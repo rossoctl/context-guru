@@ -100,7 +100,8 @@ type API struct {
 	// spendCache covers /api/spend/explain, a whole-window pass over requests.
 	spendCache jsonCache
 	// jsonInflight collapses concurrent COLD reads of the same cache key onto one computation.
-	// Keyed by the same principal-scoped cacheKey as the caches, so two tenants never share a
+	// The flight key holds the cache pointer AND the entry key, so two caches never share a flight.
+	// The entry key is the same principal-scoped cacheKey as the caches, so two tenants never share a
 	// computation and a manager never shares one with a tenant.
 	jsonInflight singleflight.Group
 }
