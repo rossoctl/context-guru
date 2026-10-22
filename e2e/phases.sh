@@ -267,3 +267,14 @@ case "$TIER" in
   smoke)  for ph in preflight generate history install replay transcripts reinstall api skill ui assert; do phase "$ph" "p_$ph"; done ;;
 esac
 echo "== phases complete"
+
+# --keep: leave the dashboard up for a person to open, on the host's 127.0.0.1:18788 (run.sh publishes it).
+# The checks are done and written, so the proxy restarts on 0.0.0.0, the one change a published port needs,
+# with the same DB, and the container then waits until it is removed.
+if [ "${KEEP:-}" = 1 ]; then
+  stop_proxy
+  nohup "$HOME/.local/bin/context-guru-proxy" --listen "0.0.0.0:$PORT" --idle-exit=0 --dashboard \
+    --dashboard-db "$DB" --anthropic-upstream "http://127.0.0.1:$UP" >>"$R/logs/proxy-kept.log" 2>&1 &
+  echo "== kept: dashboard on http://127.0.0.1:18788/dashboard/ (remove the container to stop it)"
+  exec sleep infinity
+fi

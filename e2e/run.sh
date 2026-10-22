@@ -29,7 +29,7 @@ if [ "$TIER" != known ]; then
     { echo "image build failed; see $IMG_OUT/build.log"; tail -20 "$IMG_OUT/build.log"; exit 2; }
 fi
 # The host port is published only for --keep (to open the kept dashboard), so tiers can run side by side.
-RM="--rm"; PUB=""; [ "$KEEP" = --keep ] && { RM=""; PUB="-p 127.0.0.1:18788:8788"; }
+RM="--rm"; PUB=""; [ "$KEEP" = --keep ] && { RM=""; PUB="-p 127.0.0.1:18788:8788 -e KEEP=1"; }
 rebuild() { (cd "$ROOT" && python3 -c "import sys;from e2e import report;report.build(sys.argv[1])" "$1"); }
 
 run_tier() {  # run_tier <tier> [image] [outdir] -> sets OUTDIR; returns the container's exit code
@@ -82,6 +82,26 @@ if [ "$TIER" = known ]; then
   echo "results: $FULL"; exit 0
 fi
 if [ "$TIER" = stress ]; then run_tier stress; rc=$?; echo "results: $OUTDIR"; exit $rc; fi
+
+# --keep (smoke only): the container stays up after the checks with the dashboard on 127.0.0.1:18788, for a
+# person to open. Started detached, because a kept container does not exit; this waits for the checks.
+if [ "$KEEP" = --keep ]; then
+  [ "$TIER" = smoke ] || { echo "--keep is for the smoke tier"; exit 2; }
+  OUTDIR="$ROOT/e2e/results/$(date -u +%Y%m%dT%H%M%SZ)-smoke"; mkdir -p "$OUTDIR"; printf '%s\n' "$REV" >"$OUTDIR/revision.txt"
+  NAME="cg-e2e-kept"; docker rm -f "$NAME" >/dev/null 2>&1
+  docker run -d $EXTRA $PUB -e HOST_EPOCH="$(date +%s)" --name "$NAME" -v "$OUTDIR:/results" "$IMG" smoke >/dev/null || exit 2
+  until docker logs "$NAME" 2>&1 | grep -qE '^== kept:|crashed'; do
+    docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null | grep -q true || break; sleep 2
+  done
+  docker logs "$NAME" 2>&1 | grep -q '^== kept:' || { echo "the kept run did not finish its checks"; docker logs "$NAME" 2>&1 | tail -15; exit 1; }
+  [ -f "$OUTDIR/verdicts.json" ] && rebuild "$OUTDIR"
+  echo "results:   $OUTDIR"
+  echo "report:    $OUTDIR/report.html"
+  echo "dashboard: http://127.0.0.1:18788/dashboard/#savings/history"
+  echo "           http://127.0.0.1:18788/dashboard/#savings/insights"
+  echo "stop it:   docker rm -f $NAME"
+  exit 0
+fi
 
 run_tier smoke; rc=$?; SMOKE="$OUTDIR"
 if [ "$TIER" = smoke ]; then
