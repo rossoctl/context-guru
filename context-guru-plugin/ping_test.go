@@ -140,3 +140,58 @@ print(" ".join(sorted(n.split("lock", 1)[1] for n in os.listdir(os.path.dirname(
 		t.Errorf("lock files left = %v, want only the current and the future window's", got)
 	}
 }
+
+// `cg.py cachestate --json --transcript <path>` names the sub-agents with the status line's own logic (one copy of
+// it, in statusline.py), so the mod shows the names Claude Code shows. A thread without a meta file gets no name.
+func TestCachestateNamesSubAgentsFromTheTranscript(t *testing.T) {
+	requireTool(t, "python3")
+	now := time.Now().UnixMilli()
+	th := func(id string) map[string]any {
+		return map[string]any{"id": id, "main": false, "last_ts": now - 1000, "end_ts": now - 1000, "ttl_s": 300, "prefix_tokens": 1000}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"session": "S1", "last_ts": now - 1000, "end_ts": now - 1000, "now_ms": now, "ttl_s": 300,
+			"threads": []any{
+				map[string]any{"id": "main", "main": true, "last_ts": now - 1000, "end_ts": now - 1000, "ttl_s": 300},
+				th("a:abc123"), th("a:nometa"), th("p:deadbeef"),
+			},
+		})
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+
+	dir := t.TempDir()
+	transcript := filepath.Join(dir, "S1.jsonl")
+	sub := filepath.Join(dir, "S1", "subagents")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "agent-abc123.meta.json"), []byte(`{"agentType":"Explore"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := runCGCode(t, "http://"+ln.Addr().String(), []string{"XDG_CACHE_HOME=" + t.TempDir()},
+		"cachestate", "--json", "--session", "S1", "--transcript", transcript)
+	if code != 0 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	var doc struct {
+		Threads []struct{ ID, Name string } `json:"threads"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &doc); err != nil {
+		t.Fatalf("not json: %v\n%s", err, out)
+	}
+	names := map[string]string{}
+	for _, th := range doc.Threads {
+		names[th.ID] = th.Name
+	}
+	if names["a:abc123"] != "Explore" || names["a:nometa"] != "" || names["p:deadbeef"] != "" || names["main"] != "" {
+		t.Errorf("names = %v, want only a:abc123 -> Explore", names)
+	}
+}

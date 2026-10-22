@@ -11,8 +11,10 @@ const doc = (warm: boolean) => ({
   money: { main: { saved_usd: 1.0 }, others: { saved_usd: 0.234 } },
   threads: [
     { id: 'main', main: true, ...entry(warm ? NOW - 60_000 : NOW - 900_000) },
-    { id: 'explorer', main: false, ...entry(NOW - 30_000) },
-    { id: 'reviewer', main: false, ...entry(NOW - 900_000) },
+    { id: 'a:explorer1', name: 'Explore', main: false, ...entry(NOW - 30_000) },
+    { id: 'a:old', name: 'Reviewer', main: false, ...entry(NOW - 900_000) }, // cold: not shown
+    { id: 'a:unnamed', main: false, ...entry(NOW - 30_000) }, // no name: shown as nothing, never as a hex id
+    { id: 'p:classifier', name: 'Classifier', main: false, ...entry(NOW - 30_000) }, // a side request, not an agent
   ],
 })
 
@@ -40,7 +42,7 @@ async function boot($: any, on: any, warm: boolean, calls: string[][] = [], ping
     calls.push([...e.argv])
     const ping = e.argv.includes('ping')
     const base = doc(warm)
-    const out = ping ? (pingOut ?? { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 }) : { ...base, threads: base.threads.map((t: any) => (t.main ? { ...t, ...mainExtra } : t)) }
+    const out = ping ? (pingOut ?? { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 }) : { ...base, ...mainExtra, threads: base.threads.map((t: any) => (t.main ? { ...t, ...mainExtra } : t)) }
     return { value: { exitCode: 0, stdout: JSON.stringify(out) + '\n', stderr: '' } }
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -48,26 +50,52 @@ async function boot($: any, on: any, warm: boolean, calls: string[][] = [], ping
 }
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`${surface}: warm band shows cache, cost, saved, Ping and subagent chips`, async ($, on) => {
+  test(`${surface}: warm band shows the gauge, cost, saved, Ping, the dashboard link, named agents and one tip`, async ($, on) => {
     await boot($, on, true)
     const ui = await $.ui.mount({ ...BAND, surface })
-    expect(await ui.find({ type: 'Text', text: /cache warm 4m/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /\$0\.040 warm/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Context Guru/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /4m/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /\$0\.040/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /\$1\.23/ })).toBeDefined()
     expect(await ui.find({ key: 'ping' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /explorer 5m/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /reviewer.*cold/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Explore.*5m/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /save more: \/context-guru:/ })).toBeDefined()
+    if (surface === 'terminal') expect(await ui.find({ type: 'Link' })).toBeDefined()
     await ui.unmount()
   })
 
-  test(`${surface}: cold main thread has no Ping button`, async ($, on) => {
+  test(`${surface}: only named user agents; never a p: thread, a cold agent or a hex id`, async ($, on) => {
+    await boot($, on, true)
+    const ui = await $.ui.mount({ ...BAND, surface })
+    for (const gone of [/Classifier/, /Reviewer/, /unnamed/, /a:/]) {
+      expect(await ui.find({ type: 'Text', text: gone })).toBeUndefined()
+    }
+    await ui.unmount()
+  })
+
+  test(`${surface}: a cold main cache says nothing about being cold, and has no Ping`, async ($, on) => {
     await boot($, on, false)
     const ui = await $.ui.mount({ ...BAND, surface })
-    expect(await ui.find({ type: 'Text', text: /cache cold/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /cold/i })).toBeUndefined()
     expect(await ui.find({ key: 'ping' })).toBeUndefined()
     await ui.unmount()
   })
 }
+
+test('the dashboard link is http://localhost:PORT/dashboard/', async ($, on) => {
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const link = await ui.find({ type: 'Link' })
+  expect((link as any)?.props?.href ?? (link as any)?.href).toBe('http://localhost:8787/dashboard/')
+  await ui.unmount()
+})
+
+test('kept warm by pings: the gauge is marked with the cycle arrow', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { keepalive: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /\u21bb/ })).toBeDefined()
+  await ui.unmount()
+})
 
 test('no data: the band is left to the engine', async ($, on) => {
   on('ui.render', () => ({ type: 'Text', props: {}, children: ['engine'] }) as any)
@@ -135,12 +163,11 @@ test('a server without the ping route is not blamed on the session', async ($, o
   await ui.unmount()
 })
 
-test('warm but not pingable: a dim hint instead of the Ping button; an absent field keeps the button', async ($, on) => {
+test('warm but not pingable: the Ping button is still shown, and there is no keep-alive hint', async ($, on) => {
   await boot($, on, true, [], undefined as any, { pingable: false })
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ key: 'ping' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /keep-alive off/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /cache warm/ })).toBeDefined()
+  expect(await ui.find({ key: 'ping' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /keep-alive off/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -160,3 +187,13 @@ for (const [status, error, want] of [
     expect(r.text).toMatch(want)
   })
 }
+
+
+test('a refused press explains itself with the server\'s ping_reason', async ($, on) => {
+  await boot($, on, true, [], { status: 409, error: 'not held' }, { pingable: false, ping_reason: 'too large' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeDefined() // still visible
+  const r = await $.command.run({ command: 'ping', args: '' })
+  expect(r.text).toMatch(/can't ping: this context is too large/)
+  await ui.unmount()
+})
