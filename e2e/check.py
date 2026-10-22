@@ -149,6 +149,28 @@ def run(exp: dict, api: dict, ui, tier: str, probes: dict | None = None, db: str
     _rec(out, "C.money.pooled_ge_project", "money", pooled + 1e-9 >= mx, f">= max project ({mx})", pooled,
          detail="no priced items" if blocked else "", blocked=blocked)
 
+    # --- all projects together: the pool is the projects added up, and no project holds another's data ----
+    roots = exp["cleanup"]["picker"]
+    pooled_unused = sorted(i["name"] for i in _unused(pooled_doc.get("items", [])) if i.get("scope") != "none")
+    _rec(out, "C.unused_set.pooled", "cleanup", pooled_unused == sorted(exp["cleanup"].get("unused_pooled", [])),
+         sorted(exp["cleanup"].get("unused_pooled", [])), pooled_unused,
+         detail="unused only where no measured project used it", blocked="unused_pooled" not in exp["cleanup"])
+    per = {r: (api.get("stats", {}).get(r) or {}).get("requests") for r in roots}
+    total = (api.get("stats_pooled") or {}).get("requests")
+    _rec(out, "C.pooled_requests_are_the_sum", "rollup", total is not None and total == sum(v or 0 for v in per.values()),
+         sum(v or 0 for v in per.values()), total, detail="all-projects requests == the sum over projects",
+         blocked=total is None or any(v is None for v in per.values()))
+    # Each item's carried tokens, per project, must add up to its pooled figure: a project counting another's
+    # traffic makes the sum too big, a pool that drops a project makes it too small.
+    by_name: dict = {}
+    for r in roots:
+        for i in _unused((ins.get(r) or {}).get("items", [])):
+            by_name[i["name"]] = by_name.get(i["name"], 0) + (i.get("reads") or 0)
+    pool = {i["name"]: i.get("reads") or 0 for i in _unused(pooled_doc.get("items", []))}
+    off = {n: (by_name.get(n, 0), pool[n]) for n in pool if by_name.get(n, 0) != pool[n]}
+    _rec(out, "C.pooled_carry_is_the_sum", "rollup", not off, "each item's pooled tokens == sum over projects",
+         off, detail="", blocked=not pool)
+
     probe = api.get("unpriced_probe") or {}
     pitems = probe.get("items") or []
     bad = [i["name"] for i in pitems if i.get("priced") or i.get("usd", 0) > 0]

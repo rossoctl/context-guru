@@ -24,6 +24,8 @@ def collect(base: str, exp: dict, skill_cmd, unpriced_probe_id: str = "") -> dic
         "facets_all": _get(base, "/api/facets"),
         "insights": {"": _get(base, "/api/insights?timeline=1")},
         "stats": {},
+        # All projects together, to check it is the projects added up.
+        "stats_pooled": _get(base, "/api/stats"),
     }
     for r in roots:
         out["insights"][r] = _get(base, f"/api/insights?timeline=1&project={q(r)}")

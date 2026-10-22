@@ -81,6 +81,25 @@ class TestOracle(unittest.TestCase):
                 self.assertNotIn(n, ("Bash", "Read", "Edit", "Write", "Grep"), root)
                 self.assertFalse(n.startswith(("context-guru:", "cg:")), (root, n))
 
+    def test_pooled_unused_is_what_no_measured_project_used(self):
+        # All projects together: an item is unused only if NO measured project used it. Used in one project
+        # and unused in another, it is used in the pooled view.
+        c = self.e["cleanup"]
+        want = set.intersection(*(set(v) for v in c["unused"].values()))
+        self.assertEqual(set(c["unused_pooled"]), want)
+        used_somewhere = set().union(*(set(v) for v in c["used"].values()))
+        self.assertFalse(set(c["unused_pooled"]) & used_somewhere)
+
+    def test_projects_differ_so_cross_project_mixing_is_visible(self):
+        # The data must make a leak detectable: two projects with different unused lists, and an item used in
+        # one project and unused in another. Identical projects would let a leak pass.
+        c = self.e["cleanup"]
+        lists = {tuple(v) for v in c["unused"].values()}
+        self.assertGreater(len(lists), 1, "every project has the same unused list")
+        split = [n for n in set().union(*(set(v) for v in c["unused"].values()))
+                 if any(n in v for v in c["used"].values())]
+        self.assertTrue(split, "no item is used in one project and unused in another")
+
     def test_cli_writes_json(self):
         import json, subprocess, tempfile
         with tempfile.TemporaryDirectory() as d:

@@ -22,7 +22,8 @@ EXP = {
                 "owners": {"a": 1, "acme": 1}, "owner_total": 2, "self_excluded": 2,
                 "bundled_absent": ["chartmaker"]},
     "cleanup": {"picker": ["/s/alpha"], "not_in_picker": ["/s/hist"],
-                "unused": {"/s/alpha": ["mcp__d__s"]}, "used": {"/s/alpha": ["a:y"]}},
+                "unused": {"/s/alpha": ["mcp__d__s"]}, "used": {"/s/alpha": ["a:y"]},
+                "unused_pooled": ["mcp__d__s"]},
     "stats": {"requests": {"/s/alpha": 10}},
     "import": {"valid_pre_install_turns": 11},
     "skill": {"port": 8788},
@@ -38,6 +39,7 @@ API = {
                  "/s/alpha": {"items": [item("mcp__d__s"), item("Bash", usd=0, scope="none", invoked=True)],
                               "removable_usd": 0.4, "timeline": {"buckets": [1]}}},
     "stats": {"/s/alpha": {"requests": 12}},
+    "stats_pooled": {"requests": 12},
     "unpriced_probe": {"items": [item("mcp__d__s", usd=0, priced=False)]},
     "skill": {"exit": 0, "stdout": "  http://127.0.0.1:8788/dashboard/#behaviour/history\n"},
 }
@@ -375,6 +377,70 @@ class TestMain(unittest.TestCase):
             r = subprocess.run([sys.executable, "-m", "e2e.check", "--results", d, "--tier", "smoke"],
                                capture_output=True, text=True)
         self.assertEqual((r.returncode, "FileNotFoundError" in r.stderr), (3, True))
+
+
+def two_projects():
+    """Two measured projects with different usage, plus the pooled view: what cross-project checks need."""
+    exp, api = copy.deepcopy(EXP), copy.deepcopy(API)
+    exp["cleanup"]["picker"] = ["/s/alpha", "/s/beta"]
+    exp["cleanup"]["unused"] = {"/s/alpha": ["mcp__d__s", "mcp__d__t"], "/s/beta": ["mcp__d__s"]}
+    exp["cleanup"]["used"] = {"/s/alpha": ["a:y"], "/s/beta": ["mcp__d__t"]}
+    exp["cleanup"]["unused_pooled"] = ["mcp__d__s"]
+    exp["stats"]["requests"] = {"/s/alpha": 10, "/s/beta": 5}
+    a = dict(item("mcp__d__s", usd=0.3), reads=300)
+    t = dict(item("mcp__d__t", usd=0.2), reads=200)
+    b = dict(item("mcp__d__s", usd=0.1), reads=100)
+    api["insights"] = {
+        "/s/hist": {"items": [], "timeline": {"buckets": []}},
+        "/s/alpha": {"items": [a, t], "removable_usd": 0.5, "timeline": {"buckets": [1]}},
+        "/s/beta": {"items": [b, dict(item("mcp__d__t"), invoked=True, usd=0)], "removable_usd": 0.1,
+                    "timeline": {"buckets": [1]}},
+        # pooled: s is unused everywhere (reads 300+100); t was used in beta, so it is used pooled
+        "": {"items": [dict(item("mcp__d__s", usd=0.4), reads=400), dict(item("mcp__d__t"), invoked=True, usd=0)],
+             "removable_usd": 0.4, "timeline": {"buckets": [1]}},
+    }
+    api["facets_measured"]["project"] = ["/s/alpha", "/s/beta"]
+    api["stats"] = {"/s/alpha": {"requests": 12}, "/s/beta": {"requests": 5}}
+    api["stats_pooled"] = {"requests": 17}
+    return exp, api
+
+
+class TestCrossProject(unittest.TestCase):
+    """All projects together must be the projects added up, and no project may carry another's data."""
+
+    def v(self, exp, api):
+        return verdicts(api, exp)
+
+    def test_correct_two_project_data_passes(self):
+        got = self.v(*two_projects())
+        self.assertEqual([got[k] for k in ("C.unused_set.pooled", "C.pooled_requests_are_the_sum",
+                                           "C.pooled_carry_is_the_sum")], ["PASS"] * 3)
+
+    def test_pooled_list_with_an_item_used_in_another_project_fails(self):
+        exp, api = two_projects()
+        api["insights"][""]["items"][1] = dict(item("mcp__d__t", usd=0.2), reads=200)  # t shown unused pooled
+        self.assertEqual(self.v(exp, api)["C.unused_set.pooled"], "FAIL")
+
+    def test_pooled_requests_that_are_not_the_sum_fail(self):
+        exp, api = two_projects()
+        api["stats_pooled"]["requests"] = 16  # one request lost between the projects and the pool
+        self.assertEqual(self.v(exp, api)["C.pooled_requests_are_the_sum"], "FAIL")
+
+    def test_one_project_counting_anothers_traffic_fails(self):
+        # beta's figure for s includes alpha's 300 reads: beta + alpha now exceed the pool.
+        exp, api = two_projects()
+        api["insights"]["/s/beta"]["items"][0] = dict(item("mcp__d__s", usd=0.4), reads=400)
+        self.assertEqual(self.v(exp, api)["C.pooled_carry_is_the_sum"], "FAIL")
+
+    def test_pooled_dropping_a_project_fails(self):
+        exp, api = two_projects()
+        api["insights"][""]["items"][0] = dict(item("mcp__d__s", usd=0.3), reads=300)  # beta's 100 missing
+        self.assertEqual(self.v(exp, api)["C.pooled_carry_is_the_sum"], "FAIL")
+
+    def test_without_the_pooled_stats_the_sum_check_blocks(self):
+        exp, api = two_projects()
+        del api["stats_pooled"]
+        self.assertEqual(self.v(exp, api)["C.pooled_requests_are_the_sum"], "BLOCKED")
 
 
 class TestInstallImportsOnce(unittest.TestCase):

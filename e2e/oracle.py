@@ -81,6 +81,9 @@ def expected(m: mf.Manifest) -> dict:
             "not_in_picker": sorted(set(all_roots) - set(measured_roots)),
             "unused": unused,
             "used": used,
+            # All projects together: unused only where no measured project used it.
+            "unused_pooled": sorted(set(c.name for c in declared)
+                                    - {n for r in measured_roots for n in used[r]}),
         },
         "import": {
             "valid_pre_install_turns": valid_pre_install_turns,
