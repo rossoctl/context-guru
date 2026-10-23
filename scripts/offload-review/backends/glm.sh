@@ -56,6 +56,12 @@ backend_has_session() {
   [ -s "$(glm_dir)/session-id" ]
 }
 
+# Set up on this machine: Claude Code is installed, and the key file exists with a gateway URL.
+# The script skips a backend that is not ready and goes to the next one.
+backend_ready() {
+  command -v claude >/dev/null && [ -r "${GLM_KEY_FILE:-}" ] && [ -n "$(glm_base_url)" ]
+}
+
 backend_cleanup() {
   local d
   d=$(glm_dir)

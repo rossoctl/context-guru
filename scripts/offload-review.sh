@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # Offload two independent reviews of one PR to an agent tool, in parallel, on this machine.
 #
-#   scripts/offload-review.sh <pr> [--backend <name>] [--live-tests <rules-file>] [--same-head]
+#   scripts/offload-review.sh <pr> [--backend <name>] [--no-fallback] [--live-tests <rules-file>] [--same-head]
 #   scripts/offload-review.sh <pr> --cleanup
 #
 # --backend picks the reviewer tool from scripts/offload-review/backends/<name>.sh.
 # The default is $OFFLOAD_BACKEND, else glm (backends/glm.sh lists the environment it needs).
+#
+# Fallback: when a reviewer's backend is not set up, or it fails before that reviewer posted, the
+# next backend in $OFFLOAD_FALLBACK (default "bob claude") runs that reviewer. `claude` is the
+# user's own Claude Code, so it is the Anthropic fallback. A reviewer never posts twice: the next
+# backend runs only while no review of this reviewer, round and head is on the PR. The marker of
+# each review names the backend that wrote it, and in a later round each reviewer starts with the
+# backend it used last, so it can resume its session. --no-fallback (or OFFLOAD_FALLBACK="")
+# turns this off, for example to compare one backend with another.
 #
 # Each reviewer gets its own worktree, .claude/worktrees/review-pr<N>-<backend>-r<1|2>. A fixed
 # path per reviewer lets round 2 resume that reviewer's own round-1 session, and keeps the two
@@ -36,13 +44,14 @@ set -euo pipefail
 # A step that fails under `set -e` would otherwise end the script with no message.
 trap 'echo "offload-review: line $LINENO failed (exit $?)" >&2' ERR
 
-usage="usage: offload-review.sh <pr> [--backend <name>] [--live-tests <rules-file>] [--same-head] | <pr> --cleanup"
+usage="usage: offload-review.sh <pr> [--backend <name>] [--no-fallback] [--live-tests <rules-file>] [--same-head] | <pr> --cleanup"
 pr=${1:?$usage}
 shift
 backend=${OFFLOAD_BACKEND:-glm}
 rules=
 cleanup=0
 same_head=0
+fallback=${OFFLOAD_FALLBACK-bob claude}
 while [ $# -gt 0 ]; do
   case $1 in
     --backend) backend=${2:?$usage}; shift 2 ;;
@@ -51,19 +60,26 @@ while [ $# -gt 0 ]; do
       [ -s "$rules" ] || { echo "rules file $rules is empty or missing" >&2; exit 1; } ;;
     --cleanup) cleanup=1; shift ;;
     --same-head) same_head=1; shift ;;
+    --no-fallback) fallback=; shift ;;
     *) echo "$usage" >&2; exit 1 ;;
   esac
 done
 
 root=$(git rev-parse --show-toplevel)
 skill=$root/.claude/skills/offload-review
-# A plain name only: `--backend ../x` must not source a file from outside backends/.
-[[ $backend =~ ^[a-z0-9_-]+$ ]] || { echo "bad backend name: $backend" >&2; exit 1; }
-[ -f "$root/scripts/offload-review/backends/$backend.sh" ] || { echo "no backend $backend in scripts/offload-review/backends" >&2; exit 1; }
-# shellcheck source=/dev/null
-. "$root/scripts/offload-review/backends/$backend.sh"
-for fn in backend_label backend_has_session backend_run; do
-  declare -F "$fn" >/dev/null || { echo "backend $backend does not define $fn" >&2; exit 1; }
+# The backends to try, in order: the chosen one, then the fallbacks, each once.
+chain=("$backend")
+for b in $fallback; do [[ " ${chain[*]} " == *" $b "* ]] || chain+=("$b"); done
+for b in "${chain[@]}"; do
+  # A plain name only: `--backend ../x` must not source a file from outside backends/.
+  [[ $b =~ ^[a-z0-9_-]+$ ]] || { echo "bad backend name: $b" >&2; exit 1; }
+  [ -f "$root/scripts/offload-review/backends/$b.sh" ] || { echo "no backend $b in scripts/offload-review/backends" >&2; exit 1; }
+  # A subshell, so one backend's functions never stand in for another's.
+  # shellcheck source=/dev/null
+  ( . "$root/scripts/offload-review/backends/$b.sh"
+    for fn in backend_label backend_has_session backend_run; do
+      declare -F "$fn" >/dev/null || { echo "backend $b does not define $fn" >&2; exit 1; }
+    done ) || exit 1
 done
 
 max_rounds=${OFFLOAD_MAX_ROUNDS:-2}
@@ -138,87 +154,143 @@ if [ "$round" -gt "$max_rounds" ]; then
 fi
 
 git -C "$main" fetch -q origin "$head_ref" "$base_ref"
-label=$(backend_label)
 
-wt_of() { echo "$main/.claude/worktrees/review-pr$pr-$backend-r$1"; }
+wt_of() { echo "$main/.claude/worktrees/review-pr$pr-$1-r$2"; } # <backend> <reviewer>
 
-# One after the other, not in the reviewers' parallel jobs: two `git worktree add` calls at the
-# same time can fail on a git lock file.
-for r in "${todo[@]}"; do
-  wt=$(wt_of "$r")
+# ensure_wt <backend> <reviewer>: create that worktree, or reset it to the head. One at a time:
+# two `git worktree add` calls at the same time can fail on a git lock file, and with fallback the
+# reviewers may need a new worktree at the same moment. The backends' own session folders
+# survive the clean, so round 2 can resume.
+lockdir="$(git rev-parse --path-format=absolute --git-common-dir)/offload-review-worktree.lock"
+ensure_wt() {
+  local wt n=0 rc=0
+  wt=$(wt_of "$1" "$2")
+  until mkdir "$lockdir" 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -lt 600 ] || { echo "The worktree lock $lockdir is held for over 60 s. Remove it if no review is running." >&2; return 1; }
+    sleep 0.1
+  done
   if [ -d "$wt" ]; then
-    git -C "$wt" checkout -q --detach "$sha"
-    git -C "$wt" clean -qfd
+    git -C "$wt" checkout -q --detach "$sha" && git -C "$wt" clean -qfd -e .glm-cc/ -e .claude-review-session || rc=1
   else
-    git -C "$main" worktree add -q --detach "$wt" "$sha"
+    git -C "$main" worktree add -q --detach "$wt" "$sha" || rc=1
   fi
-done
+  rmdir "$lockdir"
+  return "$rc"
+}
 
-run_reviewer() {
-  # Two `local` lines: bash expands a whole `local` line before it sets any name on it.
-  local r=$1
-  local wt mode=fresh resume=0
-  local live="Live tests are NOT approved. Read the code only."
-  wt=$(wt_of "$r")
-  cd "$wt"
-  if [ "$round" -gt 1 ]; then
-    if backend_has_session 2>>review.log; then
-      mode=resumed; resume=1
-    else
-      echo "Reviewer $r: no earlier session found; round $round starts fresh." >&2
+# posted_now <reviewer>: exit 0 when that reviewer's review of this round and head is on the PR,
+# from any backend. Read fresh: it decides whether the next backend may run.
+posted_now() {
+  gh api --paginate "repos/$repo/pulls/$pr/reviews" --jq '.[].body' \
+    | grep -qE "<!-- offload-review reviewer=$1 round=$round sha=$sha backend=[a-z0-9_-]+ verdict=(approve|blocking)"
+}
+
+# chain_for <reviewer>: the backends to try for this reviewer. In a later round the backend that
+# wrote its last review goes first, so it can resume its own session.
+chain_for() {
+  local prev b out=()
+  prev=$({ grep -oE "<!-- offload-review reviewer=$1 round=[0-9]+ sha=[0-9a-f]+ backend=[a-z0-9_-]+" <<<"$reviews" || true; } \
+    | tail -1 | sed -E 's/.*backend=//')
+  if [ "$round" -gt 1 ] && [ -n "$prev" ] && [[ " ${chain[*]} " == *" $prev "* ]]; then out=("$prev"); fi
+  for b in "${chain[@]}"; do [[ " ${out[*]-} " == *" $b "* ]] || out+=("$b"); done
+  echo "${out[@]}"
+}
+
+# attempt <reviewer> <backend>: one review by one backend, in that backend's worktree. Exit 4: the
+# backend is not set up on this machine, so it was not run. Otherwise the backend's own exit code.
+# The subshell keeps this backend's functions to this attempt.
+attempt() {
+  local r=$1 b=$2
+  (
+    # shellcheck source=/dev/null
+    . "$root/scripts/offload-review/backends/$b.sh"
+    if declare -F backend_ready >/dev/null && ! backend_ready 2>/dev/null; then exit 4; fi
+    ensure_wt "$b" "$r" || exit 1
+    wt=$(wt_of "$b" "$r")
+    cd "$wt" || exit 1
+    mode=fresh resume=0
+    live="Live tests are NOT approved. Read the code only."
+    if [ "$round" -gt 1 ]; then
+      if backend_has_session 2>>review.log; then
+        mode=resumed; resume=1
+      else
+        echo "Reviewer $r: no earlier $b session found; round $round starts fresh." >&2
+      fi
     fi
-  fi
 
-  if [ -n "$rules" ]; then
-    live="Live tests ARE approved by the user. Use your own box folder, review-pr$pr-r$r.
+    if [ -n "$rules" ]; then
+      live="Live tests ARE approved by the user. Use your own box folder, review-pr$pr-r$r.
 Follow every rule below.
 
 $(cat "$rules")"
-  fi
-
-  local base marker
-  base=$(git merge-base "origin/$base_ref" HEAD)
-  marker="<!-- offload-review reviewer=$r round=$round sha=$sha backend=$backend verdict=<approve|blocking> -->"
-  {
-    if [ "$mode" = resumed ] && [ "$rehead" = 1 ]; then
-      echo "# Re-check, round $round, on the same head"
-      echo "Your round-$((round - 1)) review is earlier in this session. The head did not move."
-      echo "This round is for what is new on the PR since then: replies to findings, test results,"
-      echo "and a working eval box if your earlier tests could not run. Run the tests you could not."
-      echo "Follow the same rules and format as before; they are repeated below."
-      echo
-    elif [ "$mode" = resumed ]; then
-      echo "# Re-check, round $round"
-      echo "Your round-$((round - 1)) review is earlier in this session. The author pushed fixes."
-      echo "Follow the same rules and format as before; they are repeated below."
-      echo
     fi
-    if [ "$round" -gt 1 ]; then
-      # A plain file with placeholders, not echo lines: escaping jq inside echo broke twice.
-      sed -e "s|{{PR}}|$pr|g" -e "s|{{REPO}}|$repo|g" -e "s|{{ROUND}}|$round|g" \
-        -e "s|{{REVIEWER}}|$r|g" "$skill/review-prompt-later-rounds.md"
-      echo
-    fi
-    cat "$skill/review-prompt.md"
-    echo
-    echo "## This review"
-    echo "- PR: #$pr in $repo, head $sha, base $base."
-    echo "- Read the diff with: git diff $base..HEAD"
-    echo "- You are reviewer $r of 2, round $round of $max_rounds, context: $mode."
-    [ "$rehead" = 0 ] || echo "- The head is the same as in round $((round - 1)). Expect no new commits. That is not a skip."
-    echo "- Your folder is $wt. It is a git worktree of the PR head, only for you."
-    echo "  Write your review to $wt/.review.md. Do not change any file outside this folder."
-    [ "$round" -gt 1 ] || echo "  Do not read the other review-pr* folders in $main/.claude/worktrees."
-    echo "- Marker line (line 1 of .review.md): $marker"
-    echo "- Identity table (lines 2-4):"
-    echo "  | Reviewer | Kind | Started by | Context | Review | Round | Head | Verdict |"
-    echo "  |---|---|---|---|---|---|---|---|"
-    echo "  | Reviewer $r ($backend, user of @$me) | $label | offload-review skill, @$me's session | $mode | $r of 2 | $round of $max_rounds | \`${sha:0:12}\` | **<verdict>** |"
-    echo "- Post with: gh pr review $pr --repo $repo --comment --body-file $wt/.review.md"
-    echo "- $live"
-  } > .review-prompt.md
 
-  backend_run .review-prompt.md "$resume" > review.log 2>&1
+    label=$(backend_label)
+    base=$(git merge-base "origin/$base_ref" HEAD)
+    marker="<!-- offload-review reviewer=$r round=$round sha=$sha backend=$b verdict=<approve|blocking> -->"
+    {
+      if [ "$mode" = resumed ] && [ "$rehead" = 1 ]; then
+        echo "# Re-check, round $round, on the same head"
+        echo "Your round-$((round - 1)) review is earlier in this session. The head did not move."
+        echo "This round is for what is new on the PR since then: replies to findings, test results,"
+        echo "and a working eval box if your earlier tests could not run. Run the tests you could not."
+        echo "Follow the same rules and format as before; they are repeated below."
+        echo
+      elif [ "$mode" = resumed ]; then
+        echo "# Re-check, round $round"
+        echo "Your round-$((round - 1)) review is earlier in this session. The author pushed fixes."
+        echo "Follow the same rules and format as before; they are repeated below."
+        echo
+      fi
+      if [ "$round" -gt 1 ]; then
+        # A plain file with placeholders, not echo lines: escaping jq inside echo broke twice.
+        sed -e "s|{{PR}}|$pr|g" -e "s|{{REPO}}|$repo|g" -e "s|{{ROUND}}|$round|g" \
+          -e "s|{{REVIEWER}}|$r|g" "$skill/review-prompt-later-rounds.md"
+        echo
+      fi
+      cat "$skill/review-prompt.md"
+      echo
+      echo "## This review"
+      echo "- PR: #$pr in $repo, head $sha, base $base."
+      echo "- Read the diff with: git diff $base..HEAD"
+      echo "- You are reviewer $r of 2, round $round of $max_rounds, context: $mode."
+      [ "$rehead" = 0 ] || echo "- The head is the same as in round $((round - 1)). Expect no new commits. That is not a skip."
+      echo "- Your folder is $wt. It is a git worktree of the PR head, only for you."
+      echo "  Write your review to $wt/.review.md. Do not change any file outside this folder."
+      [ "$round" -gt 1 ] || echo "  Do not read the other review-pr* folders in $main/.claude/worktrees."
+      echo "- Marker line (line 1 of .review.md): $marker"
+      echo "- Identity table (lines 2-4):"
+      echo "  | Reviewer | Kind | Started by | Context | Review | Round | Head | Verdict |"
+      echo "  |---|---|---|---|---|---|---|---|"
+      echo "  | Reviewer $r ($b, user of @$me) | $label | offload-review skill, @$me's session | $mode | $r of 2 | $round of $max_rounds | \`${sha:0:12}\` | **<verdict>** |"
+      echo "- Post with: gh pr review $pr --repo $repo --comment --body-file $wt/.review.md"
+      echo "- $live"
+    } > .review-prompt.md
+
+    backend_run .review-prompt.md "$resume" > review.log 2>&1
+  )
+}
+
+# run_reviewer <reviewer>: try each backend until one has posted this reviewer's review.
+run_reviewer() {
+  local r=$1 b rc tried=()
+  for b in $(chain_for "$r"); do
+    rc=0
+    attempt "$r" "$b" || rc=$?
+    if posted_now "$r"; then
+      [ ${#tried[@]} -eq 0 ] || echo "Reviewer $r: posted with $b. Tried first: ${tried[*]}." >&2
+      return 0
+    fi
+    if [ "$rc" = 4 ]; then
+      tried+=("$b (not set up)")
+    else
+      tried+=("$b (exit $rc, no review posted; see $(wt_of "$b" "$r")/review.log)")
+      echo "Reviewer $r: $b did not post a review (exit $rc). Trying the next backend." >&2
+    fi
+  done
+  echo "Reviewer $r: no backend posted a review. Tried: ${tried[*]}." >&2
+  return 1
 }
 
 # A reviewer may write only in its own worktree. Its worktree is checked below. The checkouts
@@ -233,7 +305,7 @@ pids=()
 for r in "${todo[@]}"; do run_reviewer "$r" & pids+=("$!"); done
 rc=0
 for i in "${!todo[@]}"; do
-  wait "${pids[$i]}" || { echo "Reviewer ${todo[$i]} failed; see its review.log" >&2; rc=1; }
+  wait "${pids[$i]}" || { echo "Reviewer ${todo[$i]} failed; see the messages above" >&2; rc=1; }
 done
 
 for i in "${!watched[@]}"; do
@@ -242,17 +314,22 @@ for i in "${!watched[@]}"; do
 done
 
 reviews=$(gh api --paginate "repos/$repo/pulls/$pr/reviews" --jq '.[].body')
+used=()
 for r in "${todo[@]}"; do
-  wt=$(wt_of "$r")
-  [ -d "$wt" ] || { echo "Reviewer $r has no worktree at $wt" >&2; rc=1; continue; }
-  # A reviewer may write only its own files. Anything else is a broken rule.
-  # .glm-cc/ is the glm backend's own Claude Code config and session folder (backends/glm.sh).
-  extra=$(git -C "$wt" status --porcelain | grep -vE ' (\.review(-prompt)?\.md|\.review-in-(reviews|comments|inline)\.txt|review\.log|\.glm-cc/)$' || true)
-  [ -z "$extra" ] || { echo "Reviewer $r changed files:"$'\n'"$extra" >&2; rc=1; }
-  [ "$(git -C "$wt" rev-parse HEAD)" = "$sha" ] || { echo "Reviewer $r moved HEAD" >&2; rc=1; }
-  grep -qE "<!-- offload-review reviewer=$r round=$round sha=$sha backend=$backend verdict=(approve|blocking)" <<<"$reviews" \
-    || { echo "Reviewer $r did not post its review" >&2; rc=1; }
+  for b in "${chain[@]}"; do
+    wt=$(wt_of "$b" "$r")
+    # Only the worktrees this round used: their prompt names this round and head.
+    [ -f "$wt/.review-prompt.md" ] && grep -q "reviewer=$r round=$round sha=$sha " "$wt/.review-prompt.md" || continue
+    # A reviewer may write only its own files. Anything else is a broken rule. .glm-cc/ and
+    # .claude-review-session are the glm and claude backends' own session files.
+    extra=$(git -C "$wt" status --porcelain | grep -vE ' (\.review(-prompt)?\.md|\.review-in-(reviews|comments|inline)\.txt|review\.log|\.glm-cc/|\.claude-review-session)$' || true)
+    [ -z "$extra" ] || { echo "Reviewer $r ($b) changed files:"$'\n'"$extra" >&2; rc=1; }
+    [ "$(git -C "$wt" rev-parse HEAD)" = "$sha" ] || { echo "Reviewer $r ($b) moved HEAD" >&2; rc=1; }
+  done
+  b=$({ grep -oE "<!-- offload-review reviewer=$r round=$round sha=$sha backend=[a-z0-9_-]+ verdict=(approve|blocking)" <<<"$reviews" || true; } \
+    | tail -1 | sed -E 's/.*backend=([a-z0-9_-]+).*/\1/')
+  if [ -n "$b" ]; then used+=("reviewer $r: $b"); else echo "Reviewer $r did not post its review" >&2; rc=1; fi
 done
 
-[ "$rc" -eq 0 ] && echo "Round $round: both $backend reviews are on PR #$pr for ${sha:0:12}."
+[ "$rc" -eq 0 ] && echo "Round $round: both reviews are on PR #$pr for ${sha:0:12} (${used[*]})."
 exit "$rc"

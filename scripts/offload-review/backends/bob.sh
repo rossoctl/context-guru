@@ -13,6 +13,11 @@ backend_label() {
   echo "IBM Bob Shell $(bob --version)"
 }
 
+# Set up on this machine: the bob command exists. A login problem shows as a failed run.
+backend_ready() {
+  command -v bob >/dev/null
+}
+
 backend_has_session() {
   local out
   # A Bob error is not "no session": say so, so a lost round-1 context is visible.

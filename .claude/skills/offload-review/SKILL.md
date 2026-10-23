@@ -13,8 +13,23 @@ The reviewer tool is a backend in `scripts/offload-review/backends/<name>.sh`:
 
 - `glm` (the default): GLM through Claude Code, pointed at an internal gateway.
 - `bob`: IBM Bob Shell.
+- `claude`: the user's own Claude Code, with its own login and model.
 
-Use `--backend <name>` or `OFFLOAD_BACKEND` to pick one.
+Use `--backend <name>` or `OFFLOAD_BACKEND` to pick the first one.
+
+**Fallback.** When a reviewer's backend is not set up, or it fails before that reviewer posts,
+the next backend in `OFFLOAD_FALLBACK` (default `bob claude`) runs that reviewer. So the default
+order is glm, then bob, then claude.
+
+- Each reviewer falls back on its own. One reviewer can post with glm and the other with bob.
+- A reviewer never posts twice. The next backend runs only while no review of that reviewer,
+  round and head is on the PR.
+- The marker of each review names the backend that wrote it. The script's last line lists the
+  backend of each reviewer. Report both to the user.
+- In round 2, each reviewer starts with the backend that wrote its round-1 review, so it resumes
+  that session.
+- `--no-fallback` (or `OFFLOAD_FALLBACK=""`) turns it off. Use it to compare one backend with
+  another, so the results do not mix.
 
 Run this skill in the **main session**, not in a subagent. A subagent is not woken by its own
 background task, so it cannot wait for the reviewers.
@@ -40,6 +55,9 @@ background task, so it cannot wait for the reviewers.
      log it. The backend reads the key at call time through `apiKeyHelper`, so the key never
      enters the reviewer's environment.
    - For `bob`: `bob --version`, and one interactive `bob` login.
+   - For `claude`: `claude --version`, and the user is logged in. `OFFLOAD_CLAUDE_MODEL` picks the
+     model; the default is the user's own default model.
+   - A backend that is not set up is skipped, and the next one runs.
 3. `gh auth status` works. The reviewers post with the user's `gh` login.
 
 ## Steps
@@ -65,7 +83,7 @@ background task, so it cannot wait for the reviewers.
    | Exit | Meaning | What you do |
    |---|---|---|
    | 0 | Both reviews are posted. | Read both `.review.md` files. |
-   | 1 | A reviewer failed, or the input is wrong. | Read the message and that reviewer's `review.log`. Report it to the user. Stop. |
+   | 1 | No backend posted a review for a reviewer, or the input is wrong. | Read the message. It names each backend tried and its `review.log`. Report it to the user. Stop. |
    | 2 | The round budget is used. | Go to "More rounds". |
    | 3 | This head already has both reviews of its round. | You did not push since that round. Push the fixes first. If the user asks for a round on the same head, see "Same head". |
 
@@ -121,8 +139,9 @@ scripts/offload-review.sh <pr> --cleanup
 ```
 
 It removes:
-- both reviewer worktrees, `.claude/worktrees/review-pr<N>-<backend>-r<1|2>`, with their files;
-- the backend's sessions for those worktrees (for `glm`: the `.glm-cc/` folder in each worktree; for `bob`: `~/.bob/tmp/<hash of the worktree path>`);
+- every reviewer worktree, `.claude/worktrees/review-pr<N>-<backend>-r<1|2>`, with their files.
+  With fallback, a reviewer can have one worktree per backend it tried;
+- the backend's sessions for those worktrees (for `glm`: the `.glm-cc/` folder in each worktree; for `bob`: `~/.bob/tmp/<hash of the worktree path>`; for `claude`: the session that `.claude-review-session` names);
 - the live-test rules file, `/tmp/offload-review-pr<N>-rules.md`.
 
 It refuses while the PR is still open. To clean up an open PR you gave up on, ask the user
