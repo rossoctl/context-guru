@@ -204,14 +204,18 @@ chain_for() {
 }
 
 # attempt <reviewer> <backend>: one review by one backend, in that backend's worktree. Exit 4: the
-# backend is not set up on this machine, so it was not run. Otherwise the backend's own exit code.
-# The subshell keeps this backend's functions to this attempt.
+# backend is not set up on this machine, so it was not run; its reason is in $skipdir/<backend>.
+# Otherwise the backend's own exit code. The subshell keeps this backend's functions to this attempt.
+skipdir=$(mktemp -d)
+trap 'rm -rf -- "$skipdir"' EXIT
 attempt() {
   local r=$1 b=$2
   (
     # shellcheck source=/dev/null
     . "$root/scripts/offload-review/backends/$b.sh"
-    if declare -F backend_ready >/dev/null && ! backend_ready 2>/dev/null; then exit 4; fi
+    if declare -F backend_ready >/dev/null; then
+      why=$(backend_ready 2>/dev/null) || { printf '%s' "${why:-not set up}" > "$skipdir/$b"; exit 4; }
+    fi
     ensure_wt "$b" "$r" || exit 1
     wt=$(wt_of "$b" "$r")
     cd "$wt" || exit 1
@@ -289,7 +293,7 @@ run_reviewer() {
       return 0
     fi
     if [ "$rc" = 4 ]; then
-      tried+=("$b (not set up)")
+      tried+=("$b (not set up: $(cat "$skipdir/$b" 2>/dev/null || echo unknown))")
     else
       tried+=("$b (exit $rc, no review posted; see $(wt_of "$b" "$r")/review.log)")
       echo "Reviewer $r: $b did not post a review (exit $rc). Trying the next backend." >&2
@@ -338,4 +342,9 @@ for r in "${todo[@]}"; do
 done
 
 [ "$rc" -eq 0 ] && echo "Round $round: both reviews are on PR #$pr for ${sha:0:12} (${used[*]})."
+# A fallback is quiet by design, so say it last and plainly: a round that went to another backend
+# must be a decision the user sees, not a note they miss.
+for u in "${used[@]}"; do
+  [[ $u == *": $backend" ]] || { echo "Note: not every reviewer used $backend, the first backend. The reason is in the 'Tried first' lines above. Tell the user before you accept this round." >&2; break; }
+done
 exit "$rc"

@@ -57,9 +57,24 @@ backend_has_session() {
 }
 
 # Set up on this machine: Claude Code is installed, and the key file exists with a gateway URL.
-# The script skips a backend that is not ready and goes to the next one.
+# The script skips a backend that is not ready and goes to the next one. The reason goes to
+# stdout, and the script prints it: "not set up" alone sent a whole round to Bob unnoticed.
 backend_ready() {
-  command -v claude >/dev/null && [ -r "${GLM_KEY_FILE:-}" ] && [ -n "$(glm_base_url)" ]
+  if ! command -v claude >/dev/null; then echo "claude (Claude Code) is not on PATH"; return 1; fi
+  if [ -z "${GLM_KEY_FILE:-}" ]; then
+    # The common case: the variable is in the shell profile, but this session started before the
+    # line was added, so it never saw it.
+    local login
+    login=$(${SHELL:-/bin/sh} -ic 'printf %s "${GLM_KEY_FILE:+set}"' 2>/dev/null </dev/null || true)
+    if [ "$login" = set ]; then
+      echo "GLM_KEY_FILE is set in your shell profile but not in this session, which started before it. Start a new session, or prefix the command with GLM_KEY_FILE=<path>"
+    else
+      echo "GLM_KEY_FILE is not set (see the GLM setup guide)"
+    fi
+    return 1
+  fi
+  if [ ! -r "$GLM_KEY_FILE" ]; then echo "GLM_KEY_FILE names a file that is missing or not readable"; return 1; fi
+  if [ -z "$(glm_base_url)" ]; then echo "no gateway URL in the key file (field ${GLM_URL_FIELD:-BENCHMARK_ANTHROPIC_BASE_URL})"; return 1; fi
 }
 
 backend_cleanup() {
