@@ -9,8 +9,12 @@ Two reviewers review the PR in parallel, on this machine, with the user's own lo
 reviewer tool. Each one posts its review on the PR. You fix the findings, push, and run this
 skill again for round 2. Reviewer N in round 2 resumes its own round-1 session.
 
-The reviewer tool is a backend in `scripts/offload-review/backends/<name>.sh`. Today the only
-backend is `bob`. Use `--backend <name>` or `OFFLOAD_BACKEND` to pick another one.
+The reviewer tool is a backend in `scripts/offload-review/backends/<name>.sh`:
+
+- `glm` (the default): GLM through Claude Code, pointed at an internal gateway.
+- `bob`: IBM Bob Shell.
+
+Use `--backend <name>` or `OFFLOAD_BACKEND` to pick one.
 
 Run this skill in the **main session**, not in a subagent. A subagent is not woken by its own
 background task, so it cannot wait for the reviewers.
@@ -30,8 +34,12 @@ background task, so it cannot wait for the reviewers.
 ## Before you start
 
 1. The PR is pushed and is not a draft. Everything is committed.
-2. The backend tool works and the user is logged in. For `bob`: `bob --version`, and one
-   interactive `bob` login.
+2. The backend tool works and the user is logged in.
+   - For `glm`: `claude --version`, and `GLM_KEY_FILE` names the user's JSON key file. The file
+     holds the key, the gateway URL and the model id. It is not in this repo. Never print, copy or
+     log it. The backend reads the key at call time through `apiKeyHelper`, so the key never
+     enters the reviewer's environment.
+   - For `bob`: `bob --version`, and one interactive `bob` login.
 3. `gh auth status` works. The reviewers post with the user's `gh` login.
 
 ## Steps
@@ -114,7 +122,7 @@ scripts/offload-review.sh <pr> --cleanup
 
 It removes:
 - both reviewer worktrees, `.claude/worktrees/review-pr<N>-<backend>-r<1|2>`, with their files;
-- the backend's sessions for those worktrees (for `bob`: `~/.bob/tmp/<hash of the worktree path>`);
+- the backend's sessions for those worktrees (for `glm`: the `.glm-cc/` folder in each worktree; for `bob`: `~/.bob/tmp/<hash of the worktree path>`);
 - the live-test rules file, `/tmp/offload-review-pr<N>-rules.md`.
 
 It refuses while the PR is still open. To clean up an open PR you gave up on, ask the user
