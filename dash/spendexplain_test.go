@@ -203,3 +203,33 @@ func TestSpendExplainSideRequestIDsDoNotSplitThreads(t *testing.T) {
 		t.Errorf("causes = %v; want cold_start 1, new_thread 1, idle_expiry 1", got)
 	}
 }
+
+// The ping's cost sits on the ping row, its saving on the agent row it rescued. Summing the
+// saving over ping rows gave a ping_saved_usd of 0 on every window (#676), so the home screen
+// reported every ping as a loss.
+func TestSpendExplainLedgerCreditsPingSavingFromTheRescuedRow(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	const m = int64(60000)
+	t0 := int64(1_700_000_000_000)
+	rescued := spendEv(t0+8*m, "s", 5, 5, 10000, 100, 0)
+	rescued.KeepAliveSavedUSD = 0.05
+	// a credit with no ping in the 5 minutes before it: kaSaved refuses it
+	stray := spendEv(t0+8*m, "u", 3, 5, 10000, 100, 0)
+	stray.KeepAliveSavedUSD = 0.07
+	seed(t, rec,
+		spendEv(t0, "s", 3, 5, 0, 10000, 0),
+		kaPing(t0+4*m, "s", 0.002, 10000, 0),
+		rescued,
+		spendEv(t0, "u", 2, 5, 0, 10000, 0),
+		stray,
+	)
+	_, body := get(t, a, "/api/spend/explain?now="+itoa(t0+9*m), "127.0.0.1:1")
+	l := body["ledger"].(map[string]any)
+	if got := l["ping_usd"].(float64); math.Abs(got-0.002) > 1e-9 {
+		t.Errorf("ping_usd = %v; want 0.002", got)
+	}
+	if got := l["ping_saved_usd"].(float64); math.Abs(got-0.05) > 1e-9 {
+		t.Errorf("ping_saved_usd = %v; want 0.05 (the rescued row only, not the unreachable 0.07)", got)
+	}
+}
