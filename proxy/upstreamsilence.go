@@ -173,11 +173,17 @@ func silenceAttempt(parent context.Context, client *http.Client, silence time.Du
 		watchdog                *time.Timer
 		done                    bool // Do has returned: a late WroteRequest must not start a timer
 	)
-	stopWatchdog := func() {
+	// stopWatchdog runs once Do has returned. Under mu, so a watchdog that has not cancelled yet
+	// never will once a response is marked answered here. Timer.Stop alone does not promise that: a
+	// watchdog that already fired may be waiting for mu.
+	stopWatchdog := func(gotResponse bool) {
 		mu.Lock()
 		done = true
 		if watchdog != nil {
 			watchdog.Stop()
+		}
+		if gotResponse {
+			answered.Store(true)
 		}
 		mu.Unlock()
 	}
@@ -216,7 +222,20 @@ func silenceAttempt(parent context.Context, client *http.Client, silence time.Du
 		return nil, err
 	}
 	resp, err := client.Do(req)
-	stopWatchdog()
+	stopWatchdog(err == nil)
+	if err == nil && errors.Is(context.Cause(ctx), errUpstreamSilent) {
+		// The watchdog cancelled just before the first byte arrived, and the transport still
+		// returned the response it had already read (it prefers a response that races its context's
+		// cancellation). Its body is tied to the cancelled context and fails on the first read, so
+		// it is never handed on. Not one byte of it has reached the client, so the attempt counts as
+		// silent and is resent.
+		resp.Body.Close()
+		cancel(nil)
+		if parent.Err() != nil {
+			return nil, context.Cause(parent) // the client went away: never a resend
+		}
+		return nil, fmt.Errorf("%w: the first byte arrived after the deadline", errUpstreamSilent)
+	}
 	if err != nil {
 		silent := errors.Is(context.Cause(ctx), errUpstreamSilent)
 		cancel(nil)
@@ -237,7 +256,6 @@ func silenceAttempt(parent context.Context, client *http.Client, silence time.Du
 	}
 	// Headers arrived, so the watchdog's job is done. The attempt's context must stay alive while
 	// the body is read, so it is released when the caller closes the body.
-	answered.Store(true)
 	resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: func() { cancel(nil) }}
 	return resp, nil
 }

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"runtime"
 	"strings"
 	"sync"
@@ -578,25 +579,38 @@ func TestCountTokensRecoversADroppedReusedConnection(t *testing.T) {
 
 // The first byte arrives right around the silence deadline (44-55 ms against 50 ms). An answered
 // attempt must never be thrown away, a body must never be corrupted, and a call is sent at most
-// twice. Errors are expected when BOTH copies are slower than the deadline.
+// twice. Errors are expected when BOTH copies are slower than the deadline. Each call carries its
+// own id, and the sends are counted per id once the server has stopped: under load, a handler can
+// start after its call has given up, so a count taken between calls can charge one call with
+// another's request.
 func TestAFirstByteRacingTheWatchdogIsNeverLostOrDuplicated(t *testing.T) {
-	var reqs atomic.Int64
+	var (
+		mu    sync.Mutex
+		sends = map[string]int{}
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
-		reqs.Add(1)
+		mu.Lock()
+		sends[r.Header.Get("X-Call")]++
+		mu.Unlock()
 		time.Sleep(time.Duration(44+rand.Intn(12)) * time.Millisecond)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
 		w.(http.Flusher).Flush()
 		io.WriteString(w, "data: x\n\n")
 	}))
-	defer srv.Close()
 	c := &http.Client{Transport: upstreamTransport(30 * time.Second)}
 	const N = 200
 	errs := 0
 	for i := 0; i < N; i++ {
-		before := reqs.Load()
-		resp, err := doWithSilenceGuard(context.Background(), c, 50*time.Millisecond, silenceBuild(srv.URL, streamBody))
+		build := func(ctx context.Context) (*http.Request, error) {
+			req, err := silenceBuild(srv.URL, streamBody)(ctx)
+			if err == nil {
+				req.Header.Set("X-Call", fmt.Sprint(i))
+			}
+			return req, err
+		}
+		resp, err := doWithSilenceGuard(context.Background(), c, 50*time.Millisecond, build)
 		if err != nil {
 			errs++
 			continue
@@ -606,12 +620,122 @@ func TestAFirstByteRacingTheWatchdogIsNeverLostOrDuplicated(t *testing.T) {
 		if err != nil || string(b) != "data: x\n\n" {
 			t.Fatalf("iter %d body=%q err=%v", i, b, err)
 		}
-		if sent := reqs.Load() - before; sent > 2 {
-			t.Fatalf("sent %d", sent)
+	}
+	srv.Close() // waits for every handler, so every send is counted
+	total := 0
+	for id, n := range sends {
+		total += n
+		if n > 2 {
+			t.Errorf("call %s was sent %d times", id, n)
 		}
 	}
 	t.Logf("errors(both copies silent) %d", errs)
-	t.Logf("total server requests %d for %d calls (resends only when the first copy was silent)", reqs.Load(), N)
+	t.Logf("total server requests %d for %d calls (resends only when the first copy was silent)", total, N)
+}
+
+// lateByteTransport plays the race in TestAFirstByteRacingTheWatchdogIsNeverLostOrDuplicated in a
+// fixed order. On its first attempt it waits until the watchdog has cancelled the request, and only
+// then reports the first byte and returns the response with no error, as net/http's transport does
+// when a response is already read as the context is cancelled. That body is tied to the cancelled
+// context, so reading it fails. Every later attempt is answered at once. late, if set, runs after
+// the cancel and before the late response is returned.
+type lateByteTransport struct {
+	attempts atomic.Int64
+	late     func()
+}
+
+func (l *lateByteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	trace := httptrace.ContextClientTrace(req.Context())
+	io.Copy(io.Discard, req.Body)
+	trace.GotConn(httptrace.GotConnInfo{})
+	trace.WroteRequest(httptrace.WroteRequestInfo{})
+	body := io.Reader(strings.NewReader("data: x\n\n"))
+	if l.attempts.Add(1) == 1 {
+		<-req.Context().Done()
+		if l.late != nil {
+			l.late()
+		}
+		body = ctxErrReader{req.Context()}
+	}
+	trace.GotFirstResponseByte()
+	return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(body), Request: req}, nil
+}
+
+type ctxErrReader struct{ ctx context.Context }
+
+func (r ctxErrReader) Read([]byte) (int, error) { return 0, context.Cause(r.ctx) }
+
+// The watchdog fires a moment before the first byte, and the transport still returns that response
+// with no error. Its body is already dead, so it must not reach the client: the attempt is silent,
+// and it is resent once.
+func TestAResponseThatLostTheRaceToTheWatchdogIsResent(t *testing.T) {
+	tr := &lateByteTransport{}
+	c := &http.Client{Transport: tr}
+	before := upstreamSilenceResends.Load()
+	resp, err := doWithSilenceGuard(context.Background(), c, 10*time.Millisecond, silenceBuild("http://upstream.invalid", streamBody))
+	if err != nil {
+		t.Fatalf("the resend should have been answered: %v", err)
+	}
+	b, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || string(b) != "data: x\n\n" {
+		t.Fatalf("the client got a response whose watchdog had fired: body=%q err=%v", b, err)
+	}
+	if n := tr.attempts.Load(); n != 2 {
+		t.Errorf("%d attempts, want 2 (the late one, then one resend)", n)
+	}
+	if n := upstreamSilenceResends.Load() - before; n != 1 {
+		t.Errorf("silence resends counted %d, want 1", n)
+	}
+}
+
+// The same race on net/http's own transport. A trace hook holds the first byte of every first
+// attempt until the watchdog has cancelled it. The transport then either fails the attempt or, when
+// its response is already read, returns it with no error; the second shape is the one that must
+// never reach the client. On the unfixed code about 1 call in 20 took that shape.
+func TestALateFirstByteOnTheRealTransportNeverReachesTheClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		io.WriteString(w, "data: x\n\n")
+	}))
+	defer srv.Close()
+	c := &http.Client{Transport: upstreamTransport(30 * time.Second)}
+	for i := 0; i < 300; i++ {
+		var attempts atomic.Int64
+		build := func(ctx context.Context) (*http.Request, error) {
+			if attempts.Add(1) == 1 {
+				ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+					GotFirstResponseByte: func() { <-ctx.Done() },
+				})
+			}
+			return silenceBuild(srv.URL, streamBody)(ctx)
+		}
+		resp, err := doWithSilenceGuard(context.Background(), c, 5*time.Millisecond, build)
+		if err != nil {
+			t.Fatalf("call %d: the resend should have been answered: %v", i, err)
+		}
+		b, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || string(b) != "data: x\n\n" {
+			t.Fatalf("call %d: the client got a response whose watchdog had fired (%d attempts): body=%q err=%v",
+				i, attempts.Load(), b, err)
+		}
+	}
+}
+
+// The same late response, but the client has gone away by the time it arrives: it is not resent.
+func TestALateResponseForAClientThatLeftIsNotResent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	tr := &lateByteTransport{late: cancel}
+	c := &http.Client{Transport: tr}
+	if _, err := doWithSilenceGuard(ctx, c, 10*time.Millisecond, silenceBuild("http://upstream.invalid", streamBody)); err == nil {
+		t.Fatal("a request whose client left succeeded")
+	}
+	if n := tr.attempts.Load(); n != 1 {
+		t.Errorf("%d attempts: a request whose client left was resent", n)
+	}
 }
 
 // chaosGateway answers, drops (closes a reused connection after reading the request) or goes silent
