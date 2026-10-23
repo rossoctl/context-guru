@@ -168,7 +168,7 @@ type SpendLedger struct {
 	GrossSavedUSD float64 `json:"gross_saved_usd"` // sum(baseline - cost) over non-ping rows; MODELLED, session-accumulative
 	CGLLMUSD      float64 `json:"cg_llm_usd"`      // context-guru's own model calls (summariser)
 	PingUSD       float64 `json:"ping_usd"`        // keep-alive pings, billed to the caller
-	PingSavedUSD  float64 `json:"ping_saved_usd"`  // modelled
+	PingSavedUSD  float64 `json:"ping_saved_usd"`  // modelled; kaSaved over the agent rows the pings kept warm
 }
 
 type spendRow struct {
@@ -261,7 +261,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 	cond, args := warm.where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.tools, r.system_blocks,
 		r.thread_id, r.messages, r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.output_tokens,
-		r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd, r.keepalive_saved_usd, r.keepalive,
+		r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd, `+kaSaved("r.")+`, r.keepalive,
 		r.token_accounting FROM requests r WHERE `+cond+` ORDER BY r.ts, r.id`, args...)
 	if err != nil {
 		return nil, err
@@ -337,8 +337,9 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		out.Ledger.CGLLMUSD += r.cgllm
 		if r.keepalive {
 			out.Ledger.PingUSD += r.cost
-			out.Ledger.PingSavedUSD += r.kaSaved
 		} else {
+			// The ping's saving is credited to the agent row it rescued, never to the ping itself.
+			out.Ledger.PingSavedUSD += r.kaSaved
 			out.Ledger.GrossSavedUSD += r.baseline - r.cost
 		}
 		m := models[r.model]
