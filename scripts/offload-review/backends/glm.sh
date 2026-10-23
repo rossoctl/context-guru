@@ -66,6 +66,7 @@ backend_cleanup() {
 
 backend_run() {
   local prompt=$1 resume=$2 d m base sess=()
+  command -v claude >/dev/null || { echo "glm backend: claude (Claude Code) is not on PATH" >&2; return 1; }
   [ -r "${GLM_KEY_FILE:-}" ] || { echo "glm backend: GLM_KEY_FILE is not set or not readable" >&2; return 1; }
   base=$(glm_base_url)
   [ -n "$base" ] || { echo "glm backend: no gateway URL (GLM_BASE_URL or the key file's URL field)" >&2; return 1; }
@@ -89,7 +90,9 @@ PY
   if [ "$resume" = 1 ]; then
     sess=(--resume "$(cat "$d/session-id")")
   else
-    uuidgen | tr 'A-Z' 'a-z' > "$d/session-id"
+    # python3 is already required above; uuidgen is not on every Linux box.
+    python3 -I -c 'import uuid; print(uuid.uuid4())' > "$d/session-id"
+    [ -s "$d/session-id" ] || { echo "glm backend: could not make a session id" >&2; return 1; }
     sess=(--session-id "$(cat "$d/session-id")")
   fi
   # Every model variable names GLM, or Claude Code asks the gateway for a Claude model it does
