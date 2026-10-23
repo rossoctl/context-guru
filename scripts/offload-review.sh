@@ -181,9 +181,15 @@ ensure_wt() {
 
 # posted_now <reviewer>: exit 0 when that reviewer's review of this round and head is on the PR,
 # from any backend. Read fresh: it decides whether the next backend may run.
+# The answer is read whole before grep, not piped: under pipefail, `gh ... | grep -q` fails with
+# SIGPIPE when gh writes after grep has matched, and a posted review then reads as missing, so the
+# next backend would post a second one. A gh failure counts as posted for the same reason: an
+# uncertain answer stops the chain. The final check below still reports a review that is missing.
 posted_now() {
-  gh api --paginate "repos/$repo/pulls/$pr/reviews" --jq '.[].body' \
-    | grep -qE "<!-- offload-review reviewer=$1 round=$round sha=$sha backend=[a-z0-9_-]+ verdict=(approve|blocking)"
+  local now
+  now=$(gh api --paginate "repos/$repo/pulls/$pr/reviews" --jq '.[].body') \
+    || { echo "Reviewer $1: could not read the PR's reviews; not trying another backend." >&2; return 0; }
+  grep -qE "<!-- offload-review reviewer=$1 round=$round sha=$sha backend=[a-z0-9_-]+ verdict=(approve|blocking)" <<<"$now"
 }
 
 # chain_for <reviewer>: the backends to try for this reviewer. In a later round the backend that
