@@ -17,7 +17,8 @@
 | Session recap (awaySummaryEnabled) makes a model call for a one-line        |
 | summary each time you come back after a few minutes away.                   |
 |   Set in: not set anywhere (on by default)                                  |
-|   Cost: not measured yet                                                    |
+|   Saves: one small model call each time you come back after a few minutes   |
+|   away.                                                                     |
 |   Fix: set "awaySummaryEnabled": false. Takes effect at the next Claude     |
 |   Code session.                                                             |
 |   Risk: You no longer see the recap line when you come back.                |

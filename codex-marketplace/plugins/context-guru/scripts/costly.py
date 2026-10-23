@@ -182,7 +182,11 @@ def lines_for(f: dict, rows: dict | None, days: int, dollars) -> list[str]:
     c = f["check"]
     row = (rows or {}).get(c["id"])
     L = [f"{c['title']} {c['what']}.", f"  Set in: {where_words(f)}"]
-    L += [f"  Cost: {w}" for w in cost_words(row, days, dollars)[:1]] + [f"        {w}" for w in cost_words(row, days, dollars)[1:]]
+    price = c.get("price") or {}
+    if price.get("kind") == "avoided_call":  # a side call the fix stops: nothing to price or attribute
+        L.append(f"  Saves: {price['saves']}.")
+    else:
+        L += [f"  Cost: {w}" for w in cost_words(row, days, dollars)[:1]] + [f"        {w}" for w in cost_words(row, days, dollars)[1:]]
     blocked = [l for l in f["locations"] if not l["editable"]]
     if applicable(f):
         L.append(f"  Fix: {c['fix']['text']} {c['fix']['effect']}")
