@@ -25,6 +25,10 @@ type CostlyShape struct {
 	MaxTokens     *int
 	Stream        *int
 	Messages      *int // the dashboard's count: the system prompt counts as one
+	Status        *int // upstream HTTP status
+	// SessionHas, when set, keeps only rows whose session also has a row of that shape. The inner row
+	// must be in the same tenant and the same time window as the outer one.
+	SessionHas *CostlyShape
 }
 
 // CostlyCheck is one check the route prices. Shapes is empty when the shape is not known yet.
@@ -52,6 +56,16 @@ var CostlyChecks = []CostlyCheck{
 		},
 	},
 	{ID: "session-recap"}, // TODO: the recap call's shape is not known yet
+	{
+		ID: "small-model-rejects-server-check",
+		// The same classifier shape as check 1, only in sessions that also have a Haiku request the
+		// upstream answered with 400 (the gateway rejected the server-check beta). The 400 row itself
+		// is a haiku row, so the sonnet filter never counts it. Check 1 counts these rows too.
+		Shapes: []CostlyShape{
+			{ID: "classifier-after-haiku-400", ModelContains: "sonnet", Tools: ip(0), MaxTokens: ip(64), Stream: ip(0),
+				SessionHas: &CostlyShape{ModelContains: "haiku", Status: ip(400)}},
+		},
+	},
 }
 
 // CostlyPart is the count and cost of one shape.
@@ -85,17 +99,18 @@ type CostlyWin struct {
 	Until int64 `json:"until"`
 }
 
-// shapeWhere renders a shape as a predicate on the table aliased r.
-func shapeWhere(s CostlyShape) (string, []any) {
+// shapeWhere renders a shape as a predicate on the requests table aliased as alias. Column names are
+// fixed here; every value is a bound parameter.
+func shapeWhere(s CostlyShape, alias string) (string, []any) {
 	var conds []string
 	var args []any
 	if s.ModelContains != "" {
-		conds, args = append(conds, "instr(lower(r.model), ?) > 0"), append(args, strings.ToLower(s.ModelContains))
+		conds, args = append(conds, "instr(lower("+alias+".model), ?) > 0"), append(args, strings.ToLower(s.ModelContains))
 	}
-	for col, v := range map[string]*int{"r.tools": s.Tools, "r.system_blocks": s.SystemBlocks, "r.max_tokens": s.MaxTokens,
-		"r.stream": s.Stream, "r.messages": s.Messages} {
+	for col, v := range map[string]*int{"tools": s.Tools, "system_blocks": s.SystemBlocks, "max_tokens": s.MaxTokens,
+		"stream": s.Stream, "messages": s.Messages, "status": s.Status} {
 		if v != nil {
-			conds, args = append(conds, col+" = ?"), append(args, *v)
+			conds, args = append(conds, alias+"."+col+" = ?"), append(args, *v)
 		}
 	}
 	if len(conds) == 0 {
@@ -104,9 +119,34 @@ func shapeWhere(s CostlyShape) (string, []any) {
 	return strings.Join(conds, " AND "), args
 }
 
+// sessionHasWhere renders the SessionHas condition of a shape: an EXISTS on a second alias of the table,
+// in the same session, with the same tenant and time scope as the outer row.
+func sessionHasWhere(f Filter, in CostlyShape) (string, []any) {
+	conds := []string{"x.session_id = r.session_id", "r.session_id <> ''"}
+	var args []any
+	if !f.WithKeepAlive {
+		conds = append(conds, "x.keepalive = 0")
+	}
+	if !f.TenantAll {
+		conds, args = append(conds, "x.tenant_id = ?"), append(args, f.Tenant)
+	}
+	if f.Since > 0 {
+		conds, args = append(conds, "x.ts >= ?"), append(args, f.Since)
+	}
+	if f.Until > 0 {
+		conds, args = append(conds, "x.ts < ?"), append(args, f.Until)
+	}
+	w, a := shapeWhere(in, "x")
+	return "EXISTS (SELECT 1 FROM requests x WHERE " + strings.Join(conds, " AND ") + " AND " + w + ")", append(args, a...)
+}
+
 func (d *DB) costlyPart(f Filter, s CostlyShape) (CostlyPart, error) {
 	where, args := f.where()
-	sw, sargs := shapeWhere(s)
+	sw, sargs := shapeWhere(s, "r")
+	if s.SessionHas != nil {
+		iw, iargs := sessionHasWhere(f, *s.SessionHas)
+		sw, sargs = sw+" AND "+iw, append(sargs, iargs...)
+	}
 	var n int
 	var usd float64
 	err := d.sql.QueryRowContext(d.readCtx(),

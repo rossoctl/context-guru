@@ -32,6 +32,25 @@
       "risk": "You no longer see the recap line when you come back.",
       "also_changes": null,
       "applicable": true
+    },
+    {
+      "id": "small-model-rejects-server-check",
+      "title": "Small model {model}",
+      "what": "rejects the free auto-mode server check on Bedrock gateways, so Claude Code can send billed classifier requests",
+      "reads": {"env": ["ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"], "keys": []},
+      "detect": {"kind": "model_unsupported", "names": ["ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"], "family": "haiku", "below": [5, 5]},
+      "note_when": {"check": "disable-experimental-betas", "fires": "This matters after you remove the betas setting above.", "silent": "The betas setting is off, so the small model can cause billed classifier requests now."},
+      "cost_note": "(also counted under the betas setting while it is on)",
+      "price": {
+        "shapes": [
+          {"id": "classifier-after-haiku-400", "label": "classifier requests in sessions with a Haiku 400", "model_contains": "sonnet", "tools": 0, "max_tokens": 64, "stream": 0, "session_has": {"model_contains": "haiku", "status": 400}}
+        ],
+        "also": []
+      },
+      "fix": {"kind": "set_env", "names": ["ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"], "value": "claude-haiku-5-5", "done": "set the small model to claude-haiku-5-5", "text": "set ANTHROPIC_SMALL_FAST_MODEL and ANTHROPIC_DEFAULT_HAIKU_MODEL to claude-haiku-5-5.", "effect": "Takes effect at the next Claude Code session."},
+      "risk": "Haiku 5.5 costs more per token than Haiku 4.5. It handles only small side requests, such as session titles. Check that your gateway serves claude-haiku-5-5 first.",
+      "also_changes": null,
+      "applicable": true
     }
   ]
 }
