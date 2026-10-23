@@ -227,10 +227,14 @@ def lines_for(f: dict, rows: dict | None, days: int, dollars, firing: set | None
     row = (rows or {}).get(c["id"])
     title = c["title"].replace("{model}", ", ".join(f.get("values") or []))
     L = [f"{title} {c['what']}.", f"  Set in: {where_words(f)}"]
-    words = cost_words(row, days, dollars)
-    L += [f"  Cost: {w}" for w in words[:1]] + [f"        {w}" for w in words[1:]]
-    if c.get("cost_note") and row and row.get("measured") and row.get("cost_usd") is not None:
-        L.append(f"        {c['cost_note']}")
+    price = c.get("price") or {}
+    if price.get("kind") == "avoided_call":  # a side call the fix stops: nothing to price or attribute
+        L.append(f"  Saves: {price['saves']}.")
+    else:
+        words = cost_words(row, days, dollars)
+        L += [f"  Cost: {w}" for w in words[:1]] + [f"        {w}" for w in words[1:]]
+        if c.get("cost_note") and row and row.get("measured") and row.get("cost_usd") is not None:
+            L.append(f"        {c['cost_note']}")
     nw = c.get("note_when")
     if nw:
         L.append("  Note: " + (nw["fires"] if nw["check"] in (firing or set()) else nw["silent"]))

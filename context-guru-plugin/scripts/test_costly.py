@@ -287,13 +287,15 @@ class Cost(Base):
         self.assertIn("about $249.52 over the last 30 days (6,016 requests)", out)
         self.assertIn("probably", out)
         self.assertIn("not added to the figure above", out)
-        self.assertEqual(out.count("Cost: not measured yet"), 1)  # the recap
+        self.assertNotIn("Cost: not measured yet", out)
+        self.assertEqual(out.count("Saves: one small model call each time you come back after a few minutes away."), 1)  # the recap
 
     def test_old_proxy_shows_settings_with_not_measured(self):
         self.put("user", {"env": {BETAS: "1"}})
         out = self.card(None)
         self.assertIn(BETAS, out)
-        self.assertEqual(out.count("Cost: not measured yet"), 2)
+        self.assertEqual(out.count("Cost: not measured yet"), 1)  # the betas check; the recap says what it saves
+        self.assertEqual(out.count("Saves: "), 1)
         self.assertNotIn("$0", out)
 
     def test_costs_returns_none_on_404(self):

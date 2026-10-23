@@ -237,7 +237,7 @@ The default `save-more` also checks your own Claude Code settings for ones that 
 │ Session recap (awaySummaryEnabled) makes a model call for a one-line summary each time you come │
 │ back after a few minutes away.                                                                  │
 │   Set in: not set anywhere (on by default)                                                      │
-│   Cost: not measured yet                                                                        │
+│   Saves: one small model call each time you come back after a few minutes away.                 │
 │   Fix: set "awaySummaryEnabled": false. Takes effect at the next Claude Code session.           │
 │   Risk: You no longer see the recap line when you come back.                                    │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -251,7 +251,7 @@ Each check shows the setting, **where it is set**, what it cost in hindsight, th
 |---|---|---|---|
 | `disable-experimental-betas` | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` is `1` or `true` in the environment or in a settings `env` block | remove the key from the file it is in | proxy rows with the classifier shape (Sonnet, no tools, 3 system blocks, `max_tokens` 64, not streamed, 2 messages). A second shape (`max_tokens` 2112) shows apart as "probably classifier stage 2" and is not added |
 | `small-model-rejects-server-check` | `ANTHROPIC_SMALL_FAST_MODEL` or `ANTHROPIC_DEFAULT_HAIKU_MODEL`, at its effective value, names a Haiku older than 5.5 (for example `claude-haiku-4-5`, `claude-3-5-haiku-...`). Other models and ids it cannot read never fire. A key that is not set is not judged. It fires with the betas setting on or off. The card says it matters once that setting is off | set each key that holds the old Haiku to `claude-haiku-5-5`, in the file that sets it | proxy rows with the classifier shape, only in sessions that also have a Haiku request with status 400. These rows are also counted under `disable-experimental-betas` while it is on. The plugin does not ask the gateway whether it serves `claude-haiku-5-5`: the risk line tells you to check |
-| `session-recap` | `awaySummaryEnabled` is unset or true, and `CLAUDE_CODE_ENABLE_AWAY_SUMMARY` is not `0` or `false` | set `"awaySummaryEnabled": false` in `~/.claude/settings.json` | not measured yet: the request shape of the recap call is not known. It says "not measured yet", never $0 |
+| `session-recap` | `awaySummaryEnabled` is unset or true, and `CLAUDE_CODE_ENABLE_AWAY_SUMMARY` is not `0` or `false` | set `"awaySummaryEnabled": false` in `~/.claude/settings.json` | not priced: the fix stops one small side call each time you come back, so the card says what it saves ("Saves: ..."), not a dollar figure |
 
 How it works:
 

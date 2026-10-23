@@ -55,7 +55,9 @@ var CostlyChecks = []CostlyCheck{
 			{ID: "classifier-stage-2", Tools: ip(0), SystemBlocks: ip(3), MaxTokens: ip(2112), Messages: ip(2)},
 		},
 	},
-	{ID: "session-recap"}, // TODO: the recap call's shape is not known yet
+	// The recap is one side call that the fix stops. Its saving needs no price or attribution, so it
+	// has no shape on purpose and the plugin says what it saves instead of a cost.
+	{ID: "session-recap"},
 	{
 		ID: "small-model-rejects-server-check",
 		// The same classifier shape as check 1, only in sessions that also have a Haiku request the
