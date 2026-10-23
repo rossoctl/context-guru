@@ -5,7 +5,7 @@
 #   scripts/offload-review.sh <pr> --cleanup
 #
 # --backend picks the reviewer tool from scripts/offload-review/backends/<name>.sh.
-# The default is $OFFLOAD_BACKEND, else bob.
+# The default is $OFFLOAD_BACKEND, else glm (backends/glm.sh lists the environment it needs).
 #
 # Each reviewer gets its own worktree, .claude/worktrees/review-pr<N>-<backend>-r<1|2>. A fixed
 # path per reviewer lets round 2 resume that reviewer's own round-1 session, and keeps the two
@@ -39,7 +39,7 @@ trap 'echo "offload-review: line $LINENO failed (exit $?)" >&2' ERR
 usage="usage: offload-review.sh <pr> [--backend <name>] [--live-tests <rules-file>] [--same-head] | <pr> --cleanup"
 pr=${1:?$usage}
 shift
-backend=${OFFLOAD_BACKEND:-bob}
+backend=${OFFLOAD_BACKEND:-glm}
 rules=
 cleanup=0
 same_head=0
@@ -246,7 +246,8 @@ for r in "${todo[@]}"; do
   wt=$(wt_of "$r")
   [ -d "$wt" ] || { echo "Reviewer $r has no worktree at $wt" >&2; rc=1; continue; }
   # A reviewer may write only its own files. Anything else is a broken rule.
-  extra=$(git -C "$wt" status --porcelain | grep -vE ' (\.review(-prompt)?\.md|\.review-in-(reviews|comments|inline)\.txt|review\.log)$' || true)
+  # .glm-cc/ is the glm backend's own Claude Code config and session folder (backends/glm.sh).
+  extra=$(git -C "$wt" status --porcelain | grep -vE ' (\.review(-prompt)?\.md|\.review-in-(reviews|comments|inline)\.txt|review\.log|\.glm-cc/)$' || true)
   [ -z "$extra" ] || { echo "Reviewer $r changed files:"$'\n'"$extra" >&2; rc=1; }
   [ "$(git -C "$wt" rev-parse HEAD)" = "$sha" ] || { echo "Reviewer $r moved HEAD" >&2; rc=1; }
   grep -qE "<!-- offload-review reviewer=$r round=$round sha=$sha backend=$backend verdict=(approve|blocking)" <<<"$reviews" \
