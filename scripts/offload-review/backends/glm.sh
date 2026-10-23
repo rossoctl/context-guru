@@ -64,9 +64,11 @@ backend_ready() {
   if [ -z "${GLM_KEY_FILE:-}" ]; then
     # The common case: the variable is in the shell profile, but this session started before the
     # line was added, so it never saw it.
+    # A login and interactive shell reads every profile file (.zprofile and .zshrc, or
+    # .bash_profile). A marker, matched anywhere, survives any line the profile prints.
     local login
-    login=$(${SHELL:-/bin/sh} -ic 'printf %s "${GLM_KEY_FILE:+set}"' 2>/dev/null </dev/null || true)
-    if [ "$login" = set ]; then
+    login=$(${SHELL:-/bin/sh} -lic 'printf "CGPROBE:%s\n" "${GLM_KEY_FILE:+set}"' 2>/dev/null </dev/null || true)
+    if [[ $login == *CGPROBE:set* ]]; then
       echo "GLM_KEY_FILE is set in your shell profile but not in this session, which started before it. Start a new session, or prefix the command with GLM_KEY_FILE=<path>"
     else
       echo "GLM_KEY_FILE is not set (see the GLM setup guide)"

@@ -289,7 +289,12 @@ run_reviewer() {
     rc=0
     attempt "$r" "$b" || rc=$?
     if posted_now "$r"; then
-      [ ${#tried[@]} -eq 0 ] || echo "Reviewer $r: posted with $b. Tried first: ${tried[*]}." >&2
+      if [ ${#tried[@]} -gt 0 ]; then
+        echo "Reviewer $r: posted with $b. Tried first: ${tried[*]}." >&2
+        # A fallback happened in THIS round. A round-2 resume of an earlier fallback backend
+        # posts on its first try and leaves no marker, so it is not flagged as a new fallback.
+        : > "$skipdir/fellback-$r"
+      fi
       return 0
     fi
     if [ "$rc" = 4 ]; then
@@ -344,7 +349,9 @@ done
 [ "$rc" -eq 0 ] && echo "Round $round: both reviews are on PR #$pr for ${sha:0:12} (${used[*]})."
 # A fallback is quiet by design, so say it last and plainly: a round that went to another backend
 # must be a decision the user sees, not a note they miss.
-for u in "${used[@]}"; do
-  [[ $u == *": $backend" ]] || { echo "Note: not every reviewer used $backend, the first backend. The reason is in the 'Tried first' lines above. Tell the user before you accept this round." >&2; break; }
+for r in "${todo[@]}"; do
+  [ -e "$skipdir/fellback-$r" ] || continue
+  echo "Note: a reviewer fell back to another backend in this round. The reason is in the 'Tried first' lines above. Tell the user before you accept this round." >&2
+  break
 done
 exit "$rc"
