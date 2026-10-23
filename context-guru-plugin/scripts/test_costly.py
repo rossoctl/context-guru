@@ -18,7 +18,10 @@ import tvlib as T  # noqa: E402
 
 BETAS = "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"
 ID1, ID2 = "disable-experimental-betas", "session-recap"
-ENV_KEYS = ["ANTHROPIC_BASE_URL", "CG_URL", BETAS, "CLAUDE_CODE_ENABLE_AWAY_SUMMARY", "CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR", "CONTEXT_GURU_STATE", "CG_MANAGED_SETTINGS"]
+ID3 = "small-model-rejects-server-check"
+SMALL, HAIKU = "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+OLD, NEW = "claude-haiku-4-5", "claude-haiku-5-5"
+ENV_KEYS = [SMALL, HAIKU, "ANTHROPIC_BASE_URL", "CG_URL", BETAS, "CLAUDE_CODE_ENABLE_AWAY_SUMMARY", "CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR", "CONTEXT_GURU_STATE", "CG_MANAGED_SETTINGS"]
 
 
 class Base(unittest.TestCase):
@@ -115,6 +118,159 @@ class Detect(Base):
         with open(os.path.join(self.user, "settings.json"), "w") as f:
             f.write("{not json")
         self.assertEqual(self.ids(), [ID2])
+
+
+class HaikuVersion(unittest.TestCase):
+    def test_table(self):
+        for model, want in [("claude-haiku-4-5", (4, 5)), ("claude-haiku-4-5-20251001", (4, 5)), ("aws/claude-haiku-4-5", (4, 5)),
+                            ("us.anthropic.claude-haiku-4-5-20251001-v1:0", (4, 5)), ("claude-3-5-haiku-20241022", (3, 5)),
+                            ("claude-3-haiku-20240307", (3, 0)), ("claude-haiku-5-5", (5, 5)), ("claude-haiku-5-5[1m]", (5, 5)),
+                            ("CLAUDE-HAIKU-4-5", (4, 5)), ("claude-haiku-5", (5, 0)), ("claude-haiku-6", (6, 0)), ("claude-haiku-4.5", (4, 5)),
+                            ("claude-haiku-5-10", (5, 10)),
+                            ("claude-sonnet-4-5", None), ("claude-opus-4-1", None), ("garbage", None), ("", None), ("haiku", None),
+                            ("claude-haiku-latest", None), ("my-haiku-20251001", None), (None, None), (5, None)]:
+            self.assertEqual(S.haiku_version(model), want, model)
+
+
+class SmallModel(Base):
+    def setUp(self):
+        super().setUp()
+        self.clean_recap()
+
+    def test_each_source_and_key(self):
+        for where in ("user", "project", "project-local", "managed"):
+            for key in (SMALL, HAIKU):
+                path = self.put(where, {"env": {key: OLD}})
+                fs = S.findings()
+                self.assertEqual([f["check"]["id"] for f in fs], [ID3], (where, key))
+                self.assertEqual(fs[0]["locations"][0]["editable"], where != "managed")
+                self.assertEqual(fs[0]["values"], [OLD])
+                os.unlink(path)
+
+    def test_process_env(self):
+        os.environ[SMALL] = OLD
+        fs = S.findings()
+        self.assertEqual([f["check"]["id"] for f in fs], [ID3])
+        self.assertEqual(fs[0]["locations"][0]["source"], "process")
+
+    def test_fires_with_or_without_the_betas_setting(self):
+        self.put("user", {"env": {SMALL: OLD}})
+        self.assertEqual(self.ids(), [ID3])
+        self.put("user", {"env": {SMALL: OLD, BETAS: "1"}})
+        self.assertEqual(self.ids(), [ID1, ID3])
+
+    def test_new_unset_and_foreign_models_do_not_fire(self):
+        self.assertEqual(self.ids(), [])  # unset: Claude Code's own default is not judged
+        for v in (NEW, "claude-haiku-5-5[1m]", "claude-sonnet-4-5", "garbage", "", "claude-haiku-6"):
+            self.put("user", {"env": {SMALL: v, HAIKU: v}})
+            self.assertEqual(self.ids(), [], v)
+
+    def test_higher_file_overrides_a_lower_one(self):
+        self.put("user", {"env": {SMALL: OLD}})
+        self.put("project-local", {"env": {SMALL: NEW}})
+        self.assertEqual(self.ids(), [])
+        self.put("project-local", {"env": {SMALL: OLD}})
+        self.put("user", {"env": {SMALL: NEW}})
+        self.assertEqual(self.ids(), [ID3])
+
+    def test_a_file_beats_the_process_env(self):
+        os.environ[SMALL] = OLD
+        self.put("user", {"env": {SMALL: NEW}})
+        self.assertEqual(self.ids(), [])
+
+    def card(self, rows=None):
+        return "\n".join(S.render(S.findings(), rows, 30, cg.dollars, cg.card, "/x", T.Env(color=False, width=120)))
+
+    def test_card_text_with_and_without_the_betas_check(self):
+        self.put("user", {"env": {SMALL: OLD}})
+        out = self.card()
+        self.assertIn(f"Small model {OLD} rejects the free auto-mode server check", out)
+        self.assertIn("The betas setting is off, so the small model can cause billed classifier requests now.", out)
+        self.assertNotIn("after you remove", out)
+        self.assertIn("Check that your gateway serves claude-haiku-5-5 first.", out)
+        self.put("user", {"env": {SMALL: OLD, BETAS: "1"}})
+        out = self.card()
+        self.assertIn("This matters after you remove the betas setting above.", out)
+        self.assertNotIn("can cause billed classifier requests now", out)
+
+    def test_cost_line_notes_the_double_count(self):
+        self.put("user", {"env": {SMALL: OLD}})
+        row = {"id": ID3, "measured": True, "requests": 4, "cost_usd": 1.5, "also": []}
+        out = self.card({ID3: row})
+        self.assertIn("about $1.50 over the last 30 days (4 requests)", out)
+        self.assertIn("(also counted under the betas setting while it is on)", out)
+        self.assertNotIn("(also counted", self.card(None))
+
+    def test_apply_sets_both_keys_in_the_right_files_only(self):
+        user = self.put("user", {"model": "opus", "env": {SMALL: OLD, "KEEP": "x"}}, mode=0o600)
+        proj = self.put("project-local", {"env": {HAIKU: OLD}}, mode=0o644)
+        other = self.put("project", {"env": {HAIKU: NEW}})
+        other_before = open(other).read()
+        user_before = open(user).read()
+        out, rc = S.apply(ID3)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(json.load(open(user)), {"model": "opus", "env": {SMALL: NEW, "KEEP": "x"}})  # HAIKU is not set here: not added
+        self.assertEqual(json.load(open(proj)), {"env": {HAIKU: NEW}})
+        self.assertEqual(open(other).read(), other_before)
+        self.assertEqual(stat.S_IMODE(os.stat(user).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(proj).st_mode), 0o644)
+        baks = [f for f in os.listdir(self.user) if f.endswith(".bak")]
+        self.assertEqual(len(baks), 1)
+        self.assertEqual(open(os.path.join(self.user, baks[0])).read(), user_before)
+        self.assertEqual(self.ids(), [])
+
+    def test_both_keys_in_one_file_one_backup_two_records(self):
+        path = self.put("user", {"env": {SMALL: OLD, HAIKU: "claude-3-5-haiku-20241022"}})
+        out, rc = S.apply(ID3)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(json.load(open(path)), {"env": {SMALL: NEW, HAIKU: NEW}})
+        self.assertEqual(len([f for f in os.listdir(self.user) if f.endswith(".bak")]), 1)
+        self.assertEqual(len(S.load_record()[ID3]["entries"]), 2)
+
+    def test_revert_restores_both_exactly(self):
+        path = self.put("user", {"env": {SMALL: OLD, HAIKU: "claude-3-5-haiku-20241022", "KEEP": "x"}})
+        before = json.load(open(path))
+        S.apply(ID3)
+        out, rc = S.revert(ID3)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(json.load(open(path)), before)
+        self.assertEqual(S.revert(ID3)[1], 1)
+
+    def test_revert_refuses_after_an_outside_change_of_either_key(self):
+        for key in (SMALL, HAIKU):
+            path = self.put("user", {"env": {SMALL: OLD, HAIKU: OLD}})
+            S.apply(ID3)
+            doc = json.load(open(path))
+            doc["env"][key] = "claude-haiku-5-6"
+            json.dump(doc, open(path, "w"))
+            snap = open(path).read()
+            out, rc = S.revert(ID3)
+            self.assertEqual(rc, 1, key)
+            self.assertIn("Not undone", out[0])
+            self.assertEqual(open(path).read(), snap)
+            os.unlink(os.path.join(self.state, "costly-settings.json"))
+
+    def test_managed_only_and_process_only_are_not_applicable(self):
+        path = self.put("managed", {"env": {SMALL: OLD}})
+        before = open(path).read()
+        out, rc = S.apply(ID3)
+        self.assertEqual(rc, 1)
+        self.assertIn("administrator", out[0])
+        self.assertEqual(open(path).read(), before)
+        self.assertNotIn("Apply it?", self.card())
+        os.unlink(path)
+        os.environ[SMALL] = OLD
+        out, rc = S.apply(ID3)
+        self.assertEqual(rc, 1)
+        self.assertIn("not in a file", out[0])
+
+    def test_a_read_never_writes(self):
+        self.put("user", {"env": {SMALL: OLD}})
+        snap = {f: open(os.path.join(self.user, f)).read() for f in os.listdir(self.user)}
+        S.findings()
+        self.card()
+        self.assertEqual({f: open(os.path.join(self.user, f)).read() for f in os.listdir(self.user)}, snap)
+        self.assertFalse(os.path.exists(self.state))
 
 
 class Cost(Base):

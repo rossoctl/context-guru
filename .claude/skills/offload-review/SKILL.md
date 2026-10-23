@@ -26,6 +26,10 @@ order is glm, then bob, then claude.
   round and head is on the PR.
 - The marker of each review names the backend that wrote it. The script's last line lists the
   backend of each reviewer. Report both to the user.
+- **When a reviewer did not use the first backend, the script prints a `Note:` line.** The
+  `Tried first:` lines say why, for example `glm (not set up: GLM_KEY_FILE is set in your shell
+  profile but not in this session ...)`. Tell the user the reason before you accept the round. Do
+  not report "not set up" as a fact about the machine: it is often a fact about this session.
 - In round 2, each reviewer starts with the backend that wrote its round-1 review, so it resumes
   that session.
 - `--no-fallback` (or `OFFLOAD_FALLBACK=""`) turns it off. Use it to compare one backend with
@@ -54,6 +58,11 @@ background task, so it cannot wait for the reviewers.
      holds the key, the gateway URL and the model id. It is not in this repo. Never print, copy or
      log it. The backend reads the key at call time through `apiKeyHelper`, so the key never
      enters the reviewer's environment.
+     **Check the variable in this session before the run:** `echo "GLM_KEY_FILE ${GLM_KEY_FILE:+set}"`.
+     A session that started before the user added `GLM_KEY_FILE` to the shell profile does not
+     see it, and its whole round goes to the next backend. Sessions often run for days, so this is
+     the common case. Fix it for the run with `GLM_KEY_FILE=<path> scripts/offload-review.sh <pr>`,
+     using the path the user gives, or start a new session.
    - For `bob`: `bob --version`, and one interactive `bob` login.
    - For `claude`: `claude --version`, and the user is logged in. `OFFLOAD_CLAUDE_MODEL` picks the
      model; the default is the user's own default model.

@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -115,7 +116,50 @@ def detect(check: dict, seen: dict) -> dict | None:
             return {"locations": [_where(eff, d["key"])]}
         user = next(((s, p) for s, p in settings_files() if s == "user"))
         return {"locations": [{"source": "default", "path": user[1], "what": f"{d['key']} is not set (on by default)", "editable": True}]}
+    if d["kind"] == "model_unsupported":
+        below = tuple(d["below"])
+        locs, shown = [], []
+        for name in d["names"]:
+            val = effective_value(seen, name)
+            v = haiku_version(val)
+            if v is None or v >= below:
+                continue
+            shown.append(val.strip())
+            files = [f for f in seen["files"] if name in f["env"]]
+            if not files:
+                locs.append({"source": "process", "path": None, "what": f"environment variable {name}", "editable": False, "name": name, "value": val})
+                continue
+            for f in files:  # the winning file decides; every editable file that holds an old Haiku gets the fix too
+                fv = haiku_version(f["env"][name])
+                if f is files[-1] or (fv is not None and fv < below):
+                    locs.append({**_where(f, f"env.{name}"), "name": name, "value": f["env"][name]})
+        return {"locations": locs, "values": list(dict.fromkeys(shown))} if locs else None
     return None
+
+
+_HAIKU_NEW = re.compile(r"haiku[-.](\d{1,2})(?!\d)(?:[-.](\d{1,2})(?!\d))?")  # claude-haiku-4-5, ...-4-5-20251001, ...haiku-5
+_HAIKU_OLD = re.compile(r"(?<!\d)(\d{1,2})(?:[-.](\d{1,2})(?!\d))?-haiku")  # claude-3-5-haiku-20241022
+
+
+def haiku_version(model) -> tuple[int, int] | None:
+    """(major, minor) of a Haiku model id, or None when the id is not a Haiku or the version cannot be read.
+    Never guesses: 'haiku' alone, a dated id with no version, or any other model gives None."""
+    if not isinstance(model, str):
+        return None
+    m = model.strip().lower()
+    if "haiku" not in m:
+        return None
+    hit = _HAIKU_NEW.search(m) or _HAIKU_OLD.search(m)
+    return (int(hit.group(1)), int(hit.group(2) or 0)) if hit else None
+
+
+def effective_value(seen: dict, name: str) -> str | None:
+    """The value Claude Code uses for an env name: the highest-precedence file that sets it, else the process env."""
+    eff = None
+    for f in seen["files"]:
+        if name in f["env"]:
+            eff = f["env"][name]
+    return eff if eff is not None else seen["env"].get(name)
 
 
 def findings(checks: list[dict] | None = None, seen_for=None) -> list[dict]:
@@ -175,18 +219,25 @@ def where_words(f: dict) -> str:
     for l in f["locations"]:
         s = SOURCE_WORDS[l["source"]]
         parts.append(f"{s}, {tilde(l['path'])}" if l["path"] and l["source"] != "default" else s)
-    return "; ".join(parts)
+    return "; ".join(dict.fromkeys(parts))
 
 
-def lines_for(f: dict, rows: dict | None, days: int, dollars) -> list[str]:
+def lines_for(f: dict, rows: dict | None, days: int, dollars, firing: set | None = None) -> list[str]:
     c = f["check"]
     row = (rows or {}).get(c["id"])
-    L = [f"{c['title']} {c['what']}.", f"  Set in: {where_words(f)}"]
+    title = c["title"].replace("{model}", ", ".join(f.get("values") or []))
+    L = [f"{title} {c['what']}.", f"  Set in: {where_words(f)}"]
     price = c.get("price") or {}
     if price.get("kind") == "avoided_call":  # a side call the fix stops: nothing to price or attribute
         L.append(f"  Saves: {price['saves']}.")
     else:
-        L += [f"  Cost: {w}" for w in cost_words(row, days, dollars)[:1]] + [f"        {w}" for w in cost_words(row, days, dollars)[1:]]
+        words = cost_words(row, days, dollars)
+        L += [f"  Cost: {w}" for w in words[:1]] + [f"        {w}" for w in words[1:]]
+        if c.get("cost_note") and row and row.get("measured") and row.get("cost_usd") is not None:
+            L.append(f"        {c['cost_note']}")
+    nw = c.get("note_when")
+    if nw:
+        L.append("  Note: " + (nw["fires"] if nw["check"] in (firing or set()) else nw["silent"]))
     blocked = [l for l in f["locations"] if not l["editable"]]
     if applicable(f):
         L.append(f"  Fix: {c['fix']['text']} {c['fix']['effect']}")
@@ -211,8 +262,9 @@ def render(fs: list[dict], rows: dict | None, days: int, dollars, card, slash: s
     if not fs:
         return []
     body: list[str] = []
+    firing = {f["check"]["id"] for f in fs}
     for i, f in enumerate(fs):
-        body += ([""] if i else []) + lines_for(f, rows, days, dollars)
+        body += ([""] if i else []) + lines_for(f, rows, days, dollars, firing)
     L = card("Settings that cost you money", body, e)
     for f in fs:
         if applicable(f):
@@ -287,34 +339,41 @@ def _dump(doc: dict, raw: str) -> bytes:
 ABSENT = {"absent": True}
 
 
-def _get(doc: dict, fix: dict):
-    if fix["kind"] == "remove_env":
+def _get(doc: dict, fix: dict, name: str | None = None):
+    """The current value of the fix's key (for set_env and remove_env, the env key `name`)."""
+    if fix["kind"] in ("remove_env", "set_env"):
+        name = name or fix["name"]
         blk = doc.get("env")
-        return blk[fix["name"]] if isinstance(blk, dict) and fix["name"] in blk else ABSENT
+        return blk[name] if isinstance(blk, dict) and name in blk else ABSENT
     return doc[fix["key"]] if fix["key"] in doc else ABSENT
 
 
-def _put(doc: dict, fix: dict, value) -> None:
+def _put(doc: dict, fix: dict, value, name: str | None = None) -> None:
     """value ABSENT removes the key; anything else sets it. Touches that one key and nothing else."""
-    if fix["kind"] == "remove_env":
+    if fix["kind"] in ("remove_env", "set_env"):
+        name = name or fix["name"]
         if value == ABSENT:
             if isinstance(doc.get("env"), dict):
-                doc["env"].pop(fix["name"], None)
+                doc["env"].pop(name, None)
         else:
             if not isinstance(doc.get("env"), dict):
                 doc["env"] = {}
-            doc["env"][fix["name"]] = value
+            doc["env"][name] = value
     elif value == ABSENT:
         doc.pop(fix["key"], None)
     else:
         doc[fix["key"]] = value
 
 
-def _target(fix: dict):
+def _target(fix: dict, loc: dict | None = None):
+    if fix["kind"] == "set_env":
+        return (loc or {}).get("name") or fix["names"][0]
     return fix["name"] if fix["kind"] == "remove_env" else fix["key"]
 
 
 def _after(fix: dict):
+    if fix["kind"] == "set_env":
+        return fix["value"]
     return ABSENT if fix["kind"] == "remove_env" else False
 
 
@@ -338,36 +397,45 @@ def apply(check_id: str, checks: list[dict] | None = None, seen_for=None) -> tup
     if not check.get("applicable") or not edits:
         return ["Not applied: " + ("ask your administrator to change it in managed settings." if any(l["source"] == "managed" for l in f["locations"])
                                    else "this setting is not in a file Context Guru can change. Unset it where you set it.")], 1
-    plans = []
+    groups: dict[str, list[dict]] = {}
     for l in edits:
+        groups.setdefault(l["path"], []).append(l)
+    plans = []
+    for path, locs in groups.items():
         try:
-            doc, raw, mode = _read_doc(l["path"]) if os.path.exists(l["path"]) else ({}, "", 0o600)
+            doc, raw, mode = _read_doc(path) if os.path.exists(path) else ({}, "", 0o600)
         except (OSError, ValueError) as exc:
-            return [f"Not applied: could not read {tilde(l['path'])} ({exc.__class__.__name__}). Nothing was written."], 1
-        before = _get(doc, fix)
+            return [f"Not applied: could not read {tilde(path)} ({exc.__class__.__name__}). Nothing was written."], 1
         want = _after(fix)
-        if before == want:
-            continue
-        plans.append((l, doc, raw, mode, before))
+        todo = []  # (target key, value before) for each key in this file the fix must change
+        for l in locs:
+            t = _target(fix, l)
+            before = _get(doc, fix, t)
+            if before != want and t not in [x[0] for x in todo]:
+                todo.append((t, before))
+        if todo:
+            plans.append((path, doc, raw, mode, todo))
     if not plans:
         return [f"Nothing to change: {check['title']} is already as the fix wants it in the files Context Guru can change."], 0
     rec = load_record()
     entries = rec.get(check_id, {}).get("entries", [])
     out = []
-    for l, doc, raw, mode, before in plans:
-        existed = os.path.exists(l["path"])
+    for path, doc, raw, mode, todo in plans:
+        existed = os.path.exists(path)
         bak = None
         try:
             if existed:
-                bak = backup_name(l["path"])
+                bak = backup_name(path)
                 _write_atomic(bak, raw.encode("utf-8"), mode)
-            _put(doc, fix, _after(fix))
-            _write_atomic(l["path"], _dump(doc, raw), mode)
+            for t, _ in todo:
+                _put(doc, fix, _after(fix), t)
+            _write_atomic(path, _dump(doc, raw), mode)
         except OSError as exc:
-            return out + [f"Not applied to {tilde(l['path'])}: {exc.__class__.__name__}. Nothing else was written."], 1
-        entries.append({"file": os.path.realpath(l["path"]), "display": l["path"], "target": _target(fix), "kind": fix["kind"], "previous": before,
-                        "wrote": _after(fix), "backup": bak, "created": not existed, "ts": int(dt.datetime.now().timestamp())})
-        out.append(f"Applied: {fix['done']} in {tilde(l['path'])}." + (f" Backup: {tilde(os.path.join(os.path.dirname(l['path']), os.path.basename(bak)))}." if bak else ""))
+            return out + [f"Not applied to {tilde(path)}: {exc.__class__.__name__}. Nothing else was written."], 1
+        for t, before in todo:
+            entries.append({"file": os.path.realpath(path), "display": path, "target": t, "kind": fix["kind"], "previous": before,
+                            "wrote": _after(fix), "backup": bak, "created": not existed, "ts": int(dt.datetime.now().timestamp())})
+        out.append(f"Applied: {fix['done']} in {tilde(path)}." + (f" Backup: {tilde(os.path.join(os.path.dirname(path), os.path.basename(bak)))}." if bak else ""))
     rec[check_id] = {"entries": entries}
     try:
         os.makedirs(state_dir(), exist_ok=True)
@@ -389,28 +457,34 @@ def revert(check_id: str, checks: list[dict] | None = None) -> tuple[list[str], 
     if check is None or not entries:
         return [f"Nothing to undo: no change to {check_id!r} was made here."], 1
     fix = check["fix"]
-    plans = []
+    groups: dict[str, list[dict]] = {}
     for en in reversed(entries):
+        groups.setdefault(en["file"], []).append(en)
+    plans = []
+    for file, ens in groups.items():
         try:
-            doc, raw, mode = _read_doc(en["file"])
+            doc, raw, mode = _read_doc(file)
         except (OSError, ValueError) as exc:
-            return [f"Not undone: could not read {tilde(en['display'])} ({exc.__class__.__name__}). Nothing was written."], 1
-        if _get(doc, fix) != en["wrote"]:
-            return [f"Not undone: {tilde(en['display'])} changed since the apply (the key {en['target']} is not what was written). "
-                    "Nothing was written. Change it by hand."], 1
-        plans.append((en, doc, raw, mode))
+            return [f"Not undone: could not read {tilde(ens[0]['display'])} ({exc.__class__.__name__}). Nothing was written."], 1
+        for en in ens:
+            if _get(doc, fix, en["target"]) != en["wrote"]:
+                return [f"Not undone: {tilde(en['display'])} changed since the apply (the key {en['target']} is not what was written). "
+                        "Nothing was written. Change it by hand."], 1
+        plans.append((ens, doc, raw, mode))
     out = []
-    for en, doc, raw, mode in plans:
-        _put(doc, fix, en["previous"])
+    for ens, doc, raw, mode in plans:
+        en0 = ens[0]
+        for en in ens:
+            _put(doc, fix, en["previous"], en["target"])
         try:
-            if en.get("created") and not doc:  # the apply made this file; give it back as it was
-                os.unlink(os.path.realpath(en["file"]))
-                out.append(f"Removed {tilde(en['display'])}, which the apply had created.")
+            if en0.get("created") and not doc:  # the apply made this file; give it back as it was
+                os.unlink(os.path.realpath(en0["file"]))
+                out.append(f"Removed {tilde(en0['display'])}, which the apply had created.")
                 continue
-            _write_atomic(en["file"], _dump(doc, raw), mode)
+            _write_atomic(en0["file"], _dump(doc, raw), mode)
         except OSError as exc:
-            return out + [f"Not undone for {tilde(en['display'])}: {exc.__class__.__name__}."], 1
-        out.append(f"Restored {en['target']} in {tilde(en['display'])}.")
+            return out + [f"Not undone for {tilde(en0['display'])}: {exc.__class__.__name__}."], 1
+        out.append(f"Restored {', '.join(en['target'] for en in ens)} in {tilde(en0['display'])}.")
     rec.pop(check_id, None)
     try:
         _write_atomic(record_path(), json.dumps(rec, indent=2).encode("utf-8"), 0o600)
