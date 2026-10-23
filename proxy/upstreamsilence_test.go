@@ -689,6 +689,42 @@ func TestAResponseThatLostTheRaceToTheWatchdogIsResent(t *testing.T) {
 	}
 }
 
+// The same race on net/http's own transport. A trace hook holds the first byte of every first
+// attempt until the watchdog has cancelled it. The transport then either fails the attempt or, when
+// its response is already read, returns it with no error; the second shape is the one that must
+// never reach the client. On the unfixed code about 1 call in 20 took that shape.
+func TestALateFirstByteOnTheRealTransportNeverReachesTheClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		io.WriteString(w, "data: x\n\n")
+	}))
+	defer srv.Close()
+	c := &http.Client{Transport: upstreamTransport(30 * time.Second)}
+	for i := 0; i < 300; i++ {
+		var attempts atomic.Int64
+		build := func(ctx context.Context) (*http.Request, error) {
+			if attempts.Add(1) == 1 {
+				ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+					GotFirstResponseByte: func() { <-ctx.Done() },
+				})
+			}
+			return silenceBuild(srv.URL, streamBody)(ctx)
+		}
+		resp, err := doWithSilenceGuard(context.Background(), c, 5*time.Millisecond, build)
+		if err != nil {
+			t.Fatalf("call %d: the resend should have been answered: %v", i, err)
+		}
+		b, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || string(b) != "data: x\n\n" {
+			t.Fatalf("call %d: the client got a response whose watchdog had fired (%d attempts): body=%q err=%v",
+				i, attempts.Load(), b, err)
+		}
+	}
+}
+
 // The same late response, but the client has gone away by the time it arrives: it is not resent.
 func TestALateResponseForAClientThatLeftIsNotResent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
