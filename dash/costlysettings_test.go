@@ -161,6 +161,8 @@ func TestCostlyChecksMatchThePluginList(t *testing.T) {
 		MaxTokens     *int    `json:"max_tokens"`
 		Stream        *int    `json:"stream"`
 		Messages      *int    `json:"messages"`
+		Status        *int    `json:"status"`
+		SessionHas    *shape  `json:"session_has"`
 	}
 	var list struct {
 		Checks []struct {
@@ -174,11 +176,25 @@ func TestCostlyChecksMatchThePluginList(t *testing.T) {
 	if err := json.Unmarshal(raw, &list); err != nil {
 		t.Fatal(err)
 	}
-	same := func(a []shape, b []CostlyShape) bool {
+	var same func(a []shape, b []CostlyShape) bool
+	same = func(a []shape, b []CostlyShape) bool {
 		if len(a) != len(b) {
 			return false
 		}
 		for i := range a {
+			if (a[i].SessionHas == nil) != (b[i].SessionHas == nil) {
+				return false
+			}
+			if a[i].SessionHas != nil {
+				in := *a[i].SessionHas
+				in.ID = b[i].SessionHas.ID // the inner shape has no id of its own
+				if !same([]shape{in}, []CostlyShape{*b[i].SessionHas}) {
+					return false
+				}
+			}
+			if (a[i].Status == nil) != (b[i].Status == nil) || (a[i].Status != nil && *a[i].Status != *b[i].Status) {
+				return false
+			}
 			m := ""
 			if a[i].ModelContains != nil {
 				m = *a[i].ModelContains
@@ -199,5 +215,63 @@ func TestCostlyChecksMatchThePluginList(t *testing.T) {
 		if c.ID != g.ID || !same(c.Price.Shapes, g.Shapes) || !same(c.Price.Also, g.Also) {
 			t.Errorf("check %q differs between costly_settings.json and CostlyChecks", c.ID)
 		}
+	}
+}
+
+// seedCostlySessions inserts rows with an explicit session, tenant, ts and status.
+type costlySessRow struct {
+	session, model, tenant string
+	ts                     int64
+	status                 int
+	maxTok, tools          int
+	cost                   float64
+}
+
+func seedCostlySessions(t *testing.T, rows []costlySessRow) *DB {
+	t.Helper()
+	db := openTestDB(t)
+	var evs []*Event
+	for _, r := range rows {
+		e := mkEvent(r.ts, r.session, r.model, 100, 100)
+		e.TenantID, e.Status, e.MaxTokens, e.Tools, e.Stream, e.CostUSD = r.tenant, r.status, r.maxTok, r.tools, false, r.cost
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func TestCostlySmallModelCountsClassifiersOnlyInSessionsWithAHaiku400(t *testing.T) {
+	const id = "small-model-rejects-server-check"
+	db := seedCostlySessions(t, []costlySessRow{
+		{"a", "claude-haiku-4-5", "t1", 1000, 400, 32000, 0, 7},    // the 400 itself: never counted
+		{"a", "claude-sonnet-5-5", "t1", 1001, 200, 64, 0, 0.10},   // counted
+		{"a", "aws/claude-sonnet-5", "t1", 1002, 200, 64, 0, 0.20}, // counted
+		{"a", "claude-sonnet-5-5", "t1", 1003, 200, 65, 0, 5},      // near miss: max_tokens
+		{"b", "claude-haiku-4-5", "t1", 1004, 200, 32000, 0, 1},    // haiku 200 only
+		{"b", "claude-sonnet-5-5", "t1", 1005, 200, 64, 0, 9},      // no 400 in session b: not counted
+		{"c", "claude-opus-5-5", "t1", 1006, 400, 64, 0, 9},        // a 400, but not haiku
+		{"c", "claude-sonnet-5-5", "t1", 1007, 200, 64, 0, 9},      // not counted
+		{"d", "claude-haiku-4-5", "t2", 1008, 400, 32000, 0, 1},    // other tenant's 400
+		{"d", "claude-sonnet-5-5", "t1", 1009, 200, 64, 0, 9},      // t1 row, but the 400 is t2's: not counted
+		{"e", "claude-haiku-4-5", "t1", 500, 400, 32000, 0, 1},     // 400 before the window
+		{"e", "claude-sonnet-5-5", "t1", 1010, 200, 64, 0, 9},      // not counted: the 400 is outside the window
+		{"f", "claude-haiku-4-5", "t1", 1011, 400, 32000, 0, 1},    // 400 in the window
+		{"f", "claude-sonnet-5-5", "t1", 5000, 200, 64, 0, 9},      // after the window: not counted
+		{"g", "claude-haiku-4-5", "t2", 1012, 400, 32000, 0, 1},    // t2 own session
+		{"g", "claude-sonnet-5-5", "t2", 1013, 200, 64, 0, 4},      // t2 counts this
+	})
+	doc, err := db.CostlySettings(Filter{Tenant: "t1", Since: 1000, Until: 2000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := costlyByID(doc, id)
+	if !c.Measured || c.Requests != 2 || c.CostUSD == nil || *c.CostUSD < 0.2999 || *c.CostUSD > 0.3001 {
+		t.Fatalf("t1 row = %+v, want 2 requests and $0.30", c)
+	}
+	doc2, _ := db.CostlySettings(Filter{Tenant: "t2", Since: 1000, Until: 2000})
+	if c2 := costlyByID(doc2, id); c2.Requests != 1 || *c2.CostUSD != 4 {
+		t.Fatalf("t2 row = %+v, want 1 request and $4", c2)
 	}
 }
