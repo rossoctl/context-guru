@@ -1203,3 +1203,44 @@ func TestLedgerRefusesCreditFromAPingThatRefreshedNothing(t *testing.T) {
 		}
 	}
 }
+
+// The tab's COST half is summed inside the filter's window, so the SAVING half must stop at the
+// window start: a ping just before `since` that kept a row just after it warm brought a saving
+// in with no cost beside it, and the net at the window edge read too high (#678). The exporter's
+// per-tenant series must land on the same net, or the two answers to one question disagree.
+func TestLedgerStopsThePingSavingAtTheWindowStart(t *testing.T) {
+	const m = int64(60_000)
+	t0 := int64(1_700_000_000_000)
+	fx := newKAFixture(t,
+		kaPing(t0+4*m, "early", 0.002, 50_000, 0), // before the window
+		kaCredit(t0+8*m, "early", 0.05),
+		kaPing(t0+7*m, "late", 0.003, 50_000, 0), // inside it
+		kaCredit(t0+9*m, "late", 0.03),
+	)
+	f := Filter{TenantAll: true, Since: t0 + 5*m}
+	led, err := fx.db.KeepAliveLedger(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(led.SavedUSD, 0.03) {
+		t.Errorf("SavedUSD = %v, want 0.03 — the early ping cost this window nothing, so it must "+
+			"not credit it either (0.08 is the unbounded look-back)", led.SavedUSD)
+	}
+	if !near(led.PingUSD, 0.003) {
+		t.Errorf("PingUSD = %v, want 0.003 (the in-window ping only)", led.PingUSD)
+	}
+	if led.MissesAvoided != 1 {
+		t.Errorf("MissesAvoided = %d, want 1", led.MissesAvoided)
+	}
+	if !near(led.NetUSD, 0.03-0.003) {
+		t.Errorf("NetUSD = %v, want 0.027", led.NetUSD)
+	}
+	grouped, err := fx.db.KeepAliveNetUSDByTenant(t0 + 5*m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(grouped[""], led.NetUSD) {
+		t.Errorf("the grouped per-tenant net = %v, want the ledger's %v — same rows, same window",
+			grouped[""], led.NetUSD)
+	}
+}

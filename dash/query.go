@@ -638,7 +638,9 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 		-- The keep-alive's SAVING half, which lives on the real request that benefited. The COST
 		-- half cannot be summed here: this query excludes ping rows, and that exclusion is what
 		-- keeps Turns and every average on the row agent-only. It has its own query below.
-		COALESCE(SUM(` + kaSaved("r.") + `),0)
+		-- kaSavedSince stops the credit's ping half at the window start, because that cost half
+		-- is summed inside the window: both halves of the net must span the same pings (#678).
+		COALESCE(SUM(` + kaSavedSince("r.", f.Since) + `),0)
 		FROM requests r WHERE ` + cond + `
 		GROUP BY r.session_id ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, limit, offset)...)

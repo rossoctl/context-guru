@@ -646,9 +646,11 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		-- computed while it still had the session's gap and the ping's own refreshed-token
 		-- count in hand. The COST half cannot be summed here — this query excludes ping rows
 		-- (Filter.WithKeepAlive) so the request count and every average stay agent-only — so it
-		-- has its own query below.
-		COALESCE(SUM(`+kaSaved("r.")+`),0),
-		COALESCE(SUM(CASE WHEN `+kaSaved("r.")+` > 0 THEN 1 ELSE 0 END),0),
+		-- has its own query below. kaSavedSince stops the credit's ping half at the window
+		-- start, because that cost half is summed inside the window: both halves of the net
+		-- must span the same pings (#678), and SavingsTotals reads this same span.
+		COALESCE(SUM(`+kaSavedSince("r.", f.Since)+`),0),
+		COALESCE(SUM(CASE WHEN `+kaSavedSince("r.", f.Since)+` > 0 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.cache_write_1h),0),
 		-- The #240 boundary. billed_token_factor = 0 means the row was written before the
 		-- tokenizer correction existed, so its savings figures came out of the old arithmetic.

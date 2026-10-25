@@ -167,8 +167,8 @@ type SpendExplain struct {
 type SpendLedger struct {
 	GrossSavedUSD float64 `json:"gross_saved_usd"` // sum(baseline - cost) over non-ping rows; MODELLED, session-accumulative
 	CGLLMUSD      float64 `json:"cg_llm_usd"`      // context-guru's own model calls (summariser)
-	PingUSD       float64 `json:"ping_usd"`        // keep-alive pings, billed to the caller
-	PingSavedUSD  float64 `json:"ping_saved_usd"`  // modelled; kaSaved over the agent rows the pings kept warm
+	PingUSD       float64 `json:"ping_usd"`        // the keeper's pings (autoPing; a manual ping is its own category), billed to the caller
+	PingSavedUSD  float64 `json:"ping_saved_usd"`  // modelled; kaSaved over the agent rows the pings inside the window kept warm
 }
 
 type spendRow struct {
@@ -177,7 +177,7 @@ type spendRow struct {
 	tools, sysBlocks, messages       int
 	fresh, read, write, write1h, out int64
 	cost, baseline, cgllm, kaSaved   float64
-	keepalive                        bool
+	keepalive, manual                bool
 	complete                         bool
 }
 
@@ -259,10 +259,13 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		warm.Since -= ttl1h // earlier requests exist only to give the first counted request a past
 	}
 	cond, args := warm.where()
+	// kaSavedSince stops the credit's ping half at the counted window (f.Since, not the warm-up
+	// span): PingUSD below counts pings inside the window only, so a ping before it must not
+	// bring a saving in with no cost beside it (#678).
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.tools, r.system_blocks,
 		r.thread_id, r.messages, r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.output_tokens,
-		r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd, `+kaSaved("r.")+`, r.keepalive,
-		r.token_accounting FROM requests r WHERE `+cond+` ORDER BY r.ts, r.id`, args...)
+		r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd, `+kaSavedSince("r.", f.Since)+`, r.keepalive,
+		r.manual_ping, r.token_accounting FROM requests r WHERE `+cond+` ORDER BY r.ts, r.id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -285,14 +288,14 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 	}
 	for rows.Next() {
 		var r spendRow
-		var ka int
+		var ka, mp int
 		var acct string
 		if err := rows.Scan(&r.ts, &r.session, &r.model, &r.tools, &r.sysBlocks, &r.thread, &r.messages,
 			&r.fresh, &r.read, &r.write, &r.write1h, &r.out, &r.cost, &r.baseline, &r.cgllm,
-			&r.kaSaved, &ka, &acct); err != nil {
+			&r.kaSaved, &ka, &mp, &acct); err != nil {
 			return nil, err
 		}
-		r.keepalive, r.complete = ka != 0, acct == AccountingComplete
+		r.keepalive, r.manual, r.complete = ka != 0, mp != 0, acct == AccountingComplete
 		counted := f.Since == 0 || r.ts >= f.Since
 		p, priced := priceOf(rates, price, r.model)
 		ctx := r.fresh + r.read + r.write
@@ -336,7 +339,11 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		out.USD.add(u)
 		out.Ledger.CGLLMUSD += r.cgllm
 		if r.keepalive {
-			out.Ledger.PingUSD += r.cost
+			// The autoPing rule (dash/manualping.go): a manual ping is the user's own spend,
+			// booked under manual_saved_usd by every other ledger, not the keeper's.
+			if !r.manual {
+				out.Ledger.PingUSD += r.cost
+			}
 		} else {
 			// The ping's saving is credited to the agent row it rescued, never to the ping itself.
 			out.Ledger.PingSavedUSD += r.kaSaved

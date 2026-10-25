@@ -233,3 +233,62 @@ func TestSpendExplainLedgerCreditsPingSavingFromTheRescuedRow(t *testing.T) {
 		t.Errorf("ping_saved_usd = %v; want 0.05 (the rescued row only, not the unreachable 0.07)", got)
 	}
 }
+
+// A manual ping is the user's own spend, a category of its own (manual_saved_usd, dash/manualping.go).
+// The ledger's ping_usd names the KEEPER's pings — the autoPing rule every other ledger uses — so a
+// manual ping's cost must stay out of it (#678).
+func TestSpendExplainLedgerLeavesManualPingsOutOfPingUSD(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	const m = int64(60000)
+	t0 := int64(1_700_000_000_000)
+	rescued := spendEv(t0+8*m, "s", 5, 5, 10000, 100, 0)
+	rescued.KeepAliveSavedUSD = 0.05
+	manual := kaPing(t0+4*m, "s", 0.05, 10000, 0)
+	manual.ManualPing, manual.ManualSavedUSD = true, 0.15
+	seed(t, rec,
+		spendEv(t0, "s", 3, 5, 0, 10000, 0),
+		kaPing(t0+4*m, "s", 0.002, 10000, 0),
+		manual,
+		rescued,
+	)
+	_, body := get(t, a, "/api/spend/explain?now="+itoa(t0+9*m), "127.0.0.1:1")
+	l := body["ledger"].(map[string]any)
+	if got := l["ping_usd"].(float64); math.Abs(got-0.002) > 1e-9 {
+		t.Errorf("ping_usd = %v; want 0.002 — the manual ping's $0.05 is not the keeper's spend", got)
+	}
+}
+
+// The ping's cost is counted inside the window only, so the saving must stop at the window start
+// too: a ping just before `since` that keeps a row just after it warm brought a saving in with no
+// cost beside it, and the net at the window edge read too high (#678).
+func TestSpendExplainLedgerStopsThePingSavingAtTheWindowStart(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	const m = int64(60000)
+	t0 := int64(1_700_000_000_000)
+	// "early": the ping sits before the window, the row it kept warm inside it.
+	earlyRescued := spendEv(t0+8*m, "early", 5, 5, 10000, 100, 0)
+	earlyRescued.KeepAliveSavedUSD = 0.05
+	// "late": both halves inside the window — the control that the floor does not eat a credit
+	// the window paid for.
+	lateRescued := spendEv(t0+9*m, "late", 5, 5, 10000, 100, 0)
+	lateRescued.KeepAliveSavedUSD = 0.03
+	seed(t, rec,
+		spendEv(t0, "early", 3, 5, 0, 10000, 0),
+		kaPing(t0+4*m, "early", 0.002, 10000, 0), // before the window
+		earlyRescued,
+		spendEv(t0+6*m, "late", 3, 5, 0, 10000, 0),
+		kaPing(t0+7*m, "late", 0.003, 10000, 0), // inside it
+		lateRescued,
+	)
+	_, body := get(t, a, "/api/spend/explain?since="+itoa(t0+5*m)+"&now="+itoa(t0+10*m), "127.0.0.1:1")
+	l := body["ledger"].(map[string]any)
+	if got := l["ping_usd"].(float64); math.Abs(got-0.003) > 1e-9 {
+		t.Errorf("ping_usd = %v; want 0.003 (the in-window ping only)", got)
+	}
+	if got := l["ping_saved_usd"].(float64); math.Abs(got-0.03) > 1e-9 {
+		t.Errorf("ping_saved_usd = %v; want 0.03 — the early ping cost this window nothing, so it "+
+			"must not credit it either (0.08 is the unbounded look-back)", got)
+	}
+}
