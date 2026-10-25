@@ -6,7 +6,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/cheapmodel"
 )
 
 // askOpeningLine is the first line of any question that is APPENDED to a transcript as a user
