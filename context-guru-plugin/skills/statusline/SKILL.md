@@ -84,7 +84,7 @@ layout outranks the installed command's flag until `auto`. Otherwise
 
 The layouts `spark`, `strip`, `heat`, `fill` and `watch` are retired from the status line: they are
 sections of the mod's pane (`/context-guru:context-guru`: SAVED LATELY, CACHE HITS, MISSES BY HOUR,
-CONTEXT, AGENTS). A remembered or flagged retired layout falls back to `balanced`, silently.
+CONTEXT, AGENTS). A flagged retired layout falls back to `balanced`, silently. A remembered one is ignored: the installed layout applies.
 
 `--hide=a,b` / `--show=a,b` toggle single elements (`update save spend cache next agents ctx ka latency tools tip`;
 env `CG_STATUSLINE_HIDE` / `_SHOW`). `--cache` and `--keepalive` still work. `NO_COLOR=1` (or `TERM=dumb`)

@@ -756,7 +756,7 @@ def _config(argv: list[str]) -> tuple[str, set[str], int]:
             if k in ("layout", "hide", "show", "width"):
                 opt[k] = v
     chosen = _saved_layout()  # a layout picked with --set-layout outranks the installed command's flag
-    layout = chosen or (opt.get("layout") if opt.get("layout") in LAYOUTS else "balanced")  # a retired name falls back silently
+    layout = chosen or (opt.get("layout") if opt.get("layout") in LAYOUTS else "balanced")  # a retired flag falls back silently; a retired remembered name is ignored (see _saved_layout)
     on = set(LAYOUTS[layout])
     on |= {e for e in opt.get("show", "").split(",") if e in ELEMENTS}
     on -= set(opt.get("hide", "").split(","))

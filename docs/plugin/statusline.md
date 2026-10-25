@@ -151,7 +151,7 @@ python3 "<plugin dir>/scripts/statusline.py" --set-layout=detailed   # or minima
 
 `auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache next agents ctx ka latency tools tip`), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`. `next`, `agents`, `ka` and `tip` are off by default: the mod shows them.
 
-The layouts `spark`, `strip`, `heat`, `fill` and `watch` are retired. They moved into the mod's pane (below). A flag or a remembered choice that names one falls back to `balanced`, with no error.
+The layouts `spark`, `strip`, `heat`, `fill` and `watch` are retired. They moved into the mod's pane (below). A flag that names one falls back to `balanced`. A remembered choice that names one is ignored, and the installed layout applies. Neither gives an error.
 
 ### Opt-in elements
 
@@ -228,11 +228,13 @@ $4.20 today · last 14 days ▁▂▂▃▄▄▅▅▆▇▇██▅
 
 CACHE HITS
 ■■■■✖■■▨▨■■■■■■■■■■■
-last 20 requests · ■ hit ▨ partial ✖ miss · $1.40 lost today
+last 20 requests · ■ hit ▨ partial ✖ miss
+$1.40 lost today
 
 MISSES BY HOUR
 0h   ░▒  █░ ··············· 24h
-darker means more misses in that hour · $1.40 lost today
+darker means more misses in that hour
+$1.40 lost today
 
 CONTEXT
 ▒▒▒▒▒▒▒███████░░░░░░░░░░░░░░░░░░░░ 41%

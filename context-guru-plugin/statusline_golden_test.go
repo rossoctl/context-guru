@@ -1679,7 +1679,7 @@ func TestStatuslineHungStatsWithACachestateCopyKeepsTheLine(t *testing.T) {
 	env := routedEnv(port)
 	env["XDG_CACHE_HOME"] = cacheHome
 	// No cache-state copy at all: the notice stays.
-	if out, _, _ := runStatusline(t, env, stdin, "--layout=balanced"); !strings.Contains(out, "cg") {
+	if out, _, _ := runStatusline(t, env, stdin, "--layout=balanced"); !strings.Contains(out, "loading") && !strings.Contains(out, "not responding") {
 		t.Errorf("without any copy a notice is expected, got %q", out)
 	}
 	for name, body := range map[string]string{"context-guru-statusline-" + port + "-cs-sess-old.json": cache, "context-guru-statusline-" + port + "-sess-old.json": `{"total_saved_usd":0.31}`} {

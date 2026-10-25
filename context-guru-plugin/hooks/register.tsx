@@ -1,7 +1,7 @@
 // Context Guru mod: a calm band above the prompt and a pane (/context-guru:context-guru).
 //
 // One home per fact (the status line owns the money, the cache clock and the context bar):
-//   band row 1  next-message price (warm vs cold), Ping or why it is off, dashboard link, hide
+//   band row 1  next-message price (warm vs cold), Ping or why it is off, hide (the dashboard link is in the pane)
 //   band row 2  one chip per named sub-agent cache (default on; `a` or the pane button turns it off)
 //   band row 3  the weekly tip, only when a command is stale
 //   pane        next message, agents table, saved lately, cache hits, misses by hour, context, save more
