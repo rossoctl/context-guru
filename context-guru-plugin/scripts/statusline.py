@@ -793,7 +793,7 @@ def _set_layout(name: str) -> str:
             pass
         return "status line layout: back to the installed default"
     if name in RETIRED_LAYOUTS:
-        return f"status line layout: {name} moved into the Context Guru pane (/context-guru:context-guru); nothing was changed"
+        return f"status line layout: {name} moved into the Context Guru pane (/context-guru); nothing was changed"
     if name not in LAYOUTS:
         return "usage: statusline.py --set-layout=" + "|".join(LAYOUTS) + "|auto"
     os.makedirs(os.path.dirname(path), exist_ok=True)

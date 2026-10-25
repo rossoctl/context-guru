@@ -1,4 +1,4 @@
-// Context Guru mod: a calm band above the prompt and a pane (/context-guru:context-guru).
+// Context Guru mod: a calm band above the prompt and a pane (/context-guru).
 //
 // One home per fact (the status line owns the money, the cache clock and the context bar):
 //   band row 1  next-message price (warm vs cold), Ping or why it is off, hide (the dashboard link is in the pane)
