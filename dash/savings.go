@@ -33,9 +33,12 @@ type SavingsTotals struct {
 func (d *DB) SavingsTotals(f Filter) (*SavingsTotals, error) {
 	cond, args := f.where()
 	s := &SavingsTotals{}
+	// kaSavedSince on the saving line, because the ping COST below is summed inside the same
+	// window: a ping just before `since` must not credit a row just after it while its cost
+	// stays outside the window (#678).
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT
 		COALESCE(SUM(r.cost_usd),0), COALESCE(SUM(r.baseline_cost_usd),0), COALESCE(SUM(r.cg_llm_cost_usd),0),
-		COALESCE(SUM(r.cachesplit_saved_usd),0), COALESCE(SUM(`+kaSaved("r.")+`),0)
+		COALESCE(SUM(r.cachesplit_saved_usd),0), COALESCE(SUM(`+kaSavedSince("r.", f.Since)+`),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&s.CostUSD, &s.BaselineCostUSD, &s.CGLLMCostUSD, &s.CachesplitSavedUSD, &s.KeepAliveSavedUSD)
 	if err != nil {

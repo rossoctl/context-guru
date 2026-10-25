@@ -76,8 +76,27 @@ func addressable(f Filter) (string, []any) {
 	return fmt.Sprintf(addressableCTE, cond), args
 }
 
-// kaSaved is keepalive_saved_usd with the REACHABILITY test the write path could not make,
-// applied on read.
+// kaSaved is the reachability gate with no window floor: a ping anywhere in the row's TTL
+// past can carry the credit.
+func kaSaved(alias string) string {
+	return kaSavedGate(alias, "")
+}
+
+// kaSavedSince is kaSaved with the ping half stopped at the window start. The ping COST half
+// of every ledger is summed inside the filter's window only, so an unbounded look-back here
+// let a ping just before `since` credit a row just after it while its cost stayed outside
+// the window: a saving with no cost beside it, and a net too high at the window edge (#678).
+// since <= 0 — no window — is kaSaved unchanged.
+func kaSavedSince(alias string, since int64) string {
+	if since <= 0 {
+		return kaSaved(alias)
+	}
+	return kaSavedGate(alias, ` AND kp.ts >= `+strconv.FormatInt(since, 10))
+}
+
+// kaSavedGate builds keepalive_saved_usd with the REACHABILITY test the write path could
+// not make, applied on read. pingFloor is one extra predicate on the ping row (kp), "" for
+// none — see kaSavedSince for the only caller that needs one.
 //
 // The credit written at capture time asks four questions (Event.keepaliveSavedUSD) and not one
 // of them is an upper bound on the idle gap: it requires that the gap EXCEEDED the provider's
@@ -153,7 +172,7 @@ func addressable(f Filter) (string, []any) {
 // recorded instant, where the provider measures its lifetime from the request START, so the
 // window can be overstated by one request's duration. Both make this a CEILING on coverage,
 // which is the same direction SavedUSD is already documented to err in.
-func kaSaved(alias string) string {
+func kaSavedGate(alias, pingFloor string) string {
 	if alias == "" {
 		panic("dash: kaSaved needs a table alias; an un-aliased one resolves to the subquery")
 	}
@@ -170,7 +189,7 @@ func kaSaved(alias string) string {
 			SELECT 1 FROM requests kp
 			WHERE kp.keepalive = 1 AND kp.cache_read > 0
 			  AND kp.tenant_id = ` + alias + `tenant_id AND kp.session_id = ` + alias + `session_id
-			  AND kp.ts <= ` + alias + `ts
+			  AND kp.ts <= ` + alias + `ts` + pingFloor + `
 			  AND kp.ts + (CASE WHEN kp.provider = 'openai' THEN ` +
 		strconv.FormatInt(apply.OpenAIMinimumCacheTTL.Milliseconds(), 10) +
 		` WHEN ` + alias + `cache_ttl = '` + apply.TTLEphemeral1h + `' THEN ` +
@@ -242,7 +261,9 @@ const bytesPerPingRow = 400
 func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	var o KeepAliveLedger
 	// The SAVING half and the coverage, over agent traffic only — the credit lives on the real
-	// request that benefited, never on the ping.
+	// request that benefited, never on the ping. kaSavedSince stops the credit's ping half at
+	// the window start, because the COST half below is summed inside the window: both halves
+	// of the net must span the same pings (#678).
 	cond, args := f.where()
 	kaCond, kaArgs := withKeepAlive(f).where()
 	aCond, aArgs := addressable(f)
@@ -257,8 +278,8 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	var g errgroup.Group
 	g.Go(func() error {
 		return d.sql.QueryRowContext(d.readCtx(), `SELECT
-		COALESCE(SUM(`+kaSaved("r.")+`),0),
-		COALESCE(SUM(CASE WHEN `+kaSaved("r.")+` > 0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(`+kaSavedSince("r.", f.Since)+`),0),
+		COALESCE(SUM(CASE WHEN `+kaSavedSince("r.", f.Since)+` > 0 THEN 1 ELSE 0 END),0),
 		COUNT(*)
 		FROM requests r WHERE `+cond, args...).Scan(
 			&o.SavedUSD, &o.MissesAvoided, &o.Requests)
@@ -289,7 +310,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	// and the cost is on ping rows, and one aggregate cannot honestly see both.
 	g.Go(func() error {
 		var err error
-		saved, err = d.sumBySession(cond, args, kaSaved("r."), "r.keepalive_saved_usd > 0")
+		saved, err = d.sumBySession(cond, args, kaSavedSince("r.", f.Since), "r.keepalive_saved_usd > 0")
 		return err
 	})
 	g.Go(func() error {
@@ -349,7 +370,10 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 func (d *DB) KeepAliveNetUSDByTenant(since int64) (map[string]float64, error) {
 	out := map[string]float64{}
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, COALESCE(SUM(`+kaSaved("r.")+`),0)
+	// kaSavedSince, not kaSaved: this must equal what KeepAliveLedger's own SavedUSD-minus-
+	// PingUSD computes for the same `since` (its test asserts exactly that), and the ledger
+	// stops the credit's ping half at the window start (#678).
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, COALESCE(SUM(`+kaSavedSince("r.", since)+`),0)
 		FROM requests r WHERE `+cond+` GROUP BY r.tenant_id`, args...)
 	if err != nil {
 		return nil, err
@@ -907,7 +931,9 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 		s.LastPrefix, s.Model = prefix.Int64, model.String
 	}
 	// The keep-alive halves, each from its own query. Same two-query pattern as the overview.
-	saved, err := d.sumBySession(cond, args, kaSaved("r."), "r.keepalive_saved_usd > 0")
+	// kaSavedSince for the same reason as the ledger above: the cost half is summed inside the
+	// window, so a per-session net must not credit a ping the window did not pay for (#678).
+	saved, err := d.sumBySession(cond, args, kaSavedSince("r.", f.Since), "r.keepalive_saved_usd > 0")
 	if err != nil {
 		return nil, err
 	}
@@ -1132,8 +1158,9 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		return out, nil
 	}
 	// This session's own keep-alive history, from the same two queries the concentration table
-	// uses, so the two panels cannot disagree about what a session's pings cost.
-	saved, err := d.sumBySession(cond, args, kaSaved("r."), "r.keepalive_saved_usd > 0")
+	// uses, so the two panels cannot disagree about what a session's pings cost. kaSavedSince
+	// for the same reason as the ledger: the cost half below is summed inside the window (#678).
+	saved, err := d.sumBySession(cond, args, kaSavedSince("r.", f.Since), "r.keepalive_saved_usd > 0")
 	if err != nil {
 		return nil, err
 	}

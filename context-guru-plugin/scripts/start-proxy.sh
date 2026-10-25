@@ -324,6 +324,30 @@ case "${ANTHROPIC_BASE_URL:-}" in
 esac
 fi
 
+# --- (1a) the ping header on an install that predates it (#685) ----------------------------------
+# Manual pings (the Ping button) work only when the session sends `x-context-guru-ping: 1`. Only
+# install.sh wrote it, so an older install never has it. The header makes the server keep the latest
+# request and key in memory, so it is written only when settings.py can prove the install predates
+# --no-ping-header (then it prints the consent words). Otherwise settings.py prints a one-time note.
+# The grep keeps python3 off the common path: it runs only when a settings file holds our routing
+# record with no ping record at all. Fails open: any error is swallowed.
+if [ "$FORCE" != 1 ] && [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
+  for ph_file_ in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" \
+                  "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.json" \
+                  "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.local.json"; do
+    ph_seen_="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}/ping-header-note.json"
+    ph_real_=$(realpath "$ph_file_" 2>/dev/null) || ph_real_="$ph_file_"
+    if grep -qs '"installed_base_url"' "$ph_file_" 2>/dev/null \
+       && ! grep -qs '"installed_ping_header"\|"ping_header_opt_out"' "$ph_file_" 2>/dev/null \
+       && ! grep -qsF "\"$ph_real_\"" "$ph_seen_" 2>/dev/null; then
+      ph_out_=$(python3 "$HERE/settings.py" ensure-ping-header 2>/dev/null) || ph_out_=""
+      ph_note_=$(printf '%s\n' "$ph_out_" | sed -n 's/^note=//p' | head -1)
+      [ -n "$ph_note_" ] && note "$ph_note_"
+      break
+    fi
+  done
+fi
+
 # --- (1b) what configuration do we WANT, and what is running? ----------------------------
 # CONTEXT_GURU_STATE first, like settings.py, reset.sh and check-proxy.sh. S10 in review: this was the
 # ONE script that ignored it, which had two consequences. A user who relocates their state directory

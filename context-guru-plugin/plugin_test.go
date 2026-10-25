@@ -5011,9 +5011,11 @@ func TestAnAlreadyRoutedProjectStillGetsAHatch(t *testing.T) {
 	const relPath = "./.claude/settings.local.json"
 	// Routed already, by a version of the plugin that kept no record — which is what an absent
 	// recovery folder represents now (no `settings.py add` has ever run against this file).
-	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
+	// The opt-out is already on record: this test is about the hatch, and an install with no ping record
+	// gets its header (or its opt-out) written on a re-run.
+	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL},
+		"$context-guru": map[string]any{"ping_header_opt_out": true}})
 
-	// --no-ping-header: this test is about the hatch, and a pre-ping install gets its header on a re-run.
 	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL, "--no-ping-header")
 	if code != 0 || facts["result"] != "unchanged" {
 		t.Fatalf("fixture: wanted result=unchanged exit 0, got %v exit %d", facts, code)

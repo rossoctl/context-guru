@@ -120,14 +120,6 @@ func getHeld(st store.Store, threadKey string) (heldAnswer, bool) {
 	return h, true
 }
 
-// spendHeld consumes the answer. It keeps the record's identity so a reader can tell "consumed" from
-// "never asked", then reads as absent.
-func spendHeld(st store.Store, h heldAnswer) {
-	h.Spent = true
-	h.Outputs = nil
-	putHeld(st, h)
-}
-
 // claimHeldSpend consumes the answer for exactly one caller: it is true for the request that finds the
 // answer still unspent and spends it, and false for any other, so two cold requests of one thread do
 // not both report the recheck. The caller that wins keeps the answer it read.

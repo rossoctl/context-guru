@@ -199,7 +199,7 @@ test('a refused press explains itself with the server\'s ping_reason', async ($,
 })
 
 for (const [reason, want] of [
-  ['not opted in', /restart Claude Code/],
+  ['not opted in', /Ping isn't enabled for this install yet/],
   ['below limits', /below its minimum/],
   ['pings used', /pings have run out/],
   ['stopped', /stopped keeping this thread warm/],

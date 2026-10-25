@@ -546,8 +546,10 @@ the prompt), `sweep_verdict_unusable`, `sweep_verdict_unknown_label`, `sweep_ver
 **not** a failure) and `sweep_drop_would_not_shrink`.
 
 Counted at the ping (keep-alive block of `/stats`): `sweep_concurrency_full` (every question slot was
-busy, so the ping stayed plain), `sweep_not_registered` (the keep-alive cannot ping that thread, so no
-conversation copy was kept), `sweep_ping_panics`, `sweep_model_declined` and `sweep_ask_needs_shadow`.
+busy, so the ping stayed plain), `sweep_ping_panics`, `sweep_model_declined` and
+`sweep_ask_needs_shadow`. `sweep_not_registered` is counted at the **request**, not at a ping: the
+keep-alive cannot ping that thread, so the request kept no conversation copy. It is in the same
+`/stats` block.
 
 The removed economic trigger's names (`prefix_rewrite_repaid`, `prefix_rewrite_not_repaid`,
 `econ_ask_not_repaid`) and the fallback's (`sweep_fallback_*`) are no longer produced.
