@@ -68,7 +68,9 @@ func TestKeepAlivePlansReportsOnlyThreadsStillToBePinged(t *testing.T) {
 
 // TestKeepAlivePlanCountsOnlyPingsThatRefreshed: the sweep advances startedAt before a ping is
 // sent, so a ping that fails must not count as a refresh. The plan's RefreshedMS stays on the last
-// real refresh until a ping actually reads the cache.
+// real refresh until a ping actually reads the cache. A ping that fails fast, while the cache still
+// lives, is given back for a retry (#703), so the plan still shows every ping left and the next
+// ping due now.
 func TestKeepAlivePlanCountsOnlyPingsThatRefreshed(t *testing.T) {
 	k, fs, clock := testKeeper(t, Limits{})
 	k.h.keeper = k
@@ -83,8 +85,9 @@ func TestKeepAlivePlanCountsOnlyPingsThatRefreshed(t *testing.T) {
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	p := k.h.KeepAlivePlans("t1", false, "sess-1")[""]
-	if p.RefreshedMS != t0.UnixMilli() || p.PingsLeft != 2 {
-		t.Fatalf("after a failed ping: plan %+v, want RefreshedMS at the real request (%d) and 2 pings left", p, t0.UnixMilli())
+	if p.RefreshedMS != t0.UnixMilli() || p.PingsLeft != 3 || p.NextPingMS != t0.Add(pol.Idle).UnixMilli() {
+		t.Fatalf("after a fast failed ping: plan %+v, want RefreshedMS at the real request (%d), 3 pings left "+
+			"and the retry due at %d", p, t0.UnixMilli(), t0.Add(pol.Idle).UnixMilli())
 	}
 
 	fs.mu.Lock()

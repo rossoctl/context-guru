@@ -15,6 +15,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dispatch"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/store"
@@ -142,6 +143,10 @@ type kaEntry struct {
 	// missed counts this entry's current run of consecutive zero-read pings. Reset to 0 by
 	// notePingRead; a second miss in a row (missed == 2) stops the entry — see noteOutcome.
 	missed int
+	// retried is set when a ping that failed in transport was given back for one retry (see
+	// giveBackFailedPing), so a route that keeps failing is retried once, not on every tick.
+	// Reset by notePingRead.
+	retried bool
 	// tag is the host's label for this entry (Record.Tag) — in cmd/context-guru-proxy, the id of
 	// the manager-controlled keep-alive strategy that resolved this entry's policy, "" when none
 	// matched (account config or a session override supplied it instead). Resolved once, at
@@ -1282,8 +1287,10 @@ func (k *Keeper) fire(j pingJob) {
 	k.pings.Add(1)
 	if err != nil {
 		k.failed.Add(1) // a transport error: counted, not stopped, not a breaker failure
+		retry := k.giveBackFailedPing(j)
 		slog.Debug("context-guru: cache keep-alive ping failed",
-			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "err", err)
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "err", err,
+			"retry", retry)
 		return
 	}
 	switch k.noteOutcome(j, status, u) {
@@ -1348,7 +1355,7 @@ func (k *Keeper) noteOutcome(j pingJob, status int, u Usage) outcome {
 	switch {
 	case status == http.StatusTooManyRequests || status >= 500:
 		k.skipped.Add(1)
-		slog.Debug("context-guru: cache keep-alive ping hit a transient error; retrying at the next slot",
+		slog.Debug("context-guru: cache keep-alive ping hit a transient error; the next ping comes a full idle period later",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "status", status)
 		return outcomeTransient
 	case status >= 400:
@@ -1398,7 +1405,49 @@ func (k *Keeper) notePingMiss(e *kaEntry) bool {
 func (k *Keeper) notePingRead(e *kaEntry) {
 	k.mu.Lock()
 	e.missed = 0
+	e.retried = false
 	k.mu.Unlock()
+}
+
+// cacheTTL is how long the provider keeps this entry's cache after a read: 30 minutes on an
+// OpenAI Responses thread (the GPT-5.6+ minimum; ttl1h is never set there), else 1 hour or
+// 5 minutes by the tier the provider billed.
+func (e *kaEntry) cacheTTL() time.Duration {
+	switch {
+	case e.provider == bschemas.OpenAI:
+		return modelinfo.OpenAIMinimumCacheTTL
+	case e.ttl1h:
+		return time.Hour
+	default:
+		return 5 * time.Minute
+	}
+}
+
+// giveBackFailedPing undoes Sweep's stamp for a ping that failed in transport, so the next sweep
+// tick sends it again, and reports whether it did. A failed ping refreshed nothing, but Sweep had
+// already moved e.startedAt to the ping's own start and spent one of e.pol.MaxPings. Left so, the
+// next ping comes a full Idle after the FAILED one, past the cache's lifetime, and has to re-write
+// the prefix. Seen live (#703): the last refresh at 16:06:18, a ping that failed at 16:11:49, and
+// the next ping at 16:15:26, 548 s after the refresh, re-wrote 903,705 tokens for $4.52.
+//
+// Once per run of failures (e.retried), and only while the cache entry the last good read or
+// request refreshed is still alive: after that a retry can only write, which costs more than it
+// saves. A ping that times out at pingTimeout usually returns after that point, so this mostly
+// helps a failure that comes back fast (EOF, a refused or reset connection).
+func (k *Keeper) giveBackFailedPing(j pingJob) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e := j.e
+	if e.stopped || e.retried || e.pings != j.ping {
+		return false
+	}
+	if !k.now().Before(e.refreshedAt.Add(e.cacheTTL())) {
+		return false
+	}
+	e.startedAt = j.prevStartedAt
+	e.pings--
+	e.retried = true
+	return true
 }
 
 // record1 books one ping: the session's running spend, the process counter, and whatever
