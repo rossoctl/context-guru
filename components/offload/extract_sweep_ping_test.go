@@ -15,18 +15,19 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
 
-// shippedSweep builds the sweep as the registry builds it for an operator, with shadow mode on (the
-// ping asks only then, until PR C) and the shipped inventory floor. The helpers in extract_sweep_test.go
+// shippedSweep builds the sweep as the registry builds it for an operator, with the shipped inventory
+// floor. The helpers in extract_sweep_test.go
 // keep the old floor of 10; these tests are about the ping-time question and use the shipped one.
 func shippedSweep(t *testing.T, extra string) *ExtractSweep {
 	t.Helper()
-	c, err := newExtractSweep([]byte("min_tokens: 2000\nshadow: true\n" + extra))
+	c, err := newExtractSweep([]byte("min_tokens: 2000\n" + extra))
 	if err != nil {
 		t.Fatalf("newExtractSweep: %v", err)
 	}
@@ -148,24 +149,77 @@ func TestMinInventoryDefaultsToOneAndCanBeRaised(t *testing.T) {
 	}
 }
 
-// POINT 2: with nothing to offer there is no question, and the reason is counted.
+// POINT 2: with nothing to offer there is no question, and the reason is counted. A conversation with
+// no output at the floor registers nothing (#508 review D), so it reads as no_candidate; one whose big
+// outputs are all already markers registers, and reads as no_inventory.
 func TestNoCandidatesMeansNoQuestion(t *testing.T) {
 	e := shippedSweep(t, "")
 	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("hello"), assistantMsg("hi")}}
 	key, _ := registered(t, e, "ping-empty", pingAsker(), newMemStore(), req)
-	if _, _, reason, ok := SweepPingSubstitute(key); ok || reason != SweepReasonNoInventory {
-		t.Fatalf("ok=%v reason=%q, want no_inventory", ok, reason)
+	if _, _, reason, ok := SweepPingSubstitute(key); ok || reason != SweepReasonNoCandidate {
+		t.Fatalf("ok=%v reason=%q, want no_candidate (nothing was big enough to register)", ok, reason)
+	}
+	marked := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("go")}}
+	for i := 0; i < 2; i++ {
+		marked.Input = append(marked.Input, toolResultMsgWithID(fmt.Sprintf("toolu_m%d", i),
+			strings.Repeat("a spent line\n", 900)+expand.Marker(fmt.Sprintf("abcdef%d", i))))
+	}
+	key2, _ := registered(t, e, "ping-marked", pingAsker(), newMemStore(), marked)
+	if _, _, reason, ok := SweepPingSubstitute(key2); ok || reason != SweepReasonNoInventory {
+		t.Fatalf("ok=%v reason=%q, want no_inventory (big outputs, all already markers)", ok, reason)
 	}
 	if _, _, reason, ok := SweepPingSubstitute("never-registered"); ok || reason != SweepReasonNoCandidate {
 		t.Fatalf("ok=%v reason=%q, want no_candidate", ok, reason)
 	}
 }
 
-// ⭐ POINT 3 AND 5: the answer is held per thread in the Store, and it changes NO request. The same
-// session replays cg:res: decisions at any depth; a held verdict must not live there.
+// BOUND (#508 review D): a conversation that cannot hold a candidate keeps no copy, and an old
+// registration goes at the next registration, not only at the cap.
+func TestRegisterPingKeepsNoCopyOfAThreadThatCannotHaveACandidate(t *testing.T) {
+	e := shippedSweep(t, "")
+	st := newMemStore()
+	asker := pingAsker()
+	key, _ := registered(t, e, "bound-big", asker, st, deepCandidates(2))
+	sweepPingMu.Lock()
+	_, has := sweepPingCand[key]
+	sweepPingMu.Unlock()
+	if !has {
+		t.Fatal("fixture: a conversation with big outputs did not register")
+	}
+	// The same thread's next request has shrunk below the floor (a /compact): the copy is dropped.
+	small := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("hi"), assistantMsg("ok")}}
+	c := preExpiryCtx("bound-big", asker, st)
+	if _, err := e.Offload(small, &components.Report{}, c); err != nil {
+		t.Fatal(err)
+	}
+	sweepPingMu.Lock()
+	_, has = sweepPingCand[key]
+	sweepPingMu.Unlock()
+	if has {
+		t.Error("a thread with nothing big kept its old conversation copy")
+	}
+	// An old registration of ANOTHER thread goes at this registration, below the cap.
+	sweepPingMu.Lock()
+	sweepPingCand["bound-stale"] = &sweepPingCandidate{registeredAt: time.Now().Add(-2 * maxSweepPingAge)}
+	sweepPingMu.Unlock()
+	t.Cleanup(func() { clearSweepPing("bound-stale") })
+	registered(t, e, "bound-fresh", asker, st, deepCandidates(2))
+	sweepPingMu.Lock()
+	_, stale := sweepPingCand["bound-stale"]
+	sweepPingMu.Unlock()
+	if stale {
+		t.Error("a registration older than maxSweepPingAge survived a new registration below the cap")
+	}
+}
+
+// ⭐ H1 (warm half): a held answer changes NO request while the cache is warm. The cold request is the
+// apply's (extract_sweep_apply_test.go). With shadow on, even a cold request changes nothing.
 func TestAHeldAnswerChangesNoRequest(t *testing.T) {
-	for _, name := range []string{"shadow on"} {
+	for _, name := range []string{"shadow off", "shadow on"} {
 		cfg := ""
+		if name == "shadow on" {
+			cfg = "shadow: true\n"
+		}
 		t.Run(name, func(t *testing.T) {
 			asker := pingAsker()
 			e := shippedSweep(t, cfg)
@@ -181,12 +235,19 @@ func TestAHeldAnswerChangesNoRequest(t *testing.T) {
 			if !ok || asked != 4 || proposed != 4 || waiting != "human" {
 				t.Fatalf("held answer = (%d asked, %d proposed, wait %q, ok=%v)", asked, proposed, waiting, ok)
 			}
-			// THE NEXT REQUEST, on every cache phase there is.
-			for _, tc := range []struct {
+			phases := []struct {
 				name string
 				cold bool
 				idle int64
-			}{{"warm", false, 10_000}, {"cold", true, 10 * 60 * 1000}, {"a minute from expiry", false, 4 * 60 * 1000}} {
+			}{{"warm", false, 10_000}, {"a minute from expiry", false, 4 * 60 * 1000}}
+			if name == "shadow on" {
+				phases = append(phases, struct {
+					name string
+					cold bool
+					idle int64
+				}{"cold", true, 10 * 60 * 1000})
+			}
+			for _, tc := range phases {
 				next := deepCandidates(4)
 				want := make([]string, len(next.Input))
 				for i := range next.Input {
@@ -199,15 +260,18 @@ func TestAHeldAnswerChangesNoRequest(t *testing.T) {
 				}
 				for i := range next.Input {
 					if schema.MessageText(next.Input[i]) != want[i] {
-						t.Fatalf("%s request: message %d changed. A held answer must not change any request in this PR", tc.name, i)
+						t.Fatalf("%s request: message %d changed", tc.name, i)
 					}
 				}
 			}
-			// And nothing was written where the replay looks.
+			// And nothing was written where a replay looks.
 			for i := 1; i <= 4; i++ {
 				ck := contentKey(schema.MessageText(req.Input[i]))
 				if _, hit := st.Get(resultKey("held-"+name, ck)); hit {
-					t.Fatalf("output %d has a cg:res: record: the same-session replay would apply it", i)
+					t.Fatalf("output %d has a cg:res: record", i)
+				}
+				if _, hit := getDrop(st, key, ck); hit {
+					t.Fatalf("output %d has a drop record before any cold apply", i)
 				}
 			}
 		})
@@ -545,25 +609,28 @@ func (c *coverAsker) CoversSpan(_ string, count int, _ string) bool {
 	return false
 }
 
-// ⭐ Until PR C, the ping stays plain unless shadow mode is on: a held answer is used by nothing, so
-// asking would only cost money. The reason is counted as sweep_ask_needs_shadow.
-func TestWithShadowOffThePingStaysPlain(t *testing.T) {
+// ⭐ POINT 5 (PR C): the shadow-only gate is gone. With shadow OFF, as shipped, the ping asks and holds.
+func TestTheSweepAsksAtThePingWithShadowOff(t *testing.T) {
 	c, err := newExtractSweep([]byte("min_tokens: 2000\n")) // as shipped: shadow off
 	if err != nil {
 		t.Fatal(err)
 	}
 	e := c.(*ExtractSweep)
+	if e.shadow {
+		t.Fatal("fixture: shadow is on")
+	}
 	asker := pingAsker()
-	key, _ := registered(t, e, "needs-shadow", asker, newMemStore(), deepCandidates(3))
-	before := SweepPingCounters().NeedsShadow
-	if _, _, reason, ok := SweepPingSubstitute(key); ok || reason != SweepReasonNeedsShadow {
-		t.Fatalf("ok=%v reason=%q, want ask_needs_shadow", ok, reason)
+	st := newMemStore()
+	key, _ := registered(t, e, "no-shadow-gate", asker, st, deepCandidates(3))
+	dispatch, _, reason, ok := SweepPingSubstitute(key)
+	if !ok {
+		t.Fatalf("no question offered with shadow off: %s", reason)
 	}
-	if SweepPingCounters().NeedsShadow-before != 1 {
-		t.Error("sweep_ask_needs_shadow was not counted")
+	if res := dispatch(time.Second, SweepPingWait{}); !res.Held || res.Proposed != 3 {
+		t.Fatalf("result = %+v, want a held answer proposing 3 drops", res)
 	}
-	if asker.calls != 0 {
-		t.Errorf("asked %d times with shadow off", asker.calls)
+	if _, ok := getHeld(st, key); !ok {
+		t.Fatal("nothing held")
 	}
 }
 
@@ -918,7 +985,7 @@ func TestAConcurrencyRefusalIsCounted(t *testing.T) {
 // Review round 1, non-blocking: the shadow report happens once per held answer even when two requests
 // of the thread arrive together.
 func TestTheShadowAskIsReportedOnceUnderConcurrentRequests(t *testing.T) {
-	e := shippedSweep(t, "")
+	e := shippedSweep(t, "shadow: true\n")
 	st := newMemStore()
 	key, _ := registered(t, e, "report-once", pingAsker(), st, deepCandidates(3))
 	dispatch, _, _, _ := SweepPingSubstitute(key)
@@ -964,7 +1031,7 @@ func (s *slowGetStore) Get(k string) ([]byte, bool) {
 // The cold recheck is reported once too: two cold requests of one thread arriving together do not both
 // report it. The claim that consumes the answer is atomic.
 func TestTheColdRecheckIsReportedOnceUnderConcurrentRequests(t *testing.T) {
-	e := shippedSweep(t, "")
+	e := shippedSweep(t, "shadow: true\n")
 	st := newMemStore()
 	key, _ := registered(t, e, "recheck-once", pingAsker(), st, deepCandidates(3))
 	dispatch, _, _, _ := SweepPingSubstitute(key)

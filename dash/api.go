@@ -1719,6 +1719,15 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 					applySummarizeLedgerToRow(c, ls[c.Component])
 				}
 			}
+			// The sweep's expands come off its credit, and its answer cost and false-drop rate sit
+			// beside it (#404 PR C).
+			if sl, err := db.SweepLedgerFor(db.readCtx(), f, a.pricer); err != nil {
+				slog.Warn("context-guru: sweep ledger failed; the sweep reads its stored credit", "err", err)
+			} else {
+				for _, c := range rows {
+					ApplySweepLedgerToRow(c, sl)
+				}
+			}
 			// Every other replaying component, capped at the counterfactual client compaction.
 			<-repDone
 			if repErr != nil {

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
@@ -36,11 +37,13 @@ import (
 // decisionPrefixes are the namespaces whose contents assert that a removal HAPPENED. A write to
 // any of them for a removal that was refused is the defect above.
 var decisionPrefixes = []string{
-	store.ResultPrefix,  // cg:res:  extract_llm / sweep replayed decision
-	store.XResultPrefix, // cg:xres: the cross-session copy
-	store.FrozenPrefix,  // cg:frz:  mask / collapse / skeleton / ... freeze
-	"cg:own:",           // stash ownership — asserts a payload of ours is in the store
-	"cg:sum:",           // summarize's checkpoint
+	store.ResultPrefix,      // cg:res:  extract_llm / sweep replayed decision
+	store.XResultPrefix,     // cg:xres: the cross-session copy
+	store.FrozenPrefix,      // cg:frz:  mask / collapse / skeleton / ... freeze
+	"cg:own:",               // stash ownership — asserts a payload of ours is in the store
+	"cg:sum:",               // summarize's checkpoint
+	store.SweepDropPrefix,   // cg:swd: the sweep's applied-drop record and its per-thread index
+	store.SweepExpandPrefix, // cg:swx: marker id -> drop record, for charging an expand to the sweep
 }
 
 // spyStore refuses every rewind payload and records every other write, so a test can ask "what
@@ -112,9 +115,6 @@ type gateCase struct {
 // TestEveryOffloadComponentIsHeldToTheCommitGate — which is the point: the invariant's whole
 // weakness is the caller nobody thought about.
 var gateExempt = map[string]string{
-	"extract_llm_sweep": "no longer removes anything in a request (#404): it asks at the keep-alive ping and " +
-		"holds the answer under cg:swh:, which nothing replays. The cold apply (PR C) will make it a " +
-		"remover again and must add its case here",
 	"failed_run": "needs a superseded failed RUN (a later successful invocation of the same " +
 		"command) to have anything to collapse; the shape is covered by mask, which shares " +
 		"its commit path verbatim — tryMark, commitMark, SetMessageText, freeze",
@@ -229,6 +229,22 @@ func gateCases() []gateCase {
 				userMsg("summarize the worker log"), toolResultMsg(body),
 			}}
 			return e, req, pricedCtx("gate-table", st, model)
+		}},
+		{"extract_llm_sweep", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
+			// The cold apply (#404 PR C) makes the sweep a remover again. Driven to the commit gate: a
+			// held answer is seeded through the real ping path, then a COLD request applies it. Seeded
+			// into whichever store the case is given, so the saturated run holds the same answer and
+			// is refused at the payload, not at the question.
+			resetSweepLedgerForTest()
+			t.Cleanup(resetSweepLedgerForTest)
+			e := newSweepSmall(t, "")
+			key, _ := registered(t, e, "gate-sweep", pingAsker(), st, applyConv(2, 0))
+			dispatch, _, reason, ok := SweepPingSubstitute(key)
+			if !ok {
+				t.Fatalf("no question offered: %s", reason)
+			}
+			dispatch(time.Second, SweepPingWait{})
+			return e, applyConv(2, 1), coldCtx("gate-sweep", st)
 		}},
 		{"cmdfilter", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
 			c, err := newCmdfilter([]byte("min_size: 1\n"))

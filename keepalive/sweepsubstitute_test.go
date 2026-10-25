@@ -1,9 +1,11 @@
 package keepalive
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -11,9 +13,11 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
@@ -309,7 +313,9 @@ func TestKeepAliveWithZeroCandidatesSendsAPlainPing(t *testing.T) {
 	asker := &sweepAsker{cacheRead: 48576}
 	small := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&small, "hello")
-	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small, sweepToolMsg("toolu_s", "tiny output")})
+	// A big output that is already a marker: it registers, and offers nothing.
+	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small,
+		sweepToolMsg("toolu_s", strings.Repeat("a spent line\n", 900)+expand.Marker("abcdef0"))})
 	before := k.Stats().SweepNoInventory
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
@@ -488,7 +494,8 @@ func TestAClaimedPingFreesTheThreadAndTheSlotOnEveryExit(t *testing.T) {
 	asker := &sweepAsker{cacheRead: 48576}
 	small := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&small, "hello")
-	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small, sweepToolMsg("toolu_s", "tiny")})
+	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small,
+		sweepToolMsg("toolu_s", strings.Repeat("a spent line\n", 900)+expand.Marker("abcdef0"))})
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second)) // declines: no inventory, ordinary ping
 	waitPings(t, k, 1)
@@ -531,4 +538,227 @@ func TestWhenTheSummaryDeclinesTheSweepStillDoesNotAskAndAPlainPingGoesOut(t *te
 	if got := k.Stats().SweepSummaryOwnedPing - before; got != 1 {
 		t.Errorf("sweep_summary_owned_ping rose by %d, want 1", got)
 	}
+}
+
+// ⭐ C5 (#404 point 15). After a cold apply, the next ping carries the FORWARDED body.
+//
+// The keeper records the bytes that went upstream, so when a cold request is forwarded with its drops
+// applied, the entry it holds is the dropped form, and the ping that follows reads THAT prefix. The wasted
+// ping of the issue's finding 6 read the conversation the sweep had just abandoned ($0.08). The test
+// feeds the keeper two requests: one with the original output, then a cold one whose forwarded body is
+// the dropped form. The ping body must be the second, byte for byte, and must not carry the abandoned
+// output.
+func TestC5AfterAColdApplyTheNextPingCarriesTheForwardedBody(t *testing.T) {
+	k, fs, clock := testKeeper(t)
+	const big = "ORIGINAL-OUTPUT-THE-SWEEP-DROPPED"
+	before := `{"model":"aws/claude-sonnet-5","max_tokens":32000,"stream":true,` +
+		`"system":[{"type":"text","text":"you are claude code","cache_control":{"type":"ephemeral"}}],` +
+		`"messages":[{"role":"user","content":"fix it"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"` + big + `"}]},` +
+		`{"role":"assistant","content":"done","cache_control":{"type":"ephemeral"}}]}`
+	forwarded := `{"model":"aws/claude-sonnet-5","max_tokens":32000,"stream":true,` +
+		`"system":[{"type":"text","text":"you are claude code","cache_control":{"type":"ephemeral"}}],` +
+		`"messages":[{"role":"user","content":"fix it"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"[context-guru removed a spent tool output]\n<<cg:abc123>>"}]},` +
+		`{"role":"assistant","content":"done","cache_control":{"type":"ephemeral"}}]}`
+	pol := kaPolicy()
+	pol.MinPrefixTokens = 0
+	at := clock.now()
+	rec(k, pol, sess1, at.Add(-time.Second), before, http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+	rec(k, pol, sess1, at, before, http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+	// The cold request: forwarded with the drops applied. The keeper is handed the forwarded bytes.
+	at2 := at.Add(10 * time.Minute)
+	clock.advance(10 * time.Minute)
+	rec(k, pol, sess1, at2, forwarded, http.StatusOK, Usage{CacheWrite: 30000}, true)
+
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	if fs.n() != 1 {
+		t.Fatalf("sent %d pings, want 1", fs.n())
+	}
+	fs.mu.Lock()
+	sent := append([]byte(nil), fs.sent[0].Body...)
+	fs.mu.Unlock()
+	if strings.Contains(string(sent), big) {
+		t.Fatal("the ping carries the output the sweep dropped: it re-read the prefix the cold request abandoned")
+	}
+	if !strings.Contains(string(sent), "<<cg:abc123>>") {
+		t.Fatalf("the ping does not carry the forwarded (dropped) form:\n%s", sent)
+	}
+	// Byte for byte the forwarded messages: only max_tokens and stream differ, as for any ping.
+	if got, want := gjson.GetBytes(sent, "messages").Raw, gjson.Get(forwarded, "messages").Raw; got != want {
+		t.Errorf("ping messages differ from the forwarded body:\n got %s\nwant %s", got, want)
+	}
+}
+
+// ⭐ M1 (keeper half, #404 point 9). The answer cost is booked ONCE, on the ping row the question
+// replaced, and it is the OUTPUT (thinking included) plus the question's own fresh input: never the
+// cache read, which the plain ping would have made anyway. An ordinary ping carries none.
+func TestTheAnswerCostIsBookedOnceOnThePingRowTheQuestionReplaced(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	price := modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}
+	fd.setPrices(proxyPricer{fixedPrice{price}})
+	sink := &reportSink{}
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	registerSweep(t, st, &sweepAsker{cacheRead: 48576}, "claude-sonnet-5", sweepConversation(3))
+	recordWithSink(k, sink, sess1, clock.now())
+	// The registration is for "sess-1" with no thread: sess1's session id is the same.
+	k.Sweep(clock.advance(281 * time.Second))
+	waitSweepOutcome(t, k, fd)
+	if k.sweepSubstituted.Load() != 1 {
+		t.Fatalf("the question did not replace the ping (ordinary pings %d)", fd.n())
+	}
+	reps := sink.all()
+	var onPing []components.KeepAliveReport
+	for _, r := range reps {
+		if r.Pings > 0 || r.SweepAnswerUSD > 0 {
+			onPing = append(onPing, r)
+		}
+	}
+	var withAnswer int
+	var r components.KeepAliveReport
+	for _, x := range onPing {
+		if x.SweepAnswerUSD > 0 {
+			withAnswer++
+			r = x
+		}
+	}
+	if withAnswer != 1 {
+		t.Fatalf("%d ping rows carry the answer cost, want exactly 1 (reports: %+v)", withAnswer, onPing)
+	}
+	// sweepAsker's usage: Fresh 600, Output 300, CacheRead 48576.
+	wantAnswer := 600*price.Input + 300*price.Output
+	if math.Abs(r.SweepAnswerUSD-wantAnswer) > 1e-12 {
+		t.Errorf("answer cost = %v, want output + fresh = %v (NOT including the cache read)", r.SweepAnswerUSD, wantAnswer)
+	}
+	// The row's own cost is the whole call: the read PLUS the answer. The answer is part of it.
+	wantRow := wantAnswer + 48576*price.CacheRead
+	if math.Abs(r.CostUSD-wantRow) > 1e-9 {
+		t.Errorf("ping row cost = %v, want the read + the answer = %v", r.CostUSD, wantRow)
+	}
+	if r.SweepAnswerUSD >= r.CostUSD {
+		t.Errorf("the answer (%v) is the whole row (%v): the read the ping pays anyway was lost", r.SweepAnswerUSD, r.CostUSD)
+	}
+}
+
+// A plain ping, and a summary-substituted ping, carry NO sweep answer cost.
+func TestAnOrdinaryPingCarriesNoSweepAnswerCost(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}}})
+	sink := &reportSink{}
+	recordWithSink(k, sink, sess1, clock.now())
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	for _, r := range sink.all() {
+		if r.SweepAnswerUSD != 0 {
+			t.Errorf("an ordinary ping carries a sweep answer cost of %v", r.SweepAnswerUSD)
+		}
+	}
+}
+
+// ⭐ #712 with the sweep (a). A ping the sweep's question replaced uses NO output-budget step, so the next
+// plain ping on the thread is not identical to the last plain ping before it. The question is the "a
+// substitute took it" case #712 names.
+func TestAPingTheSweepQuestionReplacedUsesNoStep(t *testing.T) {
+	k, fs, clock := testKeeper(t)
+	pol := kaPolicy()
+	pol.MaxPings = pingVary + 4
+	pol.MinPrefixTokens = 0
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
+	recordOne(t, k, pol, kaBody, clock.now())
+	key := thread.Key("sess-1", "")
+	k.mu.Lock()
+	before, had := k.lastVary[sess1.id()]
+	k.mu.Unlock()
+	if had {
+		t.Fatalf("fixture: a step already exists (%d)", before)
+	}
+	k.Sweep(clock.advance(281 * time.Second)) // the question takes the ping
+	waitSweepOutcome(t, k, fs)
+	if k.sweepSubstituted.Load() != 1 || fs.n() != 0 {
+		t.Fatalf("the question did not replace the ping (substituted %d, plain %d)", k.sweepSubstituted.Load(), fs.n())
+	}
+	k.mu.Lock()
+	_, used := k.lastVary[sess1.id()]
+	k.mu.Unlock()
+	if used {
+		t.Fatal("the substituted ping used up an output-budget step")
+	}
+	// Two plain pings follow (the question is spent: asked once per idle period). They must differ.
+	_ = key
+	k.Sweep(clock.advance(281 * time.Second))
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 3)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if len(fs.sent) < 2 {
+		t.Fatalf("sent %d plain pings, want 2", len(fs.sent))
+	}
+	if bytes.Equal(fs.sent[0].Body, fs.sent[1].Body) {
+		t.Error("two consecutive plain pings after a substituted one are byte-identical")
+	}
+}
+
+// (b) A failed question is not a transport failure of a PING, so #710's give-back does not apply to it
+// (and must not be set by it): the ordinary ping goes out in the same cycle, which is the retry. Whether
+// the question may ask again follows #508's rule: a call that never left the process (no tokens billed)
+// reopens the ask for the next ping, because it cost nothing; a call that billed anything stays asked,
+// so a question that cost money cannot be paid for twice in one idle period.
+func TestAFailedSweepQuestionFallsToAPlainPingAndAsksOnceWhenItBilled(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		billed    bool
+		wantAsked int64
+	}{{"errored before billing: may ask again", false, 2}, {"billed then failed to parse: asks once", true, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, _, clock := testKeeper(t)
+			pol := kaPolicy()
+			pol.MinPrefixTokens = 0
+			st := store.NewMemory(store.Options{MaxEntries: 400})
+			var asker components.PrefixAsker
+			sa := &sweepAsker{cacheRead: 48576, err: errors.New("upstream 500")}
+			asker = sa
+			var ba *unparseableAsker
+			if tc.billed {
+				ba = &unparseableAsker{}
+				asker = ba
+			}
+			registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
+			recordOne(t, k, pol, kaBody, clock.now())
+			k.Sweep(clock.advance(281 * time.Second))
+			waitPings(t, k, 1)
+			k.Sweep(clock.advance(281 * time.Second))
+			waitPings(t, k, 2)
+			calls := sa.calls.Load()
+			if ba != nil {
+				calls = ba.calls.Load()
+			}
+			if calls != tc.wantAsked {
+				t.Errorf("the question was asked %d times over two pings, want %d", calls, tc.wantAsked)
+			}
+			k.mu.Lock()
+			retried := sess1Entry(k).retried
+			k.mu.Unlock()
+			if retried {
+				t.Error("a failed QUESTION set the transport-retry flag: #710 retries a failed ping, not a question")
+			}
+		})
+	}
+}
+
+// unparseableAsker bills tokens and returns text that is not a verdict.
+type unparseableAsker struct{ calls atomic.Int64 }
+
+func (a *unparseableAsker) Ask(context.Context, string, string) (string, components.PrefixUsage, error) {
+	a.calls.Add(1)
+	return "I cannot answer that.", components.PrefixUsage{CacheRead: 48576, Fresh: 600, Output: 300}, nil
+}
+
+func sess1Entry(k *Keeper) *kaEntry {
+	for _, e := range k.live {
+		return e
+	}
+	return &kaEntry{}
 }

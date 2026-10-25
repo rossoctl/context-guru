@@ -245,10 +245,6 @@ func TestHousellmSweepActuallyFires(t *testing.T) {
 	if strings.Contains(block, "shadow") {
 		t.Fatalf("the housellm preset sets shadow mode:\n%s", block)
 	}
-	// Until the cold apply exists (PR C of #404) the shipped preset registers but does not ASK: a held
-	// answer would be used by nothing. Shadow mode is what turns the ping into a question, so this
-	// guard adds it to the preset's own block.
-	off := newComp(t, "extract_llm_sweep", block+"\nshadow: true\n")
 	shipped := newComp(t, "extract_llm_sweep", block)
 	// ~1,500 tokens of the noise the sweep is meant to remove.
 	body := `[`
@@ -275,23 +271,13 @@ func TestHousellmSweepActuallyFires(t *testing.T) {
 		IdleMs: 20 * 1000, CacheTTLMs: 5 * 60 * 1000, PrefixAsk: asker,
 		CanKeepAlive: func() bool { return true }}
 	var rep components.Report
-	if _, err := off.Offload(req, &rep, c); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := shipped.Offload(req, &components.Report{}, c); err != nil {
+	if _, err := shipped.Offload(req, &rep, c); err != nil {
 		t.Fatal(err)
 	}
 	if asker.calls != 0 {
 		t.Fatalf("the request asked %d times; the question belongs to the keep-alive ping", asker.calls)
 	}
 	t.Cleanup(func() { offload.ClearKeepAliveCandidate("prexp1") })
-	// (`shipped` registered last, with shadow off.) The ping is plain until PR C.
-	if _, _, reason, ok := offload.SweepPingSubstitute("prexp1"); ok || reason != offload.SweepReasonNeedsShadow {
-		t.Fatalf("the shipped preset's ping: ok=%v reason=%q, want ask_needs_shadow", ok, reason)
-	}
-	if _, err := off.Offload(req, &rep, c); err != nil {
-		t.Fatal(err)
-	}
 	dispatch, info, reason, ok := offload.SweepPingSubstitute("prexp1")
 	if !ok {
 		t.Fatalf("the housellm preset registered nothing for the ping (%s) with a ~1.5k-token "+

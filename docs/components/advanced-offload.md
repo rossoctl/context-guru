@@ -19,9 +19,8 @@ sent **in place of the keep-alive ping**, and the answer is **held**. On the nex
 after the cache has expired, the held outputs are removed, leaving a short shape descriptor plus a
 resolvable `<<cg:HASH>>` marker. It never rewrites anything.
 
-> **What ships in which PR (#404).** The question at the ping, the held answer, the recheck and shadow
-> mode are built. **Applying a held answer on a cold request is not**: until it is, a held answer
-> changes no request, and `shadow: true` is how to see what it would have done.
+> **It is on in `xhigh`** (#404). The sweep asks at the ping and applies on the next cold request
+> whenever it is enabled. `shadow: true` still turns it into a measurement that applies nothing.
 
 ### Why it is separate from `extract_llm`
 
@@ -196,13 +195,24 @@ So the two halves happen at different moments:
    it has material.
 2. **Ask whenever there is at least one candidate.** No economic gate and no minimum of ten
    (`min_inventory` defaults to 1).
-3. **Hold the answer**, per thread, in the store (`cg:swh:` namespace, pinned). A held answer is never
-   replayed by the same-session replay (that reads `cg:res:`), so **it changes no request in this PR**.
+3. **Hold the answer**, per thread, in the store (`cg:swh:` namespace, pinned). While the cache is warm a
+   held answer changes **no request**. Only `extract_llm` writes `cg:res:` now; the sweep keeps its own
+   records (`cg:swd:`), so nothing replays a verdict before a cold request applies it.
 4. **Recheck before use.** For each judged output the answer keeps its `tool_use_id` and a content hash of
    the message as the agent sent it. A verdict is dropped when the conversation is shorter than when it
    was judged (`conversation_shorter`), the output is gone (`output_gone`) or its bytes changed
    (`content_changed`), a later turn referenced it (`referenced_later`, from the co-reference index), or
    the agent expanded it (`expanded`).
+5. **Apply on the next cold request** of the thread. The valid drops are replaced by a shape descriptor and
+   a `<<cg:HASH>>` marker, and the original is stashed, so `expand` returns it byte for byte. Each drop
+   writes a record, and every later request of the thread **replays** the same bytes, so the prefix the
+   cold request wrote stays byte-stable. A warm request with an unchanged conversation never changes.
+6. **A changed prefix** (a rewind, an edited turn, a fork) is cold from the change point on. Only the held
+   drops **after** the first changed message are applied; the ones before it stay held. They are counted
+   apart (`sweep_applied_changed_prefix`).
+7. **Fail open.** A store that cannot hold an original refuses that drop and leaves the output in full. A
+   panic anywhere in the apply restores every message it touched, writes no record, and forwards the
+   request unchanged (`sweep_apply_panic`).
 
 The old time window (`pre_expiry_seconds`: ask when `0 < remaining <= window`) is **removed** and the key
 is ignored with a warning. It fired on 7 of about 4,170 requests, and when it fired the cache was still
@@ -215,8 +225,8 @@ the cached prefix. When the conversation carries one, the keeper sends an ordina
 
 #### Shadow mode
 
-`shadow: true` (off by default, in no preset) asks, holds and rechecks exactly as above and still changes
-nothing. On the first request after the ping it reports the ask; on the first **cold** request it runs
+`shadow: true` (off by default, in no preset) asks, holds and rechecks exactly as above, and **applies
+nothing, on any request**. On the first request after the ping it reports the ask; on the first **cold** request it runs
 the recheck and reports what it would drop:
 
 | event | meaning |
@@ -525,8 +535,32 @@ At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `
 `keepalive_sweep_over_budget`, and `sweep_gates`: the adjudication's own gate and event names
 (`sweep_kept`, `sweep_unparseable`, ...) summed over ping-time questions.
 
-In a request: `sweep_offered`, `sweep_adjudicated`, `sweep_dropped`, `sweep_kept`,
-`sweep_drop_refused_obligation`, `sweep_quote_fabricated`, `sweep_criterion_missing`.
+In a request: `sweep_applied_cold`, `sweep_applied_changed_prefix`, `sweep_apply_declined`,
+`sweep_apply_panic`, `sweep_apply_dropped_<reason>` (the recheck's reasons), `sweep_false_ref`.
+
+### Is it dropping things the agent needs? (the false-drop rate)
+
+There is no production shadow phase before `xhigh`, so every drop is watched from day one. A drop is
+**false** when a later turn needed it:
+
+- the agent **expanded** the marker (`sweep_expands`, `sweep_expand_tokens`: charged to the sweep and taken
+  off its saving), or
+- a later turn **used something the dropped output introduced**, without expanding it
+  (`sweep_false_ref`, `referenced_later`).
+
+A drop that is both counts once. `false_drops / applied` is the **false-drop rate**, per thread and overall:
+in `/stats` under `keepalive.sweep_drops` (threads under a hash label, never a session id), and on the
+Components tab beside the sweep's row. If it is high, pull the sweep from `xhigh`. Everything behind it is
+ids, hashes and counts. No output text is stored to compute it.
+
+### The money
+
+- **On the cold request** the credit is the removed tokens at the cache-write rate (1.25 x the input price).
+- **On each later request** of the thread it is the removed tokens at the rate that request paid.
+- **The expands of sweep markers come off the credit**, at the write rate.
+- **The answer cost** (thinking tokens included) is booked **once**, on the ping row the question replaced,
+  as the summary's call is. It sits in its own column (`sweep_answer_usd`), beside the credit, and is not
+  taken off the credit a second time: the component's net already carries it as model spend.
 
 The two to **alert** on:
 

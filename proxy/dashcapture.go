@@ -9,6 +9,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
@@ -43,6 +44,11 @@ type capture struct {
 	status    int
 	expands   int
 	expandTok int
+	// The expands that restored a sweep marker, and what they returned. A subset of the two above.
+	sweepExpands   int
+	sweepExpandTok int
+	// sweepFalseExp counts first expands of a sweep drop that no earlier signal had already counted.
+	sweepFalseExp int
 	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
 	sseTTFBMs   float64
 	sseBuffered bool
@@ -390,6 +396,21 @@ func (c *capture) noteExpand(tokens int) {
 	}
 }
 
+// noteSweepExpand records that an expand call restored a sweep marker, so the dashboard can charge
+// it to the sweep (#404 point 7). It is in addition to noteExpand, which still counts the expand in
+// the totals. note.First is true only for the first expand of a drop, so a stale tool error repaired
+// on every later turn is one false drop and not many.
+func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
+	if c == nil || !note.Sweep {
+		return
+	}
+	c.sweepExpands++
+	c.sweepExpandTok += tokens
+	if note.First && !note.Overlap {
+		c.sweepFalseExp++
+	}
+}
+
 // finish builds the event and hands it off. Called once, after the response has
 // been written, so nothing here is on the client's critical path. usage may be
 // zero-valued with ok=false, in which case the row is marked partial and left
@@ -492,6 +513,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
+	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 	e.CacheWrite1h = usage.CacheWrite1h

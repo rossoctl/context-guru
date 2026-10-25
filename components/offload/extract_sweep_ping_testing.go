@@ -19,7 +19,7 @@ import (
 func RegisterSweepPingForTest(session, threadID string, st store.Store, asker components.PrefixAsker,
 	model string, msgs []bschemas.ChatMessage, cfgYAML string) error {
 
-	built, err := newExtractSweep([]byte("shadow: true\n" + cfgYAML)) // the ping asks only in shadow mode until PR C
+	built, err := newExtractSweep([]byte(cfgYAML))
 	if err != nil {
 		return err
 	}

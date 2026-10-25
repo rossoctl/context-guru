@@ -42,7 +42,7 @@
 // them cost a measured 946 bytes at the head of the cacheable prefix of every preset including `off`,
 // the control arm of every published comparison here, and including presets with no sweep at all.
 //
-// This does not replace the text path. extract.ParseVerdicts and extract.BuildFallbackAsk are still
+// This does not replace the text path. extract.ParseVerdicts is still
 // the fallback, and a model that answers in prose anyway is still read exactly as before; the tool
 // only changes which reply shape is PREFERRED.
 package adjudicate

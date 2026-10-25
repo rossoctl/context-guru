@@ -290,9 +290,8 @@ func TestKeepAliveMaxPings1hIsCapped(t *testing.T) {
 	}
 }
 
-// In 0.5.3 xhigh is the same as high (#652): the sweep is off until #508 lands. The name still
-// loads, so a stored config that names it keeps working.
-func TestXHighPresetHasNoSweepAndEqualsHigh(t *testing.T) {
+// xhigh is high plus the sweep (#404 PR C). The other presets do not carry it.
+func TestXHighPresetIsHighPlusTheSweep(t *testing.T) {
 	load := func(name string) *Config {
 		t.Helper()
 		c, err := LoadBytes([]byte("preset: " + name + "\n"))
@@ -304,25 +303,45 @@ func TestXHighPresetHasNoSweepAndEqualsHigh(t *testing.T) {
 		}
 		return c
 	}
-	xhigh, high := load("xhigh"), load("high")
-	for _, name := range xhigh.Pipeline {
-		if name == "extract_llm_sweep" {
-			t.Fatalf("xhigh still runs extract_llm_sweep: %v", xhigh.Pipeline)
+	has := func(c *Config) bool {
+		for _, n := range c.Pipeline {
+			if n == "extract_llm_sweep" {
+				return true
+			}
+		}
+		return false
+	}
+	xhigh := load("xhigh")
+	if !has(xhigh) {
+		t.Fatalf("xhigh does not run extract_llm_sweep: %v", xhigh.Pipeline)
+	}
+	if _, ok := xhigh.Components["extract_llm_sweep"]; !ok {
+		t.Error("xhigh carries no extract_llm_sweep config block")
+	}
+	var blk map[string]any
+	if n := xhigh.Components["extract_llm_sweep"]; n.Decode(&blk) == nil && blk["shadow"] != nil {
+		t.Errorf("xhigh turns shadow mode on: %v", blk)
+	}
+	// High with the sweep spliced in after extract_llm is exactly xhigh's pipeline.
+	high := load("high")
+	var want []string
+	for _, n := range high.Pipeline {
+		want = append(want, n)
+		if n == "extract_llm" {
+			want = append(want, "extract_llm_sweep")
 		}
 	}
-	if !reflect.DeepEqual(xhigh.Pipeline, high.Pipeline) {
-		t.Errorf("xhigh pipeline = %v, want the same as high: %v", xhigh.Pipeline, high.Pipeline)
+	if !reflect.DeepEqual(xhigh.Pipeline, want) {
+		t.Errorf("xhigh pipeline = %v, want high + the sweep after extract_llm: %v", xhigh.Pipeline, want)
 	}
-	if _, ok := xhigh.Components["extract_llm_sweep"]; ok {
-		t.Error("xhigh still carries an extract_llm_sweep config block")
+	// No other tier carries the sweep.
+	for _, name := range []string{"conservative", "medium", "high"} {
+		if has(load(name)) {
+			t.Errorf("%s runs the sweep: the user decided only xhigh does", name)
+		}
 	}
-	// The short preset list (PresetPipeline) must agree with the full config.
 	list, ok := PresetPipeline("xhigh")
-	if !ok {
-		t.Fatal("xhigh is not in the preset list")
-	}
-	highList, _ := PresetPipeline("high")
-	if !reflect.DeepEqual(list, highList) {
-		t.Errorf("xhigh preset list = %v, want the same as high: %v", list, highList)
+	if !ok || !reflect.DeepEqual(list, want) {
+		t.Errorf("xhigh preset list = %v (ok=%v), want %v", list, ok, want)
 	}
 }

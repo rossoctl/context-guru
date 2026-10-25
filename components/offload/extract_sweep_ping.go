@@ -66,10 +66,6 @@ const (
 	SweepReasonConcurrencyFull SweepPingReason = "concurrency_full"
 	// SweepReasonNoAsker: the route has no prefix asker.
 	SweepReasonNoAsker SweepPingReason = "no_asker"
-	// SweepReasonNeedsShadow: sweep_ask_needs_shadow. Until the cold apply exists (PR C of #404) a held
-	// answer is used by nothing, so asking would only cost money. The ping stays plain unless shadow
-	// mode is on, where the answer is at least measured.
-	SweepReasonNeedsShadow SweepPingReason = "ask_needs_shadow"
 	// SweepReasonPanic: the question panicked and was recovered. The ping stays plain, and the
 	// conversation is marked asked so the next ping is plain too.
 	SweepReasonPanic SweepPingReason = "panic"
@@ -122,7 +118,6 @@ var (
 	sweepPingAlreadyAsked  atomic.Int64
 	sweepPingNoCandidate   atomic.Int64
 	sweepPingHoldNoToolID  atomic.Int64
-	sweepPingNeedsShadow   atomic.Int64
 	sweepPingPanics        atomic.Int64
 	sweepPingConcurrency   atomic.Int64
 	sweepPingNotRegistered atomic.Int64
@@ -143,9 +138,6 @@ type SweepPingStats struct {
 	// HoldNoToolID counts judged outputs that could not be held because the agent's request has no
 	// tool id for them.
 	HoldNoToolID int64
-	// NeedsShadow is sweep_ask_needs_shadow: pings sent plain because shadow mode is off and no cold
-	// apply exists yet to use the answer.
-	NeedsShadow int64
 	// ConcurrencyFull is sweep_concurrency_full: questions refused because every slot was busy. The
 	// ping stays plain. NotRegistered counts requests that kept no conversation copy because the
 	// keep-alive cannot ping their thread.
@@ -186,7 +178,7 @@ func SweepPingCounters() SweepPingStats {
 	return SweepPingStats{RetiredKeys: rk, Asked: sweepPingAsked.Load(), Held: sweepPingHeld.Load(),
 		Failed: sweepPingFailed.Load(), ModelDeclined: sweepPingModelDeclined.Load(),
 		NoInventory: sweepPingNoInventory.Load(), AlreadyAsked: sweepPingAlreadyAsked.Load(),
-		NoCandidate: sweepPingNoCandidate.Load(), HoldNoToolID: sweepPingHoldNoToolID.Load(), NeedsShadow: sweepPingNeedsShadow.Load(),
+		NoCandidate: sweepPingNoCandidate.Load(), HoldNoToolID: sweepPingHoldNoToolID.Load(),
 		SummaryOwnedPing: sweepSummaryOwnedPing.Load(), SummaryInFlight: sweepSummaryInFlight.Load(), ThreadBusy: sweepPingThreadBusy.Load(),
 		ConcurrencyFull: sweepPingConcurrency.Load(), NotRegistered: sweepPingNotRegistered.Load(), Panics: sweepPingPanics.Load(), Gates: g}
 }
@@ -255,6 +247,15 @@ func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChat
 		sweepPingNotRegistered.Add(1)
 		return
 	}
+	// BOUND (#508 review D). The registration keeps a copy of the whole conversation for up to
+	// maxSweepPingAge, so a thread that cannot have a candidate must not keep one. A tool output is a
+	// candidate only at or above the floor, and a text's token count never exceeds its byte count, so
+	// a conversation with no tool output of minTokens BYTES holds no candidate. The scan reads
+	// lengths only.
+	if !e.mayHaveCandidate(req.Input) {
+		clearSweepPing(thread.Key(c.Session, c.Thread))
+		return
+	}
 	baseCtx := c.Ctx
 	if baseCtx == nil {
 		baseCtx = context.Background()
@@ -285,13 +286,29 @@ func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChat
 	key := thread.Key(c.Session, c.Thread)
 	sweepPingMu.Lock()
 	defer sweepPingMu.Unlock()
+	// Pruned on EVERY registration, not only at the cap: an idle thread's copy goes after
+	// maxSweepPingAge however few threads there are. The scan is over at most maxSweepPingCandidates
+	// entries and takes only a timestamp from each.
+	pruneSweepPingLocked(cand.registeredAt)
 	if _, exists := sweepPingCand[key]; !exists && len(sweepPingCand) >= maxSweepPingCandidates {
-		pruneSweepPingLocked(cand.registeredAt)
-		if len(sweepPingCand) >= maxSweepPingCandidates {
-			return // fail toward not remembering a new thread; its pings stay pings
-		}
+		return // fail toward not remembering a new thread; its pings stay pings
 	}
 	sweepPingCand[key] = cand
+}
+
+// mayHaveCandidate is the cheap test registerPing runs before it copies a conversation: is there any
+// tool output of at least the floor in BYTES? Token counts never exceed byte counts, so a conversation
+// that fails this holds no candidate and a registration would only pin memory.
+func (e *ExtractSweep) mayHaveCandidate(msgs []bschemas.ChatMessage) bool {
+	for i := range msgs {
+		if msgs[i].Role != bschemas.ChatMessageRoleTool {
+			continue
+		}
+		if len(schema.MessageText(msgs[i])) >= e.minTokens {
+			return true
+		}
+	}
+	return false
 }
 
 func pruneSweepPingLocked(now time.Time) {
@@ -360,12 +377,6 @@ func SweepPingSubstitute(threadKey string) (dispatch func(timeout time.Duration,
 	if cand == nil {
 		sweepPingNoCandidate.Add(1)
 		return nil, SweepPingInfo{}, SweepReasonNoCandidate, false
-	}
-	// TODO(#404, PR C): remove this check. It exists only because, until the cold apply lands, a held
-	// answer changes no request, so every answer would be paid for and unused. PR C removes it.
-	if !cand.e.shadow {
-		sweepPingNeedsShadow.Add(1)
-		return nil, SweepPingInfo{}, SweepReasonNeedsShadow, false
 	}
 	if cand.asked.Load() {
 		sweepPingAlreadyAsked.Add(1)
@@ -466,9 +477,10 @@ func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 			rep.Gate(GateKeptVerbatim)
 			continue
 		}
-		// A decision already stored for these bytes is replayed by the request path, and the output
-		// is then a marker in this snapshot. A hit here means a decision made after the snapshot.
-		if _, hit := c.Store.Get(resultKey(c.Session, id)); hit {
+		// A drop already applied to these bytes is replayed by the request path, and the output is then
+		// a marker in this snapshot. A record here means a drop made after the snapshot was taken.
+		// (The sweep's own namespace; only extract_llm writes cg:res: now.)
+		if _, hit := getDrop(c.Store, thread.Key(c.Session, c.Thread), id); hit {
 			continue
 		}
 		// A lookup that missed: the result cache's hit rate is hits over all lookups, and this
@@ -497,6 +509,7 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	case sweepSlots <- struct{}{}:
 		defer func() { <-sweepSlots }()
 	default:
+		sweepPingConcurrency.Add(1) // sweep_concurrency_full, not sweep_ask_failed
 		return SweepPingResult{Reason: SweepReasonConcurrencyFull}
 	}
 	if !cand.asked.CompareAndSwap(false, true) {
@@ -589,7 +602,7 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 func (cand *sweepPingCandidate) deferBilling(sink *cheapmodel.Sink, ms float64, substituted bool) {
 	c := cand.ctx
 	if substituted {
-		deferDetailOnly(c.Store, c.Session, "extract_llm_sweep", "prefix_ask", "keepalive_ping", ms, sink)
+		deferDetailOnly(c.Store, c.Session, "extract_llm_sweep", "prefix_ask", "keepalive_substitute_billed", ms, sink)
 		return
 	}
 	deferUsage(c.Store, c.Session, "extract_llm_sweep", "prefix_ask", "keepalive_ping", ms, sink)

@@ -2104,6 +2104,27 @@ function syncDimPicker(dims) {
  * for no gain a reader can use. They stay labelled and on separate lines, so a success is never
  * mistaken for a refusal — which is the whole point of having split them.
  */
+/**
+ * The sweep's quality and money, beside its activity (#404). Only the sweep's row carries the fields.
+ * The FALSE-DROP RATE is the number to pull the sweep from xhigh on: drops a later turn used without
+ * expanding them, plus drops the agent expanded back, over the drops applied. The expand charge is
+ * already taken off the credit and the net; the answer cost is its own figure and is NOT taken off a
+ * second time (the net already carries the model spend).
+ */
+function sweepQualityLine(c) {
+  if (!c || !c.sweep_applied) return null;
+  const rate = (c.sweep_false_drop_rate || 0) * 100;
+  return el('div', {
+    class: rate >= 15 ? 'warn-text' : 'did',
+    title: 'Drops applied: ' + num(c.sweep_applied) + '. Needed again: ' + num(c.sweep_false_drops)
+      + ' (a later turn used them, or the agent expanded them back). Expands: ' + num(c.sweep_expands)
+      + ' (' + compact(c.sweep_expand_tokens) + ' tok), charged to the sweep: ' + usd(c.sweep_expand_charge_usd || 0)
+      + ', already off the saving. Answer cost: ' + usd(c.sweep_answer_usd || 0)
+      + ', booked once on the ping row the question replaced.',
+    text: 'false drops ' + rate.toFixed(1) + '% (' + num(c.sweep_false_drops) + ' of ' + num(c.sweep_applied) + ')',
+  });
+}
+
 function activitySummary(gates, events) {
   const parts = [];
   const add = (label, m, cls) => {
@@ -2141,7 +2162,7 @@ const STEP_INFO = {
   dedup: ['Duplicate remover', 'drops text the prompt already contains'],
   extract: ['Content extractor', 'keeps the relevant part of long tool output'],
   extract_llm: ['Model-based extractor', 'asks a cheap model to keep only what matters in long output'],
-  extract_llm_sweep: ['Old-output sweep', 'has a cheap model shrink old outputs after the cache has gone cold'],
+  extract_llm_sweep: ['Old-output sweep', 'asks the model which old outputs are spent, and removes them on the next request after the cache went cold'],
   failed_run: ['Failed-run trimmer', 'shortens output from commands that failed'],
   format: ['Format compactor', 'rewrites JSON and similar text in a shorter form'],
   linecap: ['Line limiter', 'caps very long lines and outputs'],
@@ -2169,6 +2190,8 @@ const REASON_TEXT = {
   no_model: 'no model known', not_json_shaped: 'not JSON', marker_present: 'already marked',
   empty: 'nothing there', cached_prefix: 'inside the cached part', reapplied_same_session: 'applied again in the same session',
   sweep_dropped: 'old output dropped', sweep_kept: 'old output kept', sweep_offered: 'offered for removal',
+  sweep_applied_cold: 'dropped on a cold request', sweep_applied_changed_prefix: 'dropped after a changed prefix',
+  sweep_false_ref: 'dropped, then used by a later turn', sweep_apply_declined: 'drop refused (kept in full)',
   sweep_adjudicated: 'judged by the model', char_window: 'cut to a character window',
   over_per_request_cap: 'over the per-request limit', over_per_session_cap: 'over the per-session limit',
   non_text_blocks: 'not plain text', no_repeated_prefix: 'no repeated start',
@@ -2597,7 +2620,7 @@ async function loadComponents() {
         // Beside the act rate, not twenty columns to its right. This is the cell that makes a
         // 0.0% act rate falsifiable (docs/dashboard.md), and at 1600px wide it sat at x=2087
         // in a 2628px table — off-screen for the reader who needs it most.
-        el('td', {}, activitySummary(c.gates, c.events)),
+        el('td', {}, activitySummary(c.gates, c.events), sweepQualityLine(c)),
         el('td', { class: 'num', text: num(c.reverted) }),
         // An unkeyed component's `unique` is identically its `gross`, so the cell is marked:
         // without it the column reads as "this component never repeated a removal", which is a

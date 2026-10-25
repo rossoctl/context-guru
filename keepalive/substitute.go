@@ -202,14 +202,17 @@ func (k *Keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 	u := Usage{FreshInput: int64(res.FreshInput), CacheRead: int64(res.CacheRead),
 		CacheWrite: int64(res.CacheWrite), Output: int64(res.Output),
 		CacheWrite1h: int64(res.CacheWrite1h)}
-	cost := k.recordSubstitutePing(j, res.Model, u, ms, startedAt)
+	cost := k.recordSubstitutePing(j, res.Model, u, ms, startedAt, 0)
 	k.summarySubstituted.Add(1)
 	return cost
 }
 
 // recordSubstitutePing is the booking both substitutes share: a call that read the cached prefix in
 // place of a ping is booked as the ping it replaced.
-func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float64, startedAt time.Time) float64 {
+//
+// answerUSD is what the answer cost beyond the ping's own read (0 for the summary): it is carried on
+// the ping row in its own field.
+func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float64, startedAt time.Time, answerUSD float64) float64 {
 	e := j.e
 	k.mu.Lock()
 	provider, route, preset, agent := e.provider, e.route, e.preset, e.agent
@@ -256,8 +259,9 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 			Route: route, Pings: j.ping, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite,
 			Output: u.Output, CostUSD: cost, Status: 200, DurationMs: ms,
 			TS: k.now().UnixMilli(), Agent: agent, Preset: preset,
-			Strategy:   appliedStrategy,
-			FreshInput: u.FreshInput,
+			Strategy:       appliedStrategy,
+			FreshInput:     u.FreshInput,
+			SweepAnswerUSD: answerUSD,
 			// 0, not pingOutputBudget(route): this call asked for a full answer, not the 1-token read
 			// an ordinary ping would have, so reporting the ping's own budget here would misdescribe
 			// what was actually requested.
@@ -265,6 +269,29 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 		})
 	}
 	return cost
+}
+
+// sweepAnswerUSD prices the ANSWER of a question that replaced a ping (#404 point 9): everything the
+// question cost beyond the read the plain ping would have made of the same prefix. That is the output
+// (thinking tokens are billed as output), any fresh input (the question's own text) and any cache
+// write, each at the model's rate. The read is the ping's and is not the answer's cost. 0 when the
+// model has no price, which reads as unknown and never as free: the ping row's own cost is unchanged.
+func (k *Keeper) sweepAnswerUSD(j pingJob, model string, u Usage) float64 {
+	e := j.e
+	k.mu.Lock()
+	endpoint, prefix, em := e.endpoint, e.prefix, e.model
+	k.mu.Unlock()
+	if model == "" {
+		model = em
+	}
+	if model == "" {
+		return 0
+	}
+	price, ok := k.price(endpoint, model, prefix)
+	if !ok || price.Zero() {
+		return 0
+	}
+	return price.CostWithCacheWrite1h(u.FreshInput, 0, u.CacheWrite, u.Output, u.CacheWrite1h)
 }
 
 // sweepOutputBudgetGuess is the assumed output size of the sweep's question, used ONLY to project its
@@ -341,14 +368,17 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 	res := dispatch(offload.CacheAwareSummarizerCallTimeout(), k.sweepWaitCause(j))
 	ms := float64(k.now().Sub(start).Microseconds()) / 1000.0
 	if !res.Substituted {
-		k.sweepAskFailed.Add(1)
+		// A full slot is counted by the offload side as sweep_concurrency_full. It is not a failed ask.
+		if res.Reason != offload.SweepReasonConcurrencyFull {
+			k.sweepAskFailed.Add(1)
+		}
 		slog.Debug("context-guru: sweep keep-alive question did not use the cache; pinging normally instead",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "reason", string(res.Reason))
 		return false
 	}
 	u := Usage{FreshInput: int64(res.FreshInput), CacheRead: int64(res.CacheRead),
 		CacheWrite: int64(res.CacheWrite), Output: int64(res.Output), CacheWrite1h: int64(res.CacheWrite1h)}
-	spent := k.recordSubstitutePing(j, res.Model, u, ms, start)
+	spent := k.recordSubstitutePing(j, res.Model, u, ms, start, k.sweepAnswerUSD(j, res.Model, u))
 	k.sweepSubstituted.Add(1)
 	// THE guard, as in fire(): a question that wrote more than it read did not match the prefix. The
 	// cache is refreshed by the write, but a repeat would pay the same mismatch, so stop.
