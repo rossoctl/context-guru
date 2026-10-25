@@ -862,3 +862,52 @@ func TestUnrelatedConversationsWithTrailingRemindersStayTwoThreads(t *testing.T)
 		t.Fatalf("two conversations that share no messages must not share a thread (both %q)", a.ID)
 	}
 }
+
+// #708, replayed from the live session's own request log (hashes and key names only): the user quit
+// Claude Code 2.1.303 and resumed the session with 2.1.309. The resumed request repeated every one
+// of the 1,877 earlier messages and added three, and the provider's cache read the whole old prefix.
+// One thing differed: 2.1.309 adds `output_config` to the system-role message it sends second,
+// with the same content. That alone moved the main conversation off the primary id onto a new
+// "p:" id, and the proxy lost the thread's state with it.
+func TestAResumeByANewerClaudeCodeKeepsTheMainThread(t *testing.T) {
+	const tools = `"tools":[{"name":"Bash","input_schema":{"type":"object"}}]`
+	// One turn of the session as 2.1.303 sent it, then the same session resumed by 2.1.309.
+	body := func(effort string, extra ...string) []byte {
+		msgs := []string{
+			`{"role":"user","content":[{"type":"text","text":"start"}]}`,
+			`{"role":"system",` + effort + `"content":"# Environment"}`,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"ls"}}]}`,
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"a"}]}`,
+			`{"role":"assistant","content":[{"type":"text","text":"done"}]}`,
+		}
+		msgs = append(msgs, extra...)
+		return []byte(`{"model":"claude-opus-5-5",` + tools + `,"messages":[` + strings.Join(msgs, ",") + `]}`)
+	}
+	tr := testTracker()
+	before := tr.Resolve("s", "", body(""), false)
+	if before.ID != Primary {
+		t.Fatalf("precondition: the main conversation got %q, want the primary id", before.ID)
+	}
+	resumed := tr.Resolve("s", "", body(`"output_config":{"effort":"medium"},`,
+		`{"role":"user","content":"go on"}`,
+		`{"role":"system","content":"<reminder>"}`), false)
+	if resumed.ID != Primary {
+		t.Fatalf("the resumed request got %q, want the primary id: a message-level output_config split the main thread", resumed.ID)
+	}
+
+	// Positive controls: the key is left out on the message object only. Inside a tool input it is
+	// the agent's own data and still counts, and a real content change still counts.
+	inInput := func(v string) []byte {
+		return []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"output_config":` + v + `}}]}]}`)
+	}
+	a, _ := Fingerprint(inInput(`"low"`))
+	b, _ := Fingerprint(inInput(`"high"`))
+	if a[0] == b[0] {
+		t.Error("output_config inside a tool input was left out of the fingerprint")
+	}
+	c, _ := Fingerprint([]byte(`{"messages":[{"role":"system","output_config":{"effort":"medium"},"content":"# Environment"}]}`))
+	d, _ := Fingerprint([]byte(`{"messages":[{"role":"system","output_config":{"effort":"medium"},"content":"# Other"}]}`))
+	if c[0] == d[0] {
+		t.Error("a content change on a message with output_config did not change the fingerprint")
+	}
+}

@@ -518,6 +518,11 @@ func (t *Tracker) pruneLocked(now time.Time) {
 //     identity, and a client may drop them from earlier turns.
 //   - the CONTENT of a tool result, kept by its call id only: Claude Code clears old tool results
 //     ("microcompact") without starting a new thread.
+//   - a message's own `output_config` (the effort setting): Claude Code 2.1.309 adds it to the
+//     system-role message it sends second, where 2.1.303 sent none. A session resumed after an
+//     upgrade then sends it on a message the old requests sent without it (#708). The provider's
+//     cache still read the whole old prefix, so it is not part of what the cache matches on.
+//     Left out on the message object only, never inside one.
 //   - a message's `content` sent as a plain string versus as a one-element
 //     `[{"type":"text","text":...}]` array: Claude Code sends the newest turn in the array
 //     form (to carry a cache_control breakpoint) and the SAME message as a plain string once
@@ -557,7 +562,7 @@ func fingerprint(body []byte) ([]uint64, []int, bool) {
 	total := 0
 	items.ForEach(func(_, m gjson.Result) bool {
 		h.Write([]byte{0x1e}) // record separator, so [ab][c] and [a][bc] differ
-		canon(h, m)
+		canonAt(h, m, true)
 		sums = append(sums, h.Sum64())
 		total += len(m.Raw)
 		mass = append(mass, total)
@@ -567,7 +572,12 @@ func fingerprint(body []byte) ([]uint64, []int, bool) {
 }
 
 // canon writes v's thread-identifying shape to h. See Fingerprint for what it leaves out.
-func canon(h hash.Hash64, v gjson.Result) {
+func canon(h hash.Hash64, v gjson.Result) { canonAt(h, v, false) }
+
+// canonAt is canon. message is set for a message object itself (an element of the message list),
+// never for anything nested in one: the message-level keys left out (see Fingerprint) are left out
+// only there, so the same key inside a tool input or a content block still counts.
+func canonAt(h hash.Hash64, v gjson.Result, message bool) {
 	switch {
 	case v.IsObject():
 		// One pass over the object. Looking the discriminating keys up with Get scanned the whole
@@ -624,7 +634,7 @@ func canon(h hash.Hash64, v gjson.Result) {
 		h.Write([]byte("{"))
 		for _, f := range fields {
 			k, val := f.k, f.val
-			if k.Str == "cache_control" {
+			if k.Str == "cache_control" || (message && k.Str == "output_config") {
 				continue
 			}
 			h.Write([]byte(k.Str))
