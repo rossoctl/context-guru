@@ -335,8 +335,11 @@ if [ "$FORCE" != 1 ] && [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
   for ph_file_ in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" \
                   "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.json" \
                   "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.local.json"; do
+    ph_seen_="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}/ping-header-note.json"
+    ph_real_=$(realpath "$ph_file_" 2>/dev/null) || ph_real_="$ph_file_"
     if grep -qs '"installed_base_url"' "$ph_file_" 2>/dev/null \
-       && ! grep -qs '"installed_ping_header"\|"ping_header_opt_out"' "$ph_file_" 2>/dev/null; then
+       && ! grep -qs '"installed_ping_header"\|"ping_header_opt_out"' "$ph_file_" 2>/dev/null \
+       && ! grep -qsF "\"$ph_real_\"" "$ph_seen_" 2>/dev/null; then
       ph_out_=$(python3 "$HERE/settings.py" ensure-ping-header 2>/dev/null) || ph_out_=""
       ph_note_=$(printf '%s\n' "$ph_out_" | sed -n 's/^note=//p' | head -1)
       [ -n "$ph_note_" ] && note "$ph_note_"

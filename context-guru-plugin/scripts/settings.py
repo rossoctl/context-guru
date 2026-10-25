@@ -3076,19 +3076,23 @@ PING_NOTE_SEEN = "ping-header-note.json"
 
 
 def predates_ping_flag(real: str) -> bool:
-    """True when an install-scope row for this file shows it was last installed before --no-ping-header existed."""
+    """True only when EVERY install-scope row that names this file was recorded before --no-ping-header existed.
+    One newer row (a flagged re-run under another key, say a machine-wide row beside a legacy project row)
+    or one row that cannot be read means the install may be an opt-out: then the answer is False."""
     try:
         cutoff = _dt.datetime.fromisoformat(PING_FLAG_SHIPPED)
+        found = False
         for row in _read_install_scopes().values():
-            if isinstance(row, dict) and isinstance(row.get("file"), str) \
-                    and os.path.realpath(row["file"]) == real and isinstance(row.get("recorded_at"), str):
-                when = _dt.datetime.fromisoformat(row["recorded_at"])
-                if when.tzinfo is None:
-                    return False
-                return when < cutoff
+            if not (isinstance(row, dict) and isinstance(row.get("file"), str)
+                    and os.path.realpath(row["file"]) == real):
+                continue
+            found = True
+            when = _dt.datetime.fromisoformat(row.get("recorded_at"))
+            if when.tzinfo is None or when >= cutoff:
+                return False
+        return found
     except Exception:
-        pass
-    return False
+        return False
 
 
 def _note_seen_path() -> str:

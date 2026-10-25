@@ -4,6 +4,7 @@
 package plugin
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -60,6 +61,20 @@ const (
 	beforeFlag = "2026-10-20T08:00:00+00:00"
 	afterFlag  = "2026-10-23T08:00:00+00:00"
 )
+
+// recordRows writes several install-scope rows for this file, in order.
+func (e *healEnv) recordRows(stamps ...string) {
+	e.t.Helper()
+	real, err := filepath.EvalSymlinks(e.file())
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	rows := map[string]any{}
+	for i, when := range stamps {
+		rows[fmt.Sprintf("key%d", i)] = map[string]any{"scope": "project-local", "file": real, "port": 1, "recorded_at": when}
+	}
+	writeJSON(e.t, filepath.Join(e.state, "install-scope.json"), map[string]any{"version": 1, "projects": rows})
+}
 
 // sessionStart runs the real start-proxy.sh. The proxy binary is a stand-in that exits at once.
 func (e *healEnv) sessionStart() string {
@@ -358,5 +373,46 @@ func TestDoctorShowsThePingHeaderLine(t *testing.T) {
 				t.Errorf("no fix text:\n%s", out)
 			}
 		})
+	}
+}
+
+// A legacy project row (old) beside a newer machine-wide row (the v0.5.4 --no-ping-header re-run): one newer
+// row, or one that cannot be read, means the install may be an opt-out. Nothing is written; one note shows once.
+func TestSessionStartDoesNotHealWhenAnyRowForTheFileIsNewOrUnreadable(t *testing.T) {
+	for name, stamps := range map[string][]string{
+		"old then new":     {beforeFlag, afterFlag},
+		"new then old":     {afterFlag, beforeFlag},
+		"old then garbage": {beforeFlag, "not-a-date"},
+		"old then naive":   {beforeFlag, "2026-10-20T08:00:00"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newHealEnv(t)
+			e.write(map[string]any{}, nil)
+			e.recordRows(stamps...)
+			before, _ := os.ReadFile(e.file())
+			out := e.sessionStart()
+			after, _ := os.ReadFile(e.file())
+			if string(before) != string(after) {
+				t.Errorf("the file was written:\n%s", after)
+			}
+			const off = "Ping is off for this install. Run /context-guru:install to turn it on."
+			if !strings.Contains(out, off) {
+				t.Errorf("no note: %q", out)
+			}
+			if again := e.sessionStart(); strings.Contains(again, off) {
+				t.Errorf("the note was shown twice: %q", again)
+			}
+		})
+	}
+}
+
+// Two rows that are both old still prove the install is older.
+func TestSessionStartHealsWhenEveryRowIsOld(t *testing.T) {
+	e := newHealEnv(t)
+	e.write(map[string]any{}, nil)
+	e.recordRows(beforeFlag, "2026-10-21T08:00:00+00:00")
+	e.sessionStart()
+	if got, _ := e.headers(); got != "x-context-guru-ping: 1" {
+		t.Errorf("headers = %q", got)
 	}
 }
