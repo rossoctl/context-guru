@@ -971,6 +971,10 @@ func TestStatuslineRetiredLayoutsFallBackToBalanced(t *testing.T) {
 		if code != 0 || strings.Contains(out, "usage") || strings.TrimSpace(out) == "" {
 			t.Errorf("a remembered retired layout must render the balanced line, got code %d %q", code, out)
 		}
+		// It is ignored, so the installed command's flag still wins.
+		if out, _, _ := runStatusline(t, env, `{"session_id":"sess-gold"}`, "--layout=minimal"); !strings.Contains(out, "no cache yet") || strings.Contains(out, "saved") {
+			t.Errorf("a retired remembered layout must not override --layout=minimal, got %q", out)
+		}
 	})
 	t.Run("set-layout-says-where-it-went", func(t *testing.T) {
 		py := requireTool(t, "python3")
@@ -1583,7 +1587,7 @@ import importlib.util, sys
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
 sl = load("statusline", sys.argv[1]); cg = load("cg", sys.argv[2])
-for x in (0, 0.004, 0.006, 0.01, 0.06, 0.78, 1, 12.346, 99.99, 100, 123.4, 1234.2):
+for x in (0, 0.004, 0.006, 0.01, 0.06, 0.78, 1, 12.346, 99.99, 100, 123.4, 1234.2, -1.5, -0.004, -123.4):
     print("%s|%s|%s" % (x, sl._money(x), cg.usd(x)))
 `
 	cmd := exec.Command(py, "-I", "-c", script, filepath.Join(scriptsDir(t), "statusline.py"), filepath.Join(scriptsDir(t), "cg.py"))
@@ -1593,7 +1597,7 @@ for x in (0, 0.004, 0.006, 0.01, 0.06, 0.78, 1, 12.346, 99.99, 100, 123.4, 1234.
 		t.Fatalf("%v\n%s", err, b)
 	}
 	want := map[string]string{"0": "$0.00", "0.004": "<$0.01", "0.006": "<$0.01", "0.01": "$0.01", "0.06": "$0.06", "0.78": "$0.78", "1": "$1.00",
-		"12.346": "$12.35", "99.99": "$99.99", "100": "$100", "123.4": "$123", "1234.2": "$1234"}
+		"12.346": "$12.35", "99.99": "$99.99", "100": "$100", "123.4": "$123", "1234.2": "$1234", "-1.5": "-$1.50", "-0.004": "$0.00", "-123.4": "-$123"}
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 		f := strings.Split(line, "|")
 		if len(f) != 3 {
@@ -1639,5 +1643,61 @@ func TestCGTipUsesTheStatusLineRule(t *testing.T) {
 	}
 	if got := run(`{}`, 9)["stale"]; len(got.([]any)) != 2 {
 		t.Errorf("an install 9 days old that never ran either: both are stale, got %v", got)
+	}
+}
+
+// Hung /api/stats with an existing cache-state copy: money, clock and context stay, with `⏳`. No loading notice.
+func TestStatuslineHungStatsWithACachestateCopyKeepsTheLine(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"s","model":"m","money":{"main":{"saved_usd":0.31,"baseline_usd":2.10,"threads":1},"others":{"saved_usd":0,"baseline_usd":0,"threads":0}},`+
+		`"last_ts":%d,"end_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":412000,"priced":true,"rewrite_usd":1.20,"window":1000000,"window_exact":true}`,
+		now-60_000, now-60_000, now)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hang := func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(5 * time.Second):
+		case <-r.Context().Done():
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", hang)
+	mux.HandleFunc("/api/cachestate", hang)
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	cacheHome := t.TempDir()
+	dir := filepath.Join(cacheHome, "context-guru")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-40 * time.Minute)
+	stdin := `{"session_id":"sess-old","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":200000}}`
+	env := routedEnv(port)
+	env["XDG_CACHE_HOME"] = cacheHome
+	// No cache-state copy at all: the notice stays.
+	if out, _, _ := runStatusline(t, env, stdin, "--layout=balanced"); !strings.Contains(out, "cg") {
+		t.Errorf("without any copy a notice is expected, got %q", out)
+	}
+	for name, body := range map[string]string{"context-guru-statusline-" + port + "-cs-sess-old.json": cache, "context-guru-statusline-" + port + "-sess-old.json": `{"total_saved_usd":0.31}`} {
+		f := filepath.Join(dir, name)
+		if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(f, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, _, _ := runStatusline(t, env, stdin, "--layout=balanced")
+	for _, want := range []string{"saved $0.31 of $2.10 session", "cache ○ cold 36:00", "ctx ███░░░░░ 41%", "⏳"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("hung stats with an old copy must show %q, got %q", want, out)
+		}
+	}
+	if strings.Contains(out, "loading") || strings.Contains(out, "not responding") {
+		t.Errorf("no notice when a copy exists, got %q", out)
 	}
 }

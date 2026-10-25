@@ -254,10 +254,11 @@ def cmd_cachestate(api: Api, o: dict) -> list[str]:
 
 
 def usd(x: float) -> str:
-    """The one money format of the status line and the mod: `$12.34`, `$0.06`, `<$0.01`, `$123`."""
+    """The one money format of the status line and the mod: `$12.34`, `$0.06`, `<$0.01`, `$123`, `-$1.50`."""
     if 0 < x < 0.01:
         return "<$0.01"
-    return f"-${abs(x):.2f}" if x < 0 else (f"${x:.0f}" if x >= 100 else f"${x:.2f}")
+    sign = "-" if x <= -0.005 else ""
+    return f"{sign}${abs(x):.0f}" if abs(x) >= 100 else f"{sign}${abs(x):.2f}"
 
 
 PANE_TTL_SECONDS = 60.0  # day, series and spend move slowly; a pane glance does not need fresher
@@ -319,7 +320,8 @@ def pane_strip(reqs: dict | None, spend: dict | None, now_s: float) -> dict | No
     rows = reqs.get("requests") if isinstance(reqs, dict) else None
     if not isinstance(rows, list):
         return None
-    rows = sorted((r for r in rows if isinstance(r, dict) and not r.get("keepalive")), key=lambda r: r.get("ts", 0))[-20:]
+    rows = sorted((r for r in rows if isinstance(r, dict) and r.get("thread_id", "") == "" and not r.get("keepalive")),
+                  key=lambda r: r.get("ts", 0))[-20:]
     kinds = []
     for r in rows:
         try:
@@ -1503,7 +1505,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "tip":  # for the mod's band: which commands are stale (local files only, no proxy; the status line's rule)
         try:
             import statusline as sl  # noqa: PLC0415  (the Codex copy of this file has no status line: no tip there)
-            print(json.dumps({"stale": sl.stale_commands() or [], "days": sl.TIP_DAYS}))
+            off = sl._tips_off()  # `--set-tips=off` silences the mod's tip too
+            print(json.dumps({"stale": [] if off else sl.stale_commands() or [], "days": sl.TIP_DAYS}))
         except Exception:  # noqa: BLE001
             print(json.dumps({"stale": [], "days": 7}))
         return 0

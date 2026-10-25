@@ -495,6 +495,6 @@ test('render: band, warm, ping off, short band', async ($, on) => {
 
 // The same table as TestMoneyFormatTable in the Go suite, which holds statusline.py and cg.py to it.
 test('usd() follows the one money format', async () => {
-  const table: [number, string][] = [[0, '$0.00'], [0.004, '<$0.01'], [0.006, '<$0.01'], [0.01, '$0.01'], [0.06, '$0.06'], [0.78, '$0.78'], [1, '$1.00'], [99.99, '$99.99'], [100, '$100'], [123.4, '$123'], [1234.2, '$1234']]
+  const table: [number, string][] = [[0, '$0.00'], [0.004, '<$0.01'], [0.006, '<$0.01'], [0.01, '$0.01'], [0.06, '$0.06'], [0.78, '$0.78'], [1, '$1.00'], [99.99, '$99.99'], [100, '$100'], [123.4, '$123'], [1234.2, '$1234'], [-1.5, '-$1.50'], [-0.004, '$0.00'], [-123.4, '-$123']]
   for (const [x, want] of table) expect(usd(x)).toBe(want)
 })

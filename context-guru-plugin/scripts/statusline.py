@@ -778,7 +778,7 @@ def _saved_layout() -> str | None:
             name = fh.read(32).strip()
     except OSError:
         return None
-    return name if name in LAYOUTS else "balanced" if name in RETIRED_LAYOUTS else None
+    return name if name in LAYOUTS else None  # a retired name is ignored: the installed command's flag wins
 
 
 def _set_layout(name: str) -> str:
@@ -824,7 +824,7 @@ def _money(x: float, approx: bool = False) -> str:
     (`$0.06`), `<$0.01` under one cent (a real cost never reads as `$0.00`), no decimals from $100."""
     if 0 < x < 0.01:
         return "<$0.01"
-    sign = "-" if x < -0.005 else ""
+    sign = "-" if x <= -0.005 else ""  # a negative under half a cent is $0.00; the same rule in cg.py and model.ts
     body = f"{abs(x):.0f}" if abs(x) >= 100 else f"{abs(x):.2f}"
     return f"{'≈' if approx else ''}{sign}${body}"
 
@@ -1561,8 +1561,11 @@ def main() -> None:
     got = _gather(port, session_id, on, _window_start_ms(sub))
     stats, status = got.get("stats") or _stale_stats(port, session_id)
     update_seg = _update_available_segment()  # local file only - independent of the proxy
-    if status == STATS_HUNG and got.get("cs", (None,))[0] is not None:
-        status = STATS_TIMEOUT  # the cache state still has the money, the context and the clock: show them with ⏳
+    if status in (STATS_HUNG, STATS_TIMEOUT) and got.get("cs", (None,))[0] is not None:
+        # A copy of the cache state exists: it has the money, the context and the clock. Show them with ⏳, never a
+        # loading or not-responding notice. Without a copy, the notices below stay.
+        status = STATS_TIMEOUT
+        stats = stats or {}
     notice = {
         STATS_DOWN: "cg ✕ proxy offline",  # unreachable: say so in words, nothing else is worth saying
         # Not `cg ✕ proxy offline`: the proxy may be healthy and merely slow on this one aggregate. It redraws on

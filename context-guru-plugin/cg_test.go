@@ -714,8 +714,6 @@ func TestCGPanedata(t *testing.T) {
 	cache := fmt.Sprintf(`{"session":"session-A","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":412000,"priced":true,"rewrite_usd":1.2,`+
 		`"window":1000000,"window_exact":true,"threads":[{"id":"","main":true,"last_ts":%d,"end_ts":%d,"ttl_s":300,"prefix_tokens":412000,"rewrite_usd":1.2,"priced":true}]}`,
 		now-60_000, now, now-60_000, now-60_000)
-	port, _ := statuslineCounting(t, cache, nil)
-	_ = port
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(cache)) })                //nolint:errcheck
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(`{"total_saved_usd":4.2}`)) }) //nolint:errcheck
@@ -778,5 +776,38 @@ func TestCGPanedata(t *testing.T) {
 		if _, ok := bare[gone]; ok {
 			t.Errorf("%s has no data and must be absent, got %v", gone, bare)
 		}
+	}
+}
+
+// `--set-tips=off` silences the mod's weekly tip as it silences the status line's.
+func TestCGTipHonoursSetTipsOff(t *testing.T) {
+	py := requireTool(t, "python3")
+	state, cfg := t.TempDir(), t.TempDir()
+	env := append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "XDG_CONFIG_HOME="+cfg, "CG_STATUSLINE_NOW=1800000000")
+	os.WriteFile(filepath.Join(state, "last-run.json"), []byte(`{}`), 0o644)                 //nolint:errcheck
+	os.WriteFile(filepath.Join(state, "statusline-first-seen"), []byte("1790000000"), 0o644) //nolint:errcheck
+	tip := func() []any {
+		cmd := exec.Command(py, filepath.Join("scripts", "cg.py"), "tip")
+		cmd.Env = env
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v %s", err, b)
+		}
+		var doc struct{ Stale []any }
+		if err := json.Unmarshal(b, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Stale
+	}
+	if len(tip()) == 0 {
+		t.Fatal("control: both commands are stale, a tip is expected")
+	}
+	off := exec.Command(py, filepath.Join("scripts", "statusline.py"), "--set-tips=off")
+	off.Env = env
+	if b, err := off.CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, b)
+	}
+	if got := tip(); len(got) != 0 {
+		t.Errorf("tips are off: want no stale commands, got %v", got)
 	}
 }

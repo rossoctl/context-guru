@@ -24,7 +24,12 @@ const num = (x: unknown): number | undefined => (typeof x === 'number' && Number
 
 /** The one money format (scripts/statusline.py `_money` and scripts/cg.py `usd` follow it, golden-tested on both sides):
  * `$12.34`, two decimals under $1 (`$0.06`), `<$0.01` under one cent, no decimals from $100. */
-export const usd = (x: number): string => (x > 0 && x < 0.01 ? '<$0.01' : x < 0 ? `-$${Math.abs(x).toFixed(2)}` : x >= 100 ? `$${x.toFixed(0)}` : `$${x.toFixed(2)}`)
+export const usd = (x: number): string => {
+  if (x > 0 && x < 0.01) return '<$0.01'
+  const sign = x <= -0.005 ? '-' : ''
+  const a = Math.abs(x)
+  return `${sign}$${a >= 100 ? a.toFixed(0) : a.toFixed(2)}`
+}
 
 /** "4m", "<1m", "1h05m": coarse on purpose, so the band redraws when the words change, not every poll. */
 export function span(ms: number): string {
