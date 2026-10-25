@@ -278,6 +278,76 @@ func TestStatuslineContextBarIgnoresSubagentWindow(t *testing.T) {
 	}
 }
 
+// #709: with no thread marked main (the proxy lost the main thread's id, #708), the status line
+// followed the session's NEWEST thread: a 70k sub-agent turn read `ctx 7%` on a conversation at 50%.
+// It must follow the largest thread Claude Code did not name as a sub-agent, even when a named
+// sub-agent (`a:`) is larger still, and the largest `a:` thread only when there is no other.
+func TestStatuslineFollowsTheLargestThreadWhenNoneIsMain(t *testing.T) {
+	const now = 1_800_000_000_000
+	th := func(id string, agoSec, prefix int) string {
+		return fmt.Sprintf(`{"id":%q,"main":false,"model":"m","last_ts":%d,"end_ts":%d,"ttl_s":300,`+
+			`"prefix_tokens":%d,"priced":true,"rewrite_usd":0.03}`, id, now-agoSec*1000, now-agoSec*1000, prefix)
+	}
+	// The top level is the newest touch, always the 70k sub-agent here.
+	cache := func(threads ...string) string {
+		return fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":70000,`+
+			`"priced":true,"rewrite_usd":0.03,"window":1000000,"window_exact":true,"threads":[%s]}`,
+			now-5000, now, strings.Join(threads, ","))
+	}
+	stdin := `{"session_id":"sess-gold","model":{"id":"m"},"context_window":` +
+		`{"total_input_tokens":70000,"total_output_tokens":900,"context_window_size":1000000}}`
+	for _, c := range []struct{ name, cache, want string }{
+		{"main-conversation-on-a-p-id", cache(th("a:new", 5, 70000), th("p:main", 60, 500000), th("a:big", 30, 800000)), "ctx ████░░░░ 50%"},
+		{"only-sub-agents", cache(th("a:new", 5, 70000), th("a:big", 30, 800000)), "ctx ██████░░ 80%"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			env := routedEnv(cgStub(t, c.cache))
+			env["CG_STATUSLINE_COLUMNS"] = "200"
+			out, code, _ := runStatusline(t, env, stdin, "--layout=balanced")
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			if !strings.Contains(out, c.want) {
+				t.Errorf("want %q (the largest thread), got %q", c.want, out)
+			}
+		})
+	}
+}
+
+// #714 review: the next-request prices must be the followed thread's too. The top level carries the
+// newest sub-agent's prices ($0.01 warm, $0.05 cold); the line must quote the main conversation's
+// ($0.20 warm, $2.50 cold), and with no prices on the thread entry, its own rewrite_usd ($1.80).
+func TestStatuslineNextCostFollowsTheChosenThread(t *testing.T) {
+	const now = 1_800_000_000_000
+	th := func(id string, agoSec, prefix int, prices string) string {
+		return fmt.Sprintf(`{"id":%q,"main":false,"model":"m","last_ts":%d,"end_ts":%d,"ttl_s":300,`+
+			`"prefix_tokens":%d,"priced":true,"rewrite_usd":1.80%s}`, id, now-agoSec*1000, now-agoSec*1000, prefix, prices)
+	}
+	cache := func(mainPrices string) string {
+		return fmt.Sprintf(`{"session":"s","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":70000,`+
+			`"priced":true,"rewrite_usd":0.05,"next_warm_usd":0.01,"next_cold_usd":0.05,"window":1000000,"window_exact":true,"threads":[%s,%s]}`,
+			now-5000, now, th("a:new", 5, 70000, `,"next_warm_usd":0.01,"next_cold_usd":0.05`), th("p:main", 60, 500000, mainPrices))
+	}
+	stdin := `{"session_id":"sess-gold","model":{"id":"m"},"context_window":` +
+		`{"total_input_tokens":70000,"total_output_tokens":900,"context_window_size":1000000}}`
+	for _, c := range []struct{ name, cache, want string }{
+		{"thread-prices", cache(`,"next_warm_usd":0.20,"next_cold_usd":2.50`), "next $0.20 warm · $2.50 cold"},
+		{"older-server-falls-back-to-the-threads-rewrite_usd", cache(""), "next $1.80 if cold"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			env := routedEnv(cgStub(t, c.cache))
+			env["CG_STATUSLINE_COLUMNS"] = "200"
+			out, code, _ := runStatusline(t, env, stdin, "--layout=balanced", "--show=next")
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			if !strings.Contains(out, c.want) {
+				t.Errorf("want %q (the followed thread's prices), got %q", c.want, out)
+			}
+		})
+	}
+}
+
 // CONTRACT section 2: the cache segment names the next request's cost warm vs cold. A server that
 // predates next_warm_usd / next_cold_usd still prices the cold case through rewrite_usd; with no
 // price at all the segment says nothing about money.

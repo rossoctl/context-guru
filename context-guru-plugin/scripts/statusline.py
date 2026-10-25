@@ -1021,9 +1021,16 @@ def _main_cs(cs: dict | None) -> dict | None:
     """/api/cachestate describes the session's latest cache touch on ANY thread, but a sub-agent has
     its own cache entry and a much smaller prompt: shown as the session's cache, a busy sub-agent
     would keep resetting the countdown and shrink the context bar. When the proxy lists threads,
-    the main thread's own entry replaces those fields."""
+    the main thread's own entry replaces those fields.
+
+    No thread is marked main when the proxy lost the main thread's id (#708): then the main
+    conversation is the largest thread Claude Code did not name as a sub-agent (`a:`), and the
+    largest `a:` thread only when there is no other (#709). Never simply the newest."""
     threads = cs.get("threads") if isinstance(cs, dict) else None
-    main = next((t for t in threads if isinstance(t, dict) and t.get("main")), None) if isinstance(threads, list) else None
+    threads = [t for t in threads if isinstance(t, dict)] if isinstance(threads, list) else []
+    main = next((t for t in threads if t.get("main")), None)
+    if main is None and threads:
+        main = max(threads, key=lambda t: (not str(t.get("id", "")).startswith("a:"), _num(t, "prefix_tokens") or 0))
     if main is None:
         return cs
     merged = dict(cs)
@@ -1036,9 +1043,12 @@ def _main_cs(cs: dict | None) -> dict | None:
         # model, so Claude Code's own size is used.
         merged.pop("window", None)
         merged.pop("window_exact", None)
-    merged.pop("held_until_ms", None)  # the main thread's own plan, or none: never a sub-agent's
-    if "held_until_ms" in main:
-        merged["held_until_ms"] = main["held_until_ms"]
+    # The main thread's own plan and next-request prices, or none: never a sub-agent's. With no
+    # prices on the entry, the cold price falls back to the main thread's rewrite_usd (_cache_view).
+    for k in ("held_until_ms", "next_warm_usd", "next_cold_usd"):
+        merged.pop(k, None)
+        if k in main:
+            merged[k] = main[k]
     merged["keepalive"] = bool(cs.get("keepalive")) and cs.get("last_ts") == main.get("last_ts")
     return merged
 
