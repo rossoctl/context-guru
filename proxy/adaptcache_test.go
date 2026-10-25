@@ -819,3 +819,14 @@ func TestAdaptCacheBusyAnswers503WithoutSpendingTheBudget(t *testing.T) {
 		}
 	}
 }
+
+// #719 review: the adapt arms' text named "270 s" after the default moved to 240 s. The number
+// now comes from autoX; this pins every spaced arm's text to it, so it cannot drift again.
+func TestAdaptLabelsStateTheSpacingTheArmsRunAt(t *testing.T) {
+	want := fmt.Sprintf("%d s", autoX)
+	for _, id := range []string{"default", "K1", "K2", "K3"} {
+		if d := adaptLabels[id][1]; !strings.Contains(d, want) {
+			t.Errorf("adapt arm %s says %q, want it to name the %s spacing the arms run at", id, d, want)
+		}
+	}
+}

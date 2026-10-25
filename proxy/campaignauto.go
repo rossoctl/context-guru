@@ -18,7 +18,7 @@ import (
 	"github.com/rossoctl/context-guru/predictive"
 )
 
-// The "auto" builder: POST /api/cache/campaigns/build with "builder":"auto" picks the tenant's plan from the menu "ping k times, 270 s apart"
+// The "auto" builder: POST /api/cache/campaigns/build with "builder":"auto" picks the tenant's plan from the menu "ping k times, autoX s apart" (240 s)
 // (k = 0..autoK) with predictive.AutoTune, which shrinks the tenant's own evidence toward the fleet's. It runs in-process: no model, no Python.
 //
 // The window's rows of EVERY tenant are the fleet prior; the target tenant's last 30% is held out: the plan is tuned on rows resolved before that cut
@@ -89,7 +89,7 @@ func (f *rowFacts) outcome(k int, x float64, sessionEnd bool) (fired int, rescue
 	return planOutcome(k, x, f.u, f.gap, f.returned, stop)
 }
 
-// The shipped default keep-alive (config.Default*): K2 at 270 s on a prefix of at least 80K tokens, at most $0.50 a ping, never after a thread's first
+// The shipped default keep-alive (config.Default*): K2 at 240 s on a prefix of at least 80K tokens, at most $0.50 a ping, never after a thread's first
 // request, with SessionEnd.
 func (f *rowFacts) defaultK() int {
 	if f.turn < 1 || f.prefix < campaignDefaultMinPrefixTokens || f.ping > DefaultMaxUSDPerPing {

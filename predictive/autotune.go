@@ -15,7 +15,7 @@ import (
 //   - kappa and the recency half-life are chosen on the training rows only: fit on the first 70% (by response end), score on the rest, safest
 //     setting first, so a less shrunk setting is taken only if it is strictly better on rows it was not fitted on.
 //
-// It is a plan chooser, not a predictor: the menu is "ping k times, 270 s apart" for k = 0..K, so the client signals (SessionEnd, /clear) compose with it the
+// It is a plan chooser, not a predictor: the menu is "ping k times, X s apart" (X = the shipped keep-alive spacing, 240 s) for k = 0..K, so the client signals (SessionEnd, /clear) compose with it the
 // same way they compose with a blanket plan.
 
 // AutoRow is one decision point: whose it is, when its response ended, and the net $ of each menu plan on it (Gain[0] = never ping = 0).

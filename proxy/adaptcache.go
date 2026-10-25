@@ -206,13 +206,16 @@ func (h *Handler) adaptCacheReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
+// adaptLabels names each adapt arm. The ping spacing in the text comes from autoX, the spacing the
+// arms actually run at, so the text cannot drift from the default again (#719 review).
 var adaptLabels = map[string][2]string{
-	"never":   {"No pings", "never keep the cache warm"},
-	"default": {"Default keep-alive", "2 pings 270 s apart on prefixes >= 80K tokens, <= $0.50 a ping, none after a thread's first request, stopped by SessionEnd"},
-	"K1":      {"1 ping, every response", "one ping 270 s after every response"},
-	"K2":      {"2 pings, every response", "two pings 270 s apart after every response"},
-	"K3":      {"3 pings, every response", "three pings 270 s apart after every response"},
-	"auto":    {"Adapted: one plan for you", "the ping count learned from your history, shrunk toward everyone's"},
+	"never": {"No pings", "never keep the cache warm"},
+	"default": {"Default keep-alive", fmt.Sprintf("2 pings %d s apart on prefixes >= 80K tokens, <= $0.50 a ping, "+
+		"none after a thread's first request, stopped by SessionEnd", autoX)},
+	"K1":   {"1 ping, every response", fmt.Sprintf("one ping %d s after every response", autoX)},
+	"K2":   {"2 pings, every response", fmt.Sprintf("two pings %d s apart after every response", autoX)},
+	"K3":   {"3 pings, every response", fmt.Sprintf("three pings %d s apart after every response", autoX)},
+	"auto": {"Adapted: one plan for you", "the ping count learned from your history, shrunk toward everyone's"},
 }
 
 // adaptReport is the whole report; adaptCacheReport only does the I/O around it.

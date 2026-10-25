@@ -10,7 +10,7 @@ For the calling account, over its own history in the dashboard DB:
 1. the decision, first: the best option against the default and against the current setting, held-out, paired by session (`relative`, `summary`);
 2. a table of options on that same held-out slice:
    - `never`: no pings (the zero every net is measured against);
-   - `default`: the shipped default, K2 at 270 s, prefix >= 80K tokens, <= $0.50 a ping, no ping after a thread's first request, plus SessionEnd;
+   - `default`: the shipped default, K2 at 240 s (`autoX`), prefix >= 80K tokens, <= $0.50 a ping, no ping after a thread's first request, plus SessionEnd;
    - `current`: the account's own policy as configured now (or its live rules campaign);
    - `K1`, `K2`, `K3`: ping-everyone blankets, for comparison;
    - adapted: `auto` (one plan for the account, shrunk toward the fleet: the auto campaign builder) and one plan per segment of
@@ -34,7 +34,7 @@ by the window end are not scored, so they are never counted as savings.
 Two replays of the same plans:
 
 - **Money** (`saved_usd`, `spend_usd`, `net_usd`, gateway rates): the closed form in expectation over the model parameters in
-  `adaptreplay.go`. Ping j starts j x 270 s after the request start (+1 s lateness) and fires while the keeper entry it refreshes (one per thread of a
+  `adaptreplay.go`. Ping j starts j x 240 s (`autoX`) after the request start (+1 s lateness) and fires while the keeper entry it refreshes (one per thread of a
   session) has seen no new request and, with SessionEnd, before the end of the session's last response. A ping can rewrite the prefix instead of
   refreshing it; a rewrite is billed and stops the span. A request only a ping kept alive can still miss. The cliff has a spread. A rescue is worth
   the prefix the next request shares, less the head a missed request reads anyway, times (write - read), and only by the share of requests that

@@ -223,7 +223,7 @@ of a request:
 
 | control | what it does |
 |---|---|
-| **Hard deadline** | released at `(K+1) × X` ≈ 14 min regardless of traffic. |
+| **Hard deadline** | released at `(K+1) × X` ≈ 12 min regardless of traffic. |
 | **Eager release** | dropped the moment the next request arrives, the gate refuses, or the process shuts down — whichever comes first. |
 | **Zeroized** | the bytes are overwritten, not just dereferenced. |
 | **Masked at rest** | the credential and the body are XORed under a random per-process key, so a leaked snapshot doesn't leak a working credential or a readable transcript. |

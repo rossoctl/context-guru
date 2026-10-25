@@ -503,7 +503,7 @@ const (
 	DefaultP5m       = 0.5
 	DefaultP1h       = 0.5
 	DefaultMinPrefix = 20000
-	// NOTE (#435): the shipped config default is now 270 s / 80k floor, but this simulator (and the
+	// NOTE (#435, #719): the shipped config default is now 240 s / 80k floor, but this simulator (and the
 	// suggester built on it) still scores at 280 s / 20k: its hazard windows are fixed at the W1
 	// clock and cannot represent the W3 cliff. Moving it needs a re-fit, not a constant edit.
 	// DefaultPingIdle and DefaultMaxPings are the shipped keep-alive schedule for a
