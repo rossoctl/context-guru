@@ -98,9 +98,10 @@ func CacheAwareColdDeferralStats() (started, resolved, fallbackFired, dropped in
 //
 // trigger and reserved are handed to startAsyncSummary unchanged when the deferral resolves: a cold
 // commission passes "cold_deferred" and false, a warm prefix-ask commission its own "turn" and the
-// reserve flag it computed (#722).
+// reserve flag it computed (#722). warm selects the registry: a warm prefix-ask commission is held
+// apart from the cold ones, under its own larger bound (see warmDeferred).
 func (s *CacheAwareSummarizer) deferSummary(c *components.Ctx, call summaryCaller, path, trigger string,
-	reserved bool, span []bschemas.ChatMessage, coveredCount int) {
+	reserved, warm bool, span []bschemas.ChatMessage, coveredCount int) {
 	if c == nil || c.Session == "" {
 		return
 	}
@@ -114,6 +115,10 @@ func (s *CacheAwareSummarizer) deferSummary(c *components.Ctx, call summaryCalle
 	conv := convKey(c)
 	d := &coldDeferral{s: s, ctx: lite, call: call, path: path, trigger: trigger, reserved: reserved,
 		span: spanCopy, coveredCount: coveredCount}
+	if warm {
+		s.deferWarm(conv, d)
+		return
+	}
 
 	coldDeferredMu.Lock()
 	if len(coldDeferred) >= maxColdDeferred && coldDeferred[conv] == nil {
@@ -133,6 +138,104 @@ func (s *CacheAwareSummarizer) deferSummary(c *components.Ctx, call summaryCalle
 	coldDeferred[conv] = d
 	coldDeferredMu.Unlock()
 	atomic.AddInt64(&cacheAwareColdDeferredStarted, 1)
+}
+
+// WARM PREFIX-ASK DEFERRALS (#722), held apart from the cold ones. Every qualifying warm turn on a
+// prefix-ask thread defers, from Offload until its own request ends, so these far outnumber cold
+// arrivals; sharing the cold registry's 256 slots would, under load, force the early dispatch #722
+// removes (#724 review). Their own bound and counters make that cap visible if it is ever reached.
+var (
+	warmDeferredMu sync.Mutex
+	warmDeferred   = map[string]*coldDeferral{}
+)
+
+// maxWarmDeferred bounds warm deferrals. One entry per thread with a commissioning request in
+// flight, each holding a span copy for one request's lifetime.
+const maxWarmDeferred = 4096
+
+// Warm-deferral counters: started, resolved by the host hook, dispatched because a newer request on
+// the same thread replaced them, fired by the fallback, dispatched early because the registry was
+// full, and dispatches startAsyncSummary refused (in flight, or the concurrency bound).
+var (
+	cacheAwareWarmDeferredStarted    int64
+	cacheAwareWarmDeferredResolved   int64
+	cacheAwareWarmDeferredReplaced   int64
+	cacheAwareWarmDeferredFallback   int64
+	cacheAwareWarmDeferredFull       int64
+	cacheAwareWarmDeferredRefused    int64
+	cacheAwareWarmDeferredSkippedDup int64
+)
+
+// CacheAwareWarmDeferralStats reports the warm-deferral counters, in the order of the vars above.
+func CacheAwareWarmDeferralStats() (started, resolved, replaced, fallback, full, refused, skippedDup int64) {
+	return atomic.LoadInt64(&cacheAwareWarmDeferredStarted), atomic.LoadInt64(&cacheAwareWarmDeferredResolved),
+		atomic.LoadInt64(&cacheAwareWarmDeferredReplaced), atomic.LoadInt64(&cacheAwareWarmDeferredFallback),
+		atomic.LoadInt64(&cacheAwareWarmDeferredFull), atomic.LoadInt64(&cacheAwareWarmDeferredRefused),
+		atomic.LoadInt64(&cacheAwareWarmDeferredSkippedDup)
+}
+
+// deferWarm stores a warm deferral. A deferral it REPLACES is dispatched at once, never dropped: a
+// newer request on the same thread has reached Offload, so the older turn's request already ended
+// and its body is in the stash, which is all the older commission was waiting for. Without that, a
+// host that never calls ResolveDeferredCacheAwareSummary would see every deferral replaced before
+// its fallback fired, on any thread whose turns come less than the fallback apart (#724 review).
+func (s *CacheAwareSummarizer) deferWarm(conv string, d *coldDeferral) {
+	warmDeferredMu.Lock()
+	prev := warmDeferred[conv]
+	if prev == nil && len(warmDeferred) >= maxWarmDeferred {
+		warmDeferredMu.Unlock()
+		atomic.AddInt64(&cacheAwareWarmDeferredFull, 1)
+		dispatchDeferred(d, &cacheAwareWarmDeferredRefused)
+		return
+	}
+	if prev != nil && prev.timer != nil {
+		prev.timer.Stop()
+	}
+	d.timer = time.AfterFunc(coldDeferralFallback, func() { s.resolveWarmFallback(conv) })
+	warmDeferred[conv] = d
+	warmDeferredMu.Unlock()
+	atomic.AddInt64(&cacheAwareWarmDeferredStarted, 1)
+	if prev != nil {
+		atomic.AddInt64(&cacheAwareWarmDeferredReplaced, 1)
+		dispatchDeferred(prev, &cacheAwareWarmDeferredRefused)
+	}
+}
+
+func takeWarmDeferral(conv string) *coldDeferral {
+	warmDeferredMu.Lock()
+	defer warmDeferredMu.Unlock()
+	d, ok := warmDeferred[conv]
+	if !ok {
+		return nil
+	}
+	delete(warmDeferred, conv)
+	if d.timer != nil {
+		d.timer.Stop()
+	}
+	return d
+}
+
+func (s *CacheAwareSummarizer) resolveWarmFallback(conv string) {
+	if d := takeWarmDeferral(conv); d != nil {
+		atomic.AddInt64(&cacheAwareWarmDeferredFallback, 1)
+		dispatchDeferred(d, &cacheAwareWarmDeferredRefused)
+	}
+}
+
+// dispatchDeferred starts a held commission. It skips one whose span a checkpoint already covers:
+// between Offload and the hook, the idle keep-alive can commit the same span through its own
+// substitute, and starting this one would pay for that summary twice (#724 review). A refusal by
+// startAsyncSummary (in flight, or the concurrency bound) is counted into refused, since no turn's
+// Report is left to file it on.
+func dispatchDeferred(d *coldDeferral, refused *int64) {
+	if cp, ok := loadCheckpoint(d.ctx); ok && cp.CoveredCount >= d.coveredCount &&
+		cp.CoveredHash == spanHash(d.span) {
+		atomic.AddInt64(&cacheAwareWarmDeferredSkippedDup, 1)
+		return
+	}
+	if gate := d.s.startAsyncSummary(d.ctx, d.call, d.path, d.trigger, d.reserved, d.span, d.coveredCount); gate != "" {
+		atomic.AddInt64(refused, 1)
+	}
 }
 
 // takeColdDeferral removes and returns the thread's pending deferral, if any (conv is convKey). Shared by the
@@ -161,9 +264,14 @@ func (s *CacheAwareSummarizer) resolveFallback(conv string) {
 	d.s.startAsyncSummary(d.ctx, d.call, d.path, d.trigger, d.reserved, d.span, d.coveredCount)
 }
 
-// ResolveDeferredCacheAwareSummary dispatches a cold-commissioned summary once the triggering
-// turn's own forwarded request has itself rewritten the prompt cache, so the side call reads a
-// now-warm prefix instead of racing the forwarded request to rewrite it twice.
+// ResolveDeferredCacheAwareSummary dispatches a summary held for the triggering turn's own forwarded
+// request: a cold commission, so the side call reads a now-warm prefix instead of racing the
+// forwarded request to rewrite it twice, and a warm prefix-ask commission, so its call reads this
+// turn's body from the host's stash rather than the previous turn's (#722).
+//
+// A HOST THAT SETS Ctx.PrefixAsk MUST CALL THIS when each request ends, after it has stashed that
+// request's forwarded body. Without it a warm prefix-ask commission is dispatched only when a newer
+// request on the thread replaces it, or by the fallback timer.
 //
 // Called by the proxy right after that turn's own upstream usage is observed — success or
 // failure. FAILURE STILL RESOLVES, deliberately: a forwarded request that errored or timed out
@@ -173,17 +281,19 @@ func (s *CacheAwareSummarizer) resolveFallback(conv string) {
 // outcome than occasionally dispatching the side call against a prefix that, in fact, never got
 // rewritten (which is simply the ordinary cold-and-will-miss case this deferral did not create).
 //
-// A no-op when no deferral is pending for the thread — the common case, since most sessions
-// never arrive cold in the first place.
+// A no-op when no deferral is pending for the thread.
 //
 // threadID is the request's thread (Ctx.Thread): the deferral is keyed by thread (convKey, #430),
 // so a subagent's forwarded request resolves only the subagent's own deferral, never the main
 // thread's, whose cache that request did not rewrite.
 func ResolveDeferredCacheAwareSummary(session, threadID string) {
-	d := takeColdDeferral(thread.Key(session, threadID))
-	if d == nil {
-		return
+	key := thread.Key(session, threadID)
+	if d := takeColdDeferral(key); d != nil {
+		atomic.AddInt64(&cacheAwareColdDeferredResolved, 1)
+		d.s.startAsyncSummary(d.ctx, d.call, d.path, d.trigger, d.reserved, d.span, d.coveredCount)
 	}
-	atomic.AddInt64(&cacheAwareColdDeferredResolved, 1)
-	d.s.startAsyncSummary(d.ctx, d.call, d.path, d.trigger, d.reserved, d.span, d.coveredCount)
+	if d := takeWarmDeferral(key); d != nil {
+		atomic.AddInt64(&cacheAwareWarmDeferredResolved, 1)
+		dispatchDeferred(d, &cacheAwareWarmDeferredRefused)
+	}
 }

@@ -948,7 +948,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// double-rewrite to avoid guarding against; Warm and PreExpiry mean the prefix the forwarded
 	// request is about to send is itself still live, so the side call already reads it.
 	if phase == components.CachePhaseCold {
-		s.deferSummary(c, call, path, "cold_deferred", false, span, end-start)
+		s.deferSummary(c, call, path, "cold_deferred", false, false, span, end-start)
 		rep.Event("cold_commission_deferred")
 		rep.Skipped = true
 		return nil, nil
@@ -970,7 +970,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// every time. So it is held in the deferral registry the cold path uses, and the host's hook
 	// dispatches it after that put. This turn still replays any stale summary, below.
 	if path == "prefix_ask" {
-		s.deferSummary(c, call, path, "turn", reserved, span, end-start)
+		s.deferSummary(c, call, path, "turn", reserved, true, span, end-start)
 		rep.Event(EventSummaryDeferredToStash)
 		return declineButReplayStale()
 	}
