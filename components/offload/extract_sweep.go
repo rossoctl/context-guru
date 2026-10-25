@@ -485,8 +485,16 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	}()
 	// SHADOW MODE changes nothing: it reports what the apply would do (extract_sweep_shadow.go).
 	if e.shadow {
+		// Shadow stops NEW applies only. Drops this thread already made stay replayed, byte for byte,
+		// or turning shadow on would flip them back to full inside the provider's cached prefix.
+		var keys []string
+		if c != nil && c.Store != nil && c.Session != "" {
+			var n int
+			keys, n = e.replayDrops(req, rep, c, thread.Key(c.Session, c.Thread), savedTokenValue(c))
+			changed += n
+		}
 		e.shadowStep(c, req, rep)
-		return nil, nil
+		return keys, nil
 	}
 	// THE COLD APPLY (#404 points 3 and 4). It replays the drops this thread already made, at any
 	// depth, and applies a held answer when this request is cold or its prefix changed. A warm request
@@ -1108,7 +1116,7 @@ func flattenTranscript(req *bschemas.BifrostChatRequest) string {
 func init() {
 	components.RegisterFields("extract_llm_sweep", extractSweepConfig{}, []components.Field{
 		{Key: "min_tokens", Type: components.FieldInt, Default: defaultSweepFloor, Min: 1,
-			Hint: "Per-output floor for naming a candidate in the inventory. NOTE this no longer has to price a drop as well: selectAffordableDrops decides which votes are worth their cache-write, on DEPTH relative to the rest of the batch rather than on size, so a low floor is safe on the econ path. Measured on iteration 022, a floor of 1000 named 4.5 of the 23.6 tool outputs a request carried and held the batch at 4.4 against a cap of 12, while a floor of 100 reaches 11.6 for 8% more mass -- candidates are nearly free (one inventory line) and are the axis the mechanism lives on. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 the shipped preset produced ZERO extractions across 3,437 production requests."},
+			Hint: "Per-output floor for naming a candidate in the inventory. Measured on iteration 022, a floor of 1000 named 4.5 of the 23.6 tool outputs a request carried and held the batch at 4.4 against a cap of 12, while a floor of 100 reaches 11.6 for 8% more mass -- candidates are nearly free (one inventory line) and are the axis the mechanism lives on. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 the shipped preset produced ZERO extractions across 3,437 production requests."},
 		{Key: "min_inventory", Type: components.FieldInt, Default: defaultMinInventory, Min: 1,
 			Hint: "Fewest candidates worth asking about; below it the sweep does not ask. Default 1: the question replaces a keep-alive ping, so the cache read is already paid for and a small inventory costs a small answer. Earlier measurement put the model's judgement at small inventories poor (shown one output it scored 6% live-kept on haiku and 14% on sonnet, inside the drop-everything null model's error bar; at batch 3-6 it dropped a genuinely-spent output 2 times in 4, at 10 4 in 4). A held answer is rechecked before anything is dropped, and shadow mode measures the real drop and false-drop rates. Raise it to bring the old floor of 10 back."},
 		{Key: "evidence", Type: components.FieldBool, Default: true,

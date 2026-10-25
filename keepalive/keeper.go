@@ -1707,16 +1707,16 @@ type Stats struct {
 
 // SweepDropStats is offload.SweepDropStats in /stats shape.
 type SweepDropStats struct {
-	Applied             int64   `json:"applied"`
-	AppliedCold         int64   `json:"applied_cold"`
-	AppliedChangedPrefx int64   `json:"applied_changed_prefix"`
-	ApplyDeclined       int64   `json:"apply_declined"`
-	Referenced          int64   `json:"referenced_later"`
-	Expanded            int64   `json:"expanded"`
-	FalseDrops          int64   `json:"false_drops"`
-	FalseDropRate       float64 `json:"false_drop_rate"`
-	ExpandEvents        int64   `json:"expand_events"`
-	ExpandTokens        int64   `json:"expand_tokens"`
+	Applied              int64   `json:"applied"`
+	AppliedCold          int64   `json:"applied_cold"`
+	AppliedChangedPrefix int64   `json:"applied_changed_prefix"`
+	ApplyDeclined        int64   `json:"apply_declined"`
+	Referenced           int64   `json:"referenced_later"`
+	Expanded             int64   `json:"expanded"`
+	FalseDrops           int64   `json:"false_drops"`
+	FalseDropRate        float64 `json:"false_drop_rate"`
+	ExpandEvents         int64   `json:"expand_events"`
+	ExpandTokens         int64   `json:"expand_tokens"`
 	// ApplyPanics counts recovered cold-apply panics; HeldStaleWrites older answers refused.
 	ApplyPanics int64 `json:"apply_panics"`
 	// Threads are the busiest threads by drops applied, most first.
@@ -1740,7 +1740,7 @@ func sweepDropStats() *SweepDropStats {
 		return nil
 	}
 	out := &SweepDropStats{Applied: o.Applied, AppliedCold: o.AppliedCold,
-		AppliedChangedPrefx: o.AppliedChangedPrefix, ApplyDeclined: o.ApplyDeclined,
+		AppliedChangedPrefix: o.AppliedChangedPrefix, ApplyDeclined: o.ApplyDeclined,
 		Referenced: o.Referenced, Expanded: o.Expanded, FalseDrops: o.FalseDrops(),
 		FalseDropRate: o.FalseDropRate(), ExpandEvents: o.ExpandEvents, ExpandTokens: o.ExpandTokens,
 		ApplyPanics: offload.SweepApplyPanics()}

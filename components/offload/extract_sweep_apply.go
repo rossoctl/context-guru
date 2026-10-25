@@ -121,6 +121,15 @@ func putDrop(st store.Store, r sweepDropRec) {
 	}
 }
 
+// tombstoneDrop makes a drop record read as absent (a version that is not dropVersion). Used to undo a
+// record written by an attempt whose request was restored. Caller holds dropMu.
+func tombstoneDrop(st store.Store, r sweepDropRec) {
+	r.V = -1
+	if b, err := json.Marshal(r); err == nil {
+		st.Put(dropKey(r.Thread, r.CK), b)
+	}
+}
+
 func getDropIndex(st store.Store, threadKey string) sweepDropIndex {
 	var ix sweepDropIndex
 	if st == nil || threadKey == "" {
@@ -158,9 +167,64 @@ func addToDropIndex(st store.Store, threadKey string, cks []string) {
 	}
 }
 
-type sweepMarkerRef struct {
+// sweepMarkerOwner is one thread that carries a marker, and the content key of its drop record.
+type sweepMarkerOwner struct {
 	Thread string `json:"t"`
 	CK     string `json:"ck"`
+}
+
+// sweepMarkerRef lists EVERY thread whose drop carries the marker. The marker id is hashKey(content)
+// and has no thread in it, so two threads that drop the same bytes share one marker (and one stash). A
+// single owner would let the second overwrite the first and credit an expand to the wrong thread.
+type sweepMarkerRef struct {
+	Owners []sweepMarkerOwner `json:"o"`
+}
+
+// dropMu serialises every read-modify-write of a drop record and of a marker ref (the reference scan,
+// the expand note, the commit and its undo). store.Store has no compare-and-set, so without it two
+// requests of one thread can each read the record, set a different flag, and lose one. One process-wide
+// mutex is enough: the sections are a few map reads and writes.
+var dropMu sync.Mutex
+
+func getMarkerRef(st store.Store, marker string) sweepMarkerRef {
+	var ref sweepMarkerRef
+	if b, ok := st.Get(dropMarkerKey(marker)); ok && len(b) > 0 {
+		if json.Unmarshal(b, &ref) != nil {
+			return sweepMarkerRef{}
+		}
+	}
+	return ref
+}
+
+func putMarkerRef(st store.Store, marker string, ref sweepMarkerRef) {
+	if b, err := json.Marshal(ref); err == nil {
+		st.Put(dropMarkerKey(marker), b)
+	}
+}
+
+// addMarkerOwner adds (thread, ck) to a marker's owners, once. Caller holds dropMu.
+func addMarkerOwner(st store.Store, marker, thread, ck string) {
+	ref := getMarkerRef(st, marker)
+	for _, o := range ref.Owners {
+		if o.Thread == thread && o.CK == ck {
+			return
+		}
+	}
+	ref.Owners = append(ref.Owners, sweepMarkerOwner{Thread: thread, CK: ck})
+	putMarkerRef(st, marker, ref)
+}
+
+// removeMarkerOwner undoes addMarkerOwner. Caller holds dropMu.
+func removeMarkerOwner(st store.Store, marker, thread, ck string) {
+	ref := getMarkerRef(st, marker)
+	out := ref.Owners[:0]
+	for _, o := range ref.Owners {
+		if !(o.Thread == thread && o.CK == ck) {
+			out = append(out, o)
+		}
+	}
+	ref.Owners = out
+	putMarkerRef(st, marker, ref)
 }
 
 // identHash is the short, one-way form an identifier is kept in. The records hold metadata only.
@@ -297,40 +361,48 @@ type SweepExpandNote struct {
 // NoteSweepExpand is called by the host for every expand call that resolved; tokens is what the
 // restored text measures. It reports whether the marker is a sweep drop and records the expand on the
 // drop and in the ledger. It never fails the expand.
-func NoteSweepExpand(st store.Store, markerID string, tokens int) (note SweepExpandNote) {
+//
+// threadKey is the thread that made the expand (thread.Key(session, thread)), or "" when the host does
+// not know it yet (the request-path repair runs before the thread is resolved). A marker can be carried by
+// several threads that dropped the same bytes. With a thread, only that thread is credited, and only if it
+// is an owner. Without one, every owner is credited, because every owner carries the marker.
+func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey string) (note SweepExpandNote) {
 	defer func() { _ = recover() }()
 	if st == nil || markerID == "" {
 		return
 	}
-	b, ok := st.Get(dropMarkerKey(markerID))
-	if !ok || len(b) == 0 {
-		return
-	}
-	var ref sweepMarkerRef
-	if json.Unmarshal(b, &ref) != nil {
-		return
-	}
-	rec, ok := getDrop(st, ref.Thread, ref.CK)
-	if !ok || rec.Marker != markerID {
-		return
-	}
-	note.Sweep = true
-	if !rec.Expanded {
-		note.First = true
-		note.Overlap = rec.Referenced
-		rec.Expanded = true
-		putDrop(st, rec)
-	}
-	ledgerNote(rec.Thread, func(q *SweepQuality) {
-		q.ExpandEvents++
-		q.ExpandTokens += int64(tokens)
-		if note.First {
-			q.Expanded++
-			if note.Overlap {
-				q.Overlap++
+	dropMu.Lock()
+	defer dropMu.Unlock()
+	ref := getMarkerRef(st, markerID)
+	for _, o := range ref.Owners {
+		if threadKey != "" && o.Thread != threadKey {
+			continue
+		}
+		rec, ok := getDrop(st, o.Thread, o.CK)
+		if !ok || rec.Marker != markerID {
+			continue
+		}
+		note.Sweep = true
+		first := !rec.Expanded
+		overlap := first && rec.Referenced
+		if first {
+			rec.Expanded = true
+			putDrop(st, rec)
+			if !note.First {
+				note.First, note.Overlap = true, overlap
 			}
 		}
-	})
+		ledgerNote(rec.Thread, func(q *SweepQuality) {
+			q.ExpandEvents++
+			q.ExpandTokens += int64(tokens)
+			if first {
+				q.Expanded++
+				if overlap {
+					q.Overlap++
+				}
+			}
+		})
+	}
 	return note
 }
 
@@ -523,13 +595,23 @@ func (e *ExtractSweep) scanReferences(req *bschemas.BifrostChatRequest, rep *com
 				}
 			}
 		}
-		rec.Seen = len(raw)
-		if hit {
-			rec.Referenced = true
-			rep.Event(eventFalseRef)
-			ledgerNote(tkey, func(q *SweepQuality) { q.Referenced++ })
+		seen := len(raw)
+		// The flags are written under dropMu from a FRESH read, so an expand that landed while this
+		// request was scanning is not overwritten.
+		dropMu.Lock()
+		cur, ok := getDrop(c.Store, tkey, ck)
+		if ok {
+			if seen > cur.Seen {
+				cur.Seen = seen
+			}
+			if hit && !cur.Referenced {
+				cur.Referenced = true
+				rep.Event(eventFalseRef)
+				ledgerNote(tkey, func(q *SweepQuality) { q.Referenced++ })
+			}
+			putDrop(c.Store, cur)
 		}
-		putDrop(c.Store, rec)
+		dropMu.Unlock()
 	}
 }
 
@@ -576,12 +658,8 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 		raw = c.RawInput
 	}
 	cold := sweepColdRequest(c)
-	cp := -1
-	if !cold {
-		cp = changePoint(raw, h)
-		if cp < 0 {
-			return nil, 0 // warm and unchanged: H1. The answer stays held.
-		}
+	if !cold && changePoint(raw, h) < 0 {
+		return nil, 0 // warm and unchanged: H1. The answer stays held.
 	}
 	kind := "cold"
 	if !cold {
@@ -595,6 +673,20 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 		return nil, 0
 	}
 	h = claimed
+	// THE CHANGE POINT COMES FROM THE ANSWER THE CLAIM RETURNED, not from the one read above: a newer
+	// answer can land between the read and the claim, and the split of drops into "after the change" and
+	// "before it" must be made against the answer that is being applied.
+	cp := -1
+	if !cold {
+		cp = changePoint(raw, h)
+		if cp < 0 {
+			// The answer we won is not changed-prefix against this request (the newer one judged what
+			// this request carries). Nothing to apply on a warm request: give it back, unspent.
+			h.Spent = false
+			putHeld(c.Store, h)
+			return nil, 0
+		}
+	}
 
 	// Fail open. A panic restores every message touched, writes no record, counts the panic, and GIVES
 	// THE ANSWER BACK (RETRIABLE) so the drops are not lost silently. The next cold request tries again,
@@ -602,11 +694,26 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 	// nothing else, while a poisoned answer that panicked on every cold request would cost a recheck each
 	// time for nothing, hence the bound.
 	var pending []pendingDrop
+	// committed is every record written by THIS attempt. The commit is atomic in effect: if anything
+	// panics after the first record is written, the recover tombstones every one of them, so the next
+	// request does not replay a form this request never sent.
+	var committed []sweepDropRec
 	defer func() {
 		if r := recover(); r != nil {
 			for i := len(pending) - 1; i >= 0; i-- {
 				req.Input[pending[i].idx] = pending[i].before
 			}
+			func() {
+				defer func() { _ = recover() }() // the Store may be what panicked
+				dropMu.Lock()
+				defer dropMu.Unlock()
+				for _, rec := range committed {
+					tombstoneDrop(c.Store, rec)
+					if rec.Marker != "" {
+						removeMarkerOwner(c.Store, rec.Marker, rec.Thread, rec.CK)
+					}
+				}
+			}()
 			keys, changed = nil, 0
 			rep.Event(eventApplyPanic)
 			sweepApplyPanics.Add(1)
@@ -614,10 +721,8 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 				defer func() { _ = recover() }() // the Store may be what panicked
 				back := h
 				back.Attempts++
-				if back.Attempts < maxApplyAttempts {
-					back.Spent = false
-					putHeld(c.Store, back)
-				}
+				back.Spent = back.Attempts >= maxApplyAttempts
+				putHeld(c.Store, back)
 			}()
 			slog.Error("cg.sweep.apply_panic: recovered; the request is forwarded unchanged",
 				"session", c.Session, "thread", c.Thread, "panic", fmt.Sprint(r))
@@ -674,33 +779,23 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 	}
 
 	// Committed only now, after every drop of this request is in req: a record exists only for a drop
-	// the request carries.
+	// the request carries. Each write is tracked in `committed` so a panic part-way undoes all of them.
 	cks := make([]string, 0, len(pending))
-	for _, p := range pending {
-		putDrop(c.Store, p.rec)
-		if p.rec.Marker != "" {
-			if b, err := json.Marshal(sweepMarkerRef{Thread: tkey, CK: p.rec.CK}); err == nil {
-				c.Store.Put(dropMarkerKey(p.rec.Marker), b)
+	func() {
+		// Deferred unlock: a panic in a Store write must release dropMu before the recover below takes
+		// it again to tombstone what was written.
+		dropMu.Lock()
+		defer dropMu.Unlock()
+		for _, p := range pending {
+			committed = append(committed, p.rec)
+			putDrop(c.Store, p.rec)
+			if p.rec.Marker != "" {
+				addMarkerOwner(c.Store, p.rec.Marker, tkey, p.rec.CK)
 			}
+			cks = append(cks, p.rec.CK)
 		}
-		cks = append(cks, p.rec.CK)
-	}
+	}()
 	addToDropIndex(c.Store, tkey, cks)
-	if n := len(pending); n > 0 {
-		ev := eventAppliedCold
-		if !cold {
-			ev = eventAppliedChangedPrefix
-		}
-		rep.EventN(ev, n)
-		ledgerNote(tkey, func(q *SweepQuality) {
-			q.Applied += int64(n)
-			if cold {
-				q.AppliedCold += int64(n)
-			} else {
-				q.AppliedChangedPrefix += int64(n)
-			}
-		})
-	}
 	for reason, n := range res.reasonCounts() {
 		rep.EventN("sweep_apply_dropped_"+trimReason(reason), n)
 	}
@@ -718,7 +813,24 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 		}
 		putHeld(c.Store, h)
 	}
-	pending = nil // committed: nothing to restore if the bookkeeping below panics
+	// Counted LAST, once the commit and the held trim both succeeded: the ledger and the events describe
+	// only drops the request carries.
+	if n := len(pending); n > 0 {
+		ev := eventAppliedCold
+		if !cold {
+			ev = eventAppliedChangedPrefix
+		}
+		rep.EventN(ev, n)
+		ledgerNote(tkey, func(q *SweepQuality) {
+			q.Applied += int64(n)
+			if cold {
+				q.AppliedCold += int64(n)
+			} else {
+				q.AppliedChangedPrefix += int64(n)
+			}
+		})
+	}
+	pending, committed = nil, nil // committed: nothing to restore
 	return keys, changed
 }
 

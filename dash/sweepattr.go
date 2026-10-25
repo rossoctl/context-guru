@@ -44,9 +44,9 @@ type SweepThread struct {
 
 // SweepLedger is the sweep's quality and money over a filtered window.
 type SweepLedger struct {
-	Applied             int64 `json:"applied"`
-	AppliedCold         int64 `json:"applied_cold"`
-	AppliedChangedPrefx int64 `json:"applied_changed_prefix"`
+	Applied              int64 `json:"applied"`
+	AppliedCold          int64 `json:"applied_cold"`
+	AppliedChangedPrefix int64 `json:"applied_changed_prefix"`
 	// Referenced: drops a later turn used something from, without expanding.
 	Referenced int64 `json:"referenced_later"`
 	// Expands and ExpandTokens: every expand of a sweep marker, and what it returned.
@@ -125,7 +125,7 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 			return nil, err
 		}
 		out.AppliedCold += cold
-		out.AppliedChangedPrefx += chg
+		out.AppliedChangedPrefix += chg
 		out.Referenced += ref
 		t := get(s, th)
 		t.Applied += cold + chg
@@ -135,7 +135,7 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out.Applied = out.AppliedCold + out.AppliedChangedPrefx
+	out.Applied = out.AppliedCold + out.AppliedChangedPrefix
 
 	// 2. The expands, from the request rows (not the component rows: an expand lands on whichever
 	// request carried the response).
@@ -258,6 +258,10 @@ func ApplySweepLedgerToRow(c *ComponentRow, l *SweepLedger) {
 	c.NetUSDWithEstimate -= l.ExpandChargeUSD
 }
 
+// KNOWN IMPRECISION (a dashboard measurement, not a decision): the "next warm" request is the first later
+// request of the same thread that is not a keep-alive ping and read from the cache. It can be a LATER cold
+// request that happened to read the system prefix, so NextWarmReadTokens is an upper-bound read of the
+// first warm turn. It runs one query per cold-apply request, bounded by the filter and used only here.
 // coldApplyCache fills the C2 numbers: for each request on which the sweep applied on a cold request, the
 // provider's cache tiers; and, for the first later request of the same thread that was not itself a cold
 // apply, its tiers too. Read from the stored integers only.

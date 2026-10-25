@@ -1586,7 +1586,7 @@ func (h *Handler) repairExpandErrors(wire string, body []byte, tn *Tenancy, cp *
 			cp.noteExpand(schema.TextTokens(orig))
 			// A sweep marker restored by the repair is charged to the sweep too (#404 point 7). Same
 			// first-time rule as the line above: the repair runs again on every later turn.
-			cp.noteSweepExpand(schema.TextTokens(orig), offload.NoteSweepExpand(tn.Store, offload.SweepMarkerID(orig), schema.TextTokens(orig)))
+			cp.noteSweepExpand(schema.TextTokens(orig), offload.NoteSweepExpand(tn.Store, offload.SweepMarkerID(orig), schema.TextTokens(orig), ""))
 		}
 		offload.MarkKeptVerbatim(tn.Store, orig)
 	}
@@ -2028,7 +2028,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				cp.noteExpand(back) // and on the dashboard row, or SavedAdjusted over-reports
 				// And, when the marker is one the sweep made, charged to the sweep (#404 point 7): the
 				// false-drop signal, and what comes off the sweep's credit.
-				cp.noteSweepExpand(back, offload.NoteSweepExpand(tn.Store, c.HashID, back))
+				cp.noteSweepExpand(back, offload.NoteSweepExpand(tn.Store, c.HashID, back, thread.Key(session, threadID)))
 			} else {
 				// Classified as well as counted: the response loop and the request-path repair
 				// both reach here, and an id this proxy could have minted with nothing behind it

@@ -458,14 +458,14 @@ func TestAnExpandOfASweepMarkerIsChargedToTheSweep(t *testing.T) {
 	}
 	id := firstMarkerID(t, schema.MessageText(req.Input[1]))
 	// A marker some OTHER component made is not the sweep's.
-	if note := NoteSweepExpand(st, "deadbeefdeadbeef", 10); note.Sweep {
+	if note := NoteSweepExpand(st, "deadbeefdeadbeef", 10, ""); note.Sweep {
 		t.Error("an expand of a foreign marker was charged to the sweep")
 	}
-	n1 := NoteSweepExpand(st, id, 1200)
+	n1 := NoteSweepExpand(st, id, 1200, "")
 	if !n1.Sweep || !n1.First {
 		t.Fatalf("first expand of a sweep marker: %+v, want Sweep and First", n1)
 	}
-	n2 := NoteSweepExpand(st, id, 1200)
+	n2 := NoteSweepExpand(st, id, 1200, "")
 	if !n2.Sweep || n2.First {
 		t.Fatalf("second expand of the same drop: %+v, want Sweep and not First", n2)
 	}
@@ -527,7 +527,7 @@ func TestALaterReferenceToADroppedOutputCounts(t *testing.T) {
 	}
 	// And a drop that is BOTH referenced and expanded is one false drop, not two.
 	id := firstMarkerID(t, schema.MessageText(cold.Input[3]))
-	NoteSweepExpand(st, id, 1200)
+	NoteSweepExpand(st, id, 1200, "")
 	if q := SweepDropCounters().Overall; q.FalseDrops() != 1 {
 		t.Errorf("a drop that is referenced AND expanded counted as %d false drops, want 1", q.FalseDrops())
 	}
@@ -807,5 +807,276 @@ func TestAFullAskSlotCountsAsConcurrencyFull(t *testing.T) {
 	}
 	if SweepPingCounters().ConcurrencyFull-before != 1 {
 		t.Error("the refusal was not counted as sweep_concurrency_full")
+	}
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Round 1 review fixes (#695): false-drop accuracy, the commit window, the change point, shadow replay.
+
+// R1-2. Two threads drop the SAME bytes, so they share one marker id. An expand in thread B credits
+// thread B and only B; an expand with no thread known credits every owner.
+func TestAnExpandOfASharedMarkerCreditsOnlyTheThreadThatExpanded(t *testing.T) {
+	resetSweepLedgerForTest()
+	t.Cleanup(resetSweepLedgerForTest)
+	st := newMemStore()
+	content := refOutput(7)
+	marker := hashKey(content)
+	SeedSweepDropForTest(st, "thread-A", content, marker)
+	SeedSweepDropForTest(st, "thread-B", content, marker) // B writes second: must not displace A
+	note := NoteSweepExpand(st, marker, 500, "thread-B")
+	if !note.Sweep || !note.First {
+		t.Fatalf("note = %+v, want a first sweep expand", note)
+	}
+	ck := contentKey(content)
+	if a, _ := getDrop(st, "thread-A", ck); a.Expanded {
+		t.Error("thread A was credited for an expand that thread B made")
+	}
+	if b, _ := getDrop(st, "thread-B", ck); !b.Expanded {
+		t.Error("thread B was not credited for its own expand")
+	}
+	var a, b SweepQuality
+	for _, th := range SweepDropCounters().Threads {
+		switch th.Label {
+		case threadLabel("thread-A"):
+			a = th.SweepQuality
+		case threadLabel("thread-B"):
+			b = th.SweepQuality
+		}
+	}
+	if a.Expanded != 0 || b.Expanded != 1 || b.ExpandEvents != 1 {
+		t.Errorf("ledger A=%+v B=%+v, want only B credited", a, b)
+	}
+	// A thread that does not carry the marker is credited with nothing.
+	if n := NoteSweepExpand(st, marker, 500, "thread-C"); n.Sweep {
+		t.Error("a thread that does not carry the marker was credited")
+	}
+	// Unknown thread (the request-path repair): every owner carries it, so every owner is credited.
+	NoteSweepExpand(st, marker, 500, "")
+	if a, _ := getDrop(st, "thread-A", ck); !a.Expanded {
+		t.Error("an expand with no thread known did not credit owner A")
+	}
+}
+
+// R1-3. scanReferences and NoteSweepExpand both read-modify-write one drop record. Slowed, an unlocked
+// pair loses a flag every time.
+func TestAReferenceAndAnExpandOnOneDropBothLand(t *testing.T) {
+	resetSweepLedgerForTest()
+	t.Cleanup(resetSweepLedgerForTest)
+	e := shippedSweep(t, "")
+	base := newMemStore()
+	st := &slowStore{Store: base}
+	tkey := thread.Key("race", "")
+	content := refOutput(3)
+	marker := hashKey(content)
+	ck := contentKey(content)
+	putDrop(st, sweepDropRec{Thread: tkey, ToolUseID: "t", CK: ck, Marker: marker, Seen: 0,
+		Idents: []string{identHash("handler_3_timeout_ms")}})
+	addToDropIndex(st, tkey, []string{ck})
+	dropMu.Lock()
+	addMarkerOwner(st, marker, tkey, ck)
+	dropMu.Unlock()
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("go"),
+		assistantMsg("the limit lives in handler_3_timeout_ms")}}
+	c := warmCtx("race", st)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); e.scanReferences(req, &components.Report{}, c, tkey) }()
+	go func() { defer wg.Done(); time.Sleep(3 * time.Millisecond); NoteSweepExpand(st, marker, 100, tkey) }()
+	wg.Wait()
+	rec, ok := getDrop(base, tkey, ck)
+	if !ok || !rec.Referenced || !rec.Expanded {
+		t.Fatalf("a flag was lost: %+v", rec)
+	}
+}
+
+// putCountStore panics on the Nth Put after arming, counted from the first drop-record write.
+type commitPanicStore struct {
+	store.Store
+	armed  bool
+	writes int
+	at     int
+}
+
+func (s *commitPanicStore) Put(k string, p []byte) {
+	if s.armed && strings.HasPrefix(k, store.SweepDropPrefix) {
+		s.writes++
+		if s.writes == s.at {
+			panic("boom inside the commit loop")
+		}
+	}
+	s.Store.Put(k, p)
+}
+
+// R1-1 / R2-1. A panic INSIDE the commit loop, after the first record is written. The request is
+// restored, so every record this attempt wrote is tombstoned: the next request does not replay a form
+// this one never sent, and nothing is counted for drops the request does not carry.
+func TestAPanicInsideTheCommitLoopLeavesNoRecordAndNoCount(t *testing.T) {
+	e, base, key := heldApply(t, "commitwin", 3)
+	ps := &commitPanicStore{Store: base, armed: true, at: 2} // first record lands, the second panics
+	req := applyConv(3, 1)
+	want := texts(req)
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(req, rep, coldCtx("commitwin", ps)); err != nil {
+		t.Fatalf("Offload must fail open: %v", err)
+	}
+	if ps.writes < 2 {
+		t.Fatalf("the panic never fired inside the commit loop (%d drop writes)", ps.writes)
+	}
+	for i, w := range want {
+		if schema.MessageText(req.Input[i]) != w {
+			t.Fatalf("message %d changed after a panic in the commit", i)
+		}
+	}
+	for i := 1; i <= 3; i++ {
+		ck := contentKey(want[i])
+		if _, ok := getDrop(base, key, ck); ok {
+			t.Errorf("output %d has a live drop record for a request that was restored", i)
+		}
+		if ref := getMarkerRef(base, hashKey(want[i])); len(ref.Owners) != 0 {
+			t.Errorf("output %d still has marker owners %+v", i, ref.Owners)
+		}
+	}
+	if q := SweepDropCounters().Overall; q.Applied != 0 {
+		t.Errorf("ledger counts %d applied for drops the request does not carry", q.Applied)
+	}
+	if rep.Events[eventAppliedCold] != 0 {
+		t.Errorf("sweep_applied_cold = %d for a restored request", rep.Events[eventAppliedCold])
+	}
+	// And the next request, with a healthy store, replays nothing from the failed attempt.
+	next := applyConv(3, 2)
+	wantNext := texts(next)
+	rep2 := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(next, rep2, warmCtx("commitwin", base)); err != nil {
+		t.Fatal(err)
+	}
+	for i, w := range wantNext {
+		if schema.MessageText(next.Input[i]) != w {
+			t.Fatalf("the next request replayed message %d from a failed attempt", i)
+		}
+	}
+}
+
+// R1-4. The change point is computed from the answer the claim returns. A newer answer lands between the
+// read and the claim; the split must use IT. Driven through a store that swaps the answer on the first
+// Get after the read.
+type swapAnswerStore struct {
+	store.Store
+	key   string
+	newer []byte
+	reads int
+}
+
+// Get swaps the stored answer for the newer one right AFTER applyHeld's first read (the one its change
+// point is computed from) and before the claim's read.
+func (s *swapAnswerStore) Get(k string) ([]byte, bool) {
+	b, ok := s.Store.Get(k)
+	if k == s.key && ok {
+		s.reads++
+		if s.reads == 1 {
+			s.Store.Put(k, s.newer)
+		}
+	}
+	return b, ok
+}
+
+func TestTheChangePointComesFromTheClaimedAnswer(t *testing.T) {
+	e, base, key := heldApply(t, "stale-cp", 4)
+	old, _ := getHeld(base, key)
+	// The NEWER answer judged a conversation whose first three messages are unchanged and which is
+	// longer; it holds the same four outputs. Build it by re-asking over a grown conversation.
+	newer := old
+	newer.AskedAtMs = old.AskedAtMs + 1000
+	newer.Prints = append([]uint32(nil), old.Prints...)
+	// A request whose message 3 differs from BOTH answers' prints at index 3 is a changed prefix with
+	// the change point at 3 for the OLD answer. Give the newer answer prints that already match the
+	// request (it judged the edited conversation), so its change point is -1.
+	req := applyConv(4, 1)
+	req.Input[3] = toolResultMsgWithID("toolu_wire_2", refOutput(2)+"an edit\n")
+	newer.Prints = msgPrints(req.Input[:len(old.Prints)])
+	nb, _ := json.Marshal(newer)
+	ss := &swapAnswerStore{Store: base, key: heldKey(key), newer: nb}
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(req, rep, warmCtx("stale-cp", ss)); err != nil {
+		t.Fatal(err)
+	}
+	// With the OLD change point (3) the sweep would have applied output 3 (index 4). With the claimed
+	// answer there is no change point: a warm request, nothing to apply, the answer given back unspent.
+	if rep.Events[eventAppliedChangedPrefix] != 0 || rep.Events[eventAppliedCold] != 0 {
+		t.Fatalf("applied on the strength of a stale change point: %v", rep.Events)
+	}
+	if h, ok := getHeld(base, key); !ok || h.AskedAtMs != newer.AskedAtMs {
+		t.Errorf("the newer answer was not left held: ok=%v %+v", ok, h)
+	}
+}
+
+// Shadow mode applies nothing NEW but keeps replaying drops that already exist, or switching it on
+// would flip them back to full inside the cached prefix.
+func TestShadowModeKeepsReplayingExistingDrops(t *testing.T) {
+	e, st, _ := heldApply(t, "shadow-replay", 3)
+	cold := applyConv(3, 1)
+	if _, err := e.Offload(cold, &components.Report{Component: "extract_llm_sweep"}, coldCtx("shadow-replay", st)); err != nil {
+		t.Fatal(err)
+	}
+	want := texts(cold)
+	sh := shippedSweep(t, "shadow: true\n")
+	next := applyConv(3, 2)
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	keys, err := sh.Offload(next, rep, warmCtx("shadow-replay", st))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < len(want); i++ {
+		if schema.MessageText(next.Input[i]) != want[i] {
+			t.Fatalf("shadow mode stopped replaying message %d", i)
+		}
+	}
+	if rep.Replays != 3 || len(keys) != 3 {
+		t.Errorf("replays %d keys %d, want 3 and 3 (the pipeline reverts a splice with no keys)", rep.Replays, len(keys))
+	}
+}
+
+// A panic AFTER the records are written (at the held-answer trim of a changed-prefix apply) still
+// restores the request, tombstones the records, and counts nothing: the ledger is bumped last.
+type trimPanicStore struct {
+	store.Store
+	armed bool
+}
+
+func (s *trimPanicStore) Put(k string, p []byte) {
+	if s.armed && strings.HasPrefix(k, store.SweepHeldPrefix) {
+		var h heldAnswer
+		if json.Unmarshal(p, &h) == nil && !h.Spent && len(h.Outputs) > 0 && h.Judged < 4 {
+			panic("boom at the held trim")
+		}
+	}
+	s.Store.Put(k, p)
+}
+
+func TestAPanicAfterTheCommitStillCountsNothing(t *testing.T) {
+	e, base, key := heldApply(t, "trimwin", 4)
+	ps := &trimPanicStore{Store: base, armed: true}
+	req := applyConv(4, 1)
+	req.Input[3] = toolResultMsgWithID("toolu_wire_2", refOutput(2)+"an edit\n") // change point 3: 0,1 stay held
+	want := texts(req)
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(req, rep, warmCtx("trimwin", ps)); err != nil {
+		t.Fatal(err)
+	}
+	for i, w := range want {
+		if schema.MessageText(req.Input[i]) != w {
+			t.Fatalf("message %d changed after a panic at the held trim", i)
+		}
+	}
+	if rep.Events[eventApplyPanic] != 1 {
+		t.Fatalf("the trim panic never fired: %v", rep.Events)
+	}
+	if q := SweepDropCounters().Overall; q.Applied != 0 || q.AppliedChangedPrefix != 0 {
+		t.Errorf("ledger counts %+v for a restored request", q)
+	}
+	if rep.Events[eventAppliedChangedPrefix] != 0 {
+		t.Errorf("event counted for a restored request: %v", rep.Events)
+	}
+	if _, ok := getDrop(base, key, contentKey(want[4])); ok {
+		t.Error("a live drop record survived the restore")
 	}
 }

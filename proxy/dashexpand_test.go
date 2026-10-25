@@ -8,8 +8,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/thread"
 )
 
 // TestDashboardRecordsExpands: the expand loop recorded restorations only to the
@@ -239,14 +242,17 @@ func TestAnExpandOfASweepMarkerIsChargedToTheSweepOnTheDashboardRow(t *testing.T
 			h, rec := dashHandler(t, up.URL, dash.Options{})
 			original := strings.Repeat("the original content the sweep dropped\n", 20)
 			h.store.Put("HASH", []byte(original))
-			if tc.sweeps {
-				offload.SeedSweepDropForTest(h.store, "sess-sweep", original, "HASH")
-			}
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()
 			body := `{"model":"gpt-x","tools":[{"type":"function","function":{"name":"read_file"}}],"messages":[` +
 				`{"role":"user","content":"go"},` +
 				`{"role":"tool","tool_call_id":"a","content":"` + strings.Repeat("a verbose repeated tool output line\\n", 60) + `"}]}`
+			if tc.sweeps {
+				// The expand is credited to the thread that made it, so the drop is seeded on THAT
+				// thread: the session the proxy derives for this body, primary thread.
+				sid := apply.SessionIDFor("", "", bschemas.OpenAI, []byte(body))
+				offload.SeedSweepDropForTest(h.store, thread.Key(sid, ""), original, "HASH")
+			}
 			resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(body))
 			if err != nil {
 				t.Fatal(err)
