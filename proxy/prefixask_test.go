@@ -292,9 +292,14 @@ func TestAskUsesTheStashedBodyForThatSession(t *testing.T) {
 // over the per-body cap is not stashed at all.
 func TestAnOversizedBodyIsNotStashed(t *testing.T) {
 	s := newSentStash()
+	before := PrefixStashOversized()
 	s.put("sess", bschemas.Anthropic, []byte(strings.Repeat("x", maxSentBody+1)), []byte(strings.Repeat("x", maxSentBody+1)))
 	if got := s.get("sess"); got != nil {
 		t.Fatalf("a %d-byte body was stashed past the %d cap", len(got), maxSentBody)
+	}
+	// #703: the refusal must show in /stats, or a no_prefix it causes reads as a first turn.
+	if got := PrefixStashOversized() - before; got != 1 {
+		t.Fatalf("prefix_stash_oversized rose by %d, want 1", got)
 	}
 	// Under the cap it is held.
 	s.put("sess", bschemas.Anthropic, []byte(prefixBodyFixture), []byte(prefixBodyFixture))

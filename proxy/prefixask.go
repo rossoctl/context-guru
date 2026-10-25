@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
@@ -109,6 +110,15 @@ type sentStash struct {
 
 func newSentStash() *sentStash { return &sentStash{m: map[string]sentEntry{}} }
 
+// sentStashOversized counts bodies put refused for being over maxSentBody. Each one leaves that
+// thread with nothing stashed, so its next prefix ask returns ErrNoPrefix. Without this count that
+// looks the same in /stats as a session's ordinary first turn (#703: a 900k-token thread was never
+// stashed, and 30 of 30 summaries failed as no_prefix).
+var sentStashOversized atomic.Int64
+
+// PrefixStashOversized returns sentStashOversized for /stats.
+func PrefixStashOversized() int64 { return sentStashOversized.Load() }
+
 // put records this session's forwarded body AND the pre-pipeline body it was built from,
 // replacing any previous entry.
 //
@@ -135,6 +145,7 @@ func (s *sentStash) put(session string, provider bschemas.ModelProvider, preBody
 		return
 	}
 	if len(forwarded) > maxSentBody || len(preBody) > maxSentBody {
+		sentStashOversized.Add(1)
 		s.mu.Lock()
 		if old, ok := s.m[session]; ok {
 			s.bytes -= len(old.forwarded) + len(old.preBody)
