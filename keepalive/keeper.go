@@ -1412,11 +1412,17 @@ func (k *Keeper) notePingRead(e *kaEntry) {
 // cacheTTL is how long the provider keeps this entry's cache after a read: 30 minutes on an
 // OpenAI Responses thread (the GPT-5.6+ minimum; ttl1h is never set there), else 1 hour or
 // 5 minutes by the tier the provider billed.
-func (e *kaEntry) cacheTTL() time.Duration {
+func (e *kaEntry) cacheTTL() time.Duration { return cacheLifetime(e.provider, e.ttl1h) }
+
+// cacheLifetime is THE rule for how long a provider keeps a thread's cache after a read, so the
+// retry guard (cacheTTL) and the substitute's phase check (cachePhaseAt) cannot disagree (#715):
+// 30 minutes on OpenAI (the GPT-5.6+ minimum; the one-hour tier is never set there), else 1 hour
+// on the one-hour tier, else 5 minutes.
+func cacheLifetime(provider bschemas.ModelProvider, ttl1h bool) time.Duration {
 	switch {
-	case e.provider == bschemas.OpenAI:
+	case provider == bschemas.OpenAI:
 		return modelinfo.OpenAIMinimumCacheTTL
-	case e.ttl1h:
+	case ttl1h:
 		return time.Hour
 	default:
 		return 5 * time.Minute
