@@ -186,6 +186,7 @@ var notExportedWhy = map[string]string{
 	"CacheAwareSummarizerAsyncCommitted":   "NOT EXPORTED YET — detached summaries that reached a checkpoint. The PAIR is the signal: started without committed is a summary paid for and lost",
 	"CacheAwareSummarizerNoPrefix":         "NOT EXPORTED YET — a session's first turn through PrefixAsk (components.ErrNoPrefix), not a failure",
 	"CacheAwareSummarizerStalePrefix":      "NOT EXPORTED YET — the PrefixAsk stash did not cover the span this turn would have claimed as summarized; a real alert candidate once it has a dashboard home",
+	"PrefixStashOversized":                 "NOT EXPORTED YET — request bodies the prefix stash refused as over its per-body cap; same family as CacheAwareSummarizerNoPrefix, exported with it",
 	"CacheAwareSummarizerPrefixAskUsed":    "NOT EXPORTED YET — the direct signal that this component is actually activating on Anthropic incoming-model traffic (#275) rather than measuring `off`",
 	"CacheAwareSummarizerCacheReadTokens":  "NOT EXPORTED YET — the direct answer to 'is the commission call actually reading warm', this component's whole argument",
 	"CacheAwareSummarizerCacheWriteTokens": "NOT EXPORTED YET — paired with CacheReadTokens; a call that only ever writes is the mechanism failing, not merely being expensive",
