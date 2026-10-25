@@ -1,0 +1,21 @@
+The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use ToolSearch with query "select:<name>[,<name>...]" to load tool schemas before calling them:
+ArtifactComments
+ArtifactData
+CronCreate
+CronDelete
+CronList
+DesignSync
+EndConversation
+EnterPlanMode
+EnterWorktree
+ExitPlanMode
+ExitWorktree
+Monitor
+NotebookEdit
+PushNotification
+SendMessage
+TaskStop
+WebFetch
+WebSearch
+mcp__web-search__WebSearch
+mcp__web-search__google_pse_search

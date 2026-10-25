@@ -1,0 +1,9 @@
+{
+  "name": "DeferredToolPlaceholder",
+  "description": "Reserved placeholder that keeps deferred tool loading active; never call this tool.",
+  "input_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "defer_loading": true
+}
