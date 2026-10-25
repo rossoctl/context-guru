@@ -96,3 +96,25 @@ func TestAPreExpirySubstituteStillTakesAnAnthropicPingWithTheDefaultWindow(t *te
 			k.summarySubstituted.Load(), fs.n())
 	}
 }
+
+// #717 review round 2. The widened default window is capped. A short schedule — a 60 s idle on a
+// 5-minute cache — has 240 s of slack, and an uncapped window would make its very first ping read
+// PreExpiry, minutes before the cache expires. That first ping must stay Warm.
+func TestAShortIdleLeavesTheFirstPingWarm(t *testing.T) {
+	ttl, idle := cacheLifetime(bschemas.Anthropic, false), 60*time.Second
+	if w := substituteWindow(0, ttl, idle); w > maxSubstituteWindow {
+		t.Fatalf("default window for a 60 s idle = %v, want at most %v", w, maxSubstituteWindow)
+	}
+	prev := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	if got := cachePhaseAt(prev, prev.Add(idle), ttl, substituteWindow(0, ttl, idle)); got != components.CachePhaseWarm {
+		t.Fatalf("a ping 60 s into a 5-minute cache reads %v, want Warm", got)
+	}
+	// A one-hour ask that was not granted is the widest such case: about 55 minutes of slack.
+	if w := substituteWindow(0, time.Hour, 270*time.Second); w > maxSubstituteWindow {
+		t.Fatalf("default window for an ungranted 1-hour ask = %v, want at most %v", w, maxSubstituteWindow)
+	}
+	// The cap still covers OpenAI's 120 s slack.
+	if w := substituteWindow(0, cacheLifetime(bschemas.OpenAI, false), modelinfo.OpenAIDefaultKeepAliveIdle); w < 2*time.Minute {
+		t.Fatalf("the cap cut the OpenAI window to %v, below its 2-minute slack", w)
+	}
+}
