@@ -301,6 +301,24 @@ func ledgerNote(threadKey string, f func(q *SweepQuality)) {
 	sweepLedger.mu.Lock()
 	defer sweepLedger.mu.Unlock()
 	f(&sweepLedger.overall)
+	ledgerThreadLocked(threadKey, f)
+}
+
+// ledgerNoteThread books into one thread only; ledgerNoteOverall into the process total only. An expand
+// of a shared marker books each owner's row and the total once.
+func ledgerNoteThread(threadKey string, f func(q *SweepQuality)) {
+	sweepLedger.mu.Lock()
+	defer sweepLedger.mu.Unlock()
+	ledgerThreadLocked(threadKey, f)
+}
+
+func ledgerNoteOverall(f func(q *SweepQuality)) {
+	sweepLedger.mu.Lock()
+	defer sweepLedger.mu.Unlock()
+	f(&sweepLedger.overall)
+}
+
+func ledgerThreadLocked(threadKey string, f func(q *SweepQuality)) {
 	t, ok := sweepLedger.threads[threadKey]
 	if !ok {
 		if len(sweepLedger.threads) >= maxLedgerThreads {
@@ -374,6 +392,7 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 	dropMu.Lock()
 	defer dropMu.Unlock()
 	ref := getMarkerRef(st, markerID)
+	credited, firsts, overlaps := 0, 0, 0
 	for _, o := range ref.Owners {
 		if threadKey != "" && o.Thread != threadKey {
 			continue
@@ -392,7 +411,7 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 				note.First, note.Overlap = true, overlap
 			}
 		}
-		ledgerNote(rec.Thread, func(q *SweepQuality) {
+		ledgerNoteThread(rec.Thread, func(q *SweepQuality) {
 			q.ExpandEvents++
 			q.ExpandTokens += int64(tokens)
 			if first {
@@ -401,6 +420,23 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 					q.Overlap++
 				}
 			}
+		})
+		credited++
+		if first {
+			firsts++
+			if overlap {
+				overlaps++
+			}
+		}
+	}
+	// Overall is counted ONCE per expand call, however many threads carry the marker: it is one expand
+	// event, and the per-thread rows above hold the per-owner detail.
+	if credited > 0 {
+		ledgerNoteOverall(func(q *SweepQuality) {
+			q.ExpandEvents++
+			q.ExpandTokens += int64(tokens)
+			q.Expanded += int64(firsts)
+			q.Overlap += int64(overlaps)
 		})
 	}
 	return note
@@ -598,9 +634,16 @@ func (e *ExtractSweep) scanReferences(req *bschemas.BifrostChatRequest, rep *com
 		seen := len(raw)
 		// The flags are written under dropMu from a FRESH read, so an expand that landed while this
 		// request was scanning is not overwritten.
-		dropMu.Lock()
-		cur, ok := getDrop(c.Store, tkey, ck)
-		if ok {
+		func() {
+			// DEFERRED unlock: the function-level recover swallows a panic from the Store or the
+			// ledger, and a plain Unlock after it would leave dropMu held for the life of the process,
+			// blocking every later scan, expand note and commit.
+			dropMu.Lock()
+			defer dropMu.Unlock()
+			cur, ok := getDrop(c.Store, tkey, ck)
+			if !ok {
+				return
+			}
 			if seen > cur.Seen {
 				cur.Seen = seen
 			}
@@ -610,8 +653,7 @@ func (e *ExtractSweep) scanReferences(req *bschemas.BifrostChatRequest, rep *com
 				ledgerNote(tkey, func(q *SweepQuality) { q.Referenced++ })
 			}
 			putDrop(c.Store, cur)
-		}
-		dropMu.Unlock()
+		}()
 	}
 }
 
@@ -694,6 +736,7 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 	// nothing else, while a poisoned answer that panicked on every cold request would cost a recheck each
 	// time for nothing, hence the bound.
 	var pending []pendingDrop
+	whole := h
 	// committed is every record written by THIS attempt. The commit is atomic in effect: if anything
 	// panics after the first record is written, the recover tombstones every one of them, so the next
 	// request does not replay a form this request never sent.
@@ -719,7 +762,7 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 			sweepApplyPanics.Add(1)
 			func() {
 				defer func() { _ = recover() }() // the Store may be what panicked
-				back := h
+				back := whole
 				back.Attempts++
 				back.Spent = back.Attempts >= maxApplyAttempts
 				putHeld(c.Store, back)
@@ -744,7 +787,6 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 			later = append(later, o)
 		}
 	}
-	_, _, write := agentRates(c)
 	for _, o := range now {
 		idx, ok := rawToolMessage(req.Input, o.ToolUseID)
 		if !ok {
@@ -768,10 +810,6 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 			Tokens: saved, AtMs: time.Now().UnixMilli(), Kind: kind,
 			Idents: res.identsOf(o.ToolUseID), Seen: len(raw),
 		}})
-		if saved > 0 {
-			metrics.RecordExtractionSaving(rep.Component, saved)
-			metrics.RecordExtractionValue(rep.Component, float64(saved)*write)
-		}
 		changed++
 		if key != "" {
 			keys = append(keys, key)
@@ -829,6 +867,13 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 				q.AppliedChangedPrefix += int64(n)
 			}
 		})
+	}
+	_, _, write := agentRates(c)
+	for _, p := range pending {
+		if p.rec.Tokens > 0 {
+			metrics.RecordExtractionSaving(rep.Component, p.rec.Tokens)
+			metrics.RecordExtractionValue(rep.Component, float64(p.rec.Tokens)*write)
+		}
 	}
 	pending, committed = nil, nil // committed: nothing to restore
 	return keys, changed

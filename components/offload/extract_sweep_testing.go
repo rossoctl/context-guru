@@ -12,9 +12,11 @@ func SeedSweepDropForTest(st store.Store, threadKey, content, marker string) {
 	ck := extract.ContentKey(content)
 	putDrop(st, sweepDropRec{Thread: threadKey, ToolUseID: "toolu_seed", CK: ck, Marker: marker, Tokens: 1})
 	addToDropIndex(st, threadKey, []string{ck})
-	dropMu.Lock()
-	addMarkerOwner(st, marker, threadKey, ck)
-	dropMu.Unlock()
+	func() {
+		dropMu.Lock()
+		defer dropMu.Unlock()
+		addMarkerOwner(st, marker, threadKey, ck)
+	}()
 }
 
 // ResetSweepLedgerForTest clears the process-wide quality ledger. The ledger is global, like the ping

@@ -889,7 +889,7 @@ func TestAReferenceAndAnExpandOnOneDropBothLand(t *testing.T) {
 	}
 }
 
-// putCountStore panics on the Nth Put after arming, counted from the first drop-record write.
+// commitPanicStore panics on the Nth drop-record Put after arming, counted from the first drop-record write.
 type commitPanicStore struct {
 	store.Store
 	armed  bool
@@ -1054,6 +1054,7 @@ func (s *trimPanicStore) Put(k string, p []byte) {
 
 func TestAPanicAfterTheCommitStillCountsNothing(t *testing.T) {
 	e, base, key := heldApply(t, "trimwin", 4)
+	savedBefore := extractGrossSaved("extract_llm_sweep")
 	ps := &trimPanicStore{Store: base, armed: true}
 	req := applyConv(4, 1)
 	req.Input[3] = toolResultMsgWithID("toolu_wire_2", refOutput(2)+"an edit\n") // change point 3: 0,1 stay held
@@ -1078,5 +1079,100 @@ func TestAPanicAfterTheCommitStillCountsNothing(t *testing.T) {
 	}
 	if _, ok := getDrop(base, key, contentKey(want[4])); ok {
 		t.Error("a live drop record survived the restore")
+	}
+	// The held answer is given back WHOLE (all four outputs, untrimmed), so the drops after the change
+	// point are not lost: a trimmed give-back would keep only the two before it.
+	h, ok := getHeld(base, key)
+	if !ok || len(h.Outputs) != 4 || h.Judged != 5 || h.Attempts != 1 {
+		t.Errorf("given-back answer = ok=%v outputs=%d judged=%d attempts=%d, want the whole answer (4, 5, 1)",
+			ok, len(h.Outputs), h.Judged, h.Attempts)
+	}
+	if got := extractGrossSaved("extract_llm_sweep") - savedBefore; got != 0 {
+		t.Errorf("savings metrics were booked (%d tokens) for a restored request", got)
+	}
+}
+
+// ROUND 2 BLOCKER. A panic inside the scan's locked window must not leave dropMu held. The scan's
+// function-level recover swallows the panic and the request completes; a plain Unlock after the panic
+// point would be skipped, and every later scan, expand note and commit would block forever. Bounded by a
+// timeout so a regression fails the test and does not hang the suite.
+type scanPanicStore struct {
+	store.Store
+	armed bool
+	puts  int
+}
+
+func (s *scanPanicStore) Put(k string, p []byte) {
+	if s.armed && strings.HasPrefix(k, store.SweepDropPrefix) {
+		s.puts++
+		panic("boom inside the scan's locked window")
+	}
+	s.Store.Put(k, p)
+}
+
+func TestAPanicInTheScansLockedWindowDoesNotWedgeDropMu(t *testing.T) {
+	resetSweepLedgerForTest()
+	t.Cleanup(resetSweepLedgerForTest)
+	e := shippedSweep(t, "")
+	base := newMemStore()
+	tkey := thread.Key("wedge", "")
+	content := refOutput(5)
+	marker := hashKey(content)
+	ck := contentKey(content)
+	putDrop(base, sweepDropRec{Thread: tkey, ToolUseID: "t", CK: ck, Marker: marker,
+		Idents: []string{identHash("handler_5_timeout_ms")}})
+	addToDropIndex(base, tkey, []string{ck})
+	func() {
+		dropMu.Lock()
+		defer dropMu.Unlock()
+		addMarkerOwner(base, marker, tkey, ck)
+	}()
+	ps := &scanPanicStore{Store: base, armed: true}
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("go"),
+		assistantMsg("see handler_5_timeout_ms")}}
+	e.scanReferences(req, &components.Report{}, warmCtx("wedge", ps), tkey) // swallows the panic
+	if ps.puts == 0 {
+		t.Fatal("the panic never fired inside the locked window, so the test proves nothing")
+	}
+	ps.armed = false
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		NoteSweepExpand(base, marker, 10, tkey)
+		e.scanReferences(req, &components.Report{}, warmCtx("wedge", base), tkey)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("dropMu is still held after a panic in the scan: every later expand and scan blocks")
+	}
+}
+
+// An expand of a marker that two threads carry, with no thread known, is ONE expand in the total and
+// one in each owner's row.
+func TestASharedMarkerExpandCountsOnceInTheTotal(t *testing.T) {
+	resetSweepLedgerForTest()
+	t.Cleanup(resetSweepLedgerForTest)
+	st := newMemStore()
+	content := refOutput(9)
+	marker := hashKey(content)
+	SeedSweepDropForTest(st, "thread-A", content, marker)
+	SeedSweepDropForTest(st, "thread-B", content, marker)
+	NoteSweepExpand(st, marker, 700, "")
+	q := SweepDropCounters().Overall
+	if q.ExpandEvents != 1 || q.ExpandTokens != 700 {
+		t.Errorf("total = %+v, want 1 expand event and 700 tokens, not one per owner", q)
+	}
+	if q.Expanded != 2 {
+		t.Errorf("total expanded drops = %d, want 2 (one drop per owning thread)", q.Expanded)
+	}
+	rows := 0
+	for _, th := range SweepDropCounters().Threads {
+		if th.ExpandEvents == 1 && th.Expanded == 1 {
+			rows++
+		}
+	}
+	if rows != 2 {
+		t.Errorf("%d thread rows carry the expand, want 2", rows)
 	}
 }
