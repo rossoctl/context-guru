@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 620" width="1100" height="620" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title id="t">Context operations: high-level package diagram</title>
-<desc id="d">Top, the context_counterfactual library. It holds the context operation class, whose kind field is one of rewrite, cacheChange, spend or setting, and the Tracker class, one for each thread. The Tracker keeps the ThreadState of a thread and has the methods BeginRequest, Add, EndRequest, Compute and Preview; Compute returns tokens for each billing tier and stores the new ThreadState. Bottom left, the Context operators: context-guru, tool-prune, headroom and other context operators, which report context operations to the Host. The Host runs the context operators. Bottom right, the Host (examples: Cortex and cg-proxy): its pipeline calls BeginRequest, Add and EndRequest on the Tracker; settle calls Compute and records cost and savings. The context operators and the Host import context_counterfactual; context_counterfactual imports none of them.</desc>
+<desc id="d">Top, the counterfactual library. It holds the context operation class, whose kind field is one of rewrite, cacheChange, spend or setting, and the Tracker class, one for each thread. The Tracker keeps the ThreadState of a thread and has the methods BeginRequest, Add, EndRequest, Compute and Preview; Compute returns tokens for each billing tier and stores the new ThreadState. Bottom left, the Context operators: context-guru, tool-prune, headroom and other context operators, which report context operations to the Host. The Host runs the context operators. Bottom right, the Host (examples: Cortex and cg-proxy): its pipeline calls BeginRequest, Add and EndRequest on the Tracker; settle calls Compute and records cost and savings. The context operators and the Host import counterfactual; counterfactual imports none of them.</desc>
 <defs>
 <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path class="aol" d="M0,0 L10,5 L0,10"/></marker>
 <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arf" d="M0,0 L10,5 L0,10 z"/></marker>
@@ -36,9 +36,9 @@ svg{--surface:#fcfcfb;--panel:#f3f2ee;--ink:#0b0b0b;--ink2:#52514e;--grid:#c9c8c
 <rect class="ext" x="440" y="51" width="30" height="18" rx="2"/>
 <text class="t2" x="478" y="64" font-size="12">external</text>
 
-<!-- ================= context_counterfactual ================= -->
+<!-- ================= counterfactual ================= -->
 <path class="lib" d="M24,92 h190 v26 h-190 z"/>
-<text class="tl" x="36" y="110" font-size="13" font-weight="600">«library» context_counterfactual</text>
+<text class="tl" x="36" y="110" font-size="13" font-weight="600">«library» counterfactual</text>
 <rect class="lib" x="24" y="118" width="1052" height="172"/>
 <text class="t2" x="44" y="142" font-size="12">Context operation types and a Tracker with the state of a thread. Imports no host and no framework.</text>
 

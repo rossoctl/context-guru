@@ -36,8 +36,8 @@ Every example uses these values. The numbers are made up for the examples.
 The agent model prices the savings, because the removed tokens would have been billed to the agent's
 requests. The summarizer model prices the summarizer call.
 
-**Rounding.** Each figure is rounded to $0.00001. A total adds the exact amounts, then rounds. It can
-differ by $0.00001 from the sum of the rounded figures.
+**Rounding.** Each figure is rounded to $0.00001, half up ($0.0000050 becomes $0.00001). A total
+adds the exact amounts, then rounds. It can differ by $0.00001 from the sum of the rounded figures.
 
 **Cache state.** A request is **hot** if the previous request of the same thread was less than 5
 minutes ago. It is **cold** if not. A hot request reads the cached prefix. A cold request writes it
@@ -54,7 +54,8 @@ on the **last message**. So the provider can read or write the cache at two poin
 `system`, and the end of the body.
 
 **Session and thread.** Examples 6 and 7 use session `s1`, thread `main`. Example 8 uses session `s2`, thread `main`. Both IDs are on the request, and the examples
-show them once, in `RequestOps`.
+show them once, in `RequestOps`. `main` is the primary thread. `internal/thread` gives it the ID `""`,
+and the host maps it to `main`.
 
 **Pipeline** of examples 6 and 7, in order:
 
@@ -193,7 +194,8 @@ agent's requests. The call uses the summarizer model's rates (see the [setup](#s
 - **Summarizer call:** costs $0.01250 = 10,000 × $1.00 + 500 × $5.00, so the balance starts below
   zero. The response also reported `costUSD` 0.0125.
 - **Request A** (hot): the summary saves 9,500 tokens that would have been read: 9,500 × $0.30 =
-  +$0.00285. But the summary changes the start of the prompt, so nothing in the cache matches. The
+  +$0.00285. But the summary changes the start of the messages, so no cached message matches. The
+  provider still reads `tools` and `system`, up to the breakpoint at the end of `system`. The
   summary and the tail (3,500 tokens) are written, not read (orange). The break costs
   3,500 × ($3.75 − $0.30) = −$0.01208. Request A is a net **−$0.00923**.
 - **Request B** (hot): the summary is cached now, so the 9,500 tokens would have been read.
@@ -229,7 +231,7 @@ carry the same `changeId`, so the host can add the cost and the saving together.
    ```
 
 3. **`cacheChange`, a break, on request A only, added by `Compute`.** The summary is at the start of
-   the prompt, so nothing in the cache matches. `Compute` finds it by comparing request A with the
+   the messages, so the provider reads only up to the end of `system`. `Compute` finds it by comparing request A with the
    previous request, and gives it the `changeId` of the `rewrite`. B and C
    have no break: on B the summary is already cached, and on C the cache expired.
 
@@ -510,6 +512,11 @@ The diagram shows two cases. Across is the prompt, in tokens. Down is time, in m
   (10,000 tokens) and gets a 1-token reply. The entry is renewed and is valid until minute 29.
   Turn 10 reads the context of turn 9 and writes only its new message.
 
+`Compute` uses two gaps here (design §5.2). The **request gap**, from turn 9 to turn 10, is 8
+minutes: past the 5m TTL, so without the ping the entry would have expired. The **entry gap**, from
+the ping to turn 10, is 4 minutes: inside the TTL, so with the ping the entry is alive. The lifetime
+of an Anthropic entry is `exact`, so the expiry without a ping is proven, and the rescue is credited.
+
 ![Without a ping the cache expires before turn 10. With a ping it is still hot](example-8-keep-alive.svg)
 
 ### The context operations
@@ -540,15 +547,16 @@ total is negative.
    }
    ```
 
-2. **`cacheChange`, a rescue, on turn 10, added by `Compute`.** It adds it after the four conditions of design §4.4 are checked. One of them, that the keeper sent a ping in the gap, is a fact that the host supplies.
-   Turn 9 forwarded messages 0 to 5, so the extent is `messages[5]`.
+2. **`cacheChange`, a rescue, on turn 10, added by `Compute`.** It adds it after the four conditions of design §4.4 are checked. The ping facts are supplied by the host at turn 10's `EndRequest`: when the ping started, what it read (`messages[5]`), and the window ID `ka:main:w1`.
+   Turn 9 forwarded messages 0 to 5, so the extent is `messages[5]`. The range of the rescue is
+   between the two extents, from the start of the prompt to `messages[5]`: 10,000 tokens. Like
+   every `cacheChange`, it has no sizes of its own.
 
    ```json
    {
-     "id": "op20", "kind": "cacheChange",
+     "id": "cc:1", "kind": "cacheChange",
      "cacheBefore": {"cachePhase": "cold"},
      "cacheAfter": {"cachePhase": "hot", "extent": {"section": "messages", "index": 5}},
-     "sizeBefore": {"tokens": 10000}, "sizeAfter": {"tokens": 10000},
      "changeId": "ka:main:w1"
    }
    ```
@@ -559,11 +567,12 @@ total is negative.
 |---|---|---|
 | Ping (`spend`) | 10,000 read + 10 input + 1 output | −$0.00305 |
 | Rescue (`cacheChange`, cold to hot) | 10,000 × ($3.75 − $0.30) | +$0.03450 |
-| **Total added to session `s2`** | | **+$0.03145** |
+| **Total added to session `s2`** | | **+$0.03146** |
 
 The ping re-sends the 10,000 cached tokens, so they are billed as a read. The 10 input tokens are
 the small part of the ping that is not cached. The 1 output token is the reply.
 
 The ping has no request of its own, so the totals add up context operations, not requests. The ping and
 the rescue both carry session `s2` and thread `main`. The host adds both to the totals of that
-session and that thread: −$0.00305 + $0.03450 = **+$0.03145**.
+session and that thread: −$0.003045 + $0.034500 = +$0.031455, which rounds to **+$0.03146**. The
+sum of the rounded figures is $0.03145, one step lower (see [Rounding](#setup)).
