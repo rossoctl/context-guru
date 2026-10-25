@@ -542,6 +542,7 @@ func (k *Keeper) Shutdown() {
 	k.bytes = 0
 	k.turns = map[string]int{}
 	k.tier1h = map[string]bool{}
+	k.lastVary = map[string]int{}
 }
 
 // clear ZEROIZES an entry's body and credential and cancels its retention deadline. Called on
@@ -838,10 +839,18 @@ func (k *Keeper) Record(r Record) {
 		// read-only turn back to the 5-minute schedule.
 		k.turns = map[string]int{key: k.turns[key]}
 		k.tier1h = map[string]bool{}
-		last, had := k.lastVary[key]
-		k.lastVary = map[string]int{}
-		if had {
-			k.lastVary[key] = last
+		// Keep the step of every thread that still holds a live entry, and of this one: a live
+		// thread that lost its step would send its next ping at step 0, the same bytes as a ping 1
+		// it may have just sent (#712 review). k.live is bounded, so this stays bounded too.
+		old := k.lastVary
+		k.lastVary = make(map[string]int, len(k.live)+1)
+		for id := range k.live {
+			if v, ok := old[id]; ok {
+				k.lastVary[id] = v
+			}
+		}
+		if v, ok := old[key]; ok {
+			k.lastVary[key] = v
 		}
 		if usageOK && (u.CacheWrite > 0 || ttl1h) {
 			k.tier1h[key] = ttl1h
@@ -1059,6 +1068,13 @@ func (k *Keeper) Forget(tenantID string) {
 		delete(k.turns, key)
 		delete(k.tier1h, key)
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
+	}
+	// Every step the tenant's threads left, including threads with no live entry: lastVary has no
+	// other bound while Forget keeps turns under MaxTurnKeys (#712 review).
+	for key := range k.lastVary {
+		if strings.HasPrefix(key, prefix) {
+			delete(k.lastVary, key)
+		}
 	}
 	// Client lifecycle end marks (see lifecycle.go) are bucketed by tenant already, so this is
 	// a single delete rather than a prefix scan.

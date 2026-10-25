@@ -3,6 +3,7 @@ package keepalive
 import (
 	"bytes"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -147,5 +148,62 @@ func TestACycleThatSendsNothingUsesNoStep(t *testing.T) {
 	}
 	if bytes.Equal(fd.sent[0].Body, fd.sent[1].Body) {
 		t.Fatalf("after %d refused cycles the next sent ping repeats the last sent one", pingVary-1)
+	}
+}
+
+// #712 review round 2. The MaxTurnKeys reset used to keep only the recording thread's step. A live
+// thread idle between its pings lost its step, so its ping 2 went out at step 0, the bytes of the
+// ping 1 it had just sent, and the gateway answered it from its response cache.
+func TestTheTurnKeyResetKeepsALiveThreadsStep(t *testing.T) {
+	start := time.Now()
+	now := start
+	fd := newFake(okPing)
+	k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+	idle := Key{Tenant: "t", Session: "idle"}
+	k.Record(trackedRecord(fd, idle, start))
+	k.Record(trackedRecord(fd, idle, start))
+	now = start.Add(281 * time.Second)
+	k.Sweep(now) // ping 1 of the idle thread
+	// Other traffic fills the turn-key bound, and one more thread's request trips the reset.
+	k.mu.Lock()
+	for i := 0; len(k.turns) <= MaxTurnKeys; i++ {
+		k.turns[Key{Tenant: "t", Session: "filler" + strconv.Itoa(i)}.id()] = 1
+	}
+	k.mu.Unlock()
+	k.Record(trackedRecord(fd, Key{Tenant: "t", Session: "trips-the-reset"}, now))
+	now = now.Add(281 * time.Second)
+	k.Sweep(now) // ping 2 of the idle thread
+	var idleBodies [][]byte
+	for _, r := range fd.sent {
+		if r.Key == idle {
+			idleBodies = append(idleBodies, r.Body)
+		}
+	}
+	if len(idleBodies) != 2 {
+		t.Fatalf("the idle thread sent %d pings, want 2", len(idleBodies))
+	}
+	if bytes.Equal(idleBodies[0], idleBodies[1]) {
+		t.Fatal("after the turn-key reset the idle thread's ping 2 repeats its ping 1")
+	}
+}
+
+// #712 review round 2. Forget drops a tenant's keep-alive state; its ping steps must go with it,
+// including steps of threads that hold no live entry any more, or lastVary grows for the life of
+// the process.
+func TestForgetDropsTheTenantsPingSteps(t *testing.T) {
+	k := New(Options{Dispatcher: newFake(okPing)})
+	k.mu.Lock()
+	k.nextVaryLocked(Key{Tenant: "gone", Session: "a"}.id())
+	k.nextVaryLocked(Key{Tenant: "gone", Session: "b", Thread: "a:x"}.id())
+	k.nextVaryLocked(Key{Tenant: "kept", Session: "a"}.id())
+	k.mu.Unlock()
+	k.Forget("gone")
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if len(k.lastVary) != 1 {
+		t.Fatalf("after Forget, lastVary holds %d keys, want 1 (only the other tenant's)", len(k.lastVary))
+	}
+	if _, ok := k.lastVary[Key{Tenant: "kept", Session: "a"}.id()]; !ok {
+		t.Fatal("Forget dropped another tenant's ping step")
 	}
 }
