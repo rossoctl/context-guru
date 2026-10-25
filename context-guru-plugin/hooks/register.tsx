@@ -58,6 +58,20 @@ async function refresh($: Engine): Promise<void> {
   }
 }
 
+/** The status line's refresher writes the first cache-state document a moment after the first reply. Until it
+ * exists, ask again every second, five times, so the band appears at once and not at the next 15 s poll. */
+async function refreshSoon($: Engine): Promise<void> {
+  try {
+    for (let i = 0; i < 6; i++) {
+      await refresh($)
+      if ((await read($, snapshot))?.doc?.last_ts) return
+      await $.clock.sleep(1000)
+    }
+  } catch {
+    // the next 15 s poll asks again
+  }
+}
+
 async function load($: Engine): Promise<void> {
   const doc = await helper($, ['cachestate', '--json', '--session', await $.session.id(), ...(transcript ? ['--transcript', transcript] : [])])
   const now = await $.clock.now()
@@ -159,13 +173,13 @@ export const register: Register = on => {
     } catch {
       // the stored choices are a convenience
     }
-    void refresh($)
+    void refreshSoon($)
     $.clock.every(POLL_MS, () => void refresh($))
     return started
   })
 
   on('turn.complete', async ($, e, next) => {
-    void refresh($) // a turn touched the cache: the countdown restarted
+    void refreshSoon($) // a turn touched the cache: the countdown restarted; the first document may not exist yet
     return next(e)
   })
 
@@ -270,7 +284,7 @@ export const register: Register = on => {
     const nameWidth = Math.max(8, Math.min(20, cols - 34))
 
     return (
-      <Box flexDirection="column" gap={1} paddingX={1}>
+      <Box flexDirection="column" paddingX={1}>
         <Box flexDirection="column">
           <Text bold color="claude">{'◆'} Context Guru</Text>
           {v.url !== '' && <Link href={v.url} label="open dashboard ↗" />}
@@ -282,7 +296,7 @@ export const register: Register = on => {
           )}
         </Box>
 
-        <Box flexDirection="column">
+        <Box flexDirection="column" paddingTop={1}>
           {head('NEXT MESSAGE')}
           <Text>
             <Text dimColor>if the cache is warm </Text>
@@ -310,7 +324,7 @@ export const register: Register = on => {
         </Box>
 
         {v.subs.length > 0 && (
-          <Box flexDirection="column">
+          <Box flexDirection="column" paddingTop={1}>
             {head('AGENTS')}
             {v.subs.map(t => {
               const s = state(t)
@@ -330,7 +344,7 @@ export const register: Register = on => {
         )}
 
         {data.spark && (
-          <Box flexDirection="column">
+          <Box flexDirection="column" paddingTop={1}>
             {head('SAVED LATELY')}
             <Text>
               <Text color="success">{usd(data.spark.today)}</Text>
@@ -341,7 +355,7 @@ export const register: Register = on => {
         )}
 
         {data.strip && (
-          <Box flexDirection="column">
+          <Box flexDirection="column" paddingTop={1}>
             {head('CACHE HITS')}
             <Text>
               {data.strip.kinds.map((k, i) => (
@@ -354,7 +368,7 @@ export const register: Register = on => {
         )}
 
         {data.heat && (
-          <Box flexDirection="column">
+          <Box flexDirection="column" paddingTop={1}>
             {head('MISSES BY HOUR')}
             <Text>
               <Text dimColor>0h </Text>
@@ -367,7 +381,7 @@ export const register: Register = on => {
         )}
 
         {data.fill && (
-          <Box flexDirection="column">
+          <Box flexDirection="column" paddingTop={1}>
             {head('CONTEXT')}
             <Text>
               <Text color={data.fill.frac >= 0.85 ? 'error' : data.fill.frac >= 0.65 ? 'warning' : undefined}>{stack(data.fill.frac, data.fill.base, bar)}</Text>
@@ -377,7 +391,7 @@ export const register: Register = on => {
               <Text dimColor>
                 {cols >= 70
                   ? `▒ always loaded ${Math.round(data.fill.base * 100)}% · █ conversation ${Math.round(Math.max(0, data.fill.frac - data.fill.base) * 100)}% · ░ free`
-                  : `▒ ${Math.round(data.fill.base * 100)}% · █ ${Math.round(Math.max(0, data.fill.frac - data.fill.base) * 100)}% · ░ free`}
+                  : `▒ fixed ${Math.round(data.fill.base * 100)}% · █ chat ${Math.round(Math.max(0, data.fill.frac - data.fill.base) * 100)}% · ░ free`}
               </Text>
             )}
             {data.fill.eta_s ? <Text dimColor>full in {words(data.fill.eta_s)}</Text> : null}
@@ -385,7 +399,7 @@ export const register: Register = on => {
           </Box>
         )}
 
-        <Box flexDirection="column">
+        <Box flexDirection="column" paddingTop={1}>
           {head('SAVE MORE')}
           {tip && (
             <Text>
@@ -400,7 +414,7 @@ export const register: Register = on => {
           ))}
         </Box>
 
-        {hidden && <Button key="show" label="Show the band again" plain onPress={() => setHidden($, false)} />}
+        {hidden && <Box paddingTop={1}><Button key="show" label="Show the band again" plain onPress={() => setHidden($, false)} /></Box>}
       </Box>
     )
   })

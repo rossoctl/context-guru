@@ -707,6 +707,7 @@ DEGRADE = (("tip", 1), ("tip", None), ("tools", None), ("next", 1), ("next", Non
            ("save", 1), ("save", 2), ("ctx", 1), ("save", 3), ("cache", 1), ("agents", None), ("ctx", None),
            ("save", None))
 DEFAULT_WIDTH = 100
+TERMINAL_MARGIN = 4  # Claude Code's own padding around the status line
 ROUTE_MEMO_SECONDS = 60
 EXPIRING_SECONDS = 60
 CRITICAL_SECONDS = 15  # the last stretch: red, and a "!" so it is not colour alone
@@ -804,14 +805,24 @@ def _set_layout(name: str) -> str:
 def _width(override: str | None) -> int:
     if override and override.isdigit() and int(override) > 0:
         return int(override)
-    cols = os.environ.get("COLUMNS", "")  # Claude Code exports the real terminal width to the command
+    # Claude Code draws the line inside a 2 column margin on each side and cuts what does not fit with `…`. So a
+    # width that comes from the terminal is shortened by that margin; an explicit --width or CG_STATUSLINE_COLUMNS is not.
+    cols = os.environ.get("COLUMNS", "")  # Claude Code may export the real terminal width to the command
     if cols.isdigit() and int(cols) > 0:
-        return int(cols)
+        return max(20, int(cols) - TERMINAL_MARGIN)
     for fd in (2, 1, 0):  # otherwise: a statusLine command's stdout is a pipe; stderr may be the tty
         try:
-            return os.get_terminal_size(fd).columns
+            return max(20, os.get_terminal_size(fd).columns - TERMINAL_MARGIN)
         except OSError:
             pass
+    try:  # the controlling terminal, when no standard stream is one (the usual case under Claude Code)
+        fd = os.open("/dev/tty", os.O_RDONLY)
+        try:
+            return max(20, os.get_terminal_size(fd).columns - TERMINAL_MARGIN)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
     return DEFAULT_WIDTH
 
 

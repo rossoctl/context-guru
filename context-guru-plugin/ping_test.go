@@ -237,7 +237,7 @@ func TestPingReasonWords(t *testing.T) {
 		"below limits": "below its minimum size", "pings used": "pings have run out", "stopped": "stopped keeping this thread warm",
 		"no entry": "knows nothing about this session", "unavailable": "route or credential is failing",
 		"not opted in": "turns on in your next session", "expired": "cache already cold", "too large": "too large to hold",
-		"unsupported": "route or settings", "over budget": "per-ping limit", "from-the-future": "cannot ping this session right now",
+		"unsupported": "this route cannot be pinged", "over budget": "per-ping limit", "from-the-future": "cannot ping this session right now",
 	} {
 		t.Run(reason, func(t *testing.T) {
 			mux := http.NewServeMux()

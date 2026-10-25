@@ -371,7 +371,7 @@ for (const [reason, want] of [
   ['unavailable', /route or credential is failing right now . try again shortly/],
   ['over budget', /per-ping limit/],
   ['too large', /too large to hold/],
-  ['unsupported', /route or settings cannot be pinged/],
+  ['unsupported', /this route cannot be pinged/],
   ['expired', /already cold/],
   ['some-future-code', /cannot ping this session right now/],
 ] as const) {
@@ -449,6 +449,7 @@ for (const cols of [140, 80, 60]) {
     const pane = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: cols }, surface: 'terminal' })
     const all = await dump(pane)
     console.log(`--- PANE ${cols} columns ---\n` + all)
+    if (cols < 70) expect(all).toMatch(/▒ fixed \d+% · █ chat \d+% · ░ free/)
     for (const l of all.split('\n').filter(l => /lost today/.test(l))) expect(l).toMatch(/^\$\d+\.\d\d lost today$/)
     await pane.unmount()
     const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: cols }, surface: 'terminal' })
@@ -520,4 +521,32 @@ test('render: band, warm, ping off, short band', async ($, on) => {
 test('usd() follows the one money format', async () => {
   const table: [number, string][] = [[0, '$0.00'], [0.004, '<$0.01'], [0.006, '<$0.01'], [0.01, '$0.01'], [0.06, '$0.06'], [0.78, '$0.78'], [1, '$1.00'], [99.99, '$99.99'], [100, '$100'], [123.4, '$123'], [1234.2, '$1234'], [-1.5, '-$1.50'], [-0.004, '$0.00'], [-123.4, '-$123']]
   for (const [x, want] of table) expect(usd(x)).toBe(want)
+})
+
+test('the first data shows within seconds when the first document is not there yet', async ($, on) => {
+  let ready = false
+  on('command.register', () => ({ value: { command: 'context-guru' } }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  clock = mock.clock(on, { now: NOW })
+  on('env.get', () => ({ value: 'http://127.0.0.1:8787/anthropic' }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  on('process.run', (_: any, e: any) => {
+    const ret = (o: object) => ({ value: { exitCode: 0, stdout: JSON.stringify(o) + '\n', stderr: '' } })
+    if (e.argv.includes('tip')) return ret({ stale: [], days: 7 })
+    return ret(ready ? doc(true) : { error: 'proxy not answering' })
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /next message/ })).toBeUndefined() // no document yet
+  await ui.unmount()
+  ready = true // the status line's refresher wrote the document
+  await clock.advance(3000) // far less than the 15 s poll
+  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /next message/ })).toBeDefined()
+  await ui.unmount()
 })

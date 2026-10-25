@@ -1701,3 +1701,15 @@ func TestStatuslineHungStatsWithACachestateCopyKeepsTheLine(t *testing.T) {
 		t.Errorf("no notice when a copy exists, got %q", out)
 	}
 }
+
+// Claude Code pads the line; with no override, the width comes from the terminal minus that margin, so a line that
+// would be cut by Claude Code sheds its own parts first (the live check showed `subag…` at 80 columns).
+func TestStatuslineWidthFromTerminalKeepsAMargin(t *testing.T) {
+	py := requireTool(t, "python3")
+	cmd := exec.Command(py, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import statusline as s; print(s._width(None), s._width('90'))", scriptsDir(t))
+	cmd.Env = append(sandboxEnv(t), "COLUMNS=140")
+	b, err := cmd.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(b)) != "136 90" {
+		t.Errorf("want 136 (COLUMNS 140 minus the margin) and 90 (an explicit width is exact), got %q %v", b, err)
+	}
+}

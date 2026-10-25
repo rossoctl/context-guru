@@ -161,7 +161,7 @@ const REASONS: Record<string, string> = {
   'below limits': 'keep-alive is on, but this thread is below its minimum size or limits',
   'over budget': 'one ping would cost more than the per-ping limit',
   'too large': 'context too large to hold for Ping',
-  unsupported: "this session's route or settings cannot be pinged (a gateway, or extended thinking)",
+  unsupported: 'this route cannot be pinged',
   'pings used': 'the planned keep-alive pings have run out',
   stopped: 'the proxy stopped keeping this thread warm after a miss or a refused ping',
   expired: 'cache already cold',
