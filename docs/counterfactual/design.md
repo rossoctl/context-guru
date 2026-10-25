@@ -11,6 +11,7 @@ document.
 
 - [0. The problem](#0-the-problem)
   - [The selected solution](#the-selected-solution)
+  - [What changes the cached prefix](#what-changes-the-cached-prefix)
 - [1. Goal](#1-goal)
 - [2. Decisions](#2-decisions)
 - [3. Requirements](#3-requirements)
@@ -121,7 +122,7 @@ the rules (§1 to §3), the model (§4), the calculation (§5, §6), and the che
 | Break | A cache change from hot to cold. The provider no longer reads content it read before. |
 | Rescue | A cache change from cold to hot. A keep-alive kept the entry alive, so the next request reads it. |
 | Host | Cortex or the context-guru proxy: the program that runs the pipeline, calls the library and turns tokens into money. |
-| Collector | A class of the library. It keeps the state of one thread, in memory or persisted: the context operations that are still active. A context operation is reported once, on the first request of its change. On each later request `Compute` applies the active ones again, until they end. What else the state holds is open (§11, question 11). The host's pipeline adds each reported context operation to it (wiring document, section 5). |
+| Tracker | A class of the library. It keeps the state of one thread, in memory or persisted: the context operations that are still active. A context operation is reported once, on the first request of its change. On each later request `Compute` applies the active ones again, with the same context operator, until they end. What else the state holds is open (§11, question 11). The host's pipeline adds each reported context operation to it (wiring document, section 5). |
 | Keeper | The context-guru component that sends keep-alive pings between turns. |
 | Thread | One conversation inside a session: the main one, or a subagent's. |
 | Session | All the requests of one working session. The period over which we add up. |
@@ -157,7 +158,7 @@ This document defines one model for the context operations, and one way to compu
 - **Context operators report context operations.** Each one reports facts about what it changed, as sizes and
   positions. No money, no rates.
 - **One library prices them in tokens.** It is a standalone, shared library for context-guru,
-  Cortex and, we hope, other AI frameworks. It is a pure function. It decides which tier every token
+  Cortex and, we hope, other AI frameworks. `Compute` is deterministic: it depends on the request and on the state of the thread. It decides which tier every token
   falls in, using the cache state of the request. It is the only place that holds this logic.
 - **Each host keeps its own rates.** A host multiplies tokens by its own price list. Two hosts get
   the same tokens for the same request, and may differ in dollars when their price lists differ.
@@ -165,6 +166,18 @@ This document defines one model for the context operations, and one way to compu
   thread's and a session's totals are sums over their context operations.
 - **A list of test cases defines correct.** We build it from the current computation before any host
   uses the library (§10).
+
+### What changes the cached prefix
+
+A provider reuses a cache entry only when the rendered prefix of a new request is the same as the
+prefix of the entry, up to a cache breakpoint. A change before the breakpoint breaks the match from
+the first changed token onward. The change can be in the content, or in a setting that the provider
+renders into the prefix. The model keeps these changes as a `setting` context operation (R50) when a
+context operator makes them, and as a client edit when the client makes them (§5.2).
+
+The settings are different for each provider. The list is in [`cached-prefix.md`](cached-prefix.md).
+It covers OpenAI and Anthropic so far, with the provider facts that the model depends on (lifetime,
+write price, reporting, granularity). It grows as each provider is read.
 
 ## 1. Goal
 
@@ -203,19 +216,20 @@ This document defines one model for the context operations, and one way to compu
 
 | # | Question | Decision |
 |---|---|---|
-| D1 | Does the library need to know that a change is applied for the first time? | **No.** The tier comes from the position and the cache state (§6.2). A report finds the first application as the first event with that `ChangeID`. The library stays stateless, and a stateless context operator (tool-prune) reports the same fields as any other (§4.6). |
+| D1 | Does the library need to know that a change is applied for the first time? | **No.** The tier comes from the position and the cache state (§6.2). A report finds the first application as the first event with that `ChangeID`. A context operator reports a change once, and `Compute` applies it again on later requests (D14, §4.6). |
 | D2 | Where is the savings logic? | **In one standalone library,** shared by context-guru and Cortex, and open to other AI frameworks. Hosts call it and keep no operator-specific pricing rules. |
 | D3 | What does the library return? | **Tokens for each tier**, not dollars. Cortex prices them with its own rates (discounts, overrides, long-context tiers), so a saving and the request's spend use the same rates. |
 | D4 | How is cg's own spend recorded? | **As context operations, in the same report as the savings.** A `spend` context operation carries the provider's billed usage of the call (`Call`). The host prices it with the savings, in one path. There is no second record and no `CostRecorder` (wiring document). `context_counterfactual.Compute` does not price the call; it returns `Call.Usage` for the host to price (D3). |
 | D5 | Shape | **One typed context operation for each change unit**, in-process only. The recorded summary (`event.Saving`/`ChangeSaving`) has the aggregate fallback above a limit, not the context operation list itself (R20; the recorded form is in the wiring document). |
-| D6 | How is a saving across requests counted? | **Realized on each request, not projected.** Each request lists every change in its body, fresh or replayed, and is priced from that request's own cache result. The context operator remembers past changes, not the library or the host (§4.6). |
+| D6 | How is a saving across requests counted? | **Realized on each request, not projected.** Each request is priced from its own cache result. A context operator reports a change once, on its first request. The Tracker remembers the active changes of the thread, and `Compute` applies them again on each later request (D14, §4.6). **The risk:** a remembered change can be wrong, because the Tracker cannot see the content. The sum check (§6.5) can catch it, but a lost state does not heal by itself (§4.6, §11 question 13). |
 | D7 | Where do the types live? | **A standalone module with no dependency on context-guru, on Cortex, or on any framework.** context-guru and Cortex are two users of it, and other frameworks can be too. The module path `github.com/rossoctl/context-guru/context_counterfactual` used below is a placeholder; its home and name are not decided. |
-| D8 | Which hosts compute dollars from context operations? | **Both: Cortex and the context-guru proxy.** The proxy stops using its own saving rules (`dash/event.go`) when it switches. The comparison of request fingerprints (§5) is a pure function in `context_counterfactual`, so the proxy does not need Cortex to find B\*. |
+| D8 | Which hosts compute dollars from context operations? | **Both: Cortex and the context-guru proxy.** The proxy stops using its own saving rules (`dash/event.go`) when it switches. The comparison of request fingerprints (§5) is inside `Compute`, so the proxy does not need Cortex to find B\*. |
 | D9 | How is the implementation validated? | **Against an exhaustive list of test cases made with the current computation** (§10), before any host switches. |
 | D10 | How is the cache state used? | **As an input to every price.** The tier of a content change depends on the state (§6.2). A context operation that changes the state (`cacheChange`, §4.4) is priced as the difference between two states. |
-| D11 | What happens to a change that a later change ends? | **Its context operator stops reporting it.** No link names the change that ended it. The snapshot rule (D6) and the measurement at each context operator's own input (R29) give the right price and stop any double count. Each change keeps the total it had until then (§4.5). |
+| D11 | What happens to a change that a later change ends? | **`Compute` finds that it has ended and stops applying it.** The context operator reports nothing after the first request (D14), so it cannot say that a change ended. No link names the change that ended it. How `Compute` finds the end is **not defined** (§11, question 12). The measurement at each context operator's own input (R29) gives the right price and stops any double count, while the change is in the state. Each change keeps the total it had until then (§4.5). |
 | D12 | Where does the thread ID come from? | **From the engine's `internal/thread`, in both hosts**, carried on the request. The host keeps one fingerprint per thread, keyed by `thread.Key`, and compares each request with its own thread's previous request (wiring document, W5.2). |
 | D13 | How does the model serve a subscription user? | **The library does not change.** It already returns tokens for each tier (D3). The request carries a `Billing` fact. The host converts tokens to dollars for an API user, and to usage-limit units for a subscription user, with an API-equivalent dollar figure beside it, marked as such (§7.1). |
+| D14 | Is `Compute` stateful? | **The library is stateful. `Compute` is deterministic.** A context operator reports a change once, on the first request. `Compute` applies it again on later requests until it ends, so a result depends on earlier requests. The state is a `ThreadState`, kept by the Tracker, one for each thread. `Compute` is a method of the request record, which starts from a copy of the `ThreadState`. As its last step `Compute` replaces the thread's `ThreadState` with the new one, so the host has nothing to commit and cannot forget to. A failure or a panic leaves the old `ThreadState`. Two requests of one thread at the same time are safe: the replace is guarded by the `Version` of the `ThreadState` (optimistic locking, R53, §6.1). Rejected: a lock from `BeginRequest` to `Compute`, because requests of one thread would wait for each other. `Preview` does the same calculation and stores nothing, for pricing an old request again and for a look that must not move the thread forward. A test case is a sequence of requests. Rejected: `Compute` returning the new state and a separate `Commit`. It is purely functional, but a host that forgets the commit gets a wrong figure with no error. Rejected: `Compute` writing the state in the middle of the call, because a failure would leave it half updated. What the state holds, and how a change ends, are open (§11, questions 11 and 12). |
 
 ## 3. Requirements
 
@@ -233,8 +247,11 @@ numbers are not used: those requirements were dropped.
   import either host or any framework, so a third party can use it. Its public types are named for
   the model, not for context-guru or Cortex. A contract test in
   each repo pins it.
-- **R26.** The library is a pure function: no state, no I/O. The context-guru proxy and Cortex
-  then compute the same figure for the same request.
+- **R26.** `Compute` is deterministic: its result depends only on its record and on the
+  `ThreadState` that the record started from, and it does no I/O. The Tracker holds the `ThreadState`.
+  As its last step `Compute` replaces it with the new one; a failure leaves the old one (D14). The same
+  `ThreadState` and the same request give the same figure in the context-guru proxy and in Cortex.
+  `Preview` gives the same figure and stores nothing.
 
 ### B. Coverage
 
@@ -318,11 +335,30 @@ numbers are not used: those requirements were dropped.
   finds that it can cut 3,000 tokens from a tool output. The request still carries all 3,000 tokens.
   The context operation records the 3,000 as "would have saved". Only applied context operations count in totals. A
   change that is not in the forwarded body (reverted by the pipeline) is not reported.
-- **R15.** Each request is complete without history.
+- **R15.** A request is priced from its input and from the state of its thread. A request is **not**
+  complete without history: the active context operations of the thread are part of the input. If the
+  state is missing (a restart, an eviction), the library does not guess. A change it was never told
+  about is not applied, so its saving is missing, and the sum check (§6.5, check 1) fails on that
+  request. Prices that depend on the state say so (§4.6).
 - **R25.** When two context operators change the same content on one request, each one is credited for
   its own change, in pipeline order.
+- **R51.** The saving or cost of a request can be attributed to each context operator. The result
+  gives tokens per tier for each context operator (R27, R29), and the sum over the context operators and
+  the items attributed to nobody (a cache break with no plugin cause, R31, and the interaction, §6.2)
+  equals the request total. A context operation that is applied again on a later request keeps its
+  context operator, so its saving stays with the same plugin.
+- **R53.** Two requests of one thread can run at the same time (a request, a keep-alive ping, a subagent).
+  The Tracker is safe for concurrent use. No request loses the changes of another. A `Compute` that
+  finds that the `ThreadState` changed since its `BeginRequest` calculates again from the current
+  `ThreadState` and says so in the `Result` (`Recomputed`). The order of the results is the order of the
+  `Compute` calls (D14, §6.1).
+- **R52.** The library never returns one token total. It returns tokens for each tier. Tiers differ in
+  price by up to 12.5 times, so a sum across them is not an invariant. A host that wants one figure
+  prices the tiers and sums dollars. This is the rule of the tool-prune accounting (cortex#952).
 - **R35.** A later change can end earlier ones (a summary of reduced messages). The model shows
-  this by the earlier change not being reported, not by a link. Their totals until then do not
+  this by `Compute` no longer applying the earlier change, not by a link and not by the context
+  operator: after its first report the context operator says nothing about the change. How `Compute`
+  finds the end is open (§11, question 12). The totals of the earlier changes until then do not
   change (§4.5).
 
 ### E. Operability
@@ -490,7 +526,7 @@ type CacheState struct {
     TTL        string     // "5m" | "1h": the lifetime the breakpoint asks for; empty when cold or unknown
 }
 
-// EntryFacts are the inputs that decide the cache phase. They are part of `Input`; the library
+// EntryFacts are the facts that decide the cache phase. The host passes them in `EndRequest`; the library
 // reads them in its internal comparison (§5), and nowhere else.
 type EntryFacts struct {
     Gap  time.Duration // time since the entry was last written or read
@@ -629,25 +665,35 @@ negative — the same visibility a keep-alive window that rescued nothing has.
 A change can remove content that earlier changes had already reduced. Example: on turn 12 a
 summary replaces messages 0 to 8, and messages 3 and 5 were reduced by `mask` and `coref`.
 
-**A change ends when its context operator stops reporting it.** There is no field that names the change
-that ended it. Nothing more is needed:
+**A change ends when `Compute` stops applying it.** The context operator reports a change once (D14), so
+after that it cannot report that the change ended, and there is no field that names the change
+that ended it. `Compute` has to find the end by itself, and drop the change from the state of the
+thread. **The rule that finds the end is not defined** (§11, question 12). What follows describes
+what must hold once the end is found. It does not say how the end is found.
 
-1. **The price.** Each request is a snapshot (D6). A change that is not reported on a request saves
-   nothing on that request. Its total until then does not change, so a change that did not pay back
+1. **The price.** Each request is priced from its own cache result (D6). A change that has ended saves
+   nothing on later requests. Its total until then does not change, so a change that did not pay back
    before it ended shows a loss.
 2. **No double count.** Each context operator's change is measured at its own input (R29), and the sum
    check tests the total (§6.5, check 1). So the tokens are counted once, in either pipeline order:
 
    | Pipeline order | `mask` | `coref` | summary | Total |
    |---|---|---|---|---|
-   | Summarizer first (cg's `medium`, `high`, `xhigh` presets) | not reported | not reported | 40,000 → 1,500 = 38,500 | **38,500** |
+   | Summarizer first (cg's `medium`, `high`, `xhigh` presets) | ended | ended | 40,000 → 1,500 = 38,500 | **38,500** |
    | Summarizer after the reducers | 3,940 | 19,950 | 16,110 → 1,500 = 14,610 | **38,500** |
 
    The order changes **who gets the credit**, not the total. Credit follows pipeline order (R25).
    In cg's presets the summarizer runs first, so it gets all of it: the reducers find their content
-   gone, and they report nothing.
-3. **A restore.** If the summary is reversed (a restore, or the summary is dropped), the context operator
-   replays `mask` and `coref` again. They are reported with their old `ChangeID`.
+   gone, so `Compute` must not apply `mask` and `coref` again.
+3. **A restore.** If the summary is reversed (a restore, or the summary is dropped), the earlier
+   changes are back in the body. The context operator reported them once, and does not report them
+   again, so `Compute` has to apply them again from the state, or they stay missing. This is the case
+   that tests the end rule: a change that `Compute` dropped for good cannot come back (§11, question 13).
+
+**What happens if `Compute` gets it wrong.** If it applies a change that has ended, the sum check fails
+on that request, because the context operations remove more than the client body held. If it drops a
+change that is still there, the sum check fails because the context operations remove less. Both are
+reported in `Result.Checks`, and pricing goes on (§4.6).
 
 **Why a change stopped** is not on the context operation. A report can find it: the change last appeared at
 position P on request N, and request N+1 has a change whose span covers P (`At` and `MessageSplice`).
@@ -655,40 +701,81 @@ That is a question for a report, not for a price, so the report answers it.
 
 ### 4.6 Replays: who remembers past changes
 
-**Each request lists every change in its body, fresh or replayed (D6). The context operator remembers past
-changes.** The library and the hosts remember nothing except the fingerprints of recent requests
-(§5.1). This is a decision, not an oversight, for three reasons:
+**A context operator reports a change once, on the first request of the change. The Tracker remembers
+it, for each thread. `Compute` applies it again on every later request of the thread, until it ends
+(D14).** The context operators report less. They do not repeat a change on each request.
 
-1. **The context operator already re-applies each change on every request.** The client sends its whole
-   uncompacted transcript on every turn. To keep the forwarded body the same, context-guru replays
-   each frozen decision, and tool-prune removes the same declarations. So the context operator already knows
-   every change in the body. Reporting it adds no state.
-2. **The price changes on every request, even when the change does not.** The same tokens are a
-   cache read on a hot turn and a cache write on a cold turn (§6.2). The library needs each change's
-   tokens and position **on this request**, and positions move: a summary turns 9 messages into 1.
-3. **A register of past changes elsewhere fails in each place it could live:**
+**What the old rule was, and why it is replaced.** The old rule was the opposite: each request listed
+every change in its body, fresh or replayed, and the context operator was the only one that
+remembered. The reason was that the context operator sees the content. It re-applies each change on
+every request anyway, because the client sends its whole transcript on every turn, so it already knows
+every change in the body. The cost of that rule was size: a replayed context operation repeated about
+200 bytes on every request, and every context operator had to carry the replay in its report. The new
+rule removes that cost. It moves the memory to a place that cannot see the content.
 
-   | Where | Why it fails |
-   |---|---|
-   | The `context_counterfactual` library | It is no longer a pure function (R26). Two hosts can disagree, and pricing an old request again gives a different figure. |
-   | The host's collector | It must move positions after each `MessageSplice`, find which changes a summary ended, and drop changes when the agent compacts its own transcript. It cannot see the content, so it cannot tell whether a change is still in the body, and a wrong guess is silent. |
-   | The archive | It has gaps (`droppedEvents`). One lost request makes every later request wrong. |
+**The risk, stated plainly.** The old design rejected a register of past changes in the host,
+for this reason: it must move positions after each `MessageSplice`, find which changes a
+summary ended, and drop changes when the agent compacts its own transcript. It cannot see the content,
+so it cannot tell whether a change is still in the body, and a wrong guess is silent. That reason still
+holds for the Tracker. It is the risk of the new rule. What the new design does about it:
 
-**The cost is size, not correctness.** A replayed context operation repeats about 200 bytes on every
-request. If that becomes a problem, a later version can send a compact replay (`changeId`, `at`,
-`tokens`) and the full context operation only once. That change would not change the model or the price, so
-it is not part of this design.
+1. **A wrong guess is no longer silent in sizes.** `Compute` has the size of every position of the
+   client body and of the forwarded body (taken in `BeginRequest` and `EndRequest`, §6.1). The sum check (§6.5, check 1)
+   compares them with the sum of the context operations, those reported now and those applied again. If
+   `Compute` applies a change that has ended, or misses one that is still there, the sums differ and
+   the check fails on that request. The conservation check (check 6) fails too.
+2. **What the checks do not catch.** A check works on sizes for each section. Two errors of the same
+   size in one section cancel out. The checks also do not say which change is wrong. And a failed check
+   does not stop pricing: the figure is still produced, with the failure in `Result.Checks`.
+3. **The end rule is not defined.** `Compute` must find by itself that a change has ended, because the
+   context operator reports nothing after the first request. Until that rule exists (§11, question 12),
+   the guard in point 1 is the only protection, and it detects an error after the fact. It does not
+   prevent one.
+
+**A lost state does not heal by itself.** This is new, and it is the main cost of the rule. If the
+Tracker loses a thread's state (a restart, an eviction, a thread that is created again), the context
+operator does not report the change again. The change stays missing for as long as it lasts. Every later
+request of the thread fails the sum check, and its saving is too low, until the change ends. Under the
+old rule, one missing request was only one missing figure, because the next request listed the change
+again. How the state recovers is open (§11, question 13).
+
+**Re-pricing an old request needs its state.** The old design could price an old request again from
+that request alone. Now `Compute` also needs the state that the thread had at that time. A replay of
+a session must start from the first request of the thread, or from a stored state. The session archive
+has gaps (`droppedEvents`). One lost request there makes every later request in a replay wrong, so the
+archive alone cannot rebuild the state.
+
+**What stays in the state after a request.** The Tracker keeps the context operations that are still
+applied on the next request, and drops the others:
+
+| Context operation | Kept in `ThreadState.Active` | Why |
+|---|---|---|
+| `rewrite` (tool-prune, mask, a summary) | yes, until it ends | The client sends the same transcript again, so the change applies again on every later request |
+| `setting` (model, effort) | yes, until the setting changes again | The setting still holds on the next request |
+| `spend` | no | A model call happened once. Only its `ChangeID` is kept, to join it with the later saving |
+| `cacheChange` | no | `Compute` adds it for one request |
+| any operation with `DryRun` | no | It was not applied, so it applies to nothing |
+| a `rewrite` that has ended | no | See §4.5 |
+
+So the state grows with the number of changes that are alive in the thread, and not with the number of
+requests. If nothing ever ended, it would grow with the session. That is why the end rule (§11,
+question 12) decides whether the memory is bounded.
+
+**What does not change.**
+
+- The tier comes from the position and the cache state (§6.2, D1). The library does not need to know
+  that a change is applied for the first time.
+- `ChangeID` is the same on every request that carries the change (R22). It is the key that joins the
+  first report to the later requests.
+- A change keeps its context operator (R51), so its saving stays with the same plugin.
 
 **A stateless context operator.** tool-prune keeps no state. It reads its `remove` list from config and
-removes the same declarations from every request. It reports every field of a replay without state: `ChangeID` is a hash of the removed set and
-the config, so it is the same on every request with the same config; the other fields are facts
-about the body it just changed.
-
-A reader that needs the first application finds it in the session history: the first event with that
-`ChangeID`. No price needs it, because the tier comes from the position and the cache state (D1).
+removes the same declarations from every request. It reports the change once. `ChangeID` is a hash of
+the removed set and the config, so it is the same for the same config. The Tracker holds the rest.
 
 **A config change of a stateless context operator.** A new `remove` list (for example, a hot reload) gives
-a new `ChangeID`. The old change stops and a new one starts. If the new list removes a declaration
+a new `ChangeID`. The old change ends and a new one starts. How `Compute` learns that the old change
+ended is the open end rule (§11, question 12). If the new list removes a declaration
 that the old list kept, the forwarded body changes inside the cached prefix. The library then adds
 a `cacheChange` that carries tool-prune's `ChangeID` (§5.2). That is the real cost of the config change.
 
@@ -698,7 +785,7 @@ The comparison is **internal to the library**. It is not part of the public API.
 first: it compares this thread's previous request with the current one, and finds B\*, a break and
 the cache state. Then it prices with them. The host does not call it and cannot pass in a B\* or a
 phase of its own, so every host derives them by the same rule. The host keeps the fingerprints,
-finds the previous one by `thread.Key`, and passes both in `Input` (§6.1, wiring document, section 5).
+finds the previous one by `thread.Key`, and keeps it in the thread's `ThreadState` (§6.1, wiring document, section 5).
 
 ```go
 // unexported
@@ -748,8 +835,8 @@ type PosHash struct {
 ```
 
 ```go
-// NewFingerprint hashes the two bodies, so every host builds fingerprints the same way. The
-// host calls it once for each request and keeps the result as the next request's `Prev`.
+// NewFingerprint hashes the two bodies, so every host builds fingerprints the same way. `BeginRequest` and
+// `EndRequest` call it; the result is kept in `ThreadState.PrevPrint` for the next request.
 func NewFingerprint(thread string, at time.Time, client, forwarded Body, cached Position) Fingerprint
 ```
 
@@ -777,7 +864,7 @@ The same comparison gives the **cache state** that `Compute` uses (R36):
 | Case | `CachePhase` | `Extent` |
 |---|---|---|
 | A previous fingerprint exists, and `Gap` ≤ its TTL | `hot` | the previous request's cached extent |
-| A previous fingerprint exists, `Gap` > TTL, and `PingRead` is set | `hot`, and the collector adds a rescue (§4.4) | `PingRead` |
+| A previous fingerprint exists, `Gap` > TTL, and `PingRead` is set | `hot`, and the library adds a rescue (§4.4) | `PingRead` |
 | A previous fingerprint exists, `Gap` > TTL, no ping, `Lifetime = exact` | `cold` | nil |
 | A previous fingerprint exists, `Gap` > TTL, no ping, `Lifetime = minimum` or `unknown` | `unknown` | nil |
 | No previous fingerprint for this thread | `unknown` | nil |
@@ -811,20 +898,76 @@ converts them with the request's own ratio (billed prompt tokens ÷ forwarded bo
 
 ### 6.1 Call
 
-```go
-func Compute(in Input) Result // pure
+One Tracker keeps the state of one thread between requests. For each request the host calls four
+methods, in this order: `BeginRequest`, `Add` (once for each reported context operation),
+`EndRequest`, and `Compute`. `Compute` also stores the new thread state. There is no separate commit.
 
-type Input struct {
-    Ops         []Operation  // the operators' operations. No cacheChange: the library adds them
-    Usage       Usage        // billed usage of this request
-    Client      []PosBytes   // every position of the client body, in hash order (checks 1 and 6)
-    Forwarded   []PosBytes   // every position of the forwarded body, in hash order
-    Breakpoints []Breakpoint // cache_control breakpoints of the forwarded body, in hash order
-    Prev        *Fingerprint // this thread's previous request; nil = none (§5.2)
-    Cur         Fingerprint  // this request, built with NewFingerprint (§5.1)
-    Facts       EntryFacts   // gap, TTL, lifetime kind, ping read (§5.2)
+```go
+// ThreadState is kept between requests and replaced after each one.
+type ThreadState struct {
+    Active    []Operation  // rewrite and setting context operations still applied (§4.6)
+    PrevPrint *Fingerprint // this thread's previous request; nil = none (§5.2)
+    Cache     CacheState   // what the previous request left cached; zero value = unknown (question 11)
+    Version   uint64       // +1 at each replace; the optimistic lock (R53)
 }
 
+type Tracker struct{ /* the thread's ThreadState */ }
+
+// 1. Before the pass. The client body is hashed once, here (the body before any plugin).
+//    The record starts from a copy of the thread's ThreadState.
+func (t *Tracker) BeginRequest(client Body, at time.Time) *Request
+
+// 2. During the pass. Each plugin reports; the framework sets Operator and DryRun.
+func (r *Request) Add(op Operation)
+
+// 3. End of the pass. The forwarded body, its cache breakpoints, and the facts only the host knows.
+func (r *Request) EndRequest(forwarded Body, breakpoints []Breakpoint, facts EntryFacts)
+
+// 4. After the response. The billed usage is the only input that arrives late.
+//    Compute is deterministic and does no I/O (R26). It prices the request, then replaces the
+//    thread's ThreadState with the new one as its last step. If Compute fails or panics, the
+//    ThreadState is unchanged.
+func (r *Request) Compute(usage Usage) Result
+
+// Preview does the same calculation and stores nothing. It is for pricing an old request again, and
+// for a test or a tool that wants to look without moving the thread forward. A shadow run (migration
+// step 5) calls Compute, because the ThreadState must advance on every request.
+func (r *Request) Preview(usage Usage) Result
+```
+
+**What each call writes.**
+
+| Call | Who calls | What it writes |
+|---|---|---|
+| `BeginRequest(client, at)` | host, before the plugins | into the record: the client sizes and fingerprint, the time. Reads `ThreadState.PrevPrint` to find `clientFirstDiff` |
+| `Add(op)` | the pipeline, once for each reported context operation | into the record: the reported context operations, in pipeline order |
+| `EndRequest(forwarded, ...)` | host, after the last plugin | into the record: the forwarded sizes and fingerprint, the breakpoints, the facts (`Gap`, TTL, lifetime kind, `PingRead`) |
+| `Compute(usage)` | host, after the response | the thread's `ThreadState`: the only write to the part that lives between requests, and the last step of the call |
+| `Preview(usage)` | host, when it must not change the state | nothing |
+
+The record of a request is private to that request. Two requests of one thread in flight at the same
+time (a keep-alive ping and a request, a subagent) each have their own record (R53). Each record keeps
+the `Version` of the `ThreadState` it started from. `Compute` works like this:
+
+1. Read the current `ThreadState` of the Tracker.
+2. If its `Version` is the one the record started from, calculate and go to step 4.
+3. If it is not, another request ended first. Take the current `ThreadState`, find `clientFirstDiff`
+   again from the client fingerprint that the record keeps, and calculate. Set `Result.Recomputed`.
+4. Replace the `ThreadState` only if its `Version` has not changed since step 1. If it has, go to step 1.
+   The new `ThreadState` has `Version` + 1.
+
+The compare and the replace are one atomic step. The calculation is outside the lock, so requests of one
+thread do not wait for each other, except in a retry. A retry needs no I/O. `Preview` does steps 1 to 3
+and does not replace.
+
+The result depends on the order of the `Compute` calls. It is not the order in which the requests
+reached the provider. When the two orders differ, the cache result of the later `Compute` can be wrong.
+The host can reduce this by calling `Compute` in the order of the responses.
+
+A missing call is not a compile error. If `EndRequest` was not called, or a fact is missing, `Compute` returns
+the result with the missing items in `Unpriced` and a reason. It does not guess.
+
+```go
 // Usage is the provider's billed prompt usage. CacheWrite1h is the part of CacheWrite billed at
 // the one-hour rate, never an addition to it.
 type Usage struct {
@@ -909,6 +1052,7 @@ type Result struct {
     Unpriced []Unpriced     // with a machine-stable reason
     Checks   []CheckFailure // §6.5
     Boundary *Position      // the B* used; nil when unknown
+    Recomputed bool         // another request replaced the ThreadState first (R53, §6.1)
     Phase    CachePhase     // the cache phase it used (§5.2). For the host's own checks, never an input
 }
 
@@ -967,10 +1111,13 @@ direction.
 The library reports failed checks in `Result.Checks`. A failure does not stop pricing.
 
 1. **Sum:** for each section, the context operations that are applied, and not `DryRun` —
-   `SizeBefore − SizeAfter` adds up to the client size minus the forwarded size. The collector sends both.
-   A failure means a plugin changed the body and did not report it.
-2. **Order:** the context operations are in pipeline order, so a context operator's output positions are mapped through the `MessageSplice` of the context operations before it.
-3. **Unique `ChangeID`:** no two `rewrite` or `setting` context operations of one request have the same `ChangeID`. A `spend` or a `cacheChange` may share the `ChangeID` of the change it belongs to.
+   `SizeBefore − SizeAfter` adds up to the client size minus the forwarded size. The context operations
+   are those reported on this request and the active ones that `Compute` applies again. The host sends
+   both sizes (taken in `BeginRequest` and `EndRequest`, §6.1). A failure means one of three things: a plugin changed
+   the body and did not report it, `Compute` applied a change that has ended, or `Compute` dropped a
+   change that is still in the body (§4.5, §4.6).
+2. **Order:** the context operations are in pipeline order, so a context operator's output positions are mapped through the `MessageSplice` of the context operations before it. An active context operation keeps the pipeline position it had when it was reported.
+3. **Unique `ChangeID`:** no two `rewrite` or `setting` context operations of one request, reported or active, have the same `ChangeID`. A `spend` or a `cacheChange` may share the `ChangeID` of the change it belongs to.
 4. **Spans:** for a context operation with `Spans`, its `SizeBefore` and `SizeAfter` equal the sums over its spans.
 5. **Attribution:** a break's `ChangeID` is the `ChangeID` of a context operation of the same request, or empty.
 6. **Conservation:** the request total of the applied context operations equals the bill difference (§6.3).
@@ -1161,8 +1308,9 @@ drops the combinations that cannot occur, and states the reason for each drop in
    gap inside the TTL, where the ping is not credited; two threads with their own windows.
 9. `cachesplit` and `breakpointTTL`, with the current `cachesplitSavedUSD` as the source.
 10. Changes that end: a summary of reduced messages, in both pipeline orders, with the same total;
-    an ended change that is not reported again; a restore of the summary, after which the earlier
-    changes are reported again.
+    an ended change that `Compute` no longer applies; a restore of the summary, after which the earlier
+    changes must be applied again from the state. This case cannot be frozen until the end rule exists
+    (§11, questions 12 and 13).
 11. A subagent thread: its context operations, its totals, and a session total that adds both threads.
 12. The interaction on a rescued request, and the conservation check on every case.
 13. A `coref` batch: three cuts in messages that are not next to each other, as one context operation with
@@ -1191,7 +1339,7 @@ reason.
 | Agreement with the current code | context-guru | The test runs `dash.Event.Price` on each case's input. Each case not in `differences.json` equals `expected` within one micro-dollar. Each `differs` entry really differs, so a stale entry fails. |
 | Agreement with the Cortex rules | Cortex, until step 10 | The same test with `pruneDraft`, `compactionDraft` and `rewritePenalty`, for the tool-prune and rewrite-penalty cases. It is removed with those rules. |
 | Review of the differences | PR review | Every `differs` entry cites a spec section, and a reviewer approves `differences.json`. |
-| Cortex contract test | Cortex | Cortex builds the same inputs through its own plugins and collector, and gets `expected`. A type change in the library fails the Cortex build on upgrade. |
+| Cortex contract test | Cortex | Cortex builds the same inputs through its own plugins and its Tracker, and gets `expected`. A type change in the library fails the Cortex build on upgrade. |
 | Shadow steps | both | Every logged difference matches a `differs` entry. |
 | Removal gate | both | No rule is removed while a `notCovered` entry uses it. |
 
@@ -1240,12 +1388,26 @@ Each has test cases that are marked `differs` or `notCovered` in `differences.js
 10. **The rates of a setting break.** A break caused by a `setting` change (a new model) has no dollar
     figure in example 5. The proposed rule: price the moved tokens at the rates of the model that
     serves the request after the change. Not decided.
-11. **What the Collector's state holds.** The active context operations are in it. Whether the cache
-    state (phase, cached extent, TTL, time of the last request or ping) is in it too is not decided.
-    Today the host keeps the fingerprint and passes `Prev` and `Facts` in `Input` (§6.1). If the
-    state moves into the Collector, those fields leave `Input`, and the host passes only the request.
+11. **What the Tracker's state holds.** `ThreadState` has three parts (§6.1): the active context
+    operations, the previous fingerprint (`PrevPrint`), and the cache state. The active context
+    operations are decided. The other two are in `ThreadState` in this design, and not in what the host
+    passes in, so a restart loses them. Whether `ThreadState` is kept in memory or persisted is not
+    decided (question 13). Whether the cache state belongs in `ThreadState` at all, or is only derived
+    from `PrevPrint` and the gap, is not decided.
 12. **How a context operation ends.** A change is reported once, and `Compute` applies it on the
     following requests until it is overwritten. `Compute` must find the end by itself, because the
     context operator reports nothing after the first request. The rule is not defined. This blocks
     the test cases that cover an ended change, and the rule for an operator that overwrites its own
     change.
+13. **How the state recovers.** A context operator reports a change once. If the Tracker loses a
+    thread's state (a restart, an eviction, a thread created again), the change is not reported
+    again, and it stays missing until it ends (§4.6). Options: the Tracker persists its state; the
+    context operator reports the active changes again when it sees a new thread, or on request; or
+    the host replays the session from the first request of the thread. Each has a cost. Persisting
+    adds I/O to a library that does none today (R26). Asking the operator breaks the rule that it
+    reports once. A replay needs the whole history, which the archive may not have. Not decided.
+14. **Two requests of one thread in flight.** A keep-alive ping, a request and a subagent can overlap.
+    Each opens its own request record from a copy of the thread's `ThreadState`, and each `Compute`
+    replaces it when it ends. Decided: optimistic locking (D14, R53, §6.1). The order of the
+    `Compute` calls can differ from the order at the provider. Open: whether the host must call `Compute` in the
+    order of the responses, and whether a ping should have its own state because it reports only a `spend`.

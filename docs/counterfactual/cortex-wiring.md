@@ -8,20 +8,25 @@ context-guru proxy connect to it. Text below is moved from that design. A plain 
 current numbering. Sections that start with `W` are this document's own.
 
 **Problem statement:** [rossoctl/cortex#1417](https://github.com/rossoctl/cortex/issues/1417).
+**Roll-up:** [rossoctl/rossoctl#2649](https://github.com/rossoctl/rossoctl/issues/2649), "Cortex Local:
+Context Guru integration with Cortex". It asks that the accounting of context-guru match the pattern of
+tool-prune, [rossoctl/cortex#952](https://github.com/rossoctl/cortex/issues/952) (closed). W7.4 compares
+the two.
 
 **Open.**
 - **Push or fingerprint (design §11, question 4).** This document and the migration steps assume a
-  collector that keeps one fingerprint for each thread. A push model, where components push facts
+  Tracker that keeps the state of each thread. A push model, where components push facts
   with an identity and the receiver keeps no state, is under review. Until it is decided, the
   fingerprint design below is the current one.
 - `pctx.ReportOps` and the Cortex name for the component that writes to the cost ledger have no
   chosen name (design §11, question 8).
-- **The Collector's state (design §11, questions 11 and 12).** A context operation is now reported
+- **The Tracker's state (design §11, questions 11 to 14).** A context operation is now reported
   once, on the first request of its change, and `Compute` applies it again on later requests. The
-  Collector in the library keeps the active context operations for each thread. This document
-  still describes the host as the keeper of the fingerprint and of the cache state. Whether the
-  cache state moves into the Collector, and how `Compute` finds that a context operation has
-  ended, are not decided.
+  Tracker in the library keeps the active context operations, the previous fingerprint and the cache
+  state for each thread. The host calls `BeginRequest`, `Add`, `EndRequest` and `Compute`
+  (design §6.1). `Compute` stores the new `ThreadState`; `Preview` stores nothing. Sections W5 and W9 below are written for the host as the keeper of the fingerprint,
+  and still describe the earlier shape. Where the cache state lives, how `Compute` finds that a
+  context operation has ended, and how the state recovers, are not decided.
 
 ## W0. Overview: from a request to the savings
 
@@ -98,7 +103,7 @@ The contract of both capabilities: safe for concurrent use; no
 blocking I/O; never makes the session active (a ping is not agent activity); may drop a report for
 a session that no longer exists.
 
-**Who builds a standalone `RequestOps`.** No collector is open, so the caller fills it from what it
+**Who builds a standalone `RequestOps`.** No request record is open, so the caller fills it from what it
 knows about the thread it acts on: `Session` and `Thread`. It sets `Billing` from the credential its
 call used (R41, design §7.1).
 
@@ -131,34 +136,35 @@ implementing `KeepAliveEmitter`, and converts each `KeepAliveReport` into a `spe
 
 ### W4.8 Sequence: three flows, and which repo each step is in
 
-`participant` labels mark which repo owns each piece: Cortex (the pipeline, the collector,
+`participant` labels mark which repo owns each piece: Cortex (the pipeline, the Tracker,
 `settle`) or context-guru (a plugin, the keeper, `context_counterfactual`). `context_counterfactual` is a library import in both; it
 runs in-process in whichever repo calls it, never as its own service.
 
-**A. A normal request.** A plugin reduces a tool output; the collector finds no break; `settle`
+**A. A normal request.** A plugin reduces a tool output; `Compute` finds no break; `settle`
 prices and records.
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Pipeline as Pipeline collector<br/>(Cortex)
+    participant Pipeline as Pipeline<br/>(Cortex)
+    participant Tracker as Tracker<br/>(context_counterfactual, imported)
     participant Plugin as context-guru plugin<br/>(context-guru)
-    participant Ops as context_counterfactual.Compute<br/>(context-guru, imported)
+    participant Ops as request.Compute<br/>(context_counterfactual)
     participant Settle as settle<br/>(Cortex)
     participant Store as Session store<br/>(Cortex)
     participant Upstream
 
     Client->>Pipeline: request
-    Pipeline->>Pipeline: open RequestOps<br/>(Session, Agent, Billing from credential)
+    Pipeline->>Tracker: BeginRequest(client body, now)<br/>(Session, Agent, Billing from credential)
     Pipeline->>Plugin: OnRequest(pctx)
     Plugin->>Plugin: apply.Apply: resolve thread,<br/>rewrite a tool output (mask/cmdfilter/coref/...)
     Plugin->>Pipeline: pctx.ReportOps(result.Ops...)<br/>+ result.Thread
-    Pipeline->>Pipeline: stamp Context operator<br/>append into RequestOps.Ops
+    Pipeline->>Tracker: Add(op) for each<br/>stamps Operator and DryRun
+    Pipeline->>Tracker: EndRequest(forwarded, breakpoints, facts)
     Pipeline->>Upstream: forward (smaller) body
     Upstream-->>Pipeline: response + usage
-    Pipeline->>Pipeline: prev = fingerprint[thread.Key]<br/>cur = context_counterfactual.NewFingerprint(...)
-    Pipeline->>Ops: Compute(Ops, usage, prev, cur, facts, ...)<br/>compares inside: B*, cacheChange, phase
-    Ops-->>Pipeline: Result (PricedOp[], Boundary, Phase; in-process only)
+    Pipeline->>Ops: request.Compute(usage)<br/>compares inside: B*, cacheChange, phase
+    Ops-->>Pipeline: Result (PricedOp[], Boundary, Phase)<br/>and the new ThreadState is stored
     Pipeline->>Settle: Result
     Settle->>Settle: price Saved/Caused with pricing.Resolver
     Settle->>Settle: discard RequestOps/Operation (R20)
@@ -172,7 +178,8 @@ closed and recorded. The summarizer call finishes afterward and reports through 
 
 ```mermaid
 sequenceDiagram
-    participant Pipeline as Pipeline collector<br/>(Cortex)
+    participant Pipeline as Pipeline<br/>(Cortex)
+    participant Tracker as Tracker<br/>(context_counterfactual)
     participant Store as Session store<br/>(Cortex)
     participant Plugin as context-guru plugin<br/>(context-guru)
     participant Model as Summarizer model call<br/>(context-guru, via cgModel)
@@ -206,24 +213,24 @@ sequenceDiagram
     Emitter->>Emitter: convert report + Billing with the library<br/>-> RequestOps with one spend op<br/>(ChangeID = window ID, Billing from the ping's credential)
     Emitter->>Settle: RequestOps
     Settle->>Settle: price Call.Usage
-    Note over Settle: on the NEXT request on thread T,<br/>the collector adds a rescue cacheChange<br/>with the SAME ChangeID -- ping cost and rescue<br/>value join under one change (design §4.4, W4.6)
+    Note over Settle: on the NEXT request on thread T,<br/>the library adds a rescue cacheChange<br/>with the SAME ChangeID -- ping cost and rescue<br/>value join under one change (design §4.4, W4.6)
     Settle->>Store: event.Saving (ping leg)
 ```
 
-## 5. The collector
+## 5. The Tracker and the host
 
-**Current design.** Each host keeps one fingerprint for each thread and compares each request with
-its own thread's previous request. The alternative, a push model, is open (design §11, questions 4
-and 5).
+**Current design.** The Tracker in the library keeps the state of each thread: the active context
+operations, the previous fingerprint and the cache state. The host owns one Tracker for each thread,
+and calls it (design §6.1). The alternative, a push model, is open (design §11, questions 4 and 5).
 
-Each host has a collector: Cortex, and the context-guru proxy. The parts are split this way. The pure parts are in the method document (design §5).
+Each host does the same: Cortex, and the context-guru proxy. The parts are split this way. The parts that live in the library are in the method document (design §5).
 
 | Part | Where | Cortex | Proxy |
 |---|---|---|---|
 | Resolve the thread | `internal/thread` (engine) | the engine resolves it inside `apply`, as today, and returns it in `apply.Result.Thread` | the same |
 | Collect the context operations | host | `pctx.ReportOps`, from every plugin, in pipeline order (W5.1) | `apply.Result.Ops`: the engine is the only context operator |
-| Keep the previous request's fingerprint, per thread | host | a map keyed by `thread.Key(session, thread)` | the same map, beside `dash.Recorder`'s `lastTail` (W5.2) |
-| Find B\*, the break and the cache state | inside `context_counterfactual.Compute` (pure; the comparison is not public) | passes `prev` and `cur` in `Compute`'s input, after the response | the same call |
+| Keep the thread's state: active context operations, previous fingerprint, cache state | the Tracker (library); the host holds one Tracker for each thread | a map from `thread.Key(session, thread)` to its Tracker | the same map, beside `dash.Recorder`'s `lastTail` (W5.2) |
+| Find B\*, the break and the cache state | inside `Compute` (deterministic; the comparison is not public) | calls `BeginRequest` and `EndRequest`, then `request.Compute(usage)` after the response, which stores the new `ThreadState` | the same calls |
 | Convert keep-alive reports | the library's keep-alive conversion (pure) | in `pingEmitter` | in `dashEmitter` |
 
 
@@ -244,7 +251,7 @@ Each host has a collector: Cortex, and the context-guru proxy. The parts are spl
 
 ### W5.2 The thread, and the previous request
 
-**The thread comes from `internal/thread`, not from the collector.** The engine already resolves
+**The thread comes from `internal/thread`, not from the Tracker.** The engine already resolves
 each request's thread (`thread.Result`): the agent's header first, then prefix continuity, then the
 session as a last resort. It also returns two signals that a weaker rule would lose:
 
@@ -273,9 +280,16 @@ would misattribute it. Keying by thread gives the right baseline for every rule 
 - **Memory:** 16 bytes for each position (`PosHash`, design §5.1). 2 bodies × 2,000 positions is about
   64 KB for each thread. `internal/thread` caps threads at 64 for each session; a typical session
   has 1 to 5. `session.max_sessions` (100) bounds the total.
+- **What is kept:** one fingerprint for each thread, the last one, overwritten after each request. B\*
+  needs only the previous request of the same thread, so the store does not grow with the length of a
+  session. The active context operations of a thread are also kept, because `Compute` applies them
+  again. They grow with the number of live changes, not with the number of requests, and a change that
+  ends is removed. That bound holds only if the end rule works (design §11, question 12). If it does
+  not, the list can grow without limit.
 - **Restart:** fingerprints are lost. Only the next request of each thread gets `penalty_unknown`.
-  They are not persisted (design §9).
-- context-guru keeps its own `MaxCachedIdx` for its own decisions. For pricing, the collector's B\*
+  They are not persisted (design §9). Whether the Tracker persists its state is open (design §11,
+  question 11).
+- context-guru keeps its own `MaxCachedIdx` for its own decisions. For pricing, the library's B\*
   is the only authority (R30), because it is computed from the forwarded body after every plugin
   ran. In the proxy there is no later plugin, so the two must agree: the proxy checks
   `MaxCachedIdx` against B\* and counts a disagreement (a bug in one of them), at no extra cost.
@@ -312,6 +326,16 @@ New fields, all additive (the ledger rule is "add, never rename"):
 | `Event.Spends []SpendRecord` | event only | `{changeId, thread, costUSD}`: one for each `spend` context operation of the request, priced from its `Call.Usage`. A ping is its own request, so its event holds one record. |
 
 `TotalAvoidedUSD` does not change: `max(0, USD − PenaltyUSD)` for each saving, floored at zero.
+
+**No single token total.** The library returns tokens for each tier, and a host never adds the tiers
+into one number. A token count summed across tiers that differ in price by up to 12.5 times is not an
+invariant worth publishing. This is the rule of tool-prune (cortex#952, `usage.go`), and it holds here.
+Tokens appear for each tier, and dollars appear in a total (W7.2).
+
+**Zero is not "no data".** A request whose agent has no changes records an explicit `Saving` with
+zero, or no `Saving` and a reason. A field that is absent must mean "not measured", never zero.
+`event.Saving` fields that carry `omitempty` today do not meet this: a true zero is absent on the wire.
+The display layer must be able to tell the two apart (open: W7.4).
 That floor applies to the existing ledger total only. The totals of W7.2 are signed and are folded
 from the recorded events, so a window that cost more than it saved shows as negative.
 
@@ -361,14 +385,14 @@ A `spend` is shown beside the savings, never inside them, as today.
 The proxy computes its dollar savings from `context_counterfactual.Compute`, as Cortex does:
 
 1. The engine returns the request's context operations (migration step 3).
-2. The proxy's collector passes the thread's previous and current fingerprints to `context_counterfactual.Compute`, which adds the `cacheChange` context operations itself.
-3. The proxy calls `context_counterfactual.Compute` (one call; there is no separate comparison step).
+2. The proxy calls `BeginRequest`, `Add` for each context operation, and `EndRequest` on the thread's Tracker.
+3. The proxy calls `request.Compute(usage)`, which adds the `cacheChange` context operations itself (one call; there is no separate comparison step). `Compute` stores the new `ThreadState`. A shadow run still calls `Compute`: only the use of the figure is shadowed, and the `ThreadState` must advance. The proxy calls `Preview` only to price an old request again, or to look without changing anything.
 4. The proxy converts each `PricedOp` to dollars with `internal/modelinfo.Price` for the request's
    model.
 5. The proxy stores the dollars in the columns its dashboard reads today: the saving of each
    component (`ComponentSavedUSD`) and the baseline delta (`baselineDeltaUSD`).
 
-The `cachesplit` and keep-alive savings are `cacheChange` context operations now (§4.4), written by the collector, so the proxy
+The `cachesplit` and keep-alive savings are `cacheChange` context operations now (§4.4), written by the library, so the proxy
 prices them through `context_counterfactual.Compute` too. Their current rules (`cachesplitSavedUSD`,
 `keepaliveSavedUSD`) are the source of their test cases (design §10), and are removed at step 10.
 
@@ -377,6 +401,33 @@ tier in both hosts. The dollars are equal only when the two rate tables are equa
 cases use one fixed rate table, so they can compare dollars (design §10.2). A drift between the tables —
 a model priced in one and not the other — shows as a dollar difference on identical tokens, which
 the cross-host comparison test (W9 step 8) reports.
+
+### W7.4 Comparison with the tool-prune accounting (cortex#952)
+
+cortex#952 delivered the savings of tool-prune. The roll-up (rossoctl#2649) asks that the context-guru
+accounting match it and not diverge. This is how the two compare.
+
+| Point | tool-prune today (#952, #1050) | This design |
+|---|---|---|
+| Where the avoided cost lives | `Counts.AvoidedMicros`, a column **beside** spend, never inside it | `event.Saving`, beside `Event.Spends`. A `spend` is never inside a saving (W7.1) |
+| Counterfactual and spend | Kept apart by construction. A test, `TestAggregator_TotalsAreInvariantToAvoidedCost`, holds that line | The same rule. The test must also cover savings that come from `Compute` |
+| Applied or projected | Applied savings only. A projected (observe-mode) saving is excluded | The same: `DryRun` is never counted in totals (R12) |
+| Gross or net | Gross. Nothing subtracts the cache re-warm a list change costs | **Different.** Net of the cache break, because `PenaltyUSD` and the `cacheChange` are priced. The floor at zero in `TotalAvoidedUSD` stays |
+| Unit | Dollars only (micros), no tokens total | Tokens for each tier from the library, dollars in the host. No single token total |
+| Cache effects | Not double-counted, because avoided rides beside the measured cost | Counted once: `Compute` keeps the cache break apart from the content change (R23, R31) |
+| Per agent | Folds into every marginal, `byAgent` included | Same, through `Saving.Operator` and `Saving.Thread` (W7.1) |
+| Zero or no data | `avoidedMicros` is `omitempty`, so a true zero is absent. This is a known deviation | Open. See W7.1 and the decision below |
+| Per session | Computed from the events, not the ledger (the ledger has no session key) | The same fold over events (W7.2) |
+
+**What changes for the tool-prune figure.** At migration step 9 (W9) tool-prune is one of the context
+operators. Its figure then comes from `Compute` and is net of the cache break. So the number for the same
+request goes down, and the difference is the re-warm cost that #1050 documents as not subtracted. This
+is one of the expected differences at step 9.
+
+**Decision needed.** Does `AvoidedMicros` stay as the column that the display reads, with `Compute`
+as its source? Or does `event.Saving` replace it? Keeping the column keeps every consumer working
+(the `SAVED` column, the spend strip, the drawer). The recommendation is to keep it, and to fix the
+`omitempty` gap at the same time.
 
 ## W9. Migration
 
@@ -387,10 +438,10 @@ Each step merges alone and leaves the totals correct.
 | 1 | context-guru | **Make the test-case list** (design §10), with the current computation. No `context_counterfactual` code yet. | The list is reviewed. Each `differs` entry cites a spec section. Each `notCovered` entry is in design §11. |
 | 2 | context-guru | Create the `context_counterfactual` module: types, `Compute` (with the comparison inside it, not public), `NewFingerprint`, checks. No callers. | Every case in the list passes (design §10.4). |
 | 3 | context-guru | The engine builds `[]context_counterfactual.Operation` from `Trace` and the reports, and returns them in `apply.Result.Ops` with `apply.Result.Thread`. Marker and apply-only changes are built by `apply` (§4.2 rule 8). **This is new work for each change, not a read of existing fields.** The frozen state is keyed by content hash (`components/offload/state.go`), so `ChangeID` can be derived. But replays are counted only for each component today (`Report.Replays`), and `apply.Trace` records no ID for each change. Each offloader must record, for each change, its `ChangeID`. | Replay tests: the same `ChangeID` on each turn. |
-| 4 | context-guru | **The proxy's collector.** It reads `apply.Result.Ops`; keeps one fingerprint per `thread.Key` beside `dash.Recorder`; builds each request's fingerprint with `context_counterfactual.NewFingerprint`; sets `Billing` with `context_counterfactual.BillingFrom`; implements `OpsEmitter` on `dashEmitter`; and converts each `KeepAliveReport` into a `spend` context operation with the library. Nothing reads its output yet. This is the largest proxy step, and it uses only engine types: none of it depends on Cortex. | The cache cases (design §5.2) pass through the proxy's collector. The `MaxCachedIdx`/B\* agreement counter is zero on captured sessions (W5.3). |
-| 5 | context-guru | The proxy computes dollars from `context_counterfactual` **in shadow** (W7.3): it stores its current figure, and logs the `context_counterfactual` figure and the difference. | Each logged difference matches a `differs` entry (design §10.4). |
+| 4 | context-guru | **The proxy's use of the Tracker.** It reads `apply.Result.Ops`; keeps one Tracker per `thread.Key` beside `dash.Recorder`; calls `BeginRequest`, `Add`, `EndRequest` and `Compute`; sets `Billing` with `context_counterfactual.BillingFrom`; implements `OpsEmitter` on `dashEmitter`; and converts each `KeepAliveReport` into a `spend` context operation with the library. Nothing reads its output yet. This is the largest proxy step, and it uses only engine types: none of it depends on Cortex. | The cache cases (design §5.2) pass through the proxy's use of the Tracker. The `MaxCachedIdx`/B\* agreement counter is zero on captured sessions (W5.3). |
+| 5 | context-guru | The proxy computes dollars from `context_counterfactual` **in shadow** (W7.3), with `Compute`, so that the `ThreadState` still advances on every request: it stores its current figure, and logs the `context_counterfactual` figure and the difference. | Each logged difference matches a `differs` entry (design §10.4). |
 | 6 | context-guru | The proxy **switches** to the `context_counterfactual` figure. `dash.Recorder`'s `TailChanged` and cold-start attribution read `Result.Boundary` and `Result.Phase` from `context_counterfactual.Compute` instead of their own copy, so the proxy has one cache-state rule, not two. | Dashboard totals before and after on the same captured sessions. |
-| 7 | Cortex | **The Cortex collector.** `pctx.ReportOps`; the context-guru plugin passes `apply.Result.Ops` through it; one fingerprint per `thread.Key`; `cgModel` fills `ModelCall`; `pingEmitter` converts each `KeepAliveReport` with the library and implements `OpsEmitter`. `plugins.Deps.Costs` and `core/cost/spend` are removed. No pricing change. | The cache cases (design §5.2) pass through the Cortex collector. |
+| 7 | Cortex | **The Cortex use of the Tracker.** `pctx.ReportOps` calls `Add`; the context-guru plugin passes `apply.Result.Ops` through it; one Tracker per `thread.Key`; `cgModel` fills `ModelCall`; `pingEmitter` converts each `KeepAliveReport` with the library and implements `OpsEmitter`. `plugins.Deps.Costs` and `core/cost/spend` are removed. No pricing change. | The cache cases (design §5.2) pass through the Cortex Tracker. |
 | 8 | Cortex | tool-prune and context-guru report context operations beside their current events. `settle` computes both figures, writes the current one, logs the difference. | Each logged difference matches a `differs` entry; also the Cortex / cg proxy / control comparison test (`62333ee9` on `feat/contextguru-keepalive`). |
 | 9 | Cortex | `settle` switches to `context_counterfactual.Compute`. The new event fields. | Ledger totals before and after on the same replay. |
 | 10 | both | Remove the current events, `saving.go`, `unique.go`, the per-operator draft functions, and the proxy's rules that `context_counterfactual` replaced (`uniqueRate`, `repeatRate`, the reduction part of `baselineDeltaUSD`, `cachesplitSavedUSD`, `keepaliveSavedUSD`). **Do not remove a rule that a `notCovered` entry still uses, nor any path design §9.1 keeps** (gates, events, tool inventory, holdout replay, `KeepAliveReport`). | `go mod tidy -diff` in every module. All cases pass in both repos. |
