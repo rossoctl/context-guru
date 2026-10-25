@@ -221,7 +221,7 @@ func TestPingExplainsAnUnheldCache(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 	env := []string{"XDG_CACHE_HOME=" + t.TempDir()}
 	out, code := runCGCode(t, "http://"+ln.Addr().String(), env, "ping", "--session", "S1")
-	if code != 1 || !strings.Contains(out, "Can't ping: restart Claude Code after the plugin update") {
+	if code != 1 || !strings.Contains(out, "Can't ping: Ping isn't enabled for this install yet") {
 		t.Errorf("exit %d:\n%s", code, out)
 	}
 	js, _ := runCGCode(t, "http://"+ln.Addr().String(), env, "ping", "--session", "S1", "--json")
@@ -236,7 +236,7 @@ func TestPingReasonWords(t *testing.T) {
 	for reason, want := range map[string]string{
 		"below limits": "below its minimum size", "pings used": "pings have run out", "stopped": "stopped keeping this thread warm",
 		"no entry": "knows nothing about this session", "unavailable": "route or credential is failing",
-		"not opted in": "restart Claude Code after the plugin update", "expired": "cache already cold", "too large": "too large to hold",
+		"not opted in": "turns on in your next session", "expired": "cache already cold", "too large": "too large to hold",
 		"unsupported": "extended thinking", "over budget": "per-ping limit", "from-the-future": "cannot ping this session right now",
 	} {
 		t.Run(reason, func(t *testing.T) {
