@@ -120,7 +120,7 @@ export const signature = (v: View | null): string =>
 
 /** Why the server holds nothing to ping with (cachestate `ping_reason`), in words. */
 const REASONS: Record<string, string> = {
-  'not opted in': 'restart Claude Code after the plugin update',
+  'not opted in': "Ping isn't enabled for this install yet; it turns on in your next session (or run /context-guru:install)",
   'below limits': 'keep-alive is on, but this thread is below its minimum size or limits',
   'over budget': 'one ping would cost more than the per-ping limit',
   'too large': 'context too large to hold for Ping',

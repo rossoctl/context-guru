@@ -324,6 +324,18 @@ case "${ANTHROPIC_BASE_URL:-}" in
 esac
 fi
 
+# --- (1a) heal an install that predates the ping header (#685) ------------------------------------
+# Manual pings (the Ping button) work only when the session sends `x-context-guru-ping: 1`. Only
+# install.sh wrote it, so an older install never has it. Add it to the settings file that holds our
+# routing. It applies from the next session. An install made with --no-ping-header is left alone.
+# Fails open: any error is swallowed.
+if [ "$FORCE" != 1 ] && [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
+  ph_out_=$(python3 "$HERE/settings.py" ensure-ping-header 2>/dev/null) || ph_out_=""
+  case "$ph_out_" in
+    *result=healed*) note "Ping enabled for this install; it works from your next session" ;;
+  esac
+fi
+
 # --- (1b) what configuration do we WANT, and what is running? ----------------------------
 # CONTEXT_GURU_STATE first, like settings.py, reset.sh and check-proxy.sh. S10 in review: this was the
 # ONE script that ignored it, which had two consequences. A user who relocates their state directory

@@ -63,6 +63,7 @@ OURS = (KEY, UPSTREAM_KEY, BIN_KEY)
 HEADERS_KEY = "ANTHROPIC_CUSTOM_HEADERS"
 PING_HEADER = "x-context-guru-ping: 1"
 PING_HEADER_META = "installed_ping_header"   # the line we added; absent when it was already there or is not ours to remove
+PING_OPT_OUT_META = "ping_header_opt_out"    # true when the install was made with --no-ping-header: SessionStart must not heal it
 
 
 def _ping_line(line: str) -> bool:
@@ -122,6 +123,14 @@ def add_ping_header(env: dict, meta: dict) -> bool:
     env[HEADERS_KEY] = new
     meta[PING_HEADER_META] = PING_HEADER
     return True
+
+
+def record_ping_choice(meta: dict, ping_on: bool) -> None:
+    """Remember an install made with --no-ping-header, so the SessionStart self-heal leaves it alone."""
+    if ping_on:
+        meta.pop(PING_OPT_OUT_META, None)
+    else:
+        meta[PING_OPT_OUT_META] = True
 
 
 def remove_ping_header(env: dict, meta: object) -> bool:
@@ -2887,7 +2896,8 @@ def cmd_add(args: argparse.Namespace) -> int:
     current = env.get(KEY)
     ping_on = not getattr(args, "no_ping_header", False)
     if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged \
-            and (not ping_on or any(_ping_line(ln) for ln in str(env.get(HEADERS_KEY, "")).split("\n"))):
+            and (not ping_on or any(_ping_line(ln) for ln in str(env.get(HEADERS_KEY, "")).split("\n"))) \
+            and (ping_on or (data.get(META) or {}).get(PING_OPT_OUT_META) is True):
         record_install_scope(args.file, url=args.url)
         emit(result="unchanged", file=args.file, base_url=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
@@ -2905,6 +2915,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         meta = data.setdefault(META, {})
         if ping_on and add_ping_header(env, meta):
             changed.append(HEADERS_KEY)
+        record_ping_choice(meta, ping_on)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2927,6 +2938,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         meta = data.setdefault(META, {})
         if ping_on:
             add_ping_header(env, meta)
+        record_ping_choice(meta, ping_on)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2993,6 +3005,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     meta = data.setdefault(META, {})
     if ping_on:
         add_ping_header(env, meta)
+    record_ping_choice(meta, ping_on)
     meta["installed_base_url"] = args.url
     if getattr(args, "upstream", ""):
         meta["installed_upstream"] = args.upstream
@@ -3044,6 +3057,73 @@ def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
             print(f"context-guru: status line updated to this plugin version ({real})")
         except Exception:
             continue
+    return 0
+
+
+def ping_header_state(data: dict) -> str:
+    """Where one settings file stands on the ping header: "not-ours" (no routing record of ours),
+    "opted-out", "present" or "missing". Only "missing" is healed."""
+    env = data.get("env")
+    meta = data.get(META)
+    if not isinstance(env, dict) or not isinstance(meta, dict):
+        return "not-ours"
+    url = meta.get("installed_base_url")
+    if not url or env.get(KEY) != url:
+        return "not-ours"
+    if meta.get(PING_OPT_OUT_META) is True:
+        return "opted-out"
+    if any(_ping_line(ln) for ln in str(env.get(HEADERS_KEY, "")).split("\n")):
+        return "present"
+    return "missing"
+
+
+def cmd_ensure_ping_header(args: argparse.Namespace) -> int:
+    """SessionStart step: add the ping header to the settings file that holds OUR routing when an install
+    from before the header existed left it out (#685). Without it the proxy never holds a request for a
+    manual ping, and a restart cannot change that.
+
+    Heals only a file with our routing record (`installed_base_url` equal to the routed URL). Skips an
+    install made with --no-ping-header and any file that is not ours. Adds our one line and records it, so
+    uninstall removes exactly that line. With --check it only reports. Never fails: exit code is 0.
+    """
+    base = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    files = [args.file] if args.file else [
+        user_scope_files()[0],
+        os.path.join(base, ".claude", "settings.json"),
+        os.path.join(base, ".claude", "settings.local.json")]
+    if not args.file:
+        try:
+            scopes = _read_install_scopes()
+            for key in (user_scope_key(), project_key(base)):
+                row = scopes.get(key)
+                if isinstance(row, dict) and isinstance(row.get("file"), str):
+                    files.append(row["file"])
+        except Exception:
+            pass
+    seen: set = set()
+    state, where = "not-ours", ""
+    for path in files:
+        real = os.path.realpath(path)
+        if real in seen or not os.path.isfile(real):
+            continue
+        seen.add(real)
+        try:
+            with open(real, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
+                continue
+            st = ping_header_state(data)
+            if st == "not-ours":
+                continue
+            if st == "missing" and not args.check:
+                if add_ping_header(data["env"], data[META]):
+                    save(real, data)
+                    st = "healed"
+            if state in ("not-ours", "present", "opted-out") or st in ("missing", "healed"):
+                state, where = st, real
+        except Exception:
+            continue
+    emit(result=state, file=where)
     return 0
 
 
@@ -3241,6 +3321,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         meta.pop("installed_upstream", None)
         meta.pop("installed_bin", None)
         meta.pop(PING_HEADER_META, None)
+        meta.pop(PING_OPT_OUT_META, None)
         meta.pop(STATUSLINE_META, None)
         meta.pop(STATUSLINE_PREV_META, None)
         if not meta:
@@ -4198,6 +4279,12 @@ def main() -> int:
              "should come back off")
     off.add_argument("--file", required=True)
 
+    ep = sub.add_parser("ensure-ping-header",
+        help="SessionStart: add the ping header to the settings file that holds our routing when an older "
+             "install left it out. Skips --no-ping-header installs and files that are not ours.")
+    ep.add_argument("--file", default="", help="check this file only, instead of the three scopes")
+    ep.add_argument("--check", action="store_true", help="report only; write nothing")
+
     en = sub.add_parser("enable-plugin",
         help="set enabledPlugins[<plugin>] = true in --file when it is absent, recorded so `remove` "
              "takes back only what this added; an explicit false is the user's and is left alone")
@@ -4340,7 +4427,7 @@ def main() -> int:
     if args.cmd == "preset" and args.op == "set" and not args.name:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
     rc = {"statusline-repoint": cmd_statusline_repoint, "add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
-          "enable-plugin": cmd_enable_plugin,
+          "enable-plugin": cmd_enable_plugin, "ensure-ping-header": cmd_ensure_ping_header,
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
           "project-key": cmd_project_key, "scopes": cmd_scopes,
           "strategy": cmd_strategy, "preset": cmd_preset, "port": cmd_port,

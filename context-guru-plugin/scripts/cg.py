@@ -30,6 +30,7 @@ import os
 import re
 import shlex
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -635,6 +636,19 @@ def cmd_session(api: Api, o: dict) -> list[str]:
 # ---------------------------------------------------------------------------------------------
 # /context-guru:doctor
 
+def _ping_header_state() -> str:
+    """present | missing | opted-out | not-ours | unknown, asked of settings.py (the one place that knows)."""
+    try:
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.py"),
+                            "ensure-ping-header", "--check"], capture_output=True, text=True, timeout=10)
+        for ln in r.stdout.splitlines():
+            if ln.startswith("result="):
+                return ln[7:]
+    except Exception:
+        pass
+    return "unknown"
+
+
 def cmd_doctor(api: Api, o: dict) -> list[str]:
     checks: list[tuple[str, str, str]] = []  # (ok|warn|bad, what, fix)
 
@@ -660,6 +674,10 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
     add("ok" if "statusline" in str(sl.get("command", "")) else "warn", "Context Guru status line is installed", "Run /context-guru:statusline")
     add("ok" if sl.get("refreshInterval") else "warn", "Status line refreshes on a timer (live cache countdown)",
         'Add "refreshInterval": 5 to statusLine in settings.json')
+    ping_state = _ping_header_state()
+    if ping_state in ("present", "missing"):
+        add("ok" if ping_state == "present" else "warn", "Ping header is set (the Ping button needs it)",
+            "Start a new session (it is added then), or run /context-guru:install")
     cache_mode = cfg.get("cache_mode")
     add("ok" if cache_mode else "warn", "Cache mode is set", "See /context-guru:cache-strategy-picker")
     bad = [c for c in checks if c[0] == "bad"]
