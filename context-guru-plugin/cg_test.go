@@ -671,3 +671,143 @@ func TestInsightsKeepAliveLossStaysNegative(t *testing.T) {
 		t.Errorf("Keep-alive pings = %.2f, want -30.00 (saved 10, spent 40)", got)
 	}
 }
+
+// A document of any age is served with `"stale": true` when the proxy cannot refresh it, never as an error (#686): the mod
+// and the status line keep showing the last figures. An error is only for "there never was a document".
+func TestCGCachestateServesAnOldDocumentAsStale(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"session-A","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000}`, now-60_000, now)
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	dead := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	ln.Close()
+	xdg := t.TempDir()
+	dir := filepath.Join(xdg, "context-guru")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "context-guru-statusline-"+dead+"-cs-session-A.json")
+	if err := os.WriteFile(file, []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(file, old, old); err != nil {
+		t.Fatal(err)
+	}
+	out, code := runCGCode(t, "http://127.0.0.1:"+dead, []string{"XDG_CACHE_HOME=" + xdg}, "cachestate", "--json")
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &doc); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if code != 0 || doc["error"] != nil || doc["stale"] != true || doc["session"] != "session-A" {
+		t.Errorf("want the 3 hour old document with stale:true and exit 0, got code %d %v", code, doc)
+	}
+	if age, _ := doc["age_s"].(float64); age < 3*3600-60 {
+		t.Errorf("age_s must say how old it is, got %v", doc["age_s"])
+	}
+}
+
+// `cg.py panedata` is the pane's data: the four mode sections as one JSON document, built from the proxy's own reads
+// through the shared on-disk cache. A section with no data is absent, so the pane omits it.
+func TestCGPanedata(t *testing.T) {
+	const now = 1_800_000_000_000
+	nowS := int64(now / 1000)
+	cache := fmt.Sprintf(`{"session":"session-A","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":412000,"priced":true,"rewrite_usd":1.2,`+
+		`"window":1000000,"window_exact":true,"threads":[{"id":"","main":true,"last_ts":%d,"end_ts":%d,"ttl_s":300,"prefix_tokens":412000,"rewrite_usd":1.2,"priced":true}]}`,
+		now-60_000, now, now-60_000, now-60_000)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(cache)) })                //nolint:errcheck
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(`{"total_saved_usd":4.2}`)) }) //nolint:errcheck
+	mux.HandleFunc("/api/series", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"buckets":[{"ts":%d,"saved_usd":3,"cache_misses":2}]}`, (nowS-3600)*1000/3_600_000*3_600_000)
+	})
+	mux.HandleFunc("/api/spend/explain", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"daily":[{"day":%d,"rewrite_usd":1.4}]}`, (nowS-3600)*1000)
+	})
+	mux.HandleFunc("/api/requests", func(w http.ResponseWriter, _ *http.Request) {
+		var rows []string
+		for i := 0; i < 5; i++ {
+			rows = append(rows, fmt.Sprintf(`{"id":%d,"ts":%d,"thread_id":"","messages":%d,"fresh_input":0,"cache_read":%d,"cache_write":%d}`, i, now-int64(i)*60_000, 40+i, 198_000, 2000))
+		}
+		fmt.Fprintf(w, `{"requests":[%s]}`, strings.Join(rows, ","))
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	base := "http://127.0.0.1:" + fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	out, code := runCGCode(t, base, []string{"XDG_CACHE_HOME=" + t.TempDir()}, "panedata")
+	var doc map[string]map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &doc); err != nil || code != 0 {
+		t.Fatalf("code %d, not JSON: %v\n%s", code, err, out)
+	}
+	for _, section := range []string{"spark", "strip", "heat", "fill"} {
+		if doc[section] == nil {
+			t.Errorf("panedata is missing the %s section: %s", section, out)
+		}
+	}
+	if doc["spark"]["today"] != 4.2 || len(doc["spark"]["days"].([]any)) != 14 {
+		t.Errorf("spark: want today 4.2 and 14 days, got %v", doc["spark"])
+	}
+	if k := doc["strip"]["kinds"].([]any); len(k) != 5 || k[0] != "hit" {
+		t.Errorf("strip: want 5 hits, got %v", doc["strip"])
+	}
+	if len(doc["heat"]["hours"].([]any)) != 24 {
+		t.Errorf("heat: want 24 hours, got %v", doc["heat"])
+	}
+	if f := doc["fill"]["frac"].(float64); f < 0.41 || f > 0.42 {
+		t.Errorf("fill: want 412k of 1M, got %v", doc["fill"])
+	}
+	// A proxy that answers nothing but the cache state: every section with no data is absent, not empty.
+	mux2 := http.NewServeMux()
+	mux2.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(cache)) }) //nolint:errcheck
+	ln2, _ := net.Listen("tcp", "127.0.0.1:0")
+	srv2 := &http.Server{Handler: mux2, ReadHeaderTimeout: 5 * time.Second}
+	go srv2.Serve(ln2) //nolint:errcheck
+	t.Cleanup(func() { srv2.Close() })
+	out, _ = runCGCode(t, "http://127.0.0.1:"+fmt.Sprint(ln2.Addr().(*net.TCPAddr).Port), []string{"XDG_CACHE_HOME=" + t.TempDir()}, "panedata")
+	var bare map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &bare); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	for _, gone := range []string{"spark", "strip", "heat"} {
+		if _, ok := bare[gone]; ok {
+			t.Errorf("%s has no data and must be absent, got %v", gone, bare)
+		}
+	}
+}
+
+// `--set-tips=off` silences the mod's weekly tip as it silences the status line's.
+func TestCGTipHonoursSetTipsOff(t *testing.T) {
+	py := requireTool(t, "python3")
+	state, cfg := t.TempDir(), t.TempDir()
+	env := append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "XDG_CONFIG_HOME="+cfg, "CG_STATUSLINE_NOW=1800000000")
+	os.WriteFile(filepath.Join(state, "last-run.json"), []byte(`{}`), 0o644)                 //nolint:errcheck
+	os.WriteFile(filepath.Join(state, "statusline-first-seen"), []byte("1790000000"), 0o644) //nolint:errcheck
+	tip := func() []any {
+		cmd := exec.Command(py, filepath.Join("scripts", "cg.py"), "tip")
+		cmd.Env = env
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v %s", err, b)
+		}
+		var doc struct{ Stale []any }
+		if err := json.Unmarshal(b, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Stale
+	}
+	if len(tip()) == 0 {
+		t.Fatal("control: both commands are stale, a tip is expected")
+	}
+	off := exec.Command(py, filepath.Join("scripts", "statusline.py"), "--set-tips=off")
+	off.Env = env
+	if b, err := off.CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, b)
+	}
+	if got := tip(); len(got) != 0 {
+		t.Errorf("tips are off: want no stale commands, got %v", got)
+	}
+}

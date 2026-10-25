@@ -83,25 +83,27 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 	}{
 		{"warm/minimal", cs(60, 300, 52000, "0.30"), small, "minimal", 200, "saved $0.31 of $2.10 │ cache ● █████░ 4:00"},
 		{"warm/balanced", cs(60, 300, 52000, "0.30"), small, "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
+			sess + "\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 		{"warm/ping", ping(cs(60, 300, 52000, "0.30")), small, "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 ↻ │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
+			sess + "\ncache ● █████░ 4:00 ↻ │ ctx ░░░░░░░░ 5%"},
 		{"warm/detailed", cs(60, 3600, 52000, "0.30"), small, "detailed", 200,
-			sess + " │ spent $0.41\ncache ● ██████ 59:00 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
+			sess + " │ spent $0.41\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
 		{"expiring/cheap", cs(258, 300, 52000, "0.30"), small, "balanced", 200,
-			sess + "\ncache ◐ █░░░░░ 0:42 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
+			sess + "\ncache ◐ █░░░░░ 0:42 │ ctx ░░░░░░░░ 5%"},
 		{"expiring/costly", cs(258, 300, 412000, "1.20"), payload, "balanced", 200,
-			sess + "\ncache ◐ █░░░░░ 0:42 │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ◐ █░░░░░ 0:42 │ ctx ███░░░░░ 41%"},
 		{"expiring/ping-covers-it", ping(cs(258, 300, 412000, "1.20")), payload, "balanced", 200,
-			sess + "\ncache ◐ █░░░░░ 0:42 ↻ │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ◐ █░░░░░ 0:42 ↻ │ ctx ███░░░░░ 41%"},
 		{"warm/rewrite-near", cs(60, 300, 900000, "2.70"), full, "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 │ next $2.70 if cold │ ctx ███████░ 90% ⚠ rewrite near"},
+			sess + "\ncache ● █████░ 4:00 │ ctx ███████░ 90% ⚠ rewrite near"},
 		{"cold/balanced", cs(400, 300, 412000, "1.20"), payload, "balanced", 200,
-			sess + "\nctx ███░░░░░ 41%"}, // cold: no cache segment at all
+			sess + "\ncache ○ cold 1:40 │ ctx ███░░░░░ 41%"}, // cold is drawn, dim, counting up (#686)
 		{"cold/minimal", cs(400, 300, 412000, "1.20"), payload, "minimal", 200,
-			"saved $0.31 of $2.10"},
+			"saved $0.31 of $2.10 │ cache ○ cold"},
+		{"long-warm-hour-clock", cs(60, 7200, 52000, "0.30"), small, "balanced", 200,
+			sess + "\ncache ● ██████ 1:59:00 │ ctx ░░░░░░░░ 5%"},
 		{"cold/narrow", cs(400, 300, 412000, "1.20"), payload, "balanced", 60,
-			sess + "\nctx ███░░░░░ 41%"},
+			sess + "\ncache ○ cold 1:40 │ ctx ███░░░░░ 41%"},
 		{"warm/narrow", cs(60, 300, 52000, "0.30"), small, "balanced", 40,
 			"saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 		{"first-run", `{"session":"s","none":true,"now_ms":1}`, `{"session_id":"sess-gold"}`, "balanced", 200,
@@ -153,7 +155,7 @@ func TestStatuslineGoldenSubscription(t *testing.T) {
 		{"no-reset-time", pay(`,"rate_limits":{"five_hour":{"used_percentage":34}}`), "balanced", 200,
 			"5h 34%\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
 		{"null-limits-is-api-key", pay(`,"rate_limits":null`), "detailed", 200,
-			"saved $0.31 │ spent $0.41\ncache ● ██████ 59:00 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
+			"saved $0.31 │ spent $0.41\ncache ● ██████ 59:00 │ ctx ░░░░░░░░ 5%"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(cgStub(t, cache))
@@ -213,30 +215,30 @@ func TestStatuslineGoldenLive(t *testing.T) {
 		want                       string
 	}{
 		{"critical", body(m, 290, th("", 290, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
-			sess + "\ncache ◐ ░░░░░░ 0:10! │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ◐ ░░░░░░ 0:10! │ ctx ███░░░░░ 41%"},
 		{"cold-counts-up", body(m, 375, th("", 375, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
-			sess + "\nctx ███░░░░░ 41%"},
+			sess + "\ncache ○ cold 1:15 │ ctx ███░░░░░ 41%"},
 		{"cold-long", body(m, 3900, th("", 3900, 300, 412000, "1.20")), ctxPay(m), "balanced", 200,
-			sess + "\nctx ███░░░░░ 41%"},
+			sess + "\ncache ○ cold 1:00:00 │ ctx ███░░░░░ 41%"}, // h:mm:ss from one hour
 		// The latest request of the session was a sub-agent's; the main cache must still count down on its own.
 		{"main-not-reset-by-subagent", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("", 200, 300, 412000, "1.20")),
-			ctxPay(m), "balanced", 200, sess + "\ncache ● ██░░░░ 1:40 │ next $1.20 if cold │ agent ● 4:55 │ ctx ███░░░░░ 41%"},
+			ctxPay(m), "balanced", 200, sess + "\ncache ● ██░░░░ 1:40 │ agent ● 4:55 │ ctx ███░░░░░ 41%"},
 		{"two-agents", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("a:2", 250, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")),
-			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ next $1.20 if cold │ agents 2 · soonest ◐ 0:50 │ ctx ███░░░░░ 41%"},
+			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ agents 2 · soonest ◐ 0:50 │ ctx ███░░░░░ 41%"},
 		{"many-agents", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("a:2", 250, 300, 9000, "0.03"),
 			th("a:3", 100, 300, 9000, "0.03"), th("a:4", 7, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")),
-			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ next $1.20 if cold │ agents 4 · soonest ◐ 0:50 │ ctx ███░░░░░ 41%"},
+			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ agents 4 · soonest ◐ 0:50 │ ctx ███░░░░░ 41%"},
 		{"cold-agents-are-counted", body(m, 100, th("a:1", 900, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")),
-			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ next $1.20 if cold │ agents 1 cold │ ctx ███░░░░░ 41%"},
+			ctxPay(m), "balanced", 200, sess + "\ncache ● ████░░ 3:20 │ agents 1 cold │ ctx ███░░░░░ 41%"},
 		{"agents-narrow", body(m, 5, th("a:1", 5, 300, 9000, "0.03"), th("a:2", 250, 300, 9000, "0.03"),
 			th("a:3", 100, 300, 9000, "0.03"), th("", 100, 300, 412000, "1.20")), ctxPay(m), "balanced", 36,
 			"saved $0.31 of $2.10 session\ncache ● 3:20 │ agents 3 │ ctx 41%"},
 		{"model-switch", body(m, 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-opus-5-5"), "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41%"},
 		{"same-model-other-spelling", body("aws/claude-sonnet-5-5", 60, th("", 60, 300, 412000, "1.20")), ctxPay("claude-sonnet-5-5[1m]"), "balanced", 200,
-			sess + "\ncache ● █████░ 4:00 │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
+			sess + "\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41%"},
 		{"spend-detailed", body(m, 60, th("", 60, 300, 412000, "1.20")), ctxPay(m), "detailed", 200,
-			sess + " │ spent $4.10 · $4.10/h · up 1h00m\ncache ● █████░ 4:00 │ next $1.20 if cold │ ctx ███░░░░░ 41%"},
+			sess + " │ spent $4.10 · $4.10/h · up 1h00m\ncache ● █████░ 4:00 │ ctx ███░░░░░ 41%"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(cgStub(t, c.cache))
@@ -289,8 +291,8 @@ func TestStatuslineNextRequestCost(t *testing.T) {
 	for _, c := range []struct{ name, cache, layout, want string }{
 		{"both", cs(60, `"priced":true,"rewrite_usd":0.30,"next_warm_usd":0.026,"next_cold_usd":0.30,`), "balanced",
 			"cache ● █████░ 4:00 │ next $0.03 warm · $0.30 cold │ ctx ░░░░░░░░ 5%"},
-		{"cold", cs(400, `"priced":true,"rewrite_usd":0.30,"next_warm_usd":0.026,"next_cold_usd":0.30,`), "balanced",
-			"ctx ░░░░░░░░ 5%"},
+		{"cold-shows-the-one-price-left", cs(400, `"priced":true,"rewrite_usd":0.30,"next_warm_usd":0.026,"next_cold_usd":0.30,`), "balanced",
+			"cache ○ cold 1:40 │ next $0.30 │ ctx ░░░░░░░░ 5%"},
 		{"older-server-falls-back-to-rewrite_usd", cs(60, `"priced":true,"rewrite_usd":0.30,`), "balanced",
 			"cache ● █████░ 4:00 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"},
 		{"unpriced", cs(60, `"priced":false,`), "balanced", "cache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
@@ -299,7 +301,11 @@ func TestStatuslineNextRequestCost(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(cgStub(t, c.cache))
-			out, _, _ := runStatusline(t, env, pay, "--layout="+c.layout)
+			args := []string{"--layout=" + c.layout}
+			if c.layout != "minimal" {
+				args = append(args, "--show=next") // the mod owns the price: opt-in here, and minimal stays short without it
+			}
+			out, _, _ := runStatusline(t, env, pay, args...)
 			lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 			if got := lines[len(lines)-1]; got != c.want {
 				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
@@ -362,8 +368,11 @@ func TestStatuslineV2OneTimerNoColdPingedCyan(t *testing.T) {
 		out, _, _ := runStatusline(t, env, pay, extra...)
 		return out
 	}
-	if out := run(cache(400, "", th("", 400, 52000, ""))); strings.Contains(out, "cache") || strings.Contains(out, "cold") || strings.Contains(out, "next") {
-		t.Errorf("a cold main cache must leave no cache or next segment, got %q", out)
+	if out := run(cache(400, "", th("", 400, 52000, ""))); !strings.Contains(out, "cache ○ cold 1:40") || strings.Contains(out, "next") {
+		t.Errorf("a cold main cache is drawn dim and counts up (#686), got %q", out)
+	}
+	if out := run(cache(400, "", th("", 400, 52000, "")), "--layout=minimal"); !strings.Contains(out, "cache ○ cold") || strings.Contains(out, "1:40") {
+		t.Errorf("minimal says `cache ○ cold` alone, got %q", out)
 	}
 	out := run(cache(60, "", th("a:1", 5, 9000, ""), th("a:2", 250, 9000, ""), th("", 60, 52000, "")))
 	if strings.Contains(out, "agent") || strings.Count(out, "4:") != 1 {
@@ -596,18 +605,18 @@ func TestStatuslineGoldenAgentsAndKeepAlive(t *testing.T) {
 	}{
 		{"named-agents", cache(th("", 60, ""), th("a:ad9ba182bf3e760e6", 10, ""), th("a:reviewer@session-ab47f1d6", 250, held(700)),
 			th("a:finished", 900, ""), th("p:0123456789ab", 10, "")), 200, // p: is a side request, not an agent
-			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 4:00 │ next $0.03 if cold │ agents Explore active ● 4:50 · reviewer ● 11:40 ↻ · 1 cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 4:00 │ agents Explore active ● 4:50 · reviewer ● 11:40 ↻ · 1 cold │ ctx ░░░░░░░░ 5%"},
 		// Most recently used first, at most five, then `+N more`; `active` within the last 10 s.
 		{"many-agents-capped", cache(th("", 60, ""), th("a:w1@t", 200, ""), th("a:w2@t", 5, ""), th("a:w3@t", 100, ""),
 			th("a:w4@t", 30, ""), th("a:w5@t", 250, ""), th("a:w6@t", 60, ""), th("a:w7@t", 150, "")), 300,
-			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 4:00 │ next $0.03 if cold │ agents w2 active ● 4:55 · w4 ● 4:30 · w6 ● 4:00 · w3 ● 3:20 · w7 ● 2:30 · +2 more │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 4:00 │ agents w2 active ● 4:55 · w4 ● 4:30 · w6 ● 4:00 · w3 ● 3:20 · w7 ● 2:30 · +2 more │ ctx ░░░░░░░░ 5%"},
 		{"main-held-warm", cache(th("", 60, held(820))), 200,
-			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 13:40 ↻ │ next $0.03 if cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ● █████░ 13:40 ↻ │ ctx ░░░░░░░░ 5%"},
 		// A plan cannot revive an expired entry (the ping failed or never came): cold is cold.
 		{"plan-cannot-revive-a-cold-cache", cache(th("", 320, held(500))), 200,
-			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\nctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
-		{"narrow-drops-ka-first", cache(th("", 60, held(820)), th("a:ad9ba182bf3e760e6", 10, "")), 60,
-			"saved $0.31 of $2.64\ncache ● █████░ 13:40 ↻ │ agents 1 │ ctx ░░░░░░░░ 5%"}, // narrow: the main thread's figure only,
+			"saved $0.31 of $2.64 session · saved $0.12 of $0.90 subagents\ncache ○ cold 0:20 │ ctx ░░░░░░░░ 5%"}, // cold is drawn, not dropped (#686)
+		{"narrow-drops-the-subagents-phrase-first", cache(th("", 60, held(820)), th("a:ad9ba182bf3e760e6", 10, "")), 60,
+			"saved $0.31 of $2.64 session\ncache ● █████░ 13:40 ↻ │ agents 1 │ ctx ░░░░░░░░ 5%"}, // narrow: the subagents phrase goes before the label,
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := routedEnv(stub(c.cache))
@@ -675,27 +684,27 @@ func TestStatuslineGoldenMoney(t *testing.T) {
 	}{
 		{"main-only", cache(`"money":{"main":{"saved_usd":0.31,"baseline_usd":2.64,"threads":1},"others":{"saved_usd":0,"baseline_usd":0,"threads":0}},`,
 			th("", 60, pair("0.31", "2.64"))), 200,
-			"saved $0.31 of $2.64 session\ncache ● █████░ 4:00 │ next $0.03 if cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 		// Two named agents with their own figures; the p: side thread is in the total only.
 		{"agents-and-a-side-thread", cache(both, agents...), 220,
-			"saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents\n" +
-				"cache ● █████░ 4:00 │ next $0.03 if cold │ agents reviewer active ● 4:55 saved $1.20 of $6.00 · Explore ◐ 0:50 saved $0.30 of $2.10 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $50.32 of $250 session · saved $60.03 of $300 subagents\n" +
+				"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 saved $1.20 of $6.00 · Explore ◐ 0:50 saved $0.30 of $2.10 │ ctx ░░░░░░░░ 5%"},
 		// Narrow: the per-agent money goes first, then the subagents total, before the names.
 		{"narrow", cache(both, agents...), 90,
-			"saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents\n" +
+			"saved $50.32 of $250 session · saved $60.03 of $300 subagents\n" +
 				"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 · Explore ◐ 0:50 │ ctx ░░░░░░░░ 5%"},
 		// An agent with no money in its row shows no figure; the other keeps its own.
 		{"agent-without-money", cache(both, th("", 60, pair("50.32", "250")), th("a:reviewer@t", 5, pair("1.20", "6.00")),
 			th("a:ad9ba182bf3e760e6", 250, "")), 220,
-			"saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents\n" +
-				"cache ● █████░ 4:00 │ next $0.03 if cold │ agents reviewer active ● 4:55 saved $1.20 of $6.00 · Explore ◐ 0:50 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $50.32 of $250 session · saved $60.03 of $300 subagents\n" +
+				"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 saved $1.20 of $6.00 · Explore ◐ 0:50 │ ctx ░░░░░░░░ 5%"},
 		// A missing field is unknown, not $0.00: that figure is left out.
 		{"missing-fields", cache(`"money":{"main":{"saved_usd":0.31,"threads":1},"others":{"baseline_usd":0.9,"threads":2}},`,
 			th("", 60, ""), th("a:reviewer@t", 5, `,"saved_usd":1.2`)), 200,
-			"cache ● █████░ 4:00 │ next $0.03 if cold │ agents reviewer active ● 4:55 │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"cache ● █████░ 4:00 │ agents reviewer active ● 4:55 │ ctx ░░░░░░░░ 5%"},
 		{"missing-subagents-figure", cache(`"money":{"main":{"saved_usd":0.31,"baseline_usd":2.64,"threads":1},"others":{"baseline_usd":0.9,"threads":2}},`,
 			th("", 60, "")), 200,
-			"saved $0.31 of $2.64 session\ncache ● █████░ 4:00 │ next $0.03 if cold │ ctx ░░░░░░░░ 5% │ ka 3 pings $0.04"},
+			"saved $0.31 of $2.64 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -936,78 +945,46 @@ func modesRender(t *testing.T, tz string, nowS int64, layout string, width int) 
 	return got
 }
 
-// TestStatuslineGoldenModes pins the five terminal-view layouts at three widths (UTC, 08:00).
-func TestStatuslineGoldenModes(t *testing.T) {
-	for _, c := range []struct {
-		layout string
-		width  int
-		want   string
-	}{
-		{"spark", 60,
-			"saved $4.20 today · last 14 days ▁▂▂▃▄▄▅▅▆▇▇██▃\ncache ● ████░░ 3:20"}, {"spark", 80,
-			"saved $4.20 today · last 14 days ▁▂▂▃▄▄▅▅▆▇▇██▃\ncache ● ████░░ 3:20"}, {"spark", 120,
-			"saved $4.20 today · last 14 days ▁▂▂▃▄▄▅▅▆▇▇██▃\ncache ● ████░░ 3:20"},
-		{"strip", 60,
-			"last 20 ■■■■■■■■✖■■■■■▨▨■■■■ ✖ miss $1.40 today\ncache ● ████░░ 3:20"}, {"strip", 80,
-			"last 20 requests ■■■■■■■■✖■■■■■▨▨■■■■  ✖ miss  $1.40 lost today\ncache ● ████░░ 3:20"}, {"strip", 120,
-			"last 20 requests ■■■■■■■■✖■■■■■▨▨■■■■  ✖ miss ▨ partial ■ hit  $1.40 lost today\ncache ● ████░░ 3:20"},
-		{"heat", 60,
-			"misses/hour 0h  ░▒  █░ ···············24h  $1.40 lost today\ncache ● ████░░ 3:20"}, {"heat", 80,
-			"misses/hour 0h  ░▒  █░ ···············24h  $1.40 lost today\ncache ● ████░░ 3:20"}, {"heat", 120,
-			"misses/hour 0h  ░▒  █░ ···············24h  $1.40 lost today\ncache ● ████░░ 3:20"},
-		{"fill", 60,
-			"context ▒▒▒▒▒█████░░░░░░░░░░░░░░ 41% · full in 58m\ncache ● ████░░ 3:20"}, {"fill", 80,
-			"context ▒▒▒▒▒▒▒▒████████░░░░░░░░░░░░░░░░░░░░░░░░ 41% · full in 58m\ncache ● ████░░ 3:20"}, {"fill", 120,
-			"context ▒▒▒▒▒▒▒▒████████░░░░░░░░░░░░░░░░░░░░░░░░ 41% · full in 58m · a miss now costs $1.20\ncache ● ████░░ 3:20"},
-		{"watch", 60,
-			"saved $0.31 │ cache ● ████░░ 3:20\nagent caches (2) ████ 4:30  █░░░ 0:50"}, {"watch", 80,
-			"saved $0.31 │ cache ● ████░░ 3:20\nagent caches (2) ████ 4:30  █░░░ 0:50"}, {"watch", 120,
-			"saved $0.31 │ cache ● ████░░ 3:20\nagent caches (2) ████ 4:30  █░░░ 0:50"},
-	} {
-		t.Run(fmt.Sprintf("%s/%d", c.layout, c.width), func(t *testing.T) {
-			if got := modesRender(t, "UTC", 1_800_000_000, c.layout, c.width); got != c.want {
-				t.Errorf("got\n%s\nwant\n%s", got, c.want)
+// The five terminal-view layouts (spark, strip, heat, fill, watch) moved into the mod's pane. A layout named
+// by a flag or remembered by --set-layout falls back to `balanced` silently: never an error, never a blank line.
+func TestStatuslineRetiredLayoutsFallBackToBalanced(t *testing.T) {
+	want := "saved $0.31\ncache ● ████░░ 3:20 │ ctx ███░░░░░ 41%"
+	for _, layout := range []string{"spark", "strip", "heat", "fill", "watch"} {
+		t.Run(layout, func(t *testing.T) {
+			if got := modesRender(t, "UTC", 1_800_000_000, layout, 80); got != want {
+				t.Errorf("--layout=%s: got\n%s\nwant the balanced line\n%s", layout, got, want)
 			}
 		})
 	}
-}
-
-// The day and hour views must follow the USER's local calendar. East of UTC the local date runs ahead
-// of the proxy's UTC buckets, west of it behind; Kolkata is on a half hour. The same data (one distinct
-// amount per local day, misses at local hours 2, 3, 6, 7) must give the same sparkline in every zone,
-// and the heat strip must end at the local hour reached.
-func TestStatuslineModesFollowLocalTime(t *testing.T) {
-	const nowS = 1_800_020_000 // 13:33 UTC: 19:03 in Kolkata, 14:33 in Berlin, 05:33 in Los Angeles
-	spark := "saved $4.20 today · last 14 days ▁▂▂▃▄▄▅▅▆▇▇██▃\ncache ● ████░░ 3:20"
-	for _, c := range []struct{ tz, heat string }{
-		{"Asia/Kolkata", "misses/hour 0h  ░▒  █░            ····24h  $1.40 lost today\ncache ● ████░░ 3:20"},
-		{"Europe/Berlin", "misses/hour 0h  ░▒  █░       ·········24h  $1.40 lost today\ncache ● ████░░ 3:20"},
-		{"America/Los_Angeles", "misses/hour 0h  ▒█  ··················24h  $1.40 lost today\ncache ● ████░░ 3:20"},
-	} {
-		t.Run(c.tz, func(t *testing.T) {
-			if got := modesRender(t, c.tz, nowS, "spark", 80); got != spark {
-				t.Errorf("spark: got\n%s\nwant\n%s", got, spark)
-			}
-			if got := modesRender(t, c.tz, nowS, "heat", 80); got != c.heat {
-				t.Errorf("heat: got\n%s\nwant\n%s", got, c.heat)
-			}
-		})
-	}
-}
-
-// The modes draw with tvlib, so CG_ASCII swaps their glyphs for plain characters.
-func TestStatuslineModesAscii(t *testing.T) {
-	port := cgStub(t, `{"none":true}`, func(mux *http.ServeMux) {
-		mux.HandleFunc("/api/requests", func(w http.ResponseWriter, _ *http.Request) {
-			w.Write([]byte(`{"requests":[{"ts":2,"fresh_input":0,"cache_read":0,"cache_write":900},{"ts":1,"fresh_input":0,"cache_read":900,"cache_write":0}]}`)) //nolint:errcheck
-		})
+	t.Run("remembered", func(t *testing.T) {
+		cfg := t.TempDir()
+		path := filepath.Join(cfg, "context-guru", "statusline-layout")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("strip"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		env := routedEnv(cgStub(t, `{"none":true}`))
+		env["XDG_CONFIG_HOME"] = cfg
+		out, code, _ := runStatusline(t, env, `{"session_id":"sess-gold"}`)
+		if code != 0 || strings.Contains(out, "usage") || strings.TrimSpace(out) == "" {
+			t.Errorf("a remembered retired layout must render the balanced line, got code %d %q", code, out)
+		}
+		// It is ignored, so the installed command's flag still wins.
+		if out, _, _ := runStatusline(t, env, `{"session_id":"sess-gold"}`, "--layout=minimal"); !strings.Contains(out, "no cache yet") || strings.Contains(out, "saved") {
+			t.Errorf("a retired remembered layout must not override --layout=minimal, got %q", out)
+		}
 	})
-	env := routedEnv(port)
-	env["NO_COLOR"], env["CG_ASCII"] = "1", "1"
-	out, _, _ := runStatusline(t, env, `{"session_id":"sess-gold"}`, "--layout=strip")
-	if !strings.Contains(out, "last 2 requests oX") {
-		t.Errorf("want ascii hit/miss glyphs, got %q", out)
-	}
+	t.Run("set-layout-says-where-it-went", func(t *testing.T) {
+		py := requireTool(t, "python3")
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"), "--set-layout=heat")
+		cmd.Env = append(sandboxEnv(t), "XDG_CONFIG_HOME="+t.TempDir())
+		b, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(b), "moved into the Context Guru pane") {
+			t.Errorf("--set-layout=heat: %v %q", err, b)
+		}
+	})
 }
 
 // statuslineAllowance is what one render may cost beyond the runner's own floor: the script's
@@ -1202,7 +1179,7 @@ func TestStatuslineGoldenWeeklyTip(t *testing.T) {
 	port := cgStub(t, cache)
 	stdin := `{"session_id":"sess-tip","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":52000,"total_output_tokens":900,"context_window_size":200000}}`
-	const lines = "saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ next $0.30 if cold │ ctx ░░░░░░░░ 5%"
+	const lines = "saved $0.31 of $2.10 session\ncache ● █████░ 4:00 │ ctx ░░░░░░░░ 5%"
 	tipBoth := "Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-skills for over a week — worth a shot."
 	py := requireTool(t, "python3")
 	// The wall limit for every case below: the runner's own floor for this render shape — the
@@ -1293,7 +1270,7 @@ func TestStatuslineGoldenWeeklyTip(t *testing.T) {
 					t.Fatalf("--set-tips=off: %v %s", err, b)
 				}
 			}
-			cmd := exec.Command(py, append([]string{c.script, "--layout=balanced"}, c.args...)...)
+			cmd := exec.Command(py, append([]string{c.script, "--layout=balanced", "--show=tip"}, c.args...)...)
 			cmd.Env, cmd.Stdin = env, strings.NewReader(stdin)
 			start := time.Now()
 			b, err := cmd.CombinedOutput()
@@ -1421,7 +1398,7 @@ func TestStatuslineMoneyShowsWhenCachestateIsSlowerThanTheRender(t *testing.T) {
 	// 0.41 s; renders that find the refresher's cache are faster still.
 	floor := statuslineFloor(t, routedEnv(cgStub(t, cache)), stdin, "--layout=balanced")
 	limit := floor + statuslineAllowance
-	want := "saved $50.32 of $250.00 session · saved $60.03 of $300.00 subagents"
+	want := "saved $50.32 of $250 session · saved $60.03 of $300 subagents"
 	deadline := time.Now().Add(8 * time.Second)
 	var out string
 	for time.Now().Before(deadline) {
@@ -1523,7 +1500,7 @@ func TestStatuslineSubscriptionShowsNoMoney(t *testing.T) {
 			`{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":200000}` + limits + `}`
 	}
 	sub := pay(`,"rate_limits":{"five_hour":{"used_percentage":34,"resets_at":1800018123}}`)
-	for _, layout := range []string{"minimal", "balanced", "detailed", "spark", "strip", "heat", "fill", "watch"} {
+	for _, layout := range []string{"minimal", "balanced", "detailed", "spark", "watch"} {
 		t.Run(layout, func(t *testing.T) {
 			env := routedEnv(cgStubStats(t, cache, stats))
 			env["CG_STATUSLINE_COLUMNS"], env["CG_STATUSLINE_NOW"] = "200", "1800000000"
@@ -1534,15 +1511,205 @@ func TestStatuslineSubscriptionShowsNoMoney(t *testing.T) {
 			if strings.Contains(out, "$") {
 				t.Errorf("a subscription must show no dollars in %s, got %q", layout, out)
 			}
-			if layout == "balanced" && !strings.Contains(out, "ka 3 pings") {
-				t.Errorf("the keep-alive count stays on a subscription, got %q", out)
+			if layout == "detailed" && !strings.Contains(out, "keep-alive 3 pings") {
+				t.Errorf("the keep-alive count stays on a subscription (detailed), got %q", out)
+			}
+			if strings.Contains(out, "ka ") {
+				t.Errorf("no `ka` abbreviation anywhere, got %q", out)
 			}
 		})
 	}
 	env := routedEnv(cgStubStats(t, cache, stats))
 	env["CG_STATUSLINE_COLUMNS"] = "200"
-	if out, _, _ := runStatusline(t, env, pay(""), "--layout=balanced"); !strings.Contains(out, "saved $0.31 of $2.10") ||
-		!strings.Contains(out, "next $0.30 if cold") || !strings.Contains(out, "ka 3 pings $0.04") {
+	if out, _, _ := runStatusline(t, env, pay(""), "--layout=detailed", "--show=next"); !strings.Contains(out, "saved $0.31 of $2.10") ||
+		!strings.Contains(out, "next $0.30 if cold") || !strings.Contains(out, "keep-alive 3 pings · $0.04") {
 		t.Errorf("an API key keeps every money element, got %q", out)
+	}
+	if out, _, _ := runStatusline(t, env, pay(""), "--layout=balanced"); strings.Contains(out, "next") || strings.Contains(out, "keep-alive") || strings.Contains(out, "ka ") {
+		t.Errorf("balanced shows no next price and no keep-alive count (the mod owns the price), got %q", out)
+	}
+}
+
+// #686 / internal #44, the second path: money and the context bar never vanish because a document is old. Past
+// the max age the status line shows the last figures with `⏳`; the clock is arithmetic on the document's own timestamps
+// at any age. `cg: stats loading…` shows only when there was never any document.
+func TestStatuslineStaleCachestateDocumentStillDrawsMoneyContextAndClock(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"s","model":"m","money":{"main":{"saved_usd":0.31,"baseline_usd":2.10,"threads":1},"others":{"saved_usd":0,"baseline_usd":0,"threads":0}},`+
+		`"last_ts":%d,"end_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":412000,"priced":true,"rewrite_usd":1.20,"window":1000000,"window_exact":true}`,
+		now-60_000, now-60_000, now)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(`{"total_saved_usd":0.31}`)) }) //nolint:errcheck
+	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, r *http.Request) {
+		select { // never answers inside the render budget
+		case <-time.After(5 * time.Second):
+		case <-r.Context().Done():
+		}
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	cacheHome := t.TempDir()
+	dir := filepath.Join(cacheHome, "context-guru")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "context-guru-statusline-"+port+"-cs-sess-old.json")
+	if err := os.WriteFile(file, []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-40 * time.Minute) // far past the 10 minute ceiling that used to blank the line
+	if err := os.Chtimes(file, old, old); err != nil {
+		t.Fatal(err)
+	}
+	env := routedEnv(port)
+	env["XDG_CACHE_HOME"] = cacheHome
+	stdin := `{"session_id":"sess-old","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":200000}}`
+	out, _, _ := runStatusline(t, env, stdin, "--layout=balanced")
+	for _, want := range []string{"saved $0.31 of $2.10 session", "cache ○ cold 36:", "ctx ███░░░░░ 41%", "⏳"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("an old document must still show %q, got %q", want, out)
+		}
+	}
+}
+
+// One money format, golden-tested on both sides (the mod's usd() in hooks/model.ts is held to the same table by
+// register.test.tsx): two decimals under $100, none from $100, `<$0.01` under a cent, never `$0.00` for a real cost.
+func TestMoneyFormatTable(t *testing.T) {
+	py := requireTool(t, "python3")
+	script := `
+import importlib.util, sys
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+sl = load("statusline", sys.argv[1]); cg = load("cg", sys.argv[2])
+for x in (0, 0.004, 0.006, 0.01, 0.06, 0.78, 1, 12.346, 99.99, 100, 123.4, 1234.2, -1.5, -0.004, -123.4):
+    print("%s|%s|%s" % (x, sl._money(x), cg.usd(x)))
+`
+	cmd := exec.Command(py, "-I", "-c", script, filepath.Join(scriptsDir(t), "statusline.py"), filepath.Join(scriptsDir(t), "cg.py"))
+	cmd.Env = append(sandboxEnv(t), "NO_COLOR=1")
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, b)
+	}
+	want := map[string]string{"0": "$0.00", "0.004": "<$0.01", "0.006": "<$0.01", "0.01": "$0.01", "0.06": "$0.06", "0.78": "$0.78", "1": "$1.00",
+		"12.346": "$12.35", "99.99": "$99.99", "100": "$100", "123.4": "$123", "1234.2": "$1234", "-1.5": "-$1.50", "-0.004": "$0.00", "-123.4": "-$123"}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		f := strings.Split(line, "|")
+		if len(f) != 3 {
+			t.Fatalf("bad line %q", line)
+		}
+		w := want[f[0]]
+		if f[1] != w || f[2] != w {
+			t.Errorf("usd(%s): statusline %q, cg %q, want %q", f[0], f[1], f[2], w)
+		}
+	}
+}
+
+// `cg.py tip` is the mod's read of the status line's weekly-tip rule (last-run.json + first-seen, no network).
+func TestCGTipUsesTheStatusLineRule(t *testing.T) {
+	py := requireTool(t, "python3")
+	state := t.TempDir()
+	const now = 1_800_000_000
+	const day = 86400
+	run := func(lastRun string, firstSeenDaysAgo int) map[string]any {
+		os.WriteFile(filepath.Join(state, "last-run.json"), []byte(lastRun), 0o644)                                      //nolint:errcheck
+		os.WriteFile(filepath.Join(state, "statusline-first-seen"), []byte(fmt.Sprint(now-firstSeenDaysAgo*day)), 0o644) //nolint:errcheck
+		cmd := exec.Command(py, filepath.Join("scripts", "cg.py"), "tip")
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, fmt.Sprintf("CG_STATUSLINE_NOW=%d", now))
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v\n%s", err, b)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(b, &doc); err != nil {
+			t.Fatalf("%v: %s", err, b)
+		}
+		return doc
+	}
+	if got := run(fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-2*day, now-1*day), 30)["stale"]; len(got.([]any)) != 0 {
+		t.Errorf("both ran this week: no tip, got %v", got)
+	}
+	got := run(fmt.Sprintf(`{"save-more":%d,"remove-mcp-and-skills":%d}`, now-8*day, now-1*day), 30)["stale"].([]any)
+	if len(got) != 1 || got[0] != "save-more" {
+		t.Errorf("save-more is 8 days old: want [save-more], got %v", got)
+	}
+	if got := run(`{}`, 2)["stale"]; len(got.([]any)) != 0 {
+		t.Errorf("a new install waits a week, got %v", got)
+	}
+	if got := run(`{}`, 9)["stale"]; len(got.([]any)) != 2 {
+		t.Errorf("an install 9 days old that never ran either: both are stale, got %v", got)
+	}
+}
+
+// Hung /api/stats with an existing cache-state copy: money, clock and context stay, with `⏳`. No loading notice.
+func TestStatuslineHungStatsWithACachestateCopyKeepsTheLine(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"s","model":"m","money":{"main":{"saved_usd":0.31,"baseline_usd":2.10,"threads":1},"others":{"saved_usd":0,"baseline_usd":0,"threads":0}},`+
+		`"last_ts":%d,"end_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":412000,"priced":true,"rewrite_usd":1.20,"window":1000000,"window_exact":true}`,
+		now-60_000, now-60_000, now)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hang := func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(5 * time.Second):
+		case <-r.Context().Done():
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", hang)
+	mux.HandleFunc("/api/cachestate", hang)
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	cacheHome := t.TempDir()
+	dir := filepath.Join(cacheHome, "context-guru")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-40 * time.Minute)
+	stdin := `{"session_id":"sess-old","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":412000,"total_output_tokens":900,"context_window_size":200000}}`
+	env := routedEnv(port)
+	env["XDG_CACHE_HOME"] = cacheHome
+	// No cache-state copy at all: the notice stays.
+	if out, _, _ := runStatusline(t, env, stdin, "--layout=balanced"); !strings.Contains(out, "loading") && !strings.Contains(out, "not responding") {
+		t.Errorf("without any copy a notice is expected, got %q", out)
+	}
+	for name, body := range map[string]string{"context-guru-statusline-" + port + "-cs-sess-old.json": cache, "context-guru-statusline-" + port + "-sess-old.json": `{"total_saved_usd":0.31}`} {
+		f := filepath.Join(dir, name)
+		if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(f, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, _, _ := runStatusline(t, env, stdin, "--layout=balanced")
+	for _, want := range []string{"saved $0.31 of $2.10 session", "cache ○ cold 36:00", "ctx ███░░░░░ 41%", "⏳"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("hung stats with an old copy must show %q, got %q", want, out)
+		}
+	}
+	if strings.Contains(out, "loading") || strings.Contains(out, "not responding") {
+		t.Errorf("no notice when a copy exists, got %q", out)
+	}
+}
+
+// Claude Code pads the line; with no override, the width comes from the terminal minus that margin, so a line that
+// would be cut by Claude Code sheds its own parts first (the live check showed `subag…` at 80 columns).
+func TestStatuslineWidthFromTerminalKeepsAMargin(t *testing.T) {
+	py := requireTool(t, "python3")
+	cmd := exec.Command(py, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import statusline as s; print(s._width(None), s._width('90'))", scriptsDir(t))
+	cmd.Env = append(sandboxEnv(t), "COLUMNS=140")
+	b, err := cmd.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(b)) != "136 90" {
+		t.Errorf("want 136 (COLUMNS 140 minus the margin) and 90 (an explicit width is exact), got %q %v", b, err)
 	}
 }

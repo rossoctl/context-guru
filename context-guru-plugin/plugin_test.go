@@ -2506,9 +2506,9 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 				t.Fatalf("exit %d", code)
 			}
 			got := strings.SplitN(strings.TrimSpace(out), " │ ", 2)[0]
-			if c.wantCold { // cold leaves the cache segment out entirely
-				if strings.Contains(got, "cache") || strings.Contains(got, "cold") {
-					t.Errorf("remaining=%.0fs: got %q, want no cache segment", c.remainingSec, got)
+			if c.wantCold { // cold is drawn, dim: `cache ○ cold` (a client-only answer does not know since when)
+				if got != "cache ○ cold" {
+					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache ○ cold")
 				}
 				return
 			}
@@ -2551,7 +2551,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m.time.time = lambda: 1_700_000_000.0
 seg = lambda e: m._cache_segment(m._cache_view({"prompt_cache": {"expires_at": e}}, None, 0))
-print(seg(1_700_000_000.0))        # remaining == 0: cold, no segment
+print(seg(1_700_000_000.0))        # remaining == 0: cold, drawn dim
 print(seg(1_700_000_000.5))        # remaining +0.5s
 print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 `
@@ -2562,7 +2562,7 @@ print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 		t.Fatalf("running the boundary check: %v\n%s", err, out)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	want := []string{"None", "cache ◐ ░░░░░░ 0:00!", "None"} // cold has no segment
+	want := []string{"cache ○ cold", "cache ◐ ░░░░░░ 0:00!", "cache ○ cold"} // cold is drawn (dim; NO_COLOR here)
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
 	}
@@ -2643,8 +2643,8 @@ func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
 	if strings.Contains(got, "proxy:") || strings.Contains(got, "upstream") {
 		t.Errorf("got %q — a detailed-layout/opt-in segment appeared in the balanced layout", got)
 	}
-	if !strings.Contains(got, "ka 4 pings") {
-		t.Errorf("got %q, want the session's keep-alive pings in the balanced layout", got)
+	if strings.Contains(got, "ka ") || strings.Contains(got, "keep-alive") {
+		t.Errorf("got %q, want no keep-alive count in the balanced layout (users did not understand it)", got)
 	}
 }
 
@@ -2688,8 +2688,8 @@ func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
 	}
 	// The keep-alive segment is this session's ping count and ping spend — see _keepalive_segment.
-	if !strings.Contains(out, "ka 4 pings $0.02") {
-		t.Errorf("got %q, want %q with --keepalive passed", out, "ka 4 pings $0.02")
+	if !strings.Contains(out, "keep-alive 4 pings · $0.02") {
+		t.Errorf("got %q, want %q with --keepalive passed", out, "keep-alive 4 pings · $0.02")
 	}
 	if !strings.Contains(out, "saved $0.03") {
 		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
