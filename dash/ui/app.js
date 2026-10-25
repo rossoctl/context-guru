@@ -1652,7 +1652,7 @@ function strategyName() {
   const t = account && account.tenant;
   if (!t || t.role === 'manager') return '';
   const c = (t.effective_config && t.effective_config.cache) || {};
-  return c.keepalive ? 'warm after ' + (c.keepalive_idle_seconds || 270) + ' s idle' : 'off';
+  return c.keepalive ? 'warm after ' + (c.keepalive_idle_seconds || 240) + ' s idle' : 'off';
 }
 async function loadOverviewIdentity() {
   try {
@@ -6479,7 +6479,7 @@ function loadSettings() {
       el('p', { class: 'hint' },
         'Sends tiny requests while you are idle so the provider keeps your prompt cached, '
         + 'which is cheaper than rebuilding it. After '
-        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 270)) + 's idle, up to '
+        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 240)) + 's idle, up to '
         + (((cfg.cache && cfg.cache.keepalive_max_pings) || 2)) + ' pings. Billed to your own key.'),
       whyBlock('What it costs and what it saves',
         'A cache read costs 0.1x base input; re-creating a lapsed prefix costs 1.25x, so one '
@@ -6490,7 +6490,7 @@ function loadSettings() {
         + 'cost, and the Overview ledger shows pings, ping cost, misses avoided and the net. '
         + 'It also RETAINS, in memory only, your provider key and that session\u2019s last '
         + 'request \u2014 which includes its conversation content \u2014 for the length of the '
-        + 'idle gap: up to about 14 minutes on a 5-minute cache, and about 2 hours (at most 4 hours) '
+        + 'idle gap: up to about 12 minutes on a 5-minute cache, and about 2 hours (at most 4 hours) '
         + 'on a 1-hour cache, because a request sent between your requests has '
         + 'nothing else to authenticate or replay. That is separate from the transcript-storage '
         + 'consent below, which is about writing content to DISK; this is held in memory, '
@@ -7828,7 +7828,7 @@ function buildStrategyForm(form) {
   $('#strategy-form-title').textContent = 'New strategy';
 
   const name = el('input', { type: 'text', id: 'sf-name', maxlength: '64', required: 'required' });
-  const idle = el('input', { type: 'number', id: 'sf-idle', value: '270', min: '1' });
+  const idle = el('input', { type: 'number', id: 'sf-idle', value: '240', min: '1' });
   const pings = el('input', { type: 'number', id: 'sf-pings', value: '1', min: '1' });
   const prefix = el('input', { type: 'number', id: 'sf-prefix', value: '80000', min: '0' });
   const usdCap = el('input', { type: 'number', id: 'sf-usd', value: '0', min: '0', step: '0.01' });
@@ -8858,8 +8858,8 @@ function renderKADecision(o, rec) {
     big = wouldCost ? 'Below $0' : 'Not enough data';
     cls = wouldCost ? 'bad' : '';
     sentence = rec.refused + '.';
-    setting = wouldCost ? 'Leave your cache strategy off. If you turn one on anyway, use the default: 270 s idle, 2 pings.'
-      : 'Use the default for now: 270 s idle, 2 pings.';
+    setting = wouldCost ? 'Leave your cache strategy off. If you turn one on anyway, use the default: 240 s idle, 2 pings.'
+      : 'Use the default for now: 240 s idle, 2 pings.';
   } else {
     const mid = (rec.lo_usd + rec.hi_usd) / 2;
     verdict = mid < 0 ? 'No, it would cost you money' : 'Yes, it should pay for itself';
@@ -9085,7 +9085,7 @@ function renderKASessions() {
 async function armSession(s) {
   // The credential hold is stated BEFORE the act, not after it. (K+1)×X is arithmetic on the two
   // integers the reader just chose — not money, so computing it here breaks no rule — and it is
-  // the number the Settings copy promises ("up to about 14 minutes" on a 5-minute cache), which an
+  // the number the Settings copy promises ("up to about 12 minutes" on a 5-minute cache), which an
   // override changes. A 1-hour thread follows the account's 1-hour schedule instead; see below.
   // The worst-case SPEND comes back from the server, which owns every dollar on this page.
   const hold = ((kaState.k + 1) * kaState.x) / 60;
@@ -9573,7 +9573,7 @@ async function loadKARecommend() {
       el('div', { class: 'small' },
         `For scale: measured over 357 cache expiries across this whole service, the 90% `
         + `interval on this policy is ${usd(rec.service_lo_usd)} to ${usd(rec.service_hi_usd)}. `
-        + 'Use the default (270 s idle, 2 pings) or arm a single session above and read your '
+        + 'Use the default (240 s idle, 2 pings) or arm a single session above and read your '
         + 'own ledger.')));
     return;
   }

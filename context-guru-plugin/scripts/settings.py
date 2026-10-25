@@ -3541,9 +3541,9 @@ STRATEGY_MARKER_TAIL = "written by"
 # sessions it governs. The proxy picks the timing; the strategy picks how many pings.
 #
 #   strategy   5-minute cache                   1-hour cache
-#   auto       2 pings, first at 270 s          1 ping at 59 min
-#   1-ping     1 ping, at 270 s                 1 ping at 59 min
-#   2-ping     2 pings, first at 270 s          2 pings, 59 min apart
+#   auto       2 pings, first at 240 s          1 ping at 59 min
+#   1-ping     1 ping, at 240 s                 1 ping at 59 min
+#   2-ping     2 pings, first at 240 s          2 pings, 59 min apart
 #
 # `auto` is the default and is the per-TTL table: a 5-minute session behaves exactly as `5-min-ping`
 # always did. The 1-hour numbers are config.DefaultKeepAliveIdle1h / DefaultKeepAliveMaxPings1h in
@@ -3610,7 +3610,7 @@ STRATEGIES: dict[str, dict] = {
         # cannot silently re-tune an already-armed install.
         "cache": {
             "keepalive": True,
-            "keepalive_idle_seconds": 270,
+            "keepalive_idle_seconds": 240,
             "keepalive_max_pings": 2,
             "keepalive_max_usd_per_ping": 0.50,
             "keepalive_min_prefix_tokens": 80000,
@@ -3619,14 +3619,14 @@ STRATEGIES: dict[str, dict] = {
         },
         "spends": True,
         "desc": "idle pings that follow the cache lifetime each session was billed at. 5-minute "
-                "cache: first ping at 270s, at most 2. 1-hour cache: 1 ping at 59 minutes. "
+                "cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. "
                 ">=80k-token prefix, <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody "
                 "is at the keyboard.",
     },
     "1-ping": {
         "cache": {
             "keepalive": True,
-            "keepalive_idle_seconds": 270,
+            "keepalive_idle_seconds": 240,
             "keepalive_max_pings": 1,
             "keepalive_max_usd_per_ping": 0.50,
             "keepalive_min_prefix_tokens": 80000,
@@ -3635,13 +3635,13 @@ STRATEGIES: dict[str, dict] = {
         },
         "spends": True,
         "desc": "at most 1 idle ping per idle span, whichever cache lifetime the session was "
-                "billed at (270s into a 5-minute cache, 59 minutes into a 1-hour cache). SPENDS "
+                "billed at (240s into a 5-minute cache, 59 minutes into a 1-hour cache). SPENDS "
                 "THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
     },
     "2-ping": {
         "cache": {
             "keepalive": True,
-            "keepalive_idle_seconds": 270,
+            "keepalive_idle_seconds": 240,
             "keepalive_max_pings": 2,
             "keepalive_max_usd_per_ping": 0.50,
             "keepalive_min_prefix_tokens": 80000,

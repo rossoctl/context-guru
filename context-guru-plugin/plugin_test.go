@@ -2981,7 +2981,7 @@ func TestOldStrategyNamesStillResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"strategy=auto", "keepalive_idle_seconds: 270", "keepalive_max_pings: 2"} {
+	for _, want := range []string{"strategy=auto", "keepalive_idle_seconds: 240", "keepalive_max_pings: 2"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("auto config lacks %q:\n%s", want, body)
 		}

@@ -156,7 +156,7 @@ func (h *Handler) ctlKeepAliveArm(w http.ResponseWriter, r *http.Request) {
 // The shipped policy's defaults, for a body that omits them. Named here rather than reaching
 // into config so this file states what it applies.
 const (
-	recIdleSecondsDefault = 270
+	recIdleSecondsDefault = 240
 	recMaxPingsDefault    = 2
 )
 

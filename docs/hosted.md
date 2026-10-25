@@ -52,7 +52,7 @@ provider credential of its own: the key is read off the request and dropped.
 (`cache.keepalive`, off by default) sends a request *between* your requests, when none is
 in flight — so for opted-in accounts it must retain your key, and the last request's body,
 for the length of the idle gap. Held in memory only, masked at rest, overwritten on
-release, never logged or persisted, and bounded by a hard deadline of about 14 minutes.
+release, never logged or persisted, and bounded by a hard deadline of about 12 minutes.
 Every use is a dashboard row you can audit. See
 [Keep an idle prompt cache warm](how-to/cache-keepalive.md).
 

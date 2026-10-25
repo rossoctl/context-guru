@@ -167,7 +167,7 @@ Dollars are closed-form units calibrated to an offline replay engine (`scripts/c
 
 ## The auto builder (`"builder":"auto"`)
 
-A plan chooser, not a predictor, and no Python: `predictive/autotune.go` picks the tenant's plan from the menu "ping k times, 270 s apart", k = 0..6, and
+A plan chooser, not a predictor, and no Python: `predictive/autotune.go` picks the tenant's plan from the menu "ping k times, 240 s apart", k = 0..6, and
 `proxy/campaignauto.go` wraps it in a campaign (spec kind `rules`, one segment, the chosen plan).
 
 * Data: the fleet's rows (for the prior) come from one read capped at the dashboard's newest-rows limit; the tenant's own rows are read on
@@ -183,7 +183,7 @@ A plan chooser, not a predictor, and no Python: `predictive/autotune.go` picks t
 * The shipped plan is the tuner refitted on the whole window (the evidence is for the procedure, not for one fit: recency is most of the value, below).
 * **Refresh**: a live (shadow or active) auto campaign is rebuilt in place every `CG_CAMPAIGN_AUTO_REFRESH` (default `24h`, `off` disables) on the same
   window length ending now, from one shared read of the fleet's history per pass; the mode is kept, an ACTIVE campaign changes its plan only on a `ship` rebuild, a rebuild that finds too little history keeps the previous plan, and a new spec replaces the old one only after it parses.
-* An active campaign (either builder) sets the ping count; the spacing stays the tenant's configured keep-alive interval (270 s if none).
+* An active campaign (either builder) sets the ping count; the spacing stays the tenant's configured keep-alive interval (240 s if none).
 
 The tuner makes the same choices as a reference Python implementation (`scripts/campaign/synth_fixtures.py`) on the same rows
 (`TestAutoTuneMatchesTheResearchImplementation`, 20,000 synthetic rows of 19 scopes whose return habits drift over four weeks).

@@ -47,14 +47,15 @@ import (
 const campaignDefaultMinPrefixTokens = 80000
 
 // campaignLegacyMinPrefixTokens is the pre-#435 floor. The 80k evidence (analysis B-policy-r2)
-// is for K=2 ping-everyone at 270 s; the K=1 (keepalive-5m-once), stop-reason-gated and 1h-tier
+// is for K=2 ping-everyone (measured at 270 s, now run at 240 s); the K=1 (keepalive-5m-once), stop-reason-gated and 1h-tier
 // arms have no separate evidence for it, so they keep the old 20k floor.
 const campaignLegacyMinPrefixTokens = 20000
 
 // campaignKeepAlive5mIdle mirrors config.DefaultKeepAliveIdle for the keepalive-5m arm only.
-// The once and stop-reason-gated arms stay at 280: the 270 s evidence (analysis B-policy-r2,
-// K>=2 under the response-end clock) does not cover K=1 (which prefers 280) or the gate.
-const campaignKeepAlive5mIdle = 270
+// The once and stop-reason-gated arms stay at 280: the K>=2 evidence (analysis B-policy-r2, then
+// the owner's 240 s choice so a ping and its 60 s timeout fit the cache, #716) does not cover K=1
+// (which prefers 280) or the gate.
+const campaignKeepAlive5mIdle = 240
 
 // campaignDefaultMaxPings mirrors config.DefaultKeepAliveMaxPings.
 const campaignDefaultMaxPings = 2
@@ -144,7 +145,7 @@ func campaignArmFor(arm string) campaignArm {
 	}
 	// keepalive-5m-xK: the 5-minute keep-alive with exactly K pings per idle span. The live strategy
 	// carries K as MaxPings, which the simulator replays as the arm's own PingCap. Idle and floor are
-	// keepalive-5m's for K >= 2 (the 270 s / 80k evidence is K>=2) and keepalive-5m-once's for K = 1.
+	// keepalive-5m's for K >= 2 (the 80k evidence is K>=2) and keepalive-5m-once's for K = 1.
 	if k, ok := kvcache.KeepAlivePingsOf(arm); ok {
 		if k == 1 {
 			return campaignArm{activatable: true, idleSeconds: 280, maxPings: 1,

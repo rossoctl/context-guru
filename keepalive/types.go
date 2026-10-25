@@ -210,7 +210,7 @@ const (
 	// one session holds one entry per thread that passed the gates (main agent, each subagent).
 	// The name is kept so the bound stays greppable from its history. 512 still holds: an entry
 	// exists only for a thread past its first request with a prefix over the floor, a finished
-	// thread's entry ends at the hard deadline ((K+1) x Idle, about 14 min at the defaults), and
+	// thread's entry ends at the hard deadline ((K+1) x Idle, about 12 min at the defaults), and
 	// the body bound below binds first. evictLocked has no per-session fairness on purpose: it
 	// drops the entry whose ping is least imminent, whichever session it belongs to.
 	MaxSessions = 512

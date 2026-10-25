@@ -87,14 +87,15 @@ type CacheConfig struct {
 	// default.
 	KeepAlive bool `yaml:"keepalive"`
 	// KeepAliveIdleSeconds is X: how long a session must be idle before the first ping.
-	// 0 = DefaultKeepAliveIdle (270).
+	// 0 = DefaultKeepAliveIdle (240).
 	//
-	// 270 rather than 280 is chosen for robustness to where the provider's cache cliff sits,
-	// not for a dollar gain: on the full window the two tie (270 vs 280 at K=2, 80k floor:
-	// -19 [-462, +326] model dollars, counterfactual), and if the cliff is at ~290 s 280 loses
-	// about $420 while 270 loses nothing material. K=1 prefers 280. The earlier 280 rationale
-	// (X=240 wastes 111 pings, X=280 wastes 53, +$125.08) rested on the W1 clock and is
-	// superseded (#435).
+	// 240 so that a ping and its whole timeout fit inside the cache: 240 s + the 60 s ping
+	// timeout = 300 s, the 5-minute lifetime. Measured on a live proxy: 92 of 95 failed pings were
+	// 60 s timeouts, and at 270 a ping that times out returns about 30 s after the cache expired,
+	// so it can only lose the cache (#707). 240 lowers that risk; it does not remove it, because a
+	// ping that runs to its timeout at 240 s still leaves no time to retry. The owner chose 240 and
+	// asked for it to be measured (#716). The earlier 270 choice (#435) was for robustness to where
+	// the provider's cache cliff sits, from replays that did not count failed pings.
 	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
 	// KeepAliveOpenAIIdleSeconds is the separate Responses ping interval for
 	// GPT-5.6+ implicit caches. Their guaranteed lifetime is 30 minutes after
@@ -193,7 +194,7 @@ type CacheConfig struct {
 // in tests and quoted in the settings page, and three copies of 280 is how one of them
 // becomes 240.
 const (
-	DefaultKeepAliveIdle          = 270
+	DefaultKeepAliveIdle          = 240
 	DefaultKeepAliveOpenAIIdle    = int(modelinfo.OpenAIDefaultKeepAliveIdle / time.Second)
 	DefaultKeepAliveMaxPings      = 2
 	DefaultKeepAliveIdle1h        = int(modelinfo.AnthropicDefaultKeepAliveIdle1h / time.Second)

@@ -85,7 +85,7 @@ actually paid for themselves, not just that they fired.
 | Name | ELI5 | Cost |
 |---|---|---|
 | `none` | no keep-alive pings, nothing extra happens | free |
-| `auto` | pings the cache so it doesn't go cold while you're away. The proxy reads each session's cache lifetime from the traffic: a 5-minute cache gets up to 2 pings (first at 270 s), a 1-hour cache gets 1 ping at 59 minutes | spends a little of your own credential between turns |
+| `auto` | pings the cache so it doesn't go cold while you're away. The proxy reads each session's cache lifetime from the traffic: a 5-minute cache gets up to 2 pings (first at 240 s), a 1-hour cache gets 1 ping at 59 minutes | spends a little of your own credential between turns |
 | `1-ping` | at most 1 ping per idle span, on either lifetime | same, fewer pings |
 | `2-ping` | at most 2 pings per idle span, on either lifetime (a 1-hour cache: 59 minutes, then 59 more) | same, more pings |
 | `1-hour-head` | asks the provider for a longer-lived cache instead of pinging, only on prefixes >=50k tokens | free, but on today's models it usually buys nothing — see below |

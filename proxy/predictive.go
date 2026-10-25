@@ -440,7 +440,7 @@ func (d predDecision) apply(pol CachePolicy) CachePolicy {
 		pol.KeepAlive = false
 		return pol
 	}
-	// The campaign decides HOW MANY pings, never their spacing: that stays the tenant's configured keep-alive interval (the shipped 270 s when none
+	// The campaign decides HOW MANY pings, never their spacing: that stays the tenant's configured keep-alive interval (the shipped 240 s when none
 	// is configured), so a campaign never pings later than it (live, pings 275-280 s after a response miss the cache 19% of the time) nor more
 	// often than the tenant's own policy would.
 	idle := pol.Idle

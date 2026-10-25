@@ -191,7 +191,7 @@ func (e *kaEntry) due(now time.Time) bool {
 }
 
 // hold is how long this entry may keep the caller's credential and conversation: (K+1) x X, the
-// hard deadline. About 14 min for a 5-minute thread at the defaults, 118 min for a 1-hour thread,
+// hard deadline. About 12 min for a 5-minute thread at the defaults, 118 min for a 1-hour thread,
 // and never more than MaxHold1h (236 min) for one.
 func (e *kaEntry) hold() time.Duration {
 	return time.Duration(e.pol.MaxPings+1) * e.pol.Idle

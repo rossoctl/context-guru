@@ -60,7 +60,7 @@ const (
 	maxOverridePings = 11
 	// maxOverrideHold is the operator's ceiling on the CREDENTIAL HOLD an override may buy.
 	// The hard deadline is (K+1)x X (see kaEntry.timer), and the Settings copy promises "up to
-	// about 14 minutes" at the shipped defaults — an override changes that number, so the arm
+	// about 12 minutes" at the shipped defaults — an override changes that number, so the arm
 	// dialog states the computed hold.
 	//
 	// It is CURRENTLY UNREACHABLE, and saying so is more useful than implying an independent
