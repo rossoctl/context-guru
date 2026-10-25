@@ -150,6 +150,15 @@ type SweepPingStats struct {
 	// ping stays plain. NotRegistered counts requests that kept no conversation copy because the
 	// keep-alive cannot ping their thread.
 	ConcurrencyFull, NotRegistered int64
+	// SummaryOwnedPing is sweep_summary_owned_ping (#404 point 10): pings where the sweep had a candidate
+	// but the summarizer had one too, so the summary owned the ping and the sweep did not ask.
+	SummaryOwnedPing int64
+	// SummaryInFlight is sweep_summary_in_flight: pings where a summary was already running for the
+	// thread, so the sweep did not ask.
+	SummaryInFlight int64
+	// ThreadBusy is sweep_ping_thread_busy: pings sent plain because an earlier substitute still held the
+	// thread's claim.
+	ThreadBusy int64
 	// RetiredKeys counts retired settings found (and ignored) in configs, by key.
 	RetiredKeys map[string]int64
 	// Panics counts panics recovered in the ping-time question (collection, the ask, or the hold). Each
@@ -178,6 +187,7 @@ func SweepPingCounters() SweepPingStats {
 		Failed: sweepPingFailed.Load(), ModelDeclined: sweepPingModelDeclined.Load(),
 		NoInventory: sweepPingNoInventory.Load(), AlreadyAsked: sweepPingAlreadyAsked.Load(),
 		NoCandidate: sweepPingNoCandidate.Load(), HoldNoToolID: sweepPingHoldNoToolID.Load(), NeedsShadow: sweepPingNeedsShadow.Load(),
+		SummaryOwnedPing: sweepSummaryOwnedPing.Load(), SummaryInFlight: sweepSummaryInFlight.Load(), ThreadBusy: sweepPingThreadBusy.Load(),
 		ConcurrencyFull: sweepPingConcurrency.Load(), NotRegistered: sweepPingNotRegistered.Load(), Panics: sweepPingPanics.Load(), Gates: g}
 }
 

@@ -368,3 +368,167 @@ func TestKeepAliveSurvivesAPanicInTheKeepersOwnQuestionCode(t *testing.T) {
 		t.Errorf("ask failed %d, substituted %d, want 1 and 0", k.sweepAskFailed.Load(), k.sweepSubstituted.Load())
 	}
 }
+
+// registerSweepThread is registerSweep for one thread of session "sess-1".
+func registerSweepThread(t *testing.T, th string, st store.Store, asker components.PrefixAsker, msgs []bschemas.ChatMessage) {
+	t.Helper()
+	if err := offload.RegisterSweepPingForTest("sess-1", th, st, asker, "claude-sonnet-5", msgs, "min_tokens: 2000\n"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { offload.ClearKeepAliveCandidate(thread.Key("sess-1", th)) })
+}
+
+// kaCandidateThread registers a summary candidate for one thread of session "sess-1".
+func kaCandidateThread(t *testing.T, th string, st store.Store, m *fakeSummaryModel) {
+	t.Helper()
+	msg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
+	schema.SetMessageText(&msg, "conversation of thread "+th)
+	span := []bschemas.ChatMessage{msg}
+	call := func(ctx context.Context) (string, error) { return m.CompleteMessages(ctx, "", span) }
+	offload.RegisterThreadKeepAliveCandidateForTest("sess-1", th, st, call, "messages", span, 1, "", 0)
+	t.Cleanup(func() { offload.ClearKeepAliveCandidate(thread.Key("sess-1", th)) })
+}
+
+// ⭐ S1, trigger fired. A thread the summarizer registered for (its trigger fired) has the summary
+// take the ping. The sweep does not ask, and the skip is counted.
+func TestWhenTheSummarizerTriggerFiresTheSummaryTakesThePingAndTheSweepDoesNotAsk(t *testing.T) {
+	k, fs, clock := testKeeper(t)
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(2))
+	model := &fakeSummaryModel{out: "<summary>explored the handler, 3 tests fail.</summary>"}
+	kaCandidate(t, "sess-1", st, model)
+	before := k.Stats().SweepSummaryOwnedPing
+
+	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	k.Sweep(clock.advance(281 * time.Second))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) < 1 {
+		time.Sleep(time.Millisecond)
+	}
+	if k.summarySubstituted.Load() != 1 || model.calls.Load() != 1 {
+		t.Errorf("summary substituted %d, summary calls %d, want 1 and 1", k.summarySubstituted.Load(), model.calls.Load())
+	}
+	if asker.calls.Load() != 0 || k.sweepSubstituted.Load() != 0 {
+		t.Errorf("the sweep asked (%d asks, %d substituted) on a ping the summary owns",
+			asker.calls.Load(), k.sweepSubstituted.Load())
+	}
+	if got := k.Stats().SweepSummaryOwnedPing - before; got != 1 {
+		t.Errorf("sweep_summary_owned_ping rose by %d, want 1", got)
+	}
+}
+
+// ⭐ S1, trigger did not fire. No summary candidate on the thread: the sweep asks and nothing is counted
+// as a skip.
+func TestWhenTheSummarizerTriggerDoesNotFireTheSweepAsks(t *testing.T) {
+	k, fs, clock := testKeeper(t)
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(2))
+	before := k.Stats().SweepSummaryOwnedPing
+
+	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	k.Sweep(clock.advance(281 * time.Second))
+	waitSweepOutcome(t, k, fs)
+	if k.sweepSubstituted.Load() != 1 || asker.calls.Load() != 1 || fs.n() != 0 {
+		t.Errorf("substituted %d, asks %d, ordinary pings %d, want 1, 1, 0",
+			k.sweepSubstituted.Load(), asker.calls.Load(), fs.n())
+	}
+	if got := k.Stats().SweepSummaryOwnedPing - before; got != 0 {
+		t.Errorf("sweep_summary_owned_ping rose by %d with no summary candidate", got)
+	}
+}
+
+// ⭐ One ping never runs both calls, with 2 threads due at the same time. Thread A has both a summary
+// and a sweep candidate (summary wins). Thread B has only a sweep candidate (sweep asks). Each ping runs
+// exactly one call, and the sweep's ask on B is its only ask.
+func TestOnePingNeverRunsBothCallsWithTwoThreadsDue(t *testing.T) {
+	k, fs, clock := testKeeper(t)
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	sumA := &fakeSummaryModel{out: "<summary>thread A so far.</summary>"}
+	registerSweepThread(t, "", st, asker, sweepConversation(2))
+	kaCandidateThread(t, "", st, sumA)
+	registerSweepThread(t, "a:B", st, asker, sweepConversation(2))
+
+	t0 := clock.now()
+	for _, th := range []string{"", "a:B"} {
+		for i := 0; i < 2; i++ {
+			rec(k, kaPolicy(), Key{Tenant: "t1", Session: "sess-1", Thread: th},
+				t0.Add(time.Duration(i)*time.Second), kaBody, http.StatusOK, Usage{CacheRead: 48576}, true)
+		}
+	}
+	if n := k.Sweep(clock.advance(283 * time.Second)); n != 2 {
+		t.Fatalf("fired %d pings, want 2 (both threads due at once)", n)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && k.pings.Load() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := k.pings.Load(); got != 2 {
+		t.Fatalf("pings = %d, want 2: one per thread, never 2 on one thread", got)
+	}
+	if sumA.calls.Load() != 1 {
+		t.Errorf("summary calls on thread A = %d, want 1", sumA.calls.Load())
+	}
+	if asker.calls.Load() != 1 {
+		t.Errorf("sweep asks = %d, want 1 (thread B only)", asker.calls.Load())
+	}
+	if k.summarySubstituted.Load() != 1 || k.sweepSubstituted.Load() != 1 || fs.n() != 0 {
+		t.Errorf("summary %d, sweep %d, ordinary %d, want 1, 1, 0",
+			k.summarySubstituted.Load(), k.sweepSubstituted.Load(), fs.n())
+	}
+}
+
+// A claimed ping frees the thread and the sweep's collection slot on every exit, a declined question
+// included: the next ping on the thread can claim and ask again.
+func TestAClaimedPingFreesTheThreadAndTheSlotOnEveryExit(t *testing.T) {
+	k, fs, clock := testKeeper(t)
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	small := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
+	schema.SetMessageText(&small, "hello")
+	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small, sweepToolMsg("toolu_s", "tiny")})
+	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	k.Sweep(clock.advance(281 * time.Second)) // declines: no inventory, ordinary ping
+	waitPings(t, k, 1)
+	_ = fs
+	c := offload.ClaimPing(thread.Key("sess-1", ""))
+	defer c.Release()
+	if c.Choice != offload.PingSweep {
+		t.Errorf("claim after a declined ping = %q, want sweep: the thread was not freed", c.Choice)
+	}
+	if offload.SweepSlotsInUseForTest() != 0 {
+		t.Errorf("%d sweep slots still held after the ping", offload.SweepSlotsInUseForTest())
+	}
+}
+
+// R1-1. The summary owns the ping even when it declines: the sweep does not ask, the ordinary ping goes
+// out, and the owned-ping counter rises. The ping is never lost, and never turned into a sweep question.
+func TestWhenTheSummaryDeclinesTheSweepStillDoesNotAskAndAPlainPingGoesOut(t *testing.T) {
+	k, fs, clock := testKeeper(t)
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(2))
+	model := &fakeSummaryModel{err: errors.New("upstream refused")}
+	kaCandidate(t, "sess-1", st, model)
+	before := k.Stats().SweepSummaryOwnedPing
+
+	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	if model.calls.Load() != 1 || k.summarySubstituted.Load() != 0 {
+		t.Errorf("summary calls %d, substituted %d, want 1 and 0 (it must have declined)",
+			model.calls.Load(), k.summarySubstituted.Load())
+	}
+	if fs.n() != 1 {
+		t.Errorf("ordinary pings = %d, want 1", fs.n())
+	}
+	if asker.calls.Load() != 0 || k.sweepSubstituted.Load() != 0 {
+		t.Errorf("the sweep asked (%d asks, %d substituted) after the summary declined",
+			asker.calls.Load(), k.sweepSubstituted.Load())
+	}
+	if got := k.Stats().SweepSummaryOwnedPing - before; got != 1 {
+		t.Errorf("sweep_summary_owned_ping rose by %d, want 1", got)
+	}
+}

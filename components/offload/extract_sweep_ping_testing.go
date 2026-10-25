@@ -42,3 +42,6 @@ func HeldSweepAnswerForTest(st store.Store, threadKey string) (asked, proposed i
 	n, _ := h.proposed()
 	return len(h.Outputs), n, h.WaitingFor, true
 }
+
+// SweepSlotsInUseForTest reports how many sweep slots are held right now.
+func SweepSlotsInUseForTest() int { return len(sweepSlots) }
