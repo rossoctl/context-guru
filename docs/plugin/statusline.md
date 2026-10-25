@@ -2,15 +2,14 @@
 
 The status line sits under the prompt and answers two questions all the time: **how much am I saving, and is my cache about to cost me?** It shows nothing in a project that is not routed through the proxy.
 
-![Warm: green, seconds ticking down](../statusline-live/warm-dark.svg#only-dark)
-![Warm: green, seconds ticking down](../statusline-live/warm-light.svg#only-light)
-
-The first line is money, the second is the main agent's cache clock (left out when cold), the context bar and the session's keep-alive pings. A third line, the weekly tip, appears only when it applies:
+The default layout has two lines:
 
 ```text
-saved $0.31 of $4.41 session ↻ $0.84 · saved $0.12 of $0.90 subagents
-cache ● █████░ 13:40 ↻ │ next $0.03 warm · $0.30 cold │ ctx ███░░░░░ 41% │ ka 3 pings $0.04
+saved $18.60 of $61.40 session · saved $4.20 of $20.50 subagents
+cache ● █████░ 4:00 ↻ │ ctx ███░░░░░ 41%
 ```
+
+Line 1 is money. Line 2 is the main agent's cache clock and the context bar. The status line owns the money, the clock and the context bar. The [Context Guru mod](#the-mod) owns the next-message price, the sub-agent caches, the weekly tip and the Ping button.
 
 Only savings recorded with each request count: the compaction saving (against the same request uncompacted), the cache split, and the keep-alive credit, which a request gets only when a ping that read the cache kept it warm. Two credits that the dashboard prices when it is read are left out: the estimate for requests recorded before the cache split was measured, and the tool (declaration) filter's saving. So the line can read lower than the dashboard, which adds both. A figure the proxy did not report is left out, never shown as `$0.00`. The figures are not Claude Code's own `cost` (its estimate at list prices), which `detailed` shows as `spent`.
 
@@ -22,7 +21,7 @@ A subscription does not bill per token. The limit is the 5-hour window. When Cla
 
 ```text
 5h 34% · saved 1.2M rd / 85.0k wr
-cache ● █████░ 3:57 │ agents 2 · soonest ◐ 0:51 │ ctx ███░░░░░ 41%
+cache ● █████░ 3:57 │ ctx ███░░░░░ 41%
 ```
 
 | Piece | Meaning | Source |
@@ -38,11 +37,10 @@ cache ● █████░ 3:57 │ agents 2 · soonest ◐ 0:51 │ ctx █�
 - No dollar figure shows on a subscription. Each money element of the API-key line:
   - `saved $x of $y session` and `subagents`: replaced by the window counts.
   - `↻ $z` manual-ping saving: goes with them.
-  - `next $a warm · $b cold`: hidden. It is a price, and a subscription is not billed per request.
-  - Per-agent `saved $x of $y`: dropped (the agents line keeps its clocks, with `--show=agents`).
-  - `ka 3 pings $0.04`: keeps the count, drops the cost.
+  - `next $a warm · $b cold` (opt-in with `--show=next`): hidden. It is a price, and a subscription is not billed per request.
+  - Per-agent `saved $x of $y` (opt-in with `--show=agents`): dropped.
+  - `keep-alive 3 pings` (detailed): keeps the count, drops the cost.
   - `spent` (detailed): hidden.
-  - The `spark` row (saved today) and the `a miss now costs` and `lost today` figures in `fill`, `strip` and `heat`: removed. `spark` renders nothing.
 - An ended window (`resets_at` in the past, before Claude Code sends a new block) shows nothing, and no money. At narrow widths the counts go first. `5h 34%` stays longest.
 - `--layout=detailed` writes `compaction saved …`, so the line names what the counts cover.
 - With an API key, Bedrock or Vertex there is no `rate_limits`. The money view above stays.
@@ -51,16 +49,16 @@ cache ● █████░ 3:57 │ agents 2 · soonest ◐ 0:51 │ ctx █�
 
 | Piece | Meaning |
 |---|---|
-| `saved $0.31 of $4.41 session` | The main agent's requests. `$4.41` is what they would have cost without context-guru, at your gateway's prices. `$0.31` is the saving against that: the same `$4.41` minus what was actually paid, including context-guru's own model calls and keep-alive pings. So the saving is always part of the total, never more. |
-| `saved $0.12 of $0.90 subagents` | The same, summed over every other request of the session: sub-agents, teammates, and Claude Code's side requests (the auto-mode classifier, titles), which cost money even though they are not listed as agents. Shown once the session has a request outside the main agent. A narrow terminal drops it first. |
-| `cache ● █████░ 3:57` | A bar that drains as the prompt cache approaches expiry, and the clock. Time is measured from the end of the last response. |
-| `next $0.03 warm · $0.30 cold` | What the next request costs for the cached prefix: warm (cache read) vs cold (cache write). Just `next $0.30` once cold; `next $0.30 if cold` on a proxy that predates the warm figure. |
-| `13:40 ↻` | The proxy is holding this cache warm with keep-alive pings. The clock is then the time until the cache goes cold if you send nothing: the last planned ping plus the cache lifetime. The bar still drains over the current cache entry, so each ping refills it. `↻` alone, with the normal clock, means the last touch was a ping and none is planned. |
-| `agents reviewer active ● 4:58 saved $1.20 of $6.00 · Explore ◐ 0:51 · 1 cold` | Each sub-agent's cache, under the name Claude Code's agents list shows (`←` / `↓` in Claude Code), most recently used first, up to five, then `+N more`. `active` marks an agent that made a request in the last 10 seconds. Each clock is that agent's time until cold, with `↻` when pings hold it, followed by that agent's own `saved $z of $q` on the same basis as the session figure. Side requests are not listed; they count only in the subagents total. Cold ones are counted. A narrow terminal drops the per-agent money first. See [Sub-agents](#sub-agents-and-the-selected-agent). |
-| `ctx ███░░░░░ 41%` | How full you are, as a share of the model's context limit. |
-| `ka 3 pings $0.04` | Keep-alive pings the proxy sent in this session, and what they cost. Shown after the first ping. |
-| `Tip: …` | The weekly tip; see [The weekly tip](#the-weekly-tip). The status line gives no other advice: that comes from `/context-guru:save-more`, `/context-guru:remove-mcp-and-skills` and the automatic sweep. |
+| `saved $18.60 of $61.40 session` | The main agent's requests. `$61.40` is what they would have cost without context-guru, at your gateway's prices. `$18.60` is the saving against that: the same `$61.40` minus what was actually paid, including context-guru's own model calls and keep-alive pings. So the saving is always part of the total, never more. |
+| `saved $4.20 of $20.50 subagents` | The same, summed over every other request of the session: sub-agents, teammates, and Claude Code's side requests (the auto-mode classifier, titles), which cost money even though they are not listed as agents. Shown once the session has a request outside the main agent. A narrow terminal drops it first. |
+| `cache ● █████░ 4:00` | A bar that drains as the prompt cache approaches expiry, and the clock (`m:ss`, or `h:mm:ss` from one hour). Time is measured from the end of the last response. |
+| `4:00 ↻` | The proxy is holding this cache warm with keep-alive pings. The clock is then the time until the cache goes cold if you send nothing: the last planned ping plus the cache lifetime. The bar still drains over the current cache entry, so each ping refills it. `↻` alone, with the normal clock, means the last touch was a ping and none is planned. |
+| `cache ○ cold 3:12` | The cache expired 3 minutes 12 seconds ago. Drawn dim, never red or amber. The next message pays the rewrite. `cache ○ cold` alone when the time since is unknown. |
+| `ctx ███░░░░░ 41%` | How full you are, as a share of the model's context limit. Adds `⚠ rewrite near` from 85%. |
 | `▲ update v0.3.2` | A newer proxy release is waiting; shown first so it cannot scroll off. |
+| `⏳` | The figures are the last ones read. The proxy is slow, or the copy is old. The money, the context bar and the clock stay on screen; the clock is arithmetic on the copy's own timestamps, so it is right at any age. |
+
+The line has no `next` price, no keep-alive count, no sub-agent clocks and no tip. They moved into the [mod](#the-mod). `--show=next`, `--show=agents`, `--show=ka` and `--show=tip` bring them back.
 
 ### The cache clock
 
@@ -69,114 +67,81 @@ cache ● █████░ 3:57 │ agents 2 · soonest ◐ 0:51 │ ctx █�
 | Warm | green `●` | more than 60 s left (a fifth of the lifetime on the 1 h tier) |
 | Expiring | amber `◐` | 60 s to 15 s left |
 | Critical | red `◐ 0:09!` | the last 15 s |
-| Cold | (nothing) | expired; the cache and next segments are left out |
+| Cold | dim `cache ○ cold 3:12` | expired; counts up how long ago. Never red or amber |
 | Pinged | cyan `● 13:40 ↻` | kept warm by keep-alive or manual pings |
 
 The bar drains over the cache's own lifetime: 5 minutes, or 1 hour on the 1 h tier.
 
 ## Every state
 
-### Warm: green, seconds ticking down
+Each render below is the real output of `statusline.py` (colour removed). The recordings that showed the older lines are gone.
 
-![Warm](../statusline-live/warm-dark.svg#only-dark)
-![Warm](../statusline-live/warm-light.svg#only-light)
-
-### Warm on the 1 h cache tier
-
-The bar rescales to the tier's lifetime.
-
-![Warm on the 1 h tier](../statusline-live/warm-1h-tier-dark.svg#only-dark)
-![Warm on the 1 h tier](../statusline-live/warm-1h-tier-light.svg#only-light)
-
-### Expiring: amber, with what a pause would cost
-
-![Expiring](../statusline-live/expiring-dark.svg#only-dark)
-![Expiring](../statusline-live/expiring-light.svg#only-light)
-
-### Critical: red, last 15 seconds, marked `!`
-
-![Critical](../statusline-live/critical-dark.svg#only-dark)
-![Critical](../statusline-live/critical-light.svg#only-light)
-
-### Cold: counts up how long it has been cold
-
-![Cold](../statusline-live/cold-dark.svg#only-dark)
-![Cold](../statusline-live/cold-light.svg#only-light)
-
-### Keep-alive ping in place: `↻`
-
-![Ping planned](../statusline-live/ping-planned-dark.svg#only-dark)
-![Ping planned](../statusline-live/ping-planned-light.svg#only-light)
-
-### <span id="sub-agents-and-the-selected-agent"></span>Sub-agents
-
-**The line shows one clock, the main agent's. The sections below describe the opt-in `--show=agents` list and the `watch` layout; the Claude Code mod shows sub-agents by default.**
-
-**Limitation: the status line cannot follow the agent you select.** Claude Code does not tell the status line command which agent is selected in its agents list; the command receives the same input whichever agent you are viewing (checked against Claude Code 2.1.296). So the line always shows the main agent's cache on the left, and every sub-agent's cache by name, the same name the agents list shows. Select `reviewer` in the list and read the `reviewer` clock.
-
-Agent-team teammates that run in their own terminal pane (`teammateMode: tmux`) are separate Claude Code sessions with their own status line. That line shows the teammate's own cache, keep-alive and money, its money as `session`, and the lead's line does not list them. Teammates that run inside the lead's process are listed on the lead's line like any sub-agent.
-
-The names come from the session's own files next to its transcript (`<session>/subagents/agent-*.meta.json`). The proxy tells the agents apart by the `x-claude-code-agent-id` header Claude Code sends on every sub-agent and agent-team teammate request. A request the proxy grouped by its prompt instead (Claude Code's side requests, such as the auto-mode classifier) is not an agent and is not listed. A sub-agent with no name on disk keeps the unlabelled form, `agents 2 · soonest ◐ 0:51`.
-
-Named agents, each with its own `saved $z of $q`: `reviewer` just made a request (`active`), it and the main cache are held warm by keep-alive pings, and one finished agent is counted as cold:
-
-![Named sub-agents](../statusline-live/agents-named-dark.svg#only-dark)
-![Named sub-agents](../statusline-live/agents-named-light.svg#only-light)
-
-The unlabelled form: one running sub-agent, then several, then five.
-
-![One sub-agent](../statusline-live/agents-1-dark.svg#only-dark)
-![One sub-agent](../statusline-live/agents-1-light.svg#only-light)
-![Several sub-agents](../statusline-live/agents-2-dark.svg#only-dark)
-![Several sub-agents](../statusline-live/agents-2-light.svg#only-light)
-![Five sub-agents](../statusline-live/agents-5-dark.svg#only-dark)
-![Five sub-agents](../statusline-live/agents-5-light.svg#only-light)
-
-### The weekly tip
+Warm, green, seconds ticking down:
 
 ```text
-Tip: you haven't run /context-guru:save-more or /context-guru:remove-mcp-and-skills for over a week — worth a shot.
+saved $18.60 of $61.40 session · saved $4.20 of $20.50 subagents
+cache ● █████░ 4:00 │ ctx ███░░░░░ 41%
 ```
 
-On by default in `balanced` and `detailed`, as its own last line. It names each of those commands (of the ones your plugin has) that has not run in the last 7 days, and shows nothing when all of them ran this week. `save-more config` and `save-more cache` count as running `save-more`. The commands record when they last ran in `last-run.json` in the plugin's state directory, and the status line only reads that file, so the tip costs no network call; if that file cannot be read, there is no tip. A command that has never run counts from the first time the status line saw the install, so a new install sees no tip in its first week.
-
-A narrow terminal gets the short form first, naming the command stale longest (`(+1)` when another is stale too), and drops the tip only when even that does not fit:
+Warm on the 1 h cache tier. The bar rescales to the tier's lifetime, and the clock shows `h:mm:ss` from one hour:
 
 ```text
-Tip: try /context-guru:save-more (not run for 7+ days) (+1)
+saved $18.60 of $61.40 session
+cache ● ██████ 59:00 │ ctx ███░░░░░ 41%
 ```
 
-Turn it off for good with `python3 "<plugin dir>/scripts/statusline.py" --set-tips=off` (`--set-tips=on` brings it back), or per installed command with `--hide=tip`.
+Expiring, amber, the last minute (the last fifth of the lifetime on the 1 h tier):
 
-### Proxy offline
+```text
+saved $18.60 of $61.40 session
+cache ◐ █░░░░░ 0:42 │ ctx ███░░░░░ 41%
+```
 
-![Proxy offline](../statusline-live/proxy-offline-dark.svg#only-dark)
-![Proxy offline](../statusline-live/proxy-offline-light.svg#only-light)
+Critical, red, the last 15 seconds, marked `!`:
 
-Refused is `cg ✕ proxy offline`. A slow proxy shows `cg: stats loading…`, then the last numbers with `⏳`. Hung for ten minutes shows `cg? not responding`.
+```text
+saved $18.60 of $61.40 session
+cache ◐ ░░░░░░ 0:10! │ ctx ███░░░░░ 41%
+```
 
-### Narrow terminals and the worst case
+Cold, dim, counting up how long ago it expired. The segment stays on the line, so you see the moment a pause started to cost money:
 
-At 80 columns, with the cache cold and five sub-agents:
+```text
+saved $18.60 of $61.40 session
+cache ○ cold 3:12 │ ctx ███░░░░░ 41%
+```
 
-![Worst case at 80 columns](../statusline-live/worst-case-80-dark.svg#only-dark)
-![Worst case at 80 columns](../statusline-live/worst-case-80-light.svg#only-light)
+Held warm by keep-alive pings, cyan, with `↻`. The clock is the time until it goes cold if you send nothing:
 
-A line too wide for the terminal sheds, in order: the tip, tools, latency, keep-alive pings, spend, the update marker, then the agents shrink to a count, then the `saved` total and label and the context bar. The cache clock is shortened last.
+```text
+saved $18.60 of $61.40 session
+cache ● █████░ 13:40 ↻ │ ctx ███░░░░░ 41%
+```
 
-![40 columns](../statusline-live/narrow-40-dark.svg#only-dark)
-![40 columns](../statusline-live/narrow-40-light.svg#only-light)
+Proxy offline is `cg ✕ proxy offline`. A slow proxy shows `cg: stats loading…` only when there was never any answer. Otherwise it shows the last figures with `⏳`. A proxy that does not answer for ten minutes shows `cg? not responding`, unless a copy of the cache state exists: then the figures stay, with `⏳`.
+
+### Narrow terminals
+
+A line too wide for the terminal sheds, in this order: spend and latency (detailed), keep-alive, the update marker, the `subagents` phrase, the `session` label, the context bar. The cache clock is shortened last.
+
+```text
+saved $18.60 of $61.40 session · saved $4.20 of $20.50 subagents     (80 columns)
+cache ● █████░ 4:00 │ ctx ███░░░░░ 41%
+
+saved $18.60 of $61.40 session                                       (62 columns)
+cache ● █████░ 4:00 │ ctx ███░░░░░ 41%
+
+saved $18.60 of $61.40                                               (28 columns)
+cache ● 4:00 │ ctx 41%
+```
 
 ## Layouts
 
 | Layout | Shows |
 |---|---|
-| `minimal` | one line: saved, cache |
-| `balanced` (default) | update, saved, cache, next, context, keep-alive pings, the weekly tip |
-| `detailed` | balanced plus `spent $4.10 · $2.73/h · up 1h30m` (the rate appears after 5 minutes), a slow-upstream note (only when upstream averages 3 s or more) and the least-used tool or skill |
-
-![Detailed layout](../statusline-live/detailed-dark.svg#only-dark)
-![Detailed layout](../statusline-live/detailed-light.svg#only-light)
+| `minimal` | one line: saved, cache (`saved $18.60 of $61.40 │ cache ● █████░ 4:00`; cold is `cache ○ cold`) |
+| `balanced` (default) | update, saved, cache, context |
+| `detailed` | balanced plus `spent $4.10 · $2.73/h · up 1h30m` (the rate appears after 5 minutes), the keep-alive count in plain words (`keep-alive 3 pings · $0.04`), a slow-upstream note (only when upstream averages 3 s or more) and the least-used tool or skill |
 
 Switch without editing settings, and keep the choice across renders:
 
@@ -184,58 +149,102 @@ Switch without editing settings, and keep the choice across renders:
 python3 "<plugin dir>/scripts/statusline.py" --set-layout=detailed   # or minimal, balanced, auto
 ```
 
-`auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache next agents ctx ka latency tools tip`; `agents`, the per-agent list, is off by default), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`.
+`auto` forgets the choice. A remembered layout wins over the flag in the installed command. To change the installed command instead, re-run `/context-guru:statusline` with `--layout=minimal|balanced|detailed`. Hide or show single elements with `--hide=a,b` and `--show=a,b` (`update save spend cache next agents ctx ka latency tools tip`), or the environment variables `CG_STATUSLINE_LAYOUT`, `CG_STATUSLINE_HIDE`, `CG_STATUSLINE_SHOW` and `CG_STATUSLINE_COLUMNS`. `next`, `agents`, `ka` and `tip` are off by default: the mod shows them.
 
-## Modes
+The layouts `spark`, `strip`, `heat`, `fill` and `watch` are retired. They moved into the mod's pane (below). A flag or a remembered choice that names one falls back to `balanced`, with no error.
 
-Five more layouts each answer one question on the second line, next to the cache clock. Choose one with `--layout=<name>` in the installed command, or remember it with `statusline.py --set-layout=<name>` (`--set-layout=auto` goes back to the default).
+### Opt-in elements
 
-| Layout | The question | What it shows |
+These are off in every layout. Turn one on with `--show=<name>` in the installed command.
+
+| Element | Shows | Where it lives by default |
 |---|---|---|
-| `spark` | How much have I saved lately? | `saved $4.20 today · last 14 days ▂▄▅…`: today's saving and a 14-day sparkline by your local calendar day; the rightmost cell is today |
-| `strip` | Are my cache hits holding? | The last 20 requests as `■` hit, `▨` partial, `✖` miss (oldest on the left), and the dollars misses cost today (`$1.40 lost today`); from 100 columns a key is added |
-| `heat` | When do I lose cache? | `misses/hour 0h … 24h  $1.40 lost today`: `░▒▓█` mean more misses in that hour, blank none, `·` hours not yet reached; the dollars are the whole day |
-| `fill` | How full is my context, and with what? | A stacked bar: `▒` always loaded, `█` conversation, `░` free; the percent and, when it is filling, the time to full. At 100 columns or more, a legend with the two shares and what a miss now would cost |
-| `watch` | Which sub-agent caches are about to lapse? | Line 1 the saved figure and the main clock; line 2 `agent caches (2) ████ 4:30  █░░░ 0:50`: one mini-bar per running sub-agent in id order, up to 4, then `+N more` |
+| `next` | `next $0.03 warm · $0.30 cold` (`next $0.30` once cold; `next $0.30 if cold` on a proxy that predates the warm figure) | the mod's band |
+| `agents` | `agents reviewer active ● 4:58 saved $1.20 of $6.00 · Explore ◐ 0:51 · 1 cold` | the mod's band and pane |
+| `ka` | `keep-alive 3 pings · $0.04`, after the first ping (also in `detailed`) | none: plain words, no `ka` |
+| `tip` | the weekly tip, as its own last line | the mod's band |
 
-All five show the cache clock. They have no tip line.
+The status line cannot follow the agent you select in Claude Code's agents list. Claude Code does not pass the selected agent to the command (checked against Claude Code 2.1.296). With `--show=agents` the line lists every agent by the name the list shows. The proxy tells agents apart by the `x-claude-code-agent-id` header. A request it grouped by prompt instead (a side request, such as the auto-mode classifier) is not an agent and is not listed.
 
-### spark
+The weekly tip names each of `/context-guru:save-more` and `/context-guru:remove-mcp-and-skills` (of the ones your plugin has) that has not run in the last 7 days. The commands record their runs in `last-run.json` in the plugin's state directory. The status line and the mod only read that file, so the tip costs no network call. A command that has never run counts from the first time the status line saw the install, so a new install sees no tip in its first week. Turn it off with `python3 "<plugin dir>/scripts/statusline.py" --set-tips=off`.
 
-![spark](../statusline-live/mode-spark-dark.svg#only-dark)
-![spark](../statusline-live/mode-spark-light.svg#only-light)
+## <span id="the-mod"></span>The mod: band and pane
 
-### strip
+Claude Code can load the plugin as a mod. It draws a calm band above the prompt and a pane. The mod never reads the network itself. It runs `scripts/cg.py`, which uses the same on-disk cache as the status line. So the two never ask the proxy twice.
 
-![strip](../statusline-live/mode-strip-dark.svg#only-dark)
-![strip](../statusline-live/mode-strip-light.svg#only-light)
+One home per fact:
 
-At 120 columns:
+| Fact | Where |
+|---|---|
+| saved $x of $y (session, subagents) | status line, line 1 |
+| the main cache clock, `↻` | status line |
+| context fill | status line |
+| the price of the next message, warm and cold | band |
+| Ping | band, pane and `/ping` |
+| sub-agent caches | band (row 2) and pane |
+| the weekly tip | band (row 3, only when stale) |
+| spark, strip, heat, fill | pane |
 
-![strip at 120 columns](../statusline-live/mode-strip-120-dark.svg#only-dark)
-![strip at 120 columns](../statusline-live/mode-strip-120-light.svg#only-light)
+### The band
 
-### heat
+At most three rows. Usually one.
 
-![heat](../statusline-live/mode-heat-dark.svg#only-dark)
-![heat](../statusline-live/mode-heat-light.svg#only-light)
+```text
+◆ next message $0.06 · $0.78 if cold [ Ping ]   dashboard ↗ hide
+└ agents  ● Explore 5m  ◐ code-reviewer <1m  ○ planner
+tip: /context-guru:save-more hasn't run in 7+ days — finds a cheaper config
+```
 
-### fill
+- **Row 1.** `◆`, then the price of the next message: warm in green, cold dim. Then **Ping** (key `p`), the dashboard link and `hide`.
+- **Cold cache.** The row changes to `◆ ○ cache cold · next message $0.78`. The price is amber. There is no Ping: a ping cannot help a cache that is gone.
+- **Ping off.** When the server says it cannot ping, the button is replaced by a dim reason, such as `ping off: turns on next session`. If the server does not say (an older server), the button stays.
+- **Row 2, sub-agents.** On by default. One chip per named agent that made a request in the last 30 minutes, most recent first, at most four, then `+N`. `●` green is warm, `◐` amber is the last minute, cyan with `↻` is kept warm by pings, dim `○` is cold. The `a` key, or the pane button, turns the row off and on.
+- **Row 3, the weekly tip.** Only when `/context-guru:save-more` or `/context-guru:remove-mcp-and-skills` has not run for 7 days. It uses the same rule as the status line tip (`last-run.json`, and a new install waits a week). It does not rotate.
+- **Hide.** `hide` removes the band for the session. `/context-guru:context-guru`, or the pane's **Show the band again** button, brings it back.
 
-![fill](../statusline-live/mode-fill-dark.svg#only-dark)
-![fill](../statusline-live/mode-fill-light.svg#only-light)
+### The pane
 
-With room for the legend (120 columns):
+`/context-guru:context-guru` opens it. Sections that have no data are left out.
 
-![fill at 120 columns](../statusline-live/mode-fill-120-dark.svg#only-dark)
-![fill at 120 columns](../statusline-live/mode-fill-120-light.svg#only-light)
+```text
+◆ Context Guru  open dashboard ↗
+saved $22.80 of $81.90 this session
 
-### watch
+NEXT MESSAGE
+if the cache is warm $0.06
+if it is cold      $0.78  (90k tokens in the cached prefix)
+● cache warm, about 4m left
+[ Ping now ]
 
-![watch](../statusline-live/mode-watch-dark.svg#only-dark)
-![watch](../statusline-live/mode-watch-light.svg#only-light)
+AGENTS
+● Explore               5m       saved $1.20
+◐ code-reviewer         <1m
+○ planner               cold
+Hide agents in the band  a
 
-These layouts draw with the same renderer as the [terminal views](terminal-views.md). `NO_COLOR` removes the colour, and `CG_ASCII=1` swaps the glyphs for plain characters (`o` hit, `~` partial, `X` miss, `#`, `=` and `-` for bars). That ASCII switch exists for these layouts only; the default layouts have none. Their data is cached (series and spend for 2 minutes, requests for 4 seconds) and a render never waits for it.
+SAVED LATELY
+$4.20 today · last 14 days ▁▂▂▃▄▄▅▅▆▇▇██▅
+
+CACHE HITS
+■■■■✖■■▨▨■■■■■■■■■■■
+last 20 requests · ■ hit ▨ partial ✖ miss · $1.40 lost today
+
+MISSES BY HOUR
+0h   ░▒  █░ ··············· 24h
+darker means more misses in that hour · $1.40 lost today
+
+CONTEXT
+▒▒▒▒▒▒▒███████░░░░░░░░░░░░░░░░░░░░ 41%
+▒ always loaded 20% · █ conversation 21% · ░ free · full in 58m · a miss now costs $1.20
+
+SAVE MORE
+tip /context-guru:save-more hasn't run in 7+ days — finds a cheaper config
+/context-guru:insights see where the money goes
+/context-guru:save-more find a cheaper configuration
+/context-guru:remove-mcp-and-skills drop MCP servers and skills you never use
+```
+
+The data for the four mode sections comes from `scripts/cg.py panedata`, with the same math the old status line modes used. The pane is the one place that repeats the money, as one summary line.
 
 ## <span id="refresh"></span>Refresh and the one-second clock
 
@@ -249,7 +258,7 @@ and start a new session. Older Claude Code versions ignore the key and redraw on
 
 ## Render time
 
-Every layout returns in about 0.4 s at worst, Python start-up included (the slowest run in the table took 0.43 s). The render has a 0.36 s budget. Only the session's totals (`/api/stats?lean=1&session=…`) are waited for, and the cache state is read in parallel under the same deadline. Everything the mode layouts add (the day total, series, spend, requests) comes from a disk cache that a detached background process refreshes, one per 30 seconds. A timeout shows the last numbers with `⏳`, never "proxy offline".
+Every layout returns in about 0.4 s at worst, Python start-up included (the slowest run in the table took 0.43 s). The render has a 0.36 s budget. Only the session's totals (`/api/stats?lean=1&session=…`) are waited for, and the cache state is read in parallel under the same deadline. A timeout shows the last numbers with `⏳`, never "proxy offline".
 
 Measured on this host, which is loaded and shared with production: 50 runs per cell, wall milliseconds, median / 95th percentile / maximum. "Slow" is a server that sleeps 5 seconds on every request.
 
@@ -258,11 +267,6 @@ Measured on this host, which is loaded and shared with production: 50 runs per c
 | minimal | 53 / 59 / 64 | 89 / 97 / 97 | 389 / 398 / 399 | 92 / 98 / 106 |
 | balanced | 51 / 60 / 66 | 89 / 104 / 133 | 390 / 397 / 401 | 94 / 105 / 110 |
 | detailed | 57 / 66 / 70 | 93 / 103 / 110 | 389 / 395 / 398 | 91 / 101 / 104 |
-| spark | 55 / 64 / 64 | 90 / 102 / 108 | 389 / 393 / 396 | 92 / 104 / 127 |
-| strip | 54 / 58 / 61 | 89 / 97 / 103 | 391 / 399 / 406 | 89 / 111 / 125 |
-| heat | 55 / 60 / 67 | 90 / 99 / 101 | 391 / 410 / 425 | 92 / 111 / 116 |
-| fill | 54 / 57 / 61 | 85 / 94 / 94 | 390 / 408 / 427 | 81 / 92 / 120 |
-| watch | 55 / 59 / 63 | 91 / 101 / 104 | 391 / 412 / 416 | 91 / 97 / 99 |
 
 The same harness on the status line before this work:
 
@@ -290,16 +294,12 @@ Per-agent names, the keep-alive plan and the session and subagents money (which 
 | detailed | cold | 83 / 88 / 90 | 86 / 93 / 95 |
 | detailed | slow | 387 / 396 / 425 | 388 / 396 / 413 |
 | detailed | down | 88 / 96 / 106 | 84 / 95 / 102 |
-| watch | warm | 53 / 63 / 65 | 54 / 61 / 78 |
-| watch | cold | 86 / 95 / 104 | 85 / 94 / 102 |
-| watch | slow | 386 / 391 / 398 | 387 / 398 / 405 |
-| watch | down | 88 / 99 / 103 | 82 / 92 / 105 |
 
 Reading the names opens only the files of the agents the proxy lists (at most 24, 4 KB each). With 5,000 agent files in the session the render takes under 0.1 s.
 
 ## Colour and plain terminals
 
-Colours are the basic ANSI set plus dim, so they follow your terminal theme on light and dark backgrounds. `NO_COLOR=1` or `TERM=dumb` removes the colour; the clock, bar and symbols still carry the state. The default layouts have no ASCII mode: their bars and symbols are Unicode (the [modes](#modes) can switch to ASCII with `CG_ASCII=1`). `--layout=minimal` keeps to one short line.
+Colours are the basic ANSI set plus dim, so they follow your terminal theme on light and dark backgrounds. `NO_COLOR=1` or `TERM=dumb` removes the colour; the clock, bar and symbols still carry the state. The status line has no ASCII mode: its bars and symbols are Unicode. `--layout=minimal` keeps to one short line.
 
 ## Turn it on, off, or change it
 

@@ -253,6 +253,156 @@ def cmd_cachestate(api: Api, o: dict) -> list[str]:
     return [json.dumps(doc, separators=(",", ":"))]
 
 
+def usd(x: float) -> str:
+    """The one money format of the status line and the mod: `$12.34`, `$0.06`, `<$0.01`, `$123`."""
+    if 0 < x < 0.01:
+        return "<$0.01"
+    return f"-${abs(x):.2f}" if x < 0 else (f"${x:.0f}" if x >= 100 else f"${x:.2f}")
+
+
+PANE_TTL_SECONDS = 60.0  # day, series and spend move slowly; a pane glance does not need fresher
+PANE_REQUESTS_TTL_SECONDS = 10.0
+
+
+def pane_get(base: str, path: str, params: dict, tag: str, ttl: float) -> dict | None:
+    """One read for the pane through the shared on-disk cache: a fresh copy answers without the network, a failure
+    serves the old copy (any age: the pane marks nothing, it simply shows the last figures) and backs off."""
+    port = base.rsplit(":", 1)[-1].split("/")[0]
+    file = os.path.join(cgcache.cache_dir(), f"context-guru-pane-{port}-{tag}.json")
+    cached, age = cgcache.read_json(file), cgcache.age_of(file)
+    if cached is not None and age is not None and age < ttl:
+        return cached
+    if not cgcache.backoff(file) and (cached is None or cgcache.take_slot(file, ttl)):
+        doc = Api(base).get(path, params, timeout=5)
+        if isinstance(doc, dict):
+            cgcache.write_atomic(file, json.dumps(doc).encode())
+            cgcache.clear_failure(file)
+            return doc
+        cgcache.record_failure(file, "error")
+    return cached
+
+
+def local_midnight_ms(now_s: float, days_ago: int = 0) -> int:
+    lt = time.localtime(now_s)
+    return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_ago, 0, 0, 0, 0, 0, -1)) * 1000)
+
+
+def lost_today(spend: dict | None, midnight: int) -> float | None:
+    """Dollars cache misses cost today, from the proxy's spend explanation (excess over a hit)."""
+    days = spend.get("daily") if isinstance(spend, dict) else None
+    if not isinstance(days, list):
+        return None
+    return sum(float(d.get("rewrite_usd") or 0.0) for d in days if isinstance(d, dict) and (d.get("day") or 0) >= midnight - 3_600_000)
+
+
+def pane_spark(day: dict | None, series: dict | None, now_s: float) -> dict | None:
+    """SAVED LATELY: today's saving and 14 local days of it (the last value is today, the same read as the number)."""
+    today = day.get("total_saved_usd") if isinstance(day, dict) else None
+    buckets = series.get("buckets") if isinstance(series, dict) else None
+    if not isinstance(today, (int, float)) or not isinstance(buckets, list):
+        return None
+
+    def local_day(ms: float) -> tuple[int, int, int]:  # hourly UTC buckets placed by midpoint into the user's local days
+        lt = time.localtime(ms / 1000 + 1800)
+        return lt.tm_year, lt.tm_mon, lt.tm_mday
+
+    by_day: dict[tuple[int, int, int], float] = {}
+    for b in buckets:
+        if isinstance(b, dict) and b.get("ts"):
+            by_day[local_day(b["ts"])] = by_day.get(local_day(b["ts"]), 0.0) + float(b.get("saved_usd") or 0.0)
+    days = [by_day.get(local_day(local_midnight_ms(now_s, n) + 12 * 3_600_000 - 1_800_000), 0.0) for n in range(13, 0, -1)] + [float(today)]
+    return {"today": float(today), "days": days}
+
+
+def pane_strip(reqs: dict | None, spend: dict | None, now_s: float) -> dict | None:
+    """CACHE HITS: the last 20 requests of the main thread as hit / part / miss, oldest first, and what misses cost today."""
+    rows = reqs.get("requests") if isinstance(reqs, dict) else None
+    if not isinstance(rows, list):
+        return None
+    rows = sorted((r for r in rows if isinstance(r, dict) and not r.get("keepalive")), key=lambda r: r.get("ts", 0))[-20:]
+    kinds = []
+    for r in rows:
+        try:
+            kinds.append(T.kind(r))
+        except (KeyError, TypeError):
+            continue
+    if not kinds:
+        return None
+    return {"kinds": kinds, "lost": lost_today(spend, local_midnight_ms(now_s))}
+
+
+def pane_heat(hourly: dict | None, spend: dict | None, now_s: float) -> dict | None:
+    """MISSES BY HOUR: cache misses in each local hour of today (24 values) and the hour reached."""
+    buckets = hourly.get("buckets") if isinstance(hourly, dict) else None
+    if not isinstance(buckets, list):
+        return None
+    per = [0.0] * 24
+    for b in buckets:
+        if isinstance(b, dict) and b.get("ts"):
+            per[time.localtime(b["ts"] / 1000 + 1800).tm_hour] += float(b.get("cache_misses") or 0.0)
+    return {"hours": per, "now": time.localtime(now_s).tm_hour, "lost": lost_today(spend, local_midnight_ms(now_s))}
+
+
+def pane_fill(reqs: dict | None, cs: dict | None) -> dict | None:
+    """CONTEXT: how full the window is, split into what loads every time and the conversation, and the time to full."""
+    used, window = (cs or {}).get("prefix_tokens"), (cs or {}).get("window")
+    if not isinstance(used, (int, float)) or not isinstance(window, (int, float)) or used <= 0 or window <= 0:
+        return None
+    rows = reqs.get("requests") if isinstance(reqs, dict) else None
+    main = sorted((r for r in rows if isinstance(r, dict) and r.get("thread_id", "") == "" and not r.get("keepalive")),
+                  key=lambda r: r.get("ts", 0)) if isinstance(rows, list) else []
+    try:
+        ctxs = [T.ctx(r) for r in main]
+        growth = T.growth(main)
+    except (KeyError, TypeError):
+        ctxs, growth = [], 0.0
+    base = min([used] + ctxs) / window if ctxs else None
+    eta = (window - used) / growth if growth > 0 else None
+    return {"used": float(used), "window": float(window), "frac": max(0.0, min(1.0, used / window)),
+            "base": None if base is None else max(0.0, min(1.0, base)), "eta_s": eta if eta and eta < 6 * 3600 else None,
+            "miss_usd": (cs or {}).get("next_cold_usd") or (cs or {}).get("rewrite_usd") or None}
+
+
+def cmd_panedata(api: Api, o: dict) -> list[str]:
+    """The five modes' data for the mod's pane, as one JSON document. A section whose data is missing is left out, so
+    the pane omits it instead of drawing it empty. Reads go through the on-disk cache; nothing here writes to the proxy."""
+    now_s = float(o.get("now_s") or time.time())
+    now_ms, midnight = int(now_s * 1000), local_midnight_ms(now_s)
+    sid = o["session"] or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid or not re.match(r"^[A-Za-z0-9_-]{1,128}$", sid):
+        return [json.dumps({"error": "no session"})]
+    tz = time.localtime(now_s).tm_gmtoff // 60
+    jobs = {
+        "series": lambda: pane_get(api.base, "/api/series", {"bucket": 3_600_000, "since": local_midnight_ms(now_s, 13), "until": now_ms}, "series14h", PANE_TTL_SECONDS),
+        "hourly": lambda: pane_get(api.base, "/api/series", {"bucket": 3_600_000, "since": midnight, "until": now_ms}, "hourly", PANE_TTL_SECONDS),
+        "spend": lambda: pane_get(api.base, "/api/spend/explain", {"since": midnight, "tz": tz, "now": now_ms}, "spend-today", PANE_TTL_SECONDS),
+        "day": lambda: pane_get(api.base, "/api/stats", {"lean": 1, "since": midnight}, "day", PANE_TTL_SECONDS),
+        "reqs": lambda: pane_get(api.base, "/api/requests", {"limit": 100, "session": sid}, "req100-" + sid, PANE_REQUESTS_TTL_SECONDS),
+    }
+    got: dict = {}
+
+    def run(name: str, fn) -> None:
+        try:
+            got[name] = fn()
+        except Exception:  # noqa: BLE001  (a failed read is a missing section, never a failed pane)
+            got[name] = None
+
+    threads = [threading.Thread(target=run, args=kv, daemon=True) for kv in jobs.items()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(8)
+    cs = cachestate_cached(api.base, sid)
+    cs = None if "error" in cs else cs
+    main = next((t for t in (cs or {}).get("threads") or [] if isinstance(t, dict) and t.get("main")), None)
+    fill_cs = {**(cs or {}), **(main or {})} if cs else None
+    if fill_cs is not None and not fill_cs.get("window_exact"):
+        fill_cs.pop("window", None)
+    doc = {"spark": pane_spark(got.get("day"), got.get("series"), now_s), "strip": pane_strip(got.get("reqs"), got.get("spend"), now_s),
+           "heat": pane_heat(got.get("hourly"), got.get("spend"), now_s), "fill": pane_fill(got.get("reqs"), fill_cs)}
+    return [json.dumps({k: v for k, v in doc.items() if v is not None}, separators=(",", ":"))]
+
+
 def remaining(cs: dict) -> float:
     return (cs["last_ts"] + cs["ttl_s"] * 1000 - cs["now_ms"]) / 1000
 
@@ -1323,7 +1473,7 @@ def run(cmd: str, api: Api, opts: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES, "cachestate", "ping"]))
+    ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES, "cachestate", "panedata", "tip", "ping"]))
     ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; save-more [config|cache|settings]; apply <kind> <option>@<basis>; revert <kind>")
     ap.add_argument("--custom", action="store_true", help="save-more config: also search custom combinations, not only the shipped presets")
     ap.add_argument("--force", action="store_true", help="apply: go ahead although the proxy's own check failed (asked separately); "
@@ -1350,6 +1500,14 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd not in (*READS, *WRITES) and set(a.args) & set(WRITES):  # `cg.py insights tools apply X`: say the one command that does it
         a.args, a.cmd = [a.cmd, *a.args], "save-more"
 
+    if a.cmd == "tip":  # for the mod's band: which commands are stale (local files only, no proxy; the status line's rule)
+        try:
+            import statusline as sl  # noqa: PLC0415  (the Codex copy of this file has no status line: no tip there)
+            print(json.dumps({"stale": sl.stale_commands() or [], "days": sl.TIP_DAYS}))
+        except Exception:  # noqa: BLE001
+            print(json.dumps({"stale": [], "days": 7}))
+        return 0
+
     opts: dict = {"days": a.days, "session": a.session, "json": a.json, "force": a.force, "custom": a.custom, "mock": a.mock,
                   "campaign": {"scope": a.scope, "id": a.id, "window": a.window, "builder": a.builder, "session_end": a.session_end},
                   "details": "details" in a.args, "args": [x for x in a.args if x != "details"],
@@ -1362,7 +1520,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         adapt = a.cmd in (*READS, *WRITES, "ping")
         base = proxy_base(a.port) or (hosted_base() if adapt else None) or ("http://127.0.0.1:0" if a.mock else None)
-        if not base and a.cmd == "cachestate":
+        if not base and a.cmd in ("cachestate", "panedata"):
             print(json.dumps({"error": "no proxy routing this session"}))
             return 1
         local = adapt and "settings" in a.args and (a.cmd in WRITES or a.args[0:1] == ["settings"] and not set(a.args) & {"config", "cache"})
@@ -1378,6 +1536,9 @@ def main(argv: list[str] | None = None) -> int:
         return ping_main(api, a.session, a.thread, a.json)
     if a.cmd in (*READS, *WRITES):
         return adapt_main(api, a.cmd, opts)
+    if a.cmd == "panedata":  # for the mod's pane: JSON only, the five modes' data (spark, strip, heat, fill)
+        print(cmd_panedata(api, {"session": a.session})[0])
+        return 0
     if a.cmd == "cachestate":  # for the mods: JSON only, from the shared cache, exit 1 when there is nothing
         o = {"session": a.session, "transcript": a.transcript}
         print(cmd_cachestate(api, o)[0])
