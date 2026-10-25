@@ -122,6 +122,11 @@ type kaEntry struct {
 	// (Usage.StopReason) — present tense, not a prediction. Read only by pol.PredictorID's
 	// gate in pingable(); "" on every entry until a strategy actually names a predictor.
 	stopReason string
+	// toolUseNames and usageOK are the establishing response's tool_use names and whether its usage
+	// parsed: the inputs, with the open-task counts, of waitcause.ClassifyWaitingFor. Kept for the
+	// wait cause the sweep's question stores with its held answer (#404, #453).
+	toolUseNames []string
+	usageOK      bool
 	// pingUSD is the projected cost of one ping on that prefix, from the model's own read
 	// rate. Checked against pol.MaxUSDPerPing before anything is sent.
 	pingUSD float64
@@ -271,6 +276,9 @@ type Options struct {
 	// makes a replay deterministic); hosts do not need it.
 	Go     func(f func())
 	OnTick func(now time.Time) // start of every sweep, outside the keeper lock; nil: none
+	// OpenTasks reports a thread's open background-task and teammate-wait counts, for the wait cause
+	// the sweep stores with a held answer (#404, #453). nil: 0, 0.
+	OpenTasks func(tenant, session, thread string) (background, teammate int)
 }
 
 // Record is one finished upstream request, handed to Keeper.Record by the host.
@@ -294,13 +302,17 @@ type Record struct {
 	// RetireSessionStartedBefore match on either Key.Session or Client.
 	Client  string
 	UsageOK bool
-	Policy  Policy // resolved by the host
-	Tag     string // host label returned by Arrive (proxy: the applied strategy id)
-	Agent   string
-	Preset  string
-	Header  http.Header // the request's headers; only PingHeaders' allow-list is read
-	Store   store.Store
-	Emitter components.Emitter // nil: components.NopEmitter{}
+	// ToolUseNames is every tool_use name the response carried, in order. Read only to classify what
+	// the thread is about to wait on (waitcause.ClassifyWaitingFor), which the sweep's held answer
+	// stores (#404, #453). A field of Record, not of Usage, so Usage stays comparable.
+	ToolUseNames []string
+	Policy       Policy // resolved by the host
+	Tag          string // host label returned by Arrive (proxy: the applied strategy id)
+	Agent        string
+	Preset       string
+	Header       http.Header // the request's headers; only PingHeaders' allow-list is read
+	Store        store.Store
+	Emitter      components.Emitter // nil: components.NopEmitter{}
 	// Hold is called once, under the keeper lock, only if the entry is tracked. The host captures
 	// the request's credential and returns the Ref it issued for it; the keeper releases it exactly
 	// once.
@@ -420,6 +432,15 @@ type Keeper struct {
 	// counted by either.
 	summarySubstituteRefreshPaid       atomic.Int64
 	summarySubstituteRefreshNotWorthIt atomic.Int64
+	// sweepSubstituted counts pings replaced by extract_llm_sweep's question (see
+	// fireSweepSubstitute), accounted toward `pings` as well, since it IS the ping for that span.
+	sweepSubstituted atomic.Int64
+	// sweepAskFailed counts a question that left the process but never touched the cache, that
+	// never left, or that panicked: the ordinary ping went out instead.
+	sweepAskFailed atomic.Int64
+	// sweepOverBudget counts a question refused BEFORE sending because its projected cost exceeded
+	// the per-ping ceiling.
+	sweepOverBudget atomic.Int64
 }
 
 // New builds a Keeper. o.Dispatcher is required. o.Now defaults to time.Now; o.Go defaults to
@@ -789,6 +810,7 @@ func (k *Keeper) Record(r Record) {
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, stopReason: u.StopReason,
+		toolUseNames: r.ToolUseNames, usageOK: usageOK,
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
 	}
@@ -1221,6 +1243,12 @@ func (k *Keeper) fire(j pingJob) {
 	if k.fireSummarySubstitute(j) {
 		return
 	}
+	// The sweep's question takes the ping when the summary did not (#404). The summary goes first: it
+	// replaces the very candidates the sweep would ask about, and PR D of #404 makes that priority an
+	// explicit rule. The slot is released before the call for the same reason as above.
+	if k.fireSweepSubstitute(j) {
+		return
+	}
 
 	// Falling through to an ordinary ping needs its own slot — the one above was already
 	// released and only ever covered the eligibility check, not this request.
@@ -1535,6 +1563,28 @@ type Stats struct {
 	// it is the gate doing its job, not a failure.
 	SummarySubstituteRefreshPaid       int64 `json:"keepalive_summary_substitute_refresh_paid"`
 	SummarySubstituteRefreshNotWorthIt int64 `json:"keepalive_summary_substitute_refresh_not_worth_it"`
+	// Sweep* are extract_llm_sweep's share of Pings (#404): the question it sends in place of a ping.
+	// SweepSubstituted climbing while SweepAsked/SweepHeld lag means the question reaches the
+	// provider and its answers do not parse. SweepModelDeclined is sweep_model_declined (#422): pings
+	// sent plain because the question would break the cache on that model.
+	SweepSubstituted   int64 `json:"keepalive_sweep_substituted"`
+	SweepAskFailed     int64 `json:"keepalive_sweep_ask_failed"`
+	SweepOverBudget    int64 `json:"keepalive_sweep_over_budget"`
+	SweepAsked         int64 `json:"sweep_asked"`
+	SweepHeld          int64 `json:"sweep_held"`
+	SweepModelDeclined int64 `json:"sweep_model_declined"`
+	SweepNoInventory   int64 `json:"sweep_no_inventory"`
+	SweepAlreadyAsked  int64 `json:"sweep_already_asked"`
+	SweepNoCandidate   int64 `json:"sweep_no_candidate"`
+	SweepHoldNoToolID  int64 `json:"sweep_hold_no_tool_id"`
+	SweepNeedsShadow   int64 `json:"sweep_ask_needs_shadow"`
+	SweepPanics        int64 `json:"sweep_ping_panics"`
+	SweepConcurrency   int64 `json:"sweep_concurrency_full"`
+	SweepNotRegistered int64 `json:"sweep_not_registered"`
+	// SweepGates counts the adjudication's own gate and event names across ping-time questions
+	// (sweep_kept, sweep_unparseable, sweep_dropped, ...), the counters a request's Report carries
+	// for an in-request question.
+	SweepGates map[string]int64 `json:"sweep_gates,omitempty"`
 }
 
 // PendingPings counts entries with a ping still ahead of them. Nil-safe: a keeper whose
@@ -1563,6 +1613,7 @@ func (k *Keeper) Stats() Stats {
 	k.mu.Lock()
 	live := len(k.live)
 	k.mu.Unlock()
+	sw := offload.SweepPingCounters()
 	return Stats{Live: live, Pings: k.pings.Load(), Skipped: k.skipped.Load(),
 		Failed: k.failed.Load(), Wrote: k.wrote.Load(), Missed: k.missed.Load(),
 		RouteTrips:                         k.routeTrips.Load(),
@@ -1577,6 +1628,21 @@ func (k *Keeper) Stats() Stats {
 		SummarySubstituteConcurrencyFull:   k.summarySubstituteConcurrencyFull.Load(),
 		SummarySubstituteRefreshPaid:       k.summarySubstituteRefreshPaid.Load(),
 		SummarySubstituteRefreshNotWorthIt: k.summarySubstituteRefreshNotWorthIt.Load(),
+		SweepSubstituted:                   k.sweepSubstituted.Load(),
+		SweepAskFailed:                     k.sweepAskFailed.Load(),
+		SweepOverBudget:                    k.sweepOverBudget.Load(),
+		SweepAsked:                         sw.Asked,
+		SweepHeld:                          sw.Held,
+		SweepModelDeclined:                 sw.ModelDeclined,
+		SweepNoInventory:                   sw.NoInventory,
+		SweepAlreadyAsked:                  sw.AlreadyAsked,
+		SweepNoCandidate:                   sw.NoCandidate,
+		SweepHoldNoToolID:                  sw.HoldNoToolID,
+		SweepNeedsShadow:                   sw.NeedsShadow,
+		SweepPanics:                        sw.Panics,
+		SweepConcurrency:                   sw.ConcurrencyFull,
+		SweepNotRegistered:                 sw.NotRegistered,
+		SweepGates:                         sw.Gates,
 	}
 }
 

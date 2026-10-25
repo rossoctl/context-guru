@@ -633,3 +633,32 @@ func TestOpenAIKeepAliveIgnoresAnthropicIntervalControls(t *testing.T) {
 		t.Fatal("disarmed OpenAI session remained retained on an account with keep-alive off")
 	}
 }
+
+// canPing is the gate for the sweep's conversation copies (#404 review): a thread the keep-alive cannot
+// ping keeps nothing extra. It follows the resolved policy, the kill switch and the audit-sink rule.
+func TestCanPingFollowsTheKeepAlivePolicy(t *testing.T) {
+	on := &Tenancy{ID: "t1", Cache: kaPolicy()}
+	offPol := kaPolicy()
+	offPol.KeepAlive = false
+	off := &Tenancy{ID: "t1", Cache: offPol}
+	k, _, _ := testKeeper(t, Limits{})
+	if !k.canPing(on, "sess-1", bschemas.Anthropic) {
+		t.Error("keep-alive on: canPing = false")
+	}
+	if k.canPing(off, "sess-1", bschemas.Anthropic) {
+		t.Error("keep-alive off: canPing = true, so a conversation copy would be kept for nothing")
+	}
+	if k.canPing(on, "", bschemas.Anthropic) {
+		t.Error("no session: canPing = true")
+	}
+	if k.canPing(on, "sess-1", bschemas.OpenAI) {
+		t.Error("OpenAI: the sweep's question is Anthropic only")
+	}
+	if k.canPing(nil, "sess-1", bschemas.Anthropic) {
+		t.Error("nil tenancy: canPing = true")
+	}
+	k.h.rec = nil
+	if k.canPing(on, "sess-1", bschemas.Anthropic) {
+		t.Error("no audit sink: canPing = true, but the keeper holds nothing without one")
+	}
+}

@@ -58,7 +58,7 @@ func TestSweepAsksUnderTheThreadKey(t *testing.T) {
 	ctx := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
 	ctx.Thread = "a:S"
 	var rep components.Report
-	if _, err := e.Offload(req, &rep, ctx); err != nil {
+	if _, err := askOffload(e, req, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
 	if n := atomic.LoadInt64(&asker.calls); n != 1 {

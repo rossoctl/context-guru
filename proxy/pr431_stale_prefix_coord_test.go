@@ -10,12 +10,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/metrics"
@@ -124,7 +126,7 @@ func toolTurn1Messages(firstToolOut string) []any {
 // runs it through the real pipeline built from pipelineYAML. It returns the gates/events the sweep
 // reported and how many of those upstream calls were the prefix ask itself.
 func runSweepGuardTurn2(t *testing.T, pipelineYAML string, upstreamURL string, stash *sentStash,
-	session string, msgs2 []any, maxCachedIdx int, upstreamCalls *atomic.Int64) (gates, events map[string]int) {
+	session string, msgs2 []any, maxCachedIdx int, upstreamCalls *atomic.Int64, turn2Stashed bool) (gates, events map[string]int) {
 	t.Helper()
 	cfg, err := config.LoadBytes([]byte(pipelineYAML))
 	if err != nil {
@@ -150,6 +152,8 @@ func runSweepGuardTurn2(t *testing.T, pipelineYAML string, upstreamURL string, s
 		CacheAware: true, MaxCachedIdx: maxCachedIdx,
 		IdleMs: 4 * 60 * 1000, CacheTTLMs: 5 * 60 * 1000,
 		PrefixAsk: sweepGuardAsker{stash: stash, cli: cli},
+		// The test's keeper can ping this thread, so the sweep registers its conversation for the ping.
+		CanKeepAlive: func() bool { return true },
 		// RawInput is what apply.BodyOpts would have set, as a shallow copy taken before this
 		// turn's own pipeline runs — exactly what the fix reads instead of req.Input at the
 		// guarded component's own position.
@@ -167,6 +171,26 @@ func runSweepGuardTurn2(t *testing.T, pipelineYAML string, upstreamURL string, s
 		}
 	}
 	_ = upstreamCalls.Load() - before
+	// THE SWEEP ASKS AT THE KEEP-ALIVE PING NOW (#404), not inside the request. The request above
+	// registered the thread; the ping asks. By the time a ping falls due the host has forwarded this
+	// turn, so its body is in the stash: turn2Stashed puts it there. Left false it is the stale-stash
+	// case, which is what the control test asserts the guard still catches.
+	if turn2Stashed {
+		stash.put(session, bschemas.Anthropic, body2, body2)
+	}
+	t.Cleanup(func() { offload.ClearKeepAliveCandidate(session) })
+	gatesBefore := offload.SweepPingCounters().Gates
+	dispatch, info, reason, ok := offload.SweepPingSubstitute(session)
+	if !ok {
+		t.Fatalf("the ping was offered no question (%s): the fixture registered no candidates", reason)
+	}
+	events["extract_llm_sweep/sweep_candidate_at_depth"] = info.Offered
+	dispatch(10*time.Second, offload.SweepPingWait{})
+	for k, v := range offload.SweepPingCounters().Gates {
+		if d := v - gatesBefore[k]; d > 0 {
+			gates["extract_llm_sweep/"+k] += int(d)
+		}
+	}
 	return gates, events
 }
 
@@ -194,7 +218,7 @@ func TestSweepGuardUsesRawCoordinatesNotPipelinePosition(t *testing.T) {
 	defer upstream.Close()
 
 	cfg, err := config.LoadBytes([]byte("pipeline: [textclean, extract_llm_sweep]\n" +
-		"components:\n  extract_llm_sweep:\n    min_tokens: 20\n"))
+		"components:\n  extract_llm_sweep:\n    min_tokens: 20\n    shadow: true\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,8 +242,8 @@ func TestSweepGuardUsesRawCoordinatesNotPipelinePosition(t *testing.T) {
 		map[string]any{"role": "user", "content": "and now?"})
 
 	gates, events := runSweepGuardTurn2(t, "pipeline: [textclean, extract_llm_sweep]\n"+
-		"components:\n  extract_llm_sweep:\n    min_tokens: 20\n",
-		upstream.URL, h.sent, session, msgs2, len(norm1)-1, &calls)
+		"components:\n  extract_llm_sweep:\n    min_tokens: 20\n    shadow: true\n",
+		upstream.URL, h.sent, session, msgs2, len(norm1)-1, &calls, true)
 
 	if n := gates["extract_llm_sweep/sweep_stale_prefix"]; n != 0 {
 		t.Errorf("sweep_stale_prefix fired %d times; textclean's rewrite must not desync the raw "+
@@ -244,7 +268,7 @@ func TestSweepGuardDeclinesWhenRawCoverageTrulyFalls(t *testing.T) {
 	defer upstream.Close()
 
 	cfg, err := config.LoadBytes([]byte("pipeline: [extract_llm_sweep]\n" +
-		"components:\n  extract_llm_sweep:\n    min_tokens: 20\n"))
+		"components:\n  extract_llm_sweep:\n    min_tokens: 20\n    shadow: true\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,8 +298,8 @@ func TestSweepGuardDeclinesWhenRawCoverageTrulyFalls(t *testing.T) {
 		map[string]any{"role": "user", "content": "and now?"})
 
 	gates, _ := runSweepGuardTurn2(t, "pipeline: [extract_llm_sweep]\n"+
-		"components:\n  extract_llm_sweep:\n    min_tokens: 20\n",
-		upstream.URL, h.sent, session, msgs2, len(norm1)-1, &calls)
+		"components:\n  extract_llm_sweep:\n    min_tokens: 20\n    shadow: true\n",
+		upstream.URL, h.sent, session, msgs2, len(norm1)-1, &calls, false)
 
 	if gates["extract_llm_sweep/sweep_stale_prefix"] != 1 {
 		t.Fatalf("a genuinely changed cached span was not caught as sweep_stale_prefix (gates: %v)", gates)

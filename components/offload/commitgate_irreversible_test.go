@@ -63,37 +63,6 @@ func TestADegradedModeReplayDeclaresItselfIrreversible(t *testing.T) {
 		assertReplayIsExemptFromRevert(t, &rep, req, originals)
 	})
 
-	t.Run("extract_sweep_drop", func(t *testing.T) {
-		// The fourth replay branch, and the one nothing pinned: the other three are covered by the
-		// subtests here and by the table test, so this branch could have regressed silently.
-		asker := &labelAsker{verdict: "drop", needed: "none"}
-		asker.cacheRead = 19595
-		e := newSweepSmall(t, "marker_mode: summary\n")
-		st := store.NewMemory(store.Options{MaxEntries: 400})
-		c := preExpiryCtx("s-sweep", asker, st)
-		req := sweepReqStocked()
-		// Turn 1 takes the decisions and freezes them.
-		var r1 components.Report
-		if _, err := e.Offload(req, &r1, c); err != nil {
-			t.Fatal(err)
-		}
-		if r1.Events["sweep_dropped"] == 0 {
-			t.Fatal("turn 1 dropped nothing, so turn 2 has no frozen decision to replay")
-		}
-		// Turn 2 replays them through applySweepDropReplay.
-		req2 := sweepReqStocked()
-		originals := capturedText(req2)
-		var r2 components.Report
-		if _, err := e.Offload(req2, &r2, c); err != nil {
-			t.Fatal(err)
-		}
-		if r2.Replays == 0 {
-			t.Fatalf("turn 2 replayed nothing, so the branch under test never ran "+
-				"(gates: %v, events: %v)", r2.Gates, r2.Events)
-		}
-		assertReplayIsExemptFromRevert(t, &r2, req2, originals)
-	})
-
 	t.Run("mask via reapplyFrozen", func(t *testing.T) {
 		// Overlaps TestASummaryModeReplayIsNotRevertedFromTurnTwoOnward deliberately, and neither
 		// replaces the other: that test's subject is reapplyFrozen's behaviour, this entry's is

@@ -61,10 +61,11 @@ func TestAskDumpWritesNothingUnlessConfigured(t *testing.T) {
 			"content to disk and must resolve to nowhere by default", got)
 	}
 	asker := &labelAsker{verdict: "drop", needed: "none"}
-	e := newSweep(t, "econ_trigger: true\n")
+	asker.cacheRead = 19595
+	e := newSweep(t, "")
 	req := sweepReqStocked()
 	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
-	if _, err := e.Offload(req, &components.Report{}, c); err != nil {
+	if _, err := askOffload(e, req, &components.Report{}, c); err != nil {
 		t.Fatal(err)
 	}
 	ents, err := os.ReadDir(dir)
@@ -85,10 +86,11 @@ func TestAskDumpCarriesThePromptTheTranscriptAndTheVerdicts(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CG_SWEEP_ASK_DUMP", dir)
 	asker := &labelAsker{verdict: "drop", needed: "none"}
-	e := newSweep(t, "econ_trigger: true\n")
+	asker.cacheRead = 19595
+	e := newSweep(t, "")
 	req := sweepReqStocked()
 	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
-	if _, err := e.Offload(req, &components.Report{}, c); err != nil {
+	if _, err := askOffload(e, req, &components.Report{}, c); err != nil {
 		t.Fatal(err)
 	}
 	m := readOneDump(t, dir)
@@ -139,10 +141,11 @@ func TestAskDumpRecordsWhatTheComponentDidNotJustWhatTheModelSaid(t *testing.T) 
 	t.Setenv("CG_SWEEP_ASK_DUMP", dir)
 	// A KEEP: the model says the output is still needed.
 	asker := &labelAsker{verdict: "keep", needed: "a", quote: "Find the auth timeout"}
-	e := newSweep(t, "econ_trigger: true\n")
+	asker.cacheRead = 19595
+	e := newSweep(t, "")
 	req := sweepReqStocked()
 	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
-	if _, err := e.Offload(req, &components.Report{}, c); err != nil {
+	if _, err := askOffload(e, req, &components.Report{}, c); err != nil {
 		t.Fatal(err)
 	}
 	m := readOneDump(t, dir)
@@ -166,63 +169,5 @@ func TestAskDumpRecordsWhatTheComponentDidNotJustWhatTheModelSaid(t *testing.T) 
 	if kept == 0 {
 		t.Fatalf("the adjudicator kept every candidate and no row records a keep: outcomes are not "+
 			"being noted at the branch that took them (rows: %v)", vs)
-	}
-}
-
-// The econ terms travel with the judgement, so a verdict can be read against the economics that paid
-// for it rather than in isolation.
-func TestAskDumpCarriesTheEconTermsThatBoughtTheAsk(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("CG_SWEEP_ASK_DUMP", dir)
-	asker := &labelAsker{verdict: "drop", needed: "none"}
-	e := newSweep(t, "econ_trigger: true\nreward_premium: 20\n")
-	req := sweepReqStocked()
-	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
-	// TRIGGER ONE OFF, so the econ decision is the only thing that can authorise this ask. Without
-	// this the pre-expiry trigger fires, there IS no break-even, and the dump correctly carries no
-	// econ block — which the sibling test below asserts.
-	c.IdleMs = 30 * 1000
-	if _, err := e.Offload(req, &components.Report{}, c); err != nil {
-		t.Fatal(err)
-	}
-	m := readOneDump(t, dir)
-	if got, _ := m["trigger"].(string); got != "econ" {
-		t.Fatalf("trigger = %q, want \"econ\": the fixture is not exercising the break-even", got)
-	}
-	ec, ok := m["econ"].(map[string]any)
-	if !ok {
-		t.Fatal("no econ block: the judgement cannot be read against the decision that bought it")
-	}
-	if p, _ := ec["premium"].(float64); p != 20 {
-		t.Fatalf("econ.premium = %v, want 20 — the dump is not reading the configured premium", p)
-	}
-	if rt, _ := ec["req_tokens"].(float64); rt <= 0 {
-		t.Fatalf("econ.req_tokens = %v: the terms are not being carried from the econ decision", rt)
-	}
-}
-
-// AN ABSENT ECON BLOCK IS NOT A ZERO ONE. The pre-expiry trigger never evaluates the break-even, so
-// there is no need, no have and no premium on those asks — and a zero-valued block would read as
-// "premium was 0", which is a different claim. Absent-versus-zero has produced three separate
-// misreadings in this component's history, so it is pinned rather than trusted to convention.
-// Mutation that must fail this: make Econ a value type again.
-func TestAskDumpOmitsTheEconBlockWhenNoBreakEvenWasEvaluated(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("CG_SWEEP_ASK_DUMP", dir)
-	asker := &labelAsker{verdict: "drop", needed: "none"}
-	e := newSweep(t, "econ_trigger: true\nreward_premium: 20\n")
-	req := sweepReqStocked()
-	// Inside the pre-expiry window: trigger one fires and the break-even is never reached.
-	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
-	if _, err := e.Offload(req, &components.Report{}, c); err != nil {
-		t.Fatal(err)
-	}
-	m := readOneDump(t, dir)
-	if got, _ := m["trigger"].(string); got != "pre_expiry" {
-		t.Fatalf("trigger = %q, want \"pre_expiry\"", got)
-	}
-	if _, present := m["econ"]; present {
-		t.Fatal("an econ block is present on a pre-expiry ask, where no break-even was evaluated: a " +
-			"reader would take premium=0 as the configured premium")
 	}
 }

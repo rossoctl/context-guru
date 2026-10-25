@@ -404,11 +404,9 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	phase := c.CachePhase(s.trigger.PreExpiry())
 	phased := s.trigger.CacheAllows(c, phase)
 	if !phased {
-		// NOT extract_llm_sweep's `not_in_pre_expiry_window`, deliberately. That component has
-		// exactly one permitted state, so a name asserting which one is always true of it. This
-		// trigger's state is CONFIGURED, and a deployment running `cache_state: cold` reading
-		// "not in the pre-expiry window" off /stats would be told something false about its own
-		// configuration. The phase it actually saw is appended, because "the cache state declined"
+		// The gate name carries the phase, because this trigger's state is CONFIGURED: a deployment
+		// running `cache_state: cold` reading a fixed "not in the pre-expiry window" off /stats would
+		// be told something false about its own configuration. The phase it actually saw is appended, because "the cache state declined"
 		// without saying which state is the sort of counter that can tell you THAT something
 		// happened and never why.
 		rep.Gate("cache_state_declined_" + phase.String())

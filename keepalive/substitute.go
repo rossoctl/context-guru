@@ -9,6 +9,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 )
 
 // cachePhaseAt classifies the cache phase of an entry last touched at prevStartedAt, for a
@@ -164,12 +165,22 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 // of a committed substitute call's spend: commissionSync defers only a detail row for it (no
 // ledger tokens), so requests.cg_llm_cost_usd does not count it a second time (#455).
 func (k *Keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummaryResult, ms float64, startedAt time.Time) float64 {
+	u := Usage{FreshInput: int64(res.FreshInput), CacheRead: int64(res.CacheRead),
+		CacheWrite: int64(res.CacheWrite), Output: int64(res.Output),
+		CacheWrite1h: int64(res.CacheWrite1h)}
+	cost := k.recordSubstitutePing(j, res.Model, u, ms, startedAt)
+	k.summarySubstituted.Add(1)
+	return cost
+}
+
+// recordSubstitutePing is the booking both substitutes share: a call that read the cached prefix in
+// place of a ping is booked as the ping it replaced.
+func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float64, startedAt time.Time) float64 {
 	e := j.e
 	k.mu.Lock()
 	provider, route, preset, agent := e.provider, e.route, e.preset, e.agent
 	appliedStrategy, endpoint, prefix := e.tag, e.endpoint, e.prefix
 	k.mu.Unlock()
-	model := res.Model
 	if model == "" {
 		model = e.model
 	}
@@ -178,9 +189,6 @@ func (k *Keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 	if model != "" {
 		price, priced = k.price(endpoint, model, prefix)
 	}
-	u := Usage{FreshInput: int64(res.FreshInput), CacheRead: int64(res.CacheRead),
-		CacheWrite: int64(res.CacheWrite), Output: int64(res.Output),
-		CacheWrite1h: int64(res.CacheWrite1h)}
 	// Same clock, same gate, same reason as record1: a substitute call reads the SAME cached
 	// prefix a ping would (it is built from the byte-identical forwarded body — see
 	// offload.registerKeepAliveCandidate), so it refreshes the SAME liveness clock
@@ -208,7 +216,6 @@ func (k *Keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 		}
 	}
 	k.pings.Add(1)
-	k.summarySubstituted.Add(1)
 	if ka, ok := j.emitter.(components.KeepAliveEmitter); ok {
 		ka.KeepAlivePing(components.KeepAliveReport{
 			Tenant: j.tenant, Session: j.session, Thread: j.thread, Model: model, Provider: string(provider),
@@ -217,11 +224,112 @@ func (k *Keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 			TS: k.now().UnixMilli(), Agent: agent, Preset: preset,
 			Strategy:   appliedStrategy,
 			FreshInput: u.FreshInput,
-			// 0, not pingOutputBudget(route): this ping asked for a full summary, not the
-			// 1-token read an ordinary ping would have, so reporting the ping's own budget here
-			// would misdescribe what was actually requested. See KeepAliveSummaryResult.
+			// 0, not pingOutputBudget(route): this call asked for a full answer, not the 1-token read
+			// an ordinary ping would have, so reporting the ping's own budget here would misdescribe
+			// what was actually requested.
 			MaxTokens: 0,
 		})
 	}
 	return cost
+}
+
+// sweepOutputBudgetGuess is the assumed output size of the sweep's question, used ONLY to project its
+// cost against the keep-alive $ cap before dispatching it, never a cap on the real call. A measured
+// 12-candidate answer was 7,191 tokens including the model's reasoning; this is deliberately below
+// that, because it only has to keep the question from being sent where even a small answer exceeds
+// the per-ping ceiling.
+const sweepOutputBudgetGuess = 4000
+
+// projectedSweepUSD mirrors projectedSummaryUSD for the sweep's question.
+func (k *Keeper) projectedSweepUSD(model, endpoint string, prefix int64) float64 {
+	if model == "" || prefix <= 0 {
+		return 0
+	}
+	price, ok := k.price(endpoint, model, prefix)
+	if !ok || price.Zero() {
+		return 0
+	}
+	return float64(prefix)*price.CacheRead + float64(sweepOutputBudgetGuess)*price.Output
+}
+
+// sweepWaitCause is the thread's wait cause (#453) for the question to store: what the response that
+// established this entry was about to wait on, from its own tool_use names and stop reason and the
+// thread's open-task counts. Recorded with the held answer; nothing decides on it.
+func (k *Keeper) sweepWaitCause(j pingJob) offload.SweepPingWait {
+	e := j.e
+	k.mu.Lock()
+	names, stop, usageOK := e.toolUseNames, e.stopReason, e.usageOK
+	k.mu.Unlock()
+	bg, tm := 0, 0
+	if k.o.OpenTasks != nil {
+		bg, tm = k.o.OpenTasks(j.tenant, j.session, j.thread)
+	}
+	waitingFor, tool := waitcause.ClassifyWaitingFor(names, stop, false, usageOK, bg, tm)
+	return offload.SweepPingWait{WaitingFor: waitingFor, WaitTool: tool}
+}
+
+// fireSweepSubstitute sends extract_llm_sweep's question instead of this due ping (#404). Returns true
+// when the question stood in for the ping; the caller then sends no ordinary ping. Every other
+// outcome returns false and the ordinary ping goes out, so a ping is never lost to this.
+//
+// The question is the same read of the cached prefix a ping is, plus an answer. It is sent only when
+// the sweep registered candidates for THIS thread (offload.SweepPingSubstitute), the model is one the
+// question does not hurt (#422, counted as sweep_model_declined), and its projected cost fits the
+// per-ping ceiling.
+func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
+	// Last line of defence: a panic anywhere in the question's bookkeeping leaves the ordinary ping.
+	defer func() {
+		if r := recover(); r != nil {
+			k.sweepAskFailed.Add(1)
+			slog.Error("context-guru: sweep keep-alive question panicked; pinging normally instead",
+				"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "panic", r)
+			substituted = false
+		}
+	}()
+	dispatch, info, reason, ok := offload.SweepPingSubstitute(thread.Key(j.session, j.thread))
+	if !ok {
+		slog.Debug("context-guru: sweep keep-alive question not offered",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "reason", string(reason))
+		return false
+	}
+	e := j.e
+	k.mu.Lock()
+	model, prefix, ceiling, endpoint := e.model, e.prefix, e.pol.Ceiling(), e.endpoint
+	k.mu.Unlock()
+	if cost := k.projectedSweepUSD(model, endpoint, prefix); cost > ceiling {
+		k.sweepOverBudget.Add(1)
+		slog.Debug("context-guru: sweep keep-alive question would exceed the per-ping cost cap; "+
+			"pinging normally instead",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "estimate_usd", cost, "ceiling_usd", ceiling)
+		return false
+	}
+	start := k.now()
+	res := dispatch(offload.CacheAwareSummarizerCallTimeout(), k.sweepWaitCause(j))
+	ms := float64(k.now().Sub(start).Microseconds()) / 1000.0
+	if !res.Substituted {
+		k.sweepAskFailed.Add(1)
+		slog.Debug("context-guru: sweep keep-alive question did not use the cache; pinging normally instead",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "reason", string(res.Reason))
+		return false
+	}
+	u := Usage{FreshInput: int64(res.FreshInput), CacheRead: int64(res.CacheRead),
+		CacheWrite: int64(res.CacheWrite), Output: int64(res.Output), CacheWrite1h: int64(res.CacheWrite1h)}
+	spent := k.recordSubstitutePing(j, res.Model, u, ms, start)
+	k.sweepSubstituted.Add(1)
+	// THE guard, as in fire(): a question that wrote more than it read did not match the prefix. The
+	// cache is refreshed by the write, but a repeat would pay the same mismatch, so stop.
+	if u.CacheWrite > u.CacheRead {
+		k.wrote.Add(1)
+		k.markStopped(j.e)
+		slog.Error("context-guru: sweep keep-alive question CREATED a cache entry instead of reading one; "+
+			"not pinging this session again",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
+			"cache_write", u.CacheWrite, "cache_read", u.CacheRead)
+	}
+	slog.Debug("context-guru: cache keep-alive ping (via extract_llm_sweep)",
+		"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "ping", j.ping,
+		"offered", info.Offered, "proposed", res.Proposed, "held", res.Held,
+		"cache_read", res.CacheRead, "cache_write", res.CacheWrite, "output", res.Output,
+		"cost_usd", spent, "ms", ms)
+	return true
 }
