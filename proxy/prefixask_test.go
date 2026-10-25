@@ -292,9 +292,14 @@ func TestAskUsesTheStashedBodyForThatSession(t *testing.T) {
 // over the per-body cap is not stashed at all.
 func TestAnOversizedBodyIsNotStashed(t *testing.T) {
 	s := newSentStash()
+	before := PrefixStashOversized()
 	s.put("sess", bschemas.Anthropic, []byte(strings.Repeat("x", maxSentBody+1)), []byte(strings.Repeat("x", maxSentBody+1)))
 	if got := s.get("sess"); got != nil {
 		t.Fatalf("a %d-byte body was stashed past the %d cap", len(got), maxSentBody)
+	}
+	// #703: the refusal must show in /stats, or a no_prefix it causes reads as a first turn.
+	if got := PrefixStashOversized() - before; got != 1 {
+		t.Fatalf("prefix_stash_oversized rose by %d, want 1", got)
 	}
 	// Under the cap it is held.
 	s.put("sess", bschemas.Anthropic, []byte(prefixBodyFixture), []byte(prefixBodyFixture))
@@ -354,5 +359,18 @@ func TestResponsesPrefixAskerUsesOnlyItsSessionAndReportsMissingPrefix(t *testin
 	if err != nil || reply != "verdict" || usage.CacheRead != 1100 ||
 		!strings.Contains(string(got), "ONLY-ONE") || !strings.Contains(string(got), "ASK-ONE") {
 		t.Fatalf("stashed Responses ask failed: reply=%q usage=%+v err=%v body=%s", reply, usage, err, got)
+	}
+}
+
+// #703: a body from a thread near a 1M-token window (about 4 MB of request JSON) must be stashed,
+// or every prefix ask at the summarizer's own 0.9 trigger ends as ErrNoPrefix. At the old 1.5 MB cap
+// it was refused, and 30 of 30 live summaries failed.
+func TestAFullWindowBodyIsStashed(t *testing.T) {
+	const fullWindowBody = 4_500_000
+	s := newSentStash()
+	body := []byte(strings.Repeat("x", fullWindowBody))
+	s.put("sess", bschemas.Anthropic, body, body)
+	if got := s.get("sess"); len(got) != fullWindowBody {
+		t.Fatalf("a %d-byte full-window body was not stashed (cap %d)", fullWindowBody, maxSentBody)
 	}
 }

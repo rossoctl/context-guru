@@ -808,6 +808,10 @@ type Snapshot struct {
 	// failure, counted apart from CacheAwareSummarizerErrors for the same reason extract_llm_sweep
 	// separates sweep_no_prefix from sweep_ask_failed
 	CacheAwareSummarizerNoPrefix int64 `json:"cache_aware_summarizer_no_prefix"`
+	// request bodies the host's prefix stash refused because they were over its per-body cap. Each
+	// one leaves that thread with nothing to ask over, so a later no_prefix there is the cap, not a
+	// first turn
+	PrefixStashOversized int64 `json:"prefix_stash_oversized"`
 	// a decline because the PrefixAsk path's stashed body does not cover the span this turn was
 	// about to commission a summary for — the stale-prefix guard, distinct from NoPrefix ("the
 	// session has sent nothing" vs. "something is stashed and it is the wrong something")

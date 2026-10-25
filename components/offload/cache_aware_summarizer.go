@@ -625,15 +625,26 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		return nil, nil
 	}
 	if end <= start {
+		// Named for the same reason summarize names it: a transcript too short for keep_last_turns
+		// is a shape this component can never act on, and an unnamed skip reads as "not big
+		// enough yet" in /stats (#703).
+		rep.Gate("summary_span_empty")
 		rep.Skipped = true
 		return nil, nil
 	}
 	// Never summarize away content the agent just expanded: that is the bounce loop cg:keep:
 	// exists to prevent, and it falsifies expand.RestoredInPlace's "present above" pointer.
+	//
+	// KEPT-VERBATIM ONLY, exactly as summarize asks it — never skipReduce's other half,
+	// expand.HasPlaceholder. That half stopped the span at the first message whose TEXT holds
+	// `<<cg:...>>`, and a session that reads this repo's own docs or code carries that text from
+	// its first tool result on. Live, every commission on a 900k-token, 2,200-message thread
+	// covered 4 messages (#703). A real marker inside the span is safe to summarize: the span is
+	// stashed whole under the summary's own marker, so it stays reversible.
 	if trimmed := trimSpanForKeptVerbatim(msgs, start, end, func(content string) bool {
-		_, skip := skipReduce(c, content)
-		return skip || restoredSpanGuard(c, content)
+		return isKeptVerbatim(c, contentKey(content)) || restoredSpanGuard(c, content)
 	}); trimmed <= start {
+		rep.Gate("summary_span_empty_after_expand_trim")
 		rep.Skipped = true
 		return nil, nil
 	} else {
@@ -722,6 +733,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 
 	span := msgs[start:end]
 	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: span}) < s.minTokens {
+		rep.Gate("summary_span_below_min_tokens")
 		return declineButReplayStale()
 	}
 	// The bill is set by the WHOLE conversation, because that is what gets sent. Checked before the
@@ -752,6 +764,8 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 			// client's own capability gap, distinct from "nothing configured at all".
 			atomic.AddInt64(&cacheAwareDeclined, 1)
 			rep.Gate("no_messages_model")
+		} else {
+			rep.Gate("no_model")
 		}
 		return declineButReplayStale()
 	}
@@ -956,6 +970,10 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// and the next eligible turn finds the checkpoint and splices; see cache_aware_async.go.
 	if gate := s.startAsyncSummary(c, call, path, "turn", reserved, span, end-start); gate != "" {
 		rep.Gate(gate)
+	} else {
+		// The call's outcome lands later, off this turn, in the async counters. Without this
+		// event the turn that paid for it reads as a skip with no reason (#703).
+		rep.Event(EventSummaryStarted)
 	}
 	// A fresh summary is now on its way (or already was), but THIS turn still has the stale one:
 	// send it. Returning the full transcript here was the same cache flip replayStale exists to
