@@ -6,6 +6,7 @@
 #   backend_run <prompt> <resume:0|1>   run one review; stdout and stderr go to the log
 #   backend_ready            optional: exit 0 when the backend is set up on this machine
 #   backend_cleanup          optional: delete this worktree's sessions (runs after the PR merges)
+#   backend_forget_session   optional: drop the session to resume after a run that posted nothing
 #
 # This is the last fallback. It runs `claude -p` with the user's own login and settings, so it
 # uses whatever endpoint the user's Claude Code uses. Optional environment:
@@ -39,6 +40,11 @@ backend_cleanup() {
   dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
   [ -d "$dir" ] && find "$dir" -maxdepth 2 -name "$sid.jsonl" -type f -delete
   rm -f -- "$f"
+}
+
+# backend_forget_session: drop the saved session id, so the next run starts a new session.
+backend_forget_session() {
+  rm -f -- "$(claude_sid_file)"
 }
 
 backend_run() {

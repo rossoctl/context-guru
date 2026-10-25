@@ -27,6 +27,15 @@
 # only when the user asked for it: for example, the reviewers could not run their tests, or the
 # author replied to a finding without a code change. The round still counts toward the budget.
 #
+# Each reviewer has a wall-clock limit, $OFFLOAD_REVIEW_TIMEOUT seconds (default 1800; 0 turns it
+# off). A run past it is stopped with its whole process group, and the reviewer then goes to the
+# next backend, unless its review is already on the PR. The limit is for a run that never ends: on
+# #507 a GLM reviewer repeated one word up to the output limit 4 turns in a row, about 21 minutes
+# each. It is not a token limit; the model keeps its full output and thinking budget.
+#
+# A run that ends without posting a review loses its session: the next round starts fresh, and
+# does not resume a session that may be the one that failed.
+#
 # --cleanup runs after the PR merges or closes. It removes the reviewer worktrees, the backend's
 # sessions for them, and the live-test rules file.
 #
@@ -203,6 +212,51 @@ chain_for() {
   echo "${out[@]}"
 }
 
+# run_limited <seconds> <cmd...>: run cmd in its own process group. Past the limit, stop the whole
+# group (TERM, then KILL) and return 124. A plain kill of the backend's pid would leave its children
+# (claude -p starts tool processes) running. 0 means no limit.
+run_limited() {
+  local limit=$1 pid rc=0 t=0
+  shift
+  set -m
+  # stdin from /dev/null: a job in its own process group that reads the terminal is stopped
+  # (SIGTTIN) and would sit there until the limit.
+  "$@" < /dev/null &
+  pid=$!
+  set +m
+  # A stopped review script must not leave the reviewer running in its own group.
+  trap 'kill -TERM -- "-$pid" 2>/dev/null || true' INT TERM
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$limit" -gt 0 ] && [ "$t" -ge "$limit" ]; then
+      kill -TERM -- "-$pid" 2>/dev/null || true
+      sleep 5
+      kill -KILL -- "-$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      trap - INT TERM
+      return 124
+    fi
+    sleep 1
+    t=$((t + 1))
+  done
+  wait "$pid" || rc=$?
+  trap - INT TERM
+  return "$rc"
+}
+
+# forget_session <reviewer> <backend>: drop that worktree's saved session after a run that posted
+# nothing, so a later round starts fresh instead of resuming it. A backend names its own way with
+# backend_forget_session; one without it falls back to backend_cleanup.
+forget_session() {
+  local wt
+  wt=$(wt_of "$2" "$1")
+  [ -d "$wt" ] || return 0
+  # shellcheck source=/dev/null
+  ( . "$root/scripts/offload-review/backends/$2.sh"; cd "$wt"
+    if declare -F backend_forget_session >/dev/null; then backend_forget_session
+    elif declare -F backend_cleanup >/dev/null; then backend_cleanup; fi ) \
+    || echo "Reviewer $1: could not clear the $2 session in $wt" >&2
+}
+
 # attempt <reviewer> <backend>: one review by one backend, in that backend's worktree. Exit 4: the
 # backend is not set up on this machine, so it was not run; its reason is in $skipdir/<backend>.
 # Otherwise the backend's own exit code. The subshell keeps this backend's functions to this attempt.
@@ -278,7 +332,15 @@ $(cat "$rules")"
       echo "- $live"
     } > .review-prompt.md
 
-    backend_run .review-prompt.md "$resume" > review.log 2>&1
+    limit=${OFFLOAD_REVIEW_TIMEOUT:-1800}
+    [[ $limit =~ ^[0-9]+$ ]] || { echo "OFFLOAD_REVIEW_TIMEOUT must be whole seconds, not '$limit'" >&2; exit 1; }
+    rc=0
+    run_limited "$limit" backend_run .review-prompt.md "$resume" > review.log 2>&1 || rc=$?
+    if [ "$rc" = 124 ]; then
+      echo "offload-review: stopped after ${limit}s (OFFLOAD_REVIEW_TIMEOUT)" >> review.log
+      echo "Reviewer $r: $b ran past ${limit}s and was stopped." >&2
+    fi
+    exit "$rc"
   )
 }
 
@@ -300,7 +362,12 @@ run_reviewer() {
     if [ "$rc" = 4 ]; then
       tried+=("$b (not set up: $(cat "$skipdir/$b" 2>/dev/null || echo unknown))")
     else
-      tried+=("$b (exit $rc, no review posted; see $(wt_of "$b" "$r")/review.log)")
+      forget_session "$r" "$b"
+      if [ "$rc" = 124 ]; then
+        tried+=("$b (timed out, no review posted; see $(wt_of "$b" "$r")/review.log)")
+      else
+        tried+=("$b (exit $rc, no review posted; see $(wt_of "$b" "$r")/review.log)")
+      fi
       echo "Reviewer $r: $b did not post a review (exit $rc). Trying the next backend." >&2
     fi
   done
@@ -335,9 +402,11 @@ for r in "${todo[@]}"; do
     wt=$(wt_of "$b" "$r")
     # Only the worktrees this round used: their prompt names this round and head.
     [ -f "$wt/.review-prompt.md" ] && grep -q "reviewer=$r round=$round sha=$sha " "$wt/.review-prompt.md" || continue
-    # A reviewer may write only its own files. Anything else is a broken rule. .glm-cc/ and
+    # A reviewer may write only its own files. Anything else is a broken rule. Any .review-in-*.txt
+    # is its own: the later-rounds prompt saves the conversation there, and a reviewer that also
+    # saves the PR body (.review-in-prbody.txt, #508) breaks no rule. .glm-cc/ and
     # .claude-review-session are the glm and claude backends' own session files.
-    extra=$(git -C "$wt" status --porcelain | grep -vE ' (\.review(-prompt)?\.md|\.review-in-(reviews|comments|inline)\.txt|review\.log|\.glm-cc/|\.claude-review-session)$' || true)
+    extra=$(git -C "$wt" status --porcelain | grep -vE ' (\.review(-prompt)?\.md|\.review-in-[a-z0-9-]+\.txt|review\.log|\.glm-cc/|\.claude-review-session)$' || true)
     [ -z "$extra" ] || { echo "Reviewer $r ($b) changed files:"$'\n'"$extra" >&2; rc=1; }
     [ "$(git -C "$wt" rev-parse HEAD)" = "$sha" ] || { echo "Reviewer $r ($b) moved HEAD" >&2; rc=1; }
   done
