@@ -492,8 +492,8 @@ func TestCtlCreateCampaignEndToEnd(t *testing.T) {
 		t.Fatalf("got %d strategies, want 1 (coalesced): %+v", len(strategies), strategies)
 	}
 	s := strategies[0]
-	if s.IdleSeconds != 270 || s.MinPrefixTokens != 80000 || len(s.Target.TenantIDs) != 2 || s.Target.Mode != tenant.TargetList {
-		t.Errorf("strategy = %+v, want idle 270s, 80k floor, targeting both tenants", s)
+	if s.IdleSeconds != 240 || s.MinPrefixTokens != 80000 || len(s.Target.TenantIDs) != 2 || s.Target.Mode != tenant.TargetList {
+		t.Errorf("strategy = %+v, want idle 240s, 80k floor, targeting both tenants", s)
 	}
 
 	if w, _ := f.do(t, "GET", "/api/keepalive/campaigns", "", mgrJar); w.Code != http.StatusOK {
@@ -1168,12 +1168,12 @@ func TestCoalesceCampaignCellsExcludesBaselineAndNonActivatable(t *testing.T) {
 	}
 }
 
-// keepalive-5m carries the recommended policy (270 s, K=2, 80k floor); the K=1 and gated arms
-// stay at 280 because the 270 s evidence covers K>=2 only.
+// keepalive-5m carries the recommended policy (240 s, K=2, 80k floor); the K=1 and gated arms
+// stay at 280 because the K>=2 evidence covers K>=2 only.
 func TestCampaignKeepAlive5mIsTheRecommendedPolicy(t *testing.T) {
 	a := campaignArmFor(kvcache.StrategyKeepAlive5m)
-	if a.idleSeconds != 270 || a.maxPings != 2 || campaignDefaultMinPrefixTokens != 80000 {
-		t.Errorf("keepalive-5m = idle %d, K %d, floor %d; want 270, 2, 80000",
+	if a.idleSeconds != 240 || a.maxPings != 2 || campaignDefaultMinPrefixTokens != 80000 {
+		t.Errorf("keepalive-5m = idle %d, K %d, floor %d; want 240, 2, 80000",
 			a.idleSeconds, a.maxPings, campaignDefaultMinPrefixTokens)
 	}
 	if got := campaignArmFor(kvcache.StrategyKeepAlive5mOnce).idleSeconds; got != 280 {
@@ -1181,7 +1181,7 @@ func TestCampaignKeepAlive5mIsTheRecommendedPolicy(t *testing.T) {
 	}
 }
 
-// once, stop-reason-gated and the 1h arms keep 280 s / the old 20k floor: the 270 s / 80k
+// once, stop-reason-gated and the 1h arms keep 280 s / the old 20k floor: the 80k
 // evidence is K=2 ping-everyone only.
 func TestCampaignNonRecommendedArmsKeepTheirOldFloor(t *testing.T) {
 	for _, arm := range []string{kvcache.StrategyKeepAlive5mOnce, kvcache.StrategyStopReasonGated} {

@@ -28,9 +28,9 @@ import (
 
 const (
 	autoK = 6
-	// autoX is the menu spacing. 270 s, not 280: live, pings 275-280 s after a response end miss the provider's cache 19% of the time,
-	// and at 270 s the replayed result no longer depends on where the cliff is (simfid's live A/B and cliff sensitivity).
-	autoX    = campaignKeepAlive5mIdle // = config.DefaultKeepAliveIdle (270 s); apply() also caps it at the tenant's own interval
+	// autoX is the menu spacing. 240 s, not 280: live, pings 275-280 s after a response end miss the provider's cache 19% of the time,
+	// and 240 s also leaves room for a ping's 60 s timeout inside the 5-minute cache (#707, #716).
+	autoX    = campaignKeepAlive5mIdle // = config.DefaultKeepAliveIdle (240 s); apply() also caps it at the tenant's own interval
 	autoBoot = 1000
 )
 

@@ -14,7 +14,7 @@ const (
 
 // The Anthropic one-hour tier. This is the ONE place the one-hour ping time lives: 59 minutes
 // after the previous request STARTED, one minute inside the lifetime, and one ping. Tune it here.
-// The five-minute pair (270 s, 2 pings) stays in config.
+// The five-minute pair (240 s, 2 pings) stays in config.
 const (
 	AnthropicDefaultKeepAliveIdle1h     = 59 * time.Minute
 	AnthropicDefaultKeepAliveMaxPings1h = 1

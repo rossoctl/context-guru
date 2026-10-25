@@ -1567,7 +1567,7 @@ type KeepAliveRecommendation struct {
 
 // The shipped policy, which is also what is recommended when the rule admits an account.
 const (
-	recIdleSeconds = 270
+	recIdleSeconds = 240
 	recMaxPings    = 2
 )
 

@@ -52,9 +52,10 @@ const campaignDefaultMinPrefixTokens = 80000
 const campaignLegacyMinPrefixTokens = 20000
 
 // campaignKeepAlive5mIdle mirrors config.DefaultKeepAliveIdle for the keepalive-5m arm only.
-// The once and stop-reason-gated arms stay at 280: the 270 s evidence (analysis B-policy-r2,
-// K>=2 under the response-end clock) does not cover K=1 (which prefers 280) or the gate.
-const campaignKeepAlive5mIdle = 270
+// The once and stop-reason-gated arms stay at 280: the K>=2 evidence (analysis B-policy-r2, then
+// the owner's 240 s choice so a ping and its 60 s timeout fit the cache, #716) does not cover K=1
+// (which prefers 280) or the gate.
+const campaignKeepAlive5mIdle = 240
 
 // campaignDefaultMaxPings mirrors config.DefaultKeepAliveMaxPings.
 const campaignDefaultMaxPings = 2

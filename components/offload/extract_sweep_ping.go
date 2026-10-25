@@ -217,7 +217,7 @@ var sweepSlots = make(chan struct{}, 4)
 const (
 	maxSweepPingCandidates = 256
 	// maxSweepPingAge is past the longest idle span the default keep-alive spends on one conversation
-	// (K+1 pings of X, about 14 minutes). The keeper clears a registration when it stops tracking the
+	// (K+1 pings of X, about 12 minutes). The keeper clears a registration when it stops tracking the
 	// thread; this is the backstop for hosts that run without it.
 	maxSweepPingAge = 30 * time.Minute
 )
