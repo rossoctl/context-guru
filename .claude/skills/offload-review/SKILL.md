@@ -69,6 +69,19 @@ background task, so it cannot wait for the reviewers.
    - A backend that is not set up is skipped, and the next one runs.
 3. `gh auth status` works. The reviewers post with the user's `gh` login.
 
+**Time limit.** Each reviewer run has a wall-clock limit, `OFFLOAD_REVIEW_TIMEOUT` seconds
+(default 1800, 30 minutes; `0` turns it off). A run past the limit is stopped with all its
+processes, and that reviewer goes to the next backend, unless its review is already on the PR.
+
+- The limit is for a run that never ends. On #507 a GLM reviewer repeated one word up to the
+  output limit, 4 turns in a row, about 21 minutes each, and never posted.
+- It does not limit tokens. The reviewer keeps its full output and thinking budget.
+- A stopped run shows `timed out` in its `Tried first:` line, and its `review.log` ends with
+  `offload-review: stopped after <N>s`.
+
+**A failed run is never resumed.** When a run ends without posting, its saved session is dropped.
+The next round starts that reviewer fresh, and does not resume the session that failed.
+
 ## Steps
 
 1. **Decide on live tests.** Reviewers read code only by default. If the change needs a live
@@ -171,7 +184,7 @@ remove it.
 
 ## Add a backend
 
-Create `scripts/offload-review/backends/<name>.sh` with three functions, and one optional one.
+Create `scripts/offload-review/backends/<name>.sh` with three functions, and the optional ones below.
 Each one runs inside the reviewer's worktree:
 
 - `backend_label`: one line for the identity table, with the tool and version.
@@ -179,6 +192,8 @@ Each one runs inside the reviewer's worktree:
 - `backend_run <prompt-file> <resume:0|1>`: run one review with every tool approved. The tool
   must post the review itself, as `review-prompt.md` says.
 - `backend_cleanup` (optional): delete this worktree's sessions. `--cleanup` calls it.
+- `backend_forget_session` (optional): drop the session to resume, after a run that posted
+  nothing. Without it, the script calls `backend_cleanup` instead.
 
 The tool must keep sessions per folder, or `backend_has_session` and `backend_run` must store
 their own session id in the worktree, for example in `.review-session`.

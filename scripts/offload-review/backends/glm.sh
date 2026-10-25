@@ -1,10 +1,11 @@
 # Backend: GLM through Claude Code. Sourced by scripts/offload-review.sh.
 #
-# A backend defines three functions, and one optional one. Each runs inside the reviewer's worktree.
+# A backend defines three functions, and optional ones listed below. Each runs inside the reviewer's worktree.
 #   backend_label            one line for the identity table
 #   backend_has_session      exit 0 when this worktree has an earlier session to resume
 #   backend_run <prompt> <resume:0|1>   run one review; stdout and stderr go to the log
 #   backend_cleanup          optional: delete this worktree's sessions (runs after the PR merges)
+#   backend_forget_session   optional: drop the session to resume after a run that posted nothing
 #
 # GLM has no CLI of its own here. The reviewer is plain Claude Code (`claude -p`) pointed at a
 # gateway that serves GLM with the Anthropic /v1/messages format, so tools, sessions and resume
@@ -85,6 +86,12 @@ backend_cleanup() {
   # Guard the rm: the folder must be the one inside this worktree, never an empty or root path.
   [[ $d == */.glm-cc ]] && [ "$d" != "/.glm-cc" ] || { echo "glm cleanup: bad dir $d" >&2; return 1; }
   if [ -d "$d" ]; then rm -rf -- "$d"; fi
+}
+
+# backend_forget_session: drop the saved session id, so the next run starts a new session. The
+# transcript stays in .glm-cc/ for diagnosis; --cleanup removes it after the PR merges.
+backend_forget_session() {
+  rm -f -- "$(glm_dir)/session-id"
 }
 
 backend_run() {
