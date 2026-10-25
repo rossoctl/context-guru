@@ -267,6 +267,9 @@ const (
 	// is filed by the goroutine that commits it. Two names because a started-and-lost call is a
 	// real outcome that must not read as a delivered summary.
 	EventSummaryStarted = "summary_started"
+	// EventSummaryDeferredToStash marks a cache_aware_summarizer prefix-ask commission held until
+	// the host has stashed this turn's body, then started from the host's hook (#722).
+	EventSummaryDeferredToStash = "summary_deferred_to_stash"
 	// EventAwaitedCheckpoint marks a turn that WAITED for a summary an earlier turn started and
 	// then spliced it. Distinct from EventReusedCheckpoint because this one cost latency: it is
 	// the turn that paid for the async design, and the pair (awaited, summary_wait_timeout) is

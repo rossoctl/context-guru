@@ -61,6 +61,8 @@ func TestCacheAwareUsesPrefixAskWhenNoMessagesModelIsAvailable(t *testing.T) {
 	if _, err := s.Offload(t1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the commissioned summary never landed")
 	}
@@ -110,6 +112,8 @@ func TestCacheAwarePrefixAskNoPrefixIsNotAFailure(t *testing.T) {
 	if _, err := s.Offload(t1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the detached call never resolved")
 	}
@@ -140,6 +144,8 @@ func TestCacheAwarePrefixAskFailureFailsOpenAndCounts(t *testing.T) {
 	if _, err := s.Offload(t1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the detached call never resolved")
 	}
@@ -223,6 +229,8 @@ func TestCacheAwarePrefixAskSendsTheUserPromptEvenForAPromotedModel(t *testing.T
 	if _, err := s.Offload(req, &rep, ctx); err != nil {
 		t.Fatal(err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) || atomic.LoadInt64(&asker.calls) != 1 {
 		t.Fatalf("no ask was made, so the assertion below is vacuous (gates: %v)", rep.Gates)
 	}

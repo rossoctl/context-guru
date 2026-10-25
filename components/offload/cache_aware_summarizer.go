@@ -948,7 +948,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// double-rewrite to avoid guarding against; Warm and PreExpiry mean the prefix the forwarded
 	// request is about to send is itself still live, so the side call already reads it.
 	if phase == components.CachePhaseCold {
-		s.deferColdSummary(c, call, path, span, end-start)
+		s.deferSummary(c, call, path, "cold_deferred", false, span, end-start)
 		rep.Event("cold_commission_deferred")
 		rep.Skipped = true
 		return nil, nil
@@ -963,6 +963,17 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// reserve that can only graduate on Cold would never graduate on a deployment whose phase is
 	// always Unknown, so Unknown applies immediately instead, exactly like `any`.
 	reserved := s.trigger.CacheState == components.CacheStatePreExpiry && phase == components.CachePhasePreExpiry
+
+	// A PREFIX-ASK COMMISSION WAITS FOR THIS TURN'S STASH (#722). Its call reads the host's stash of
+	// this thread's last forwarded body, which holds this turn's body only once its upstream answers
+	// 200. Started now, it ran against the previous turn's body and its coverage check refused it
+	// every time. So it is held in the deferral registry the cold path uses, and the host's hook
+	// dispatches it after that put. This turn still replays any stale summary, below.
+	if path == "prefix_ask" {
+		s.deferSummary(c, call, path, "turn", reserved, span, end-start)
+		rep.Event(EventSummaryDeferredToStash)
+		return declineButReplayStale()
+	}
 
 	// COMMISSION, do not block. The call covers most of the transcript against a 300 s budget, so
 	// running it inline would stall the triggering turn by minutes — billed against the agent's own

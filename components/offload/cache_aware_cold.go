@@ -25,11 +25,21 @@ import (
 // request goes upstream) stores the commission material here instead of calling
 // startAsyncSummary directly; proxy calls ResolveDeferredCacheAwareSummary once that same
 // request's usage is observed (succeeded or not — see its own doc for why "not" still resolves).
+//
+// THE SAME HANDOFF SERVES A WARM PREFIX-ASK COMMISSION (#722). That call appends its question to
+// the host's stash of this thread's last forwarded body, and checks that the stash covers the span
+// it is about to summarize. Started at Offload time, it ran about 1 ms later, while the stash still
+// held the PREVIOUS turn's body, so the coverage check refused it every time (stale_prefix, 3 of 3
+// on a clean session) and no detached summary ever committed. The host stashes this turn's body on
+// its upstream 200, before the hook below runs, so a commission dispatched from the hook reads the
+// body it was built against.
 type coldDeferral struct {
 	s            *CacheAwareSummarizer
-	ctx          *components.Ctx // minimal: Session, Thread, Store, Ctx — see deferColdSummary
+	ctx          *components.Ctx // minimal: Session, Thread, Store, Ctx — see deferSummary
 	call         summaryCaller
 	path         string
+	trigger      string
+	reserved     bool
 	span         []bschemas.ChatMessage
 	coveredCount int
 	timer        *time.Timer
@@ -75,7 +85,8 @@ func CacheAwareColdDeferralStats() (started, resolved, fallbackFired, dropped in
 		atomic.LoadInt64(&cacheAwareColdDeferredDropped)
 }
 
-// deferColdSummary stores one cold-turn commission, replacing any earlier one for the session
+// deferSummary stores one commission until the turn's own forwarded request finishes, replacing any
+// earlier one for the session
 // (stale either way: a session cannot have two triggering turns want two different spans
 // deferred at once without a real request landing in between, and a real request clears the
 // deferral along with every checkpoint-affecting state this component owns).
@@ -84,8 +95,12 @@ func CacheAwareColdDeferralStats() (started, resolved, fallbackFired, dropped in
 // discipline startAsyncSummary already follows and for the same reason: this goroutine's caller
 // (the fallback timer, or ResolveDeferredCacheAwareSummary) runs long after the request that
 // built it has returned.
-func (s *CacheAwareSummarizer) deferColdSummary(c *components.Ctx, call summaryCaller, path string,
-	span []bschemas.ChatMessage, coveredCount int) {
+//
+// trigger and reserved are handed to startAsyncSummary unchanged when the deferral resolves: a cold
+// commission passes "cold_deferred" and false, a warm prefix-ask commission its own "turn" and the
+// reserve flag it computed (#722).
+func (s *CacheAwareSummarizer) deferSummary(c *components.Ctx, call summaryCaller, path, trigger string,
+	reserved bool, span []bschemas.ChatMessage, coveredCount int) {
 	if c == nil || c.Session == "" {
 		return
 	}
@@ -97,7 +112,8 @@ func (s *CacheAwareSummarizer) deferColdSummary(c *components.Ctx, call summaryC
 	// safe even though the request itself has long since returned by the time this resolves.
 	lite := &components.Ctx{Session: c.Session, Thread: c.Thread, Store: c.Store, Ctx: c.Ctx}
 	conv := convKey(c)
-	d := &coldDeferral{s: s, ctx: lite, call: call, path: path, span: spanCopy, coveredCount: coveredCount}
+	d := &coldDeferral{s: s, ctx: lite, call: call, path: path, trigger: trigger, reserved: reserved,
+		span: spanCopy, coveredCount: coveredCount}
 
 	coldDeferredMu.Lock()
 	if len(coldDeferred) >= maxColdDeferred && coldDeferred[conv] == nil {
@@ -107,7 +123,7 @@ func (s *CacheAwareSummarizer) deferColdSummary(c *components.Ctx, call summaryC
 		// compaction, or the memory bound, entirely.
 		coldDeferredMu.Unlock()
 		atomic.AddInt64(&cacheAwareColdDeferredDropped, 1)
-		s.startAsyncSummary(lite, call, path, "cold_deferred", false, spanCopy, coveredCount)
+		s.startAsyncSummary(lite, call, path, trigger, reserved, spanCopy, coveredCount)
 		return
 	}
 	if prev, ok := coldDeferred[conv]; ok && prev.timer != nil {
@@ -142,7 +158,7 @@ func (s *CacheAwareSummarizer) resolveFallback(conv string) {
 		return // already resolved via the proxy hook
 	}
 	atomic.AddInt64(&cacheAwareColdDeferredFallbackFired, 1)
-	d.s.startAsyncSummary(d.ctx, d.call, d.path, "cold_deferred", false, d.span, d.coveredCount)
+	d.s.startAsyncSummary(d.ctx, d.call, d.path, d.trigger, d.reserved, d.span, d.coveredCount)
 }
 
 // ResolveDeferredCacheAwareSummary dispatches a cold-commissioned summary once the triggering
@@ -169,5 +185,5 @@ func ResolveDeferredCacheAwareSummary(session, threadID string) {
 		return
 	}
 	atomic.AddInt64(&cacheAwareColdDeferredResolved, 1)
-	d.s.startAsyncSummary(d.ctx, d.call, d.path, "cold_deferred", false, d.span, d.coveredCount)
+	d.s.startAsyncSummary(d.ctx, d.call, d.path, d.trigger, d.reserved, d.span, d.coveredCount)
 }
