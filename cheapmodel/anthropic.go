@@ -431,8 +431,8 @@ func insertAskMessage(prefixBody []byte, ask string) ([]byte, error) {
 	for _, m := range msgs {
 		parts = append(parts, m.Raw)
 	}
-	if len(msgs) > 0 && msgs[len(msgs)-1].Get("role").String() == "system" {
-		understoodJSON, err := json.Marshal(map[string]any{"role": "assistant", "content": "Understood."})
+	if bridge := lastBridge(msgs); bridge != "" {
+		understoodJSON, err := json.Marshal(map[string]any{"role": "assistant", "content": bridge})
 		if err != nil {
 			return nil, err
 		}
@@ -444,4 +444,22 @@ func insertAskMessage(prefixBody []byte, ask string) ([]byte, error) {
 	}
 	parts = append(parts, string(askJSON))
 	return sjson.SetRawBytes(prefixBody, "messages", []byte("["+strings.Join(parts, ",")+"]"))
+}
+
+// lastBridge is AskBridge for the last message's role, or "" for an empty transcript.
+func lastBridge(msgs []gjson.Result) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	return AskBridge(msgs[len(msgs)-1].Get("role").String())
+}
+
+// AskBridge returns the assistant text to insert between a last message of role lastRole and an
+// appended user question, or "" when the question may follow directly. Only a trailing `system`
+// message needs one; see insertAskMessage for why.
+func AskBridge(lastRole string) string {
+	if lastRole == "system" {
+		return "Understood."
+	}
+	return ""
 }
