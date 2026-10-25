@@ -675,9 +675,11 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
     add("ok" if sl.get("refreshInterval") else "warn", "Status line refreshes on a timer (live cache countdown)",
         'Add "refreshInterval": 5 to statusLine in settings.json')
     ping_state = _ping_header_state()
-    if ping_state in ("present", "missing"):
+    if ping_state in ("present", "missing", "user-off", "removed"):
         add("ok" if ping_state == "present" else "warn", "Ping header is set (the Ping button needs it)",
-            "Start a new session (it is added then), or run /context-guru:install")
+            {"missing": "Run /context-guru:install to turn Ping on",
+             "removed": "You removed it. Run /context-guru:install to turn Ping on again",
+             "user-off": "Your own x-context-guru-ping line is not 1. Set it to 1 in env.ANTHROPIC_CUSTOM_HEADERS"}.get(ping_state, ""))
     cache_mode = cfg.get("cache_mode")
     add("ok" if cache_mode else "warn", "Cache mode is set", "See /context-guru:cache-strategy-picker")
     bad = [c for c in checks if c[0] == "bad"]
@@ -1232,7 +1234,7 @@ CMDS = {"home": cmd_home, "insights": cmd_insights,
 
 # Why the server holds nothing to ping with (cachestate `ping_reason`), in words. The mod's toast says the same.
 PING_REASONS = {
-    "not opted in": "restart Claude Code after the plugin update",
+    "not opted in": "Ping isn't enabled for this install yet; it turns on in your next session (or run /context-guru:install)",
     "below limits": "keep-alive is on, but this thread is below its minimum size or limits",
     "over budget": "one ping would cost more than the per-ping limit",
     "too large": "context too large to hold for Ping",

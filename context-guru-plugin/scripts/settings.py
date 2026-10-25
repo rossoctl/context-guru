@@ -125,12 +125,17 @@ def add_ping_header(env: dict, meta: dict) -> bool:
     return True
 
 
-def record_ping_choice(meta: dict, ping_on: bool) -> None:
-    """Remember an install made with --no-ping-header, so the SessionStart self-heal leaves it alone."""
+def record_ping_choice(env: dict, meta: dict, ping_on: bool) -> bool:
+    """Remember an install made with --no-ping-header, so the SessionStart self-heal leaves it alone.
+    An opt-out also takes back the line WE added earlier (an install or a heal): the opt-out text promises
+    that a re-run with --no-ping-header stops the header. True when a line was removed."""
     if ping_on:
         meta.pop(PING_OPT_OUT_META, None)
-    else:
-        meta[PING_OPT_OUT_META] = True
+        return False
+    meta[PING_OPT_OUT_META] = True
+    removed = remove_ping_header(env, meta)
+    meta.pop(PING_HEADER_META, None)
+    return removed
 
 
 def remove_ping_header(env: dict, meta: object) -> bool:
@@ -2897,7 +2902,8 @@ def cmd_add(args: argparse.Namespace) -> int:
     ping_on = not getattr(args, "no_ping_header", False)
     if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged \
             and (not ping_on or any(_ping_line(ln) for ln in str(env.get(HEADERS_KEY, "")).split("\n"))) \
-            and (ping_on or (data.get(META) or {}).get(PING_OPT_OUT_META) is True):
+            and (ping_on or ((data.get(META) or {}).get(PING_OPT_OUT_META) is True
+                             and (data.get(META) or {}).get(PING_HEADER_META) != PING_HEADER)):
         record_install_scope(args.file, url=args.url)
         emit(result="unchanged", file=args.file, base_url=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
@@ -2915,7 +2921,8 @@ def cmd_add(args: argparse.Namespace) -> int:
         meta = data.setdefault(META, {})
         if ping_on and add_ping_header(env, meta):
             changed.append(HEADERS_KEY)
-        record_ping_choice(meta, ping_on)
+        if record_ping_choice(env, meta, ping_on):
+            changed.append(HEADERS_KEY)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2938,7 +2945,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         meta = data.setdefault(META, {})
         if ping_on:
             add_ping_header(env, meta)
-        record_ping_choice(meta, ping_on)
+        record_ping_choice(env, meta, ping_on)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -3005,7 +3012,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     meta = data.setdefault(META, {})
     if ping_on:
         add_ping_header(env, meta)
-    record_ping_choice(meta, ping_on)
+    record_ping_choice(env, meta, ping_on)
     meta["installed_base_url"] = args.url
     if getattr(args, "upstream", ""):
         meta["installed_upstream"] = args.upstream
@@ -3060,9 +3067,60 @@ def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
     return 0
 
 
+# The first build that could write --no-ping-header (#667, 328064e3, 2026-10-22 16:58:53 +0300). An install
+# made with that flag on such a build left no record of the choice. A file is healed only when the
+# install-scope row for it was recorded BEFORE this moment: every `add` rewrites the row, so a row older than
+# the cutoff proves nobody ran a flagged install since. Anything else gets a note, never a write.
+PING_FLAG_SHIPPED = "2026-10-22T13:58:53+00:00"
+PING_NOTE_SEEN = "ping-header-note.json"
+
+
+def predates_ping_flag(real: str) -> bool:
+    """True when an install-scope row for this file shows it was last installed before --no-ping-header existed."""
+    try:
+        cutoff = _dt.datetime.fromisoformat(PING_FLAG_SHIPPED)
+        for row in _read_install_scopes().values():
+            if isinstance(row, dict) and isinstance(row.get("file"), str) \
+                    and os.path.realpath(row["file"]) == real and isinstance(row.get("recorded_at"), str):
+                when = _dt.datetime.fromisoformat(row["recorded_at"])
+                if when.tzinfo is None:
+                    return False
+                return when < cutoff
+    except Exception:
+        pass
+    return False
+
+
+def _note_seen_path() -> str:
+    return os.path.join(state_dir(), PING_NOTE_SEEN)
+
+
+def ping_note_seen(real: str) -> bool:
+    try:
+        with open(_note_seen_path(), encoding="utf-8") as fh:
+            return real in json.load(fh)
+    except Exception:
+        return False
+
+
+def mark_ping_note_seen(real: str) -> None:
+    try:
+        try:
+            with open(_note_seen_path(), encoding="utf-8") as fh:
+                seen = json.load(fh)
+        except Exception:
+            seen = []
+        if real not in seen:
+            ensure_state_dir(state_dir())
+            _write_atomic(_note_seen_path(), (json.dumps([*seen, real]) + "\n").encode("utf-8"), mode=0o600)
+    except Exception:
+        pass
+
+
 def ping_header_state(data: dict) -> str:
     """Where one settings file stands on the ping header: "not-ours" (no routing record of ours),
-    "opted-out", "present" or "missing". Only "missing" is healed."""
+    "opted-out" (--no-ping-header), "removed" (we added the line and the user took it out), "present",
+    "user-off" (the user's own x-context-guru-ping line is not 1) or "missing". Only "missing" can be healed."""
     env = data.get("env")
     meta = data.get(META)
     if not isinstance(env, dict) or not isinstance(meta, dict):
@@ -3072,19 +3130,31 @@ def ping_header_state(data: dict) -> str:
         return "not-ours"
     if meta.get(PING_OPT_OUT_META) is True:
         return "opted-out"
-    if any(_ping_line(ln) for ln in str(env.get(HEADERS_KEY, "")).split("\n")):
-        return "present"
+    lines = [ln.strip() for ln in str(env.get(HEADERS_KEY, "")).replace("\r", "").split("\n") if _ping_line(ln)]
+    if lines:
+        return "present" if any(ln == PING_HEADER for ln in lines) else "user-off"
+    if meta.get(PING_HEADER_META) == PING_HEADER:
+        return "removed"
     return "missing"
 
 
-def cmd_ensure_ping_header(args: argparse.Namespace) -> int:
-    """SessionStart step: add the ping header to the settings file that holds OUR routing when an install
-    from before the header existed left it out (#685). Without it the proxy never holds a request for a
-    manual ping, and a restart cannot change that.
+PING_CONSENT = ("Ping enabled for this install; it works from your next session. The Context Guru server keeps your "
+                "latest request and key in memory so the Ping button and /context-guru:ping can work: for 5 minutes "
+                "after your last request on a 5-minute cache, and for up to 59 minutes on a 1-hour cache. It never "
+                "pings automatically for it, and drops the copy at that time. A press never extends it. To opt out, "
+                "re-run the install with --no-ping-header.")
+PING_OFF_NOTE = "Ping is off for this install. Run /context-guru:install to turn it on."
 
-    Heals only a file with our routing record (`installed_base_url` equal to the routed URL). Skips an
-    install made with --no-ping-header and any file that is not ours. Adds our one line and records it, so
-    uninstall removes exactly that line. With --check it only reports. Never fails: exit code is 0.
+
+def cmd_ensure_ping_header(args: argparse.Namespace) -> int:
+    """SessionStart step (#685): an install from before the header existed never got
+    `x-context-guru-ping: 1`, so the Ping button cannot work and a restart cannot change that.
+
+    The header makes the server keep the latest request and key in memory, so it is never written without
+    consent. It is written only for a file with our routing record AND an install-scope row older than
+    --no-ping-header (so no opt-out can exist). Any other install without a record gets `note=1` once and
+    no write. An opt-out, a line the user removed and a ping line the user set are left alone. Never fails:
+    exit code is 0. With --check it only reports.
     """
     base = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
     files = [args.file] if args.file else [
@@ -3100,8 +3170,9 @@ def cmd_ensure_ping_header(args: argparse.Namespace) -> int:
                     files.append(row["file"])
         except Exception:
             pass
+    rank = {"not-ours": 0, "opted-out": 1, "removed": 1, "user-off": 2, "present": 2, "missing": 3, "healed": 4}
     seen: set = set()
-    state, where = "not-ours", ""
+    state, where, notify = "not-ours", "", False
     for path in files:
         real = os.path.realpath(path)
         if real in seen or not os.path.isfile(real):
@@ -3116,14 +3187,22 @@ def cmd_ensure_ping_header(args: argparse.Namespace) -> int:
             if st == "not-ours":
                 continue
             if st == "missing" and not args.check:
-                if add_ping_header(data["env"], data[META]):
-                    save(real, data)
-                    st = "healed"
-            if state in ("not-ours", "present", "opted-out") or st in ("missing", "healed"):
+                if predates_ping_flag(real):
+                    if add_ping_header(data["env"], data[META]):
+                        save(real, data)
+                        st = "healed"
+                elif not ping_note_seen(real):
+                    notify = True
+                    mark_ping_note_seen(real)
+            if rank[st] >= rank[state]:
                 state, where = st, real
         except Exception:
             continue
     emit(result=state, file=where)
+    if state == "healed":
+        emit(note=PING_CONSENT)
+    elif notify:
+        emit(note=PING_OFF_NOTE)
     return 0
 
 
