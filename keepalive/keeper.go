@@ -1717,6 +1717,8 @@ type SweepDropStats struct {
 	FalseDropRate       float64 `json:"false_drop_rate"`
 	ExpandEvents        int64   `json:"expand_events"`
 	ExpandTokens        int64   `json:"expand_tokens"`
+	// ApplyPanics counts recovered cold-apply panics; HeldStaleWrites older answers refused.
+	ApplyPanics int64 `json:"apply_panics"`
 	// Threads are the busiest threads by drops applied, most first.
 	Threads []SweepDropThread `json:"threads,omitempty"`
 }
@@ -1740,7 +1742,8 @@ func sweepDropStats() *SweepDropStats {
 	out := &SweepDropStats{Applied: o.Applied, AppliedCold: o.AppliedCold,
 		AppliedChangedPrefx: o.AppliedChangedPrefix, ApplyDeclined: o.ApplyDeclined,
 		Referenced: o.Referenced, Expanded: o.Expanded, FalseDrops: o.FalseDrops(),
-		FalseDropRate: o.FalseDropRate(), ExpandEvents: o.ExpandEvents, ExpandTokens: o.ExpandTokens}
+		FalseDropRate: o.FalseDropRate(), ExpandEvents: o.ExpandEvents, ExpandTokens: o.ExpandTokens,
+		ApplyPanics: offload.SweepApplyPanics()}
 	for _, t := range d.Threads {
 		out.Threads = append(out.Threads, SweepDropThread{Thread: t.Label, Applied: t.Applied,
 			FalseDrops: t.FalseDrops(), FalseDropRate: t.FalseDropRate()})

@@ -318,3 +318,48 @@ func TestTheAnswerCostIsNotSubtractedFromTheCreditAgain(t *testing.T) {
 		t.Errorf("the answer cost is not carried in its own column: %v", row.SweepAnswerUSD)
 	}
 }
+
+// L1 and C2 read these numbers on the merged main. The ledger must carry the net saving (credit minus the
+// expand charge minus the answer cost, all from stored provider usage), and the cache tiers of each cold
+// apply request and of the next warm request of the same thread.
+func TestTheLedgerCarriesTheNetSavingAndTheColdApplyCacheNumbers(t *testing.T) {
+	db := openTestDB(t)
+	cold := sweepEvent(1, "s", CacheTTLExpiry, 62_965, 300_000, 50, 10_000, 10_000)
+	cold.Components[0].Events = map[string]int{"sweep_applied_cold": 4}
+	warm := sweepEvent(2, "s", CacheHit, 360_000, 200, 50, 10_000, 0)
+	other := sweepEvent(3, "other", CacheHit, 1, 1, 1, 0, 0)
+	other.Components = nil
+	ping := &Event{TS: 0, TenantID: "t", SessionID: "s", Model: "claude-sonnet-5", KeepAlive: true, Status: 200,
+		FreshInput: 600, CacheRead: 80_000, OutputTokens: 7_000}
+	ping.Price(sweepPrice, true)
+	ping.SweepAnswerUSD = sweepPrice.CostWithCacheWrite1h(600, 0, 0, 7_000, 0)
+	if err := db.insertBatch([]*Event{ping, cold, warm, other}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := db.SweepLedgerFor(context.Background(), Filter{TenantAll: true}, staticPricer{sweepPrice})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCredit := cold.Components[0].SavedUSD + warm.Components[0].SavedUSD
+	if !approx(l.CreditUSD, wantCredit) || !approx(l.NetUSD, wantCredit-l.ExpandChargeUSD-ping.SweepAnswerUSD) {
+		t.Errorf("credit %v net %v, want credit %v and net = credit - expand charge - answer %v",
+			l.CreditUSD, l.NetUSD, wantCredit, ping.SweepAnswerUSD)
+	}
+	if l.ColdApplyRequests != 1 || l.ColdReadTokens != 62_965 || l.ColdWriteTokens != 300_000 {
+		t.Errorf("cold apply tiers = %d requests %d read %d write", l.ColdApplyRequests, l.ColdReadTokens, l.ColdWriteTokens)
+	}
+	if l.NextWarmRequests != 1 || l.NextWarmReadTokens != 360_000 {
+		t.Errorf("next warm = %d requests %d read, want 1 and 360000", l.NextWarmRequests, l.NextWarmReadTokens)
+	}
+}
+
+func TestTheSweepRowCarriesTheL1AndC2Numbers(t *testing.T) {
+	l := &SweepLedger{Applied: 4, NetUSD: 0.12, ColdApplyRequests: 2, ColdReadTokens: 100, ColdWriteTokens: 200,
+		NextWarmRequests: 2, NextWarmReadTokens: 900}
+	row := &ComponentRow{Component: SweepComponent}
+	ApplySweepLedgerToRow(row, l)
+	if row.SweepNetUSD != 0.12 || row.SweepColdApplyRequests != 2 || row.SweepColdApplyCacheRead != 100 ||
+		row.SweepColdApplyCacheWrite != 200 || row.SweepNextWarmRequests != 2 || row.SweepNextWarmCacheRead != 900 {
+		t.Errorf("row = %+v", row)
+	}
+}

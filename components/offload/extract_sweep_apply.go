@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -401,7 +402,31 @@ func changePoint(raw []bschemas.ChatMessage, h heldAnswer) int {
 // sweepColdRequest is the one test for "the cache is gone": apply's own verdict (Ctx.ColdCache), which
 // carries a clock margin. Shadow mode and the apply use it alike, so shadow reports what the apply
 // would do. CachePhase(0) also calls the minute before the margin cold, which is the wrong error here.
-func sweepColdRequest(c *components.Ctx) bool { return c != nil && c.ColdCache }
+//
+// It is the SAME test the summary reserve graduates on (ColdApplyPhase, #688): cold, or unknown. One
+// narrowing for the sweep: an unknown phase on a request that still has a known cached prefix
+// (CacheAware with MaxCachedIdx >= 0) is NOT cold. Unknown there means "cannot say how much life is
+// left", not "gone", and a drop would rewrite a live prefix. The summary never removes content from
+// inside the prefix, so it can afford the wider test.
+func sweepColdRequest(c *components.Ctx) bool {
+	if c == nil {
+		return false
+	}
+	p := c.CachePhase(0)
+	if !ColdApplyPhase(p) {
+		return false
+	}
+	return !(p == components.CachePhaseUnknown && c.CacheAware && c.MaxCachedIdx >= 0)
+}
+
+// maxApplyAttempts bounds how often a panicking cold apply gives the answer back.
+const maxApplyAttempts = 2
+
+// sweepApplyPanics counts recovered panics in the cold apply (also an event on the request's Report).
+var sweepApplyPanics atomic.Int64
+
+// SweepApplyPanics is the process-wide count of recovered cold-apply panics.
+func SweepApplyPanics() int64 { return sweepApplyPanics.Load() }
 
 // coldStep runs at the top of every request of the sweep, outside shadow mode. It replays earlier
 // drops, scans for references to them, and applies a held answer when the request is cold or its
@@ -543,6 +568,9 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 	if !ok {
 		return nil, 0
 	}
+	if h.Attempts >= maxApplyAttempts {
+		return nil, 0
+	}
 	raw := req.Input
 	if c.RawInput != nil {
 		raw = c.RawInput
@@ -560,7 +588,19 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 		kind = "changed_prefix"
 	}
 
-	// Fail open. A panic restores every message touched and writes no record.
+	// CLAIM FIRST: two cold requests of one thread must not both apply. claimHeldSpend marks the answer
+	// spent for exactly one caller and hands back what it read.
+	claimed, won := claimHeldSpend(c.Store, tkey)
+	if !won {
+		return nil, 0
+	}
+	h = claimed
+
+	// Fail open. A panic restores every message touched, writes no record, counts the panic, and GIVES
+	// THE ANSWER BACK (RETRIABLE) so the drops are not lost silently. The next cold request tries again,
+	// at most maxApplyAttempts times in all: a cold apply that panics costs one request its saving and
+	// nothing else, while a poisoned answer that panicked on every cold request would cost a recheck each
+	// time for nothing, hence the bound.
 	var pending []pendingDrop
 	defer func() {
 		if r := recover(); r != nil {
@@ -569,6 +609,16 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 			}
 			keys, changed = nil, 0
 			rep.Event(eventApplyPanic)
+			sweepApplyPanics.Add(1)
+			func() {
+				defer func() { _ = recover() }() // the Store may be what panicked
+				back := h
+				back.Attempts++
+				if back.Attempts < maxApplyAttempts {
+					back.Spent = false
+					putHeld(c.Store, back)
+				}
+			}()
 			slog.Error("cg.sweep.apply_panic: recovered; the request is forwarded unchanged",
 				"session", c.Session, "thread", c.Thread, "panic", fmt.Sprint(r))
 		}
@@ -660,9 +710,7 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 
 	// The held answer: spent on a cold request, trimmed to the drops before the change point
 	// otherwise. What is kept is judged against the intact prefix only.
-	if cold || len(later) == 0 {
-		spendHeld(c.Store, h)
-	} else {
+	if !(cold || len(later) == 0) {
 		h.Outputs = later
 		h.Judged = cp
 		if cp < len(h.Prints) {

@@ -985,7 +985,7 @@ func TestAConcurrencyRefusalIsCounted(t *testing.T) {
 // Review round 1, non-blocking: the shadow report happens once per held answer even when two requests
 // of the thread arrive together.
 func TestTheShadowAskIsReportedOnceUnderConcurrentRequests(t *testing.T) {
-	e := shippedSweep(t, "")
+	e := shippedSweep(t, "shadow: true\n")
 	st := newMemStore()
 	key, _ := registered(t, e, "report-once", pingAsker(), st, deepCandidates(3))
 	dispatch, _, _, _ := SweepPingSubstitute(key)
@@ -1031,7 +1031,7 @@ func (s *slowGetStore) Get(k string) ([]byte, bool) {
 // The cold recheck is reported once too: two cold requests of one thread arriving together do not both
 // report it. The claim that consumes the answer is atomic.
 func TestTheColdRecheckIsReportedOnceUnderConcurrentRequests(t *testing.T) {
-	e := shippedSweep(t, "")
+	e := shippedSweep(t, "shadow: true\n")
 	st := newMemStore()
 	key, _ := registered(t, e, "recheck-once", pingAsker(), st, deepCandidates(3))
 	dispatch, _, _, _ := SweepPingSubstitute(key)

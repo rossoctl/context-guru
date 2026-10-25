@@ -509,6 +509,7 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	case sweepSlots <- struct{}{}:
 		defer func() { <-sweepSlots }()
 	default:
+		sweepPingConcurrency.Add(1) // sweep_concurrency_full, not sweep_ask_failed
 		return SweepPingResult{Reason: SweepReasonConcurrencyFull}
 	}
 	if !cand.asked.CompareAndSwap(false, true) {

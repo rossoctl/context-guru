@@ -63,6 +63,23 @@ type SweepLedger struct {
 	AnswerUSD float64 `json:"answer_usd"`
 	// Questions is how many ping rows carry an answer cost.
 	Questions int64 `json:"questions"`
+	// CreditUSD is the sweep's stored saving over the window, before the expand charge. NetUSD is what L1
+	// asks for: that credit, minus the expand charge, minus the answer cost, in dollars from the
+	// provider's own usage (the credit is priced from each row's billed tiers, the answer from the ping
+	// row's billed output). Both are filled by SweepLedgerFor so /stats-style readers need no second query.
+	CreditUSD float64 `json:"credit_usd"`
+	NetUSD    float64 `json:"net_usd"`
+	// Cold-apply request cache usage (C2): over requests where the sweep applied on a cold request, the
+	// cache read, cache write and fresh input the provider billed. A cold request should read the same
+	// cached part as with the sweep off (the system prompt and tools) and write the smaller prefix; the
+	// NEXT warm request should read the whole new prefix. ColdReadTokens/ColdWriteTokens are the first,
+	// NextWarmReadTokens the second (the first warm request after each such cold request, same thread).
+	ColdApplyRequests   int64 `json:"cold_apply_requests"`
+	ColdReadTokens      int64 `json:"cold_apply_cache_read"`
+	ColdWriteTokens     int64 `json:"cold_apply_cache_write"`
+	NextWarmRequests    int64 `json:"next_warm_requests"`
+	NextWarmReadTokens  int64 `json:"next_warm_cache_read"`
+	NextWarmWriteTokens int64 `json:"next_warm_cache_write"`
 	// Threads: the busiest threads by drops applied, at most 20. Labels are hashes.
 	Threads []SweepThread `json:"threads,omitempty"`
 }
@@ -176,6 +193,17 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 	}
 	out.AnswerUSD, out.Questions = usd, n
 
+	// The credit, from the component rows, and the cold-apply cache numbers (C2).
+	cq := `SELECT COALESCE(SUM(c.saved_usd), 0) FROM requests r JOIN request_components c
+		ON c.request_id = r.id AND c.component = '` + SweepComponent + `' WHERE ` + cond
+	if err := d.sql.QueryRowContext(ctx, cq, args...).Scan(&out.CreditUSD); err != nil {
+		return nil, err
+	}
+	out.NetUSD = out.CreditUSD - out.ExpandChargeUSD - out.AnswerUSD
+	if err := d.coldApplyCache(ctx, cond, args, out); err != nil {
+		return nil, err
+	}
+
 	// Threads, busiest first, under a hash label.
 	for k, t := range threads {
 		if t.Applied == 0 && t.FalseDrops == 0 {
@@ -221,7 +249,56 @@ func ApplySweepLedgerToRow(c *ComponentRow, l *SweepLedger) {
 	c.SweepApplied, c.SweepFalseDrops, c.SweepFalseDropRate = l.Applied, l.FalseDrops, l.FalseDropRate
 	c.SweepExpands, c.SweepExpandTokens = l.Expands, l.ExpandTokens
 	c.SweepExpandChargeUSD, c.SweepAnswerUSD = l.ExpandChargeUSD, l.AnswerUSD
+	c.SweepNetUSD = l.NetUSD
+	c.SweepColdApplyRequests, c.SweepColdApplyCacheRead, c.SweepColdApplyCacheWrite =
+		l.ColdApplyRequests, l.ColdReadTokens, l.ColdWriteTokens
+	c.SweepNextWarmRequests, c.SweepNextWarmCacheRead = l.NextWarmRequests, l.NextWarmReadTokens
 	c.SavedUSD -= l.ExpandChargeUSD
 	c.NetUSD -= l.ExpandChargeUSD
 	c.NetUSDWithEstimate -= l.ExpandChargeUSD
+}
+
+// coldApplyCache fills the C2 numbers: for each request on which the sweep applied on a cold request, the
+// provider's cache tiers; and, for the first later request of the same thread that was not itself a cold
+// apply, its tiers too. Read from the stored integers only.
+func (d *DB) coldApplyCache(ctx context.Context, cond string, args []any, out *SweepLedger) error {
+	const ev = `CASE WHEN c.events LIKE '{%' THEN COALESCE(json_extract(c.events, '$.sweep_applied_cold'), 0) ELSE 0 END`
+	rows, err := d.sql.QueryContext(ctx, `SELECT r.id, r.tenant_id, r.session_id, r.thread_id, r.ts, r.cache_read, r.cache_write
+		FROM requests r JOIN request_components c ON c.request_id = r.id AND c.component = '`+SweepComponent+`'
+		WHERE `+cond+` AND `+ev+` > 0 ORDER BY r.ts`, args...)
+	if err != nil {
+		return err
+	}
+	type cold struct {
+		id, ts, read, write int64
+		tenant, sess, th    string
+	}
+	var colds []cold
+	for rows.Next() {
+		var c cold
+		if err := rows.Scan(&c.id, &c.tenant, &c.sess, &c.th, &c.ts, &c.read, &c.write); err != nil {
+			rows.Close()
+			return err
+		}
+		colds = append(colds, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, c := range colds {
+		out.ColdApplyRequests++
+		out.ColdReadTokens += c.read
+		out.ColdWriteTokens += c.write
+		var read, write int64
+		err := d.sql.QueryRowContext(ctx, `SELECT cache_read, cache_write FROM requests
+			WHERE tenant_id = ? AND session_id = ? AND thread_id = ? AND keepalive = 0 AND id > ? AND cache_read > 0
+			ORDER BY id LIMIT 1`, c.tenant, c.sess, c.th, c.id).Scan(&read, &write)
+		if err == nil {
+			out.NextWarmRequests++
+			out.NextWarmReadTokens += read
+			out.NextWarmWriteTokens += write
+		}
+	}
+	return nil
 }

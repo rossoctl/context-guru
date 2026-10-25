@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -608,5 +609,203 @@ func TestAnExtractLLMRecordIsNotTheSweepsDrop(t *testing.T) {
 		if schema.MessageText(next.Input[i]) != w {
 			t.Fatalf("the sweep replayed another component's cg:res: record onto message %d", i)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------------
+// putHeld (#508 review, required before any code reads a held answer to change a request).
+
+// slowStore sleeps after every Get and every Put, so a read-check-write that is not serialised is
+// interleaved with another every time and not by luck.
+type slowStore struct{ store.Store }
+
+func (s *slowStore) Get(k string) ([]byte, bool) {
+	b, ok := s.Store.Get(k)
+	time.Sleep(4 * time.Millisecond)
+	return b, ok
+}
+
+func (s *slowStore) Put(k string, p []byte) {
+	time.Sleep(4 * time.Millisecond)
+	s.Store.Put(k, p)
+}
+
+func heldAt(key string, at int64, n int) heldAnswer {
+	h := heldAnswer{Thread: key, AskedAtMs: at, Judged: 4}
+	for i := 0; i < n; i++ {
+		h.Outputs = append(h.Outputs, heldOutput{ToolUseID: fmt.Sprintf("t%d", i), Hash: "h", Drop: true, Saves: 10})
+	}
+	return h
+}
+
+// A claim that read the OLD answer must not overwrite a NEW answer a concurrent ask just wrote.
+func TestAClaimNeverOverwritesANewerAnswer(t *testing.T) {
+	for _, claim := range []string{"report", "spend"} {
+		t.Run(claim, func(t *testing.T) {
+			st := &slowStore{Store: newMemStore()}
+			putHeld(st, heldAt("th", 100, 2))
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				if claim == "report" {
+					claimHeldReport(st, "th")
+				} else {
+					claimHeldSpend(st, "th")
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				time.Sleep(2 * time.Millisecond) // lands while the claim is between its read and its write
+				putHeld(st, heldAt("th", 200, 3))
+			}()
+			wg.Wait()
+			h, ok := getHeld(st.Store, "th")
+			if !ok || h.AskedAtMs != 200 || len(h.Outputs) != 3 {
+				t.Fatalf("the newer answer was lost: ok=%v %+v", ok, h)
+			}
+		})
+	}
+}
+
+// Two asks of one thread landing out of order: the older never replaces the newer.
+func TestAnOlderAnswerNeverReplacesANewerOne(t *testing.T) {
+	st := newMemStore()
+	putHeld(st, heldAt("th", 200, 3))
+	putHeld(st, heldAt("th", 100, 1))
+	h, ok := getHeld(st, "th")
+	if !ok || h.AskedAtMs != 200 || len(h.Outputs) != 3 {
+		t.Fatalf("an older answer replaced a newer one: ok=%v %+v", ok, h)
+	}
+	// Equal or newer is written, including the tombstone a claim writes (same AskedAtMs).
+	if _, won := claimHeldSpend(st, "th"); !won {
+		t.Fatal("the claim could not spend the answer")
+	}
+	if _, ok := getHeld(st, "th"); ok {
+		t.Fatal("the spent tombstone was refused as stale")
+	}
+	putHeld(st, heldAt("th", 300, 2))
+	if h, ok := getHeld(st, "th"); !ok || h.AskedAtMs != 300 {
+		t.Fatalf("a newer ask after a spend was refused: %+v", h)
+	}
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The summary and the sweep on one cold request (#404 point 10 follow-up).
+
+// A cold request on which cache_aware_summarizer has replaced a span with its summary (it runs FIRST in
+// xhigh, so the sweep sees its output) and the sweep applies. Rule: the sweep never touches what the
+// summary replaced. It finds a held output by tool id in the request it is given, so an output inside the
+// summarized span is simply absent and is skipped; the rest are dropped. Nothing is double-counted, no
+// record is written for the skipped output, and every marker that does go out expands.
+func TestTheSummaryAndTheSweepOnOneColdRequest(t *testing.T) {
+	e, st, key := heldApply(t, "both", 4)
+	agent := applyConv(4, 2)
+	// The pipeline's copy: the summarizer replaced messages 1-2 (the first output and its neighbour)
+	// with ONE summary message, so the count changed and every index moved.
+	piped := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage{agent.Input[0],
+		userMsg("[summary of the first two exchanges]")}, agent.Input[3:]...)}
+	if len(piped.Input) == len(agent.Input) {
+		t.Fatal("fixture: the count did not change")
+	}
+	orig := texts(piped)
+	c := coldCtx("both", st)
+	c.RawInput = agent.Input
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	keys, err := e.Offload(piped, rep, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Events[eventAppliedCold] != 2 || len(keys) != 2 {
+		t.Fatalf("events = %v keys = %d, want the 2 outputs outside the summarized span dropped", rep.Events, len(keys))
+	}
+	if schema.MessageText(piped.Input[1]) != orig[1] {
+		t.Error("the sweep changed the summary message")
+	}
+	for i := 2; i < len(piped.Input); i++ {
+		now := schema.MessageText(piped.Input[i])
+		if piped.Input[i].Role != bschemas.ChatMessageRoleTool || now == orig[i] {
+			continue
+		}
+		id := firstMarkerID(t, now)
+		if got, ok := expand.Resolve(st, id); !ok || got != orig[i] {
+			t.Errorf("message %d: the marker does not expand to the original", i)
+		}
+	}
+	for _, i := range []int{1, 2} { // the two outputs the summary replaced
+		if _, ok := getDrop(st, key, contentKey(schema.MessageText(agent.Input[i]))); ok {
+			t.Errorf("a drop record was written for output %d, which the summary had replaced", i)
+		}
+	}
+	if q := SweepDropCounters().Overall; q.Applied != 2 {
+		t.Errorf("ledger counts %d applied, want 2 (the summarized output is not double-counted)", q.Applied)
+	}
+	if _, ok := getHeld(st, key); ok {
+		t.Error("the answer is still held after the cold apply")
+	}
+}
+
+// A panic in the recheck on a cold apply forwards the request unchanged, is counted, and hands the answer
+// back ONCE so the drops are not lost silently; a second panic leaves it spent.
+func TestAColdApplyPanicIsCountedAndRetriedOnce(t *testing.T) {
+	e, st, key := heldApply(t, "retry", 3)
+	before := SweepApplyPanics()
+	ps := &getPanicStore{Store: st, key: "cg:keep:"}
+	for attempt := 1; attempt <= 3; attempt++ {
+		req := applyConv(3, 1)
+		want := texts(req)
+		rep := &components.Report{Component: "extract_llm_sweep"}
+		if _, err := e.Offload(req, rep, coldCtx("retry", ps)); err != nil {
+			t.Fatal(err)
+		}
+		for i, w := range want {
+			if schema.MessageText(req.Input[i]) != w {
+				t.Fatalf("attempt %d: message %d changed after a panic", attempt, i)
+			}
+		}
+		_, held := getHeld(st, key)
+		switch attempt {
+		case 1:
+			if rep.Events[eventApplyPanic] != 1 || !held {
+				t.Fatalf("attempt 1: panic events %v, held=%v; want counted and handed back", rep.Events, held)
+			}
+		case 2:
+			if rep.Events[eventApplyPanic] != 1 || held {
+				t.Fatalf("attempt 2: panic events %v, held=%v; want counted and now left spent", rep.Events, held)
+			}
+		case 3:
+			if rep.Events[eventApplyPanic] != 0 {
+				t.Fatalf("attempt 3 ran the apply on a spent answer: %v", rep.Events)
+			}
+		}
+	}
+	if got := SweepApplyPanics() - before; got != 2 {
+		t.Errorf("process panic counter rose by %d, want 2", got)
+	}
+}
+
+// The ask-level slot refusal is sweep_concurrency_full, not a failed ask.
+func TestAFullAskSlotCountsAsConcurrencyFull(t *testing.T) {
+	e := shippedSweep(t, "")
+	key, _ := registered(t, e, "slot-full", pingAsker(), newMemStore(), deepCandidates(2))
+	dispatch, _, _, ok := SweepPingSubstitute(key)
+	if !ok {
+		t.Fatal("no question offered")
+	}
+	for i := 0; i < cap(sweepSlots); i++ {
+		sweepSlots <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap(sweepSlots); i++ {
+			<-sweepSlots
+		}
+	}()
+	before := SweepPingCounters().ConcurrencyFull
+	res := dispatch(time.Second, SweepPingWait{})
+	if res.Reason != SweepReasonConcurrencyFull || res.Substituted {
+		t.Fatalf("result = %+v, want a concurrency_full refusal", res)
+	}
+	if SweepPingCounters().ConcurrencyFull-before != 1 {
+		t.Error("the refusal was not counted as sweep_concurrency_full")
 	}
 }

@@ -493,7 +493,8 @@ func TestAClaimedPingFreesTheThreadAndTheSlotOnEveryExit(t *testing.T) {
 	asker := &sweepAsker{cacheRead: 48576}
 	small := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&small, "hello")
-	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small, sweepToolMsg("toolu_s", "tiny")})
+	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small,
+		sweepToolMsg("toolu_s", strings.Repeat("a spent line\n", 900)+expand.Marker("abcdef0"))})
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second)) // declines: no inventory, ordinary ping
 	waitPings(t, k, 1)

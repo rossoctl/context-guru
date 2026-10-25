@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
@@ -78,6 +79,9 @@ type heldAnswer struct {
 	// Reported is set once a request has reported the ask in shadow mode, so two requests do not
 	// count one question twice.
 	Reported bool `json:"reported,omitempty"`
+	// Attempts counts cold applies that panicked and gave the answer back. After maxApplyAttempts it stays
+	// spent: a poisoned answer must not panic on every cold request.
+	Attempts int `json:"attempts,omitempty"`
 	// Spent marks a consumed answer. store.Store has no Delete, so a consumed record is overwritten
 	// with a tombstone and reads as absent.
 	Spent bool `json:"spent,omitempty"`
@@ -98,14 +102,50 @@ func heldKey(threadKey string) string { return store.SweepHeldPrefix + threadKey
 
 // putHeld writes the answer, replacing any earlier one for the thread. A newer question is about a
 // newer conversation, so it supersedes the older answer rather than merging with it.
+//
+// It takes heldMu, and it NEVER OVERWRITES A NEWER ANSWER WITH AN OLDER ONE (#508 review, #404 PR C).
+// store.Store has no compare-and-set, so without both a claim that read the old answer could overwrite a
+// new answer a concurrent ask had just written, and two asks of one thread could land out of order. A
+// tombstone (Spent) carries the AskedAtMs of the answer it replaced, so spending, reporting and a fresh
+// ask all pass: equal or newer is written, strictly older is refused.
 func putHeld(st store.Store, h heldAnswer) {
+	heldMu.Lock()
+	defer heldMu.Unlock()
+	putHeldLocked(st, h)
+}
+
+// putHeldLocked is putHeld for a caller that already holds heldMu (the claims).
+func putHeldLocked(st store.Store, h heldAnswer) bool {
 	if st == nil || h.Thread == "" {
-		return
+		return false
+	}
+	if cur, ok := readHeldRaw(st, h.Thread); ok && cur.AskedAtMs > h.AskedAtMs {
+		sweepHeldStaleWrites.Add(1)
+		return false
 	}
 	h.V = heldVersion
-	if b, err := json.Marshal(h); err == nil {
-		st.Put(heldKey(h.Thread), b)
+	b, err := json.Marshal(h)
+	if err != nil {
+		return false
 	}
+	st.Put(heldKey(h.Thread), b)
+	return true
+}
+
+// sweepHeldStaleWrites counts held-answer writes refused because a newer answer was already stored.
+var sweepHeldStaleWrites atomic.Int64
+
+// readHeldRaw reads the stored record, spent or not, for the staleness test only.
+func readHeldRaw(st store.Store, threadKey string) (heldAnswer, bool) {
+	b, ok := st.Get(heldKey(threadKey))
+	if !ok || len(b) == 0 {
+		return heldAnswer{}, false
+	}
+	var h heldAnswer
+	if json.Unmarshal(b, &h) != nil || h.V != heldVersion {
+		return heldAnswer{}, false
+	}
+	return h, true
 }
 
 // getHeld reads a thread's held answer. A missing, unreadable, consumed or other-version record is
@@ -138,7 +178,7 @@ func claimHeldSpend(st store.Store, threadKey string) (heldAnswer, bool) {
 	spent := h
 	spent.Spent = true
 	spent.Outputs = nil
-	putHeld(st, spent)
+	putHeldLocked(st, spent)
 	return h, true
 }
 
@@ -160,7 +200,7 @@ func claimHeldReport(st store.Store, threadKey string) (heldAnswer, bool) {
 		return h, false
 	}
 	h.Reported = true
-	putHeld(st, h)
+	putHeldLocked(st, h)
 	return h, true
 }
 

@@ -368,7 +368,10 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 	res := dispatch(offload.CacheAwareSummarizerCallTimeout(), k.sweepWaitCause(j))
 	ms := float64(k.now().Sub(start).Microseconds()) / 1000.0
 	if !res.Substituted {
-		k.sweepAskFailed.Add(1)
+		// A full slot is counted by the offload side as sweep_concurrency_full. It is not a failed ask.
+		if res.Reason != offload.SweepReasonConcurrencyFull {
+			k.sweepAskFailed.Add(1)
+		}
 		slog.Debug("context-guru: sweep keep-alive question did not use the cache; pinging normally instead",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "reason", string(res.Reason))
 		return false

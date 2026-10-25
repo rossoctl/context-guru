@@ -837,6 +837,14 @@ type ComponentRow struct {
 	SweepExpandTokens    int64   `json:"sweep_expand_tokens,omitempty"`
 	SweepExpandChargeUSD float64 `json:"sweep_expand_charge_usd,omitempty"`
 	SweepAnswerUSD       float64 `json:"sweep_answer_usd,omitempty"`
+	// L1: the sweep's net saving by the provider's usage (credit - expand charge - answer cost). C2: the
+	// provider's cache tiers on the cold-apply requests, and on the first warm request after each.
+	SweepNetUSD              float64 `json:"sweep_net_usd,omitempty"`
+	SweepColdApplyRequests   int64   `json:"sweep_cold_apply_requests,omitempty"`
+	SweepColdApplyCacheRead  int64   `json:"sweep_cold_apply_cache_read,omitempty"`
+	SweepColdApplyCacheWrite int64   `json:"sweep_cold_apply_cache_write,omitempty"`
+	SweepNextWarmRequests    int64   `json:"sweep_next_warm_requests,omitempty"`
+	SweepNextWarmCacheRead   int64   `json:"sweep_next_warm_cache_read,omitempty"`
 	// ReplayCreditPastCapUSD is stored credit the replay ledger took out of SavedUSD: turns after
 	// the counterfactual (or a real) client compaction. Set on the capped components' rows.
 	ReplayCreditPastCapUSD float64 `json:"replay_credit_past_cap_usd,omitempty"`
