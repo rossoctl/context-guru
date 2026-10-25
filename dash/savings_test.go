@@ -128,3 +128,75 @@ func TestSavingsTotalsEmptyIsZeroNotError(t *testing.T) {
 		t.Errorf("no matching rows: %+v, want all zero", s)
 	}
 }
+
+// TestSavingsTotalsStopsThePingSavingAtTheWindowStart pins the two halves of the keep-alive
+// net to one span: the ping COST is summed inside the filter's window, so the SAVING must stop
+// at the window start too. A ping just before `since` that kept a row just after it warm used to
+// bring a saving in with no cost beside it, and the net at the window edge read too high (#678).
+func TestSavingsTotalsStopsThePingSavingAtTheWindowStart(t *testing.T) {
+	db := openTestDB(t)
+	const m = int64(60_000)
+	t0 := int64(1_700_000_000_000)
+	if err := db.insertBatch([]*Event{
+		kaPing(t0+4*m, "early", 0.002, 50_000, 0), // before the window
+		kaCredit(t0+8*m, "early", 0.05),
+		kaPing(t0+7*m, "late", 0.003, 50_000, 0), // inside it
+		kaCredit(t0+9*m, "late", 0.03),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := db.SavingsTotals(Filter{TenantAll: true, Since: t0 + 5*m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(s.KeepAliveSavedUSD-0.03) > 1e-9 {
+		t.Errorf("keepalive_saved_usd = %v, want 0.03 — the early ping's cost is outside the "+
+			"window, so its credit must be too (0.08 is the unbounded look-back)", s.KeepAliveSavedUSD)
+	}
+	if math.Abs(s.KeepAlivePingUSD-0.003) > 1e-9 {
+		t.Errorf("keepalive_ping_usd = %v, want 0.003 (the in-window ping only)", s.KeepAlivePingUSD)
+	}
+	if math.Abs(s.KeepAliveNetUSD-(0.03-0.003)) > 1e-9 {
+		t.Errorf("keepalive_net_usd = %v, want 0.027", s.KeepAliveNetUSD)
+	}
+}
+
+// TestOverviewStopsThePingSavingAtTheWindowStart pins Overview to the same span: its ping
+// COST half is summed inside the window, so its SAVING half must stop at the window start
+// too (#678). SavingsTotals' own doc promises the two never disagree about what "saved"
+// means, and the unbounded look-back broke that promise at the window edge.
+func TestOverviewStopsThePingSavingAtTheWindowStart(t *testing.T) {
+	db := openTestDB(t)
+	const m = int64(60_000)
+	t0 := int64(1_700_000_000_000)
+	if err := db.insertBatch([]*Event{
+		kaPing(t0+4*m, "early", 0.002, 50_000, 0), // before the window
+		kaCredit(t0+8*m, "early", 0.05),
+		kaPing(t0+7*m, "late", 0.003, 50_000, 0), // inside it
+		kaCredit(t0+9*m, "late", 0.03),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f := Filter{TenantAll: true, Since: t0 + 5*m}
+	o, err := db.Overview(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(o.KeepAliveSavedUSD-0.03) > 1e-9 {
+		t.Errorf("overview keepalive_saved_usd = %v, want 0.03 — the early ping's cost is "+
+			"outside the window, so its credit must be too (0.08 is the unbounded look-back)",
+			o.KeepAliveSavedUSD)
+	}
+	if math.Abs(o.KeepAlivePingUSD-0.003) > 1e-9 {
+		t.Errorf("overview keepalive_ping_usd = %v, want 0.003 (the in-window ping only)",
+			o.KeepAlivePingUSD)
+	}
+	s, err := db.SavingsTotals(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(o.KeepAliveSavedUSD-s.KeepAliveSavedUSD) > 1e-9 {
+		t.Errorf("overview keepalive_saved_usd = %v, SavingsTotals says %v — the two must "+
+			"agree on the same window", o.KeepAliveSavedUSD, s.KeepAliveSavedUSD)
+	}
+}
