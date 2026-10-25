@@ -1066,19 +1066,19 @@ func TestTheColdRecheckIsReportedOnceUnderConcurrentRequests(t *testing.T) {
 	}
 }
 
-// #721: a correct prefix question writes its own appended blocks (6 to 20 tokens measured). The
-// gate refuses a write only when it is larger than what the question appended.
-func TestThePingGateAllowsTheQuestionsOwnWriteAndRefusesARebuild(t *testing.T) {
+// #721: the sweep judges the question by what it READ against the last turn's read, not by its write.
+func TestThePingGateJudgesTheReadAgainstTheLastTurn(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		read, write int
-		held        bool
-		gate        string
+		name              string
+		read, write, turn int
+		held              bool
+		gate              string
 	}{
-		{"write equal to the appended blocks", 25588, 20, true, ""},
-		{"a few tokens written", 25588, 6, true, ""},
-		{"the whole conversation rebuilt", 13446, 12142, false, "sweep_prefix_cache_write"},
-		{"read of zero", 0, 0, false, "sweep_prefix_cache_read_ZERO"},
+		{"A5: read equals the turn's, small write", 25512, 53, 25512, true, ""},
+		{"a tail write after a text turn is fine", 25516, 83, 25516, true, ""},
+		{"model switch: read far below the turn", 13440, 12000, 41886, false, "sweep_prefix_cache_read_below_turn"},
+		{"read of zero", 0, 0, 25512, false, "sweep_prefix_cache_read_ZERO"},
+		{"unknown turn read: only zero is refused", 13440, 12000, 0, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			asker := pingAsker()
@@ -1089,15 +1089,15 @@ func TestThePingGateAllowsTheQuestionsOwnWriteAndRefusesARebuild(t *testing.T) {
 			if !ok {
 				t.Fatalf("no question offered (reason %q)", reason)
 			}
-			res := dispatch(time.Second, SweepPingWait{WaitingFor: "own_tool", WaitTool: "Bash"})
+			res := dispatch(time.Second, SweepPingWait{WaitingFor: "own_tool", WaitTool: "Bash", LastTurnRead: tc.turn})
 			if res.Held != tc.held {
 				t.Fatalf("held = %v, want %v (gates %v)", res.Held, tc.held, res.Gates)
 			}
 			if tc.gate != "" && res.Gates[tc.gate] == 0 {
 				t.Errorf("gate %s not recorded (gates %v)", tc.gate, res.Gates)
 			}
-			if tc.gate != "sweep_prefix_cache_write" && res.Gates["sweep_prefix_cache_write"] != 0 {
-				t.Errorf("a write within the allowance was refused as a rebuild (gates %v)", res.Gates)
+			if tc.gate == "" && res.Gates["sweep_prefix_cache_write"] != 0 {
+				t.Errorf("a write was refused as a rebuild (gates %v)", res.Gates)
 			}
 		})
 	}

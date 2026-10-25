@@ -765,3 +765,13 @@ func sess1Entry(k *Keeper) *kaEntry {
 	}
 	return &kaEntry{}
 }
+
+// #721: the keeper hands the sweep the cache_read of the real turn that made the entry.
+func TestSweepWaitCauseCarriesTheTurnsRead(t *testing.T) {
+	k, _, _ := testKeeper(t)
+	e := &kaEntry{turnRead: 25512}
+	got := k.sweepWaitCause(pingJob{e: e})
+	if got.LastTurnRead != 25512 {
+		t.Fatalf("LastTurnRead = %d, want 25512", got.LastTurnRead)
+	}
+}

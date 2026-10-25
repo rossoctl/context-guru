@@ -77,6 +77,9 @@ const (
 // Never read to decide anything here.
 type SweepPingWait struct {
 	WaitingFor, WaitTool string
+	// LastTurnRead is the cache_read of the thread's last real turn, 0 when unknown. It is the one
+	// field here that decides something: the cache gate compares the question's read to it (#721).
+	LastTurnRead int
 }
 
 // SweepPingInfo is what a registered candidate looks like before the question is sent, for the
@@ -537,8 +540,9 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	rep := &components.Report{Component: "extract_llm_sweep", Kind: "offload"}
 	start := time.Now()
 	drop, r := e.adjudicateWith(req, &c, rep, cands, askOpts{
-		trigger:    "ping",
-		gateReason: "asked at the keep-alive ping, in place of the ping",
+		trigger:      "ping",
+		gateReason:   "asked at the keep-alive ping, in place of the ping",
+		lastTurnRead: wait.LastTurnRead,
 	})
 	ms := float64(time.Since(start).Microseconds()) / 1000.0
 	gates, events := map[string]int{}, map[string]int{}
