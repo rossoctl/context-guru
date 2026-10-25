@@ -24,16 +24,18 @@ import (
 // until THIS ping's refresh expires" (always nearly the full TTL) instead of "how close was the
 // ENTRY to expiring before this ping". See pingJob.prevStartedAt.
 //
-// Deliberately NOT Ctx.CachePhase itself: that function also handles CacheTTLMinimum and an
-// unknown idle time, neither of which arises here — a live kaEntry always knows its own idle
-// time exactly (now - prevStartedAt, never "unknown"), and the keeper holds the TTL tier the provider
-// billed for this thread (kaEntry.ttl1h, or the host's own pol.HeadTTL1h ask). A
-// narrower function is simpler and cannot drift from a case this call site never reaches.
-func cachePhaseAt(prevStartedAt, now time.Time, ttl1h bool, preExpiry time.Duration) components.CachePhase {
-	ttl := 5 * time.Minute
-	if ttl1h {
-		ttl = time.Hour
-	}
+// Deliberately NOT Ctx.CachePhase itself: that function also handles an unknown idle time, which
+// does not arise here — a live kaEntry always knows its own idle time exactly (now - prevStartedAt,
+// never "unknown"). It also handles CacheTTLMinimum, which DOES reach this function: OpenAI's
+// 30 minutes is a minimum. Ctx.CachePhase never reports PreExpiry for a minimum; this function does,
+// because the keeper knows when it pings and only asks whether that ping is close to the end.
+//
+// ttl is the entry's cache lifetime, from cacheLifetime: 30 minutes on an OpenAI thread, which an
+// earlier version of this function treated as 5, so at 28 minutes it read Cold and a pre_expiry
+// substitute never ran there (#715).
+func cachePhaseAt(prevStartedAt, now time.Time, ttl, preExpiry time.Duration) components.CachePhase {
+	// Past the lifetime this reads Cold. On OpenAI the 30 minutes is a minimum, so that is not proof
+	// of expiry; the only caller compares against PreExpiry, so Cold and Unknown act the same there.
 	remaining := ttl - now.Sub(prevStartedAt)
 	if remaining <= 0 {
 		return components.CachePhaseCold
@@ -52,6 +54,35 @@ func preExpiryFor(seconds int) time.Duration {
 	}
 	return components.DefaultPreExpiry
 }
+
+// substituteWindow is the pre-expiry window the substitute's phase check uses for this entry. An
+// operator's own pre_expiry_seconds is kept as set. The DEFAULT is widened to the keeper's own
+// slack (the cache lifetime minus its idle period) plus two sweep ticks, because the keeper pings
+// exactly that far before expiry: a window narrower than that reads every ping as Warm, and a
+// pre_expiry substitute never takes one (#715, #717 review). On Anthropic at the defaults the slack
+// is 300 s - 270 s = 30 s, inside the 60 s default, so the window stays 60 s. On OpenAI it is
+// 30 min - 28 min = 120 s, so the window becomes 124 s.
+//
+// CAPPED at maxSubstituteWindow. The slack of a SHORT schedule is large — a 60 s idle on a
+// 5-minute cache leaves 240 s, a 1-hour ask that was not granted leaves about 55 minutes — and an
+// uncapped window would then cover the whole idle span, so the substitute would take every ping
+// from the first, minutes before expiry, which is what pre_expiry exists to refuse (#717 review).
+func substituteWindow(seconds int, ttl, idle time.Duration) time.Duration {
+	w := preExpiryFor(seconds)
+	if seconds > 0 {
+		return w
+	}
+	if slack := min(ttl-idle+2*tick, maxSubstituteWindow); slack > w {
+		return slack
+	}
+	return w
+}
+
+// maxSubstituteWindow bounds the widened default window: twice the component's 60 s default plus
+// two 2 s sweep ticks, 124 s. That still covers every schedule this repo ships, the widest being
+// OpenAI's 120 s slack (modelinfo.OpenAIMinimumCacheTTL - OpenAIDefaultKeepAliveIdle) plus the
+// same two ticks.
+const maxSubstituteWindow = 2*components.DefaultPreExpiry + 2*tick
 
 // fireSummarySubstitute tries to replace this due ping with cache_aware_summarizer's own
 // cache-reading call. Returns true when it did — the caller must then not also send an ordinary
@@ -89,15 +120,18 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 	e := j.e
 	k.mu.Lock()
 	model, prefix, ceiling, ttl1h := e.model, e.prefix, e.pol.Ceiling(), e.ttl1h || e.pol.HeadTTL1h
-	endpoint := e.endpoint
+	endpoint, ttl, idle := e.endpoint, cacheLifetime(e.provider, ttl1h), e.pol.Idle
 	k.mu.Unlock()
-	phase := cachePhaseAt(j.prevStartedAt, k.now(), ttl1h, preExpiryFor(info.PreExpirySeconds))
+	phase := cachePhaseAt(j.prevStartedAt, k.now(), ttl, substituteWindow(info.PreExpirySeconds, ttl, idle))
 	// A `pre_expiry` candidate asked to spend only when ITS OWN notion of the pre-expiry window
 	// is live, not merely whenever the keeper happens to be sending a ping — the two can diverge
-	// (a manager strategy's K>1 schedule, or a component configured with a narrower
-	// pre_expiry_seconds than the keeper's own Idle). `any` has no such condition. Checked against
-	// the SAME phase arithmetic Ctx.CachePhase itself uses (cachePhaseLocked), computed from this
-	// entry's own startedAt/pol rather than approximated from timing alone.
+	// (a manager strategy's K>1 schedule, a short idle override, or a component configured with a
+	// narrower pre_expiry_seconds than the keeper's own Idle). With pre_expiry_seconds unset the
+	// window is widened to the keeper's slack, but only up to maxSubstituteWindow, so a short
+	// schedule still reads its early pings as Warm (substituteWindow). `any` has no such condition. Computed by
+	// cachePhaseAt from this entry's own clock and cache lifetime, not approximated from timing
+	// alone. It differs from Ctx.CachePhase on OpenAI on purpose: that one treats the 30 minutes as
+	// a minimum and never reports PreExpiry there, while the keeper knows exactly when it pings.
 	if info.CacheState == components.CacheStatePreExpiry && phase != components.CachePhasePreExpiry {
 		k.summarySubstitutePhaseMismatch.Add(1)
 		return false
