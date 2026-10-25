@@ -372,7 +372,7 @@ for (const [reason, want] of [
   ['unavailable', /route or credential is failing right now . try again shortly/],
   ['over budget', /per-ping limit/],
   ['too large', /too large to hold/],
-  ['unsupported', /this route cannot be pinged/],
+  ['unsupported', /Ping cannot hold this session \(extended thinking, or a route Ping does not support\)/],
   ['expired', /already cold/],
   ['some-future-code', /cannot ping this session right now/],
 ] as const) {
@@ -552,22 +552,65 @@ test('the first data shows within seconds when the first document is not there y
   await ui.unmount()
 })
 
-test('band row 1 fits one line at 60 columns for EVERY ping reason, with hide; no entry draws nothing', async ($, on) => {
-  const extra: { v: object } = { v: {} }
-  await boot($, on, true, [], undefined as any, extra.v)
-  const reasons = [...REASON_CODES, 'some-future-code']
-  for (const reason of ['', ...reasons]) {
-    Object.assign(extra.v, reason === '' ? { pingable: undefined, ping_reason: undefined } : { pingable: false, ping_reason: reason })
-    await clock.advance(16_000) // the next poll reads the new document
-    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
-    const row = (await dump(ui)).split('\n')[0]
-    expect(row.length, `${reason}: ${row}`).toBeLessThanOrEqual(60)
-    expect(row, reason).toMatch(/hide$/)
-    if (reason === '' ) expect(row).toMatch(/\[ Ping \]/)
-    else if (reason === 'no entry' || reason === 'some-future-code') expect(row, reason).not.toMatch(/ping off/)
-    else expect(row, reason).toMatch(/ping off: /)
-    await ui.unmount()
-  }
+for (const warm of [true, false]) {
+  test(`band row 1 fits the width minus 4 at 60 columns for EVERY ping reason (${warm ? 'warm' : 'cold'}); below 80 it shows only "ping off"`, async ($, on) => {
+    const extra: { v: object } = { v: {} }
+    await boot($, on, warm, [], undefined as any, extra.v)
+    for (const reason of ['', ...REASON_CODES, 'some-future-code']) {
+      Object.assign(extra.v, reason === '' ? { pingable: undefined, ping_reason: undefined } : { pingable: false, ping_reason: reason })
+      await clock.advance(16_000) // the next poll reads the new document
+      const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+      const row = (await dump(ui)).split('\n')[0]
+      expect(row.length, `${reason}: ${row}`).toBeLessThanOrEqual(60 - 4) // the band has its own padding and the terminal a margin
+      expect(row, reason).toMatch(/hide$/)
+      if (!warm) expect(row, reason).not.toMatch(/ping off|\[ Ping \]/)
+      else if (reason === '') expect(row).toMatch(/\[ Ping \]/)
+      else if (reason === 'no entry' || reason === 'some-future-code') expect(row, reason).not.toMatch(/ping off/)
+      else {
+        expect(row, reason).toMatch(/ping off\s+hide$/) // no reason below 80 columns
+        expect(row, reason).not.toMatch(/ping off:/)
+      }
+      await ui.unmount()
+    }
+  })
+}
+
+test('"$x lost today" shows once in the pane, under CACHE HITS', async ($, on) => {
+  await boot($, on, true)
+  await $.command.run({ command: 'context-guru', args: '' })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const lines = (await dump(ui)).split('\n')
+  expect(lines.filter(l => /lost today/.test(l)).length).toBe(1)
+  const hits = lines.indexOf('CACHE HITS'), heat = lines.indexOf('MISSES BY HOUR')
+  const at = lines.findIndex(l => /lost today/.test(l))
+  expect(at > hits && at < heat).toBe(true)
+  await ui.unmount()
+})
+
+test('a slow first document (about 10 s) still shows the band before the next 15 s poll', async ($, on) => {
+  let ready = false
+  on('command.register', () => ({ value: { command: 'context-guru' } }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  clock = mock.clock(on, { now: NOW })
+  on('env.get', () => ({ value: 'http://127.0.0.1:8787/anthropic' }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  on('process.run', (_: any, e: any) => {
+    const ret = (o: object) => ({ value: { exitCode: 0, stdout: JSON.stringify(o) + '\n', stderr: '' } })
+    if (e.argv.includes('tip')) return ret({ stale: [], days: 7 })
+    return ret(ready ? doc(true) : { error: 'proxy not answering' })
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(9_000)
+  ready = true // the document arrives about 9 s in
+  await clock.advance(3_000) // 12 s: before the poll at 15 s
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /next message/ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('SAVE MORE at 60 columns puts each description on its own line', async ($, on) => {
@@ -578,4 +621,38 @@ test('SAVE MORE at 60 columns puts each description on its own line', async ($, 
   expect(lines[i]).toBe('/context-guru:remove-mcp-and-skills')
   expect(lines[i + 1].trim()).toMatch(/^drop MCP servers/)
   await ui.unmount()
+})
+
+test('"$x lost today" falls back to MISSES BY HOUR when CACHE HITS has no data, and shows once', async ($, on) => {
+  paneDoc = { heat: PANE_DATA.heat, spark: PANE_DATA.spark }
+  await boot($, on, true)
+  await $.command.run({ command: 'context-guru', args: '' })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const lines = (await dump(ui)).split('\n')
+  expect(lines).not.toContain('CACHE HITS')
+  expect(lines.filter(l => /lost today/.test(l))).toEqual(['$1.40 lost today'])
+  expect(lines.findIndex(l => /lost today/.test(l))).toBeGreaterThan(lines.indexOf('MISSES BY HOUR'))
+  await ui.unmount()
+  paneDoc = PANE_DATA
+})
+
+test('two turns in a row with no document run one retry loop: at most 12 helper reads, not 24', async ($, on) => {
+  const calls: string[][] = []
+  on('command.register', () => ({ value: { command: 'context-guru' } }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  clock = mock.clock(on, { now: NOW })
+  on('env.get', () => ({ value: 'http://127.0.0.1:8787/anthropic' }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('process.run', (_: any, e: any) => {
+    calls.push([...e.argv])
+    return { value: { exitCode: 0, stdout: JSON.stringify(e.argv.includes('tip') ? { stale: [], days: 7 } : { error: 'proxy not answering' }) + '\n', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete({} as any).catch(() => undefined)
+  await $.turn.complete({} as any).catch(() => undefined)
+  await clock.advance(14_000) // under the 15 s poll, long enough for the whole loop
+  const n = calls.filter(c => c.includes('cachestate')).length
+  expect(n).toBeGreaterThan(1) // the loop ran
+  expect(n).toBeLessThanOrEqual(12)
 })

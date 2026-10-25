@@ -1,4 +1,4 @@
-// Context Guru mod: a calm band above the prompt and a pane (/context-guru:context-guru).
+// Context Guru mod: a calm band above the prompt and a pane (/context-guru).
 //
 // One home per fact (the status line owns the money, the cache clock and the context bar):
 //   band row 1  next-message price (warm vs cold), Ping or why it is off, hide (the dashboard link is in the pane)
@@ -59,16 +59,21 @@ async function refresh($: Engine): Promise<void> {
 }
 
 /** The status line's refresher writes the first cache-state document a moment after the first reply. Until it
- * exists, ask again every second, five times, so the band appears at once and not at the next 15 s poll. */
+ * exists, ask again every 1.5 s, twelve times (about 15 s), so the band appears at once and not at the next 15 s poll. */
+let soon = false // one loop at a time: a second turn while it runs returns at once
 async function refreshSoon($: Engine): Promise<void> {
+  if (soon) return
+  soon = true
   try {
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 12; i++) {
       await refresh($)
       if ((await read($, snapshot))?.doc?.last_ts) return
-      await $.clock.sleep(1000)
+      await $.clock.sleep(1500)
     }
   } catch {
     // the next 15 s poll asks again
+  } finally {
+    soon = false
   }
 }
 
@@ -237,7 +242,9 @@ export const register: Register = on => {
               <Button key="ping" label={busy ? 'Pinging…' : 'Ping'} variant="primary" hotkey="p" onPress={() => (busy ? undefined : ping($))} />
             </Box>
           )}
-          {m.isWarm && v.pingable === false && shortReason(v.pingReason) !== undefined && <Text dimColor>{'  '}ping off: {shortReason(v.pingReason)}</Text>}
+          {m.isWarm && v.pingable === false && shortReason(v.pingReason) !== undefined && (
+            <Text dimColor>{'  '}ping off{narrow ? '' : `: ${shortReason(v.pingReason)}`}</Text>
+          )}
           <Text>{'  '}</Text>
           <Button key="hide" label="hide" plain dimColor onPress={() => setHidden($, true)} />
         </Box>
@@ -377,7 +384,7 @@ export const register: Register = on => {
               <Text dimColor> 24h</Text>
             </Text>
             <Text dimColor>{Math.max(0, ...data.heat.hours) > 0 ? (cols >= 44 ? 'darker means more misses in that hour' : 'darker = more misses') : 'no cache misses today'}</Text>
-            {data.heat.lost != null && data.heat.lost >= 0.005 && <Text dimColor>{usd(data.heat.lost)} lost today</Text>}
+            {!data.strip && data.heat.lost != null && data.heat.lost >= 0.005 && <Text dimColor>{usd(data.heat.lost)} lost today</Text>}
           </Box>
         )}
 

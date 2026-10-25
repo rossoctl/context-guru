@@ -83,7 +83,7 @@ layout outranks the installed command's flag until `auto`. Otherwise
 | detailed | balanced + `spent` + `keep-alive 3 pings · $0.04` + `upstream slow: 7.0s` (only when slow) + least-used tool/skill (`◇ github 1% remove`) |
 
 The layouts `spark`, `strip`, `heat`, `fill` and `watch` are retired from the status line: they are
-sections of the mod's pane (`/context-guru:context-guru`: SAVED LATELY, CACHE HITS, MISSES BY HOUR,
+sections of the mod's pane (`/context-guru`: SAVED LATELY, CACHE HITS, MISSES BY HOUR,
 CONTEXT, AGENTS). A flagged retired layout falls back to `balanced`, silently. A remembered one is ignored: the installed layout applies.
 
 `--hide=a,b` / `--show=a,b` toggle single elements (`update save spend cache next agents ctx ka latency tools tip`;
