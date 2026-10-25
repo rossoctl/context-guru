@@ -409,7 +409,9 @@ type Keeper struct {
 	summarySubstitutePhaseMismatch atomic.Int64
 	// summarySubstituteNoCandidate counts a due ping for which no keep-alive candidate was
 	// registered at all — the ordinary case for the vast majority of sessions (the component
-	// not in the pipeline, or no turn has reached registration yet). Was previously folded into
+	// not in the pipeline, or no turn has reached registration yet). Counted only when the summary
+	// lookup RUNS (#404 point 10): a ping whose claim went to the sweep alone, or found the thread busy,
+	// does not look the summary up. Was previously folded into
 	// one silent `return false` indistinguishable from the three counters below it.
 	summarySubstituteNoCandidate atomic.Int64
 	// summarySubstituteCheckpointExists counts a due ping for a session that HAD a registered
@@ -1240,13 +1242,12 @@ func (k *Keeper) fire(j pingJob) {
 	// already shares cache_aware_summarizer's own, separate concurrency gate (summarySlots in
 	// cache_aware_async.go), sized for exactly this kind of call.
 	release()
-	if k.fireSummarySubstitute(j) {
-		return
-	}
-	// The sweep's question takes the ping when the summary did not (#404). The summary goes first: it
-	// replaces the very candidates the sweep would ask about, and PR D of #404 makes that priority an
-	// explicit rule. The slot is released before the call for the same reason as above.
-	if k.fireSweepSubstitute(j) {
+	// ONE substitute per ping, per thread (#404 point 10). The claim names who may take the ping and
+	// holds the thread until the attempt is over. The summary owns the ping when its trigger fired; the
+	// sweep asks only when it did not. They never both run from the keeper. One gap remains: the in-flight
+	// check is check-then-act, so a detached summary that a real request starts after the look can
+	// overlap the sweep's question (see ClaimPing; PR C decides whether to close it).
+	if k.fireSubstitute(j) {
 		return
 	}
 
@@ -1573,14 +1574,20 @@ type Stats struct {
 	SweepAsked         int64 `json:"sweep_asked"`
 	SweepHeld          int64 `json:"sweep_held"`
 	SweepModelDeclined int64 `json:"sweep_model_declined"`
-	SweepNoInventory   int64 `json:"sweep_no_inventory"`
-	SweepAlreadyAsked  int64 `json:"sweep_already_asked"`
-	SweepNoCandidate   int64 `json:"sweep_no_candidate"`
-	SweepHoldNoToolID  int64 `json:"sweep_hold_no_tool_id"`
-	SweepNeedsShadow   int64 `json:"sweep_ask_needs_shadow"`
-	SweepPanics        int64 `json:"sweep_ping_panics"`
-	SweepConcurrency   int64 `json:"sweep_concurrency_full"`
-	SweepNotRegistered int64 `json:"sweep_not_registered"`
+	// SweepSummaryOwnedPing is #404 point 10: pings where the summarizer had a candidate, so it owned the
+	// ping and the sweep did not ask (also when the summary then declined). SweepSummaryInFlight: a
+	// summary was already running. SweepThreadBusy: an earlier substitute still held the thread.
+	SweepSummaryOwnedPing int64 `json:"sweep_summary_owned_ping"`
+	SweepSummaryInFlight  int64 `json:"sweep_summary_in_flight"`
+	SweepThreadBusy       int64 `json:"sweep_ping_thread_busy"`
+	SweepNoInventory      int64 `json:"sweep_no_inventory"`
+	SweepAlreadyAsked     int64 `json:"sweep_already_asked"`
+	SweepNoCandidate      int64 `json:"sweep_no_candidate"`
+	SweepHoldNoToolID     int64 `json:"sweep_hold_no_tool_id"`
+	SweepNeedsShadow      int64 `json:"sweep_ask_needs_shadow"`
+	SweepPanics           int64 `json:"sweep_ping_panics"`
+	SweepConcurrency      int64 `json:"sweep_concurrency_full"`
+	SweepNotRegistered    int64 `json:"sweep_not_registered"`
 	// SweepGates counts the adjudication's own gate and event names across ping-time questions
 	// (sweep_kept, sweep_unparseable, sweep_dropped, ...), the counters a request's Report carries
 	// for an in-request question.
@@ -1634,6 +1641,9 @@ func (k *Keeper) Stats() Stats {
 		SweepAsked:                         sw.Asked,
 		SweepHeld:                          sw.Held,
 		SweepModelDeclined:                 sw.ModelDeclined,
+		SweepSummaryOwnedPing:              sw.SummaryOwnedPing,
+		SweepSummaryInFlight:               sw.SummaryInFlight,
+		SweepThreadBusy:                    sw.ThreadBusy,
 		SweepNoInventory:                   sw.NoInventory,
 		SweepAlreadyAsked:                  sw.AlreadyAsked,
 		SweepNoCandidate:                   sw.NoCandidate,
@@ -1763,3 +1773,22 @@ func predictorFor(id string) (func(stopReason string) float64, bool) {
 // PredictorFor is predictorFor, exported for a host that needs to replay the same gate
 // outside the keeper (the adapt-cache report's currentPlan).
 func PredictorFor(id string) (func(stopReason string) float64, bool) { return predictorFor(id) }
+
+// fireSubstitute runs the one substitute the claim names for this ping and reports whether it took the
+// ping. The claim is released by a defer, so every exit frees the thread, a panic included. The sweep's
+// collection slot is released the same way inside SweepPingSubstitute, so a claimed ping holds neither
+// past this call.
+func (k *Keeper) fireSubstitute(j pingJob) bool {
+	claim := offload.ClaimPing(thread.Key(j.session, j.thread))
+	defer claim.Release()
+	switch claim.Choice {
+	case offload.PingSummary:
+		return k.fireSummarySubstitute(j)
+	case offload.PingSweep:
+		return k.fireSweepSubstitute(j)
+	case offload.PingNone:
+		// Nothing registered. Both lookups decline and count their own no-candidate reason.
+		return k.fireSummarySubstitute(j) || k.fireSweepSubstitute(j)
+	}
+	return false
+}

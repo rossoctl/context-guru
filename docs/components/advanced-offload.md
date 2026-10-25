@@ -547,7 +547,11 @@ the prompt), `sweep_verdict_unusable`, `sweep_verdict_unknown_label`, `sweep_ver
 
 Counted at the ping (keep-alive block of `/stats`): `sweep_concurrency_full` (every question slot was
 busy, so the ping stayed plain), `sweep_ping_panics`, `sweep_model_declined` and
-`sweep_ask_needs_shadow`. `sweep_not_registered` is counted at the **request**, not at a ping: the
+`sweep_ask_needs_shadow`. `sweep_summary_owned_ping` (the summarizer had a candidate for the thread, so it
+owned the ping, and the sweep did not ask, also when the summary then declined) and
+`sweep_summary_in_flight` (a summary was already running for the thread, so the sweep did not ask) are
+counted there as well, and so is `sweep_ping_thread_busy` (an earlier substitute still held the thread,
+so the ping stayed plain). `sweep_not_registered` is counted at the **request**, not at a ping: the
 keep-alive cannot ping that thread, so the request kept no conversation copy. It is in the same
 `/stats` block.
 
