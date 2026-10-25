@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { usd } from './model'
+import { REASON_CODES, usd } from './model'
 
 const NOW = 1_800_000_000_000
 const entry = (end: number, extra = {}) => ({ end_ts: end, ttl_s: 300, prefix_tokens: 90000, rewrite_usd: 0.5, next_warm_usd: 0.06, next_cold_usd: 0.78, ...extra })
@@ -314,19 +314,20 @@ test('warm but not pingable: no Ping button, a dim `ping off: <reason>` in its p
 })
 
 for (const [reason, want] of [
-  ['not opted in', /ping off: turns on next session/],
+  ['not opted in', /ping off: on next session/],
   ['too large', /ping off: context too large/],
   ['pings used', /ping off: pings used up/],
-  ['some-future-code', /ping off: not available now/],
+  ['some-future-code', /^[^p]*$|^(?!.*ping off)/s],
+  ['no entry', /^(?!.*ping off)/s],
 ] as const) {
-  test(`ping off, reason ${reason}: short words (40 characters at most), never a raw code`, async ($, on) => {
+  test(`ping off, reason ${reason}: short words (17 characters at most) or nothing, never a raw code`, async ($, on) => {
     await boot($, on, true, [], undefined as any, { pingable: false, ping_reason: reason })
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     const all = await dump(ui)
     expect(all).toMatch(want)
     expect(all).not.toMatch(/some-future-code/)
-    const shown = /ping off: (.*?)(?:\s{2,}|$)/.exec(all)![1]
-    expect(shown.length).toBeLessThanOrEqual(40)
+    const shown = /ping off: (.*?)(?:\s{2,}|$)/.exec(all)?.[1] ?? ''
+    expect(shown.length).toBeLessThanOrEqual(17)
     await ui.unmount()
   })
 }
@@ -548,5 +549,33 @@ test('the first data shows within seconds when the first document is not there y
   await clock.advance(3000) // far less than the 15 s poll
   ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /next message/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('band row 1 fits one line at 60 columns for EVERY ping reason, with hide; no entry draws nothing', async ($, on) => {
+  const extra: { v: object } = { v: {} }
+  await boot($, on, true, [], undefined as any, extra.v)
+  const reasons = [...REASON_CODES, 'some-future-code']
+  for (const reason of ['', ...reasons]) {
+    Object.assign(extra.v, reason === '' ? { pingable: undefined, ping_reason: undefined } : { pingable: false, ping_reason: reason })
+    await clock.advance(16_000) // the next poll reads the new document
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+    const row = (await dump(ui)).split('\n')[0]
+    expect(row.length, `${reason}: ${row}`).toBeLessThanOrEqual(60)
+    expect(row, reason).toMatch(/hide$/)
+    if (reason === '' ) expect(row).toMatch(/\[ Ping \]/)
+    else if (reason === 'no entry' || reason === 'some-future-code') expect(row, reason).not.toMatch(/ping off/)
+    else expect(row, reason).toMatch(/ping off: /)
+    await ui.unmount()
+  }
+})
+
+test('SAVE MORE at 60 columns puts each description on its own line', async ($, on) => {
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const lines = (await dump(ui)).split('\n')
+  const i = lines.findIndex(l => l.startsWith('/context-guru:remove-mcp-and-skills'))
+  expect(lines[i]).toBe('/context-guru:remove-mcp-and-skills')
+  expect(lines[i + 1].trim()).toMatch(/^drop MCP servers/)
   await ui.unmount()
 })

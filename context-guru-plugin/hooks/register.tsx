@@ -209,6 +209,7 @@ export const register: Register = on => {
     const agentsOff = await read($, isAgentsOff)
     const m = v.main
     const rows = e.props.maxRows
+    const narrow = (e.props.bodyColumns ?? 100) < 80 // row 1 must fit one line with `hide` at 60 columns
     const tip = weeklyTip(v.tip)
     const chips = v.subs.slice(0, AGENT_CHIPS)
 
@@ -218,9 +219,9 @@ export const register: Register = on => {
           <Text bold color="claude">{'◆'} </Text>
           {m.isWarm && (
             <Text>
-              <Text dimColor>next message </Text>
+              <Text dimColor>{narrow ? 'next ' : 'next message '}</Text>
               {m.warmUsd !== undefined && <Text color="success">{usd(m.warmUsd)}</Text>}
-              {m.coldUsd !== undefined && <Text dimColor>{m.warmUsd !== undefined ? ' · ' : ''}{usd(m.coldUsd)} if cold</Text>}
+              {m.coldUsd !== undefined && <Text dimColor>{m.warmUsd !== undefined ? ' · ' : ''}{usd(m.coldUsd)}{narrow ? ' cold' : ' if cold'}</Text>}
             </Text>
           )}
           {!m.isWarm && (
@@ -236,7 +237,7 @@ export const register: Register = on => {
               <Button key="ping" label={busy ? 'Pinging…' : 'Ping'} variant="primary" hotkey="p" onPress={() => (busy ? undefined : ping($))} />
             </Box>
           )}
-          {m.isWarm && v.pingable === false && <Text dimColor>{'   '}ping off: {shortReason(v.pingReason)}</Text>}
+          {m.isWarm && v.pingable === false && shortReason(v.pingReason) !== undefined && <Text dimColor>{'  '}ping off: {shortReason(v.pingReason)}</Text>}
           <Text>{'  '}</Text>
           <Button key="hide" label="hide" plain dimColor onPress={() => setHidden($, true)} />
         </Box>
@@ -319,7 +320,7 @@ export const register: Register = on => {
               <Button key="ping" label={busy ? 'Pinging…' : 'Ping now'} variant="primary" hotkey="p" onPress={() => (busy ? undefined : ping($))} />
             </Box>
           )}
-          {m.isWarm && v.pingable === false && <Text dimColor>ping off: {v.pingReason ? reasonWords(v.pingReason) : shortReason(undefined)}</Text>}
+          {m.isWarm && v.pingable === false && <Text dimColor>ping off: {v.pingReason ? reasonWords(v.pingReason) : 'not available now'}</Text>}
           {last !== '' && <Text dimColor>last ping: {last}</Text>}
         </Box>
 
@@ -407,11 +408,18 @@ export const register: Register = on => {
               <Text color="suggestion">{tip}</Text>
             </Text>
           )}
-          {TIPS.map(t => (
-            <Text key={t.cmd}>
-              <Text color="suggestion">{t.cmd}</Text> <Text dimColor>{t.why}</Text>
-            </Text>
-          ))}
+          {TIPS.map(t =>
+            cols >= 80 ? (
+              <Text key={t.cmd}>
+                <Text color="suggestion">{t.cmd}</Text> <Text dimColor>{t.why}</Text>
+              </Text>
+            ) : (
+              <Box key={t.cmd} flexDirection="column">
+                <Text color="suggestion">{t.cmd}</Text>
+                <Text dimColor>  {t.why}</Text>
+              </Box>
+            ),
+          )}
         </Box>
 
         {hidden && <Box paddingTop={1}><Button key="show" label="Show the band again" plain onPress={() => setHidden($, false)} /></Box>}

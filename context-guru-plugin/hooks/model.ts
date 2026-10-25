@@ -169,23 +169,27 @@ const REASONS: Record<string, string> = {
   unavailable: 'the upstream route or credential is failing right now — try again shortly',
 }
 
-/** The same reasons in at most 40 characters, for the band's `ping off: <reason>`. */
+/** The same reasons in at most 17 characters, so `ping off: <reason>` (27) and `hide` fit one row at 60 columns.
+ * A reason with no entry here (`no entry` is a timing artefact right after a reply, and a code from a newer
+ * server is unknown) draws nothing in the band: the user cannot act on it. The pane and the toast keep the full text. */
 const SHORT_REASONS: Record<string, string> = {
-  'not opted in': 'turns on next session',
-  'below limits': 'below the ping limits',
-  'over budget': 'over the per-ping limit',
+  'not opted in': 'on next session',
+  'below limits': 'below limits',
+  'over budget': 'over ping limit',
   'too large': 'context too large',
   unsupported: 'not on this route',
   'pings used': 'pings used up',
-  stopped: 'stopped after a miss',
+  stopped: 'stopped, a miss',
   expired: 'cache cold',
-  'no entry': 'send a prompt first',
-  unavailable: 'upstream failing, retry soon',
+  unavailable: 'upstream failing',
 }
+
+/** Every code the server can send with a full text: the tests walk it. */
+export const REASON_CODES = Object.keys(REASONS)
 
 /** A code from a newer server is never shown raw. */
 export const reasonWords = (reason: string): string => REASONS[reason] ?? 'cannot ping this session right now'
-export const shortReason = (reason: string | undefined): string => (reason && SHORT_REASONS[reason]) || 'not available now'
+export const shortReason = (reason: string | undefined): string | undefined => (reason ? SHORT_REASONS[reason] : undefined)
 
 /** The main thread's `ping_reason` from the last cachestate read, when the server gave one. */
 export function pingReason(snap: Snapshot | null): string | undefined {
