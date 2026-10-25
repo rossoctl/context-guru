@@ -1,0 +1,87 @@
+package keepalive
+
+import (
+	"bytes"
+	"testing"
+	"time"
+
+	"github.com/tidwall/gjson"
+)
+
+// #706. The gateway answers a byte-identical request from its own response cache, so an identical
+// second ping never reaches the provider and refreshes nothing. Every ping an entry sends must
+// therefore differ from the one before it, and only outside the prefix the provider hashes.
+func TestConsecutivePingsAreNeverByteIdentical(t *testing.T) {
+	start := time.Now()
+	now := start
+	fd := newFake(okPing)
+	k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+	key := Key{Tenant: "t", Session: "s"}
+	r := trackedRecord(fd, key, start)
+	r.Policy.MaxPings = 3
+	k.Record(r) // turn 0: counted, not tracked
+	k.Record(r) // turn 1: tracked, Held
+	for i := 1; i <= 3; i++ {
+		now = start.Add(time.Duration(i) * 281 * time.Second)
+		k.Sweep(now)
+	}
+	if fd.n() != 3 {
+		t.Fatalf("sent %d pings, want 3", fd.n())
+	}
+	for i := 1; i < len(fd.sent); i++ {
+		if bytes.Equal(fd.sent[i].Body, fd.sent[i-1].Body) {
+			t.Fatalf("ping %d is byte-identical to ping %d: the gateway answers it from its response "+
+				"cache and the provider's cache is not refreshed", i+1, i)
+		}
+	}
+	if got := gjson.GetBytes(fd.sent[0].Body, "max_tokens").Int(); got != 1 {
+		t.Errorf("first ping max_tokens = %d, want 1 (unchanged from before #706)", got)
+	}
+	for _, p := range []string{"model", "system", "messages", "tools", "tool_choice", "thinking"} {
+		a, b := gjson.GetBytes(fd.sent[0].Body, p).Raw, gjson.GetBytes(fd.sent[1].Body, p).Raw
+		if a != b {
+			t.Errorf("%s differs between pings: the hashed prefix must stay byte-identical", p)
+		}
+	}
+}
+
+// A manual press is a ping too: it must not repeat the automatic ping before it.
+func TestAManualPingDiffersFromTheAutomaticPingBeforeIt(t *testing.T) {
+	start := time.Now()
+	now := start
+	fd := newFake(okPing)
+	k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+	key := Key{Tenant: "t", Session: "s"}
+	k.Record(trackedRecord(fd, key, start))
+	k.Record(trackedRecord(fd, key, start))
+	now = start.Add(281 * time.Second)
+	k.Sweep(now)
+	now = now.Add(10 * time.Second)
+	if _, err := k.PingNow(ManualRequest{Key: key}); err != nil {
+		t.Fatalf("PingNow: %v", err)
+	}
+	if fd.n() != 2 {
+		t.Fatalf("sent %d pings, want 2", fd.n())
+	}
+	if bytes.Equal(fd.sent[0].Body, fd.sent[1].Body) {
+		t.Fatal("the manual ping is byte-identical to the automatic ping before it")
+	}
+}
+
+// The output budget cycles within a small range, so a long-lived entry never asks for a large
+// answer.
+func TestPingOutputBudgetStaysSmall(t *testing.T) {
+	for n := 0; n < 3*pingVary; n++ {
+		out, ok := pingBodyN([]byte(`{"model":"m","max_tokens":4096,"messages":[]}`), "/v1/messages", n)
+		if !ok {
+			t.Fatal("pingBodyN refused a well-formed body")
+		}
+		if got := gjson.GetBytes(out, "max_tokens").Int(); got < 1 || got > pingVary {
+			t.Fatalf("ping %d: max_tokens = %d, want 1..%d", n, got, pingVary)
+		}
+	}
+	out, _ := pingBodyN([]byte(`{"model":"m","max_output_tokens":4096,"input":[]}`), "/v1/responses", 5)
+	if got := gjson.GetBytes(out, "max_output_tokens").Int(); got != 21 {
+		t.Errorf("Responses ping 5: max_output_tokens = %d, want 16+5", got)
+	}
+}

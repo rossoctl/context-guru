@@ -142,6 +142,10 @@ type kaEntry struct {
 	// missed counts this entry's current run of consecutive zero-read pings. Reset to 0 by
 	// notePingRead; a second miss in a row (missed == 2) stops the entry — see noteOutcome.
 	missed int
+	// sent counts the pings this entry has sent, automatic and manual, so each one can ask for a
+	// different output budget than the one before (pingBodyN): an identical body is answered from
+	// the gateway's response cache and refreshes nothing (#706).
+	sent int
 	// tag is the host's label for this entry (Record.Tag) — in cmd/context-guru-proxy, the id of
 	// the manager-controlled keep-alive strategy that resolved this entry's policy, "" when none
 	// matched (account config or a session override supplied it instead). Resolved once, at
@@ -1160,10 +1164,12 @@ func (k *Keeper) Sweep(now time.Time) int {
 		// stays masked, so the long-lived hold never contains a readable transcript.
 		raw := append([]byte(nil), e.body...)
 		mask(raw)
+		seq := e.sent
+		e.sent++
 		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
 			route: e.route, provider: e.provider, model: e.model,
 			tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
-			ping: e.pings, prevStartedAt: prevStartedAt})
+			ping: e.pings, seq: seq, prevStartedAt: prevStartedAt})
 	}
 	k.mu.Unlock()
 
@@ -1200,6 +1206,9 @@ type pingJob struct {
 	// job runs on its own goroutine and must hold a copy rather than reach back into the entry.
 	emitter components.Emitter
 	ping    int
+	// seq is this ping's place among every ping its entry has sent (kaEntry.sent before it), which
+	// sets its output budget — see pingBodyN.
+	seq int
 	// prevStartedAt is e.startedAt as it stood BEFORE this sweep tick overwrote it with `now` —
 	// i.e. when the cache entry this ping is about to refresh was last written or read. Needed
 	// for fireSummarySubstitute's own cache-phase check: by the time fire() runs, e.startedAt is
@@ -1260,7 +1269,7 @@ func (k *Keeper) fire(j pingJob) {
 	}
 	defer release()
 
-	body, ok := pingBody(j.raw, j.route)
+	body, ok := pingBodyN(j.raw, j.route, j.seq)
 	if !ok {
 		k.markStopped(j.e)
 		k.skipped.Add(1)
@@ -1484,7 +1493,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 			// request with no output budget. The audit trail is the reason these rows exist; a
 			// column that is blank because nobody filled it in is the same defect at a smaller
 			// scale.
-			MaxTokens: pingOutputBudget(route),
+			MaxTokens: pingOutputBudget(route) + j.seq%pingVary,
 		})
 	}
 	return cost
