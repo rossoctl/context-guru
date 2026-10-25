@@ -1,6 +1,6 @@
 # Backend: the user's own Claude Code (Anthropic models). Sourced by scripts/offload-review.sh.
 #
-# A backend defines three functions, and two optional ones. Each runs inside the reviewer's worktree.
+# A backend defines three functions, and optional ones listed below. Each runs inside the reviewer's worktree.
 #   backend_label            one line for the identity table
 #   backend_has_session      exit 0 when this worktree has an earlier session to resume
 #   backend_run <prompt> <resume:0|1>   run one review; stdout and stderr go to the log
@@ -42,9 +42,11 @@ backend_cleanup() {
   rm -f -- "$f"
 }
 
-# backend_forget_session: drop the saved session id, so the next run starts a new session.
+# backend_forget_session: drop the saved session, so the next run starts a new one. The session
+# lives under ~/.claude/projects, outside the worktree, so --cleanup could not find it once the id
+# file names a newer session: remove it here, as backend_cleanup does.
 backend_forget_session() {
-  rm -f -- "$(claude_sid_file)"
+  backend_cleanup
 }
 
 backend_run() {

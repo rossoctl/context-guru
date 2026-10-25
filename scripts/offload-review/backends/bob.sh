@@ -1,6 +1,6 @@
 # Backend: IBM Bob Shell. Sourced by scripts/offload-review.sh.
 #
-# A backend defines three functions, and one optional one. Each runs inside the reviewer's worktree.
+# A backend defines three functions, and optional ones listed below. Each runs inside the reviewer's worktree.
 #   backend_label            one line for the identity table
 #   backend_has_session      exit 0 when this worktree has an earlier session to resume
 #   backend_run <prompt> <resume:0|1>   run one review; stdout and stderr go to the log

@@ -184,7 +184,7 @@ remove it.
 
 ## Add a backend
 
-Create `scripts/offload-review/backends/<name>.sh` with three functions, and one optional one.
+Create `scripts/offload-review/backends/<name>.sh` with three functions, and the optional ones below.
 Each one runs inside the reviewer's worktree:
 
 - `backend_label`: one line for the identity table, with the tool and version.
