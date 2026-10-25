@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -468,7 +469,7 @@ func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 			continue
 		}
 		content := schema.MessageText(*msg)
-		if content == "" || expand.HasPlaceholder(content) {
+		if content == "" || carriesRealMarker(c, content) {
 			rep.Gate("empty_or_marker_present")
 			continue
 		}
@@ -606,4 +607,26 @@ func (cand *sweepPingCandidate) deferBilling(sink *cheapmodel.Sink, ms float64, 
 		return
 	}
 	deferUsage(c.Store, c.Session, "extract_llm_sweep", "prefix_ask", "keepalive_ping", ms, sink)
+}
+
+// carriesRealMarker reports whether content holds a marker one of our components made: a summary
+// sentinel, or a `<<cg:HASH>>` whose HASH is in the store. Text that merely QUOTES marker syntax,
+// such as a grep of this repo's own source, is not one, and skipping it would take a tool output
+// out of the sweep for nothing (#721, the same fault #705 fixed in the summarizer).
+func carriesRealMarker(c *components.Ctx, content string) bool {
+	if !expand.HasPlaceholder(content) {
+		return false
+	}
+	if strings.Contains(content, expand.SummaryMarker) {
+		return true
+	}
+	if c.Store == nil {
+		return true // cannot tell, so keep the old, safe answer
+	}
+	for _, id := range expand.ParseMarkers(content) {
+		if _, ok := c.Store.Get(id); ok {
+			return true
+		}
+	}
+	return false
 }

@@ -752,6 +752,7 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 			}
 		}
 	}
+	var askPrompt string // the framed question; the write gate below sizes its allowance from it
 	if !usePrefixAsk || stalePrefix {
 		// No asker at all (a non-Anthropic route, or no incoming client) and a stale stash take the
 		// same fork, because both mean there is nothing SAFE to ask through: one has nothing stashed,
@@ -779,7 +780,7 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 		// The shared role/opening helper (#507) then frames it for the model.
 		ask := extract.NewAsk()
 		ask.Add(extract.SpentOutputs{Items: items})
-		askPrompt := resolveAsk(nil, c.ModelName, askViaPrefix).Frame(ask.Prompt())
+		askPrompt = resolveAsk(nil, c.ModelName, askViaPrefix).Frame(ask.Prompt())
 		if dumpDir != "" {
 			dump = newSweepAskDump(req, c.Session, c.ModelName, items, cands, askPrompt)
 			dump.Trigger = opt.trigger
@@ -846,8 +847,15 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 	// a stable sub-prefix, so `CacheRead == 0` was false and the counter stayed silent on $2.26 of
 	// it. A partial hit is not evidence of safety: the write is the harm, at 1.25x fresh on the
 	// AGENT's model rather than a tenth of it.
-	if usage.CacheRead == 0 || usage.CacheWrite > 0 {
-		if usage.CacheWrite > 0 {
+	//
+	// BUT NOT EVERY WRITE (#721). The question's own appended blocks (the "Understood." bridge and
+	// the ask) are new bytes after the breakpoint, so a correct question writes them: 6 to 20 tokens
+	// measured. Refusing any write refused every question. The gate now refuses a write only when
+	// it is LARGER than what the question appended; more than that means the turn's own bytes were
+	// rebuilt, which is the harm this gate exists to catch.
+	allowed := prefixAskWriteAllowance(askPrompt)
+	if usage.CacheRead == 0 || usage.CacheWrite > allowed {
+		if usage.CacheWrite > allowed {
 			r.gate("sweep_prefix_cache_write")
 		}
 		if usage.CacheRead == 0 {
@@ -857,7 +865,7 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 		// call "read nothing from cache" is simply false. This string is persisted to
 		// extraction_calls.rejection, so a wrong reason here becomes a wrong finding later.
 		why := "read nothing from cache"
-		if usage.CacheWrite > 0 {
+		if usage.CacheWrite > allowed {
 			why = "re-created the agent's prefix instead of reading it"
 		}
 		r.rec.Rejection = "the prefix ask " + why + "; declining rather than acting on it"
@@ -1130,4 +1138,19 @@ func init() {
 		},
 		markerModeField(),
 	})
+}
+
+// prefixAskWriteSlackTokens covers what prefixAskWriteAllowance cannot count from text: the role
+// and framing tokens of the two appended messages, and a block-boundary token or two. Measured
+// writes for a correct question were 6 and 20 tokens; 32 sits above both with room.
+const prefixAskWriteSlackTokens = 32
+
+// prefixAskWriteAllowance is the cache write a CORRECT prefix question may show: the tokens it
+// appended (the bridge and the ask), estimated with our own counter, plus a quarter for the gap
+// between our counter and the provider's, plus prefixAskWriteSlackTokens. A write above it means
+// bytes of the turn itself were written again. Keep-alive's own stop rule (write > read) and the
+// summarizer's substitute do not use this gate; see #721.
+func prefixAskWriteAllowance(askPrompt string) int {
+	n := schema.TextTokens(askPrompt) + schema.TextTokens(cheapmodel.AskBridge("system"))
+	return n + n/4 + prefixAskWriteSlackTokens
 }

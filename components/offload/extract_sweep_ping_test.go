@@ -160,11 +160,13 @@ func TestNoCandidatesMeansNoQuestion(t *testing.T) {
 		t.Fatalf("ok=%v reason=%q, want no_candidate (nothing was big enough to register)", ok, reason)
 	}
 	marked := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("go")}}
+	markedStore := newMemStore()
 	for i := 0; i < 2; i++ {
+		markedStore.Put(fmt.Sprintf("abcdef%d", i), []byte("the stashed original")) // a real marker has one
 		marked.Input = append(marked.Input, toolResultMsgWithID(fmt.Sprintf("toolu_m%d", i),
 			strings.Repeat("a spent line\n", 900)+expand.Marker(fmt.Sprintf("abcdef%d", i))))
 	}
-	key2, _ := registered(t, e, "ping-marked", pingAsker(), newMemStore(), marked)
+	key2, _ := registered(t, e, "ping-marked", pingAsker(), markedStore, marked)
 	if _, _, reason, ok := SweepPingSubstitute(key2); ok || reason != SweepReasonNoInventory {
 		t.Fatalf("ok=%v reason=%q, want no_inventory (big outputs, all already markers)", ok, reason)
 	}
@@ -1062,4 +1064,63 @@ func TestTheColdRecheckIsReportedOnceUnderConcurrentRequests(t *testing.T) {
 	if rechecks.Load() != 1 {
 		t.Fatalf("%d of %d concurrent cold requests reported the recheck, want exactly 1", rechecks.Load(), n)
 	}
+}
+
+// #721: a correct prefix question writes its own appended blocks (6 to 20 tokens measured). The
+// gate refuses a write only when it is larger than what the question appended.
+func TestThePingGateAllowsTheQuestionsOwnWriteAndRefusesARebuild(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		read, write int
+		held        bool
+		gate        string
+	}{
+		{"write equal to the appended blocks", 25588, 20, true, ""},
+		{"a few tokens written", 25588, 6, true, ""},
+		{"the whole conversation rebuilt", 13446, 12142, false, "sweep_prefix_cache_write"},
+		{"read of zero", 0, 0, false, "sweep_prefix_cache_read_ZERO"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asker := pingAsker()
+			asker.cacheRead, asker.cacheWrite = tc.read, tc.write
+			e := shippedSweep(t, "")
+			key, _ := registered(t, e, "gate-721-"+tc.name, asker, newMemStore(), deepCandidates(2))
+			dispatch, _, reason, ok := SweepPingSubstitute(key)
+			if !ok {
+				t.Fatalf("no question offered (reason %q)", reason)
+			}
+			res := dispatch(time.Second, SweepPingWait{WaitingFor: "own_tool", WaitTool: "Bash"})
+			if res.Held != tc.held {
+				t.Fatalf("held = %v, want %v (gates %v)", res.Held, tc.held, res.Gates)
+			}
+			if tc.gate != "" && res.Gates[tc.gate] == 0 {
+				t.Errorf("gate %s not recorded (gates %v)", tc.gate, res.Gates)
+			}
+			if tc.gate != "sweep_prefix_cache_write" && res.Gates["sweep_prefix_cache_write"] != 0 {
+				t.Errorf("a write within the allowance was refused as a rebuild (gates %v)", res.Gates)
+			}
+		})
+	}
+}
+
+// #721: a tool output that QUOTES marker text is a candidate. A marker the sweep made is not.
+func TestThePingOffersAnOutputThatOnlyQuotesAMarker(t *testing.T) {
+	st := newMemStore()
+	req := deepCandidates(2)
+	quote := "grep result: <<cg:notinstore123>> appears in expand.go\n"
+	real := "<<cg:realmarker456>>\n"
+	st.Put("realmarker456", []byte("the original"))
+	req.Input[1] = toolResultMsgWithID("toolu_wire_0", quote+strings.Repeat("candidate 0 distinct line\n", 900))
+	req.Input[2] = toolResultMsgWithID("toolu_wire_1", real+strings.Repeat("candidate 1 distinct line\n", 900))
+	asker := pingAsker()
+	e := shippedSweep(t, "")
+	key, _ := registered(t, e, "quote-721", asker, st, req)
+	dispatch, info, reason, ok := SweepPingSubstitute(key)
+	if !ok {
+		t.Fatalf("no question offered (reason %q)", reason)
+	}
+	if info.Offered != 1 {
+		t.Fatalf("offered %d, want exactly the quoting output", info.Offered)
+	}
+	_ = dispatch
 }
