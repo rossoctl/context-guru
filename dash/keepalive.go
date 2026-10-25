@@ -1121,9 +1121,11 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		if price != nil && r.Model != "" && r.Prefix > 0 {
 			if p, ok := price(r.Model); ok && !p.Zero() {
 				r.Priced = true
-				// The ping as the request path actually sends it: max_tokens 1, so one output
-				// token is billed. max_tokens 0 is accepted by this gateway and bills none, but
-				// the figure has to match what is sent, not the cheapest shape available.
+				// The ping as the request path actually sends it: one output token is billed.
+				// Its max_tokens varies from 1 to 8 so that two pings in a row are never
+				// identical (#706), but the reply is one token and output is billed as generated.
+				// max_tokens 0 is accepted by this gateway and bills none, but the figure has to
+				// match what is sent, not the cheapest shape available.
 				r.PingUSDEach = float64(r.Prefix)*p.CacheRead + p.Output
 				r.MissUSD = float64(r.Prefix) * (p.CacheWrite - p.CacheRead)
 				if r.PingUSDEach > 0 {

@@ -122,7 +122,11 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		return ManualResult{}, ErrLimited
 	}
 	defer release()
-	body, ok := pingBody(raw, job.route)
+	// A press is a ping too: it takes the thread's next step, at dispatch time (nextVaryLocked).
+	k.mu.Lock()
+	job.vary = k.nextVaryLocked(id)
+	k.mu.Unlock()
+	body, ok := pingBodyN(raw, job.route, job.vary)
 	if !ok {
 		k.unclaimManual(id, now)
 		return ManualResult{}, ErrNotHeld
@@ -182,7 +186,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 			CacheWrite: u.CacheWrite, Output: u.Output, CostUSD: res.CostUSD, Status: resp.Status,
 			DurationMs: float64(k.now().Sub(start).Microseconds()) / 1000.0, TS: k.now().UnixMilli(),
 			Agent: agent, Preset: preset, StopReason: u.StopReason, FreshInput: u.FreshInput,
-			CacheWrite1h: u.CacheWrite1h, MaxTokens: pingOutputBudget(job.route),
+			CacheWrite1h: u.CacheWrite1h, MaxTokens: pingOutputBudget(job.route) + job.vary%pingVary,
 			Manual: true, Strategy: ManualStrategyID, RewriteUSD: res.AvoidedUSD,
 		})
 	}

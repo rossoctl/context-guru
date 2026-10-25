@@ -382,6 +382,11 @@ type Keeper struct {
 	// turn that only READS the cache bills no write, so it carries no tier of its own and
 	// inherits this. Written beside turns, so it is bounded and reset exactly as turns is.
 	tier1h map[string]bool
+	// lastVary is, per THREAD (keyed like live), the output-budget step of the last ping actually
+	// handed to the Dispatcher. It outlives the entry, as turns does, so a new entry on the same
+	// thread never repeats the step its predecessor last sent (#706, #712 review). Bounded and reset
+	// exactly as turns is.
+	lastVary map[string]int
 	// manualHoldMax overrides ManualHoldMax in tests that need a real, short timer; zero means the constant.
 	manualHoldMax time.Duration
 	// reasons records why a thread is NOT held (manualhold.go), for the button's explanation.
@@ -465,7 +470,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, lastVary: map[string]int{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -542,6 +547,7 @@ func (k *Keeper) Shutdown() {
 	k.bytes = 0
 	k.turns = map[string]int{}
 	k.tier1h = map[string]bool{}
+	k.lastVary = map[string]int{}
 }
 
 // clear ZEROIZES an entry's body and credential and cancels its retention deadline. Called on
@@ -838,6 +844,19 @@ func (k *Keeper) Record(r Record) {
 		// read-only turn back to the 5-minute schedule.
 		k.turns = map[string]int{key: k.turns[key]}
 		k.tier1h = map[string]bool{}
+		// Keep the step of every thread that still holds a live entry, and of this one: a live
+		// thread that lost its step would send its next ping at step 0, the same bytes as a ping 1
+		// it may have just sent (#712 review). k.live is bounded, so this stays bounded too.
+		old := k.lastVary
+		k.lastVary = make(map[string]int, len(k.live)+1)
+		for id := range k.live {
+			if v, ok := old[id]; ok {
+				k.lastVary[id] = v
+			}
+		}
+		if v, ok := old[key]; ok {
+			k.lastVary[key] = v
+		}
 		if usageOK && (u.CacheWrite > 0 || ttl1h) {
 			k.tier1h[key] = ttl1h
 		}
@@ -894,6 +913,27 @@ func (k *Keeper) Record(r Record) {
 	// anything else in this process is awake.
 	e.timer = time.AfterFunc(e.hold(), func() { k.expireAuto(key) })
 	k.evictLocked()
+}
+
+// nextVaryLocked picks the output-budget step for a ping about to be dispatched on thread key,
+// and records it. Called at DISPATCH time only, never when a ping merely falls due: a cycle that
+// sends nothing (a substitute took it, the limiter refused it) must not use up a step, or two pings
+// sent in a row could repeat one another (#712 review).
+//
+// The next step after the thread's last one, so two pings in a row on one thread always differ.
+// A thread's first ping is step 0, the bytes every ping sent before #706.
+//
+// NOT covered: two threads holding a byte-identical body (a fork, agent-team teammates) step through
+// the same values, so their pings can match. That needs the threads to ping in lockstep with the
+// same transcript; a turn on either thread changes its body and ends it.
+// Caller holds k.mu.
+func (k *Keeper) nextVaryLocked(key string) int {
+	v, ok := k.lastVary[key]
+	if ok {
+		v = (v + 1) % pingVary
+	}
+	k.lastVary[key] = v
+	return v
 }
 
 // price asks the host for a model's rates. Never nil-checked: the Dispatcher is required.
@@ -1033,6 +1073,13 @@ func (k *Keeper) Forget(tenantID string) {
 		delete(k.turns, key)
 		delete(k.tier1h, key)
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
+	}
+	// Every step the tenant's threads left, including threads with no live entry: lastVary has no
+	// other bound while Forget keeps turns under MaxTurnKeys (#712 review).
+	for key := range k.lastVary {
+		if strings.HasPrefix(key, prefix) {
+			delete(k.lastVary, key)
+		}
 	}
 	// Client lifecycle end marks (see lifecycle.go) are bucketed by tenant already, so this is
 	// a single delete rather than a prefix scan.
@@ -1205,6 +1252,9 @@ type pingJob struct {
 	// job runs on its own goroutine and must hold a copy rather than reach back into the entry.
 	emitter components.Emitter
 	ping    int
+	// vary is the output-budget step this ping was actually sent with (Keeper.nextVaryLocked), set
+	// in fire at dispatch time and read by record1 for the audit row.
+	vary int
 	// prevStartedAt is e.startedAt as it stood BEFORE this sweep tick overwrote it with `now` —
 	// i.e. when the cache entry this ping is about to refresh was last written or read. Needed
 	// for fireSummarySubstitute's own cache-phase check: by the time fire() runs, e.startedAt is
@@ -1265,7 +1315,10 @@ func (k *Keeper) fire(j pingJob) {
 	}
 	defer release()
 
-	body, ok := pingBody(j.raw, j.route)
+	k.mu.Lock()
+	j.vary = k.nextVaryLocked(j.key.id())
+	k.mu.Unlock()
+	body, ok := pingBodyN(j.raw, j.route, j.vary)
 	if !ok {
 		k.markStopped(j.e)
 		k.skipped.Add(1)
@@ -1533,7 +1586,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 			// request with no output budget. The audit trail is the reason these rows exist; a
 			// column that is blank because nobody filled it in is the same defect at a smaller
 			// scale.
-			MaxTokens: pingOutputBudget(route),
+			MaxTokens: pingOutputBudget(route) + j.vary%pingVary,
 		})
 	}
 	return cost

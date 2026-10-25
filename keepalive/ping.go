@@ -49,12 +49,36 @@ func pingOutputBudget(route string) int {
 	return 1
 }
 
-func pingBody(body []byte, route string) ([]byte, bool) {
+func pingBody(body []byte, route string) ([]byte, bool) { return pingBodyN(body, route, 0) }
+
+// pingVary is how many distinct output budgets the pings of one thread cycle through.
+const pingVary = 8
+
+// pingBodyN is pingBody with output-budget step n: the budget is the base plus n mod pingVary. The
+// keeper picks n per thread at dispatch time (Keeper.nextVaryLocked), so no two pings sent in a row
+// on one thread are byte-identical.
+//
+// IDENTICAL PINGS NEVER REACH THE PROVIDER (#706). The IBM LiteLLM gateway keeps a response cache
+// keyed on the request, and answers a byte-identical request from it: the same response id, the
+// same usage (a "cache read" that never happened), and no call to the provider, so the provider's
+// prompt cache was not refreshed. The first ping always differs from the real turn it follows (the
+// turn asks for thousands of output tokens), so it got through; the second was a copy of the first,
+// and the prefix expired 5 minutes after the first. Live: after 1 ping the next turn missed 0 of
+// 146 times, after 2 pings 50 of 67 times. Measured on the gateway: `max_tokens`, `temperature`
+// and `stop_sequences` each change its cache key, and `metadata.user_id` does not.
+//
+// The output budget is the field to vary because the ping already sets it and it is outside the
+// prefix the provider hashes, so the ping is still a pure cache read. A larger budget costs nothing
+// on its own: the reply to a keep-alive ping is one token, and output is billed as generated.
+func pingBodyN(body []byte, route string, n int) ([]byte, bool) {
 	field := "max_tokens"
 	if route == "/v1/responses" {
 		field = "max_output_tokens"
 	}
-	out, err := sjson.SetBytes(body, field, pingOutputBudget(route))
+	if n < 0 {
+		n = 0
+	}
+	out, err := sjson.SetBytes(body, field, pingOutputBudget(route)+n%pingVary)
 	if err != nil {
 		return nil, false
 	}
