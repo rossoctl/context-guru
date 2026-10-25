@@ -4,6 +4,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // failedPingKeeper tracks one entry recorded at start, with resp answering every ping and now
@@ -80,5 +83,41 @@ func TestARunOfTransportFailuresIsRetriedOnce(t *testing.T) {
 	}
 	if got := fd.n(); got != 2 {
 		t.Fatalf("%d pings sent inside one lifetime, want 2 (the ping and one retry)", got)
+	}
+}
+
+// An OpenAI Responses thread keeps its cache 30 minutes and pings at 28 (modelinfo). ttl1h is never
+// set there, so a guard that knew only the 5-minute and 1-hour tiers saw every OpenAI fast failure
+// as past the cache's life and never retried it (#710 review).
+func TestAnOpenAIFastFailureIsRetriedInsideItsThirtyMinuteCache(t *testing.T) {
+	start := time.Now()
+	now := start
+	calls := 0
+	fd := newFake(func(DispatchRequest) (Usage, int, error) {
+		calls++
+		if calls == 1 {
+			return Usage{}, 0, errors.New("EOF")
+		}
+		return Usage{CacheRead: 50_000, Output: 1}, 200, nil
+	})
+	k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+	key := Key{Tenant: "t", Session: "s"}
+	r := trackedRecord(fd, key, start)
+	r.Provider = bschemas.OpenAI
+	r.Route = "/v1/responses"
+	r.Body = []byte(`{"model":"azure/gpt-5.6-luna","max_output_tokens":2048,"input":[]}`)
+	r.Policy.Idle = modelinfo.OpenAIDefaultKeepAliveIdle
+	k.Record(r) // turn 0: counted, not tracked
+	k.Record(r) // turn 1: tracked, Held
+	now = start.Add(modelinfo.OpenAIDefaultKeepAliveIdle + time.Second)
+	k.Sweep(now)
+	if fd.n() != 1 {
+		t.Fatalf("sent %d pings at the first slot, want 1 (is the OpenAI fixture tracked?)", fd.n())
+	}
+	now = now.Add(2 * time.Second)
+	k.Sweep(now)
+	if fd.n() != 2 {
+		t.Fatalf("%d pings sent, want 2: an OpenAI fast failure 28 min in, inside the 30-minute cache, "+
+			"was not retried", fd.n())
 	}
 }

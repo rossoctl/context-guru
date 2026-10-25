@@ -236,9 +236,10 @@ func TestPingNeverUsesTheLastConcurrencySlot(t *testing.T) {
 	}
 }
 
-// Fail open and quiet: a transport error is logged, counted and forgotten. It must not panic,
-// must not retry inside the sweep, and must still count against K so a broken upstream cannot
-// be pinged forever.
+// Fail open and quiet: a transport error is logged and counted. It must not panic and must not
+// retry inside the sweep. A fast failure is given back for ONE retry at a later sweep tick
+// (giveBackFailedPing); the retried flag, not K, is what stops a broken upstream from being pinged
+// forever.
 func TestPingErrorFailsOpen(t *testing.T) {
 	k, fd, clock := testKeeper(t)
 	fd.setResp(func(DispatchRequest) (Usage, int, error) {
