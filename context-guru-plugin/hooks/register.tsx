@@ -190,7 +190,7 @@ export const register: Register = on => {
     const v = view(snap, now)
     if (e.props.hasSurvey || !v || (await read($, isHidden))) return next(e)
 
-    const { Box, Text, Button, Link } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const busy = await read($, isPinging)
     const agentsOff = await read($, isAgentsOff)
     const m = v.main
@@ -223,13 +223,7 @@ export const register: Register = on => {
             </Box>
           )}
           {m.isWarm && v.pingable === false && <Text dimColor>{'   '}ping off: {shortReason(v.pingReason)}</Text>}
-          {v.url !== '' && (
-            <Box>
-              <Text>{'   '}</Text>
-              <Link href={v.url} label="dashboard ↗" />
-            </Box>
-          )}
-          <Text> </Text>
+          <Text>{'  '}</Text>
           <Button key="hide" label="hide" plain dimColor onPress={() => setHidden($, true)} />
         </Box>
         {chips.length > 0 && rows > 2 && !agentsOff && (
@@ -278,10 +272,8 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" gap={1} paddingX={1}>
         <Box flexDirection="column">
-          <Box columnGap={2} flexWrap="wrap">
-            <Text bold color="claude">{'◆'} Context Guru</Text>
-            {v.url !== '' && <Link href={v.url} label="open dashboard ↗" />}
-          </Box>
+          <Text bold color="claude">{'◆'} Context Guru</Text>
+          {v.url !== '' && <Link href={v.url} label="open dashboard ↗" />}
           {v.saved !== undefined && v.baseline !== undefined && v.baseline >= 0.005 && (
             <Text>
               <Text color="success">saved {usd(v.saved)}</Text>
@@ -356,10 +348,8 @@ export const register: Register = on => {
                 <Text key={i} color={k === 'hit' ? 'success' : k === 'part' ? 'warning' : 'error'}>{k === 'hit' ? '■' : k === 'part' ? '▨' : '✖'}</Text>
               ))}
             </Text>
-            <Text dimColor>
-              last {data.strip.kinds.length} requests · ■ hit ▨ partial ✖ miss
-              {data.strip.lost != null && data.strip.lost >= 0.005 ? ` · ${usd(data.strip.lost)} lost today` : ''}
-            </Text>
+            <Text dimColor>last {data.strip.kinds.length} requests{cols >= 56 ? ' · ■ hit ▨ partial ✖ miss' : cols >= 40 ? ' · ■ hit ▨ part ✖ miss' : ''}</Text>
+            {data.strip.lost != null && data.strip.lost >= 0.005 && <Text dimColor>{usd(data.strip.lost)} lost today</Text>}
           </Box>
         )}
 
@@ -371,10 +361,8 @@ export const register: Register = on => {
               <Text color="error">{heatCells(data.heat.hours, data.heat.now)}</Text>
               <Text dimColor> 24h</Text>
             </Text>
-            <Text dimColor>
-              {Math.max(0, ...data.heat.hours) > 0 ? 'darker means more misses in that hour' : 'no cache misses today'}
-              {data.heat.lost != null && data.heat.lost >= 0.005 ? ` · ${usd(data.heat.lost)} lost today` : ''}
-            </Text>
+            <Text dimColor>{Math.max(0, ...data.heat.hours) > 0 ? (cols >= 44 ? 'darker means more misses in that hour' : 'darker = more misses') : 'no cache misses today'}</Text>
+            {data.heat.lost != null && data.heat.lost >= 0.005 && <Text dimColor>{usd(data.heat.lost)} lost today</Text>}
           </Box>
         )}
 
@@ -385,11 +373,15 @@ export const register: Register = on => {
               <Text color={data.fill.frac >= 0.85 ? 'error' : data.fill.frac >= 0.65 ? 'warning' : undefined}>{stack(data.fill.frac, data.fill.base, bar)}</Text>
               <Text> {Math.round(data.fill.frac * 100)}%</Text>
             </Text>
-            <Text dimColor>
-              {data.fill.base != null ? `▒ always loaded ${Math.round(data.fill.base * 100)}% · █ conversation ${Math.round(Math.max(0, data.fill.frac - data.fill.base) * 100)}% · ░ free` : '█ used · ░ free'}
-              {data.fill.eta_s ? ` · full in ${words(data.fill.eta_s)}` : ''}
-              {data.fill.miss_usd ? ` · a miss now costs ${usd(data.fill.miss_usd)}` : ''}
-            </Text>
+            {data.fill.base != null && (
+              <Text dimColor>
+                {cols >= 70
+                  ? `▒ always loaded ${Math.round(data.fill.base * 100)}% · █ conversation ${Math.round(Math.max(0, data.fill.frac - data.fill.base) * 100)}% · ░ free`
+                  : `▒ ${Math.round(data.fill.base * 100)}% · █ ${Math.round(Math.max(0, data.fill.frac - data.fill.base) * 100)}% · ░ free`}
+              </Text>
+            )}
+            {data.fill.eta_s ? <Text dimColor>full in {words(data.fill.eta_s)}</Text> : null}
+            {data.fill.miss_usd ? <Text dimColor>a miss now costs {usd(data.fill.miss_usd)}</Text> : null}
           </Box>
         )}
 

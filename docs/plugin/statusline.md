@@ -190,14 +190,14 @@ One home per fact:
 At most three rows. Usually one.
 
 ```text
-◆ next message $0.06 · $0.78 if cold [ Ping ]   dashboard ↗ hide
+◆ next message $0.06 · $0.78 if cold [ Ping ]  hide
 └ agents  ● Explore 5m  ◐ code-reviewer <1m  ○ planner
 tip: /context-guru:save-more hasn't run in 7+ days — finds a cheaper config
 ```
 
-- **Row 1.** `◆`, then the price of the next message: warm in green, cold dim. Then **Ping** (key `p`), the dashboard link and `hide`.
+- **Row 1.** `◆`, then the price of the next message: warm in green, cold dim. Then **Ping** (key `p`) and a small `hide`. The dashboard link is in the pane header: the terminal draws a link's address next to its label, which would wrap the row.
 - **Cold cache.** The row changes to `◆ ○ cache cold · next message $0.78`. The price is amber. There is no Ping: a ping cannot help a cache that is gone.
-- **Ping off.** When the server says it cannot ping, the button is replaced by a dim reason, such as `ping off: turns on next session`. If the server does not say (an older server), the button stays.
+- **Ping off.** When the server says it cannot ping, the button is replaced by a dim reason, such as `ping off: turns on next session` or `ping off: not on this route` (a gateway, or extended thinking). If the server does not say (an older server), the button stays.
 - **Row 2, sub-agents.** On by default. One chip per named agent that made a request in the last 30 minutes, most recent first, at most four, then `+N`. `●` green is warm, `◐` amber is the last minute, cyan with `↻` is kept warm by pings, dim `○` is cold. The `a` key, or the pane button, turns the row off and on.
 - **Row 3, the weekly tip.** Only when `/context-guru:save-more` or `/context-guru:remove-mcp-and-skills` has not run for 7 days. It uses the same rule as the status line tip (`last-run.json`, and a new install waits a week). It does not rotate.
 - **Hide.** `hide` removes the band for the session. `/context-guru:context-guru`, or the pane's **Show the band again** button, brings it back.
@@ -207,7 +207,8 @@ tip: /context-guru:save-more hasn't run in 7+ days — finds a cheaper config
 `/context-guru:context-guru` opens it. Sections that have no data are left out.
 
 ```text
-◆ Context Guru  open dashboard ↗
+◆ Context Guru
+open dashboard ↗
 saved $22.80 of $81.90 this session
 
 NEXT MESSAGE

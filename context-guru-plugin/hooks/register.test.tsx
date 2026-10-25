@@ -104,7 +104,7 @@ async function boot($: any, on: any, warm: boolean, calls: string[][] = [], ping
 let statusCalls = 0
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`${surface}: warm band shows the next-message price warm and cold, Ping, the dashboard link and the agent chips`, async ($, on) => {
+  test(`${surface}: warm band shows the next-message price warm and cold, Ping and the agent chips`, async ($, on) => {
     await boot($, on, true)
     const ui = await $.ui.mount({ ...BAND, surface })
     expect(await ui.find({ type: 'Text', text: /next message/ })).toBeDefined()
@@ -112,7 +112,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await ui.find({ type: 'Text', text: /\$0\.78 if cold/ })).toBeDefined()
     expect(await ui.find({ key: 'ping' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Explore/ })).toBeDefined()
-    if (surface === 'terminal') expect(await ui.find({ type: 'Link' })).toBeDefined()
+    expect(await ui.find({ type: 'Link' })).toBeUndefined() // the link lives in the pane: the terminal draws its address too
     await ui.unmount()
   })
 
@@ -205,11 +205,12 @@ test('the agents row can be turned off from the pane, and stays off', async ($, 
   await ui.unmount()
 })
 
-test('the dashboard link is http://localhost:PORT/dashboard/', async ($, on) => {
+test('the pane has the dashboard link http://localhost:PORT/dashboard/ on its own line under the title', async ($, on) => {
   await boot($, on, true)
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const link = await ui.find({ type: 'Link' })
   expect((link as any)?.props?.href ?? (link as any)?.href).toBe('http://localhost:8787/dashboard/')
+  expect((await dump(ui)).split('\n').slice(0, 3)).toEqual(['◆ Context Guru', 'open dashboard ↗', 'saved $22.80 of $81.90 this session'])
   await ui.unmount()
 })
 
@@ -370,7 +371,7 @@ for (const [reason, want] of [
   ['unavailable', /route or credential is failing right now . try again shortly/],
   ['over budget', /per-ping limit/],
   ['too large', /too large to hold/],
-  ['unsupported', /extended thinking/],
+  ['unsupported', /route or settings cannot be pinged/],
   ['expired', /already cold/],
   ['some-future-code', /cannot ping this session right now/],
 ] as const) {
@@ -405,6 +406,7 @@ test('the pane has every section, in order, when the data is there', async ($, o
   expect(all).toMatch(/if it is cold\s+\$0\.78/)
   expect(all).toMatch(/\$4\.20 today · last 14 days/)
   expect(all).toMatch(/\$1\.40 lost today/)
+  expect(all).toMatch(/^ ?\$4\.20 today/m)
   expect(all).toMatch(/41%/)
   expect(all).toMatch(/tip .*save-more hasn't run in 7\+ days/)
   expect(all).not.toMatch(/gauge|█{6}.*left/) // no cache clock in the pane either
@@ -437,6 +439,27 @@ test('the pane omits AGENTS when there are none, and no tip line when no command
   await ui.unmount()
   noAgents = false
 })
+
+for (const cols of [140, 80, 60]) {
+  test(`render: pane and band at ${cols} columns; no "$x lost today" is split and the band is one row`, async ($, on) => {
+    tipStale = ['save-more']
+    await boot($, on, true)
+    await $.command.run({ command: 'context-guru', args: '' })
+    await clock.advance(100)
+    const pane = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: cols }, surface: 'terminal' })
+    const all = await dump(pane)
+    console.log(`--- PANE ${cols} columns ---\n` + all)
+    for (const l of all.split('\n').filter(l => /lost today/.test(l))) expect(l).toMatch(/^\$\d+\.\d\d lost today$/)
+    await pane.unmount()
+    const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: cols }, surface: 'terminal' })
+    const rows = (await dump(band)).split('\n')
+    console.log(`--- BAND ${cols} columns ---\n` + rows.join('\n'))
+    expect(rows[0].length).toBeLessThan(80) // row 1 holds no address: it fits one line
+    expect(rows[0]).not.toMatch(/localhost|dashboard/)
+    await band.unmount()
+    tipStale = []
+  })
+}
 
 test('the pane at 60 columns fits, and a cold pane shows the cold price and no Ping now', async ($, on) => {
   await boot($, on, false)
