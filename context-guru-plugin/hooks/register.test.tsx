@@ -372,7 +372,7 @@ for (const [reason, want] of [
   ['unavailable', /route or credential is failing right now . try again shortly/],
   ['over budget', /per-ping limit/],
   ['too large', /too large to hold/],
-  ['unsupported', /Ping can't hold this session \(extended thinking, or a gateway route\)/],
+  ['unsupported', /Ping cannot hold this session \(extended thinking, or a route Ping does not support\)/],
   ['expired', /already cold/],
   ['some-future-code', /cannot ping this session right now/],
 ] as const) {
@@ -621,4 +621,38 @@ test('SAVE MORE at 60 columns puts each description on its own line', async ($, 
   expect(lines[i]).toBe('/context-guru:remove-mcp-and-skills')
   expect(lines[i + 1].trim()).toMatch(/^drop MCP servers/)
   await ui.unmount()
+})
+
+test('"$x lost today" falls back to MISSES BY HOUR when CACHE HITS has no data, and shows once', async ($, on) => {
+  paneDoc = { heat: PANE_DATA.heat, spark: PANE_DATA.spark }
+  await boot($, on, true)
+  await $.command.run({ command: 'context-guru', args: '' })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const lines = (await dump(ui)).split('\n')
+  expect(lines).not.toContain('CACHE HITS')
+  expect(lines.filter(l => /lost today/.test(l))).toEqual(['$1.40 lost today'])
+  expect(lines.findIndex(l => /lost today/.test(l))).toBeGreaterThan(lines.indexOf('MISSES BY HOUR'))
+  await ui.unmount()
+  paneDoc = PANE_DATA
+})
+
+test('two turns in a row with no document run one retry loop: at most 12 helper reads, not 24', async ($, on) => {
+  const calls: string[][] = []
+  on('command.register', () => ({ value: { command: 'context-guru' } }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  clock = mock.clock(on, { now: NOW })
+  on('env.get', () => ({ value: 'http://127.0.0.1:8787/anthropic' }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('process.run', (_: any, e: any) => {
+    calls.push([...e.argv])
+    return { value: { exitCode: 0, stdout: JSON.stringify(e.argv.includes('tip') ? { stale: [], days: 7 } : { error: 'proxy not answering' }) + '\n', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete({} as any).catch(() => undefined)
+  await $.turn.complete({} as any).catch(() => undefined)
+  await clock.advance(14_000) // under the 15 s poll, long enough for the whole loop
+  const n = calls.filter(c => c.includes('cachestate')).length
+  expect(n).toBeGreaterThan(1) // the loop ran
+  expect(n).toBeLessThanOrEqual(12)
 })

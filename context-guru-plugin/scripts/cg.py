@@ -1390,7 +1390,7 @@ PING_REASONS = {
     "below limits": "keep-alive is on, but this thread is below its minimum size or limits",
     "over budget": "one ping would cost more than the per-ping limit",
     "too large": "context too large to hold for Ping",
-    "unsupported": "Ping can't hold this session (extended thinking, or a gateway route)",
+    "unsupported": "Ping cannot hold this session (extended thinking, or a route Ping does not support)",
     "pings used": "the planned keep-alive pings have run out",
     "stopped": "the proxy stopped keeping this thread warm after a miss or a refused ping",
     "expired": "cache already cold",

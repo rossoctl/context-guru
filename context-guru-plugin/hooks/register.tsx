@@ -60,7 +60,10 @@ async function refresh($: Engine): Promise<void> {
 
 /** The status line's refresher writes the first cache-state document a moment after the first reply. Until it
  * exists, ask again every 1.5 s, twelve times (about 15 s), so the band appears at once and not at the next 15 s poll. */
+let soon = false // one loop at a time: a second turn while it runs returns at once
 async function refreshSoon($: Engine): Promise<void> {
+  if (soon) return
+  soon = true
   try {
     for (let i = 0; i < 12; i++) {
       await refresh($)
@@ -69,6 +72,8 @@ async function refreshSoon($: Engine): Promise<void> {
     }
   } catch {
     // the next 15 s poll asks again
+  } finally {
+    soon = false
   }
 }
 
@@ -379,6 +384,7 @@ export const register: Register = on => {
               <Text dimColor> 24h</Text>
             </Text>
             <Text dimColor>{Math.max(0, ...data.heat.hours) > 0 ? (cols >= 44 ? 'darker means more misses in that hour' : 'darker = more misses') : 'no cache misses today'}</Text>
+            {!data.strip && data.heat.lost != null && data.heat.lost >= 0.005 && <Text dimColor>{usd(data.heat.lost)} lost today</Text>}
           </Box>
         )}
 
