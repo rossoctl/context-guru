@@ -191,6 +191,16 @@ CREATE TABLE IF NOT EXISTS requests (
   -- rate (0 when the ping read nothing, because then it avoided nothing). Gross; the ping's own
   -- cost is cost_usd on the same row. Its net joins total_saved_usd.
   manual_saved_usd REAL NOT NULL DEFAULT 0,
+  -- extract_llm_sweep's quality signals and answer cost (#404 PR C). sweep_expands and
+  -- sweep_expand_tokens are the part of expands and expand_tokens that restored a marker the SWEEP
+  -- made; sweep_false_expands counts drops expanded back for the first time (and not already counted
+  -- as referenced); sweep_answer_usd is, on a ping row the sweep's question replaced, what the answer
+  -- cost beyond the read the ping would have paid. It is PART OF cost_usd, not added to it. 0 on every
+  -- earlier row, which is true: nothing was applied then.
+  sweep_expands       INTEGER NOT NULL DEFAULT 0,
+  sweep_expand_tokens INTEGER NOT NULL DEFAULT 0,
+  sweep_false_expands INTEGER NOT NULL DEFAULT 0,
+  sweep_answer_usd    REAL    NOT NULL DEFAULT 0,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -744,6 +754,15 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// records having got wrong once already.
 	{"request_components", "events", "TEXT NOT NULL DEFAULT ''"},
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
+	// extract_llm_sweep's quality signals and answer cost (#404 PR C). Additive with a default of 0:
+	// a row from before the sweep applied anything reads as "no sweep activity", which is true.
+	// sweep_expands / sweep_expand_tokens are the part of expands / expand_tokens that restored a
+	// marker the SWEEP made; sweep_false_expands counts first expands of a drop; sweep_answer_usd is
+	// on a ping row the sweep's question replaced and is part of that row's cost_usd, not added to it.
+	{"requests", "sweep_expands", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "sweep_expand_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "sweep_false_expands", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "sweep_answer_usd", "REAL NOT NULL DEFAULT 0"},
 }
 
 // migrateToolUsesProject adds tool_uses.project and puts it in the primary key.

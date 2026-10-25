@@ -9,7 +9,6 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -187,13 +186,13 @@ func TestShadowIsOffByDefaultAndInNoPreset(t *testing.T) {
 	if c.(*ExtractSweep).shadow {
 		t.Fatal("shadow mode is on by default")
 	}
-	if !shippedSweep(t, "").shadow {
+	if !shippedSweep(t, "shadow: true\n").shadow {
 		t.Fatal("shadow: true was not honoured")
 	}
 }
 
 func TestShadowReportsTheAskThenTheRecheckAtTheColdRequest(t *testing.T) {
-	e := shippedSweep(t, "")
+	e := shippedSweep(t, "shadow: true\n")
 	judged := refConversation(3)
 	st := newMemStore()
 	key, _ := registered(t, e, "shadow-flow", pingAsker(), st, judged)
@@ -265,34 +264,5 @@ func TestShadowReportsTheAskThenTheRecheckAtTheColdRequest(t *testing.T) {
 		if strings.HasPrefix(ev, "sweep_shadow_") {
 			t.Errorf("a consumed answer was reported again: %s", ev)
 		}
-	}
-}
-
-// With shadow off nothing is asked, held or reported (see TestWithShadowOffThePingStaysPlain), so the
-// next request has nothing to report.
-func TestShadowOffReportsNothing(t *testing.T) {
-	c0, err := newExtractSweep([]byte("min_tokens: 2000\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := c0.(*ExtractSweep)
-	st := newMemStore()
-	key, _ := registered(t, e, "shadow-off", pingAsker(), st, refConversation(3))
-	if _, _, _, ok := SweepPingSubstitute(key); ok {
-		t.Fatal("a question was offered with shadow off")
-	}
-	cold := preExpiryCtx("shadow-off", pingAsker(), st)
-	cold.ColdCache = true
-	rep := &components.Report{Component: "extract_llm_sweep"}
-	if _, err := e.Offload(refConversation(3), rep, cold); err != nil {
-		t.Fatal(err)
-	}
-	for ev := range rep.Events {
-		if strings.HasPrefix(ev, "sweep_shadow_") {
-			t.Errorf("shadow is off but %s was reported", ev)
-		}
-	}
-	if _, ok := getHeld(st, thread.Key("shadow-off", "")); ok {
-		t.Error("an answer is held with shadow off")
 	}
 }

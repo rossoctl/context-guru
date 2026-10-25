@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -11,9 +12,11 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
@@ -309,7 +312,9 @@ func TestKeepAliveWithZeroCandidatesSendsAPlainPing(t *testing.T) {
 	asker := &sweepAsker{cacheRead: 48576}
 	small := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&small, "hello")
-	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small, sweepToolMsg("toolu_s", "tiny output")})
+	// A big output that is already a marker: it registers, and offers nothing.
+	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small,
+		sweepToolMsg("toolu_s", strings.Repeat("a spent line\n", 900)+expand.Marker("abcdef0"))})
 	before := k.Stats().SweepNoInventory
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
@@ -530,5 +535,121 @@ func TestWhenTheSummaryDeclinesTheSweepStillDoesNotAskAndAPlainPingGoesOut(t *te
 	}
 	if got := k.Stats().SweepSummaryOwnedPing - before; got != 1 {
 		t.Errorf("sweep_summary_owned_ping rose by %d, want 1", got)
+	}
+}
+
+// ⭐ C5 (#404 point 15). After a cold apply, the next ping carries the FORWARDED body.
+//
+// The keeper records the bytes that went upstream, so when a cold request is forwarded with its drops
+// applied, the entry it holds is the dropped form, and the ping that follows reads THAT prefix. The wasted
+// ping of the issue's finding 6 read the conversation the sweep had just abandoned ($0.08). The test
+// feeds the keeper two requests: one with the original output, then a cold one whose forwarded body is
+// the dropped form. The ping body must be the second, byte for byte, and must not carry the abandoned
+// output.
+func TestC5AfterAColdApplyTheNextPingCarriesTheForwardedBody(t *testing.T) {
+	k, fs, clock := testKeeper(t)
+	const big = "ORIGINAL-OUTPUT-THE-SWEEP-DROPPED"
+	before := `{"model":"aws/claude-sonnet-5","max_tokens":32000,"stream":true,` +
+		`"system":[{"type":"text","text":"you are claude code","cache_control":{"type":"ephemeral"}}],` +
+		`"messages":[{"role":"user","content":"fix it"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"` + big + `"}]},` +
+		`{"role":"assistant","content":"done","cache_control":{"type":"ephemeral"}}]}`
+	forwarded := `{"model":"aws/claude-sonnet-5","max_tokens":32000,"stream":true,` +
+		`"system":[{"type":"text","text":"you are claude code","cache_control":{"type":"ephemeral"}}],` +
+		`"messages":[{"role":"user","content":"fix it"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"[context-guru removed a spent tool output]\n<<cg:abc123>>"}]},` +
+		`{"role":"assistant","content":"done","cache_control":{"type":"ephemeral"}}]}`
+	pol := kaPolicy()
+	pol.MinPrefixTokens = 0
+	at := clock.now()
+	rec(k, pol, sess1, at.Add(-time.Second), before, http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+	rec(k, pol, sess1, at, before, http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+	// The cold request: forwarded with the drops applied. The keeper is handed the forwarded bytes.
+	at2 := at.Add(10 * time.Minute)
+	clock.advance(10 * time.Minute)
+	rec(k, pol, sess1, at2, forwarded, http.StatusOK, Usage{CacheWrite: 30000}, true)
+
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	if fs.n() != 1 {
+		t.Fatalf("sent %d pings, want 1", fs.n())
+	}
+	fs.mu.Lock()
+	sent := append([]byte(nil), fs.sent[0].Body...)
+	fs.mu.Unlock()
+	if strings.Contains(string(sent), big) {
+		t.Fatal("the ping carries the output the sweep dropped: it re-read the prefix the cold request abandoned")
+	}
+	if !strings.Contains(string(sent), "<<cg:abc123>>") {
+		t.Fatalf("the ping does not carry the forwarded (dropped) form:\n%s", sent)
+	}
+	// Byte for byte the forwarded messages: only max_tokens and stream differ, as for any ping.
+	if got, want := gjson.GetBytes(sent, "messages").Raw, gjson.Get(forwarded, "messages").Raw; got != want {
+		t.Errorf("ping messages differ from the forwarded body:\n got %s\nwant %s", got, want)
+	}
+}
+
+// ⭐ M1 (keeper half, #404 point 9). The answer cost is booked ONCE, on the ping row the question
+// replaced, and it is the OUTPUT (thinking included) plus the question's own fresh input: never the
+// cache read, which the plain ping would have made anyway. An ordinary ping carries none.
+func TestTheAnswerCostIsBookedOnceOnThePingRowTheQuestionReplaced(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	price := modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}
+	fd.setPrices(proxyPricer{fixedPrice{price}})
+	sink := &reportSink{}
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	registerSweep(t, st, &sweepAsker{cacheRead: 48576}, "claude-sonnet-5", sweepConversation(3))
+	recordWithSink(k, sink, sess1, clock.now())
+	// The registration is for "sess-1" with no thread: sess1's session id is the same.
+	k.Sweep(clock.advance(281 * time.Second))
+	waitSweepOutcome(t, k, fd)
+	if k.sweepSubstituted.Load() != 1 {
+		t.Fatalf("the question did not replace the ping (ordinary pings %d)", fd.n())
+	}
+	reps := sink.all()
+	var onPing []components.KeepAliveReport
+	for _, r := range reps {
+		if r.Pings > 0 || r.SweepAnswerUSD > 0 {
+			onPing = append(onPing, r)
+		}
+	}
+	var withAnswer int
+	var r components.KeepAliveReport
+	for _, x := range onPing {
+		if x.SweepAnswerUSD > 0 {
+			withAnswer++
+			r = x
+		}
+	}
+	if withAnswer != 1 {
+		t.Fatalf("%d ping rows carry the answer cost, want exactly 1 (reports: %+v)", withAnswer, onPing)
+	}
+	// sweepAsker's usage: Fresh 600, Output 300, CacheRead 48576.
+	wantAnswer := 600*price.Input + 300*price.Output
+	if math.Abs(r.SweepAnswerUSD-wantAnswer) > 1e-12 {
+		t.Errorf("answer cost = %v, want output + fresh = %v (NOT including the cache read)", r.SweepAnswerUSD, wantAnswer)
+	}
+	// The row's own cost is the whole call: the read PLUS the answer. The answer is part of it.
+	wantRow := wantAnswer + 48576*price.CacheRead
+	if math.Abs(r.CostUSD-wantRow) > 1e-9 {
+		t.Errorf("ping row cost = %v, want the read + the answer = %v", r.CostUSD, wantRow)
+	}
+	if r.SweepAnswerUSD >= r.CostUSD {
+		t.Errorf("the answer (%v) is the whole row (%v): the read the ping pays anyway was lost", r.SweepAnswerUSD, r.CostUSD)
+	}
+}
+
+// A plain ping, and a summary-substituted ping, carry NO sweep answer cost.
+func TestAnOrdinaryPingCarriesNoSweepAnswerCost(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}}})
+	sink := &reportSink{}
+	recordWithSink(k, sink, sess1, clock.now())
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	for _, r := range sink.all() {
+		if r.SweepAnswerUSD != 0 {
+			t.Errorf("an ordinary ping carries a sweep answer cost of %v", r.SweepAnswerUSD)
+		}
 	}
 }

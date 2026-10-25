@@ -202,7 +202,8 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.thread_id,
 	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms,
 	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd,
-	r.project, r.source`
+	r.project, r.source,
+	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -224,7 +225,8 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.ThreadID,
 		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs,
 		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD,
-		&e.Project, &e.Source)
+		&e.Project, &e.Source,
+		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD)
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64
@@ -824,6 +826,17 @@ type ComponentRow struct {
 	// attribution ledger took out of SavedUSD (see SummarizeLedger). Set on the summarize row only.
 	SummarizeCreditPastSpanUSD     float64 `json:"summarize_credit_past_span_usd,omitempty"`
 	SummarizeCreditPrefixChangeUSD float64 `json:"summarize_credit_prefix_change_usd,omitempty"`
+	// The sweep's ledger (#404 PR C), set on the extract_llm_sweep row only. SweepExpandChargeUSD is the
+	// cost of the sweep's expands, already taken off SavedUSD and NetUSD. SweepAnswerUSD is what the
+	// answers cost beyond the pings' own reads: its own column, NOT subtracted again (the component's
+	// model spend already carries it). The false-drop rate is the number to pull the sweep on.
+	SweepApplied         int64   `json:"sweep_applied,omitempty"`
+	SweepFalseDrops      int64   `json:"sweep_false_drops,omitempty"`
+	SweepFalseDropRate   float64 `json:"sweep_false_drop_rate,omitempty"`
+	SweepExpands         int64   `json:"sweep_expands,omitempty"`
+	SweepExpandTokens    int64   `json:"sweep_expand_tokens,omitempty"`
+	SweepExpandChargeUSD float64 `json:"sweep_expand_charge_usd,omitempty"`
+	SweepAnswerUSD       float64 `json:"sweep_answer_usd,omitempty"`
 	// ReplayCreditPastCapUSD is stored credit the replay ledger took out of SavedUSD: turns after
 	// the counterfactual (or a real) client compaction. Set on the capped components' rows.
 	ReplayCreditPastCapUSD float64 `json:"replay_credit_past_cap_usd,omitempty"`

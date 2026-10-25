@@ -383,6 +383,19 @@ type Event struct {
 	Expands      int `json:"expands"`
 	ExpandTokens int `json:"expand_tokens"`
 	Reverts      int `json:"reverts"`
+	// SweepExpands and SweepExpandTokens are the part of Expands and ExpandTokens that restored a
+	// marker the extract_llm_sweep made (#404 point 7). The sweep's credit has them taken off; the
+	// totals above still carry them, so SavedAdjusted is unchanged.
+	SweepExpands      int `json:"sweep_expands"`
+	SweepExpandTokens int `json:"sweep_expand_tokens"`
+	// SweepFalseExpands is how many drops were expanded back for the FIRST time on this request and
+	// were not already counted as referenced: the expand half of the false-drop count, exact per drop.
+	SweepFalseExpands int `json:"sweep_false_expands"`
+	// SweepAnswerUSD is, on a keep-alive ping row the sweep's question replaced, what the answer cost
+	// beyond the read the ping would have paid anyway (#404 point 9). Booked once, on the ping row, as
+	// the summary's call is (#458). It is part of CostUSD, not added to it, and it is a separate
+	// column so the sweep's credit and its answer cost are never one number.
+	SweepAnswerUSD float64 `json:"sweep_answer_usd,omitempty"`
 
 	TokenAccounting    string `json:"token_accounting"`
 	CacheMissReason    string `json:"cache_miss_reason"`

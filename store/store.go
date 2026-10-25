@@ -174,7 +174,16 @@ const (
 	// replays a cg:swh: record. PINNED, because the record is a paid model call: losing it to LRU
 	// eviction throws the answer away.
 	SweepHeldPrefix = "cg:swh:" // extract_llm_sweep: "the model said drop these, asked at the ping"
-	LenPrefix       = "cg:len:" // apply's prev-turn message count (the MaxCachedIdx boundary)
+	// SweepDropPrefix holds the sweep's APPLIED drops (#404 PR C), one record per thread and dropped
+	// output. It is the sweep's own replay state, and it is NOT ResultPrefix: only extract_llm writes
+	// cg:res: now, and a sweep reader of that namespace would replay another component's decisions.
+	// PINNED, because losing a record flips an output back to its full form inside the cached prefix,
+	// which is a full-suffix cache write.
+	SweepDropPrefix = "cg:swd:" // extract_llm_sweep: "this output was dropped at a cold request; replay it"
+	// SweepExpandPrefix maps a sweep marker id to its drop record, so an expand of that marker can be
+	// charged to the sweep (the false-drop signal). Metadata only: a thread key and a content key.
+	SweepExpandPrefix = "cg:swx:"
+	LenPrefix         = "cg:len:" // apply's prev-turn message count (the MaxCachedIdx boundary)
 	// XResultPrefix is extract_llm's CROSS-session result namespace. Pinned for the same
 	// reason ResultPrefix is: every entry is a model call already paid for, and the store's
 	// default cap is 1,000 entries shared with the unpinned expand stashes — which are the
@@ -246,7 +255,7 @@ const (
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
 var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
-	BilledPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix}
+	BilledPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix, SweepDropPrefix, SweepExpandPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {

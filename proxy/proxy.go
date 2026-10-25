@@ -1584,6 +1584,9 @@ func (h *Handler) repairExpandErrors(wire string, body []byte, tn *Tenancy, cp *
 		// stale error on ten later turns is one recovery, not ten.
 		if !offload.KeptVerbatim(tn.Store, orig) {
 			cp.noteExpand(schema.TextTokens(orig))
+			// A sweep marker restored by the repair is charged to the sweep too (#404 point 7). Same
+			// first-time rule as the line above: the repair runs again on every later turn.
+			cp.noteSweepExpand(schema.TextTokens(orig), offload.NoteSweepExpand(tn.Store, offload.SweepMarkerID(orig), schema.TextTokens(orig)))
 		}
 		offload.MarkKeptVerbatim(tn.Store, orig)
 	}
@@ -2023,6 +2026,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 					h.agg.RecordExpand(back) // bounce: offload had to come back
 				}
 				cp.noteExpand(back) // and on the dashboard row, or SavedAdjusted over-reports
+				// And, when the marker is one the sweep made, charged to the sweep (#404 point 7): the
+				// false-drop signal, and what comes off the sweep's credit.
+				cp.noteSweepExpand(back, offload.NoteSweepExpand(tn.Store, c.HashID, back))
 			} else {
 				// Classified as well as counted: the response loop and the request-path repair
 				// both reach here, and an id this proxy could have minted with nothing behind it
@@ -2418,7 +2424,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// lives in `proxy` because it acts between requests, so `metrics` cannot reach it. Only
 	// published once it has done something — a deployment where nobody opted in shows no
 	// field at all rather than a row of zeroes that reads as a broken feature.
-	if ka := h.keeper.Stats(); ka.Live > 0 || ka.Pings > 0 || ka.Skipped > 0 {
+	if ka := h.keeper.Stats(); ka.Live > 0 || ka.Pings > 0 || ka.Skipped > 0 || ka.SweepDrops != nil {
 		snap.KeepAlive = ka
 	}
 	// Off-path pool counters, same layering: the pool lives in `modes`, so `metrics` cannot

@@ -14,7 +14,6 @@ import (
 
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
@@ -470,102 +469,30 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	// the whole usage when the ping was sent after all). Idempotent: whichever component runs first
 	// takes it.
 	takeDeferredUsage(c, rep)
-	// A held answer from the last keep-alive ping is reported (shadow) and, once PR C lands, applied.
-	// Done FIRST and before any gate below can return: the answer is a fact about the conversation
-	// whatever this turn decides to collect.
-	e.shadowStep(c, req, rep)
 	// The ping-time question reads a snapshot of the conversation as this component leaves it, so it
-	// is taken last, after the replays below have spliced their markers. Deferred because this
-	// function returns from several places.
+	// is taken last, after the cold step has spliced its markers. Deferred because this function
+	// returns from several places.
 	defer e.registerPing(c, req)
-	// In-request collection runs only for the econ trigger. The decision is taken at the ask, where
-	// the candidate mass is known.
-	val := savedTokenValue(c)
-	var keys []string
-	changed := 0
-	// Skipped is a property of the OUTCOME, not of one exit, and this function has two: the
-	// inventory floor below returns early, and every turn that collects nothing reaches
-	// it with no candidates at all. Setting it only on the tail return made 29,321 of 29,372
-	// production rows report `mutated=1` for a component that had DECLINED -- because
+	// Skipped is a property of the OUTCOME, not of one exit. Setting it only on one return made 29,321
+	// of 29,372 production rows report `mutated=1` for a component that had DECLINED -- because
 	// dash/event.go computes Mutated as !Reverted && !Skipped, and GateN is a no-op at n<=0, so
-	// those turns recorded neither a gate nor a skip. A deferred guard covers both exits and any
-	// future one; the alternative, a copy of the check at each return, is what went wrong here.
+	// those turns recorded neither a gate nor a skip. A deferred guard covers every exit.
+	changed := 0
 	defer func() {
 		if changed == 0 {
 			rep.Skipped = true
 		}
 	}()
-	// Phase 1 (serial): replay frozen decisions at any depth, and collect the candidates to name in
-	// the inventory.
-	for _, i := range toolIndices(req) {
-		msg := &req.Input[i]
-		if !schema.Rewritable(*msg) {
-			rep.Gate("non_text_blocks")
-			continue
-		}
-		content := schema.MessageText(*msg)
-		if content == "" || expand.HasPlaceholder(content) {
-			rep.Gate("empty_or_marker_present")
-			continue
-		}
-		id := extract.ContentKey(content)
-		// If the agent recently EXPANDED this content, leave it verbatim — removing it again would
-		// just trigger another expand.
-		if isKeptVerbatim(c, id) {
-			rep.Gate(GateKeptVerbatim)
-			continue
-		}
-		// SAME-SESSION REPLAY, and it bypasses the depth gate legitimately: this session already
-		// sent these exact bytes on an earlier turn, so the provider's cached prefix holds the
-		// REMOVED form and replaying it is byte-identical.
-		//
-		// The stored value is the descriptor, which sweepDescriptor derives from the content alone.
-		// That is what makes the replay safe in the sense TailOnlyCold's doc requires: the DECISION
-		// came from a model, but the REPLACEMENT is a pure function of (content, config), so a replay
-		// can never emit different bytes than the turn that decided it.
-		// The cached VALUE is no longer read: the saving is measured against the message as
-		// replayed, not against the stored descriptor. Only the HIT is consulted.
-		//
-		// WHAT THE HIT ACTUALLY PROVES, stated precisely because the depth bypass below rests on it
-		// and the key cannot carry the stronger claim. resultKey is cg:res:<session>:<id> — session
-		// and content hash, no component tag (state.go) — and extract_llm keys the same namespace
-		// off the same extract.ContentKey. The shipped `housellm` preset runs extract_llm
-		// immediately before this component in one pipeline (config/config.go), so a record written
-		// by extract_llm for content M is indistinguishable from one written here.
-		//
-		// So a hit proves "SOME component in this session recorded a decision for these bytes",
-		// not "this component already sent this descriptor". The bypass is still sound in practice —
-		// the replacement is a pure function of (content, config), so a replay emits the same bytes
-		// whichever component decided — but the sequence that would exercise the difference (M
-		// verbatim, at cached depth, with a live cg:res: from extract_llm and no marker on it) has
-		// not been constructed, and unreachability has not been established either. Filed rather
-		// than asserted here (#197); namespacing the record or storing a component tag would make
-		// the stronger claim true by construction.
-		if _, hit := getResult(c, id); hit {
-			metrics.RecordExtractionCacheLookup(rep.Component, true)
-			// Inside the ok branch, with rep.Replay. It used to sit above the call, so a drop
-			// applySweepDrop declined still booked its token savings — and after #188 that
-			// call can decline for a new reason (the reserve), on precisely the runs where the
-			// savings figure is being measured. rep.Replay on this path was already guarded
-			// correctly; this is the metric matching it.
-			if k, ok := applySweepDropReplay(c, rep, e.mode, msg, content); ok {
-				// Measured against the message AS REPLAYED, for the same reason the fresh path is:
-				// the text written is descriptor + marker + hint. Correcting only the fresh path
-				// left this component contradicting ITSELF — the same drop valued higher on every
-				// replay turn than on the turn it was made, and replays are the steady state, so
-				// most of the reported value came from the overstated side.
-				if saved := schema.TextTokens(content) - schema.TextTokens(schema.MessageText(*msg)); saved > 0 {
-					metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
-				}
-				changed++
-				if k != "" {
-					keys = append(keys, k)
-				}
-				rep.Replay("reapplied_same_session")
-			}
-			continue
-		}
+	// SHADOW MODE changes nothing: it reports what the apply would do (extract_sweep_shadow.go).
+	if e.shadow {
+		e.shadowStep(c, req, rep)
+		return nil, nil
 	}
+	// THE COLD APPLY (#404 points 3 and 4). It replays the drops this thread already made, at any
+	// depth, and applies a held answer when this request is cold or its prefix changed. A warm request
+	// with an unchanged prefix gets only the replays, which are byte-identical to what it sent before.
+	keys, n := e.coldStep(req, rep, c)
+	changed += n
 	return keys, nil
 }
 

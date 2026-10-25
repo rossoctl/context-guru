@@ -81,7 +81,7 @@ func (e *ExtractSweep) shadowStep(c *components.Ctx, req *bschemas.BifrostChatRe
 			"waiting_for", h.WaitingFor, "wait_tool", h.WaitTool, "cost_usd", h.CostUSD,
 			"model", h.Model, "judged_msgs", h.Judged)
 	}
-	if c.CachePhase(0) != components.CachePhaseCold {
+	if !sweepColdRequest(c) {
 		return
 	}
 	// The recheck is reported once per held answer: the request that wins the claim consumes it, and a

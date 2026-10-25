@@ -18,6 +18,7 @@ package coref
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -197,7 +198,14 @@ type Record struct {
 	// referenced. Near the tail this approaches zero, and an output that has not had a
 	// chance to be used must not be scored as unused. See Classify's minLater.
 	LaterTurns int
+	// NovelIDs are the identifiers this output introduced (the set Novel counts), sorted and capped.
+	// Filled only by IndexNovel; Index leaves it nil, so existing callers pay nothing for it.
+	NovelIDs []string
 }
+
+// maxNovelIDs bounds Record.NovelIDs. A reference signal needs a few distinctive identifiers, not all of
+// them, and the cap keeps what a caller stores per output small.
+const maxNovelIDs = 48
 
 // Classify applies the open/closed predicate. closedDist is the recency floor (a last
 // reference NEWER than this many messages ago keeps the output open); openReps is the
@@ -250,11 +258,23 @@ func Index(msgs []Message, minOutputTokens int, tok func(string) int) []Record {
 	return index(msgs, minOutputTokens, tok, true)
 }
 
+// IndexNovel is Index with Record.NovelIDs filled. The sweep keeps a hash of each dropped output's
+// identifiers, so it can tell later that a turn used something the dropped output introduced, after the
+// output itself is no longer in the request.
+func IndexNovel(msgs []Message, minOutputTokens int, tok func(string) int) []Record {
+	return indexN(msgs, minOutputTokens, tok, true, true)
+}
+
 // index is Index with the echo guard made switchable, so the test can run the negative
 // control that proves the guard is what produces the result. The knob is unexported on
 // purpose: priorGuard=false is a KNOWN-WRONG index (it counts the tool-call argument
 // echoed by its own result as a reference), and no caller should be able to select it.
 func index(msgs []Message, minOutputTokens int, tok func(string) int, priorGuard bool) []Record {
+	return indexN(msgs, minOutputTokens, tok, priorGuard, false)
+}
+
+// indexN is index with Record.NovelIDs switchable.
+func indexN(msgs []Message, minOutputTokens int, tok func(string) int, priorGuard, withNovel bool) []Record {
 	if tok == nil {
 		tok = approxTokens
 	}
@@ -345,6 +365,17 @@ func index(msgs []Message, minOutputTokens int, tok func(string) int, priorGuard
 			}
 
 			rec := Record{Idx: i, ID: r.ID, SizeTokens: size, Novel: len(novel), RefAge: -1, ConsumeLag: -1}
+			if withNovel && len(novel) > 0 {
+				ids := make([]string, 0, len(novel))
+				for t := range novel {
+					ids = append(ids, t)
+				}
+				sort.Strings(ids)
+				if len(ids) > maxNovelIDs {
+					ids = ids[:maxNovelIDs]
+				}
+				rec.NovelIDs = ids
+			}
 			used := map[string]struct{}{}
 			last := -1
 			for j := i + 1; j < n; j++ {

@@ -19,11 +19,12 @@ import (
 // never pays), so the answer is HELD, per thread, until a cold request arrives, when the whole
 // conversation is written anyway and a drop makes that write smaller.
 //
-// THIS PR ONLY HOLDS. Nothing reads a held answer to change a request. The record lives under its own
-// store namespace (store.SweepHeldPrefix) and not under cg:res:, because the same-session replay in
-// ExtractSweep.Offload reads cg:res: and splices what it finds at ANY depth: a verdict stored there
-// would be applied on the very next request, warm or cold, and would force the rewrite this design
-// exists to avoid. TestAHeldAnswerChangesNoRequest pins that.
+// A held answer changes no request while the cache is warm. The cold apply (extract_sweep_apply.go)
+// reads it on a cold request, or on a request whose prefix changed. The record lives under its own
+// store namespace (store.SweepHeldPrefix) and not under cg:res:, because a replay reads its records
+// and splices what it finds at ANY depth: a verdict stored there would be applied on the very next
+// request, warm or cold, and would force the rewrite this design exists to avoid.
+// TestAHeldAnswerChangesNoRequest pins that.
 //
 // WHAT IS KEPT PER JUDGED OUTPUT is its tool_use id and a content hash of the message as the AGENT
 // sent it (components.SpanHash over the raw message, #431). The id finds the output again on a later
@@ -64,6 +65,10 @@ type heldAnswer struct {
 	// void: see RecheckConversationShorter.
 	Judged  int          `json:"judged_msgs"`
 	Outputs []heldOutput `json:"outputs"`
+	// Prints is one short fingerprint per message of the judged conversation (msgPrint). The cold
+	// apply compares them with the request in hand to find where the conversation changed (#404
+	// point 4). Metadata only: a hash, never text.
+	Prints []uint32 `json:"prints,omitempty"`
 	// WaitingFor and WaitTool are the thread's wait cause (#453) when the question was asked: what
 	// the thread was waiting on. STORED ONLY. Nothing here uses it to decide; it is an input to the
 	// warm-path gate in #491.
@@ -192,7 +197,7 @@ func buildHeld(threadKey, model string, raw []bschemas.ChatMessage, cands []swee
 	for _, k := range drop {
 		voted[k] = true
 	}
-	h = heldAnswer{V: heldVersion, Thread: threadKey, AskedAtMs: askedAtMs, Model: model, Judged: len(raw),
+	h = heldAnswer{V: heldVersion, Thread: threadKey, AskedAtMs: askedAtMs, Model: model, Judged: len(raw), Prints: msgPrints(raw),
 		WaitingFor: wait.WaitingFor, WaitTool: wait.WaitTool, CostUSD: costUSD}
 	for k, cd := range cands {
 		idx, ok := rawToolMessage(raw, cd.toolID)

@@ -9,6 +9,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/extract"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -31,77 +32,43 @@ func assertSweepRejection(t *testing.T, rep *components.Report, want string) {
 	}
 }
 
-// A declined replay must record nothing — and the honest statement of what this test still pins is
-// narrower than what it was written for.
+// A declined replay must record nothing.
 //
-// It was written when the saving was computed from the stored DESCRIPTOR, so a declined replay could
-// book a non-zero figure and moving the recorder above the ok gate was observable. Measuring the
-// spliced message instead — the right fix, and one the review asked for — made `saved == 0` TRUE BY
-// CONSTRUCTION on a decline, because sweepDrop only calls SetMessageText on success. So the savings
-// half of this test cannot fail any more, whatever the recorder's position.
-//
-// That is worth stating rather than quietly leaving a test that looks like a guard:
-//
-//   - What still BINDS here is rep.Replay, which sits inside the ok branch and would fire for a
-//     message that was never rewritten. The mutation below is what proves it.
-//   - What guards the SAVING is now TestSweepReplayBooksWhatTheReplayedMessageActuallySaved: revert
-//     the basis to descriptor-only and it fails, which also restores this test's original premise.
-//
-// The general lesson, and the reason for this comment: a measurement change can void a test that
-// never mentioned the measurement. Nothing in this function referred to the basis, and correcting
-// the basis silently removed its only signal.
+// The fixture sits in a NARROW gap: the descriptor alone is smaller than the content, but the
+// descriptor PLUS the marker is not. A drop record exists for the output, so the replay path is
+// entered; it declines at the marker-inclusive never-worse check; the message goes upstream verbatim
+// and neither a replay nor a saving is booked. Without the precondition below the test would pass on
+// a request nothing touched.
 func TestSweepRecordsNoReplayForADropItDeclined(t *testing.T) {
-	// The fixture has to sit in a NARROW gap, and getting it wrong makes this test vacuous: the
-	// saving is computed from the descriptor ALONE, so the descriptor must be smaller than the
-	// content (or no saving would be booked either way and the mutation escapes), while
-	// descriptor+marker must NOT be (or the splice succeeds and there is no declined replay).
-	// Searched rather than hard-coded, because both sides depend on the tokenizer.
 	content := sweepDeclineFixture(t)
 	e := newSweepSmall(t, "")
-	asker := &labelAsker{verdict: "keep", needed: "none"}
-	asker.cacheRead = 19595
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
 		userMsg("do the thing"), toolResultMsg(content),
 	}}
-	c := preExpiryCtx("s", asker, st)
-	// PRICED HIGH, deliberately. The saving under test is a few tokens, and at real cache-read
-	// rates (~3e-7 USD/token) that is ~1e-6 USD — which round4 reports as 0.0000, so a saving
-	// wrongly booked would be indistinguishable from none and this test would pass against the
-	// very defect it exists to catch. A rate of 1 USD/token makes the counter observable without
-	// changing which BRANCH runs: savedTokenValue reads SelfRates.CacheRead on a warm cache-aware
-	// turn, which is what preExpiryCtx sets up.
+	c := preExpiryCtx("s", nil, st)
+	// PRICED HIGH, so a wrongly booked saving is visible (round4 would hide a few tokens at real rates).
 	c.SelfRates = components.TokenRates{Input: 10, CacheRead: 1, CacheWrite: 12.5, Output: 50}
-	// Freeze a decision whose descriptor is LONGER than the content once the marker is added, so
-	// the replay path is entered and then declines.
-	putResult(c, extract.ContentKey(content), sweepDescriptor(content), "")
-	if _, hit := getResult(c, extract.ContentKey(content)); !hit {
-		t.Fatal("the fixture's frozen decision is not readable, so the replay path is not taken")
-	}
+	tkey := thread.Key("s", "")
+	ck := extract.ContentKey(content)
+	putDrop(st, sweepDropRec{Thread: tkey, ToolUseID: "t", CK: ck, Marker: hashKey(content), Tokens: 1})
+	addToDropIndex(st, tkey, []string{ck})
 	rep := &components.Report{Component: "extract_llm_sweep"}
 	before, hitsBefore := sweepValueUSD(), sweepCacheHits()
-	if _, err := askOffload(e, req, rep, c); err != nil {
+	if _, err := e.Offload(req, rep, c); err != nil {
 		t.Fatalf("Offload: %v", err)
 	}
-	// PRECONDITION, and this test was vacuous without it: an unchanged message is ALSO what a
-	// component that never ran leaves behind, so "the message is verbatim and no saving was
-	// booked" proves nothing until the replay branch is known to have been entered. The cache
-	// lookup is recorded on entry to that branch, before any of the checks that can decline.
+	// PRECONDITION: the replay path was entered (the lookup is recorded on entry, before any decline).
 	if got := sweepCacheHits() - hitsBefore; got == 0 {
-		t.Fatalf("the sweep recorded no result-cache HIT, so the replay path was not entered and "+
-			"the assertions below would pass on a transcript nothing touched (gates: %v)", rep.Gates)
+		t.Fatalf("the sweep looked up no drop record, so the replay path was not entered and the "+
+			"assertions below would pass on a request nothing touched (gates: %v)", rep.Gates)
 	}
 	if got := schema.MessageText(req.Input[1]); got != content {
-		t.Fatalf("the fixture was spliced after all (%q), so there is no declined replay to "+
-			"assert about", got)
+		t.Fatalf("the fixture was spliced after all (%q), so there is no declined replay", got)
 	}
 	if rep.Replays != 0 {
-		t.Errorf("rep.Replay fired %d time(s) for a replay that did not splice: the message went "+
-			"upstream verbatim, so no replay reached the model", rep.Replays)
+		t.Errorf("rep.Replay fired %d time(s) for a replay that did not splice", rep.Replays)
 	}
-	// Kept, but no longer load-bearing: with the wire basis a declined replay cannot book a saving,
-	// so this asserts a structural property rather than guarding a reachable defect. See the doc
-	// above for which test guards the basis itself.
 	if after := sweepValueUSD(); after > before {
 		t.Errorf("sweep gross value rose from %v to %v for a drop that did not happen", before, after)
 	}

@@ -53,6 +53,9 @@ type recheckDropped struct {
 type recheckResult struct {
 	Valid   []heldOutput
 	Dropped []recheckDropped
+	// novel holds, per tool id, the identifiers each valid output introduced. The cold apply keeps
+	// their hashes to see a later reference (the referenced_later quality signal).
+	novel map[string][]string
 }
 
 // reasonCounts tallies Dropped by reason.
@@ -109,9 +112,10 @@ func recheckHeld(c *components.Ctx, req *bschemas.BifrostChatRequest, h heldAnsw
 	// One co-reference pass over the agent's own conversation, indexed by tool id. Run on raw, not on
 	// req, so the record's message indexes and h.Judged count the same messages.
 	refd := map[string]coref.Record{}
-	for _, r := range coref.Index(flattenForCoref(&bschemas.BifrostChatRequest{Input: raw}), minTokens, schema.TextTokens) {
+	for _, r := range coref.IndexNovel(flattenForCoref(&bschemas.BifrostChatRequest{Input: raw}), minTokens, schema.TextTokens) {
 		refd[r.ID] = r
 	}
+	res.novel = map[string][]string{}
 	for _, o := range drops {
 		idx, ok := rawToolMessage(raw, o.ToolUseID)
 		if !ok {
@@ -133,6 +137,9 @@ func recheckHeld(c *components.Ctx, req *bschemas.BifrostChatRequest, h heldAnsw
 			continue
 		}
 		res.Valid = append(res.Valid, o)
+		if r, ok := refd[o.ToolUseID]; ok && len(r.NovelIDs) > 0 {
+			res.novel[o.ToolUseID] = r.NovelIDs
+		}
 	}
 	return res
 }

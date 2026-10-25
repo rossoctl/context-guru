@@ -1076,6 +1076,11 @@ type KeepAliveReport struct {
 	// read nothing. A sink keeps both off every strategy's ledger.
 	Manual     bool
 	RewriteUSD float64
+	// SweepAnswerUSD is, when extract_llm_sweep's question stood in for this ping, what the ANSWER cost
+	// beyond the read a plain ping would have paid (#404 point 9): the output (thinking included), plus
+	// any fresh input or cache write. Booked here once, on the ping row the question replaced, as the
+	// summary's call is (#458). Part of CostUSD, not added to it. 0 for every other ping.
+	SweepAnswerUSD float64
 }
 
 // KeepAliveEmitter is an OPTIONAL capability an Emitter implementation may add. Most Emitter

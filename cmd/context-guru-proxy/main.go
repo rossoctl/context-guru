@@ -854,6 +854,8 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	// A ping the user asked for stays a keepalive row (real spend, a real refresh) but is flagged,
 	// so no strategy ledger counts it; the write it avoided is stored beside its cost.
 	ev.ManualPing, ev.ManualSavedUSD = r.Manual, r.RewriteUSD
+	// The sweep's answer cost, on the ping row its question replaced (#404 point 9).
+	ev.SweepAnswerUSD = r.SweepAnswerUSD
 	ev.Lifecycle = d.rec.PingLifecycle(r.Pings)
 	ev.Agent = dash.AgentFor(r.Agent)
 	ev.FreshInput, ev.CacheRead = r.FreshInput, r.CacheRead

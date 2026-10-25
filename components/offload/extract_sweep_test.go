@@ -90,7 +90,7 @@ func (m *labelAsker) Ask(ctx context.Context, session, ask string) (string, comp
 // should call newExtractSweep directly rather than routing through here.
 func newSweep(t *testing.T, extraYAML string) *ExtractSweep {
 	t.Helper()
-	c, err := newExtractSweep([]byte("min_tokens: 2000\nshadow: true\n" + extraYAML))
+	c, err := newExtractSweep([]byte("min_tokens: 2000\n" + extraYAML))
 	if err != nil {
 		t.Fatalf("newExtractSweep: %v", err)
 	}
@@ -113,8 +113,8 @@ func newSweep(t *testing.T, extraYAML string) *ExtractSweep {
 // askOffload is e.Offload followed by the ping-time question, with the question's gates and events
 // merged into rep. The in-request ask is gone (#404); the adjudication these tests exercise now runs
 // at the keep-alive ping, and this lets a test read its counters the way it read them from a request's
-// Report. It asks only when the ping would be offered the question. A removal is NOT applied: that is
-// the cold apply (PR C).
+// Report. It asks only when the ping would be offered the question. A removal is NOT applied here: that
+// is the cold apply (extract_sweep_apply.go).
 func askOffload(e *ExtractSweep, req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	keys, err := e.Offload(req, rep, c)
 	key := thread.Key(c.Session, c.Thread)

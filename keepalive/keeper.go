@@ -1692,14 +1692,60 @@ type Stats struct {
 	SweepAlreadyAsked     int64 `json:"sweep_already_asked"`
 	SweepNoCandidate      int64 `json:"sweep_no_candidate"`
 	SweepHoldNoToolID     int64 `json:"sweep_hold_no_tool_id"`
-	SweepNeedsShadow      int64 `json:"sweep_ask_needs_shadow"`
 	SweepPanics           int64 `json:"sweep_ping_panics"`
 	SweepConcurrency      int64 `json:"sweep_concurrency_full"`
 	SweepNotRegistered    int64 `json:"sweep_not_registered"`
+	// SweepDrops is what became of the drops the sweep applied (#404 point 7), overall and for the
+	// busiest threads, under hashed labels. The false-drop rate is the number to pull the sweep from
+	// xhigh on. Metadata only: counts, never content, never a session id.
+	SweepDrops *SweepDropStats `json:"sweep_drops,omitempty"`
 	// SweepGates counts the adjudication's own gate and event names across ping-time questions
 	// (sweep_kept, sweep_unparseable, sweep_dropped, ...), the counters a request's Report carries
 	// for an in-request question.
 	SweepGates map[string]int64 `json:"sweep_gates,omitempty"`
+}
+
+// SweepDropStats is offload.SweepDropStats in /stats shape.
+type SweepDropStats struct {
+	Applied             int64   `json:"applied"`
+	AppliedCold         int64   `json:"applied_cold"`
+	AppliedChangedPrefx int64   `json:"applied_changed_prefix"`
+	ApplyDeclined       int64   `json:"apply_declined"`
+	Referenced          int64   `json:"referenced_later"`
+	Expanded            int64   `json:"expanded"`
+	FalseDrops          int64   `json:"false_drops"`
+	FalseDropRate       float64 `json:"false_drop_rate"`
+	ExpandEvents        int64   `json:"expand_events"`
+	ExpandTokens        int64   `json:"expand_tokens"`
+	// Threads are the busiest threads by drops applied, most first.
+	Threads []SweepDropThread `json:"threads,omitempty"`
+}
+
+// SweepDropThread is one thread's share, under a hash label that is not the session id.
+type SweepDropThread struct {
+	Thread        string  `json:"thread"`
+	Applied       int64   `json:"applied"`
+	FalseDrops    int64   `json:"false_drops"`
+	FalseDropRate float64 `json:"false_drop_rate"`
+}
+
+// sweepDropStats reads the offload ledger, or nil when the sweep never applied anything, so a
+// deployment without the sweep shows no field.
+func sweepDropStats() *SweepDropStats {
+	d := offload.SweepDropCounters()
+	o := d.Overall
+	if o.Applied == 0 && o.ApplyDeclined == 0 && o.ExpandEvents == 0 {
+		return nil
+	}
+	out := &SweepDropStats{Applied: o.Applied, AppliedCold: o.AppliedCold,
+		AppliedChangedPrefx: o.AppliedChangedPrefix, ApplyDeclined: o.ApplyDeclined,
+		Referenced: o.Referenced, Expanded: o.Expanded, FalseDrops: o.FalseDrops(),
+		FalseDropRate: o.FalseDropRate(), ExpandEvents: o.ExpandEvents, ExpandTokens: o.ExpandTokens}
+	for _, t := range d.Threads {
+		out.Threads = append(out.Threads, SweepDropThread{Thread: t.Label, Applied: t.Applied,
+			FalseDrops: t.FalseDrops(), FalseDropRate: t.FalseDropRate()})
+	}
+	return out
 }
 
 // PendingPings counts entries with a ping still ahead of them. Nil-safe: a keeper whose
@@ -1756,10 +1802,10 @@ func (k *Keeper) Stats() Stats {
 		SweepAlreadyAsked:                  sw.AlreadyAsked,
 		SweepNoCandidate:                   sw.NoCandidate,
 		SweepHoldNoToolID:                  sw.HoldNoToolID,
-		SweepNeedsShadow:                   sw.NeedsShadow,
 		SweepPanics:                        sw.Panics,
 		SweepConcurrency:                   sw.ConcurrencyFull,
 		SweepNotRegistered:                 sw.NotRegistered,
+		SweepDrops:                         sweepDropStats(),
 		SweepGates:                         sw.Gates,
 	}
 }
