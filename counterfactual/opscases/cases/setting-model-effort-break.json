@@ -1,0 +1,340 @@
+{
+ "id": "setting/model-and-effort/break",
+ "description": "A router moves request 5 to a smaller model at a lower effort. The provider keeps its cache for a model, so request 5 reads 0 where request 4 left 40,000 cached. The setting operation itself is not priced (R50). Compute adds a break carrying the setting's ChangeID: 40,000 tokens from read to write. Which model's rates price them is not decided, so the case holds tokens only.",
+ "source": "examples.md#5",
+ "dims": {
+  "kind": "setting",
+  "position": "beforeBStar",
+  "cache": "break",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "break": "setting"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a711 question 10: the rates of a setting break are not decided",
+  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "req-4",
+     "session": "s3",
+     "model": "large-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     },
+     "params": {
+      "effort": "high"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 40000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 40000,
+     "cacheWrite1h": 0
+    },
+    "ops": []
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "req-5",
+     "session": "s3",
+     "model": "small-model",
+     "at": "2026-03-02T09:01:00Z",
+     "billing": {
+      "mode": "api"
+     },
+     "params": {
+      "effort": "low"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      },
+      {
+       "hash": 17967468631920018574,
+       "bytes": 4000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "op1",
+     "kind": "setting",
+     "operator": "inference-router",
+     "changeId": "rt:model-7c1a",
+     "settings": {
+      "model": {
+       "from": "large-model",
+       "to": "small-model"
+      },
+      "effort": {
+       "from": "high",
+       "to": "low"
+      }
+     }
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      },
+      {
+       "hash": 17967468631920018574,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 41000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 40000,
+     "cacheWrite": 1000,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "rt:model-7c1a",
+      "saved": {
+       "cacheRead": 40000
+      },
+      "caused": {
+       "cacheWrite5m": 40000
+      },
+      "note": "the new model starts cold: 40,000 tokens move from read to write"
+     }
+    ],
+    "boundary": {
+     "section": "messages",
+     "index": 3
+    }
+   }
+  }
+ ]
+}

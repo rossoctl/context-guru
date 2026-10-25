@@ -1,0 +1,102 @@
+[
+ {
+  "case": "rewrite+spend/summary/break-then-payback/5m",
+  "kind": "differs",
+  "reason": "design \u00a75.2 row 1 and \u00a76.2 (a break): the summary breaks the cache on request A and the 3,500 tokens it moves from read to write are charged to the summary. dash.Event.baselineDeltaUSD adds only the removed tokens to the billed cost, so the penalty is in the bill and in no saving, and cg's baseline overstates the client body's bill by 12,075 \u00b5$.",
+  "allow": [
+   {
+    "step": 1,
+    "change": "cg:summarize:5d21"
+   },
+   {
+    "step": 1
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/coref-break-inside-prefix/hot/5m",
+  "kind": "differs",
+  "reason": "design \u00a76.2 (tier by position) and \u00a75.2 row 1 (a break). coref reduces message 5, which is inside the cached prefix: the spec prices the 19,950 tokens as a read and charges the break (19,010 x ($3.75 - $0.30)). cg prices a first removal at the write rate (uniqueRate) and has no break, so it books a gain where the spec books a loss.",
+  "allow": [
+   {
+    "step": 6,
+    "change": "cg:coref:5e2d"
+   },
+   {
+    "step": 6
+   },
+   {
+    "step": 0,
+    "change": "cg:expand:91b0"
+   },
+   {
+    "step": 1,
+    "change": "cg:expand:91b0"
+   },
+   {
+    "step": 2,
+    "change": "cg:expand:91b0"
+   },
+   {
+    "step": 3,
+    "change": "cg:expand:91b0"
+   },
+   {
+    "step": 4,
+    "change": "cg:expand:91b0"
+   },
+   {
+    "step": 5,
+    "change": "cg:expand:91b0"
+   },
+   {
+    "step": 6,
+    "change": "cg:expand:91b0"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/four-operations/hot/5m",
+  "kind": "differs",
+  "reason": "design \u00a76.2 (added tokens): the expand tool adds 300 tokens, a cost the spec books as Caused. cg has no per-component figure for an addition: ComponentSavedUSD clamps a negative gross to zero, and Play passes max(delta, 0) the same way. The step totals agree because dash.Event.Saved already nets the added tokens. Unverified: whether the live pipeline reports the addition as a component at all.",
+  "allow": [
+   {
+    "step": 0,
+    "change": "cg:expand:91b0"
+   },
+   {
+    "step": 1,
+    "change": "cg:expand:91b0"
+   },
+   {
+    "step": 2,
+    "change": "cg:expand:91b0"
+   },
+   {
+    "step": 3,
+    "change": "cg:expand:91b0"
+   },
+   {
+    "step": 4,
+    "change": "cg:expand:91b0"
+   }
+  ]
+ },
+ {
+  "case": "setting/model-and-effort/break",
+  "kind": "notCovered",
+  "reason": "design \u00a75.2 row 3 and R50: a break caused by a setting change. cg has no such concept: its baseline equals the bill, so it books nothing. The rates of the moved tokens are also undecided (design \u00a711 question 10).",
+  "allow": [
+   {
+    "step": 1,
+    "change": "rt:model-7c1a"
+   },
+   {
+    "step": 1
+   }
+  ],
+  "total": true
+ }
+]
