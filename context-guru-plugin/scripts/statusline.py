@@ -1043,9 +1043,12 @@ def _main_cs(cs: dict | None) -> dict | None:
         # model, so Claude Code's own size is used.
         merged.pop("window", None)
         merged.pop("window_exact", None)
-    merged.pop("held_until_ms", None)  # the main thread's own plan, or none: never a sub-agent's
-    if "held_until_ms" in main:
-        merged["held_until_ms"] = main["held_until_ms"]
+    # The main thread's own plan and next-request prices, or none: never a sub-agent's. With no
+    # prices on the entry, the cold price falls back to the main thread's rewrite_usd (_cache_view).
+    for k in ("held_until_ms", "next_warm_usd", "next_cold_usd"):
+        merged.pop(k, None)
+        if k in main:
+            merged[k] = main[k]
     merged["keepalive"] = bool(cs.get("keepalive")) and cs.get("last_ts") == main.get("last_ts")
     return merged
 
