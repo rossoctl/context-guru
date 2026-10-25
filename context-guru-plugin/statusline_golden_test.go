@@ -71,6 +71,11 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 	small := strings.Replace(payload, "412000", "52000", 1)
 	full := strings.Replace(payload, "412000", "900000", 1)
 	sess := "saved $0.31 of $2.10 session"
+	// The wall limit for every case below: the runner's own floor for this render shape (start-up
+	// plus the render work, against a stub that answers at once) plus statuslineAllowance. The
+	// cases differ only in payload, layout and width, which do not change the cost shape.
+	floor := statuslineFloor(t, routedEnv(cgStub(t, cs(60, 300, 52000, "0.30"))), small, "--layout=balanced")
+	limit := floor + statuslineAllowance
 	for _, c := range []struct {
 		name, cache, stdin, layout string
 		width                      int
@@ -112,8 +117,9 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 			if got := strings.TrimRight(out, "\n"); got != c.want {
 				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
 			}
-			if elapsed > time.Second {
-				t.Errorf("render took %v; the status line must stay cheap", elapsed)
+			if elapsed > limit {
+				t.Errorf("render took %v; the limit is the runner's floor %v plus %v",
+					elapsed, floor, statuslineAllowance)
 			}
 		})
 	}
@@ -1015,7 +1021,8 @@ const statuslineAllowance = time.Second
 // statuslineFloor is the runner's own cost of one render of this shape: the median of three
 // renders against env, which must point at a stub that answers at once. On a loaded CI runner
 // Python start-up alone eats a large part of a second (issue #674), so a flat wall limit flakes
-// with nothing wrong; every wall assert in this file is such a floor plus statuslineAllowance.
+// with nothing wrong; every wall limit on a render in this file is such a floor plus
+// statuslineAllowance.
 func statuslineFloor(t *testing.T, env map[string]string, stdin string, args ...string) time.Duration {
 	t.Helper()
 	floors := make([]time.Duration, 3)
