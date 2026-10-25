@@ -92,9 +92,6 @@ for b in "${chain[@]}"; do
 done
 
 max_rounds=${OFFLOAD_MAX_ROUNDS:-2}
-# Checked once here: a bad value inside a run would fail every backend in turn.
-review_timeout=${OFFLOAD_REVIEW_TIMEOUT:-1800}
-[[ $review_timeout =~ ^[0-9]+$ ]] || { echo "OFFLOAD_REVIEW_TIMEOUT must be whole seconds, not '$review_timeout'" >&2; exit 1; }
 # Worktrees hang off the main checkout, even when this runs inside another worktree.
 main=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
 repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
@@ -124,6 +121,11 @@ if [ "$cleanup" = 1 ]; then
   rm -f "/tmp/offload-review-pr$pr-rules.md"
   exit 0
 fi
+
+# Checked once here: a bad value inside a run would fail every backend in turn. It sits after
+# --cleanup, which runs no reviewer, and before any reviewer worktree or session is touched.
+review_timeout=${OFFLOAD_REVIEW_TIMEOUT:-1800}
+[[ $review_timeout =~ ^[0-9]+$ ]] || { echo "OFFLOAD_REVIEW_TIMEOUT must be whole seconds, not '$review_timeout'" >&2; exit 1; }
 
 pr_json=$(gh pr view "$pr" --repo "$repo" --json headRefName,headRefOid,baseRefName)
 head_ref=$(jq -r .headRefName <<<"$pr_json")
