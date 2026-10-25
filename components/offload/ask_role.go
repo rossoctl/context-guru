@@ -5,8 +5,6 @@ import (
 	"sync"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-
-	"github.com/rossoctl/context-guru/cheapmodel"
 )
 
 // askOpeningLine is the first line of any question that is APPENDED to a transcript as a user
@@ -95,7 +93,7 @@ var (
 )
 
 // askStripsThinkingShipped is askStripsThinking over the SHIPPED registry, for a caller that has
-// no profiles of its own (the sweep). It fails open: an unreadable registry means "no strip".
+// no profiles of its own: the sweep's prefix ask (extract_sweep.go) declines on it. It fails open: an unreadable registry means "no strip".
 func askStripsThinkingShipped(modelID string, msgs []bschemas.ChatMessage) bool {
 	shippedAskProfilesOnce.Do(func() { shippedAskProfiles, _ = loadSummarizerProfiles(summarizerProfilesYAML) })
 	if shippedAskProfiles == nil {
@@ -103,13 +101,6 @@ func askStripsThinkingShipped(modelID string, msgs []bschemas.ChatMessage) bool 
 	}
 	return askStripsThinking(shippedAskProfiles.ThinkingLastTurnModels, modelID, msgs)
 }
-
-// askBridge returns the short assistant turn that must sit between a transcript ending in a
-// `role: system` message and an appended user question, or "" when none is needed. The rule itself
-// (Anthropic 400s on system-then-user; inserting the question BEFORE the system message costs a
-// full cache write, #413) lives in cheapmodel because insertAskMessage applies it to the wire body;
-// this is the same rule, named here so every channel reads one answer.
-func askBridge(lastRole string) string { return cheapmodel.AskBridge(lastRole) }
 
 // askStripsThinking reports whether appending a user question to msgs would drop thinking blocks
 // from the provider's cached prefix: modelID keeps only the LAST turn's thinking (lastTurnOnly is

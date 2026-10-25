@@ -514,7 +514,7 @@ is **not** a failure), `sweep_unparseable`, `sweep_reply_truncated` (a different
 unparseable: raise the budget, not the prompt), `sweep_verdict_unusable`,
 `sweep_verdict_unknown_label`, `sweep_verdict_duplicate_label`, `sweep_verdict_missing`,
 `sweep_prefix_cache_read_ok`, `sweep_prefix_cache_read_ZERO`, `sweep_prefix_cache_write`, `sweep_fallback_used`,
-`sweep_fallback_blocked`, `sweep_fallback_failed`, `sweep_fallback_no_model`, `sweep_no_asker`,
+`sweep_fallback_blocked`, `sweep_fallback_failed`, `sweep_fallback_no_model`, `sweep_no_asker`, `sweep_thinking_would_be_stripped`,
 `sweep_no_prefix`, `sweep_ask_failed`, `sweep_inventory_of_one`, `sweep_kept_everything`,
 `sweep_unparseable`, `sweep_reply_truncated`, `sweep_verdict_unusable`, `sweep_verdict_unknown_label`,
 `sweep_verdict_duplicate_label`, `sweep_verdict_missing`, `sweep_drop_would_not_shrink`,

@@ -116,6 +116,39 @@ func TestSweepQuestionOpensWithTheSharedLine(t *testing.T) {
 	}
 }
 
+// CALLER: on a model that keeps only the last turn's thinking, a transcript with an earlier
+// thinking block must not get the prefix ask (#422). The sweep declines it and gates why; the same
+// request on a keep-all model still asks, so the test cannot pass by never asking.
+func TestSweepDeclinesThePrefixAskWhenItWouldStripThinking(t *testing.T) {
+	for _, tc := range []struct {
+		model string
+		asks  int64
+	}{
+		{"claude-haiku-4-5", 0},
+		{"claude-sonnet-5", 1},
+	} {
+		asker := &labelAsker{verdict: "keep", needed: "none"}
+		asker.cacheRead = 19595
+		e := newSweepSmall(t, "block_fallback: true\n")
+		req := sweepReqStocked()
+		req.Input = append([]bschemas.ChatMessage{req.Input[0], thinkingAsst()}, req.Input[1:]...)
+		c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
+		c.ModelName = tc.model
+		rep := &components.Report{}
+		if _, err := e.Offload(req, rep, c); err != nil {
+			t.Fatal(err)
+		}
+		if got := atomic.LoadInt64(&asker.calls); got != tc.asks {
+			t.Errorf("%s: %d prefix asks, want %d (gates: %v)", tc.model, got, tc.asks, rep.Gates)
+		}
+		gated := rep.Gates["sweep_thinking_would_be_stripped"] > 0
+		if gated != (tc.asks == 0) {
+			t.Errorf("%s: gate sweep_thinking_would_be_stripped present=%v, want %v (gates: %v)",
+				tc.model, gated, tc.asks == 0, rep.Gates)
+		}
+	}
+}
+
 func thinkingAsst() bschemas.ChatMessage {
 	r := "thought"
 	return bschemas.ChatMessage{Role: bschemas.ChatMessageRoleAssistant,
@@ -152,13 +185,5 @@ func TestAskStripsThinking(t *testing.T) {
 	if !askStripsThinkingShipped("claude-haiku-4-5", withThinking) ||
 		askStripsThinkingShipped("claude-sonnet-5", withThinking) {
 		t.Error("shipped registry: Haiku 4.5 must strip and Sonnet 5 must not")
-	}
-}
-
-func TestAskBridge(t *testing.T) {
-	for role, want := range map[string]string{"system": "Understood.", "user": "", "assistant": "", "": ""} {
-		if got := askBridge(role); got != want {
-			t.Errorf("askBridge(%q) = %q, want %q", role, got, want)
-		}
 	}
 }

@@ -1425,21 +1425,30 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 	// One arming point for all four exits that can carry a fallback — the three error returns and
 	// the happy path. A per-site call was what left the error paths uncovered, and a fifth site
 	// added later would have been missed the same way.
+	// A model that keeps only the LAST turn's thinking strips every earlier thinking block from its
+	// cached context when a user question is appended after them (#422). The summarizer declines in
+	// this state (thinking_would_be_stripped); the sweep's prefix ask takes the fallback instead.
+	thinkingStripped := usePrefixAsk && !stalePrefix && askStripsThinkingShipped(c.ModelName, req.Input)
 	defer foldFallback()
-	if !usePrefixAsk || stalePrefix {
+	if !usePrefixAsk || stalePrefix || thinkingStripped {
 		// No asker at all (a non-Anthropic route, or no incoming client) and a stale stash take the
 		// same fork, because both mean there is nothing SAFE to ask through — one has nothing
 		// stashed, the other has the wrong thing. Gated separately so a run showing
 		// sweep_stale_prefix, rather than sweep_no_asker, says which one happened.
-		if stalePrefix {
+		switch {
+		case stalePrefix:
 			r.gate("sweep_stale_prefix")
-		} else {
+		case thinkingStripped:
+			r.gate("sweep_thinking_would_be_stripped")
+		default:
 			r.gate("sweep_no_asker")
 		}
 		if e.effectiveBlockFallback(c) {
 			r.gate("sweep_fallback_blocked")
 			if stalePrefix {
 				r.rec.Rejection = "stashed prefix does not cover the candidates offered and block_fallback is set"
+			} else if thinkingStripped {
+				r.rec.Rejection = "a prefix ask would strip earlier thinking on this model and block_fallback is set"
 			} else {
 				r.rec.Rejection = "no prefix asker on this route and block_fallback is set"
 			}
