@@ -1045,7 +1045,7 @@ tool output gets a long run at it.
 | `cache_aware_summarizer_async_started` / `_committed` | the **pair** is the signal — started without committed is a summary paid for and lost |
 | `cache_aware_summarizer_timeouts` / `_errors` | fail-open paths; a timeout means the budget is too small for this load, an error means the route is wrong |
 | `cache_aware_summarizer_no_prefix` | the Anthropic (`PrefixAsk`) path's first-turn case — nothing stashed yet to build on. Counted apart from `_errors`: this is routine, not a failure |
-| `prefix_stash_oversized` | the proxy did not keep a request body because it was over the per-body cap (1.5 MB). That thread then has nothing to build on, so its later `_no_prefix` is the cap, not a first turn. A thread near a 1M-token window is always over the cap |
+| `prefix_stash_oversized` | the proxy did not keep a request body because it was over the per-body cap (8 MB). That thread then has nothing to build on, so its later `_no_prefix` is the cap, not a first turn. Before #703 the cap was 1.5 MB, and every thread near a 1M-token window was over it |
 | `cache_aware_summarizer_prefix_ask_used` | the call went through `PrefixAsk` rather than a `MessagesModel` — whether this component is actually reaching Anthropic traffic |
 | `cache_aware_summarizer_cache_read_tokens` / `_cache_write_tokens` | the summary call's own usage — the direct answer to "is the call actually reading warm", this component's whole argument |
 | `cache_aware_summarizer_truncated` | a reply cut off before its closing tag was rejected rather than spliced in as a looks-complete fragment |
