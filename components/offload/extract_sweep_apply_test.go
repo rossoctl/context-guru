@@ -1176,3 +1176,53 @@ func TestASharedMarkerExpandCountsOnceInTheTotal(t *testing.T) {
 		t.Errorf("%d thread rows carry the expand, want 2", rows)
 	}
 }
+
+// (c) #711 keeps the main thread on its own id when a newer client resumes it. The sweep keys every
+// record by thread.Key(session, thread) from the id the pipeline resolves, and nothing else, so a thread
+// that keeps its id keeps its held answer and its drop records, and a thread that does move (a new id)
+// does not carry them to the new key: the old key's records are simply not found. Pinned both ways.
+func TestAHeldAnswerAndItsDropsStayOnTheirThreadKey(t *testing.T) {
+	e, st, key := heldApply(t, "t711", 3)
+	cold := applyConv(3, 1)
+	if _, err := e.Offload(cold, &components.Report{Component: "extract_llm_sweep"}, coldCtx("t711", st)); err != nil {
+		t.Fatal(err)
+	}
+	want := texts(cold)
+	// The same thread, same id: replays.
+	same := applyConv(3, 2)
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(same, rep, warmCtx("t711", st)); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Replays != 3 {
+		t.Fatalf("the thread that kept its id replayed %d drops, want 3", rep.Replays)
+	}
+	// A request on ANOTHER thread id of the same session (what a thread split looks like) finds nothing:
+	// no record moved to it, and nothing is replayed or applied there.
+	other := applyConv(3, 2)
+	oc := warmCtx("t711", st)
+	oc.Thread = "p:other"
+	rep2 := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(other, rep2, oc); err != nil {
+		t.Fatal(err)
+	}
+	if rep2.Replays != 0 {
+		t.Errorf("a drop record crossed to another thread key (%d replays)", rep2.Replays)
+	}
+	ck := contentKey(refOutput(0))
+	if _, ok := getDrop(st, thread.Key("t711", "p:other"), ck); ok {
+		t.Error("a drop record exists under the other thread's key")
+	}
+	// Explicitly: the two thread keys address different records (a shared key would let one thread's
+	// record answer for the other).
+	if dropKey(key, ck) == dropKey(thread.Key("t711", "p:other"), ck) || heldKey(key) == heldKey(thread.Key("t711", "p:other")) {
+		t.Error("two threads of one session share a drop or held key")
+	}
+	if len(getDropIndex(st, thread.Key("t711", "p:other")).Cks) != 0 {
+		t.Error("the other thread has a drop index")
+	}
+	if _, ok := getDrop(st, key, ck); !ok {
+		t.Error("the original thread lost its drop record")
+	}
+	_ = want
+}

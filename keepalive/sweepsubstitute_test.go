@@ -1,6 +1,7 @@
 package keepalive
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -653,4 +654,111 @@ func TestAnOrdinaryPingCarriesNoSweepAnswerCost(t *testing.T) {
 			t.Errorf("an ordinary ping carries a sweep answer cost of %v", r.SweepAnswerUSD)
 		}
 	}
+}
+
+// ⭐ #712 with the sweep (a). A ping the sweep's question replaced uses NO output-budget step, so the next
+// plain ping on the thread is not identical to the last plain ping before it. The question is the "a
+// substitute took it" case #712 names.
+func TestAPingTheSweepQuestionReplacedUsesNoStep(t *testing.T) {
+	k, fs, clock := testKeeper(t)
+	pol := kaPolicy()
+	pol.MaxPings = pingVary + 4
+	pol.MinPrefixTokens = 0
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
+	recordOne(t, k, pol, kaBody, clock.now())
+	key := thread.Key("sess-1", "")
+	k.mu.Lock()
+	before, had := k.lastVary[sess1.id()]
+	k.mu.Unlock()
+	if had {
+		t.Fatalf("fixture: a step already exists (%d)", before)
+	}
+	k.Sweep(clock.advance(281 * time.Second)) // the question takes the ping
+	waitSweepOutcome(t, k, fs)
+	if k.sweepSubstituted.Load() != 1 || fs.n() != 0 {
+		t.Fatalf("the question did not replace the ping (substituted %d, plain %d)", k.sweepSubstituted.Load(), fs.n())
+	}
+	k.mu.Lock()
+	_, used := k.lastVary[sess1.id()]
+	k.mu.Unlock()
+	if used {
+		t.Fatal("the substituted ping used up an output-budget step")
+	}
+	// Two plain pings follow (the question is spent: asked once per idle period). They must differ.
+	_ = key
+	k.Sweep(clock.advance(281 * time.Second))
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 3)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if len(fs.sent) < 2 {
+		t.Fatalf("sent %d plain pings, want 2", len(fs.sent))
+	}
+	if bytes.Equal(fs.sent[0].Body, fs.sent[1].Body) {
+		t.Error("two consecutive plain pings after a substituted one are byte-identical")
+	}
+}
+
+// (b) A failed question is not a transport failure of a PING, so #710's give-back does not apply to it
+// (and must not be set by it): the ordinary ping goes out in the same cycle, which is the retry. Whether
+// the question may ask again follows #508's rule: a call that never left the process (no tokens billed)
+// reopens the ask for the next ping, because it cost nothing; a call that billed anything stays asked,
+// so a question that cost money cannot be paid for twice in one idle period.
+func TestAFailedSweepQuestionFallsToAPlainPingAndAsksOnceWhenItBilled(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		billed    bool
+		wantAsked int64
+	}{{"errored before billing: may ask again", false, 2}, {"billed then failed to parse: asks once", true, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, _, clock := testKeeper(t)
+			pol := kaPolicy()
+			pol.MinPrefixTokens = 0
+			st := store.NewMemory(store.Options{MaxEntries: 400})
+			var asker components.PrefixAsker
+			sa := &sweepAsker{cacheRead: 48576, err: errors.New("upstream 500")}
+			asker = sa
+			var ba *unparseableAsker
+			if tc.billed {
+				ba = &unparseableAsker{}
+				asker = ba
+			}
+			registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
+			recordOne(t, k, pol, kaBody, clock.now())
+			k.Sweep(clock.advance(281 * time.Second))
+			waitPings(t, k, 1)
+			k.Sweep(clock.advance(281 * time.Second))
+			waitPings(t, k, 2)
+			calls := sa.calls.Load()
+			if ba != nil {
+				calls = ba.calls.Load()
+			}
+			if calls != tc.wantAsked {
+				t.Errorf("the question was asked %d times over two pings, want %d", calls, tc.wantAsked)
+			}
+			k.mu.Lock()
+			retried := sess1Entry(k).retried
+			k.mu.Unlock()
+			if retried {
+				t.Error("a failed QUESTION set the transport-retry flag: #710 retries a failed ping, not a question")
+			}
+		})
+	}
+}
+
+// unparseableAsker bills tokens and returns text that is not a verdict.
+type unparseableAsker struct{ calls atomic.Int64 }
+
+func (a *unparseableAsker) Ask(context.Context, string, string) (string, components.PrefixUsage, error) {
+	a.calls.Add(1)
+	return "I cannot answer that.", components.PrefixUsage{CacheRead: 48576, Fresh: 600, Output: 300}, nil
+}
+
+func sess1Entry(k *Keeper) *kaEntry {
+	for _, e := range k.live {
+		return e
+	}
+	return &kaEntry{}
 }
