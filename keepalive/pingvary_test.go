@@ -2,6 +2,7 @@ package keepalive
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 	"time"
 
@@ -83,5 +84,68 @@ func TestPingOutputBudgetStaysSmall(t *testing.T) {
 	out, _ := pingBodyN([]byte(`{"model":"m","max_output_tokens":4096,"input":[]}`), "/v1/responses", 5)
 	if got := gjson.GetBytes(out, "max_output_tokens").Int(); got != 21 {
 		t.Errorf("Responses ping 5: max_output_tokens = %d, want 16+5", got)
+	}
+}
+
+// #712 review, finding 2. A client that re-sends a byte-identical turn starts a NEW entry on the
+// same thread with the same body. Its first ping must not repeat the last ping the previous entry
+// sent, or the gateway answers it from its response cache.
+func TestANewEntryDoesNotRepeatThePreviousEntrysLastPing(t *testing.T) {
+	start := time.Now()
+	now := start
+	fd := newFake(okPing)
+	k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+	key := Key{Tenant: "t", Session: "s"}
+	k.Record(trackedRecord(fd, key, start)) // turn 0: counted, not tracked
+	k.Record(trackedRecord(fd, key, start)) // turn 1: tracked
+	now = start.Add(281 * time.Second)
+	k.Sweep(now)
+	// The same request again: a new entry, byte-identical body.
+	again := now.Add(5 * time.Second)
+	k.Record(trackedRecord(fd, key, again))
+	now = again.Add(281 * time.Second)
+	k.Sweep(now)
+	if fd.n() != 2 {
+		t.Fatalf("sent %d pings, want 2", fd.n())
+	}
+	if bytes.Equal(fd.sent[0].Body, fd.sent[1].Body) {
+		t.Fatal("the new entry's first ping is byte-identical to the previous entry's last ping")
+	}
+}
+
+// #712 review, finding 1. A cycle that sends nothing (the limiter refused it) must not use up a
+// step. Otherwise pingVary such cycles between two sent pings make the two identical again.
+func TestACycleThatSendsNothingUsesNoStep(t *testing.T) {
+	start := time.Now()
+	now := start
+	refuse := false
+	fd := newFake(okPing)
+	k := New(Options{Dispatcher: fd, Now: func() time.Time { return now }, Go: func(f func()) { f() },
+		Spare: func(string, float64) (func(), error) {
+			if refuse {
+				return nil, errors.New("no spare slot")
+			}
+			return func() {}, nil
+		}})
+	key := Key{Tenant: "t", Session: "s"}
+	r := trackedRecord(fd, key, start)
+	r.Policy.MaxPings = pingVary + 2
+	k.Record(r)
+	k.Record(r)
+	now = start.Add(281 * time.Second)
+	k.Sweep(now) // sent
+	refuse = true
+	for i := 0; i < pingVary-1; i++ {
+		now = now.Add(281 * time.Second)
+		k.Sweep(now) // due, refused, nothing sent
+	}
+	refuse = false
+	now = now.Add(281 * time.Second)
+	k.Sweep(now) // sent
+	if fd.n() != 2 {
+		t.Fatalf("sent %d pings, want 2", fd.n())
+	}
+	if bytes.Equal(fd.sent[0].Body, fd.sent[1].Body) {
+		t.Fatalf("after %d refused cycles the next sent ping repeats the last sent one", pingVary-1)
 	}
 }

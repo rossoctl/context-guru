@@ -111,8 +111,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	mask(raw)
 	job := pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref, route: e.route,
 		provider: e.provider, model: e.model, tenant: e.tenant, session: e.session,
-		thread: e.thread, st: e.st, emitter: e.emitter, seq: e.sent}
-	e.sent++ // a press is a ping too: the next one must differ from it (pingBodyN)
+		thread: e.thread, st: e.st, emitter: e.emitter}
 	endpoint, prefix, agent, preset := e.endpoint, e.prefix, e.agent, e.preset
 	k.mu.Unlock()
 	defer zero(raw)
@@ -123,7 +122,11 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		return ManualResult{}, ErrLimited
 	}
 	defer release()
-	body, ok := pingBodyN(raw, job.route, job.seq)
+	// A press is a ping too: it takes the thread's next step, at dispatch time (nextVaryLocked).
+	k.mu.Lock()
+	job.vary = k.nextVaryLocked(id)
+	k.mu.Unlock()
+	body, ok := pingBodyN(raw, job.route, job.vary)
 	if !ok {
 		k.unclaimManual(id, now)
 		return ManualResult{}, ErrNotHeld
@@ -183,7 +186,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 			CacheWrite: u.CacheWrite, Output: u.Output, CostUSD: res.CostUSD, Status: resp.Status,
 			DurationMs: float64(k.now().Sub(start).Microseconds()) / 1000.0, TS: k.now().UnixMilli(),
 			Agent: agent, Preset: preset, StopReason: u.StopReason, FreshInput: u.FreshInput,
-			CacheWrite1h: u.CacheWrite1h, MaxTokens: pingOutputBudget(job.route) + job.seq%pingVary,
+			CacheWrite1h: u.CacheWrite1h, MaxTokens: pingOutputBudget(job.route) + job.vary%pingVary,
 			Manual: true, Strategy: ManualStrategyID, RewriteUSD: res.AvoidedUSD,
 		})
 	}

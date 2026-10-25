@@ -51,11 +51,12 @@ func pingOutputBudget(route string) int {
 
 func pingBody(body []byte, route string) ([]byte, bool) { return pingBodyN(body, route, 0) }
 
-// pingVary is how many distinct output budgets the pings of one entry cycle through.
+// pingVary is how many distinct output budgets the pings of one thread cycle through.
 const pingVary = 8
 
-// pingBodyN is pingBody for the entry's n-th ping (0 for the first): its output budget is the base
-// plus n mod pingVary, so no two pings in a row on one entry are byte-identical.
+// pingBodyN is pingBody with output-budget step n: the budget is the base plus n mod pingVary. The
+// keeper picks n per thread at dispatch time (Keeper.nextVaryLocked), so no two pings sent in a row
+// on one thread are byte-identical.
 //
 // IDENTICAL PINGS NEVER REACH THE PROVIDER (#706). The IBM LiteLLM gateway keeps a response cache
 // keyed on the request, and answers a byte-identical request from it: the same response id, the
