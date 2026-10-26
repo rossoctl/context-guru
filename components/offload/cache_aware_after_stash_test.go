@@ -60,6 +60,7 @@ func TestCacheAwareDetachedPrefixAskCommitsAfterTheTurnIsStashed(t *testing.T) {
 	// short of it. (Live, on a clean session, it was 7 required against 5 stashed; this fixture needs
 	// end messages and stashes end-1.)
 	_, start, end := summarizeSpan(in, 1, s.keepLastTurns, nil)
+	end = retreatPastLastToolExchange(in, nil, start, end) // the span the commission covers (#723)
 	if end <= start+1 {
 		t.Fatalf("fixture span [%d,%d) is too short to test", start, end)
 	}
@@ -72,8 +73,9 @@ func TestCacheAwareDetachedPrefixAskCommitsAfterTheTurnIsStashed(t *testing.T) {
 	// Live, the upstream round trip takes seconds and a detached call starts in about 1 ms, so
 	// anything started at Offload time has finished before this turn's body is stashed. Wait for it
 	// here, then let the host stash this turn's body (its upstream answered 200) and run its hook as
-	// the request ends.
-	WaitForSummaryForTest(convKey(ctx), 5*time.Second)
+	// the request ends. (On this branch that wait finds the held deferral and times out after 1 s;
+	// with an Offload-time start it drains the stale call, which is what this test must catch.)
+	WaitForSummaryForTest(convKey(ctx), time.Second)
 	asker.put(len(in))
 	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 
@@ -105,7 +107,8 @@ func TestAReplacedWarmDeferralIsDispatchedWithoutTheHook(t *testing.T) {
 	asker := &turnStash{out: "<summary>explored the handler via prefix ask.</summary>"}
 	ctx := caCtxNoModel("ca-replaced-warm", asker)
 	in := caFixture()
-	_, _, end := summarizeSpan(in, 1, s.keepLastTurns, nil)
+	_, start, end := summarizeSpan(in, 1, s.keepLastTurns, nil)
+	end = retreatPastLastToolExchange(in, nil, start, end)
 	asker.put(end - 1)
 	turn := func(msgs []bschemas.ChatMessage) {
 		t.Helper()
@@ -130,6 +133,7 @@ func TestAReplacedWarmDeferralIsDispatchedWithoutTheHook(t *testing.T) {
 		t.Fatal("no checkpoint: the replaced warm deferral was dropped instead of dispatched")
 	}
 	takeWarmDeferral(convKey(ctx)) // the newer one; nothing else will resolve it in this test
+	doneDispatching(convKey(ctx))
 }
 
 // #724 review, finding 2. Warm deferrals have their own bound, so a full cold registry does not
@@ -153,7 +157,8 @@ func TestAWarmCommissionDefersWhenTheColdRegistryIsFull(t *testing.T) {
 	asker := &turnStash{out: "<summary>x</summary>"}
 	ctx := caCtxNoModel("ca-warm-own-bound", asker)
 	in := caFixture()
-	_, _, end := summarizeSpan(in, 1, s.keepLastTurns, nil)
+	_, start, end := summarizeSpan(in, 1, s.keepLastTurns, nil)
+	end = retreatPastLastToolExchange(in, nil, start, end)
 	asker.put(end - 1)
 	req := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), in...)}
 	var rep components.Report
@@ -161,6 +166,7 @@ func TestAWarmCommissionDefersWhenTheColdRegistryIsFull(t *testing.T) {
 		t.Fatalf("Offload: %v", err)
 	}
 	d := takeWarmDeferral(convKey(ctx))
+	doneDispatching(convKey(ctx))
 	if d == nil {
 		t.Fatal("the warm commission was not deferred while the cold registry was full")
 	}
@@ -177,6 +183,7 @@ func TestADeferredCommissionSkipsASpanACheckpointAlreadyCovers(t *testing.T) {
 	ctx := caCtxNoModel("ca-skip-dup", asker)
 	in := caFixture()
 	_, start, end := summarizeSpan(in, 1, s.keepLastTurns, nil)
+	end = retreatPastLastToolExchange(in, nil, start, end) // the span the commission covers (#723)
 	asker.put(len(in))
 	req := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), in...)}
 	var rep components.Report
@@ -190,5 +197,35 @@ func TestADeferredCommissionSkipsASpanACheckpointAlreadyCovers(t *testing.T) {
 	WaitForSummaryForTest(ctx.Session, time.Second)
 	if n := atomic.LoadInt64(&asker.calls); n != 0 {
 		t.Fatalf("the deferred commission paid %d call(s) for a span a checkpoint already covers", n)
+	}
+}
+
+// #727 review round 3 (the CI failure). The host's hook takes a deferral out of its registry and
+// then starts it. In between, the deferral is neither registered nor in flight, so a test that
+// waited right after its request could see "nothing pending", return, and read its counters before
+// the call ran (TestCacheAwareRealContentChangeInsideSpanStillDeclines failed this way in CI).
+// WaitForSummaryForTest must keep waiting through that window.
+func TestWaitForSummaryCoversTheGapBetweenTakeAndStart(t *testing.T) {
+	s := newCacheAware(t, caBaseCfg+"instruction_role: auto\n")
+	asker := &turnStash{out: "<summary>x</summary>"}
+	ctx := caCtxNoModel("ca-take-start-gap", asker)
+	in := caFixture()
+	asker.put(len(in))
+	req := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), in...)}
+	var rep components.Report
+	if _, err := s.Offload(req, &rep, ctx); err != nil {
+		t.Fatalf("Offload: %v", err)
+	}
+	inGap, release := make(chan struct{}), make(chan struct{})
+	betweenTakeAndStartForTest = func() { close(inGap); <-release }
+	t.Cleanup(func() { betweenTakeAndStartForTest = nil })
+	go ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
+	<-inGap
+	if WaitForSummaryForTest(convKey(ctx), 50*time.Millisecond) {
+		t.Fatal("WaitForSummaryForTest returned while a taken deferral had not started yet")
+	}
+	close(release)
+	if !WaitForSummaryForTest(convKey(ctx), 5*time.Second) {
+		t.Fatal("the deferral never finished after the gap")
 	}
 }

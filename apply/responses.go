@@ -285,12 +285,13 @@ func rebuildResponsesCountChanged(body []byte, norm []bschemas.ChatMessage, slot
 	if len(out) > len(norm) || len(out) <= start {
 		return body, false
 	}
-	// Only summarize currently changes count, and its wrapper identifies the
-	// inserted message without relying on retained text staying unchanged.
+	// A summarizer's header identifies the inserted message without relying on
+	// retained text staying unchanged. The same test as the equal-count gate
+	// (isSummaryHeader), so the gate never sends a splice here that cannot be found.
 	head := -1
 	for i := start; i < len(out); i++ {
 		text := schema.MessageText(out[i])
-		if strings.HasPrefix(text, "=== History Summary ===") {
+		if isSummaryHeader(text) {
 			if head >= 0 {
 				return body, false
 			}

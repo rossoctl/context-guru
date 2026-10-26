@@ -175,6 +175,60 @@ func summarizeSpan(msgs []bschemas.ChatMessage, keepFirst, keepLast int, groups 
 	return headCount, start, end
 }
 
+// retreatPastLastToolExchange moves end back so the LAST tool exchange in [start, len(msgs)) stays
+// verbatim after the span: end becomes the index of the assistant message that called the tool
+// whose results are the last run of role=tool messages. Returns end unchanged when there is no tool
+// result at or after start, or when the exchange starts at or before start (nothing left to
+// summarize). cache_aware_summarizer only (#723): a splice that keeps a tool exchange gives the next
+// turn a cache entry it can read, once the host marks that exchange's tool_result.
+//
+// The exchange is found from its results — the run of role=tool messages, and the assistant
+// message just before them — rather than from the assistant's ToolCalls, so it does not depend on
+// how a caller populated those. groups keeps the cut on a wire-message edge, as summarizeSpan's own
+// boundary does.
+func retreatPastLastToolExchange(msgs []bschemas.ChatMessage, groups []int, start, end int) int {
+	if len(groups) != len(msgs) {
+		groups = nil
+	}
+	last := -1
+	for i := len(msgs) - 1; i >= start; i-- {
+		if msgs[i].Role == bschemas.ChatMessageRoleTool {
+			last = i
+			break
+		}
+	}
+	if last < 0 {
+		return end
+	}
+	first := last
+	for first-1 >= start && (msgs[first-1].Role == bschemas.ChatMessageRoleTool ||
+		(groups != nil && groups[first-1] == groups[first])) {
+		first--
+	}
+	call := first - 1 // the assistant turn that asked for the tool
+	if call <= start || msgs[call].Role != bschemas.ChatMessageRoleAssistant {
+		return end
+	}
+	for call > start && groups != nil && groups[call-1] == groups[call] {
+		call--
+	}
+	if call <= start || call >= end {
+		return end
+	}
+	return call
+}
+
+// lastKeptToolResultID is the tool_call_id of the last role=tool message in msgs[from:], or "".
+func lastKeptToolResultID(msgs []bschemas.ChatMessage, from int) string {
+	for i := len(msgs) - 1; i >= from && i >= 0; i-- {
+		m := msgs[i]
+		if m.Role == bschemas.ChatMessageRoleTool && m.ChatToolMessage != nil && m.ChatToolMessage.ToolCallID != nil {
+			return *m.ChatToolMessage.ToolCallID
+		}
+	}
+	return ""
+}
+
 // advanceSpanBoundary is THE rule for "is it safe for a kept tail (or a replayed checkpoint's
 // tail, see emitCheckpoint) to begin at `at`", so there is exactly one implementation rather
 // than two that can drift. Advances `at` while it would:
@@ -222,11 +276,12 @@ func advanceSpanBoundary(msgs []bschemas.ChatMessage, groups []int, at int) int 
 // requestedToolCalls reports whether m is an assistant message that asked for tool calls, as
 // bifrost models them.
 //
-// ⚠️ OpenAI-shaped traffic only: bifrost does not map Anthropic `tool_use` content blocks onto
-// ToolCalls, so on the Anthropic path this is always false. The head-retreat above is still
-// correct there, because apply's normalize turns each Anthropic tool_result block into a
-// synthetic role=tool message and the ORIGINAL msgs[0] on that path is the opening user turn,
-// never a tool-calling assistant message.
+// bifrost's own unmarshal does not map Anthropic `tool_use` content blocks onto ToolCalls, but
+// apply's normalize lifts them there (attachToolUse), so on proxy traffic this is true for an
+// Anthropic tool-calling turn too. On a Ctx built some other way it can be false for one; the
+// head-retreat above is still correct then, because apply's normalize turns each Anthropic
+// tool_result block into a synthetic role=tool message and the ORIGINAL msgs[0] on that path is the
+// opening user turn, never a tool-calling assistant message.
 func requestedToolCalls(m bschemas.ChatMessage) bool {
 	return m.Role == bschemas.ChatMessageRoleAssistant &&
 		m.ChatAssistantMessage != nil && len(m.ChatAssistantMessage.ToolCalls) > 0

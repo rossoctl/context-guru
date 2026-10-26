@@ -3,6 +3,7 @@ package apply
 import (
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -211,3 +212,61 @@ func elemMarks(v gjson.Result) int {
 
 // wireBreakpoints is the total, which is what the provider's cap applies to.
 func wireBreakpoints(body []byte) int { return CountBreakpoints(body).Total() }
+
+// Cache-anchor counters (#723): anchors written, anchors skipped for want of a free breakpoint slot,
+// and anchors whose tool_result was not found in the rebuilt body.
+var cacheAnchorWritten, cacheAnchorNoSlot, cacheAnchorNotFound atomic.Int64
+
+// CacheAnchorStats reports the cache-anchor counters: written, no free slot, block not found.
+func CacheAnchorStats() (written, noSlot, notFound int64) {
+	return cacheAnchorWritten.Load(), cacheAnchorNoSlot.Load(), cacheAnchorNotFound.Load()
+}
+
+// anchorCacheBreakpoint writes one {"type":"ephemeral"} cache_control onto the tool_result block
+// whose tool_use_id is toolID, in the raw body a count-changing rebuild just produced (#723). A
+// splice that keeps its last tool exchange verbatim only gives the next turn a readable cache
+// entry once that exchange's tool_result carries a breakpoint: the provider never reads an entry
+// that ends at a text turn, and Claude Code's own last breakpoint sits on a trailing text turn.
+//
+// THE BUDGET. The provider rejects a request with more than maxWireBreakpoints. The count is taken
+// on the body AS REBUILT, after every component ran, so it already includes any breakpoint
+// cacheinject placed from its own (earlier, raw-body) count; adding ours only when that total is
+// below the cap can never push the wire to 5. With no free slot the anchor is skipped and counted:
+// the turn then behaves exactly as before #723. Claude Code itself uses 3 (2 system, 1 message).
+//
+// Returns the body unchanged when there is nothing to do.
+func anchorCacheBreakpoint(body []byte, toolID string) []byte {
+	if toolID == "" {
+		return body
+	}
+	msgs := gjson.GetBytes(body, "messages").Array()
+	for mi := len(msgs) - 1; mi >= 0; mi-- {
+		blocks := msgs[mi].Get("content")
+		if !blocks.IsArray() {
+			continue
+		}
+		arr := blocks.Array()
+		for bi := range arr {
+			b := arr[bi]
+			if b.Get("type").String() != "tool_result" || b.Get("tool_use_id").String() != toolID {
+				continue
+			}
+			if elemMarks(b) > 0 {
+				return body // already a breakpoint there; nothing to add
+			}
+			if wireBreakpoints(body) >= maxWireBreakpoints {
+				cacheAnchorNoSlot.Add(1)
+				return body
+			}
+			out, err := sjson.SetRawBytes(body, "messages."+strconv.Itoa(mi)+".content."+strconv.Itoa(bi)+".cache_control",
+				[]byte(`{"type":"ephemeral"}`))
+			if err != nil {
+				return body
+			}
+			cacheAnchorWritten.Add(1)
+			return out
+		}
+	}
+	cacheAnchorNotFound.Add(1)
+	return body
+}
