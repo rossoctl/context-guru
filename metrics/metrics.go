@@ -2,8 +2,8 @@
 // concrete components.Emitter implementations; the pipeline depends only on the
 // Emitter interface, so this package imports components and not vice versa.
 //
-// v1 ships: Nop (in components), Slog (structured logs in OTel gen_ai.*
-// vocabulary), and Aggregator (in-process rollups behind /stats). An OTel-SDK
+// v1 ships: Nop (in components), Slog (structured logs, context_engineering.*
+// keys), and Aggregator (in-process rollups behind /stats). An OTel-SDK
 // emitter and honest-metrics extras (bounce-adjusted savings, waste signals)
 // land in P5. Each host surfaces these natively (proxy -> bifrost Prometheus/
 // OTel + /metrics; sidecar plugin -> StatsSource).
@@ -61,7 +61,7 @@ func (t Tee) KeepAlivePing(r components.KeepAliveReport) {
 	}
 }
 
-// Slog logs each component and run in the GenAI semantic-convention vocabulary.
+// Slog logs each component and run with context_engineering.* keys.
 //
 // At DEBUG, not INFO. These are per-component records — several per request — so at
 // INFO they buried the one line per request that describes the request, which is that
