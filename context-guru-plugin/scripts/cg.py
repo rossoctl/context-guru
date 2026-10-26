@@ -1158,9 +1158,14 @@ def render_kind(kind: str, rep: dict, o: dict, e) -> list[str]:
         shown = items if o["details"] else items[:8]
         top = max([i.get("usd") or 0 for i in shown] + [0.01])
         L += ["", f"Never used in this window ({len(shown)} of {len(items)}):" if len(shown) < len(items) else "Never used in this window:"]
-        L += ["  " + r for r in T.cols([[ITEM_KINDS[i["kind"]], T.clip(i["name"], 40, e),
-                                         money(i.get("usd") if i.get("priced", True) else None),
-                                         bar((i.get("usd") or 0) / top, 10, e)] for i in shown], "llrl")]
+        rows = T.cols([[ITEM_KINDS[i["kind"]], T.clip(i["name"], 40, e),
+                        money(i.get("usd") if i.get("priced", True) else None),
+                        bar((i.get("usd") or 0) / top, 10, e)] for i in shown], "llrl")
+        for i, r in zip(shown, rows):
+            L.append("  " + r)
+            # The proxy cannot filter a deferred item, and the summary sends the reader to its command.
+            if i.get("client_only") and (i.get("remove") or i.get("suggest")):
+                L.append("      run: " + (i.get("remove") or i.get("suggest")))
     removed = rep.get("removed") or []
     if removed and o["details"]:
         # Measured (the proxy's filter) and estimated (removed in the client) stay apart and are never added
