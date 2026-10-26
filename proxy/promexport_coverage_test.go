@@ -232,6 +232,9 @@ var notExportedWhy = map[string]string{
 // family that appears only once something breaks renders "No data" in Grafana, which reads
 // as healthy — the same argument as refusalReasons), and both track the real counter.
 func TestExpandUnresolvedSeriesRender(t *testing.T) {
+	// These two counters are process-global and this test records into them on purpose, so
+	// reset first: without that, a -count>1 run fails here on its second iteration (#192).
+	expand.ResetUnresolvedForTest()
 	h := New(nil, nil, metrics.NewAggregator(), Options{})
 	zero := []string{
 		`cg_expand_unresolved_total{reason="malformed"} 0`,
