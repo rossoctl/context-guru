@@ -279,6 +279,13 @@ if [ "$FORCE" != 1 ] && [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
                   "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.json" \
                   "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.local.json"; do
     sl_line_=$(grep -hs '"installed_statusline"' "$sl_file_" 2>/dev/null) || sl_line_=""
+    # Since 0.6.1 the mod's band draws the status line, and a line an install wrote by default (no
+    # `"statusline_asked": true` beside it) is retired: that also needs python3, whatever path it names.
+    sl_asked_=$(grep -hs '"statusline_asked": *true' "$sl_file_" 2>/dev/null) || sl_asked_=""
+    if [ -n "$sl_line_" ] && [ -z "$sl_asked_" ]; then
+      python3 "$HERE/settings.py" statusline-repoint 2>/dev/null | head -1 || true
+      break
+    fi
     case "$sl_line_" in
       *plugins/cache*)
         case "$sl_line_" in

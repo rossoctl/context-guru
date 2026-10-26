@@ -104,13 +104,10 @@ below.
 **It never sends a keep-alive ping, and never will.** It only reads. Turning the keep-alive
 mechanism on is a separate, explicit action — see `/context-guru:cache-strategy-picker`.
 
-**It is on by default.** `/context-guru:install`'s own orchestrator (`install.sh --route`)
-installs it in the same file it just wrote routing to, in the same run, right after routing
-succeeds — no separate step, and it never fails the install if it can't (a write conflict just
-leaves it skipped, reported as `statusline=skipped` in the install's own output). This skill is
-for what that automatic install doesn't cover: turning an extra on, moving it to a different
-scope, or putting it back after `off` — or installing it by hand in the rare case someone passed
-`--no-statusline` and changed their mind.
+**It is off by default since 0.6.1.** The Context Guru band above the prompt shows the same figures (saved, the
+cache clock, context), so `/context-guru:install` no longer writes a status line, and the one an earlier install wrote by
+default is removed at the next session start. This skill installs it for a user who wants it as well: a line installed
+here is recorded as asked for and stays. `install.sh --statusline` does the same during an install.
 
 ## Where to install it
 

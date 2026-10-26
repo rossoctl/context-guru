@@ -1913,6 +1913,18 @@ func TestSettingsStatuslineRoundTrips(t *testing.T) {
 	if readJSON(t, path)["theme"] != "dark" {
 		t.Error("removal took more than its own keys")
 	}
+	if meta, still := readJSON(t, path)["$context-guru"]; still {
+		t.Errorf("our bookkeeping outlived the uninstall: %v", meta)
+	}
+
+	// A file context-guru created holds nothing of the user's: uninstall deletes it.
+	fresh := filepath.Join(dir, "fresh.json")
+	if _, code := settings(t, "add", "--file", fresh, "--url", ourURL, "--statusline", cmdPath); code != 0 {
+		t.Fatal("add on a new file failed")
+	}
+	if facts, _ := settings(t, "remove", "--file", fresh, "--url", ourURL); facts["file_deleted"] != "true" {
+		t.Errorf("remove left a file context-guru created: %v", facts)
+	}
 }
 
 // TestSettingsStatuslineRefusesToStealAnExisting mirrors
@@ -7488,21 +7500,41 @@ func TestRouteWritesRoutingOnlyAfterSomethingAnswers(t *testing.T) {
 	})
 }
 
-// TestRouteInstallsStatuslineByDefault: the status line install now rides along with a successful
-// route, IN WHATEVER FILE ROUTING ITSELF JUST USED — not unconditionally at user scope. That
-// scope-following is the fix for the reported incident: a default (project-scope) install used to
-// write and back up the user's machine-wide ~/.claude/settings.json as a side effect, every time.
-// --no-statusline is still the opt-out, and a statusline write failure never turns a successful
-// route into a reported failure — `statusline=skipped` alongside `result=routed`, not
-// `result=error`.
+// TestRouteInstallsStatuslineByDefault (the name kept for history): since 0.6.1 the install writes NO status line by
+// default, because the mod's band draws it. `--statusline` asks for it, IN WHATEVER FILE ROUTING ITSELF JUST USED —
+// not unconditionally at user scope (the fix for a default project-scope install that wrote and backed up the user's
+// machine-wide ~/.claude/settings.json). A statusline write failure never turns a successful route into a reported
+// failure — `statusline=skipped` alongside `result=routed`, not `result=error`.
 func TestRouteInstallsStatuslineByDefault(t *testing.T) {
-	t.Run("default scope (project): the status line follows routing into the project, "+
-		"the machine-wide file is never created", func(t *testing.T) {
+	t.Run("default: routing succeeds and no statusLine is written (the mod's band draws it)", func(t *testing.T) {
 		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
 		port := freePort(t)
 		writePluginOptions(t, home, map[string]any{"port": port})
 		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
 		facts, code := runRoute(t, proj, env, consentOK()...)
+		t.Cleanup(func() {
+			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+			}
+		})
+		if code != 0 || facts["result"] != "routed" {
+			t.Fatalf("exit %d result=%q: %v", code, facts["result"], facts)
+		}
+		if facts["statusline"] != "off" {
+			t.Fatalf("statusline=%q, want off: %v", facts["statusline"], facts)
+		}
+		if got := readJSON(t, filepath.Join(proj, ".claude", "settings.local.json")); got["statusLine"] != nil {
+			t.Errorf("a default install wrote a statusLine: %v", got["statusLine"])
+		}
+	})
+
+	t.Run("--statusline, default scope (project): the status line follows routing into the project, "+
+		"the machine-wide file is never created", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		port := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": port})
+		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+		facts, code := runRoute(t, proj, env, consentOK("--statusline")...)
 		t.Cleanup(func() {
 			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
 				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
@@ -7564,7 +7596,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		writePluginOptions(t, home, map[string]any{"port": port})
 		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
 		facts, code := runRoute(t, proj, env, "--scope", "user", "--i-understand-machine-wide",
-			"--i-consent-to-traffic-interception")
+			"--i-consent-to-traffic-interception", "--statusline")
 		t.Cleanup(func() {
 			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
 				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
@@ -7589,7 +7621,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		}
 	})
 
-	t.Run("--no-statusline: routing succeeds, nothing is written to statusLine", func(t *testing.T) {
+	t.Run("--no-statusline (now the default, still accepted): routing succeeds, nothing is written to statusLine", func(t *testing.T) {
 		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
 		port := freePort(t)
 		writePluginOptions(t, home, map[string]any{"port": port})
@@ -7603,8 +7635,8 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		if code != 0 || facts["result"] != "routed" {
 			t.Fatalf("exit %d result=%q: %v", code, facts["result"], facts)
 		}
-		if facts["statusline"] != "skipped" {
-			t.Fatalf("statusline=%q, want skipped: %v", facts["statusline"], facts)
+		if facts["statusline"] != "off" {
+			t.Fatalf("statusline=%q, want off: %v", facts["statusline"], facts)
 		}
 		got := readJSON(t, filepath.Join(proj, ".claude", "settings.local.json"))
 		if _, has := got["statusLine"]; has {
@@ -7625,7 +7657,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 			"statusLine": map[string]any{"type": "command", "command": "my-own-thing"},
 		})
 		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
-		facts, code := runRoute(t, proj, env, consentOK()...)
+		facts, code := runRoute(t, proj, env, consentOK("--statusline")...)
 		t.Cleanup(func() {
 			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
 				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
